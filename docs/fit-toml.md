@@ -43,14 +43,13 @@ sweeps    = 300
 The file has two halves. Everything above `[method]` is the **problem** — the
 model, the data, the estimate/fixed partition, the priors — and every reader of
 a fit config reads it: `simulate --draws prior --fit`, `pfilter --fit`,
-`survey --fit`, `profile --fit`. A file with no `[method]` at all is a complete
-problem for those. `[method]` is the **inference**: how `fit run` fits that
-problem. A second way of fitting the same problem is a second file with the same
-problem half and a different `[method]`
-(`camdl fit new --from fit.toml
-fit-if2.toml` copies the file with provenance;
-edit the table). The store puts both under one `fits/<stem>-<h8>/` segment,
-because that level hashes the problem alone.
+`profile --fit`. A file with no `[method]` at all is a complete problem for
+those. `[method]` is the **inference**: how `fit run` fits that problem. A
+second way of fitting the same problem is a second file with the same problem
+half and a different `[method]` (`camdl fit new --from fit.toml
+fit-if2.toml`
+copies the file with provenance; edit the table). The store puts both under one
+`fits/<stem>-<h8>/` segment, because that level hashes the problem alone.
 
 ## Sections
 
@@ -95,8 +94,6 @@ function, whether its data come from `--data` or from the config: under
 `holdout_after` every cell fits only the rows that end at or before the cutoff,
 and a `[data.holdout]` config's training files are fitted whole, its holdout
 files checked against the bound training data by the same tail-only rule.
-`camdl survey --fit` likewise scores only the rows that end at or before a
-`holdout_after` cutoff, and checks `[data.holdout]` files by the same rule.
 
 `[synthetic]` may stand beside `[data]`: `fit run` then fits the real data, and
 the synthetic block records the truth a recovery check reads.
@@ -114,15 +111,15 @@ contact = "../data/build/contact.tsv"
 ```
 
 Every command that reads a fit config binds these files: `fit run`,
-`pfilter --fit`, `profile --fit`, `survey --fit`, and through a stored fit
-`fit predict` and `simulate --draws posterior --fit`. A `--table NAME=FILE` on
-the command line replaces the config's file for that name, as `--data` replaces
-a `[data.observations]` entry. A run is refused, naming the input, when the
-model declares an external input that nothing binds, when `[data.tables]` or
-`--table` names one the model does not declare, or when the file does not hold
-what the declaration reads: a forcing's file without its `time_col`, `value_col`
-or `key_col`, or with no row for one of its levels; a table's file without
-exactly one number per cell.
+`pfilter --fit`, `profile --fit`, and through a stored fit `fit predict` and
+`simulate --draws posterior --fit`. A `--table NAME=FILE` on the command line
+replaces the config's file for that name, as `--data` replaces a
+`[data.observations]` entry. A run is refused, naming the input, when the model
+declares an external input that nothing binds, when `[data.tables]` or `--table`
+names one the model does not declare, or when the file does not hold what the
+declaration reads: a forcing's file without its `time_col`, `value_col` or
+`key_col`, or with no row for one of its levels; a table's file without exactly
+one number per cell.
 
 A bound file enters the fit's identity by its bytes, not its path: the same
 bytes under another path are the same fit (and are reused), and one changed byte
@@ -149,12 +146,12 @@ of `simulate --to`. `first_obs` is the start of the earliest observed period of
 the training rows this config binds, so for weekly counts with
 `covers = closing_at(time, 7 'days)` whose first row is labelled day 5 it is day
 −2, the day that week opened. Every command that reads the config applies it:
-`fit run`, `pfilter --fit`, `profile --fit`, `survey --fit` and
-`simulate --fit`, where `simulate --from` takes precedence over it. The start
-moves with every start the model derives from its own (the output and emit
-schedules, a recurring intervention with no `from`), and a model whose literal
-`from` is also a recurring schedule's start is refused rather than guessed (the
-language spec, §18).
+`fit run`, `pfilter --fit`, `profile --fit` and `simulate --fit`, where
+`simulate --from` takes precedence over it. The start moves with every start the
+model derives from its own (the output and emit schedules, a recurring
+intervention with no `from`), and a model whose literal `from` is also a
+recurring schedule's start is refused rather than guessed (the language spec,
+§18).
 
 The start enters the fit's identity through the model, not through this key:
 camdl writes the resolved start into the model before keying the fit, so
@@ -489,11 +486,10 @@ legacy table `[stages.posterior]`
 
 Nothing is converted silently. `init` is `starts`; `init_mle` is one of the two
 sourced rules, chosen by the author, with the upstream run first and named by
-handle; `survey_top_k` with `survey_path` / `survey_top_k_n` is gone — a survey
-landscape is not a posterior — and `from_prior`, or `from_posterior` from a
-short run, takes its place; the top-level `fit_starts` key, which no runner
-read, is gone with it (`from_prior` is now the default whenever every estimated
-parameter declares a prior).
+handle; `survey_top_k` with `survey_path` / `survey_top_k_n` is refused, and
+`from_prior`, or `from_posterior` from a short run, takes its place; the
+top-level `fit_starts` key, which no runner read, is gone with it (`from_prior`
+is now the default whenever every estimated parameter declares a prior).
 
 ## Where scoring begins
 
@@ -678,8 +674,8 @@ The model file is the source of truth for what _can_ be estimated; the
   or `instant` on `(−∞, ∞)` has no automatic `rw_sd` (there is no scale to take
   one from); give `rw_sd`. At two or more chains the `uniform`, `lhs` and
   `uniform_unconstrained` starts refuse it, the default `uniform_unconstrained`
-  included; and `camdl survey` refuses it. `from_prior` draws it from its prior,
-  and `single` starts every chain at its `start`.
+  included. `from_prior` draws it from its prior, and `single` starts every
+  chain at its `start`.
 - **Hierarchical parameters** (`a ~ normal(mu, 1)`) may not have bounds that cut
   into their prior's support under `pmmh` or `mh`: the prior is not renormalised
   to the bounds, and for a hierarchical parameter the missing constant depends

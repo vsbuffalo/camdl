@@ -5896,12 +5896,12 @@ the resolved value on stderr, and substitutes it into the model its identity is
 computed from, so a run under one data release is never served from the store
 for another. Every command that binds observation data resolves anchors this
 way: `camdl simulate --fit <fit.toml | fit run dir>`, `fit run`, `fit predict`,
-and `pfilter`, `profile` and `survey`, which take the observation window from
-what they bind through `--data` or `--fit`. A command that binds no data
+and `pfilter` and `profile`, which take the observation window from what they
+bind through `--data` or `--fit`. A command that binds no data
 refuses an anchored model, naming the anchored construct.
 
-`pfilter`, `profile` and `survey` score at the observation times and do not
-simulate to a horizon, so a scenario's own `simulate { to }` is refused there.
+`pfilter` and `profile` score at the observation times and do not simulate to
+a horizon, so a scenario's own `simulate { to }` is refused there.
 The comparison is made after resolution: a scenario anchor that resolves to the
 model's own horizon has no effect and runs.
 
@@ -5950,7 +5950,7 @@ serves several data windows. In order of precedence:
 1. `camdl simulate --from SPEC` on the command line;
 2. `[simulate] from = SPEC` in the fit config (`camdl docs fit-toml`), read by
    every command that reads the config (`fit run`, `pfilter --fit`,
-   `profile --fit`, `survey --fit`, `simulate --fit`);
+   `profile --fit`, `simulate --fit`);
 3. the model's own `simulate { from }`.
 
 `SPEC` has the grammar of `--to`: a model-time number, a date under a model
@@ -6190,7 +6190,7 @@ run spec §12 (prior precedence and the `fit.toml` forms).
 
 A fit partitions the model's parameters into those it estimates and those it
 holds fixed. The partition is the `fit.toml`'s `[estimate]` and `[fixed]`
-tables (run spec §6.3, §6.4); `camdl profile` and `camdl survey` also take
+tables (run spec §6.3, §6.4); `camdl profile` also takes
 `--fixed NAME=VALUE`. Forward simulation has no partition: every parameter
 takes a value (§20.1).
 
@@ -6368,7 +6368,7 @@ absent. Cooling follows pomp's `cooling.fraction.50`: the perturbation SD
 reaches `cooling` times its initial value after `cooling_target_iters`
 iterations (default 50; `docs/methods/cooling.md`).
 
-**`--fixed NAME=VALUE`** (`camdl profile`, `camdl survey`) pins `NAME` at
+**`--fixed NAME=VALUE`** (`camdl profile`) pins `NAME` at
 `VALUE` and removes it from the estimated set; it may be repeated.
 `--fixed-file FILE` (`camdl profile`) pins every key of a params file (§20.1),
 and may be repeated, a later file overriding an earlier one. A parameter named

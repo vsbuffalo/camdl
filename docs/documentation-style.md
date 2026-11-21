@@ -425,11 +425,11 @@ whether a result can be trusted is a red warning or plain text, whoever is
 reading. If a person would need the point too, it belongs in the main text, and
 the box is the wrong place for it.
 
-::: {.agents title="Surface the survey plot rather than reading its geometry"}
+::: {.agents title="Hand over the pair plot rather than reading its geometry"}
 
-Rank points by the log-likelihoods in the survey's `landscape.tsv`, not by your
-reading of the scatter in its HTML page. Give the person the HTML path and your
-one-line reading, and let them confirm before you start a fit from it.
+Rank parameter values by the numbers in the table beside the figure, not by your
+reading of the scatter. Give the person the figure's path and your one-line
+reading, and let them confirm before you act on it.
 
 :::
 

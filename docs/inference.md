@@ -980,8 +980,8 @@ tier above it:
    model's `scenarios {}` block, or, for a scale, in a `--fixed-file` the scale
    applies over.
 
-The legacy `--params` and `--param` flags on inference subcommands (profile,
-if2, fit run, survey) were removed in the same revision. Their replacements are:
+The `--params` and `--param` flags are refused on `profile` and `fit run`. Their
+replacements are:
 
 - `--fixed-file <toml>` for the "load many values from a file" case.
 - `--fixed NAME=VALUE` for the "change one value" case.
@@ -993,10 +993,7 @@ On `profile --fit`, a `--fixed` or plain `--fixed-file` naming a parameter the
 config lists in `[estimate]` is refused (parameter-roles proposal §4.2): it
 would make every cell solve a conditional problem the config does not state. To
 slice while holding `gamma`, move `gamma` from `[estimate]` to `[fixed]` in a
-copy of the config and sweep the other parameter. `survey --fit` still accepts
-`--fixed` over `[estimate]`: the parameter is held and not sampled, with one
-`info:` line on stderr:
-``info: gamma: `--fixed gamma=0.1` pins it, so it is not estimated (the fit config lists it in [estimate])``.
+copy of the config and sweep the other parameter.
 
 `camdl fit run` takes no `--fixed`: the fit config is the record of the problem
 it runs, so a held parameter is a `[fixed]` entry, one line moved from

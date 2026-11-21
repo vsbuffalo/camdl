@@ -21,7 +21,7 @@ write model → check → simulate → synthetic recovery → choose a method
             → write fit.toml → fit run → fit summary → fit predict → validate
 
 optional, when a fit needs them:
-  survey (map the likelihood surface) · if2 (a point estimate, profiles)
+  design lhs (a design of parameter values) · if2 (a point estimate, profiles)
 ```
 
 <!-- /figure -->
@@ -126,17 +126,49 @@ rather than choosing a shape to make the sampler run. See
 
 :::
 
-### Optional: map the likelihood surface with `survey`
+### Optional: evaluate the model over a design of parameter values
+
+A Latin-hypercube design covers the box of `[estimate]` bounds evenly with a
+fixed number of points. This command writes one, a TSV with a `point_id` column
+and one column per estimated parameter:
+`camdl design lhs model.camdl --fit fit.toml --n 200 --seed 1 -o design.tsv`.
+`simulate` runs the model at every row:
 
 ```bash
-camdl survey model.camdl --fit fit.toml --render
+camdl simulate model.camdl --sweep-file design.tsv --params fixed.toml
 ```
 
-`survey` evaluates the likelihood at Latin-hypercube points across the parameter
-bounds and writes them to `landscape.tsv`, with `--render` adding a pair plot of
-the points in `landscape.html`. It shows separate high-likelihood regions,
-ridges, and parameters whose best values sit at a bound. It is worth running
-when:
+`fixed.toml` gives a value to every parameter the design does not vary. The
+result is one ensemble with a trajectory per design point, which shows whether
+the model can produce dynamics like the data anywhere in the box before any fit
+is run.
+
+No single command scores a whole design. `camdl pfilter` evaluates the
+log-likelihood at one parameter set per call. Each of the row's values is passed
+as `--param NAME=VALUE`, and the rest in a `--params` file. `--fit` supplies the
+data and the likelihood the fit scores, and no parameter values:
+
+```bash
+camdl pfilter model.camdl --fit fit.toml --params fixed.toml \
+    --param beta=0.35 --param gamma=0.12 --particles 1000 --seed 1
+```
+
+It prints the log-likelihood on standard output, so a loop over the design's
+rows collects one per point (here the design has the two columns `beta` and
+`gamma` after `point_id`):
+
+```bash
+printf 'point_id\tloglik\n' > loglik.tsv
+tail -n +2 design.tsv | while IFS=$'\t' read -r point_id beta gamma; do
+  loglik=$(camdl pfilter model.camdl --fit fit.toml --params fixed.toml \
+             --param beta="$beta" --param gamma="$gamma" \
+             --particles 1000 --seed 1)
+  printf '%s\t%s\n' "$point_id" "$loglik" >> loglik.tsv
+done
+```
+
+Each value is a particle-filter estimate with Monte Carlo error; `--replicates`
+reports that error for a point. A table of this kind is worth building when:
 
 - the model estimates many parameters, so starts drawn from the priors may land
   far from where the likelihood is high;
@@ -146,15 +178,8 @@ when:
 - the priors are weak and you need to know where the likelihood puts the mass.
 
 For a small model with informative priors whose chains already agree, it adds
-little.
-
-::: {.agents title="Surface the survey plot rather than reading its geometry"}
-
-Rank points by the log-likelihoods in `landscape.tsv`, not by your reading of
-the scatter in `landscape.html`. Give the person the HTML path and your one-line
-reading, and let them confirm before you start a fit from it.
-
-:::
+little. The points are not a posterior sample and are not a source of chain
+starts.
 
 ## 4. Write `fit.toml` and run the fit
 
@@ -187,10 +212,10 @@ sweeps = 300
 
 - **One `[method]` per file.** `algorithm` picks the method from the table in
   section 3. Everything above `[method]` is the problem, which every reader
-  loads (`simulate --draws prior --fit`, `pfilter --fit`, `survey --fit`,
-  `profile --fit`). A second way of fitting the same problem, such as an `if2`
-  point estimate beside this posterior, is a second file with the same problem
-  half: `camdl fit new --from fit.toml fit-if2.toml`, then edit `[method]`.
+  loads (`simulate --draws prior --fit`, `pfilter --fit`, `profile --fit`). A
+  second way of fitting the same problem, such as an `if2` point estimate beside
+  this posterior, is a second file with the same problem half:
+  `camdl fit new --from fit.toml fit-if2.toml`, then edit `[method]`.
 - **Chains start apart by default.** `starts` says where the chains begin. When
   omitted it is `from_prior` (one draw per chain from the priors) whenever every
   estimated parameter has a prior, else `uniform_unconstrained`. A start from a
@@ -335,18 +360,18 @@ divergences and trajectory renewal, never from Â, and do not carry R̂'s "above
 
 ### Diagnostics reference
 
-| Method           | Diagnostic           | Healthy         | Warning           | Action                                         |
-| ---------------- | -------------------- | --------------- | ----------------- | ---------------------------------------------- |
-| Particle filter  | ESS per-obs          | > 50% of N      | 10–50%            | more particles or looser obs model             |
-| Particle filter  | ESS at MLE           | mean > 50%      | mean < 30%        | estimate `σ²` or `k`                           |
-| Particle filter  | log-likelihood       | finite          | `−∞`              | check starts / model structure                 |
-| IF2 (MLE)        | Â                    | < 1.05          | 1.1–1.5           | more iterations                                |
-| IF2 (MLE)        | Â                    | —               | > 1.5 + LL spread | multimodal surface, more chains                |
-| IF2 (MLE)        | logit position \|z\| | < 2             | > 3               | widen bounds or change transform               |
-| PGAS (posterior) | R̂ (rank-normalized)  | < 1.05          | > 1.1             | more sweeps; check multimodality with `survey` |
-| PGAS (posterior) | trajectory renewal   | > 30%           | < 10%             | more CSMC particles                            |
-| PGAS (posterior) | NUTS divergences     | 0               | any               | reduce step size, reparameterize               |
-| PGAS (posterior) | NUTS max tree depth  | < 20% of sweeps | > 50%             | increase `max_treedepth`                       |
+| Method           | Diagnostic           | Healthy         | Warning           | Action                                        |
+| ---------------- | -------------------- | --------------- | ----------------- | --------------------------------------------- |
+| Particle filter  | ESS per-obs          | > 50% of N      | 10–50%            | more particles or looser obs model            |
+| Particle filter  | ESS at MLE           | mean > 50%      | mean < 30%        | estimate `σ²` or `k`                          |
+| Particle filter  | log-likelihood       | finite          | `−∞`              | check starts / model structure                |
+| IF2 (MLE)        | Â                    | < 1.05          | 1.1–1.5           | more iterations                               |
+| IF2 (MLE)        | Â                    | —               | > 1.5 + LL spread | multimodal surface, more chains               |
+| IF2 (MLE)        | logit position \|z\| | < 2             | > 3               | widen bounds or change transform              |
+| PGAS (posterior) | R̂ (rank-normalized)  | < 1.05          | > 1.1             | more sweeps; more chains from separate starts |
+| PGAS (posterior) | trajectory renewal   | > 30%           | < 10%             | more CSMC particles                           |
+| PGAS (posterior) | NUTS divergences     | 0               | any               | reduce step size, reparameterize              |
+| PGAS (posterior) | NUTS max tree depth  | < 20% of sweeps | > 50%             | increase `max_treedepth`                      |
 
 ::: {.agents title="Report a fired diagnostic; do not decide it is fine"}
 
@@ -544,8 +569,8 @@ they belong to the person responsible for the model:
 - **Responding to a failed convergence gate.** Find out why it failed (the
   bounds, too few chains or iterations, more than one mode) rather than lowering
   the threshold.
-- **Reading the geometry of a plot**: the `survey` pair plot, a posterior pair
-  plot, a predictive ribbon.
+- **Reading the geometry of a plot**: a posterior pair plot, a predictive
+  ribbon.
 - **An external estimate that disagrees**, such as a genomic estimate or a
   published result. Raise the disagreement rather than tuning until the numbers
   match.

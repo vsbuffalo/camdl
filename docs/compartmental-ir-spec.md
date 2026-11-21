@@ -1002,7 +1002,7 @@ struct SyntheticObs {
 | `Gillespie`     | Exact stochastic (SSA)   | Continuous     | Small populations, exact dynamics |
 | `ODE`           | Deterministic mean-field | Continuous     | Large populations, warm-start     |
 | `Hybrid`        | ODE + Gillespie by event | Continuous     | Mixed-scale models                |
-| `ChainBinomial` | Discrete-time stochastic | Discrete       | Operational models, surveys       |
+| `ChainBinomial` | Discrete-time stochastic | Discrete       | Operational models                |
 
 Backend selection is a runtime configuration choice, not part of the IR.
 

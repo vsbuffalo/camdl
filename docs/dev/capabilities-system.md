@@ -104,8 +104,8 @@ but the "what the backend provides" side forks by mode.
   so the bitflag check there only ever fires as an internal-error assertion).
 - `fit/methods.rs::check_model_capabilities` — the inference gate (hardcoded
   table). Called once per `camdl fit run` (`fit/mod.rs`, via
-  `gate_run_method_against_model`), in `profile.rs`, in `survey.rs` (for
-  `--eval simulate`), and inside `nlopt_method.rs`.
+  `gate_run_method_against_model`), in `profile.rs`, and inside
+  `nlopt_method.rs`.
 
 The inference math itself contains **zero** capability references — the gate is
 the only thing standing between a real-compartment model and a silent mis-fit

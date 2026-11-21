@@ -377,12 +377,12 @@ that answers it.
 - **Invariant:** for each stream the training rows are a prefix. Ends increase
   strictly, so the rule in §4.1 always yields a prefix; the constructor checks
   it rather than assuming it.
-- **Built by:** `fit run`, `profile --fit` and `survey --fit`, through the two
-  constructors only (`runner::cutoff_partition` and `runner::whole_partition`
-  wrap them and word the refusals). **Read by:** `compare`, which checks each
-  stream's recorded prefix digest against the data it reads and scores the rows
-  past the prefix. `fit predict` and the forecast plan will read it (Phase B);
-  there is no `camdl score` command yet.
+- **Built by:** `fit run` and `profile --fit`, through the two constructors only
+  (`runner::cutoff_partition` and `runner::whole_partition` wrap them and word
+  the refusals). **Read by:** `compare`, which checks each stream's recorded
+  prefix digest against the data it reads and scores the rows past the prefix.
+  `fit predict` and the forecast plan will read it (Phase B); there is no
+  `camdl score` command yet.
 - **Stored:** in `fit.meta.json`, for every fit, replacing `training_window`
   (`TrainingPartitionRecord`, `run_meta.rs`). `rule_version` is
   `PARTITION_RULE_VERSION`, the version of the rule that decides membership
@@ -711,14 +711,14 @@ and side, as a warning with notice code `forcing-outside-range` naming the
 function, its range, the side evaluated and the span held. Formulas defined for
 all time and periodic forms are unaffected.
 
-The override is identity: a `simulate`, `pfilter`, `profile` or `survey` run
-under it keys differently from the same run without it (`SimConfig` and the
-`pfilter`, `profile` and `survey` configs carry `allow_forcing_extrapolation`; a
-fit keys it through its config blob), and every `run.json` such a command writes
-records it as `forcing_extrapolation: {allowed: true, held: [...]}`, each held
-entry giving the forcing, the range it is defined on, the side and the value
-held. A run without the override records nothing: it held nothing, or it was
-refused before it committed. The score artifact will record it too (Phase B).
+The override is identity: a `simulate`, `pfilter` or `profile` run under it keys
+differently from the same run without it (`SimConfig` and the `pfilter` and
+`profile` configs carry `allow_forcing_extrapolation`; a fit keys it through its
+config blob), and every `run.json` such a command writes records it as
+`forcing_extrapolation: {allowed: true, held: [...]}`, each held entry giving
+the forcing, the range it is defined on, the side and the value held. A run
+without the override records nothing: it held nothing, or it was refused before
+it committed. The score artifact will record it too (Phase B).
 
 The check reads the values the run actually evaluated, not the run's time span:
 a forcing referenced only under a condition that is never true past its range
@@ -733,9 +733,9 @@ command's reporter (`cli::forcing_extrapolation::report`) turns it into the
 error or the warning. Because the flag records a side and not a time, the
 message names the side; which time outside the range a multi-threaded run meets
 first depends on its threads. A command that holds a store claim while its model
-runs (`fit run`, `survey`) defers the error so the claim is failed through its
-own path. For a forcing with a `lag`, the range bounds its argument, `t − lag`,
-and the message says so.
+runs (`fit run`) defers the error so the claim is failed through its own path.
+For a forcing with a `lag`, the range bounds its argument, `t − lag`, and the
+message says so.
 
 Separately, a forecast that reads a data-table forcing's values after the
 forecast origin uses covariate values that would not have been known at the
@@ -839,8 +839,8 @@ supersedes D47's single shared bump): the removal of `obs_alignment` from the
 fit identity is the bump from 3 to 4, and the bump from 4 to 5 covers two
 changes together, the training rule (rows decided by period, `last_obs` read
 over training rows) and the forcing-extrapolation override entering the identity
-of `simulate`, `pfilter`, `profile` and `survey` runs. The score-artifact
-proposal's identity step will be a later bump.
+of `simulate`, `pfilter` and `profile` runs. The score-artifact proposal's
+identity step will be a later bump.
 
 `FitDigest` carries the partition rule's version (`partition_rule_version`, set
 from `PARTITION_RULE_VERSION`), so a change to the rule re-keys every fit with

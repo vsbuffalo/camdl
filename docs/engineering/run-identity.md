@@ -429,9 +429,9 @@ build made with a switch is this build's run. The commands that store a result
 under an address key the switches: `simulate` (its trajectories, their
 observation subtrees and its ensembles), `fit run` (at the `fit` level),
 `fit predict` (its output directory, whose manifests also record
-`engine_version` and `engine_switches`), `pfilter` and `survey` (at the `model`
-level) and `profile` (a point's base). `compare` scores a chain-binomial fit
-through a `camdl pfilter` child, which keys them; its in-process ODE scoring and
+`engine_version` and `engine_switches`), `pfilter` (at the `model` level) and
+`profile` (a point's base). `compare` scores a chain-binomial fit through a
+`camdl pfilter` child, which keys them; its in-process ODE scoring and
 `dev eval` store nothing under an address. The switches themselves are fields of
 the evaluator settings each compiled model carries
 ([`EvalSettings`](rust:sim::compiled_model::EvalSettings)), set by
@@ -471,10 +471,9 @@ makes, so it refuses a flag-made fit and names its leaf. Every `fit run` input
 is classified in `input_class::FIT_RUN` and has a case in
 `rust/crates/cli/tests/fit_run_input_classes.rs`.
 
-`pfilter`, `profile` and `survey` resolve their configurations the same way:
-[`ResolvedPfilterConfig`](rust:cli::pfilter_config::ResolvedPfilterConfig),
-[`ResolvedProfileConfig`](rust:cli::profile_config::ResolvedProfileConfig) and
-[`ResolvedSurveyConfig`](rust:cli::survey_config::ResolvedSurveyConfig), each
+`pfilter` and `profile` resolve their configurations the same way:
+[`ResolvedPfilterConfig`](rust:cli::pfilter_config::ResolvedPfilterConfig) and
+[`ResolvedProfileConfig`](rust:cli::profile_config::ResolvedProfileConfig), each
 built by a `resolve` that destructures the command's arguments field by field
 (so an argument added to the command does not compile until it is placed), with
 the outputs written outside the store, the execution settings and the label
@@ -493,7 +492,7 @@ pair a fit folder does: the user's text as `fit.toml.original` and the resolved
 config as `fit.resolved.toml`. The fit is read once, and its
 `[config] allow_degenerate_rates` and `allow_forcing_extrapolation` are folded
 with the flags in resolution. Every input of each is classified
-(`input_class::PFILTER`, `PROFILE`, `SURVEY`) and has a case in
+(`input_class::PFILTER`, `PROFILE`) and has a case in
 `rust/crates/cli/tests/<command>_input_classes.rs`, which share one runner
 (`tests/input_class_runner/mod.rs`). A profile keys the user's config text
 (`fit.toml.original`, or the file) in its base, as `fit run`'s `fit_toml_hash`
@@ -507,8 +506,7 @@ A derived artifact that only some invocations ask for is a child of the leaf at
 its own address, never one of the leaf's files:
 [`RecordedChild`](rust:cli::cas_sink::RecordedChild) writes one file and its
 record into `<leaf>/<name>/`, declared in the leaf's `run.json` `children`
-before it is written. `simulate --event-log` (`event_log/`) and
-`survey --render` (`landscape_html/`) are the two.
+before it is written. `simulate --event-log` (`event_log/`) is one.
 
 `fit run` routes its method flags through one struct,
 [`CliMethodOverrides`](rust:cli::fit::config_v2::CliMethodOverrides), which
@@ -572,8 +570,8 @@ address under the leaf. These are regression evidence on small fixtures, not
 proof that no model behaves otherwise. `fit run`'s inputs are tested the same
 way in `rust/crates/cli/tests/fit_run_input_classes.rs`, against the `fit`,
 `method` and `seed` levels, with a `removed` case for each old spelling it
-refuses, and `pfilter`'s, `profile`'s and `survey`'s in
-`rust/crates/cli/tests/{pfilter,profile,survey}_input_classes.rs` against each
+refuses, and `pfilter`'s and `profile`'s in
+`rust/crates/cli/tests/{pfilter,profile}_input_classes.rs` against each
 command's levels. The other commands' flags are not yet tested this way; the
 differential tests in `rust/crates/cli/src/resolve/tests.rs` check the hash of
 one `SimConfig` field at a time without running the simulation.

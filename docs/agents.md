@@ -116,15 +116,13 @@ error costs much more. Default to pausing.
   whether the model needs a `Cond` guard.
 - **Profile likelihood non-monotonicity** or wide CIs from `camdl profile`.
   Identifiability problems are model-design issues, not fitting bugs.
-- **`camdl survey` results.** The HTML pair-plot is a visual artefact
-  (parameter-pair scatter coloured by loglik). Agent vision is unreliable on
-  scatter geometry — what looks like a "clear basin" or a "ridge" or "bound
-  pinning" to an agent is often partially wrong about location, extent, or
-  whether multiple basins are present. Surface the rendered HTML path and a
-  one-line summary ("survey rendered to `survey.html`; my read is X but please
-  confirm before I start the fit from it"), don't act on the survey
-  unilaterally. The numerical TSV next to the HTML is reliable for argmax-loglik
-  points; the geometry interpretation is not.
+- **A scatter of log-likelihoods over a parameter design.** Agent vision is
+  unreliable on scatter geometry — what looks like a "clear basin" or a "ridge"
+  or "bound pinning" to an agent is often partially wrong about location,
+  extent, or whether multiple basins are present. Surface the plot's path and a
+  one-line summary ("my read is X but please confirm before I start the fit from
+  it"), and don't act on it unilaterally. The table of log-likelihoods is
+  reliable for the highest-scoring points; the geometry interpretation is not.
 - **External-oracle disagreements**: if a model is meant to reproduce a
   published result (He et al. 2010 measles, K-McK final-size, etc.) and the
   numbers don't match within the expected tolerance, surface immediately rather
@@ -138,7 +136,7 @@ than guessing: `camdl mre fit fit.toml` bundles the model, its compile-time
 
 **Safe to do autonomously:**
 
-- Run `camdl check`, `camdl simulate`, `camdl survey`, `camdl pfilter`,
+- Run `camdl check`, `camdl simulate`, `camdl design lhs`, `camdl pfilter`,
   `camdl fit run` (a single method, not committing the fit dir),
   `camdl fit
   summary`, `camdl fit predict`, `camdl list`, `camdl show`,
@@ -211,7 +209,7 @@ not all "the fit failed"; they're typed signals.
 
 | Diagnostic                   | Threshold                                               | What it means                                                                                                  | What to do                                                                                                                                                        |
 | ---------------------------- | ------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `RhatHigh`                   | R̂ > 1.1 (warn), > 1.5 (error)                           | Chains haven't agreed on this parameter's posterior                                                            | More sweeps; check for multimodality with `survey`. R̂ > 1.5 → almost certainly a real basin problem.                                                              |
+| `RhatHigh`                   | R̂ > 1.1 (warn), > 1.5 (error)                           | Chains haven't agreed on this parameter's posterior                                                            | More sweeps; check for multimodality with more chains from separate starts. R̂ > 1.5 → almost certainly a real basin problem.                                      |
 | `LowESSAtMLE`                | ESS < 5% × n_particles                                  | Particle filter is struggling at the point estimate. Loglik estimate has wide variance.                        | Increase `n_particles` for the likelihood evaluation, or check for model misspecification at the MLE.                                                             |
 | `ParamNearBound`             | within 1% of natural-scale bound                        | Posterior pile-up at a bound                                                                                   | Almost always: widen the bound. The data is telling you the parameter wants to live outside your prior support.                                                   |
 | `DivergentTransitions`       | any post-burn-in divergence                             | NUTS hit a divergent trajectory (high curvature in posterior geometry)                                         | Reparameterise (log/logit transforms), shrink the step size, or check for funnel geometry. Stan-canonical: any post-burn divergence is suspicious.                |
@@ -220,7 +218,7 @@ not all "the fit failed"; they're typed signals.
 | `MaxTreeDepthHits`           | > 5% of post-burn-in sweeps                             | NUTS trees not finishing — step size too small or posterior too elongated                                      | Increase `max_tree_depth`, or reparameterise.                                                                                                                     |
 | `DegenerateAncestorSampling` | > 10% of post-burn-in CSMC substeps                     | Reference trajectory too far from particle cloud                                                               | More particles, or smaller PGAS proposal SDs.                                                                                                                     |
 | `LowTrajectoryRenewal`       | mean post-burn renewal < 10%                            | PGAS reference trajectory not getting refreshed — possibly stuck                                               | More particles. Check that CSMC is actually proposing diverse trajectories (run with `RUST_LOG=sim::inference::pgas=debug`).                                      |
-| `MultimodalLikelihood`       | ll spread > 50 nats with R̂ > 1.5                        | Different chains are in different basins                                                                       | Run `camdl survey` to map the landscape. Likely need more chains or different initialisation.                                                                     |
+| `MultimodalLikelihood`       | ll spread > 50 nats with R̂ > 1.5                        | Different chains are in different basins                                                                       | Score a Latin-hypercube design with `camdl pfilter` (`camdl docs workflow`). Likely need more chains or different initialisation.                                 |
 | `ConvergenceIncomplete`      | max R̂ > 1.1 with finite agreements                      | Some parameters haven't converged                                                                              | More sweeps; check the per-parameter R̂ table to see which.                                                                                                        |
 | `AcceptanceRateUnhealthy`    | < 10% or > 50%                                          | MH proposal SD is too big (low accept) or too small (high accept)                                              | Let burn-in run longer; the Robbins-Monro adapter usually fixes this. If not, fix the proposal SD manually in fit.toml.                                           |
 
@@ -468,11 +466,14 @@ without priors or for profiles, not to place the final chains:
 `starts = { from_mle = … }` leaves R̂ not assessed. The method table and the
 reasoning are `camdl docs workflow`, "Choose a method".
 
-**Survey when a fit needs it, not by reflex.** `camdl survey` maps the
-likelihood over the bounds. Run it when the model estimates many parameters,
-when chains disagree or one chain's log-likelihood differs, or when the priors
-are weak; a small model with informative priors and agreeing chains gains little
-from it.
+**Score a parameter design when a fit needs it, not by reflex.**
+`camdl design lhs MODEL --fit fit.toml --n 200 --seed 1 -o design.tsv` writes a
+Latin-hypercube design over the `[estimate]` bounds, and `camdl pfilter` scores
+one of its rows per call; no single command scores a whole design
+(`camdl docs workflow` has the loop). Do it when the model estimates many
+parameters, when chains disagree or one chain's log-likelihood differs, or when
+the priors are weak; a small model with informative priors and agreeing chains
+gains little from it.
 
 **Explicit priors, always.** PGAS now refuses implicit-Flat priors. A wide
 uniform is fine if that's actually your belief; a wide normal is fine for log
@@ -731,7 +732,8 @@ camdl-scope --port 8800 --host 0.0.0.0   # reachable from a phone over the LAN
 ```
 
 Hand the human the URL and let them read the plots. Agent vision on scatter and
-ribbon geometry is unreliable — the same caution as `camdl survey` above.
+ribbon geometry is unreliable — the same caution as for a log-likelihood scatter
+above.
 
 ### Reading camdl outputs correctly
 
@@ -758,8 +760,8 @@ cannot disagree with the file it describes. Consume the _role_, never the name �
 the iteration column is spelled `sweep`, `step`, `draw` or `iteration` depending
 on the method, and `time` (physical) and `iteration` (a sampler index) are
 deliberately distinct roles. Not every producer declares one: `sim` leaves and
-completed fit leaves do; `pfilter`, `survey`, `profile` and the `fit predict`
-outputs do not.
+completed fit leaves do; `pfilter`, `profile` and the `fit predict` outputs do
+not.
 
 **To ask whether a long fit is still alive, read `progress.json`, not the
 mtimes.** Every method but `pfilter` writes one into its leaf and a background
@@ -849,8 +851,7 @@ Things to remember the compiler is doing for you, so you can lean on them:
   rate confusion → `E300` at compile time.
 - **Source-to-source autodiff** on every rate expression. PGAS+NUTS gets exact
   gradients; you don't need to hand-write Jacobians.
-- **Identifiability checks** in `camdl survey` (informally) and in
-  `camdl profile` (formally — 1D and 2D profile likelihoods).
+- **Identifiability checks** in `camdl profile` (1D and 2D profile likelihoods).
 - **Backend-capability gate**: requesting a backend that can't run a model (e.g.
   `--backend gillespie` on a model with `overdispersed()`) errors at dispatch
   time with a hint.

@@ -8,10 +8,9 @@ catalogue that drifts.
 ## Run identity and the content-addressed store (`runid` crate)
 
 - **`runid::ArtifactKind`** (`rust/crates/runid/src/kind.rs`) — the top "type"
-  partition of the store (`sims/`, `fits/`, `pfilters/`, `surveys/`,
-  `profiles/`, `obs/`, `projections/`) and the `kind` discriminator in
-  `run.json`. `run_id(kind, levels)` composes a leaf's address from the
-  per-level hashes.
+  partition of the store (`sims/`, `fits/`, `pfilters/`, `profiles/`, `obs/`,
+  `projections/`) and the `kind` discriminator in `run.json`.
+  `run_id(kind, levels)` composes a leaf's address from the per-level hashes.
 - **`runid::RunRecord`** (`record.rs`) — the on-disk `run.json`: the `run_id`
   leaf address, the ordered per-level `levels` (each a `LevelId` =
   `{name, label, hash}`), upstream `deps`, the `kind`, a `RunStatus` (Running →
@@ -42,7 +41,6 @@ Each CAS-emitting command resolves CLI inputs into `runid` levels at one site:
   `ArtifactKind::ProfilePoint` levels (`profile` / `point` / `method` / `seed` /
   `start`).
 - `cli/src/pfilter_cas.rs` — pfilter-eval identity (`ArtifactKind::Pfilter`).
-- `cli/src/survey.rs` — survey identity (`ArtifactKind::Survey`).
 
 `cli/src/cas/typed.rs::ContentHash` is the small newtype these sites use to keep
 content hashes type-distinct from arbitrary strings.
@@ -59,8 +57,8 @@ content hashes type-distinct from arbitrary strings.
   aggregates a fit segment's method leaves into the headline numbers fit
   consumers read, each leaf carrying its `method`, `method_hash` and `run_id`.
 - `cli/src/run_meta.rs` — the cross-cutting value types readers/writers share
-  (`FitAlgorithm`, `InferenceBackend`, `SurveyEvalMethod`, the provenance
-  records, and the fit-level `FitSidecar` written as `fit.meta.json`).
+  (`FitAlgorithm`, `InferenceBackend`, the provenance records, and the fit-level
+  `FitSidecar` written as `fit.meta.json`).
 
 ## Fit config schema
 

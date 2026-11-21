@@ -196,11 +196,10 @@ knowledge constrains the plausible region.
    refuse a parameter whose box has an infinite end — an unbounded `real` or
    `instant` on `(−∞, ∞)`, or an unbounded positive kind on `[0, ∞)` — since
    there is no interval to draw within; the refusal asks for bounds or a
-   different `starts` rule. `camdl survey` refuses such a parameter the same
-   way: its Latin-hypercube landscape needs a finite region. `from_prior` draws
-   each parameter from its prior restricted to its box, redrawing a value that
-   falls outside; an unbounded `real` or `instant` is drawn from its prior
-   unrestricted, negative values included.
+   different `starts` rule. `from_prior` draws each parameter from its prior
+   restricted to its box, redrawing a value that falls outside; an unbounded
+   `real` or `instant` is drawn from its prior unrestricted, negative values
+   included.
 
 4. **Boundary proximity warning.** If the MLE is within 1% of the width from
    either end of a box finite at both ends, warn that the true MLE may be on the
@@ -459,19 +458,17 @@ The method's algorithm must be `if2`, `pfilter` or `pmmh`; `pgas` and the ODE
 algorithms accumulate every observation unconditionally and are rejected
 outright.
 
-`profile --fit`, `survey --fit` and `pfilter --fit` score the objective the fit
-config sets, so a profile curve, a survey landscape and a fixed-θ filter run are
-on the scale of the fit's own maximum and rank parameter values by the
-likelihood the fit maximises. Each records the objective in its `run.json` as
-`inputs.likelihood_objective` — `full` or `conditional_on_first_observation` —
-and the conditional objective is part of the run identity, so the two never
-share a stored result. A profile with an `nl-*` algorithm and
-`survey --eval simulate` score the deterministic ODE skeleton, which cannot
-leave `y₁` out, so both are refused under `ic_free = true`; `survey --eval auto`
-resolves to `pfilter`. `pfilter --fit` of an `ic_free` fit applies the same
-model check as a `pfilter` fit — a deterministic `init { }` is refused — and
-prints which objective it scored; without `--fit`, `pfilter` scores the full
-likelihood.
+`profile --fit` and `pfilter --fit` score the objective the fit config sets, so
+a profile curve and a fixed-θ filter run are on the scale of the fit's own
+maximum and rank parameter values by the likelihood the fit maximises. Each
+records the objective in its `run.json` as `inputs.likelihood_objective` —
+`full` or `conditional_on_first_observation` — and the conditional objective is
+part of the run identity, so the two never share a stored result. A profile with
+an `nl-*` algorithm scores the deterministic ODE skeleton, which cannot leave
+`y₁` out, so it is refused under `ic_free = true`. `pfilter --fit` of an
+`ic_free` fit applies the same model check as a `pfilter` fit — a deterministic
+`init { }` is refused — and prints which objective it scored; without `--fit`,
+`pfilter` scores the full likelihood.
 
 See `docs/dev/proposals/archive/pre-alpha/2026-04-18-ic-free-inference.md` for
 the mathematical derivation, references (King Nguyen Ionides 2016 JSS, Ionides

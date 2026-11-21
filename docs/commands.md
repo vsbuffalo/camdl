@@ -33,12 +33,6 @@ transform. A few commands delegate to the compiler.
 | `pfilter` | A log-likelihood at _fixed_ parameters via a bootstrap particle filter (no estimation).                                                                                                                      |
 | `profile` | A profile-likelihood curve over a grid of one or more focal parameters — per-cell IF2 (`chain_binomial`) or an `nl-*` optimizer (`ode`).                                                                     |
 
-### Produce diagnostic artifacts
-
-| Command  | Produces                                                                                                                                                                                  |
-| -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `survey` | A likelihood landscape: log-likelihood at many Latin-hypercube points across a parameter box. Answers "is this model identifiable from this data?" _before_ a fit. Not a fitting routine. |
-
 ### Read, display, compare
 
 | Command                                            | Does                                                                                                                                                                                  |
@@ -117,7 +111,6 @@ quick one-shot use.
 | PMMH                     | `"pmmh"`                     | —                  | Bayesian posterior, gradient-free.                                         |
 | Particle filter          | `"pfilter"`                  | `camdl pfilter`    | Log-likelihood evaluation at fixed θ (diagnostic).                         |
 | NLopt (Subplex / BOBYQA) | `"nl-sbplx"`, `"nl-bobyqa"`  | —                  | Deterministic MLE on the ODE backend.                                      |
-| Survey (LHS landscape)   | —                            | `camdl survey`     | Identifiability diagnostic; _feeds_ a fit, is not a method.                |
 | Profile likelihood       | —                            | `camdl profile`    | Meta-routine running IF2 per grid point.                                   |
 
 Two methods are **fit-run only** — PGAS and PMMH have no standalone command,
@@ -128,12 +121,10 @@ not. PGAS uses gradient-based NUTS by default, which requires the compiler to
 have emitted `rate_grad` expressions (autodiff); set `use_nuts = false` for a
 gradient-free Metropolis-within-Gibbs fallback.
 
-Two routines are **standalone only**. `survey` is a diagnostic, not a fit — it
-maps the landscape so you can see ridges and multimodality before committing
-compute. `profile` is a meta-fit that maximizes the likelihood at each point of
-a parameter grid (IF2, or an `nl-*` optimizer); it orchestrates fits rather than
-being a single method, and prints one table row per grid point (TSV, or
-`--format json`).
+One routine is **standalone only**. `profile` is a meta-fit that maximizes the
+likelihood at each point of a parameter grid (IF2, or an `nl-*` optimizer); it
+orchestrates fits rather than being a single method, and prints one table row
+per grid point (TSV, or `--format json`).
 
 ## Workflows
 
@@ -150,18 +141,25 @@ camdl inspect model.camdl --cost-report       # per-step eval cost analysis
 trajectory. With `--obs` it also draws synthetic observations through the
 model's observation block.
 
-### Diagnose identifiability: survey → fit
+### Evaluate the model over a parameter design
 
-Before burning hours on a fit, map the likelihood:
+Before a long fit, run the model across the box of `[estimate]` bounds:
 
 ```bash
-camdl survey model.camdl --fit fit.toml       # LHS landscape → landscape.tsv
+camdl design lhs model.camdl --fit fit.toml --n 200 --seed 1 -o design.tsv
+camdl simulate model.camdl --sweep-file design.tsv --params fixed.toml
 ```
 
-The survey is a diagnostic, not a starting-point source: a landscape is not a
-posterior. A fit whose chains should begin somewhere informed starts
-`from_prior` (the default when every parameter has one), or from a short fit's
-posterior.
+`design lhs` writes a Latin-hypercube design, a TSV with `point_id` and one
+column per estimated parameter; `simulate --sweep-file` runs the model at every
+row, with `fixed.toml` giving the parameters the design does not vary.
+
+No single command scores a whole design. `camdl pfilter` evaluates the
+log-likelihood at one parameter set per call, so a log-likelihood per design
+point is a loop over the rows; [`camdl docs workflow`](workflow.md) shows it.
+The points are not a posterior sample and are not a source of chain starts: a
+fit whose chains should begin somewhere informed starts `from_prior` (the
+default when every parameter has one), or from a short fit's posterior.
 
 ### The fit: one problem, one method
 
@@ -509,23 +507,21 @@ in §7 of `camdl docs model-comparison`.
 - **A forcing is not extended past its range silently.** A run that evaluates an
   `interpolated` forcing before its first or after its last data point, or a
   `bspline` outside its window, is refused by every command that runs a model
-  (`simulate`, `fit run`, `fit predict`, `pfilter`, `profile`, `survey`,
-  `compare` when it derives a prequential, `dev eval`). The error names the
-  forcing, its range and the side it was evaluated on.
-  `--allow-forcing-extrapolation` on any of them (in a fit config,
-  `[config] allow_forcing_extrapolation = true`) holds the forcing's end value
-  instead, prints one warning per forcing naming its range and the span held,
-  and records the override in each `run.json` the command writes. The override
-  is part of the run's identity, so a run under it and the same run without it
-  are two runs: neither is served the other's stored result.
+  (`simulate`, `fit run`, `fit predict`, `pfilter`, `profile`, `compare` when it
+  derives a prequential, `dev eval`). The error names the forcing, its range and
+  the side it was evaluated on. `--allow-forcing-extrapolation` on any of them
+  (in a fit config, `[config] allow_forcing_extrapolation = true`) holds the
+  forcing's end value instead, prints one warning per forcing naming its range
+  and the span held, and records the override in each `run.json` the command
+  writes. The override is part of the run's identity, so a run under it and the
+  same run without it are two runs: neither is served the other's stored result.
 
 - **`simulate` goes forward; `fit` goes backward.** Simulation maps parameters →
   data; fitting maps data → parameters. A sweep is many forward runs, never an
   inference.
-- **`survey` and `profile` are about the likelihood _surface_, not a fit.**
-  Survey samples it broadly to check identifiability; profile traces it along
-  one axis. Both can precede or contextualize a fit; neither produces a
-  posterior.
+- **`profile` is about the likelihood _surface_, not a fit.** It traces the
+  maximized likelihood along one axis. It can precede or contextualize a fit; it
+  does not produce a posterior.
 - **`pfilter` is a shortcut into machinery `fit run` also uses.** The same
   particle-filter core backs both surfaces; the standalone command exposes a
   smaller set of knobs for a quick fixed-θ log-likelihood, while a `fit.toml`

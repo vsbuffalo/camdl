@@ -417,7 +417,7 @@ rust/
                        (PF, IF2, PGAS+NUTS, PMMH, obs_loglik, prequential)
   crates/io/           TSV read/write
   crates/cli/          camdl: simulate, fit, pfilter, profile,
-                       survey, data, lineage, list, show, cat, compare,
+                       data, lineage, list, show, cat, compare,
                        label, check, inspect, docs, mre, dev (compile,
                        doctest, eval, reindex)
 ir/

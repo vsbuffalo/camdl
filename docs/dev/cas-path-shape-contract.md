@@ -12,9 +12,7 @@ Every leaf directory contains a `run.json` (`runid::RunRecord`) with the
 authoritative fields:
 
 - `run_id` — the 64-hex canonical address of the run.
-- `kind` —
-  `"sim" | "fit_method" | "pfilter" | "survey" | "profile_point" |
-  "sim_ensemble"`
+- `kind` — `"sim" | "fit_method" | "pfilter" | "profile_point" | "sim_ensemble"`
   (plus `"obs"` and `"projection"`, which are reserved — their store partitions
   and run-id tags are pinned but no leaf is emitted yet).
 - `levels` — the factored identity, in order: each
@@ -41,8 +39,8 @@ from the path — read `kind` / `levels` / `deps` / `children` from `run.json`.
 results/<kind_dir>/<seg>/<seg>/…/run.json
 ```
 
-- `<kind_dir>`: `sims` | `fits` | `pfilters` | `surveys` | `profiles` |
-  `ensembles` (reserved, not emitted yet: `obs`, `projections`).
+- `<kind_dir>`: `sims` | `fits` | `pfilters` | `profiles` | `ensembles`
+  (reserved, not emitted yet: `obs`, `projections`).
 - `<seg>` = `<label>-<hash8>`, one segment per level in `levels` order.
 - **Collision suffix:** if two leaves would share a directory name, the later
   one's final segment gets a `~<disambiguator>` suffix, escalating
@@ -58,7 +56,6 @@ results/<kind_dir>/<seg>/<seg>/…/run.json
 | `sim`           | `sims`      | model · config · params · scenario · seed |
 | `fit_method`    | `fits`      | fit · method · seed                       |
 | `pfilter`       | `pfilters`  | model · config · params · seed            |
-| `survey`        | `surveys`   | model · config · box · seed               |
 | `profile_point` | `profiles`  | profile · point · method · seed · start   |
 | `sim_ensemble`  | `ensembles` | model · config · params · grid            |
 

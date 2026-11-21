@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 304" role="img" aria-labelledby="t d">
   <title id="t">The fit workflow</title>
-  <desc id="d">Ten steps in order. Before any fit: write the model, check it, simulate from it, recover known parameters from synthetic data, and choose an inference method. The fit: write fit.toml, fit run, fit summary, fit predict, and validate. Two further steps are optional and used only when a fit needs them: survey, which maps the likelihood surface, and if2, which gives a point estimate and profiles.</desc>
+  <desc id="d">Ten steps in order. Before any fit: write the model, check it, simulate from it, recover known parameters from synthetic data, and choose an inference method. The fit: write fit.toml, fit run, fit summary, fit predict, and validate. Two further steps are optional and used only when a fit needs them: design lhs, which writes a design of parameter values to simulate or score, and if2, which gives a point estimate and profiles.</desc>
   <defs>
     <marker id="wf-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
       <path d="M0,0 L10,5 L0,10 z" class="fig-arrow"/>
@@ -60,7 +60,7 @@
   <text x="16" y="262" class="t-cap fig-muted">OPTIONAL, WHEN A FIT NEEDS THEM</text>
   <g class="t-small fig-ink">
     <rect x="16" y="270" width="296" height="24" rx="3" class="fig-card s-muted" stroke-dasharray="4 3"/>
-    <text x="28" y="287"><tspan class="t-b">survey</tspan>  map the likelihood surface</text>
+    <text x="28" y="287"><tspan class="t-b">design lhs</tspan>  a design of parameter values</text>
     <rect x="328" y="270" width="296" height="24" rx="3" class="fig-card s-muted" stroke-dasharray="4 3"/>
     <text x="340" y="287"><tspan class="t-b">if2</tspan>  a point estimate, profiles</text>
   </g>

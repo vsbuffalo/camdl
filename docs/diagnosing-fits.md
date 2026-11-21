@@ -84,20 +84,18 @@ two reasons:
 2. **A likelihood-only landscape sampled over bounds ignores the prior**, so a
    direction the prior would downweight still looks freely explorable.
 
-In camdl, `camdl survey` is exactly this likelihood landscape — it draws points
-by Latin-hypercube over the declared `[estimate]` bounds. Two things to know:
+No camdl command writes such a landscape. One built by scoring the rows of a
+`camdl design lhs` design with `camdl pfilter`, one row per call
+([`camdl docs workflow`](workflow.md)), has both properties:
 
-- It does **not** silently smooth the noise. By default it runs several particle
-  replicates per point and reports `loglik_se` (the replicate standard error on
-  the log scale) and `mean_ess` alongside `loglik`, summarises the across-point
-  SE distribution in `summary.json`, and warns when too many points exceed the
-  ~1.7-nat reliability bar (Doucet et al.). **Read `loglik_se` and `mean_ess`,
-  not just the shape of `loglik`.** A peak built from points with large SE or
-  collapsed ESS is an artifact.
-- It is **prior-free by construction**. The landscape is the likelihood, not the
-  posterior, so a flat direction a prior would tame still looks explorable. Heed
-  the bound-clustering warning (top points pinning against a bound) — that is
-  the landscape telling you a direction is unidentified by the data alone.
+- **Each value is a noisy estimate.** Score a point with `--replicates N` and
+  `pfilter` reports the mean log-likelihood with its standard error across the
+  replicates (`loglik = -16.0 ± 0.7 (40 replicates, N=5)`). Read the standard
+  error, not just the shape of the log-likelihoods: a peak built from points
+  whose standard error is large is an artifact.
+- **It is prior-free.** The table is the likelihood, not the posterior, so a
+  flat direction a prior would tame still looks explorable. High-scoring points
+  that sit against a bound mark a direction the data alone do not identify.
 
 ## 3. Two inference failure modes — opposite fixes
 
@@ -694,8 +692,8 @@ at the transition model over that window.
 
 A point estimate can be a symptom rather than an answer. Watch for:
 
-- a parameter **pinned at a bound** (survey's bound-clustering warning and the
-  IF2 chain-agreement ranges surface this);
+- a parameter **pinned at a bound** (the `ParamNearBound` diagnostic and the IF2
+  chain-agreement ranges surface this);
 - an **unphysical** value — $R_0 < 1$ for an outbreak that visibly grew,
   overdispersion slammed to its maximum, a reporting rate at 0 or 1.
 

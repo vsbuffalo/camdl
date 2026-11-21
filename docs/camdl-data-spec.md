@@ -876,11 +876,6 @@ zero trials: it is outside the family's domain and also scores `-inf`, reported
 as the `n` argument being out of domain. A fractional `n` at run time (an `n`
 built from a real-valued compartment) is rounded to the nearest whole number.
 
-`camdl survey` reads the same `n = <column>` as `camdl fit` and applies the same
-rules. Survey refuses an `NA` in a column the likelihood reads rather than
-making the row a hole, since its rows are meant to be complete; it accepts a `0`
-of `0` row, which, as above, carries no information and adds no term.
-
 ## Missing observations: `NA` is a hole, not a zero
 
 In an **observation** file, the token `NA` in a value column marks a **hole**: a
