@@ -3182,6 +3182,76 @@ The two seed segments are shared by both `beta` points — the common random
 numbers above — and `beta` is absent from the parameter list because the sweep
 supplies it per cell.
 
+#### Scoring a design: `pfilter --sweep-file`
+
+`camdl pfilter --sweep-file FILE` estimates the log-likelihood log p(y | θ) at
+every row of a design file, one table row per design point. With a space-filling
+design from `camdl design lhs`, the table is a likelihood landscape
+([Commands](commands.md#scoring-a-design-pfilter---sweep-file)).
+
+```bash
+camdl pfilter sir.camdl --fit fit.toml --sweep-file design.tsv \
+    --particles 1000 --replicates 5 --seed 1 -o landscape.tsv
+```
+
+The file is read as `simulate --sweep-file` reads it: its header names model
+parameters, an optional `point_id` column names the rows, and the same files are
+refused. Each design point is scored exactly as the single call
+`camdl pfilter sir.camdl --fit fit.toml --param beta=… --param gamma=… --particles 1000 --replicates 5 --seed 1`
+would score it:
+
+- **Parameters.** A point's values enter at tier 3.5 (§1.3). Every other tier
+  resolves as it does for a single call: the fit config's `[fixed]`, `--params`,
+  the scenario.
+- **Seeds.** A point does not enter the seed. Every point runs its
+  `--replicates` filters on the seeds of the single call with the same `--seed`,
+  so the filters at different points share random numbers, and the errors of the
+  rows are correlated.
+- **The store.** Each point is stored as the single call's `Pfilter` leaf, with
+  that call's `run_id`. A point already stored, by a single call or by another
+  design, is reported `cached` and not recomputed, so an interrupted design run
+  again computes only the remaining points. The design file's digest enters no
+  identity, and the table itself is not stored.
+
+Points run concurrently on the `--parallel` thread pool. The table does not
+depend on the schedule.
+
+**The table**, to `-o PATH` or stdout, one row per design point in file order:
+
+| column          | meaning                                                                                                |
+| --------------- | ------------------------------------------------------------------------------------------------------ |
+| `point_id`      | the row's `point_id`, else its 0-based row                                                             |
+| `sweep:<param>` | one per design column, name-sorted: the value scored                                                   |
+| `loglik`        | the mean over replicates of the estimated log-likelihood; `-inf` when any replicate collapsed          |
+| `loglik_sd`     | the standard deviation over replicates; empty under `--replicates 1`, `NaN` when a replicate collapsed |
+| `n_collapsed`   | how many replicates collapsed (every particle scored `-inf` at some observation)                       |
+| `run_id`        | the stored leaf (`camdl cat <run_id>`); empty when every replicate collapsed, or under `--no-store`    |
+
+Numbers are written in shortest round-trip form, so a `loglik` read back equals
+the stored one.
+
+**Collapsed points.** A point at which every replicate collapses is a row with
+`loglik = -inf`, `n_collapsed` equal to `--replicates` and an empty `run_id`,
+and the run continues. After the table, the run prints how many points collapsed
+and the first collapse message. The run exits with status 3, the status of a
+single call whose filter collapsed, only when every point collapsed. A point at
+which the filter stops with an error instead, such as an effective sample size
+that stays collapsed over several observations, ends the run with status 3 and
+no table, as it ends a single call.
+
+**Refused beside `--sweep-file`**, before any filter runs:
+
+- `--param` on a design column, and a `--scenario` that sets or scales one:
+  either would score every row at one value while its `sweep:<param>` column
+  said otherwise;
+- every output that describes one filter run: `--trace`, `--pf-health`,
+  `--save-final-state`, `--save-paths`, `--save-filtering`,
+  `--save-filtered-streams` and `--save-prequential`.
+
+A parameter that no tier gives a value, such as an `[estimate]` parameter the
+file has no column for, is refused as it is for a single call ("parameter 'beta'
+has no value").
+
 ### 5.6 Execution Flow
 
 A multi-cell `camdl simulate`:
