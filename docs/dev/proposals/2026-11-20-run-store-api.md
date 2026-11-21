@@ -18,10 +18,14 @@ files they name. Typed steps turn those into one identity per result. An output
 is a function of its identity alone. The store does every write and every read
 of a stored file.
 
-Most of the library exists in camdl today, scattered: locks naming process and
+Much of the library exists in camdl today, scattered: locks naming process and
 host, heartbeats, `progress.json`, `.attempts/`, `.quarantine/`, `.staging/`,
-profile invocation records and `index.json`. This design unifies them and adds
-no mechanism of its own beyond the invocation record.
+profile invocation records and `index.json`. This design unifies them. Four
+mechanisms are new or reshaped: an owner whose beat file carries its process
+start time, in place of a lock per claim; per-owner index logs, in place of one
+`index.json`; by-products with a reproducing mode, in place of children added to
+a parent's record; and an invocation record for every command run, which also
+holds the labels.
 
 The main points:
 
@@ -47,7 +51,8 @@ The main points:
   that sit in `[estimate]`, belong to the run.
 - **Existing fits are abandoned at migration.**
 - **The compiled model is stored whole,** derivative tables included, under the
-  digest of what is stored. The IR does not change.
+  digest of what is stored. The IR loses two fields nothing reads,
+  `output.format` and `simulation.time_semantics`, and is otherwise unchanged.
 - **A configuration file never names a run.** Labels, ids and paths do.
 - **Some features are left for later.** Archive and prune, search by identity
   field, `diff`, a `watch` command and stored combinations are listed under
@@ -84,19 +89,22 @@ recomputing.
 4. **Canonical identity.** Two requests that mean the same thing get the same
    id. Files are hashed by content and their paths only recorded. Defaults are
    resolved first, so a flag at its default and no flag are one identity.
-5. **A content key is the digest of what is stored and consumed.** Never of a
-   projection of it.
-6. **Only completed results are reused.** Every stored folder has a status:
-   running, completed, failed or interrupted. A running or stopped run is
-   visible and explains itself, and is never served as a result.
+5. **A content's digest is the SHA-256 of what is stored and consumed.** Never
+   of a projection of it.
+6. **Only completed results are reused.** Every result folder has a status:
+   running, completed, failed (an in-place run only) or interrupted. A failed
+   atomic result leaves no folder; its failure and reason are kept in the
+   invocation record. A running or stopped run is visible and explains itself,
+   and is never served as a result.
 7. **Completed records are sealed.** Nothing rewrites a completed result or its
-   record. The only change is appending a naming event.
+   record, without exception.
 8. **Every write and every read of a stored file goes through the store.**
    Claims, manifests and records cannot be skipped, and every read of another
    result's files is recorded.
-9. **Self-explaining results.** The record alone says what produced a result:
-   the inputs as given, the build, the environment, and the results it consumed
-   with their digests and builds.
+9. **Self-explaining results.** The record, with the invocation record it names,
+   says what produced a result: the inputs as given (the full command line is in
+   the invocation record), the build, the environment, and the results it
+   consumed with their digests and builds.
 10. **Readers ask the record.** Seed, kind, parent and status come from the
     record, never from a folder name or its depth.
 11. **Old records are refused loudly, never misread.**
@@ -121,36 +129,35 @@ Running, completed and failed are written to the record. Interrupted is never
 written: a reader concludes it when the record says running and the owner is
 gone.
 
-| Term              | Meaning                                                                                                                                                                                                                                                      |
-| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Input             | Anything that reaches a command: a flag, a key in a settings file, the content of a data file, an environment variable, or an earlier result.                                                                                                                |
-| Class             | What an input may do. The main three: identity (can change a result, hashed), execution (used by the engine, must not change the result), store (a request to the store). API 1 lists them all.                                                              |
-| Declared inputs   | The struct of identity-class inputs a derive generates from a command's arguments or from a settings file. Its fields are private and it cannot be hashed.                                                                                                   |
-| Resolution        | The typed steps that consume declared inputs by value and produce identity values: parsing a file, compiling a model, merging flags over file settings, filling in defaults.                                                                                 |
-| Identity          | A project-written typed value that fully determines one result's bytes.                                                                                                                                                                                      |
-| Content           | A typed value with a byte form. Its key is the digest of those bytes.                                                                                                                                                                                        |
-| Content artifact  | An artifact whose identity is the digest of its one result file, such as a compiled model. Other results depend on it.                                                                                                                                       |
-| Identity record   | The form of an identity that `identity.json` holds and readers get. Content the artifact stores itself appears there as a key.                                                                                                                               |
-| Key               | A 32-byte hash. A struct's key covers its tag, its version, and each field's name and key.                                                                                                                                                                   |
-| Ambient identity  | The build fingerprint and the identity-class environment variables. The store adds it to every run id.                                                                                                                                                       |
-| Artifact          | A kind of stored result, such as a simulation, a fit problem, a fit run or a prediction. Each has one identity type and one write mode.                                                                                                                      |
-| By-product        | A second artifact produced by the same computation as another, such as observations drawn while a trajectory is simulated. Its identity holds the upstream's identity record plus its own settings.                                                          |
-| Run id            | The hash of the artifact's kind, the ambient identity and the identity key.                                                                                                                                                                                  |
-| Status            | Running, completed or failed, as written in the record. Interrupted is derived by readers and never written.                                                                                                                                                 |
-| Claim             | Exclusive ownership of a run id while it is computed.                                                                                                                                                                                                        |
-| Owner and beat    | The process holding claims, named by host, process id and start time. It increments one counter, its beat, every few seconds.                                                                                                                                |
-| Invocation record | The store-owned, durable record of one command run: the inputs as given, a digest of each configuration file, the ordered list of results the command asked for with each one's labels, and how many completed and failed. It is written on a cache hit too. |
-| Batch             | An invocation that asks for several results.                                                                                                                                                                                                                 |
-| Label             | Anything a user recognises a result by that is not in its identity: a scenario's name, a model file's name, a replicate number, the seed the user typed, a `--label`. Labels live in invocation records and naming events.                                   |
-| Dependency        | An identity field naming a file of another result: the upstream run id, the file, and the digest of what was consumed. The upstream may come from another build.                                                                                             |
-| Naming event      | A `--label` minted on a result or an invocation when a command runs. Naming events are appended and never edited.                                                                                                                                            |
-| Record            | `identity.json` (the identity record) and `run.json` (status, manifest, dependencies, inputs as given, naming events). Sealed once completed.                                                                                                                |
-| File role         | Result files are in the manifest and determined by the identity. Provenance files are in the manifest but not compared on a recompute. Attempt files describe one attempt and are outside the manifest.                                                      |
-| Export            | A file written to a path the user gave: a copy of a stored result file, or a rendering computed from stored files and the invocation record.                                                                                                                 |
-| Rendering         | A pure function of stored result files, an invocation record and rendering options such as date columns or a file format. It is not stored.                                                                                                                  |
-| Index             | A rebuildable log of results, their labels and their dependency edges in both directions. It can be rebuilt from the records and the invocation records.                                                                                                     |
-| Layout            | Where a folder sits under the store root. It is a view; readers never parse it.                                                                                                                                                                              |
-| Store             | The only code that writes or reads stored folders. One command uses one store root.                                                                                                                                                                          |
+| Term              | Meaning                                                                                                                                                                                                                                                                                                                                   |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Input             | Anything that reaches a command: a flag, a key in a settings file, the content of a data file, an environment variable, or an earlier result.                                                                                                                                                                                             |
+| Class             | What an input may do. The main three: identity (can change a result, hashed), execution (used by the engine, must not change the result), store (a request to the store). API 1 lists them all.                                                                                                                                           |
+| Declared inputs   | The struct of `identity`, `expands` and `adds` inputs that a derive generates from a command's arguments or from a settings file. Its fields are private. It has no key and cannot be passed to the store; only the identity resolved from it can.                                                                                        |
+| Resolution        | The typed steps that consume declared inputs by value and produce identity values: parsing a file, compiling a model, merging flags over file settings, filling in defaults.                                                                                                                                                              |
+| Identity          | A project-written typed value that fully determines one result's bytes.                                                                                                                                                                                                                                                                   |
+| Content           | A typed value with a byte form. Its digest is the SHA-256 of those bytes.                                                                                                                                                                                                                                                                 |
+| Content artifact  | An artifact whose identity is the digest of its one result file, such as a compiled model. Other results depend on it.                                                                                                                                                                                                                    |
+| Identity record   | The form of an identity that `identity.json` holds and readers get. Content the artifact stores itself appears there as its digest.                                                                                                                                                                                                       |
+| Key               | A 32-byte SHA-256 digest of a value's canonical encoding (the "Keys" section). A struct's encoding covers its tag, its version, and each field's name and encoding.                                                                                                                                                                       |
+| Ambient identity  | The build fingerprint and the identity-class environment variables. The store adds it to every run id.                                                                                                                                                                                                                                    |
+| Artifact          | A kind of stored result, such as a simulation, a fit problem, a fit run or a prediction. Each has one identity type, one labels type and one write mode.                                                                                                                                                                                  |
+| By-product        | A second artifact produced by the same computation as another, such as observations drawn while a trajectory is simulated. Its identity holds the upstream's identity record plus its own settings.                                                                                                                                       |
+| Run id            | The hash of the artifact's kind, the ambient identity and the identity key.                                                                                                                                                                                                                                                               |
+| Status            | Running, completed or failed, as written in the record. Interrupted is derived by readers and never written. Only an in-place run is ever recorded as failed in its folder; a failed atomic result leaves no folder.                                                                                                                      |
+| Claim             | Exclusive ownership of a run id while it is computed.                                                                                                                                                                                                                                                                                     |
+| Owner and beat    | The process holding claims, named by host, process id and start time. It increments one counter, its beat, every few seconds.                                                                                                                                                                                                             |
+| Invocation record | The store-owned, durable record of one command run: the inputs as given, a digest of each configuration file, the `--label` if one was given, the ordered list of results the command asked for with each one's labels, and how many completed and failed. It is written on a cache hit too, and is not rewritten after the command ends. |
+| Batch             | An invocation that asks for several results.                                                                                                                                                                                                                                                                                              |
+| Label             | Anything a user recognises a result by that is not in its identity: a scenario's name, a model file's name, a replicate number, the seed the user typed, a `--label`. Labels live only in invocation records. A result's labels are a value the project supplies (`Artifact::Labels`); the `--label` names the invocation.                |
+| Dependency        | An identity field naming a file of another result: the upstream run id, the file, and the digest of what was consumed. The upstream may come from another build.                                                                                                                                                                          |
+| Record            | `identity.json` (the identity record) and `run.json` (status, manifest, dependencies, lineage, inputs as given). Sealed once completed.                                                                                                                                                                                                   |
+| File role         | Result files are in the manifest and determined by the identity. Provenance files are in the manifest but not compared on a recompute. Attempt files describe one attempt and are outside the manifest.                                                                                                                                   |
+| Export            | A file written to a path the user gave: a copy of a stored result file, or a rendering computed from stored files and the invocation record.                                                                                                                                                                                              |
+| Rendering         | A pure function of stored result files, an invocation record and rendering options such as date columns or a file format. It is not stored.                                                                                                                                                                                               |
+| Index             | A rebuildable log of results, their folders, the invocations that asked for them (with those invocations' labels) and their dependency edges in both directions. It can be rebuilt from the records and the invocation records.                                                                                                           |
+| Layout            | Where a folder sits under the store root. It is a view; readers never parse it.                                                                                                                                                                                                                                                           |
+| Store             | The only code that writes or reads stored folders. One command uses one store root.                                                                                                                                                                                                                                                       |
 
 ## API 1: inputs and identity
 
@@ -173,10 +180,13 @@ pub struct NumericsArgs {
 #[derive(clap::Args, Inputs)]
 pub struct ExampleArgs {
     #[command(flatten)] #[input(group)] pub numerics: NumericsArgs,
-    #[input(identity)]                  pub model: InputFile<ModelSource>,
-    #[arg(long)] #[input(identity)]     pub params: InputFile<ParamsToml>,
+    #[input(identity, vary = fixtures::other_model)]
+                                        pub model: InputFile<ModelSource>,
+    #[arg(long)] #[input(identity, vary = fixtures::other_params)]
+                                        pub params: InputFile<ParamsToml>,
     #[arg(long)] #[input(identity)]     pub seed: u64,
-    #[arg(long)] #[input(execution)]    pub parallel: usize,
+    #[arg(long)] #[input(execution, exercised_by = fixtures::example_two_cells)]
+                                        pub parallel: usize,
     #[arg(long)] #[input(store)]        pub label: Option<String>,
     #[arg(long)] #[input(skip)]         pub quiet: bool,
 }
@@ -191,7 +201,7 @@ pub struct ExampleArgs {
 | `export`    | It is a path to write a copy or a rendering of stored files to              | The exports                                                                | A copy matches the stored digest; a rendering made twice from the same stored files gives the same bytes |
 | `render`    | It chooses how an export is rendered, such as date columns or a file format | The exports                                                                | No stored file differs across two values                                                                 |
 | `store`     | It is a request to the store: a label, or which store root to use           | The store request                                                          | None                                                                                                     |
-| `recorded`  | People want it on record and nothing reads it                               | `run.json`                                                                 | None                                                                                                     |
+| `recorded`  | People want it on record and nothing reads it                               | `Given`, and from there `run.json` and the invocation record               | None                                                                                                     |
 | `group`     | The field is a nested struct that itself derives `Inputs`                   | Wherever its own fields go                                                 | Its fields' tests                                                                                        |
 | `skip`      | It only affects what is printed                                             | Nowhere                                                                    | None                                                                                                     |
 
@@ -206,39 +216,112 @@ This is close to the set camdl's input classes have today, without the level.
   algorithm runs on one backend (the comment at `input_class.rs:290-293`); in
   `simulate` it changes the result.
 
-The derive generates one struct per class. The split does no reading and cannot
-fail.
+The derive generates one struct per destination and implements one trait. The
+split does no reading and cannot fail.
 
 ```rust
-/// Fields are private. The only way in is into_parts, which returns every field.
+/// Implemented by #[derive(Inputs)] on a clap struct.
+pub trait Inputs: Sized {
+    type Declared;    // the identity, expands and adds fields; groups as their own Declared
+    type Execution;   // the execution fields
+    type Exports;     // the export and render fields; () when there are none
+    type Request;     // the store fields
+    const FIELDS: &'static [FieldInfo];
+    fn split(self) -> Split<Self>;
+    /// These arguments with one field changed to a second value: by `Vary` on the
+    /// field's type, or by the function its `vary = ...` names. For the class checks.
+    fn varied(&self, field: &str) -> Self;
+    /// The arguments of the fixture the field's `exercised_by = ...` names, at two
+    /// values of the field. For the class checks.
+    fn exercised(field: &str) -> (Self, Self);
+}
+
+/// The split arguments. Taken apart once, in full.
+pub struct Split<I: Inputs> { /* the four parts and the Given */ }
+
+impl<I: Inputs> Split<I> {
+    /// The declared inputs, the execution inputs, the exports, the store request,
+    /// and the inputs as given (the recorded fields included, with argv), for the records.
+    pub fn into_parts(self) -> (I::Declared, I::Execution, I::Exports, I::Request, Given);
+}
+
+/// One field, for the generated tests. A field of a group is named `group.field`.
+pub struct FieldInfo {
+    pub name: &'static str,                  // the clap id, the settings key, or the variable
+    pub class: Class,
+    pub vary: Option<&'static str>,          // the path given as `vary = ...`; None uses Vary
+    pub exercised_by: Option<&'static str>,  // the path given as `exercised_by = ...`
+}
+
+pub enum Class { Identity, Expands, Adds, Execution, Export, Render, Store, Recorded, Skip }
+```
+
+For `ExampleArgs` the derive generates these. `Declared`, `Exports` and
+`Request` have private fields and one `into_parts` that returns every field, in
+declaration order; `Execution` has public fields, since the engine reads them
+and nothing needs to prove they were all consumed, and derives `Serialize`,
+since `RunInfo::new` records it.
+
+A generated struct is named after the struct it came from, with a trailing
+`Args` removed, followed by its part: `ExampleArgs` gives `ExampleDeclared`,
+`ExampleExecution` and `ExampleRequest`, and would give `ExampleExports` if it
+had export fields; `FitToml` gives `FitTomlDeclared`; `FitProblemFlags` gives
+`FitProblemFlagsDeclared`. `#[derive(EnvInputs)]` names its identity part
+`<Name>Identity`, and `#[derive(Identity)]` names a record form `<Name>Record`.
+A part with no fields is `()` rather than a struct.
+
+```rust
 pub struct ExampleDeclared { /* numerics, model, params, seed */ }
 
 impl ExampleDeclared {
     pub fn into_parts(self) -> (NumericsDeclared, InputFile<ModelSource>, InputFile<ParamsToml>, u64);
 }
 
+#[derive(Serialize)]
 pub struct ExampleExecution { pub parallel: usize }
-pub struct ExampleRequest   { /* label */ }
+
+pub struct ExampleRequest { /* label */ }
+
+impl ExampleRequest {
+    pub fn into_parts(self) -> (Option<String>,);
+}
 
 impl Inputs for ExampleArgs {
     type Declared  = ExampleDeclared;
     type Execution = ExampleExecution;
-    type Exports   = ();                      // this command has no export paths
+    type Exports   = ();                      // this command has no export or render fields
     type Request   = ExampleRequest;
-
-    const FIELDS: &'static [FieldInfo];      // name and class of every field, for tests
-    fn split(self) -> Split<Self>;
-}
-
-impl<I: Inputs> Split<I> {
-    /// The declared inputs, the execution inputs, the export paths, the store request,
-    /// and the inputs as given (argv included), for the record.
-    pub fn into_parts(self) -> (I::Declared, I::Execution, I::Exports, I::Request, Given);
+    const FIELDS: &'static [FieldInfo] = &[ /* numerics.dt, numerics.binomial, model, ... */ ];
+    fn split(self) -> Split<Self> { /* generated */ }
+    fn varied(&self, field: &str) -> Self { /* generated */ }
+    fn exercised(field: &str) -> (Self, Self) { /* generated */ }
 }
 ```
 
+The `Given` holds every field except `skip` and `store` ones, by name, as typed,
+and the full command line, `argv`. `run.json` records the fields as "given". The
+invocation record records them too, and is the only record that holds `argv`,
+since the command line carries the `--label`, `--force` and the store root,
+which no result's record holds.
+
+```rust
+/// The inputs as given, for the records.
+pub struct Given { /* argv, and each field's value as typed, by name, store and skip fields excluded */ }
+
+impl Given {
+    /// Add a parsed settings file's own Given under the field that named it,
+    /// with the digest of its raw bytes.
+    pub fn with_file(self, field: &str, file: Given, source: &SourceBytes) -> Given;
+}
+```
+
+A command's `Exports` is generated the same way: its fields are the `export` and
+`render` fields, and `into_parts` returns them all, so a new export flag breaks
+the caller until it is used. The rendering options a command passes to a
+rendering are built from them by the project (the `simulate` example).
+
 Two rules follow from the private fields, and they apply to every generated
-struct, groups included.
+struct that has them, groups included.
 
 - **No field access.** `declared.seed` does not compile. A caller gets the
   fields only from `into_parts`, all at once, so adding a field breaks every
@@ -251,8 +334,9 @@ struct, groups included.
 be swapped by mistake. Distinct types for distinct meanings, such as a seed
 type, keep that rare.
 
-`ExampleDeclared` does not implement `Identity`. It cannot be hashed or passed
-to the store.
+`ExampleDeclared` does not implement `ContentAddressed` or `Identity`. It has no
+key and cannot be passed to the store; resolution turns it into something that
+can.
 
 ### Declaring the contents of input files
 
@@ -264,22 +348,49 @@ class for every key.
 pub struct InputFile<T>(PathBuf);
 
 /// A settings file. An unknown key is a parse error; a key with no class is a compile error.
-#[derive(Deserialize, FileInputs)]
+#[derive(Serialize, Deserialize, FileInputs)]
 #[serde(deny_unknown_fields)]
 pub struct ParamsToml {
     #[input(identity)] pub values: BTreeMap<String, f64>,
-    #[input(identity)] pub tables: BTreeMap<String, InputFile<Table>>,
+    #[input(identity, vary = fixtures::other_tables)]
+                       pub tables: BTreeMap<String, InputFile<Table>>,
+}
+
+/// Implemented by #[derive(FileInputs)]. The same as Inputs, without exports:
+/// the derive refuses `export` and `render` on a settings key. Serialize lets the
+/// class checks write a varied copy of the file.
+pub trait FileInputs: DeserializeOwned + Serialize + Sized {
+    type Declared;
+    type Execution;   // () when the file has no execution keys
+    type Request;     // () when the file has no store keys
+    const FIELDS: &'static [FieldInfo];
+    /// Called by InputFile::parse with the bytes it read.
+    fn split(self, source: SourceBytes) -> Parsed<Self>;
+    /// As Inputs::varied, for one key.
+    fn varied(&self, key: &str) -> Self;
 }
 
 impl<T: FileInputs> InputFile<T> {
-    /// Parse and split, as for arguments.
+    /// Read, parse and split, as for arguments.
     pub fn parse(self) -> Result<Parsed<T>>;
 }
 
+/// A parsed and split settings file.
+pub struct Parsed<T: FileInputs> { /* the parts, the Given and the raw bytes */ }
+
 impl<T: FileInputs> Parsed<T> {
-    /// Every part of the file: declared inputs, execution inputs, store request,
-    /// and the raw bytes, which are kept as a provenance file.
-    pub fn into_parts(self) -> (T::Declared, T::Execution, T::Request, SourceBytes);
+    /// Every part of the file: declared inputs, execution inputs, store request, the
+    /// keys as given (recorded keys included), and the raw bytes.
+    pub fn into_parts(self) -> (T::Declared, T::Execution, T::Request, Given, SourceBytes);
+}
+
+/// A settings file's raw bytes, its path as given, and their digest.
+pub struct SourceBytes { /* path, bytes, Key */ }
+
+impl SourceBytes {
+    pub fn digest(&self) -> Key;
+    /// Write the bytes as they were read, to a file of a run (a provenance file).
+    pub fn write(&self, to: &FileHandle) -> Result<()>;
 }
 
 impl<T: Content> InputFile<T> {
@@ -287,6 +398,23 @@ impl<T: Content> InputFile<T> {
     pub fn content(self) -> Result<Hashed<T>>;
 }
 ```
+
+The classes behave in a settings file as they do in arguments, with three points
+particular to files.
+
+- **A `group` is a nested table** whose type itself derives `FileInputs`. Its
+  declared, execution and store parts become fields of the parent's parts, and
+  its recorded keys go into the parent's `Given` under the table's name. An
+  `Option<group>` is a table that may be absent: each of the parent's parts then
+  holds an `Option` of the group's part, `None` when the table is absent, so
+  `[data]` absent and `[data]` present with every key at its default stay
+  distinct until resolution decides what absence means.
+- **An `expands` key** holds the whole set, as an `expands` flag does. The
+  declared inputs carry the set; resolution makes one member per value, and only
+  that value enters the member's identity. `fit_seeds` in `fit.toml` is the case
+  in point.
+- **A `recorded` key** goes into the file's `Given`, which the command adds to
+  its own with `Given::with_file`.
 
 | Kind of file | Example                      | What is hashed                   | What is kept                                                              |
 | ------------ | ---------------------------- | -------------------------------- | ------------------------------------------------------------------------- |
@@ -310,7 +438,40 @@ pub struct CamdlEnv {
     #[env(prefix = "CAMDL_EXPERIMENTAL_")]  #[input(identity)] pub experimental: BTreeMap<String, String>,
     #[env("CAMDL_OUTPUT_DIR")]              #[input(store)]    pub output_dir: Option<PathBuf>,
 }
+
+/// Implemented by #[derive(EnvInputs)].
+pub trait EnvInputs: Sized {
+    /// The identity-class variables. Unlike a command's declared inputs, this struct
+    /// implements ContentAddressed and Identity itself: an ambient value needs no
+    /// resolution, so what is read is what is hashed.
+    type Identity: Identity;
+    type Execution;
+    type Request;
+    const FIELDS: &'static [FieldInfo];
+    /// Read every declared variable once, and no other.
+    fn read() -> Result<(Self::Identity, Self::Execution, Self::Request, Given)>;
+}
 ```
+
+For `CamdlEnv` the derive generates `CamdlEnvIdentity` (the three identity
+fields, public, with `#[derive(Identity)]` and the tag `camdl_env`),
+`CamdlEnvRequest` (`output_dir`, private, with `into_parts`), and an `Execution`
+of `()`. Every variable is parsed by one rule, by its field's type:
+
+- **A `bool` variable is true when the variable is set,** whatever its value,
+  the empty string and `0` included.
+- **A `prefix` field collects every set variable whose name starts with the
+  prefix,** keyed by the full variable name, prefix included, with its value as
+  a string.
+- **A `String` or `PathBuf` variable is its text,** the empty string included,
+  and `None` in an `Option` when unset.
+
+Today's parsing follows this rule for most variables (`cli/src/env.rs:183-221`):
+`is_set` for a `bool` (`env.rs:191`, `:203-204`), the prefix scan
+(`env.rs:194-200`) and the text of a path or string (`env.rs:192-193`). Two
+variables differ, and keep their own parsing in the target, declared on the
+field: `CAMDL_TRACE_STEPS` is true only for the value `"1"` (`env.rs:202`), and
+`CAMDL_IR_CACHE_DIR` set to the empty string is read as unset (`env.rs:209`).
 
 ### From declared inputs to identity
 
@@ -318,13 +479,23 @@ Resolution is a function that takes the declared inputs by value and hands each
 one to the typed step that uses it.
 
 ```rust
+#[derive(Identity, Clone)]
+#[identity(tag = "example", version = 1)]
+pub struct ExampleIdentity {
+    pub model: Dep<CompiledModel>,    // shared content: a dependency on a content artifact
+    pub numerics: Numerics,
+    pub params: ResolvedParams,
+    pub seed: ProcessSeed,
+}
+
 #[deny(unused_variables)]
-pub fn resolve(declared: ExampleDeclared) -> Result<ExampleIdentity> {
+pub fn resolve(declared: ExampleDeclared, store: &Store, info: &RunInfo) -> Result<ExampleIdentity> {
     // Every declared input, by value. A new one changes this tuple and breaks the build here.
     let (numerics, model, params, seed) = declared.into_parts();
 
-    let model  = compile(model.content()?)?;              // Hashed<CompiledModel>
-    let params = resolve_params(params.parse()?, &model)?;   // takes the parsed file whole
+    let parts  = compile(model.content()?)?;                                 // CompiledParts
+    let params = resolve_params(Some(params.parse()?), Vec::new(), &parts.model)?;   // the parsed file whole
+    let model  = store.put::<CompiledModel>(parts.model, &parts.labels, &parts.provenance, info)?.dep(CompiledModel::FILE)?;
 
     Ok(ExampleIdentity {
         model,
@@ -334,6 +505,9 @@ pub fn resolve(declared: ExampleDeclared) -> Result<ExampleIdentity> {
     })
 }
 ```
+
+`compile`, `resolve_params`, `CompiledParts` and the other value types here are
+the project's; camdl's are declared in Part 2, under "camdl's types".
 
 - **Every step is a typed function** that takes the declared values it uses. No
   function takes "everything that was loaded".
@@ -348,7 +522,12 @@ pub fn resolve(declared: ExampleDeclared) -> Result<ExampleIdentity> {
 - **A merge is one function.** Where a flag overrides a key in a file, one
   `merge` takes both values and sets the precedence.
 - **An input a command does not use is released by name,** with a reason, such
-  as held-out tables in a command that only fits.
+  as held-out tables in a command that only fits. `release` consumes the value,
+  so the unused binding is visible in the code with its reason:
+
+  ```rust
+  pub fn release<T>(value: T, reason: &'static str);
+  ```
 - **Files are read only through `InputFile`.**
 - **What the compiler cannot see** is a step that takes an input and ignores
   what it means. The generated identity tests cover that.
@@ -375,12 +554,32 @@ pub trait Content: Sized {
     fn from_bytes(bytes: &[u8]) -> Result<Self>;
 }
 
-/// Content with its key. The key is the SHA-256 of to_bytes(), computed in the only constructor.
+/// Content with its digest, the SHA-256 of to_bytes(), computed in the only constructor.
 pub struct Hashed<T: Content> { /* Arc<T>, Key */ }
+
+impl<T: Content> Hashed<T> {
+    pub fn new(value: T) -> Self;
+    /// The SHA-256 of the content's bytes.
+    pub fn digest(&self) -> Key;
+    pub fn get(&self) -> &T;
+}
+
+/// Cloning shares the value, so T need not implement Clone.
+impl<T: Content> Clone for Hashed<T> { /* Arc::clone */ }
+
+/// Writes the digest's 32 bytes, as a Key does.
+impl<T: Content> ContentAddressed for Hashed<T> { /* ... */ }
 ```
 
-- **Everything a result consumes is a typed value** whose key is the digest of
-  its bytes.
+The digest of `Hashed<T>` is the plain SHA-256 of the bytes, with no framing,
+the digest the manifest records for a file (`ContentHash::digest_bytes`,
+`runid/src/hash.rs:213`). So a `Hashed<T>` written as a result file has the
+digest that file's manifest entry shows. `Hashed<T>` has no method of its own
+named `key`; as a field of an identity, or as a content artifact's whole
+identity, it is hashed through `ContentAddressed`, which writes the digest.
+
+- **Everything a result consumes is a typed value** whose digest is the SHA-256
+  of its bytes.
 - **Content a result does not depend on is not part of that value.** A
   trajectory consumes a model's dynamics. Quantities and contrasts are separate
   content, keyed separately and depended on only by the results that use them.
@@ -400,48 +599,122 @@ An identity can hold content in two ways.
 | The identity holds             | When                                                                                               | The record holds | The running code gets the content by           |
 | ------------------------------ | -------------------------------------------------------------------------------------------------- | ---------------- | ---------------------------------------------- |
 | `Dep<C>` on a content artifact | The content is shared by many results, such as a compiled model                                    | The dependency   | `run.load(&dep)`, cached per process by digest |
-| `Hashed<T>`                    | The artifact writes that content among its own result files, such as a fit problem's training rows | The key          | `run.identity()`                               |
+| `Hashed<T>`                    | The artifact writes that content among its own result files, such as a fit problem's training rows | Its digest       | `run.identity()`                               |
 
 For the second case the derive generates a record form of the identity, with
-each `Hashed<T>` replaced by its key. The key of the identity is always computed
-from that record form. At `finish` the store checks that a result file with each
-such digest exists.
+each `Hashed<T>` replaced by its digest, as a `Key`, and each nested identity by
+its record. The record form hashes to exactly the same bytes as the identity: a
+`Hashed<T>` writes its 32-byte digest, as a `Key` does, and every other field
+writes the same encoding in both forms. So the key of an identity equals the key
+of its record, and a record nested inside another identity, such as a
+by-product's copy of its upstream's record, hashes exactly as the identity it
+came from.
 
 ```rust
-pub trait Identity {
-    type Record: Serialize + DeserializeOwned;
+/// A value that can stand in an identity: it has a key and a record form.
+pub trait Identity: ContentAddressed + Clone {
+    type Record: ContentAddressed + Serialize + DeserializeOwned + Clone;
     fn record(&self) -> Self::Record;
-    fn key(&self) -> Key;                 // always computed from the record
+    /// The digest of every Hashed<T> this value holds, nested values included.
+    fn held_content(&self) -> Vec<Key>;
+    /// self.content_hash(), which equals self.record().content_hash().
+    fn key(&self) -> Key { self.content_hash() }
 }
 ```
+
+The library implements `Identity` for the types an identity is built from: each
+primitive, `String`, `Finite` and `Key` (each its own record, holding no
+content); `Hashed<T>` (record: its digest as a `Key`, holding that digest);
+`Dep<A>` (its own record, holding no content: a dependency's digest is checked
+when it is read, not at `finish`); and `Option`, `Vec`, `BTreeMap` and
+`BTreeSet` of such types, element by element. `#[derive(Identity)]` implements
+it for every named type in an identity, nested ones included, generating
+`<Name>Record` with each field's type replaced by its `Record`, and
+`held_content` as the concatenation of the fields'. The generated record type
+implements `ContentAddressed`, writing the tag and version of the type it came
+from, which is what makes the two encodings equal, and implements `Identity` as
+its own record, holding no content. A record can therefore be a field of another
+identity, and hashes there exactly as the identity it came from:
+`ObsIdentity.sim` is a `SimIdentityRecord`. At `finish` the store calls
+`held_content` and checks that a result file with each digest is in the
+manifest; a missing one fails the run.
 
 `Run::identity()` returns the identity. `Stored::identity()` returns the record.
 
 ### Keys
 
-There is one encoding. No project writes hashing code for a struct.
+There is one trait for a value that has a key, and one encoder. Both are
+today's: the trait `ContentAddressed` (`runid/src/hash.rs:473`) and the
+streaming hasher `CanonicalHasher` (`hash.rs:263`), which every implementation
+drives. No project writes hashing code for a struct. The type this document
+calls `Key` is today's `ContentHash`, 32 bytes (`hash.rs:180`).
 
-- **A struct's key** is the hash of its tag, its version, and each field's name
-  and key, taken in name order.
-- **Names matter, location does not.** Renaming a field or changing the tag
-  changes the key. Moving the type to another module or reordering its fields
-  does not.
+```rust
+/// Today's trait, unchanged.
+pub trait ContentAddressed {
+    /// Write this value's canonical bytes into the hasher. Composition only.
+    fn hash_into(&self, h: &mut CanonicalHasher);
+    /// SHA-256 of HASH_VERSION (u16, little-endian) followed by hash_into's bytes.
+    fn content_hash(&self) -> Key;
+}
+```
+
+`content_hash` writes the hash version once, at the root (`hash.rs:478-484`), so
+one bump of `HASH_VERSION` re-keys everything. Nested values compose through
+`hash_into`: a field's bytes are streamed into its parent's hash, not hashed
+separately first. The bytes written are these.
+
+| Value                          | Bytes written by `hash_into`                                                                                                                                                                                             |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| A struct                       | Its tag as a string, its version as a `u16`, then for each field in name order: the field's name as a string, then the field's bytes                                                                                     |
+| An enum                        | Its tag and version, then the variant's name as a string, then the variant's fields: named fields as for a struct, tuple fields in position order                                                                        |
+| `bool`                         | One byte, `0` or `1` (`hash.rs:368-370`)                                                                                                                                                                                 |
+| `u8` to `u64`, `i32`, `i64`    | Fixed width, little-endian; `usize` as a `u64` (`hash.rs:494-529`)                                                                                                                                                       |
+| `char`                         | Its code point as a `u32` (`hash.rs:371-373`)                                                                                                                                                                            |
+| `String`, `str`                | Its UTF-8 length as a `u64`, then the bytes (`hash.rs:376-384`)                                                                                                                                                          |
+| `Finite` (today's `FiniteF64`) | The `f64` bit pattern as a `u64`. NaN and infinity are refused when the value is made, and `-0.0` is made `+0.0`, so `0` and `-0` are one key (`runid/src/float.rs:38-47`, `:54-60`)                                     |
+| `f64`                          | Not implemented, so an unchecked float cannot enter an identity (`hash.rs:488-492`)                                                                                                                                      |
+| `Option<T>`                    | A byte `0`, or a byte `1` then the value (`hash.rs:551-561`). Allowed only where absence is itself meaningful, never for an unset default                                                                                |
+| `Vec<T>`                       | The element count as a `u64`, then each element in order (`hash.rs:418-424`)                                                                                                                                             |
+| `BTreeMap<K, V>`               | The entry count as a `u64`, then each key and value, in key order (`hash.rs:600-610`)                                                                                                                                    |
+| `BTreeSet<T>`                  | The element count as a `u64`, then each element in order (`hash.rs:613-620`)                                                                                                                                             |
+| `(A, B)`                       | `A` then `B`, with no prefix (`hash.rs:578-583`)                                                                                                                                                                         |
+| `Key`                          | Its 32 bytes, with no prefix (`hash.rs:588-592`)                                                                                                                                                                         |
+| `Hashed<T>`                    | Its digest's 32 bytes, as a `Key`; the digest is the plain SHA-256 of the content's bytes                                                                                                                                |
+| `Dep<A>`                       | As a struct with tag `dep` and version 1 and three fields, in name order: `digest` (a `Key`), `file` (a string) and `run_id` (a `Key`), as API 3 defines them. The upstream's kind and build are recorded and not hashed |
+
+A run id is the SHA-256 of the hash version as a `u16`, the artifact's `KIND` as
+a string, the ambient key's 32 bytes and the identity key's 32 bytes. Today's
+run id hashes the version, a kind index and a count-prefixed list of level
+hashes instead (`runid/src/kind.rs:79-88`).
+
+`#[derive(Identity)]` evolves today's `#[derive(RunInput)]`
+(`rust/crates/runid-derive/src/lib.rs`). It writes through the same encoder,
+with three rules changed.
+
+| Rule     | Today, `#[derive(RunInput)]`                                                                  | Target, `#[derive(Identity)]`                          |
+| -------- | --------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| Type tag | The module path and the type's name, `module_path!()::Name` (`runid-derive/src/lib.rs:52-55`) | The string the type states, `#[identity(tag = "sim")]` |
+| Fields   | Hashed in declaration order, without their names (`lib.rs:71-94`)                             | Each field's name, then its bytes, in name order       |
+| Enums    | The variant's position, as a `u32` in declaration order (`lib.rs:96-141`)                     | The variant's name, as a string                        |
+
+The version is written as today, a `u16` after the tag (`hash.rs:388-396`),
+declared as `version = N` where today it is `schema_version = N`
+(`lib.rs:162-182`). Today's `#[run_input(provenance)]`, which skips a field
+(`lib.rs:143-160`), has no counterpart: a value that is not identity is not a
+field of an identity.
+
+- **Names matter, location does not.** Renaming a field, a variant or the tag
+  changes the key. Moving the type to another module, or reordering its fields
+  or variants, does not.
 - **Every field is always hashed,** including at its default. Adding a field
   changes the key of every value of that type. That is accepted; a schema is not
   bent to keep old ids.
 - **The version is bumped** when the same values would now produce different
   stored bytes.
-
-| Type                                    | Key                                                                                                                         |
-| --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `bool`, integers, `String`, plain enums | Hash of a fixed encoding                                                                                                    |
-| `Finite` (a checked `f64`)              | Hash of the bit pattern. NaN and infinity are refused. `-0.0` and `0.0` differ, which over-separates in the safe direction. |
-| `Vec<T>`                                | Hash of the element keys, in order                                                                                          |
-| `BTreeMap<K, V>`, `BTreeSet<T>`         | Hash of the entries, in sorted order                                                                                        |
-| `Option<T>`                             | Allowed only where absence is itself meaningful, never for an unset default                                                 |
-| `Hashed<T>`                             | The digest of the content's bytes                                                                                           |
-| `Dep<A>`                                | An upstream run id, file name and content digest (API 3)                                                                    |
-| An enum with fields                     | The variant's name and its fields' keys                                                                                     |
+- **Nothing is keyed by hashing a JSON rendering.** Today's fit identity hashes
+  canonical JSON of the configuration (`cli/src/fit/cas.rs:151-160`); in the
+  target every key comes from the encoder above.
 
 ### Ambient identity
 
@@ -449,11 +722,11 @@ The build and the identity-class environment variables are part of every run id.
 The project supplies them once, when it opens the store.
 
 ```rust
-#[derive(Identity)]
+#[derive(Identity, Clone)]
 #[identity(tag = "engine", version = 1)]
 pub struct Engine {
     pub build: String,              // fingerprint of source, lockfile, features, compiler, target
-    pub env: CamdlEnvDeclared,
+    pub env: CamdlEnvIdentity,      // generated by #[derive(EnvInputs)]; hashed as read
 }
 
 pub enum Build<T> {
@@ -461,40 +734,89 @@ pub enum Build<T> {
     Incomplete(T),                  // some part of the fingerprint could not be determined
 }
 
-let store = Store::open(root, Build::Known(engine))?;
+/// The artifact kinds a project stores. Commands that work across kinds
+/// (list, show, status, verify, reindex) read any kind's record through it.
+pub struct Kinds { /* KIND -> how to read that kind's identity record */ }
+
+impl Kinds {
+    pub fn new() -> Self;
+    pub fn register<A: Artifact>(self) -> Self;   // a KIND registered twice: Error::KindRegisteredTwice at open
+}
+
+impl Store {
+    pub fn open<E: Identity>(root: &Path, ambient: Build<E>, kinds: Kinds) -> Result<Store>;
+}
+
+let store = Store::open(&root, Build::Known(engine), camdl_kinds())?;
 ```
 
+`Store::open` refuses a root it cannot read as a store of this format with
+`Error::NotAStore` ("On disk" under "Behaviour and formats"), and an open store
+refuses to read a record whose kind is not registered with `Error::UnknownKind`.
+
 With `Build::Incomplete`, the store never reuses anything: it computes, moves
-any stored result of the same id to quarantine, and writes its own. Because the
-build is in every id, a new build reuses nothing from an old one.
+any stored result of the same id to quarantine, and writes its own. The one
+exception is a content artifact, which `Store::put` stores the same way under
+either build: it is keyed by its own bytes, so a stored copy has nothing to
+distrust ("Content artifacts and `put`"). Because the build is in every id, a
+new build reuses nothing from an old one.
 
 ### Artifacts
 
 Each kind of stored result implements one trait.
 
 ```rust
-pub trait Artifact {
-    const KIND: &'static str;                  // such as "sim"
-    const WRITE: WriteMode;                    // Atomic or InPlace (API 2)
+pub trait Artifact: 'static {
+    const KIND: &'static str;                  // such as "sim"; also the kind's directory name
+    const WRITE: WriteMode;
     type Identity: Identity;
+
+    /// What a user recognises one result by: a scenario's name, a replicate number, the
+    /// seed typed. An opaque value the project supplies with each identity; the library
+    /// stores it in the invocation record and never looks inside it.
+    type Labels: Serialize + DeserializeOwned + Clone;
 
     /// A readable folder name, fixed by the first writer. It may use the identity and that
     /// writer's labels. Nothing reads it back.
-    fn name(identity: &Self::Identity, labels: &Labels) -> String;
+    fn name(identity: &Self::Identity, labels: &Self::Labels) -> String;
 
+    /// Where the folder sits. Not called for a by-product, which the store places inside
+    /// its upstream (API 2, "By-products").
     fn layout(_identity: &Self::Identity) -> Layout { Layout::flat() }
+}
+
+pub enum WriteMode {
+    Atomic,    // written into a staging folder and renamed into place by finish
+    InPlace,   // written in its final folder, visible while it runs
 }
 
 /// A typed run id.
 pub struct Id<A: Artifact> { /* Key + PhantomData<A> */ }
+
+impl<A: Artifact> Id<A> {
+    pub fn key(&self) -> Key;
+}
+
+// Written by hand, so that A, a unit marker type, need not implement them.
+impl<A: Artifact> Clone for Id<A> { /* ... */ }
+impl<A: Artifact> Copy for Id<A> {}
+impl<A: Artifact> PartialEq for Id<A> { /* compares the keys */ }
+impl<A: Artifact> Eq for Id<A> {}
 ```
 
-The run id is the hash of `KIND`, the ambient key and `identity.key()`.
+The run id is the hash of `KIND`, the ambient key and `identity.key()`, encoded
+as the "Keys" section says. `Clone` on `Dep<A>` and `Wanted<A>` is written by
+hand for the same reason as on `Id<A>`.
 
 ### Generated tests
 
-The field list drives a generated test per class (the table under "Declaring
-arguments"). Most need something the field must declare.
+The derives generate no test code. They emit `FIELDS`: each field's name and
+class, with its `vary` and `exercised_by` values as text for messages. They also
+generate `Inputs::varied`, `Inputs::exercised` and `FileInputs::varied`, which
+is how a harness reaches a field's second value and its fixture. One library
+function checks every field of a command against its class. The project supplies
+a harness that says how to run that command in a fresh store and read back what
+it stored.
 
 ```rust
 /// Another valid value of the same type.
@@ -505,10 +827,60 @@ pub dt: f64,                                        // numbers and enums provide
 
 #[input(identity, vary = fixtures::other_model)]
 pub model: InputFile<ModelSource>,                  // a file needs a named second file
+                                                    // fn other_model() -> InputFile<ModelSource>
 
 #[arg(long)] #[input(execution, exercised_by = fixtures::two_cell_grid)]
-pub parallel: usize,
+pub parallel: usize,                                // fn two_cell_grid() -> (SimulateArgs, SimulateArgs)
+
+/// How to run one command for the class checks. Written once per command by the project.
+pub trait InputHarness {
+    type Invocation: Clone;
+    /// The command with its base arguments.
+    fn base(&self) -> Self::Invocation;
+    /// The base with one field changed: for identity, a second value (Inputs::varied, or
+    /// for a settings-file key, the file written again from FileInputs::varied); for
+    /// expands, a larger set containing the base's; for adds, the request switched on;
+    /// for export and render, the option set.
+    fn varied(&self, field: &FieldInfo) -> Self::Invocation;
+    /// The fixture `exercised_by` names, at two values of the field (Inputs::exercised).
+    fn exercised(&self, field: &FieldInfo) -> (Self::Invocation, Self::Invocation);
+    /// Whether a run of the fixture shows the field was used.
+    fn shows_use(&self, field: &FieldInfo, seen: &Observed) -> bool;
+    /// Run in a fresh store, or in `store` when given, and read back what was stored.
+    fn run(&self, invocation: &Self::Invocation, store: Option<&Path>) -> Result<Observed>;
+}
+
+/// What one run left behind, as the checks compare it.
+pub struct Observed {
+    pub results: Vec<ObservedResult>,
+    pub exports: BTreeMap<PathBuf, Key>,             // each export file's digest
+}
+
+pub struct ObservedResult {
+    pub kind: String,
+    pub run_id: Key,
+    pub files: BTreeMap<String, Key>,                // each result file's digest, checked on read
+    pub upstream: Option<Key>,                       // a by-product's upstream run id
+}
+
+/// Every field's check, for one command. Each failure names the field and its class.
+pub fn check_input_classes<H: InputHarness>(
+    fields: &[FieldInfo], harness: &H,
+) -> std::result::Result<(), Vec<ClassFailure>>;
+
+pub struct ClassFailure { pub field: &'static str, pub class: Class, pub what: String }
 ```
+
+This is how camdl's tests work today, written by hand per command. The runner
+runs the release `camdl` in a fresh temporary store with a cleared environment
+and reads back every leaf's kind, run id and file digests
+(`cli/tests/simulate_input_classes.rs:371-439`). One assertion per class does
+the comparing (`assert_rekeys` at `:544`, `assert_same_result` at `:572`,
+`assert_shared_cells_keep_ids` at `:583`, `assert_child_written` at `:609`), and
+a table test fails when an input of the command has no case
+(`cli/src/input_class.rs:542-584`). The target keeps the runner and the
+assertions and replaces the hand-written case per input with the loop over
+`FIELDS`.
 
 - **Identity.** Vary the field and require the run id to change.
 - **Expands.** Run a set and a larger set; require the shared members to keep
@@ -523,20 +895,29 @@ pub parallel: usize,
 - **Render.** Run with two values and require every stored file to be unchanged.
 - **An execution field with no `exercised_by` is a compile error.** Without a
   fixture that exercises it, an input wrongly marked execution would pass.
+- **A file identity field with no `vary` is a compile error.** `InputFile<T>`,
+  and every container of one, does not implement `Vary`, so the generated
+  `varied` does not compile until `vary = ...` names a function returning a
+  second example file of the field's type.
 
 ## API 2: running a computation
 
-Every result is produced under a claim, and its record carries a status. Only a
-completed result is ever reused.
+Every result except a content artifact is produced under a claim, and its record
+carries a status. Only a completed result is ever reused.
 
 ### Statuses
 
-| Status      | Written by                         | Meaning                                                                | Reused |
-| ----------- | ---------------------------------- | ---------------------------------------------------------------------- | ------ |
-| Running     | The store, at the claim            | A process holds the claim                                              | Never  |
-| Completed   | `finish`                           | The manifest is built and the result is whole                          | Yes    |
-| Failed      | `fail`, or the claim being dropped | The run stopped; the reason is kept when one was given                 | Never  |
-| Interrupted | Nobody; readers derive it          | The record says running, but the owner is dead or its beat has stopped | Never  |
+| Status      | Written by                                         | Meaning                                                                | Reused |
+| ----------- | -------------------------------------------------- | ---------------------------------------------------------------------- | ------ |
+| Running     | The store, at the claim                            | A process holds the claim                                              | Never  |
+| Completed   | `finish`                                           | The manifest is built and the result is whole                          | Yes    |
+| Failed      | `fail`, or the claim being dropped; `InPlace` only | The run stopped; the reason is kept when one was given                 | Never  |
+| Interrupted | Nobody; readers derive it                          | The record says running, but the owner is dead or its beat has stopped | Never  |
+
+A failed `Atomic` result has no status, because it has no folder: `fail`, or the
+claim being dropped, removes its staging folder, and the failure and its reason
+are kept in the invocation record's entry for that result. A failed `InPlace`
+run keeps its folder, marked failed.
 
 Interrupted has to be derived. A killed process, a lost node, or a build
 compiled to abort on panic runs no cleanup, so nothing can write it.
@@ -546,7 +927,9 @@ compiled to abort on panic runs no cleanup, so nothing can write it.
 ```rust
 pub enum Begin<A: Artifact> {
     Reused(Stored<A>),       // a completed result exists, with every by-product that was wanted
-    Busy(Owner),             // another live process holds the claim
+    Busy(Owner),             // an InPlace run's live owner holds the claim, an owner on another
+                             // host is not known to have stopped, or this process holds it; an
+                             // Atomic claim another live process holds is waited for instead
     Claimed(Run<A>),         // this process now owns the run id
 }
 
@@ -554,31 +937,128 @@ pub enum Reuse { IfCompleted, Force }
 
 impl Store {
     pub fn begin<A: Artifact>(
-        &self, identity: &A::Identity, info: RunInfo, reuse: Reuse,
+        &self, identity: &A::Identity, labels: &A::Labels, info: &RunInfo, reuse: Reuse,
     ) -> Result<Begin<A>>;
 
     /// As begin, also wanting by-products of the same computation.
     pub fn begin_with<A: Artifact>(
-        &self, identity: &A::Identity, wanted: &Wanted<A>, info: RunInfo, reuse: Reuse,
+        &self, identity: &A::Identity, labels: &A::Labels, wanted: &Wanted<A>,
+        info: &RunInfo, reuse: Reuse,
     ) -> Result<Begin<A>>;
+
+    /// begin, then the match below: reuse, refuse a busy id with Error::InProgress,
+    /// or run `compute` and finish, or fail with its error's text under `operation`.
+    pub fn run<A: Artifact, E: std::fmt::Display>(
+        &self, identity: &A::Identity, labels: &A::Labels, info: &RunInfo, reuse: Reuse,
+        operation: &str, compute: impl FnOnce(&mut Run<A>) -> std::result::Result<(), E>,
+    ) -> std::result::Result<Stored<A>, RunError<E>>;
 
     pub fn get<A: Artifact>(&self, id: &Id<A>) -> Result<Option<Stored<A>>>;     // completed only
     pub fn inspect<A: Artifact>(&self, id: &Id<A>) -> Result<Option<Entry<A>>>;  // any status
 }
 ```
 
-An artifact picks one of two write modes. Both take the claim first, so two
-concurrent runs of one id never both compute it.
+`begin` writes the labels into the invocation record's entry for this result,
+whatever it returns. What `begin` does for each prior state of the run id is in
+"Behaviour and formats".
 
-| Mode      | The claim is                                                    | Files go to                                         | Visible while running    | After a failure                 | Suits                                         |
-| --------- | --------------------------------------------------------------- | --------------------------------------------------- | ------------------------ | ------------------------------- | --------------------------------------------- |
-| `Atomic`  | The staging folder itself, created exclusively under the run id | That staging folder, renamed into place by `finish` | No                       | Nothing is left                 | Quick results: a simulation, a compiled model |
-| `InPlace` | A lock in the final folder                                      | The final folder                                    | Yes, with status running | The folder stays, marked failed | Long runs: a fit, a survey, a profile point   |
+Two processes that want the same result are handled by the artifact's kind:
+
+- **A quick result (`Atomic`) waits.** When `begin` or `begin_many` finds the id
+  claimed by a live owner, it waits for that owner to end the claim and then
+  returns `Reused`. If the owner fails, or dies, it claims the id itself. It
+  reads the owner's liveness by the rules in "Owners and the beat": on the
+  owner's host, by checking the process and its start time; from another host,
+  by watching the beat counter. An owner on another host whose beat stops makes
+  the waiter return `Busy`, as any run that stopped on another host does. The
+  wait has no timeout; it is bounded only by the owner's liveness. A claim the
+  calling process itself holds is not waited for: `begin` returns `Busy` for it.
+- **A long run (`InPlace`) is refused.** A live owner's claim returns
+  `Busy(owner)`, which the command reports as `Error::InProgress` naming the
+  owner, as today's claim refuses a live `.lock` with `CasError::FitInProgress`
+  (`runid/src/store.rs:672`, `:1689-1702`).
+- **A content artifact is not claimed.** Two writers produce identical bytes, so
+  `Store::put` lets both write and keeps the first ("Content artifacts and
+  `put`"). It never returns `Error::InProgress`.
+
+What a run records besides its identity comes from one `RunInfo`, built once per
+command and passed by reference to every `begin`, `begin_with`, `begin_many` and
+`put`.
+
+```rust
+/// The store-class inputs, from every source.
+pub struct StoreRequest { /* label, force, root */ }
+
+impl StoreRequest {
+    pub fn new(label: Option<String>, force: bool, root: Option<PathBuf>) -> Self;
+    /// Each value given in `self` wins over `other`'s; `force` is true if either is.
+    pub fn merge(self, other: StoreRequest) -> StoreRequest;
+    /// The given root, else the default `./results`.
+    pub fn root(&self) -> PathBuf;
+    pub fn reuse(&self) -> Reuse;                  // Force when force was asked for
+    pub fn label(&self) -> Option<&str>;
+}
+
+/// What every result of one command records: the inputs as given, the execution
+/// values, the store request and the lineage.
+pub struct RunInfo { /* ... */ }
+
+impl RunInfo {
+    pub fn new(given: &Given, execution: &impl Serialize, request: &StoreRequest) -> Result<Self>;
+    /// Record an upstream in run.json without hashing it. Applies to every result this
+    /// RunInfo is passed to from now on.
+    pub fn lineage(&mut self, item: impl Into<Lineage>);
+}
+
+/// Something a result came from that is recorded and not hashed.
+pub enum Lineage {
+    Result { kind: String, run_id: Key, file: String, digest: Key, build: String },
+    Input { field: String, digest: Key },          // a file input, by its content digest
+}
+
+impl<A: Artifact> From<&Dep<A>> for Lineage { /* ... */ }
+
+/// A result in any status, for commands that show unfinished runs.
+pub struct Entry<A: Artifact> { /* id, identity record, state */ }
+
+pub enum EntryState {
+    Running { owner: Owner, liveness: Liveness },
+    Completed,
+    Damaged { what: String },
+    Failed { operation: Option<String>, reason: Option<String> },   // InPlace only
+    Interrupted { owner: Owner },
+}
+
+impl<A: Artifact> Entry<A> {
+    pub fn id(&self) -> &Id<A>;
+    pub fn identity(&self) -> &<A::Identity as Identity>::Record;
+    pub fn state(&self) -> &EntryState;
+    pub fn progress(&self) -> Result<Option<serde_json::Value>>;   // the latest snapshot
+    pub fn stored(self) -> Option<Stored<A>>;                       // Some when completed and not damaged
+}
+```
+
+The store root comes from `StoreRequest` and is the only one a command uses.
+`RunInfo::new` takes the request because the `--label` is part of what the
+invocation records. The invocation record is first written at the command's
+first call to the store, `begin`, `begin_with`, `begin_many` or `put`, whether
+or not anything is claimed. That is when the label is checked, the store-wide
+invocation lock taken and the sequence number assigned (API 4, "Labels").
+
+An artifact picks one of two write modes. Both take the claim first, so two
+concurrent runs of one id never both compute it. A content artifact, stored with
+`put`, is the exception: it takes no claim.
+
+| Mode      | The claim is                                                    | Files go to                                         | Visible while running    | After a failure                                                    | Suits                                       |
+| --------- | --------------------------------------------------------------- | --------------------------------------------------- | ------------------------ | ------------------------------------------------------------------ | ------------------------------------------- |
+| `Atomic`  | The staging folder itself, created exclusively under the run id | That staging folder, renamed into place by `finish` | No                       | No folder; the failure and its reason are in the invocation record | Quick results: a simulation, a fit problem  |
+| `InPlace` | A lock in the final folder                                      | The final folder                                    | Yes, with status running | The folder stays, marked failed                                    | Long runs: a fit, a survey, a profile point |
 
 ### Writing and ending a run
 
 ```rust
 impl<A: Artifact> Run<A> {
+    pub fn id(&self) -> &Id<A>;
     pub fn identity(&self) -> &A::Identity;
 
     pub fn result_file(&self, name: &str) -> Result<FileHandle>;      // in the manifest
@@ -588,52 +1068,105 @@ impl<A: Artifact> Run<A> {
     pub fn finish(self) -> Result<Stored<A>>;
     pub fn fail(self, operation: &str, reason: &str) -> Result<()>;
 }
+
+/// One file of a run, opened once by name. It can be sent to another thread, and
+/// cloned to share it between threads; every clone writes to the same file.
+#[derive(Clone)]
+pub struct FileHandle { /* the role, the name, the open file */ }
+
+impl FileHandle {
+    /// Append bytes to the file.
+    pub fn write_all(&self, bytes: &[u8]) -> Result<()>;
+    /// A buffered writer that appends to the file; flushed when dropped.
+    pub fn writer(&self) -> impl Write + '_;
+}
 ```
 
 The run hands out files; it does not hand out its folder. A file's role is
-chosen when it is opened, which replaces a list of reserved file names. A
-`FileHandle` can be sent to another thread, so several chains can write through
-one run. Ending the run takes it by value, so that stays with the owner.
+chosen when it is opened, which replaces today's list of per-attempt file names
+(`PER_ATTEMPT_RECORDS`, `runid/src/store.rs:1156`).
 
-| How the run ends                                            | Record afterwards            | A reader sees                                    |
-| ----------------------------------------------------------- | ---------------------------- | ------------------------------------------------ |
-| `finish`                                                    | Completed, with the manifest | Completed                                        |
-| `fail(operation, reason)`                                   | Failed, with both strings    | Failed                                           |
-| The `Run` is dropped: an early return or an unwinding panic | Failed, no reason            | Failed, reason unknown                           |
-| The process is killed or the node is lost                   | Still says running           | Interrupted, derived from the owner and the beat |
+- **A name is a relative path.** It may contain subdirectories, such as
+  `chain_0/trace.tsv`, which the store creates. A name with `..`, an absolute
+  path, or one that starts with `.` is refused with `Error::BadFileName`, so a
+  run cannot write over the store's own entries.
+- **The store's own names are refused too,** in any role: `identity.json`,
+  `run.json`, `run.json.tmp`, `progress.json` and `events.jsonl` at the folder
+  root, which the store writes itself (`Run::progress` and `Run::event` write
+  the last two), and a first path component equal to any registered `KIND`,
+  since by-products are placed under their `KIND`. Today's store reserves
+  `run.json`, `run.json.tmp` and its lock files the same way (`is_reserved`,
+  `store.rs:1119-1121`).
+- **A name is opened once.** Opening a name a second time in the same run, in
+  any role, is refused with `Error::FileOpenedTwice`; a caller that needs the
+  file in two places clones the handle.
+- **`finish` syncs and closes every handle.** A write through a handle after
+  `finish` or `fail` is refused with `Error::WriteAfterEnd`.
 
-A command uses it like this. `Store::run` wraps the same match for the common
-case.
+Ending the run takes it by value, so that stays with the owner.
+
+| How the run ends                                            | `Atomic` result afterwards                                | `InPlace` record afterwards  | A reader sees                                    |
+| ----------------------------------------------------------- | --------------------------------------------------------- | ---------------------------- | ------------------------------------------------ |
+| `finish`                                                    | Completed, with the manifest                              | Completed, with the manifest | Completed                                        |
+| `fail(operation, reason)`                                   | No folder; both strings in the invocation record          | Failed, with both strings    | Failed                                           |
+| The `Run` is dropped: an early return or an unwinding panic | No folder; failed with no reason in the invocation record | Failed, no reason            | Failed, reason unknown                           |
+| The process is killed or the node is lost                   | A staging folder whose record says running                | Still says running           | Interrupted, derived from the owner and the beat |
+
+A command uses it like this, in a function returning the project's own `Result`,
+whose error converts from the store's. `Store::run` wraps the same match for the
+common case.
 
 ```rust
-match store.begin::<FitRun>(&identity, info, reuse)? {
+match store.begin::<FitRun>(&identity, &labels, &info, reuse)? {
     Begin::Reused(stored) => Ok(stored),
-    Begin::Busy(owner)    => Err(Error::InProgress(owner)),
+    Begin::Busy(owner)    => Err(store::Error::InProgress(owner).into()),
     Begin::Claimed(mut run) => match engine::fit(&mut run, &execution) {
-        Ok(())   => run.finish(),
+        Ok(())   => Ok(run.finish()?),
         Err(err) => { run.fail("fitting", &err.to_string())?; Err(err) }
     },
 }
 ```
 
-- **Retry.** `begin` on a failed or interrupted id reclaims it. The earlier
-  record and attempt files move to `.attempts/<n>/`, result files are cleared,
-  and the last three attempts are kept.
-- **Force.** `Reuse::Force` moves a completed result of the same id to
-  quarantine and starts again. It never deletes, and never touches another id.
-- **Divergence.** If `finish` finds a completed result of the same id already in
-  place, the result files' digests are compared. A difference is an error, and
-  the new bytes go to quarantine as evidence. This is the check that exposes an
-  output that depends on something outside its identity.
-- **Readers.** `get` returns only completed results, and checks the manifest and
-  the file sizes. Full digests are checked by `verify`, and by `Run::open` as it
-  reads. `Stored<A>` is the only type that opens result files.
+- **Retry.** `begin` on a failed or interrupted `InPlace` run, or on an
+  interrupted `Atomic` claim whose owner is dead on this host, reclaims it. For
+  an `InPlace` run every file at the folder's root except the store's own
+  (`identity.json` and `.lock`) moves into `.attempts/<n>/`, result files
+  included, with `run.json` kept as `attempt.json`; subdirectories are cleared;
+  the last three attempts are kept. That is today's behaviour
+  (`runid/src/store.rs:1186`, `:1199-1236`, `clear_except_lock` at `:1797`). An
+  interrupted `Atomic` claim's staging folder is removed. A failed `Atomic`
+  result left no folder, so `begin` finds nothing and computes.
+- **Force.** `Reuse::Force` recomputes. It moves a completed result, damaged or
+  not, of the same id to quarantine, with any by-products nested in it, and
+  claims afresh; it moves a run that stopped on another host to quarantine and
+  claims afresh; on every other state it does what `IfCompleted` does. It never
+  takes a claim from a live owner and never touches another id. The full table
+  is in "Behaviour and formats".
+- **Divergence.** In reproducing mode (a by-product produced later), the
+  upstream's computation runs again beside its stored result, and the result
+  files' digests are compared. A difference is `Error::Divergent`, and the new
+  bytes go to quarantine as evidence. This is the check that exposes an output
+  that depends on something outside its identity. It runs only in reproducing
+  mode: a claim or a wait means two processes never both finish one id, and
+  `Force` and an incomplete build move the stored result to quarantine before
+  computing.
+- **Readers.** `get` returns only completed results, and checks the manifest:
+  every listed file present with its recorded size and modification time, and no
+  unlisted file, as today (`store.rs:1332-1354`). Full digests are checked by
+  `verify`, and by `Run::open` as it reads. `Stored<A>` is the only type that
+  opens result files.
 - **Damaged results.** A completed result whose files fail a check is reported
   as damaged and is not served. The next `begin` for that id moves it to
   quarantine and computes again.
-- **No store.** `Store::scratch(ambient)` has the same API over a temporary root
-  that is deleted when dropped. A command that must not store, such as the
-  filter runs inside `compare`, uses it.
+- **No store.** `Store::scratch(ambient, kinds)` has the same API over a
+  temporary root that is deleted when dropped. A command that must not store,
+  such as the filter runs inside `compare`, uses it.
+
+```rust
+impl Store {
+    pub fn scratch<E: Identity>(ambient: Build<E>, kinds: Kinds) -> Result<Store>;
+}
+```
 
 ### By-products
 
@@ -646,17 +1179,37 @@ afterwards.
 /// An artifact produced by the same computation as another.
 pub trait ByProduct: Artifact {
     type Of: Artifact;
+    /// The upstream's identity record, which this by-product's identity holds.
+    fn upstream(identity: &Self::Identity) -> &<<Self::Of as Artifact>::Identity as Identity>::Record;
 }
 
-/// The by-products wanted from one run of A, each with its identity.
+/// The by-products wanted from one run of A, each with its identity and labels.
 pub struct Wanted<A: Artifact> { /* ... */ }
 
+impl<A: Artifact> Clone for Wanted<A> { /* ... */ }
+
+impl<A: Artifact> Wanted<A> {
+    pub fn none() -> Self;
+    pub fn with<B: ByProduct<Of = A>>(self, identity: B::Identity, labels: B::Labels) -> Self;
+}
+
 impl<A: Artifact> Run<A> {
-    /// A run for this by-product, if it was wanted and is not already stored.
-    pub fn also<B: ByProduct<Of = A>>(&mut self) -> Result<Option<Run<B>>>;
+    /// The by-product's part of this run, if it was wanted and is not already stored.
+    pub fn also<B: ByProduct<Of = A>>(&mut self) -> Result<Option<ByProductRun<B>>>;
 
     /// True when A itself is already stored and this run exists only for by-products.
     pub fn reproducing(&self) -> bool;
+}
+
+/// A by-product's files, claimed with its upstream. It has no finish or fail: the
+/// upstream's run commits or fails it, and dropping it does neither.
+pub struct ByProductRun<B: ByProduct> { /* the claim, shared with the upstream's Run */ }
+
+impl<B: ByProduct> ByProductRun<B> {
+    pub fn identity(&self) -> &B::Identity;
+    pub fn result_file(&self, name: &str) -> Result<FileHandle>;
+    pub fn provenance_file(&self, name: &str) -> Result<FileHandle>;
+    pub fn attempt_file(&self, name: &str) -> Result<FileHandle>;
 }
 ```
 
@@ -673,7 +1226,13 @@ impl<A: Artifact> Run<A> {
   computation again. The upstream's run id does not change and its stored files
   are not rewritten; the recomputed files are compared with them, which is a
   free determinism check.
-- **Layout.** A by-product sits inside its upstream's folder.
+- **Layout.** The library places a by-product inside its upstream's folder,
+  under a subdirectory named by the by-product's `KIND`. It finds that folder
+  from the by-product's identity alone: `ByProduct::upstream` gives the upstream
+  record, whose key equals the upstream identity's key, and with the ambient key
+  the store holds that gives the upstream's run id. `ByProduct` therefore has no
+  layout of its own. Where the claims and files go in each case is in "Behaviour
+  and formats".
 
 ### Exports
 
@@ -683,15 +1242,41 @@ labelled, in the format asked for. It is made after `finish` or `get`, never by
 running the computation again.
 
 ```rust
+/// A path the user gave for an export.
+pub struct ExportPath(PathBuf);
+
 impl<A: Artifact> Stored<A> {
     /// A byte copy of one stored result file.
     pub fn export(&self, file: &str, to: &ExportPath) -> Result<()>;
 }
 
+/// A rendering: a pure function of stored result files, an invocation's labels and options.
+pub trait Rendering {
+    /// The kind of result it renders: the invocation's results of this kind, in order.
+    type Of: Artifact;
+    /// Such as date columns or a file format; built by the project from its Exports.
+    type Options;
+    fn render(
+        members: &[(Stored<Self::Of>, <Self::Of as Artifact>::Labels)],
+        options: &Self::Options,
+        out: &mut dyn Write,
+    ) -> Result<()>;
+}
+
+/// An invocation record, as read back.
+pub struct Invocation { /* the record: seq, label, given, results with their labels */ }
+
 impl Invocation {
-    /// A rendering of this invocation's results: a pure function of their stored files,
-    /// this record's labels and the rendering options.
-    pub fn render<R: Rendering>(&self, options: &R::Options, to: &ExportPath) -> Result<()>;
+    pub fn seq(&self) -> u64;
+    pub fn label(&self) -> Option<&str>;
+    /// The results this invocation asked for, of kind A, in order, with their labels.
+    pub fn members<A: Artifact>(&self) -> Vec<(Id<A>, A::Labels)>;
+
+    /// Render this invocation's results of kind R::Of to a path. Every one must be completed;
+    /// otherwise Error::MemberNotCompleted, naming those that are not.
+    pub fn render<R: Rendering>(&self, store: &Store, options: &R::Options, to: &ExportPath) -> Result<()>;
+    /// The same rendering, to any writer, such as the terminal.
+    pub fn render_to<R: Rendering>(&self, store: &Store, options: &R::Options, out: &mut dyn Write) -> Result<()>;
 }
 ```
 
@@ -700,7 +1285,13 @@ impl Invocation {
   invocation record: a combined table across cells, date columns, a rounded
   summary, another file format.
 - **The same function serves the path and the screen.** A project's `cat`
-  command calls the rendering that `-o` calls, so the two always agree.
+  command calls `render_to` with the rendering that `-o` passes to `render`, so
+  the two always agree.
+- **An invocation with a member that did not complete is refused,** with
+  `Error::MemberNotCompleted` naming every such member, rather than rendered
+  with it left out.
+- **A rendering's options come from the command line only,** such as `--dates`.
+  Nothing stored supplies a format or a date option.
 - **If what a user wants cannot be made from stored files,** it becomes a
   by-product first and is then exported.
 
@@ -710,21 +1301,28 @@ Every command run writes one invocation record, whether its results were
 computed or were already stored.
 
 - **What it holds.** The inputs as given, with `argv`; a digest of each
-  configuration file; the ordered list of results the command asked for; each
-  result's labels; counts of completed and failed; a progress snapshot.
-- **It is durable and never rewritten after the command ends.** It is not a
-  cache: the index is rebuilt from the records and the invocation records
-  together.
+  configuration file; the `--label`, if one was given; the ordered list of
+  results the command asked for, each with its labels and its outcome (computed,
+  reused, failed with its reason, or busy); counts of completed and failed; the
+  last progress snapshot.
+- **When it is written.** Twice: at the command's first call to the store
+  (`begin`, `begin_with`, `begin_many` or `put`), whether or not anything is
+  claimed, with status running and the results planned so far; and when the
+  command ends, replacing the first atomically. It is not written again after
+  that. A batch's progress while it runs goes to a separate snapshot file beside
+  it ("On disk").
+- **It is durable.** It is not a cache: the index is rebuilt from the records
+  and the invocation records together.
 - **It is where a second request for a stored result is recorded.** The result's
   own record is sealed and is not touched.
 - **`clean` does not remove invocation records.**
 
 ### Sealed records
 
-After `finish`, a result's files and its record are not written again. The one
-exception is appending a naming event (API 4). Anything else that would have
-been added later has another home: a by-product, an attempt file written before
-`finish`, or the invocation record.
+After `finish`, a result's files and its record are not written again, with no
+exception. Anything that would have been added later has another home: a
+by-product, an attempt file written before `finish`, or an invocation record. A
+label given later is part of a later invocation record.
 
 ### Owners and the beat
 
@@ -733,14 +1331,30 @@ is an owner, named by host, process id and process start time. It keeps one beat
 file and increments a counter in it every few seconds. Every claim it holds
 points at that owner.
 
+```rust
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Owner {
+    pub host: String,
+    pub pid: u32,
+    pub started: Timestamp,      // the process start time, as this host's OS reports it
+}
+
+/// A time for people to read, in UTC to the millisecond. Never compared across hosts
+/// and never used to order events.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Timestamp(String);
+```
+
 | Observer            | Rule                                                                                               |
 | ------------------- | -------------------------------------------------------------------------------------------------- |
 | On the owner's host | A process with that id and that start time exists: alive. Otherwise dead. No waiting.              |
 | On another host     | Read the counter, wait a few intervals on the reader's own clock, read it again. Unchanged: stale. |
 
 The start time is checked so that a reused process id is not read as the owner
-still being alive. No timestamp is compared across machines, because on a shared
-filesystem a file's time comes from the file server.
+still being alive. Today's lock records the process id and host only
+(`runid/src/store.rs:1513-1516`), so a reused id reads as alive. No timestamp is
+compared across machines, because on a shared filesystem a file's time comes
+from the file server.
 
 ```rust
 pub enum Liveness { Alive, Dead, Stale { unchanged_for: Duration }, Unknown }
@@ -753,8 +1367,10 @@ impl Store {
 - **A beat means alive, not progressing.** A deadlocked fit still beats.
 - **Same-host reclaim is automatic.** A dead owner's claims are reclaimed by the
   next `begin`.
-- **Cross-host reclaim is manual.** A stale owner on another host is reported
-  and reclaimed only with `Reuse::Force`.
+- **Cross-host reclaim is manual.** A run whose owner is on another host and
+  stale or unknown is reported as possibly still alive there, and a rerun
+  returns `Busy`; only `Reuse::Force` reclaims it. Today's store refuses the
+  same way and names `--force` (`store.rs:1700-1702`, `:316-347`).
 - **A long-lived reader** keeps the last counter it saw, so it needs no wait
   after the first look.
 
@@ -768,11 +1384,18 @@ labels, and how many are completed and failed.
   with a count, not 10,000 lines.
 - **Results appear as they finish.** Each member is visible the moment its
   `finish` returns.
+- **A failed member does not stop the batch.** Its failure and reason are
+  recorded in the invocation record, the remaining members are computed, and the
+  command reports every failure at the end and exits non-zero. A rerun computes
+  only the members that are not stored. This is what `simulate` does today: a
+  cell whose identity or commit fails is added to the sink's `errors` and the
+  next cell proceeds (`cli/src/cas_sink.rs:141`, `:620-626`, `:750-758`), and
+  the command prints every one and exits 1 (`cli/src/main.rs:2524-2531`).
 - **The same identity may be listed twice,** such as two scenarios with the same
   effect. It is claimed and computed once, and both entries point at the one
   result.
-- **A dead owner's staging folders are found through its invocation record** and
-  reclaimed with it.
+- **A dead owner's staging folders are found through the owner** that each
+  staging folder's `run.json` names, and reclaimed with it.
 - **Within one atomic result there are no partial files.** An in-place run shows
   its traces growing.
 
@@ -781,17 +1404,17 @@ labels, and how many are completed and failed.
 A large grid on a shared filesystem cannot afford a lock, a beat and several
 renames per cell. These counts are rough estimates, not measurements.
 
-| Step                         | Atomic result                                             | In-place run                                     |
-| ---------------------------- | --------------------------------------------------------- | ------------------------------------------------ |
-| Check for a completed result | One read, or none when a batch has planned from the index | One read                                         |
-| Claim                        | One exclusive folder create                               | A folder create and a lock create                |
-| Records                      | Two writes                                                | Two writes at the claim, one rewrite at `finish` |
-| Result files                 | One write each                                            | One write each, over the run                     |
-| Commit                       | One rename                                                | One rename of the record                         |
-| Index                        | One buffered append to the owner's log                    | The same                                         |
-| Beat and invocation record   | None per result; one of each per process                  | None per run; the owner's                        |
+| Step                         | Atomic result                                                                                                       | In-place run                                     |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
+| Check for a completed result | One read, or none when a batch has planned from the index                                                           | One read                                         |
+| Claim                        | One exclusive folder create                                                                                         | A folder create and a lock create                |
+| Records                      | Two writes at the claim, one rewrite at `finish`                                                                    | Two writes at the claim, one rewrite at `finish` |
+| Result files                 | One write each                                                                                                      | One write each, over the run                     |
+| Commit                       | One rename                                                                                                          | One rename of the record                         |
+| Index                        | One buffered append to the owner's log                                                                              | The same                                         |
+| Beat and invocation record   | None per result; per process, one beat file, the invocation record written twice and the store-wide lock taken once | None per run; the owner's                        |
 
-An atomic result with one file is about six filesystem operations. After
+An atomic result with one file is about seven filesystem operations. After
 claiming, the store checks once more that no completed result arrived in the
 meantime.
 
@@ -810,10 +1433,477 @@ impl<A: Artifact> Run<A> {
 }
 ```
 
-Both are attempt files, so they sit outside the manifest and survive in
-`.attempts/` after a retry. Every kind of run gets them, not only fits. A live
-view reads the two files, whose names and formats are documented, and finds them
-by handle.
+Both are attempt files, `progress.json` and `events.jsonl`, so they sit outside
+the manifest and survive in `.attempts/` after a retry, as today's per-attempt
+records do (`runid/src/store.rs:1156-1157`). Every kind of run gets them, not
+only fits. A live view reads the two files, whose formats are in "Behaviour and
+formats", and finds them by handle.
+
+## Behaviour and formats
+
+Wherever this document does not say otherwise, the new store does what today's
+store does: `runid/src/store.rs`, `leaf.rs`, `record.rs` and `layout.rs`, and,
+for simulations and the index, `cli/src/cas_sink.rs` and `cli/src/cas_index.rs`.
+This section states the behaviour an implementer needs and cites today's code
+for it. Where the target differs, the difference is stated. Where the document
+is silent, the implementer does what today's store does, and records that choice
+in this document in the same change.
+
+### What `begin` does
+
+`begin` reads what the store holds for the run id (the folder rule under "How a
+run id becomes a folder"), classifies it as one of the states below, and acts.
+After claiming, it checks once more that no completed result arrived in the
+meantime, as today's in-place claim does under its lock (`store.rs:675-689`); if
+one did, it releases the claim and returns `Reused`. Content artifacts do not
+pass through `begin`; `Store::put` has its own rule ("Content artifacts and
+`put`").
+
+| Prior state of the run id                                                                                                                              | `IfCompleted`, `Atomic`                                                                                                                                                                                                                                                                                                                                                                                                                      | `IfCompleted`, `InPlace`                                                                                                                                                         | `Force`, either mode                                                                                                                                      |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Absent                                                                                                                                                 | Create the staging folder exclusively; `Claimed`                                                                                                                                                                                                                                                                                                                                                                                             | Create the final folder and its `.lock` exclusively, and write both records with status running; `Claimed`                                                                       | As `IfCompleted`                                                                                                                                          |
+| Running, with a live owner: alive on this host, or on another host with a beat that changes                                                            | Wait until the owner ends the claim, then act on the state found: `Reused` if it completed, a claim if it failed or its owner died                                                                                                                                                                                                                                                                                                           | `Busy(owner)`, which the command reports as `Error::InProgress`                                                                                                                  | `Atomic`: wait as under `IfCompleted`, then act on the state found as `Force` does. `InPlace`: `Busy(owner)`. Force never takes a claim from a live owner |
+| Running, held by the calling process itself                                                                                                            | `Busy(owner)`                                                                                                                                                                                                                                                                                                                                                                                                                                | `Busy(owner)`                                                                                                                                                                    | `Busy(owner)`                                                                                                                                             |
+| Running, with an owner that is dead on this host                                                                                                       | Remove its staging folder, then claim; `Claimed`                                                                                                                                                                                                                                                                                                                                                                                             | Reclaim: every root-level file except `identity.json` and `.lock` moves to `.attempts/<n>/`, `run.json` as `attempt.json`, and subdirectories are cleared, then claim; `Claimed` | As `IfCompleted`                                                                                                                                          |
+| Running, with an owner on another host whose beat is stale, or whose beat file cannot be read                                                          | `Busy(owner)`, reported as possibly still alive on that host, with `--force` named                                                                                                                                                                                                                                                                                                                                                           | `Busy(owner)`, likewise                                                                                                                                                          | Move the staging folder, or the folder, to quarantine, then claim; `Claimed`                                                                              |
+| Failed                                                                                                                                                 | Cannot occur: a failed atomic result leaves no folder, so the run id is absent                                                                                                                                                                                                                                                                                                                                                               | Reclaim, as for a dead owner; `Claimed`                                                                                                                                          | As `IfCompleted`                                                                                                                                          |
+| Completed                                                                                                                                              | `Reused`                                                                                                                                                                                                                                                                                                                                                                                                                                     | `Reused`                                                                                                                                                                         | Move the folder, with every result nested in it, to quarantine, then claim; `Claimed`                                                                     |
+| Completed but damaged: a listed file missing or changed in size or modification time, an unlisted file, an unreadable record, or an old format version | Move the folder, with every result nested in it, to quarantine, then claim; `Claimed`                                                                                                                                                                                                                                                                                                                                                        | The same                                                                                                                                                                         | As `IfCompleted`                                                                                                                                          |
+| Completed, with a wanted by-product missing (`begin_with`, `begin_many`)                                                                               | `Claimed` in reproducing mode: only the missing by-products are claimed                                                                                                                                                                                                                                                                                                                                                                      | The same                                                                                                                                                                         | Move the folder, with its by-products, to quarantine, then claim the upstream and every wanted by-product; `Claimed`                                      |
+| Completed, with a wanted by-product in another state (`begin_with`, `begin_many`)                                                                      | Each wanted by-product is classified by the rows above as if it were begun alone. One that is completed is not claimed. One that is failed, damaged or held by an owner dead on this host is cleared as its row says and claimed in reproducing mode. One a live owner holds is waited for. If any is held by an owner on another host that is stale, or by the calling process, the whole call returns `Busy(owner)` and nothing is claimed | The same                                                                                                                                                                         | As for a missing by-product                                                                                                                               |
+
+With `Build::Incomplete`, every state is treated as under `Force`, as today's
+simulation sink does (`cli/src/cas_sink.rs:523-530`).
+
+A waiting `begin` reads the claim and the owner's liveness once per beat
+interval: on the owner's host by the process check, from another host by the
+beat counter, as "Owners and the beat" says. It stops when the claim's staging
+folder is gone (renamed into place by `finish`, or removed by `fail`) or the
+owner is no longer alive, and then classifies the run id again.
+
+Today's code classifies a leaf the same way (`store.rs:259-286`), reuses a
+completed one, refuses a live or another host's lock (`store.rs:1689-1702`),
+reclaims a dead holder's (`store.rs:1689-1795`), and under `--force` moves a
+completed leaf, or one held from another host, to quarantine and refuses one a
+process on this host holds (`store.rs:316-347`). Four things differ.
+
+- **A damaged result is moved to quarantine.** Today a stale leaf of the same
+  identity is removed and recomputed (`store.rs:598-608`) or cleared by the
+  claim (`store.rs:695-696`).
+- **An atomic claim is taken before computing.** Today an atomic result is held
+  in memory and its staging folder is made at the commit, named by run id,
+  process id and a counter so that two writers never share one
+  (`store.rs:487-545`). In the target the staging folder is the claim, so the
+  second writer waits for the first and reuses its result.
+- **A completed result found under the claim is reused.** Today an in-place
+  claim that finds, under its lock, a completed result of the same identity
+  refuses with `CasError::ReclaimRaceCompleted` (`store.rs:675-689`). In the
+  target `begin` releases the claim and returns `Reused`.
+- **A by-product missing from a stored result is produced in reproducing mode.**
+  Today the cell is treated as absent and simulated again in full
+  (`cas_sink.rs:469-519`).
+
+### What is written, and where
+
+| Moment                                                                               | `Atomic`                                                                                                                                                                                              | `InPlace`                                                                                                                          |
+| ------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| The command's first call to the store (`begin`, `begin_with`, `begin_many` or `put`) | The owner's beat file; the invocation record's first version                                                                                                                                          | The same                                                                                                                           |
+| The claim                                                                            | `.staging/<run id>/`, created exclusively, holding `identity.json` and `run.json` with status running and the owner                                                                                   | The final folder; `.lock`, created exclusively; `identity.json`; `run.json` with status running                                    |
+| During the run                                                                       | Result, provenance and attempt files, in the staging folder                                                                                                                                           | The same, in the final folder                                                                                                      |
+| `finish`                                                                             | Every handle synced; the manifest built; `held_content` checked against it; `run.json` written completed; the staging folder renamed into its final folder; the by-products committed; one index line | The manifest; `run.json` written completed through a temporary file and a rename; `.lock` removed; the by-products; one index line |
+| `fail`                                                                               | The staging folder removed; the failure kept for the invocation record                                                                                                                                | `run.json` rewritten as failed, with the reason; `.lock` removed                                                                   |
+| The `Run` is dropped                                                                 | As `fail`, with no reason                                                                                                                                                                             | As `fail`, with no reason                                                                                                          |
+| The command ends                                                                     | The invocation record's last version, replacing the first; the beat file removed                                                                                                                      | The same                                                                                                                           |
+
+Every write is made durable in today's order: each file synced, then the record,
+then its folder, then the rename, then the destination's parent
+(`store.rs:14-18`, `:1838-1903`). The `InPlace` record is replaced through
+`run.json.tmp` and a rename, as today (`store.rs:979-993`, `:1004-1029`), and a
+dropped claim is marked failed with no reason, as today (`store.rs:1040-1048`).
+
+Staging lives on the same filesystem as the results, so the rename is atomic:
+
+- **A result that is not a by-product** stages in
+  `<root>/.staging/<64 hex of the run id>/`, whether its layout is flat or
+  `Layout::inside` a parent.
+- **A content artifact written by `put`** stages in a temporary folder of its
+  own, `<root>/.staging/<64 hex of the run id>.<host>-<pid>-<start>.<n>/`, as
+  today's atomic commit names one per attempt (`store.rs:493-503`).
+- **A by-product produced with an `Atomic` upstream** stages inside the
+  upstream's staging folder, at `<KIND>/<name>-<12 hex>/`, so the upstream's
+  rename places both.
+- **A by-product produced with an `InPlace` upstream, or produced later,**
+  stages in `<upstream folder>/.staging/<64 hex of its run id>/` and is renamed
+  to `<upstream folder>/<KIND>/<name>-<12 hex>/`. A retry of an `InPlace`
+  upstream clears its `.staging/` with its other subdirectories, so the
+  by-products of a failed attempt leave nothing behind.
+
+When a by-product's record becomes completed:
+
+- **With an `Atomic` upstream,** the upstream's `run.json` and then each
+  by-product's are written completed inside the staging folder, before the one
+  rename that places them all. No reader sees a completed by-product before its
+  upstream is in place.
+- **With an `InPlace` upstream,** the upstream's `run.json` is written completed
+  first; then each by-product's `run.json` is written completed in its staging
+  folder and the folder is renamed into place, in the order wanted.
+- **Produced later,** each by-product's `run.json` is written completed and its
+  folder renamed into place after the comparison in reproducing mode matches.
+
+A completed folder's check passes over the store's own entries (`.staging/`,
+`.attempts/`, `.lock`, `identity.json`, `run.json`), over the attempt files the
+record names with the role `attempt`, and over the subdirectories that hold
+nested results, and treats anything else not in the manifest as damage. A
+root-level subdirectory that no manifest entry lies under is a nested-results
+subdirectory when every entry in it is a folder holding an `identity.json` whose
+kind is registered and which names this result as its upstream or its
+`Layout::inside` parent; each such folder is checked as a result of its own. Any
+other unlisted subdirectory makes the folder damaged. Today's check passes over
+the subdirectories the record declares as children, and over `.attempts/`
+(`store.rs:1380-1414`); the target has no children list, since a sealed record
+cannot gain one.
+
+A result placed with `Layout::inside` moves with its parent: quarantining a
+folder moves it whole, nested results and by-products included, as today's
+quarantine renames the whole leaf (`store.rs:818-831`).
+
+### On disk
+
+```text
+<root>/
+  store.json                         { "format": 1 }, the store's format
+  <KIND>/<name>-<12 hex>/            a flat result
+  .staging/                          claims of atomic results, and put's temporary folders
+  .quarantine/                       results moved aside
+  .invocations/
+    .lock                            the store-wide invocation lock
+    <seq>.json                       an invocation record
+    <seq>.progress.json              a running batch's progress snapshot
+  .owners/<host>-<pid>-<start>.json  an owner's beat file
+  .index/<host>-<pid>-<start>.log    an owner's index log
+```
+
+The store's format is the `format` number in `store.json`. `Store::open`
+refuses, with `Error::NotAStore`, a root that is not empty and has no
+`store.json`, a `store.json` it cannot read, and a format number this binary
+does not know. There is no other layout version.
+
+Every record carries `format`, a version number. A reader that finds another
+version refuses the record by name and says which version it found and which it
+reads. `begin` treats a result whose record has another version as damaged: it
+is never read as a result, and is moved to quarantine and computed again.
+Today's lookup likewise never serves a record whose `format_version` or
+`hash_version` differs, and the claim recomputes it (`store.rs:274-277`).
+
+`identity.json` holds what the run id is computed from, so `verify` can compute
+it again:
+
+```json
+{
+  "format": 1,
+  "kind": "sim",
+  "run_id": "<64 hex>",
+  "hash_version": 8,
+  "ambient": { "build": "1ae16a5ce28b...", "env": { "eval_unresolved": false, "no_binding_cache": false, "experimental": {} } },
+  "identity": { "model": { "run_id": "...", "file": "model.ir.json", "digest": "..." }, "config": { "...": "..." } }
+}
+```
+
+`run.json` holds the status and everything recorded about the run:
+
+```json
+{
+  "format": 1,
+  "status": "completed",
+  "owner": { "host": "node12", "pid": 22149, "started": "2026-11-20T09:14:03.120Z" },
+  "invocation": 123,
+  "started": "2026-11-20T09:14:05.002Z",
+  "finished": "2026-11-20T09:14:06.410Z",
+  "given": { "model": "models/sir.camdl", "...": "..." },
+  "execution": { "parallel": 8 },
+  "files": { "traj.tsv": { "role": "result", "bytes": 10234, "mtime": "1763630046.410000000", "sha256": "..." } },
+  "deps": [ { "kind": "compiled_model", "run_id": "...", "file": "model.ir.json", "sha256": "...", "build": "..." } ],
+  "lineage": [],
+  "reads": [ { "kind": "compiled_model", "run_id": "...", "file": "model.ir.json" } ],
+  "failure": null
+}
+```
+
+`failure` is `{ "operation": "...", "reason": "..." }`, or
+`{ "operation": null,
+"reason": null }` for a dropped claim, on a failed
+`InPlace` run. The manifest records size, modification time and digest per file,
+as today's does (`record.rs:162-168`).
+
+An invocation record:
+
+```json
+{
+  "format": 1,
+  "seq": 123,
+  "record": "invocation",
+  "status": "ended",
+  "owner": { "host": "node12", "pid": 22149, "started": "2026-11-20T09:14:03.120Z" },
+  "started": "2026-11-20T09:14:04.880Z",
+  "ended": "2026-11-20T09:14:09.311Z",
+  "label": "baseline",
+  "argv": ["simulate", "models/sir.camdl", "--scenario", "slow,fast", "--seeds", "1,2", "--obs", "--label", "baseline"],
+  "given": { "model": "models/sir.camdl", "scenario": ["slow", "fast"], "seeds": [1, 2], "obs": true, "...": "..." },
+  "config_files": [],
+  "results": [
+    { "kind": "compiled_model", "run_id": "...", "labels": { "name": "sir" }, "outcome": "reused", "failure": null },
+    { "kind": "sim", "run_id": "...", "labels": { "scenario": "slow", "replicate": 0, "seed": 1 },
+      "outcome": "computed", "failure": null },
+    { "kind": "obs", "run_id": "...", "labels": null, "outcome": "computed", "failure": null }
+  ],
+  "counts": { "completed": 9, "failed": 0 },
+  "progress": null
+}
+```
+
+`status` is `running` in the first version and `ended` in the last. `outcome` is
+one of `planned` (first version only), `computed`, `reused`, `failed` (with
+`failure`) or `busy`.
+
+`results` lists every result the command passed to the store, in the order of
+its calls: each `put` (a compiled model, a data table), each member of a
+`begin`, `begin_with` or `begin_many`, and each by-product wanted of one,
+directly after its upstream, each as an entry of its own with its kind. A result
+asked for twice is listed twice. `counts` counts every entry, so the example's
+nine are the compiled model, four cells and the four cells' observations.
+`Invocation::members::<A>` returns the entries of kind `A` only, so a rendering
+of the cells sees the four cells.
+
+`argv` and `given` have one shape everywhere. `argv` is the command line as an
+array of strings. `given` is an object with one entry per field of the `Given`,
+keyed by the field's name: a group's fields sit in an object under the group's
+name, a value is written as serde writes its typed value, and a file argument is
+its path as typed. A settings file added with `Given::with_file` sits under its
+field as `{ "path": ..., "sha256": ..., "keys": { ... } }`, where `keys` is that
+file's own `given`.
+
+An owner's beat file, replaced through a temporary file and a rename every few
+seconds:
+
+```json
+{ "format": 1, "host": "node12", "pid": 22149, "started": "2026-11-20T09:14:03.120Z", "beat": 1841, "invocation": 123 }
+```
+
+An index log line, appended when a result is committed and when an invocation
+ends:
+
+```json
+{ "format": 1, "event": "completed", "kind": "sim", "run_id": "...", "folder": "sim/slow-3fa9c1d2e07b", "invocation": 123, "deps": ["..."], "lineage": [], "upstream": null }
+{ "format": 1, "event": "invocation", "seq": 123, "label": "baseline", "results": ["..."] }
+```
+
+`.lock`, in an `InPlace` folder, created exclusively and naming the owner. Today
+it holds `"{pid}\n{host}\n"` (`store.rs:1513-1516`):
+
+```json
+{ "format": 1, "owner": { "host": "node12", "pid": 22149, "started": "2026-11-20T09:14:03.120Z" } }
+```
+
+`.invocations/.lock`, the store-wide invocation lock, has the same contents as a
+folder's `.lock`: the format and the owner. A command holds it only while it
+checks the label and takes the next sequence number, a few file operations. A
+command that finds it held acts by the holder's liveness: a holder alive on this
+host, or on another host with a beat that changes, is waited for, as today's
+short record edits wait for a leaf's lock (`RECORD_EDIT_WAIT`, `store.rs:1613`);
+a holder dead on this host has its lock taken over as today's `.lock` is
+(`store.rs:1689-1795`); a holder on another host whose beat is stale, or whose
+beat file cannot be read, is refused with `Error::InvocationLockHeld`, naming
+the owner and the lock file, which only a person may remove.
+
+`.attempts/<n>/` holds one earlier attempt: its `run.json`, kept unchanged as
+`attempt.json` so no walk mistakes it for a second result, and every other file
+it had at the folder root except `identity.json` and `.lock`, result files
+included. Attempts are numbered from 1 and the last three are kept, as today
+(`store.rs:1174-1236`).
+
+`.quarantine/` holds whole folders moved aside, under their own name, with `.1`,
+`.2` appended when that name is taken, their records unchanged, as today
+(`store.rs:818-831`). Reproducing mode's recomputed upstream files go there the
+same way when they diverge.
+
+### How a run id becomes a folder
+
+The folder name comes from the first writer's labels, so the path cannot be
+computed from the run id alone. To find the folder of a run id:
+
+1. Look in the index.
+2. Failing that, scan the kind's directory, or for a nested result its
+   subdirectory of the parent's folder (the `subdir` given to `Layout::inside`,
+   or a by-product's `KIND`), for a name ending in
+   `-<first 12 hex of the run id>`, or in all 64 hex digits of it. The parent's
+   folder is found by this same rule, from the parent's run id, which the
+   identity gives.
+3. Confirm the full run id against the candidate's `identity.json`. A candidate
+   whose id differs is another result and is passed over.
+
+A new folder is `<name>-<12 hex>`. If that name is taken by another run id, the
+later folder is `<name>-<64 hex>`, the whole run id, which cannot collide. Today
+escalates the same way, from the segment to a 16-hex and then the 64-hex suffix
+(`disambiguation_candidates`, `store.rs:1462-1483`). Today's `find_leaf`
+(`store.rs:872-930`) works the same way, at each of a leaf's levels: the exact
+path first, then every directory whose name ends in that level's 8-hex hash,
+each candidate confirmed by its record.
+
+`<name>` is `Artifact::name` made safe for a path as today's `path_label` does
+(`runid/src/layout.rs:62-106`): lowercased, every character outside `a-z`,
+`0-9`, `_`, `-` and `.` replaced by `_`, and a result longer than 200 bytes cut
+to a prefix and ended with `..` and the first 16 hex digits of the SHA-256 of
+the whole sanitised name. One rule is added: a leading `.` becomes `_`, so no
+result folder is hidden among the store's own entries.
+
+### Content artifacts and `put`
+
+`Store::put` writes a content artifact without a claim, because any two writers
+of one content artifact produce identical bytes.
+
+1. It finds the content artifact's folder by the rule above. If a completed one
+   is there, its manifest is checked as `get` checks it, nothing is written, and
+   it is returned. A damaged one is moved to quarantine.
+2. Otherwise it writes `identity.json`, `C::FILE`, the provenance files and
+   `run.json`, completed, into a temporary folder of its own under `.staging/`,
+   and renames the folder into place if the destination is absent.
+3. If the destination is present, because another writer renamed first, its
+   temporary folder is removed and the stored result is returned. A rename onto
+   a folder that is not empty fails, which is how it finds this out, as today's
+   commit does (`try_rename`, `store.rs:625-645`).
+
+`put` never returns `Error::InProgress`, and two writers never compare their
+bytes. It does the same under `Build::Incomplete`: content is keyed by its own
+bytes, so a stored copy has nothing to distrust. The run id of a content
+artifact is computed as every artifact's is, from `KIND`, the ambient key and
+`Identity::key()` of its `Hashed<T>`; it is never the content's digest itself.
+
+### Reproducing mode
+
+A by-product produced later runs the upstream's computation again without
+claiming the upstream.
+
+- **What is claimed.** Only the missing by-products' run ids, never the
+  upstream's. The stored upstream is not locked, moved or written.
+- **Where the upstream's files go.** Every file the upstream's `Run` opens, in
+  any role, goes into `.reproduce/` inside the first by-product's staging
+  folder, never into the upstream's folder: its result files, its provenance and
+  attempt files, and the `progress.json` and `events.jsonl` that `Run::progress`
+  and `Run::event` write. `status` finds the progress there through the
+  by-product's claim.
+- **What is compared.** At `finish`, each file written there is compared by
+  digest with the stored upstream's file of the same name. A stored result file
+  that was not written again is a mismatch too. Provenance and attempt files are
+  not compared.
+- **On a match,** `.reproduce/` is removed before any by-product's folder is
+  renamed into place, the by-products are committed, and `finish` returns the
+  stored upstream.
+- **On a mismatch,** `finish` returns `Error::Divergent`, `.reproduce/` goes to
+  quarantine, and the by-products are failed.
+- **On a failure,** the by-products are failed and the upstream is untouched.
+
+### By-products
+
+- **Produced together,** a by-product is claimed inside the upstream's staging
+  folder (`Atomic`), or in the `.staging/` of the upstream's final folder
+  (`InPlace`).
+- **Produced later,** it is claimed in the `.staging/` of the upstream's final
+  folder.
+- **Committed** by the upstream's `finish`: the upstream first, then each
+  by-product in the order wanted, each with its own records.
+- **Failed** with the upstream: when the upstream fails, is dropped or diverges,
+  each by-product claimed with it is failed the same way. An `Atomic` by-product
+  leaves no folder, and the invocation record holds its failure.
+
+### Dependencies
+
+A `Dep<A>` holds five values. Three are hashed, as a struct with tag `dep` and
+version 1, in name order: `digest`, a `Key`; `file`, a string; and `run_id`, the
+upstream's run id as a `Key`. Two are recorded and not hashed: the upstream's
+`build`, and for a part of a file, `whole`, the digest of the whole file the
+part was taken from. Today's dependency, `ArtifactRef`, hashes the same three
+values (`run_id`, `artifact`, `digest`) and records the kind without hashing it
+(`runid/src/inputs.rs:404-419`). In `run.json` each entry of `deps` holds
+`kind`, `run_id`, `file`, `sha256` (the `digest`), `build`, and `whole` when it
+is a part.
+
+| Made by                                 | `file`                                                                               | `digest`                                                                                                                                                               | What `Run::open` or `Run::open_in` checks                                                                                                                                                                |
+| --------------------------------------- | ------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Stored::dep(file)`                     | The file's name                                                                      | The file's digest, from the manifest                                                                                                                                   | The bytes read, against `digest`                                                                                                                                                                         |
+| `Stored::dep_part(file, part, extract)` | `<file>:<part>`, as today's `fit_state.toml:start_values` (`cli/src/fit/cas.rs:797`) | The SHA-256 of the extracted bytes                                                                                                                                     | `open` returns the whole file and checks its bytes against `whole`; the reader applies the same extraction. The upstream is sealed, so an unchanged file yields the same part                            |
+| `Stored::dep_all()`                     | `*`                                                                                  | The SHA-256 of the upstream's result files in name order, each written as its name (a `u64` little-endian length, then the UTF-8 bytes) followed by its 32-byte digest | `open_in(dep, file)` refuses a file that is not a result file of the upstream, recomputes this digest from the upstream's manifest and compares it, then checks the bytes read against the file's digest |
+
+`Stored::dep_files(files)` is the same as `dep_all` over the named files only:
+its `file` is the names joined in name order, and its digest is computed the
+same way over those files. A provenance file is never part of a dependency.
+Today's resumed fit holds a dependency of this shape, one digest over each
+chain's carried files (`cli/src/fit/cas.rs:680-717`).
+
+### `clean`, `verify` and `reindex`
+
+None exists today except `dev reindex`, which rebuilds `index.json`
+(`cli/src/cas_index.rs:115-130`, `cli/src/args/mod.rs:2816-2820`).
+
+- **`clean`** deletes the staging folders whose owner is dead on this host,
+  everything in `.quarantine/`, and every `.attempts/` folder. It does not touch
+  a completed result, a running claim, an invocation record or the index.
+- **`verify [<handle>]`** checks every completed result, or the one named. It
+  computes the run id again from `identity.json` and compares it with the
+  folder's, and computes each manifest file's SHA-256 and compares it with the
+  recorded digest. It reports each result that fails as damaged and writes
+  nothing; the next `begin` moves a damaged result to quarantine.
+- **`reindex`** reads every `identity.json`, `run.json` and invocation record,
+  writes one compacted log through a temporary file and a rename, and removes
+  the logs it covered of owners known to be dead. Any other owner's log is kept.
+
+### Handles
+
+- **An id prefix** names the one result whose run id starts with it. There is no
+  minimum length, as today: the prefix is matched against every run id and a
+  prefix with several matches is refused with every match listed
+  (`cli/src/fit/handle.rs:365-394`, `cli/src/cas_read.rs:156-170`).
+- **`@L`** is the latest invocation labelled `L`, by sequence number, whose
+  results all completed; **`@L~n`** counts `n` such invocations back from it. An
+  invocation labelled `L` with a member that failed, was busy or is still
+  running is passed over. Today `@L~n` counts back through the completed runs
+  that carry the label, newest label first (`handle.rs:405-423`, `:458-466`).
+- **A handle's kind is checked.** Resolving a handle as `RunRef<A>` refuses a
+  result whose record's kind is not `A::KIND`, naming both kinds.
+
+### Errors
+
+```rust
+pub enum Error {
+    InProgress(Owner),                                     // a busy claim the caller cannot take
+    NotAStore { root: PathBuf, why: String },              // open: unreadable, foreign, or an unknown format
+    UnknownKind { kind: String },                          // a record whose kind is not registered
+    KindRegisteredTwice { kind: &'static str },            // open: one KIND registered by two artifacts
+    Divergent { run_id: Key, file: String, stored: Key, recomputed: Key },
+    Damaged { run_id: Key, what: String },
+    OldRecord { path: PathBuf, found: u16, reads: u16 },
+    NotFound { handle: String },
+    Ambiguous { handle: String, matches: Vec<Key> },
+    WrongKind { handle: String, expected: &'static str, found: String },
+    NotOneResult { handle: String, members: Vec<Key> },     // a label on several results, where one is needed
+    LabelInUse { label: String, running: Key, owner: Owner },   // a result of a running invocation labelled L
+    InvocationLockHeld { owner: Owner, path: PathBuf },     // .invocations/.lock held from another host, stale
+    MemberNotCompleted { invocation: u64, members: Vec<Key> },  // a rendering of an invocation not all completed
+    ConfigurationNotARun { path: PathBuf, runs: Vec<Key> },     // a configuration file where one run is needed
+    NoRecord { path: PathBuf },                             // a directory with no record, offered as a run
+    FileOpenedTwice { name: String },
+    BadFileName { name: String },
+    WriteAfterEnd { name: String },                         // a write through a handle after finish or fail
+    ContentMissing { digest: Key },                         // finish: a held digest with no result file
+    Io { op: &'static str, path: PathBuf, source: std::io::Error },
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+/// What Store::run returns on failure: the store's error, or the computation's.
+pub enum RunError<E> { Store(Error), Compute(E) }
+```
+
+A project's own error type converts from `Error`; camdl's is declared in Part 2.
 
 ## API 3: results that use other results
 
@@ -823,8 +1913,20 @@ the store does the reading.
 ### Dependencies
 
 ```rust
-/// One file, or one named part of a file, of an upstream result.
-pub struct Dep<A: Artifact> { /* upstream Id<A>, name, content digest; the upstream's build is recorded */ }
+/// One file, one named part of a file, or every result file of an upstream result.
+/// Hashed as the "Keys" section says; its record form is itself. The upstream's build,
+/// and for a part the whole file's digest, are recorded, not hashed ("Dependencies",
+/// under "Behaviour and formats").
+#[derive(Serialize, Deserialize)]
+pub struct Dep<A: Artifact> { /* upstream Id<A>, file, digest; recorded: build, whole */ }
+
+impl<A: Artifact> Clone for Dep<A> { /* ... */ }
+
+impl<A: Artifact> Dep<A> {
+    pub fn id(&self) -> &Id<A>;                               // the upstream's run id
+    pub fn file(&self) -> &str;                               // the file, `<file>:<part>`, or `*`
+    pub fn digest(&self) -> Key;
+}
 
 impl<A: Artifact> Stored<A> {
     pub fn id(&self) -> &Id<A>;
@@ -832,10 +1934,15 @@ impl<A: Artifact> Stored<A> {
 
     pub fn dep(&self, file: &str) -> Result<Dep<A>>;          // digest taken from the manifest
     pub fn dep_all(&self) -> Dep<A>;                          // every result file, never a provenance file
+    pub fn dep_files(&self, files: &[&str]) -> Result<Dep<A>>; // the named result files, as one dependency
     pub fn dep_part(
         &self, file: &str, part: &str,
         extract: impl Fn(&[u8]) -> Result<Vec<u8>>,
     ) -> Result<Dep<A>>;                                      // digest of the extracted bytes
+
+    /// Read one result file, checked against its digest as it is read. For readers
+    /// outside a run, such as a rendering; a running computation uses Run::open.
+    pub fn open(&self, file: &str) -> Result<impl Read>;
 }
 
 impl<B: Artifact> Run<B> {
@@ -876,10 +1983,10 @@ dependency, and `show` flags a cross-build dependency.
 | ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
 | A whole file of an upstream result                                     | `stored.dep("draws.tsv")`                                                                    |
 | Part of a file, such as a fit's start values                           | `stored.dep_part("fit_state.toml", "start_values", extract)`                                 |
-| Recorded but not hashed, because the values enter identity another way | `info.lineage(dep)` puts it in `run.json` only                                               |
+| Recorded but not hashed, because the values enter identity another way | `info.lineage(&dep)` puts it in `run.json` only                                              |
 | A loose file outside any store, such as a starting point in a TSV      | An ordinary `InputFile`, hashed by content                                                   |
 | A result in a different store root                                     | Foreign input: its files are content-hashed input files, recorded as lineage, never a `Dep`. |
-| A directory with no record, offered as a run to resume                 | Refused, with a message naming the run to resume by handle                                   |
+| A directory with no record, offered as a run to resume                 | Refused with `Error::NoRecord`, whose message says to name the run to resume by handle       |
 
 ### Content artifacts
 
@@ -887,7 +1994,8 @@ Content that many results consume is stored once, as an artifact whose identity
 is the digest of its one result file.
 
 ```rust
-/// An artifact whose identity is its content.
+/// An artifact whose identity is its content. Hashed<T> implements Identity
+/// (record: its digest, as a Key), so this is a valid Artifact::Identity.
 pub trait ContentArtifact: Artifact<Identity = Hashed<Self::Content>> {
     type Content: Content;
     const FILE: &'static str;                // such as "model.ir.json"
@@ -895,12 +2003,35 @@ pub trait ContentArtifact: Artifact<Identity = Hashed<Self::Content>> {
 
 impl Store {
     /// Store the content if it is not there yet, and return it as a result to depend on.
-    pub fn put<C: ContentArtifact>(&self, content: Hashed<C::Content>, info: &RunInfo) -> Result<Stored<C>>;
+    /// The labels and the provenance are the first writer's; the labels name the folder.
+    pub fn put<C: ContentArtifact>(
+        &self, content: Hashed<C::Content>, labels: &C::Labels, provenance: &Provenance, info: &RunInfo,
+    ) -> Result<Stored<C>>;
+}
+
+/// What a content artifact's first writer records beside its one result file:
+/// provenance files (in the manifest, never compared) and named values in run.json.
+#[derive(Clone)]
+pub struct Provenance { /* files by name, values by name */ }
+
+impl Provenance {
+    pub fn none() -> Self;
+    pub fn file(self, name: &str, bytes: Vec<u8>) -> Self;
+    pub fn value(self, name: &str, value: &impl Serialize) -> Result<Self>;
+}
+
+impl<A: Artifact> Stored<A> {
+    /// A value recorded in run.json, such as the digest of a compiled model's whole file.
+    pub fn recorded(&self, name: &str) -> Option<&serde_json::Value>;
 }
 ```
 
+A content artifact also implements `Artifact`, with `WRITE = WriteMode::Atomic`
+and `Identity = Hashed<Self::Content>`; camdl's are in Part 2.
+
 - **Key equals stored bytes by construction.** The identity is the digest of the
-  file the artifact holds.
+  file the artifact holds, and `put` checks that the `FILE` it wrote has that
+  digest (`Identity::held_content`), as `finish` does for any other result.
 - **Normalization happens before `put`.** Two model files that compile to the
   same content are one artifact.
 - **Results depend on it with an ordinary `Dep`.** The index holds the edge.
@@ -925,8 +2056,9 @@ ordinary `Atomic` artifact whose identity is the problem itself.
 
 A combination that only reshapes its members and adds labels is a rendering. A
 combined table across the cells of a batch is the case in point: its rows are
-the members' rows, and its extra columns (scenario name, replicate number) are
-labels. It is rendered from the invocation record and is not stored.
+the members' rows, and its extra columns (the scenario's name, and the cell's
+position in the invocation as `replicate`) are labels. It is rendered from the
+invocation record and is not stored.
 
 The members never hold the combination in their own identity, so they keep their
 ids when it grows. camdl's two combinations, the combined simulation table and
@@ -939,42 +2071,56 @@ design.
 ```rust
 pub struct Planned<A: Artifact> { pub id: Id<A>, pub state: PlanState }
 
-pub enum PlanState { Absent, Running(Owner), Completed, Failed, Interrupted }
+pub enum PlanState { Absent, Running(Owner), Completed, Damaged, Failed, Interrupted }
 
 impl Store {
     /// Read-only: what exists for each identity. Nothing is claimed.
     pub fn plan<A: Artifact>(&self, identities: &[A::Identity]) -> Result<Vec<Planned<A>>>;
 
-    /// Open a batch and claim its members in one pass, with the by-products wanted of each.
-    /// An id another process holds comes back as Busy, not waited for.
+    /// Open a batch and claim its members in one pass, each with its labels and the
+    /// by-products wanted of it. An Atomic id a live owner holds is waited for, as begin
+    /// waits; an InPlace one comes back as Busy.
     pub fn begin_many<A: Artifact>(
-        &self, members: &[(A::Identity, Wanted<A>)], info: &RunInfo, reuse: Reuse,
+        &self, members: &[(A::Identity, A::Labels, Wanted<A>)], info: &RunInfo, reuse: Reuse,
     ) -> Result<Batch<A>>;
 }
 
-impl<A: Artifact> Batch<A> {
-    pub fn members(&mut self) -> impl Iterator<Item = Begin<A>>;
-    pub fn progress(&self, snapshot: &impl Serialize) -> Result<()>;
+/// Several claims opened together, under one invocation.
+pub struct Batch<A: Artifact> { /* ... */ }
 
-    /// The invocation record: the members in the order asked for, with their labels.
-    pub fn invocation(&self) -> &Invocation;
+impl<A: Artifact> Batch<A> {
+    /// One Begin per distinct identity, in the order first asked for. The claims
+    /// themselves were taken by begin_many, in run-id order.
+    pub fn members(&mut self) -> impl Iterator<Item = Begin<A>> + '_;
+    pub fn progress(&self, snapshot: &impl Serialize) -> Result<()>;
+}
+
+impl RunInfo {
+    /// End the invocation: write the record's last version and return it. A RunInfo
+    /// dropped without this writes the last version too, with what is known.
+    pub fn finish(self, store: &Store) -> Result<Invocation>;
 }
 ```
 
 A grid, a sweep or a profile plans first, reports how many results are already
-stored, and runs the rest. `begin_many` writes the invocation record, removes
-repeated identities, then claims in run-id order without blocking on a busy id.
-Two overlapping batches therefore cannot deadlock or compute the same id twice.
+stored, and runs the rest. `begin_many` adds the members to the invocation
+record, removes repeated identities, then claims in run-id order, waiting on an
+atomic id that a live owner holds. It waits only there, before any member is
+computed, and a batch waiting on an id holds only ids that sort before it, so
+two overlapping batches cannot deadlock or compute the same id twice. The
+invocation record belongs to the `RunInfo`, so a command that opens several
+batches, such as a batch of fit problems and a batch of runs on each, writes one
+invocation record that lists them all.
 
 ### The index
 
-The index records every result, its labels and its dependency edges. It is a
-cache: everything in it can be rebuilt from the records and the invocation
-records.
+The index records every result, its folder, the invocations that asked for it
+with their labels, and its dependency edges. It is a cache: everything in it can
+be rebuilt from the records and the invocation records.
 
-- **It is a set of append-only logs, one per owner.** A finish or a naming event
-  appends one line. No shared file is rewritten per result. Readers merge the
-  logs, and `reindex` rebuilds and compacts them.
+- **It is a set of append-only logs, one per owner.** A finish, or the end of an
+  invocation, appends one line. No shared file is rewritten per result. Readers
+  merge the logs, and `reindex` rebuilds and compacts them.
 - **It holds edges in both directions:** which results a result consumed, and
   which results consumed it.
 - **It holds both kinds of edge:** dependencies that are hashed, and lineage
@@ -989,6 +2135,8 @@ a path.
 ### Layout
 
 ```rust
+pub struct Layout { /* flat, or inside a parent result */ }
+
 impl Layout {
     /// <root>/<kind>/<name>-<12 hex of run id>/
     pub fn flat() -> Self;
@@ -1004,9 +2152,11 @@ impl Layout {
   another name finds the folder already named. The user's `--label` is not in
   it.
 - **A folder is found by id and then verified.** The full run id in
-  `identity.json` decides, never the path.
-- **Two run ids can share their first 12 digits.** The second folder then gets a
+  `identity.json` decides, never the path ("How a run id becomes a folder").
+- **Two run ids can share their first 12 digits.** The later folder then gets a
   longer suffix. A test covers it.
+- **A by-product is placed by the library,** inside its upstream's folder (API
+  2, "By-products"); its `Artifact::layout` is not called.
 - **A nested result is still its own artifact,** with its own records and
   manifest. Removing a parent removes what is nested in it.
 - **Readers never parse a path.** The seed, the kind and the settings come back
@@ -1018,9 +2168,29 @@ impl Layout {
 A command-line argument that names a stored result has the type `RunRef<A>`.
 
 ```rust
+/// A handle as typed: a path, an id prefix, `@L` or `@L~n`. Parsing is syntactic and
+/// cannot fail on a well-formed string; resolution does the I/O.
+pub enum Handle {
+    Path(PathBuf),
+    IdPrefix(String),
+    Label { name: String, back: u32 },              // @L is back = 0
+}
+
+impl std::str::FromStr for Handle { /* ... */ }
+
+/// A handle that must name a result of kind A.
+pub struct RunRef<A: Artifact> { /* Handle + PhantomData<A> */ }
+
+impl<A: Artifact> std::str::FromStr for RunRef<A> { /* ... */ }
+
 impl Store {
     pub fn resolve<A: Artifact>(&self, handle: &RunRef<A>) -> Result<Stored<A>>;      // completed only
     pub fn resolve_entry<A: Artifact>(&self, handle: &RunRef<A>) -> Result<Entry<A>>; // any status
+
+    /// The invocation a handle names: for `@L` and `@L~n`, that invocation; for a path
+    /// or an id, the latest invocation that listed that result. Used by `cat @L` and
+    /// by exports, which render an invocation.
+    pub fn invocation(&self, handle: &Handle) -> Result<Invocation>;
 }
 ```
 
@@ -1028,77 +2198,85 @@ impl Store {
 | ------------------------- | -------------------------------------------------------------------------------------------------- |
 | A path to a stored folder | That result                                                                                        |
 | An id prefix              | The one result whose run id starts with it; an ambiguous prefix is refused with every match listed |
-| `@L`                      | The latest completed result named `L`                                                              |
-| `@L~n`                    | The n-th earlier result named `L`                                                                  |
+| `@L`                      | The latest invocation labelled `L` whose results all completed                                     |
+| `@L~n`                    | The n-th such invocation before it                                                                 |
 
 - **One store root per command.** Every handle resolves in the root the command
   writes to, never in a default one.
+- **A label on several results.** `@L` names an invocation. A command that
+  renders, such as `cat` or an export, takes it as it is, through
+  `Store::invocation`. `Store::resolve` takes its only member of kind `A` when
+  there is one, and otherwise refuses with `Error::NotOneResult`, listing the
+  members.
+- **The kind is checked.** A handle that resolves to a result of another kind is
+  refused with `Error::WrongKind`.
 - **Only these forms name a result.** A configuration file passed where a fit is
   expected names a configuration: it is an `InputFile`, merged with the flags
   and resolved to a fit problem, which is created if absent.
 - **A configuration file never names a run.** One unchanged file produces
   several runs whenever something outside its text changes: the data, a seed
   list, a sweep, or the build. A command that needs one run and is given a
-  configuration file refuses, and lists the runs that file has produced, newest
-  first, with their labels and ids. The list comes from the invocation records,
-  which hold a digest of each configuration file.
+  configuration file refuses with `Error::ConfigurationNotARun`, and lists the
+  runs that file has produced, newest first, with their labels and ids. The list
+  comes from the invocation records, which hold a digest of each configuration
+  file.
 
 ### Labels
 
-A label is minted when a command runs and is never edited afterwards.
+A `--label L` is part of the invocation record of the command run that carried
+it. No result's record holds a label, and no record is edited to add one.
 
-```rust
-pub struct NamingEvent {
-    pub seq: u64,              // store-wide order
-    pub time: Timestamp,       // for people; not used for ordering
-    pub name: String,
-    pub kind: NamingKind,      // Minted or Corrected
-}
-```
-
-- **Minting.** `--label L` is a request to the store, carried in `RunInfo`. The
-  store appends a naming event when the command runs, whether its result is
-  computed now or was already stored.
-- **A label names what the command made, once.** For a command that makes one
-  result, that result. For a command that makes several, the invocation, and
-  never each member.
-- **Resolving a batch's name.** `@L` on a batch names the invocation. A command
-  that renders, such as `cat` or an export, takes it as it is. A command that
-  needs one result takes the only member when there is one, and otherwise
-  refuses with the members listed.
-- **Naming after the fact.** Running the same command again with `--label L`
-  finds the stored results and mints `L` on them. That is also how an earlier
-  result becomes the current holder of a name again.
-- **Append only.** A record keeps every name it has been given. Appending a
-  naming event is the one change a sealed record allows.
-- **No clashes, with one refusal.** A name another result holds moves to the new
-  one, with a printed note. Minting is refused while a run holding that name is
-  still running.
-- **Order.** Minting takes one store-wide lock, held only for the append, and
-  the event gets the next sequence number. A counter per owner would avoid the
-  lock, but it cannot say which of two owners' events came later, and "latest"
-  is what `@L` means.
-- **No user-facing label command.** `dev relabel <handle> <name>` is a
-  maintainer's correction: it appends a corrected event and refuses while the
-  run is running.
+- **Minting.** `--label L` is a request to the store, carried in `RunInfo`. It
+  is written into the invocation record at the command's first call to the
+  store, whether its results are computed now or were already stored.
+- **A label names what the command made, once.** It names the invocation: for a
+  command that makes one result, that result; for a command that makes several,
+  all of them together, and never each member.
+- **Who holds a label.** `@L` is the latest invocation labelled `L` whose
+  results all completed, and `@L~n` counts back through such invocations. A
+  newer invocation labelled `L` takes the name once every one of its results has
+  completed, with a printed note naming the invocation that held it. An
+  invocation with a result that failed or was busy never holds the name, and
+  `@L` goes on naming the earlier one.
+- **Naming again.** Running the same command again with `--label L`, on the same
+  build, finds the stored results and writes an invocation record labelled `L`
+  that lists them. That is also how an earlier result becomes the current holder
+  of a name again. A result made by an older build is reached by its id or its
+  path.
+- **One refusal.** Minting is refused, with `Error::LabelInUse`, while a result
+  of an invocation labelled `L` is still running. An invocation is running while
+  its record says running and its owner is not known to be dead. An owner on
+  another host whose beat is stale is not known to be dead, so its invocation
+  still blocks the label, and the refusal names the owner and its host; under
+  `Reuse::Force` such an invocation does not block, as `Force` reclaims a run
+  that stopped on another host.
+- **Order.** The command's first call to the store (`begin`, `begin_with`,
+  `begin_many` or `put`) takes one store-wide lock, `.invocations/.lock`, by
+  exclusive file create. While it is held, the label is checked against running
+  invocations and the record gets the next sequence number; the lock is then
+  released. A counter per owner would avoid the lock, but it cannot say which of
+  two owners' invocations came later, and "latest" is what `@L` means. What a
+  command does when it finds the lock held is in "On disk".
 - **Movable tags** such as "best current model" are out of scope. They would be
   a separate mechanism with its own history.
 
 ### Commands
 
 The library ships a clap subcommand set that a project adds to its own. Every
-command works from the index and the records.
+command works from the index and the records. The commands that work across
+kinds (`list`, `show`, `status`, `verify`, `reindex`) read each record through
+the `Kinds` the project registered when it opened the store.
 
-| Command                       | What it answers or does                                                                      |
-| ----------------------------- | -------------------------------------------------------------------------------------------- |
-| `list <kind>`                 | What results exist, with status, names and time                                              |
-| `show <handle>`               | What produced this result: identity record, dependencies, sources, files, naming events      |
-| `status`                      | Which runs and batches are running, failed or interrupted, with owner, liveness and progress |
-| `verify [<handle>]`           | Whether each folder's id matches its `identity.json` and each file matches its digest        |
-| `clean`                       | Clears staging, quarantine and old attempts                                                  |
-| `reindex`                     | Rebuilds and compacts the index from the records                                             |
-| `migrate`                     | Upgrades this store's layout one numbered step at a time, or refuses and says why            |
-| `dev relabel <handle> <name>` | Appends a correcting naming event                                                            |
+| Command             | What it answers or does                                                                                     |
+| ------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `list <kind>`       | What results exist, with status, the labels of the invocations that asked for them, and time                |
+| `show <handle>`     | What produced this result: identity record, dependencies, sources, files, the invocations that asked for it |
+| `status`            | Which runs and batches are running, failed or interrupted, with owner, liveness and progress                |
+| `verify [<handle>]` | Whether each folder's id matches its `identity.json` and each file matches its digest                       |
+| `clean`             | Deletes dead owners' staging, everything in quarantine, and every earlier attempt                           |
+| `reindex`           | Rebuilds and compacts the index from the records and the invocation records                                 |
+
+What each does exactly is in "Behaviour and formats".
 
 ## What is enforced, and by what
 
@@ -1106,23 +2284,23 @@ The compiler and the types carry most of it. Two things they cannot carry are
 that an execution input leaves the result unchanged, and that engine code reads
 nothing behind the store's back.
 
-| Property                                                               | Enforced by                                                                                                            | What remains open                                                                                   |
-| ---------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| Every argument, settings-file key and environment variable has a class | Compiler: the derives reject an unannotated field; an unknown file key fails to parse                                  | Code that reads the environment outside the declared struct                                         |
-| Every declared input reaches a resolution step                         | Compiler: generated structs have private fields and one `into_parts` that returns them all; unused bindings are denied | A step that ignores what an input means; the identity tests cover it                                |
-| The hash covers the whole identity                                     | Compiler: one derive, every field hashed, the key computed from the record form                                        | A content type whose byte form leaves something out                                                 |
-| A content key is the digest of the stored bytes                        | Types: a content artifact's identity is its file's digest; `finish` checks each `Hashed` field against a result file   | Nothing                                                                                             |
-| What ran is what was hashed                                            | Types: the engine takes its settings and content from the run                                                          | Engine code that reads a global or opens a file directly                                            |
-| An output is a function of its identity                                | Library: the divergence check, on every recompute and every by-product rerun                                           | A dependence that no rerun has yet exposed                                                          |
-| Execution inputs do not change results                                 | Generated tests, each with a named fixture that exercises the input                                                    | Only as good as the fixture; not provable                                                           |
-| Identity inputs do change the id                                       | Generated tests, using each field's `Vary` value                                                                       | A second value that happens to be equivalent                                                        |
-| Only completed results are reused or read as results                   | Types: `Stored<A>` exists only for a completed result                                                                  | A reader that opens files by a path it built                                                        |
-| Completed records are sealed                                           | Types: nothing but the naming append takes a completed result mutably                                                  | A hand-built path                                                                                   |
-| Every write goes through the store                                     | Types: a run hands out files and never its folder                                                                      | A hand-built path under the root; a test can check that non-store commands leave the root untouched |
-| Every upstream read is declared                                        | Types: `Run::open` takes a `Dep`                                                                                       | A plain file read on a hand-built path; the three guards below                                      |
-| One id is never computed twice at once                                 | Library: a claim in both write modes                                                                                   | Filesystems without exclusive create                                                                |
-| A dead run is noticed                                                  | Library: the owner check, with start time, and the beat counter                                                        | A hung process still beats                                                                          |
-| Old records are never misread                                          | Library: versions in every record; a mismatch is refused by name                                                       | Nothing                                                                                             |
+| Property                                                               | Enforced by                                                                                                                                                                                                                          | What remains open                                                                                                                                   |
+| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Every argument, settings-file key and environment variable has a class | Compiler: the derives reject an unannotated field; an unknown file key fails to parse                                                                                                                                                | Code that reads the environment outside the declared struct                                                                                         |
+| Every declared input reaches a resolution step                         | Compiler: generated structs have private fields and one `into_parts` that returns them all; unused bindings are denied                                                                                                               | A step that ignores what an input means; the identity tests cover it                                                                                |
+| The hash covers the whole identity                                     | Compiler: one derive, every field hashed, the key computed from the record form                                                                                                                                                      | A content type whose byte form leaves something out                                                                                                 |
+| A content's digest is the SHA-256 of the stored bytes                  | Types: a content artifact's identity is its file's digest; `put` and `finish` check each digest `Identity::held_content` lists against a result file                                                                                 | Nothing                                                                                                                                             |
+| What ran is what was hashed                                            | Types: the engine takes its settings and content from the run                                                                                                                                                                        | Engine code that reads a global or opens a file directly                                                                                            |
+| An output is a function of its identity                                | Library: the divergence check in reproducing mode, whenever a by-product is produced after its upstream                                                                                                                              | A dependence that no reproducing run has yet exposed; a recompute under `Force` or an incomplete build, which quarantines first and is not compared |
+| Execution inputs do not change results                                 | Generated tests, each with a named fixture that exercises the input                                                                                                                                                                  | Only as good as the fixture; not provable                                                                                                           |
+| Identity inputs do change the id                                       | Generated tests, using each field's `Vary` value                                                                                                                                                                                     | A second value that happens to be equivalent                                                                                                        |
+| Only completed results are reused or read as results                   | Types: `Stored<A>` exists only for a completed result                                                                                                                                                                                | A reader that opens files by a path it built                                                                                                        |
+| Completed records are sealed                                           | Types: nothing takes a completed result mutably; labels live in invocation records                                                                                                                                                   | A hand-built path                                                                                                                                   |
+| Every write goes through the store                                     | Types: a run hands out files and never its folder                                                                                                                                                                                    | A hand-built path under the root; a test can check that non-store commands leave the root untouched                                                 |
+| Every upstream read is declared                                        | Types: `Run::open` takes a `Dep`                                                                                                                                                                                                     | A plain file read on a hand-built path; the two guards below                                                                                        |
+| One id is never computed twice at once                                 | Library: a claim in both write modes; a second request for an atomic id waits for the first, and one for an in-place id is refused. A content artifact is not claimed: two writers produce identical bytes and the first rename wins | Filesystems without exclusive create                                                                                                                |
+| A dead run is noticed                                                  | Library: the owner check, with start time, and the beat counter                                                                                                                                                                      | A hung process still beats                                                                                                                          |
+| Old records are never misread                                          | Library: versions in every record; a mismatch is refused by name                                                                                                                                                                     | Nothing                                                                                                                                             |
 
 ### Guarding against undeclared reads
 
@@ -1172,9 +2350,10 @@ design lands.
 One function decides, by listing every field of the compiled model and either
 hashing it or naming the reason it is left out.
 
-- **`impl ContentAddressed for Model`** (`runid/src/ir_hash.rs:1655`) takes the
-  model apart field by field, so a new field does not compile until it is hashed
-  or excluded.
+- **`impl HashFields for Model`** (`runid/src/ir_hash.rs:1654`) takes the model
+  apart field by field, so a new field does not compile until it is hashed or
+  excluded. `impl ContentAddressed for Model` (`ir_hash.rs:1634`) calls it,
+  after digesting each hoisted subtree's body.
 - **`normalize_for_hash`** (`runid/src/inputs.rs:396`) blanks two presentation
   fields first.
 - **`model_ir_hash`** and **`model_ir_hash_with_gradients`** (`inputs.rs:361`,
@@ -1190,17 +2369,21 @@ what is stored and read.
 The same exhaustive function becomes a split. It takes the compiled output apart
 and assigns every field to one part.
 
-| Part               | What it holds                                                                                                                                                                                                                                                                                                   | Who depends on it                                                             |
-| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| Model              | Everything the engine runs: compartments, transitions, equations, time functions, tables, interventions, observation models, parameters, constants, bindings, initial conditions, the output schedule, the simulation window, presets, and every derivative table, each beside the expression it differentiates | Every simulation, filter, fit problem and prediction, as `Dep<CompiledModel>` |
-| Quantities         | The `quantities` and `contrasts` blocks                                                                                                                                                                                                                                                                         | A prediction, and a `--quantities-out` by-product                             |
-| Labels             | The model's name, which is the file's stem                                                                                                                                                                                                                                                                      | Nothing; recorded with the invocation                                         |
-| Rendering defaults | `output.format` and `simulation.time_semantics`                                                                                                                                                                                                                                                                 | Nothing stored; an export reads them                                          |
-| Provenance         | The `#'` documentation, the model as its author wrote it, the source file                                                                                                                                                                                                                                       | Nothing; kept as provenance files                                             |
+| Part       | What it holds                                                                                                                                                                                                                                                                                                   | Who depends on it                                                                                         |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| Model      | Everything the engine runs: compartments, transitions, equations, time functions, tables, interventions, observation models, parameters, constants, bindings, initial conditions, the output schedule, the simulation window, presets, and every derivative table, each beside the expression it differentiates | Every simulation, filter, fit problem and prediction, as `Dep<CompiledModel>`                             |
+| Quantities | The `quantities` and `contrasts` blocks                                                                                                                                                                                                                                                                         | A prediction, and a `--quantities-out` by-product                                                         |
+| Labels     | The model's name, which is the file's stem                                                                                                                                                                                                                                                                      | Nothing; recorded with the invocation                                                                     |
+| Provenance | The `#'` documentation, the model as its author wrote it, the source file, the `description`, and the envelope's `ir_version` and `validated_by`                                                                                                                                                                | Nothing; kept as provenance files or in the record. `ir_version` is also checked when the model is loaded |
 
 - **The parts are disjoint.** Each is one or more whole top-level fields of the
-  compiled output. No field appears in two parts and none is blanked, so each
-  part's key is simply the digest of its bytes.
+  compiled output, without exception. No field appears in two parts and none is
+  blanked, so each part's key is simply the digest of its bytes.
+- **Two fields leave the IR.** `output.format` and `simulation.time_semantics`
+  are the two fields today's digest blanks (`runid/src/inputs.rs:396-401`), and
+  nothing reads either. They are deleted from the IR, with an `ir/VERSION` bump,
+  before the first command moves ("Order"). A rendering's format and date
+  options come from the command line only.
 - **The record of every compiled model holds two more digests:** of the full
   compiled output and of the source file. They answer "is this the same file"
   without being part of any key.
@@ -1216,8 +2399,8 @@ gradient table an absent key means a true zero, so a table that was lost or
 misaligned would read as a zero gradient and a fit would continue with a wrong
 answer.
 
-The model part therefore includes the derivative tables, and the IR is not
-changed. Today's digest leaves them out; the target's key covers them because
+The model part therefore includes the derivative tables, which stay where the IR
+has them. Today's digest leaves them out; the target's key covers them because
 they are in the stored bytes.
 
 - **Nothing is lost by covering them.** Derivative tables change without the
@@ -1256,7 +2439,9 @@ This is today's behaviour, kept.
 | Adding or editing a quantity or a contrast           | Trajectories, filters and fits are reused; predictions that use quantities are new                          |
 | A change to the dynamics                             | Everything that depends on the model is new                                                                 |
 | A compiler change that alters only derivative tables | Everything that depends on the model is new. It arrives with a new build, which re-keys every result anyway |
-| The `description`                                    | Nothing is recomputed. Today it re-keys the model; it becomes provenance                                    |
+
+One row changes. Editing the model's `description` re-keys the model today; in
+the target it is provenance, so nothing is recomputed.
 
 ### A model rewritten from data
 
@@ -1276,6 +2461,157 @@ Their dates and their pattern of missing values can, because a cutoff such as
 observations were made is part of the study design, and what was observed is
 not.
 
+## camdl's types
+
+The worked examples below call these camdl functions and types. They are project
+code, not library code. The value types an identity holds (`SimConfig`,
+`ResolvedParams`, `ResolvedScenario`, `ProcessSeed`, `Numerics`, `Estimate`,
+`MethodSettings` and the rest) each derive `Identity` with a tag of their own
+and are not listed.
+
+```rust
+/// camdl's error. The store's errors convert into it.
+pub enum Error {
+    Store(store::Error),
+    NoMethod,                 // fit.toml has no [method] table
+    Resolve(String),          // a resolution step refused its input, with the reason
+    Engine(String),           // the computation failed
+    Members(Vec<Error>),      // every member of a batch that did not complete, reported at the end
+}
+
+impl From<store::Error> for Error { /* Error::Store */ }
+impl std::fmt::Display for Error { /* the message; Members lists one line per failure */ }
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+/// Every kind camdl stores, registered with the store when it is opened.
+pub fn camdl_kinds() -> Kinds;    // CompiledModel, Quantities, DataTable, Sim, Obs, EventLog,
+                                  // FitProblem, FitRun, Prediction, Score, Pfilter, SavedPaths
+
+/// Everything one compile yields, assigned to exactly one part ("The model split", in the appendix).
+pub struct CompiledParts {
+    pub model: Hashed<CompiledModelContent>,
+    pub quantities: Hashed<QuantitiesContent>,
+    pub labels: ModelLabels,
+    pub provenance: Provenance,       // docs, declared model, source, description, ir_version,
+                                      // validated_by, both whole-file digests
+}
+
+/// The compile of a model file as it is.
+pub fn compile(source: Hashed<ModelSource>) -> Result<CompiledParts>;
+
+/// The compile of a model file rewritten from data: anchored times and bound tables are
+/// written in before the parts are keyed. `jacobian` asks for the state Jacobian.
+pub fn compile_from_data(
+    source: Hashed<ModelSource>,
+    simulate: Option<SimulateSpec>,
+    observations: &Observations,
+    tables: &BTreeMap<String, Hashed<Table>>,
+    jacobian: StateJacobian,
+) -> Result<CompiledParts>;
+
+pub enum StateJacobian { Omit, Include }
+
+/// Today's structural model hash must agree for both compiles.
+pub fn check_same_model(a: &Hashed<CompiledModelContent>, b: &Hashed<CompiledModelContent>) -> Result<()>;
+
+/// Every parameter after all sources: the parameter file, then each `--param`.
+pub fn resolve_params(
+    file: Option<Parsed<ParamsToml>>,
+    overrides: Vec<ParamOverride>,
+    model: &Hashed<CompiledModelContent>,
+) -> Result<ResolvedParams>;
+
+impl Numerics {
+    pub fn check(declared: NumericsDeclared) -> Result<Numerics>;
+}
+
+impl Cell {
+    /// One cell per scenario and seed, in the order asked for; each cell's `replicate`
+    /// label is its position in that order.
+    pub fn grid(scenarios: Vec<String>, seeds: Vec<u64>, model: &Hashed<CompiledModelContent>) -> Result<Vec<Cell>>;
+}
+
+/// The training data as read: one wide table, or one table per stream.
+pub struct Observations { /* ... */ }
+
+impl Observations {
+    pub fn read(file: Option<InputFile<Table>>, per_stream: IndexMap<String, InputFile<Table>>) -> Result<Observations>;
+}
+
+/// The content of each named table file.
+pub fn content_of_each(files: IndexMap<String, InputFile<Table>>) -> Result<BTreeMap<String, Hashed<Table>>>;
+
+pub fn check_holdout_files(holdout: &Option<BTreeMap<String, Hashed<Table>>>, observations: &Observations) -> Result<()>;
+
+impl ResolvedScenario {
+    pub fn new(scenario: Option<String>, enable: Vec<String>, disable: Vec<String>,
+               model: &Hashed<CompiledModelContent>) -> Result<ResolvedScenario>;
+}
+impl FitSettings {
+    pub fn merge(config: FitBackendConfigDeclared, allow_forcing_extrapolation: bool) -> Result<FitSettings>;
+}
+impl Method {
+    pub fn merge(file: MethodSpecDeclared, flags: FitMethodFlagsDeclared) -> Result<Method>;
+    pub fn needs_state_jacobian(&self) -> bool;
+}
+impl Seeds {
+    pub fn exactly_one_source(fit_seeds: Option<Vec<u64>>, seed_flag: Option<u64>) -> Result<Seeds>;
+}
+impl StartSource {
+    pub fn resolve(starts: Option<ChainStarts>, chains: Option<ChainSelection>, store: &Store) -> Result<StartSource>;
+}
+impl Estimate {
+    /// The problem's half of [estimate], and the per-parameter settings that belong to the run.
+    pub fn split(estimate: IndexMap<String, EstimateSpec>) -> Result<(Estimate, PerturbationSettings)>;
+}
+impl Partitioned {
+    pub fn new(observations: Observations, holdout_after: Option<TimeSpec>) -> Result<Partitioned>;
+}
+impl DataSources {
+    pub fn none() -> DataSources;
+}
+
+/// The fit problem as the engine reads it, through the run.
+pub struct Problem { pub model: Dep<CompiledModel>, /* training rows, tables, settings */ }
+
+impl Problem {
+    pub fn read(run: &mut Run<FitRun>, problem: &Dep<FitProblem>) -> Result<Problem>;
+}
+
+/// Write a claimed problem's result and provenance files.
+pub fn write_problem(run: &mut Run<FitProblem>, plan: &FitPlan) -> Result<()>;
+
+// The engine's side, as the examples use it.
+pub struct Stepper { /* a backend stepping one cell */ }
+impl Stepper {
+    pub fn new(model: &CompiledModelContent, identity: &SimIdentity, execution: &SimulateExecution) -> Self;
+}
+impl Iterator for Stepper { type Item = Step; /* ... */ }
+
+pub struct Step { /* the state after one output step */ }
+impl Step {
+    pub fn write_row(&self, to: &FileHandle) -> Result<()>;
+}
+
+pub fn draw_observations(obs: &mut ByProductRun<Obs>, step: &Step) -> Result<()>;
+pub fn record_events(log: &mut ByProductRun<EventLog>, step: &Step) -> Result<()>;
+
+pub struct MethodStep { pub loglik: f64, /* one iteration's draws */ }
+impl MethodStep {
+    pub fn write_row(&self, to: &FileHandle) -> Result<()>;
+}
+pub fn method_step(model: &CompiledModelContent, problem: &Problem, identity: &FitRunIdentity,
+                   execution: &FitRunExecution) -> Result<MethodStep>;
+pub fn write_summary(to: &FileHandle) -> Result<()>;
+
+#[derive(Serialize)]
+pub struct FitProgress { pub iteration: u64, pub of: u64, pub loglik: f64 }
+
+#[derive(Serialize)]
+pub enum FitEvent { ChainFinished { chain: u32 } }
+```
+
 ## Worked example: `camdl simulate`
 
 One `simulate` invocation is a batch of cells. Each cell is one atomically
@@ -1288,8 +2624,10 @@ lists every flag with its class today.
 ```rust
 #[derive(clap::Args, Inputs)]
 pub struct SimulateArgs {
-    #[input(identity)]                        pub model: InputFile<ModelSource>,
-    #[arg(long)] #[input(identity)]           pub params: Option<InputFile<ParamsToml>>,
+    #[input(identity, vary = fixtures::other_model)]
+                                              pub model: InputFile<ModelSource>,
+    #[arg(long)] #[input(identity, vary = fixtures::other_params)]
+                                              pub params: Option<InputFile<ParamsToml>>,
     #[arg(long = "param")] #[input(identity)] pub overrides: Vec<ParamOverride>,
     #[command(flatten)] #[input(group)]       pub numerics: NumericsArgs,     // backend, dt, flags
     #[arg(long)] #[input(expands)]            pub scenario: Vec<String>,
@@ -1300,6 +2638,7 @@ pub struct SimulateArgs {
     #[arg(long)] #[input(render)]             pub dates: bool,
     #[arg(long)] #[input(execution, exercised_by = fixtures::two_cell_grid)]
                                               pub parallel: usize,
+    #[arg(long)] #[input(store)]              pub force: bool,
     #[arg(long)] #[input(store)]              pub label: Option<String>,
     #[arg(long)] #[input(store)]              pub output_dir: Option<PathBuf>,
     #[arg(long)] #[input(skip)]               pub quiet: bool,
@@ -1325,9 +2664,20 @@ pub struct SimShared {
 
 pub struct Cell {
     pub scenario: ResolvedScenario,   // the scenario's effects, without its name
-    pub seed: ProcessSeed,            // derived from the user's seed, the point and the replicate
+    pub seed: ProcessSeed,            // derived from the user's seed, the point and the
+                                      // replicate number (the index within the replicates
+                                      // asked for, an internal value and not a label)
     pub window: Window,
-    pub labels: CellLabels,           // scenario name, replicate number, the user's seed; never hashed
+    pub labels: CellLabels,           // never hashed
+}
+
+/// A cell's labels: Sim's Artifact::Labels.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CellLabels {
+    pub scenario: String,
+    pub replicate: u32,               // the cell's position in the invocation, from 0: the
+                                      // rendered table's `replicate` column
+    pub seed: u64,                    // the seed the user typed
 }
 
 #[deny(unused_variables)]
@@ -1336,20 +2686,21 @@ pub fn resolve(declared: SimulateDeclared, store: &Store, info: &RunInfo)
 {
     let (model, params, overrides, numerics, scenario, seeds, obs, event_log) = declared.into_parts();
 
-    // The compiled model, stored once, by the digest of what is stored.
-    let compiled = compile(model.content()?)?.model();            // Hashed<CompiledModelContent>
-    let cells    = Cell::grid(scenario, seeds, &compiled)?;       // consumes `scenario` and `seeds`
-    let file     = params.map(InputFile::parse).transpose()?;     // the parsed file, whole
-    let params   = resolve_params(file, overrides, &compiled)?;   // takes every part of it
-    let request  = ByProductRequest::new(obs, event_log, &compiled);
-    let model    = store.put::<CompiledModel>(compiled, info)?.dep("model.ir.json")?;
+    // One compile, split into its parts; the model part is stored once, by its own digest.
+    let parts    = compile(model.content()?)?;                          // CompiledParts
+    let cells    = Cell::grid(scenario, seeds, &parts.model)?;          // consumes `scenario` and `seeds`
+    let file     = params.map(InputFile::parse).transpose()?;           // the parsed file, whole
+    let params   = resolve_params(file, overrides, &parts.model)?;      // takes every part of it
+    let request  = ByProductRequest::new(obs, event_log, &parts.model);
+    let model    = store.put::<CompiledModel>(parts.model, &parts.labels, &parts.provenance, info)?.dep(CompiledModel::FILE)?;
 
     Ok((SimShared { model, numerics: Numerics::check(numerics)?, params }, cells, request))
 }
 ```
 
 `CompiledModel` holds everything the engine runs, derivative tables included.
-Quantities and contrasts are other content; the model's name is a label.
+Quantities and contrasts are other content, which `simulate` does not use; the
+model's name is a label.
 
 ### 3. The identities
 
@@ -1357,7 +2708,7 @@ The five fields of `SimIdentity` are the five levels `simulate` hashes today. A
 cell's labels are not among them.
 
 ```rust
-#[derive(Identity)]
+#[derive(Identity, Clone)]
 #[identity(tag = "sim", version = 1)]
 pub struct SimIdentity {
     pub model: Dep<CompiledModel>,
@@ -1367,8 +2718,13 @@ pub struct SimIdentity {
     pub seed: ProcessSeed,
 }
 
+impl SimIdentity {
+    /// One cell's identity, and its labels apart from it.
+    pub fn for_cell(shared: &SimShared, cell: Cell) -> Result<(SimIdentity, CellLabels)>;
+}
+
 /// Observations drawn while the trajectory is simulated.
-#[derive(Identity)]
+#[derive(Identity, Clone)]
 #[identity(tag = "obs", version = 3)]
 pub struct ObsIdentity {
     pub sim: <SimIdentity as Identity>::Record,     // the upstream's identity, not a file of it
@@ -1376,95 +2732,233 @@ pub struct ObsIdentity {
     pub emit_every: Option<u32>,
     pub seed: ObsSeed,
 }
+
+/// The event log written while the trajectory is simulated. It has no settings of its
+/// own: today its address is derived from the leaf's run id alone (`cas_sink.rs:1266-1268`).
+#[derive(Identity, Clone)]
+#[identity(tag = "event_log", version = 1)]
+pub struct EventLogIdentity {
+    pub sim: <SimIdentity as Identity>::Record,
+}
+
+/// What `--obs` and `--event-log` ask for.
+pub struct ByProductRequest { /* the two flags and the model's observation streams */ }
+
+impl ByProductRequest {
+    pub fn new(obs: bool, event_log: bool, model: &Hashed<CompiledModelContent>) -> Self;
+    /// The by-products wanted of one cell, each with its identity; their labels are ().
+    pub fn for_cell(&self, sim: &SimIdentity) -> Wanted<Sim>;
+}
 ```
 
 There is no ensemble identity. The combined table is a rendering (section 6).
 
 ### 4. The artifacts
 
+The content artifacts, with the `Artifact` impl every content artifact has:
+
 ```rust
+/// The compiled model's name, from the file's stem: a label.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ModelLabels { pub name: String }
+
 pub struct CompiledModel;
+
+impl Artifact for CompiledModel {
+    const KIND: &'static str = "compiled_model";
+    const WRITE: WriteMode = WriteMode::Atomic;
+    type Identity = Hashed<CompiledModelContent>;
+    type Labels = ModelLabels;
+    fn name(_id: &Self::Identity, labels: &ModelLabels) -> String { labels.name.clone() }
+}
 
 impl ContentArtifact for CompiledModel {
     type Content = CompiledModelContent;
     const FILE: &'static str = "model.ir.json";
 }
 
+pub struct Quantities;
+
+impl Artifact for Quantities {
+    const KIND: &'static str = "quantities";
+    const WRITE: WriteMode = WriteMode::Atomic;
+    type Identity = Hashed<QuantitiesContent>;
+    type Labels = ModelLabels;
+    fn name(_id: &Self::Identity, labels: &ModelLabels) -> String { labels.name.clone() }
+}
+
+impl ContentArtifact for Quantities {
+    type Content = QuantitiesContent;            // the quantities and contrasts blocks
+    const FILE: &'static str = "quantities.json";
+}
+
+/// A data table stored for results that depend on it: observations a prediction
+/// conditions on, held-out tables a score uses.
+pub struct DataTable;
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct TableLabels { pub stream: String, pub path: String }   // the stream and the path as given
+
+impl Artifact for DataTable {
+    const KIND: &'static str = "data_table";
+    const WRITE: WriteMode = WriteMode::Atomic;
+    type Identity = Hashed<Table>;
+    type Labels = TableLabels;
+    fn name(_id: &Self::Identity, labels: &TableLabels) -> String { labels.stream.clone() }
+}
+
+impl ContentArtifact for DataTable {
+    type Content = Table;
+    const FILE: &'static str = "table.tsv";
+}
+```
+
+`Quantities` and `DataTable` are content artifacts and are used only through
+`Dep<Quantities>` and `Dep<DataTable>`. A `Hashed<Table>` inside an identity is
+content the artifact stores itself, such as a fit problem's bound tables; a
+`Dep<DataTable>` is a table stored once and depended on.
+
+The simulation and its by-products:
+
+```rust
 pub struct Sim;
 
 impl Artifact for Sim {
     const KIND: &'static str = "sim";
     const WRITE: WriteMode = WriteMode::Atomic;
     type Identity = SimIdentity;
+    type Labels = CellLabels;
 
     // The first writer's scenario name. A label, so it is not read back.
-    fn name(_id: &SimIdentity, labels: &Labels) -> String { labels.scenario().to_string() }
+    fn name(_id: &SimIdentity, labels: &CellLabels) -> String { labels.scenario.clone() }
 }
 
 pub struct Obs;
-
-impl ByProduct for Obs { type Of = Sim; }
 
 impl Artifact for Obs {
     const KIND: &'static str = "obs";
     const WRITE: WriteMode = WriteMode::Atomic;
     type Identity = ObsIdentity;
+    type Labels = ();
 
-    fn name(id: &ObsIdentity, _labels: &Labels) -> String { id.observation.streams().join("+") }
-    // A by-product is laid out inside its upstream's folder by the library.
+    fn name(id: &ObsIdentity, _labels: &()) -> String { id.observation.streams().join("+") }
+}
+
+impl ByProduct for Obs {
+    type Of = Sim;
+    fn upstream(id: &ObsIdentity) -> &<SimIdentity as Identity>::Record { &id.sim }
+}
+
+pub struct EventLog;
+
+impl Artifact for EventLog {
+    const KIND: &'static str = "event_log";
+    const WRITE: WriteMode = WriteMode::Atomic;
+    type Identity = EventLogIdentity;
+    type Labels = ();
+    fn name(_id: &EventLogIdentity, _labels: &()) -> String { "event_log".into() }
+}
+
+impl ByProduct for EventLog {
+    type Of = Sim;
+    fn upstream(id: &EventLogIdentity) -> &<SimIdentity as Identity>::Record { &id.sim }
+}
+
+/// The combined table across a simulate invocation's cells.
+pub struct CombinedTable;
+
+pub struct CombinedTableOptions { pub dates: bool }
+
+impl Rendering for CombinedTable {
+    type Of = Sim;
+    type Options = CombinedTableOptions;
+    fn render(
+        members: &[(Stored<Sim>, CellLabels)], options: &CombinedTableOptions, out: &mut dyn Write,
+    ) -> store::Result<()> { /* each member's traj.tsv, with its labels as columns */ }
 }
 ```
+
+The library places `Obs` and `EventLog` inside their upstream's folder.
 
 ### 5. The command and the engine
 
 ```rust
-pub fn simulate(args: SimulateArgs, ambient: Build<Engine>, reuse: Reuse) -> Result<()> {
+pub fn simulate(args: SimulateArgs, ambient: Build<Engine>, env: StoreRequest) -> Result<()> {
     let (declared, execution, exports, request, given) = args.split().into_parts();
+    let (force, label, output_dir) = request.into_parts();
+    let (output, dates)            = exports.into_parts();
 
-    let store = Store::open(request.root()?, ambient)?;
-    let info  = RunInfo::new(given, &execution, request);
+    let request = StoreRequest::new(label, force, output_dir).merge(env);   // a flag wins over the environment
+    let reuse   = request.reuse();
+    let store   = Store::open(&request.root(), ambient, camdl_kinds())?;
+    let info    = RunInfo::new(&given, &execution, &request)?;
     let (shared, cells, by_products) = resolve(declared, &store, &info)?;
 
-    let members = cells.iter()
+    let members = cells.into_iter()
         .map(|cell| {
-            let identity = SimIdentity::for_cell(&shared, cell)?;
-            let wanted   = by_products.for_cell(&identity);       // the Obs and EventLog identities
-            Ok((identity, wanted))
+            let (identity, labels) = SimIdentity::for_cell(&shared, cell)?;
+            let wanted = by_products.for_cell(&identity);           // the Obs and EventLog identities
+            Ok((identity, labels, wanted))
         })
         .collect::<Result<Vec<_>>>()?;
 
     // The label names the invocation, whose record lists the cells in order with their labels.
+    // A cell another live process is computing is waited for inside begin_many.
     let mut batch = store.begin_many::<Sim>(&members, &info, reuse)?;
 
+    // A failed cell does not stop the batch: the store records it in the invocation record,
+    // the other cells are computed, and every failure is reported at the end.
+    let mut failures = Vec::new();
     for begun in batch.members() {
         match begun {
             Begin::Reused(_)        => {}
-            Begin::Busy(owner)      => return Err(Error::InProgress(owner)),
-            Begin::Claimed(mut run) => {
-                engine::simulate(&mut run, &execution)?;          // on error the run is dropped
-                run.finish()?;                                    // commits the cell, then its by-products
-            }
+            Begin::Busy(owner)      => failures.push(store::Error::InProgress(owner).into()),  // held from another host
+            Begin::Claimed(mut run) => match engine::simulate(&mut run, &execution) {
+                Ok(())   => if let Err(err) = run.finish() { failures.push(err.into()) },  // commits the cell, then its by-products
+                Err(err) => {
+                    if let Err(e) = run.fail("simulating", &err.to_string()) { failures.push(e.into()) }
+                    failures.push(err);
+                }
+            },
         }
+    }
+    drop(batch);
+    let invocation = info.finish(&store)?;
+    if !failures.is_empty() {
+        return Err(Error::Members(failures));                    // the command exits non-zero
     }
 
     // -o: the combined table, rendered from the stored cells and the invocation's labels.
-    exports.render::<CombinedTable>(batch.invocation())?;
+    if let Some(to) = output {
+        invocation.render::<CombinedTable>(&store, &CombinedTableOptions { dates }, &to)?;
+    }
     Ok(())
 }
 
+// engine::simulate
 pub fn simulate(run: &mut Run<Sim>, execution: &SimulateExecution) -> Result<()> {
-    let identity = run.identity().clone();
-    let model    = run.load(&identity.model)?;                    // parsed once per process
-    let traj     = run.result_file("traj.tsv")?;
-    let mut obs  = run.also::<Obs>()?;                            // Some if wanted and not yet stored
+    let identity      = run.identity().clone();
+    let model         = run.load(&identity.model)?;               // parsed once per process
+    let traj          = run.result_file("traj.tsv")?;
+    let mut obs       = run.also::<Obs>()?;                       // Some if wanted and not yet stored
+    let mut event_log = run.also::<EventLog>()?;                  // likewise
 
-    for step in Engine::new(&model, &identity, execution) {
+    for step in Stepper::new(&model, &identity, execution) {     // the backend's step iterator
         step.write_row(&traj)?;
-        if let Some(obs) = &mut obs { draw_observations(obs, &step)?; }   // from the in-memory state
+        if let Some(obs) = &mut obs { draw_observations(obs, &step)?; }      // from the in-memory state
+        if let Some(log) = &mut event_log { record_events(log, &step)?; }   // the actions that fired
     }
-    Ok(())                                                        // the upstream's finish commits `obs`
+    Ok(())                                                        // the upstream's finish commits both
 }
 ```
+
+`SimulateExecution` is the generated execution struct, `{ pub parallel: usize }`
+in this sketch, and derives `Serialize`. `SimulateExports::into_parts` returns
+`(Option<ExportPath>, bool)`, the `-o` path and `--dates`;
+`SimulateRequest::into_parts` returns `(bool, Option<String>, Option<PathBuf>)`,
+`--force`, `--label` and `--output-dir`, in declaration order. A failed cell
+leaves the others computed and stored, so a rerun of the same command computes
+only the cells that failed.
 
 The engine takes the model and every setting from the run. It never sees the
 arguments or the labels, so what ran cannot differ from what was hashed.
@@ -1495,9 +2989,14 @@ results/
     fast-0b77c2e1f6a3/ ...
     fast-e2f09d14b8c5/ ...
   .invocations/
-    20261120-7f3a.json              # this run: inputs as given, the four cells in order, their labels
+    123.json                        # this run: inputs as given, the label, the four cells in order, their labels
   .owners/  .index/                 # owner beats, index logs
 ```
+
+The compiled model's folder is named by its run id, `81cc03a1f2d4...`, which is
+the hash of its kind, the ambient key and the key of its `Hashed` content; the
+content digest itself, `c4e97b20d5a6...`, is what its manifest and every
+dependency on it record.
 
 The combined table is not in the store. `-o out.tsv` and `camdl cat @baseline`
 both render it from the four cells and the invocation record, in the order the
@@ -1513,6 +3012,9 @@ replicate  scenario  seed  t  S    I   R
 ```
 
 - **`replicate` and `scenario` are labels** from the invocation record.
+  `replicate` is the cell's position in the invocation, from 0, as today's
+  `replicate` column is (`cli/src/main.rs:3615`). It is not the replicate number
+  that feeds a cell's seed, which is internal and in no table.
 - **`seed` is the seed that reproduces that row's cell** when passed back to
   `--seeds`.
 - **The table has the same columns for one cell and for many,** so a script does
@@ -1524,47 +3026,53 @@ A cell's `run.json`, with invented values:
 
 ```json
 {
+  "format": 1,
   "status": "completed",
-  "names": [],
-  "invocation": "20261120-7f3a",
-  "ambient": { "build": "1ae16a5ce28b...", "env": {} },
+  "owner": { "host": "node12", "pid": 22149, "started": "2026-11-20T09:14:03.120Z" },
+  "invocation": 123,
+  "started": "2026-11-20T09:14:05.002Z",
+  "finished": "2026-11-20T09:14:06.410Z",
   "given": {
-    "argv": ["simulate", "models/sir.camdl", "--scenario", "slow,fast", "--seeds", "1,2"],
     "model": "models/sir.camdl",
     "scenario": ["slow", "fast"],
-    "seeds": [1, 2]
+    "seeds": [1, 2],
+    "obs": true
   },
   "execution": { "parallel": 8 },
-  "files": { "traj.tsv": { "role": "result", "sha256": "7c10..." } },
+  "files": { "traj.tsv": { "role": "result", "bytes": 10234, "mtime": "1763630046.410000000", "sha256": "7c10..." } },
   "deps": [
-    { "kind": "compiled_model", "id": "81cc03a1f2d4...", "file": "model.ir.json",
-      "sha256": "81cc...", "build": "1ae16a5ce28b..." }
+    { "kind": "compiled_model", "run_id": "81cc03a1f2d4...", "file": "model.ir.json",
+      "sha256": "c4e97b20d5a6...", "build": "1ae16a5ce28b..." }
   ],
-  "owner": { "host": "...", "pid": 22149, "started": "..." }
+  "lineage": [],
+  "reads": [ { "kind": "compiled_model", "run_id": "81cc03a1f2d4...", "file": "model.ir.json" } ],
+  "failure": null
 }
 ```
 
-A cell carries no name of its own, and lists no children: a by-product is found
-through the index, by the upstream record in its identity. The record names the
-invocation that first computed the cell; later invocations that reuse it are
-found through their own records.
+The ambient identity is in the cell's `identity.json`, not here. `given` holds
+no `--label` and no `argv`: those are in invocation 123's record. A cell carries
+no label and lists no children: a by-product is found through the index, by the
+upstream record in its identity. The record names the invocation that first
+computed the cell; later invocations that reuse it, and the `--label` of each,
+are found through their own records.
 
 ### 7. What changes what
 
-| Change                                                        | Effect                                                                                                                                                     |
-| ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--parallel 16`                                               | Every cell is reused                                                                                                                                       |
-| The same command again with `--label v2`                      | Every cell is reused; the new invocation is named `v2`, and `camdl cat @v2` renders its table                                                              |
-| The model file is reformatted, or the project directory moves | Every cell is reused; the compiled content is the same                                                                                                     |
-| The same values come from a file instead of `--param`         | Every cell is reused                                                                                                                                       |
-| `--scenario fast,slow` in the other order                     | Every cell is reused; the rendered table lists `fast` first, as asked                                                                                      |
-| A scenario is renamed without changing its effects            | Every cell is reused; the table shows the new name                                                                                                         |
-| `--dt 0.5`                                                    | Every cell is new                                                                                                                                          |
-| A third scenario is added                                     | The four stored cells are reused; two are computed                                                                                                         |
-| `--obs` is added later                                        | Each cell is simulated again to draw its observations. The trajectory ids do not change, and each recomputed trajectory is checked against the stored one. |
-| `-o out.tsv` is added later, with or without `--dates`        | Nothing is computed; the table is rendered from the stored cells                                                                                           |
-| camdl is rebuilt from changed source                          | Every id is new; the old results stay and are listed                                                                                                       |
-| One cell fails                                                | Nothing is left for that cell; the invocation record counts one failure                                                                                    |
+| Change                                                        | Effect                                                                                                                                                                                                                                                                     |
+| ------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--parallel 16`                                               | Every cell is reused                                                                                                                                                                                                                                                       |
+| The same command again with `--label v2`                      | Every cell is reused; the new invocation is named `v2`, and `camdl cat @v2` renders its table                                                                                                                                                                              |
+| The model file is reformatted, or the project directory moves | Every cell is reused; the compiled content is the same                                                                                                                                                                                                                     |
+| The same values come from a file instead of `--param`         | Every cell is reused                                                                                                                                                                                                                                                       |
+| `--scenario fast,slow` in the other order                     | Every cell is reused; the rendered table lists `fast` first, as asked                                                                                                                                                                                                      |
+| A scenario is renamed without changing its effects            | Every cell is reused; the table shows the new name                                                                                                                                                                                                                         |
+| `--dt 0.5`                                                    | Every cell is new                                                                                                                                                                                                                                                          |
+| A third scenario is added                                     | The four stored cells are reused; two are computed                                                                                                                                                                                                                         |
+| `--obs` is added later                                        | Each cell is simulated again to draw its observations. The trajectory ids do not change, and each recomputed trajectory is checked against the stored one.                                                                                                                 |
+| `-o out.tsv` is added later, with or without `--dates`        | Nothing is computed; the table is rendered from the stored cells                                                                                                                                                                                                           |
+| camdl is rebuilt from changed source                          | Every id is new; the old results stay and are listed                                                                                                                                                                                                                       |
+| One cell fails                                                | Nothing is left for that cell; the other cells are computed; the invocation record counts one failure, with its reason; the command reports it and exits non-zero; `@baseline` keeps naming the last invocation whose cells all completed; a rerun computes only that cell |
 
 ## Worked example: `camdl fit run`
 
@@ -1580,7 +3088,7 @@ The file's keys below are the real ones (`FitConfigWire`,
 ### 1. Declared inputs: the file and the flags
 
 ```rust
-#[derive(Deserialize, FileInputs)]
+#[derive(Serialize, Deserialize, FileInputs)]
 #[serde(deny_unknown_fields)]
 pub struct FitToml {
     #[input(group)]    pub model: ModelRef,                        // camdl = "model.camdl"
@@ -1595,43 +3103,33 @@ pub struct FitToml {
     #[input(identity)] pub enable: Vec<String>,
     #[input(identity)] pub disable: Vec<String>,
     #[input(identity)] pub ic_free: Option<bool>,
-    #[input(group)]    pub method: Option<Method>,                 // algorithm, with its backend and settings; starts
+    #[input(group)]    pub method: Option<MethodSpec>,             // algorithm, with its backend and settings; starts
     #[input(expands)]  pub fit_seeds: Option<Vec<u64>>,
     #[input(store)]    pub output_dir: Option<String>,
     #[input(recorded)] pub provenance: Option<FitProvenance>,
 }
 
-#[derive(Deserialize, FileInputs)]
+#[derive(Serialize, Deserialize, FileInputs)]
 #[serde(deny_unknown_fields)]
 pub struct DataSpec {
-    #[input(identity)] pub file: Option<InputFile<Table>>,                       // one wide table for every stream
-    #[input(identity)] pub observations: IndexMap<String, InputFile<Table>>,     // or one table per stream
+    #[input(identity, vary = fixtures::other_wide_table)]
+                       pub file: Option<InputFile<Table>>,                       // one wide table for every stream
+    #[input(identity, vary = fixtures::other_stream_tables)]
+                       pub observations: IndexMap<String, InputFile<Table>>,     // or one table per stream
     #[input(identity)] pub holdout_after: Option<TimeSpec>,                      // the partition rule
-    #[input(identity)] pub holdout: Option<IndexMap<String, InputFile<Table>>>,  // enters a score, never a fit
-    #[input(identity)] pub tables: IndexMap<String, InputFile<Table>>,           // tables bound with external("NAME")
+    #[input(identity, vary = fixtures::other_holdout_tables)]
+                       pub holdout: Option<IndexMap<String, InputFile<Table>>>,  // enters a score, never a fit
+    #[input(identity, vary = fixtures::other_external_tables)]
+                       pub tables: IndexMap<String, InputFile<Table>>,           // tables bound with external("NAME")
 }
 
 #[derive(clap::Args, Inputs)]
 pub struct FitRunArgs {
-    #[input(identity)]                  pub config: InputFile<FitToml>,
-
-    // Change the problem.
-    #[arg(long)] #[input(identity)]     pub allow_forcing_extrapolation: bool,   // sets the [config] key
-    #[arg(long)] #[input(identity)]     pub emit_every: Option<EmitEvery>,       // changes generated synthetic data
-    #[arg(long)] #[input(expands)]      pub sweep: Vec<SweepAxis>,               // one problem per sweep point
-
-    // Change the run.
-    #[arg(long)] #[input(expands)]      pub seed: Option<u64>,                   // an error if the file has fit_seeds
-    #[arg(long)] #[input(identity)]     pub starts: Option<StartsSpec>,
-    #[arg(long)] #[input(identity)]     pub starts_chains: Option<ChainSubset>,
-    #[arg(long)] #[input(identity)]     pub resume: Option<RunRef<FitRun>>,
-    #[arg(long)] #[input(identity)]     pub max_tree_depth: Option<u32>,
-    #[arg(long)] #[input(identity)]     pub no_nuts: bool,
-    #[arg(long)] #[input(identity)]     pub n_trajectories: Option<u32>,
-    // ... and the other method flags, each a flat field: --decibans-thresh, --no-dt-check,
-    // --dt-check-strict, --dt-check-halvings, --binomial, --cooling-target-iters,
-    // --trajectory-warmup, --csmc-sweeps-per-nuts, --diagonal-mass, --no-ancestor-sampling,
-    // --no-adapt, --adapt-start, --record-ancestry, --record-prequential.
+    #[input(identity, vary = fixtures::other_fit_toml)]
+                                        pub config: InputFile<FitToml>,
+    #[command(flatten)] #[input(group)] pub problem: FitProblemFlags,
+    #[command(flatten)] #[input(group)] pub run: FitRunFlags,
+    #[command(flatten)] #[input(group)] pub method: FitMethodFlags,
 
     // Decide only whether the run may start, or how it runs.
     #[arg(long)] #[input(execution, exercised_by = fixtures::nonconverged_source)]
@@ -1641,13 +3139,63 @@ pub struct FitRunArgs {
     #[arg(long)] #[input(store)]        pub force: bool,                         // conflicts with --resume
     #[arg(long)] #[input(store)]        pub label: Option<String>,
 }
+
+/// Flags that change the problem.
+#[derive(clap::Args, Inputs)]
+pub struct FitProblemFlags {
+    #[arg(long)] #[input(identity)]     pub allow_forcing_extrapolation: bool,   // sets the [config] key
+    #[arg(long = "emit-every")] #[input(identity)]
+                                        pub emit_every: Vec<EmitEvery>,          // changes generated synthetic data
+    #[arg(long)] #[input(expands)]      pub sweep: Vec<SweepAxis>,               // one problem per sweep point
+}
+
+/// Flags that change the run, other than the method's settings.
+#[derive(clap::Args, Inputs)]
+pub struct FitRunFlags {
+    #[arg(long)] #[input(expands)]      pub seed: Option<u64>,                   // an error if the file has fit_seeds
+    #[arg(long)] #[input(identity)]     pub starts: Option<ChainStarts>,
+    #[arg(long)] #[input(identity)]     pub starts_chains: Option<ChainSelection>,
+    #[arg(long)] #[input(identity)]     pub resume: Option<RunRef<FitRun>>,
+}
+
+/// The method flags. Each overrides one key of [method].
+#[derive(clap::Args, Inputs)]
+pub struct FitMethodFlags {
+    #[arg(long)] #[input(identity)]     pub decibans_thresh: Option<f64>,
+    #[arg(long)] #[input(identity)]     pub no_dt_check: bool,
+    #[arg(long)] #[input(identity)]     pub dt_check_strict: bool,
+    #[arg(long)] #[input(identity)]     pub binomial: Option<BinomialAlgorithm>,
+    #[arg(long)] #[input(identity)]     pub dt_check_halvings: Option<usize>,
+    #[arg(long)] #[input(identity)]     pub cooling_target_iters: Option<usize>,
+    #[arg(long)] #[input(identity)]     pub max_tree_depth: Option<usize>,
+    #[arg(long)] #[input(identity)]     pub trajectory_warmup: Option<usize>,
+    #[arg(long)] #[input(identity)]     pub csmc_sweeps_per_nuts: Option<usize>,
+    #[arg(long)] #[input(identity)]     pub n_trajectories: Option<usize>,
+    #[arg(long)] #[input(identity)]     pub diagonal_mass: bool,
+    #[arg(long)] #[input(identity)]     pub no_nuts: bool,
+    #[arg(long)] #[input(identity)]     pub no_ancestor_sampling: bool,
+    #[arg(long)] #[input(identity)]     pub no_adapt: bool,
+    #[arg(long)] #[input(identity)]     pub adapt_start: Option<usize>,
+    #[arg(long)] #[input(identity)]     pub record_ancestry: bool,
+    #[arg(long)] #[input(identity)]     pub record_prequential: bool,
+}
 ```
+
+The three groups are flattened, so the command line is the one `fit run` has
+today. Today the same flags are fields of one struct
+(`cli/src/args/mod.rs:743-1000`), with `--allow-forcing-extrapolation` in a
+flattened group of its own, and each is classified in `FIT_RUN`
+(`cli/src/input_class.rs:159-230`): the seventeen method flags and `--starts`,
+`--starts-chains` and `--resume` key the method level, `--emit-every` and
+`--allow-forcing-extrapolation` key the fit level, `--sweep` expands, and
+`--seed` keys the seed level. The flag types are today's; the hidden flags that
+refuse an old spelling are left out of the sketch.
 
 - **`backend` is a key of `[method]`, and `dt` is in `[config]`.** `fit run` has
   no `--dt` and no `--output-dir`; the store root comes from the file's
   `output_dir`, then the environment, then the default.
-- **The method flags are flat fields,** not a group. Each overrides one key of
-  `[method]`.
+- **The method flags are a group,** `FitMethodFlags`, which `Method::merge`
+  takes whole with the file's `[method]` table, each flag overriding one key.
 - **`--seed` with `fit_seeds` in the file is refused**
   (`fit/run_config.rs:719-723`). Otherwise the seeds are the file's `fit_seeds`,
   else `--seed`, else 1.
@@ -1663,7 +3211,7 @@ keeps both and moves them into the types.
 ### 2. The identities
 
 ```rust
-#[derive(Identity)]
+#[derive(Identity, Clone)]
 #[identity(tag = "fit_problem", version = 1)]
 pub struct FitProblemIdentity {
     pub model: Dep<CompiledModel>,                          // the ordinary compile
@@ -1679,7 +3227,7 @@ pub struct FitProblemIdentity {
 }
 
 /// Everything about a run except how long it is. A resume must match this exactly.
-#[derive(Identity)]
+#[derive(Identity, Clone)]
 #[identity(tag = "fit_chain", version = 1)]
 pub struct ChainIdentity {
     pub problem: Dep<FitProblem>,
@@ -1691,20 +3239,22 @@ pub struct ChainIdentity {
     pub starts: StartSource,                                // the prior, a Dep on another run, or an input file
 }
 
-#[derive(Identity)]
+#[derive(Identity, Clone)]
 #[identity(tag = "fit_run", version = 1)]
 pub struct FitRunIdentity {
     pub chain: ChainIdentity,
     pub length: u64,                                        // sweeps or iterations, counted once
-    pub resumed_from: Option<Dep<FitRun>>,                  // the base run's chain files, as one dependency
+    pub resumed_from: Option<Dep<FitRun>>,                  // the base run's carried chain files,
+                                                            // made with dep_files
 }
 ```
 
 - **Held-out rows are not in the problem.** With `holdout_after` they sit in the
   training file, so the problem hashes the training rows, not the file. The
-  per-stream digest of the training rows exists today (`RowPrefix.digest`,
-  `fit/training_partition.rs:59-133`); it is recorded and not yet in any
-  identity. Held-out tables enter only a score.
+  per-stream digest of the training rows exists today: `RowPrefix`
+  (`fit/training_partition.rs:135`) carries it, computed by `row_digest`
+  (`training_partition.rs:59`). It is recorded and not yet in any identity.
+  Held-out tables enter only a score.
 - **This re-keys every fit with a holdout.** Today the fit's identity covers the
   whole training file and the held-out tables. Removing them is deliberate.
 - **Method settings that sit in `[estimate]` belong to the run.** `rw_sd`,
@@ -1743,44 +3293,83 @@ How today's fit identity maps onto this:
 | The seed level                                                                        | `ChainIdentity.seed`                                                                                                      |
 | `MethodConfig.obs_block` and `flow_indices`, always empty for a fit                   | Dropped                                                                                                                   |
 
+The two artifacts:
+
+```rust
+/// The model's name and, in a sweep, the point's values as typed.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ProblemLabels { pub model: String, pub sweep_point: Option<String> }
+
+pub struct FitProblem;
+
+impl Artifact for FitProblem {
+    const KIND: &'static str = "fit";
+    const WRITE: WriteMode = WriteMode::Atomic;
+    type Identity = FitProblemIdentity;
+    type Labels = ProblemLabels;
+    fn name(_id: &FitProblemIdentity, labels: &ProblemLabels) -> String { labels.model.clone() }
+}
+
+/// The method's name and the seed the user typed.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct RunLabels { pub method: String, pub seed: u64 }
+
+pub struct FitRun;
+
+impl Artifact for FitRun {
+    const KIND: &'static str = "fit_run";
+    const WRITE: WriteMode = WriteMode::InPlace;
+    type Identity = FitRunIdentity;
+    type Labels = RunLabels;
+    fn name(_id: &FitRunIdentity, labels: &RunLabels) -> String { labels.method.clone() }
+    fn layout(id: &FitRunIdentity) -> Layout { Layout::inside(id.chain.problem.id(), "runs") }
+}
+```
+
 ### 3. Resolution
 
 ```rust
 #[deny(unused_variables)]
 pub fn resolve(
     file: FitTomlDeclared,
-    flags: FitRunFlags,                 // every identity and expands flag, taken apart below
+    problem_flags: FitProblemFlagsDeclared,
+    run_flags: FitRunFlagsDeclared,
+    method_flags: FitMethodFlagsDeclared,     // passed whole to Method::merge
     store: &Store,
     info: &RunInfo,
 ) -> Result<FitPlan> {
     let (model, data, synthetic, estimate, fixed, simplex_groups, config, simulate,
          scenario, enable, disable, ic_free, method, fit_seeds) = file.into_parts();
-    let (allow_forcing_extrapolation, emit_every, sweep, seed_flag,
-         starts, starts_chains, resume, method_flags) = flags.into_parts();
+    let (allow_forcing_extrapolation, emit_every, sweep) = problem_flags.into_parts();
+    let (seed_flag, starts, starts_chains, resume) = run_flags.into_parts();
+    let (model_file,) = model.into_parts();
 
-    let (observations, holdout_after, holdout, tables) = data.resolve()?;   // every field of [data]
+    let DataSources { observations, holdout_after, holdout, tables } = DataSources::resolve(data)?;
     check_holdout_files(&holdout, &observations)?;           // today's check, kept
     release(holdout, "held-out tables enter a score, never a fit");
 
     // Anchored times and bound tables are written into the model before it is keyed.
-    let compiled = compile(model, simulate, &observations, &tables)?;
-    let scenario = ResolvedScenario::new(scenario, enable, disable, &compiled)?;
+    let source   = model_file.content()?;                    // Hashed<ModelSource>
+    let compiled = compile_from_data(source.clone(), simulate.clone(), &observations, &tables, StateJacobian::Omit)?;
+    let scenario = ResolvedScenario::new(scenario, enable, disable, &compiled.model)?;
     let settings = FitSettings::merge(config, allow_forcing_extrapolation)?;      // the flag wins
     let method   = Method::merge(method.ok_or(Error::NoMethod)?, method_flags)?;  // the flags win
     let seeds    = Seeds::exactly_one_source(fit_seeds, seed_flag)?;              // both given: refused
     let starts   = StartSource::resolve(starts, starts_chains, store)?;
+    let resume   = resume.map(|handle| store.resolve(&handle)).transpose()?;     // Option<Stored<FitRun>>
     let (estimate, perturbation) = Estimate::split(estimate)?;                    // rw_sd, start go to the run
 
     // Only nl-lbfgs on the ODE backend needs the compile with the state Jacobian.
-    let jacobian_model = method.needs_state_jacobian()
-        .then(|| {
-            let larger = compile_with_state_jacobian(&compiled)?;    // checked to be the same model
-            store.put::<CompiledModel>(larger.model(), info)?.dep("model.ir.json")
-        })
-        .transpose()?;
+    let jacobian_model = if method.needs_state_jacobian() {
+        let larger = compile_from_data(source, simulate, &observations, &tables, StateJacobian::Include)?;
+        check_same_model(&compiled.model, &larger.model)?;    // today's structural model hash must agree
+        Some(store.put::<CompiledModel>(larger.model, &larger.labels, &larger.provenance, info)?.dep(CompiledModel::FILE)?)
+    } else {
+        None
+    };
 
     FitPlan::new(
-        store.put::<CompiledModel>(compiled.model(), info)?.dep("model.ir.json")?,
+        store.put::<CompiledModel>(compiled.model, &compiled.labels, &compiled.provenance, info)?.dep(CompiledModel::FILE)?,
         Partitioned::new(observations, holdout_after)?,      // training rows and the rule
         tables, estimate, fixed, simplex_groups, settings, scenario,
         ic_free.unwrap_or(false),
@@ -1788,52 +3377,149 @@ pub fn resolve(
         method, perturbation, jacobian_model, seeds, starts, resume,
     )
 }
+
+/// Every key of [data], resolved; nothing when the table is absent.
+pub struct DataSources {
+    pub observations: Observations,                          // one wide table, or one table per stream
+    pub holdout_after: Option<TimeSpec>,
+    pub holdout: Option<BTreeMap<String, Hashed<Table>>>,
+    pub tables: BTreeMap<String, Hashed<Table>>,
+}
+
+impl DataSources {
+    pub fn resolve(data: Option<DataSpecDeclared>) -> Result<DataSources> {
+        let Some(data) = data else { return Ok(DataSources::none()) };
+        // All five keys of [data].
+        let (file, observations, holdout_after, holdout, tables) = data.into_parts();
+        Ok(DataSources {
+            observations: Observations::read(file, observations)?,   // the wide file or the per-stream tables
+            holdout_after,
+            holdout: holdout.map(content_of_each).transpose()?,
+            tables: content_of_each(tables)?,
+        })
+    }
+}
 ```
 
 If `fit.toml` gains a key, `file.into_parts()` returns one more value and this
-stops compiling. The same holds for a new flag.
+stops compiling. The same holds for a new flag in any of the three groups.
 
 ### 4. The command
 
 ```rust
-pub fn fit_run(args: FitRunArgs, ambient: Build<Engine>) -> Result<()> {
-    let (declared, execution, (), args_request, given) = args.split().into_parts();
-    let (config, flags) = declared.into_parts();                     // the file, and every flag
+pub fn fit_run(args: FitRunArgs, ambient: Build<Engine>, env: StoreRequest) -> Result<()> {
+    let (declared, execution, (), request, given) = args.split().into_parts();
+    let (config, problem_flags, run_flags, method_flags) = declared.into_parts();
+    let (force, label) = request.into_parts();
 
     // Every part of the file. fit.toml has no execution keys, so that part is the unit type.
-    let (file, (), file_request, source) = config.parse()?.into_parts();
+    let (file, (), file_request, file_given, source) = config.parse()?.into_parts();
+    let (output_dir,) = file_request.into_parts();
 
-    let request = StoreRequest::merge(args_request, file_request);   // label, force, output_dir
+    // The root: the file's output_dir, then the environment, then the default.
+    let request = StoreRequest::new(label, force, output_dir.map(PathBuf::from)).merge(env);
     let reuse   = request.reuse();
-    let store   = Store::open(request.root()?, ambient)?;
-    let info    = RunInfo::new(given, &execution, request);
+    let given   = given.with_file("config", file_given, &source);
+    let store   = Store::open(&request.root(), ambient, camdl_kinds())?;
+    let info    = RunInfo::new(&given, &execution, &request)?;
 
-    let plan = resolve(file, flags, &store, &info)?;
+    let plan = resolve(file, problem_flags, run_flags, method_flags, &store, &info)?;
 
-    // A batch of problems: one, or one per sweep point or synthetic dataset.
+    // A failed problem or run does not stop the others: the store records it in the
+    // invocation record, and every failure is reported at the end.
+    let mut failures: Vec<Error> = Vec::new();
+
+    // A batch of problems: one, or one per sweep point or synthetic dataset. A problem
+    // another live process is writing is waited for inside begin_many.
     let mut problems = store.begin_many::<FitProblem>(&plan.problems(), &info, Reuse::IfCompleted)?;
     for begun in problems.members() {
         let problem = match begun {
             Begin::Reused(stored)   => stored,
-            Begin::Busy(owner)      => return Err(Error::InProgress(owner)),
-            Begin::Claimed(mut run) => { write_problem(&mut run)?; run.finish()? }
+            Begin::Busy(owner)      => { failures.push(store::Error::InProgress(owner).into()); continue }
+            Begin::Claimed(mut run) => match write_problem(&mut run, &plan) {
+                Ok(()) => match run.finish() {
+                    Ok(stored) => stored,
+                    Err(err)   => { failures.push(err.into()); continue }
+                },
+                Err(err) => {
+                    if let Err(e) = run.fail("writing the problem", &err.to_string()) { failures.push(e.into()) }
+                    failures.push(err);
+                    continue
+                }
+            },
         };
 
         // A batch of runs on it: one per seed.
-        let mut runs = store.begin_many::<FitRun>(&plan.runs_on(&problem)?, &info, reuse)?;
+        let runs = match plan.runs_on(&problem) {
+            Ok(runs) => runs,
+            Err(err) => { failures.push(err); continue }
+        };
+        let mut runs = store.begin_many::<FitRun>(&runs, &info, reuse)?;
         for begun in runs.members() {
-            if let Begin::Claimed(mut run) = begun {
-                source.write(&run.provenance_file("fit.toml")?)?;    // the exact file this run used
-                match engine::fit(&mut run, &execution) {
-                    Ok(())   => { run.finish()?; }
-                    Err(err) => run.fail("fitting", &err.to_string())?,
+            match begun {
+                Begin::Reused(_)        => {}
+                Begin::Busy(owner)      => failures.push(store::Error::InProgress(owner).into()),  // a live fit
+                Begin::Claimed(mut run) => {
+                    let outcome = run.provenance_file("fit.toml")
+                        .and_then(|to| source.write(&to))              // the exact file this run used
+                        .map_err(Error::from)
+                        .and_then(|()| engine::fit(&mut run, &execution));
+                    match outcome {
+                        Ok(())   => if let Err(err) = run.finish() { failures.push(err.into()) },
+                        Err(err) => {
+                            if let Err(e) = run.fail("fitting", &err.to_string()) { failures.push(e.into()) }
+                            failures.push(err);
+                        }
+                    }
                 }
             }
         }
     }
+    drop(problems);
+    info.finish(&store)?;
+    if !failures.is_empty() {
+        return Err(Error::Members(failures));                    // the command exits non-zero
+    }
     Ok(())
 }
+
+/// What resolution produced: every problem and every run on each.
+pub struct FitPlan { /* ... */ }
+
+impl FitPlan {
+    /// Builds the problem identities (one per sweep point or synthetic dataset) and the
+    /// run identities on each, from the values resolve passes, in this order.
+    pub fn new(
+        model: Dep<CompiledModel>,
+        partitioned: Partitioned,
+        tables: BTreeMap<String, Hashed<Table>>,
+        estimate: Estimate,
+        fixed: FixedParams,
+        simplex_groups: Vec<SimplexGroup>,
+        settings: FitSettings,
+        scenario: ResolvedScenario,
+        ic_free: bool,
+        synthetic: Option<SyntheticSpecDeclared>,
+        emit_every: Vec<EmitEvery>,
+        sweep: Vec<SweepAxis>,
+        method: Method,
+        perturbation: PerturbationSettings,
+        jacobian_model: Option<Dep<CompiledModel>>,
+        seeds: Seeds,
+        starts: StartSource,
+        resume: Option<Stored<FitRun>>,
+    ) -> Result<FitPlan>;
+    pub fn problems(&self) -> Vec<(FitProblemIdentity, ProblemLabels, Wanted<FitProblem>)>;
+    pub fn runs_on(&self, problem: &Stored<FitProblem>) -> Result<Vec<(FitRunIdentity, RunLabels, Wanted<FitRun>)>>;
+}
 ```
+
+`FitRunExecution`, the execution struct the derive generates for `FitRunArgs`,
+is `{ pub allow_nonconverged_source: bool, pub parallel: usize }`. It derives
+`Serialize`. `FitRunRequest::into_parts` returns `(bool, Option<String>)`,
+`--force` and `--label`, in declaration order; the file's request part returns
+`(Option<String>,)`, its `output_dir`. A rerun of the same command computes only
+the problems and runs that are not stored.
 
 `write_problem` writes the training rows, the tables and the resolved settings
 as result files, and the model source as a required provenance file. A problem
@@ -1844,7 +3530,7 @@ Inside the engine, upstream content is loaded through the run, and progress is
 reported through it.
 
 ```rust
-pub fn fit(run: &mut Run<FitRun>, execution: &FitExecution) -> Result<()> {
+pub fn fit(run: &mut Run<FitRun>, execution: &FitRunExecution) -> Result<()> {
     let identity = run.identity().clone();
     let problem  = Problem::read(run, &identity.chain.problem)?;     // opens the problem's files through the run
     // nl-lbfgs on the ODE backend runs on the larger compile; every other method on the problem's.
@@ -1864,21 +3550,21 @@ pub fn fit(run: &mut Run<FitRun>, execution: &FitExecution) -> Result<()> {
 
 ### 5. What a watcher sees
 
-| Moment                        | Status in the record                 | In the folder                                                       | `camdl status` shows                             |
-| ----------------------------- | ------------------------------------ | ------------------------------------------------------------------- | ------------------------------------------------ |
-| Just after the claim          | Running                              | Both records, the lock, the run's `fit.toml`                        | Running, alive                                   |
-| While fitting                 | Running                              | Plus the snapshot, the event log, and traces that grow              | Iteration 12 of 50 and the latest log-likelihood |
-| The engine returns an error   | Failed, with operation and reason    | Everything stays                                                    | Failed, with the reason                          |
-| The process is killed         | Still running                        | Everything stays; the owner's beat stops                            | Interrupted                                      |
-| The same command is run again | Running                              | The earlier attempt's record and attempt files under `.attempts/1/` | Running, second attempt                          |
-| `finish`                      | Completed, with the manifest; sealed | The result files, now listed                                        | Completed                                        |
+| Moment                        | Status in the record                 | In the folder                                                                                                                                                        | `camdl status` shows                             |
+| ----------------------------- | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
+| Just after the claim          | Running                              | Both records, the lock, the run's `fit.toml`                                                                                                                         | Running, alive                                   |
+| While fitting                 | Running                              | Plus the snapshot, the event log, and traces that grow                                                                                                               | Iteration 12 of 50 and the latest log-likelihood |
+| The engine returns an error   | Failed, with operation and reason    | Everything stays                                                                                                                                                     | Failed, with the reason                          |
+| The process is killed         | Still running                        | Everything stays; the owner's beat stops                                                                                                                             | Interrupted                                      |
+| The same command is run again | Running                              | The earlier attempt's `run.json`, as `attempt.json`, and every other root-level file except `identity.json` and `.lock` under `.attempts/1/`; subdirectories cleared | Running, second attempt                          |
+| `finish`                      | Completed, with the manifest; sealed | The result files, now listed                                                                                                                                         | Completed                                        |
 
 ### 6. What lands in the store
 
 ```text
 results/
   compiled_model/
-    seir-81cc03a1f2d4/model.ir.json         # the ordinary compile
+    seir-5d27e0b9a3c1/model.ir.json         # the ordinary compile
     seir-2b90f1c47e03/model.ir.json         # with the state Jacobian; only if nl-lbfgs on ODE ran
   fit/
     seir-2696ab0a41c7/                      # FitProblem: written once
@@ -1906,8 +3592,13 @@ results/
   with the flags, resolved to a problem that is created if absent.
   `--fit @label` names a stored result.
 - **A resume** is a new `FitRun` with a longer `length`, the same `chain`, and
-  the base run's chain files in `resumed_from`. A directory with no record
-  cannot be resumed; today one can, keyed by its contents.
+  the base run in `resumed_from`: one `dep_files` dependency over the files a
+  resume carries forward, which for each chain are `resume_state.bin`,
+  `trace.tsv` and `trajectories.tsv`, as today
+  (`cli/src/fit/resumed_chain.rs:24`, `cli/src/fit/cas.rs:680-717`). The base
+  run's summary files are not in it, so recomputing a summary does not re-key a
+  resume. A directory with no record cannot be resumed; today one can, keyed by
+  its contents.
 - **A fit made by an earlier build can still be predicted from.** The
   prediction's dependency records the fit's build.
 
@@ -1921,11 +3612,13 @@ unified-prediction proposal; this section shows only how they sit on the store.
 
 Fixed-point predictions are allowed (D101). A prediction's parameters come from
 a fit's posterior or from a fixed point, so its identity holds an enum. A
-fixed-point prediction is labelled in its record and in every rendering as
-carrying no parameter uncertainty.
+fixed-point prediction is marked by being the `FixedPoint` variant of its
+identity, which its identity record shows and every rendering labels as carrying
+no parameter uncertainty. Nothing yet stops such a result being presented as a
+basis for a decision; that is a future feature.
 
 ```rust
-#[derive(Identity)]
+#[derive(Identity, Clone)]
 #[identity(tag = "prediction", version = 1)]
 pub struct PredictIdentity {
     pub source: ParameterSource,
@@ -1934,7 +3627,7 @@ pub struct PredictIdentity {
     pub options: PredictOptions,                    // mode, origins, horizon, draws, seed, scenarios
 }
 
-#[derive(Identity)]
+#[derive(Identity, Clone)]
 #[identity(tag = "parameter_source", version = 1)]
 pub enum ParameterSource {
     Posterior  { draws: Dep<FitRun>, problem: Dep<FitProblem> },
@@ -1943,6 +3636,26 @@ pub enum ParameterSource {
         params: ResolvedParams,
         trained_through: Option<TrainingCutoff>,
     },
+}
+
+/// The mode and the scenario names as typed.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct PredictionLabels { pub mode: String, pub scenarios: Vec<String> }
+
+pub struct Prediction;
+
+impl Artifact for Prediction {
+    const KIND: &'static str = "prediction";
+    const WRITE: WriteMode = WriteMode::Atomic;
+    type Identity = PredictIdentity;
+    type Labels = PredictionLabels;
+    fn name(_id: &PredictIdentity, labels: &PredictionLabels) -> String { labels.mode.clone() }
+    fn layout(id: &PredictIdentity) -> Layout {
+        match &id.source {
+            ParameterSource::Posterior { draws, .. } => Layout::inside(draws.id(), "predict"),
+            ParameterSource::FixedPoint { .. }       => Layout::flat(),
+        }
+    }
 }
 ```
 
@@ -1961,12 +3674,22 @@ Held-out outcomes enter only a score (D81). They never change a prediction's run
 id, which is why they are in neither the fit problem nor the prediction.
 
 ```rust
-#[derive(Identity)]
+#[derive(Identity, Clone)]
 #[identity(tag = "score", version = 1)]
 pub struct ScoreIdentity {
     pub prediction: Dep<Prediction>,
     pub holdout: BTreeMap<String, Dep<DataTable>>,
     pub rule: ScoringRule,
+}
+
+pub struct Score;
+
+impl Artifact for Score {
+    const KIND: &'static str = "score";
+    const WRITE: WriteMode = WriteMode::Atomic;
+    type Identity = ScoreIdentity;
+    type Labels = ();
+    fn name(id: &ScoreIdentity, _labels: &()) -> String { id.rule.name().to_string() }
 }
 ```
 
@@ -1995,6 +3718,47 @@ Every file `pfilter` can save is a by-product of the filter run, and the
 filter runs again on a cache hit just to write those files, and the stored
 result holds only the log-likelihood.
 
+```rust
+/// One particle-filter run. Written in place, as today's `pfilter` leaf is.
+pub struct Pfilter;
+
+#[derive(Identity, Clone)]
+#[identity(tag = "pfilter", version = 1)]
+pub struct PfilterIdentity { /* the model, the data, the parameters, the filter's settings, the seed */ }
+
+impl Artifact for Pfilter {
+    const KIND: &'static str = "pfilter";
+    const WRITE: WriteMode = WriteMode::InPlace;
+    type Identity = PfilterIdentity;
+    type Labels = ();
+    fn name(_id: &PfilterIdentity, _labels: &()) -> String { "pfilter".into() }
+}
+
+/// The particle paths `--save-paths` exports: one by-product of the filter run.
+/// The other saved files are by-products of the same shape.
+pub struct SavedPaths;
+
+#[derive(Identity, Clone)]
+#[identity(tag = "saved_paths", version = 1)]
+pub struct SavedPathsIdentity {
+    pub filter: <PfilterIdentity as Identity>::Record,
+    /* the save settings, such as how many paths */
+}
+
+impl Artifact for SavedPaths {
+    const KIND: &'static str = "saved_paths";
+    const WRITE: WriteMode = WriteMode::Atomic;
+    type Identity = SavedPathsIdentity;
+    type Labels = ();
+    fn name(_id: &SavedPathsIdentity, _labels: &()) -> String { "paths".into() }
+}
+
+impl ByProduct for SavedPaths {
+    type Of = Pfilter;
+    fn upstream(id: &SavedPathsIdentity) -> &<PfilterIdentity as Identity>::Record { &id.filter }
+}
+```
+
 - **All of them are stored,** the per-particle ones included (`--save-paths`,
   `--save-filtering`, `--save-prequential`). A later export is then a copy.
 - **Sizes in practice are small.** In the London measles project, 50 saved paths
@@ -2017,40 +3781,40 @@ about today come from the inventory.
 
 ### What maps to what
 
-| Today                                                                             | Target                                                                                                            |
-| --------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| A hand-assembled list of levels per kind                                          | The fields of that kind's identity struct                                                                         |
-| `Keyed(Level)`, the `levels(..)` lists, 13 per-command overrides                  | The `identity` class, and `into_parts` in `resolve`                                                               |
-| `Expands`, `Child`                                                                | `expands`, `adds`, each with the generated test camdl has today                                                   |
-| Free-form loading of files into the run                                           | Typed files and typed resolution steps                                                                            |
-| Canonical JSON with a hand-kept list of excluded keys                             | A class on every key of a settings file                                                                           |
-| Two hashing regimes, one of which omits defaults                                  | One `Identity` derive: names hashed, every field hashed, defaults resolved first                                  |
-| A model digest that hashes part of the compiled model                             | Content artifacts: the compiled model with its derivative tables, and the quantities, each keyed by its own bytes |
-| Level labels: scenario name, model file stem, `seed_N`                            | Labels in the invocation record; a folder keeps its first writer's name                                           |
-| Engine identity folded into the model level                                       | Ambient identity in every run id                                                                                  |
-| `begin_resolved_write` with `Atomic` or `Streaming`                               | `begin`, with the artifact's `Atomic` or `InPlace` mode                                                           |
-| `.lock` with process id and host; `progress.json` on a timer                      | An owner with a start time and one beat; progress and events for every kind                                       |
-| Per-invocation records under a profile folder                                     | Invocation records, for every command run                                                                         |
-| Failed leaves, `.attempts/`, `.quarantine/`, `.staging/`, `--force`               | Kept as they are                                                                                                  |
-| Reserved file names outside the manifest                                          | Attempt files                                                                                                     |
-| A label overwritten in `run.json` on a cache hit                                  | Naming events appended to the record                                                                              |
-| `index.json`, written by `dev reindex` and on a prefix miss                       | Per-owner index logs, appended on every finish                                                                    |
-| Deleting results by hand                                                          | Unchanged                                                                                                         |
-| The fit folder: a level's directory, with files every run rewrites                | The `FitProblem` artifact, written once; each run keeps its own `fit.toml`                                        |
-| Held-out tables in the fit level                                                  | In a score only                                                                                                   |
-| `predict/` under the fit folder, with no record                                   | `Prediction` results                                                                                              |
-| `obs/` and `event_log/` children, declared in the parent's record afterwards      | By-products, each with its own records; the parent's record is not touched                                        |
-| `-o`, `--save-*` and `--draws-out` recomputing on a cache hit                     | Exports: copies or renderings of stored files                                                                     |
-| `--dates` and `--format` applied while the run writes its `-o` file               | Rendering options on the export                                                                                   |
-| Synthetic data in a fit folder keyed without data                                 | The generated rows are the problem's training rows, hashed by content                                             |
-| A profile point with the grid in its identity and its seed from its grid position | A point without the grid, seeded from its own values                                                              |
-| `ensemble.tsv`, stored, with a position column and labels outside its identity    | Not stored: the same table, rendered from the cells and the invocation record                                     |
-| `store.augment`, adding a file to a completed result                              | Removed. `reactive_log.tsv`, its one remaining use, is an ordinary result file                                    |
-| `find_leaf` by level hash; the `~` collision suffix                               | Found by run id; a suffix only when 12 digits collide                                                             |
-| Filters on level labels, the seed parsed from `seed_N`, the fourth ancestor       | The identity record and the dependencies                                                                          |
-| `@label` resolved in the default root                                             | Every handle resolved in the command's one root                                                                   |
-| `STORE_LAYOUT` and `dev migrate`                                                  | Kept for new-format stores; it rewrites no completed record                                                       |
-| A `fit.toml` handle matched through a second hash appended to records             | Refused where one run is needed, with the runs that file produced listed from the invocation records              |
+| Today                                                                             | Target                                                                                                                                            |
+| --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A hand-assembled list of levels per kind                                          | The fields of that kind's identity struct                                                                                                         |
+| `Keyed(Level)`, the `levels(..)` lists, 13 per-command overrides                  | The `identity` class, and `into_parts` in `resolve`                                                                                               |
+| `Expands`, `Child`                                                                | `expands`, `adds`, each with the generated test camdl has today                                                                                   |
+| Free-form loading of files into the run                                           | Typed files and typed resolution steps                                                                                                            |
+| Canonical JSON with a hand-kept list of excluded keys                             | A class on every key of a settings file                                                                                                           |
+| Two hashing regimes, one of which omits defaults                                  | One `Identity` derive: names hashed, every field hashed, defaults resolved first                                                                  |
+| A model digest that hashes part of the compiled model                             | Content artifacts: the compiled model with its derivative tables, and the quantities, each keyed by its own bytes                                 |
+| Level labels: scenario name, model file stem, `seed_N`                            | Labels in the invocation record; a folder keeps its first writer's name                                                                           |
+| Engine identity folded into the model level                                       | Ambient identity in every run id                                                                                                                  |
+| `begin_resolved_write` with `Atomic` or `Streaming`                               | `begin`, with the artifact's `Atomic` or `InPlace` mode                                                                                           |
+| `.lock` with process id and host; `progress.json` on a timer                      | An owner with a start time and one beat; progress and events for every kind                                                                       |
+| Per-invocation records under a profile folder                                     | Invocation records, for every command run                                                                                                         |
+| Failed leaves, `.attempts/`, `.quarantine/`, `.staging/`, `--force`               | Kept, with three changes: a failed atomic result leaves no folder, a damaged result goes to quarantine, and an atomic claim is its staging folder |
+| Reserved file names outside the manifest                                          | Attempt files                                                                                                                                     |
+| A label overwritten in `run.json` on a cache hit                                  | The label in the invocation record of the command that carried it; the result's record is not touched                                             |
+| `index.json`, written by `dev reindex` and on a prefix miss                       | Per-owner index logs, appended on every finish                                                                                                    |
+| Deleting results by hand                                                          | Unchanged                                                                                                                                         |
+| The fit folder: a level's directory, with files every run rewrites                | The `FitProblem` artifact, written once; each run keeps its own `fit.toml`                                                                        |
+| Held-out tables in the fit level                                                  | In a score only                                                                                                                                   |
+| `predict/` under the fit folder, with no record                                   | `Prediction` results                                                                                                                              |
+| `obs/` and `event_log/` children, declared in the parent's record afterwards      | By-products, each with its own records; the parent's record is not touched                                                                        |
+| `-o`, `--save-*` and `--draws-out` recomputing on a cache hit                     | Exports: copies or renderings of stored files                                                                                                     |
+| `--dates` and `--format` applied while the run writes its `-o` file               | Rendering options on the export                                                                                                                   |
+| Synthetic data in a fit folder keyed without data                                 | The generated rows are the problem's training rows, hashed by content                                                                             |
+| A profile point with the grid in its identity and its seed from its grid position | A point without the grid, seeded from its own values                                                                                              |
+| `ensemble.tsv`, stored, with a position column and labels outside its identity    | Not stored: the same table, rendered from the cells and the invocation record                                                                     |
+| `store.augment`, adding a file to a completed result                              | Removed. `reactive_log.tsv`, its one remaining use, is an ordinary result file                                                                    |
+| `find_leaf` by level hash; the `~` collision suffix                               | Found by run id; a suffix only when 12 digits collide                                                                                             |
+| Filters on level labels, the seed parsed from `seed_N`, the fourth ancestor       | The identity record and the dependencies                                                                                                          |
+| `@label` resolved in the default root                                             | Every handle resolved in the command's one root                                                                                                   |
+| `STORE_LAYOUT` and `dev migrate`                                                  | The `format` number in `store.json`; a root whose format the binary does not know is refused. No migrate command                                  |
+| A `fit.toml` handle matched through a second hash appended to records             | Refused where one run is needed, with the runs that file produced listed from the invocation records                                              |
 
 ### Run ids
 
@@ -2094,7 +3858,7 @@ holds by-products under their upstream.
 | ----------------------------------------------------- | ------------------------------------- | ----------------------------------------- |
 | A simulation, a fit problem, a fixed-point prediction | The compiled model                    | `Dep` on a content artifact               |
 | A fit run started from another fit                    | The source run's start values         | `Dep` on part of a file                   |
-| A resumed fit run                                     | The base run's chain files            | `Dep`                                     |
+| A resumed fit run                                     | The base run's carried chain files    | `Dep` over those files (`dep_files`)      |
 | An `nl-lbfgs` fit run on the ODE backend              | The compile with the state Jacobian   | `Dep` on a content artifact               |
 | A prediction that reports quantities                  | The model's quantities                | `Dep` on a content artifact               |
 | `pfilter`, `profile`, `survey` given a stored fit     | The fit problem                       | `Dep`                                     |
@@ -2156,15 +3920,27 @@ not moved keeps the old code and the old root.
 1. The new `store` and `store-derive` crates, with the lifecycle carried over
    and its tests, beside `runid`. They hold no camdl types. The input derive is
    written fresh here; no earlier branch of it is merged.
-2. `camdl predict` from fixed points, born on the new store. It needs no fit
+2. `output.format` and `simulation.time_semantics` are deleted from the IR, in
+   the compiler and the runtime together, with an `ir/VERSION` bump and the
+   goldens it moves. This is a change of its own, independent of step 1; both
+   land before step 3. The compiler sets the first from the model's
+   `output { trajectories { format = ... } }` and the second to `"continuous"`
+   (`ocaml/lib/compiler/expander.ml:9551-9554`, `:9583`, `:9430`, `:9542`), and
+   writes and reads both only in its IR serialiser
+   (`ocaml/lib/ir/serde.ml:1857`, `:1864`, `:1911`, `:1943`); nothing else in
+   the compiler reads either. In the runtime only the model hash and its tests
+   touch them (`runid/src/inputs.rs:396-401`, `runid/src/ir_hash.rs:1518`). The
+   `format` key a model declares stays in the language and in the declared model
+   (`ocaml/lib/compiler/declared_emit.ml:590`).
+3. `camdl predict` from fixed points, born on the new store. It needs no fit
    artifact. `fit predict` stays on the old store, untouched.
-3. `pfilter` and `survey`. Each is one result with few readers.
-4. `simulate`, with observations and the combined table.
-5. `fit run` with the problem artifact. Posterior predictions arrive with it,
+4. `pfilter` and `survey`. Each is one result with few readers.
+5. `simulate`, with observations and the combined table.
+6. `fit run` with the problem artifact. Posterior predictions arrive with it,
    and `camdl predict @fit` replaces `fit predict`.
-6. `profile`. Its identity changes the most.
-7. Scores.
-8. `runid` and `runid-derive` are deleted when the last command has moved.
+7. `profile`. Its identity changes the most.
+8. Scores.
+9. `runid` and `runid-derive` are deleted when the last command has moved.
 
 camdl-viewer and camdl-scope are not part of this work. Once `fit run` has
 landed on main, the agent that maintains them is told what changed: the paths,
@@ -2241,7 +4017,9 @@ Settled:
 
 - dependencies hash the run id plus a digest and may cross builds;
 - the store owns the progress channel;
-- labels are minted and sealed, and a label on a batch names the invocation;
+- labels live in invocation records, which are not rewritten once the command
+  ends; a result's record never holds one, and a label on a batch names the
+  invocation;
 - names are labels and never identity;
 - the combined table and the profile table are renderings, exports are copies or
   renderings, and a table has the same columns for one cell and for many;
@@ -2255,9 +4033,15 @@ Settled:
 - every particle-filter diagnostic is stored;
 - fixed-point predictions are allowed (D101), labelled as carrying no parameter
   uncertainty;
-- a damaged completed result is moved to quarantine and computed again, never
-  deleted;
-- a run that stopped on another host is reclaimed only by hand, with force;
+- a damaged completed result is not served: the next `begin` moves it to
+  quarantine and computes again, and only `clean` deletes what quarantine holds;
+- a failed atomic result leaves no folder, and its failure and reason are kept
+  in the invocation record; a failed in-place run keeps its folder, marked
+  failed;
+- a run that stopped on another host is reported as possibly still alive there
+  and is reclaimed only by hand, with force;
+- the divergence check runs only in reproducing mode, and not under force or an
+  incomplete build;
 - a profile point with a non-finite log-likelihood is a completed result with a
   null value, as today;
 - the library is two new crates built beside `runid`.
@@ -2268,8 +4052,19 @@ Settled:
 - the first version has `verify`; it has no archive, no search by identity
   field, no `diff` and no `watch` command.
 
-- the compiled model is stored whole, derivative tables included, and the IR
-  does not change.
+- the compiled model is stored whole, derivative tables included, where the IR
+  has them;
+- `output.format` and `simulation.time_semantics` are deleted from the IR, with
+  an `ir/VERSION` bump, as a change of its own before the first command moves,
+  and a rendering's format and date options come from the command line only;
+- a batch carries on past a failed member, records it, reports every failure at
+  the end and exits non-zero, and `@L` names the latest invocation labelled `L`
+  whose results all completed;
+- a quick (`Atomic`) result that another live process is computing is waited
+  for, a long (`InPlace`) run is refused, and a content artifact is written
+  without a claim;
+- naming a stored result after the fact and upgrading a store's format in place
+  are future features.
 
 No decision is open.
 
@@ -2285,8 +4080,9 @@ room for it.
 - **Thinning stored diagnostics.** A rule that removes old per-particle files
   when they grow too large.
 - **A marker for results that are not decision-ready.** A fixed-point prediction
-  carries no parameter uncertainty. A type or a record field would let a report
-  refuse to present one as a basis for a decision.
+  carries no parameter uncertainty. In this design it is marked only by being
+  the `FixedPoint` variant of its identity, which every rendering labels. A type
+  would stop such a result being presented as a basis for a decision.
 - **Archive, restore and prune.** Removing a result in two steps, the first
   reversible, and refused while other results depend on it. The index already
   holds the dependency edges this needs.
@@ -2301,6 +4097,13 @@ room for it.
   its declared dependencies. On Linux, Landlock looks suitable.
 - **An open-file audit on CI,** running each producer under a system-call tracer
   and requiring every file it opens under the store root to be in its record.
+- **Naming a stored result after the fact.** A command that gives a label to
+  results already stored without running anything, needed for a result made by
+  an older build, which a rerun on the current build does not find. Until then
+  such a result is reached by its id or its path.
+- **Upgrading a store's format in place.** A command that rewrites a store from
+  one `format` number in `store.json` to the next. Until then a root whose
+  format the binary does not know is refused.
 - **Browsing an old store from the new binary.** Not planned; old fits are run
   again.
 
@@ -2329,71 +4132,85 @@ Stored<A>  --dep()-->  Dep<A>  -->  a field of the next result's Identity
 
 ### Declaring inputs
 
-| Trait or type  | What it is                                                                            | camdl example                                         |
-| -------------- | ------------------------------------------------------------------------------------- | ----------------------------------------------------- |
-| `Inputs`       | Derived on a clap struct. Gives every field a class and splits the struct by class    | `SimulateArgs`, `FitRunArgs`                          |
-| `FileInputs`   | The same for a settings file: every key has a class, an unknown key is a parse error  | `FitToml`, `ParamsToml`                               |
-| `EnvInputs`    | The same for environment variables                                                    | `CamdlEnv`                                            |
-| `Split<I>`     | The result of splitting: one struct per class                                         | `SimulateDeclared`, `SimulateExecution`               |
-| `I::Declared`  | The identity, `expands` and `adds` inputs. Private fields; only `into_parts` opens it | `(model, params, overrides, numerics, scenario, ...)` |
-| `I::Execution` | Inputs the engine uses that must not change a result                                  | `parallel`                                            |
-| `I::Exports`   | Paths to write to, and how to render                                                  | `-o`, `--dates`                                       |
-| `I::Request`   | Requests to the store                                                                 | `--label`, `--force`, the store root                  |
-| `Given`        | The inputs as typed, with `argv`, for the invocation record                           |                                                       |
-| `InputFile<T>` | A path whose content type is known. The only way a file is read                       | `InputFile<ModelSource>`, `InputFile<Table>`          |
-| `Parsed<T>`    | A parsed settings file, taken apart in full like arguments                            | the four parts of `fit.toml`                          |
-| `Vary`         | "Another valid value of this type", for the generated identity test                   | a second `dt`, a second model file                    |
-| `Labels`       | What a user recognises a result by; never hashed                                      | scenario name, replicate number, the seed typed       |
+| Trait or type        | What it is                                                                            | camdl example                                         |
+| -------------------- | ------------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| `Inputs`             | Derived on a clap struct. Gives every field a class and splits the struct by class    | `SimulateArgs`, `FitRunArgs`                          |
+| `FileInputs`         | The same for a settings file: every key has a class, an unknown key is a parse error  | `FitToml`, `ParamsToml`                               |
+| `EnvInputs`          | The same for environment variables                                                    | `CamdlEnv`                                            |
+| `Split<I>`           | The result of splitting: one struct per class                                         | `SimulateDeclared`, `SimulateExecution`               |
+| `I::Declared`        | The identity, `expands` and `adds` inputs. Private fields; only `into_parts` opens it | `(model, params, overrides, numerics, scenario, ...)` |
+| `I::Execution`       | Inputs the engine uses that must not change a result                                  | `parallel`                                            |
+| `I::Exports`         | Paths to write to, and how to render                                                  | `-o`, `--dates`                                       |
+| `I::Request`         | Requests to the store                                                                 | `--label`, `--force`, the store root                  |
+| `Given`              | The inputs as typed, with `argv` and the recorded fields, for the records             |                                                       |
+| `InputFile<T>`       | A path whose content type is known. The only way a file is read                       | `InputFile<ModelSource>`, `InputFile<Table>`          |
+| `Parsed<T>`          | A parsed settings file, taken apart in full like arguments                            | the five parts of `fit.toml`                          |
+| `SourceBytes`        | A settings file's raw bytes and their digest                                          | the `fit.toml` each run keeps                         |
+| `FieldInfo`, `Class` | One field's name and class, with its `vary` and `exercised_by`, for the class checks  | `SimulateArgs::FIELDS`                                |
+| `Vary`               | "Another valid value of this type", for the generated identity test                   | a second `dt`, a second model file                    |
+| `InputHarness`       | How to run one command for the class checks; `check_input_classes` drives it          | one per command                                       |
+| `release`            | Consumes a declared input a command does not use, with the reason                     | held-out tables in `fit run`                          |
 
 ### Identity and content
 
-| Trait or type        | What it is                                                                                        | camdl example                                         |
-| -------------------- | ------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
-| `Identity`           | Derived on a struct that fully determines one result's bytes. `key()` hashes every field          | `SimIdentity`, `FitProblemIdentity`, `FitRunIdentity` |
-| `Identity::Record`   | The form written to `identity.json`: the identity with each held content replaced by its key      | `SimIdentity`'s record inside `ObsIdentity`           |
-| `Key`                | A 32-byte hash                                                                                    |                                                       |
-| `Content`            | A typed value with a byte form; its key is the digest of those bytes                              | `CompiledModelContent`, `TrainingRows`, `Table`       |
-| `Hashed<T: Content>` | Content together with its key, computed once                                                      | `Hashed<TrainingRows>` in a fit problem               |
-| `Finite`             | An `f64` that is neither NaN nor infinite                                                         | `dt`, a parameter value                               |
-| `Engine`, `Build<T>` | The ambient identity: build fingerprint and identity-class environment. `Incomplete` never reuses | `Build::Known(engine)`                                |
+| Trait or type                 | What it is                                                                                                                   | camdl example                                                 |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| `ContentAddressed`            | Today's trait for a value with a key, driven by today's `CanonicalHasher`                                                    | every identity, every field type                              |
+| `Identity`                    | Derived on a struct that fully determines one result's bytes, and on every named type inside it                              | `SimIdentity`, `FitProblemIdentity`, `FitRunIdentity`         |
+| `Identity::Record`            | The form written to `identity.json`: the identity with each held content replaced by its digest; hashes as the identity does | `SimIdentity`'s record inside `ObsIdentity`                   |
+| `Key`                         | A 32-byte SHA-256 digest; today's `ContentHash`                                                                              |                                                               |
+| `Content`                     | A typed value with a byte form; its digest is the SHA-256 of those bytes                                                     | `CompiledModelContent`, `TrainingRows`, `Table`               |
+| `Hashed<T: Content>`          | Content together with its digest, computed once                                                                              | `Hashed<TrainingRows>` in a fit problem                       |
+| `Finite`                      | An `f64` that is neither NaN nor infinite                                                                                    | `dt`, a parameter value                                       |
+| `Engine`, `Build<T>`          | The ambient identity: build fingerprint and identity-class environment. `Incomplete` never reuses                            | `Build::Known(engine)`                                        |
+| `Labels` (`Artifact::Labels`) | What a user recognises one result by; an opaque value stored in the invocation record, never hashed                          | `CellLabels`: scenario name, replicate number, the seed typed |
 
 ### Kinds of stored result
 
-| Trait or type     | What it is                                                                            | camdl example                                           |
-| ----------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------- |
-| `Artifact`        | One kind of stored result: its `KIND`, write mode, identity type, folder name, layout | `Sim`, `FitProblem`, `FitRun`, `Prediction`, `Score`    |
-| `ContentArtifact` | An artifact whose identity is the digest of its one file. Stored with `Store::put`    | `CompiledModel`, `Quantities`                           |
-| `ByProduct`       | An artifact produced by the same computation as another (`type Of`)                   | `Obs` and `EventLog` of `Sim`; saved paths of `Pfilter` |
-| `WriteMode`       | `Atomic` (staged, then renamed in) or `InPlace` (visible while it runs)               | `Sim` is atomic; `FitRun` is in place                   |
-| `Id<A>`           | A typed run id: the hash of kind, ambient identity and identity key                   |                                                         |
-| `Layout`          | Where the folder sits: flat, or inside a parent                                       | a `FitRun` inside its `FitProblem`                      |
+| Trait or type     | What it is                                                                                         | camdl example                                            |
+| ----------------- | -------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| `Artifact`        | One kind of stored result: its `KIND`, write mode, identity type, labels type, folder name, layout | `Sim`, `FitProblem`, `FitRun`, `Prediction`, `Score`     |
+| `ContentArtifact` | An artifact whose identity is the digest of its one file. Stored with `Store::put`                 | `CompiledModel`, `Quantities`, `DataTable`               |
+| `Provenance`      | What a content artifact's first writer records beside its file                                     | a compiled model's docs and source                       |
+| `ByProduct`       | An artifact produced by the same computation as another (`type Of`, `upstream`)                    | `Obs` and `EventLog` of `Sim`; `SavedPaths` of `Pfilter` |
+| `Kinds`           | The artifact kinds a project registers when it opens the store                                     | `camdl_kinds()`                                          |
+| `WriteMode`       | `Atomic` (staged, then renamed in) or `InPlace` (visible while it runs)                            | `Sim` is atomic; `FitRun` is in place                    |
+| `Id<A>`           | A typed run id: the hash of kind, ambient identity and identity key                                |                                                          |
+| `Layout`          | Where the folder sits: flat, or inside a parent                                                    | a `FitRun` inside its `FitProblem`                       |
 
 ### Running and reading
 
-| Trait or type       | What it is                                                                            | camdl example                             |
-| ------------------- | ------------------------------------------------------------------------------------- | ----------------------------------------- |
-| `Store`             | The only code that reads or writes stored folders. One root per command               | `Store::open(root, ambient)`              |
-| `Begin<A>`, `Reuse` | The answer to "may I compute this": reused, busy, or claimed                          |                                           |
-| `Run<A>`            | A claimed, running result. Hands out files by role; ends with `finish` or `fail`      | the argument of `engine::simulate`        |
-| `Wanted<A>`         | The by-products asked for alongside one run                                           | observations for one cell                 |
-| `Stored<A>`         | A completed result. The only type that opens result files or makes a `Dep`            | what `store.resolve("@baseline")` returns |
-| `Entry<A>`          | A result in any status, for a command that shows unfinished runs                      | `fit summary` on a running fit            |
-| `Dep<A>`            | An identity field naming an upstream file: run id, file name, digest                  | `FitRunIdentity.chain.problem`            |
-| `RunRef<A>`         | A handle typed on the command line: a path, an id prefix, `@L`, `@L~n`                | `--resume @scout`                         |
-| `Owner`, `Liveness` | The process holding claims, and whether it is alive                                   |                                           |
-| `Batch<A>`          | Several claims opened together                                                        | the cells of one `simulate`               |
-| `Planned<A>`        | What exists for an identity, before anything is claimed                               | "3 of 4 cells already stored"             |
-| `Invocation`        | The durable record of one command run: inputs as given, ordered results, their labels | what `camdl cat @baseline` renders from   |
-| `Rendering`         | A pure function from stored files, an invocation and options to an export             | `CombinedTable`, with `--dates`           |
-| `NamingEvent`       | One `--label` appended to a result or an invocation                                   |                                           |
+| Trait or type                    | What it is                                                                                       | camdl example                                                                |
+| -------------------------------- | ------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------- |
+| `Store`                          | The only code that reads or writes stored folders. One root per command                          | `Store::open(&root, ambient, camdl_kinds())`                                 |
+| `StoreRequest`                   | The store-class inputs merged from every source: label, force, root                              | `--label`, `--force`, `output_dir`                                           |
+| `RunInfo`                        | What every result of one command records; owns the invocation record                             | built once in `simulate`, by reference                                       |
+| `Lineage`                        | An upstream recorded and not hashed                                                              | `simulate --fit`'s draws                                                     |
+| `Begin<A>`, `Reuse`              | The answer to "may I compute this": reused, busy, or claimed                                     |                                                                              |
+| `Run<A>`                         | A claimed, running result. Hands out files by role; ends with `finish` or `fail`                 | the argument of `engine::simulate`                                           |
+| `FileHandle`                     | One file of a run, opened once by name, shareable between threads                                | `chain_0/trace.tsv`                                                          |
+| `Wanted<A>`                      | The by-products asked for alongside one run                                                      | observations for one cell                                                    |
+| `ByProductRun<B>`                | A by-product's files, claimed with its upstream and committed by its `finish`                    | what `run.also::<Obs>()` gives                                               |
+| `Stored<A>`                      | A completed result. The only type that opens result files or makes a `Dep`                       | what `store.resolve(&resume)` returns for `--resume @scout`                  |
+| `Entry<A>`, `EntryState`         | A result in any status, for a command that shows unfinished runs                                 | `fit summary` on a running fit                                               |
+| `Dep<A>`                         | An identity field naming an upstream file: run id, file name, digest                             | `FitRunIdentity.chain.problem`                                               |
+| `Handle`, `RunRef<A>`            | A handle typed on the command line: a path, an id prefix, `@L`, `@L~n`; `RunRef` checks the kind | `--resume @scout`                                                            |
+| `Owner`, `Liveness`, `Timestamp` | The process holding claims, and whether it is alive                                              |                                                                              |
+| `Batch<A>`                       | Several claims opened together                                                                   | the cells of one `simulate`                                                  |
+| `Planned<A>`                     | What exists for an identity, before anything is claimed                                          | "3 of 4 cells already stored"                                                |
+| `Invocation`                     | The durable record of one command run: inputs as given, label, ordered results, their labels     | what `camdl cat @baseline` renders from, through `store.invocation(&handle)` |
+| `Rendering`                      | A pure function from stored files, an invocation's labels and options to an export               | `CombinedTable`, with `--dates`                                              |
+| `ExportPath`                     | A path the user gave for an export                                                               | `-o out.tsv`                                                                 |
+| `Error`, `RunError<E>`           | The store's errors, and `Store::run`'s                                                           | `Error::InProgress(owner)`                                                   |
 
 ### The model split, as the worked example of `Content`
 
 Today one trait impl decides what a model contributes to identity, by listing
-every field (`runid/src/ir_hash.rs:1655`):
+every field: `impl HashFields for Model` (`runid/src/ir_hash.rs:1654`), which
+`impl ContentAddressed for Model` (`ir_hash.rs:1634`) calls.
 
 ```rust
-impl ContentAddressed for Model {
+impl HashFields for Model {
     fn hash_fields(&self, h: &mut CanonicalHasher) {
         let Model {
             name: _,                      // the file's stem; a label
@@ -2414,10 +4231,10 @@ digest of some of the fields.
 /// Everything one compile yields, assigned to exactly one part.
 pub struct CompiledParts {
     pub model: Hashed<CompiledModelContent>,         // everything the engine runs, derivative tables included
-    pub quantities: Hashed<Quantities>,              // the quantities and contrasts blocks
+    pub quantities: Hashed<QuantitiesContent>,       // the quantities and contrasts blocks
     pub labels: ModelLabels,                         // name
-    pub rendering: RenderingDefaults,                // output.format, time_semantics
-    pub provenance: ModelProvenance,                 // docs, the declared model, both whole-file digests
+    pub provenance: Provenance,                      // docs, the declared model, the source, description,
+                                                     // ir_version, validated_by, both whole-file digests
 }
 
 impl CompiledParts {
@@ -2431,8 +4248,11 @@ impl CompiledParts {
 }
 ```
 
-`description` goes to provenance with the docs. Every field of `Model` not named
-above goes to the model part unchanged.
+`description` goes to provenance with the docs. `ir_version` and `validated_by`
+go to provenance too; `ir_version` is also checked when a stored model is loaded
+(`ir/src/envelope.rs:169-176`), which is what refuses a model stored by a build
+with another IR version. Every field of `Model` not named above goes to the
+model part unchanged.
 
 The `..` in the sketch stands for the full field list; the real function names
 every field, as today's does.
