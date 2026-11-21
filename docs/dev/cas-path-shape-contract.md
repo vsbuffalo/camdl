@@ -63,13 +63,16 @@ results/<kind_dir>/<seg>/<seg>/…/run.json
 | `sim_ensemble`  | `ensembles` | model · config · params · grid            |
 
 A **fit** is the `fits/<stem>-<hash8>/` segment: it has no `run.json` of its own
-— it carries a `fit.meta.json` sidecar (fit-wide provenance: label, model/data
-hashes, estimated/fixed, resolved priors) and one `fit_method` leaf per (cell ×
-seed) underneath, labelled by the method that ran (`if2-<h8>`, `pgas-<h8>`). The
-fit level hashes the problem alone, so two `fit.toml` files that share a problem
-half and differ in `[method]` share the hash; they sit in sibling segments named
-by their stems. Read the fit-level view by combining the sidecar with its
-method-leaf `run.json`s.
+— it carries a `fit.meta.json` sidecar (fit-wide provenance: model/data hashes,
+estimated/fixed, resolved priors) and one `fit_method` leaf per (cell × seed)
+underneath, labelled by the method that ran (`if2-<h8>`, `pgas-<h8>`). A fit's
+`--label` is stored on each of its runs, in the leaf `run.json`'s
+`provenance.label`; the sidecar holds none. A profile's sidecar is the
+exception: a profile has no `run.json` of its own, so its label is the sidecar's
+`label`. The fit level hashes the problem alone, so two `fit.toml` files that
+share a problem half and differ in `[method]` share the hash; they sit in
+sibling segments named by their stems. Read the fit-level view by combining the
+sidecar with its method-leaf `run.json`s.
 
 A **multi-cell `simulate`** (`--replicates` / `--seeds` / multiple `--scenario`
 / `--draws`) writes N per-cell `sim` leaves under `sims/` **plus** one
