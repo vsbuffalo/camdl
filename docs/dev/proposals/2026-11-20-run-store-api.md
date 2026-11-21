@@ -3407,7 +3407,7 @@ A posterior prediction sits inside the run whose draws it used, under
 `predict/`, and is named by its mode. A fixed-point prediction sits under
 `prediction/`, grouped by its model. A score sits inside the prediction it
 scores, under `scores/`, named by its rule. The fixed-point command line is a
-sketch: that command is born on the new store ("Order", step 3), and its flags,
+sketch: that command is born on the new store ("Order", step 7), and its flags,
 like the command that writes a score, belong to the unified-prediction proposal.
 
 ```text
@@ -4991,15 +4991,20 @@ not moved keeps the old code and the old root.
    touch them (`runid/src/inputs.rs:396-401`, `runid/src/ir_hash.rs:1518`). The
    `format` key a model declares stays in the language and in the declared model
    (`ocaml/lib/compiler/declared_emit.ml:590`).
-3. `camdl predict` from fixed points, born on the new store. It needs no fit
-   artifact. `fit predict` stays on the old store, untouched.
-4. `pfilter` and `survey`. Each is one result with few readers.
-5. `simulate`, with observations and the combined table.
-6. `fit run` with the problem artifact. Posterior predictions arrive with it,
+3. `pfilter`, with its saved files as by-products. It is the first command to
+   use the store crates, and builds the parts every later command shares.
+4. `simulate`, with observations and the combined table.
+5. `fit run` with the problem artifact. Posterior predictions arrive with it,
    and `camdl predict @fit` replaces `fit predict`.
-7. `profile`. Its identity changes the most.
-8. Scores.
-9. `runid` and `runid-derive` are deleted when the last command has moved.
+6. `profile`. Its identity changes the most.
+7. `camdl predict` from fixed points, born on the new store, then scores. A
+   fixed-point prediction needs no fit artifact. Its command surface gets a
+   short specification of its own when this step begins.
+8. `runid` and `runid-derive` are deleted when the last command has moved.
+
+Steps 4 and 5 are independent of each other, as are steps 6 and 7. The
+`camdl survey` command is removed in a separate change and is not moved to the
+new store.
 
 camdl-viewer and camdl-scope are not part of this work. Once `fit run` has
 landed on main, the agent that maintains them is told what changed: the paths,
