@@ -128,6 +128,16 @@ rather than choosing a shape to make the sampler run. See
 
 ### Optional: evaluate the model over a design of parameter values
 
+::: {.practice collapse="false" title="camdl survey has been removed"}
+
+`camdl survey`, which scored a log-likelihood at every point of a
+Latin-hypercube design and drew the landscape as an HTML pair plot, is no longer
+part of camdl. Writing the design is now `camdl design lhs`, below. Scoring a
+whole design in one run, with the landscape summaries survey printed, will come
+back later, in camdl or in a separate tool.
+
+:::
+
 A Latin-hypercube design covers the box of `[estimate]` bounds evenly with a
 fixed number of points. This command writes one, a TSV with a `point_id` column
 and one column per estimated parameter:

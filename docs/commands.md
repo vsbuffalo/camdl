@@ -143,6 +143,15 @@ model's observation block.
 
 ### Evaluate the model over a parameter design
 
+::: {.practice collapse="false" title="camdl survey has been removed"}
+
+`camdl survey`, which scored a log-likelihood at every point of a
+Latin-hypercube design, is no longer part of camdl. `camdl design lhs` writes
+the design; scoring a whole design in one run will come back later, in camdl or
+in a separate tool.
+
+:::
+
 Before a long fit, run the model across the box of `[estimate]` bounds:
 
 ```bash
