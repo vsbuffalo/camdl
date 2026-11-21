@@ -119,6 +119,11 @@ Runbook: `docs/dev/testing.md` ("Gotcha: camdlc version check"). The deeper fix
   is a scheduling convenience. State what the bump invalidates, confirm, and
   then do the better thing. When several re-keying changes are pending, propose
   landing them in one bump rather than dropping any of them. (`VERSIONING.md`.)
+- **Alpha is the time to bump.** When an IR restructure sets the code on a
+  cleaner long-run trajectory, recommend it. Do not design around the current IR
+  layout to avoid a bump, and do not offer a workaround as the recommendation
+  because the clean option changes the IR. The size of the lift is a fair
+  consideration; the bump itself is not.
 
 ## Markdown
 
