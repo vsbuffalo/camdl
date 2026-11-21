@@ -6,6 +6,80 @@ Supersedes: phase 3 of `2026-11-17-honest-input-addressed-store.md` (the input
 architecture) and its named follow-up, the fit's typed identity. Phases 1 and 2
 of that proposal stand.
 
+## Inputs, identity and the store
+
+Scientific software has two bookkeeping problems that are usually left to the
+scientist. This design solves each once, in a library, so that nobody solves it
+by hand. Three words carry it.
+
+- **An input** is anything that reaches a command: an argument, the contents of
+  a settings or data file, an environment switch.
+- **An identity** is the typed value that fully determines one result.
+- **A store** is the directory tree that holds results, together with the only
+  code that reads or writes it.
+
+![Figure 1: what a scientist gives crosses a wall where every input is classed once; past it are four typed structures, the identity, the execution settings, the exports and the store request; the store then records what went in and derives the result's folder from the identity.](../figures/run-store-inputs-and-store.svg)
+
+### Knowing what a run was given
+
+Reproducing a result needs a record of everything that went into it: the
+arguments, the contents of the settings and data files, the environment
+switches. A scientist should not have to keep that record. The software should
+write it.
+
+Some tools already write part of it. bcftools, for example, appends its version
+and command line to the header of each VCF file it writes, unless told not to
+with `--no-version`
+([bcftools manual](https://samtools.github.io/bcftools/bcftools.html), "Common
+Options", version 1.22). The VCF format holds such lines in its header as
+meta-information
+([VCFv4.3 specification](https://samtools.github.io/hts-specs/VCFv4.3.pdf),
+"Meta-information lines").
+
+What is new here is a wall between the user's input and the program. Each input
+is given a class once, in its type, and an input with no class does not compile.
+
+- **identity:** can change the result, and is hashed into the run id.
+- **expands:** decides which results a batch has, such as a list of seeds.
+- **adds:** requests a by-product, such as observations drawn from a simulation.
+- **execution:** used by the engine and must not change the result, such as a
+  number of threads.
+- **export and render:** write a copy or a rendering of stored files to a path,
+  or shape that rendering.
+- **store and recorded:** a request to the store, such as a label, or something
+  kept on record that nothing reads.
+- **group:** a nested set of inputs, each with its own class.
+- **skip:** affects only what is printed, and is recorded nowhere.
+
+Past the wall the inputs are four typed structures: the identity, the execution
+settings, the exports and the store request. Only the identity is hashed. Every
+classed input is recorded as given; `skip` is the one exception.
+
+### Keeping an output's name tied to its inputs
+
+When users name their own output files, the name drifts from the inputs they
+care about. A file called `baseline_final_v2.tsv` says nothing reliable about
+the model or the scenario that produced it.
+
+Here the store derives the folder from the identity.
+
+- **The run id** is a hash of the kind of result, the ambient identity and the
+  identity.
+- **The ambient identity** is the build of camdl and the environment switches
+  that can change results.
+- **A layout** places the folder. It groups parts of the identity into directory
+  levels, so results that share a model or a block of settings share a
+  directory. The tool's author writes one layout for each kind of result.
+
+What a user chooses sits around a result, not in it.
+
+- **A label** (`--label`, found again as `@L`) names an invocation, one run of a
+  command. It is never part of the identity.
+- **An export** writes a copy or a rendering of stored files to a path of the
+  user's choosing.
+
+A reader never parses a path. It asks the result's record.
+
 ## Summary
 
 This is the target design for camdl's run store, in two parts. Part 1 is the
@@ -31,8 +105,8 @@ The main points:
 
 - **Names are labels, never identity.** A scenario's name, a model file's name,
   a replicate number and the user's seed are recorded with the invocation. No
-  stored result file contains them and no folder name is computed from an
-  identity.
+  stored result file contains them; a folder's name may show them, and is never
+  read back.
 - **The combined table of a multi-cell `simulate` is a rendering, not a stored
   result.** `-o` and `camdl cat` render it from the stored cells and the
   invocation record, so it keeps today's shape.
@@ -116,14 +190,14 @@ recomputing.
 Two ideas carry the design: every input has a class and only identity inputs are
 hashed, and every stored folder has a status and only completed ones are reused.
 
-&#91;embedded content: input split · three classes, where each ends up\]
+![Figure 2: declared inputs are split by class; resolution turns the identity inputs into one typed identity, whose key with the kind and the ambient key gives the run id; labels and requests go to the invocation record and never reach the hash.](../figures/run-store-input-split.svg)
 
 The split separates the arguments by class. Typed resolution steps then turn the
 identity inputs into the identity, and the engine receives that identity and the
 execution values. Requests to the store, such as a label, are recorded and never
 hashed.
 
-&#91;embedded content: run statuses · four states, one reusable\]
+![Figure 3: begin either serves a completed result or claims the run id; a claimed run is running, then completed and sealed, or failed; interrupted is derived by readers when the record says running and the owner's beat has stopped.](../figures/run-store-run-statuses.svg)
 
 Running, completed and failed are written to the record. Interrupted is never
 written: a reader concludes it when the record says running and the owner is
@@ -743,12 +817,49 @@ impl Kinds {
     pub fn register<A: Artifact>(self) -> Self;   // a KIND registered twice: Error::KindRegisteredTwice at open
 }
 
-impl Store {
-    pub fn open<E: Identity>(root: &Path, ambient: Build<E>, kinds: Kinds) -> Result<Store>;
+/// What sits at the top of the store's result trees. Required, with no default.
+pub enum TopLevel {
+    /// <root>/<label>-<12 hex of the ambient key>/<kind>/...: one directory per build.
+    /// `label` is a short readable name for the build, such as a version string; it
+    /// names the directory and is never hashed.
+    ByBuild { label: String },
+    /// <root>/<kind>/...: every build's results side by side.
+    ByKind,
 }
 
-let store = Store::open(&root, Build::Known(engine), camdl_kinds())?;
+impl Store {
+    pub fn open<E: Identity>(root: &Path, ambient: Build<E>, top: TopLevel, kinds: Kinds) -> Result<Store>;
+}
+
+let store = Store::open(&root, Build::Known(engine), camdl_top_level(), camdl_kinds())?;
 ```
+
+A project chooses, when it opens the store, whether results are grouped by build
+at the top level, and states it: there is no default, for the reason
+`Primary::layout` has none. The choice is recorded in `store.json`, and opening
+an existing store with the other choice is refused with
+`Error::TopLevelDiffers`, since the two lay the same results out differently.
+Neither choice changes what is reused, because the build is in every run id
+either way. The "Layout" section of API 4 says when each suits.
+
+With `TopLevel::ByBuild`, every result placed under its kind's directory sits
+first under a directory for the build that made it:
+`<root>/<build label>-<12 hex of the ambient key>/`. The ambient key is the key
+of the ambient identity, the build fingerprint and the identity-class
+environment switches, so one build directory holds everything one build made
+under one set of switches, and removing it by hand removes exactly that. The
+library places it; a kind's layout does not name it. The build label is
+sanitised and capped as any label is ("How a run id becomes a folder").
+
+camdl groups by build. `camdl_top_level()` is `TopLevel::ByBuild` with camdl's
+readable version as the label, `VERSION_SHORT` (`cli/src/version.rs:19-22`),
+such as `0.1.0+ce78a5e`: the package version and the source label the build
+script writes (`CAMDL_SOURCE_LABEL`, `cli/build.rs:78`), which is the short
+commit, with `.dirty-` and 8 hex of the uncommitted changes when there are any,
+`nogit-` and 8 hex without git, or `unknown`
+(`cli/src/engine_fingerprint.rs:153-160`). Today has no build directory: the
+engine identity is folded into the model level's key (`ModelDigest.engine`,
+`runid/src/inputs.rs:329-337`).
 
 `Store::open` refuses a root it cannot read as a store of this format with
 `Error::NotAStore` ("On disk" under "Behaviour and formats"), and an open store
@@ -763,7 +874,10 @@ new build reuses nothing from an old one.
 
 ### Artifacts
 
-Each kind of stored result implements one trait.
+Each kind of stored result implements `Artifact`, and states where its results
+sit by one of two traits: `Primary` for every kind that is not a by-product, and
+`ByProduct` (API 2) for a by-product, which the library places inside its
+upstream.
 
 ```rust
 pub trait Artifact: 'static {
@@ -775,14 +889,15 @@ pub trait Artifact: 'static {
     /// seed typed. An opaque value the project supplies with each identity; the library
     /// stores it in the invocation record and never looks inside it.
     type Labels: Serialize + DeserializeOwned + Clone;
+}
 
-    /// A readable folder name, fixed by the first writer. It may use the identity and that
-    /// writer's labels. Nothing reads it back.
-    fn name(identity: &Self::Identity, labels: &Self::Labels) -> String;
-
-    /// Where the folder sits. Not called for a by-product, which the store places inside
-    /// its upstream (API 2, "By-products").
-    fn layout(_identity: &Self::Identity) -> Layout { Layout::flat() }
+/// A kind of result that is not a by-product.
+pub trait Primary: Artifact {
+    /// Where the folder sits and what its own folder is called: the groups of its
+    /// identity, or the parent it sits inside, and the result folder's label. Fixed by
+    /// the first writer, whose labels it may use. Required, with no default, so a kind
+    /// cannot be placed without stating where. Nothing reads it back.
+    fn layout(identity: &Self::Identity, labels: &Self::Labels) -> Placed;
 }
 
 pub enum WriteMode {
@@ -810,6 +925,18 @@ hand for the same reason as on `Id<A>`.
 
 ### Generated tests
 
+Every input is declared once with a class, and each class is a testable promise:
+an identity input changes the run id, an execution input changes nothing, an
+`adds` input leaves its upstream alone. Because the declaration is data, one
+loop can check every input of every command against its promise. A new flag is
+tested the moment it is declared, and a flag with the wrong class fails.
+
+For example, suppose `--parallel` is declared `execution` but a bug makes the
+output depend on the number of threads. The execution check runs its fixture at
+two values, compares every stored file, and fails naming the field and its
+class. Today the same protection needs a hand-written case per flag, and a flag
+added without one is caught only by a separate table test.
+
 The derives generate no test code. They emit `FIELDS`: each field's name and
 class, with its `vary` and `exercised_by` values as text for messages. They also
 generate `Inputs::varied`, `Inputs::exercised` and `FileInputs::varied`, which
@@ -817,6 +944,14 @@ is how a harness reaches a field's second value and its fixture. One library
 function checks every field of a command against its class. The project supplies
 a harness that says how to run that command in a fresh store and read back what
 it stored.
+
+The `fixtures::...` paths in this document's examples name functions the project
+writes in its own test support code. None of them is defined here, and the names
+are placeholders. A `vary` function returns another valid value of the field's
+type, such as a second model file. An `exercised_by` function returns the
+command's arguments at two values of the field, on a case where the field is
+actually used. Today's equivalents are the hand-written cases in
+`rust/crates/cli/tests/simulate_input_classes.rs` and its siblings.
 
 ```rust
 /// Another valid value of the same type.
@@ -936,19 +1071,19 @@ pub enum Begin<A: Artifact> {
 pub enum Reuse { IfCompleted, Force }
 
 impl Store {
-    pub fn begin<A: Artifact>(
+    pub fn begin<A: Primary>(
         &self, identity: &A::Identity, labels: &A::Labels, info: &RunInfo, reuse: Reuse,
     ) -> Result<Begin<A>>;
 
     /// As begin, also wanting by-products of the same computation.
-    pub fn begin_with<A: Artifact>(
+    pub fn begin_with<A: Primary>(
         &self, identity: &A::Identity, labels: &A::Labels, wanted: &Wanted<A>,
         info: &RunInfo, reuse: Reuse,
     ) -> Result<Begin<A>>;
 
     /// begin, then the match below: reuse, refuse a busy id with Error::InProgress,
     /// or run `compute` and finish, or fail with its error's text under `operation`.
-    pub fn run<A: Artifact, E: std::fmt::Display>(
+    pub fn run<A: Primary, E: std::fmt::Display>(
         &self, identity: &A::Identity, labels: &A::Labels, info: &RunInfo, reuse: Reuse,
         operation: &str, compute: impl FnOnce(&mut Run<A>) -> std::result::Result<(), E>,
     ) -> std::result::Result<Stored<A>, RunError<E>>;
@@ -1164,6 +1299,7 @@ match store.begin::<FitRun>(&identity, &labels, &info, reuse)? {
 
 ```rust
 impl Store {
+    /// Laid out by kind (TopLevel::ByKind): a temporary root no person browses.
     pub fn scratch<E: Identity>(ambient: Build<E>, kinds: Kinds) -> Result<Store>;
 }
 ```
@@ -1178,9 +1314,12 @@ afterwards.
 ```rust
 /// An artifact produced by the same computation as another.
 pub trait ByProduct: Artifact {
-    type Of: Artifact;
+    type Of: Primary;
     /// The upstream's identity record, which this by-product's identity holds.
     fn upstream(identity: &Self::Identity) -> &<<Self::Of as Artifact>::Identity as Identity>::Record;
+    /// The label of this by-product's folder, `<label>-<12 hex of its run id>/`. The
+    /// library places that folder inside the upstream's folder, under `KIND/`.
+    fn label(identity: &Self::Identity, labels: &Self::Labels) -> String;
 }
 
 /// The by-products wanted from one run of A, each with its identity and labels.
@@ -1230,9 +1369,10 @@ impl<B: ByProduct> ByProductRun<B> {
   under a subdirectory named by the by-product's `KIND`. It finds that folder
   from the by-product's identity alone: `ByProduct::upstream` gives the upstream
   record, whose key equals the upstream identity's key, and with the ambient key
-  the store holds that gives the upstream's run id. `ByProduct` therefore has no
-  layout of its own. Where the claims and files go in each case is in "Behaviour
-  and formats".
+  the store holds that gives the upstream's run id. A by-product supplies only
+  its folder's label, through `ByProduct::label`; it implements no `Primary`, so
+  it has no layout of its own to state. Where the claims and files go in each
+  case is in "Behaviour and formats".
 
 ### Exports
 
@@ -1316,6 +1456,8 @@ computed or were already stored.
 - **It is where a second request for a stored result is recorded.** The result's
   own record is sealed and is not touched.
 - **`clean` does not remove invocation records.**
+
+![Figure 5: two invocations with different labels and file names resolve to one identity and share one result folder; each invocation record names the same run id, and the names live in those records, never in the hash.](../figures/run-store-invocations.svg)
 
 ### Sealed records
 
@@ -1461,7 +1603,7 @@ pass through `begin`; `Store::put` has its own rule ("Content artifacts and
 
 | Prior state of the run id                                                                                                                              | `IfCompleted`, `Atomic`                                                                                                                                                                                                                                                                                                                                                                                                                      | `IfCompleted`, `InPlace`                                                                                                                                                         | `Force`, either mode                                                                                                                                      |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Absent                                                                                                                                                 | Create the staging folder exclusively; `Claimed`                                                                                                                                                                                                                                                                                                                                                                                             | Create the final folder and its `.lock` exclusively, and write both records with status running; `Claimed`                                                                       | As `IfCompleted`                                                                                                                                          |
+| Absent                                                                                                                                                 | Create the staging folder exclusively; `Claimed`                                                                                                                                                                                                                                                                                                                                                                                             | Create the group directories if absent, then the final folder and its `.lock` exclusively, and write both records with status running; `Claimed`                                 | As `IfCompleted`                                                                                                                                          |
 | Running, with a live owner: alive on this host, or on another host with a beat that changes                                                            | Wait until the owner ends the claim, then act on the state found: `Reused` if it completed, a claim if it failed or its owner died                                                                                                                                                                                                                                                                                                           | `Busy(owner)`, which the command reports as `Error::InProgress`                                                                                                                  | `Atomic`: wait as under `IfCompleted`, then act on the state found as `Force` does. `InPlace`: `Busy(owner)`. Force never takes a claim from a live owner |
 | Running, held by the calling process itself                                                                                                            | `Busy(owner)`                                                                                                                                                                                                                                                                                                                                                                                                                                | `Busy(owner)`                                                                                                                                                                    | `Busy(owner)`                                                                                                                                             |
 | Running, with an owner that is dead on this host                                                                                                       | Remove its staging folder, then claim; `Claimed`                                                                                                                                                                                                                                                                                                                                                                                             | Reclaim: every root-level file except `identity.json` and `.lock` moves to `.attempts/<n>/`, `run.json` as `attempt.json`, and subdirectories are cleared, then claim; `Claimed` | As `IfCompleted`                                                                                                                                          |
@@ -1505,36 +1647,39 @@ process on this host holds (`store.rs:316-347`). Four things differ.
 
 ### What is written, and where
 
-| Moment                                                                               | `Atomic`                                                                                                                                                                                              | `InPlace`                                                                                                                          |
-| ------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| The command's first call to the store (`begin`, `begin_with`, `begin_many` or `put`) | The owner's beat file; the invocation record's first version                                                                                                                                          | The same                                                                                                                           |
-| The claim                                                                            | `.staging/<run id>/`, created exclusively, holding `identity.json` and `run.json` with status running and the owner                                                                                   | The final folder; `.lock`, created exclusively; `identity.json`; `run.json` with status running                                    |
-| During the run                                                                       | Result, provenance and attempt files, in the staging folder                                                                                                                                           | The same, in the final folder                                                                                                      |
-| `finish`                                                                             | Every handle synced; the manifest built; `held_content` checked against it; `run.json` written completed; the staging folder renamed into its final folder; the by-products committed; one index line | The manifest; `run.json` written completed through a temporary file and a rename; `.lock` removed; the by-products; one index line |
-| `fail`                                                                               | The staging folder removed; the failure kept for the invocation record                                                                                                                                | `run.json` rewritten as failed, with the reason; `.lock` removed                                                                   |
-| The `Run` is dropped                                                                 | As `fail`, with no reason                                                                                                                                                                             | As `fail`, with no reason                                                                                                          |
-| The command ends                                                                     | The invocation record's last version, replacing the first; the beat file removed                                                                                                                      | The same                                                                                                                           |
+| Moment                                                                               | `Atomic`                                                                                                                                                                                                                                       | `InPlace`                                                                                                                                             |
+| ------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| The command's first call to the store (`begin`, `begin_with`, `begin_many` or `put`) | The owner's beat file; the invocation record's first version                                                                                                                                                                                   | The same                                                                                                                                              |
+| The claim                                                                            | `.staging/<run id>/`, created exclusively, holding `identity.json` and `run.json` with status running and the owner                                                                                                                            | The group directories, created if absent; the final folder; `.lock`, created exclusively, first; then `identity.json`; `run.json` with status running |
+| During the run                                                                       | Result, provenance and attempt files, in the staging folder                                                                                                                                                                                    | The same, in the final folder                                                                                                                         |
+| `finish`                                                                             | Every handle synced; the manifest built; `held_content` checked against it; `run.json` written completed; the group directories created if absent; the staging folder renamed into its final folder; the by-products committed; one index line | The manifest; `run.json` written completed through a temporary file and a rename; `.lock` removed; the by-products; one index line                    |
+| `fail`                                                                               | The staging folder removed; the failure kept for the invocation record                                                                                                                                                                         | `run.json` rewritten as failed, with the reason; `.lock` removed                                                                                      |
+| The `Run` is dropped                                                                 | As `fail`, with no reason                                                                                                                                                                                                                      | As `fail`, with no reason                                                                                                                             |
+| The command ends                                                                     | The invocation record's last version, replacing the first; the beat file removed                                                                                                                                                               | The same                                                                                                                                              |
 
 Every write is made durable in today's order: each file synced, then the record,
 then its folder, then the rename, then the destination's parent
-(`store.rs:14-18`, `:1838-1903`). The `InPlace` record is replaced through
+(`store.rs:14-18`, `:1838-1903`). Before that rename `finish` creates the chain
+of group directories the layout names, and syncs each directory it made and that
+directory's parent, so a result renamed into place never sits under a group
+directory that a crash could lose. The `InPlace` record is replaced through
 `run.json.tmp` and a rename, as today (`store.rs:979-993`, `:1004-1029`), and a
 dropped claim is marked failed with no reason, as today (`store.rs:1040-1048`).
 
 Staging lives on the same filesystem as the results, so the rename is atomic:
 
 - **A result that is not a by-product** stages in
-  `<root>/.staging/<64 hex of the run id>/`, whether its layout is flat or
-  `Layout::inside` a parent.
+  `<root>/.staging/<64 hex of the run id>/`, whether its layout starts at the
+  kind's directory or `Layout::inside` a parent, and with or without groups.
 - **A content artifact written by `put`** stages in a temporary folder of its
   own, `<root>/.staging/<64 hex of the run id>.<host>-<pid>-<start>.<n>/`, as
   today's atomic commit names one per attempt (`store.rs:493-503`).
 - **A by-product produced with an `Atomic` upstream** stages inside the
-  upstream's staging folder, at `<KIND>/<name>-<12 hex>/`, so the upstream's
+  upstream's staging folder, at `<KIND>/<label>-<12 hex>/`, so the upstream's
   rename places both.
 - **A by-product produced with an `InPlace` upstream, or produced later,**
   stages in `<upstream folder>/.staging/<64 hex of its run id>/` and is renamed
-  to `<upstream folder>/<KIND>/<name>-<12 hex>/`. A retry of an `InPlace`
+  to `<upstream folder>/<KIND>/<label>-<12 hex>/`. A retry of an `InPlace`
   upstream clears its `.staging/` with its other subdirectories, so the
   by-products of a failed attempt leave nothing behind.
 
@@ -1555,13 +1700,16 @@ A completed folder's check passes over the store's own entries (`.staging/`,
 record names with the role `attempt`, and over the subdirectories that hold
 nested results, and treats anything else not in the manifest as damage. A
 root-level subdirectory that no manifest entry lies under is a nested-results
-subdirectory when every entry in it is a folder holding an `identity.json` whose
-kind is registered and which names this result as its upstream or its
-`Layout::inside` parent; each such folder is checked as a result of its own. Any
-other unlisted subdirectory makes the folder damaged. Today's check passes over
-the subdirectories the record declares as children, and over `.attempts/`
-(`store.rs:1380-1414`); the target has no children list, since a sealed record
-cannot gain one.
+subdirectory when every file below it lies inside a result folder: one holding
+an `identity.json` whose kind is registered and whose record names this result
+as its upstream or its `Layout::inside` parent, or, while it is being claimed,
+one holding only the `.lock` an `InPlace` claim writes first. The directories
+between the subdirectory and those folders are the nested kind's group
+directories, which hold no files. Each such folder is checked as a result of its
+own. Any other unlisted subdirectory makes the folder damaged. Today's check
+passes over the subdirectories the record declares as children, and over
+`.attempts/` (`store.rs:1380-1414`); the target has no children list, since a
+sealed record cannot gain one.
 
 A result placed with `Layout::inside` moves with its parent: quarantining a
 folder moves it whole, nested results and by-products included, as today's
@@ -1571,8 +1719,10 @@ quarantine renames the whole leaf (`store.rs:818-831`).
 
 ```text
 <root>/
-  store.json                         { "format": 1 }, the store's format
-  <KIND>/<name>-<12 hex>/            a flat result
+  store.json                         { "format": 1, "top_level": "by_build" }
+  <build label>-<12 hex>/            TopLevel::ByBuild: one build's results, named by the ambient key
+    <KIND>/<group>/.../<label>-<12 hex>/  a result, under its layout's group directories
+  <KIND>/<group>/.../<label>-<12 hex>/    TopLevel::ByKind: the same, with no build directory
   .staging/                          claims of atomic results, and put's temporary folders
   .quarantine/                       results moved aside
   .invocations/
@@ -1583,10 +1733,13 @@ quarantine renames the whole leaf (`store.rs:818-831`).
   .index/<host>-<pid>-<start>.log    an owner's index log
 ```
 
-The store's format is the `format` number in `store.json`. `Store::open`
-refuses, with `Error::NotAStore`, a root that is not empty and has no
-`store.json`, a `store.json` it cannot read, and a format number this binary
-does not know. There is no other layout version.
+The store's format is the `format` number in `store.json`, and `top_level`
+(`by_build` or `by_kind`) is the project's `TopLevel` choice; a build's label is
+not recorded there, since each build brings its own. `Store::open` refuses, with
+`Error::NotAStore`, a root that is not empty and has no `store.json`, a
+`store.json` it cannot read, and a format number this binary does not know; and,
+with `Error::TopLevelDiffers`, a store whose `top_level` is not the one asked
+for. There is no other layout version.
 
 Every record carries `format`, a version number. A reader that finds another
 version refuses the record by name and says which version it found and which it
@@ -1693,7 +1846,7 @@ An index log line, appended when a result is committed and when an invocation
 ends:
 
 ```json
-{ "format": 1, "event": "completed", "kind": "sim", "run_id": "...", "folder": "sim/slow-3fa9c1d2e07b", "invocation": 123, "deps": ["..."], "lineage": [], "upstream": null }
+{ "format": 1, "event": "completed", "kind": "sim", "run_id": "...", "folder": "0.1.0_ce78a5e-4b1f07d2a9e3/sim/sir-6d02b7e914fa/chain_binomial-dt1-5e2a90c417bd/base-77c0d1e25f3a/slow-9b1e44a07c62/seed_1-3fa9c1d2e07b", "invocation": 123, "deps": ["..."], "lineage": [], "upstream": null }
 { "format": 1, "event": "invocation", "seq": 123, "label": "baseline", "results": ["..."] }
 ```
 
@@ -1723,8 +1876,10 @@ included. Attempts are numbered from 1 and the last three are kept, as today
 
 `.quarantine/` holds whole folders moved aside, under their own name, with `.1`,
 `.2` appended when that name is taken, their records unchanged, as today
-(`store.rs:818-831`). Reproducing mode's recomputed upstream files go there the
-same way when they diverge.
+(`store.rs:818-831`). A quarantined result keeps only its own folder name, not
+the group directories it sat under; its identity record says what it was.
+Reproducing mode's recomputed upstream files go there the same way when they
+diverge.
 
 ### How a run id becomes a folder
 
@@ -1732,29 +1887,84 @@ The folder name comes from the first writer's labels, so the path cannot be
 computed from the run id alone. To find the folder of a run id:
 
 1. Look in the index.
-2. Failing that, scan the kind's directory, or for a nested result its
+2. Failing that, and when the identity is in hand (as in `begin`), compute the
+   layout and walk it. Start at the kind's directory: under `TopLevel::ByBuild`,
+   inside the directory named by the ambient key the store was opened with, and
+   under `TopLevel::ByKind`, at the root; or, for a nested result, at its
    subdirectory of the parent's folder (the `subdir` given to `Layout::inside`,
-   or a by-product's `KIND`), for a name ending in
-   `-<first 12 hex of the run id>`, or in all 64 hex digits of it. The parent's
-   folder is found by this same rule, from the parent's run id, which the
-   identity gives.
-3. Confirm the full run id against the candidate's `identity.json`. A candidate
+   or a by-product's `KIND`). The parent's or upstream's folder is found from
+   its run id, which the identity gives, by step 1 or step 3. At each group,
+   follow every directory whose name ends in
+   `-<first 12 hex of the group's key>`, not one. Below the last group, take
+   every folder whose name ends in `-<first 12 hex of the run id>` or in all 64
+   hex digits of it.
+3. Failing the index when only a run id is in hand (a handle typed as an id
+   prefix, or the parent of an `inside` result found from its id alone), walk
+   the result trees under the root: every kind's directory, in every build
+   directory under `TopLevel::ByBuild`, nested results included and the store's
+   own entries passed over. Take every folder that has an `identity.json` of the
+   kind asked for whose run id starts with the prefix. Today's prefix lookup
+   does the same over a kind's leaves, filtering by the run id each record
+   holds, and then rebuilds the index (`cli/src/cas_read.rs:156-170`); the
+   target rebuilds the index the same way. The walk covers every build, because
+   an upstream may come from another build, and every kind's directory, because
+   a kind placed with `Layout::inside` sits under its parent's kind.
+4. Confirm the full run id against each candidate's `identity.json`. A candidate
    whose id differs is another result and is passed over.
 
-A new folder is `<name>-<12 hex>`. If that name is taken by another run id, the
-later folder is `<name>-<64 hex>`, the whole run id, which cannot collide. Today
-escalates the same way, from the segment to a 16-hex and then the 64-hex suffix
-(`disambiguation_candidates`, `store.rs:1462-1483`). Today's `find_leaf`
-(`store.rs:872-930`) works the same way, at each of a leaf's levels: the exact
-path first, then every directory whose name ends in that level's 8-hex hash,
-each candidate confirmed by its record.
+The walk never works out which key a group directory belongs to. Two group keys
+that share their first 12 hex digits share directories, and results of both sit
+below them; that is harmless, because the result is verified against its
+`identity.json` at the end. Today's `find_leaf` works the same way
+(`runid/src/store.rs:847-924`): it tries the exact path first (`:883-888`), then
+widens, at each level, to every directory whose name ends in that level's 8-hex
+hash (`:892-920`), and verifies a candidate only at the leaf, against its record
+(`:921-923`).
 
-`<name>` is `Artifact::name` made safe for a path as today's `path_label` does
-(`runid/src/layout.rs:62-106`): lowercased, every character outside `a-z`,
-`0-9`, `_`, `-` and `.` replaced by `_`, and a result longer than 200 bytes cut
-to a prefix and ended with `..` and the first 16 hex digits of the SHA-256 of
-the whole sanitised name. One rule is added: a leading `.` becomes `_`, so no
-result folder is hidden among the store's own entries.
+The walk itself never writes: it creates and removes no directory. Where it
+matters, a group directory is told from a result folder by depth, never by what
+the directory lacks: the walk of step 2 knows how many groups the layout has. An
+`InPlace` claim writes its `.lock` before anything else in the result folder, so
+a half-made result folder always holds a `.lock` or an `identity.json` and is
+never mistaken for anything else.
+
+A group directory is created if it is absent, and an existing one is used: a
+writer places its result in the first directory, in name order, whose name ends
+in the group's suffix, and otherwise creates
+`<label>-<12 hex of the group's
+key>`. Creation has `create_dir_all` semantics,
+so a directory another writer created a moment earlier is not an error. If the
+same group key arrives under two labels at once, two directories can result,
+both ending in the same suffix; the widened walk of step 2 finds results in
+both. A build directory is created and found the same way, by the ambient key's
+suffix. Empty group and build directories are removed only by `clean`.
+
+A new result folder is `<label>-<12 hex>`. If that name is taken by another run
+id, the later folder is `<label>-<64 hex>`, the whole run id, which cannot
+collide. Today escalates the leaf's segment from the plain segment to a `~` and
+16 hex and then a `~` and all 64 (`disambiguation_candidates`,
+`store.rs:1462-1483`).
+
+`<label>`, for a build directory, a group and a result folder alike, is the
+label made safe for a path as today's `path_label` does
+(`runid/src/layout.rs:62-106`): lowercased, and every character outside `a-z`,
+`0-9`, `_`, `-` and `.` replaced by `_`. A sanitised label longer than 64 bytes
+is cut to a 46-byte prefix and ended with `..` and the first 16 hex digits of
+the SHA-256 of the whole sanitised label, so it is 64 bytes; today's cap is 200
+(`layout.rs:34`), with the same truncation (`:94-105`). One rule is added: a
+leading `.` becomes `_`, so no folder is hidden among the store's own entries.
+
+The cap bounds every path. The longest component is a result folder whose name
+escalated, 64 + 1 + 64 = 129 bytes; a build or group directory is at most 64 +
+1 + 12 = 77 bytes, well under the 255-byte limit on one component. A
+simulation's deepest path in camdl's store, which groups by build, holds the
+build's directory, the kind's directory, four groups, the result folder, a
+by-product's `KIND` directory and folder, and a file: the build directory (78
+bytes with its separator), `sim/` (4), four groups of at most 78 bytes (312),
+the result folder (130), `obs/` (4) and the by-product's folder (130), 658 bytes
+before the file's name. That leaves 366 bytes for the store root and the file's
+name under macOS's limit on a path, 1,024 bytes with the terminating zero
+(`PATH_MAX` in `sys/syslimits.h`).
 
 ### Content artifacts and `put`
 
@@ -1845,8 +2055,11 @@ None exists today except `dev reindex`, which rebuilds `index.json`
 (`cli/src/cas_index.rs:115-130`, `cli/src/args/mod.rs:2816-2820`).
 
 - **`clean`** deletes the staging folders whose owner is dead on this host,
-  everything in `.quarantine/`, and every `.attempts/` folder. It does not touch
-  a completed result, a running claim, an invocation record or the index.
+  everything in `.quarantine/`, and every `.attempts/` folder, and removes each
+  group directory, and each build directory, that is empty and has no live
+  owner's staging below it. It does not touch a completed result, a running
+  claim, an invocation record or the index. It is the only command that removes
+  a group or build directory.
 - **`verify [<handle>]`** checks every completed result, or the one named. It
   computes the run id again from `identity.json` and compares it with the
   folder's, and computes each manifest file's SHA-256 and compares it with the
@@ -1869,6 +2082,12 @@ None exists today except `dev reindex`, which rebuilds `index.json`
   that carry the label, newest label first (`handle.rs:405-423`, `:458-466`).
 - **A handle's kind is checked.** Resolving a handle as `RunRef<A>` refuses a
   result whose record's kind is not `A::KIND`, naming both kinds.
+- **A group directory is not a handle.** It has no record, so a path to one is
+  refused with `Error::NoRecord`. What is addressable is a result, such as a fit
+  problem or a fit run, or an invocation, such as a profile or a batch of cells,
+  by its label. Today's handles to an intermediate directory map onto these: a
+  fit folder is the `FitProblem` result, and a profile's base folder is the
+  profile's invocation. "Every cell of one model" has no handle today either.
 
 ### Errors
 
@@ -1878,6 +2097,7 @@ pub enum Error {
     NotAStore { root: PathBuf, why: String },              // open: unreadable, foreign, or an unknown format
     UnknownKind { kind: String },                          // a record whose kind is not registered
     KindRegisteredTwice { kind: &'static str },            // open: one KIND registered by two artifacts
+    TopLevelDiffers { root: PathBuf, stored: String, asked: String },  // open: the other TopLevel
     Divergent { run_id: Key, file: String, stored: Key, recomputed: Key },
     Damaged { run_id: Key, what: String },
     OldRecord { path: PathBuf, found: u16, reads: u16 },
@@ -1996,7 +2216,7 @@ is the digest of its one result file.
 ```rust
 /// An artifact whose identity is its content. Hashed<T> implements Identity
 /// (record: its digest, as a Key), so this is a valid Artifact::Identity.
-pub trait ContentArtifact: Artifact<Identity = Hashed<Self::Content>> {
+pub trait ContentArtifact: Primary<Identity = Hashed<Self::Content>> {
     type Content: Content;
     const FILE: &'static str;                // such as "model.ir.json"
 }
@@ -2027,7 +2247,8 @@ impl<A: Artifact> Stored<A> {
 ```
 
 A content artifact also implements `Artifact`, with `WRITE = WriteMode::Atomic`
-and `Identity = Hashed<Self::Content>`; camdl's are in Part 2.
+and `Identity = Hashed<Self::Content>`, and `Primary`, which places it; camdl's
+are in Part 2.
 
 - **Key equals stored bytes by construction.** The identity is the digest of the
   file the artifact holds, and `put` checks that the `FILE` it wrote has that
@@ -2075,12 +2296,12 @@ pub enum PlanState { Absent, Running(Owner), Completed, Damaged, Failed, Interru
 
 impl Store {
     /// Read-only: what exists for each identity. Nothing is claimed.
-    pub fn plan<A: Artifact>(&self, identities: &[A::Identity]) -> Result<Vec<Planned<A>>>;
+    pub fn plan<A: Primary>(&self, members: &[(A::Identity, A::Labels)]) -> Result<Vec<Planned<A>>>;
 
     /// Open a batch and claim its members in one pass, each with its labels and the
     /// by-products wanted of it. An Atomic id a live owner holds is waited for, as begin
     /// waits; an InPlace one comes back as Busy.
-    pub fn begin_many<A: Artifact>(
+    pub fn begin_many<A: Primary>(
         &self, members: &[(A::Identity, A::Labels, Wanted<A>)], info: &RunInfo, reuse: Reuse,
     ) -> Result<Batch<A>>;
 }
@@ -2135,28 +2356,98 @@ a path.
 ### Layout
 
 ```rust
-pub struct Layout { /* flat, or inside a parent result */ }
+/// Where a result's folder will sit: a base (the kind's directory, or a subdirectory of
+/// a parent result) and the groups below it, in order.
+pub struct Layout { /* the base and a list of (label, key) */ }
+
+/// A whole placement: the layout and the result folder's own label. Only Layout::result
+/// makes one, so a layout that does not name its result folder does not compile.
+pub struct Placed { /* the Layout and the label */ }
 
 impl Layout {
-    /// <root>/<kind>/<name>-<12 hex of run id>/
-    pub fn flat() -> Self;
+    /// Under the kind's directory: <root>/<kind>/, or with TopLevel::ByBuild
+    /// <root>/<build label>-<12 hex of the ambient key>/<kind>/. The library adds
+    /// the build directory; the kind does not name it.
+    pub fn in_kind() -> Self;
 
-    /// Places the result at <parent's folder>/<subdir>/<name>-<12 hex of run id>/.
+    /// Under a subdirectory of a parent result: <parent's folder>/<subdir>/, in
+    /// whichever build's directory the parent sits.
     pub fn inside<P: Artifact>(parent: &Id<P>, subdir: &'static str) -> Self;
+
+    /// One directory level: <label>-<12 hex of the part's key>/. `part` is a part of
+    /// the identity, so results that share that part share the directory. Groups nest
+    /// in the order they are added.
+    pub fn group<T: ContentAddressed + ?Sized>(self, label: &str, part: &T) -> Self;
+
+    /// The result folder itself: <label>-<12 hex of the run id>/. Ends the layout.
+    pub fn result(self, label: &str) -> Placed;
 }
 ```
 
-- **The folder name is fixed by the first writer.** It is `Artifact::name` plus
-  the first 12 hex digits of the run id. The name may use that writer's labels,
-  such as a scenario's name, so a later request for the same result under
-  another name finds the folder already named. The user's `--label` is not in
-  it.
+A layout says how a kind's results are grouped on disk. Each group is a part of
+the identity that many results share, and it becomes a directory level, so a
+large batch is spread over a tree the way today's levels spread it and no
+directory holds every result of a kind. `group` takes the part itself, not a key
+the caller computed, so a layout cannot group by something that is not in the
+identity.
+
+```rust
+// camdl's simulation cells, written out in full (Part 2 writes the first three
+// groups through one shared helper): the model, the settings, the parameters, the scenario.
+fn layout(id: &SimIdentity, labels: &CellLabels) -> Placed {
+    Layout::in_kind()                                     // <build>/sim/
+        .group(&labels.model, &id.model)                  //   sir-6d02b7e914fa/
+        .group(&id.config.label(), &id.config)            //     chain_binomial-dt1-5e2a90c417bd/
+        .group(&labels.params, &id.params)                //       base-77c0d1e25f3a/
+        .group(&labels.scenario, &id.scenario)            //         slow-9b1e44a07c62/
+        .result(&format!("seed_{}", labels.seed))         //           seed_1-3fa9c1d2e07b/  (the result)
+}
+```
+
+- **A group directory is a view.** It holds no files of its own, has no record,
+  and nothing reads meaning from its name. A reader gets a result's model,
+  settings or seed from the identity record.
+- **A group's name is fixed by its first writer,** like a result folder's. A
+  later result with the same group key and another label goes into the directory
+  that exists; it is found by the `-<12 hex>` suffix. The first writer's label
+  exists only as the directory's name and is recorded nowhere else. That is
+  deliberate: nothing reads it.
+- **A group directory is never matched back to a key.** Two group keys that
+  share 12 hex digits share the directory, and the run id, checked against
+  `identity.json`, tells their results apart ("How a run id becomes a folder").
+- **Every field of the identity is still in the run id.** Grouping chooses where
+  the folder sits and never what the result is. A field left out of every group
+  only means results that differ in it are siblings.
+- **Groups and `inside` combine.** A result laid out inside a parent can be
+  grouped below the parent's subdirectory.
+- **The top level is the project's choice.** Under `TopLevel::ByBuild` every
+  `Layout::in_kind` result sits under its build's directory. That suits a tool
+  whose results are recomputed after an upgrade and removed by hand, because
+  everything one build made is one directory. `TopLevel::ByKind` suits a tool
+  whose users keep results across upgrades and browse them by subject first. The
+  build is in every run id either way, so neither choice changes what is reused.
+  camdl groups by build.
+- **A nested result follows its parent's build.** Under `TopLevel::ByBuild`, a
+  result placed `inside` a parent, and a by-product, follow the parent's folder,
+  whichever build made the parent: a prediction made by a new build from an old
+  build's fit sits inside the old build's run folder. Removing the old build's
+  directory removes that prediction too, which is consistent, since it depends
+  on that fit. The store-wide entries (`store.json`, `.invocations/`,
+  `.owners/`, `.index/`, `.staging/`, `.quarantine/`) stay at the root, under no
+  build.
+- **The result's folder name is fixed by the first writer.** It is the label
+  given to `Layout::result` plus the first 12 hex digits of the run id. The
+  label may use that writer's labels, such as a scenario's name, so a later
+  request for the same result under another name finds the folder already named.
+  A seed shown in it is the seed the user typed, from the labels, never a
+  formatting of a seed the identity derived. The user's `--label` is not in it.
 - **A folder is found by id and then verified.** The full run id in
   `identity.json` decides, never the path ("How a run id becomes a folder").
-- **Two run ids can share their first 12 digits.** The later folder then gets a
-  longer suffix. A test covers it.
+- **Two run ids can share their first 12 digits.** The later result folder then
+  gets the whole run id as its suffix. A test covers it.
 - **A by-product is placed by the library,** inside its upstream's folder (API
-  2, "By-products"); its `Artifact::layout` is not called.
+  2, "By-products"). It implements `ByProduct::label` and no `Primary`, so it
+  states no layout.
 - **A nested result is still its own artifact,** with its own records and
   manifest. Removing a parent removes what is nested in it.
 - **Readers never parse a path.** The seed, the kind and the settings come back
@@ -2267,14 +2558,14 @@ command works from the index and the records. The commands that work across
 kinds (`list`, `show`, `status`, `verify`, `reindex`) read each record through
 the `Kinds` the project registered when it opened the store.
 
-| Command             | What it answers or does                                                                                     |
-| ------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `list <kind>`       | What results exist, with status, the labels of the invocations that asked for them, and time                |
-| `show <handle>`     | What produced this result: identity record, dependencies, sources, files, the invocations that asked for it |
-| `status`            | Which runs and batches are running, failed or interrupted, with owner, liveness and progress                |
-| `verify [<handle>]` | Whether each folder's id matches its `identity.json` and each file matches its digest                       |
-| `clean`             | Deletes dead owners' staging, everything in quarantine, and every earlier attempt                           |
-| `reindex`           | Rebuilds and compacts the index from the records and the invocation records                                 |
+| Command             | What it answers or does                                                                                          |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `list <kind>`       | What results exist, with status, the labels of the invocations that asked for them, and time                     |
+| `show <handle>`     | What produced this result: identity record, dependencies, sources, files, the invocations that asked for it      |
+| `status`            | Which runs and batches are running, failed or interrupted, with owner, liveness and progress                     |
+| `verify [<handle>]` | Whether each folder's id matches its `identity.json` and each file matches its digest                            |
+| `clean`             | Deletes dead owners' staging, everything in quarantine, every earlier attempt, empty group and build directories |
+| `reindex`           | Rebuilds and compacts the index from the records and the invocation records                                      |
 
 What each does exactly is in "Behaviour and formats".
 
@@ -2344,6 +2635,8 @@ A model file is compiled to one output, and different results depend on
 different parts of it. This section is the definition. It belongs in the
 run-identity engineering document (`docs/engineering/run-identity.md`) when the
 design lands.
+
+![Figure 4: a model file compiles to separate contents, each keyed by its own bytes; a simulation depends on the compiled model and not on the quantities or the names, so editing a docstring or adding a quantity recomputes nothing.](../figures/run-store-content-and-dependencies.svg)
 
 ### Today
 
@@ -2486,7 +2779,33 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// Every kind camdl stores, registered with the store when it is opened.
 pub fn camdl_kinds() -> Kinds;    // CompiledModel, Quantities, DataTable, Sim, Obs, EventLog,
-                                  // FitProblem, FitRun, Prediction, Score, Pfilter, SavedPaths
+                                  // FitProblem, FitRun, Prediction, Score, Pfilter, SavedPaths,
+                                  // Survey, ProfilePoint
+
+/// camdl's readable version, `0.1.0+ce78a5e` (`cli/src/version.rs:19-22`).
+pub const VERSION_SHORT: &str;
+
+/// camdl groups its results by build: TopLevel::ByBuild with VERSION_SHORT as the label.
+pub fn camdl_top_level() -> TopLevel;
+
+/// camdl's shared grouping, under the kind's directory: the model, then the settings,
+/// then the parameters for a kind that has them. Each kind's layout starts from it.
+pub fn camdl_groups<S: ContentAddressed>(
+    model_label: &str, model: &Dep<CompiledModel>,
+    settings_label: &str, settings: &S,
+    params: Option<(&str, &ResolvedParams)>,
+) -> Layout {
+    let layout = Layout::in_kind().group(model_label, model).group(settings_label, settings);
+    match params {
+        Some((label, params)) => layout.group(label, params),
+        None => layout,
+    }
+}
+
+impl SimConfig {
+    /// The settings group's label, `<backend>-dt<dt>`, as today's (`cli/src/resolve.rs:156-160`).
+    pub fn label(&self) -> String;
+}
 
 /// Everything one compile yields, assigned to exactly one part ("The model split", in the appendix).
 pub struct CompiledParts {
@@ -2524,6 +2843,11 @@ pub fn resolve_params(
 
 impl Numerics {
     pub fn check(declared: NumericsDeclared) -> Result<Numerics>;
+}
+
+impl CellLabels {
+    /// `seed_<seed typed>`, with `-r<n>` for every replicate of that seed after the first.
+    pub fn seed_label(&self) -> String;
 }
 
 impl Cell {
@@ -2612,6 +2936,375 @@ pub struct FitProgress { pub iteration: u64, pub of: u64, pub loglik: f64 }
 pub enum FitEvent { ChainFinished { chain: u32 } }
 ```
 
+## Layouts, kind by kind
+
+Every way camdl stores results today can be written with `Layout::in_kind`,
+`Layout::inside`, `group` and the result label. This section shows each case:
+the command, the layout, and the tree it makes. The names are invented but
+consistent with one another, and every tree starts in camdl's build directory,
+`results/0.1.0_ce78a5e-4b1f07d2a9e3/`, written `<build>/`: camdl
+`0.1.0+ce78a5e`, sanitised, and 12 hex digits of the ambient key.
+
+| Kind              | Today's levels                                                                                                                                                                                                                                              | The proposal's groups, then the result label                                            | What differs                                                                                                                                           |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `Sim`             | `sims/`: model (the file's stem), config (`<backend>-dt<dt>`), params (`base`, or the point's `name=value` pairs), scenario (its name, or `(none)`), seed (`seed_<process seed>`) (`cli/src/resolve.rs:156-160`, `:168-172`; `cas_sink.rs:307-319`, `:354`) | model, settings, parameters, scenario; `seed_<seed typed>`                              | The seed level becomes the result folder, and its label is the seed typed, not the seed the cell derived                                               |
+| `Obs`, `EventLog` | `<leaf>/obs/<8 hex>-<obs seed>/` and `<leaf>/event_log/event_log.tsv`, children declared in the leaf's record (`cas_sink.rs:1103-1109`, `:1343-1357`)                                                                                                       | inside the cell, under `obs/` or `event_log/`; the streams' names, or `event_log`       | Each is a result folder with its own records; the cell's record is not touched                                                                         |
+| `Pfilter`         | `pfilters/`: model, config (`pf-N<particles>-r<replicates>-dt<dt>`), params (always labelled `params`), seed (`seed_<seed>`) (`pfilter_cas.rs:165-171`)                                                                                                     | model, settings, parameters; `seed_<seed typed>`                                        | Saved files are by-products inside the run, under `saved_paths/` and the like; today they are not stored                                               |
+| `Survey`          | `surveys/`: model, config (`<eval>-P<particles>-r<replicates>`), box (`box-n<points>`), seed (`seed_<seed>`) (`survey_cas.rs:153-161`); `landscape_html/` as a child                                                                                        | model, settings, the box; `seed_<seed typed>`                                           | The HTML page is a rendering, not a child                                                                                                              |
+| `ProfilePoint`    | `profiles/`: profile (the model's stem; its key includes the grid), point (`name=value` to 4 decimals, joined by `__`), method, seed (`seed_<seed>`), start (`start_<index>`) (`profile_cas.rs:99-110`, `:122-138`)                                         | the problem, the focal values, the method; `seed_<n>-start_<i>`                         | The first group is the problem, without the grid; seed and start become one result folder; the base folder's sidecar and `invocations/` leave the tree |
+| `FitProblem`      | `fits/`: fit (the `fit.toml`'s stem; its key is the problem), a level directory with no record (`fit/cas.rs:654`, `fit/mod.rs:894-895`)                                                                                                                     | no group; the model's label                                                             | A result folder with its own records, written once, named by the model                                                                                 |
+| `FitRun`          | under the fit level: method (the algorithm's name), seed (`seed_<seed>`) (`fit/cas.rs:655-656`)                                                                                                                                                             | inside its problem at `runs/`: the method's settings; `seed_<seed typed>`               | The runs sit under `runs/` in the problem's folder; the seed level becomes the result folder                                                           |
+| `Prediction`      | `<fit level>/predict/<12 hex of the run id>-<address key>/`, with no record (`fit/fit_view.rs:172-184`)                                                                                                                                                     | from a posterior, inside the run at `predict/`; from a fixed point, the model; the mode | It sits inside the run whose draws it used, with its own records; fixed-point predictions are new                                                      |
+| `Score`           | Not stored                                                                                                                                                                                                                                                  | inside its prediction at `scores/`; the rule's name                                     | New                                                                                                                                                    |
+| Content artifacts | Not stored; the model's digest is folded into the model level's key                                                                                                                                                                                         | no group; the model's or the file's label                                               | New                                                                                                                                                    |
+
+Above every kind, today has no build directory: the engine identity is part of
+the model level's key (`runid/src/inputs.rs:329-337`).
+
+### One simulation
+
+```bash
+camdl simulate sir.camdl
+```
+
+The `Sim` layout is the one in section 4 of the simulate example: the shared
+model, settings and parameters groups, then the scenario, then the seed typed.
+With no scenario the cell runs the implicit arm, labelled `(none)` as today
+(`cli/src/sim_job.rs:351`), which sanitises to `_none_`. The seed is `--seed`'s
+default, 1.
+
+```text
+<build>/
+  compiled_model/
+    sir-81cc03a1f2d4/
+  sim/
+    sir-6d02b7e914fa/                       # the model
+      chain_binomial-dt1-5e2a90c417bd/      # the settings
+        base-77c0d1e25f3a/                  # the parameters
+          _none_-0c4d21e9b7a3/              # the scenario
+            seed_1-e81f5a0c3d29/            # the cell
+```
+
+### Scenarios and seeds
+
+```bash
+camdl simulate sir.camdl --scenario slow --scenario fast --seeds 1,2
+```
+
+Each scenario is a directory under the parameters, and each seed a cell below
+it. With `--seeds` a cell's process seed is the listed seed itself
+(`cli/src/engine.rs:59-60`), so today's labels and the target's agree.
+
+```text
+<build>/sim/sir-6d02b7e914fa/chain_binomial-dt1-5e2a90c417bd/base-77c0d1e25f3a/
+  slow-9b1e44a07c62/
+    seed_1-3fa9c1d2e07b/
+    seed_2-a41be07c9d02/
+  fast-2c7f0d93b518/
+    seed_1-0b77c2e1f6a3/
+    seed_2-e2f09d14b8c5/
+```
+
+### Replicates
+
+```bash
+camdl simulate sir.camdl --seed 7 --replicates 3
+```
+
+Three cells share the seed the user typed, 7. Each derives its own process seed:
+the first keeps 7, and the others XOR the replicate's index, times a mixing
+constant, into it (`cli/src/engine.rs:52-66`, `cli/src/util.rs:36-38`). Today
+the seed level is labelled with that derived process seed (`resolve.rs:172`,
+with `base_seed` set to the cell's process seed at `cas_sink.rs:354`), so
+today's three folders read `seed_7` and two `seed_<20-digit number>`. In the
+target the label is the seed typed, followed by the replicate's number for every
+replicate after the first: `seed_7`, `seed_7-r1`, `seed_7-r2`. That number is
+the one the cell's seed is derived from, so it is the same in whichever command
+the cell appears; it is not the `replicate` column of the rendered table, which
+is the cell's position in one invocation.
+
+```text
+<build>/sim/sir-6d02b7e914fa/chain_binomial-dt1-5e2a90c417bd/base-77c0d1e25f3a/_none_-0c4d21e9b7a3/
+  seed_7-5d91c0e2a7b4/
+  seed_7-r1-a03e6f18c25d/
+  seed_7-r2-f4b2097de1c6/
+```
+
+### A sweep
+
+```bash
+camdl simulate sir.camdl --sweep beta=0.2,0.3,0.6
+```
+
+One parameters directory per sweep point under one settings directory. Today the
+label is the point's parameters at the values the cell ran, sorted and joined
+with `_`, `base` when there are none, and `draws` when the text is over 96 bytes
+(`cli/src/cas_sink.rs:404-423`); the target uses the same text for
+`CellLabels.params`. Every point uses one random stream: a sweep point does not
+enter the process seed (`engine.rs:182-193`), so each cell is `seed_1`. A sweep
+file, `--sweep-file`, gives the same shape, one directory per row.
+
+```text
+<build>/sim/sir-6d02b7e914fa/chain_binomial-dt1-5e2a90c417bd/
+  beta_0.2-1c8e05a3f9d2/_none_-0c4d21e9b7a3/seed_1-6a2d4f01e8b7/
+  beta_0.3-9e47b2c0d561/_none_-0c4d21e9b7a3/seed_1-b5c83e9a0f14/
+  beta_0.6-3f0a91d7c2e8/_none_-0c4d21e9b7a3/seed_1-07e6d1b4a29c/
+```
+
+### Parameter draws
+
+```bash
+camdl simulate sir.camdl --draws draws.tsv --replicates 2
+```
+
+One parameters directory per row of `draws.tsv`, labelled as a sweep point is,
+and two cells in each. A draw row is a sample, so its index enters the process
+seed (`engine.rs:182-193`), but both cells of a row show the seed typed, 1.
+
+```text
+<build>/sim/sir-6d02b7e914fa/chain_binomial-dt1-5e2a90c417bd/
+  beta_0.31_gamma_0.12-4e1b9d07a3c5/_none_-0c4d21e9b7a3/
+    seed_1-c29f03e7b18a/
+    seed_1-81d6a5c0f4e2/
+  beta_0.27_gamma_0.09-d0a73f2e5b16/_none_-0c4d21e9b7a3/
+    seed_1-2b7e94c1d05f/
+    seed_1-e9035a8d6c71/
+```
+
+### Observations and the event log
+
+```bash
+camdl simulate sir.camdl --obs --event-log
+```
+
+Both are by-products: the library places each inside the cell, under its `KIND`,
+with the label `ByProduct::label` gives (section 4).
+
+```text
+<build>/sim/.../_none_-0c4d21e9b7a3/seed_1-e81f5a0c3d29/
+  identity.json  run.json  traj.tsv
+  obs/
+    cases-5c0d93aa41e7/
+      identity.json  run.json  cases.tsv
+  event_log/
+    event_log-7a2c0e4f91b3/
+      identity.json  run.json  event_log.tsv
+```
+
+### A filter run and its saved files
+
+```bash
+camdl pfilter sir.camdl --data cases.tsv --particles 1000 --save-paths paths.tsv
+```
+
+The `Pfilter` layout is in "By-products of a filter run": the shared model,
+settings and parameters groups, then the seed typed. The saved paths are a
+by-product, and `paths.tsv` is an export of it.
+
+```text
+<build>/pfilter/
+  sir-2e5d8b1a0c73/
+    pf-n1000-r1-dt1-6f0c2a9d4e18/
+      params-a1d47e3b9c02/
+        seed_1-0d93f6c2b7e5/
+          identity.json  run.json  ...
+          saved_paths/
+            paths-48c1e7a0d3b9/
+              identity.json  run.json  paths.tsv
+```
+
+### A survey
+
+```bash
+camdl survey sir.camdl --estimate beta=0.1:1 --data cases.tsv --n-points 200 --eval pfilter
+```
+
+The `Survey` layout is in "Surveys": the shared model and settings groups, the
+box, then the seed typed. The particle filter evaluates each point with 200
+particles and 5 replicates by default (`cli/src/args/mod.rs:2373-2374`,
+`:2383-2384`). The HTML page is rendered from `landscape.tsv` and is not in the
+tree.
+
+```text
+<build>/survey/
+  sir-2e5d8b1a0c73/
+    pfilter-p200-r5-8b3f1d0e6a27/
+      box-n200-c7e2a49f0d13/
+        seed_1-5a0e3c8d17b9/
+          identity.json  run.json  landscape.tsv  summary.json
+```
+
+### A profile, and a grid that grows
+
+```bash
+camdl profile sir.camdl --fit fit.toml --sweep beta=0.2,0.3 --n-starts 2 --seeds 1,2
+camdl profile sir.camdl --fit fit.toml --sweep beta=0.2,0.3,0.4 --n-starts 2 --seeds 1,2
+```
+
+The `ProfilePoint` layout is in "Profiles": the problem, the focal values, the
+method, then the seed typed and the start's index. The first command stores
+eight points, two values by two seeds by two starts. The second finds those
+eight and computes four more, in a new `beta_0.4000` directory beside the
+others. Today the second command writes everything again under a new first
+level, because the first level's key includes the grid
+(`profile_cas.rs:99-110`). Both commands' invocation records list their points,
+so each renders its own profile table.
+
+```text
+<build>/
+  fit/
+    sir-71c3e0a9b2d5/                       # the FitProblem the profile is of
+  profile_point/
+    sir-e6b20d4f8a13/                       # the problem
+      beta_0.2000-1f6c9e2a0d47/             # the focal values
+        if2-3b8d05e1c9a2/                   # the method
+          seed_1-start_0-a7e02c4f1d93/
+          seed_1-start_1-04d9b3e7c5a1/
+          seed_2-start_0-c18f6a2d09e4/
+          seed_2-start_1-6e3a0d91b7c2/
+      beta_0.3000-8a2e4d7c1f05/
+        if2-3b8d05e1c9a2/ ...
+      beta_0.4000-d5c1907e3a2b/             # added by the second command
+        if2-3b8d05e1c9a2/ ...
+```
+
+The problem group's suffix is 12 hex digits of the key of the dependency on the
+`FitProblem`, which hashes the problem's run id with a file name and a digest,
+so it differs from the problem folder's own suffix.
+
+### A fit: one problem and one run
+
+```bash
+camdl fit run fit.toml
+```
+
+The `FitProblem` and `FitRun` layouts are in the fit example's section 2: the
+problem is one folder named by the model, and each run sits inside it under
+`runs/`, grouped by the method's settings and named by the seed typed.
+
+```text
+<build>/fit/
+  seir-2696ab0a41c7/                        # the FitProblem
+    runs/
+      if2-8d4e11a0c27b/                     # the method's settings
+        seed_1-7b21e4c09a3d/                # the FitRun
+```
+
+### Several seeds, two methods, a resume
+
+```bash
+camdl fit run fit.toml                       # fit_seeds = [1, 2, 3], IF2
+camdl fit run fit_pmmh.toml                  # the same problem, [method] is PMMH
+camdl fit run fit_pmmh_long.toml --resume @scout   # the PMMH run, continued to a longer length
+```
+
+`fit_seeds` gives three runs under one method directory. A second `fit.toml`
+whose problem half is the same, with another `[method]`, finds the problem
+stored and adds a method directory beside the first. A resume keeps the base
+run's method settings and seed, `chain` in its identity, and differs in `length`
+and `resumed_from`, so it is a new run folder beside its base, with the same
+label.
+
+```text
+<build>/fit/seir-2696ab0a41c7/runs/
+  if2-8d4e11a0c27b/
+    seed_1-7b21e4c09a3d/
+    seed_2-c3d1e88a0f52/
+    seed_3-51a9f0e6d2c8/
+  pmmh-5a0c93e1d4f8/
+    seed_1-19ab44d0e7c6/                    # the base run, @scout
+    seed_1-6e02d8b3a4f1/                    # the resumed run
+```
+
+Today a resume's method level differs from its base's, since that level hashes
+the target length and the resume dependency (`fit/cas.rs:640-647`), so today the
+resumed run sits under a second `pmmh` method directory.
+
+### Several problems: a sweep, or synthetic datasets
+
+```bash
+camdl fit run fit.toml --sweep beta=0.2,0.3
+camdl fit run fit_synthetic.toml             # [synthetic] with three datasets
+```
+
+Each sweep point, and each synthetic dataset, is a problem of its own, and every
+problem folder carries the model's label. Today the same holds: each sweep point
+and each dataset gets its own fit level, all labelled with the `fit.toml`'s
+stem, because each cell's fit level hashes its own problem and data
+(`fit/mod.rs:1030-1035`, `fit/cas.rs:654`); the generated tables are written
+under the fit directory announced with no data, at `synthetic/data/`
+(`fit/mod.rs:708`, `:812-815`). In the target the generated rows are each
+problem's training rows, stored in the problem.
+
+```text
+<build>/fit/
+  seir-2696ab0a41c7/runs/if2-8d4e11a0c27b/seed_1-7b21e4c09a3d/
+  seir-e04b7c19d3a5/runs/if2-8d4e11a0c27b/seed_1-92f1c6a0e8d4/
+```
+
+### Predictions and a score
+
+```bash
+camdl predict @scout --mode forecast
+camdl predict seir.camdl --params best.toml --mode free_forward
+```
+
+A posterior prediction sits inside the run whose draws it used, under
+`predict/`, and is named by its mode. A fixed-point prediction sits under
+`prediction/`, grouped by its model. A score sits inside the prediction it
+scores, under `scores/`, named by its rule. The fixed-point command line is a
+sketch: that command is born on the new store ("Order", step 3), and its flags,
+like the command that writes a score, belong to the unified-prediction proposal.
+
+```text
+<build>/
+  fit/seir-2696ab0a41c7/runs/pmmh-5a0c93e1d4f8/seed_1-19ab44d0e7c6/
+    predict/
+      forecast-3c7a0e9f15d2/                # the posterior prediction
+        scores/
+          crps-b81d4f06a2e9/                # its score
+  prediction/
+    seir-0f2c8a71d4e3/                      # the model
+      free_forward-d6e9013b7c4a/            # the fixed-point prediction
+```
+
+### Rough edges
+
+These are the places where the layouts are awkward. None is a defect: each is a
+consequence of a group or a label being a part of the identity or a label, and
+the identity record answers what the path does not show.
+
+- **Each rebuild of camdl starts new model directories.** The model group's key
+  is the key of the `Dep<CompiledModel>`, which holds the compiled model's run
+  id, and a run id includes the ambient key, so a new build gives a new model
+  group with the same label. Today's model level has the same property: its key
+  includes the engine identity (`ModelDigest.engine`,
+  `runid/src/inputs.rs:329-337`), so today's `sims/` holds one `sir-...`
+  directory per build, side by side. In the target each build's model
+  directories sit under that build's directory, so a label does not repeat
+  within one directory.
+- **A large sweep makes the parameters level as wide as the sweep.** One
+  parameters directory per point sits under one settings directory, so a
+  thousand-point sweep puts a thousand directories in one. Today's params level
+  has the same width.
+- **The group order is fixed per kind.** A simulation is grouped by model, then
+  settings, then parameters, then scenario, so a view by scenario across models
+  is not available on disk; it comes from `list` or the index. Today's level
+  order is fixed in the same way.
+- **Problems that differ only in data or a sweep point share a label.** Sweep
+  points and synthetic datasets are problems whose folders read `seir-...`, told
+  apart only by the suffix. Today's fit levels have the same property, with the
+  `fit.toml`'s stem as the label.
+- **Runs that differ in something other than the method's settings and the seed
+  share a folder name.** A resume and its base, or two runs that differ only in
+  `rw_sd` or `--starts`, are siblings named `seed_<n>-...`. Today a resume sits
+  under a second method directory labelled with the same method's name, so the
+  same ambiguity sits one level up.
+- **Long or near-equal labels collapse.** A draw row whose text is over 96 bytes
+  is labelled `draws`, as today (`cas_sink.rs:415-422`), and focal values that
+  agree to four decimals share a label, as today (`profile_cas.rs:122-127`); in
+  both cases the directories differ only in the suffix.
+
 ## Worked example: `camdl simulate`
 
 One `simulate` invocation is a batch of cells. Each cell is one atomically
@@ -2674,10 +3367,15 @@ pub struct Cell {
 /// A cell's labels: Sim's Artifact::Labels.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct CellLabels {
+    pub model: String,                // the model file's stem
+    pub params: String,               // `base`, or a sweep point's or draw row's values, as today's
+                                      // label (`cas_sink.rs:404-423`)
     pub scenario: String,
     pub replicate: u32,               // the cell's position in the invocation, from 0: the
                                       // rendered table's `replicate` column
     pub seed: u64,                    // the seed the user typed
+    pub seed_replicate: u32,          // which replicate of that seed this cell is, from 0: the
+                                      // number its process seed is derived from
 }
 
 #[deny(unused_variables)]
@@ -2755,7 +3453,11 @@ There is no ensemble identity. The combined table is a rendering (section 6).
 
 ### 4. The artifacts
 
-The content artifacts, with the `Artifact` impl every content artifact has:
+The content artifacts, with the `Artifact` and `Primary` impls every content
+artifact has. Each is one folder named by the model's or the file's label, with
+no group. That is not a large directory: a content artifact is one folder per
+distinct content per build, so even a long project holds a few per model file in
+each build's `compiled_model/`.
 
 ```rust
 /// The compiled model's name, from the file's stem: a label.
@@ -2769,7 +3471,10 @@ impl Artifact for CompiledModel {
     const WRITE: WriteMode = WriteMode::Atomic;
     type Identity = Hashed<CompiledModelContent>;
     type Labels = ModelLabels;
-    fn name(_id: &Self::Identity, labels: &ModelLabels) -> String { labels.name.clone() }
+}
+
+impl Primary for CompiledModel {
+    fn layout(_id: &Self::Identity, labels: &ModelLabels) -> Placed { Layout::in_kind().result(&labels.name) }
 }
 
 impl ContentArtifact for CompiledModel {
@@ -2784,7 +3489,10 @@ impl Artifact for Quantities {
     const WRITE: WriteMode = WriteMode::Atomic;
     type Identity = Hashed<QuantitiesContent>;
     type Labels = ModelLabels;
-    fn name(_id: &Self::Identity, labels: &ModelLabels) -> String { labels.name.clone() }
+}
+
+impl Primary for Quantities {
+    fn layout(_id: &Self::Identity, labels: &ModelLabels) -> Placed { Layout::in_kind().result(&labels.name) }
 }
 
 impl ContentArtifact for Quantities {
@@ -2804,7 +3512,10 @@ impl Artifact for DataTable {
     const WRITE: WriteMode = WriteMode::Atomic;
     type Identity = Hashed<Table>;
     type Labels = TableLabels;
-    fn name(_id: &Self::Identity, labels: &TableLabels) -> String { labels.stream.clone() }
+}
+
+impl Primary for DataTable {
+    fn layout(_id: &Self::Identity, labels: &TableLabels) -> Placed { Layout::in_kind().result(&labels.stream) }
 }
 
 impl ContentArtifact for DataTable {
@@ -2828,9 +3539,17 @@ impl Artifact for Sim {
     const WRITE: WriteMode = WriteMode::Atomic;
     type Identity = SimIdentity;
     type Labels = CellLabels;
+}
 
-    // The first writer's scenario name. A label, so it is not read back.
-    fn name(_id: &SimIdentity, labels: &CellLabels) -> String { labels.scenario.clone() }
+impl Primary for Sim {
+    // Grouped as today's levels are: model, settings, parameters, scenario. The result
+    // folder shows the seed the first writer typed, a label, so it is not read back.
+    fn layout(id: &SimIdentity, labels: &CellLabels) -> Placed {
+        camdl_groups(&labels.model, &id.model, &id.config.label(), &id.config,
+                     Some((labels.params.as_str(), &id.params)))
+            .group(&labels.scenario, &id.scenario)
+            .result(&labels.seed_label())      // `seed_7`, or `seed_7-r2` for a later replicate
+    }
 }
 
 pub struct Obs;
@@ -2840,13 +3559,12 @@ impl Artifact for Obs {
     const WRITE: WriteMode = WriteMode::Atomic;
     type Identity = ObsIdentity;
     type Labels = ();
-
-    fn name(id: &ObsIdentity, _labels: &()) -> String { id.observation.streams().join("+") }
 }
 
 impl ByProduct for Obs {
     type Of = Sim;
     fn upstream(id: &ObsIdentity) -> &<SimIdentity as Identity>::Record { &id.sim }
+    fn label(id: &ObsIdentity, _labels: &()) -> String { id.observation.streams().join("+") }
 }
 
 pub struct EventLog;
@@ -2856,12 +3574,12 @@ impl Artifact for EventLog {
     const WRITE: WriteMode = WriteMode::Atomic;
     type Identity = EventLogIdentity;
     type Labels = ();
-    fn name(_id: &EventLogIdentity, _labels: &()) -> String { "event_log".into() }
 }
 
 impl ByProduct for EventLog {
     type Of = Sim;
     fn upstream(id: &EventLogIdentity) -> &<SimIdentity as Identity>::Record { &id.sim }
+    fn label(_id: &EventLogIdentity, _labels: &()) -> String { "event_log".into() }
 }
 
 /// The combined table across a simulate invocation's cells.
@@ -2890,7 +3608,7 @@ pub fn simulate(args: SimulateArgs, ambient: Build<Engine>, env: StoreRequest) -
 
     let request = StoreRequest::new(label, force, output_dir).merge(env);   // a flag wins over the environment
     let reuse   = request.reuse();
-    let store   = Store::open(&request.root(), ambient, camdl_kinds())?;
+    let store   = Store::open(&request.root(), ambient, camdl_top_level(), camdl_kinds())?;
     let info    = RunInfo::new(&given, &execution, &request)?;
     let (shared, cells, by_products) = resolve(declared, &store, &info)?;
 
@@ -2976,18 +3694,25 @@ always writes it, so it is an ordinary result file of the cell.
 
 ```text
 results/
-  compiled_model/
-    sir-81cc03a1f2d4/
-      identity.json  run.json  model.ir.json
-  sim/
-    slow-3fa9c1d2e07b/
-      identity.json  run.json  traj.tsv
-      obs/
-        cases-5c0d93aa41e7/
-          identity.json  run.json  cases.tsv
-    slow-a41be07c9d02/ ...
-    fast-0b77c2e1f6a3/ ...
-    fast-e2f09d14b8c5/ ...
+  store.json                                # { "format": 1, "top_level": "by_build" }
+  0.1.0_ce78a5e-4b1f07d2a9e3/               # the build: camdl 0.1.0+ce78a5e, sanitised
+    compiled_model/
+      sir-81cc03a1f2d4/
+        identity.json  run.json  model.ir.json
+    sim/
+      sir-6d02b7e914fa/                     # group: the model
+        chain_binomial-dt1-5e2a90c417bd/    # group: the settings
+          base-77c0d1e25f3a/                # group: the parameters
+            slow-9b1e44a07c62/              # group: the scenario
+              seed_1-3fa9c1d2e07b/          # one cell
+                identity.json  run.json  traj.tsv
+                obs/
+                  cases-5c0d93aa41e7/
+                    identity.json  run.json  cases.tsv
+              seed_2-a41be07c9d02/ ...
+            fast-2c7f0d93b518/
+              seed_1-0b77c2e1f6a3/ ...
+              seed_2-e2f09d14b8c5/ ...
   .invocations/
     123.json                        # this run: inputs as given, the label, the four cells in order, their labels
   .owners/  .index/                 # owner beats, index logs
@@ -3307,7 +4032,13 @@ impl Artifact for FitProblem {
     const WRITE: WriteMode = WriteMode::Atomic;
     type Identity = FitProblemIdentity;
     type Labels = ProblemLabels;
-    fn name(_id: &FitProblemIdentity, labels: &ProblemLabels) -> String { labels.model.clone() }
+}
+
+impl Primary for FitProblem {
+    // No group: one folder per problem, named by the model, is not many.
+    fn layout(_id: &FitProblemIdentity, labels: &ProblemLabels) -> Placed {
+        Layout::in_kind().result(&labels.model)
+    }
 }
 
 /// The method's name and the seed the user typed.
@@ -3321,8 +4052,15 @@ impl Artifact for FitRun {
     const WRITE: WriteMode = WriteMode::InPlace;
     type Identity = FitRunIdentity;
     type Labels = RunLabels;
-    fn name(_id: &FitRunIdentity, labels: &RunLabels) -> String { labels.method.clone() }
-    fn layout(id: &FitRunIdentity) -> Layout { Layout::inside(id.chain.problem.id(), "runs") }
+}
+
+impl Primary for FitRun {
+    // Inside its problem, grouped by the method; the folder shows the seed typed.
+    fn layout(id: &FitRunIdentity, labels: &RunLabels) -> Placed {
+        Layout::inside(id.chain.problem.id(), "runs")
+            .group(&labels.method, &id.chain.method)
+            .result(&format!("seed_{}", labels.seed))
+    }
 }
 ```
 
@@ -3420,7 +4158,7 @@ pub fn fit_run(args: FitRunArgs, ambient: Build<Engine>, env: StoreRequest) -> R
     let request = StoreRequest::new(label, force, output_dir.map(PathBuf::from)).merge(env);
     let reuse   = request.reuse();
     let given   = given.with_file("config", file_given, &source);
-    let store   = Store::open(&request.root(), ambient, camdl_kinds())?;
+    let store   = Store::open(&request.root(), ambient, camdl_top_level(), camdl_kinds())?;
     let info    = RunInfo::new(&given, &execution, &request)?;
 
     let plan = resolve(file, problem_flags, run_flags, method_flags, &store, &info)?;
@@ -3563,26 +4301,29 @@ pub fn fit(run: &mut Run<FitRun>, execution: &FitRunExecution) -> Result<()> {
 
 ```text
 results/
-  compiled_model/
-    seir-5d27e0b9a3c1/model.ir.json         # the ordinary compile
-    seir-2b90f1c47e03/model.ir.json         # with the state Jacobian; only if nl-lbfgs on ODE ran
-  fit/
-    seir-2696ab0a41c7/                      # FitProblem: written once
-      identity.json  run.json
-      problem.toml  inputs/cases.tsv        # training rows only
-      model.camdl.original                  # provenance file, required
-      runs/
-        if2-7b21e4c09a3d/                   # FitRun, completed and sealed
-          identity.json  run.json
-          fit.toml                          # provenance file: what this run was given
-          fit_state.toml  mle_params.toml  chain_0/trace.tsv
-          events.jsonl  progress.json       # attempt files
-        if2-c3d1e88a0f52/                   # FitRun, another seed, running now
-          identity.json  run.json  .lock  fit.toml
-          events.jsonl  progress.json  chain_0/trace.tsv
-        pmmh-19ab44d0e7c6/                  # FitRun, failed once and retried
-          identity.json  run.json  fit.toml
-          .attempts/1/
+  0.1.0_ce78a5e-4b1f07d2a9e3/                 # the build
+    compiled_model/
+      seir-5d27e0b9a3c1/model.ir.json         # the ordinary compile
+      seir-2b90f1c47e03/model.ir.json         # with the state Jacobian; only if nl-lbfgs on ODE ran
+    fit/
+      seir-2696ab0a41c7/                      # FitProblem: written once
+        identity.json  run.json
+        problem.toml  inputs/cases.tsv        # training rows only
+        model.camdl.original                  # provenance file, required
+        runs/
+          if2-8d4e11a0c27b/                   # group: the method's settings
+            seed_1-7b21e4c09a3d/              # FitRun, completed and sealed
+              identity.json  run.json
+              fit.toml                        # provenance file: what this run was given
+              fit_state.toml  mle_params.toml  chain_0/trace.tsv
+              events.jsonl  progress.json     # attempt files
+            seed_2-c3d1e88a0f52/              # FitRun, another seed, running now
+              .lock  identity.json  run.json  fit.toml
+              events.jsonl  progress.json  chain_0/trace.tsv
+          pmmh-5a0c93e1d4f8/
+            seed_1-19ab44d0e7c6/              # FitRun, failed once and retried
+              identity.json  run.json  fit.toml
+              .attempts/1/
 ```
 
 - **Each run keeps the exact `fit.toml` it was given.** A later run with other
@@ -3638,9 +4379,9 @@ pub enum ParameterSource {
     },
 }
 
-/// The mode and the scenario names as typed.
+/// The mode, the scenario names as typed, and the model file's stem.
 #[derive(Clone, Serialize, Deserialize)]
-pub struct PredictionLabels { pub mode: String, pub scenarios: Vec<String> }
+pub struct PredictionLabels { pub mode: String, pub scenarios: Vec<String>, pub model: String }
 
 pub struct Prediction;
 
@@ -3649,18 +4390,21 @@ impl Artifact for Prediction {
     const WRITE: WriteMode = WriteMode::Atomic;
     type Identity = PredictIdentity;
     type Labels = PredictionLabels;
-    fn name(_id: &PredictIdentity, labels: &PredictionLabels) -> String { labels.mode.clone() }
-    fn layout(id: &PredictIdentity) -> Layout {
+}
+
+impl Primary for Prediction {
+    fn layout(id: &PredictIdentity, labels: &PredictionLabels) -> Placed {
         match &id.source {
             ParameterSource::Posterior { draws, .. } => Layout::inside(draws.id(), "predict"),
-            ParameterSource::FixedPoint { .. }       => Layout::flat(),
+            ParameterSource::FixedPoint { model, .. } => Layout::in_kind().group(&labels.model, model),
         }
+        .result(&labels.mode)
     }
 }
 ```
 
 - **A posterior prediction sits inside the run whose draws it used.** A
-  fixed-point prediction sits on its own under `prediction/`.
+  fixed-point prediction sits under `prediction/`, grouped by its model.
 - **The fit may come from an earlier build.** The dependency records which.
 - **One overlap is accepted.** A fixed-point free-forward prediction computes
   nearly what `simulate --obs` computes, under a different id, so that one table
@@ -3689,7 +4433,13 @@ impl Artifact for Score {
     const WRITE: WriteMode = WriteMode::Atomic;
     type Identity = ScoreIdentity;
     type Labels = ();
-    fn name(id: &ScoreIdentity, _labels: &()) -> String { id.rule.name().to_string() }
+}
+
+impl Primary for Score {
+    // Inside the prediction it scores.
+    fn layout(id: &ScoreIdentity, _labels: &()) -> Placed {
+        Layout::inside(id.prediction.id(), "scores").result(id.rule.name())
+    }
 }
 ```
 
@@ -3707,9 +4457,62 @@ A profile point is the same result whichever grid holds it.
   drawn once for a whole run, so the same index can mean different values in two
   runs.
 - **Its identity has no grid.** Growing a grid reuses the points already stored.
+- **Points are grouped on disk** by the problem they profile, then by focal
+  values, then by method, with one folder per seed and start below that. Today's
+  levels are the same but for the first, which today includes the grid
+  (`cli/src/profile_cas.rs:99-110`, `:130-138`).
+- **The problem is a `FitProblem`.** With `--fit` it is that fit's problem; a
+  profile given no fit resolves its flags to a problem of its own, as
+  `pfilter --fit fit.toml` resolves a configuration to one.
+- **No group directory holds a file.** Today the profile's base folder, the
+  first level, holds a provenance sidecar, `fit.meta.json`; when a fit was
+  given, the archived configuration, `fit.toml.original` and
+  `fit.resolved.toml`; and `invocations/`, the per-invocation records and
+  heartbeat (`cli/src/profile.rs:1740-1878`). In the target the label and the
+  inputs as given are in the invocation record, and the problem is the
+  `FitProblem` result.
 - **The profile table is a rendering** over the invocation's points, as the
   combined simulation table is. There is no stored profile result today either;
   the curve is rebuilt from the stored points.
+
+```rust
+/// One point of a profile: a fit with the focal parameters held at given values.
+/// Written in place, as today's profile point is.
+pub struct ProfilePoint;
+
+#[derive(Identity, Clone)]
+#[identity(tag = "profile_point", version = 1)]
+pub struct ProfilePointIdentity {
+    pub problem: Dep<FitProblem>,                 // the problem it profiles
+    pub focal: BTreeMap<String, Finite>,          // the focal parameters' values
+    pub method: ProfileMethod,                    // the algorithm and its settings
+    pub start: BTreeMap<String, Finite>,          // the start's values, not its index
+    pub seed: ProcessSeed,                        // from the user's seed, the focal values and the start's values
+}
+
+/// The model file's stem, the focal values as today's segment writes them
+/// (`beta=0.3000__gamma=0.1000`, `profile_cas.rs:122-127`), the method's name,
+/// the seed typed and the start's index.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ProfilePointLabels { pub model: String, pub focal: String, pub method: String, pub seed: u64, pub start: u32 }
+
+impl Artifact for ProfilePoint {
+    const KIND: &'static str = "profile_point";
+    const WRITE: WriteMode = WriteMode::InPlace;
+    type Identity = ProfilePointIdentity;
+    type Labels = ProfilePointLabels;
+}
+
+impl Primary for ProfilePoint {
+    fn layout(id: &ProfilePointIdentity, labels: &ProfilePointLabels) -> Placed {
+        Layout::in_kind()
+            .group(&labels.model, &id.problem)
+            .group(&labels.focal, &id.focal)
+            .group(&labels.method, &id.method)
+            .result(&format!("seed_{}-start_{}", labels.seed, labels.start))
+    }
+}
+```
 
 ### By-products of a filter run
 
@@ -3724,14 +4527,38 @@ pub struct Pfilter;
 
 #[derive(Identity, Clone)]
 #[identity(tag = "pfilter", version = 1)]
-pub struct PfilterIdentity { /* the model, the data, the parameters, the filter's settings, the seed */ }
+pub struct PfilterIdentity {
+    pub model: Dep<CompiledModel>,
+    pub config: PfilterConfig,        // particles, replicates, dt, the data and the objective, as today's config level
+    pub params: ResolvedParams,
+    pub seed: ProcessSeed,
+}
+
+impl PfilterConfig {
+    /// The settings group's label, `pf-N<particles>-r<replicates>-dt<dt>`, as today's
+    /// (`cli/src/pfilter_cas.rs:165`).
+    pub fn label(&self) -> String;
+}
+
+/// The model file's stem and the seed the user typed.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct PfilterLabels { pub model: String, pub seed: u64 }
 
 impl Artifact for Pfilter {
     const KIND: &'static str = "pfilter";
     const WRITE: WriteMode = WriteMode::InPlace;
     type Identity = PfilterIdentity;
-    type Labels = ();
-    fn name(_id: &PfilterIdentity, _labels: &()) -> String { "pfilter".into() }
+    type Labels = PfilterLabels;
+}
+
+impl Primary for Pfilter {
+    // Grouped as today's levels are: model, settings, parameters. Today's parameters
+    // level is labelled `params` for every run (`pfilter_cas.rs:170`).
+    fn layout(id: &PfilterIdentity, labels: &PfilterLabels) -> Placed {
+        camdl_groups(&labels.model, &id.model, &id.config.label(), &id.config,
+                     Some(("params", &id.params)))
+            .result(&format!("seed_{}", labels.seed))
+    }
 }
 
 /// The particle paths `--save-paths` exports: one by-product of the filter run.
@@ -3750,12 +4577,12 @@ impl Artifact for SavedPaths {
     const WRITE: WriteMode = WriteMode::Atomic;
     type Identity = SavedPathsIdentity;
     type Labels = ();
-    fn name(_id: &SavedPathsIdentity, _labels: &()) -> String { "paths".into() }
 }
 
 impl ByProduct for SavedPaths {
     type Of = Pfilter;
     fn upstream(id: &SavedPathsIdentity) -> &<PfilterIdentity as Identity>::Record { &id.filter }
+    fn label(_id: &SavedPathsIdentity, _labels: &()) -> String { "paths".into() }
 }
 ```
 
@@ -3773,6 +4600,58 @@ impl ByProduct for SavedPaths {
   because it cuts the data to the training rows. It is an identity input, as it
   is today.
 
+### Surveys
+
+A survey is one `InPlace` result, as today: `survey` claims a streaming write
+(`cli/src/survey.rs:423-425`). Its rendered HTML page is a rendering of the
+stored `landscape.tsv`, made from stored files after the run, and is neither a
+by-product nor a stored child. Today `--render` writes it as a child of the
+leaf, `landscape_html/landscape.html` with its own record, and declares the
+child in the completed leaf's record (`survey.rs:21-23`, `:2088-2111`,
+`cli/src/cas_sink.rs:1137-1145`).
+
+```rust
+pub struct Survey;
+
+#[derive(Identity, Clone)]
+#[identity(tag = "survey", version = 1)]
+pub struct SurveyIdentity {
+    pub model: Dep<CompiledModel>,
+    pub config: SurveyConfig,         // the evaluation method, particles, replicates, data, objective
+    pub sample_box: SurveyBox,        // the bounds and the number of points
+    pub seed: ProcessSeed,
+}
+
+impl SurveyConfig {
+    /// `<eval>-P<particles>-r<replicates>`, as today's (`cli/src/survey_cas.rs:153-154`).
+    pub fn label(&self) -> String;
+}
+impl SurveyBox {
+    /// `box-n<points>`, as today's (`survey_cas.rs:155`).
+    pub fn label(&self) -> String;
+}
+
+/// The model file's stem and the seed the user typed.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SurveyLabels { pub model: String, pub seed: u64 }
+
+impl Artifact for Survey {
+    const KIND: &'static str = "survey";
+    const WRITE: WriteMode = WriteMode::InPlace;
+    type Identity = SurveyIdentity;
+    type Labels = SurveyLabels;
+}
+
+impl Primary for Survey {
+    // Grouped as today's levels are: model, settings, the box.
+    fn layout(id: &SurveyIdentity, labels: &SurveyLabels) -> Placed {
+        camdl_groups(&labels.model, &id.model, &id.config.label(), &id.config, None)
+            .group(&id.sample_box.label(), &id.sample_box)
+            .result(&format!("seed_{}", labels.seed))
+    }
+}
+```
+
 ## The path from today's store
 
 Most of the work is here, not in the target. Today's lifecycle carries over
@@ -3781,40 +4660,43 @@ about today come from the inventory.
 
 ### What maps to what
 
-| Today                                                                             | Target                                                                                                                                            |
-| --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| A hand-assembled list of levels per kind                                          | The fields of that kind's identity struct                                                                                                         |
-| `Keyed(Level)`, the `levels(..)` lists, 13 per-command overrides                  | The `identity` class, and `into_parts` in `resolve`                                                                                               |
-| `Expands`, `Child`                                                                | `expands`, `adds`, each with the generated test camdl has today                                                                                   |
-| Free-form loading of files into the run                                           | Typed files and typed resolution steps                                                                                                            |
-| Canonical JSON with a hand-kept list of excluded keys                             | A class on every key of a settings file                                                                                                           |
-| Two hashing regimes, one of which omits defaults                                  | One `Identity` derive: names hashed, every field hashed, defaults resolved first                                                                  |
-| A model digest that hashes part of the compiled model                             | Content artifacts: the compiled model with its derivative tables, and the quantities, each keyed by its own bytes                                 |
-| Level labels: scenario name, model file stem, `seed_N`                            | Labels in the invocation record; a folder keeps its first writer's name                                                                           |
-| Engine identity folded into the model level                                       | Ambient identity in every run id                                                                                                                  |
-| `begin_resolved_write` with `Atomic` or `Streaming`                               | `begin`, with the artifact's `Atomic` or `InPlace` mode                                                                                           |
-| `.lock` with process id and host; `progress.json` on a timer                      | An owner with a start time and one beat; progress and events for every kind                                                                       |
-| Per-invocation records under a profile folder                                     | Invocation records, for every command run                                                                                                         |
-| Failed leaves, `.attempts/`, `.quarantine/`, `.staging/`, `--force`               | Kept, with three changes: a failed atomic result leaves no folder, a damaged result goes to quarantine, and an atomic claim is its staging folder |
-| Reserved file names outside the manifest                                          | Attempt files                                                                                                                                     |
-| A label overwritten in `run.json` on a cache hit                                  | The label in the invocation record of the command that carried it; the result's record is not touched                                             |
-| `index.json`, written by `dev reindex` and on a prefix miss                       | Per-owner index logs, appended on every finish                                                                                                    |
-| Deleting results by hand                                                          | Unchanged                                                                                                                                         |
-| The fit folder: a level's directory, with files every run rewrites                | The `FitProblem` artifact, written once; each run keeps its own `fit.toml`                                                                        |
-| Held-out tables in the fit level                                                  | In a score only                                                                                                                                   |
-| `predict/` under the fit folder, with no record                                   | `Prediction` results                                                                                                                              |
-| `obs/` and `event_log/` children, declared in the parent's record afterwards      | By-products, each with its own records; the parent's record is not touched                                                                        |
-| `-o`, `--save-*` and `--draws-out` recomputing on a cache hit                     | Exports: copies or renderings of stored files                                                                                                     |
-| `--dates` and `--format` applied while the run writes its `-o` file               | Rendering options on the export                                                                                                                   |
-| Synthetic data in a fit folder keyed without data                                 | The generated rows are the problem's training rows, hashed by content                                                                             |
-| A profile point with the grid in its identity and its seed from its grid position | A point without the grid, seeded from its own values                                                                                              |
-| `ensemble.tsv`, stored, with a position column and labels outside its identity    | Not stored: the same table, rendered from the cells and the invocation record                                                                     |
-| `store.augment`, adding a file to a completed result                              | Removed. `reactive_log.tsv`, its one remaining use, is an ordinary result file                                                                    |
-| `find_leaf` by level hash; the `~` collision suffix                               | Found by run id; a suffix only when 12 digits collide                                                                                             |
-| Filters on level labels, the seed parsed from `seed_N`, the fourth ancestor       | The identity record and the dependencies                                                                                                          |
-| `@label` resolved in the default root                                             | Every handle resolved in the command's one root                                                                                                   |
-| `STORE_LAYOUT` and `dev migrate`                                                  | The `format` number in `store.json`; a root whose format the binary does not know is refused. No migrate command                                  |
-| A `fit.toml` handle matched through a second hash appended to records             | Refused where one run is needed, with the runs that file produced listed from the invocation records                                              |
+| Today                                                                                          | Target                                                                                                                                                                                               |
+| ---------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A hand-assembled list of levels per kind                                                       | The fields of that kind's identity struct                                                                                                                                                            |
+| `Keyed(Level)`, the `levels(..)` lists, 13 per-command overrides                               | The `identity` class, and `into_parts` in `resolve`                                                                                                                                                  |
+| `Expands`, `Child`                                                                             | `expands`, `adds`, each with the generated test camdl has today                                                                                                                                      |
+| Free-form loading of files into the run                                                        | Typed files and typed resolution steps                                                                                                                                                               |
+| Canonical JSON with a hand-kept list of excluded keys                                          | A class on every key of a settings file                                                                                                                                                              |
+| Two hashing regimes, one of which omits defaults                                               | One `Identity` derive: names hashed, every field hashed, defaults resolved first                                                                                                                     |
+| A model digest that hashes part of the compiled model                                          | Content artifacts: the compiled model with its derivative tables, and the quantities, each keyed by its own bytes                                                                                    |
+| Level labels: scenario name, model file stem, `seed_N`                                         | Labels in the invocation record; a folder keeps its first writer's name                                                                                                                              |
+| Engine identity folded into the model level                                                    | Ambient identity in every run id                                                                                                                                                                     |
+| `begin_resolved_write` with `Atomic` or `Streaming`                                            | `begin`, with the artifact's `Atomic` or `InPlace` mode                                                                                                                                              |
+| `.lock` with process id and host; `progress.json` on a timer                                   | An owner with a start time and one beat; progress and events for every kind                                                                                                                          |
+| Per-invocation records under a profile folder                                                  | Invocation records, for every command run                                                                                                                                                            |
+| Failed leaves, `.attempts/`, `.quarantine/`, `.staging/`, `--force`                            | Kept, with three changes: a failed atomic result leaves no folder, a damaged result goes to quarantine, and an atomic claim is its staging folder                                                    |
+| Reserved file names outside the manifest                                                       | Attempt files                                                                                                                                                                                        |
+| A label overwritten in `run.json` on a cache hit                                               | The label in the invocation record of the command that carried it; the result's record is not touched                                                                                                |
+| `index.json`, written by `dev reindex` and on a prefix miss                                    | Per-owner index logs, appended on every finish                                                                                                                                                       |
+| Deleting results by hand                                                                       | Unchanged                                                                                                                                                                                            |
+| The fit folder: a level's directory, with files every run rewrites                             | The `FitProblem` artifact, written once; each run keeps its own `fit.toml`                                                                                                                           |
+| Held-out tables in the fit level                                                               | In a score only                                                                                                                                                                                      |
+| `predict/` under the fit folder, with no record                                                | `Prediction` results                                                                                                                                                                                 |
+| `obs/` and `event_log/` children, declared in the parent's record afterwards                   | By-products, each with its own records; the parent's record is not touched                                                                                                                           |
+| `-o`, `--save-*` and `--draws-out` recomputing on a cache hit                                  | Exports: copies or renderings of stored files                                                                                                                                                        |
+| `--dates` and `--format` applied while the run writes its `-o` file                            | Rendering options on the export                                                                                                                                                                      |
+| Synthetic data in a fit folder keyed without data                                              | The generated rows are the problem's training rows, hashed by content                                                                                                                                |
+| A profile point with the grid in its identity and its seed from its grid position              | A point without the grid, seeded from its own values                                                                                                                                                 |
+| `ensemble.tsv`, stored, with a position column and labels outside its identity                 | Not stored: the same table, rendered from the cells and the invocation record                                                                                                                        |
+| `store.augment`, adding a file to a completed result                                           | Removed. `reactive_log.tsv`, its one remaining use, is an ordinary result file                                                                                                                       |
+| `find_leaf` by level hash; the `~` collision suffix                                            | Found by run id: group directories followed by their key's suffix as today's levels are, the result verified by its record; the whole run id as a result folder's suffix only when 12 digits collide |
+| The engine identity folded into the model level's key; no build directory                      | camdl's results grouped by build at the top level, `<build label>-<12 hex of the ambient key>/`                                                                                                      |
+| `landscape_html/`, a survey leaf's child written on `--render`                                 | A rendering of the stored `landscape.tsv`; not stored                                                                                                                                                |
+| A profile's base folder holding `fit.meta.json`, the archived configuration and `invocations/` | The invocation record, holding the label and the inputs as given; the profiled problem is a `FitProblem` result; the group directory holds nothing                                                   |
+| Filters on level labels, the seed parsed from `seed_N`, the fourth ancestor                    | The identity record and the dependencies                                                                                                                                                             |
+| `@label` resolved in the default root                                                          | Every handle resolved in the command's one root                                                                                                                                                      |
+| `STORE_LAYOUT` and `dev migrate`                                                               | The `format` number in `store.json`; a root whose format the binary does not know is refused. No migrate command                                                                                     |
+| A `fit.toml` handle matched through a second hash appended to records                          | Refused where one run is needed, with the runs that file produced listed from the invocation records                                                                                                 |
 
 ### Run ids
 
@@ -3835,7 +4717,23 @@ grid leaves the profile point.
 
 ### Folders that change shape
 
-- **One folder per result,** where today there is one directory per level.
+- **Results stay grouped by parts of their identity, at least as finely as
+  today's levels.** What matches: a simulation's model, settings, parameters and
+  scenario; a filter's model, settings and parameters; a survey's model,
+  settings and box; a profile point's focal values and method; a fit run's
+  method; each in the same order as today's levels
+  (`cli/src/resolve.rs:168-172`, `pfilter_cas.rs:168-171`,
+  `survey_cas.rs:158-161`, `profile_cas.rs:130-138`, `fit/cas.rs:654-656`). What
+  differs: a build directory sits above every kind; the seed level, and for a
+  profile the start level, become the result folder; a profile's first group is
+  its problem, without the grid; a fit's first level becomes the `FitProblem`
+  result, named by the model rather than the `fit.toml`'s stem, with the runs
+  inside it under `runs/`; and no group directory holds a file, where today a
+  fit's level directory holds files every run rewrites and a profile's base
+  folder holds a sidecar and `invocations/`.
+- **The last two levels of a simulation merge.** Today a cell sits under a
+  scenario directory and then a seed directory; the seed directory is now the
+  result folder itself.
 - **Compiled models get folders of their own,** as content artifacts.
 - **Fit folders** become a problem folder with `runs/` inside. The `[method]`
   table leaves the shared files, each run keeps its own `fit.toml`, and held-out
@@ -3845,7 +4743,13 @@ grid leaves the profile point.
 - **`obs/` and `event_log/`** keep their place inside the simulation and gain
   records of their own.
 - **Profile folders** become one folder per point. Their per-invocation records
-  become invocation records.
+  become invocation records, and the base folder's sidecar and archived
+  configuration leave the tree: the invocation record holds the inputs as given,
+  and the `FitProblem` holds the problem.
+- **A survey's `landscape_html/` goes away.** The HTML page is rendered from the
+  stored `landscape.tsv` on request.
+- **Every result moves under a build directory,** `<build label>-<12 hex>/` at
+  the top of the root.
 - **`ensembles/` goes away.** The combined table is rendered on request and
   keeps its columns.
 
@@ -3893,17 +4797,18 @@ holds by-products under their upstream.
 
 ### Where today's rewrites of a completed result go
 
-Today a completed result is written again in six ways. In the target a completed
-record is sealed, so each needs another home.
+Today a completed result is written again in seven ways. In the target a
+completed record is sealed, so each needs another home.
 
-| Today                                                           | In the target                                                                                                                                                |
-| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| The end-of-run event report, appended after the commit          | An attempt file, written before `finish`                                                                                                                     |
-| Configuration identities added to a record on a cache hit       | The invocation record of the run that hit, never the result's record                                                                                         |
-| Fit-folder rewrites, and the training partition merged in later | The `FitProblem` artifact, written once; the partition is computed when it is made. It depends on the data, `holdout_after` and the model, not on the method |
-| `augment`, adding `reactive_log.tsv` to a completed result      | Removed; the file is an ordinary result file, written with the result                                                                                        |
-| `output_schema`                                                 | Written at `finish`                                                                                                                                          |
-| `migrate` rewriting old leaves                                  | Nothing; old stores are not read                                                                                                                             |
+| Today                                                                                                  | In the target                                                                                                                                                |
+| ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| The end-of-run event report, appended after the commit                                                 | An attempt file, written before `finish`                                                                                                                     |
+| Configuration identities added to a record on a cache hit                                              | The invocation record of the run that hit, never the result's record                                                                                         |
+| Fit-folder rewrites, and the training partition merged in later                                        | The `FitProblem` artifact, written once; the partition is computed when it is made. It depends on the data, `holdout_after` and the model, not on the method |
+| `augment`, adding `reactive_log.tsv` to a completed result                                             | Removed; the file is an ordinary result file, written with the result                                                                                        |
+| `output_schema`                                                                                        | Written at `finish`                                                                                                                                          |
+| `survey --render` declaring `landscape_html/` in a completed survey's record (`cas_sink.rs:1137-1145`) | Nothing is written: the HTML page is a rendering of the stored `landscape.tsv`                                                                               |
+| `migrate` rewriting old leaves                                                                         | Nothing; old stores are not read                                                                                                                             |
 
 ### A model stored by an older build
 
@@ -3949,9 +4854,10 @@ the two progress files, and that results are named by handle.
 ## Suspected defects in today's code
 
 The reviews turned up four places where today's code may give two different
-results under one run id, or may class an input wrongly. None has been
-reproduced. Each is a question until its test fails, and each test is written
-against today's code, before the command it concerns moves to the new store.
+results under one run id, or may class an input wrongly, and one path that may
+be too long to create. None has been reproduced. Each is a question until its
+test fails, and each test is written against today's code, before the command it
+concerns moves to the new store.
 
 ### A profile's results may depend on the order of its `--sweep` flags
 
@@ -4001,6 +4907,21 @@ against today's code, before the command it concerns moves to the new store.
   the log-likelihood differs, it is an identity input in `pfilter` too.
 - **In the new design.** A group shared between commands must mean the same in
   each, so the two classes cannot both stand.
+
+### A leaf's segment may exceed the limit on one path component
+
+- **What.** A level label is capped at 200 bytes (`runid/src/layout.rs:34`), and
+  a segment is the label, `-` and an 8-hex hash (`layout.rs:110-112`). The
+  commit's escalation appends `~` and all 64 hex digits of the run id to the
+  leaf's segment (`store.rs:1462-1483`). The longest segment is then 200 + 1 +
+  8 + 1 + 64 = 274 bytes, over the 255-byte limit (`NAME_MAX`) that the comment
+  at `layout.rs:30-33` says the cap leaves room for. `mkdir` would fail with
+  `ENAMETOOLONG`. Not reproduced.
+- **The test.** Give a leaf's last level a label of over 200 bytes, occupy its
+  plain and 16-hex paths with folders of another identity so that the commit
+  escalates to the 64-hex suffix, and require the commit to succeed.
+- **In the new design.** A label is capped at 64 bytes, so the longest component
+  is 129 bytes ("How a run id becomes a folder").
 
 ### Documentation found out of date
 
@@ -4065,6 +4986,14 @@ Settled:
   without a claim;
 - naming a stored result after the fact and upgrading a store's format in place
   are future features.
+
+- every primary kind states its whole placement, groups and result label, in
+  `Primary::layout`, which has no default; a by-product supplies only its
+  folder's label; a group is a part of the identity, its directory is never
+  matched back to a key, and the walk follows every directory with the group's
+  suffix and verifies the result by its record;
+- the library offers the choice of grouping results by build at the top level
+  with no default, recorded in `store.json`; camdl groups by build.
 
 No decision is open.
 
@@ -4167,22 +5096,24 @@ Stored<A>  --dep()-->  Dep<A>  -->  a field of the next result's Identity
 
 ### Kinds of stored result
 
-| Trait or type     | What it is                                                                                         | camdl example                                            |
-| ----------------- | -------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
-| `Artifact`        | One kind of stored result: its `KIND`, write mode, identity type, labels type, folder name, layout | `Sim`, `FitProblem`, `FitRun`, `Prediction`, `Score`     |
-| `ContentArtifact` | An artifact whose identity is the digest of its one file. Stored with `Store::put`                 | `CompiledModel`, `Quantities`, `DataTable`               |
-| `Provenance`      | What a content artifact's first writer records beside its file                                     | a compiled model's docs and source                       |
-| `ByProduct`       | An artifact produced by the same computation as another (`type Of`, `upstream`)                    | `Obs` and `EventLog` of `Sim`; `SavedPaths` of `Pfilter` |
-| `Kinds`           | The artifact kinds a project registers when it opens the store                                     | `camdl_kinds()`                                          |
-| `WriteMode`       | `Atomic` (staged, then renamed in) or `InPlace` (visible while it runs)                            | `Sim` is atomic; `FitRun` is in place                    |
-| `Id<A>`           | A typed run id: the hash of kind, ambient identity and identity key                                |                                                          |
-| `Layout`          | Where the folder sits: flat, or inside a parent                                                    | a `FitRun` inside its `FitProblem`                       |
+| Trait or type      | What it is                                                                                                                                  | camdl example                                            |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| `Artifact`         | One kind of stored result: its `KIND`, write mode, identity type and labels type                                                            | every kind                                               |
+| `Primary`          | A kind that is not a by-product; its required `layout` gives the whole placement                                                            | `Sim`, `FitProblem`, `FitRun`, `Prediction`, `Score`     |
+| `ContentArtifact`  | An artifact whose identity is the digest of its one file. Stored with `Store::put`                                                          | `CompiledModel`, `Quantities`, `DataTable`               |
+| `Provenance`       | What a content artifact's first writer records beside its file                                                                              | a compiled model's docs and source                       |
+| `ByProduct`        | An artifact produced by the same computation as another (`type Of`, `upstream`, `label`)                                                    | `Obs` and `EventLog` of `Sim`; `SavedPaths` of `Pfilter` |
+| `Kinds`            | The artifact kinds a project registers when it opens the store                                                                              | `camdl_kinds()`                                          |
+| `WriteMode`        | `Atomic` (staged, then renamed in) or `InPlace` (visible while it runs)                                                                     | `Sim` is atomic; `FitRun` is in place                    |
+| `Id<A>`            | A typed run id: the hash of kind, ambient identity and identity key                                                                         |                                                          |
+| `Layout`, `Placed` | Where the folder sits: under the kind's directory or inside a parent, below groups of the identity; `Placed` adds the result folder's label | a `FitRun` inside its `FitProblem`, grouped by method    |
+| `TopLevel`         | The project's choice, when it opens the store, of grouping results by build at the top level                                                | camdl's `TopLevel::ByBuild`                              |
 
 ### Running and reading
 
 | Trait or type                    | What it is                                                                                       | camdl example                                                                |
 | -------------------------------- | ------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------- |
-| `Store`                          | The only code that reads or writes stored folders. One root per command                          | `Store::open(&root, ambient, camdl_kinds())`                                 |
+| `Store`                          | The only code that reads or writes stored folders. One root per command                          | `Store::open(&root, ambient, camdl_top_level(), camdl_kinds())`              |
 | `StoreRequest`                   | The store-class inputs merged from every source: label, force, root                              | `--label`, `--force`, `output_dir`                                           |
 | `RunInfo`                        | What every result of one command records; owns the invocation record                             | built once in `simulate`, by reference                                       |
 | `Lineage`                        | An upstream recorded and not hashed                                                              | `simulate --fit`'s draws                                                     |

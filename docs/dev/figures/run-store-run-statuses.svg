@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" class="dg" viewBox="0 0 820 290" role="img" aria-label="Run statuses and which one is reused">
+<style>
+.dg{font:13px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+.dg text{fill:#1d1f21}.dg .m{fill:#5d6166}.dg .t{font-weight:600}
+.dg rect,.dg path.box{stroke-width:1.5}
+.dg .box{fill:#ffffff;stroke:#5d6166}
+.dg .id{fill:#e7f0ff;stroke:#0d6efd}.dg .ex{fill:#f1f3f5;stroke:#6c757d}.dg .st{fill:#fff4dc;stroke:#b7791f}
+.dg .ok{fill:#e3f5ea;stroke:#198754}.dg .bad{fill:#fbe7e4;stroke:#c0392b}.dg .amb{fill:#efe8f9;stroke:#7952b3}
+.dg .arrow{stroke:#5d6166;stroke-width:1.5;fill:none}.dg .ah{fill:#5d6166}.dg .dash{stroke-dasharray:5 4}
+</style>
+<defs><marker id="b1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0 0L10 5L0 10z"/></marker></defs>
+<rect class="box" x="10" y="108" width="74" height="40" rx="20"/><text x="47" y="133" text-anchor="middle" class="t">begin</text>
+<path class="arrow" d="M84 128H112" marker-end="url(#b1)"/>
+<path class="box" d="M114 128L204 88L294 128L204 168z"/>
+<text x="204" y="124" text-anchor="middle">completed result</text><text x="204" y="140" text-anchor="middle">for this run id?</text>
+<path class="arrow" d="M204 88V50H330" marker-end="url(#b1)"/><text x="214" y="70" class="m">yes</text>
+<rect class="ok" x="332" y="26" width="200" height="48" rx="8"/><text x="432" y="48" text-anchor="middle" class="t">cache hit</text><text x="432" y="64" text-anchor="middle" class="m">serve it; nothing is computed</text>
+<path class="arrow" d="M294 128H330" marker-end="url(#b1)"/><text x="302" y="120" class="m">no</text>
+<rect class="box" x="332" y="104" width="100" height="48" rx="8"/><text x="382" y="125" text-anchor="middle" class="t">claim</text><text x="382" y="141" text-anchor="middle" class="m">the run id</text>
+<path class="arrow" d="M432 128H462" marker-end="url(#b1)"/>
+<rect class="st" x="464" y="104" width="100" height="48" rx="8"/><text x="514" y="125" text-anchor="middle" class="t">running</text><text x="514" y="141" text-anchor="middle" class="m">owner beats</text>
+<path class="arrow" d="M564 116L638 84" marker-end="url(#b1)"/><text x="582" y="90" class="m">finish</text>
+<rect class="ok" x="640" y="44" width="170" height="68" rx="8" style="stroke-width:2.5"/><text x="725" y="68" text-anchor="middle" class="t">completed, sealed</text><text x="725" y="86" text-anchor="middle" class="m">the only state that</text><text x="725" y="100" text-anchor="middle" class="m">is ever reused</text>
+<path class="arrow" d="M564 140L638 166" marker-end="url(#b1)"/><text x="580" y="170" class="m">error</text>
+<rect class="bad" x="640" y="138" width="170" height="96" rx="8"/><text x="725" y="160" text-anchor="middle" class="t">failed</text><text x="725" y="178" text-anchor="middle" class="m">in-place runs only;</text><text x="725" y="192" text-anchor="middle" class="m">an atomic failure leaves</text><text x="725" y="206" text-anchor="middle" class="m">no folder; the reason is</text><text x="725" y="220" text-anchor="middle" class="m">in the invocation record</text>
+<path class="arrow dash" d="M514 152V196" marker-end="url(#b1)"/>
+<rect class="ex dash" x="354" y="198" width="270" height="62" rx="8"/>
+<text x="489" y="220" text-anchor="middle" class="t">interrupted</text><text x="489" y="238" text-anchor="middle" class="m">record says running, owner's beat stopped.</text><text x="489" y="252" text-anchor="middle" class="m">Derived by readers, never written.</text>
+</svg>

@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" class="dg" viewBox="0 0 820 350" role="img" aria-label="Declared inputs split by class; only identity inputs are hashed into the run id">
+<style>
+.dg{font:13px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+.dg text{fill:#1d1f21}.dg .m{fill:#5d6166}.dg .t{font-weight:600}
+.dg rect,.dg path.box{stroke-width:1.5}
+.dg .box{fill:#ffffff;stroke:#5d6166}
+.dg .id{fill:#e7f0ff;stroke:#0d6efd}.dg .ex{fill:#f1f3f5;stroke:#6c757d}.dg .st{fill:#fff4dc;stroke:#b7791f}
+.dg .ok{fill:#e3f5ea;stroke:#198754}.dg .bad{fill:#fbe7e4;stroke:#c0392b}.dg .amb{fill:#efe8f9;stroke:#7952b3}
+.dg .arrow{stroke:#5d6166;stroke-width:1.5;fill:none}.dg .ah{fill:#5d6166}.dg .dash{stroke-dasharray:5 4}
+</style>
+<defs><marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0 0L10 5L0 10z"/></marker></defs>
+<text x="10" y="16" class="m">declared inputs</text>
+<rect class="id" x="10" y="26" width="215" height="112" rx="8"/>
+<text x="22" y="46" class="t">identity inputs</text><text x="22" y="62" class="m">can change the result</text>
+<text x="22" y="84">model file contents</text><text x="22" y="102">parameter file contents</text><text x="22" y="120">--seed, --dt</text>
+<rect class="ex" x="10" y="152" width="215" height="70" rx="8"/>
+<text x="22" y="172" class="t">execution inputs</text><text x="22" y="188" class="m">must not change the result</text><text x="22" y="209">--parallel</text>
+<rect class="st" x="10" y="236" width="215" height="70" rx="8"/>
+<text x="22" y="256" class="t">labels and requests</text><text x="22" y="272" class="m">recorded, never hashed</text><text x="22" y="293">--label, scenario name, -o path</text>
+
+<path class="arrow" d="M225 82H252" marker-end="url(#a1)"/>
+<rect class="box" x="254" y="48" width="128" height="68" rx="8"/>
+<text x="318" y="76" text-anchor="middle" class="t">resolve</text><text x="318" y="94" text-anchor="middle" class="m">typed steps;</text><text x="318" y="108" text-anchor="middle" class="m">defaults filled in</text>
+<path class="arrow" d="M382 82H410" marker-end="url(#a1)"/>
+<rect class="id" x="412" y="40" width="150" height="84" rx="8"/>
+<text x="487" y="64" text-anchor="middle" class="t">Identity</text><text x="487" y="82" text-anchor="middle" class="m">one typed value</text><text x="487" y="98" text-anchor="middle" class="m">identity key = SHA-256</text><text x="487" y="112" text-anchor="middle" class="m">of its canonical bytes</text>
+<path class="arrow" d="M562 82H606" marker-end="url(#a1)"/>
+<rect class="box" x="608" y="30" width="202" height="104" rx="8"/>
+<text x="709" y="56" text-anchor="middle" class="t">run id</text><text x="709" y="76" text-anchor="middle">SHA-256 of</text><text x="709" y="94" text-anchor="middle">kind, ambient key,</text><text x="709" y="112" text-anchor="middle">identity key</text>
+<rect class="amb" x="608" y="164" width="202" height="58" rx="8"/>
+<text x="709" y="188" text-anchor="middle" class="t">ambient identity</text><text x="709" y="206" text-anchor="middle" class="m">build fingerprint, env switches</text>
+<path class="arrow" d="M709 164V136" marker-end="url(#a1)"/>
+
+<path class="arrow" d="M487 124V238" marker-end="url(#a1)"/>
+<path class="arrow" d="M225 187H330V273H402" marker-end="url(#a1)"/>
+<rect class="box" x="404" y="240" width="166" height="66" rx="8"/>
+<text x="487" y="266" text-anchor="middle" class="t">engine runs</text><text x="487" y="284" text-anchor="middle" class="m">output = f(identity) alone</text>
+<path class="arrow" d="M570 273H606" marker-end="url(#a1)"/>
+<rect class="ok" x="608" y="240" width="202" height="66" rx="8"/>
+<text x="709" y="266" text-anchor="middle" class="t">stored result</text><text x="709" y="284" text-anchor="middle" class="m">filed under its run id</text>
+<text x="10" y="326" class="m">Labels and requests are written to the invocation record instead (figure 5); they never reach the hash.</text>
+</svg>

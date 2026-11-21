@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" class="dg" viewBox="0 0 820 412" role="img" aria-label="Inputs cross a wall where each is classed once; the store then records them and derives the output path from the identity">
+<style>
+.dg{font:13px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+.dg text{fill:#1d1f21}.dg .m{fill:#5d6166}.dg .t{font-weight:600}
+.dg rect,.dg path.box{stroke-width:1.5}
+.dg .box{fill:#ffffff;stroke:#5d6166}
+.dg .id{fill:#e7f0ff;stroke:#0d6efd}.dg .ex{fill:#f1f3f5;stroke:#6c757d}.dg .st{fill:#fff4dc;stroke:#b7791f}
+.dg .ok{fill:#e3f5ea;stroke:#198754}.dg .bad{fill:#fbe7e4;stroke:#c0392b}.dg .amb{fill:#efe8f9;stroke:#7952b3}
+.dg .arrow{stroke:#5d6166;stroke-width:1.5;fill:none}.dg .ah{fill:#5d6166}.dg .dash{stroke-dasharray:5 4}
+</style>
+<defs><marker id="z1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0 0L10 5L0 10z"/></marker></defs>
+<text x="10" y="22" class="m">what the scientist gives</text>
+<rect class="box" x="10" y="36" width="160" height="236" rx="8"/>
+<text x="22" y="60" class="t">arguments</text><text x="22" y="78" class="m">--dt 0.5 --seed 1</text>
+<text x="22" y="108" class="t">settings and data files</text><text x="22" y="126" class="m">params.toml, sir.camdl</text><text x="22" y="144" class="m">(their contents)</text>
+<text x="22" y="174" class="t">environment</text><text x="22" y="192" class="m">switches that change</text><text x="22" y="206" class="m">the software's behaviour</text>
+<text x="22" y="236" class="t">a name for the run</text><text x="22" y="254" class="m">--label baseline</text>
+<path class="arrow" d="M170 154H206" marker-end="url(#z1)"/>
+<text x="265" y="22" text-anchor="middle" class="m">the wall</text>
+<rect class="amb" x="208" y="36" width="114" height="254" rx="8" style="stroke-width:2.5"/>
+<text x="265" y="58" text-anchor="middle" class="t">every input is</text><text x="265" y="73" text-anchor="middle" class="t">classed once</text>
+<rect class="id" x="222" y="86" width="86" height="16" rx="4"/><text x="265" y="98" text-anchor="middle" style="font-size:11px">identity</text>
+<rect class="id" x="222" y="105" width="86" height="16" rx="4"/><text x="265" y="117" text-anchor="middle" style="font-size:11px">expands</text>
+<rect class="id" x="222" y="124" width="86" height="16" rx="4"/><text x="265" y="136" text-anchor="middle" style="font-size:11px">adds</text>
+<rect class="ex" x="222" y="143" width="86" height="16" rx="4"/><text x="265" y="155" text-anchor="middle" style="font-size:11px">execution</text>
+<rect class="ok" x="222" y="162" width="86" height="16" rx="4"/><text x="265" y="174" text-anchor="middle" style="font-size:11px">export</text>
+<rect class="ok" x="222" y="181" width="86" height="16" rx="4"/><text x="265" y="193" text-anchor="middle" style="font-size:11px">render</text>
+<rect class="st" x="222" y="200" width="86" height="16" rx="4"/><text x="265" y="212" text-anchor="middle" style="font-size:11px">store</text>
+<rect class="st" x="222" y="219" width="86" height="16" rx="4"/><text x="265" y="231" text-anchor="middle" style="font-size:11px">recorded</text>
+<rect class="box" x="222" y="238" width="86" height="16" rx="4"/><text x="265" y="250" text-anchor="middle" style="font-size:11px">group</text>
+<rect class="box" x="222" y="257" width="86" height="16" rx="4"/><text x="265" y="269" text-anchor="middle" style="font-size:11px">skip</text>
+<text x="265" y="312" text-anchor="middle" class="m">no class: does not compile</text>
+<text x="450" y="22" text-anchor="middle" class="m">typed structures past the wall</text>
+<rect class="id" x="352" y="36" width="196" height="56" rx="8"/><text x="450" y="60" text-anchor="middle" class="t">Identity</text><text x="450" y="78" text-anchor="middle" class="m">hashed into the run id</text>
+<rect class="ex" x="352" y="104" width="196" height="56" rx="8"/><text x="450" y="128" text-anchor="middle" class="t">Execution</text><text x="450" y="146" text-anchor="middle" class="m">used by the engine only</text>
+<rect class="ok" x="352" y="172" width="196" height="56" rx="8"/><text x="450" y="196" text-anchor="middle" class="t">Exports</text><text x="450" y="214" text-anchor="middle" class="m">copies and renderings</text>
+<rect class="st" x="352" y="240" width="196" height="56" rx="8"/><text x="450" y="264" text-anchor="middle" class="t">Store request</text><text x="450" y="282" text-anchor="middle" class="m">a label, notes to keep</text>
+<path class="arrow" d="M322 64H350" marker-end="url(#z1)"/><path class="arrow" d="M322 132H350" marker-end="url(#z1)"/><path class="arrow" d="M322 200H350" marker-end="url(#z1)"/><path class="arrow" d="M322 268H350" marker-end="url(#z1)"/>
+<text x="700" y="22" text-anchor="middle" class="m">the store, not the scientist, does both</text>
+<rect class="box" x="588" y="36" width="222" height="274" rx="8"/>
+<path class="arrow" d="M548 64H586" marker-end="url(#z1)"/><path class="arrow" d="M548 132H586" marker-end="url(#z1)"/><path class="arrow" d="M548 268H586" marker-end="url(#z1)"/>
+<circle cx="606" cy="58" r="11" class="amb"/><text x="606" y="62" text-anchor="middle" class="t" style="font-size:12px">1</text>
+<text x="624" y="62" class="t">record what went in</text>
+<text x="602" y="84" class="m">every input as given, the build,</text><text x="602" y="98" class="m">the environment: the software</text><text x="602" y="112" class="m">writes it, as a variant caller</text><text x="602" y="126" class="m">writes its settings into its VCF</text>
+<line x1="600" y1="146" x2="798" y2="146" stroke="var(--line)"/>
+<circle cx="606" cy="168" r="11" class="amb"/><text x="606" y="172" text-anchor="middle" class="t" style="font-size:12px">2</text>
+<text x="624" y="172" class="t">name what came out</text>
+<text x="602" y="194" class="m">layout groups parts of the identity</text><text x="602" y="208" class="m">into directory levels:</text>
+<text x="602" y="232" style="font:11px SFMono-Regular,Menlo,monospace">0.3.0-1ae1/sim/sir-6d02/</text>
+<text x="602" y="248" style="font:11px SFMono-Regular,Menlo,monospace">  dt1-5e2a/base-77c0/</text>
+<text x="602" y="264" style="font:11px SFMono-Regular,Menlo,monospace">    slow-9b1e/seed_1-3fa9/</text>
+<text x="602" y="284" class="m" style="font-size:11px">levels: build, model, settings,</text><text x="602" y="297" class="m" style="font-size:11px">params, scenario, then the result</text>
+<text x="10" y="338" class="t">1. The scientist does not track what they ran.</text>
+<text x="10" y="356" class="m">Every input is classed once, in its type, and the software records all of them. Only inputs that can change the result are hashed.</text>
+<text x="10" y="382" class="t">2. The scientist does not name output files.</text>
+<text x="10" y="400" class="m">The folder name is derived from the identity, so it cannot drift from the inputs. A label is a handle for finding the result, never its name.</text>
+</svg>

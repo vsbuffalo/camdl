@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" class="dg" viewBox="0 0 820 330" role="img" aria-label="Results depend on other results by digest; editing a docstring recomputes nothing">
+<style>
+.dg{font:13px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+.dg text{fill:#1d1f21}.dg .m{fill:#5d6166}.dg .t{font-weight:600}
+.dg rect,.dg path.box{stroke-width:1.5}
+.dg .box{fill:#ffffff;stroke:#5d6166}
+.dg .id{fill:#e7f0ff;stroke:#0d6efd}.dg .ex{fill:#f1f3f5;stroke:#6c757d}.dg .st{fill:#fff4dc;stroke:#b7791f}
+.dg .ok{fill:#e3f5ea;stroke:#198754}.dg .bad{fill:#fbe7e4;stroke:#c0392b}.dg .amb{fill:#efe8f9;stroke:#7952b3}
+.dg .arrow{stroke:#5d6166;stroke-width:1.5;fill:none}.dg .ah{fill:#5d6166}.dg .dash{stroke-dasharray:5 4}
+</style>
+<defs><marker id="c1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0 0L10 5L0 10z"/></marker></defs>
+<rect class="box" x="10" y="110" width="120" height="70" rx="8"/><text x="70" y="136" text-anchor="middle" class="t">model file</text><text x="70" y="154" text-anchor="middle" class="m">source text</text><text x="70" y="168" text-anchor="middle" class="m">(.camdl)</text>
+<path class="arrow" d="M130 145H170" marker-end="url(#c1)"/>
+<rect class="box" x="172" y="110" width="96" height="70" rx="8"/><text x="220" y="140" text-anchor="middle" class="t">compile</text><text x="220" y="158" text-anchor="middle" class="m">and split</text>
+<path class="arrow" d="M268 128L318 56" marker-end="url(#c1)"/>
+<path class="arrow" d="M268 145H318" marker-end="url(#c1)"/>
+<path class="arrow" d="M268 162L318 244" marker-end="url(#c1)"/>
+<rect class="id" x="320" y="28" width="220" height="56" rx="8"/><text x="430" y="52" text-anchor="middle" class="t">compiled model</text><text x="430" y="70" text-anchor="middle" class="m">content; digest of its bytes</text>
+<rect class="box" x="320" y="118" width="220" height="56" rx="8"/><text x="430" y="142" text-anchor="middle" class="t">quantities</text><text x="430" y="160" text-anchor="middle" class="m">separate content, own digest</text>
+<rect class="st" x="320" y="216" width="220" height="56" rx="8"/><text x="430" y="240" text-anchor="middle" class="t">names, docstrings</text><text x="430" y="258" text-anchor="middle" class="m">labels: recorded, not hashed</text>
+<path class="arrow" d="M540 56H588" marker-end="url(#c1)"/><text x="548" y="48" class="m">Dep</text>
+<rect class="id" x="590" y="22" width="220" height="108" rx="8"/><text x="700" y="46" text-anchor="middle" class="t">simulation</text>
+<text x="700" y="66" text-anchor="middle" class="m">identity holds a dependency:</text><text x="700" y="82" text-anchor="middle" class="m">upstream run id, file, digest,</text><text x="700" y="98" text-anchor="middle" class="m">plus numerics, params, seed</text><text x="700" y="118" text-anchor="middle" class="m">(no quantities, no names)</text>
+<path class="arrow" d="M700 130V190" marker-end="url(#c1)"/>
+<rect class="ok" x="590" y="192" width="220" height="80" rx="8"/><text x="700" y="216" text-anchor="middle" class="t">observations (by-product)</text>
+<text x="700" y="236" text-anchor="middle" class="m">the simulation's identity record</text><text x="700" y="252" text-anchor="middle" class="m">plus its own settings; stored</text><text x="700" y="266" text-anchor="middle" class="m">inside the simulation's folder</text>
+<text x="10" y="306" class="m">Edit a docstring or add a quantity: the compiled model's digest is unchanged, so the simulation's id is unchanged and nothing is recomputed.</text>
+<text x="10" y="324" class="m">Change the dynamics: its digest changes, so the id of every result that depends on it changes.</text>
+</svg>
