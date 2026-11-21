@@ -13,6 +13,23 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-11-20 — the mean of `beta` and `beta_binomial` excludes 0 and 1
+
+**What.** A constant `mean` of `beta` or `beta_binomial` must lie in the open
+interval `(0, 1)`, not the closed `[0, 1]` that every other probability argument
+keeps. A mean of exactly 0 or 1 makes `alpha = mean * concentration` or
+`beta = (1 - mean) * concentration` zero, which is not a distribution. These
+used to compile.
+
+**Migration.** Write a mean strictly between 0 and 1, or estimate it as a
+parameter of kind `probability`. `binomial` and `bernoulli` `p` and
+`zero_inflated` `pi` still accept 0 and 1.
+
+**Diagnostic.** E379, "observation 'y': the beta `mean` is not a proportion:
+`mean` is 0, outside (0, 1)".
+
+---
+
 ## 2026-11-20 — `-x^2` is `-(x^2)`
 
 **What.** `^` now binds more tightly than unary minus, as in mathematics, so

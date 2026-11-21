@@ -10548,6 +10548,30 @@ let test_probability_args_out_of_range_rejected () =
        "y ~ beta_binomial(n = N_tested, mean = 1.2, concentration = 10)",
        "beta_binomial `mean`") ]
 
+(** The `mean` of `beta` and `beta_binomial` lies in the open interval (0, 1):
+    an endpoint makes a shape parameter zero. Both endpoints are E379, and the
+    message says "outside (0, 1)". gh#1338 *)
+let test_beta_mean_open_interval () =
+  List.iter (fun (columns, measurement, contains) ->
+      compile_expect_error_code ~code:"E379" ~contains
+        (probability_arg_src ~columns ~measurement ()))
+    [ ("time : time, y : probability",
+       "y ~ beta(mean = 0, concentration = 10)", "`mean` is 0, outside (0, 1)");
+      ("time : time, y : probability",
+       "y ~ beta(mean = lab + 0.1, concentration = 10)", "`mean` is 1, outside (0, 1)");
+      ("time : time, y : count",
+       "y ~ beta_binomial(n = N_tested, mean = 0, concentration = 10)",
+       "`mean` is 0, outside (0, 1)");
+      ("time : time, y : count",
+       "y ~ beta_binomial(n = N_tested, mean = 1, concentration = 10)",
+       "`mean` is 1, outside (0, 1)") ];
+  (* A value strictly inside compiles, and the closed families keep both
+     endpoints. *)
+  ignore (compile_expect_ok (probability_arg_src ~columns:"time : time, y : probability"
+    ~measurement:"y ~ beta(mean = 0.5, concentration = 10)" ()));
+  ignore (compile_expect_ok (probability_arg_src ~columns:"time : time, y : count"
+    ~measurement:"y ~ binomial(n = N_tested, p = 1)" ()))
+
 (** A `diagnostic_test`'s base `p` is checked as written, not as rewritten:
     with `sens = spec = 0.5` the rewritten `p` is 0.5 whatever the base's. *)
 let test_diagnostic_test_base_p_checked_as_written () =
@@ -19695,6 +19719,7 @@ let () =
       Alcotest.test_case "gh#1323: E379 non-finite constant sens/spec"    `Quick test_diagnostic_test_accuracy_non_finite_rejected;
       Alcotest.test_case "gh#1323: sens/spec in [0,1] accepted"           `Quick test_diagnostic_test_accuracy_in_range_ok;
       Alcotest.test_case "gh#1328: E379 constant probability arguments"   `Quick test_probability_args_out_of_range_rejected;
+      Alcotest.test_case "gh#1338: E379 beta mean excludes 0 and 1"        `Quick test_beta_mean_open_interval;
       Alcotest.test_case "gh#1328: E379 diagnostic_test base p as written" `Quick test_diagnostic_test_base_p_checked_as_written;
       Alcotest.test_case "gh#1328: E379 diagnostic_test sens reported once" `Quick test_diagnostic_test_sens_reported_once;
       Alcotest.test_case "gh#1328: E379 init-law probabilities"           `Quick test_init_law_probability_rejected;

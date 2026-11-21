@@ -3965,9 +3965,13 @@ and `beta_binomial`'s `mean` are dimensionless fractions, fed by a proportion
 **E304**, and so is a fraction given to a count argument. One of these
 arguments, or `zero_inflated`'s `pi` (§12.2.2), that is a compile-time constant
 (a number, arithmetic on numbers, or an unindexed `let` of one, as for the
-weights of a destination split, §9.1.2) must be a finite number in `[0, 1]`:
-`p = 1.5` is **E379**. A parameter is not checked when the model is compiled;
-declaring it `probability` keeps its values in `[0, 1]` (§4.4).
+weights of a destination split, §9.1.2) must be a finite number in `[0, 1]`,
+except the `mean` of `beta` and `beta_binomial`, which must lie in the open
+interval `(0, 1)`: a mean of 0 or 1 makes `alpha = mean · concentration` or
+`beta = (1 − mean) · concentration` zero, which is not a distribution. `p = 1.5`
+is **E379**, and so is `mean = 0` or `mean = 1` ("outside (0, 1)"). A parameter
+is not checked when the model is compiled; declaring it `probability` keeps its
+values in `[0, 1]` (§4.4).
 
 The two `beta_binomial` forms are equivalent: `mean`/`concentration` lowers to
 `alpha = mean · concentration`, `beta = (1 − mean) · concentration`. Mixing the
@@ -7391,7 +7395,7 @@ information.
 | E360 | Error   | Arithmetic with no meaning on a definite instant: `Instant + Instant`, a `sum` of instants, `k * Instant`, `Duration − Instant`, `Instant +` a unitless constant, a conditional choosing between an Instant and a duration (§2.1) |
 | E377 | Error   | A stratified compartment is named without indices in a transition's stoichiometry (§8.3) |
 | E378 | Error   | A reactive trigger's threshold is neither a constant nor a parameter (§13.9) |
-| E379 | Error   | A probability-valued distribution argument (`p`, `pi`, a `beta`/`beta_binomial` `mean`, a `diagnostic_test` `sens` or `spec`) that is a constant outside `[0, 1]` or not a finite number, in a measurement or an initial-value law (§12.2) |
+| E379 | Error   | A probability-valued distribution argument (`p`, `pi`, a `diagnostic_test` `sens` or `spec`) that is a constant outside `[0, 1]`, or a `beta`/`beta_binomial` `mean` that is a constant outside `(0, 1)`, or either not a finite number, in a measurement or an initial-value law (§12.2) |
 | E423 | Error   | A destination split's constant weights are not a probability distribution: a weight is not finite or lies outside [0, 1], or all are constant and do not sum to 1 (within `1e-9`) (§9.1.2) |
 | W103 | Warning | Let binding name shadows a stratum value in some dimension                                |
 

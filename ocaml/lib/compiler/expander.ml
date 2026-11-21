@@ -9162,12 +9162,15 @@ type probability_arg = {
   pa_arg     : string;
   pa_meaning : string;
   pa_noun    : string;
+  pa_open    : bool;  (* the endpoints 0 and 1 are excluded *)
   pa_expr    : expr;
 }
 
-(* The arguments of a distribution, as written, whose value lies in [0, 1]:
-   `binomial` and `bernoulli` `p`, `zero_inflated` `pi`, and the `mean` of
-   `beta` and of `beta_binomial` (spec §12.2, "Proportion arguments"). A
+(* The arguments of a distribution, as written, whose value is a probability
+   or proportion: `binomial` and `bernoulli` `p` and `zero_inflated` `pi`, in
+   [0, 1], and the `mean` of `beta` and of `beta_binomial`, in the open
+   interval (0, 1) because an endpoint makes a shape parameter zero (spec
+   §12.2, "Proportion arguments"). A
    `diagnostic_test` contributes its base's arguments as written and its
    `sens` and `spec`, rather than the rewritten `p`, whose value cannot say
    which of the three is wrong. A reported distribution has none. *)
@@ -9177,34 +9180,35 @@ let rec probability_args (l : likelihood_kind) (acc : test_accuracy option)
   | Some ta ->
     let accuracy arg meaning e =
       { pa_family = "diagnostic_test"; pa_arg = arg; pa_meaning = meaning;
-        pa_noun = "a probability"; pa_expr = e } in
+        pa_noun = "a probability"; pa_open = false; pa_expr = e } in
     probability_args ta.ta_base None
     @ [ accuracy "sens" "an infected individual tests positive" ta.ta_sens;
         accuracy "spec" "an uninfected individual tests negative" ta.ta_spec ]
   | None ->
     let table = match l with
       | LikBinomial _ ->
-        [ ("binomial", "p", "each of the `n` trials is a success", "a probability") ]
+        [ ("binomial", "p", "each of the `n` trials is a success", "a probability", false) ]
       | LikBernoulli _ ->
-        [ ("bernoulli", "p", "the outcome is 1", "a probability") ]
+        [ ("bernoulli", "p", "the outcome is 1", "a probability", false) ]
       | LikZeroInflatedNegBinomial _ ->
-        [ ("zero_inflated", "pi", "a count is a structural zero", "a probability") ]
+        [ ("zero_inflated", "pi", "a count is a structural zero", "a probability", false) ]
       | LikBeta _ ->
-        [ ("beta", "mean", "", "a proportion") ]
+        [ ("beta", "mean", "", "a proportion", true) ]
       | LikBetaBinomial _ ->
-        [ ("beta_binomial", "mean", "", "a probability") ]
+        [ ("beta_binomial", "mean", "", "a probability", true) ]
       | LikNegBinomial _ | LikPoisson _ | LikNormal _ | LikReported _ -> []
     in
-    List.concat_map (fun (family, arg, meaning, noun) ->
+    List.concat_map (fun (family, arg, meaning, noun, open_) ->
       List.filter_map (fun (k, e) ->
         if k = arg then
           Some { pa_family = family; pa_arg = arg; pa_meaning = meaning;
-                 pa_noun = noun; pa_expr = e }
+                 pa_noun = noun; pa_open = open_; pa_expr = e }
         else None) (likelihood_kwargs l)) table
 
 (* E379: a probability-valued argument ([probability_args]) that is a
    compile-time constant ([const_value], the evaluator E423 uses) and either is
-   not a finite number or lies outside [0, 1]. A parameter is not a constant
+   not a finite number or lies outside its interval, [0, 1] or, for the `mean`
+   of `beta` and `beta_binomial`, (0, 1). A parameter is not a constant
    and is not checked here; one declared `probability` is bounded by its kind
    (spec §4.4). [subject] names the declaration the distribution belongs to,
    and opens the message; [loc] is the span of the distribution call. Shared
@@ -9229,31 +9233,33 @@ let check_probability_args ctx ~(subject : string) ~(loc : Diagnostics.loc)
           pa.pa_arg pa.pa_meaning
       | ("beta" | "beta_binomial"), _ ->
         Printf.sprintf
-          "`mean` is the expected %s, so it lies in [0, 1]; `alpha = mean * \
+          "`mean` is the expected %s, so it lies in (0, 1); `alpha = mean * \
            concentration` and `beta = (1 - mean) * concentration` are \
-           positive only inside it"
+           positive only strictly inside it"
           (if pa.pa_family = "beta" then "value of the observed proportion"
            else "probability of success of each of the `n` trials")
       | _ ->
         Printf.sprintf "`%s` is the probability that %s, so it lies in [0, 1]"
           pa.pa_arg pa.pa_meaning
     in
+    let interval = if pa.pa_open then "(0, 1)" else "[0, 1]" in
     let err message =
       Diagnostics.error ctx.diags ~code:"E379" ~loc
         ~message:(Printf.sprintf "%s: %s is not %s: %s"
           subject what pa.pa_noun message)
         ~detail
         ~hint:(Printf.sprintf
-          "write `%s` as a value in [0, 1], such as `%s = 0.95`, or estimate \
-           it as a parameter declared `probability`"
-          pa.pa_arg pa.pa_arg)
+          "write `%s` as a value in %s, such as `%s = %s`, or estimate it as \
+           a parameter declared `probability`"
+          pa.pa_arg interval pa.pa_arg (if pa.pa_open then "0.5" else "0.95"))
         ()
     in
     match const_value ctx pa.pa_expr with
     | Some v when not (Float.is_finite v) ->
       err (Printf.sprintf "`%s` is not a finite number (%g)" pa.pa_arg v)
-    | Some v when v < 0.0 || v > 1.0 ->
-      err (Printf.sprintf "`%s` is %.12g, outside [0, 1]" pa.pa_arg v)
+    | Some v when (if pa.pa_open then v <= 0.0 || v >= 1.0
+                   else v < 0.0 || v > 1.0) ->
+      err (Printf.sprintf "`%s` is %.12g, outside %s" pa.pa_arg v interval)
     | Some _ | None -> ())
     (probability_args l acc)
 
