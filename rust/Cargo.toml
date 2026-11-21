@@ -56,6 +56,27 @@ ir = { path = "crates/ir" }
 # because it's in the same workspace.
 external-harness = { path = "crates/external-harness" }
 
+# The simulation engine, the inference stack and every third-party crate are
+# optimized in the dev profile, which `cargo test` inherits: the inference
+# tests run samplers and particle filters for thousands of iterations, and the
+# sim suite runs about 4.5 times faster optimized. Debug assertions and
+# overflow checks are set per profile, not per package, so they stay on.
+# rustc does not reorder or contract floating-point operations at any
+# opt-level, so results do not change. `cli` and the other workspace crates
+# stay at opt-level 0, so an edit to them rebuilds as fast as before.
+# Measurement: docs/dev/notes/2026-11-21-optimized-test-profile.md.
+[profile.dev.package.sim]
+opt-level = 2
+
+[profile.dev.package.numerics]
+opt-level = 2
+
+[profile.dev.package.score]
+opt-level = 2
+
+[profile.dev.package."*"]
+opt-level = 2
+
 # Profiling profile: release-grade codegen + line tables so `samply`/`perf`
 # can resolve symbols and source lines. Kept separate so the shipped
 # `release` profile stays lean. Build with `cargo build --profile profiling`.
