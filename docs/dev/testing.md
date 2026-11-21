@@ -406,6 +406,18 @@ tests the queue itself: with two slots and three jobs, at most two run at once
 and two do; a holder killed with SIGKILL frees its slot; a process left behind
 by the command does not hold it; the exit status is the command's.
 
+**`make gate-timing` measures where a gate's time goes.** It runs `make test`
+(or `TARGET=<name>`) with every recipe line and every line of output
+timestamped, then prints the wall-clock time and slot wait, the longest recipe
+lines, each cargo invocation split into compile time, time inside test harnesses
+and the remainder, and each test binary's launch overhead: the time from cargo's
+`Running` line to the binary's result, minus the time libtest reports for its
+own tests. On macOS that overhead includes the security scan the system makes on
+the first launch of a newly linked binary. The log is kept in
+`rust/target/gate-timing/`, and `scripts/gate_timing_report.py <log>` reprints
+the report. The timed run is a real `make test`: it queues for a slot and writes
+a gate stamp when it passes.
+
 **Pre-push hook (`.githooks/pre-push`, installed via `core.hooksPath`).**
 Mirrors CI — runs locally on every `git push`:
 
@@ -417,6 +429,22 @@ Mirrors CI — runs locally on every `git push`:
    `tests/fixtures/regression/ir/` (which live outside the first two, so a
    reactive/regression compile-drift would otherwise slip through)
 5. `make test-integration`
+
+**The hook skips a commit whose tree already passed `make test`.** Each of its
+five steps is also part of `make test`, so a push straight after a passing gate
+would run the same tests a second time. A passing `make test` therefore records
+the git tree hash it tested in `<git common dir>/camdl-gate-passed/`, and the
+hook exits at once when every pushed commit's tree has a record. The tree hash
+covers every tracked file's path and content, so a record also covers an amended
+message or a rebase that leaves the content unchanged, and a record written in
+one worktree covers the same content pushed from another.
+`scripts/gate-stamp.sh` writes a record only when the checkout had no
+uncommitted change and no untracked file under `rust/`, `ocaml/`, `tests/`,
+`ir/`, `scripts/`, `docs/` or `.githooks/` when the run started, and was in the
+same state when it ended. Records are removed after 14 days.
+`make test-gate-stamp` tests these rules. A record does not cover state outside
+the repository, such as the installed opam packages; CI runs the full gate on
+every push and pull request that changes code, whether or not a record exists.
 
 (The book used to be built here via `mdbook`; it now lives in `../camdl-book`
 with its own CI. Remove any stale `.githooks/pre-push` entry that still invokes

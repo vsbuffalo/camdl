@@ -159,14 +159,22 @@ export CARGO_BUILD_JOBS
 TEST_ENV := RAYON_NUM_THREADS=$(or $(RAYON_NUM_THREADS),2)
 endif
 
-.PHONY: test lint test-ocaml test-rust test-inference test-integration test-docs test-cli-docs test-data-spec test-dates-doc test-install test-slot-queue
+.PHONY: test lint test-ocaml test-rust test-inference test-integration test-docs test-cli-docs test-data-spec test-dates-doc test-install test-slot-queue test-gate-stamp
 
 # `make test` runs the full surface. The Rust suite is split into two groups so
 # CI can run and badge them independently (see .github/workflows/): test-rust =
 # everything except the sim crate; test-inference = the sim crate (simulation
 # engine + the inference stack). Their union is the whole workspace.
+#
+# A passing run records the source tree it tested (scripts/gate-stamp.sh), and
+# the pre-push hook skips its own run for a commit whose tree is recorded.
+# GATE_TREE is read when this make starts, before any prerequisite runs, and
+# is empty if the checkout has uncommitted changes, in which case no stamp is
+# written.
 ifeq ($(TEST_SLOT_QUEUED),)
-test: lint test-ocaml check-reactive-golden check-quantities-golden check-contrasts-golden check-declared-names-golden check-hoisted-identity-golden check-diff-pairs-golden test-rust test-inference test-integration test-docs test-cli-docs test-install test-slot-queue
+GATE_TREE := $(if $(filter test,$(MAKECMDGOALS)),$(shell bash scripts/gate-stamp.sh tree))
+test: lint test-ocaml check-reactive-golden check-quantities-golden check-contrasts-golden check-declared-names-golden check-hoisted-identity-golden check-diff-pairs-golden test-rust test-inference test-integration test-docs test-cli-docs test-install test-slot-queue test-gate-stamp
+	@bash scripts/gate-stamp.sh write "$(GATE_TREE)"
 endif
 
 # Clippy, the same invocation CI's `test` job runs as its second step. Kept in
@@ -361,6 +369,30 @@ test-install:
 # on Linux, which exercises the flock path; locally it exercises lockf.
 test-slot-queue:
 	bash tests/test_slot_test.sh
+
+# The record of trees that passed `make test` (scripts/gate-stamp.sh), which
+# the pre-push hook reads to skip a second run: a stamp is written only for a
+# clean checkout that did not change during the run, and found from any
+# worktree. Offline, under a second, in private scratch repositories.
+test-gate-stamp:
+	bash tests/gate_stamp_test.sh
+
+# `make test`, with the start and end of every recipe line and every line of
+# output timestamped (scripts/timed_shell.py, passed to make as its SHELL and
+# so to the nested make inside the test slot), then a report of where the time
+# went: slot wait, each recipe line, cargo's compile time against time inside
+# test harnesses, and each test binary's launch overhead
+# (scripts/gate_timing_report.py). TARGET=<name> times another target. The log
+# is kept in rust/target/gate-timing/; the exit status is the timed target's.
+GATE_TIMING_DIR := $(abspath rust/target/gate-timing)
+TARGET ?= test
+.PHONY: gate-timing
+gate-timing:
+	@mkdir -p $(GATE_TIMING_DIR)
+	@log=$(GATE_TIMING_DIR)/$$(date +%Y%m%dT%H%M%S)-$(TARGET).tsv; rc=0; \
+	CAMDL_GATE_TIMING_LOG=$$log $(MAKE) $(TARGET) SHELL=$(abspath scripts/timed_shell.py) || rc=$$?; \
+	echo; python3 scripts/gate_timing_report.py $$log; \
+	echo "log: $$log"; exit $$rc
 
 # ── Golden file management ────────────────────────────────────────────────────
 
