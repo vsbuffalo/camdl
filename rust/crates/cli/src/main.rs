@@ -41,6 +41,7 @@ mod prequential_out; // the one prequential.tsv/.json writer (gh#650)
 mod pfilter_cas;    // gh#147 (M3.3): pfilter-eval CAS identity (model/config/params/seed)
 mod pfilter_config; // ResolvedPfilterConfig: pfilter's one resolved configuration; identity and filter derive from it
 mod caltime_load;   // dated-data loader: column detection + date→internal-time (2026-05-22)
+mod design;         // `camdl design lhs`: a Latin-hypercube design as a `--sweep-file` TSV
 mod docs;           // `camdl docs <topic>` — embedded, version-locked usage docs
 mod fit;
 mod compare;
@@ -194,6 +195,10 @@ pub(crate) enum Command {
     /// See `camdl survey --help` for full notes on when to trust
     /// the output and the known limitations.
     Survey(args::SurveyArgs),
+
+    /// Write a design: a table of parameter points for `simulate --sweep-file`
+    #[command(subcommand)]
+    Design(DesignCmd),
 
     /// Browse cached runs as a table
     List(args::ListArgs),
@@ -428,6 +433,12 @@ pub(crate) enum LineageCmd {
     Cohort(args::LineageCohortArgs),
 }
 
+#[derive(Subcommand)]
+pub(crate) enum DesignCmd {
+    /// A Latin-hypercube design over a fit config's estimated parameters
+    Lhs(args::DesignLhsArgs),
+}
+
 /// Captures all remaining argv tokens verbatim. Used only by Compile/Check/Inspect
 /// which forward raw argv to camdlc and don't benefit from typed parsing.
 #[derive(clap::Args)]
@@ -559,6 +570,7 @@ fn main() {
         Command::If2(a)                 => if2::cmd_if2(&a),
         Command::Profile(a)             => profile::cmd_profile(&a, compile),
         Command::Survey(a)              => survey::cmd_survey(&a, compile),
+        Command::Design(DesignCmd::Lhs(a)) => design::cmd_design_lhs(&a, compile),
         Command::Lineage(LineageCmd::Realize(a)) => lineage::cmd_lineage_realize(&a),
         Command::Lineage(LineageCmd::Tree(a)) => lineage::cmd_lineage_tree(&a),
         Command::Lineage(LineageCmd::Sojourn(a)) => lineage::cmd_lineage_sojourn(&a),

@@ -2180,6 +2180,57 @@ pub struct ProfileArgs {
     pub backend: Option<String>,
 }
 
+// ─── design ───────────────────────────────────────────────────────────────────
+
+/// `camdl design lhs MODEL --fit FIT.toml --n N`: a Latin-hypercube design
+/// over a fit config's estimated parameters, written as a `--sweep-file` TSV.
+#[derive(Args)]
+#[command(after_help = colored_help!("\
+EXAMPLES
+
+  # 200 points over the search boxes of fit.toml's [estimate] parameters
+  camdl design lhs model.camdl --fit fit.toml --n 200 --seed 1 -o design.tsv
+
+  # Simulate the model at every point of the design
+  camdl simulate model.camdl --sweep-file design.tsv
+
+OUTPUT
+
+  A TSV: a `point_id` column (0-based), then one column per estimated
+  parameter, in the order of the fit config's [estimate] table. Values are
+  on the natural scale and read back to the same floating-point numbers.
+  The same model, fit config, --n and --seed give the same bytes. Nothing is
+  written to the store.
+
+  Each parameter's search box is its `bounds` in [estimate], else the range
+  the model declares. The box is cut into --n bins of equal width, on the log
+  scale for a positive parameter whose lower bound is above zero and on the
+  linear scale otherwise, and each bin holds one point. A parameter whose
+  box has an infinite end is refused.
+"))]
+pub struct DesignLhsArgs {
+    /// IR JSON or .camdl model file
+    pub model: PathBuf,
+
+    /// The fit config (or a stored fit's handle) whose [estimate] parameters
+    /// are sampled, each within its search box. The model sampled is MODEL;
+    /// the config's [model] is not read.
+    #[arg(long)]
+    pub fit: PathBuf,
+
+    /// Number of design points, at least 2.
+    #[arg(long)]
+    pub n: usize,
+
+    /// RNG seed
+    #[arg(long, default_value_t = 1)]
+    pub seed: u64,
+
+    /// Write the design to this file (default: stdout).
+    #[arg(short, long)]
+    pub output: Option<PathBuf>,
+}
+
 // ─── survey ───────────────────────────────────────────────────────────────────
 
 #[derive(Args)]
