@@ -121,6 +121,9 @@ jobs:
         # the only place its flock branch runs (local macOS runs use lockf).
         run: make test-slot-queue
 
+      - name: Gate stamp
+        run: make test-gate-stamp
+
   # Always-runs required gate. Passes when `test` succeeded OR was skipped
   # (doc-only change); fails only when `test` genuinely failed or was cancelled,
   # or the change-detector itself failed. This is the check to require in branch
