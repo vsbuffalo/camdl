@@ -1,4 +1,4 @@
-{"ir_version":"0.48","validated_by":"ocaml-compiler-v0.48","model":{"name":"sir_pow_zero_base","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.49","validated_by":"ocaml-compiler-v0.49","model":{"name":"sir_pow_zero_base","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S","kind":"integer"},
 {"name":"I","kind":"integer"},
 {"name":"R","kind":"integer"}
@@ -9,7 +9,7 @@
 {"name":"beta","value":{"mode":"required"},"param_kind":"rate","param_dim":null},
 {"name":"gamma","value":{"mode":"required"},"param_kind":"rate","param_dim":null},
 {"name":"alpha","value":{"mode":"estimated","bounds":[1.0,2.0],"prior":"flat"},"param_kind":"positive","param_dim":[0,0]}
-],"initial_conditions":{"S":{"deterministic":{"const":990.0}},"I":{"deterministic":{"const":10.0}},"R":{"deterministic":{"const":0.0}}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":30.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[],"model_structure":{"dimensions":[],"compartment_dims":{"S":[],"I":[],"R":[]},"base_compartments":["S","I","R"],"transmission_transitions":["infection"],"infectious_compartments":["R","I"]},"bindings":[
+],"initial_conditions":{"S":{"deterministic":{"const":990.0}},"I":{"deterministic":{"const":10.0}},"R":{"deterministic":{"const":0.0}}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":30.0,"dt":null,"rng_seed":null},"scenarios":[],"model_structure":{"dimensions":[],"compartment_dims":{"S":[],"I":[],"R":[]},"base_compartments":["S","I","R"],"transmission_transitions":["infection"],"infectious_compartments":["R","I"]},"bindings":[
 {"name":"N","expr":{"pop_sum":["S","I","R"]}}
 ]},"declared":{"schema_version":1,"compile_inputs":{"set_values":[],"files":[]},"time_unit":"days","description":null,"origin":null,"dimensions":[],"compartments":[
 {"name":"S","kind":"integer","dims":[],"expands_to":["S"],"source_text":"S"},

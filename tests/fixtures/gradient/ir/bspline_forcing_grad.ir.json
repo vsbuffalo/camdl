@@ -1,4 +1,4 @@
-{"ir_version":"0.48","validated_by":"ocaml-compiler-v0.48","model":{"name":"bspline_forcing_grad","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.49","validated_by":"ocaml-compiler-v0.49","model":{"name":"bspline_forcing_grad","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"X","kind":"integer"},
 {"name":"D1","kind":"integer"},
 {"name":"D2","kind":"integer"},
@@ -25,7 +25,7 @@
 {"name":"c5","value":{"mode":"estimated","bounds":[-3.0,3.0],"prior":"flat"},"param_kind":"real","param_dim":[0,0]},
 {"name":"c6","value":{"mode":"estimated","bounds":[-3.0,3.0],"prior":"flat"},"param_kind":"real","param_dim":[0,0]},
 {"name":"a","value":{"mode":"estimated","bounds":[-3.0,3.0],"prior":"flat"},"param_kind":"real","param_dim":[0,0]}
-],"initial_conditions":{"X":{"deterministic":{"const":1000.0}}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":80.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[],"model_structure":{"dimensions":[],"compartment_dims":{"X":[],"D1":[],"D2":[],"D3":[],"D4":[],"D5":[]},"base_compartments":["X","D1","D2","D3","D4","D5"],"transmission_transitions":[],"infectious_compartments":[]}},"declared":{"schema_version":1,"compile_inputs":{"set_values":[],"files":[]},"time_unit":"days","description":null,"origin":null,"dimensions":[],"compartments":[
+],"initial_conditions":{"X":{"deterministic":{"const":1000.0}}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":80.0,"dt":null,"rng_seed":null},"scenarios":[],"model_structure":{"dimensions":[],"compartment_dims":{"X":[],"D1":[],"D2":[],"D3":[],"D4":[],"D5":[]},"base_compartments":["X","D1","D2","D3","D4","D5"],"transmission_transitions":[],"infectious_compartments":[]}},"declared":{"schema_version":1,"compile_inputs":{"set_values":[],"files":[]},"time_unit":"days","description":null,"origin":null,"dimensions":[],"compartments":[
 {"name":"X","kind":"integer","dims":[],"expands_to":["X"],"source_text":"X"},
 {"name":"D1","kind":"integer","dims":[],"expands_to":["D1"],"source_text":"D1"},
 {"name":"D2","kind":"integer","dims":[],"expands_to":["D2"],"source_text":"D2"},

@@ -1,4 +1,4 @@
-{"ir_version":"0.48","validated_by":"ocaml-compiler-v0.48","model":{"name":"table_time_dimension","version":"0.3","time_unit":"days","description":null,"compartments":[
+{"ir_version":"0.49","validated_by":"ocaml-compiler-v0.49","model":{"name":"table_time_dimension","version":"0.3","time_unit":"days","description":null,"compartments":[
 {"name":"S_north","kind":"integer"},
 {"name":"S_south","kind":"integer"},
 {"name":"I_north","kind":"integer"},
@@ -16,7 +16,7 @@
 ],"interventions":[],"observations":[],"parameters":[
 {"name":"beta","value":{"mode":"estimated","bounds":[0.001,2.0],"prior":"flat"},"param_kind":"rate","param_dim":null},
 {"name":"gamma","value":{"mode":"estimated","bounds":[0.01,1.0],"prior":"flat"},"param_kind":"rate","param_dim":null}
-],"initial_conditions":{"S_north":{"deterministic":{"const":990.0}},"I_north":{"deterministic":{"const":10.0}},"S_south":{"deterministic":{"const":495.0}},"I_south":{"deterministic":{"const":5.0}}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"format":"tsv","trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":20.0,"time_semantics":"continuous","dt":null,"rng_seed":null},"scenarios":[],"model_structure":{"dimensions":[{"name":"patch","values":["north","south"]}],"compartment_dims":{"S":["patch"],"I":["patch"]},"base_compartments":["S","I"],"transmission_transitions":["infection"],"infectious_compartments":["I"]},"bindings":[
+],"initial_conditions":{"S_north":{"deterministic":{"const":990.0}},"I_north":{"deterministic":{"const":10.0}},"S_south":{"deterministic":{"const":495.0}},"I_south":{"deterministic":{"const":5.0}}},"output":{"times":{"regular":{"start":0.0,"step":1.0}},"trajectory":true,"observations":true},"simulation":{"t_start":0.0,"t_end":20.0,"dt":null,"rng_seed":null},"scenarios":[],"model_structure":{"dimensions":[{"name":"patch","values":["north","south"]}],"compartment_dims":{"S":["patch"],"I":["patch"]},"base_compartments":["S","I"],"transmission_transitions":["infection"],"infectious_compartments":["I"]},"bindings":[
 {"name":"N_north","expr":{"pop_sum":["S_north","I_north"]}},
 {"name":"N_south","expr":{"pop_sum":["S_south","I_south"]}}
 ]},"declared":{"schema_version":1,"compile_inputs":{"set_values":[],"files":[{"path":"data/weeks.tsv","sha256":"22d5675e845400ecb1dd30fd00e6fcd22447ea0f93fb7e012a872ee3f10677f7"},{"path":"data/contact_by_week.tsv","sha256":"dc0dad281ba18de67f3742ef9f3a264ec9c08c2cb51f34bddaed934557072924"}]},"time_unit":"days","description":null,"origin":null,"dimensions":[

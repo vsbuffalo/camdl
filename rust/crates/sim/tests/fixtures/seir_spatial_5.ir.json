@@ -1,5 +1,5 @@
 {
-  "ir_version": "0.48",
+  "ir_version": "0.49",
   "validated_by": "hand-curated-fixture",
   "model": {
     "name": "seir_spatial_5",
@@ -9507,14 +9507,12 @@
           "step": 1.0
         }
       },
-      "format": "tsv",
       "trajectory": true,
       "observations": true
     },
     "simulation": {
       "t_start": 0.0,
       "t_end": 1825.0,
-      "time_semantics": "continuous",
       "dt": null,
       "rng_seed": null
     },
