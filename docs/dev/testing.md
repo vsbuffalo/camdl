@@ -406,6 +406,18 @@ tests the queue itself: with two slots and three jobs, at most two run at once
 and two do; a holder killed with SIGKILL frees its slot; a process left behind
 by the command does not hold it; the exit status is the command's.
 
+**`make gate-timing` measures where a gate's time goes.** It runs `make test`
+(or `TARGET=<name>`) with every recipe line and every line of output
+timestamped, then prints the wall-clock time and slot wait, the longest recipe
+lines, each cargo invocation split into compile time, time inside test harnesses
+and the remainder, and each test binary's launch overhead: the time from cargo's
+`Running` line to the binary's result, minus the time libtest reports for its
+own tests. On macOS that overhead includes the security scan the system makes on
+the first launch of a newly linked binary. The log is kept in
+`rust/target/gate-timing/`, and `scripts/gate_timing_report.py <log>` reprints
+the report. The timed run is a real `make test`: it queues for a slot and writes
+a gate stamp when it passes.
+
 **Pre-push hook (`.githooks/pre-push`, installed via `core.hooksPath`).**
 Mirrors CI — runs locally on every `git push`:
 
