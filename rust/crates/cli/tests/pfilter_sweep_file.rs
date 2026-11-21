@@ -372,26 +372,67 @@ fn what_is_refused_beside_a_design() {
     refused(&[], "parameter 'beta' has no value");
 }
 
-/// Test 7: a design file in the format `camdl design lhs` writes (a
-/// `point_id` column, then parameter columns) is scored end to end, each row
-/// under its own id.
+/// A design file's own `point_id` column names the rows of the table, in file
+/// order.
 #[test]
-fn a_point_id_design_is_scored_under_its_ids() {
+fn rows_are_written_under_the_files_point_ids() {
     let dir = tempfile::tempdir().unwrap();
     fixture(dir.path());
     std::fs::write(
         dir.path().join("design.tsv"),
-        "point_id\tbeta\tgamma\n4\t0.71\t1.43\n7\t1.12\t1.61\n9\t0.93\t1.27\n12\t0.55\t1.88\n",
+        "point_id\tbeta\tgamma\n4\t0.71\t1.43\n7\t1.12\t1.61\n9\t0.93\t1.27\n",
     ).unwrap();
     let mut args: Vec<&str> = COMMON.to_vec();
-    args.extend(["1", "--replicates", "2"]);
+    args.push("1");
     let (rows, _) = design(dir.path(), &args);
     let ids: Vec<&str> = rows.iter().map(|r| r["point_id"].as_str()).collect();
-    assert_eq!(ids, ["4", "7", "9", "12"], "each row is written under its own id, in file order");
-    assert_eq!(rows[3]["sweep:beta"], "0.55");
-    assert_eq!(rows[3]["sweep:gamma"], "1.88");
-    for r in &rows {
-        assert!(r["loglik"].parse::<f64>().unwrap().is_finite());
-        assert_eq!(r["run_id"].len(), 64);
+    assert_eq!(ids, ["4", "7", "9"], "each row is written under its own id, in file order");
+    assert_eq!(rows[2]["sweep:beta"], "0.93");
+}
+
+/// Test 7: `camdl design lhs` writes a design over the fit's `[estimate]`
+/// parameter, and `pfilter --sweep-file` scores it with the fit's `[fixed]`
+/// value for the other. Every design point is a row, under the design's id and
+/// at the design's value, and a scored row equals the single call there.
+#[test]
+fn a_design_from_design_lhs_is_scored() {
+    let dir = tempfile::tempdir().unwrap();
+    fixture(dir.path());
+    let path = std::env::var("PATH").unwrap_or_default();
+    let out = Command::new(camdl_bin())
+        .env_remove("CLICOLOR_FORCE")
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("PATH", format!("{}:{path}", dir.path().join("bin").display()))
+        .current_dir(dir.path())
+        .args(["design", "lhs", "model.camdl", "--fit", "fit.toml", "--n", "6", "--seed", "1",
+               "-o", "design.tsv"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "design lhs failed:\n{}", stderr(&out));
+    let lhs = table(&std::fs::read_to_string(dir.path().join("design.tsv")).unwrap());
+    assert_eq!(lhs.len(), 6);
+    assert!(lhs.iter().all(|r| r.len() == 2 && r.contains_key("beta")),
+        "the design varies the one [estimate] parameter: {lhs:?}");
+
+    let mut args: Vec<&str> = COMMON.to_vec();
+    args.extend(["1", "--replicates", "2"]);
+    let (rows, err) = design(dir.path(), &args);
+    assert_eq!(rows.len(), 6, "{err}");
+    for (row, point) in rows.iter().zip(&lhs) {
+        assert_eq!(row["point_id"], point["point_id"]);
+        assert_eq!(row["sweep:beta"], point["beta"], "the value scored is the design's");
+        match row["n_failed"].as_str() {
+            "0" => assert_eq!(row["run_id"].len(), 64, "{row:?}"),
+            _ => assert!(!row["failure"].is_empty(), "{row:?}"),
+        }
     }
+    let scored = rows.iter().find(|r| r["n_failed"] == "0").expect("a scored point");
+    let own = tempfile::tempdir().unwrap();
+    fixture(own.path());
+    let beta = format!("beta={}", scored["sweep:beta"]);
+    let mut one = args.clone();
+    one.extend(["--param", &beta]);
+    let s = single(own.path(), &one);
+    assert_eq!(scored["loglik"].parse::<f64>().unwrap().to_bits(), s.loglik.parse::<f64>().unwrap().to_bits());
+    assert_eq!(scored["run_id"], s.run_id);
 }
