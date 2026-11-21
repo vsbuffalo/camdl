@@ -3187,7 +3187,7 @@ supplies it per cell.
 `camdl pfilter --sweep-file FILE` estimates the log-likelihood log p(y | θ) at
 every row of a design file, one table row per design point. With a space-filling
 design from `camdl design lhs`, the table is a likelihood landscape
-([Commands](commands.md#scoring-a-design-pfilter---sweep-file)).
+([Commands](commands.md#evaluate-the-model-over-a-parameter-design)).
 
 ```bash
 camdl pfilter sir.camdl --fit fit.toml --sweep-file design.tsv \
@@ -3218,26 +3218,35 @@ depend on the schedule.
 
 **The table**, to `-o PATH` or stdout, one row per design point in file order:
 
-| column          | meaning                                                                                                |
-| --------------- | ------------------------------------------------------------------------------------------------------ |
-| `point_id`      | the row's `point_id`, else its 0-based row                                                             |
-| `sweep:<param>` | one per design column, name-sorted: the value scored                                                   |
-| `loglik`        | the mean over replicates of the estimated log-likelihood; `-inf` when any replicate collapsed          |
-| `loglik_sd`     | the standard deviation over replicates; empty under `--replicates 1`, `NaN` when a replicate collapsed |
-| `n_collapsed`   | how many replicates collapsed (every particle scored `-inf` at some observation)                       |
-| `run_id`        | the stored leaf (`camdl cat <run_id>`); empty when every replicate collapsed, or under `--no-store`    |
+| column          | meaning                                                                                               |
+| --------------- | ----------------------------------------------------------------------------------------------------- |
+| `point_id`      | the row's `point_id`, else its 0-based row                                                            |
+| `sweep:<param>` | one per design column, name-sorted: the value scored                                                  |
+| `loglik`        | the mean over replicates of the estimated log-likelihood; `-inf` when any replicate failed            |
+| `loglik_sd`     | the standard deviation over replicates; empty under `--replicates 1` or when any replicate failed     |
+| `n_failed`      | how many replicates failed (below)                                                                    |
+| `failure`       | empty when every replicate scored; else the first failed replicate's message, on one line             |
+| `run_id`        | the stored leaf (`camdl cat <run_id>`); empty when no leaf was written, as under `--no-store` (below) |
 
 Numbers are written in shortest round-trip form, so a `loglik` read back equals
 the stored one.
 
-**Collapsed points.** A point at which every replicate collapses is a row with
-`loglik = -inf`, `n_collapsed` equal to `--replicates` and an empty `run_id`,
-and the run continues. After the table, the run prints how many points collapsed
-and the first collapse message. The run exits with status 3, the status of a
-single call whose filter collapsed, only when every point collapsed. A point at
-which the filter stops with an error instead, such as an effective sample size
-that stays collapsed over several observations, ends the run with status 3 and
-no table, as it ends a single call.
+**Failed points.** A replicate fails at a design point in either of two ways: it
+scores `-inf` (every particle's weight is zero at some observation), or the
+filter stops with an error, such as a degeneracy error when the effective sample
+size stays collapsed over several observations. Both are recorded in the row and
+neither stops the run. In the `failure` column the message is on one line: tabs
+and newlines are replaced by spaces, and a degeneracy error leaves out the
+wall-clock time it carries, so a rerun writes the same table. A point whose
+every replicate failed has `loglik = -inf`, `n_failed` equal to `--replicates`
+and an empty `run_id`. A point at which some replicate stopped with an error is
+not stored either, since the single call at its values exits on that error; a
+point at which some, but not all, replicates scored `-inf` is stored with
+`loglik = -inf`, as the single call stores it. After the table, the run prints
+how many points failed entirely and the first failure message. The run exits
+with status 3, the status of a single call whose filter failed, only when every
+point failed, and with 0 otherwise. A single call without `--sweep-file` exits
+with status 3 at a filter error at once.
 
 **Refused beside `--sweep-file`**, before any filter runs:
 
@@ -6941,11 +6950,10 @@ Samples uniformly from each parameter's declared bounds. No Bayesian pretension
 `camdl design lhs MODEL --fit fit.toml --n 200 --seed 1 [-o design.tsv]` writes
 a Latin-hypercube design over a fit config's `[estimate]` bounds, a TSV with
 `point_id` and one column per estimated parameter, which
-`camdl simulate MODEL --sweep-file design.tsv` runs point by point. No command
-scores a whole design: `camdl pfilter` evaluates the log-likelihood of one
-parameter set per call, each value given as `--param NAME=VALUE` or in a
-`--params` file (`camdl docs workflow` shows the loop over a design's rows).
-`camdl survey` is refused as an unrecognized subcommand.
+`camdl simulate MODEL --sweep-file design.tsv` runs point by point and
+`camdl pfilter MODEL --fit fit.toml --sweep-file design.tsv` scores point by
+point (§5.5, "Scoring a design"). `camdl survey` is refused as an unrecognized
+subcommand.
 
 ### 11.5 Replicate Fits at Known Truth
 

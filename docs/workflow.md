@@ -132,9 +132,10 @@ rather than choosing a shape to make the sampler run. See
 
 `camdl survey`, which scored a log-likelihood at every point of a
 Latin-hypercube design and drew the landscape as an HTML pair plot, is no longer
-part of camdl. Writing the design is now `camdl design lhs`, below. Scoring a
-whole design in one run, with the landscape summaries survey printed, will come
-back later, in camdl or in a separate tool.
+part of camdl. Writing the design is now `camdl design lhs`, below, and scoring
+a whole design is `camdl pfilter --sweep-file`. The landscape summaries survey
+printed (the pair plot, the bound pile-up and dimension warnings) may come back
+later, in camdl or in a separate tool.
 
 :::
 
@@ -153,32 +154,26 @@ result is one ensemble with a trajectory per design point, which shows whether
 the model can produce dynamics like the data anywhere in the box before any fit
 is run.
 
-No single command scores a whole design. `camdl pfilter` evaluates the
-log-likelihood at one parameter set per call. Each of the row's values is passed
-as `--param NAME=VALUE`, and the rest in a `--params` file. `--fit` supplies the
-data and the likelihood the fit scores, and no parameter values:
+`camdl pfilter --sweep-file` scores every row, a particle-filter estimate of the
+log-likelihood at each design point:
 
 ```bash
-camdl pfilter model.camdl --fit fit.toml --params fixed.toml \
-    --param beta=0.35 --param gamma=0.12 --particles 1000 --seed 1
+camdl pfilter model.camdl --fit fit.toml --sweep-file design.tsv \
+    --particles 1000 --replicates 5 --seed 1 -o landscape.tsv
 ```
 
-It prints the log-likelihood on standard output, so a loop over the design's
-rows collects one per point (here the design has the two columns `beta` and
-`gamma` after `point_id`):
-
-```bash
-printf 'point_id\tloglik\n' > loglik.tsv
-tail -n +2 design.tsv | while IFS=$'\t' read -r point_id beta gamma; do
-  loglik=$(camdl pfilter model.camdl --fit fit.toml --params fixed.toml \
-             --param beta="$beta" --param gamma="$gamma" \
-             --particles 1000 --seed 1)
-  printf '%s\t%s\n' "$point_id" "$loglik" >> loglik.tsv
-done
-```
-
-Each value is a particle-filter estimate with Monte Carlo error; `--replicates`
-reports that error for a point. A table of this kind is worth building when:
+`--fit` supplies the data, the likelihood the fit scores and the values of its
+`[fixed]` parameters; the design supplies the `[estimate]` parameters. The table
+has one row per point: `point_id`, the point's values as `sweep:<param>`,
+`loglik` (the mean over replicates), `loglik_sd` (its spread, the Monte Carlo
+error), `n_failed`, `failure` and `run_id`. A point where the filter fails, by
+scoring `-inf` or by stopping with an error, is a row with `loglik = -inf` and
+the first failure message, and the run goes on. Each row is the result the
+single call
+`camdl pfilter model.camdl --fit fit.toml --param beta=… --param gamma=…` gives
+with the same flags, stored as that call's leaf, so a run that was interrupted
+computes only the points it had not reached. A table of this kind is worth
+building when:
 
 - the model estimates many parameters, so starts drawn from the priors may land
   far from where the likelihood is high;

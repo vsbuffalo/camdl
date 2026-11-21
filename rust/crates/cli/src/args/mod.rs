@@ -1760,6 +1760,10 @@ Examples:
   # Prequential out-of-sample evaluation
   camdl pfilter sir.camdl --params p.toml --data cases.tsv \\
       --particles 5000 --save-prequential preq
+
+  # Loglik at every row of a design (one table row per point)
+  camdl pfilter sir.camdl --fit fit.toml --sweep-file design.tsv \\
+      --particles 1000 --replicates 5 -o landscape.tsv
 "))]
 // gh#194: `--scenario` and explicit-θ flags (`--params` / `--param`) are a
 // hard conflict on pfilter. A scenario's `set`/`scale` block resolves at a
@@ -1812,9 +1816,11 @@ pub struct PfilterArgs {
 
     /// Optional fit toml. Supplies the multi-stream binding via its
     /// `[data.observations]` map (gh#90) when no `--data` flags were
-    /// supplied (CLI flags win), and always supplies the likelihood
-    /// objective: under `ic_free = true` the first observation's term is
-    /// left out, as `fit run` scores it. Omit `--fit` for the full likelihood.
+    /// supplied (CLI flags win), the values of its `[fixed]` parameters
+    /// (`--params`, a scenario and `--param` override them), and always the
+    /// likelihood objective: under `ic_free = true` the first observation's
+    /// term is left out, as `fit run` scores it. Omit `--fit` for the full
+    /// likelihood.
     #[arg(long, value_name = "PATH")]
     pub fit: Option<PathBuf>,
 
@@ -2198,6 +2204,10 @@ EXAMPLES
 
   # Simulate the model at every point of the design
   camdl simulate model.camdl --sweep-file design.tsv
+
+  # Score the log-likelihood at every point of the design
+  camdl pfilter model.camdl --fit fit.toml --sweep-file design.tsv \\
+      --particles 1000 -o landscape.tsv
 
 OUTPUT
 

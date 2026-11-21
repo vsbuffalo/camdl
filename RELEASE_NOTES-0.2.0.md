@@ -206,11 +206,18 @@ order. Every handle now names one run, or is refused with the runs listed.
   Latin-hypercube design, a TSV with `point_id` and one column per estimated
   parameter, with
   `camdl design lhs MODEL --fit fit.toml --n 200 --seed 1 -o design.tsv`, and
-  simulate it with `camdl simulate MODEL --sweep-file design.tsv`. No single
-  command scores a whole design:
-  `camdl pfilter MODEL --fit fit.toml --params fixed.toml --param NAME=VALUE …`
-  evaluates the log-likelihood at one row per call, and `camdl docs workflow`
-  shows the loop over the rows.
+  simulate it with `camdl simulate MODEL --sweep-file design.tsv`, and score it
+  with `camdl pfilter MODEL --fit fit.toml --sweep-file design.tsv` (below).
+
+- **`camdl pfilter --sweep-file FILE` scores every row of a design file** and
+  writes one log-likelihood row per point; with `camdl design lhs` it replaces
+  the landscape `camdl survey` produced. Each point is scored and stored as the
+  single `pfilter` call at its values, so a rerun reuses the points already
+  stored. A point at which the filter fails, by scoring `-inf` or by stopping
+  with an error, is a row with its `n_failed` count and first `failure` message,
+  and the run goes on; it fails only when every point failed. `pfilter --fit`
+  now applies the fit config's `[fixed]` values; a parameter set only there was
+  refused before.
 
 - **A fit leaf's `run.json` says `"kind": "fit_method"`, not `"fit_stage"`.**
   The kind was the last stored spelling of the `[stages]` era; a script that

@@ -84,15 +84,14 @@ two reasons:
 2. **A likelihood-only landscape sampled over bounds ignores the prior**, so a
    direction the prior would downweight still looks freely explorable.
 
-No camdl command writes such a landscape. One built by scoring the rows of a
-`camdl design lhs` design with `camdl pfilter`, one row per call
-([`camdl docs workflow`](workflow.md)), has both properties:
+`camdl pfilter --sweep-file` writes such a landscape from a `camdl design lhs`
+design ([`camdl docs workflow`](workflow.md)), and it has both properties:
 
-- **Each value is a noisy estimate.** Score a point with `--replicates N` and
-  `pfilter` reports the mean log-likelihood with its standard error across the
-  replicates (`loglik = -16.0 ± 0.7 (40 replicates, N=5)`). Read the standard
-  error, not just the shape of the log-likelihoods: a peak built from points
-  whose standard error is large is an artifact.
+- **Each value is a noisy estimate.** Score the design with `--replicates N` and
+  each row's `loglik` is the mean over N filter runs, with `loglik_sd` their
+  standard deviation. Read the spread, not just the shape of the
+  log-likelihoods: a peak built from points whose spread is large is an
+  artifact.
 - **It is prior-free.** The table is the likelihood, not the posterior, so a
   flat direction a prior would tame still looks explorable. High-scoring points
   that sit against a bound mark a direction the data alone do not identify.

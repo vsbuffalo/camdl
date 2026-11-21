@@ -468,9 +468,9 @@ reasoning are `camdl docs workflow`, "Choose a method".
 
 **Score a parameter design when a fit needs it, not by reflex.**
 `camdl design lhs MODEL --fit fit.toml --n 200 --seed 1 -o design.tsv` writes a
-Latin-hypercube design over the `[estimate]` bounds, and `camdl pfilter` scores
-one of its rows per call; no single command scores a whole design
-(`camdl docs workflow` has the loop). Do it when the model estimates many
+Latin-hypercube design over the `[estimate]` bounds, and
+`camdl pfilter MODEL --fit fit.toml --sweep-file design.tsv --particles 1000 -o landscape.tsv`
+scores every row (`camdl docs workflow`). Do it when the model estimates many
 parameters, when chains disagree or one chain's log-likelihood differs, or when
 the priors are weak; a small model with informative priors and agreeing chains
 gains little from it.

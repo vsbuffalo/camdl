@@ -27,11 +27,11 @@ transform. A few commands delegate to the compiler.
 
 ### Produce inference artifacts
 
-| Command   | Produces                                                                                                                                                                                                     |
-| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `fit run` | Fit a `fit.toml`'s problem with its one `[method]` — an MLE (`if2`, the NLopt optimizers), a posterior (`pgas`, `pmmh`, `mh`) or a filter evaluation (`pfilter`), with its diagnostics. The production path. |
-| `pfilter` | A log-likelihood at _fixed_ parameters via a bootstrap particle filter (no estimation); with `--sweep-file`, one per row of a design file — see [Scoring a design](#scoring-a-design-pfilter---sweep-file).  |
-| `profile` | A profile-likelihood curve over a grid of one or more focal parameters — per-cell IF2 (`chain_binomial`) or an `nl-*` optimizer (`ode`).                                                                     |
+| Command   | Produces                                                                                                                                                                                                                                   |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `fit run` | Fit a `fit.toml`'s problem with its one `[method]` — an MLE (`if2`, the NLopt optimizers), a posterior (`pgas`, `pmmh`, `mh`) or a filter evaluation (`pfilter`), with its diagnostics. The production path.                               |
+| `pfilter` | A log-likelihood at _fixed_ parameters via a bootstrap particle filter (no estimation); with `--sweep-file`, one per row of a design file — see [Evaluate the model over a parameter design](#evaluate-the-model-over-a-parameter-design). |
+| `profile` | A profile-likelihood curve over a grid of one or more focal parameters — per-cell IF2 (`chain_binomial`) or an `nl-*` optimizer (`ode`).                                                                                                   |
 
 ### Read, display, compare
 
@@ -147,8 +147,9 @@ model's observation block.
 
 `camdl survey`, which scored a log-likelihood at every point of a
 Latin-hypercube design, is no longer part of camdl. `camdl design lhs` writes
-the design; scoring a whole design in one run will come back later, in camdl or
-in a separate tool.
+the design, and scoring a whole design is `camdl pfilter --sweep-file`. The
+landscape summaries survey printed (the pair plot, the bound pile-up and
+dimension warnings) may come back later, in camdl or in a separate tool.
 
 :::
 
@@ -163,9 +164,32 @@ camdl simulate model.camdl --sweep-file design.tsv --params fixed.toml
 column per estimated parameter; `simulate --sweep-file` runs the model at every
 row, with `fixed.toml` giving the parameters the design does not vary.
 
-No single command scores a whole design. `camdl pfilter` evaluates the
-log-likelihood at one parameter set per call, so a log-likelihood per design
-point is a loop over the rows; [`camdl docs workflow`](workflow.md) shows it.
+`pfilter --sweep-file` scores every row and writes one log-likelihood row per
+design point:
+
+```bash
+camdl pfilter model.camdl --fit fit.toml --sweep-file design.tsv \
+    --particles 1000 --replicates 5 --seed 1 -o landscape.tsv
+```
+
+Each point is scored exactly as the single `pfilter` call with the point's
+values passed as `--param` would score it, on the same seeds, and is stored as
+that call's leaf. So any row can be reproduced by one plain `pfilter` call, a
+point already stored is reported `cached` rather than recomputed, and a design
+run that was interrupted computes only the points it had not reached. The points
+share random numbers, so their errors are correlated. `--fit` supplies the data,
+the likelihood and the fit's `[fixed]` values.
+
+The table has `point_id`, one `sweep:<param>` column per design column, `loglik`
+(the mean over replicates), `loglik_sd` (empty under `--replicates 1` or when a
+replicate failed), `n_failed`, `failure` and `run_id`. A replicate fails when it
+scores `-inf` or the filter stops with an error; a point whose every replicate
+failed is a row with `loglik = -inf`, its first failure message and no `run_id`,
+and the run fails only when every point failed. A `--param` or `--scenario` that
+would override a design column is refused, as is every per-run output
+(`--trace`, `--save-paths` and the rest). Full reference: run spec §5.5,
+"Scoring a design".
+
 The points are not a posterior sample and are not a source of chain starts: a
 fit whose chains should begin somewhere informed starts `from_prior` (the
 default when every parameter has one), or from a short fit's posterior.
@@ -393,34 +417,6 @@ an ad-hoc run is labelled from its flags (`(none)` for no flags,
 
 Use a sweep to explore _forward_ behavior under interventions and parameter
 ranges. To estimate parameters from data, use `fit`.
-
-### Scoring a design: `pfilter --sweep-file`
-
-`pfilter --sweep-file FILE` scores every row of a design file and writes one
-log-likelihood row per design point. With a space-filling design from
-`camdl design lhs`, the table is a likelihood landscape:
-
-```bash
-camdl design lhs sir.camdl --fit fit.toml --n 200 --seed 1 -o design.tsv
-camdl pfilter    sir.camdl --fit fit.toml --sweep-file design.tsv \
-                 --particles 1000 --replicates 5 --seed 1 -o landscape.tsv
-```
-
-Each point is scored exactly as the single `pfilter` call with the point's
-values passed as `--param` would score it, on the same seeds, and is stored as
-that call's leaf. So any row can be reproduced by one plain `pfilter` call, a
-point already stored is reported `cached` rather than recomputed, and a design
-run that was interrupted computes only the points it had not reached. The points
-share random numbers, so their errors are correlated.
-
-The table has `point_id`, one `sweep:<param>` column per design column, `loglik`
-(the mean over replicates), `loglik_sd` (empty under `--replicates 1`),
-`n_collapsed` (replicates whose particles all scored `-inf`) and `run_id`. A
-point at which every replicate collapsed is a row with `loglik = -inf` and no
-`run_id`; the run fails only when every point collapsed, or when the filter
-stops with an error at some point. A `--param` or `--scenario` that would
-override a design column is refused, as is every per-run output (`--trace`,
-`--save-paths` and the rest). Full reference: run spec §5.5, "Scoring a design".
 
 ### Model comparison
 
