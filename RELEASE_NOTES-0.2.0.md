@@ -240,15 +240,14 @@ order. Every handle now names one run, or is refused with the runs listed.
   did not. The name is no longer hashed (`ir` hash policy version 3 → 4), so
   identical models share every `run_id` with the cache on or off, and renaming a
   model file never re-keys it. Every model-bearing leaf (simulate, fit, pfilter,
-  survey, profile, simulate ensembles) re-keys once; a re-run recomputes it. A
-  run that reuses stored results computed from a file of another name
-  (`simulate`, `fit run`, `survey`) says so once, naming both files; the stored
-  runs keep the first file's directory names. `camdl pfilter` and
-  `camdl profile` look a stored result up under the current file name only, so
-  under another file name they recompute it; the write then finds the stored
-  leaf, keeps it, and stores nothing twice, and `pfilter` reports it `cached`
-  under the current file name's path, which does not exist on disk. Neither
-  warns. Migration: none.
+  profile, simulate ensembles) re-keys once; a re-run recomputes it. A run that
+  reuses stored results computed from a file of another name (`simulate`,
+  `fit run`) says so once, naming both files; the stored runs keep the first
+  file's directory names. `camdl pfilter` and `camdl profile` look a stored
+  result up under the current file name only, so under another file name they
+  recompute it; the write then finds the stored leaf, keeps it, and stores
+  nothing twice, and `pfilter` reports it `cached` under the current file name's
+  path, which does not exist on disk. Neither warns. Migration: none.
 
 - **One integration-step rule for every backend and command.** A model's
   declared `simulate { dt = … }` is the step every fit method (`if2`, `pgas`,
@@ -478,10 +477,6 @@ order. Every handle now names one run, or is refused with the runs listed.
   (a flat or hierarchical one). Migration: give the parameter bounds
   (`in [lo, hi]` or `bounds = [lo, hi]`), or use `starts = "from_prior"` with a
   prior on it, or `starts = "single"`.
-- **`camdl survey` refuses an estimated parameter with no finite box.** Its
-  Latin-hypercube sample had jittered such a parameter around its start, so the
-  reported landscape was not over the box the record named. Migration: give it
-  `bounds = [lo, hi]` in `[estimate]` (or `in [lo, hi]` in the model).
 - **`starts = "from_prior"` draws inside the bounds.** A prior draw outside the
   box the transform keeps is redrawn; before, it was clamped to the edge of the
   box and the chain started there. Fits whose prior draws fell outside the box
@@ -501,9 +496,6 @@ order. Every handle now names one run, or is refused with the runs listed.
   `--fixed-file`, and never a model constant (`let omega : rate = 0.01`). Such
   profiles, and profiles whose fit config declares `[[simplex_groups]]`, re-key
   and recompute. Migration: none; list a name in `--rw-sd` to estimate it.
-- **`survey --fit` honours `--fixed`.** A pinned `[estimate]` name is held and
-  no longer sampled, so the landscape loses that column and re-keys. Migration:
-  drop `--fixed` to sample it again.
 
 - **Coincident event drains that could overdraw a compartment are refused.**
   Among the `events {}` due at one instant, two or more `transfer`s from one
@@ -569,44 +561,44 @@ order. Every handle now names one run, or is refused with the runs listed.
   replaced gamma = 0.2 (from fit.toml [fixed]) with 0.3"), so its estimates were
   those of a fit without the scenario. It is now refused before anything is
   written, naming the parameter, both values, the scenario and the fit.toml.
-  `survey --fit` and `profile --fit` refuse the same collision, whether the
-  scenario comes from the fit.toml or from `--scenario`; there the scenario's
-  value had silently won. A scenario `scale` that moves a `[fixed]` value is
-  refused the same way; an equal value is not a collision. `fit run --sweep`
-  over a parameter the scenario sets or scales is refused, as `simulate --sweep`
-  already was (gh#572). Migration: to run under the scenario, give `[fixed]` the
-  scenario's value; otherwise remove the parameter from the scenario or name one
-  that does not set it. A refit of such a file under the scenario gives
-  different estimates from the old run.
+  `profile --fit` refuses the same collision, whether the scenario comes from
+  the fit.toml or from `--scenario`; there the scenario's value had silently
+  won. A scenario `scale` that moves a `[fixed]` value is refused the same way;
+  an equal value is not a collision. `fit run --sweep` over a parameter the
+  scenario sets or scales is refused, as `simulate --sweep` already was
+  (gh#572). Migration: to run under the scenario, give `[fixed]` the scenario's
+  value; otherwise remove the parameter from the scenario or name one that does
+  not set it. A refit of such a file under the scenario gives different
+  estimates from the old run.
 
 - **A parameter cannot be both estimated and given a value: a fit.toml whose
   scenario sets or scales an estimated parameter is refused, and so is a name in
   both `[fixed]` and `[estimate]`.** `fit run` on a fit.toml whose `scenario`
   sets a parameter `[estimate]` lists used to estimate it anyway, discard the
-  scenario's value and print nothing. `fit run` and `survey --fit` now refuse a
-  scenario, from the fit.toml or (on `survey`) `--scenario`, that sets or scales
-  an estimated parameter, composed presets included; the error names the
-  parameter and the scenario's value. A name in both `[fixed]` and `[estimate]`
-  of one fit.toml, which `profile --fit` and `survey --fit` used to accept with
-  a warning (`[fixed]` won), is refused by every command; `fit run` already
-  refused it. Unchanged: `--fixed` over `[estimate]` (see CLI); a scenario that
-  sets a `profile` nuisance parameter; and `fit predict --scenario`. Migration:
-  to fit under the scenario's value, move the parameter from `[estimate]` to
-  `[fixed]` with that value; otherwise name a scenario that does not touch it.
-  For an overlap, remove the name from whichever block is wrong.
+  scenario's value and print nothing. `fit run` now refuses a scenario in the
+  fit.toml that sets or scales an estimated parameter, composed presets
+  included; the error names the parameter and the scenario's value. A name in
+  both `[fixed]` and `[estimate]` of one fit.toml, which `profile --fit` used to
+  accept with a warning (`[fixed]` won), is refused by every command; `fit run`
+  already refused it. Unchanged: `--fixed` over `[estimate]` (see CLI); a
+  scenario that sets a `profile` nuisance parameter; and
+  `fit predict --scenario`. Migration: to fit under the scenario's value, move
+  the parameter from `[estimate]` to `[fixed]` with that value; otherwise name a
+  scenario that does not touch it. For an overlap, remove the name from
+  whichever block is wrong.
 
 - **`[fixed] from_scenario` naming a scenario that sets or scales an estimated
   parameter is refused.** The import used to skip every parameter `[estimate]`
   lists (gh#37), so `from_scenario = "baseline"` with `beta` estimated fitted
   beta and dropped baseline's value without a word. A parameter cannot be both
-  fixed (imported from the scenario) and estimated, so `fit run`,
-  `profile --fit` and `survey --fit` now refuse it, composed presets included;
-  the error names the parameter, the scenario and the scenario's value.
-  Migration: define a scenario that does not set the estimated parameters (for
-  example one `baseline` composes from, minus them) and name it in
-  `from_scenario`, or drop them from `[estimate]` to hold them at the scenario's
-  value. A scenario that only scales an estimated parameter has the first fix
-  only: the import would have no value for the scale to multiply.
+  fixed (imported from the scenario) and estimated, so `fit run` and
+  `profile --fit` now refuse it, composed presets included; the error names the
+  parameter, the scenario and the scenario's value. Migration: define a scenario
+  that does not set the estimated parameters (for example one `baseline`
+  composes from, minus them) and name it in `from_scenario`, or drop them from
+  `[estimate]` to hold them at the scenario's value. A scenario that only scales
+  an estimated parameter has the first fix only: the import would have no value
+  for the scale to multiply.
 
 - **`simulate`'s implicit arm is labelled `(none)`, not `baseline`.** A run
   without `--scenario` shows `(none)` (path segment `_none_-<h8>`) in its leaf
@@ -849,7 +841,7 @@ order. Every handle now names one run, or is refused with the runs listed.
   fit's pre-flight checks only the particle-filter methods). Migration: none.
 
 - **A fit whose data run past the model's simulation end is refused.** The
-  particle filter, PMMH, IF2 and PGAS (and `profile`, `survey`, `compare` and
+  particle filter, PMMH, IF2 and PGAS (and `profile`, `compare` and
   `fit predict` through them) used to step on to the last observation past
   `simulate { to }`, scoring states `simulate` never produces, with the effects
   due there unplanned. They now refuse, naming both times: "the data run to
@@ -872,8 +864,7 @@ order. Every handle now names one run, or is refused with the runs listed.
   leaf a new `run_id`. The hashed values are unchanged; nothing a fit or profile
   computes changes. A re-run recomputes rather than reusing a stored leaf, and
   an in-flight PGAS or PMMH fit cannot `--resume` across the change.
-  Simulations, `pfilter` and `survey` runs and simulate ensembles keep their
-  keys.
+  Simulations, `pfilter` runs and simulate ensembles keep their keys.
 - **Every stored `camdl profile` run re-keys** (the method level now carries
   only the knobs its cell reads, plus IF2's `cooling_target_iters` and `nl-*`'s
   `tolerance` / `max_evals`); a `pfilter` fit whose every parameter declares a
@@ -887,11 +878,11 @@ order. Every handle now names one run, or is refused with the runs listed.
 - **Every stored run re-keys at IR 0.41 (typed constants).** A typed `let` with
   a constant body (`let omega : rate = 0.01`) is now a model constant in the
   IR's `constants` section, not a parameter. The model hash folds the new
-  section on every model, so every `simulate`, `fit`, `pfilter`, `survey` and
-  `profile` run gets a new `run_id`; nothing stored before is reused. A model
-  with constants also loses them from `parameters`: they no longer appear in a
-  fit's `[fixed]`, draws, traces, `mle_params.toml` or the record's `fixed`
-  list. Results are unchanged: simulations and fits of models with constants are
+  section on every model, so every `simulate`, `fit`, `pfilter` and `profile`
+  run gets a new `run_id`; nothing stored before is reused. A model with
+  constants also loses them from `parameters`: they no longer appear in a fit's
+  `[fixed]`, draws, traces, `mle_params.toml` or the record's `fixed` list.
+  Results are unchanged: simulations and fits of models with constants are
   identical to before apart from run IDs, version headers and the constant's own
   column or line (checked with `cmp` on six models across the ODE,
   chain-binomial and Gillespie backends, and on MH, nl-sbplx and IF2 fits). A
@@ -963,8 +954,8 @@ order. Every handle now names one run, or is refused with the runs listed.
 ## CLI
 
 - **Content-addressed run management:** `simulate` / `fit` / `profile` /
-  `survey` write to a keyed store; browse with `list`, `show`, `cat`, `reindex`,
-  and `compare` (prequential elpd / CRPS / PIT).
+  `pfilter` write to a keyed store; browse with `list`, `show`, `cat`,
+  `reindex`, and `compare` (prequential elpd / CRPS / PIT).
 - **`camdl docs <topic>`** — embedded, version-matched usage guides (workflow,
   fit-toml, concepts, diagnosing-fits, language, language-changes) served
   offline.
@@ -1090,15 +1081,13 @@ User-visible correctness fixes (selected from ~138):
   to the box (MH, flat likelihood: mean 0.3152, sd 0.1467; the truncated
   Beta(2, 5) has 0.3142, 0.1468).
 
-- **`profile --fit` and `survey --fit` ignored `ic_free`.** A fit with
-  `ic_free = true` maximises the likelihood without the first observation's
-  term; profile and survey scored every observation, so at the fit's own MLE a
-  profile cell read −47.4 where `fit run` reported −43.0 (the 4.3-nat gap is
-  `log p(y₁ | θ̂)`), and a survey ranked starting points on a likelihood the fit
-  does not maximise. Both now score the fit's objective, record it as
-  `inputs.likelihood_objective`, and key `ic_free` results apart from full-
-  likelihood ones. `nl-*` profiles and `survey --eval simulate` of an `ic_free`
-  fit are refused, since the ODE likelihood cannot leave `y₁` out.
+- **`profile --fit` ignored `ic_free`.** A fit with `ic_free = true` maximises
+  the likelihood without the first observation's term; profile scored every
+  observation, so at the fit's own MLE a profile cell read −47.4 where `fit run`
+  reported −43.0 (the 4.3-nat gap is `log p(y₁ | θ̂)`). It now scores the fit's
+  objective, records it as `inputs.likelihood_objective`, and keys `ic_free`
+  results apart from full-likelihood ones. `nl-*` profiles of an `ic_free` fit
+  are refused, since the ODE likelihood cannot leave `y₁` out.
 - **`pfilter --fit` ignored `ic_free`.** At an `ic_free` fit's MLE,
   `pfilter
   --fit` reported −47.35 where `fit run` reported −43.01: it scored
@@ -1120,12 +1109,9 @@ User-visible correctness fixes (selected from ~138):
   `parameters_provenance` now records the swept parameter as `focal` and the
   parameters the cell moves as `estimated`, and the profile base `fit.meta.json`
   carries the same map instead of an empty one.
-- **`survey --fit … --fixed beta=0.3` ignored `--fixed`.** No notice was printed
-  and the landscape sampled beta across its bounds. It now pins beta, with the
-  info notice `profile` prints for `--fixed` over `[estimate]`.
 - **`fit run` recorded an `[estimate].start` as `model_default`.** The
   provenance now says `estimate_start` (or `estimate_start_drawn` for an
-  in-bounds draw); the same holds for `survey --fit` and `profile --fit`.
+  in-bounds draw); the same holds for `profile --fit`.
 - **`pmmh`/`mh`/`pgas` reported a hyperparameter's prior as its posterior** when
   its hierarchical leaves were held; such a fit is now refused (see Breaking
   changes).
@@ -1147,12 +1133,11 @@ User-visible correctness fixes (selected from ~138):
   `simulate --scenario s` ran at gamma = 0.3 and a `from_scenario = "s"` fit
   held it at 0.15. The import now gives exactly the values `simulate --scenario`
   uses (the `set` values with `scale` applied, through composed presets) on
-  `fit run`, `profile --fit` and `survey --fit`. A scenario that scales a
-  parameter it does not set is refused, since the import has no value for the
-  factor to multiply; the error names the parameter and the factor, and the fix
-  is to set the parameter in the scenario as well. Fits under a scaling
-  `from_scenario` change value and re-key (their `fit_hash` covers the fixed
-  values).
+  `fit run` and `profile --fit`. A scenario that scales a parameter it does not
+  set is refused, since the import has no value for the factor to multiply; the
+  error names the parameter and the factor, and the fix is to set the parameter
+  in the scenario as well. Fits under a scaling `from_scenario` change value and
+  re-key (their `fit_hash` covers the fixed values).
 
 - **PGAS scores an observation at `t_start`.** It kept an observation only at a
   substep after the first, so a `t_start` row was silently dropped from every
@@ -1176,35 +1161,21 @@ User-visible correctness fixes (selected from ~138):
   top-level `scenario`, `enable` or `disable`, so earlier `profile --fit` runs
   whose config named a scenario profiled the unmodified model, and their
   log-likelihoods did not include the scenario. The config's selection now
-  applies, combined with `--scenario`/`--enable`/`--disable` by the same rule as
-  `survey --fit`: either alone selects, both must name the same scenario, and
-  anything else is refused, naming both.
-- **`survey --fit` applies `--scenario`.** The fit-aware form of `survey` read
-  only the fit config's own `scenario` key, so the `--scenario` flag never
-  reached parameter resolution: earlier `survey --fit … --scenario NAME` runs
-  used the unmodified model, so their landscapes did not include the scenario
-  (they were byte-identical to, and stored in the same leaf as, the run with no
-  scenario), and a misspelled name ran at exit status 0. The flag is now
-  resolved like every other verb's: a declared scenario is applied and keys its
-  own leaf, an undeclared one is refused with the declared names listed. When
-  the fit config also names a scenario, the two must agree or the run is
-  refused; `--scenario` beside the config's `enable`/`disable` lists is refused
-  too. Separately, a scenario that set a parameter the config also pins in
-  `[fixed]` was overridden by the `[fixed]` value when the landscape was scored;
-  the scenario's value now applies, as the precedence order states. Surveys
-  whose config named such a scenario should be re-run.
+  applies, combined with `--scenario`/`--enable`/`--disable`: either alone
+  selects, both must name the same scenario, and anything else is refused,
+  naming both.
 - **`baseline` is an ordinary scenario name on every verb.**
   `--scenario baseline` means the scenario the model declares under that name,
-  on `simulate`, `fit predict`, `pfilter`, `profile` and inline-mode `survey`; a
-  model that declares no `baseline` gets the same refusal, listing its declared
-  scenarios, as any other undeclared name. `fit predict` used to accept an
-  undeclared `baseline` in its up-front check, run, and then fail with exit
-  status 1 after writing partial output, and its message for a misspelled
-  scenario advised `use 'baseline' for the unmodified model`, which is that
-  failing form. It now refuses before running anything, and the message says to
-  drop `--scenario` to run the model with no scenario applied. A declared
-  `baseline` scenario was applied correctly before this change, so earlier
-  predictions made with `--scenario baseline` are unaffected.
+  on `simulate`, `fit predict`, `pfilter` and `profile`; a model that declares
+  no `baseline` gets the same refusal, listing its declared scenarios, as any
+  other undeclared name. `fit predict` used to accept an undeclared `baseline`
+  in its up-front check, run, and then fail with exit status 1 after writing
+  partial output, and its message for a misspelled scenario advised
+  `use 'baseline' for the unmodified model`, which is that failing form. It now
+  refuses before running anything, and the message says to drop `--scenario` to
+  run the model with no scenario applied. A declared `baseline` scenario was
+  applied correctly before this change, so earlier predictions made with
+  `--scenario baseline` are unaffected.
 - **Inference math:** missing terms in the PGAS+NUTS energy for gamma
   multipliers (gh#197) and deterministic source-less inflow (gh#200); corrected
   `log_normal` NUTS gradient bias (gh#155); coherent counts across CSMC-AS joins
@@ -1222,8 +1193,8 @@ User-visible correctness fixes (selected from ~138):
 - **Forcing:** forcing/table coefficients evaluated live during inference, not
   frozen at construction (gh#119) — a previously silent flat-likelihood bug.
 - **CLI / identity:** the IR cache invalidates when a `read()`-loaded data file
-  changes (gh#260); `--table` content and `init_method`/survey folded into run
-  identity (gh#147); robust lock-reclaim for interrupted fits.
+  changes (gh#260); `--table` content and `init_method` folded into run identity
+  (gh#147); robust lock-reclaim for interrupted fits.
 - **Robustness:** clean errors (not panics) for empty observation data and
   degenerate IF2 chains; non-increasing / sub-dt-colliding observation times
   rejected at construction (gh#188).
