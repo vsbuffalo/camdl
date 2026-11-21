@@ -874,10 +874,17 @@ new build reuses nothing from an old one.
 
 ### Artifacts
 
-Each kind of stored result implements `Artifact`, and states where its results
-sit by one of two traits: `Primary` for every kind that is not a by-product, and
-`ByProduct` (API 2) for a by-product, which the library places inside its
-upstream.
+Each kind of stored result implements `Artifact`. It then implements one of two
+further traits, which say how its folder is placed.
+
+| Trait       | The kind is                                                                  | Its folder is placed by                                          | camdl's                                                   |
+| ----------- | ---------------------------------------------------------------------------- | ---------------------------------------------------------------- | --------------------------------------------------------- |
+| `Primary`   | The main output of its own computation: something a command asks for by name | Its own `layout`: the groups of its identity, or a parent result | a simulation cell, a fit problem, a fit run, a prediction |
+| `ByProduct` | A second output of another kind's computation (API 2)                        | The library, inside that other result's folder                   | observations, an event log, a filter's saved paths        |
+
+The split exists so that the types say which is which. Only a `Primary` kind can
+be begun, planned or stored on its own, and it must state a layout. A by-product
+cannot be begun alone and has no layout to state.
 
 ```rust
 pub trait Artifact: 'static {
@@ -891,7 +898,7 @@ pub trait Artifact: 'static {
     type Labels: Serialize + DeserializeOwned + Clone;
 }
 
-/// A kind of result that is not a by-product.
+/// A kind that is the main output of its own computation, placed by its own layout.
 pub trait Primary: Artifact {
     /// Where the folder sits and what its own folder is called: the groups of its
     /// identity, or the parent it sits inside, and the result folder's label. Fixed by
@@ -2059,7 +2066,10 @@ None exists today except `dev reindex`, which rebuilds `index.json`
   group directory, and each build directory, that is empty and has no live
   owner's staging below it. It does not touch a completed result, a running
   claim, an invocation record or the index. It is the only command that removes
-  a group or build directory.
+  a group or build directory. A `finish` that finds a directory of its chain
+  gone when it renames, because `clean` removed it a moment before, makes the
+  chain again and renames once more; nothing is lost, since the result is still
+  whole in staging.
 - **`verify [<handle>]`** checks every completed result, or the one named. It
   computes the run id again from `identity.json` and compares it with the
   folder's, and computes each manifest file's SHA-256 and compares it with the
@@ -3426,7 +3436,7 @@ impl SimIdentity {
 #[identity(tag = "obs", version = 3)]
 pub struct ObsIdentity {
     pub sim: <SimIdentity as Identity>::Record,     // the upstream's identity, not a file of it
-    pub observation: ObsModel,
+    pub observation: ObsModel,                      // has `streams() -> Vec<String>`, the streams' names
     pub emit_every: Option<u32>,
     pub seed: ObsSeed,
 }
@@ -4423,7 +4433,7 @@ id, which is why they are in neither the fit problem nor the prediction.
 pub struct ScoreIdentity {
     pub prediction: Dep<Prediction>,
     pub holdout: BTreeMap<String, Dep<DataTable>>,
-    pub rule: ScoringRule,
+    pub rule: ScoringRule,                          // has `name() -> &str`, the folder's label
 }
 
 pub struct Score;
