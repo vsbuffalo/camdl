@@ -5088,8 +5088,9 @@ The admissible laws depend on the compartment's kind:
 | `: real`    | `normal(mean = .., sd = ..)`                                                      |
 
 A law of the wrong kind for its compartment is **E344**. A family that is not
-an initial-state law is **E343**: `bernoulli`, `beta` and `beta_binomial`
-describe a measurement of a compartment, and belong in `observations {}`.
+an initial-state law is **E343**: `bernoulli`, `beta`, `beta_binomial`,
+`zero_inflated` and `diagnostic_test` describe a measurement of a compartment,
+and belong in `observations {}`.
 `binomial`'s `p` given as a parameter declared with a kind other than
 `probability` (a `count`, say) is **E344**, naming the parameter. A constant
 `p` must be a finite number in `[0, 1]` (**E379**), as in a measurement

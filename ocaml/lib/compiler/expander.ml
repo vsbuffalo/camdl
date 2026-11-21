@@ -9265,6 +9265,21 @@ let check_probability_args ctx ~(subject : string) ~(loc : Diagnostics.loc)
 
 (* ── Initial conditions ──────────────────────────────────────────────────── *)
 
+(* E343: an observation likelihood written as an initial-state law. The
+   observation vocabulary is wider than the initial-state one on purpose:
+   these families describe a measurement of a compartment, not the compartment
+   itself. Enumerating what is admissible is the useful half of the message. *)
+let refuse_observation_law ctx ~(comp : string) ~(family : string)
+    ~(loc : Diagnostics.loc) =
+  Diagnostics.error ctx.diags ~code:"E343" ~loc
+    ~message:(Printf.sprintf
+      "initial condition '%s ~ %s(...)': `%s` is an observation likelihood, \
+       not an initial-state law" comp family family)
+    ~hint:"an integer compartment is seeded by `poisson(rate = ..)`, \
+           `binomial(n = .., p = ..)` or `neg_binomial(mean = .., r = ..)`; a real \
+           compartment by `normal(mean = .., sd = ..)`"
+    ()
+
 (* Lower one `comp ~ D(kw = ...)` init entry to its IR spec.
 
    [comp] is the EXPANDED cell name, [is_real] its declared kind. Returns
@@ -9377,18 +9392,7 @@ let init_law_spec ctx ~(comp : string) ~(is_real : bool) ~(loc : Diagnostics.loc
      | _ -> None)
   | LikReported _ -> None
   | LikBetaBinomial _ | LikBeta _ | LikBernoulli _ | LikZeroInflatedNegBinomial _ ->
-    (* The observation vocabulary is wider than the initial-state one on
-       purpose: these three describe a MEASUREMENT of a compartment, not the
-       compartment itself. Enumerating what IS admissible is the useful half of
-       the message. *)
-    Diagnostics.error ctx.diags ~code:"E343" ~loc
-      ~message:(Printf.sprintf
-        "initial condition '%s ~ %s(...)': `%s` is an observation likelihood, \
-         not an initial-state law" comp family family)
-      ~hint:"an integer compartment is seeded by `poisson(rate = ..)`, \
-             `binomial(n = .., p = ..)` or `neg_binomial(mean = .., r = ..)`; a real \
-             compartment by `normal(mean = .., sd = ..)`"
-      ();
+    refuse_observation_law ctx ~comp ~family ~loc;
     None
 
 let expand_init ctx ~(comps : Ir.compartment list) =
@@ -9410,7 +9414,13 @@ let expand_init ctx ~(comps : Ir.compartment list) =
   let spec_of ie env concrete_name : Ir.init_spec option =
     match ie.ivalue with
     | IVExpr e -> Some (Ir.Deterministic (normalize_expr (resolve_expr ctx env e)))
-    | IVLaw (l, _, lloc) ->
+    | IVLaw (_, Some _, lloc) ->
+      (* A `diagnostic_test` is rewritten to a binomial in the parser, so it
+         reaches here looking like one; the accuracy is what marks it. *)
+      refuse_observation_law ctx ~comp:concrete_name ~family:"diagnostic_test"
+        ~loc:(diag_loc_of_ast_ctx ctx lloc);
+      None
+    | IVLaw (l, None, lloc) ->
       let loc = diag_loc_of_ast_ctx ctx lloc in
       (* The balance stage recomputes its target from the declared expression
          after EVERY substep (`lifecycle.rs`), so a draw placed there never
@@ -9483,11 +9493,12 @@ let expand_init ctx ~(comps : Ir.compartment list) =
     (* Once per entry, before it expands to cells: a constant is the same in
        every cell. *)
     (match ie.ivalue with
-     | IVLaw (l, acc, lloc) ->
-       let family = if acc = None then lik_family_name l else "diagnostic_test" in
+     | IVLaw (l, None, lloc) ->
        check_probability_args ctx
-         ~subject:(Printf.sprintf "initial condition '%s ~ %s(...)'" ie.icomp family)
-         ~loc:(diag_loc_of_ast_ctx ctx lloc) l acc
+         ~subject:(Printf.sprintf "initial condition '%s ~ %s(...)'" ie.icomp
+                     (lik_family_name l))
+         ~loc:(diag_loc_of_ast_ctx ctx lloc) l None
+     | IVLaw (_, Some _, _) -> () (* refused whole, E343, by [spec_of] *)
      | IVExpr _ -> ());
     if ie.ibindings = [] then begin
       (* Positional or bare form *)

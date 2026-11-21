@@ -13,6 +13,27 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-11-20 — `diagnostic_test` is refused as an initial-state law
+
+**What.**
+`I ~ diagnostic_test(base = binomial(n = .., p = ..), sens = ..,
+spec = ..)` in
+an `init` block used to compile, as the binomial the call is rewritten to. A
+diagnostic test describes a measurement of a compartment, not the compartment,
+and the spec never listed it as an initial-state law, so it is refused like
+`bernoulli`, `beta`, `beta_binomial` and `zero_inflated`.
+
+**Migration.** Seed the compartment with `poisson(rate = ..)`,
+`binomial(n = .., p = ..)` or `neg_binomial(mean = .., r = ..)`, writing the
+probability the test would have produced (`sens * p + (1 - spec) * (1 - p)`) as
+the binomial's `p` if that is what was meant. Keep `diagnostic_test` in
+`observations {}`.
+
+**Diagnostic.** E343, "initial condition 'I ~ diagnostic_test(...)':
+`diagnostic_test` is an observation likelihood, not an initial-state law".
+
+---
+
 ## 2026-11-20 — the mean of `beta` and `beta_binomial` excludes 0 and 1
 
 **What.** A constant `mean` of `beta` or `beta_binomial` must lie in the open

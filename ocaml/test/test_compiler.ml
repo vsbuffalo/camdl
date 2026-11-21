@@ -10590,18 +10590,12 @@ let test_diagnostic_test_sens_reported_once () =
 
 let init_measurement = "y ~ binomial(n = N_tested, p = projected)"
 
-(** An init law's constant probability is checked like a measurement's, for a
-    binomial and for a `diagnostic_test` written as an init law. *)
+(** An init law's constant probability is checked like a measurement's. *)
 let test_init_law_probability_rejected () =
   compile_expect_error_code ~code:"E379"
     ~contains:"initial condition 'I ~ binomial(...)': the binomial `p`"
     (probability_arg_src ~measurement:init_measurement
-       ~init:"S = 999  I ~ binomial(n = 10, p = 1.5)" ());
-  compile_expect_error_code ~code:"E379"
-    ~contains:"the `diagnostic_test` sensitivity is not a probability"
-    (probability_arg_src ~measurement:init_measurement
-       ~init:"S = 999  I ~ diagnostic_test(base = binomial(n = 10, p = 0.1), \
-              sens = 1.5, spec = 0.9)" ())
+       ~init:"S = 999  I ~ binomial(n = 10, p = 1.5)" ())
 
 (** Constants in [0, 1], both endpoints included, and parameters compile. *)
 let test_probability_args_in_range_ok () =
@@ -14543,6 +14537,23 @@ let test_init_law_arguments_carry_a_gradient () =
 let test_init_law_observation_only_family_rejected () =
   compile_expect_error_code ~code:"E343" ~contains:"observation likelihood"
     (init_law_model ~init:"I ~ bernoulli(p = frac)" ())
+
+(** `diagnostic_test` describes a measurement, so it is not an initial-state
+    law: E343, naming `diagnostic_test` as an observation likelihood, and no
+    second diagnostic from the probability check or the binomial it rewrites to.
+    gh#1337 *)
+let test_init_law_diagnostic_test_rejected () =
+  let src = init_law_model
+    ~init:"S = N0 - I - R\n  I ~ diagnostic_test(base = binomial(n = N0, p = frac), \
+           sens = 0.9, spec = 0.95)" () in
+  compile_expect_error_code ~code:"E343"
+    ~contains:"`diagnostic_test` is an observation likelihood" src;
+  let codes =
+    Compiler.collect_diagnostics ~name:"init-diagnostic-test" src
+    |> List.filter_map (fun (d : Diagnostics.diagnostic) ->
+         if d.Diagnostics.severity = Diagnostics.Error then Some d.Diagnostics.code
+         else None) in
+  Alcotest.(check (list string)) "one error, E343" [ "E343" ] codes
 
 let test_init_law_continuous_on_integer_rejected () =
   compile_expect_error_code ~code:"E344" ~contains:"declared an integer compartment"
@@ -18917,6 +18928,8 @@ let () =
         test_init_law_arguments_carry_a_gradient;
       Alcotest.test_case "E343 observation-only family" `Quick
         test_init_law_observation_only_family_rejected;
+      Alcotest.test_case "gh#1337: E343 diagnostic_test" `Quick
+        test_init_law_diagnostic_test_rejected;
       Alcotest.test_case "E344 normal on an integer compartment" `Quick
         test_init_law_continuous_on_integer_rejected;
       Alcotest.test_case "E344 poisson on a real compartment" `Quick
