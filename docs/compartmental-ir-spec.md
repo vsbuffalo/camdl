@@ -415,7 +415,7 @@ time_functions: [{
 
 time_func_kind :=
   | Sinusoidal(amplitude: expr, period: expr, phase: expr, baseline: expr)
-      -- baseline * (1 + amplitude * cos(2π(t - phase) / period))
+      -- baseline + amplitude * sin(2π(t - phase) / period)
       -- each field is an expr, so forcing amplitudes can be Param refs
   | Piecewise(breakpoints: expr list, values: expr list)
       -- step function, constant between breakpoints
@@ -2045,9 +2045,13 @@ assert_eq!(eval(Cond(Const(0.0),  Const(5.0), Const(0.0)), ...), 0.0);
 assert_eq!(eval(Cond(Const(-1.0), Const(5.0), Const(0.0)), ...), 0.0);
 
 // TimeFunc
-// t = 91.3125 is a quarter-year; cos(2π * 0.25) = 0.0 → forcing = baseline
+// phase is the zero crossing: forcing = baseline there and half a period later,
+// and the peak (baseline + amplitude) is a quarter-period after phase.
+// t = 91.3125 is a quarter-year; sin(2π * 0.25) = 1 → forcing = 1.0 + 0.2
 let seasonal = Sinusoidal { amplitude: 0.2, period: 365.25, phase: 0.0, baseline: 1.0 };
-assert_approx_eq!(eval(TimeFunc("seasonal"), ..., t=91.3125), 1.0, 1e-10);
+assert_approx_eq!(eval(TimeFunc("seasonal"), ..., t=0.0), 1.0, 1e-10);
+assert_approx_eq!(eval(TimeFunc("seasonal"), ..., t=91.3125), 1.2, 1e-10);
+assert_approx_eq!(eval(TimeFunc("seasonal"), ..., t=182.625), 1.0, 1e-10);
 
 // TableLookup
 table["C"] = [12.0, 4.0, 4.0, 8.0];
