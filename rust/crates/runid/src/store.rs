@@ -2,14 +2,20 @@
 //!
 //! Two commit modes:
 //!
-//! - **Mode A — atomic stage-then-rename** (sim, obs, pfilter, survey,
-//!   profile-point — single-shot): write the whole leaf into a staging dir
-//!   on the *same filesystem* as `results/`, apply the fsync ordering, then
-//!   `rename` it into place. A reader never sees a half-written leaf.
-//! - **Mode B — streamed `Running → Completed`** (fit methods — long,
-//!   streaming, resumable): claim the leaf dir exclusively via an `O_EXCL`
-//!   `.lock`, write a `Running` `run.json`, stream files, then commit by
+//! - **Mode A — atomic stage-then-rename** (a `simulate` cell's trajectory
+//!   and the combined ensemble of a multi-cell `simulate`, both written whole
+//!   at once): write the whole leaf into a staging dir on the *same
+//!   filesystem* as `results/`, apply the fsync ordering, then `rename` it
+//!   into place. A reader never sees a half-written leaf.
+//! - **Mode B — streamed `Running → Completed`** (fit methods, `pfilter`,
+//!   `survey` and profile points — written in place as the run proceeds):
+//!   claim the leaf dir exclusively via an `O_EXCL` `.lock`, write a
+//!   `Running` `run.json`, stream files, then commit by
 //!   `run.json.tmp → rename` over `run.json`.
+//!
+//! A cell's synthetic observations (`simulate --obs`) use neither mode: they
+//! are written directly into an `obs/` child directory of the committed
+//! trajectory leaf.
 //!
 //! **Durability is explicit code.** `rename` without a barrier is *not*
 //! crash-atomic — a durable dir entry can point at an inode whose data
