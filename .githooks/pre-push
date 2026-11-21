@@ -10,6 +10,22 @@
 
 set -e
 
+# A commit whose source tree already passed `make test` has nothing left for
+# this hook to find, because the hook runs a subset of that gate. git passes
+# one line per pushed ref on stdin, "<local ref> <local sha> <remote ref>
+# <remote sha>"; a deleted ref has a local sha of all zeros and needs no
+# check. scripts/gate-stamp.sh says what a stamp covers.
+if [ -z "${CAMDL_TEST_SLOT_HELD:-}" ]; then
+    pushed=()
+    while read -r _ local_sha _ _; do
+        case "$local_sha" in *[!0]*) pushed+=("$local_sha") ;; esac
+    done
+    if [ ${#pushed[@]} -gt 0 ] && bash scripts/gate-stamp.sh check "${pushed[@]}"; then
+        echo "pre-push: every pushed tree passed make test; skipping the hook's own run."
+        exit 0
+    fi
+fi
+
 # Run the whole hook in one slot of the machine-wide test queue, as `make test`
 # does (scripts/test-slot.sh; docs/dev/testing.md, "Tiered gate"): it runs the
 # full workspace suite. Its own `make test-integration` then shares the slot.

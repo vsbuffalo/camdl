@@ -418,6 +418,22 @@ Mirrors CI — runs locally on every `git push`:
    reactive/regression compile-drift would otherwise slip through)
 5. `make test-integration`
 
+**The hook skips a commit whose tree already passed `make test`.** Each of its
+five steps is also part of `make test`, so a push straight after a passing gate
+would run the same tests a second time. A passing `make test` therefore records
+the git tree hash it tested in `<git common dir>/camdl-gate-passed/`, and the
+hook exits at once when every pushed commit's tree has a record. The tree hash
+covers every tracked file's path and content, so a record also covers an amended
+message or a rebase that leaves the content unchanged, and a record written in
+one worktree covers the same content pushed from another.
+`scripts/gate-stamp.sh` writes a record only when the checkout had no
+uncommitted change and no untracked file under `rust/`, `ocaml/`, `tests/`,
+`ir/`, `scripts/`, `docs/` or `.githooks/` when the run started, and was in the
+same state when it ended. Records are removed after 14 days.
+`make test-gate-stamp` tests these rules. A record does not cover state outside
+the repository, such as the installed opam packages; CI runs the full gate on
+every push and pull request that changes code, whether or not a record exists.
+
 (The book used to be built here via `mdbook`; it now lives in `../camdl-book`
 with its own CI. Remove any stale `.githooks/pre-push` entry that still invokes
 `mdbook build` if present.)
