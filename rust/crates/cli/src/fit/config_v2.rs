@@ -232,8 +232,8 @@ impl FitConfig {
     pub fn method(&self) -> Result<&Method, String> {
         self.inference.method.as_ref().ok_or_else(|| {
             "this fit.toml declares no `[method]` table, so there is nothing to \
-             run. It is a complete problem for `simulate --fit`, `pfilter --fit`, \
-             `survey --fit` and `profile --fit`; to fit it, add\n  \
+             run. It is a complete problem for `simulate --fit`, `pfilter --fit` \
+             and `profile --fit`; to fit it, add\n  \
              [method]\n  \
              algorithm = \"pgas\"          # if2 | pgas | pmmh | mh | pfilter | nl-sbplx | nl-bobyqa | nl-lbfgs\n  \
              backend   = \"chain_binomial\"\n  \
@@ -2485,7 +2485,7 @@ pub fn detect_legacy_stages(contents: &str, file_name: &str) -> Result<(), Strin
         return Err(
             "legacy table `[stages]` (empty)\n  \
              replacement: delete it. A file with no `[method]` is a complete problem for \
-             `simulate --fit`, `pfilter --fit`, `survey --fit` and `profile --fit`; \
+             `simulate --fit`, `pfilter --fit` and `profile --fit`; \
              `fit run` needs a `[method]`.\n  \
              See `camdl docs fit-toml`."
                 .into(),
@@ -2547,10 +2547,10 @@ pub fn detect_legacy_stages(contents: &str, file_name: &str) -> Result<(), Strin
     }
     if saw_survey {
         msg.push_str(
-            "  `init = \"survey_top_k\"` (with `survey_path` / `survey_top_k_n`) was removed: a \
-             survey\n  \
-             landscape is not a posterior. Use `starts = \"from_prior\"`, or run a short fit \
-             and\n  \
+            "  `init = \"survey_top_k\"` (with `survey_path` / `survey_top_k_n`) was removed \
+             with\n  \
+             the command that wrote its input. Use `starts = \"from_prior\"`, or run a short \
+             fit and\n  \
              write `starts = { from_posterior = \"@handle\" }`.\n",
         );
     }
@@ -2620,8 +2620,8 @@ fn validate_method_keys(contents: &str, method: &Method) -> Result<(), String> {
         // replacement rather than a bare "unknown key".
         let retired = match key.as_str() {
             "init" => Some(match value.as_str() {
-                Some("survey_top_k") => "`init = \"survey_top_k\"` was removed: a survey \
-                     landscape is not a posterior. Use `starts = \"from_prior\"`, or run a \
+                Some("survey_top_k") => "`init = \"survey_top_k\"` was removed with the \
+                     command that wrote its input. Use `starts = \"from_prior\"`, or run a \
                      short fit and write `starts = { from_posterior = \"@handle\" }`."
                     .to_string(),
                 Some(rule) => format!("`init` is now `starts`: write `starts = \"{rule}\"`."),
@@ -2636,7 +2636,7 @@ fn validate_method_keys(contents: &str, method: &Method) -> Result<(), String> {
             ),
             "survey_path" | "survey_top_k_n" => Some(
                 "`survey_top_k` starts were removed with their `survey_path` / \
-                 `survey_top_k_n` companions: a survey landscape is not a posterior. Use \
+                 `survey_top_k_n` companions and the command that wrote their input. Use \
                  `starts = \"from_prior\"`, or a `from_posterior` from a short run."
                     .to_string(),
             ),
@@ -3587,9 +3587,8 @@ impl ChainStarts {
 /// top-level `ic_free` key.
 ///
 /// Every command that scores a [`Problem`] — `fit run`, `profile --fit`,
-/// `survey --fit` — reads it from [`Problem::likelihood_objective`], so a
-/// profile curve or a survey landscape is on the same scale as the fit it
-/// belongs to. The two objectives differ by `log p(y₁ | θ)`, a term that
+/// `pfilter --fit` — reads it from [`Problem::likelihood_objective`], so a
+/// profile curve is on the same scale as the fit it belongs to. The two objectives differ by `log p(y₁ | θ)`, a term that
 /// varies with θ, so neither can be compared with, or ranked against, the
 /// other.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -3648,7 +3647,7 @@ impl Problem {
     }
 
     /// The entry point for every non-fit reader (`simulate --draws prior
-    /// --fit`, `pfilter --fit`, `survey --fit`, `profile --fit`): the file's
+    /// --fit`, `pfilter --fit`, `profile --fit`): the file's
     /// problem half, with the inference half discarded. A file with no
     /// `[method]` at all loads here.
     pub fn load(path: &str) -> Result<Self, String> {

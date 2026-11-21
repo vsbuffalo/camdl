@@ -19,7 +19,7 @@
 //! A class belongs to a (command, input) pair, not to a flag: a group that
 //! several commands flatten (`ForcingExtrapolationArg`, the global options) is
 //! classified in each command's table: [`SIMULATE`], [`FIT_RUN`], [`PFILTER`],
-//! [`PROFILE`], [`SURVEY`].
+//! [`PROFILE`].
 //! `every_<command>_flag_is_classified` (below) checks each against every
 //! argument clap accepts, both ways, and `every_<command>_input_has_a_case`
 //! that every input has a case in `rust/crates/cli/tests/<command>_input_classes.rs`.
@@ -38,8 +38,7 @@
 /// its inputs key `Profile`, `Method` or `Seed`. The profile level (the base)
 /// holds the model, the data, the problem, the sweep grid and the
 /// engine, so an environment variable keyed at `Model` enters a profile at
-/// its `Profile` level. A survey leaf's are `Model`, `Config`, `Box` (the
-/// sampled bounds and the number of points) and `Seed`.
+/// its `Profile` level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(not(test), allow(dead_code))] // the levels other than `Model` occur only in the command tables
 pub enum Level {
@@ -52,7 +51,6 @@ pub enum Level {
     Fit,
     Method,
     Profile,
-    Box,
 }
 
 /// What an input may do to a stored result. See the module table.
@@ -350,46 +348,6 @@ pub const PROFILE: &[(&str, InputClass)] = &[
     ("no_licm", Keyed(Profile)),
 ];
 
-/// `camdl survey`'s inputs, by clap argument id (the field name), with their
-/// classes: `SurveyArgs`, the group it flattens and the global options.
-///
-/// A survey leaf's levels are `model` (the resolved model and the engine),
-/// `config` (the evaluation, the data, the fixed values, the scenario, the
-/// objective, the two policies), `box` (the sampled bounds and the number of
-/// points) and `seed`. `--fit` keys the config level through what its
-/// problem supplies. `--output` is the store root, so it is `execution`, with
-/// `--force` and `--parallel`. `--render` asks for the leaf's child
-/// `landscape_html/`.
-#[cfg(test)]
-pub const SURVEY: &[(&str, InputClass)] = &[
-    // SurveyArgs
-    ("model", Keyed(Model)),
-    ("allow_degenerate_rates", Keyed(Config)),
-    ("fit", Keyed(Config)),
-    ("estimate", Keyed(Level::Box)),
-    ("data", Keyed(Config)),
-    ("fixed", Keyed(Config)),
-    ("scenario", Keyed(Config)),
-    ("n_points", Keyed(Level::Box)),
-    ("eval", Keyed(Config)),
-    ("eval_particles", Keyed(Config)),
-    ("eval_replicates", Keyed(Config)),
-    ("seed", Keyed(Seed)),
-    ("render", Child),
-    ("output", Execution),
-    ("label", Provenance),
-    ("force", Execution),
-    ("parallel", Execution),
-    // ForcingExtrapolationArg
-    ("allow_forcing_extrapolation", Keyed(Config)),
-    // GlobalArgs
-    ("verbosity", Presentation),
-    ("progress", Presentation),
-    ("no_progress", Presentation),
-    ("no_ir_cache", Execution),
-    ("no_licm", Keyed(Model)),
-];
-
 /// `camdl mre simulate`'s own input. It flattens `SimulateArgs` and writes a
 /// bundle that reproduces that simulate run, so every other input keeps the
 /// class it has in [`SIMULATE`].
@@ -455,11 +413,6 @@ mod tests {
     }
 
     #[test]
-    fn every_survey_flag_is_classified() {
-        assert_covers("camdl survey", clap_args(&["survey"]), SURVEY);
-    }
-
-    #[test]
     fn every_mre_simulate_flag_is_classified() {
         assert_covers("camdl mre simulate", clap_args(&["mre", "simulate"]), SIMULATE.iter().chain(MRE_SIMULATE_OWN));
     }
@@ -495,14 +448,6 @@ mod tests {
         ("path", "the harness needs PATH to start camdl; `execution_env_camdlc` varies the camdlc found on it"),
         ("unlabeled_threshold", "not read by profile: `fit table` and `camdl list` read it"),
         ("ci", "not read by profile: `fit summary` reads it"),
-    ];
-
-    /// Environment inputs with no `survey` case, each with the reason.
-    const SURVEY_NO_CASE: &[(&str, &str)] = &[
-        ("skip_version_check", "every test run sets it: without it the handshake refuses a test build's camdlc"),
-        ("path", "the harness needs PATH to start camdl; `execution_env_camdlc` varies the camdlc found on it"),
-        ("unlabeled_threshold", "not read by survey: `fit table` and `camdl list` read it"),
-        ("ci", "not read by survey: `fit summary` reads it"),
     ];
 
     fn case_name(class: InputClass, field: &str, env: bool) -> String {
@@ -579,12 +524,6 @@ mod tests {
     #[test]
     fn every_fit_run_input_has_a_case() {
         assert_every_input_has_a_case("fit run", "fit_run_input_classes.rs", FIT_RUN, FIT_RUN_NO_CASE);
-    }
-
-    /// The same for `survey`, in `tests/survey_input_classes.rs`.
-    #[test]
-    fn every_survey_input_has_a_case() {
-        assert_every_input_has_a_case("survey", "survey_input_classes.rs", SURVEY, SURVEY_NO_CASE);
     }
 
     /// The same for `profile`, in `tests/profile_input_classes.rs`.

@@ -15,7 +15,7 @@
 //! - **Identity.** The bound file's bytes are a run input: the same bytes under
 //!   another path give the same run id, and one added byte gives a new one.
 //! - **Fit configs.** `[data.tables]` binds the same inputs for `fit run`,
-//!   `pfilter --fit`, `profile --fit` and `survey --fit`, with `--table` laid
+//!   `pfilter --fit` and `profile --fit`, with `--table` laid
 //!   over it; two calendars are two fits with two log-likelihoods; a fit
 //!   records each bound file's digest and stores its bytes; `fit predict` and
 //!   `simulate --fit` replay those stored bytes after the source is edited.
@@ -529,9 +529,6 @@ fn pfilter_and_profile_bind_the_config_table_under_table_flag() {
         String::from_utf8_lossy(&out.stdout).lines().last().unwrap_or_default().to_string()
     };
     assert_ne!(profile(&[]), profile(&["--table", "school=cal/b.tsv"]), "profile must bind --table, not drop it");
-
-    ok(&fx.camdl(&["survey", "fit.camdl", "--fit", "a.toml", "--n-points", "4", "--eval", "pfilter",
-                   "--eval-particles", "30", "--eval-replicates", "1", "--seed", "1"]));
 }
 
 /// A stored fit read back by a reader of its config binds the table bytes

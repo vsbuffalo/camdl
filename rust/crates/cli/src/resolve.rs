@@ -75,29 +75,23 @@ pub struct TrajectoryCtx<'a> {
 
 /// The model's *structural* content identity, hex-encoded: the `runid` model
 /// content hash ([`ModelDigest::ir`] = `Model::content_hash`), rendered as
-/// hex. The single helper every recorded
-/// "model identity" string and the survey↔fit warm-start cross-check goes
-/// through, so the survey writer and the fit's recompute can never disagree.
+/// hex. Every recorded "model identity" string is computed here, so two
+/// records of one model carry the same string.
 ///
-/// Takes the **raw compiled IR JSON** (the `model_ir_json` both survey and fit
-/// already carry), NOT an in-memory `ir::Model`: survey and fit each seed
-/// `[estimate].start` into their working model (gh#92 / gh#34), so hashing the
-/// parsed model would make the cross-check spuriously sensitive to a start-value
-/// edit. Hashing the raw IR — the .camdl's compiled output — keeps the identity
-/// tracking the *model*, exactly as the retired `model_hash` did.
+/// Takes the **raw compiled IR JSON**, not an in-memory `ir::Model`: a command
+/// that reads a fit config seeds `[estimate].start` into its working model, so
+/// hashing the parsed model would make the identity depend on a start value.
+/// Hashing the raw IR, the .camdl's compiled output, keeps the identity
+/// tracking the model.
 ///
-/// Deliberately **structural only** — it folds the model IR, not the engine
-/// version or IR schema string. This is `model_digest`'s `ir` component, *not*
-/// the full per-level [`ModelDigest`] (which also folds `engine` = the volatile
-/// `ENGINE_ID` build fingerprint). The cross-check asks "is this the same *model*?"
-/// (a model edit between survey and fit invalidates it), not "the same engine
-/// build?": folding the per-commit engine hash would refuse every warm-start
-/// from a survey built at a different commit, and engine/schema skew is already
-/// the camdlc↔camdl version guard's job. So this stays usable across rebuilds.
+/// It folds the model IR only, not the engine version or the IR schema
+/// string. This is `model_digest`'s `ir` component, not the full per-level
+/// [`ModelDigest`], which also folds `engine` (the `ENGINE_ID` build
+/// fingerprint). Two builds of camdl therefore record the same identity for
+/// the same model.
 ///
 /// Returns an empty string when the IR can't be parsed (a partially-written or
-/// absent IR, as the fit sidecar tolerates) — at the cross-check sites the IR is
-/// always a freshly-compiled, valid envelope, so the value is never empty there.
+/// absent IR, as the fit sidecar tolerates).
 pub fn model_identity_from_ir(model_ir_json: &str) -> String {
     match ir::from_str(model_ir_json) {
         // `model_ir_hash` owns the presentation strip — the same function
@@ -288,7 +282,7 @@ pub enum WriteMode {
 ///
 /// Every command has a `--force`-shaped flag, and before this type each one
 /// decided for itself what that meant: the grid writer recomputed and had its
-/// bytes discarded at commit, fit and survey hard-errored with `AlreadyCompleted`,
+/// bytes discarded at commit, fit hard-errored with `AlreadyCompleted`,
 /// pfilter and profile had no force at all, and simulate threaded a flag
 /// nothing ever read. One meaning now, in one place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -323,8 +317,8 @@ pub enum ReuseVerdict {
 }
 
 /// The one cache-hit decision. Ask this instead of hand-rolling a `lookup`,
-/// an `exists()` check, or a bespoke cache scan — each of those grew its own
-/// bugs (survey's `landscape.tsv.exists()` had no identity gate at all).
+/// an `exists()` check, or a bespoke cache scan: a file's existence says
+/// nothing about the identity of the run that wrote it.
 ///
 /// The leaf is found by its hashes, not its labels ([`runid::find_leaf`]):
 /// a leaf's `run_id` is its level hashes alone, while its directory is

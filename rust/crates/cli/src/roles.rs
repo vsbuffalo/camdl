@@ -649,7 +649,6 @@ pub struct CommandRoles {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Allowed {
-    No,
     Optional,
     AtLeastOne,
     /// At least one, unless the run says it is a slice (`profile --slice`).
@@ -660,12 +659,6 @@ pub const FIT_RUN: CommandRoles = CommandRoles {
     command: "fit run",
     estimated: Allowed::Optional,
     design: Allowed::Optional,
-    profiles: false,
-};
-pub const SURVEY: CommandRoles = CommandRoles {
-    command: "survey",
-    estimated: Allowed::AtLeastOne,
-    design: Allowed::No,
     profiles: false,
 };
 pub const PROFILE: CommandRoles = CommandRoles {
@@ -730,7 +723,6 @@ pub enum RoleError {
     /// configurable.
     UnknownName { name: String, by: Declaration, candidates: Vec<String>,
                   constant_hint: Option<String> },
-    NotAccepted { name: String, role: RoleKind, command: &'static str },
     Missing { role: RoleKind, command: &'static str },
     ScenarioOnRole { scenario: String, name: String, role: RoleKind },
     SimplexPartlyHeld { group: Vec<String>, held: Vec<String> },
@@ -771,9 +763,6 @@ impl std::fmt::Display for RoleError {
                 }
                 Ok(())
             }
-            RoleError::NotAccepted { name, role, command } => write!(f,
-                "`{command}` does not take a {} parameter, and `{name}` is declared one",
-                role.word()),
             RoleError::Missing { role, command } => write!(f,
                 "`{command}` needs at least one {} parameter, and none is declared",
                 role.word()),
@@ -931,9 +920,6 @@ pub fn resolve_roles<'a>(inputs: &'a RoleInputs<'a>, command: &CommandRoles)
         let mut names = entries.iter().filter(|(_, e)| e.role.kind() == kind).map(|(n, _)| n);
         let first = names.next();
         match (allowed, first) {
-            (Allowed::No, Some(name)) => return Err(RoleError::NotAccepted {
-                name: name.clone(), role: kind, command: command.command,
-            }),
             (Allowed::AtLeastOne, None) => return Err(RoleError::Missing {
                 role: kind, command: command.command,
             }),
@@ -1252,7 +1238,7 @@ mod tests {
             cli_fixed: vec!["gamma".into()],
             ..Run::default()
         };
-        let (name, first, second) = two(run.resolve(&SURVEY).unwrap_err());
+        let (name, first, second) = two(run.resolve(&FIT_RUN).unwrap_err());
         assert_eq!((name.as_str(), first, second),
             ("gamma", Declaration::CliEstimate, Declaration::CliFixed));
     }
@@ -1263,7 +1249,7 @@ mod tests {
         run.fit_estimate.insert("rho".into(), toml::from_str("").unwrap());
         run.fit_fixed.retain(|(n, _)| n != "rho");
         run.cli_fixed = vec!["rho".into()];
-        let err = run.resolve(&SURVEY).unwrap_err();
+        let err = run.resolve(&FIT_RUN).unwrap_err();
         assert!(err.to_string().contains("move it from [estimate] to [fixed]"), "{err}");
         let (name, first, second) = two(err);
         assert_eq!((name.as_str(), first, second),
@@ -1313,7 +1299,7 @@ mod tests {
             }],
             ..Run::default()
         };
-        assert_eq!(two(run.resolve(&SURVEY).unwrap_err()).0, "gamma");
+        assert_eq!(two(run.resolve(&FIT_RUN).unwrap_err()).0, "gamma");
     }
 
     #[test]
@@ -1364,24 +1350,12 @@ mod tests {
     // ── §4.4 and §4.5 ───────────────────────────────────────────────────────
 
     #[test]
-    fn a_role_the_command_does_not_take_is_refused() {
-        match sir_fit().sweep(&["N0"]).resolve(&SURVEY).unwrap_err() {
-            RoleError::NotAccepted { name, role, command } => {
-                assert_eq!((name.as_str(), role, command), ("N0", RoleKind::Design, "survey"));
-            }
-            other => panic!("expected NotAccepted, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn a_profile_with_nothing_estimated_needs_slice() {
         let run = Run::default().sweep(&["beta"]);
         assert_eq!(run.resolve(&PROFILE).unwrap_err(),
             RoleError::Missing { role: RoleKind::Estimated, command: "profile" });
         let slice = Run { slice: true, ..run };
         assert!(slice.resolve(&PROFILE).is_ok());
-        assert_eq!(Run::default().resolve(&SURVEY).unwrap_err(),
-            RoleError::Missing { role: RoleKind::Estimated, command: "survey" });
     }
 
     #[test]
@@ -1433,7 +1407,7 @@ mod tests {
             cli_estimate: vec![EstimateDecl { name: "beta".into(), bounds: Some((0.1, 0.5)) }],
             ..Run::default()
         };
-        let p = run.resolve(&SURVEY).unwrap();
+        let p = run.resolve(&FIT_RUN).unwrap();
         assert_eq!(kind(&p, "gamma"), RoleKind::Fixed);
         assert_eq!(p.entries["gamma"].declared_by, Declaration::Default);
         assert_eq!(p.names_with(RoleKind::Estimated).collect::<Vec<_>>(), vec!["beta"]);
@@ -1502,6 +1476,20 @@ mod tests {
             pinned_over_estimate: vec![],
             context: Default::default(),
         }
+    }
+
+    /// Roles that form no partition are recorded as `unresolved` with the
+    /// refusal, and the legacy fields are the ones the command supplies.
+    #[test]
+    fn roles_that_form_no_partition_are_recorded_as_unresolved() {
+        let reason = "a simplex group is partly held";
+        let record = RoleRecord::new(Err(reason.to_string()), || {
+            (vec!["beta".into()], BTreeMap::from([("gamma".to_string(), 0.15)]))
+        });
+        let json = serde_json::to_value(&record.partition).unwrap();
+        assert_eq!(json, serde_json::json!({ "status": "unresolved", "reason": reason }));
+        assert_eq!(record.estimated, vec!["beta".to_string()]);
+        assert_eq!(record.fixed["gamma"], 0.15);
     }
 
     #[test]

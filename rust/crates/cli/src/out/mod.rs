@@ -107,11 +107,11 @@ pub enum ForcingRefusal {
 
 /// The operation context of a streamed run: the store claim on its leaf, and
 /// what is running in it, which a failure records (`runid::Failure`). Owned
-/// by the command's `Out` for the run's span — one per `fit run` cell, or per
-/// survey — and never by anything process-wide.
+/// by the command's `Out` for the run's span — one per `fit run` cell — and
+/// never by anything process-wide.
 pub struct HeldClaim {
     claim: crate::resolve::ResolvedClaim,
-    /// The fit method (`pmmh`, `if2`, …) or command (`survey`).
+    /// The fit method (`pmmh`, `if2`, …).
     operation: String,
 }
 

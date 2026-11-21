@@ -1,5 +1,5 @@
 //! gh#571: a tier-5 value — `simulate --param NAME=VALUE`, or `--fixed
-//! NAME=VALUE` on `survey` / `profile` — on a parameter a selected scenario
+//! NAME=VALUE` on `profile` — on a parameter a selected scenario
 //! `set`s or `scale`s is refused before anything runs.
 //!
 //! Precedence puts tier 5 above the scenario (run spec §1.3), so the flag
@@ -278,14 +278,15 @@ fn params_file_under_scenarios_runs_and_each_scenario_applies() {
 }
 
 #[test]
-fn survey_fixed_over_a_setting_scenario_is_refused() {
+fn profile_fixed_over_a_setting_scenario_is_refused() {
     let f = Fixture::new();
     let out = f.camdl(&[
-        "survey", "m.camdl", "--data", "cases.tsv", "--estimate", "beta=0.1:0.9",
-        "--fixed", "gamma=0.15", "--fixed", "rho=0.5", "--fixed", "ce=1.0",
-        "--scenario", "c25", "--n-points", "4",
+        "profile", "m.camdl", "--data", "cases.tsv", "--sweep", "beta=0.3,0.4",
+        "--rw-sd", "gamma=auto", "--particles", "50", "--n-starts", "1",
+        "--fixed", "rho=0.5", "--fixed", "ce=1.0", "--fixed", "gamma=0.15",
+        "--scenario", "c25",
     ]);
-    assert_refused_with(&out, "survey --fixed", "\
+    assert_refused_with(&out, "profile --fixed", "\
 error: --fixed ce=1.0 would replace the value scenario 'c25' sets
   scenario 'c25' sets ce = 0.75
   A --fixed value overrides every scenario, so scenario 'c25' would run with

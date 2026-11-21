@@ -213,8 +213,7 @@ pub fn draw_start_in_bounds(
 fn lhs_map_to_natural(spec: &EstimatedParam, u: f64) -> f64 {
     let (lo, hi) = spec.bounds();
     if !lo.is_finite() || !hi.is_finite() {
-        // Unreachable from the callers: `draw_chain_starts` and `survey`
-        // refuse a parameter whose box has an infinite end before any
+        // Unreachable from the callers: `draw_chain_starts` refuses a parameter whose box has an infinite end before any
         // builder runs. Kept total: ±50% jitter around the seeded start.
         return spec.initial * (0.5 + u);
     }

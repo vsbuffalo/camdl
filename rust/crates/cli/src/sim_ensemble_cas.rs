@@ -41,7 +41,7 @@
 //!     `--sweep beta=0.3,0.2` — the same cell set, two different combined
 //!     files — two ensembles.
 //!
-//! Mirrors [`crate::survey_cas`] / [`crate::pfilter_cas`] for the level/digest
+//! Mirrors [`crate::pfilter_cas`] for the level/digest
 //! conventions.
 
 use runid::inputs::ModelDigest;
@@ -251,7 +251,7 @@ mod tests {
     }
 
     /// The `grid` level exactly as `resolve_sim_ensemble` builds it, without an
-    /// `ir::Model` fixture (mirrors `survey_cas::tests`).
+    /// `ir::Model` fixture.
     fn grid_level(cells: &[EnsembleCell], design: Option<&ResolvedDesign>) -> crate::fit::cas::LevelHash {
         let s = grid_cells(cells);
         canonical_config_hash(&EnsembleGridLevel { n_cells: cells.len(), cells: &s, design }, &[]).unwrap()

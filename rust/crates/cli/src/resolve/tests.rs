@@ -5,7 +5,7 @@
 //!
 //! The model-identity gates at the bottom are **cross-kind**: they are
 //! asserted for every CAS kind whose identity folds a model (`sim`, `fit`,
-//! `pfilter`, `survey`, `sim_ensemble`, `profile`), not just the two that
+//! `pfilter`, `sim_ensemble`, `profile`), not just the two that
 //! route through this module.
 
 use std::collections::HashMap;
@@ -429,7 +429,6 @@ use crate::fit::config_v2::FitConfig;
 use crate::pfilter_cas::{resolve_pfilter, PfilterCtx};
 use crate::profile_cas::{resolve_profile_point, ProfilePointCtx};
 use crate::sim_ensemble_cas::{resolve_sim_ensemble, EnsembleCell, EnsembleCtx};
-use crate::survey_cas::{resolve_survey, SurveyCtx};
 
 const IRV: &str = "0.7";
 const ENGV: &str = "0.3.0+test";
@@ -506,31 +505,6 @@ fn all_kind_identities(model: &Model) -> Vec<(&'static str, ContentHash, Content
     })
     .expect("pfilter");
     out.push(("pfilter", pf.levels[0].hash, pf.run_id));
-
-    // survey — levels[0] is the `model` level.
-    let bounds = [("beta".to_string(), 0.01_f64, 2.0_f64)];
-    let fixed = [("N0".to_string(), 1000.0_f64)];
-    let sv = resolve_survey(&SurveyCtx {
-        model,
-        ir_version: IRV,
-        engine: &runid::inputs::EngineIdentity::of_build(ENGV),
-        stem: "sir",
-        data: &data,
-        eval_method: "pfilter",
-        eval_particles: 100,
-        eval_replicates: 1,
-        objective: crate::fit::config_v2::LikelihoodObjective::Full,
-        allow_forcing_extrapolation: false,
-        allow_degenerate_rates: false,
-        training_rows: None,
-        bounds: &bounds,
-        fixed: &fixed,
-        scenario: None,
-        n_points: 32,
-        seed: 7,
-    })
-    .expect("survey");
-    out.push(("survey", sv.levels[0].hash, sv.run_id));
 
     // sim_ensemble — levels[0] is the `model` level.
     let cells = [EnsembleCell {
@@ -774,7 +748,6 @@ fn cas_identity_pins() {
         ("sim", "82ed170f4e0580051cbe8e064c60d982f095be8a3bb90f12536a088575e57dc2"),
         ("fit", "937d67de229bc67c23bf862cdc345332dd145f1b66283d4e2635f6022851979f"),
         ("pfilter", "291de53592555457ee9872aec197db1f8c58a67c111f07b5806d320ea056b0a5"),
-        ("survey", "058ca0c9283a1ccf614dae56adc58820ebd9c8c489a07f59326e67e7022936cb"),
         ("sim_ensemble", "c784064470aee98529f7a4976382c3a51f85cea46434528ae49dd2d5cb861c37"),
         ("profile", "a3182ce7cbb9eae3f2f5f9bc2a782d2d6d4a5a19ca3921624f1f73ecdff5857b"),
     ];

@@ -4554,8 +4554,7 @@ fn one_step_bands(
         binomial,
     };
 
-    // Each draw's parameter vector — base defaults overlaid by name (the
-    // survey.rs:722-734 idiom). The cloud is schema-validated upstream, so
+    // Each draw's parameter vector — base defaults overlaid by name. The cloud is schema-validated upstream, so
     // every model parameter is present.
     let param_sets: Vec<Vec<f64>> = chosen
         .iter()

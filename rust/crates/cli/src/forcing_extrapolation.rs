@@ -12,7 +12,7 @@
 //! ([`crate::resolve::RecordMeta::new`]). By default a note is an error: the
 //! command says which forcing, its range and the side it was evaluated on,
 //! and exits before it commits anything. A command that holds a store claim
-//! while its model runs (`fit run`, `survey`) takes the refusal itself
+//! while its model runs (`fit run`) takes the refusal itself
 //! ([`ForcingPolicy::defer_while_claimed`]), so the claim is failed through
 //! its own error path rather than left `running` by an exit from the engine's
 //! worker thread. Under the override the note is said once as a warning, and

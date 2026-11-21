@@ -345,7 +345,7 @@ impl FittedSettings {
 
     /// The settings a replay of the fit runs under, given the replaying
     /// command's flags: each is on when the fit ran under it or the flag is
-    /// given, the fold `pfilter`, `profile` and `survey` apply to a `--fit`.
+    /// given, the fold `pfilter` and `profile` apply to a `--fit`.
     /// A flag can only turn a setting on, so a replay never drops the fit's.
     pub fn with_flags(self, allow_degenerate_rates: bool, allow_forcing_extrapolation: bool) -> Self {
         FittedSettings {

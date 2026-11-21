@@ -416,7 +416,7 @@ pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs, compile: crate::util::Compile
     // gh#162: a fit nests Rayon parallelism (chains × particle filter) on the
     // global pool, which otherwise defaults to ALL logical cores regardless of
     // `chains`. Cap it from `--parallel` / CAMDL_PARALLEL (0 = all cores) so the
-    // thread budget is explicit and matches pfilter/profile/survey.
+    // thread budget is explicit and matches pfilter/profile.
     // `build_global` is one-shot per process; ignore the already-initialised
     // Err so re-entry (tests) stays safe. Mirrors pfilter.rs.
     if execution.parallel > 0 {
@@ -2386,8 +2386,8 @@ fn removed_flag_message(a: &crate::args::FitRunArgs) -> Option<String> {
     ));
     if a._removed_survey_path.is_some() || a._removed_survey_top_k.is_some() {
         lines.push(
-            "--survey-path / --survey-top-k: the `survey_top_k` start rule was removed (a \
-             survey landscape is not a posterior). Use `--starts from_prior`, or run a short \
+            "--survey-path / --survey-top-k: the `survey_top_k` start rule was removed with \
+             the command that wrote its input. Use `--starts from_prior`, or run a short \
              fit and `--starts from_posterior=@handle`."
                 .to_string(),
         );
@@ -3089,7 +3089,7 @@ pub fn cmd_label(args: &crate::args::LabelArgs) {
     }
 
     // Match by hash prefix. Two homes for the label, by kind:
-    //   - sims / pfilters / surveys / fit runs → a per-leaf `run.json` whose
+    //   - sims / pfilters / fit runs → a per-leaf `run.json` whose
     //     `provenance.label` IS the label home; resolved by leaf `run_id`
     //     prefix via the same `cas_read::resolve_*_prefix` machinery `show`
     //     uses, so anything `show` can address, `label` can too.
@@ -3221,7 +3221,7 @@ pub fn cmd_label(args: &crate::args::LabelArgs) {
     let run_dir = matches.into_iter().next().unwrap();
     let run_json_path = run_dir.join("run.json");
 
-    // Per-leaf kinds (sim / pfilter / survey): the label lives in the leaf's
+    // Per-leaf kinds (sim / pfilter): the label lives in the leaf's
     // `run.json` `provenance.label`. These are always written `Completed`, so
     // there is no in-progress gate. Rewritten under the record lock, through a
     // uniquely named temporary file.

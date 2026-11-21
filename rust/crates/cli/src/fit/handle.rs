@@ -708,7 +708,7 @@ pub fn resolve_fit_run(s: &str) -> Result<ResolvedFit, ResolveError> {
 }
 
 /// The fit problem a `--fit` handle names, for a command that reads a fit's
-/// problem but none of its results (`pfilter`, `profile`, `survey`): the
+/// problem but none of its results (`pfilter`, `profile`): the
 /// config as the user wrote it, the configuration resolved from it, where its
 /// relative paths are anchored, and the configuration parsed.
 ///

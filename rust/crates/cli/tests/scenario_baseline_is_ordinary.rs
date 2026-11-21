@@ -271,13 +271,6 @@ fn an_undeclared_baseline_is_refused_by_every_verb() {
         "--sweep", "beta=lin(0.3,0.4,2)", "--scenario", "baseline", "--seed", "1",
     ]), "profile");
 
-    refused(&run(&bin, dir, &[
-        "survey", "model.camdl", "--parallel", "1", "--data", "weekly_cases.tsv",
-        "--estimate", "beta=0.1:0.9", "--estimate", "gamma=0.05:0.3",
-        "--fixed", "N0=10000", "--fixed", "I0=5", "--fixed", "rho=0.6", "--fixed", "k=10",
-        "--n-points", "10", "--scenario", "baseline",
-    ]), "survey");
-
     // fit predict refuses up front, before any replay runs or any file is
     // written — not partway through, with partial output on disk.
     fit(&bin, dir);

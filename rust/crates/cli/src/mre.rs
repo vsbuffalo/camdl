@@ -10,7 +10,7 @@
 //! the fit.toml's directory, so copying preserves each file's relative path and
 //! the bundled fit.toml needs no rewriting. Absolute / `../`-escaping paths are
 //! a portability smell (gh#211) and hard-error. Upstream-artifact seeds
-//! (`init = survey_top_k` / `from_mle` / `from_posterior` / `from_params`) are
+//! (`from_mle` / `from_posterior` / `from_params`) are
 //! not yet bundled and hard-error with guidance.
 
 use std::fmt::Write;

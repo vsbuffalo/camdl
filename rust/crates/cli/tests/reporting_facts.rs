@@ -239,13 +239,6 @@ fn every_recorded_fact_is_shown() {
     runs.push(("profile", run(&profile)));
     runs.push(("profile.cached", run(&profile)));
     runs.push(("profile.refused", run(&a(&["profile", "sir.camdl", "--fit", "if2.toml", "--sweep", "beta=lin(0.3,0.6,3)"]))));
-    let survey = a(&[
-        "survey", "sir.camdl", "--fit", "if2.toml", "--n-points", "8", "--eval-particles", "50", "--seed", "1",
-        "--progress", "none",
-    ]);
-    runs.push(("survey", run(&survey)));
-    runs.push(("survey.cached", run(&survey)));
-    runs.push(("survey.refused", run(&a(&["survey", "sir.camdl", "--estimate", "beta=0:1"]))));
     runs.push(("compare.refused", run(&a(&["compare", "@if2"]))));
     runs.push(("predict", run(&a(&["fit", "predict", "@converged", "--mode", "free_forward", "--n-draws", "5"]))));
     runs.push(("predict.refused", run(&a(&["fit", "predict", "@nope", "--mode", "free_forward"]))));

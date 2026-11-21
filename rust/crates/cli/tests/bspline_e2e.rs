@@ -322,11 +322,11 @@ fn only_a_run_past_the_window_is_refused() {
     assert!(recorded_holds(&cas).is_empty());
 }
 
-/// `pfilter`, `profile` and `survey` resolve the same anchored window and,
+/// `pfilter` and `profile` resolve the same anchored window and,
 /// with the data running past it, refuse the run without the override and
 /// warn once each under it.
 #[test]
-fn pfilter_profile_and_survey_refuse_or_warn_the_hold() {
+fn pfilter_and_profile_refuse_or_warn_the_hold() {
     let tmp = tempfile::tempdir().unwrap();
     let model = anchored_model(tmp.path(), "[0 'days, last_obs - 2 'weeks]");
     let fit = fit_toml(tmp.path(), &model);
@@ -361,8 +361,6 @@ fn pfilter_profile_and_survey_refuse_or_warn_the_hold() {
     run("profile", ["profile", &m, "--fit", &f, "--sweep", "gamma=lin(0.08,0.12,2)", "--algorithm", "if2",
                     "--particles", "30", "--iterations", "3", "--n-starts", "1", "--rw-sd", "auto", "--seed", "1"]
         .map(String::from).to_vec());
-    run("survey", ["survey", &m, "--fit", &f, "--eval", "simulate", "--n-points", "4", "--seed", "1",
-                   "--output", &s(&tmp.path().join("survey_out"))].map(String::from).to_vec());
 }
 
 /// A tiny pgas `fit run` of `model` on weekly synthetic counts, with the given

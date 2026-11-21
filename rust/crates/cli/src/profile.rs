@@ -534,7 +534,7 @@ fn run_profile(
         // How each [fixed] name reached the config, for the partition.
         let fixed_via = fit_cfg.fixed.declarations(&model_pre);
         // Resolve [fixed] (file load, scenario, inline overlay) the
-        // same way `camdl survey --fit` and `camdl fit run` do.
+        // same way `camdl fit run` does.
         let mut fixed_cfg = fit_cfg.fixed.clone();
         fixed_cfg.expand_from_scenario(&model_pre, &fit_cfg.estimate)
             .unwrap_or_else(|e| {
@@ -589,8 +589,8 @@ fn run_profile(
     // profile defaults; `--starts`, else the fit's `[method] starts`.
 
     // The scenario this profile runs under: the fit config's top-level
-    // `scenario`/`enable`/`disable` combined with the CLI flags by the same
-    // rule `survey --fit` uses.
+    // `scenario`/`enable`/`disable` combined with the CLI flags by the rule
+    // `pfilter --fit` uses.
     let crate::util::ScenarioSelection {
         scenario: scenario_name,
         enable: adhoc_enable,

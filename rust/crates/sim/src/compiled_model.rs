@@ -578,8 +578,8 @@ fn expr_is_time_dependent_memo(
 fn refuse_unresolved_anchors(model: &Model) -> Result<(), SimError> {
     const HOW: &str = "An observation anchor resolves from the run's bound observation \
                        streams, so the command must have data: pass `--fit <fit.toml | fit \
-                       run dir>` on `simulate`, `--data`/`--fit` on `pfilter`, `profile` or \
-                       `survey`, or run it through a command that binds data by construction \
+                       run dir>` on `simulate`, `--data`/`--fit` on `pfilter` or `profile`, \
+                       or run it through a command that binds data by construction \
                        (`fit run`, `fit predict`).";
 
     if let Some(a) = &model.simulation.t_start_anchor {

@@ -78,7 +78,7 @@ pub enum LoglikType {
     /// IF2 clean-eval marginal at θ̂ (iterated-filtering MLE).
     If2,
     /// Generic marginal `log p(y | θ)`: PMMH MAP, standalone `pfilter`,
-    /// `survey` / `profile` grid evaluations.
+    /// `profile` grid evaluations.
     Marginal,
     /// Marginal on the deterministic ODE skeleton: NLopt MLE and MH-ODE.
     OdeMarginal,
@@ -175,8 +175,7 @@ impl std::fmt::Display for LoglikType {
 }
 
 /// The loglik class is a function of the run's algorithm. This covers the
-/// surfaces keyed on the broad `FitAlgorithm` (browse, profile, pfilter,
-/// survey).
+/// surfaces keyed on the broad `FitAlgorithm` (browse, profile, pfilter).
 impl From<FitAlgorithm> for LoglikType {
     fn from(a: FitAlgorithm) -> Self {
         match a {

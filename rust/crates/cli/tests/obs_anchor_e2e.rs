@@ -691,9 +691,9 @@ fn an_anchored_horizon_can_write_observations() {
     assert_eq!(max_t, 42.0, "obs axis reaches the resolved horizon:\n{txt}");
 }
 
-// ── The three fixed-θ commands that bind data ────────────────────────────────
+// ── The fixed-θ commands that bind data ──────────────────────────────────────
 //
-// `pfilter`, `profile` and `survey` all bind observation streams before they
+// `pfilter` and `profile` both bind observation streams before they
 // score anything, so each resolves a model's anchors from its own bindings
 // rather than refusing at `CompiledModel::new`. `pfilter --fit` is the cheapest
 // probe of a fitted model at fixed θ, and without this an anchored model could
@@ -783,55 +783,6 @@ fn profile_resolves_an_anchored_model() {
         stderr.contains("cells written"),
         "profile must have scored its grid:\n{stderr}"
     );
-}
-
-/// And `survey`, in both of its input modes: `--fit` reads the toml's
-/// `[data.observations]`, inline reads a single `--data` file. Both bind data,
-/// so neither may refuse.
-#[test]
-fn survey_resolves_an_anchored_model_in_both_input_modes() {
-    let bin = bin();
-    let tmp = tempfile::tempdir().unwrap();
-    let model = write_model(tmp.path(), "last_obs + 4 'weeks");
-    let data = tmp.path().join("cases.tsv");
-    write_data(&data, 4);
-    let toml = write_fit_toml(tmp.path(), &model, &data);
-
-    let run = |args: Vec<&str>, out: &str| -> String {
-        let o = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-            .arg("survey")
-            .arg(&model)
-            .args(args)
-            .args(["--eval", "simulate", "--n-points", "4", "--seed", "1"])
-            .args(["--output", tmp.path().join(out).to_str().unwrap()])
-            .env("CAMDL_SKIP_VERSION_CHECK", "1")
-            .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
-            .output()
-            .expect("spawn survey");
-        let stderr = String::from_utf8_lossy(&o.stderr).into_owned();
-        assert!(o.status.success(), "survey must run an anchored model:\n{stderr}");
-        stderr
-    };
-
-    let s = run(vec!["--fit", toml.to_str().unwrap()], "cas_fit");
-    assert_both_anchors_announced(&s, "survey --fit");
-    assert!(s.contains("landscape.tsv"), "survey --fit wrote no landscape:\n{s}");
-
-    let s = run(
-        vec![
-            "--data",
-            data.to_str().unwrap(),
-            "--estimate",
-            "gamma=0.01:1.0",
-            "--fixed",
-            "beta=0.12",
-            "--fixed",
-            "rho=0.6",
-        ],
-        "cas_inline",
-    );
-    assert_both_anchors_announced(&s, "survey --data");
-    assert!(s.contains("landscape.tsv"), "survey --data wrote no landscape:\n{s}");
 }
 
 /// An anchored model with NO data bound is still refused, by name. `--data` was
@@ -925,14 +876,14 @@ fn pfilter_scenario_horizon_guard_compares_resolved_numbers() {
     assert_both_anchors_announced(&stderr, "pfilter --scenario (equal horizons)");
 }
 
-/// A resolved anchor re-keys a `survey` too, and it must reach the recorded
-/// `model_identity` as well as the run key. Survey keys its run off the
-/// substituted `ir::Model`, but records provenance from the IR TEXT — so a
+/// A resolved anchor re-keys a `profile` too, and it must reach the recorded
+/// `model_identity` as well as the run key. Profile substitutes the anchors in
+/// the `ir::Model` it runs, but records `model_identity` from the IR text, so a
 /// substitution that never reaches the text leaves two data vintages sharing an
 /// identity string that says they are the same model, while their forcing forks
 /// differ by four weeks.
 #[test]
-fn survey_records_a_distinct_model_identity_per_data_vintage() {
+fn profile_records_a_distinct_model_identity_per_data_vintage() {
     let bin = bin();
     let tmp = tempfile::tempdir().unwrap();
     let model = write_model(tmp.path(), "120 'days"); // LITERAL horizon: only the fork moves
@@ -943,18 +894,20 @@ fn survey_records_a_distinct_model_identity_per_data_vintage() {
     let run = |rows: usize| {
         write_data(&data, rows);
         let o = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-            .arg("survey")
+            .arg("profile")
             .arg(&model)
             .args(["--fit", toml.to_str().unwrap()])
-            .args(["--eval", "simulate", "--n-points", "4", "--seed", "1"])
-            .args(["--output", root.to_str().unwrap()])
+            .args(["--sweep", "gamma=lin(0.08,0.12,2)"])
+            .args(["--algorithm", "if2", "--particles", "30", "--iterations", "3"])
+            .args(["--n-starts", "1", "--rw-sd", "auto", "--seed", "1"])
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
+            .env("CAMDL_OUTPUT_DIR", &root)
             .output()
-            .expect("spawn survey");
+            .expect("spawn profile");
         assert!(
             o.status.success(),
-            "survey must run:\n{}",
+            "profile must run:\n{}",
             String::from_utf8_lossy(&o.stderr)
         );
     };
@@ -970,15 +923,11 @@ fn survey_records_a_distinct_model_identity_per_data_vintage() {
             if !p.is_dir() {
                 continue;
             }
-            let rj = p.join("run.json");
-            if rj.is_file() {
+            let meta = p.join("fit.meta.json");
+            if meta.is_file() {
                 let v: serde_json::Value =
-                    serde_json::from_str(&std::fs::read_to_string(&rj).unwrap()).unwrap();
-                if let Some(id) = v
-                    .get("inputs")
-                    .and_then(|i| i.get("model_identity"))
-                    .and_then(|x| x.as_str())
-                {
+                    serde_json::from_str(&std::fs::read_to_string(&meta).unwrap()).unwrap();
+                if let Some(id) = v.get("model_identity").and_then(|x| x.as_str()) {
                     identities.push(id.to_string());
                 }
             }

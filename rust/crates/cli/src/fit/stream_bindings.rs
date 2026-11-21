@@ -124,8 +124,8 @@ impl StreamBindings {
         Ok(BoundDataDigests { training, holdout, identity_training, tables: BTreeMap::new() })
     }
 
-    /// The training files keyed as the run identities of `fit`, `survey`,
-    /// `profile` and `pfilter --fit` have always been built over:
+    /// The training files keyed as the run identities of `fit`, `profile`
+    /// and `pfilter --fit` have always been built over:
     /// `[data.observations]` as written (by source), and under the one-file
     /// shorthand the file once per model observation leaf. These identities
     /// fold the files' digests in key order with the keys dropped, so under

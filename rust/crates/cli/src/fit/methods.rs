@@ -694,7 +694,7 @@ pub fn check_model_capabilities(
     // via `Capabilities`, which lets the error name the offending compartment and
     // transitions. ODE inference runs every transition as a deterministic flow
     // and is exempt. This is the single inference chokepoint every stochastic
-    // fit method / profile / survey routes through.
+    // fit method and profile routes through.
     if matches!(backend, InferenceBackend::ChainBinomial) {
         compiled
             .validate_deterministic_source_exits()
@@ -1042,7 +1042,7 @@ mod tests {
 
     /// A transition consuming two units of its source per firing (`S + S --> D`,
     /// net stoichiometry `S: -2`) is refused by the chain-binomial inference
-    /// dispatch check — the one every `fit` method, `profile` and survey routes
+    /// dispatch check — the one every `fit` method and `profile` routes
     /// through — with a message naming the transition, the units and the
     /// compartment. ODE inference runs it as a continuous flow and accepts it.
     #[test]
@@ -1543,7 +1543,7 @@ mod tests {
         // must ACCEPT it on chain_binomial. Before the fix the gate granted
         // chain_binomial only OVERDISPERSION, so a balance{} model was
         // falsely rejected on `profile` (the one path that calls the gate),
-        // even though fit/survey/pfilter ran it.
+        // even though fit/pfilter ran it.
         let compiled = compiled_sir_with_balance();
         assert!(
             compiled

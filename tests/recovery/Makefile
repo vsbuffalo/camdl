@@ -15,7 +15,6 @@
 #   make -f tests/recovery/Makefile pgas       # PGAS fit    — per-chain ll bars
 #   make -f tests/recovery/Makefile pmmh       # PMMH fit    — per-chain ll + acc bars
 #   make -f tests/recovery/Makefile ensemble   # 30-cell simulate — the cells bar
-#   make -f tests/recovery/Makefile survey     # likelihood survey — best-ll bar
 #   make -f tests/recovery/Makefile all        # synth + the three fits
 #   make -f tests/recovery/Makefile clean      # remove generated data + results
 #   make -f tests/recovery/Makefile smooth-diagnosis   # pgas sampling diagnosis (≈1 h)
@@ -49,7 +48,7 @@ TRUTH := --params truth.toml      # planted ground truth (single source)
 # afp.tsv, … — gate the fits on a stamp, not on a specific stream filename.
 SYNTH := $(CASE)/data/.synth-stamp
 
-.PHONY: help ocaml synth if2 pgas pmmh ensemble survey all clean
+.PHONY: help ocaml synth if2 pgas pmmh ensemble all clean
 .DEFAULT_GOAL := help
 
 help: ## show this help
@@ -76,9 +75,6 @@ pmmh: $(SYNTH) ; cd $(CASE) && $(CAMDL) fit run pmmh.toml ## PMMH fit
 ensemble: | ocaml ## 30-replicate forward sim (cells bar)
 	cd $(CASE) && $(CAMDL) simulate $(MODEL) --backend chain_binomial $(TRUTH) \
 	  --replicates 30 --output-dir results
-
-survey: $(SYNTH) ## likelihood survey over if2.toml bounds (best-ll bar)
-	cd $(CASE) && $(CAMDL) survey $(MODEL) --fit if2.toml --n-points 400 --output results
 
 all: if2 pgas pmmh ## synth + all three fits
 

@@ -3,9 +3,9 @@
 //! The profile verb read `[estimate]`, `[fixed]` and `[data]` from the fit
 //! config but never its top-level `scenario` / `enable` / `disable`, so a
 //! config naming a scenario profiled the unmodified model. It now combines
-//! the config's selection with `--scenario` / `--enable` / `--disable` by the
-//! same rule as `survey --fit` (`util::combine_fit_scenario`): either alone
-//! selects, both must name the same scenario, anything else is refused.
+//! the config's selection with `--scenario` / `--enable` / `--disable` by one
+//! rule (`util::combine_fit_scenario`): either alone selects, both must name
+//! the same scenario, anything else is refused.
 //!
 //! Scenario `Z` sets `N0 = 5000`. Runs under a scenario use a fit config whose
 //! `[fixed]` does not pin `N0`, so the scenario supplies it; the no-scenario

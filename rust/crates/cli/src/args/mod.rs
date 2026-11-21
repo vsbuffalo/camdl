@@ -779,7 +779,7 @@ pub struct FitRunArgs {
     /// each chain, the particle filter. `0` (the default) uses all logical
     /// cores. Results are bit-identical regardless of this value — it caps the
     /// thread budget / CPU footprint, not the numerics. Mirrors `--parallel`
-    /// on pfilter/profile/survey; also honored via `CAMDL_PARALLEL`.
+    /// on pfilter/profile; also honored via `CAMDL_PARALLEL`.
     #[arg(long, default_value_t = 0, env = "CAMDL_PARALLEL")]
     pub parallel: usize,
 
@@ -1715,7 +1715,7 @@ Notes:
   - Labels are 1–64 characters after trim, restricted to:
     letters, digits, spaces, commas, dot, underscore, hyphen.
   - The hash is matched as a prefix (8+ chars recommended) across
-    every kind under <root>/ (sims, fits, profiles, pfilters, surveys).
+    every kind under <root>/ (sims, fits, profiles, pfilters).
   - Errors on ambiguous or unmatched prefix.
   - Errors on a still-running fit (RunStatus::Running); the
     runner would otherwise overwrite the label at completion.
@@ -1728,7 +1728,7 @@ Notes:
 pub struct LabelArgs {
     /// Hash prefix of the target run (matches against any kind's leaf
     /// `run.json` `run_id` under
-    /// `<root>/{sims,fits,profiles,pfilters,surveys}/`)
+    /// `<root>/{sims,fits,profiles,pfilters}/`)
     pub hash: String,
 
     /// New label text. Validated against ^[a-zA-Z0-9 ,._-]{1,64}$
@@ -2019,8 +2019,8 @@ pub struct ProfileArgs {
     pub data: Vec<DataSpec>,
 
     /// Optional fit toml supplying the estimated set, bounds, starting
-    /// values and fixed list. Mirrors `camdl survey --fit`'s schema (the
-    /// `[estimate]`, `[fixed]`, `[model]` blocks). A swept parameter
+    /// values and fixed list (the `[estimate]`, `[fixed]`, `[model]`
+    /// blocks). A swept parameter
     /// belongs in `[estimate]`, whose entry bounds the grid; each cell pins
     /// it at its grid value and estimates the rest. Listing it in `[fixed]`
     /// is refused. Priors do not
@@ -2229,244 +2229,6 @@ pub struct DesignLhsArgs {
     /// Write the design to this file (default: stdout).
     #[arg(short, long)]
     pub output: Option<PathBuf>,
-}
-
-// ─── survey ───────────────────────────────────────────────────────────────────
-
-#[derive(Args)]
-#[command(after_help = colored_help!("\
-EXAMPLES
-
-  # Fit-aware: read [estimate] bounds and [data] from fit.toml
-  camdl survey model.camdl --fit fit.toml
-
-  # Inline bounds, data file specified directly
-  camdl survey model.camdl --data cases.tsv \\
-      --estimate \"beta=0.001:1.0\" --estimate \"gamma=0.01:0.5\"
-
-  # Fast deterministic-only mode (skip PF; not safe for stochastic models)
-  camdl survey model.camdl --fit fit.toml --eval simulate
-
-  # Render the interactive HTML alongside the TSV
-  camdl survey model.camdl --fit fit.toml --render
-
-WHAT THIS IS
-
-  A diagnostic tool that draws N Latin-hypercube points across the
-  declared parameter bounds, evaluates the marginal log-likelihood
-  at each, and writes a TSV (and optionally an interactive HTML
-  pair-plot) to surface identifiability structure. It is intended
-  to be run BEFORE camdl fit, to answer:
-
-    - Is this model identifiable from this data?
-    - Are there ridges or multiple basins?
-    - Are the high-loglik regions biologically plausible?
-    - Where do likely basins concentrate? (informs scout bounds)
-
-  Survey is NOT a fitting routine. It does not produce an MLE.
-  The output cannot substitute for camdl fit.
-
-WHEN TO TRUST THE OUTPUT
-
-  Survey works well when:
-    - Process noise is small (deterministic-skeleton regime),
-      or `--eval pfilter` is used with adequate
-      particles/replicates
-    - Parameter dimension d <= 8 (pair-plots are visually parseable)
-    - Bounds reflect informed prior plausibility (not \"throw a
-      wide net\")
-    - Dynamics are not strongly chaotic (seasonally-forced SEIR
-      with high R0 may produce intrinsically jagged landscapes)
-
-KNOWN LIMITATIONS
-
-  Stochastic deceiver (mitigated by --eval pfilter):
-    Single-trajectory loglik is a 1-sample Monte Carlo estimate of
-    p(y|theta) with variance proportional to the model's process
-    noise. With high noise (e.g. multiplicative gamma white noise
-    on transmission, sigma_se > ~1) the rank of N points by
-    single-trajectory loglik is biased toward \"lucky outliers\"
-    (Andrieu & Roberts 2009; Doucet et al. 2015, Biometrika). The
-    default --eval pfilter substantially mitigates this; survey
-    will warn at run end if the per-point loglik SE distribution
-    indicates unreliable ranks.
-
-  Chaotic dynamics:
-    Seasonally-forced SEIR and similar systems have positive
-    Lyapunov exponents in much of parameter space (Earn et al.
-    2000; Bauch & Earn 2003). Small delta-theta produces wildly
-    divergent deterministic trajectories. The landscape will be
-    intrinsically jagged regardless of eval method. Interpret
-    such surveys cautiously: the diagnostic is correctly
-    reporting \"this is hard,\" not \"your model is broken.\"
-
-  Bounds dependence:
-    Survey ranks are conditional on the bounds you give. Wide
-    bounds dilute (the \"top 10%\" may be marginally-less-bad
-    rather than meaningfully-good). Narrow bounds may exclude
-    the true basin entirely with no signal that this happened.
-    Bound choice is a load-bearing modelling decision; survey
-    cannot rescue a poorly-specified bounds box.
-
-  Curse of dimensionality:
-    Pair-plots project 2D marginals from a d-dimensional joint
-    distribution. High-loglik points concentrating in a 2D
-    pair may reflect tight conditioning on unshown parameters
-    not visible in that view. Past d ~= 8 this becomes hard to
-    interpret. Survey emits warnings at d > 6 and d > 10;
-    consider camdl profile for higher-dimensional
-    identifiability questions.
-
-  Misspecification != identifiability:
-    A tight, well-clustered top-K is a necessary but not
-    sufficient condition for trusting the resulting fit. A
-    misspecified model can have a tight likelihood at a
-    wrong-but-best-fitting theta. Posterior predictive checks
-    against held-out data are the orthogonal validation;
-    survey cannot substitute.
-
-  Silent miss case:
-    With N points in d dimensions, LHS may not hit a true basin
-    that occupies a small fraction of the bounds box. The
-    landscape would then show structure of wrong basins with
-    no signal that the right one was missed. If results look
-    surprising, increase --n-points and re-run.
-
-CITED REFERENCES
-
-  Andrieu, C. & Roberts, G. O. (2009). The pseudo-marginal
-    approach for efficient Monte Carlo computations. Annals of
-    Statistics, 37(2), 697-725.
-  Doucet, A., Pitt, M. K., Deligiannidis, G. & Kohn, R. (2015).
-    Efficient implementation of MCMC when using an unbiased
-    likelihood estimator. Biometrika, 102(2), 295-313.
-  Earn, D. J. D., Rohani, P., Bolker, B. M. & Grenfell, B. T.
-    (2000). A simple model for complex dynamical transitions in
-    epidemics. Science, 287(5453), 667-670.
-"))]
-pub struct SurveyArgs {
-    /// IR JSON or .camdl model file
-    pub model: PathBuf,
-
-    #[command(flatten)]
-    pub forcing_extrapolation: ForcingExtrapolationArg,
-
-    /// Evaluate a rate that collapses (a division by an empty compartment, a
-    /// power that is NaN) as 0 instead of failing the trajectory, as
-    /// `pfilter` and `profile` do under the same flag. A `--fit` config sets
-    /// it as `[config] allow_degenerate_rates = true`; either turns it on. It
-    /// changes every point's log-likelihood, so it is part of the survey's
-    /// run identity.
-    #[arg(long, default_value_t = false)]
-    pub allow_degenerate_rates: bool,
-
-    /// fit.toml supplying [estimate] bounds and [data] (fit-aware mode).
-    /// The model scored is MODEL; the config's [model] is not read. A
-    /// `[data] holdout_after` removes every row ending after the cutoff from every
-    /// point's likelihood, as `fit run` removes it from training, and
-    /// `[data.holdout]` files must lie after the training rows.
-    /// Mutually exclusive with --estimate / --data; pass exactly one.
-    #[arg(long, conflicts_with_all = ["estimate", "data"])]
-    pub fit: Option<PathBuf>,
-
-    /// Inline LHS bounds, e.g. --estimate "beta=0.001:1.0" (repeat).
-    /// Required when --fit is not given.
-    #[arg(long, value_name = "NAME=LO:HI")]
-    pub estimate: Vec<types::EstimateBoundsSpec>,
-
-    /// Inline observation data TSV. Required when --fit is not given.
-    #[arg(long)]
-    pub data: Option<PathBuf>,
-
-    /// Fixed parameters (NAME=VALUE), repeat. Pins the parameter at the
-    /// value rather than the model default. With `--fit`, a name the fit
-    /// config lists in `[estimate]` is held at the value and not sampled
-    /// (reported at info).
-    #[arg(long, value_name = "NAME=VALUE")]
-    pub fixed: Vec<types::ParamOverride>,
-
-    /// Named scenario from the model. Applies the scenario's
-    /// enable/disable lists and param overrides before survey.
-    #[arg(long)]
-    pub scenario: Option<String>,
-
-    /// Number of Latin-hypercube points to evaluate.
-    ///
-    /// Default behaviour: auto-scale with parameter dimension as
-    /// `max(1000, 50 * d^2)` so the n/d^2 >= 50 pair-plot coverage
-    /// floor is met by default. For d=4 this is 1000 (unchanged from
-    /// v1); for d=8 it's 3200; for d=12 it's 7200. Pass `--n-points
-    /// N` to override (e.g. lower it explicitly for fast iteration,
-    /// or higher for sparse-basin models). Set 0 to use the auto rule
-    /// regardless.
-    #[arg(long, default_value_t = 0)]
-    pub n_points: usize,
-
-    /// Likelihood evaluation method:
-    ///   `auto` (default) — pick from the model: `pfilter` if any rate
-    ///     uses overdispersed() / similar process noise; otherwise
-    ///     `simulate`. The chosen method is announced at run start and
-    ///     stored in run.json; the `auto` discriminator itself is never
-    ///     persisted.
-    ///   `pfilter` — particle filter, K replicates → logmeanexp combiner.
-    ///     Estimates p(y|θ) under the chain-binomial process. Doucet et
-    ///     al. 2015 gives the bar for trustworthy ranks: per-point loglik
-    ///     SE ≤ ~1.7 nats.
-    ///   `simulate` — single deterministic trajectory per point. ~10×
-    ///     cheaper but biased toward "lucky outliers" when process noise
-    ///     is non-trivial. Safe only for known-deterministic models.
-    #[arg(long, default_value_t = crate::run_meta::SurveyEvalMethod::Auto)]
-    pub eval: crate::run_meta::SurveyEvalMethod,
-
-    /// Particle count for `--eval pfilter`. 200 is adequate for
-    /// `sigma_se <= 1` on weekly data per the proposal's per-point
-    /// cost table.
-    #[arg(long, default_value_t = 200)]
-    pub eval_particles: usize,
-
-    /// PF replicates per LHS point (logmeanexp combiner). The
-    /// replicate variance also drives the per-point loglik_se column;
-    /// at K=3 the SE *estimate* itself has ~50% uncertainty (df=2),
-    /// which can fire the Doucet 1.7-nat warning spuriously. K=5
-    /// matches Sherlock et al. 2015's recommendation for
-    /// pseudo-marginal MCMC and gives a tighter SE estimate at
-    /// 5/3× the compute. Always 1 with `--eval simulate`.
-    #[arg(long, default_value_t = 5)]
-    pub eval_replicates: usize,
-
-    /// LHS / PF base seed.
-    #[arg(long, default_value_t = 42)]
-    pub seed: u64,
-
-    /// Render an interactive HTML pair-plot (`landscape.html`) of the
-    /// landscape, written as a child of the stored survey
-    /// (`<leaf>/landscape_html/landscape.html`); on a stored survey it is
-    /// rendered from the stored landscape. Off by default — TSV is the
-    /// canonical artifact, HTML is opt-in (proposal §"Default behaviour").
-    #[arg(long)]
-    pub render: bool,
-
-    /// Output root directory (default: ./results, matches the rest
-    /// of camdl).
-    #[arg(long)]
-    pub output: Option<PathBuf>,
-
-    /// User-supplied display label for this survey run. Validated
-    /// against `^[a-zA-Z0-9 ,._-]{1,64}$` after trim. Surfaced in
-    /// `camdl list` and `camdl show`.
-    #[arg(long, value_name = "TEXT")]
-    pub label: Option<String>,
-
-    /// Force re-evaluation of all LHS points; bypass the cache (the
-    /// CAS layout still applies — same hash, fresh artifacts). Also clears a
-    /// leaf held by a survey on another host, which camdl never reclaims on
-    /// its own.
-    #[arg(long)]
-    pub force: bool,
-
-    /// Rayon thread count (0 = all available cores).
-    #[arg(long, default_value_t = 0, env = "CAMDL_PARALLEL")]
-    pub parallel: usize,
 }
 
 // ─── eval ─────────────────────────────────────────────────────────────────────
@@ -2741,7 +2503,7 @@ pub struct ListArgs {
     #[arg(long)]
     pub since: Option<ListDuration>,
 
-    /// Filter by run kind: sim, fit, profile, pfilter, survey, ensemble, or
+    /// Filter by run kind: sim, fit, profile, pfilter, ensemble, or
     /// all (default).
     #[arg(long, default_value = "all")]
     pub kind: String,

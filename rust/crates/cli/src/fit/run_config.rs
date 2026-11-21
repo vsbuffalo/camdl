@@ -49,7 +49,7 @@
 //! so runs under the override a flag set (gh#1268) and at a sweep point's own
 //! values; `fit table`'s config diff compares it. A `fit.toml` handle names
 //! only the run the file alone makes (gh#896), so it refuses a flag-made fit,
-//! naming its leaf. `pfilter`, `profile` and `survey` take the same handle
+//! naming its leaf. `pfilter` and `profile` take the same handle
 //! forms for `--fit` (`fit::handle::resolve_fit_problem`): a run handle reads
 //! the resolved config, and a `fit.toml` names the file's problem, which does
 //! not hold a flag's value. The resolved config's `[method]` table is the file's:

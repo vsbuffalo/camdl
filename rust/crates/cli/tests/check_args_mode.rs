@@ -53,7 +53,6 @@ fn valid_surface_with_missing_inputs_is_ok() {
     assert_eq!(check(&["pfilter", "m.camdl", "--params", "p.toml",
                        "--data", "d.tsv", "--particles", "5000"]), 0);
     assert_eq!(check(&["compare", "a", "b"]), 0);
-    assert_eq!(check(&["survey", "m.camdl", "--fit", "f.toml", "--render"]), 0);
     assert_eq!(check(&["simulate", "m.camdl", "--draws", "prior",
                        "--fit", "f.toml", "-n", "200", "--obs", "ppc.tsv"]), 0);
 }
@@ -89,6 +88,20 @@ fn unknown_subcommand_is_drift() {
     assert_eq!(check(&["frobnicate", "foo"]), 2);
 }
 
+/// `survey` is not a subcommand: clap refuses it as it refuses any unknown
+/// name, and no command of that name is left to accept it.
+#[test]
+fn survey_is_an_unknown_subcommand() {
+    assert_eq!(check(&["survey", "m.camdl", "--fit", "f.toml"]), 2);
+    let out = Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
+        .args(["survey", "m.camdl", "--fit", "f.toml"])
+        .output()
+        .expect("spawn camdl survey");
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("unrecognized subcommand 'survey'"), "{err}");
+}
+
 #[test]
 fn unrecognized_flag_is_drift() {
     assert_eq!(check(&["simulate", "model.camdl", "--no-such-flag"]), 2);
@@ -107,7 +120,7 @@ fn invalid_enum_value_is_drift() {
 
 #[test]
 fn flag_on_wrong_subcommand_is_drift() {
-    // `--particles` belongs to pfilter/profile/survey, not simulate.
+    // `--particles` belongs to pfilter/profile, not simulate.
     assert_eq!(check(&["simulate", "model.camdl", "--particles", "10"]), 2);
 }
 

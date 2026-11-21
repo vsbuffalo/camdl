@@ -79,8 +79,8 @@ pub struct FitMethodCtx<'a> {
 pub(crate) const LEVEL_SCHEMA_VERSION: u16 = 1;
 
 /// Build a CAS [`LevelId`] with the canonical schema version. The single
-/// constructor every artifact-kind resolver (`fit`/`pfilter`/`survey`/
-/// `profile`/`sim_ensemble`/`resolve`) routes through.
+/// constructor every artifact-kind resolver (`fit`/`pfilter`/`profile`/
+/// `sim_ensemble`/`resolve`) routes through.
 pub(crate) fn level(name: &str, label: &str, hash: LevelHash) -> LevelId {
     LevelId {
         name: name.into(),

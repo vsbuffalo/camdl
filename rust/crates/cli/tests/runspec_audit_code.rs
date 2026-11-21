@@ -3,8 +3,8 @@
 //! * IF2's `mle_params.toml` `[provenance]` states the uncertainty of the
 //!   log-likelihood it records: the re-score's Monte Carlo standard error and
 //!   particle count, not a zero and the swarm's size.
-//! * `survey --fit` and `profile --fit` seed an `[estimate]` entry with no
-//!   `start` (`beta = {}`) the way `fit run` does (run-spec §1.4, §6.3).
+//! * `profile --fit` seeds an `[estimate]` entry with no `start`
+//!   (`beta = {}`) the way `fit run` does (run-spec §1.4, §6.3).
 //! * The resolver's refusals name the flag the user passed and fixes that
 //!   exist (§1.3).
 //!
@@ -127,7 +127,7 @@ dt_check = {{ enabled = false }}
         "the re-score's mean effective sample size is recorded: {text}");
 }
 
-// ─── B: survey and profile seed `beta = {}` the way fit run does ────────────
+// ─── B: profile seeds `beta = {}` the way fit run does ──────────────────────
 
 /// Both parameters are estimated with no `start`; nothing else gives them a
 /// value.
@@ -151,18 +151,6 @@ cooling = 0.5
 loglik_eval = { n_particles = 20, n_replicates = 2 }
 dt_check = { enabled = false }
 "#;
-
-#[test]
-fn survey_fit_draws_a_start_for_a_bare_estimate_entry() {
-    let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path();
-    fixture(dir);
-    std::fs::write(dir.join("fit.toml"), BARE_ESTIMATE_FIT).unwrap();
-    let out = camdl(dir, &["survey", "sir.camdl", "--fit", "fit.toml",
-                           "--n-points", "3", "--seed", "1"]);
-    let e = ok(&out, "survey --fit with `beta = {}`");
-    assert!(!e.contains("has no value"), "stderr: {e}");
-}
 
 #[test]
 fn profile_fit_needs_no_start_for_the_swept_or_the_nuisance_parameter() {
@@ -239,8 +227,10 @@ fn an_inference_command_still_names_fixed() {
     let dir = tmp.path();
     fixture(dir);
     std::fs::write(dir.join("fit.toml"), BARE_ESTIMATE_FIT).unwrap();
-    let out = camdl(dir, &["survey", "sir.camdl", "--fit", "fit.toml", "--n-points", "2",
-                           "--fixed", "bta=0.3", "--seed", "1"]);
+    let out = camdl(dir, &["profile", "sir.camdl", "--fit", "fit.toml",
+                           "--sweep", "beta=lin(0.2,0.4,2)",
+                           "--particles", "20", "--iterations", "2", "--n-starts", "1",
+                           "--rw-sd", "auto", "--fixed", "bta=0.3", "--seed", "1"]);
     assert!(!out.status.success());
     let e = stderr(&out);
     assert!(e.contains("unknown parameter 'bta' from --fixed"), "stderr: {e}");

@@ -399,7 +399,7 @@ fn pfilter_fit_scores_under_the_fits_selection() {
         "--enable vax beside a fit config that enables vax scores the fit's model");
 
     // A flag naming a different selection from the fit's is refused, as on
-    // `survey --fit` / `profile --fit`: a run scores one problem.
+    // `profile --fit`: a run scores one problem.
     let out = pf(&["--fit", fit.to_str().unwrap(), "--disable", "vax"]);
     assert!(!out.status.success(), "pfilter --fit (enable vax) --disable vax must be refused");
     let stderr = String::from_utf8_lossy(&out.stderr);

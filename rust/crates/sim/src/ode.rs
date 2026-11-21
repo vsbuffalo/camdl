@@ -528,7 +528,7 @@ trait OdeStepper {
 /// on the unscored warm-up `[t_start, cond_from)`, exact `dt` on the scored window
 /// `[cond_from, t_end]`. `cond_from` is the warm-up/scored split (the first
 /// observation time). Threaded into the value-only [`run_ode`] — the deterministic
-/// ODE likelihood path shared by `mh`, `nlopt`/IF2, and `survey`; the augmented
+/// ODE likelihood path shared by `mh` and `nlopt`/IF2; the augmented
 /// gradient path ([`integrate_obs_sensitivity`], `nuts`) carries the same split
 /// via the same [`CoarseBurnin::nominal`] step rule.
 #[derive(Debug, Clone, Copy)]
@@ -1569,7 +1569,7 @@ mod tests {
             int[0]
         );
 
-        // Value-only path (forward simulate, `mh`, NLopt, profile, survey):
+        // Value-only path (forward simulate, `mh`, NLopt, profile):
         // refused the same way, with the compartment, time and step named.
         let mut int2 = vec![100.0];
         let mut real2: Vec<f64> = vec![];
@@ -2168,7 +2168,7 @@ mod tests {
         let params = [-0.1];
         let nf = cm.model.transitions.len();
 
-        // Value-only RK4 step (forward simulate, mh / nlopt / survey likelihood).
+        // Value-only RK4 step (forward simulate, mh / nlopt likelihood).
         let (mut int, mut real, mut flow) = (vec![1000.0], Vec::<f64>::new(), vec![0.0; nf]);
         let res =
             rk4_step(&cm, &mut int, &mut real, Some(&mut flow), &params, 0.0, 0.1, None, None, &[]);

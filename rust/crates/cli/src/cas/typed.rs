@@ -1,7 +1,6 @@
 //! [`ContentHash`] — a SHA-256 newtype the CLI uses to keep content hashes
 //! type-distinct from arbitrary strings. Constructed from canonicalized input
-//! bytes via [`ContentHash::from_bytes`]; used by `profile` / `survey` /
-//! `pfilter` at the sites that fold an input slice into a level hash.
+//! bytes via [`ContentHash::from_bytes`]; used by `profile` and `pfilter` at the sites that fold an input slice into a level hash.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

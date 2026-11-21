@@ -19,7 +19,7 @@
 //! loads of the same IR file (`build_simulate_cas_sink`'s `base_model` and
 //! `resolve_run_model`'s), so both call this function with the same
 //! [`ObsAnchorTimes`] — same input, same output, agreement by construction
-//! rather than by convention. `profile` and `survey` key their runs by the IR
+//! rather than by convention. `profile` keys its runs by the IR
 //! **text** instead (`resolve::model_identity_from_ir`), so there the caller
 //! re-emits that text after substituting — the `bool` [`resolve_from_bindings`]
 //! returns is exactly that cue.
@@ -72,8 +72,8 @@ pub fn model_is_anchored(model: &ir::Model) -> bool {
 /// `--data` flags or its `--fit` toml — substituting in place and announcing
 /// each resolved time on stderr.
 ///
-/// This is the seam for the three fixed-θ commands (`pfilter`, `profile`,
-/// `survey`). Each of them binds observation data before it scores anything, so
+/// This is the seam for the fixed-θ commands (`pfilter`, `profile`). Each of
+/// them binds observation data before it scores anything, so
 /// the window it anchors to is by construction the window it scores; folding
 /// from a second, separately-resolved source is how the two would drift apart.
 ///
@@ -102,10 +102,9 @@ pub fn resolve_from_bindings(
 }
 
 /// As [`resolve_from_bindings`], for a command holding a fit config rather than
-/// a list of bindings (`survey --fit`). The two differ ONLY in where the
+/// a list of bindings (`design lhs --fit`). The two differ only in where the
 /// observed window is read from; the substitution, the stderr report and the
-/// refusal wording are shared, so the two commands cannot drift on what a
-/// resolved anchor means or on what an unresolvable one says.
+/// refusal wording are shared.
 pub fn resolve_from_config(
     out: &crate::out::Out, model: &mut ir::Model,
     config: &crate::fit::config_v2::Problem,

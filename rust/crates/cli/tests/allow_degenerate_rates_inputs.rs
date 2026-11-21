@@ -9,8 +9,6 @@
 //! - `pfilter` applies the flag and must put it in its run identity, or a run
 //!   with it and a run without it share one stored leaf; with `--fit` it must
 //!   also apply the fit config's field (gh#1235);
-//! - `survey` takes the flag and the fit-config field, and must apply and key
-//!   them (gh#1235);
 //! - commands that replay a stored fit (`fit predict`, `compare`) must replay
 //!   it under the fit's own setting, as they already do for forcing
 //!   extrapolation.
@@ -290,70 +288,6 @@ fn pfilter_applies_the_fit_configs_allow_degenerate_rates() {
     let leaves = pfilter_leaves(&tmp.0);
     assert_eq!(leaves.len(), 2,
         "the config's run shares the flagged run's leaf, not the unflagged one's: {leaves:?}");
-}
-
-/// The one survey leaf under `root`: its run id and the sorted `loglik`
-/// column of its `landscape.tsv`.
-fn survey_leaf(root: &Path) -> (String, Vec<f64>) {
-    fn collect(d: &Path, found: &mut Vec<PathBuf>) {
-        if d.join("run.json").is_file() && d.join("landscape.tsv").is_file() {
-            found.push(d.to_path_buf());
-        }
-        for e in std::fs::read_dir(d).into_iter().flatten().flatten() {
-            if e.path().is_dir() { collect(&e.path(), found) }
-        }
-    }
-    let mut found = Vec::new();
-    collect(root, &mut found);
-    assert_eq!(found.len(), 1, "one survey leaf under {}: {found:?}", root.display());
-    let v: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(found[0].join("run.json")).unwrap()).unwrap();
-    let tsv = std::fs::read_to_string(found[0].join("landscape.tsv")).unwrap();
-    let mut lines = tsv.lines().filter(|l| !l.starts_with('#'));
-    let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
-    let col = header.iter().position(|c| *c == "loglik")
-        .unwrap_or_else(|| panic!("no loglik column in {header:?}"));
-    let mut ll: Vec<f64> = lines
-        .map(|l| l.split('\t').nth(col).unwrap().parse::<f64>().unwrap())
-        .collect();
-    ll.sort_by(f64::total_cmp);
-    (v["run_id"].as_str().unwrap().to_string(), ll)
-}
-
-/// `survey --fit` scores under the fit config's `[config]
-/// allow_degenerate_rates`, and `survey --allow-degenerate-rates` sets the
-/// same thing from the command line; either way it is keyed. Only some
-/// particles collapse at each point, so every point scores either way, to
-/// different values. Before the fix survey applied the config's setting
-/// nowhere and keyed it nowhere, and had no flag.
-#[test]
-fn survey_applies_and_keys_allow_degenerate_rates() {
-    let tmp = partial_collapse_fixture("survey");
-    // Each run writes into its own output root, so a shared identity shows as
-    // equal run ids rather than as a cache hit that hides the computation.
-    let run = |dir: &str, extra: &[&str]| {
-        let mut args = vec![
-            "survey", "model.camdl", "--eval", "pfilter", "--eval-particles", "50",
-            "--eval-replicates", "1", "--n-points", "4", "--seed", "1", "--parallel", "1",
-            "--output", dir,
-        ];
-        args.extend_from_slice(extra);
-        let o = camdl(&tmp.0, &args);
-        assert!(o.status.success(), "{}", text(&o));
-        survey_leaf(&tmp.0.join(dir))
-    };
-    let off = run("off", &["--fit", "off.toml"]);
-    let flagged = run("flagged", &["--fit", "off.toml", "--allow-degenerate-rates"]);
-    let on = run("on", &["--fit", "on.toml"]);
-    assert!(off.1.iter().chain(&flagged.1).all(|l| l.is_finite()),
-        "the control: every point scores with and without the setting\n{off:?}\n{flagged:?}");
-    assert_ne!(off.1, flagged.1, "the control: the flag changes this landscape's logliks");
-    assert_eq!(on.1, flagged.1,
-        "the fit config's setting must score as the flag does: config {:?}, flag {:?}, \
-         neither {:?}", on.1, flagged.1, off.1);
-    assert_ne!(off.0, flagged.0, "the flagged survey must have its own run id");
-    assert_ne!(off.0, on.0, "the config's survey must have its own run id");
-    assert_eq!(on.0, flagged.0, "the config's setting and the flag are one computation");
 }
 
 // ── replaying a stored fit ──────────────────────────────────────────────────

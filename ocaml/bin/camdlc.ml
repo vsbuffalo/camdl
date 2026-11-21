@@ -22,7 +22,7 @@ Flags (compile):
                      nothing else). Replaces, never merges.
   --camdl-version    print the compiler's git hash
 
-To run models — simulate, fit, profile, survey, browse results — use `camdl`,
+To run models — simulate, fit, profile, browse results — use `camdl`,
 which also wraps these compiler commands (camdl compile/check/inspect/doctest).
 Run `camdl --help`.
 |}

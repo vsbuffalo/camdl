@@ -12,7 +12,7 @@
 //! least once, every compile under `--no-licm` was told, and no compile
 //! without it was. The IR cache is off, so every compile reaches the shim.
 //!
-//! `simulate`, `fit run`, `pfilter`, `profile` and `survey` are covered by
+//! `simulate`, `fit run`, `pfilter` and `profile` are covered by
 //! their input-class tests (`keyed_no_licm`), which show the run identity
 //! move with the flag.
 

@@ -21,7 +21,7 @@ Monte-Carlo tolerance (the same `expected.toml` + power-rationale discipline
 
 ```
 tests/recovery/
-  Makefile                 # synth / if2 / pgas / pmmh / ensemble / survey / all / clean
+  Makefile                 # synth / if2 / pgas / pmmh / ensemble / all / clean
   cases/
     seir_age/
       model.camdl          # the model, priors inline
@@ -44,7 +44,6 @@ make -f tests/recovery/Makefile if2        # IF2 fit     — per-chain ll bars
 make -f tests/recovery/Makefile pgas       # PGAS fit    — per-chain ll bars
 make -f tests/recovery/Makefile pmmh       # PMMH fit    — per-chain ll + acc bars
 make -f tests/recovery/Makefile ensemble   # 30-cell forward sim — the cells bar
-make -f tests/recovery/Makefile survey     # likelihood survey   — best-ll bar
 make -f tests/recovery/Makefile all        # synth + the three fits
 make -f tests/recovery/Makefile clean
 ```

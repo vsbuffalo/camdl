@@ -3,11 +3,11 @@
 //! Two contradictions in a fit config are refused:
 //!
 //! - **a scenario that sets or scales a parameter `[estimate]` lists** — the
-//!   fit config's `scenario =`, or `--scenario` on `survey --fit` — on `fit run`
-//!   and `survey --fit`, composed presets included. Before this, the estimate
+//!   fit config's `scenario =`, or `--scenario` on `profile --fit` — on `fit run`
+//!   and `profile --fit`, composed presets included. Before this, the estimate
 //!   silently overwrote the scenario's value.
 //! - **a name in both `[fixed]` and `[estimate]`** of one fit config. `fit run`
-//!   refused it already; `profile --fit` and `survey --fit` used to warn and let
+//!   refused it already; `profile --fit` used to warn and let
 //!   `[fixed]` win.
 //!
 //! - **`[fixed] from_scenario` naming a scenario that sets or scales a
@@ -392,94 +392,15 @@ fn profile_accepts_a_scenario_whose_parameters_are_pinned() {
     assert!(out.status.success(), "pinned at the scenario's own value: {}", stderr(&out));
 }
 
-// ─── survey ───────────────────────────────────────────────────────────────────
-
-fn survey(dir: &Path, root: &str, args: &[&str]) -> Output {
-    let ir = dir.join("m.ir.json");
-    Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
-        .env("CAMDL_SKIP_VERSION_CHECK", "1")
-        .current_dir(dir)
-        .args(["survey", &ir.to_string_lossy()])
-        .args(args)
-        .args(["--eval", "simulate", "--n-points", "10", "--seed", "1", "--output", root])
-        .output()
-        .expect("spawn camdl survey")
-}
-
+/// The `from_scenario` refusal on the `profile --fit` path.
 #[test]
-fn survey_refuses_a_scenario_that_sets_an_estimated_parameter() {
-    let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path();
-    setup(dir);
-    fit_toml(dir, "sv", "", BETA, "gamma = 0.15\nN0 = 1000");
-    fit_toml(dir, "sv_hi", "scenario = \"hi\"", BETA, "gamma = 0.15\nN0 = 1000");
-    for (what, args) in [("config scenario", &["--fit", "sv_hi.toml"][..]),
-                         ("--scenario", &["--fit", "sv.toml", "--scenario", "hi"][..])] {
-        let root = what.trim_start_matches('-').replace(' ', "_");
-        let out = survey(dir, &root, args);
-        assert_refused(what, &out, &[
-            "error: parameter `beta` is both estimated and set by scenario `hi`",
-            "  [estimate]:  beta    (in `",
-        ], &dir.join(&root));
-    }
-}
-
-/// Inline `survey --estimate NAME=LO:HI` samples NAME over its box, so a
-/// scenario that sets or scales NAME is refused as `survey --fit` refuses it.
-/// Before, the scenario's value was discarded without a notice and run.json
-/// recorded `beta: {role: fixed, source: scenario}` for a parameter that was
-/// sampled.
-#[test]
-fn survey_inline_refuses_a_scenario_that_sets_an_estimated_parameter() {
-    let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path();
-    setup(dir);
-    let common = ["--data", "cases.tsv", "--estimate", "beta=0.01:1.0",
-                  "--fixed", "gamma=0.1", "--fixed", "N0=1000"];
-    for (scenario, lines) in [
-        ("hi", &[
-            "error: parameter `beta` is both estimated and set by scenario `hi`",
-            "  estimated by: `--estimate beta=LO:HI`",
-            "  scenario:    beta = 0.8    (set beta = 0.8)",
-        ][..]),
-        ("half", &[
-            "error: parameter `beta` is both estimated and scaled by scenario `half`",
-            "  scenario:    scale beta \u{d7} 0.5",
-        ][..]),
-    ] {
-        let root = format!("inline_{scenario}");
-        let out = survey(dir, &root, &[&common[..], &["--scenario", scenario]].concat());
-        assert_refused(scenario, &out, lines, &dir.join(&root));
-    }
-    // A scenario that touches only parameters the survey does not sample runs.
-    let out = survey(dir, "inline_ok", &["--data", "cases.tsv", "--estimate", "beta=0.01:1.0",
-        "--fixed", "N0=1000", "--scenario", "fastg"]);
-    assert!(out.status.success(), "disjoint scenario: {}", stderr(&out));
-}
-
-#[test]
-fn survey_refuses_a_name_in_both_fixed_and_estimate() {
-    let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path();
-    setup(dir);
-    fit_toml(dir, "sv_both", "", BETA, "beta = 0.4\ngamma = 0.15\nN0 = 1000");
-    let out = survey(dir, "both", &["--fit", "sv_both.toml"]);
-    assert_refused("survey both", &out, &[
-        "error: parameter `beta` is in both [estimate] and [fixed]",
-    ], &dir.join("both"));
-}
-
-/// The `from_scenario` refusal on the `survey --fit` and `profile --fit` paths.
-#[test]
-fn survey_and_profile_refuse_from_scenario_that_sets_an_estimated_parameter() {
+fn profile_refuses_from_scenario_that_sets_an_estimated_parameter() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     setup(dir);
     fit_toml(dir, "sv_carve", "", BETA, "from_scenario = \"base\"");
     let line = "error: parameter `beta` is both estimated and set by scenario `base`, which \
                 [fixed] from_scenario imports";
-    let out = survey(dir, "carve", &["--fit", "sv_carve.toml"]);
-    assert_refused("survey from_scenario", &out, &[line], &dir.join("carve"));
     let out = profile(dir, "pf_carve", "sv_carve.toml", &["--rw-sd", "beta=0.02"]);
     assert_refused("profile from_scenario", &out, &[line],
         &dir.join("pf_carve").join("results"));

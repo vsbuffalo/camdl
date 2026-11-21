@@ -368,15 +368,6 @@ profile.cached	stderr	line	profile:	6 of 6 starts already cached — resuming
 profile.cached	stderr	line	profile:	3 cells written (6 starts) under results/profiles
 profile.cached	stdout	line	loglik_spread_starts	starts_n_completed
 profile.refused	stderr	line	error:	--particles is required for an if2 profile
-survey	stderr	line	survey: --eval auto	resolved to 'simulate' (model does not have stochastic process noise)
-survey	stderr	line	note: --n-points 8	below the rule-of-thumb coverage floor of n_points/d^2 >= 50 (d=2, recommended >= 200)
-survey	stderr	line	stored	8 points (eval=simulate)
-survey	stderr	line	camdl list	--kind survey
-survey	stderr	line	--eval simulate now computes	p(y|θ, ODE_skeleton) via the ODE backend
-survey	stderr	line	survey: wrote	landscape.tsv (8 rows)
-survey	stderr	line	survey: 0 of 8 points	(0.0%) scored a non-finite log-likelihood
-survey.cached	stderr	line	cached	results/surveys/sir-
-survey.refused	stderr	block	error: camdl survey requires either --fit FIT.toml	Got neither.
 compare.refused	stderr	line	error:	compare requires either --config FILE or ≥2 fit leaf paths
 predict	stderr	line	fit predict: free_forward horizon	subsampling 5 of 400 posterior draws (raise with --n-draws)
 predict	stderr	line	fit predict: mode=free_forward	treatment=posterior, 1 scenario(s) [fitted], 1 stream(s), 400 draws from pmmh method 'pmmh'

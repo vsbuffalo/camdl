@@ -387,7 +387,7 @@ pub struct SMCConfig {
     /// from the observation model's shape (`obs_model.n_streams() > 0` and a
     /// non-empty `mean()`), which made it true for essentially every fitted
     /// model — including the inner likelihood evaluation of every PMMH step,
-    /// every IF2 iteration's periodic re-check, and every `survey`/preflight
+    /// every IF2 iteration's periodic re-check, and every preflight
     /// call, none of which read `PFilterResult.predictions` (gh#520). Only
     /// `camdl pfilter --trace <path>` (single-run, not `--replicates`) reads
     /// it. Requesting this with an observation model that has no streams, or

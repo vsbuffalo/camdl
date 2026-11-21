@@ -1,6 +1,5 @@
 //! A binomial trial count `n` is checked against the observed counts when the
-//! data is loaded, whenever `n` is decidable from the file alone, and `camdl
-//! survey` reads the same `n = <column>` the fit does.
+//! data is loaded, whenever `n` is decidable from the file alone.
 //!
 //!   * `a_literal_n_below_a_count_is_refused_by_pfilter` — `n = 50` against a
 //!     count of 90 was bound and scored `-inf` (printed as the loglik, exit 0);
@@ -14,10 +13,6 @@
 //!     above it scores `-inf` for every particle; pfilter used to print a bare
 //!     `-inf` and exit 0, and now exits 3 (`FILTER_FAILED`) naming the stream,
 //!     the time, the observed value and the guard.
-//!   * `survey_scores_a_column_n_and_refuses_a_count_above_it` — survey bound
-//!     the stream with no aux columns, so every `n = tested` stream failed with
-//!     "aux column missing"; it now loads the column, scores, and refuses a
-//!     transposed row like the fit loader does.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -147,32 +142,6 @@ fn a_fractional_expression_n_is_refused_by_pfilter() {
     let err = stderr(&out);
     assert!(!out.status.success(), "{err}");
     assert!(err.contains("n = 45.5 is not an integer"), "{err}");
-}
-
-fn survey(dir: &Path, ir: &Path, data: &Path) -> Output {
-    camdl(dir)
-        .args(["survey", &ir.to_string_lossy(), "--data", &data.to_string_lossy(),
-               "--estimate", "beta=0.1:0.6", "--estimate", "gamma=0.05:0.3",
-               "--fixed", "N0=1000", "--n-points", "6", "--eval", "pfilter",
-               "--eval-particles", "50", "--eval-replicates", "2", "--seed", "1"])
-        .output().unwrap()
-}
-
-#[test]
-fn survey_scores_a_column_n_and_refuses_a_count_above_it() {
-    let tmp = tempdir("survey");
-    let ir = compile_model(&tmp.0, "tested");
-    let ok = write(&tmp.0, "ok.tsv",
-        "time\tpos\ttested\n1\t1\t100\n2\t3\t120\n3\t5\t90\n4\t4\t110\n5\t2\t100\n6\t1\t95\n");
-    let out = survey(&tmp.0, &ir, &ok);
-    assert!(out.status.success(), "survey on `n = tested` must run:\n{}", stderr(&out));
-
-    let bad = write(&tmp.0, "bad.tsv",
-        "time\tpos\ttested\n1\t1\t100\n2\t3\t120\n3\t90\t50\n4\t4\t110\n5\t2\t100\n6\t1\t95\n");
-    let out = survey(&tmp.0, &ir, &bad);
-    let err = stderr(&out);
-    assert!(!out.status.success(), "{err}");
-    assert!(err.contains("row 2 (t = 3)") && err.contains("exceeds denominator 'tested' = 50"), "{err}");
 }
 
 fn pfilter_with(dir: &Path, ir: &Path, data: &Path, extra: &[&str]) -> Output {

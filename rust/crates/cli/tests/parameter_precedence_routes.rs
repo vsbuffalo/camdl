@@ -403,7 +403,7 @@ fn dev_eval_reports_param_over_a_params_file_and_evaluates_the_winner() {
     assert_eq!(stdout.lines().nth(1), Some("0\t0.300000"), "stdout: {stdout}");
 }
 
-// ─── profile and survey: --fixed-file, scenario, --fixed ────────────────────
+// ─── profile: --fixed-file, scenario, --fixed ───────────────────────────────
 
 const PROFILE_MODEL: &str = r#"
 time_unit = 'days
@@ -482,10 +482,10 @@ fn profile_reports_and_records_each_replacement_of_a_fixed_value() {
     }
 }
 
-/// `survey --fit`: `--fixed` replaces the fit config's `[fixed]` value. (A
+/// `profile --fit`: `--fixed` replaces the fit config's `[fixed]` value. (A
 /// `--fixed` over a scenario's value is refused, gh#571.)
 #[test]
-fn survey_reports_fixed_over_the_fit_config_and_fixes_the_winner() {
+fn profile_reports_fixed_over_the_fit_config_and_fixes_the_winner() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     profile_fixture(dir);
@@ -498,37 +498,37 @@ cases = \"cases.tsv\"
 
 [estimate]
 beta = { bounds = [0.001, 5.0] }
+N0 = { bounds = [100, 10000], start = 1000 }
 
 [fixed]
 gamma = 0.1
-N0 = 1000
-
-[method]
-algorithm = \"if2\"
-backend = \"chain_binomial\"
-chains = 1
-particles = 30
-iterations = 3
-cooling = 0.5
 ").unwrap();
-    let out = camdl(dir, &["survey", "sir.camdl", "--fit", "fit.toml", "--fixed", "gamma=0.15",
-        "--eval", "simulate", "--n-points", "4", "--seed", "1", "--output", "sv"]);
-    let stderr = ok(&out, "survey");
+    let out = Command::new(binary()).env_remove("CLICOLOR_FORCE")
+        .args(["profile", "sir.camdl", "--fit", "fit.toml", "--fixed", "gamma=0.15",
+            "--sweep", "beta=lin(0.2,0.4,2)", "--particles", "30", "--iterations", "3",
+            "--n-starts", "1", "--rw-sd", "auto", "--output", "p.tsv", "--seed", "1"])
+        .current_dir(dir)
+        .env("CAMDL_OUTPUT_DIR", dir.join("pf"))
+        .output()
+        .expect("spawn");
+    let stderr = ok(&out, "profile --fit --fixed");
     assert_eq!(override_lines(&stderr),
         vec!["info: --param/--fixed replaced gamma = 0.1 (from fit.toml [fixed]) with 0.15"]);
-    let leaf = one_leaf(&dir.join("sv"));
-    assert_eq!(leaf["inputs"]["fixed"]["gamma"], 0.15);
-    let gamma = &leaf["inputs"]["parameters_provenance"]["gamma"];
-    assert_eq!(gamma["value"], 0.15);
-    assert_eq!(gamma["source"], "fixed_cli");
-    assert_eq!(gamma["overrides"], serde_json::json!([
-        { "replaced": { "source": "fit_toml_fixed", "value": 0.1 },
-          "by": { "source": "fixed_cli", "value": 0.15 } },
-    ]));
-    assert_eq!(leaf["inputs"]["notices"].as_array().map(Vec::len), Some(1));
+    let provs: Vec<serde_json::Value> = run_jsons(&dir.join("pf")).into_iter()
+        .filter(|l| l["inputs"]["provenance"].is_object())
+        .map(|l| l["inputs"]["provenance"]["parameters_provenance"].clone())
+        .collect();
+    assert_eq!(provs.len(), 2, "one leaf per grid point");
+    for prov in provs {
+        let gamma = &prov["gamma"];
+        assert_eq!(gamma["value"], 0.15);
+        assert_eq!(gamma["source"], "fixed_cli");
+        assert_eq!(gamma["overrides"], serde_json::json!([
+            { "replaced": { "source": "fit_toml_fixed", "value": 0.1 },
+              "by": { "source": "fixed_cli", "value": 0.15 } },
+        ]));
+    }
 }
-
-// ─── profile --starts: the starts rule's values are their own tier ─────────
 
 /// Run `profile` on the profile fixture with `extra` flags; returns stderr and
 /// every profile-point leaf's `parameters_provenance`.

@@ -1,4 +1,4 @@
-//! `profile --fit`, `survey --fit` and `pfilter --fit` score the likelihood
+//! `profile --fit` and `pfilter --fit` score the likelihood
 //! the fit config defines, including `ic_free`.
 //!
 //! `ic_free = true` makes `fit run` maximise the conditional likelihood
@@ -238,67 +238,6 @@ fn profile_scores_the_ic_free_objective_of_the_fit_it_profiles() {
          profile {profile_ll}, fit {fit_ll}, pfilter conditional {conditional}, \
          pfilter full {full}"
     );
-}
-
-#[test]
-fn survey_of_an_ic_free_fit_is_a_different_landscape() {
-    let bin = binary();
-    assert!(bin.exists(), "release camdl binary missing: {} — run `make build-rust`", bin.display());
-    let dir = tempfile::tempdir().expect("tempdir");
-    let d = dir.path();
-    std::fs::write(d.join("sir.camdl"), MODEL).unwrap();
-    std::fs::write(d.join("weekly_cases.tsv"), DATA).unwrap();
-    std::fs::write(d.join("conditional.toml"), FIT).unwrap();
-    std::fs::write(d.join("full.toml"), FIT.replace("ic_free = true", "ic_free = false")).unwrap();
-
-    // Same problem, same points, same seed — the same particle paths, since
-    // leaving a term out of the sum draws no random numbers. Point by point
-    // the landscapes therefore differ by exactly that point's estimate of
-    // `log p(y₁ | θ)`, which is negative for a count observation.
-    let landscape = |fit: &str| -> (serde_json::Value, std::collections::BTreeMap<u64, f64>) {
-        run(
-            camdl(&bin, d).args([
-                "survey", "sir.camdl", "--fit", fit,
-                "--n-points", "8", "--eval", "pfilter",
-                "--eval-particles", "300", "--eval-replicates", "1",
-                "--no-progress", "--output", &format!("out-{fit}"),
-            ]),
-            "survey",
-        );
-        let runs = find_all(&d.join(format!("out-{fit}")), "run.json");
-        assert_eq!(runs.len(), 1, "one survey leaf expected: {runs:?}");
-        let rec: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&runs[0]).unwrap()).unwrap();
-        let tsv = std::fs::read_to_string(runs[0].with_file_name("landscape.tsv")).unwrap();
-        let mut lines = tsv.lines().filter(|l| !l.starts_with('#'));
-        let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
-        let ll = header.iter().position(|h| *h == "loglik").expect("loglik column");
-        let id = header.iter().position(|h| *h == "point_id").expect("point_id column");
-        let rows = lines
-            .map(|l| {
-                let f: Vec<&str> = l.split('\t').collect();
-                (f[id].parse::<u64>().unwrap(), f[ll].parse::<f64>().unwrap_or(f64::NEG_INFINITY))
-            })
-            .collect();
-        (rec, rows)
-    };
-    let (cond_rec, cond) = landscape("conditional.toml");
-    let (full_rec, full) = landscape("full.toml");
-
-    assert_eq!(cond_rec["inputs"]["likelihood_objective"], "conditional_on_first_observation");
-    assert_eq!(full_rec["inputs"]["likelihood_objective"], "full");
-    let scored: Vec<(f64, f64)> = cond
-        .iter()
-        .filter_map(|(id, c)| full.get(id).map(|f| (*c, *f)))
-        .filter(|(c, f)| c.is_finite() && f.is_finite())
-        .collect();
-    assert!(!scored.is_empty(), "no point scored under both objectives");
-    for (c, f) in &scored {
-        assert!(
-            c > f,
-            "leaving y₁'s term out must raise every point's loglik: conditional {c}, full {f}"
-        );
-    }
 }
 
 /// `camdl pfilter` at `mle` with extra arguments: (printed loglik, stderr).

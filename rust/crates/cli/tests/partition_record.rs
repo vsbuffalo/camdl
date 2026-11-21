@@ -1,4 +1,4 @@
-//! Every `fit run`, `survey` and `profile` records its partition — which
+//! Every `fit run` and `profile` records its partition — which
 //! parameters it fixed, estimated or swept, and what declared each — and the
 //! legacy `estimated` / `fixed` fields of its record are generated from it
 //! (proposal `docs/dev/proposals/2026-10-26-parameter-roles.md`, Stage 1,
@@ -192,51 +192,6 @@ fn a_swept_fit_records_each_points_cell_partition() {
     assert_eq!(seen, vec![0.4, 0.6]);
 }
 
-/// A run today's rules accept and the partition refuses — here a simplex
-/// group that `--fixed` splits — records why, and keeps the legacy fields as
-/// the command wrote them before.
-#[test]
-fn a_survey_whose_roles_form_no_partition_records_why_and_still_runs() {
-    let fit = fit_toml(ESTIMATE, FIXED) + "\n[[simplex_groups]]\nparams = [\"beta\", \"gamma\"]\n";
-    let tmp = fixture(&fit);
-    camdl(tmp.path(), &["survey", "model.camdl", "--fit", "fit.toml", "--fixed", "gamma=0.15",
-        "--n-points", "4", "--eval-particles", "20", "--output", "srv"]);
-    let inputs = &json(&find_all(&tmp.path().join("srv"), "run.json")[0])["inputs"];
-    assert_eq!(inputs["partition"]["status"], "unresolved", "{inputs:#}");
-    assert!(inputs["partition"]["reason"].as_str().unwrap().contains("simplex"), "{inputs:#}");
-    assert_eq!(inputs["estimated"], serde_json::json!(["beta"]));
-    assert_eq!(inputs["fixed"]["gamma"], 0.15);
-}
-
-#[test]
-fn survey_records_its_partition() {
-    let tmp = fixture(&fit_toml(ESTIMATE, FIXED));
-    camdl(tmp.path(), &["survey", "model.camdl", "--fit", "fit.toml", "--n-points", "4",
-        "--eval-particles", "20", "--output", "srv"]);
-    let runs = find_all(&tmp.path().join("srv"), "run.json");
-    assert_eq!(runs.len(), 1, "{runs:?}");
-    let inputs = &json(&runs[0])["inputs"];
-    let part = &inputs["partition"];
-    assert_eq!(part["status"], "resolved", "{inputs:#}");
-    assert_eq!(part["parameters"]["beta"]["role"], "estimated");
-    assert_eq!(part["parameters"]["N0"]["value"], 10000.0);
-    let (estimated, fixed) = legacy_of(part);
-    assert_eq!((&inputs["estimated"], &inputs["fixed"]), (&estimated, &fixed));
-
-    // Inline: `--estimate` declares, an undeclared parameter is fixed by default.
-    camdl(tmp.path(), &["survey", "model.camdl", "--data", "weekly_cases.tsv",
-        "--estimate", "beta=0.1:0.9", "--fixed", "gamma=0.15", "--fixed", "N0=10000",
-        "--fixed", "I0=10", "--fixed", "rho=0.6", "--n-points", "4",
-        "--eval-particles", "20", "--output", "srv_inline"]);
-    let inputs = &json(&find_all(&tmp.path().join("srv_inline"), "run.json")[0])["inputs"];
-    let part = &inputs["partition"];
-    assert_eq!(part["parameters"]["beta"]["declared_by"], "cli_estimate", "{inputs:#}");
-    assert_eq!(part["parameters"]["beta"]["search_from"], "cli");
-    assert_eq!(part["parameters"]["gamma"]["declared_by"], "cli_fixed");
-    let (estimated, fixed) = legacy_of(part);
-    assert_eq!((&inputs["estimated"], &inputs["fixed"]), (&estimated, &fixed));
-}
-
 /// `profile` stores under the default output root, `results/`.
 #[test]
 fn profile_records_the_jobs_partition_and_each_cells() {
@@ -300,19 +255,15 @@ fn a_cli_only_profile_records_its_rw_sd_selection_as_estimate_declarations() {
     assert_eq!((&meta["estimated"], &meta["fixed"]), (&estimated, &fixed));
 }
 
-/// The legacy `estimated` list keeps the order of the survey's columns, which
-/// follow `[estimate]`, not the model.
+/// The legacy `estimated` list keeps the order of `[estimate]`, not the
+/// model's.
 #[test]
-fn survey_keeps_the_estimated_order_of_its_columns() {
+fn fit_run_keeps_the_estimated_order_of_the_fit_config() {
     let estimate = "gamma = { start = 0.15 }\nbeta  = { bounds = [0.1, 0.9], start = 0.4 }";
     let tmp = fixture(&fit_toml(estimate, FIXED));
-    camdl(tmp.path(), &["survey", "model.camdl", "--fit", "fit.toml", "--n-points", "4",
-        "--eval-particles", "20", "--output", "srv"]);
-    let run = &find_all(&tmp.path().join("srv"), "run.json")[0];
-    let inputs = &json(run)["inputs"];
-    assert_eq!(inputs["estimated"], serde_json::json!(["gamma", "beta"]), "{inputs:#}");
-    let header = std::fs::read_to_string(run.parent().unwrap().join("landscape.tsv")).unwrap();
-    let cols: Vec<&str> = header.lines().find(|l| !l.starts_with('#')).unwrap().split('\t')
-        .filter(|c| *c == "gamma" || *c == "beta").collect();
-    assert_eq!(cols, vec!["gamma", "beta"], "{header}");
+    camdl(tmp.path(), &["fit", "run", "fit.toml", "--seed", "1"]);
+    let metas = find_all(&tmp.path().join("res"), "fit.meta.json");
+    assert_eq!(metas.len(), 1, "{metas:?}");
+    let meta = json(&metas[0]);
+    assert_eq!(meta["estimated"], serde_json::json!(["gamma", "beta"]), "{meta:#}");
 }

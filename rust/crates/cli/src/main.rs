@@ -55,11 +55,7 @@ mod profile_diagnostics;
 mod profile_invocation; // profiles/<base>/invocations/<id>/: the grid an invocation runs, and its heartbeat
 mod profile_table;    // gh#1059: the collected per-cell table a profile run prints
 mod out;           // the stream layer: notices, progress, milestones, colour
-mod survey;
-mod survey_cas;     // gh#147 (M3.3): survey CAS identity (model/config/box/seed)
-mod survey_config;  // ResolvedSurveyConfig: survey's one resolved configuration; identity and points derive from it
 mod sim_ensemble_cas; // gh#147: multi-cell simulate ensemble CAS identity (model/config/params/grid)
-mod landscape_html;
 mod lineage;        // three-layer lineage: --event-log record + realize + tree
 mod mre;            // `camdl mre` — minimal-reproducible-example bundles (gh#212)
 mod input_class;    // every input of a converted command and its class, checked against clap
@@ -187,14 +183,6 @@ pub(crate) enum Command {
 
     /// Profile likelihood over a parameter grid: per-cell IF2 (chain_binomial) or an nl-* optimizer (ode)
     Profile(args::ProfileArgs),
-
-    /// Likelihood-landscape diagnostic via Latin-hypercube sampling.
-    ///
-    /// Diagnostic, NOT a fitting routine — answers "is my model
-    /// identifiable from this data?" before burning hours on IF2.
-    /// See `camdl survey --help` for full notes on when to trust
-    /// the output and the known limitations.
-    Survey(args::SurveyArgs),
 
     /// Write a design: a table of parameter points for `simulate --sweep-file`
     #[command(subcommand)]
@@ -569,7 +557,6 @@ fn main() {
         Command::Pfilter(a)             => pfilter::cmd_pfilter(&a, compile),
         Command::If2(a)                 => if2::cmd_if2(&a),
         Command::Profile(a)             => profile::cmd_profile(&a, compile),
-        Command::Survey(a)              => survey::cmd_survey(&a, compile),
         Command::Design(DesignCmd::Lhs(a)) => design::cmd_design_lhs(&a, compile),
         Command::Lineage(LineageCmd::Realize(a)) => lineage::cmd_lineage_realize(&a),
         Command::Lineage(LineageCmd::Tree(a)) => lineage::cmd_lineage_tree(&a),
@@ -612,7 +599,7 @@ fn delegate(subcommand: &str, args: &[String], compile: util::CompileSettings) {
 
 // Per-(point, replicate) seed derivation lives in one place,
 // `util::mix_cell_seed` (with `util::SEED_MIX_OBS` for the obs stream);
-// `engine::run_job` and `survey` both route through it. The constants
+// `engine::run_job` routes through it. The constants
 // below are for the *other*, unrelated RNG streams owned by this module.
 const SEED_MIX_UNIFORM: u64 = 0xd4a5_b1ce;      // uniform draws RNG
 const SEED_MIX_PRIOR: u64  = 0x0014_b1ce;      // prior draws RNG
@@ -917,8 +904,8 @@ fn run_simulate(a: &args::SimulateArgs, compile: util::CompileSettings) {
     let mut dt           = a.backend.dt.or(model_dt).unwrap_or(1.0_f64);
     let seed             = a.seed;
     // The engine's Rayon branch runs on the global pool, which defaults to
-    // every core, so the pool is capped here (mirrors fit/pfilter/profile/
-    // survey); `build_global` is one-shot per process and an
+    // every core, so the pool is capped here (mirrors fit/pfilter/profile);
+    // `build_global` is one-shot per process and an
     // already-initialised Err is ignored as those verbs do.
     if execution.threads > 1 {
         let _ = rayon::ThreadPoolBuilder::new().num_threads(execution.threads).build_global();
@@ -4403,7 +4390,7 @@ pub(crate) fn obs_anchors_from_config(
 }
 
 /// The fold itself, over `(binding key → file)` pairs a command has ALREADY
-/// resolved. `pfilter` / `profile` / `survey` reach it directly: their bindings
+/// resolved. `pfilter` and `profile` reach it directly: their bindings
 /// come from `--data` flags as often as from a fit toml, and re-deriving the
 /// window from a config they may not have would be a second reader that could
 /// disagree with the one they score against.

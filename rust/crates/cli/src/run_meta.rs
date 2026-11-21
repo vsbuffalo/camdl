@@ -6,8 +6,6 @@
 //!
 //! - [`FitAlgorithm`] / [`InferenceBackend`] — the (algorithm, backend) tags a
 //!   fit method records and a reader projects.
-//! - [`SurveyEvalMethod`] — how `camdl survey` evaluates the marginal
-//!   log-likelihood at each point.
 //! - [`ResolvedPriorEntry`] / [`ParameterProvenance`] / [`InitProvenance`] —
 //!   the gh#75 / gh#83/gh#85 provenance records embedded in a leaf's `inputs`
 //!   and in the fit-level [`FitSidecar`].
@@ -437,50 +435,6 @@ impl InitProvenance {
             method: cs.rule.tag().to_string(),
             chains,
         }
-    }
-}
-
-/// How `camdl survey` evaluates the marginal log-likelihood at each
-/// LHS point. The default is `Pfilter` (handles process noise via a
-/// PMMH-style MC estimator); `Simulate` is an opt-in fast path for
-/// known-deterministic models.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
-#[serde(rename_all = "lowercase")]
-#[clap(rename_all = "lowercase")]
-pub enum SurveyEvalMethod {
-    /// Bootstrap particle filter, K replicates → logmeanexp combiner.
-    /// Estimates p(y|θ) under the chain-binomial process; the safe
-    /// default for inference-grade likelihood evaluation. Doucet et
-    /// al. 2015 (Biometrika) gives the rule for trustworthy ranks:
-    /// per-point loglik SE ≤ ~1.7 nats.
-    Pfilter,
-    /// Single deterministic simulation per point. 1-sample MC estimator
-    /// of the same quantity; cheap (~10× faster than Pfilter at
-    /// modest particles/replicates) but biased toward "lucky outliers"
-    /// when process noise is non-trivial. Andrieu & Roberts 2009 frame
-    /// the failure mode.
-    Simulate,
-    /// Auto-detect from the compiled model: `Pfilter` when the model
-    /// requires `Capabilities::OVERDISPERSION` (i.e. it has stochastic
-    /// process noise via `overdispersed()` or similar), `Simulate`
-    /// otherwise. Resolved before any persistent state is written — the
-    /// survey `run.json` records the resolved method, never `Auto`.
-    Auto,
-}
-
-impl SurveyEvalMethod {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            SurveyEvalMethod::Pfilter  => "pfilter",
-            SurveyEvalMethod::Simulate => "simulate",
-            SurveyEvalMethod::Auto     => "auto",
-        }
-    }
-}
-
-impl std::fmt::Display for SurveyEvalMethod {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
     }
 }
 
@@ -1393,14 +1347,6 @@ mod tests {
             FitAlgorithm::Mh.summary_filename(),
             FitAlgorithm::Pmmh.summary_filename()
         );
-    }
-
-    #[test]
-    fn survey_eval_method_serializes_lowercase() {
-        let p = SurveyEvalMethod::Pfilter;
-        assert_eq!(serde_json::to_string(&p).unwrap(), r#""pfilter""#);
-        let s = SurveyEvalMethod::Simulate;
-        assert_eq!(serde_json::to_string(&s).unwrap(), r#""simulate""#);
     }
 
     // ─── gh#241: backend domain types (ForwardBackend / InferenceBackend) ──

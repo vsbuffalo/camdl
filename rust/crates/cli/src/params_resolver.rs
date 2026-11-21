@@ -414,8 +414,8 @@ impl PinnedOverEstimate {
 
 /// Which flags the command that hit a [`ResolveError`] actually has, so a
 /// refusal names the flag the user passed. `simulate`, `pfilter` and `eval`
-/// take `--params FILE` and `--param NAME=VALUE`; `fit`, `profile` and
-/// `survey` take `--fixed-file` and `--fixed`. The resolver does not know
+/// take `--params FILE` and `--param NAME=VALUE`; `fit` and `profile`
+/// take `--fixed-file` and `--fixed`. The resolver does not know
 /// which command called it: it reports [`FlagStyle::Fixed`] and a caller on
 /// the other surface relabels with [`ResolveError::with_flags`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -583,7 +583,7 @@ impl std::error::Error for ResolveError {}
 /// The refusal for a fit config that lists `names` in both `[fixed]` and
 /// `[estimate]`. A parameter is either estimated or given a value, never both,
 /// and the file does not say which it means. One wording for every command:
-/// `fit run`'s config validation and the resolver behind `profile` / `survey`.
+/// `fit run`'s config validation and the resolver behind `profile`.
 pub fn fixed_estimate_overlap_message(names: &[&str]) -> String {
     let quoted: Vec<String> = names.iter().map(|n| format!("`{n}`")).collect();
     let quoted = quoted.join(", ");
@@ -1098,7 +1098,7 @@ pub fn scenario_coordinate_collision(
 pub enum TierFiveFlag<'a> {
     /// `simulate --param NAME=VALUE`.
     Param,
-    /// `survey` / `profile` `--fixed NAME=VALUE`.
+    /// `profile` `--fixed NAME=VALUE`.
     Fixed,
     /// `simulate --param-vec PREFIX=FILE`: each `key<TAB>value` row of
     /// `file` sets `PREFIX_key` (`util::param_vec_name`).
@@ -1173,7 +1173,7 @@ fn row_key<'p>(prefix: &str, param: &'p str) -> &'p str {
 /// `[fixed]`).
 ///
 /// `flag` is the flag the user typed (`--param` / `--param-vec` on
-/// `simulate`, `--fixed` on `survey` / `profile`); `values` are its
+/// `simulate`, `--fixed` on `profile`); `values` are its
 /// `(parameter, value)` pairs, last occurrence winning.
 pub fn scenario_param_flag_collision(
     model: &ir::Model,
@@ -1215,8 +1215,8 @@ pub fn scenario_param_flag_collision(
     Ok(if blocks.is_empty() { None } else { Some(blocks.join("\n\nerror: ")) })
 }
 
-/// [`scenario_param_flag_collision`] for the inference-side commands
-/// (`survey`, `profile`), whose tier-5 flag is `--fixed` and which run one
+/// [`scenario_param_flag_collision`] for the inference-side command
+/// (`profile`), whose tier-5 flag is `--fixed` and which runs one
 /// scenario (from `--scenario` or the fit config): `Err(message)` on a
 /// collision, `Ok(())` otherwise or with no scenario.
 pub fn refuse_fixed_flag_over_scenario(
@@ -1615,8 +1615,6 @@ pub enum EstimatedBy<'a> {
     /// `profile`'s `--rw-sd`: `auto` estimates every parameter that is not
     /// swept or pinned, a map estimates the names it lists.
     RwSd { auto: bool },
-    /// `survey`'s inline `--estimate NAME=LO:HI` boxes.
-    EstimateFlag,
 }
 
 impl EstimatedBy<'_> {
@@ -1629,7 +1627,6 @@ impl EstimatedBy<'_> {
             EstimatedBy::RwSd { auto: false } => {
                 format!("\n  estimated by: `--rw-sd {param}=...`")
             }
-            EstimatedBy::EstimateFlag => format!("\n  estimated by: `--estimate {param}=LO:HI`"),
         }
     }
 
@@ -1653,7 +1650,7 @@ impl EstimatedBy<'_> {
                  discard the scenario's value, so which one is meant cannot be read from the \
                  fit config."
             }
-            EstimatedBy::RwSd { .. } | EstimatedBy::EstimateFlag => {
+            EstimatedBy::RwSd { .. } => {
                 "\nAn estimated parameter takes its values from the estimation, which would \
                  discard the scenario's value, so which one is meant cannot be read from the \
                  command line."
@@ -1677,16 +1674,13 @@ impl EstimatedBy<'_> {
             EstimatedBy::RwSd { auto: false } => format!(
                 "drop {names} from `--rw-sd` to hold {them} at the scenario's value ({values})"
             ),
-            EstimatedBy::EstimateFlag => format!(
-                "drop {names} from `--estimate` to hold {them} at the scenario's value ({values})"
-            ),
         }
     }
 }
 
 /// Refuse a run whose scenario sets or scales a parameter it estimates:
-/// `[estimate]` for a fit config, `--rw-sd` for `profile`, `--estimate` for an
-/// inline `survey` ([`EstimatedBy`]). `Ok(None)` when the scenario touches none
+/// `[estimate]` for a fit config, `--rw-sd` for `profile` ([`EstimatedBy`]).
+/// `Ok(None)` when the scenario touches none
 /// of `estimated`; `Ok(Some(message))` names every colliding parameter, what
 /// the scenario does to it, where it is declared estimated and the fix.
 ///
@@ -1730,7 +1724,7 @@ pub fn scenario_estimate_collision(
         let scaled = match by {
             EstimatedBy::FitToml(_) => " A scaled parameter cannot be held at a value of its \
                 own: the scenario would rescale that value too.",
-            EstimatedBy::RwSd { .. } | EstimatedBy::EstimateFlag => "",
+            EstimatedBy::RwSd { .. } => "",
         };
         format!("\nFix: {other}.{scaled}")
     } else {

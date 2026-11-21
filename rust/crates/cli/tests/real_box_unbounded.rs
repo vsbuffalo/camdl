@@ -6,9 +6,8 @@
 //!
 //! A positive kind with no bounds keeps `[0, ∞)`. Either way the box has an
 //! infinite end, so the rules that draw within it (`uniform`, `lhs`,
-//! `uniform_unconstrained`, at two or more chains) and `survey`'s
-//! Latin-hypercube landscape refuse the parameter rather than substitute a
-//! jitter around its start.
+//! `uniform_unconstrained`, at two or more chains) refuse the parameter
+//! rather than substitute a jitter around its start.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -185,15 +184,3 @@ fn a_box_spreading_start_rule_refuses_an_unbounded_rate_too() {
     assert!(out.status.success(), "{}", stderr(&out));
 }
 
-#[test]
-fn survey_refuses_a_parameter_with_no_finite_box() {
-    for (free, shown) in [("delta", "`delta` [-inf, inf]"), ("eta", "`eta` [0, inf]")] {
-        let (out, _tmp) = run(free, IF2, &["survey", "model.camdl", "--fit", "fit.toml",
-            "--n-points", "4", "--eval-particles", "20", "--output", "srv"]);
-        let err = stderr(&out);
-        assert!(!out.status.success(), "{free}: expected a refusal:\n{err}");
-        assert!(err.contains(&format!("these parameters have no finite one: {shown}."))
-            && err.contains("`bounds = [lo, hi]`"),
-            "{free}: the refusal names the parameter, its box and the remedy:\n{err}");
-    }
-}

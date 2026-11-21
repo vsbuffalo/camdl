@@ -7,7 +7,7 @@
 //! log-likelihood. Every observation path reads its cells through the same
 //! two parsers in `pfilter.rs` (the by-name column parser and the long-form
 //! row parser), so these tests drive them through the commands that matter —
-//! `pfilter`, `fit run` and `survey` — for every count family, the binomial
+//! `pfilter` and `fit run` — for every count family, the binomial
 //! trial count, the Bernoulli outcome, and a stratified long-form stream.
 
 use std::path::{Path, PathBuf};
@@ -201,13 +201,13 @@ fn pfilter_refuses_a_negative_count_in_a_long_form_stream() {
     assert_refused(&out, name, "cases", 5, "-6");
 }
 
-/// `fit run` and `survey` read the same cells through their own entry points.
+/// `fit run` reads the same cells through its own entry point.
 #[test]
-fn fit_run_and_survey_refuse_a_negative_poisson_count() {
-    let tmp = tempdir("fit_survey");
-    let ir = compile(&tmp.0, CASES_COLUMNS, "cases ~ poisson(rate = rho * projected)");
+fn fit_run_refuses_a_negative_poisson_count() {
+    let tmp = tempdir("fit_run");
+    compile(&tmp.0, CASES_COLUMNS, "cases ~ poisson(rate = rho * projected)");
     let name = "neg.tsv";
-    let data = write(&tmp.0, name, "time\tcases\n1\t3\n2\t-4\n3\t6\n4\t5\n5\t4\n6\t3\n");
+    write(&tmp.0, name, "time\tcases\n1\t3\n2\t-4\n3\t6\n4\t5\n5\t4\n6\t3\n");
     // Paths relative to the fit.toml, which sits beside the model and data.
     let toml = write(&tmp.0, "fit.toml", r#"
 output_dir = "results"
@@ -231,12 +231,4 @@ cooling    = 0.9
 "#);
     let fit = camdl(&tmp.0, &["fit", "run", toml.to_str().unwrap()]);
     assert_refused(&fit, name, "cases", 3, "-4");
-
-    let binding = data.display().to_string();
-    let survey = camdl(&tmp.0, &[
-        "survey", ir.to_str().unwrap(), "--data", &binding,
-        "--estimate", "beta=0.1:1.0", "--fixed", "gamma=0.2", "--fixed", "rho=0.5",
-        "--fixed", "N0=1000", "--n-points", "4", "--eval", "simulate",
-    ]);
-    assert_refused(&survey, name, "cases", 3, "-4");
 }

@@ -338,7 +338,7 @@ impl ChainStarts {
                 Ok(ChainStarts::Point(Point::FromParams { path: PathBuf::from(src) }))
             }
             "survey_top_k" => Err(
-                "`survey_top_k` was removed: a survey landscape is not a posterior. Run a \
+                "`survey_top_k` was removed with the command that wrote its input. Run a \
                  short fit and start from its cloud with `starts = { from_posterior = \
                  \"@handle\" }`, or use `from_prior`."
                     .to_string(),

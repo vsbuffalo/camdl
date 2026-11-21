@@ -216,8 +216,8 @@ impl Default for Reporter {
 /// line; `None` is silent.
 ///
 /// `inc`/`set` take `&self` (interior-mutable throttle + metric) so one bar
-/// can be shared across rayon workers — `survey` ticks a single overall bar
-/// from a parallel point sweep, `CasSink` ticks it from the sequential merge
+/// can be shared across rayon workers — `pfilter` ticks a single overall bar
+/// from its parallel replicates, `CasSink` ticks it from the sequential merge
 /// loop, and fit gives each chain its own bar. `Task` is `Send + Sync`.
 pub struct Task {
     pb: ProgressBar,
@@ -376,8 +376,7 @@ impl std::fmt::Display for Metric {
 }
 
 /// Standard "best log-likelihood so far" metric for search-style work
-/// (`survey`, `profile`). Kept here so the live bar reads identically across
-/// subcommands.
+/// (`profile`).
 pub fn best_ll(x: f64) -> Metric {
     Metric::BestLoglik(x)
 }

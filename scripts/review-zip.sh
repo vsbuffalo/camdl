@@ -90,8 +90,6 @@ INFERENCE_TESTS=(
     rust/crates/cli/tests/profile_priors.rs
     rust/crates/cli/tests/profile_diagnostics.rs
     rust/crates/cli/tests/profile_multi_stream.rs
-    rust/crates/cli/tests/survey_top_k_pmmh.rs
-    rust/crates/cli/tests/survey_top_k_pgas.rs
     rust/crates/cli/tests/pgas_resume.rs
     rust/crates/cli/tests/calendar_fit_summary.rs
     rust/crates/cli/tests/pfilter_trajectories.rs
@@ -163,7 +161,6 @@ INFERENCE=(
     rust/crates/cli/src/profile.rs
     rust/crates/cli/src/profile_diagnostics.rs
     rust/crates/cli/src/sampling.rs
-    rust/crates/cli/src/survey.rs
     rust/crates/ir/src/
     "${CLI_PLUMBING[@]}"
     "${INFERENCE_TESTS[@]}"

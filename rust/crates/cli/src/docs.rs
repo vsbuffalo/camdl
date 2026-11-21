@@ -84,7 +84,7 @@ const TOPICS: &[Topic] = &[
     Topic {
         slug: "workflow",
         aliases: &["calibrate", "pipeline"],
-        summary: "The canonical fit workflow: check → simulate → survey → fit → diagnose → refine → validate",
+        summary: "The canonical fit workflow: check → simulate → fit → diagnose → refine → validate",
         body: include_str!("../../../../docs/workflow.md"),
         page: Some("workflow.md"),
     },

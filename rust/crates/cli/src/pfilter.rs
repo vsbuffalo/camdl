@@ -206,7 +206,7 @@ fn run_pfilter(
     // The interventions this run scores under. With `--fit` it is the fit's
     // own problem, so the fit config's `scenario` / `enable` / `disable` is
     // applied, as `fit run` applied it — combined with the flags by the rule
-    // `survey --fit` and `profile --fit` use: either side alone selects, and
+    // `profile --fit` uses: either side alone selects, and
     // two selections that differ are refused rather than one winning.
     //
     // A selection taken from the fit config contributes its intervention

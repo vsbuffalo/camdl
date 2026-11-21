@@ -1,6 +1,5 @@
-//! The differential runner the `pfilter`, `profile` and `survey` input-class
-//! suites share (`pfilter_input_classes.rs`, `profile_input_classes.rs`,
-//! `survey_input_classes.rs`; proposal
+//! The differential runner the `pfilter` and `profile` input-class suites
+//! share (`pfilter_input_classes.rs`, `profile_input_classes.rs`; proposal
 //! `docs/dev/proposals/2026-11-17-honest-input-addressed-store.md` phase 3
 //! "Tests").
 //!
@@ -10,8 +9,8 @@
 //! returns every stored leaf: its kind, its run id, its level hashes and the
 //! bytes its manifest checksums (each file's SHA-256, checked against the
 //! digest `run.json` records). The assertions, one per class, compare the
-//! leaves of one kind — the command's own (`pfilter`, `profile_point`,
-//! `survey`) — between two invocations.
+//! leaves of one kind — the command's own (`pfilter`, `profile_point`) —
+//! between two invocations.
 //!
 //! The release binary under test must be built from the source this test was
 //! built from: [`Fixture::create`] checks that `--version` names the source

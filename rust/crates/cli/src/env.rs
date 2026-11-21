@@ -38,7 +38,7 @@
 //! model level. The commands that store a result under an address key the
 //! switches into it: `simulate` (its trajectories, their observation subtrees
 //! and its ensembles), `fit run` (at the `fit` level), `fit predict` (its
-//! output directory), `pfilter`, `profile` (a point's base) and `survey`.
+//! output directory), `pfilter` and `profile` (a point's base).
 //! `compare` scores a chain-binomial fit through a `camdl pfilter` child,
 //! which keys them; its in-process ODE scoring and `dev eval` store nothing
 //! under an address, so they key no switch.

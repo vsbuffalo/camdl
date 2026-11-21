@@ -191,7 +191,7 @@ pub(crate) struct FitParameters {
 /// resolver does not refuse it as unset: its `start`, else a draw within its
 /// bounds, else (no finite box) a draw from its proper prior. One function
 /// for every command that reads a fit config's `[estimate]` (`fit run`,
-/// `survey --fit`, `profile --fit`), so a bare `beta = {}` entry means the
+/// `profile --fit`), so a bare `beta = {}` entry means the
 /// same everywhere (run-spec §1.4). The draw is keyed by `(seed, name)`.
 ///
 /// `no_prior_draw` names parameters that must not fall back to a prior draw
@@ -1973,8 +1973,8 @@ pub(crate) fn apply_holdout_declaration(
 /// The partition `holdout_after = spec` makes of `rows`: the cutoff resolved
 /// by [`resolve_holdout_cutoff`], each stream's rows ending at or before it.
 /// The one place a `holdout_after` declaration becomes training rows: `fit
-/// run`, `profile --fit`, `survey --fit` and the model's observation anchors
-/// all cut through it.
+/// run`, `profile --fit` and the model's observation anchors all cut through
+/// it.
 pub(crate) fn cutoff_partition(
     spec: &super::config_v2::TimeSpecToml,
     rows: &BTreeMap<String, Vec<ObservedRow>>,
@@ -2208,17 +2208,6 @@ impl PartitionLines {
             out.say(format_args!("{line}"));
         }
     }
-}
-
-/// Say the startup lines of `partition` now ([`partition_lines`]), for a
-/// command that decides its partition once.
-pub(crate) fn say_partition(
-    partition: &TrainingPartition,
-    rows: &BTreeMap<String, Vec<ObservedRow>>,
-    held_out_file_rows: usize,
-    time_opts: &crate::caltime_load::TimeOpts,
-) {
-    partition_lines(partition, rows, held_out_file_rows, time_opts).say();
 }
 
 /// Tolerance for "the same observation time" comparisons at the holdout

@@ -19,8 +19,7 @@ pub const SEED_MIX_OBS: u64 = 0xa5a5a5a5a5a5;
 
 /// Per-(point, replicate) seed-mix constants. Private: the only public
 /// surface is [`mix_cell_seed`], so the derivation has exactly one home
-/// and callers cannot drift the constants. (These were previously
-/// duplicated across `engine.rs`, `main.rs`, and `survey.rs`.) The values
+/// and callers cannot drift the constants. The values
 /// are arbitrary golden-ratio fractional bits — any pairwise-distinct mix
 /// works, since ChaCha8 maps seeds to independent streams.
 const SEED_MIX_DRAW: u64 = 0x9e3779b97f4a7c15;
@@ -29,8 +28,8 @@ const SEED_MIX_REP:  u64 = 0x517cc1b727220a95;
 /// Canonical per-cell process-seed mix. A run cell at param/sweep point
 /// `point_idx` and replicate `rep` derives its process seed from `base` as
 /// `base ^ point·SEED_MIX_DRAW ^ rep·SEED_MIX_REP`. This is the one mix the
-/// whole CLI shares — `engine::run_job`'s `process_seed_for` and `survey`'s
-/// landscape both route through it. Scenario is deliberately NOT an input:
+/// whole CLI shares — `engine::run_job`'s `process_seed_for` routes through
+/// it. Scenario is deliberately NOT an input:
 /// paired scenarios at the same (point, rep) share a cell seed, which is
 /// what makes their pre-divergence trajectories byte-identical (CRN).
 pub fn mix_cell_seed(base: u64, point_idx: u64, rep: u64) -> u64 {
@@ -3367,7 +3366,7 @@ fn same_toggles(a: &[String], b: &[String]) -> bool {
 
 /// Combine a fit config's top-level `scenario` / `enable` / `disable` with the
 /// CLI's `--scenario` / `--enable` / `--disable`, for a verb that reads both
-/// (`survey --fit`, `profile --fit`).
+/// (`pfilter --fit`, `profile --fit`).
 ///
 /// Either side alone selects the scenario. When both select one they must be
 /// the same named scenario, or the same sets of enabled and disabled toggles
@@ -5468,7 +5467,6 @@ mod tests {
             ));
         }
     }
-
     // ── validate_parameter_values (gh#31) ────────────────────────────────
 
     /// Build a minimal `ir::Model` with a single parameter, used as a

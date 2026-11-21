@@ -450,7 +450,7 @@ pub fn run_method(
     // `Ok(None)` when its init-eval surfaces a `PFDegenerate` bail (gh#110)
     // — skipped with a BadInit diagnostic and omitted from downstream
     // R̂/ESS/MAP aggregation, surviving chains continue ("skip + continue",
-    // so a 6-chain run with one bound-pathological survey_top_k init still
+    // so a 6-chain run with one bound-pathological start still
     // gives 5 chains of inference). A `Err` is a structural failure
     // (gh#224): the model/config cannot run, so the whole fit aborts rather
     // than reporting a degenerate posterior — no further chain starts after
