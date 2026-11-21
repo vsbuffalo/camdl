@@ -487,9 +487,7 @@ pub enum ResolveError {
     /// once rather than failing on the first, so a user fixing
     /// `--param beta=5 --param gamma=10` against bounded parameters
     /// sees both names in a single error and can fix both before
-    /// re-running. Mirrors the legacy `validate_parameter_values`
-    /// behaviour, which already collected violations into one
-    /// message (pinned by
+    /// re-running (pinned by
     /// `parameter_bounds_validation::multiple_oob_params_reported_in_one_error`).
     MultipleViolations(Vec<ResolveError>),
 }
@@ -524,11 +522,8 @@ impl std::fmt::Display for ResolveError {
                 Ok(())
             }
             ResolveError::NonFiniteValue { name, value, source } => {
-                // "not finite (NaN or ±∞)" mirrors the legacy
-                // `validate_parameter_values` wording so existing
-                // integration tests
-                // (`parameter_bounds_validation::param_positive_infinity_errors`)
-                // and the user's mental model both stay green.
+                // The wording "not finite (NaN or ±∞)" is pinned by
+                // `parameter_bounds_validation::param_positive_infinity_errors`.
                 // The fix names the source the value came from, not a
                 // flag list: a value from a scenario's `set` or a params
                 // file is corrected there, and `--fixed` is not a flag of
@@ -2206,8 +2201,7 @@ pub fn resolve_parameters_with_starts<'a>(
     //       `--param a=NaN --param b=999` against bounded `a, b`
     //       sees both problems in one stderr block.
     //
-    // This mirrors the legacy `validate_parameter_values` behaviour
-    // (pinned by `parameter_bounds_validation::multiple_oob_params_*`).
+    // Pinned by `parameter_bounds_validation::multiple_oob_params_*`.
     let mut params: Vec<ResolvedParameter> = Vec::with_capacity(model.parameters.len());
     let mut violations: Vec<ResolveError> = Vec::new();
     for p in &model.parameters {

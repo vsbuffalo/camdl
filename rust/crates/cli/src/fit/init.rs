@@ -167,8 +167,8 @@ pub(crate) fn build_uniform_unconstrained_chain_starts(
 /// Draw a single Transform-aware value within `[lo, hi]`, suitable for
 /// the gh#34 start-fallback path: when an `[estimate]` entry has neither
 /// `start =` nor a model-declared parameter `value`, we still need a
-/// scalar to seed `model.parameters[i].value` with so that compile +
-/// `validate_parameter_values` succeed. Downstream chain init can then
+/// scalar to seed `model.parameters[i].value` with so that compile and the
+/// resolver's value checks succeed. Downstream chain init can then
 /// perturb from this base.
 ///
 /// "Transform-aware" means: for a log-spaced domain (`Transform::log_spaced`)
