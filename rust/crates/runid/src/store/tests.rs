@@ -426,7 +426,7 @@ fn augment_on_a_missing_leaf_is_a_no_op() {
 /// `--force` had no store-level meaning: there was no path that replaced a
 /// Completed leaf, so the grid writer recomputed and had its bytes discarded at
 /// commit,
-/// while fit and survey died with AlreadyCompleted. `displace`
+/// while fit died with AlreadyCompleted. `displace`
 /// quarantines the incumbent so the recompute lands on a clean leaf — and
 /// quarantine, not delete, so a forced rerun never destroys what it replaces.
 #[test]

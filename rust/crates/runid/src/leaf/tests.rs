@@ -193,6 +193,40 @@ fn a_renamed_kind_is_named_with_the_sentence_readers_already_print() {
     assert!(matches!(found.as_slice(), [Err(u)] if u.dir == dir), "{found:?}");
 }
 
+/// A record of a kind this camdl does not have is named as such, with the
+/// command that wrote it, and is an unreadable entry: never a leaf of another
+/// kind, never a parse error.
+#[test]
+fn a_removed_kind_is_named_with_the_command_that_wrote_it() {
+    let root = TmpRoot::new("removed");
+    let mut v =
+        serde_json::to_value(record(ArtifactKind::Pfilter, id(5), RunStatus::Completed)).unwrap();
+    let (kind, command) = crate::record::REMOVED_KINDS[0];
+    assert_eq!((kind, command), ("survey", "camdl survey"));
+    v["kind"] = kind.into();
+    let bytes = serde_json::to_vec(&v).unwrap();
+    assert!(serde_json::from_slice::<crate::RunRecord>(&bytes).is_err(), "the kind does not deserialize");
+    let dir = plant_bytes(&root.join("surveys/a"), &bytes);
+    let u = unreadable(&dir);
+    assert_eq!(u.reason, Unreadable::RemovedKind { kind: kind.into(), command: command.into() });
+    assert_eq!(u.reason.to_string(), crate::record::removed_kind(&bytes).unwrap());
+    assert!(u.reason.to_string().contains("`camdl survey` wrote"), "{}", u.reason);
+    assert_eq!(u.kind, None, "its kind is not one of this camdl's");
+    // The whole-store walk reports it as an entry and reads every other leaf.
+    let sim = plant_bytes(
+        &root.join("sims/a"),
+        &serde_json::to_vec(&record(ArtifactKind::Sim, id(6), RunStatus::Completed)).unwrap(),
+    );
+    let found = discover(&root, Scope::default());
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert!(found.iter().any(|e| matches!(e, Ok(l) if l.dir == sim)), "{found:?}");
+    assert!(found.iter().any(|e| matches!(e, Err(u) if u.dir == dir)), "{found:?}");
+    // An unknown kind that is in neither table stays a parse error.
+    v["kind"] = "no_such_kind".into();
+    let dir = plant_bytes(&root.join("surveys/b"), &serde_json::to_vec(&v).unwrap());
+    assert!(matches!(unreadable(&dir).reason, Unreadable::Malformed { .. }));
+}
+
 #[test]
 #[cfg(unix)]
 fn a_run_json_this_process_may_not_read_is_an_io_entry() {

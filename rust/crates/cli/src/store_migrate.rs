@@ -407,7 +407,9 @@ pub fn folders(path: &Path) -> Vec<Result<Folder, (PathBuf, Outcome)>> {
                 }
                 Ok(None) => continue,
                 Err(u) => match u.reason {
-                    runid::Unreadable::RenamedKind { .. } | runid::Unreadable::PredatesCalendar => {
+                    runid::Unreadable::RenamedKind { .. }
+                    | runid::Unreadable::RemovedKind { .. }
+                    | runid::Unreadable::PredatesCalendar => {
                         Err((dir, Outcome::Stale { reason: u.reason.to_string() }))
                     }
                     other => Err((dir, Outcome::Refused { reason: other.to_string() })),

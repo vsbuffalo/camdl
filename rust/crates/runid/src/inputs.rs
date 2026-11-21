@@ -338,7 +338,7 @@ pub struct ModelDigest {
 
 impl ModelDigest {
     /// Build the whole-IR digest from a compiled model. Every identity path
-    /// (`sim`, `fit`, `pfilter`, `survey`, `sim_ensemble`, `profile`) builds
+    /// (`sim`, `fit`, `pfilter`, `sim_ensemble`, `profile`) builds
     /// its model level through this constructor, so all of them hash the
     /// model by [`model_ir_hash`].
     pub fn from_model(model: &ir::Model, ir_version: String, engine: EngineIdentity) -> Self {
@@ -350,8 +350,8 @@ impl ModelDigest {
 ///
 /// Every CAS path that needs a structural model identity goes through here:
 /// the per-level [`ModelDigest`] via [`ModelDigest::from_model`], and the bare
-/// structural identity string (the survey↔fit warm-start cross-check, which
-/// leaves out the engine and IR-version fold).
+/// structural identity string a record carries as its `model_identity`, which
+/// leaves out the engine and IR-version fold.
 pub fn model_ir_hash(model: &ir::Model) -> ContentHash {
     model.content_hash()
 }

@@ -103,17 +103,16 @@ fn discover_ensemble_rows(root: &str) -> Vec<EnsembleRow> {
 
 // ── cmd_list ─────────────────────────────────────────────────────────────────
 
-/// `--kind` filter: which of sims / fits / profiles / surveys / pfilters /
-/// ensembles to surface. `All` is the default and includes every kind.
+/// `--kind` filter: which of sims / fits / profiles / pfilters / ensembles
+/// to surface. `All` is the default and includes every kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum KindFilter { Sim, Fit, Profile, Pfilter, Survey, Ensemble, All }
+enum KindFilter { Sim, Fit, Profile, Pfilter, Ensemble, All }
 
 impl KindFilter {
     fn includes_sims(self)      -> bool { matches!(self, Self::Sim      | Self::All) }
     fn includes_fits(self)      -> bool { matches!(self, Self::Fit      | Self::All) }
     fn includes_profiles(self)  -> bool { matches!(self, Self::Profile  | Self::All) }
     fn includes_pfilters(self)  -> bool { matches!(self, Self::Pfilter  | Self::All) }
-    fn includes_surveys(self)   -> bool { matches!(self, Self::Survey   | Self::All) }
     fn includes_ensembles(self) -> bool { matches!(self, Self::Ensemble | Self::All) }
 }
 
@@ -135,7 +134,6 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
         "fit"                   => KindFilter::Fit,
         "profile" | "profiles"  => KindFilter::Profile,
         "pfilter" | "pfilters"  => KindFilter::Pfilter,
-        "survey" | "surveys"    => KindFilter::Survey,
         "ensemble" | "ensembles" => KindFilter::Ensemble,
         _                       => KindFilter::All,
     };
@@ -192,11 +190,6 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
     } else {
         discover_profiles(&root).unwrap_or_else(|e| { out.fail(format!("error: {}", e)); })
     };
-    let surveys = if !filter_kind.includes_surveys() {
-        Vec::new()
-    } else {
-        discover_survey_rows(&root)
-    };
     let pfilters = if !filter_kind.includes_pfilters() {
         Vec::new()
     } else {
@@ -249,16 +242,6 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
         .collect();
     filtered_profiles.sort_by(|x, y| y.created.cmp(&x.created));
 
-    let mut filtered_surveys: Vec<SurveyRow> = surveys.into_iter()
-        .filter(|s| a.model.as_deref().is_none_or(|m| s.leaf.level_label("model").contains(m)))
-        .filter(|_| a.scenario.is_none())
-        .filter(|s| match filter_since {
-            Some(dur) => now.duration_since(s.created).is_ok_and(|d| d <= dur),
-            None => true,
-        })
-        .collect();
-    filtered_surveys.sort_by(|x, y| y.created.cmp(&x.created));
-
     let mut filtered_pfilters: Vec<PfilterRow> = pfilters.into_iter()
         .filter(|p| a.model.as_deref().is_none_or(|m| p.leaf.level_label("model").contains(m)))
         .filter(|_| a.scenario.is_none())
@@ -283,7 +266,6 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
         filtered_runs.truncate(a.limit);
         fit_rows.truncate(a.limit);
         filtered_profiles.truncate(a.limit);
-        filtered_surveys.truncate(a.limit);
         filtered_pfilters.truncate(a.limit);
         filtered_ensembles.truncate(a.limit);
     }
@@ -295,13 +277,11 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
             out.report_line(format_args!("{}", serde_json::to_string(&line).unwrap_or_default()));
         }
         print_profiles_json(&out, &filtered_profiles);
-        print_survey_json(&out, &filtered_surveys);
         print_pfilter_json(&out, &filtered_pfilters);
         print_ensemble_json(&out, &filtered_ensembles);
     } else {
         let any_other = !fit_rows.is_empty()
             || !filtered_profiles.is_empty()
-            || !filtered_surveys.is_empty()
             || !filtered_pfilters.is_empty()
             || !filtered_ensembles.is_empty();
         if !filtered_ensembles.is_empty() {
@@ -317,11 +297,6 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
         if !filtered_profiles.is_empty() {
             out.say(format_args!("{}", style::stderr().paint("profiles", Style::Bold)));
             print_profiles_table(&out, &filtered_profiles, now);
-            out.say("");
-        }
-        if !filtered_surveys.is_empty() {
-            out.say(format_args!("{}", style::stderr().paint("surveys", Style::Bold)));
-            print_survey_table(&out, &filtered_surveys, now);
             out.say("");
         }
         if !filtered_pfilters.is_empty() {
@@ -412,7 +387,6 @@ pub fn cmd_show(a: &crate::args::ShowArgs) {
             Resolved::Sim { leaf, rel_path, .. } => run_show_json(leaf, "sim", rel_path),
             Resolved::Profile { leaf, rel_path, .. } => run_show_json(leaf, "profile_point", rel_path),
             Resolved::Pfilter { leaf, rel_path, .. } => run_show_json(leaf, "pfilter", rel_path),
-            Resolved::Survey { leaf, rel_path, .. } => run_show_json(leaf, "survey", rel_path),
             Resolved::SimEnsemble { leaf, rel_path, .. } => run_show_json(leaf, "sim_ensemble", rel_path),
         };
         out.report_line(format_args!("{}", serde_json::to_string_pretty(&value).unwrap_or_default()));
@@ -423,7 +397,6 @@ pub fn cmd_show(a: &crate::args::ShowArgs) {
         Ok(Resolved::Fit { leaf, rel_path, created }) => show_fit_run(&out, &leaf, &rel_path, created),
         Ok(Resolved::Profile { leaf, rel_path, created }) => show_profile_record(&out, &leaf, &rel_path, created),
         Ok(Resolved::Pfilter { leaf, rel_path, created }) => show_pfilter_record(&out, &leaf, &rel_path, created),
-        Ok(Resolved::Survey { leaf, rel_path, created }) => show_survey_record(&out, &leaf, &rel_path, created),
         Ok(Resolved::SimEnsemble { leaf, rel_path, created }) => show_sim_ensemble_record(&out, &leaf, &rel_path, created),
         Ok(Resolved::FitEnvelope { segment, run, rel_path }) => show_fit_envelope(&out, &segment, run.as_deref(), &rel_path),
         Err(e) => {
@@ -791,69 +764,6 @@ fn show_pfilter_record(out: &crate::out::Out, leaf: &cas_read::Leaf, rel_path: &
     out.report_line(format_args!("{}", style::stdout().paint("engine", Style::Dim))); out.report_line(format_args!("  {}", engine_line(rec)));
 }
 
-/// Render a new-format (`RunRecord`) survey leaf: the four factored levels
-/// (`model`/`config`/`box`/`seed`), the run_id address, the recorded eval
-/// config + estimated set + best-loglik from `inputs`, and the landscape /
-/// summary / HTML artifact sizes. A survey is a single leaf (the N LHS points
-/// live within it, not as an axis). Mirrors `show_pfilter_record`.
-fn show_survey_record(out: &crate::out::Out, leaf: &cas_read::Leaf, rel_path: &str, created: SystemTime) {
-    let rec = &leaf.record;
-    out.report_line(format_args!("{}", style::stdout().paint("path", Style::Dim))); out.report_line(format_args!("  {}", style::stdout().paint(rel_path, Style::Code)));
-    out.report_line(format_args!("{}", style::stdout().paint("kind", Style::Dim))); out.report_line("  survey");
-    if let Some(ref l) = rec.provenance.label {
-        out.report_line(format_args!("{}", style::stdout().paint("label", Style::Dim))); out.report_line(format_args!("  {}", l));
-    }
-    for lvl_name in ["model", "config", "box", "seed"] {
-        out.report_line(format_args!("{}", style::stdout().paint(lvl_name, Style::Dim)));
-        out.report_line(format_args!("  {}", leaf.level_label(lvl_name)));
-    }
-    out.report_line(format_args!("{}", style::stdout().paint("run_id", Style::Dim))); out.report_line(format_args!("  {}", style::stdout().paint(&rec.run_id.to_hex().to_string(), Style::Dim)));
-    out.report_line(format_args!("{}", style::stdout().paint("levels", Style::Dim)));
-    for lvl in &rec.levels {
-        out.report_line(format_args!("  {:<9} {}-{}", lvl.name, lvl.label, style::stdout().paint(&lvl.hash.short8().to_string(), Style::Dim)));
-    }
-    if let Some(obj) = rec.inputs.as_object() {
-        if let Some(est) = obj.get("estimated").and_then(|v| v.as_array()) {
-            let names: Vec<&str> = est.iter().filter_map(|v| v.as_str()).collect();
-            out.report_line(format_args!("{}", style::stdout().paint("estimated", Style::Dim))); out.report_line(format_args!("  {}", names.join(", ")));
-        }
-        for key in ["eval_method", "eval_particles", "eval_replicates", "n_points", "best_loglik"] {
-            if let Some(v) = obj.get(key) {
-                if v.is_null() { continue; }
-                out.report_line(format_args!("{}", style::stdout().paint(key, Style::Dim))); out.report_line(format_args!("  {}", v));
-            }
-        }
-    }
-    let landscape = leaf.dir.join("landscape.tsv");
-    if landscape.exists() {
-        let bytes = std::fs::metadata(&landscape).map(|m| m.len()).unwrap_or(0);
-        out.report_line(format_args!("{}", style::stdout().paint("landscape", Style::Dim)));
-        out.report_line(format_args!("  landscape.tsv ({} bytes)", bytes));
-    }
-    let summary = leaf.dir.join("summary.json");
-    if summary.exists() {
-        if let Ok(s) = std::fs::read_to_string(&summary) {
-            if let Ok(j) = serde_json::from_str::<serde_json::Value>(&s) {
-                if let Some(se_q) = j.get("loglik_se_quartiles") {
-                    out.report_line(format_args!("{}", style::stdout().paint("loglik_se quartiles", Style::Dim)));
-                    out.report_line(format_args!("  {}", se_q));
-                }
-            }
-        }
-    }
-    let html = leaf.dir.join("landscape.html");
-    if html.exists() {
-        let bytes = std::fs::metadata(&html).map(|m| m.len()).unwrap_or(0);
-        out.report_line(format_args!("{}", style::stdout().paint("rendered", Style::Dim)));
-        out.report_line(format_args!("  landscape.html ({} bytes)", bytes));
-    }
-    out.report_line(format_args!("{}", style::stdout().paint("created", Style::Dim)));
-    out.report_line(format_args!("  {}  ({})",
-        rec.provenance.created_at.as_deref().unwrap_or("?"),
-        fmt_relative_time(created, SystemTime::now())));
-    out.report_line(format_args!("{}", style::stdout().paint("engine", Style::Dim))); out.report_line(format_args!("  {}", engine_line(rec)));
-}
-
 /// Render a new-format (`RunRecord`) `SimEnsemble` leaf: the four factored
 /// levels (`model`/`config`/`params`/`grid`), the run_id address, the cell
 /// count + scenario/seed/draw summary from `inputs`, the `deps` (the N per-cell
@@ -1004,17 +914,6 @@ pub fn cmd_cat(a: &crate::args::CatArgs) {
             });
             let _ = out.data().write_all(&bytes);
         }
-        // New-format survey: default to `landscape.tsv`; `--stream NAME`
-        // cats a named file from the leaf (e.g. `summary.json`,
-        // `landscape.html`).
-        Resolved::Survey { leaf, rel_path, .. } => {
-            let name = a.stream.as_deref().unwrap_or("landscape.tsv");
-            let path = leaf.dir.join(name);
-            let bytes = std::fs::read(&path).unwrap_or_else(|e| {
-                out.fail(format!("error reading {} in {}: {}", name, rel_path, e));
-            });
-            let _ = out.data().write_all(&bytes);
-        }
         // New-format ensemble: default to `ensemble.tsv` (the combined
         // wide-format trajectory — byte-identical to the `-o` mirror).
         Resolved::SimEnsemble { leaf, rel_path, .. } => {
@@ -1148,7 +1047,7 @@ fn find_obs_stream(sim_dir: &Path, stream: &str) -> Option<PathBuf> {
 // ── Internals: discovery + resolution ────────────────────────────────────────
 //
 // New-format `sims/` are discovered generically via [`discover_sim_rows`]
-// (data-driven depth through [`cas_read`]). The legacy fit/profile/survey
+// (data-driven depth through [`cas_read`]). The legacy fit/profile
 // discovery below is M3-DELETION-BOUND (gh#147) — see [`load_run_common`].
 
 /// A discovered cached fit.
@@ -1287,75 +1186,6 @@ fn summarize_grid(point_labels: &[String], n_starts: usize) -> (String, String) 
     (focal, shape)
 }
 
-// ── Survey listings ──────────────────────────────────────────────────────────
-
-/// One discovered survey run. Surveys live at
-/// `<root>/surveys/<stem>-<hash[:8]>/` with a `run.json` of kind
-/// A new-format (`runid::RunRecord`) survey leaf, prepared for the `list`
-/// display. The kind-Survey filter happens in [`cas_read::walk_survey_leaves`].
-struct SurveyRow {
-    leaf: cas_read::Leaf,
-    rel_path: String,
-    created: SystemTime,
-}
-
-/// Discover the new-format survey leaves under `root/surveys/` for `list`.
-fn discover_survey_rows(root: &str) -> Vec<SurveyRow> {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    cas_read::walk_survey_leaves(Path::new(root))
-        .into_iter()
-        .map(|leaf| {
-            let created = leaf.record.provenance.created_at.as_deref()
-                .and_then(parse_iso8601)
-                .unwrap_or_else(|| {
-                    std::fs::metadata(&leaf.dir).and_then(|m| m.modified())
-                        .unwrap_or(SystemTime::UNIX_EPOCH)
-                });
-            let rel_path = pathdiff_str(&leaf.dir, &cwd);
-            SurveyRow { leaf, rel_path, created }
-        })
-        .collect()
-}
-
-fn print_survey_table(out: &crate::out::Out, surveys: &[SurveyRow], now: SystemTime) {
-    let mut t = comfy_table::Table::new();
-    t.set_content_arrangement(comfy_table::ContentArrangement::Dynamic);
-    t.set_header(vec!["model", "estimate", "n_points", "eval", "top_loglik", "age", "path"]);
-    for s in surveys {
-        let obj = s.leaf.record.inputs.as_object();
-        let estimated = obj
-            .and_then(|o| o.get("estimated"))
-            .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(","))
-            .unwrap_or_default();
-        let n_points = obj.and_then(|o| o.get("n_points")).and_then(|v| v.as_u64())
-            .map(|n| n.to_string()).unwrap_or_else(|| "—".into());
-        // The `config` level label is `{method}-P{particles}-r{replicates}`.
-        let eval = s.leaf.level_label("config").to_string();
-        let ll = obj.and_then(|o| o.get("best_loglik")).and_then(|v| v.as_f64())
-            .map(|x| format!("{:.2}", x)).unwrap_or_else(|| "—".into());
-        let age = fmt_relative_time(s.created, now);
-        t.add_row(vec![
-            s.leaf.level_label("model").to_string(),
-            estimated,
-            n_points,
-            eval,
-            ll,
-            age,
-            s.rel_path.clone(),
-        ]);
-    }
-    out.report_line(format_args!("{t}"));
-}
-
-fn print_survey_json(out: &crate::out::Out, surveys: &[SurveyRow]) {
-    let recs: Vec<&runid::RunRecord> = surveys.iter().map(|s| &s.leaf.record).collect();
-    match serde_json::to_string_pretty(&recs) {
-        Ok(s) => out.report_line(format_args!("{}", s)),
-        Err(e) => out.say(format_args!("json error: {}", e)),
-    }
-}
-
 /// Walk `root/fits/` one level deep — each immediate child is a fit
 /// directory (`<stem>-<hash[:8]>/`). Method-level run.json records live
 /// deeper and are not surfaced by `camdl list`.
@@ -1396,8 +1226,6 @@ enum Resolved {
     Profile { leaf: cas_read::Leaf, rel_path: String, created: SystemTime },
     /// `Pfilter`-eval leaf under `pfilters/`.
     Pfilter { leaf: cas_read::Leaf, rel_path: String, created: SystemTime },
-    /// `Survey` leaf under `surveys/`.
-    Survey { leaf: cas_read::Leaf, rel_path: String, created: SystemTime },
     /// `SimEnsemble` leaf under `ensembles/` (the combined multi-cell TSV).
     SimEnsemble { leaf: cas_read::Leaf, rel_path: String, created: SystemTime },
     /// A fit SEGMENT under `fits/` — the fit's *output envelope*, not a single
@@ -1456,7 +1284,6 @@ fn resolve_any(root: &str, key: &str) -> Result<Resolved, String> {
             runid::ArtifactKind::FitMethod => Resolved::Fit { leaf, rel_path, created },
             runid::ArtifactKind::ProfilePoint => Resolved::Profile { leaf, rel_path, created },
             runid::ArtifactKind::Pfilter => Resolved::Pfilter { leaf, rel_path, created },
-            runid::ArtifactKind::Survey => Resolved::Survey { leaf, rel_path, created },
             runid::ArtifactKind::SimEnsemble => Resolved::SimEnsemble { leaf, rel_path, created },
             _ => Resolved::Sim { leaf, rel_path, created },
         });
@@ -1535,14 +1362,6 @@ fn resolve_any(root: &str, key: &str) -> Result<Resolved, String> {
         pfilter_matches.push((leaf, rel, created));
     }
 
-    // New-format surveys (M3.3): match the run_id hex prefix under surveys/.
-    let mut survey_matches: Vec<(cas_read::Leaf, String, SystemTime)> = Vec::new();
-    for leaf in cas_read::resolve_survey_prefix(Path::new(root), hash_prefix) {
-        let created = leaf_created(&leaf);
-        let rel = pathdiff_str(&leaf.dir, &cwd);
-        survey_matches.push((leaf, rel, created));
-    }
-
     // New-format sim ensembles: match the run_id hex prefix under ensembles/.
     let mut ensemble_matches: Vec<(cas_read::Leaf, String, SystemTime)> = Vec::new();
     for leaf in cas_read::resolve_sim_ensemble_prefix(Path::new(root), hash_prefix) {
@@ -1558,7 +1377,7 @@ fn resolve_any(root: &str, key: &str) -> Result<Resolved, String> {
     // leaf (`fit_matches`) surfaces as ambiguous rather than silently picked.
 
     match sim_matches.len() + fit_matches.len() + profile_matches.len()
-        + pfilter_matches.len() + survey_matches.len() + ensemble_matches.len()
+        + pfilter_matches.len() + ensemble_matches.len()
         + fit_envelope_matches.len() {
         0 => Err(format!("no run matches '{}' in {}", key, root)),
         1 => {
@@ -1570,8 +1389,6 @@ fn resolve_any(root: &str, key: &str) -> Result<Resolved, String> {
                 Ok(Resolved::Profile { leaf, rel_path, created })
             } else if let Some((leaf, rel_path, created)) = pfilter_matches.into_iter().next() {
                 Ok(Resolved::Pfilter { leaf, rel_path, created })
-            } else if let Some((leaf, rel_path, created)) = survey_matches.into_iter().next() {
-                Ok(Resolved::Survey { leaf, rel_path, created })
             } else if let Some((leaf, rel_path, created)) = ensemble_matches.into_iter().next() {
                 Ok(Resolved::SimEnsemble { leaf, rel_path, created })
             } else {
@@ -1592,9 +1409,6 @@ fn resolve_any(root: &str, key: &str) -> Result<Resolved, String> {
             }
             for (_, rel, _) in &pfilter_matches {
                 msg.push_str(&format!("  {:<14} {}\n", "pfilter", rel));
-            }
-            for (_, rel, _) in &survey_matches {
-                msg.push_str(&format!("  {:<14} {}\n", "survey", rel));
             }
             for (_, rel, _) in &ensemble_matches {
                 msg.push_str(&format!("  {:<14} {}\n", "sim_ensemble", rel));

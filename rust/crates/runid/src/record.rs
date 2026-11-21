@@ -22,7 +22,7 @@ use crate::kind::ArtifactKind;
 /// record `execution.json`) are outside its manifest, and its result files
 /// carry no wall-clock time, duration or path; a fit leaf's wall time is in
 /// the execution record, no longer in its `inputs.wall_time_seconds` (profile
-/// and survey leaves still record theirs there). A version-1 leaf reads as
+/// leaves still record theirs there). A version-1 leaf reads as
 /// stale and is recomputed.
 pub const FORMAT_VERSION: u16 = 2;
 
@@ -67,6 +67,39 @@ pub(crate) fn renamed_kind_sentence(old: &str, new: &str) -> String {
         "its run.json has `kind = \"{old}\"`, which camdl now calls `{new}`; \
          it was written by an older camdl and is not read. Delete it (or its \
          fit directory) and run the fit again"
+    )
+}
+
+/// `kind` strings an older camdl wrote for a kind of run this camdl does not
+/// have, each with the command that wrote it. A record carrying one does not
+/// deserialize; this table only lets a reader say why.
+pub(crate) const REMOVED_KINDS: &[(&str, &str)] = &[("survey", "camdl survey")];
+
+/// Why a `run.json` that fails to deserialize was written by an older camdl,
+/// when the cause is a `kind` this camdl does not have; `None` for any other
+/// failure.
+///
+/// Like [`renamed_kind`], this only lets a reader say why it skips the
+/// record; the record is still refused, and nothing in its folder is read or
+/// changed.
+pub fn removed_kind(bytes: &[u8]) -> Option<String> {
+    removed_kind_pair(bytes).map(|(kind, command)| removed_kind_sentence(kind, command))
+}
+
+/// The `(kind, command)` of a record [`removed_kind`] explains.
+pub(crate) fn removed_kind_pair(bytes: &[u8]) -> Option<(&'static str, &'static str)> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let kind = value.get("kind")?.as_str()?;
+    REMOVED_KINDS.iter().find(|(old, _)| *old == kind).copied()
+}
+
+/// The sentence [`removed_kind`] gives for a record of kind `kind`, which
+/// `command` wrote.
+pub(crate) fn removed_kind_sentence(kind: &str, command: &str) -> String {
+    format!(
+        "its run.json has `kind = \"{kind}\"`, which `{command}` wrote and this \
+         camdl does not have; it was written by an older camdl and is not \
+         read. Its files are left as they are"
     )
 }
 
@@ -122,7 +155,7 @@ pub struct Failure {
     /// printed, which the event log's `failed` report also carries.
     pub message: String,
     /// What was running when it failed: the fit method (`pmmh`, `if2`, …)
-    /// or the command (`pfilter`, `survey`, `profile`).
+    /// or the command (`pfilter`, `profile`).
     pub operation: String,
 }
 
@@ -230,7 +263,7 @@ pub enum TableRole {
     Trace,
     /// Predicted-vs-observed bands: `predictive/<stream>.tsv`.
     Predictive,
-    /// A parameter-grid evaluation: `landscape.tsv`, `profile.tsv`.
+    /// A parameter-grid evaluation: `profile.tsv`.
     Landscape,
 }
 

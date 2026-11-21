@@ -7,12 +7,14 @@ use crate::hash::{CanonicalHasher, ContentAddressed, ContentHash, HASH_VERSION};
 
 /// The kind of artifact a leaf produces. This is the top level of the store
 /// (`results/sims/`, `results/fits/`, …) and the `kind` discriminator in
-/// `run.json`. The declaration order fixes each variant's index, which is
-/// folded into [`run_id`] as a fixed-width tag — so two kinds with a
-/// coincidentally-equal level-hash sequence cannot alias to the same id.
+/// `run.json`. Each variant has a fixed index, which is folded into
+/// [`run_id`] as a fixed-width tag — so two kinds with a coincidentally-equal
+/// level-hash sequence cannot alias to the same id.
 ///
-/// Adding a variant is append-only: insert new kinds at the end so existing
-/// indices (and therefore existing `run_id`s) are stable.
+/// A variant's index is its [`tag_index`](ArtifactKind::tag_index), which is
+/// written out per variant and never reused: a new kind takes the next unused
+/// number, and index 3 stays unassigned, so no kind's `run_id` depends on
+/// which other kinds exist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactKind {
@@ -22,8 +24,6 @@ pub enum ArtifactKind {
     FitMethod,
     /// A particle-filter loglik evaluation at fixed params (`pfilter`).
     Pfilter,
-    /// A likelihood-landscape diagnostic (`survey`).
-    Survey,
     /// One grid-point × start of a profile scan (`profile`).
     ProfilePoint,
     /// Reserved for a synthetic-observation sub-artifact under a trajectory.
@@ -44,14 +44,13 @@ pub enum ArtifactKind {
 }
 
 impl ArtifactKind {
-    /// The fixed-width tag folded into [`run_id`]: the variant's declaration
-    /// index. Append-only — never renumber.
+    /// The fixed-width tag folded into [`run_id`]. A number is never
+    /// reassigned: 3 is unassigned, and a new kind takes the next unused one.
     pub fn tag_index(self) -> u32 {
         match self {
             ArtifactKind::Sim => 0,
             ArtifactKind::FitMethod => 1,
             ArtifactKind::Pfilter => 2,
-            ArtifactKind::Survey => 3,
             ArtifactKind::ProfilePoint => 4,
             ArtifactKind::Obs => 5,
             ArtifactKind::Projection => 6,
@@ -62,7 +61,7 @@ impl ArtifactKind {
 
 impl ContentAddressed for ArtifactKind {
     fn hash_into(&self, h: &mut CanonicalHasher) {
-        // Enum rule: the variant index as a fixed-width `u32`.
+        // Enum rule: the variant's tag as a fixed-width `u32`.
         h.write_u32(self.tag_index());
     }
 }

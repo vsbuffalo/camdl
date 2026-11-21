@@ -5,7 +5,8 @@
 //! [`read_leaf`] reads one directory; [`discover`] / [`discover_kind`] find
 //! every leaf under a subtree. Both report a candidate whose record cannot be
 //! turned into a [`Leaf`] as an [`UnreadableLeaf`] entry — a garbage or
-//! truncated `run.json`, one written under a since-renamed `kind`, one this
+//! truncated `run.json`, one written under a `kind` this camdl has renamed or
+//! does not have, one this
 //! process may not read, or a directory holding a `.lock` and no `run.json`
 //! — never as an omission. What to do with such an entry (list it, refuse on
 //! it, drop it) is the command's decision, not this module's.
@@ -28,8 +29,8 @@ use std::time::{Duration, SystemTime};
 use crate::hash::ContentHash;
 use crate::kind::ArtifactKind;
 use crate::record::{
-    predates_calendar, renamed_kind_pair, renamed_kind_sentence, RunRecord,
-    PREDATES_CALENDAR_SENTENCE,
+    predates_calendar, removed_kind_pair, removed_kind_sentence, renamed_kind_pair,
+    renamed_kind_sentence, RunRecord, PREDATES_CALENDAR_SENTENCE,
 };
 use crate::store::{leaf_state, lock_owner, LeafState, LockOwner, ATTEMPTS_DIR};
 
@@ -68,6 +69,10 @@ pub enum Unreadable {
     /// `run.json` names a `kind` an older camdl wrote and this one has
     /// renamed ([`renamed_kind`](crate::record::renamed_kind)).
     RenamedKind { old: String, new: String },
+    /// `run.json` names a `kind` an older camdl wrote and this one does not
+    /// have ([`removed_kind`](crate::record::removed_kind)); `command` is the
+    /// command that wrote it.
+    RemovedKind { kind: String, command: String },
     /// `run.json` was written before the `calendar` block became required
     /// ([`predates_calendar`](crate::record::predates_calendar)).
     PredatesCalendar,
@@ -85,6 +90,9 @@ impl std::fmt::Display for Unreadable {
                 write!(f, "its run.json is not a run record: {message}")
             }
             Unreadable::RenamedKind { old, new } => f.write_str(&renamed_kind_sentence(old, new)),
+            Unreadable::RemovedKind { kind, command } => {
+                f.write_str(&removed_kind_sentence(kind, command))
+            }
             Unreadable::PredatesCalendar => f.write_str(PREDATES_CALENDAR_SENTENCE),
             Unreadable::NoRecord { owner } => {
                 f.write_str("it holds a .lock and no run.json")?;
@@ -462,10 +470,13 @@ fn read_candidate(dir: &Path, scope: &Scope, guard: bool) -> Option<Result<Leaf,
 /// header read already failed and the message comes from a value parse.
 fn malformed(dir: &Path, bytes: &[u8], parse_error: Option<serde_json::Error>) -> UnreadableLeaf {
     let header = run_header(bytes);
-    let reason = match renamed_kind_pair(bytes) {
-        Some((old, new)) => Unreadable::RenamedKind { old: old.into(), new: new.into() },
-        None if predates_calendar(bytes) => Unreadable::PredatesCalendar,
-        None => Unreadable::Malformed {
+    let reason = match (renamed_kind_pair(bytes), removed_kind_pair(bytes)) {
+        (Some((old, new)), _) => Unreadable::RenamedKind { old: old.into(), new: new.into() },
+        (None, Some((kind, command))) => {
+            Unreadable::RemovedKind { kind: kind.into(), command: command.into() }
+        }
+        (None, None) if predates_calendar(bytes) => Unreadable::PredatesCalendar,
+        (None, None) => Unreadable::Malformed {
             message: match parse_error {
                 Some(e) => e.to_string(),
                 None => match serde_json::from_slice::<serde_json::Value>(bytes) {

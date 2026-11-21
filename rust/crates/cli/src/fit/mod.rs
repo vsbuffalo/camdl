@@ -3102,7 +3102,6 @@ pub fn cmd_label(args: &crate::args::LabelArgs) {
     let mut seen_leaves: HashSet<std::path::PathBuf> = HashSet::new();
     for leaf in crate::cas_read::resolve_sim_prefix(&root, &args.hash).into_iter()
         .chain(crate::cas_read::resolve_pfilter_prefix(&root, &args.hash))
-        .chain(crate::cas_read::resolve_survey_prefix(&root, &args.hash))
     {
         if seen_leaves.insert(leaf.dir.clone()) {
             matches.push(leaf.dir);

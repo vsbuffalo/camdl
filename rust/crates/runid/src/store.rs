@@ -7,8 +7,8 @@
 //!   at once): write the whole leaf into a staging dir on the *same
 //!   filesystem* as `results/`, apply the fsync ordering, then `rename` it
 //!   into place. A reader never sees a half-written leaf.
-//! - **Mode B — streamed `Running → Completed`** (fit methods, `pfilter`,
-//!   `survey` and profile points — written in place as the run proceeds):
+//! - **Mode B — streamed `Running → Completed`** (fit methods, `pfilter`
+//!   and profile points — written in place as the run proceeds):
 //!   claim the leaf dir exclusively via an `O_EXCL` `.lock`, write a
 //!   `Running` `run.json`, stream files, then commit by
 //!   `run.json.tmp → rename` over `run.json`.
@@ -186,7 +186,7 @@ pub enum CasError {
     #[error(
         "{path} is held by pid {pid} on host {host}, whose liveness this host cannot \
          check, so it is not reclaimed. If that run is no longer running, re-run with \
-         `--force` (`camdl fit run --force`, `camdl survey --force`): the leaf, its \
+         `--force` (`camdl fit run --force`): the leaf, its \
          records included, moves to the store's .quarantine/ and the run starts clean"
     )]
     OwnedOnOtherHost { path: String, pid: u32, host: String },
@@ -303,8 +303,7 @@ impl FsCasStore {
     /// The store had no such operation, which is why `--force` meant four
     /// different things at five call sites and "overwrite" at none of them:
     /// the grid writer recomputed and then had its bytes discarded by the
-    /// already-completed path, fit and survey died with
-    /// `AlreadyCompleted`, and simulate's flag was inert. Forcing routes
+    /// already-completed path, fit died with `AlreadyCompleted`, and simulate's flag was inert. Forcing routes
     /// through the same collision-aware machinery as everything else — it
     /// only ever displaces a leaf whose identity MATCHES (a different
     /// identity at this path is somebody else's artifact), and it

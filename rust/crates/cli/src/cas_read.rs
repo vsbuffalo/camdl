@@ -52,13 +52,17 @@ pub struct Bounds<'a> {
 }
 
 /// Say once per path, on stderr, that a skipped `run.json` was written by an
-/// older camdl: under a since-renamed `kind` ([`runid::renamed_kind`]), or
-/// before the calendar axis was recorded ([`runid::predates_calendar`]). Any
-/// other unreadable record is skipped silently, as before.
+/// older camdl: under a since-renamed `kind` ([`runid::renamed_kind`]), under
+/// a `kind` this camdl does not have ([`runid::removed_kind`]), or before the
+/// calendar axis was recorded ([`runid::predates_calendar`]). Any other
+/// unreadable record is skipped silently.
 fn warn_if_from_an_older_camdl(leaf: &UnreadableLeaf) {
     use std::sync::{Mutex, OnceLock};
     static WARNED: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
-    if !matches!(leaf.reason, Unreadable::RenamedKind { .. } | Unreadable::PredatesCalendar) {
+    if !matches!(
+        leaf.reason,
+        Unreadable::RenamedKind { .. } | Unreadable::RemovedKind { .. } | Unreadable::PredatesCalendar
+    ) {
         return;
     }
     let run_json = leaf.dir.join("run.json");
@@ -230,19 +234,6 @@ pub fn walk_pfilter_leaves(root: &Path) -> Vec<Leaf> {
 /// `show`/`cat` prefix resolution alongside `resolve_sim_prefix`).
 pub fn resolve_pfilter_prefix(root: &Path, prefix: &str) -> Vec<Leaf> {
     resolve_prefix_indexed(root, ArtifactKind::Pfilter, prefix, walk_pfilter_leaves)
-}
-
-/// All `surveys/` leaves of kind `Survey` (new-format likelihood-landscape
-/// surveys, M3.3). Each is one `(model × config × box × seed)` LHS landscape —
-/// a single leaf, the N points are within it (not an axis).
-pub fn walk_survey_leaves(root: &Path) -> Vec<Leaf> {
-    walk_kind(root, ArtifactKind::Survey, Bounds::default())
-}
-
-/// New-format surveys whose `run_id` hex matches `prefix` (for `show`/`cat`
-/// prefix resolution alongside `resolve_sim_prefix`).
-pub fn resolve_survey_prefix(root: &Path, prefix: &str) -> Vec<Leaf> {
-    resolve_prefix_indexed(root, ArtifactKind::Survey, prefix, walk_survey_leaves)
 }
 
 /// All `ensembles/` leaves of kind `SimEnsemble` (the combined-across-cells

@@ -59,7 +59,6 @@ impl ArtifactKind {
             ArtifactKind::Sim => "sims",
             ArtifactKind::FitMethod => "fits",
             ArtifactKind::Pfilter => "pfilters",
-            ArtifactKind::Survey => "surveys",
             ArtifactKind::ProfilePoint => "profiles",
             ArtifactKind::Obs => "obs",
             ArtifactKind::Projection => "projections",

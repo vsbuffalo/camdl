@@ -150,7 +150,6 @@ fn kind_store_dirs() {
     assert_eq!(ArtifactKind::Sim.store_dir(), "sims");
     assert_eq!(ArtifactKind::FitMethod.store_dir(), "fits");
     assert_eq!(ArtifactKind::Pfilter.store_dir(), "pfilters");
-    assert_eq!(ArtifactKind::Survey.store_dir(), "surveys");
     assert_eq!(ArtifactKind::ProfilePoint.store_dir(), "profiles");
     assert_eq!(ArtifactKind::Obs.store_dir(), "obs");
     assert_eq!(ArtifactKind::Projection.store_dir(), "projections");
