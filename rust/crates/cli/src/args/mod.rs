@@ -2197,7 +2197,7 @@ EXAMPLES
 OUTPUT
 
   A TSV: a `point_id` column (0-based), then one column per estimated
-  parameter, in the order of the fit config's [estimate] table. Values are
+  parameter, in name order. Values are
   on the natural scale and read back to the same floating-point numbers.
   The same model, fit config, --n and --seed give the same bytes. Nothing is
   written to the store.

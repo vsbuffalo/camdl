@@ -98,7 +98,7 @@ pub(crate) fn lhs_design(
 }
 
 /// The fit config's estimated parameters, resolved against the model at
-/// `model_path`: one per `[estimate]` entry, in the table's order, each with
+/// `model_path`: one per `[estimate]` entry, in name order, each with
 /// the search box (`bounds` in the entry, else the model's declared range) and
 /// the transform its kind and box select.
 ///
@@ -191,7 +191,12 @@ fn resolve_estimated(
             bounds: spec.bounds,
         })
         .collect();
-    build_if2_params_from_specs(&model, &compiled, &compiled.default_params, &specs)
+    let mut estimated = build_if2_params_from_specs(&model, &compiled, &compiled.default_params, &specs)?;
+    // The sampler draws parameter by parameter, so this order decides every
+    // point. Name order, as `fit run` sorts, keeps the design independent of
+    // the order the `[estimate]` table lists its entries in.
+    estimated.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(estimated)
 }
 
 /// `camdl design lhs`, under the compile settings `compile`.

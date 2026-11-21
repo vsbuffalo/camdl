@@ -155,6 +155,26 @@ fn table(text: &str) -> (Vec<String>, Vec<Vec<String>>) {
     (header, lines.map(split).collect())
 }
 
+/// The sampler draws its random numbers parameter by parameter, so the order
+/// of the estimated list decides every point. The design takes the
+/// parameters in name order, as `fit run` does, so the order in which the
+/// `[estimate]` table lists them changes nothing.
+#[test]
+fn reordering_the_estimate_table_leaves_the_design_unchanged() {
+    let fx = Fixture::new();
+    let listed = fx.bounded_fit();
+    let reordered = fx.fit_toml("reordered.toml",
+        "gamma = { start = 0.15 }\n\
+         beta  = { bounds = [0.01, 5.0], start = 0.4 }\n\
+         rho   = { bounds = [0.1, 0.9] }",
+        "mu = 0.0\nN0 = 1000");
+    let a = fx.design(&listed, &["--n", "16", "--seed", "3"]);
+    let b = fx.design(&reordered, &["--n", "16", "--seed", "3"]);
+    assert_ok(&a, "design lhs, [estimate] as listed");
+    assert_ok(&b, "design lhs, [estimate] reordered");
+    assert_eq!(a.stdout, b.stdout, "the two designs differ in bytes");
+}
+
 /// The design `design lhs` writes is run by `simulate --sweep-file` as it
 /// stands: one design point per row, under the row's `point_id`, at the row's
 /// values.
@@ -168,15 +188,15 @@ fn the_design_runs_under_simulate_sweep_file() {
     let design = std::fs::read_to_string(&design_path).unwrap();
     assert!(!design.contains('#'), "the design carries no comment line");
     let (header, rows) = table(&design);
-    assert_eq!(header, ["point_id", "rho", "beta", "gamma"],
-        "point_id, then the parameters in the [estimate] table's order");
+    assert_eq!(header, ["point_id", "beta", "gamma", "rho"],
+        "point_id, then the parameters in name order");
     assert_eq!(rows.len(), 8);
     for (i, row) in rows.iter().enumerate() {
         assert_eq!(row[0], i.to_string(), "point_id is the 0-based row");
         let value = |col: usize| row[col].parse::<f64>().unwrap();
-        assert!((0.1..=0.9).contains(&value(1)), "rho within its [estimate] bounds: {row:?}");
-        assert!((0.01..=5.0).contains(&value(2)), "beta within its [estimate] bounds: {row:?}");
-        assert!((0.01..=1.0).contains(&value(3)), "gamma within the model's range: {row:?}");
+        assert!((0.01..=5.0).contains(&value(1)), "beta within its [estimate] bounds: {row:?}");
+        assert!((0.01..=1.0).contains(&value(2)), "gamma within the model's range: {row:?}");
+        assert!((0.1..=0.9).contains(&value(3)), "rho within its [estimate] bounds: {row:?}");
     }
 
     let ir = fx.ir.to_string_lossy().into_owned();
@@ -199,7 +219,7 @@ fn the_design_runs_under_simulate_sweep_file() {
         (col("point_id"), col("sweep:rho"), col("sweep:beta"), col("sweep:gamma"));
     let mut seen: std::collections::BTreeMap<String, Vec<f64>> = Default::default();
     for r in &sim_rows {
-        let values = [rho, beta, gamma].map(|c| r[c].parse::<f64>().unwrap()).to_vec();
+        let values = [beta, gamma, rho].map(|c| r[c].parse::<f64>().unwrap()).to_vec();
         seen.insert(r[pid].clone(), values);
     }
     assert_eq!(seen.len(), 8, "eight design points ran: {:?}", seen.keys());
