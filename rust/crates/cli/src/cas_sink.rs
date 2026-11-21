@@ -87,9 +87,11 @@ pub(crate) struct RunEntry {
     /// resolved process seed, and the id the cell is written under on the
     /// parameter-point axis: a sweep cell's `point_id` (a sweep file's own
     /// column, else the 0-based design index), the draw index of a `--draws`
-    /// cell. `(point_id, process_seed)` plus the cell `run_id` are what the
+    /// cell. `(row, point_id, process_seed)` plus the cell `run_id` are what the
     /// ensemble's `grid` digest sorts over.
     pub(crate) scenario: String,
+    /// The cell's position in the combined table (the engine's `run_idx`).
+    pub(crate) row: usize,
     pub(crate) process_seed: u64,
     pub(crate) point_id: usize,
     /// The cell's `params` level hash — the identity of the parameter values
@@ -596,6 +598,7 @@ impl crate::engine::RunSink for CasSink {
             run_id,
             traj_digest,
             scenario: name,
+            row: spec.run_idx,
             process_seed: spec.process_seed,
             point_id: spec.point_id,
             params_level,
@@ -845,6 +848,7 @@ impl crate::engine::RunSink for CasSink {
             run_id: Some(rt.run_id),
             traj_digest: Some(traj_digest),
             scenario: name,
+            row: spec.run_idx,
             process_seed: spec.process_seed,
             point_id: spec.point_id,
             params_level: params_level_hash(&rt),

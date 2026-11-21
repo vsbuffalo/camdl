@@ -573,6 +573,7 @@ fn all_kind_identities(model: &Model) -> Vec<(&'static str, ContentHash, Content
 
     // sim_ensemble — levels[0] is the `model` level.
     let cells = [EnsembleCell {
+        row: 0,
         scenario_label: "baseline".into(),
         process_seed: 1,
         point_id: 0,
@@ -843,7 +844,7 @@ fn cas_identity_pins() {
         ("fit", "dbba2ae4a701d1f75fea5be82dd2379815ceb9db4d9cf7c14b757fba4fa8ac33"),
         ("pfilter", "856c94f609a1655aa8d9cb61d8692031379b905c10d603d1a93431b39683fb2b"),
         ("survey", "e5397cc9b86b22368671b27e0998f3dc18884f47a26ddafc7690eb89d762f329"),
-        ("sim_ensemble", "f1cd909ce021ee87b67f97d69e3cf3d5708e0e27b40dfb87294d9cea48cb6de1"),
+        ("sim_ensemble", "dc3ddeafe905f04d6fbd8c68721ab830f2d8400028a5d7f14796f731909a6102"),
         ("profile", "b2c9d7d30b83c13c1757af863cd2d90ad41416f3043a635bd68928ac06ab1ef0"),
     ];
     // Compared as whole lists so a failure reports EVERY kind that moved, not

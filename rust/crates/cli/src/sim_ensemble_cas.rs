@@ -15,9 +15,10 @@
 //!     deduplicated): which resolved parameter vectors the ensemble ran. Read
 //!     off the cells' identities rather than rebuilt beside them, so it cannot
 //!     describe different values from the ones the cells hashed (gh#583).
-//!   - **grid** — a digest over the SORTED cell list plus the run's resolved
-//!     design. Each cell contributes `(point_id, process_seed, sim_run_id)`;
-//!     the `sim_run_id` already encodes that cell's model/config/params/
+//!   - **grid** — a digest over the cell list plus the run's resolved
+//!     design. Each cell contributes `(row, point_id, process_seed,
+//!     sim_run_id)`, where `row` is the cell's position in the combined
+//!     table; the `sim_run_id` already encodes that cell's model/config/params/
 //!     scenario/seed, so a changed `--draws` param value (same draw index)
 //!     re-keys the ensemble, and the arm's label — a display string, not
 //!     identity — is deliberately absent: two ensembles of identical cells
@@ -27,7 +28,14 @@
 //!     model digest). The cell COUNT is folded in
 //!     explicitly (`n_cells`): 3 replicates vs 4 is a different combined TSV,
 //!     so a different ensemble (count-in-the-key, the n_trajectories collision
-//!     class). Sorting makes the digest order-independent. The `design` is the
+//!     class). The `row` is in the key because the table is laid out by it:
+//!     its `replicate` column is the row, and its rows follow the order the
+//!     scenarios and seeds were asked for in. `--scenario a,b` and
+//!     `--scenario b,a` run the same cells and write two different tables, so
+//!     they are two ensembles; without the row they would be one id over two
+//!     tables. The list is sorted before hashing, so the order in which cells
+//!     reach the sink does not matter, only the row each is written at. The
+//!     `design` is the
 //!     resolved `--sweep` / `--sweep-file` grid of a sweep job ([`ResolvedDesign`])
 //!     and `None` otherwise; it is what makes `--sweep beta=0.2,0.3` and
 //!     `--sweep beta=0.3,0.2` — the same cell set, two different combined
@@ -45,6 +53,11 @@ use crate::fit::cas::canonical_config_hash;
 /// digest and to its `deps` (the cell's `Sim` leaf).
 #[derive(Debug, Clone)]
 pub struct EnsembleCell {
+    /// The cell's 0-based position in the combined table, in the engine's
+    /// `scenario → point → replicate` order: the table's `replicate` column.
+    /// Two runs over one cell set that lay it out in different orders write
+    /// different tables, so the row enters the `grid` digest.
+    pub row: usize,
     /// The scenario label rendered into the combined TSV's `scenario` column.
     /// Display only: it enters the ensemble's `run.json` summary, never its
     /// `grid` digest.
@@ -144,15 +157,26 @@ struct EnsembleConfigLevel<'a> {
     dt: f64,
 }
 
-/// The `grid` level: the sorted cell list, the explicit count (so N vs N+1
+/// The `grid` level: the cell list in table order, the explicit count (so N vs N+1
 /// replicates is a different ensemble) and the resolved design (`null` for a
 /// job without one — serialized as it is, so a design-less job and a sweep job
 /// over the same cells are two ensembles).
 #[derive(serde::Serialize)]
 struct EnsembleGridLevel<'a> {
     n_cells: usize,
-    cells: &'a [(usize, u64, String)],
+    cells: &'a [(usize, usize, u64, String)],
     design: Option<&'a ResolvedDesign>,
+}
+
+/// The cells as the `grid` level hashes them: `(row, point_id, seed,
+/// sim_run_id)`, in table order.
+fn grid_cells(cells: &[EnsembleCell]) -> Vec<(usize, usize, u64, String)> {
+    let mut v: Vec<(usize, usize, u64, String)> = cells
+        .iter()
+        .map(|c| (c.row, c.point_id, c.process_seed, c.sim_run_id.to_hex()))
+        .collect();
+    v.sort();
+    v
 }
 
 pub fn resolve_sim_ensemble(ctx: &EnsembleCtx) -> Result<ResolvedEnsemble, String> {
@@ -165,16 +189,11 @@ pub fn resolve_sim_ensemble(ctx: &EnsembleCtx) -> Result<ResolvedEnsemble, Strin
     params_levels.sort();
     params_levels.dedup();
 
-    // grid level — the sorted cell list + the explicit cell count + the
-    // design. Each cell is (point_id, seed, sim_run_id); sorting is
-    // order-independent. The count is folded so N vs N+1 replicates is a
-    // different ensemble.
-    let mut cells_sorted: Vec<(usize, u64, String)> = ctx
-        .cells
-        .iter()
-        .map(|c| (c.point_id, c.process_seed, c.sim_run_id.to_hex()))
-        .collect();
-    cells_sorted.sort();
+    // grid level — the cell list + the explicit cell count + the design.
+    // Each cell is (row, point_id, seed, sim_run_id); sorting puts the list in
+    // table order whatever order the cells arrived in (a cell read back from
+    // the store arrives before the cells that were simulated).
+    let cells_sorted = grid_cells(ctx.cells);
     let grid_level =
         EnsembleGridLevel { n_cells: ctx.cells.len(), cells: &cells_sorted, design: ctx.design };
 
@@ -221,6 +240,7 @@ mod tests {
 
     fn cell(scenario: &str, seed: u64, point_id: usize, rid: u8) -> EnsembleCell {
         EnsembleCell {
+            row: rid as usize,
             scenario_label: scenario.to_string(),
             process_seed: seed,
             point_id,
@@ -233,9 +253,7 @@ mod tests {
     /// The `grid` level exactly as `resolve_sim_ensemble` builds it, without an
     /// `ir::Model` fixture (mirrors `survey_cas::tests`).
     fn grid_level(cells: &[EnsembleCell], design: Option<&ResolvedDesign>) -> crate::fit::cas::LevelHash {
-        let mut s: Vec<(usize, u64, String)> =
-            cells.iter().map(|c| (c.point_id, c.process_seed, c.sim_run_id.to_hex())).collect();
-        s.sort();
+        let s = grid_cells(cells);
         canonical_config_hash(&EnsembleGridLevel { n_cells: cells.len(), cells: &s, design }, &[]).unwrap()
     }
 
@@ -248,7 +266,7 @@ mod tests {
 
     /// The identity pin for the `grid` level (proposal
     /// 2026-10-24-batch-to-simulate §3 "Ensemble identity", §8). The level is
-    /// `(point_id, process_seed, sim_run_id)` per cell, the count, and the
+    /// `(row, point_id, process_seed, sim_run_id)` per cell, the count, and the
     /// design — the arm's label is not in it. These bytes re-keyed every stored
     /// multi-cell ensemble once; a change here re-keys them again and is a
     /// release-notes event, never collateral.
@@ -257,12 +275,12 @@ mod tests {
         let cells = [cell("baseline", 1, 0, 1), cell("baseline", 2, 0, 2)];
         assert_eq!(
             grid_level(&cells, None).into_inner().to_hex(),
-            "1bb7c8ce76ab09cae24ecbdc22b9ca69cc3defc3844d4295da4232e60fbdba27",
+            "72f22ee35823782a77e181c67195d786a102db2b3fafc0f8b81c8e333cd8ab57",
             "the design-less grid level moved; every stored multi-cell ensemble re-keys"
         );
         assert_eq!(
             grid_level(&cells, Some(&beta_design(vec![0.2, 0.3]))).into_inner().to_hex(),
-            "28ab1670e60b47b6459615cac3d768cbc2c15ab153197e4c87600b05649f9fca",
+            "bbd5c3c86f065c13d62d922256148e447c4ac6715673bb38c4f3e02dba702bcc",
             "the sweep grid level moved; every stored sweep ensemble re-keys"
         );
         let file = ResolvedDesign::File {
@@ -273,7 +291,7 @@ mod tests {
         };
         assert_eq!(
             grid_level(&cells, Some(&file)).into_inner().to_hex(),
-            "6f24d516083b51736a01b71dde45ccd14b440c191a62b4e2e261b373be471211",
+            "af44b58b2583cd7c798923ea326810e8fb42bdd45bbc327dd81f161e4839a5c3",
             "the sweep-file grid level moved; every stored sweep-file ensemble re-keys"
         );
     }
@@ -330,6 +348,19 @@ mod tests {
         let a_scen = [cell("baseline+vaccination", 1, 0, 1), cell("vax", 2, 0, 2)];
         assert_eq!(grid_level(&a, None), grid_level(&a_scen, None),
             "the arm label is not identity; identical cells under two names are one ensemble");
+    }
+
+    /// The row is in the key: one cell set laid out in two orders (the cells
+    /// of `--scenario a,b` and of `--scenario b,a`) is two combined tables, so
+    /// two ensembles.
+    #[test]
+    fn grid_is_sensitive_to_each_cells_row() {
+        let ab = [cell("a", 1, 0, 1), cell("b", 1, 0, 2)];
+        let mut ba = ab.clone();
+        ba[0].row = 2;
+        ba[1].row = 1;
+        assert_ne!(grid_level(&ab, None), grid_level(&ba, None),
+            "the same cells at swapped rows must change the grid hash");
     }
 
     /// The design is in the key: a sweep job and a design-less job over the

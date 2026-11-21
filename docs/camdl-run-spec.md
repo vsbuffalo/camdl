@@ -1429,11 +1429,15 @@ A **multi-cell** `simulate` (`--replicates`, `--seeds`, several `--scenario`, or
 `--draws`) writes the N per-cell `sim` leaves _and_ one `sim_ensemble` leaf
 under `ensembles/` holding the combined wide-format `ensemble.tsv` that
 interleaves every cell with `replicate` / `scenario` / `draw` columns. The
-ensemble's `grid` level digests the sorted cell list — each cell contributing
-`(scenario_label, process_seed, draw_idx, sim_run_id)` — plus the explicit cell
-count, so three replicates and four replicates are different ensembles
-(count-in-the-key), and the ensemble `deps` on the N `sim` leaves it was built
-from. Its path label is `cells-n{N}`.
+ensemble's `grid` level digests the cell list in table order, each cell
+contributing its row in the table, its point id, its process seed and its `sim`
+run id, plus the explicit cell count and the sweep design. So three replicates
+and four replicates are different ensembles (count-in-the-key), and so are two
+runs that lay one cell set out in different orders, such as `--scenario a,b` and
+`--scenario b,a`, or `--seeds 1,2` and `--seeds 2,1`: their tables differ in row
+order and in the `replicate` column, which numbers the rows. The scenario label
+is not digested; a cell's `sim` run id already pins its scenario. The ensemble
+`deps` on the N `sim` leaves it was built from. Its path label is `cells-n{N}`.
 
 ### 2.5 Per-leaf metadata
 
@@ -2201,9 +2205,9 @@ clash, which is disambiguated rather than overwritten.
 **Derived ensembles.** A multi-cell `simulate` also writes the combined
 wide-format TSV as its own artifact kind, `SimEnsemble`, under
 `results/ensembles/` with four levels — `model` / `config` / `params` / `grid`
-(`rust/crates/cli/src/sim_ensemble_cas.rs`). The `grid` level folds the sorted
-per-cell list _and the explicit cell count_, so three replicates and four
-replicates are different ensembles; the ensemble's `deps` carry one
+(`rust/crates/cli/src/sim_ensemble_cas.rs`). The `grid` level folds the per-cell
+list in table order _and the explicit cell count_ (§2.4), so three replicates
+and four replicates are different ensembles; the ensemble's `deps` carry one
 `ArtifactRef` per cell leaf, pinned to that cell's `traj.tsv` digest.
 
 ## 4. Single-Run Simulation

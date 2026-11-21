@@ -3358,6 +3358,7 @@ fn write_sim_ensemble(
         .iter()
         .filter_map(|r| {
             Some(crate::sim_ensemble_cas::EnsembleCell {
+                row: r.row,
                 scenario_label: r.scenario.clone(),
                 process_seed: r.process_seed,
                 point_id: r.point_id,
