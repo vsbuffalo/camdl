@@ -19,6 +19,12 @@ transform. A few commands delegate to the compiler.
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `simulate` (alias `sim`) | One forward trajectory (+ optional synthetic observations, event log), or a grid of them — see [Sweeps and scenario grids](#sweeps-and-scenario-grids-simulate---sweep). |
 
+### Write a design
+
+| Command      | Writes                                                                                                                                                                                                                                                                                         |
+| ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `design lhs` | A Latin-hypercube design over a `fit.toml`'s `[estimate]` parameters, as a TSV that `simulate --sweep-file` reads. A function of the model, the fit config, `--n` and `--seed`; nothing is written to the store. See [Sweeps and scenario grids](#sweeps-and-scenario-grids-simulate---sweep). |
+
 ### Produce inference artifacts
 
 | Command   | Produces                                                                                                                                                                                                     |
@@ -351,6 +357,10 @@ camdl simulate sir.camdl --params p.toml --sweep beta=0.2,0.3 --sweep gamma=0.1,
 
 # design points from a TSV (header = parameters, one row per point)
 camdl simulate sir.camdl --params p.toml --sweep-file design.tsv --replicates 5
+
+# a 200-point Latin-hypercube design over fit.toml's [estimate] parameters, then run it
+camdl design lhs sir.camdl --fit fit.toml --n 200 --seed 1 -o design.tsv
+camdl simulate sir.camdl --params p.toml --sweep-file design.tsv
 
 # plan against the store without running: every cell a hit or a miss
 camdl simulate sirv.camdl --params params.toml --sweep beta=lin(0.2,0.6,5) --seeds 1:50 --dry-run

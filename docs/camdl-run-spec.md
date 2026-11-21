@@ -3095,6 +3095,23 @@ repeated or non-integer `point_id` is refused naming the row. `--sweep-file` and
 `--sweep` are mutually exclusive. The file enters the ensemble's record by
 content digest.
 
+**`camdl design lhs MODEL --fit FIT.toml --n N [--seed S] [-o FILE]`** writes
+such a file: a Latin-hypercube design of N points over the fit config's
+`[estimate]` parameters, on stdout or to FILE. The header is `point_id`, then
+the parameters in the order of the `[estimate]` table; `point_id` is the 0-based
+row; each value is on the natural scale, written in the shortest decimal form
+that reads back to the same floating-point number. Each parameter is sampled
+within its search box, the entry's `bounds` or else the range the model declares
+(§6.3). The box is cut into N bins of equal width, on the log scale for a
+positive-kind parameter (`rate`, `positive`, `count`, `duration`) whose lower
+bound is above zero and on the linear scale otherwise, and each bin holds one
+point. The design is a function of the model, the fit config, N and the seed
+(default 1): the same four give the same bytes, and the command writes nothing
+to the store. `--n` below 2 is refused; so is a parameter whose search box has
+an infinite end, named with its box, since such a box has no bins of equal
+width. `--fit` takes a fit config or a stored fit's handle; the model sampled is
+MODEL, and the config's `[model]` is not read.
+
 **Seeds and common random numbers.** Every design point at a given replicate
 shares one process seed: with `--replicates 2`, point 0 and point 1 of replicate
 0 run on the same random stream, as do their replicate-1 cells. So a parameter
