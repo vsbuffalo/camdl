@@ -851,8 +851,8 @@ impl DiagnosticKind {
             Self::BadInit { .. } => {
                 let mut hints = vec![
                     "Inspect chain_starts.tsv to see which init was used",
-                    "If using survey_top_k, the survey may be putting \
-                     bound-pinned points into the top-K; consider --starts lhs",
+                    "If a start sits on a parameter bound, draw the starts \
+                     inside the bounds instead; consider --starts lhs",
                 ];
                 // Only when a chain actually finished. A run in which every
                 // chain was refused printed this line once per refusal,
@@ -1410,7 +1410,7 @@ mod tests {
         }
         assert!(bad.hints(HintContext::default()).iter()
                 .any(|h| h.contains("--starts lhs")),
-            "the survey_top_k remedy still has to name a drawing rule");
+            "the bound-pinned-start remedy still has to name a drawing rule");
     }
 
     /// The threshold in a `RhatHigh` message was formatted `{:.1}`, so every

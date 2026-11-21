@@ -205,7 +205,7 @@ pub enum SimError {
              in the rate expression. The chain rejects this proposal and continues; if\n\
              you see thousands of these warnings, NUTS step-size adaptation is unstable\n\
              on this model. Consider:\n  \
-               - init_method = \"survey_top_k\" for better starting points (gh#51)\n  \
+               - starting the chains from a stored fit's draws, `starts = {{ from_posterior = \"@handle\" }}`\n  \
                - increasing n_particles if PMMH; pinning some params if PGAS\n  \
                - investigating gradient stability via --check-grads (gh#78, not yet implemented)")]
     NonFiniteParameter {
