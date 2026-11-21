@@ -108,6 +108,7 @@ pub(crate) struct ParamFlags {
 
 /// What `pfilter` writes outside the store, and whether it stores a leaf:
 /// none of it changes the stored log-likelihood.
+#[derive(Clone)]
 pub(crate) struct PfilterOutputs {
     pub trace: Option<String>,
     pub pf_health: Option<String>,

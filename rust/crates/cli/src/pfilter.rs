@@ -187,18 +187,6 @@ fn run_pfilter(
         save_final_state,
         engine,
     } = config;
-    let crate::pfilter_config::PfilterOutputs {
-        trace: trace_path,
-        pf_health,
-        output: output_path,
-        save_paths,
-        save_filtering,
-        save_filtered_streams,
-        save_prequential,
-        score_from,
-        save_samples,
-        no_store,
-    } = outputs;
     let crate::pfilter_config::PfilterExecution { parallel } = execution;
     let fit_problem: Option<&crate::fit::config_v2::Problem> = fit.as_ref().map(|f| &f.config.problem);
 
@@ -379,7 +367,6 @@ fn run_pfilter(
     // scenario and `--param`. pfilter scores one parameter set and estimates
     // nothing, so the `[estimate]` set is empty and no
     // `--fixed`-over-[estimate] notice can fire.
-    use crate::params_resolver::{ParameterInputs, resolve_parameters, emit_notices};
     use indexmap::{IndexMap, IndexSet};
 
     let crate::pfilter_config::ParamFlags { param: fixed_cli, params: fixed_files, table } = param_flags;
@@ -400,20 +387,292 @@ fn run_pfilter(
     };
     let fte: IndexSet<String> = IndexSet::new();
 
-    let resolved = resolve_parameters(ParameterInputs {
-        model: &model_in,
-        scenario: scenario_name.as_deref(),
+    // gh#audit-H13: --parallel / CAMDL_PARALLEL throttles the rayon thread
+    // budget for the particle filter. Build a SCOPED local pool and run the
+    // bootstrap_filter calls inside `pool.install(...)` — both the
+    // per-replicate loop and the single run of `score_point`. The earlier
+    // fix used `build_global`, but the global pool is already initialised by
+    // the time cmd_pfilter reaches here, so `build_global` returned
+    // AlreadyInitialized and the default all-core pool was used regardless of
+    // --parallel. A scoped pool is order-independent: nested rayon work
+    // (particle_filter.rs par_iter_mut) inherits the surrounding pool. A
+    // value of 0 means "use rayon's default" (all logical cores) — leave the
+    // pool unset and run on the global pool in that case.
+    let pf_pool: Option<rayon::ThreadPool> = if parallel > 0 {
+        Some(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(parallel)
+                .build()
+                .unwrap_or_else(|e| {
+                    out.fail(format!("error: failed to build thread pool (--parallel {}): {}", parallel, e));
+                }),
+        )
+    } else {
+        None
+    };
+    let scorer = PointScorer {
+        out,
+        ir_path: &ir_path,
+        fit: &fit,
+        objective,
+        eval,
+        forcing: &forcing,
+        model_in: &model_in,
+        scenario_name: scenario_name.as_deref(),
         adhoc_enable: &adhoc_enable,
         adhoc_disable: &adhoc_disable,
+        fixed_cli: &fixed_cli,
+        fixed_files: &fixed_files,
+        external: &external,
+        fit_fixed: &ftf,
+        fit_estimate: &fte,
+        bound_streams: bound_streams.as_deref(),
+        data_flags_given: !cli_data_specs.is_empty(),
+        dt,
+        n_particles,
+        n_replicates,
+        seed,
+        binomial,
+        max_substeps,
+        time_format,
+        save_final_state: &save_final_state,
+        engine: &engine,
+        outputs: &outputs,
+        parallel,
+        pool: &pf_pool,
+    };
+
+    let score = score_point(&scorer, &[], PointRole::Single, |score| {
+        report_single(out, score, &outputs, seed, n_particles);
+    });
+    if score.every_replicate_collapsed() {
+        let first = score.first_collapse.unwrap_or_default();
+        let message = if n_replicates > 1 {
+            format!("{first} (all {n_replicates} replicates; replicate 1 shown)")
+        } else {
+            first
+        };
+        out.error(filter_failed(message)).exit();
+    }
+}
+
+/// Seed stride between replicates: replicate `r` of a call with `--seed s`
+/// runs on `s + r * SEED_STRIDE`. A stride of one would give highly correlated
+/// ChaCha8 initial states; the golden-ratio multiplier decorrelates the low
+/// bits.
+const SEED_STRIDE: u64 = 0x9e3779b97f4a7c15;
+
+/// The seed replicate `rep` of a call with `--seed seed` runs on.
+fn replicate_seed(seed: u64, rep: usize) -> u64 {
+    seed.wrapping_add((rep as u64).wrapping_mul(SEED_STRIDE))
+}
+
+/// Print the result of the single call before its leaf is stored: the
+/// log-likelihood to `-o` or stdout, or with `--replicates N` the mean and
+/// spread on stderr and each replicate's seed and log-likelihood to `-o` or
+/// stdout.
+fn report_single(
+    out: &crate::out::Out,
+    score: &PointScore,
+    outputs: &crate::pfilter_config::PfilterOutputs,
+    seed: u64,
+    n_particles: usize,
+) {
+    let output_path = &outputs.output;
+    let logliks = &score.replicate_logliks;
+    let n_replicates = logliks.len();
+    match score.loglik_sd {
+        Some(sd_ll) => {
+            let mean_ll = score.loglik;
+            let n_collapsed = score.n_collapsed;
+            out.say(format_args!("loglik = {:.1} ± {:.1} ({} replicates, N={})", mean_ll, sd_ll, n_replicates, n_particles));
+            if let Some(first) = &score.first_collapse {
+                out.say(format_args!("warning: {n_collapsed} of {n_replicates} replicates scored \
+                    -inf, so the mean is -inf; the first: {}",
+                    first.strip_prefix("error: ").unwrap_or(first)));
+            }
+
+            // Output: TSV of seed + loglik, or summary to --output
+            match output_path {
+                Some(path) => {
+                    let mut f = std::fs::File::create(path)
+                        .unwrap_or_else(|e| { out.fail(format!("cannot create {}: {}", path, e)); });
+                    writeln!(f, "seed\tloglik").unwrap();
+                    for (rep, ll) in logliks.iter().enumerate() {
+                        writeln!(f, "{}\t{:.4}", replicate_seed(seed, rep), ll).unwrap();
+                    }
+                    out.say(format_args!("replicate logliks written to {}", path));
+                }
+                None => {
+                    out.data_line("seed\tloglik");
+                    for (rep, ll) in logliks.iter().enumerate() {
+                        out.data_line(format_args!("{}\t{:.4}", replicate_seed(seed, rep), ll));
+                    }
+                }
+            }
+        }
+        None => {
+            let trace_to_stdout = outputs.trace.as_deref() == Some("-");
+            match output_path {
+                Some(path) => {
+                    std::fs::write(path, format!("{:.4}\n", score.loglik))
+                        .unwrap_or_else(|e| { out.fail(format!("cannot write {}: {}", path, e)); });
+                    out.say(format_args!("loglik written to {}", path));
+                }
+                None => {
+                    if trace_to_stdout {
+                        out.say(format_args!("{:.4}", score.loglik));
+                    } else {
+                        out.data_line(format_args!("{:.4}", score.loglik));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Run a closure on the scoped pool if one was built, else on the global pool
+/// (`--parallel 0`). Generic over the closure so the borrowed captures
+/// (process, observation model, all `Sync`) keep the closure `Send` for
+/// `ThreadPool::install`.
+fn run_pooled<R: Send>(pool: &Option<rayon::ThreadPool>, f: impl FnOnce() -> R + Send) -> R {
+    match pool {
+        Some(p) => p.install(f),
+        None => f(),
+    }
+}
+
+/// What one `pfilter` call resolves before any parameter value is known: the
+/// loaded model with its scenario lists and observation anchors applied, the
+/// data bindings, the step, the objective, the flags of every parameter tier
+/// but the design point, the outputs and the thread pool. [`score_point`]
+/// scores one parameter point against it.
+struct PointScorer<'a> {
+    out: &'a crate::out::Out,
+    ir_path: &'a str,
+    fit: &'a Option<crate::fit::handle::FitProblem>,
+    objective: crate::fit::config_v2::LikelihoodObjective,
+    eval: sim::EvalSettings,
+    forcing: &'a crate::forcing_extrapolation::ForcingPolicy,
+    /// The model before any parameter value is written into it.
+    model_in: &'a ir::Model,
+    scenario_name: Option<&'a str>,
+    adhoc_enable: &'a Vec<String>,
+    adhoc_disable: &'a Vec<String>,
+    /// `--param`, tier 5.
+    fixed_cli: &'a [(String, f64)],
+    /// `--params`, tier 3.
+    fixed_files: &'a [std::path::PathBuf],
+    external: &'a crate::external_inputs::ExternalBindings,
+    /// The fit config's `[fixed]` table, tier 2.
+    fit_fixed: &'a indexmap::IndexMap<String, f64>,
+    fit_estimate: &'a indexmap::IndexSet<String>,
+    /// `None` when nothing bound data; refused once the model gates have run.
+    bound_streams: Option<&'a [(String, std::path::PathBuf)]>,
+    /// `--data` was given, so the bound files are not the fit config's.
+    data_flags_given: bool,
+    dt: f64,
+    n_particles: usize,
+    n_replicates: usize,
+    seed: u64,
+    binomial: sim::rng::BinomialAlgorithm,
+    max_substeps: u64,
+    time_format: crate::caltime_load::TimeFormat,
+    save_final_state: &'a Option<String>,
+    engine: &'a runid::inputs::EngineIdentity,
+    outputs: &'a crate::pfilter_config::PfilterOutputs,
+    parallel: usize,
+    pool: &'a Option<rayon::ThreadPool>,
+}
+
+/// Which evaluation a [`score_point`] call is.
+#[derive(Clone, Copy)]
+enum PointRole {
+    /// The one evaluation of a call without a design: every line the run
+    /// prints, the replicate progress bar, and the `camdl cat` hint.
+    Single,
+}
+
+/// The result of scoring one parameter point.
+struct PointScore {
+    /// The estimated log-likelihood, or the mean over replicates; `-inf` when
+    /// any replicate collapsed.
+    loglik: f64,
+    /// The standard deviation over replicates; `None` for a single run.
+    loglik_sd: Option<f64>,
+    /// How many replicates collapsed (every particle scored `-inf` at some
+    /// observation).
+    n_collapsed: usize,
+    /// The collapse message of the first replicate that collapsed.
+    first_collapse: Option<String>,
+    /// The stored leaf: written by this call or found already stored. `None`
+    /// when every replicate collapsed, under `--no-store`, or when the store
+    /// did not record it.
+    leaf: Option<runid::ContentHash>,
+    /// Each replicate's log-likelihood, in replicate order.
+    replicate_logliks: Vec<f64>,
+}
+
+impl PointScore {
+    /// Every replicate collapsed, so the point has no likelihood and no leaf.
+    fn every_replicate_collapsed(&self) -> bool {
+        self.n_collapsed > 0 && self.n_collapsed == self.replicate_logliks.len()
+    }
+}
+
+/// Score one parameter point: resolve the parameters with `overrides` at
+/// tier 3.5 (a design point; empty for the single call), compile the model at
+/// them, bind the data, run the filter `--replicates` times, write the
+/// single-run outputs, and store the result as a `Pfilter` leaf.
+///
+/// `before_store` is called with the score before the leaf is written, unless
+/// every replicate collapsed, in which case no leaf is written. A refusal of
+/// the inputs, or a filter that returns an error, ends the process.
+fn score_point(
+    scorer: &PointScorer<'_>,
+    overrides: &[(String, f64)],
+    role: PointRole,
+    before_store: impl FnOnce(&PointScore),
+) -> PointScore {
+    let PointScorer {
+        out, ir_path, fit, objective, eval, forcing, model_in, scenario_name,
+        adhoc_enable, adhoc_disable, fixed_cli, fixed_files, external,
+        fit_fixed: ftf, fit_estimate: fte, bound_streams, data_flags_given, dt,
+        n_particles, n_replicates, seed, binomial, max_substeps, time_format,
+        save_final_state, engine, outputs, parallel, pool: pf_pool,
+    } = *scorer;
+    let crate::pfilter_config::PfilterOutputs {
+        trace: trace_path,
+        pf_health,
+        output: _,
+        save_paths,
+        save_filtering,
+        save_filtered_streams,
+        save_prequential,
+        score_from,
+        save_samples,
+        no_store,
+    } = outputs.clone();
+    // The lines every point of a call would print alike.
+    let announce = match role {
+        PointRole::Single => true,
+    };
+    use crate::params_resolver::{ParameterInputs, resolve_parameters, emit_notices};
+
+    let resolved = resolve_parameters(ParameterInputs {
+        model: model_in,
+        scenario: scenario_name,
+        adhoc_enable,
+        adhoc_disable,
         scenario_inline_name: None,
         scenario_inline_set: &[],
         scenario_inline_scale: &[],
-        point_overrides: &[],
-        fixed_cli: &fixed_cli,
-        fixed_files: &fixed_files,
-        fit_toml_fixed: &ftf,
-        fit_toml_estimate: &fte,
-        external: &external,
+        point_overrides: overrides,
+        fixed_cli,
+        fixed_files,
+        fit_toml_fixed: ftf,
+        fit_toml_estimate: fte,
+        external,
     }).unwrap_or_else(|e| {
         out.fail(format!("error: {}", e.with_flags(crate::params_resolver::FlagStyle::Params)));
     });
@@ -470,10 +729,12 @@ fn run_pfilter(
             ) {
                 out.fail(format!("error: the --fit config sets ic_free = true. {msg}"));
             }
-            out.say(format_args!("pfilter: objective: conditional on the first observation \
-                (ic_free = true in {fit_name}); omit --fit and pass --data for the \
-                full likelihood"));
-        } else {
+            if announce {
+                out.say(format_args!("pfilter: objective: conditional on the first observation \
+                    (ic_free = true in {fit_name}); omit --fit and pass --data for the \
+                    full likelihood"));
+            }
+        } else if announce {
             out.say(format_args!("pfilter: objective: full likelihood ({fit_name} does not set \
                 ic_free = true)"));
         }
@@ -510,7 +771,7 @@ fn run_pfilter(
     // key-space bindings) is mapped to the by-source `effective` map at the
     // boundary; it is retained below only for the CAS data-hash + the unbound-
     // streams warning, whose key-space (leaf name / family root) must not change.
-    let effective = crate::fit::runner::data_bindings_to_effective(&model, &bound_streams)
+    let effective = crate::fit::runner::data_bindings_to_effective(&model, bound_streams)
         .unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
     let mut streams = crate::fit::runner::resolve_and_load_obs_streams(
         &model, &compiled, &effective, &time_opts,
@@ -533,7 +794,7 @@ fn run_pfilter(
     // rows that trained. Those files are read only in that case.
     let mut training_cut: Option<TrainingCut> = None;
     if save_final_state.is_some() {
-        let holdout_after = fit_problem
+        let holdout_after = fit.as_ref().map(|f| &f.config.problem)
             .and_then(|p| p.data.as_ref())
             .and_then(|d| d.holdout_after.as_ref());
         if let (Some(spec), Some(f)) = (holdout_after, fit.as_ref()) {
@@ -546,7 +807,7 @@ fn run_pfilter(
             > {
                 ss.iter().map(|s| (s.name.clone(), s.rows.clone())).collect()
             };
-            let rows = if !anchored || cli_data_specs.is_empty() {
+            let rows = if !anchored || !data_flags_given {
                 cutoff_rows(&streams)
             } else {
                 let fit_streams = data_observations_of(&f.config.problem, &model, &f.handle)
@@ -606,19 +867,19 @@ fn run_pfilter(
         Some(sim::inference::ObsCell::Scalar(_)) => false,
         Some(sim::inference::ObsCell::HeldOut(_)) | None => true,
     }));
-    if has_holes && (save_prequential.is_some() || trace_path.is_some()) {
+    if announce && has_holes && (save_prequential.is_some() || trace_path.is_some()) {
         out.say("pfilter: data has missing observations (NA) — prequential/trace \
              scores skip the missing (stream, time) cells; a step with no \
              present stream is omitted from the prequential and prints NA in \
              the trace.");
     }
 
-    if n_streams > 1 {
+    if announce && n_streams > 1 {
         out.say(format_args!("  streams: {}", streams.iter()
             .map(|s| s.name.as_str()).collect::<Vec<_>>().join(", ")));
     }
 
-    out.say(format_args!("pfilter: bound streams: {}", streams.iter()
+    if announce { out.say(format_args!("pfilter: bound streams: {}", streams.iter()
         .map(|s| format!("{}({})", s.name, match &s.obs_model_ir.likelihood {
             ir::observation::Likelihood::NegBinomial(_)  => "neg_binomial",
             ir::observation::Likelihood::Normal(_)       => "normal",
@@ -628,7 +889,7 @@ fn run_pfilter(
             ir::observation::Likelihood::Beta(_)         => "beta",
             ir::observation::Likelihood::Bernoulli(_)    => "bernoulli",
             ir::observation::Likelihood::ZeroInflatedNegBinomial(_) => "zero_inflated_neg_binomial",
-        })).collect::<Vec<_>>().join(", ")));
+        })).collect::<Vec<_>>().join(", "))); }
 
     // gh#90: emit unbound-streams warning if a multi-block model is only
     // partially covered. The bound set is the RESOLVED leaf names (a family root
@@ -641,7 +902,7 @@ fn run_pfilter(
             .map(|s| s.name.clone()).collect();
         if let Some(w) = crate::util::format_unbound_streams_warning(
             "pfilter", &all_names, &bound_names,
-        ) {
+        ).filter(|_| announce) {
             out.say_raw(format_args!("{}", w));
         }
     }
@@ -666,7 +927,7 @@ fn run_pfilter(
     // gh#812: a non-fatal bind report was previously discarded, so the
     // Warn channel was write-only. Surface it — a zero denominator scores
     // as zero, and the user must be told which rows and why.
-    if !report.findings().is_empty() {
+    if announce && !report.findings().is_empty() {
         out.say(format_args!("{}", report.render()));
     }
     let obs_model = MultiStreamObsModel::new(bound, compiled.clone())
@@ -687,8 +948,10 @@ fn run_pfilter(
         .map(|&time| Observation { time, value: 0.0 })
         .collect();
 
-    out.say(format_args!("pfilter: {} observation boundaries × {} streams, {} particles, dt={}, seed={}",
-        observations.len(), n_streams, n_particles, dt, seed));
+    if announce {
+        out.say(format_args!("pfilter: {} observation boundaries × {} streams, {} particles, dt={}, seed={}",
+            observations.len(), n_streams, n_particles, dt, seed));
+    }
 
     // Record ancestry when either --save-paths or --save-filtering is
     // active. Both flags consume the same per-step snapshot data; the
@@ -737,11 +1000,12 @@ fn run_pfilter(
     // in-leaf, not an axis. Written after the loglik is computed, from both
     // the replicate and single-run paths; the stdout `loglik = …` line and the
     // explicit `--save-*` paths are unchanged. Idempotent: same inputs → same
-    // run_id → same path.
-    let write_cas_leaf = |mean_ll: f64, sd_ll: f64, n_reps: usize| {
+    // run_id → same path. Returns the leaf's run_id when it is stored, by this
+    // call or an earlier one.
+    let write_cas_leaf = |mean_ll: f64, sd_ll: f64, n_reps: usize| -> Option<runid::ContentHash> {
         // `--no-store`: the caller wants the evaluation, not a stored leaf.
         if no_store {
-            return;
+            return None;
         }
         let data_hashes: Vec<(String, String)> = bound_streams.iter()
             .filter_map(|(name, path)| std::fs::read(path).ok()
@@ -754,12 +1018,12 @@ fn run_pfilter(
         // no-flow value) to keep the content-addressed `run_id` stable — the
         // hash of a `--flow`-free pfilter run is unchanged by this removal.
         let flow_indices: Vec<u32> = Vec::new();
-        let stem = crate::hashing::path_stem_slug(&ir_path).unwrap_or_else(|| "model".to_string());
+        let stem = crate::hashing::path_stem_slug(ir_path).unwrap_or_else(|| "model".to_string());
         let ir_version_str = ir::IR_VERSION.trim().to_string();
         let ctx = crate::pfilter_cas::PfilterCtx {
             model: &model,
             ir_version: &ir_version_str,
-            engine: &engine,
+            engine,
             stem: &stem,
             data: &data_hashes,
             params: &scored,
@@ -777,7 +1041,7 @@ fn run_pfilter(
         };
         let resolved_id = match crate::pfilter_cas::resolve_pfilter(&ctx) {
             Ok(r) => r,
-            Err(e) => { out.say(format_args!("warning: pfilter CAS identity: {}", e)); return; }
+            Err(e) => { out.say(format_args!("warning: pfilter CAS identity: {}", e)); return None; }
         };
         let root = crate::run_paths::output_root(None, None);
         let cas_path = runid::store_path(&root, runid::ArtifactKind::Pfilter, &resolved_id.levels);
@@ -815,7 +1079,7 @@ fn run_pfilter(
         };
         let calendar = ir::caltime::CalendarAxis::from_model(&model)
             .unwrap_or_else(|e| out.fail(format!("error: {e}")));
-        let mut meta = crate::resolve::RecordMeta::new(&ir_version_str, &ir_path, None, calendar, &forcing);
+        let mut meta = crate::resolve::RecordMeta::new(&ir_version_str, ir_path, None, calendar, forcing);
         // The engine the leaf's identity keyed: `run.json` names its switches.
         meta.engine = engine.clone();
         let write = match crate::resolve::begin_resolved_write(
@@ -831,15 +1095,17 @@ fn run_pfilter(
             // (`begin_resolved_write` finds it by identity), so report the
             // path the store names, not this run's `cas_path`.
             Err(runid::CasError::AlreadyCompleted { path }) => {
-                out.milestone("cached", path);
-                return;
+                match role {
+                    PointRole::Single => out.milestone("cached", path),
+                }
+                return Some(resolved_id.run_id);
             }
             // Another process is computing this same evaluation right now. The
             // loglik above is still correct and already printed; only the store
             // write is skipped.
             Err(e @ runid::CasError::FitInProgress { .. }) => {
                 out.say(format_args!("warning: not storing this pfilter leaf — {}", e));
-                return;
+                return None;
             }
             // Anything else means the result was NOT recorded, and the run
             // fails: the filter's outputs already delivered (the loglik
@@ -871,64 +1137,35 @@ fn run_pfilter(
         if let Err(e) = write.finalize(inputs_json) {
             out.fail(format!("error: finalize pfilter leaf {}: {}", cas_path.display(), e));
         }
-        out.milestone("stored", cas_path.display());
-        out.hint(format_args!("camdl cat {}", resolved_id.run_id.to_hex()));
-    };
-
-    // gh#audit-H13: --parallel / CAMDL_PARALLEL throttles the rayon thread
-    // budget for the particle filter. Build a SCOPED local pool and run the
-    // bootstrap_filter calls inside `pool.install(...)` — both the
-    // per-replicate loop (this branch) and the single run below. The earlier
-    // fix used `build_global`, but the global pool is already initialised by
-    // the time cmd_pfilter reaches here, so `build_global` returned
-    // AlreadyInitialized and the default all-core pool was used regardless of
-    // --parallel. A scoped pool is order-independent: nested rayon work
-    // (particle_filter.rs par_iter_mut) inherits the surrounding pool. A
-    // value of 0 means "use rayon's default" (all logical cores) — leave the
-    // pool unset and run on the global pool in that case.
-    let pf_pool: Option<rayon::ThreadPool> = if parallel > 0 {
-        Some(
-            rayon::ThreadPoolBuilder::new()
-                .num_threads(parallel)
-                .build()
-                .unwrap_or_else(|e| {
-                    out.fail(format!("error: failed to build thread pool (--parallel {}): {}", parallel, e));
-                }),
-        )
-    } else {
-        None
-    };
-    // Run a closure on the scoped pool if one was built, else on the global
-    // pool (parallel == 0). Keeps both bootstrap_filter call sites throttled.
-    // Generic over the closure so the borrowed captures (process/obs_model/…,
-    // all Sync) keep the closure Send for `ThreadPool::install`.
-    fn run_pooled<R: Send>(pool: &Option<rayon::ThreadPool>, f: impl FnOnce() -> R + Send) -> R {
-        match pool {
-            Some(p) => p.install(f),
-            None => f(),
+        match role {
+            PointRole::Single => {
+                out.milestone("stored", cas_path.display());
+                out.hint(format_args!("camdl cat {}", resolved_id.run_id.to_hex()));
+            }
         }
-    }
+        Some(resolved_id.run_id)
+    };
 
     // ── Replicates mode: run N independent pfilters, output loglik summary ──
     if n_replicates > 1 {
-        out.say(format_args!("pfilter: {} replicates × {} particles{}",
-            n_replicates, n_particles,
-            if parallel > 0 { format!(" (parallel = {})", parallel) }
-            else { String::new() }));
-        // Im20 in 2026-04-19 inference review batch 3: replicate
-        // seeding was `seed + rep`, which gives highly correlated
-        // ChaCha8 initial states across replicates. Use the
-        // golden-ratio multiplier to decorrelate low bits.
-        const SEED_STRIDE: u64 = 0x9e3779b97f4a7c15;
+        if announce {
+            out.say(format_args!("pfilter: {} replicates × {} particles{}",
+                n_replicates, n_particles,
+                if parallel > 0 { format!(" (parallel = {})", parallel) }
+                else { String::new() }));
+        }
         // Per-replicate progress bar; the metric is the running-mean loglik
         // (replicates are noisy estimates of ONE loglik at fixed params, so
         // the mean is the live estimate — not a search "best"). Ticked from
         // the parallel loop (`Task` is `Send + Sync`); honors `--progress
         // none/plain`. Finer per-obs-window progress would need a callback
         // into `sim::bootstrap_filter` — deferred (an inference-crate change).
-        let bar = crate::out::progress::Reporter::new().task(n_replicates as u64, "pfilter", "reps");
+        // A design point has no bar of its own: the design counts points.
+        let bar = matches!(role, PointRole::Single).then(|| {
+            crate::out::progress::Reporter::new().task(n_replicates as u64, "pfilter", "reps")
+        });
         let acc = std::sync::Mutex::new((0.0_f64, 0usize)); // (Σ loglik, count)
-        let (logliks, collapses): (Vec<f64>, Vec<Option<String>>) = run_pooled(&pf_pool, || {
+        let (logliks, collapses): (Vec<f64>, Vec<Option<String>>) = run_pooled(pf_pool, || {
             (0..n_replicates).into_par_iter().map(|rep| {
                 let rep_seed = seed.wrapping_add((rep as u64).wrapping_mul(SEED_STRIDE));
                 let result = bootstrap_filter(
@@ -939,7 +1176,7 @@ fn run_pfilter(
                 // The replicate is added to the running mean before its count
                 // is ticked, so the line printed at the last count names the
                 // mean of every finite replicate (the sibling of gh#1269).
-                if result.log_likelihood.is_finite() {
+                if let (true, Some(bar)) = (result.log_likelihood.is_finite(), bar.as_ref()) {
                     if let Ok(mut g) = acc.lock() {
                         g.0 += result.log_likelihood;
                         g.1 += 1;
@@ -947,62 +1184,42 @@ fn run_pfilter(
                         bar.set(crate::out::progress::ll(g.0 / g.1 as f64));
                     }
                 }
-                bar.inc(1);
+                if let Some(bar) = bar.as_ref() { bar.inc(1); }
                 (result.log_likelihood, collapse_message(&result))
             }).unzip()
         });
-        bar.finish();
+        if let Some(bar) = bar { bar.finish(); }
 
         // Every replicate lost all its weight: the filter rejects these
-        // parameters, which is what exit status `FILTER_FAILED` says. A mean
-        // of `-inf` with no cause would be all the run reported. When only
-        // some replicates collapsed, the mean is still `-inf` and still
-        // reported, and the first collapse is named below it.
+        // parameters, there is no likelihood to store, and the caller reports
+        // the collapse. When only some replicates collapsed, the mean is still
+        // `-inf`, and is stored.
         let n_collapsed = collapses.iter().flatten().count();
-        if n_collapsed == n_replicates {
-            out.error(filter_failed(format!(
-                "{} (all {n_replicates} replicates; replicate 1 shown)",
-                collapses[0].as_deref().unwrap_or_default()))).exit();
-        }
-
+        let first_collapse = collapses.iter().flatten().next().cloned();
         let mean_ll = logliks.iter().sum::<f64>() / n_replicates as f64;
         let var_ll = logliks.iter().map(|&l| (l - mean_ll).powi(2)).sum::<f64>() / (n_replicates - 1) as f64;
         let sd_ll = var_ll.sqrt();
-
-        out.say(format_args!("loglik = {:.1} ± {:.1} ({} replicates, N={})", mean_ll, sd_ll, n_replicates, n_particles));
-        if let Some(first) = collapses.iter().flatten().next() {
-            out.say(format_args!("warning: {n_collapsed} of {n_replicates} replicates scored \
-                -inf, so the mean is -inf; the first: {}",
-                first.strip_prefix("error: ").unwrap_or(first)));
+        let mut score = PointScore {
+            loglik: mean_ll,
+            loglik_sd: Some(sd_ll),
+            n_collapsed,
+            first_collapse,
+            leaf: None,
+            replicate_logliks: logliks,
+        };
+        if score.every_replicate_collapsed() {
+            return score;
         }
-
-        // Output: TSV of seed + loglik, or summary to --output
-        match &output_path {
-            Some(path) => {
-                let mut f = std::fs::File::create(path)
-                    .unwrap_or_else(|e| { out.fail(format!("cannot create {}: {}", path, e)); });
-                writeln!(f, "seed\tloglik").unwrap();
-                for (rep, ll) in logliks.iter().enumerate() {
-                    writeln!(f, "{}\t{:.4}", seed.wrapping_add((rep as u64).wrapping_mul(SEED_STRIDE)), ll).unwrap();
-                }
-                out.say(format_args!("replicate logliks written to {}", path));
-            }
-            None => {
-                out.data_line("seed\tloglik");
-                for (rep, ll) in logliks.iter().enumerate() {
-                    out.data_line(format_args!("{}\t{:.4}", seed.wrapping_add((rep as u64).wrapping_mul(SEED_STRIDE)), ll));
-                }
-            }
-        }
-        write_cas_leaf(mean_ll, sd_ll, n_replicates);
-        return;
+        before_store(&score);
+        score.leaf = write_cas_leaf(mean_ll, sd_ll, n_replicates);
+        return score;
     }
 
     // ── Single pfilter run ─────────────────────────────────────────────────
     // gh#audit-H13: run on the scoped pool so --parallel throttles the
     // particle-level parallelism inside bootstrap_filter (par_iter_mut over
     // the swarm).
-    let result = run_pooled(&pf_pool, || {
+    let result = run_pooled(pf_pool, || {
         bootstrap_filter(
             &process, &obs_model, &params, &smc_config, seed,
         ).unwrap_or_else(|e| {
@@ -1011,7 +1228,6 @@ fn run_pfilter(
     });
 
     // Write trace diagnostics
-    let trace_to_stdout = trace_path.as_deref() == Some("-");
     if let Some(ref path) = trace_path {
         let mut w: Box<dyn Write> = if path == "-" {
             Box::new(std::io::BufWriter::new(out.data()))
@@ -1244,30 +1460,26 @@ fn run_pfilter(
 
     // A filter that lost all its weight has no likelihood to report or store:
     // the diagnostic outputs above (`--trace`'s `ll_increment`, `--pf-health`)
-    // are written, and the run then fails with the cause. Storing the `-inf`
-    // would make the identical rerun a cache hit that says nothing about why.
-    if let Some(message) = collapse_message(&result) {
-        out.error(filter_failed(message)).exit();
+    // are written, and the caller reports the cause. Storing the `-inf` would
+    // make the identical rerun a cache hit that says nothing about why.
+    let first_collapse = collapse_message(&result);
+    let mut score = PointScore {
+        loglik: result.log_likelihood,
+        loglik_sd: None,
+        n_collapsed: usize::from(first_collapse.is_some()),
+        first_collapse,
+        leaf: None,
+        replicate_logliks: vec![result.log_likelihood],
+    };
+    if score.every_replicate_collapsed() {
+        return score;
     }
-
-    // Write loglik
-    match &output_path {
-        Some(path) => {
-            std::fs::write(path, format!("{:.4}\n", result.log_likelihood))
-                .unwrap_or_else(|e| { out.fail(format!("cannot write {}: {}", path, e)); });
-            out.say(format_args!("loglik written to {}", path));
-        }
-        None => {
-            if trace_to_stdout {
-                out.say(format_args!("{:.4}", result.log_likelihood));
-            } else {
-                out.data_line(format_args!("{:.4}", result.log_likelihood));
-            }
-        }
-    }
-
+    before_store(&score);
     // Single run → one replicate, no spread.
-    write_cas_leaf(result.log_likelihood, 0.0, 1);
+    score.leaf = write_cas_leaf(result.log_likelihood, 0.0, 1);
+    score
+
+
 }
 
 use crate::caltime_load::{check_substeps_and_grid, convert_time_column, TimeOpts};
