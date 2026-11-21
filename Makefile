@@ -377,6 +377,23 @@ test-slot-queue:
 test-gate-stamp:
 	bash tests/gate_stamp_test.sh
 
+# `make test`, with the start and end of every recipe line and every line of
+# output timestamped (scripts/timed_shell.py, passed to make as its SHELL and
+# so to the nested make inside the test slot), then a report of where the time
+# went: slot wait, each recipe line, cargo's compile time against time inside
+# test harnesses, and each test binary's launch overhead
+# (scripts/gate_timing_report.py). TARGET=<name> times another target. The log
+# is kept in rust/target/gate-timing/; the exit status is the timed target's.
+GATE_TIMING_DIR := $(abspath rust/target/gate-timing)
+TARGET ?= test
+.PHONY: gate-timing
+gate-timing:
+	@mkdir -p $(GATE_TIMING_DIR)
+	@log=$(GATE_TIMING_DIR)/$$(date +%Y%m%dT%H%M%S)-$(TARGET).tsv; rc=0; \
+	CAMDL_GATE_TIMING_LOG=$$log $(MAKE) $(TARGET) SHELL=$(abspath scripts/timed_shell.py) || rc=$$?; \
+	echo; python3 scripts/gate_timing_report.py $$log; \
+	echo "log: $$log"; exit $$rc
+
 # ── Golden file management ────────────────────────────────────────────────────
 
 .PHONY: update-golden update-ocaml-golden update-corner-golden update-step-size-golden update-regression-golden update-reactive-golden update-quantities-golden check-quantities-golden update-contrasts-golden check-contrasts-golden update-gradient-golden update-bspline-inference-golden update-declared-names-golden check-declared-names-golden update-hoisted-identity-golden check-hoisted-identity-golden update-diff-pairs-golden check-diff-pairs-golden
