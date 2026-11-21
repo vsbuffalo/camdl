@@ -13,6 +13,23 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-11-20 — `-x^2` is `-(x^2)`
+
+**What.** `^` now binds more tightly than unary minus, as in mathematics, so
+`-x^2` is `-(x^2)`. It used to parse as `(-x)^2`, which equals `x^2`: the sign
+of a negated power was silently lost. `x ^ -0.5` still parses, and unary minus
+still binds more tightly than `*` and `/`.
+
+**Migration.** A model that meant `(-x)^2` must now write the parentheses. A
+model that wrote `-x^2` meaning `-(x^2)` now computes what it meant. No model or
+example in the camdl repository used the form.
+
+**Diagnostic.** None: both readings compile, so a model that relied on the old
+one computes a different value without an error. Search a model for a `-`
+directly before a name or number that is raised to a power.
+
+---
+
 ## 2026-11-20 — a reactive threshold may name an untyped constant `let`
 
 **What.** A reactive trigger threshold that named a `let` without a declared

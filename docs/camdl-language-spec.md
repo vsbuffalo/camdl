@@ -3148,17 +3148,18 @@ domain (§9.7) or an overflow, is refused as a numerical collapse; with
 Precedence  Operators        Associativity
 ─────────────────────────────────────────
 1 (highest) ()  f()  x[]     —
-2           - (unary)        —
-3           ^                right
+2           ^                right
+3           - (unary)        —
 4           * /              left
 5           + -              left
 6           == != < > <= >=  non-associative
 7 (lowest)  if/then/else     —
 ```
 
-`a + b * c` is `a + (b * c)`, and `a ^ b ^ c` is `a ^ (b ^ c)`. Unary minus binds
-more tightly than `^`, so `-x^2` is `(-x)^2`, which equals `x^2`; the negated
-square is written `-(x^2)`. A chained comparison, `a < b < c`, is a syntax
+`a + b * c` is `a + (b * c)`, and `a ^ b ^ c` is `a ^ (b ^ c)`. `^` binds more
+tightly than unary minus, as in mathematics: `-x^2` is `-(x^2)`, and the square
+of a negated value is written `(-x)^2`. An exponent may be negated, `x ^ -0.5`.
+Unary minus binds more tightly than `*` and `/`. A chained comparison, `a < b < c`, is a syntax
 error. A comparison has the value 1 when it holds and 0 otherwise. Expressions
 have no logical operators: `and`, `or` and `not` are written only in `where`
 guards (§9.3), and a conjunction in an expression is a product of comparisons.

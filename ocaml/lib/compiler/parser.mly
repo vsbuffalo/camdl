@@ -516,8 +516,8 @@
 %nonassoc EQ2 NEQ LT GT LE GE
 %left  PLUS MINUS
 %left  STAR SLASH CROSS
-%right CARET
 %nonassoc UMINUS
+%right CARET
 
 %start <Ast.declaration list> file
 

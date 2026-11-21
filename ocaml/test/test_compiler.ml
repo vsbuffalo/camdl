@@ -4985,6 +4985,34 @@ let test_serde_refuses_non_finite_const () =
    the expander and written as `{"name", "value", "kind"}`, not as an
    expression; a NaN value there made the IR unreadable just as a folded
    `Const nan` did. It is E520, at the `let` (line 4 of [non_finite_src]). *)
+(* Unary minus binds looser than `^`, as in mathematics: `-x^2` is `-(x^2)`.
+   The constant is folded at compile time, so its value shows the parse:
+   `5 + -2^2` is 1 under that reading and 9 if the minus bound the 2. *)
+let test_unary_minus_binds_looser_than_power () =
+  let value_of body =
+    let m = compile_expect_ok (Printf.sprintf {|
+compartments { S, I, R }
+parameters { beta : rate  gamma : rate }
+let k : rate = %s
+transitions {
+  infection : S --> I @ beta * S * I / (S + I + R)
+  recovery  : I --> R @ k * gamma * I
+}
+init { S = 990  I = 10 }
+simulate { from = 0 'days to = 10 'days }
+|} body) in
+    match m.Ir.constants with
+    | [ c ] -> c.Ir.c_value
+    | cs -> Alcotest.failf "expected one constant, got %d" (List.length cs)
+  in
+  Alcotest.(check (float 1e-12)) "5 + -2^2 is 5 - (2^2)" 1.0 (value_of "5 + -2^2");
+  Alcotest.(check (float 1e-12)) "5 + (-2)^2 keeps its parentheses" 9.0
+    (value_of "5 + (-2)^2");
+  Alcotest.(check (float 1e-12)) "a negative exponent still parses" 0.5
+    (value_of "4 ^ -0.5");
+  Alcotest.(check (float 1e-12)) "unary minus still binds tighter than *" 6.0
+    (value_of "10 + -2 * 2")
+
 let test_non_finite_typed_let_constant_is_e520 () =
   let src = non_finite_src ~extra_let:"\nlet k : rate = (0 - 8) ^ 0.5"
       "if I > 1000000 'count then k * I else gamma * I" in
@@ -19358,6 +19386,7 @@ let () =
       Alcotest.test_case "E520 is not raised for finite or non-literal operands" `Quick test_finite_and_non_literal_powers_compile;
       Alcotest.test_case "the IR writer refuses a non-finite Const (gh#1207)" `Quick test_serde_refuses_non_finite_const;
       Alcotest.test_case "E520: a typed let constant that is NaN (gh#1207)" `Quick test_non_finite_typed_let_constant_is_e520;
+      Alcotest.test_case "unary minus binds looser than ^: -x^2 is -(x^2)" `Quick test_unary_minus_binds_looser_than_power;
       Alcotest.test_case "the IR writer refuses a non-finite model constant" `Quick test_serde_refuses_non_finite_model_constant;
       Alcotest.test_case "E520: a non-finite literal in a quantity" `Quick test_non_finite_literal_in_quantity_is_e520;
       Alcotest.test_case "constant_fold: an overflow is not folded (gh#1207)" `Quick test_constant_fold_does_not_fold_an_overflow;
