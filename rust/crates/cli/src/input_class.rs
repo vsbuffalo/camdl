@@ -230,6 +230,8 @@ pub const FIT_RUN: &[(&str, InputClass)] = &[
 /// `holdout_after` cuts the bound rows to the training rows, which the config
 /// level keys. `--pf-max-substeps` and `--time-format` decide whether a run is
 /// refused, never what a run that completes stores, so they are `execution`.
+/// `--sweep-file` expands one call into one leaf per design point, each the
+/// single call's leaf at that point.
 #[cfg(test)]
 pub const PFILTER: &[(&str, InputClass)] = &[
     // PfilterArgs
@@ -238,6 +240,7 @@ pub const PFILTER: &[(&str, InputClass)] = &[
     ("data", Keyed(Config)),
     ("fit", Keyed(Config)),
     ("replicates", Keyed(Config)),
+    ("sweep_file", Expands),
     ("trace", Presentation),
     ("pf_health", Presentation),
     ("output", Presentation),

@@ -26,11 +26,12 @@ const PFILTER_SUPPLY: &str = "pass `--data PATH` (single-stream), \
     `--data NAME=PATH` (repeatable, multi-stream), or `--fit FOO.toml` with a \
     [data.observations] section.";
 
-/// Refuse `--replicates N` (N > 1) beside any output that describes one filter
-/// run. The replicate path writes only the per-replicate log-likelihoods; every
-/// flag named here is written on the single-run path alone (gh#686).
+/// Refuse `--sweep-file`, or `--replicates N` (N > 1), beside any output that
+/// describes one filter run. A design writes one log-likelihood row per point
+/// and the replicate path only the per-replicate log-likelihoods; every flag
+/// named here is written on the single-run path alone.
 pub(crate) fn check_per_run_outputs(a: &crate::args::PfilterArgs) -> Result<(), String> {
-    if a.replicates <= 1 {
+    if a.replicates <= 1 && a.sweep_file.is_none() {
         return Ok(());
     }
     let per_run: Vec<&str> = [
@@ -47,6 +48,18 @@ pub(crate) fn check_per_run_outputs(a: &crate::args::PfilterArgs) -> Result<(), 
     .collect();
     if per_run.is_empty() {
         return Ok(());
+    }
+    if let Some(file) = &a.sweep_file {
+        return Err(format!(
+            "--sweep-file {} cannot be combined with {}: {} one filter run, and \
+             `--sweep-file` writes one log-likelihood row per design point without \
+             writing any single run's outputs. For the per-run file of one point, \
+             run `pfilter` without `--sweep-file`, passing the point's values with \
+             `--param`.",
+            file.display(),
+            per_run.join(", "),
+            if per_run.len() == 1 { "that output describes" } else { "those outputs describe" },
+        ));
     }
     Err(format!(
         "--replicates {} cannot be combined with {}: {} one filter run, and \
@@ -180,6 +193,7 @@ fn run_pfilter(
         dt: dt_flag,
         particles: n_particles,
         replicates: n_replicates,
+        sweep_file,
         seed,
         binomial,
         max_substeps,
@@ -362,6 +376,21 @@ fn run_pfilter(
         out.fail(format!("error: {e}"));
     }
 
+    // The design points of `--sweep-file`, read against the model as the run
+    // scores it, and refused before any filter runs when a tier above 3.5
+    // would override a design column at every point.
+    let design: Option<Vec<(usize, crate::sweep::DesignPoint)>> = sweep_file.as_deref().map(|file| {
+        let points = crate::sweep::read_sweep_file(file, &model_in)
+            .unwrap_or_else(|e| { out.fail(format!("error: {e}")); })
+            .points;
+        if let Err(e) = refuse_design_overrides(
+            &model_in, file, &points, &param_flags.param, scenario_name.as_deref(),
+        ) {
+            out.fail(format!("error: {e}"));
+        }
+        points
+    });
+
     // The scored parameters, resolved by the tiers of `docs/camdl-run-spec.md`
     // §1.3: the fit config's `[fixed]` (tier 2, with `--fit`), `--params`, the
     // scenario and `--param`. pfilter scores one parameter set and estimates
@@ -442,6 +471,10 @@ fn run_pfilter(
         pool: &pf_pool,
     };
 
+    if let Some(points) = design {
+        score_design(&scorer, &points, outputs.output.as_deref());
+        return;
+    }
     let score = score_point(&scorer, &[], PointRole::Single, |score| {
         report_single(out, score, &outputs, seed, n_particles);
     });
@@ -531,6 +564,119 @@ fn report_single(
     }
 }
 
+/// Refuse a `--sweep-file` design whose column a higher tier would override
+/// at every point: a `--param` on a design column (tier 5), or a `--scenario`
+/// that sets or scales one (tier 4). Either would score every row at the same
+/// value while its `sweep:<param>` column said otherwise.
+fn refuse_design_overrides(
+    model: &ir::Model,
+    file: &std::path::Path,
+    points: &[(usize, crate::sweep::DesignPoint)],
+    param_flags: &[(String, f64)],
+    scenario: Option<&str>,
+) -> Result<(), String> {
+    let columns: std::collections::BTreeSet<&str> =
+        points.iter().flat_map(|(_, pt)| pt.iter().map(|(k, _)| k.as_str())).collect();
+    for (name, value) in param_flags {
+        if columns.contains(name.as_str()) {
+            return Err(format!(
+                "parameter `{name}` is both a column of --sweep-file {file} and pinned by \
+                 `--param {name}={value}`.\n  \
+                 A `--param` outranks a design point, so the design would not vary `{name}`: \
+                 every row would be scored at {value} while its `sweep:{name}` column said \
+                 otherwise.\n  \
+                 Fix: drop `--param {name}=…`, or remove the `{name}` column from the file.",
+                file = file.display(),
+            ));
+        }
+    }
+    if let Some(scenario) = scenario {
+        let varied = crate::params_resolver::coordinate_values(
+            points.iter().flat_map(|(_, pt)| pt.iter().map(|(k, v)| (k.as_str(), *v))),
+        );
+        if let Some(msg) = crate::params_resolver::scenario_coordinate_collision(
+            model,
+            &crate::sim_job::ScenarioRef::Named(scenario.to_string()),
+            crate::params_resolver::UserCoordinate::Sweep,
+            &varied,
+        )? {
+            return Err(format!("--sweep-file {} and --scenario {scenario}: {msg}", file.display()));
+        }
+    }
+    Ok(())
+}
+
+/// Score every point of a `--sweep-file` design and write one row per point,
+/// in file order, to `output` or stdout. Each point is [`score_point`] at its
+/// values, on the seeds the single call uses, so a row equals the single call
+/// at that point and its leaf is that call's. The first point runs alone and
+/// prints the lines every point would print alike; the rest run concurrently
+/// on the call's pool. A point whose every replicate collapsed is a row with
+/// no leaf; the run exits with `FILTER_FAILED` only when every point did.
+fn score_design(
+    scorer: &PointScorer<'_>,
+    points: &[(usize, crate::sweep::DesignPoint)],
+    output: Option<&str>,
+) {
+    let out = scorer.out;
+    let n_points = points.len();
+    out.say(format_args!("pfilter: {n_points} design points from --sweep-file"));
+    let bar = crate::out::progress::Reporter::new().task(n_points as u64, "pfilter", "points");
+    let score_at = |i: usize| -> PointScore {
+        let (point_id, point) = &points[i];
+        let role = PointRole::Design { point_id: *point_id, first: i == 0 };
+        let score = score_point(scorer, point, role, |_| {});
+        bar.inc(1);
+        score
+    };
+    let first = score_at(0);
+    let rest: Vec<PointScore> =
+        run_pooled(scorer.pool, || (1..n_points).into_par_iter().map(score_at).collect());
+    bar.finish();
+    let scores: Vec<PointScore> = std::iter::once(first).chain(rest).collect();
+
+    // Every point names the same parameters, sorted by name.
+    let columns: Vec<&str> = points[0].1.iter().map(|(k, _)| k.as_str()).collect();
+    let mut table = String::from("point_id");
+    for c in &columns {
+        table.push_str(&format!("\tsweep:{c}"));
+    }
+    table.push_str("\tloglik\tloglik_sd\tn_collapsed\trun_id\n");
+    for ((point_id, point), score) in points.iter().zip(&scores) {
+        table.push_str(&point_id.to_string());
+        for (_, v) in point {
+            table.push_str(&format!("\t{v}"));
+        }
+        let sd = score.loglik_sd.map(|sd| sd.to_string()).unwrap_or_default();
+        let run_id = score.leaf.as_ref().map(|h| h.to_hex()).unwrap_or_default();
+        // The shortest round-trip form, so a value read back is the one stored.
+        table.push_str(&format!("\t{}\t{sd}\t{}\t{run_id}\n", score.loglik, score.n_collapsed));
+    }
+    match output {
+        Some(path) => {
+            std::fs::write(path, &table)
+                .unwrap_or_else(|e| { out.fail(format!("cannot write {path}: {e}")); });
+            out.say(format_args!("design table ({n_points} points) written to {path}"));
+        }
+        None => out.data_raw(&table),
+    }
+
+    let collapsed: Vec<&PointScore> = scores.iter().filter(|s| s.every_replicate_collapsed()).collect();
+    if let Some(first) = collapsed.first() {
+        let message = first.first_collapse.as_deref().unwrap_or_default();
+        let message = message.strip_prefix("error: ").unwrap_or(message);
+        if collapsed.len() == n_points {
+            out.error(filter_failed(format!(
+                "error: every one of the {n_points} design points collapsed (every replicate \
+                 scored -inf); the first: {message}"))).exit();
+        }
+        out.say(format_args!(
+            "warning: {} of {n_points} design points collapsed (every replicate scored \
+             -inf), so they have no leaf; the first: {message}",
+            collapsed.len()));
+    }
+}
+
 /// Run a closure on the scoped pool if one was built, else on the global pool
 /// (`--parallel 0`). Generic over the closure so the borrowed captures
 /// (process, observation model, all `Sync`) keep the closure `Send` for
@@ -591,6 +737,9 @@ enum PointRole {
     /// The one evaluation of a call without a design: every line the run
     /// prints, the replicate progress bar, and the `camdl cat` hint.
     Single,
+    /// One point of a `--sweep-file` design, written under `point_id`. The
+    /// `first` point prints the lines every point would print alike.
+    Design { point_id: usize, first: bool },
 }
 
 /// The result of scoring one parameter point.
@@ -656,6 +805,7 @@ fn score_point(
     // The lines every point of a call would print alike.
     let announce = match role {
         PointRole::Single => true,
+        PointRole::Design { first, .. } => first,
     };
     use crate::params_resolver::{ParameterInputs, resolve_parameters, emit_notices};
 
@@ -1097,6 +1247,8 @@ fn score_point(
             Err(runid::CasError::AlreadyCompleted { path }) => {
                 match role {
                     PointRole::Single => out.milestone("cached", path),
+                    PointRole::Design { point_id, .. } =>
+                        out.milestone("cached", format_args!("point {point_id} {path}")),
                 }
                 return Some(resolved_id.run_id);
             }
@@ -1142,6 +1294,8 @@ fn score_point(
                 out.milestone("stored", cas_path.display());
                 out.hint(format_args!("camdl cat {}", resolved_id.run_id.to_hex()));
             }
+            PointRole::Design { point_id, .. } =>
+                out.milestone("stored", format_args!("point {point_id} {}", cas_path.display())),
         }
         Some(resolved_id.run_id)
     };

@@ -167,6 +167,8 @@ fn files(d: &std::path::Path) -> Vec<(&'static str, String)> {
         ("fit_plain.toml", fit_toml(d, "")),
         ("fit_adr.toml", fit_toml(d, "[config]\nallow_degenerate_rates = true\n")),
         ("fit_holdout.toml", fit_toml(d, "[data]\nholdout_after = 15.0\n")),
+        ("design2.tsv", "beta_a\n0.4\n0.5\n".into()),
+        ("design3.tsv", "beta_a\n0.4\n0.5\n0.6\n".into()),
     ]
 }
 
@@ -407,6 +409,17 @@ fn keyed_env_experimental() {
         leaf.record["engine_switches"],
         serde_json::json!([{ "name": "CAMDL_EXPERIMENTAL_DIFFERENTIAL_TEST", "value": "1" }])
     );
+}
+
+// ─── expands ─────────────────────────────────────────────────────────────────
+
+/// A design point is stored as the single call's leaf, so a larger design
+/// keeps the run id of every point it shares with a smaller one.
+#[test]
+fn expands_sweep_file() {
+    let fx = fx();
+    let design = |f: &str| pf(&fx, &["--sweep-file", &fx.path(f)]);
+    assert_shared_leaves_keep_ids(KIND, &run(&design("design2.tsv")), &run(&design("design3.tsv")));
 }
 
 // ─── execution ───────────────────────────────────────────────────────────────

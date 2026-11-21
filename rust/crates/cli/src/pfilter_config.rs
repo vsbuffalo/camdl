@@ -30,7 +30,10 @@
 //! `--save-final-state` keeps under the fit's `holdout_after`, the binomial
 //! sampler); the params level the scored point; the seed level the seed.
 //! `--pf-max-substeps` and `--time-format` decide whether a run is refused,
-//! never what a run that completes stores, so neither is keyed.
+//! never what a run that completes stores, so neither is keyed. A
+//! `--sweep-file` design is a list of points, each stored as the leaf of the
+//! single call at its values: a point reaches its leaf's params level, and the
+//! file itself reaches no identity.
 
 use crate::args::types::DataSpec;
 use crate::fit::config_v2::LikelihoodObjective;
@@ -69,6 +72,9 @@ pub(crate) struct ResolvedPfilterConfig {
     pub dt: Option<f64>,
     pub particles: usize,
     pub replicates: usize,
+    /// `--sweep-file`: the design whose points are scored, each as the single
+    /// call at the point's values would score it.
+    pub sweep_file: Option<std::path::PathBuf>,
     pub seed: u64,
     /// `--binomial`, else BTPE.
     pub binomial: sim::rng::BinomialAlgorithm,
@@ -172,6 +178,7 @@ pub(crate) fn resolve(
         data,
         fit,
         replicates,
+        sweep_file,
         trace,
         pf_health,
         output,
@@ -234,6 +241,7 @@ pub(crate) fn resolve(
         dt: *dt,
         particles: *particles,
         replicates: *replicates,
+        sweep_file: sweep_file.clone(),
         seed: *seed,
         binomial: binomial.unwrap_or_default(),
         max_substeps: pf_max_substeps.unwrap_or(sim::inference::degeneracy::ITER_BUDGET),

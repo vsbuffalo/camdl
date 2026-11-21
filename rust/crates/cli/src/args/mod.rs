@@ -1822,6 +1822,11 @@ pub struct PfilterArgs {
     #[arg(long, default_value_t = 1)]
     pub replicates: usize,
 
+    /// A TSV of design points (header: parameter names, optional `point_id`);
+    /// one log-likelihood row per point.
+    #[arg(long, value_name = "FILE")]
+    pub sweep_file: Option<PathBuf>,
+
     /// Write per-observation diagnostics TSV; use "-" for stdout
     #[arg(long)]
     pub trace: Option<String>,
