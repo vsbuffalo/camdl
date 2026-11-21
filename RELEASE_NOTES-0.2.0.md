@@ -195,6 +195,23 @@ order. Every handle now names one run, or is refused with the runs listed.
 
 ### Other breaking changes
 
+- **`camdl survey` is removed.** The command is gone, and with it the `surveys/`
+  store kind, `landscape.tsv`, the `--render` HTML pair plot, the tally of
+  points with a non-finite log-likelihood, the warnings for top points piling up
+  at a bound and for a box of many dimensions, and the rank of the config's
+  start among the points. `camdl survey` is now an unrecognized subcommand. A
+  `surveys/` leaf in an existing store is not read and not changed: `camdl list`
+  does not show it, `camdl show <leaf directory>` refuses it naming the kind,
+  and a walk of the whole store skips it with a warning. Migration: write the
+  Latin-hypercube design, a TSV with `point_id` and one column per estimated
+  parameter, with
+  `camdl design lhs MODEL --fit fit.toml --n 200 --seed 1 -o design.tsv`, and
+  simulate it with `camdl simulate MODEL --sweep-file design.tsv`. No single
+  command scores a whole design:
+  `camdl pfilter MODEL --fit fit.toml --params fixed.toml --param NAME=VALUE …`
+  evaluates the log-likelihood at one row per call, and `camdl docs workflow`
+  shows the loop over the rows.
+
 - **A fit leaf's `run.json` says `"kind": "fit_method"`, not `"fit_stage"`.**
   The kind was the last stored spelling of the `[stages]` era; a script that
   selects fit leaves by `kind` must match the new string. A store written before
