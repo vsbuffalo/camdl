@@ -27,11 +27,20 @@ use crate::record::LevelId;
 /// than this fails `mkdir` with `ENAMETOOLONG`.
 pub const NAME_MAX: usize = 255;
 
-/// Conservative cap on the *label* portion of a segment, in bytes. A segment
-/// is `{label}-{hash8}` (label + `-` + 8 hex). Capping the label at 200 leaves
-/// ample headroom under `NAME_MAX` (255) for the `-{hash8}` suffix, the
-/// truncation marker, and the store's `~{disambiguator}` it may later append.
-const LABEL_CAP: usize = 200;
+/// Bytes of the `-{hash8}` that follows the label in every segment.
+const HASH8_SUFFIX: usize = 1 + 8;
+
+/// Bytes of the longest suffix the store appends to a leaf's segment to tell
+/// it apart from a leaf of another identity at the same path: `~` and all 64
+/// hex digits of the run id (`CasStore::commit`'s last disambiguation
+/// candidate).
+pub const DISAMBIGUATOR_MAX: usize = 1 + 64;
+
+/// The cap on the *label* portion of a segment, in bytes, truncation marker
+/// and hash included. A leaf's longest segment is
+/// `{label}-{hash8}~{run id}`, so the cap is what remains of `NAME_MAX` after
+/// [`HASH8_SUFFIX`] and [`DISAMBIGUATOR_MAX`]: 181 bytes.
+const LABEL_CAP: usize = NAME_MAX - HASH8_SUFFIX - DISAMBIGUATOR_MAX;
 
 /// Marker inserted between a truncated label prefix and its full-label hash,
 /// so a truncated label reads as deliberately-shortened, not merely cut off.
@@ -39,7 +48,7 @@ const TRUNC_MARKER: &str = "..";
 
 /// Hex chars of the full-label digest appended after truncation. 16 hex = 8
 /// bytes of SHA-256 — collision-resistant enough to disambiguate two labels
-/// that share the same 200-byte prefix.
+/// that share the same truncated prefix.
 const TRUNC_HASH_HEX: usize = 16;
 
 impl ArtifactKind {
@@ -71,8 +80,8 @@ impl ArtifactKind {
 /// overflow `NAME_MAX` when rendered as a single directory component, so the
 /// result is capped at [`LABEL_CAP`] bytes: a long sanitized label is
 /// truncated to a prefix and suffixed with `..{hash16}`, the first 16 hex of
-/// the full sanitized label's SHA-256. Two distinct long labels that share a
-/// 200-byte prefix still render distinctly via that hash. Identity is
+/// the full sanitized label's SHA-256. Two distinct long labels that share
+/// the truncated prefix still render distinctly via that hash. Identity is
 /// unaffected — the label is provenance, never part of the level hash.
 pub fn path_label(label: &str) -> String {
     let sanitized: String = label
@@ -106,7 +115,8 @@ pub fn path_label(label: &str) -> String {
 }
 
 /// One path segment for a level: `{path_label(label)}-{hash8}`. The label is
-/// capped (see [`path_label`]) so the whole segment fits in `NAME_MAX`.
+/// capped (see [`path_label`]) so the segment fits in `NAME_MAX` even after
+/// the store appends its longest disambiguator, [`DISAMBIGUATOR_MAX`] bytes.
 pub fn segment(level: &LevelId) -> String {
     format!("{}-{}", path_label(&level.label), level.hash.short8())
 }

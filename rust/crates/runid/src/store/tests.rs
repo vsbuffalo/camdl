@@ -2158,6 +2158,33 @@ fn find_leaf_verifies_as_lookup_does() {
     cleanup(&root);
 }
 
+/// A leaf whose last level has a label long enough to be capped, and whose
+/// plain and `~{hash16}` paths both hold another identity, is committed at the
+/// `~{full64}` path: the longest segment the store writes still fits in one
+/// path component.
+#[test]
+fn a_capped_label_escalated_to_the_full_run_id_still_commits() {
+    let root = tmp_root("long_escalate");
+    let store = FsCasStore::new(&root);
+    let long = "x".repeat(300);
+    let (levels, rid) = sim_levels(["sir", "cb", "base", "baseline", &long], [1, 2, 3, 4, 5]);
+    let base = crate::layout::store_path(&root, ArtifactKind::Sim, &levels);
+    let hex = rid.to_hex();
+    let seg = base.file_name().unwrap().to_string_lossy().into_owned();
+    let hash16 = base.with_file_name(format!("{seg}~{}", &hex[..16]));
+
+    // Other identities occupy the plain and the 16-hex candidates.
+    store.commit_atomic(&base, record(id(0xbb)), arts(b"other\n")).unwrap();
+    store.commit_atomic(&hash16, record(id(0xcc)), arts(b"other\n")).unwrap();
+
+    let dest = store.commit_atomic(&base, record(rid), arts(b"S\n1\n")).unwrap();
+    let name = dest.file_name().unwrap().to_string_lossy().into_owned();
+    assert_eq!(name, format!("{seg}~{hex}"), "the commit escalated to the full run id");
+    assert!(name.len() <= crate::layout::NAME_MAX, "segment of {} bytes", name.len());
+    assert!(matches!(store.lookup(&dest, &LeafIdentity::new(rid)), Lookup::Hit(_)));
+    cleanup(&root);
+}
+
 // ── gh#896: in-place record updates ─────────────────────────────────────────
 
 /// Concurrent record updates and augments of one leaf lose nothing: each
