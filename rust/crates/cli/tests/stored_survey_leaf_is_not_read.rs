@@ -21,6 +21,7 @@ fn camdl(dir: &Path, args: &[&str]) -> Output {
         .current_dir(dir)
         .env_remove("CLICOLOR_FORCE")
         .env_remove("CAMDL_OUTPUT_DIR")
+        .env_remove("CAMDL_STORE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDLC", manifest().join("../../../ocaml/_build/default/bin/camdlc.exe"))
         .args(args)
@@ -32,26 +33,45 @@ fn text(o: &Output) -> String {
     format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))
 }
 
-fn find(root: &Path, name: &str) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
+const SURVEY_RUN_ID: &str = "abababababababababababababababababababababababababababababababab";
+
+/// Copies the committed old-store root `tests/fixtures/old_store/root` (one
+/// simulation leaf; its README says what it is) to `to`, with each result
+/// file's modification time set to the one its record states, so the leaf
+/// reads as the store wrote it. Returns the leaf's record.
+fn copy_old_store(to: &Path) -> serde_json::Value {
+    let from = manifest().join("tests/fixtures/old_store/root");
+    let mut record = None;
+    let mut stack = vec![from.clone()];
     while let Some(d) = stack.pop() {
-        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+        for e in std::fs::read_dir(&d).unwrap().flatten() {
             let p = e.path();
+            let dest = to.join(p.strip_prefix(&from).unwrap());
             if p.is_dir() {
+                std::fs::create_dir_all(&dest).unwrap();
                 stack.push(p);
-            } else if e.file_name() == name {
-                out.push(p);
+                continue;
+            }
+            std::fs::copy(&p, &dest).unwrap();
+            if e.file_name() == "run.json" {
+                let r: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+                record = Some((dest.parent().unwrap().to_path_buf(), r));
             }
         }
     }
-    out
+    let (dir, record) = record.expect("the fixture holds one leaf");
+    for (name, entry) in record["artifacts"].as_object().unwrap() {
+        let (secs, nanos) = entry["mtime"].as_str().unwrap().split_once('.').unwrap();
+        let at = std::time::UNIX_EPOCH
+            + std::time::Duration::new(secs.parse().unwrap(), nanos.parse().unwrap());
+        std::fs::File::options().write(true).open(dir.join(name)).unwrap().set_modified(at).unwrap();
+    }
+    record
 }
 
-const SURVEY_RUN_ID: &str = "abababababababababababababababababababababababababababababababab";
-
-/// A store holding one pfilter leaf and one `surveys/` leaf made from its
-/// record; returns the directory and the survey leaf's path relative to it.
+/// A store holding one pfilter run, one old-store leaf from the committed
+/// fixture, and one `surveys/` leaf made from that leaf's record; returns the
+/// directory and the survey leaf's path relative to it.
 fn store() -> (tempfile::TempDir, String) {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
@@ -65,10 +85,7 @@ fn store() -> (tempfile::TempDir, String) {
         "--param", "gamma=0.12", "--particles", "50", "--seed", "1",
     ]);
     assert!(o.status.success(), "{}", text(&o));
-    let records = find(&dir.join("results/pfilters"), "run.json");
-    assert_eq!(records.len(), 1, "{records:?}");
-    let mut record: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&records[0]).unwrap()).unwrap();
+    let mut record = copy_old_store(&dir.join("results"));
     record["kind"] = "survey".into();
     record["run_id"] = SURVEY_RUN_ID.into();
     let leaf = "results/surveys/sir-aaaaaaaa/cfg-bbbbbbbb/box-cccccccc/seed_1-dddddddd";

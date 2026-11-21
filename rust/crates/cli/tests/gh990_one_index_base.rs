@@ -141,7 +141,7 @@ starts    = "uniform_unconstrained"
 fn camdl(dir: &Path, args: &[&str]) -> std::process::Output {
     Command::new(binary()).env_remove("CLICOLOR_FORCE")
         .current_dir(dir)
-        .env("CAMDL_OUTPUT_DIR", dir.join("results"))
+        .env("CAMDL_OUTPUT_DIR", dir.join("results")).env("CAMDL_STORE", std::path::Path::new(&dir.join("results")).join("camdl-store"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDLC", camdlc_bin())
         .args(args)

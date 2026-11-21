@@ -40,6 +40,7 @@ fn command(dir: &Path) -> Command {
     let mut c = Command::new(camdl());
     c.env_remove("CLICOLOR_FORCE")
         .env_remove("CAMDL_OUTPUT_DIR")
+        .env_remove("CAMDL_STORE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDLC", camdlc())
         .env("CAMDL_IR_CACHE_DIR", dir.join(".ir-cache"))
@@ -105,10 +106,10 @@ fn a_pfilter_run_that_cannot_claim_its_output_exits_non_zero() {
     let out = command(tmp.path())
         .args(["pfilter", "sir.camdl", "--data=cases.tsv", "--particles", "100",
                "--seed", "1", "--params", "p.toml"])
-        .env("CAMDL_OUTPUT_DIR", tmp.path().join("not_a_dir/store"))
+        .env("CAMDL_STORE", tmp.path().join("not_a_dir/store"))
         .output().unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("NOT stored"), "the failure says the result was not stored:\n{stderr}");
+    assert!(stderr.contains("the run store at"), "the failure names the store it could not open:\n{stderr}");
     assert_eq!(out.status.code(), Some(1),
         "an unstored result is an error (status 1, not the filter-failed status 3):\n{stderr}");
 }

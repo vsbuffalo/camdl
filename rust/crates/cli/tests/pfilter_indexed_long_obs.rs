@@ -76,7 +76,7 @@ fn pfilter_cli_family_binding_slices_per_stratum() {
 
     let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
-        .env("CAMDL_OUTPUT_DIR", tmp.path().join("out_cli"))
+        .env("CAMDL_OUTPUT_DIR", tmp.path().join("out_cli")).env("CAMDL_STORE", std::path::Path::new(&tmp.path().join("out_cli")).join("camdl-store"))
         .args([
             "pfilter", &long_obs_model().to_string_lossy(),
             "--params", &params.to_string_lossy(),
@@ -141,7 +141,7 @@ cooling    = 0.5
 
     let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
-        .env("CAMDL_OUTPUT_DIR", tmp.path().join("out_fit"))
+        .env("CAMDL_OUTPUT_DIR", tmp.path().join("out_fit")).env("CAMDL_STORE", std::path::Path::new(&tmp.path().join("out_fit")).join("camdl-store"))
         .args([
             "pfilter", &long_obs_model().to_string_lossy(),
             "--params", &params.to_string_lossy(),

@@ -65,6 +65,7 @@ dt = 1.0
 "#, ir = golden_ir().display())).unwrap();
     let out = Command::new(binary()).env_remove("CLICOLOR_FORCE")
         .env_remove("CAMDL_OUTPUT_DIR")
+        .env_remove("CAMDL_STORE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args(["fit", "run", "fit.toml", "--seed", "1"])
         .current_dir(&sub)
@@ -83,6 +84,7 @@ fn compare(dir: &Path, extra: &[&str]) -> Output {
     args.extend_from_slice(extra);
     Command::new(binary()).env_remove("CLICOLOR_FORCE")
         .env_remove("CAMDL_OUTPUT_DIR")
+        .env_remove("CAMDL_STORE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args(&args)
         .current_dir(dir)
@@ -188,6 +190,7 @@ fn the_trace_records_its_filter_settings_and_compare_checks_them() {
          N0 = 1000\nbeta = 0.1\nI0 = 5\n").unwrap();
     let out = Command::new(binary()).env_remove("CLICOLOR_FORCE")
         .env_remove("CAMDL_OUTPUT_DIR")
+        .env_remove("CAMDL_STORE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args(["pfilter", &golden_ir().to_string_lossy(),
                "--data", &format!("weekly_cases={}", fit_a.join("obs.tsv").display()),
@@ -245,6 +248,7 @@ fn the_trace_records_its_filter_settings_and_compare_checks_them() {
         args.extend_from_slice(extra);
         Command::new(binary()).env_remove("CLICOLOR_FORCE")
             .env_remove("CAMDL_OUTPUT_DIR")
+            .env_remove("CAMDL_STORE")
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .args(&args).current_dir(dir)
             .output().expect("spawn camdl compare")
@@ -274,9 +278,8 @@ fn the_trace_records_its_filter_settings_and_compare_checks_them() {
 }
 
 /// `compare` derives each row by running `camdl pfilter` once per draw per
-/// replicate. Each of those runs used to record a `pfilters/` leaf under the
-/// caller's output root — a log-likelihood nobody asked for, written into
-/// whatever directory `compare` was run from.
+/// replicate, with `--no-store`: none of those runs writes a run store in the
+/// directory `compare` was run from.
 #[test]
 fn deriving_a_trace_writes_no_pfilter_leaf() {
     let tmp = tempfile::tempdir().unwrap();
@@ -286,7 +289,6 @@ fn deriving_a_trace_writes_no_pfilter_leaf() {
 
     let out = compare(dir, &[]);
     assert!(out.status.success(), "compare failed:\n{}", String::from_utf8_lossy(&out.stderr));
-    assert!(!dir.join("results").join("pfilters").exists(),
-        "compare's filter runs must not record pfilters/ leaves under {}",
-        dir.join("results").display());
+    assert!(!dir.join("camdl-store").exists(),
+        "compare's filter runs must not write a run store under {}", dir.display());
 }

@@ -5,7 +5,7 @@ use std::str::FromStr;
 // ─── ParamOverride ────────────────────────────────────────────────────────────
 
 /// `--param NAME=VALUE`  e.g. `--param R0=2.5`
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct ParamOverride {
     pub name:  String,
     pub value: f64,
@@ -25,7 +25,7 @@ impl FromStr for ParamOverride {
 // ─── TableSpec ────────────────────────────────────────────────────────────────
 
 /// `--table NAME=FILE`  e.g. `--table contact=matrix.tsv`
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct TableSpec {
     pub name: String,
     pub path: PathBuf,
@@ -61,7 +61,7 @@ impl FromStr for TableSpec {
 /// through rather than rejecting it — single-PATH form swallows the
 /// whole argument, and the file-existence check downstream catches
 /// the (unlikely) typo.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub enum DataSpec {
     /// `--data PATH` — no `=`, or `=` at position 0.
     Single(PathBuf),

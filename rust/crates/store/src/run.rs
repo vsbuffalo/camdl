@@ -267,6 +267,10 @@ pub(crate) struct Core {
     pub(crate) info: Arc<Shared>,
     pub(crate) entries: Vec<usize>,
     pub(crate) by_products: Vec<ByProductSlot>,
+    /// The folders of by-products ended by `fail_by_products` while the
+    /// run's own files are written inside one of them (reproducing mode):
+    /// removed when the run ends.
+    pub(crate) dropped: Vec<PathBuf>,
     pub(crate) events: AtomicU64,
     pub(crate) settled: bool,
 }
@@ -407,6 +411,16 @@ impl<A: Artifact> Run<A> {
     pub fn fail(mut self, operation: &str, reason: &str) -> Result<()> {
         self.core.fail(Some(operation.to_string()), Some(reason.to_string()))
     }
+
+    /// Ends every by-product wanted of this run as failed, with what was
+    /// running and why, and leaves the run itself to `finish` or `fail`. For
+    /// a computation that completed without the state its by-products are
+    /// written from. The invocation record lists each one as failed, and
+    /// `finish` commits none of them, so a later request for one produces it
+    /// in reproducing mode.
+    pub fn fail_by_products(&mut self, operation: &str, reason: &str) {
+        self.core.drop_by_products(Some(operation.to_string()), Some(reason.to_string()));
+    }
 }
 
 impl<A: Artifact> Drop for Run<A> {
@@ -492,13 +506,41 @@ impl Core {
         if r.is_err() && !self.settled {
             let _ = self.fail(None, r.as_ref().err().map(|e| e.to_string()));
         }
+        self.remove_dropped();
         r
+    }
+
+    /// Ends every wanted by-product as failed and takes it out of the run.
+    /// A by-product's folder is removed at once, unless the run's own files
+    /// are being written inside it (reproducing mode), when it is removed as
+    /// the run ends.
+    fn drop_by_products(&mut self, operation: Option<String>, reason: Option<String>) {
+        let reproducing = matches!(self.place, Place::Reproducing { .. });
+        for bp in std::mem::take(&mut self.by_products) {
+            bp.table.end();
+            self.store.info_set(&self.info, &bp.entries, Outcome::Failed, Some(Failure { operation: operation.clone(), reason: reason.clone() }));
+            if reproducing {
+                self.dropped.push(bp.dir);
+            } else {
+                let _ = remove_all(&bp.dir);
+            }
+        }
+    }
+
+    fn remove_dropped(&mut self) {
+        for dir in std::mem::take(&mut self.dropped) {
+            let _ = remove_all(&dir);
+        }
     }
 
     fn finish_inner(&mut self) -> Result<PathBuf> {
         let mut files = self.table.close_all()?;
         let files_dir = self.files_dir().to_path_buf();
         self.store_attempt_files(&mut files, &files_dir);
+        // A by-product is written by this run, so it records the run's reads.
+        for bp in &mut self.by_products {
+            bp.run_file.reads = self.run_file.reads.clone();
+        }
         let mut bp_files = Vec::new();
         for bp in &self.by_products {
             let mut f = bp.table.close_all()?;
@@ -690,6 +732,7 @@ impl Core {
             Place::Reproducing { files_dir, .. } => {
                 let _ = remove_all(files_dir);
                 self.store.info_set(&self.info, &self.entries, Outcome::Reused, None);
+                self.remove_dropped();
                 Ok(())
             }
         }

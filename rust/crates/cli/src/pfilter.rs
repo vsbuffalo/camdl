@@ -8,6 +8,9 @@
 //! With --trace: per-observation TSV (time, ll_increment, ESS).
 
 use rayon::prelude::*;
+use store::{Artifact, ContentArtifact};
+
+use crate::pfilter_store::Loglik;
 use sim::{
     compiled_model::CompiledModel,
     inference::{
@@ -159,25 +162,63 @@ fn cut_to_training_rows(
     Ok(TrainingCut { at, extent, rows, dropped })
 }
 
-/// `camdl pfilter`, under the compile settings `compile` (`--no-licm`), which
-/// every compile of the model is given. The arguments are read once, into the
-/// resolved configuration ([`crate::pfilter_config::resolve`]); the run is
-/// built from it and does not see them.
-pub fn cmd_pfilter(a: &crate::args::PfilterArgs, compile: crate::util::CompileSettings) {
+/// `camdl pfilter`: its inputs split by class, the configuration resolved
+/// from the declared inputs ([`crate::pfilter_config::resolve`]), and the run
+/// built from it, which does not see the arguments.
+pub fn cmd_pfilter(inv: crate::args::PfilterInvocation) {
     // pfilter has no `--no-color`: its painters follow the environment and
     // whether each stream is a terminal.
     let out = crate::out::Out::new(false);
     let _eval_stats_guard = crate::util::EvalStatsReportGuard::start();  // gh#audit-H5
-    let (config, outputs, execution, _forcing_route) = crate::pfilter_config::resolve(a, compile, &out);
-    run_pfilter(&out, config, outputs, execution);
+    // The replicate path reports the spread of the log-likelihood estimate
+    // over independent runs and writes nothing per run, so a per-run output
+    // beside it is refused rather than silently not written (gh#686).
+    if let Err(e) = check_per_run_outputs(&inv.args) {
+        out.fail(format!("error: {e}"));
+    }
+    let (declared, execution, exports, request, given) = store::Inputs::split(inv).into_parts();
+    let (declared, no_licm) = declared.into_parts();
+    let crate::args::PfilterInvocationExecution { args: execution, no_ir_cache } = execution;
+    let crate::args::PfilterExecution { model_overrides: (), scenario: (), inference, stream: () } = execution;
+    let compile = crate::util::CompileSettings::resolve(no_licm, no_ir_cache);
+    let filter_execution = crate::pfilter_config::execution(&inference);
+    let (exports,) = exports.into_parts();
+    let ((), (), _inference_exports, (), output) = exports.into_parts();
+    let (request,) = request.into_parts();
+    let ((), (), _inference_request, (), no_store, label, root) = request.into_parts();
+    let request = crate::camdl_store::store_request(label, root);
+    let execution_record = crate::args::PfilterInvocationExecution {
+        args: crate::args::PfilterExecution { model_overrides: (), scenario: (), inference, stream: () },
+        no_ir_cache,
+    };
+    let (config, requests, _forcing_route) = crate::pfilter_config::resolve(declared, compile, &out);
+    let store = StoreSide { request, no_store, given, execution: execution_record };
+    run_pfilter(&out, config, requests, RunExports { output }, filter_execution, store);
 }
 
-/// The particle filter of one resolved `pfilter`, and its stored leaf.
+/// The store-class inputs of one `pfilter`, and what its records hold.
+struct StoreSide {
+    request: store::StoreRequest,
+    /// `--no-store`: compute in a temporary store, deleted at the end.
+    no_store: bool,
+    given: store::Given,
+    execution: crate::args::PfilterInvocationExecution,
+}
+
+/// The exports a command asks for besides its by-products.
+struct RunExports {
+    /// `-o`: the log-likelihood table, rendered from the stored result.
+    output: Option<std::path::PathBuf>,
+}
+
+/// The particle filter of one resolved `pfilter`, and its stored result.
 fn run_pfilter(
     out: &crate::out::Out,
     config: crate::pfilter_config::ResolvedPfilterConfig,
-    outputs: crate::pfilter_config::PfilterOutputs,
-    execution: crate::pfilter_config::PfilterExecution,
+    requests: crate::pfilter_config::ByProductRequests,
+    exports: RunExports,
+    execution: crate::pfilter_config::FilterExecution,
+    store_side: StoreSide,
 ) {
     let crate::pfilter_config::ResolvedPfilterConfig {
         model_path: ir_path,
@@ -196,12 +237,21 @@ fn run_pfilter(
         sweep_file,
         seed,
         binomial,
-        max_substeps,
-        time_format,
         save_final_state,
-        engine,
     } = config;
-    let crate::pfilter_config::PfilterExecution { parallel } = execution;
+    let crate::pfilter_config::ByProductRequests {
+        trace: trace_path,
+        pf_health,
+        final_state: save_final_state_path,
+        paths: save_paths,
+        filtering: save_filtering,
+        filtered_streams: save_filtered_streams,
+        prequential: save_prequential,
+        score_from,
+        samples: save_samples,
+    } = requests;
+    let RunExports { output: output_path } = exports;
+    let crate::pfilter_config::FilterExecution { parallel, time_format, max_substeps } = execution;
     let fit_problem: Option<&crate::fit::config_v2::Problem> = fit.as_ref().map(|f| &f.config.problem);
 
 
@@ -212,12 +262,11 @@ fn run_pfilter(
     // two selections that differ are refused rather than one winning.
     //
     // A selection taken from the fit config contributes its intervention
-    // lists only ([`crate::util::FitBase`]); its named scenario's `set` and
-    // `scale` are not applied. At tier 4 they would override `--params`,
-    // the silent wrong θ for which `--scenario` beside `--params` is refused.
-    // The parameter values the fit config supplies are its `[fixed]` table,
-    // resolved at tier 2 below. A `--scenario` flag keeps its full meaning,
-    // and that refusal.
+    // lists only ([`crate::util::FitBase`]): its parameter effect is already
+    // the fit's `[fixed]` value, and applying a named scenario's `set` at
+    // tier 4 here would override `--params` — the silent-wrong-θ hazard
+    // gh#194 refuses `--scenario` beside `--params` for. A `--scenario` flag
+    // keeps its full meaning, and that gh#194 refusal.
     let flag_given = scenario_flags.any();
     let fit_base: Option<crate::util::FitBase> = fit_problem.map(|p| {
         crate::util::FitBase::of(p).unwrap_or_else(|e| {
@@ -250,7 +299,7 @@ fn run_pfilter(
     } = scenario_flags;
 
     // Load model (supports .camdl via camdlc)
-    let (mut model_in, _model_json) = crate::util::load_model(&ir_path, compile)
+    let (mut model_in, model_json) = crate::util::load_model(&ir_path, compile)
         .unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
     if let Some(base) = &scored_fit_base {
         let (enable, disable) = base.lists(&model_in).unwrap_or_else(|e| {
@@ -392,10 +441,11 @@ fn run_pfilter(
     });
 
     // The scored parameters, resolved by the tiers of `docs/camdl-run-spec.md`
-    // §1.3: the fit config's `[fixed]` (tier 2, with `--fit`), `--params`, the
-    // scenario and `--param`. pfilter scores one parameter set and estimates
-    // nothing, so the `[estimate]` set is empty and no
-    // `--fixed`-over-[estimate] notice can fire.
+    // §1.3: the fit config's `[fixed]` (tier 2, with `--fit`), `--params`, a
+    // design point (tier 3.5), the scenario and `--param`. pfilter scores one
+    // parameter set and estimates nothing, so the `[estimate]` set is empty
+    // and no `--fixed`-over-[estimate] notice can fire.
+    use crate::params_resolver::{ParameterInputs, resolve_parameters, emit_notices};
     use indexmap::{IndexMap, IndexSet};
 
     let crate::pfilter_config::ParamFlags { param: fixed_cli, params: fixed_files, table } = param_flags;
@@ -416,17 +466,23 @@ fn run_pfilter(
     };
     let fte: IndexSet<String> = IndexSet::new();
 
+    // The compiled model the run's identity names: the model as compiled and
+    // rewritten from data (its anchored times, its bound tables), before the
+    // parameter values and the scenario selection are applied. Those two
+    // are identity fields of their own, which `camdl_store::apply` sets, so
+    // every point of a design shares this one compiled model.
+    let mut keyed_model = model_in.clone();
+    crate::external_inputs::bind(&mut keyed_model, &external)
+        .unwrap_or_else(|e| out.fail(format!("error: {e}")));
+
     // gh#audit-H13: --parallel / CAMDL_PARALLEL throttles the rayon thread
-    // budget for the particle filter. Build a SCOPED local pool and run the
-    // bootstrap_filter calls inside `pool.install(...)` — both the
-    // per-replicate loop and the single run of `score_point`. The earlier
-    // fix used `build_global`, but the global pool is already initialised by
-    // the time cmd_pfilter reaches here, so `build_global` returned
-    // AlreadyInitialized and the default all-core pool was used regardless of
-    // --parallel. A scoped pool is order-independent: nested rayon work
-    // (particle_filter.rs par_iter_mut) inherits the surrounding pool. A
-    // value of 0 means "use rayon's default" (all logical cores) — leave the
-    // pool unset and run on the global pool in that case.
+    // budget for the particle filter: a scoped pool, on which the
+    // bootstrap_filter calls and the points of a design run. The global pool
+    // is already initialised by the time cmd_pfilter reaches here, so
+    // `build_global` cannot be used. Nested rayon work (particle_filter.rs
+    // par_iter_mut) inherits the surrounding pool. A value of 0 means rayon's
+    // default (all logical cores): the pool is left unset and the global pool
+    // used.
     let pf_pool: Option<rayon::ThreadPool> = if parallel > 0 {
         Some(
             rayon::ThreadPoolBuilder::new()
@@ -439,60 +495,864 @@ fn run_pfilter(
     } else {
         None
     };
-    let scorer = PointScorer {
-        out,
-        ir_path: &ir_path,
-        fit: &fit,
-        objective,
-        eval,
-        forcing: &forcing,
-        model_in: &model_in,
-        scenario_name: scenario_name.as_deref(),
-        adhoc_enable: &adhoc_enable,
-        adhoc_disable: &adhoc_disable,
-        fixed_cli: &fixed_cli,
-        fixed_files: &fixed_files,
-        external: &external,
-        fit_fixed: &ftf,
-        fit_estimate: &fte,
-        bound_streams: bound_streams.as_deref(),
-        data_flags_given: !cli_data_specs.is_empty(),
-        dt,
-        n_particles,
-        n_replicates,
-        seed,
-        binomial,
-        max_substeps,
-        time_format,
-        save_final_state: &save_final_state,
-        engine: &engine,
-        outputs: &outputs,
-        parallel,
-        pool: &pf_pool,
+
+    // ── The store ───────────────────────────────────────────────────────────
+    //
+    // Opened by the first point to pass its gates, so an invocation refused
+    // before any filter runs leaves no store; the compiled model and each
+    // data table are stored once, for every point.
+    let StoreSide { request, no_store, given, execution: execution_record } = store_side;
+    let stem = crate::hashing::path_stem_slug(&ir_path).unwrap_or_else(|| "model".to_string());
+    let prepared: std::sync::OnceLock<Prepared> = std::sync::OnceLock::new();
+    let prepare = |bound_streams: &[(String, std::path::PathBuf)]| -> Prepared {
+        let store = if no_store { crate::camdl_store::scratch() } else { crate::camdl_store::open(&request) }
+            .unwrap_or_else(|e| out.fail(format!("error: the run store at {}: {e}", crate::camdl_store::root_of(&request).display())));
+        if no_store {
+            out.remove_on_error(store.root().to_path_buf());
+        }
+        let mut info = store::RunInfo::new(&given, &execution_record, &request)
+            .unwrap_or_else(|e| out.fail(format!("error: {e}")));
+        // Each bound stream's table, read once, by content. The model was
+        // rewritten from these rows (its anchored times), so its record names
+        // them as lineage.
+        let mut tables = Vec::new();
+        for (name, path) in bound_streams {
+            let table = store::InputFile::<crate::camdl_store::Table>::new(path.clone())
+                .content()
+                .unwrap_or_else(|e| out.fail(format!("error: --data {name}: {e}")));
+            info.lineage(store::Lineage::Input { field: format!("data.{name}"), digest: table.digest() });
+            tables.push((name.clone(), path.clone(), table));
+        }
+        let source = std::fs::read(&ir_path)
+            .unwrap_or_else(|e| out.fail(format!("error: cannot read {ir_path}: {e}")));
+        let envelope = ir::envelope_from_str(&model_json)
+            .unwrap_or_else(|e| out.fail(format!("error: IR load error from {ir_path}: {e}")))
+            .with_model(keyed_model.clone());
+        let parts = crate::camdl_store::CompiledParts::split(
+            envelope, stem.clone(),
+            crate::camdl_store::ModelSource { bytes: &source, path: std::path::Path::new(&ir_path) },
+        ).unwrap_or_else(|e| out.fail(format!("error: {e}")));
+        let crate::camdl_store::CompiledParts { model: model_part, quantities, labels: model_labels, provenance } = parts;
+        store::release(quantities, "a filter run reports no quantities");
+        let model = store
+            .put::<crate::camdl_store::CompiledModel>(model_part, &model_labels, &provenance, &info)
+            .unwrap_or_else(|e| out.fail(format!("error: storing the compiled model: {e}")))
+            .dep(crate::camdl_store::CompiledModel::FILE)
+            .unwrap_or_else(|e| out.fail(format!("error: storing the compiled model: {e}")));
+        let mut data = std::collections::BTreeMap::new();
+        for (name, path, table) in tables {
+            let labels = crate::camdl_store::TableLabels { stream: name.clone(), path: path.display().to_string() };
+            let dep = store
+                .put::<crate::camdl_store::DataTable>(table, &labels, &store::Provenance::none(), &info)
+                .unwrap_or_else(|e| out.fail(format!("error: storing the data table of `{name}`: {e}")))
+                .dep(crate::camdl_store::DataTable::FILE)
+                .unwrap_or_else(|e| out.fail(format!("error: storing the data table of `{name}`: {e}")));
+            data.insert(name, dep);
+        }
+        Prepared { store, info, model, data }
     };
 
-    if let Some(points) = design {
-        score_design(&scorer, &points, outputs.output.as_deref());
-        return;
-    }
-    let score = score_point(&scorer, &[], PointRole::Single, |score| {
-        report_single(out, score, &outputs, seed, n_particles);
-    });
-    if score.every_replicate_failed() {
-        let first = score.failure.unwrap_or_default();
-        let message = if n_replicates > 1 {
-            format!("{first} (all {n_replicates} replicates; replicate 1 shown)")
-        } else {
-            first
+    // ── One parameter point ─────────────────────────────────────────────────
+    //
+    // Everything from the parameter values on: resolve them with `overrides`
+    // at tier 3.5 (a design point; empty for the single call), compile the
+    // model at them, bind the data, and run the filter under the point's
+    // claim. The single call and every design point are this one closure, so
+    // a design row is the single call at its values by construction.
+    let score_point = |overrides: &[(String, f64)], role: PointRole| -> PointResult {
+        // The lines every point of a call would print alike.
+        let announce = role.announces();
+        let resolved = resolve_parameters(ParameterInputs {
+            model: &model_in,
+            scenario: scenario_name.as_deref(),
+            adhoc_enable: &adhoc_enable,
+            adhoc_disable: &adhoc_disable,
+            scenario_inline_name: None,
+            scenario_inline_set: &[],
+            scenario_inline_scale: &[],
+            point_overrides: overrides,
+            fixed_cli: &fixed_cli,
+            fixed_files: &fixed_files,
+            fit_toml_fixed: &ftf,
+            fit_toml_estimate: &fte,
+            external: &external,
+        }).unwrap_or_else(|e| {
+            out.fail(format!("error: {}", e.with_flags(crate::params_resolver::FlagStyle::Params)));
+        });
+        emit_notices(out, &[&resolved]);
+        let model = resolved.model.clone();
+
+        let compiled = CompiledModel::new(model.clone())
+            .unwrap_or_else(|e| { out.fail(format!("compile error: {:?}", e)); })
+            .with_eval_settings(eval);
+        // gh#122: the particle filter is a stochastic (chain_binomial) producer; a
+        // source that mixes a deterministic exit with another exit would over-draw
+        // the source. Reject it here (the standalone `pfilter` command bypasses
+        // `check_model_capabilities`).
+        compiled
+            .validate_deterministic_source_exits()
+            .unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
+        // gh#121: a multi-source stochastic transition (`A + B --> C`) is bounded by
+        // only its first source on chain_binomial, driving the secondary source
+        // negative. The standalone pfilter bypasses check_model_capabilities, so
+        // gate it here too.
+        compiled
+            .validate_single_source_transitions()
+            .unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
+        // A transition consuming more than one unit of its source per firing has no
+        // meaning in the chain-binomial kernel the filter steps with; refuse it here
+        // for the same reason.
+        compiled
+            .validate_unit_source_consumption()
+            .unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
+        // gh#191: the particle filter is a chain_binomial INFERENCE producer — it
+        // carries no real state and never advances a reservoir, so a real-coupled
+        // (REAL_COMPARTMENTS) model would be filtered with its reservoir frozen at
+        // its init value: silently mis-fit. `camdl fit`/`profile` route through
+        // `check_model_capabilities`, but the standalone `pfilter` command bypasses
+        // it — so gate here too, with the same shared inference gate.
+        crate::fit::methods::check_model_capabilities(
+            crate::run_meta::InferenceBackend::ChainBinomial, &compiled,
+        ).unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
+        let params = compiled.default_params.clone();
+
+        // The conditional objective (`ic_free = true`) is admitted by the check
+        // `fit run` applies to its `pfilter` method: it needs particles that
+        // differ in x₀, which a deterministic `init { }` does not give.
+        if let Some(f) = fit.as_ref() {
+            let fit_name = f.name();
+            if objective.skips_first_observation() {
+                let init_law = if compiled.has_init_law {
+                    crate::fit::methods::InitLaw::Declared
+                } else {
+                    crate::fit::methods::InitLaw::Absent
+                };
+                if let Err(msg) = crate::fit::methods::validate_ic_free(
+                    crate::run_meta::FitAlgorithm::Pfilter, init_law,
+                ) {
+                    out.fail(format!("error: the --fit config sets ic_free = true. {msg}"));
+                }
+                if announce {
+                    out.say(format_args!("pfilter: objective: conditional on the first observation \
+                        (ic_free = true in {fit_name}); omit --fit and pass --data for the \
+                        full likelihood"));
+                }
+            } else if announce {
+                out.say(format_args!("pfilter: objective: full likelihood ({fit_name} does not set \
+                    ic_free = true)"));
+            }
+        }
+
+        // The missing-data refusal, reported here rather than where the binding was
+        // resolved, so every gate above keeps first say (see the binding block).
+        let bound_streams: &[(String, std::path::PathBuf)] = bound_streams.as_deref().unwrap_or_else(|| {
+            out.fail(format!("error: pfilter needs observation data to score: {PFILTER_SUPPLY}"));
+        });
+        if bound_streams.is_empty() {
+            out.fail("error: zero streams resolved from --data / --fit toml. \
+                       pfilter requires at least one observation stream.");
+        }
+
+        // Load data — route the time column through the calendar-time boundary
+        // translator (numeric or dated, per --time-format + the model origin).
+        let time_opts = TimeOpts {
+            origin: model.origin.as_deref(),
+            time_unit: &model.time_unit,
+            dt,
+            t_start: compiled.model.simulation.t_start,
+            format: time_format,
         };
-        out.error(filter_failed(message)).exit();
+
+        // Resolve the bound observation streams (BY SOURCE) and load each one's
+        // per-observation values + aux via the single shared seam that `fit run`
+        // and `profile` also route through (`fit::runner::resolve_and_load_obs_streams`).
+        // The seam filters `model.observations` by `source`, dispatches long-form vs
+        // wide loading (holes + aux), resolves each projection, and runs the per-
+        // stream origin / first-window guards — so a stratified family bound by its
+        // ROOT (`[data.observations] cases = FILE`, source `cases`) fans out to all
+        // its leaves exactly as `fit run` binds them. `bound_streams` (the CLI/toml
+        // key-space bindings) is mapped to the by-source `effective` map at the
+        // boundary; it is retained below only for the CAS data-hash + the unbound-
+        // streams warning, whose key-space (leaf name / family root) must not change.
+        let effective = crate::fit::runner::data_bindings_to_effective(&model, bound_streams)
+            .unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
+        let mut streams = crate::fit::runner::resolve_and_load_obs_streams(
+            &model, &compiled, &effective, &time_opts,
+        ).unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
+        let n_streams = streams.len();
+
+        // gh#1138: a saved final state is a forecast origin. Under the fit's
+        // `holdout_after`, one filtered through rows past the cutoff would already
+        // condition on the data a forecast from it is scored against, so a
+        // `--save-final-state` run binds only the training rows, cut by the rule
+        // the fit's partition uses, and saves the state at their end. Without
+        // `--save-final-state` the filter scores every bound row, held-out ones
+        // included: its log-likelihood and prequential outputs are what `compare`
+        // scores a holdout with.
+        //
+        // The cutoff resolves as `fit run` resolved it. A bare time or date needs
+        // no rows. An anchored one (`holdout_after = "last_obs - 4 weeks"`)
+        // resolves over the fit config's own files: resolved over `--data` files
+        // holding only the training rows, it would move back and cut the very
+        // rows that trained. Those files are read only in that case.
+        let mut training_cut: Option<TrainingCut> = None;
+        if save_final_state {
+            let holdout_after = fit_problem
+                .and_then(|p| p.data.as_ref())
+                .and_then(|d| d.holdout_after.as_ref());
+            if let (Some(spec), Some(f)) = (holdout_after, fit.as_ref()) {
+                let anchored = matches!(
+                    crate::fit::runner::parse_time_spec(
+                        "holdout_after", &spec.raw(), model.origin.as_deref(), &model.time_unit),
+                    Ok(crate::fit::runner::TimeSpec::Anchored(_)));
+                let cutoff_rows = |ss: &[crate::fit::runner::ObsStream]| -> std::collections::BTreeMap<
+                    String, Vec<crate::fit::observed_rows::ObservedRow>,
+                > {
+                    ss.iter().map(|s| (s.name.clone(), s.rows.clone())).collect()
+                };
+                let rows = if !anchored || cli_data_specs.is_empty() {
+                    cutoff_rows(&streams)
+                } else {
+                    let fit_streams = data_observations_of(&f.config.problem, &model, &f.handle)
+                        .and_then(|b| crate::fit::runner::data_bindings_to_effective(&model, &b))
+                        .and_then(|e| crate::fit::runner::resolve_and_load_obs_streams(
+                            &model, &compiled, &e, &time_opts))
+                        .unwrap_or_else(|e| {
+                            out.fail(format!(
+                                "error: --fit toml data, read to resolve holdout_after: {e}"));
+                        });
+                    cutoff_rows(&fit_streams)
+                };
+                let raw = spec.raw();
+                let cut = crate::fit::runner::resolve_holdout_cutoff(spec, &rows, &model)
+                    .and_then(|at| cut_to_training_rows(at, &raw, &mut streams))
+                    .unwrap_or_else(|e| { out.fail(format!("error: {e}")); });
+                // `--score-from` asks for a held-out window, and a cut that dropped
+                // rows leaves none: every row it could score trained. Scoring them
+                // would present in-sample rows as the held-out score.
+                if cut.dropped {
+                    if let Some(raw_from) = score_from.as_ref() {
+                        out.fail(format!(
+                            "error: --score-from {raw_from} scores a held-out window, but under \
+                             --save-final-state this run binds only the training rows of \
+                             holdout_after = \"{raw}\" (t = {}), so every row it could score \
+                             trained.\n  Fix: run --save-prequential --score-from without \
+                             --save-final-state (the filter then scores the full series), and \
+                             save the state in a separate run.", cut.at));
+                    }
+                }
+                out.say(format_args!(
+                    "pfilter: --save-final-state under holdout_after = \"{raw}\" (t = {}): \
+                     state saved at t = {}, the end of the training rows (holdout_after); \
+                     the log-likelihood shown covers training rows only, as does every \
+                     other output of this run (--trace, --save-prequential, --save-paths, \
+                     --save-filtering, --save-filtered-streams, --pf-health)",
+                    cut.at, cut.extent));
+                training_cut = Some(cut);
+            }
+        }
+
+        // Holes (missing observations via `NA`) are correct for the filter
+        // log-likelihood — a hole contributes no term but still resets the bin
+        // (the authoritative per-stream cells carry `None`). But the prequential
+        // and `--trace` outputs read the dense placeholder view, where a hole shows
+        // as 0: prequential would score elpd/CRPS/PIT against a fictitious observed
+        // 0, and the trace's `observed` column would report 0 at a missing week.
+        // Rather than emit a silently-wrong diagnostic, reject the combination until
+        // those paths thread holes through (follow-up). The plain filter loglik is
+        // unaffected.
+        // gh#636: holes are first-class in the diagnostic outputs — per-stream
+        // prequential scores skip hole (stream, time) cells (they carry no term),
+        // the joint scores cover the present streams only, and the trace's
+        // observed column prints NA where nothing is present. Say so once, so a
+        // reader of the outputs knows rows were skipped rather than zero-filled.
+        let has_holes = streams.iter().any(|s| s.cells.iter().any(|c| match c {
+            Some(sim::inference::ObsCell::Scalar(_)) => false,
+            Some(sim::inference::ObsCell::HeldOut(_)) | None => true,
+        }));
+        if announce && has_holes && (save_prequential.is_some() || trace_path.is_some()) {
+            out.say("pfilter: data has missing observations (NA) — prequential/trace \
+                 scores skip the missing (stream, time) cells; a step with no \
+                 present stream is omitted from the prequential and prints NA in \
+                 the trace.");
+        }
+
+        if announce && n_streams > 1 {
+            out.say(format_args!("  streams: {}", streams.iter()
+                .map(|s| s.name.as_str()).collect::<Vec<_>>().join(", ")));
+        }
+
+        if announce { out.say(format_args!("pfilter: bound streams: {}", streams.iter()
+            .map(|s| format!("{}({})", s.name, match &s.obs_model_ir.likelihood {
+                ir::observation::Likelihood::NegBinomial(_)  => "neg_binomial",
+                ir::observation::Likelihood::Normal(_)       => "normal",
+                ir::observation::Likelihood::Poisson(_)      => "poisson",
+                ir::observation::Likelihood::Binomial(_)     => "binomial",
+                ir::observation::Likelihood::BetaBinomial(_) => "beta_binomial",
+                ir::observation::Likelihood::Beta(_)         => "beta",
+                ir::observation::Likelihood::Bernoulli(_)    => "bernoulli",
+                ir::observation::Likelihood::ZeroInflatedNegBinomial(_) => "zero_inflated_neg_binomial",
+            })).collect::<Vec<_>>().join(", "))); }
+
+        // gh#90: emit unbound-streams warning if a multi-block model is only
+        // partially covered. The bound set is the RESOLVED leaf names (a family root
+        // fans out to its leaves), not the raw binding keys — else an indexed family
+        // bound by its root would look entirely unbound and false-warn.
+        {
+            let all_names: Vec<String> = model.observations.iter()
+                .map(|o| o.name.clone()).collect();
+            let bound_names: Vec<String> = streams.iter()
+                .map(|s| s.name.clone()).collect();
+            if let Some(w) = crate::util::format_unbound_streams_warning(
+                "pfilter", &all_names, &bound_names,
+            ).filter(|_| announce) {
+                out.say_raw(format_args!("{}", w));
+            }
+        }
+
+        // Build process + observation model via traits. The `ObsStream -> StreamSpec`
+        // mapping is the single shared builder (`stream_specs_from_obs_streams`):
+        // authoritative per-grid-time cells (holes = `None`) + survey denominators
+        // (`aux`), each stream fed its OWN schedule; `bind` re-merges to the union
+        // and validates aux — identical to how `fit run` builds its obs model.
+        let compiled = std::sync::Arc::new(compiled);
+        let process = ChainBinomialProcess::new(compiled.clone());
+        let stream_specs = crate::fit::runner::stream_specs_from_obs_streams(&streams);
+        // The observed window `--score-from first_obs/last_obs` anchors to (D40):
+        // the earliest start and the latest end of a row with a value.
+        let observed_window =
+            crate::fit::training_partition::observed_window(streams.iter().flat_map(|s| &s.rows));
+        let (bound, report) = BoundObs::bind(compiled.model.simulation.t_start, stream_specs)
+            .unwrap_or_else(|report| {
+            out.fail(format!("error: observation data invalid:\n{}", report.render()));
+        });
+
+        // gh#812: a non-fatal bind report was previously discarded, so the
+        // Warn channel was write-only. Surface it — a zero denominator scores
+        // as zero, and the user must be told which rows and why.
+        if announce && !report.findings().is_empty() {
+            out.say(format_args!("{}", report.render()));
+        }
+        let obs_model = MultiStreamObsModel::new(bound, compiled.clone())
+            .unwrap_or_else(|e| {
+                out.fail(format!("error: observation model construction failed: {:?}", e));
+            });
+
+        // Canonical observations: the UNION axis the bound model scores along —
+        // every stream's scoring boundaries plus every declared period's opening
+        // boundary inside the run (multi-cadence, proposal 2026-06-10 §3.3;
+        // periods, gh#833) — taken FROM the model, never rebuilt from the rows'
+        // labels, which agree with it only under `closing_at`. Downstream
+        // single-stream code paths (trace, prequential, save_filtering, save_paths,
+        // save_final_state) consume `obs.time` (the union grid) and `obs.value` (a
+        // never-scored placeholder 0.0 — the per-stream scored values live in each
+        // stream's cells).
+        let observations: Vec<Observation> = obs_model.obs_times().iter()
+            .map(|&time| Observation { time, value: 0.0 })
+            .collect();
+
+        if announce {
+            out.say(format_args!("pfilter: {} observation boundaries × {} streams, {} particles, dt={}, seed={}",
+                observations.len(), n_streams, n_particles, dt, seed));
+        }
+
+        // Record ancestry when either --save-paths or --save-filtering is
+        // active. Both flags consume the same per-step snapshot data; the
+        // difference is only in what we write to disk at the end.
+        let need_ancestry = save_paths.is_some() || save_filtering.is_some();
+        // gh#520: the PredictionDiag block is only read by the single-run
+        // `--trace` writer below (`result.predictions`, ~line 660). It used to
+        // compute unconditionally whenever the obs model could project a state —
+        // which meant `--replicates N` (which never reads `.predictions` at all,
+        // only `.log_likelihood`) and a plain single run with no `--trace` both
+        // paid for it and threw it away.
+        let want_predictions = trace_path.is_some() && n_replicates <= 1;
+        let smc_config = SMCConfig {
+            n_particles,
+            dt,
+            t_start: compiled.model.simulation.t_start,
+            skip_first_obs_from_loglik: objective.skips_first_observation(),
+            record_ancestry: need_ancestry,
+            record_prequential: save_prequential.is_some(),
+            record_predictions: want_predictions,
+            // Single-run only: `--replicates` refuses `--save-filtered-streams`.
+            record_stream_means: save_filtered_streams.is_some() && n_replicates <= 1,
+            // gh#241: deterministic compute budget (the engine default unless the
+            // user passes `--pf-max-substeps`). Reproducible across machines — there
+            // is no wall-clock watchdog, so a content-addressed `pfilters/` leaf is
+            // produced identically regardless of hardware.
+            max_substeps,
+            // gh#747: `--binomial`; the run's stored address records it.
+            binomial,
+        };
+
+        // --save-filtering caveat log. Fires unconditionally (not quietable)
+        // because the failure mode — plotting filtering marginals as if
+        // they were smoothing paths — is silent. See
+        // docs/dev/proposals/2026-04-19-pf-latent-trajectories.md.
+        if save_filtering.is_some() {
+            out.say(format_args!("[info] --save-filtering emits filtering marginals \
+                       p(x_t | y_{{1..t}}), not smoothing paths. Joining \
+                       particles across time by index does NOT yield \
+                       trajectory samples from the posterior. For coherent \
+                       sample paths use --save-paths N PATH."));
+        }
+
+        // ── The prequential window ──────────────────────────────────────────────
+        //
+        // `--score-from TIME` windows the prequential trace: observations at
+        // t <= TIME are assimilated but not scored. It is resolved here, before
+        // the run, to the model time its by-product's identity holds.
+        let score_from_t: Option<f64> = match (&save_prequential, &score_from) {
+            (Some(_), Some(raw)) => {
+                let last = observations.last().map(|o| o.time).unwrap_or(0.0);
+                let (first_obs, last_obs) = observed_window.unwrap_or((0.0, last));
+                let spec = crate::fit::runner::parse_time_spec(
+                    "--score-from", raw, model.origin.as_deref(), &model.time_unit,
+                ).unwrap_or_else(|e| {
+                    out.fail(format!("error: {}", e));
+                });
+                let t = match spec {
+                    crate::fit::runner::TimeSpec::Absolute(v) => v,
+                    crate::fit::runner::TimeSpec::Anchored(at) => {
+                        let anchor = match at.anchor {
+                            crate::fit::runner::ObsAnchor::First => first_obs,
+                            crate::fit::runner::ObsAnchor::Last => last_obs,
+                        };
+                        at.resolve(anchor)
+                    }
+                };
+                if t >= last - 1e-9 {
+                    out.fail(format!(
+                        "error: --score-from {raw} resolves to t = {t}, at or \
+                         after the last observation (t = {last}) — nothing \
+                         would be scored."));
+                }
+                Some(t)
+            }
+            _ => None,
+        };
+
+        // ── The engine ──────────────────────────────────────────────────────────
+        //
+        // The filter itself, run only under a claim: `--replicates N` runs N
+        // independent filters and keeps each log-likelihood; one run keeps the
+        // whole result, which the by-products are written from. A failure the
+        // run's identity determines (every particle's weight reaching zero, an
+        // error the model raises at these parameters) is part of the result.
+        // Only the compute budget, an execution input, refuses the run.
+        let run_filter = || -> Result<Filtered, crate::out::CommandError> {
+            if n_replicates > 1 {
+                if announce {
+                    out.say(format_args!("pfilter: {} replicates × {} particles{}",
+                        n_replicates, n_particles,
+                        if parallel > 0 { format!(" (parallel = {})", parallel) } else { String::new() }));
+                }
+                // The metric is the running-mean loglik: replicates are noisy
+                // estimates of one loglik at fixed parameters. A design point has
+                // no bar of its own: the design counts points.
+                let bar = matches!(role, PointRole::Single).then(|| {
+                    crate::out::progress::Reporter::new().task(n_replicates as u64, "pfilter", "reps")
+                });
+                let acc = std::sync::Mutex::new((0.0_f64, 0usize)); // (Σ loglik, count)
+                let each: Vec<Result<(u64, f64, Option<String>), String>> = run_pooled(&pf_pool, || {
+                    (0..n_replicates).into_par_iter().map(|rep| {
+                        let rep_seed = replicate_seed(seed, rep);
+                        let result = match bootstrap_filter(&process, &obs_model, &params, &smc_config, rep_seed) {
+                            Ok(result) => result,
+                            Err(e) if refuses_the_run(&e) => {
+                                return Err(format!("pfilter replicate {} error: {:?}", rep + 1, e));
+                            }
+                            Err(e) => {
+                                if let Some(bar) = bar.as_ref() { bar.inc(1); }
+                                return Ok((rep_seed, f64::NEG_INFINITY, Some(format!(
+                                    "pfilter replicate {} error: {}", rep + 1, failure_text(&e)))));
+                            }
+                        };
+                        // The replicate is added to the running mean before its
+                        // count is ticked, so the line printed at the last count
+                        // names the mean of every finite replicate.
+                        if let (true, Some(bar)) = (result.log_likelihood.is_finite(), bar.as_ref()) {
+                            if let Ok(mut g) = acc.lock() {
+                                g.0 += result.log_likelihood;
+                                g.1 += 1;
+                                bar.set(crate::out::progress::ll(g.0 / g.1 as f64));
+                            }
+                        }
+                        if let Some(bar) = bar.as_ref() { bar.inc(1); }
+                        Ok((rep_seed, result.log_likelihood, collapse_message(&result)))
+                    }).collect()
+                });
+                if let Some(bar) = bar { bar.finish(); }
+                let mut rows = Vec::with_capacity(n_replicates);
+                let mut failures = Vec::with_capacity(n_replicates);
+                for r in each {
+                    let (s, ll, c) = r.map_err(filter_failed)?;
+                    rows.push((s, ll));
+                    failures.push(c);
+                }
+                Ok(Filtered::Replicates { rows, failures })
+            } else {
+                // The scoped pool throttles the particle-level parallelism inside
+                // bootstrap_filter (par_iter_mut over the swarm).
+                match run_pooled(&pf_pool, || bootstrap_filter(&process, &obs_model, &params, &smc_config, seed)) {
+                    Ok(result) => Ok(Filtered::Single(Box::new(result))),
+                    Err(e) if refuses_the_run(&e) => Err(filter_failed(format!(
+                        "pfilter error: {}", crate::util::sim_error_text(&e)))),
+                    Err(e) => Ok(Filtered::Failed(format!("pfilter error: {}", failure_text(&e)))),
+                }
+            }
+        };
+
+        // What one computed run stores, from the filter's outcome. The writers
+        // are those of the files the flags export, so a stored by-product and
+        // its export are the same bytes.
+        let run_files = |filtered: &Filtered, model: &ir::Model| -> RunFiles {
+            // Where each scored value came from, the notices the resolution
+            // reported, and under the forcing override each forcing the run held
+            // outside its range: what the run records besides its result.
+            let mut record = serde_json::json!({
+                "parameters_provenance": crate::run_meta::ParameterProvenance::of_all(&resolved.params),
+                "notices": crate::params_resolver::notices(&[&resolved]),
+            });
+            forcing.record_in(&mut record);
+            let parameters = serde_json::to_vec_pretty(&record).expect("the run's record encodes");
+            let mut f = RunFiles {
+                loglik: Loglik {
+                    loglik: None,
+                    n_replicates: n_replicates as u64,
+                    n_particles: n_particles as u64,
+                    loglik_sd: None,
+                    n_failed: 0,
+                    failure: None,
+                },
+                replicates: None,
+                parameters,
+                trace: None,
+                pf_health: None,
+                final_state: None,
+                paths: None,
+                prequential: None,
+                filtering: None,
+                filtered_streams: None,
+            };
+            let result = match filtered {
+                Filtered::Failed(message) => {
+                    f.loglik.n_failed = 1;
+                    f.loglik.failure = Some(message.clone());
+                    return f;
+                }
+                Filtered::Replicates { rows, failures } => {
+                    let n = rows.len();
+                    f.replicates = Some(replicates_bytes(rows));
+                    // A replicate that failed has no log-likelihood, so neither
+                    // has the mean: the count and the first failure are stored.
+                    let n_failed = failures.iter().flatten().count();
+                    if n_failed > 0 {
+                        f.loglik.n_failed = n_failed as u64;
+                        f.loglik.failure = failures.iter().flatten().next().cloned();
+                    } else {
+                        let mean = rows.iter().map(|r| r.1).sum::<f64>() / n as f64;
+                        let var = rows.iter().map(|r| (r.1 - mean).powi(2)).sum::<f64>() / (n - 1) as f64;
+                        f.loglik.loglik = Some(mean);
+                        f.loglik.loglik_sd = Some(var.sqrt());
+                    }
+                    return f;
+                }
+                Filtered::Single(result) => result,
+            };
+            match collapse_message(result) {
+                Some(message) => {
+                    f.loglik.n_failed = 1;
+                    f.loglik.failure = Some(message);
+                }
+                None => f.loglik.loglik = Some(result.log_likelihood),
+            }
+            if trace_path.is_some() {
+                f.trace = Some(trace_bytes(result, &observations, &obs_model));
+            }
+            if pf_health.is_some() {
+                f.pf_health = Some(pf_health_bytes(result, &observations, n_particles));
+            }
+            // An unweighted sample from p(x_T | y_{1:T}) at this θ, at the last
+            // observation time on the union grid: the swarm was resampled after
+            // scoring it. That time rides in the file's header, because
+            // `simulate --init-state` has no other way to learn the forecast
+            // origin.
+            if save_final_state_path.is_some() {
+                if let Some(states) = &result.final_states {
+                    let origin_t = observations.last().map(|o| o.time).unwrap_or(model.simulation.t_start);
+                    let columns = io::trajectories::TrajColumnSpec::from_model(model, &[]);
+                    f.final_state = Some(io::final_states_bytes(states, &columns, origin_t)
+                        .unwrap_or_else(|e| out.fail(format!("error writing final states: {}", e))));
+                }
+            }
+            if let Some((n_paths, _)) = &save_paths {
+                let trace = result.ancestry.as_ref().expect("record_ancestry is set when save_paths is");
+                let paths = sim::inference::ancestor_trace::sample_paths(trace, *n_paths, seed);
+                f.paths = Some(paths_bytes(&paths, model));
+            }
+            if save_prequential.is_some() {
+                let recorded = result.prequential.as_ref().expect("record_prequential is set when save_prequential is");
+                // Each stream is scored against its own observed values.
+                let per_stream_obs = obs_model.per_stream_observed();
+                let t0 = score_from_t.map_or(0, |t| crate::fit::runner::first_scored_index(&recorded.obs_times, t));
+                // What each scored value was accumulated over, so `compare` can
+                // refuse to difference two traces that scored different windows.
+                let per_stream_cov = obs_model.per_stream_coverage();
+                let mut trace = sim::inference::prequential::build_trace(
+                    recorded, &per_stream_obs, &per_stream_cov, &result.ess_trace, t0, seed,
+                    obs_model.first_observation_opens_after_run_start(smc_config.t_start),
+                    score_from_t);
+                // The forcings the filter held outside their ranges, with the
+                // scores they affected.
+                trace.warnings.extend(forcing.trace_warnings());
+                // How this trace was computed: one pass at the parameters this
+                // invocation was given.
+                trace.derivation = Some(score::trace::Derivation::single_pass(
+                    &trace, n_particles, dt, seed,
+                    score::trace::ThetaSource::Supplied,
+                    adhoc_enable.clone(), adhoc_disable.clone()));
+                if !save_samples {
+                    for step in &mut trace.steps {
+                        for ss in &mut step.per_stream { ss.y_pred_samples.clear(); }
+                    }
+                    trace.warnings.push(score::trace::PrequentialWarning::SamplesNotSaved);
+                }
+                let calendar = ir::caltime::CalendarAxis::from_model(model)
+                    .unwrap_or_else(|e| out.fail(format!("error: {e}")));
+                f.prequential = Some(crate::prequential_out::prequential_files(&trace, &calendar)
+                    .unwrap_or_else(|e| out.fail(format!("error writing prequential: {}", e))));
+            }
+            if save_filtering.is_some() {
+                let trace = result.ancestry.as_ref().expect("record_ancestry is set when save_filtering is");
+                f.filtering = Some(filtering_bytes(trace, model));
+            }
+            if save_filtered_streams.is_some() {
+                let steps = result.stream_means.as_deref().expect("record_stream_means is set when save_filtered_streams is");
+                f.filtered_streams = Some(filtered_streams_bytes(steps, &observations, &obs_model.stream_names()));
+            }
+            f
+        };
+
+        // ── The run ─────────────────────────────────────────────────────────────
+        let Prepared { store, info, model: model_dep, data } = prepared.get_or_init(|| prepare(bound_streams));
+        use crate::pfilter_store::*;
+        let finite = |what: &str, x: f64| store::Finite::new(x).unwrap_or_else(|e| out.fail(format!("error: {what}: {e}")));
+        let identity = PfilterIdentity {
+            model: model_dep.clone(),
+            config: PfilterConfig {
+                particles: n_particles as u64,
+                replicates: n_replicates as u64,
+                dt: finite("dt", dt),
+                data: data.clone(),
+                objective: objective.into(),
+                allow_forcing_extrapolation: forcing.allowed(),
+                allow_degenerate_rates: eval.allow_degenerate_rates,
+                training_rows: training_cut.as_ref().and_then(TrainingCut::identity)
+                    .map(|rows| rows.iter().map(|(n, c)| (n.clone(), *c as u64)).collect()),
+                binomial: smc_config.binomial.into(),
+            },
+            params: crate::camdl_store::ResolvedParams::new(resolved.params.iter().map(|p| (p.name.clone(), p.value)))
+                .unwrap_or_else(|e| out.fail(format!("error: the scored point: {e}"))),
+            scenario: crate::camdl_store::ActiveInterventions::of(&model),
+            seed: crate::camdl_store::ProcessSeed { seed },
+        };
+        let point = match role {
+            PointRole::Single => None,
+            PointRole::Design { row, point_id, .. } => Some(DesignPointLabel { row, point_id, values: overrides.to_vec() }),
+        };
+        let labels = PfilterLabels { model: stem.clone(), seed, point };
+        let filter = store::Identity::record(&identity);
+        let asked_by_products = trace_path.is_some() || pf_health.is_some() || save_final_state_path.is_some()
+            || save_paths.is_some() || save_prequential.is_some() || save_filtering.is_some()
+            || save_filtered_streams.is_some();
+        let mut wanted = store::Wanted::<Pfilter>::none();
+        if trace_path.is_some() {
+            wanted = wanted.with::<Trace>(TraceIdentity { filter: filter.clone() }, ());
+        }
+        if pf_health.is_some() {
+            wanted = wanted.with::<PfHealth>(PfHealthIdentity { filter: filter.clone() }, ());
+        }
+        if save_final_state_path.is_some() {
+            wanted = wanted.with::<FinalState>(FinalStateIdentity { filter: filter.clone() }, ());
+        }
+        if let Some((n_paths, _)) = &save_paths {
+            wanted = wanted.with::<SavedPaths>(SavedPathsIdentity { filter: filter.clone(), paths: *n_paths as u64 }, ());
+        }
+        if save_prequential.is_some() {
+            let score_from = score_from_t.map(|t| finite("--score-from", t));
+            wanted = wanted.with::<Prequential>(PrequentialIdentity { filter: filter.clone(), score_from, samples: save_samples }, ());
+        }
+        if save_filtering.is_some() {
+            wanted = wanted.with::<Filtering>(FilteringIdentity { filter: filter.clone() }, ());
+        }
+        if save_filtered_streams.is_some() {
+            wanted = wanted.with::<FilteredStreams>(FilteredStreamsIdentity { filter }, ());
+        }
+
+        // A failure here is not a property of the point: an I/O or store error,
+        // or another process holding the run. The point is not stored, and a
+        // rerun computes it.
+        let not_completed = |message: String| PointResult::Failed(crate::out::CommandError::new(message));
+        let begun = match store.begin_with::<Pfilter>(&identity, &labels, &wanted, info, request.reuse()) {
+            Ok(b) => b,
+            Err(e) => return not_completed(format!("error: {e}")),
+        };
+        let result = match begun {
+            store::Begin::Reused(stored) => PointResult::Stored { stored, kept: false, by_products_failed: false },
+            store::Begin::Busy(owner) => not_completed(format!("error: {}", store::Error::InProgress(owner))),
+            store::Begin::Claimed(mut run) => 'claimed: {
+                // A claim on a stored run exists only for by-products: the run
+                // is computed again and compared, and keeps nothing of its own.
+                let reproducing = run.reproducing();
+                let filtered = match run_filter() {
+                    Ok(f) => f,
+                    Err(e) => {
+                        let _ = run.fail("filtering", &e.message);
+                        break 'claimed PointResult::Failed(e);
+                    }
+                };
+                // The by-products are written against the model the run read
+                // from the store, the bytes its identity is keyed by.
+                let run_model = match run.load(&identity.model) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        let message = format!("error: reading the stored compiled model: {e}");
+                        let _ = run.fail("filtering", &message);
+                        break 'claimed not_completed(message);
+                    }
+                };
+                // The model the filter ran is the stored one with the identity's
+                // parameters and interventions applied, byte for byte.
+                let run_model = crate::camdl_store::apply(run_model.model(), &identity.params, &identity.scenario);
+                if crate::camdl_store::model_part_digest(&run_model) != crate::camdl_store::model_part_digest(&model) {
+                    let message = "internal: the model the filter ran is not the stored model with this run's \
+                        parameters and interventions applied";
+                    let _ = run.fail("filtering", message);
+                    break 'claimed not_completed(format!("error: {message}"));
+                }
+                let files = run_files(&filtered, &run_model);
+                // A filter that stopped with an error left no state to write the
+                // by-products from: each one asked for is recorded as failed, and
+                // the run itself is stored.
+                let by_products_failed = match &filtered {
+                    Filtered::Failed(message) if asked_by_products => {
+                        run.fail_by_products("filtering", message);
+                        true
+                    }
+                    _ => false,
+                };
+                if let Err(e) = write_run(&mut run, &files) {
+                    let message = format!("error: writing the filter run: {e}");
+                    let _ = run.fail("storing", &e.to_string());
+                    break 'claimed not_completed(message);
+                }
+                match run.finish() {
+                    // Something new is kept unless the run was reproduced and
+                    // every by-product it was reproduced for failed.
+                    Ok(stored) => PointResult::Stored { stored, kept: !(reproducing && by_products_failed), by_products_failed },
+                    Err(e) => not_completed(format!("error: storing the filter run: {e}")),
+                }
+            }
+        };
+        if let (PointRole::Design { point_id, .. }, PointResult::Stored { stored, kept: computed, .. }) = (role, &result) {
+            if !no_store {
+                let folder = crate::run_paths::display_absolute(stored.folder());
+                out.milestone(if *computed { "stored" } else { "cached" }, format_args!("point {point_id} {}", folder.display()));
+            }
+        }
+        result
+    };
+
+    match design {
+        Some(points) => {
+            let results = score_design(out, &points, &pf_pool, &score_point);
+            let Some(Prepared { store, info, .. }) = prepared.into_inner() else {
+                unreachable!("a point that returns has opened the store")
+            };
+            report_design(out, &points, results, store, info, output_path.as_deref(), no_store);
+        }
+        None => {
+            let result = score_point(&[], PointRole::Single);
+            let Some(Prepared { store, info, .. }) = prepared.into_inner() else {
+                unreachable!("a point that returns has opened the store")
+            };
+            let paths = ExportPaths {
+                trace: trace_path.as_deref(),
+                pf_health: pf_health.as_deref(),
+                final_state: save_final_state_path.as_deref(),
+                paths: save_paths.as_ref().map(|(n, p)| (*n, p.as_path())),
+                prequential: save_prequential.as_deref(),
+                filtering: save_filtering.as_deref(),
+                filtered_streams: save_filtered_streams.as_deref(),
+            };
+            report_single(out, result, store, info, &paths, output_path.as_deref(), no_store, &model_in);
+        }
+    }
+}
+/// What every point of one `pfilter` stores through: the store, the
+/// invocation's record, and the compiled model and data tables each point's
+/// identity names. Made once, by the first point to reach the store.
+struct Prepared {
+    store: store::Store,
+    info: store::RunInfo,
+    model: store::Dep<crate::camdl_store::CompiledModel>,
+    data: std::collections::BTreeMap<String, store::Dep<crate::camdl_store::DataTable>>,
+}
+
+/// Which evaluation a point is.
+#[derive(Clone, Copy)]
+enum PointRole {
+    /// The one evaluation of a call without a design: every line the run
+    /// prints, the replicate progress bar, and the exports.
+    Single,
+    /// One point of a `--sweep-file` design: the `row`-th of the file,
+    /// written under `point_id`. The `first` point prints the lines every
+    /// point would print alike.
+    Design { row: usize, point_id: usize, first: bool },
+}
+
+impl PointRole {
+    /// Whether this evaluation prints the lines every point prints alike.
+    fn announces(self) -> bool {
+        match self {
+            PointRole::Single => true,
+            PointRole::Design { first, .. } => first,
+        }
     }
 }
 
+/// What became of one point.
+enum PointResult {
+    /// A completed filter run: computed now, or found stored. `kept` says
+    /// whether this call stored anything: the run, or a by-product of a run
+    /// already stored. `by_products_failed` says the filter stopped with an
+    /// error, so no by-product asked for could be written. Its
+    /// `loglik.toml` says whether the filter scored the point or failed at
+    /// it.
+    Stored { stored: store::Stored<crate::pfilter_store::Pfilter>, kept: bool, by_products_failed: bool },
+    /// The point did not complete, for a reason that is not a property of
+    /// the point (the compute budget, an I/O or store error, another process
+    /// holding the run). Nothing is stored for it, and a rerun computes it.
+    Failed(crate::out::CommandError),
+}
+
+/// The paths the single call's by-products are exported to.
+struct ExportPaths<'a> {
+    trace: Option<&'a str>,
+    pf_health: Option<&'a str>,
+    final_state: Option<&'a std::path::Path>,
+    paths: Option<(usize, &'a std::path::Path)>,
+    prequential: Option<&'a str>,
+    filtering: Option<&'a std::path::Path>,
+    filtered_streams: Option<&'a std::path::Path>,
+}
+
 /// Seed stride between replicates: replicate `r` of a call with `--seed s`
-/// runs on `s + r * SEED_STRIDE`. A stride of one would give highly correlated
-/// ChaCha8 initial states; the golden-ratio multiplier decorrelates the low
-/// bits.
+/// runs on `s + r * SEED_STRIDE`. The golden-ratio multiplier decorrelates
+/// the low bits of the ChaCha8 initial states, which a stride of one leaves
+/// highly correlated.
 const SEED_STRIDE: u64 = 0x9e3779b97f4a7c15;
 
 /// The seed replicate `rep` of a call with `--seed seed` runs on.
@@ -500,67 +1360,34 @@ fn replicate_seed(seed: u64, rep: usize) -> u64 {
     seed.wrapping_add((rep as u64).wrapping_mul(SEED_STRIDE))
 }
 
-/// Print the result of the single call before its leaf is stored: the
-/// log-likelihood to `-o` or stdout, or with `--replicates N` the mean and
-/// spread on stderr and each replicate's seed and log-likelihood to `-o` or
-/// stdout.
-fn report_single(
-    out: &crate::out::Out,
-    score: &PointScore,
-    outputs: &crate::pfilter_config::PfilterOutputs,
-    seed: u64,
-    n_particles: usize,
-) {
-    let output_path = &outputs.output;
-    let logliks = &score.replicate_logliks;
-    let n_replicates = logliks.len();
-    match score.loglik_sd {
-        Some(sd_ll) => {
-            let mean_ll = score.loglik;
-            let n_collapsed = score.n_failed;
-            out.say(format_args!("loglik = {:.1} ± {:.1} ({} replicates, N={})", mean_ll, sd_ll, n_replicates, n_particles));
-            if let Some(first) = &score.failure {
-                out.say(format_args!("warning: {n_collapsed} of {n_replicates} replicates scored \
-                    -inf, so the mean is -inf; the first: {}",
-                    first.strip_prefix("error: ").unwrap_or(first)));
-            }
+/// Whether a filter error refuses the run instead of being its result. The
+/// compute budget is the one such error: it depends on `--pf-max-substeps`,
+/// an execution input, so a run it stops is not a function of its identity.
+/// Every other error the filter returns is determined by the model, the
+/// parameters, the data, the particles and the seed.
+fn refuses_the_run(e: &sim::SimError) -> bool {
+    matches!(e, sim::SimError::PFIterationBudget { .. })
+}
 
-            // Output: TSV of seed + loglik, or summary to --output
-            match output_path {
-                Some(path) => {
-                    let mut f = std::fs::File::create(path)
-                        .unwrap_or_else(|e| { out.fail(format!("cannot create {}: {}", path, e)); });
-                    writeln!(f, "seed\tloglik").unwrap();
-                    for (rep, ll) in logliks.iter().enumerate() {
-                        writeln!(f, "{}\t{:.4}", replicate_seed(seed, rep), ll).unwrap();
-                    }
-                    out.say(format_args!("replicate logliks written to {}", path));
-                }
-                None => {
-                    out.data_line("seed\tloglik");
-                    for (rep, ll) in logliks.iter().enumerate() {
-                        out.data_line(format_args!("{}\t{:.4}", replicate_seed(seed, rep), ll));
-                    }
-                }
-            }
-        }
-        None => {
-            let trace_to_stdout = outputs.trace.as_deref() == Some("-");
-            match output_path {
-                Some(path) => {
-                    std::fs::write(path, format!("{:.4}\n", score.loglik))
-                        .unwrap_or_else(|e| { out.fail(format!("cannot write {}: {}", path, e)); });
-                    out.say(format_args!("loglik written to {}", path));
-                }
-                None => {
-                    if trace_to_stdout {
-                        out.say(format_args!("{:.4}", score.loglik));
-                    } else {
-                        out.data_line(format_args!("{:.4}", score.loglik));
-                    }
-                }
-            }
-        }
+/// A filter error as a stored result holds it: the text depends only on the
+/// run's identity, so a degeneracy error leaves out the wall-clock time it
+/// carries.
+fn failure_text(e: &sim::SimError) -> String {
+    match e {
+        sim::SimError::PFDegenerate { kind, obs_window, .. } =>
+            format!("particle filter degeneracy ({kind:?}) at obs_window {obs_window}"),
+        other => crate::util::sim_error_text(other),
+    }
+}
+
+/// Run a closure on the scoped pool if one was built, else on the global pool
+/// (`--parallel 0`). Generic over the closure so the borrowed captures
+/// (process, observation model, all `Sync`) keep the closure `Send` for
+/// `ThreadPool::install`.
+fn run_pooled<R: Send>(pool: &Option<rayon::ThreadPool>, f: impl FnOnce() -> R + Send) -> R {
+    match pool {
+        Some(p) => p.install(f),
+        None => f(),
     }
 }
 
@@ -606,1090 +1433,402 @@ fn refuse_design_overrides(
     Ok(())
 }
 
-/// Score every point of a `--sweep-file` design and write one row per point,
-/// in file order, to `output` or stdout. Each point is [`score_point`] at its
-/// values, on the seeds the single call uses, so a row equals the single call
-/// at that point and its leaf is that call's. The first point runs alone and
-/// prints the lines every point would print alike; the rest run concurrently
-/// on the call's pool. A replicate that scores `-inf` or returns an error
-/// fails, and a point whose every replicate failed is a row with no leaf; the
-/// run exits with `FILTER_FAILED` only when every point did.
+/// Score every point of a `--sweep-file` design, in file order. The first
+/// point runs alone, prints the lines every point would print alike and opens
+/// the store; the rest run concurrently on the call's pool.
 fn score_design(
-    scorer: &PointScorer<'_>,
+    out: &crate::out::Out,
     points: &[(usize, crate::sweep::DesignPoint)],
-    output: Option<&str>,
-) {
-    let out = scorer.out;
+    pool: &Option<rayon::ThreadPool>,
+    score_point: &(dyn Fn(&[(String, f64)], PointRole) -> PointResult + Sync),
+) -> Vec<PointResult> {
     let n_points = points.len();
     out.say(format_args!("pfilter: {n_points} design points from --sweep-file"));
     let bar = crate::out::progress::Reporter::new().task(n_points as u64, "pfilter", "points");
-    let score_at = |i: usize| -> PointScore {
+    let score_at = |i: usize| -> PointResult {
         let (point_id, point) = &points[i];
-        let role = PointRole::Design { point_id: *point_id, first: i == 0 };
-        let score = score_point(scorer, point, role, |_| {});
+        let result = score_point(point, PointRole::Design { row: i, point_id: *point_id, first: i == 0 });
         bar.inc(1);
-        score
+        result
     };
     let first = score_at(0);
-    let rest: Vec<PointScore> =
-        run_pooled(scorer.pool, || (1..n_points).into_par_iter().map(score_at).collect());
+    let rest: Vec<PointResult> = run_pooled(pool, || (1..n_points).into_par_iter().map(score_at).collect());
     bar.finish();
-    let scores: Vec<PointScore> = std::iter::once(first).chain(rest).collect();
+    std::iter::once(first).chain(rest).collect()
+}
 
-    // Every point names the same parameters, sorted by name.
-    let columns: Vec<&str> = points[0].1.iter().map(|(k, _)| k.as_str()).collect();
-    let mut table = String::from("point_id");
-    for c in &columns {
-        table.push_str(&format!("\tsweep:{c}"));
-    }
-    table.push_str("\tloglik\tloglik_sd\tn_failed\tfailure\trun_id\n");
-    for ((point_id, point), score) in points.iter().zip(&scores) {
-        table.push_str(&point_id.to_string());
-        for (_, v) in point {
-            table.push_str(&format!("\t{v}"));
+/// End a design's invocation and write its table, rendered from the stored
+/// points, to `output` or stdout. A point that did not complete is reported
+/// and the table is not written, since a rendering of the invocation needs
+/// every point; the run exits non-zero and a rerun computes only those
+/// points. Otherwise the run exits with `FILTER_FAILED` only when the filter
+/// failed at every point.
+fn report_design(
+    out: &crate::out::Out,
+    points: &[(usize, crate::sweep::DesignPoint)],
+    results: Vec<PointResult>,
+    store: store::Store,
+    info: store::RunInfo,
+    output: Option<&std::path::Path>,
+    no_store: bool,
+) {
+    use crate::pfilter_store::*;
+    let n_points = points.len();
+    let options = DesignTableOptions { run_id: !no_store };
+    let mut not_completed = Vec::new();
+    let mut every_failed: Vec<String> = Vec::new();
+    for ((point_id, _), result) in points.iter().zip(results) {
+        match result {
+            PointResult::Failed(e) => not_completed.push((*point_id, e.message)),
+            PointResult::Stored { stored, .. } => {
+                let loglik = read_stored(&stored, LOGLIK_FILE)
+                    .and_then(|b| Loglik::from_bytes(&b))
+                    .unwrap_or_else(|e| out.fail(format!("error: {e}")));
+                if loglik.every_replicate_failed() {
+                    every_failed.push(loglik.failure.unwrap_or_default());
+                }
+            }
         }
-        // A spread over replicates that include a failed one is not a number.
-        let sd = score.loglik_sd.filter(|_| score.n_failed == 0)
-            .map(|sd| sd.to_string()).unwrap_or_default();
-        let failure = score.failure.as_deref().map(one_line).unwrap_or_default();
-        let run_id = score.leaf.as_ref().map(|h| h.to_hex()).unwrap_or_default();
-        // The shortest round-trip form, so a value read back is the one stored.
-        table.push_str(&format!("\t{}\t{sd}\t{}\t{failure}\t{run_id}\n", score.loglik, score.n_failed));
+    }
+    let invocation = info.finish(&store).unwrap_or_else(|e| out.fail(format!("error: {e}")));
+    if !not_completed.is_empty() {
+        for (point_id, message) in &not_completed {
+            out.say(format_args!("point {point_id}: {}", message.strip_prefix("error: ").unwrap_or(message)));
+        }
+        out.fail(format!(
+            "error: {} of {n_points} design points did not complete, so the design table is not \
+             written; a rerun computes only those points",
+            not_completed.len()));
+    }
+    if let (Some(label), Some(before)) = (invocation.label(), invocation.took_label_from()) {
+        out.say(format_args!("pfilter: @{label} now names invocation {}, which held it from invocation {before}",
+            invocation.seq()));
     }
     match output {
         Some(path) => {
-            std::fs::write(path, &table)
-                .unwrap_or_else(|e| { out.fail(format!("cannot write {path}: {e}")); });
-            out.say(format_args!("design table ({n_points} points) written to {path}"));
+            invocation
+                .render::<DesignTable>(&store, &options, &store::ExportPath(path.to_path_buf()))
+                .unwrap_or_else(|e| out.fail(format!("cannot write {}: {e}", path.display())));
+            out.say(format_args!("design table ({n_points} points) written to {}", path.display()));
         }
-        None => out.data_raw(&table),
+        None => {
+            let mut table = Vec::new();
+            invocation
+                .render_to::<DesignTable>(&store, &options, &mut table)
+                .unwrap_or_else(|e| out.fail(format!("error: {e}")));
+            out.data_raw(String::from_utf8_lossy(&table));
+        }
     }
-
-    let failed: Vec<&PointScore> = scores.iter().filter(|s| s.every_replicate_failed()).collect();
-    if let Some(first) = failed.first() {
-        let message = one_line(first.failure.as_deref().unwrap_or_default());
-        if failed.len() == n_points {
+    if let Some(first) = every_failed.first() {
+        let message = crate::pfilter_store::one_line(first);
+        if every_failed.len() == n_points {
             out.error(filter_failed(format!(
                 "error: every one of the {n_points} design points failed (every replicate \
                  scored -inf or stopped with an error); the first: {message}"))).exit();
         }
         out.say(format_args!(
             "warning: {} of {n_points} design points failed (every replicate scored -inf \
-             or stopped with an error), so they have no leaf; the first: {message}",
-            failed.len()));
+             or stopped with an error), so they have no log-likelihood; the first: {message}",
+            every_failed.len()));
     }
 }
 
-/// A filter error as a design table reports it. The text depends only on the
-/// point's inputs: a degeneracy error leaves out the wall-clock time it
-/// carries, so a rerun of the same design writes the same bytes.
-fn design_failure_text(e: &sim::SimError) -> String {
-    match e {
-        sim::SimError::PFDegenerate { kind, obs_window, .. } =>
-            format!("particle filter degeneracy ({kind:?}) at obs_window {obs_window}"),
-        other => other.to_string(),
-    }
-}
-
-/// A failure message as one cell of a table: without the `error: ` the
-/// command prints before it, and with each tab and newline replaced by a
-/// space.
-fn one_line(message: &str) -> String {
-    message.strip_prefix("error: ").unwrap_or(message)
-        .chars()
-        .map(|c| if matches!(c, '\t' | '\n' | '\r') { ' ' } else { c })
-        .collect()
-}
-
-/// Run a closure on the scoped pool if one was built, else on the global pool
-/// (`--parallel 0`). Generic over the closure so the borrowed captures
-/// (process, observation model, all `Sync`) keep the closure `Send` for
-/// `ThreadPool::install`.
-fn run_pooled<R: Send>(pool: &Option<rayon::ThreadPool>, f: impl FnOnce() -> R + Send) -> R {
-    match pool {
-        Some(p) => p.install(f),
-        None => f(),
-    }
-}
-
-/// What one `pfilter` call resolves before any parameter value is known: the
-/// loaded model with its scenario lists and observation anchors applied, the
-/// data bindings, the step, the objective, the flags of every parameter tier
-/// but the design point, the outputs and the thread pool. [`score_point`]
-/// scores one parameter point against it.
-struct PointScorer<'a> {
-    out: &'a crate::out::Out,
-    ir_path: &'a str,
-    fit: &'a Option<crate::fit::handle::FitProblem>,
-    objective: crate::fit::config_v2::LikelihoodObjective,
-    eval: sim::EvalSettings,
-    forcing: &'a crate::forcing_extrapolation::ForcingPolicy,
-    /// The model before any parameter value is written into it.
-    model_in: &'a ir::Model,
-    scenario_name: Option<&'a str>,
-    adhoc_enable: &'a Vec<String>,
-    adhoc_disable: &'a Vec<String>,
-    /// `--param`, tier 5.
-    fixed_cli: &'a [(String, f64)],
-    /// `--params`, tier 3.
-    fixed_files: &'a [std::path::PathBuf],
-    external: &'a crate::external_inputs::ExternalBindings,
-    /// The fit config's `[fixed]` table, tier 2.
-    fit_fixed: &'a indexmap::IndexMap<String, f64>,
-    fit_estimate: &'a indexmap::IndexSet<String>,
-    /// `None` when nothing bound data; refused once the model gates have run.
-    bound_streams: Option<&'a [(String, std::path::PathBuf)]>,
-    /// `--data` was given, so the bound files are not the fit config's.
-    data_flags_given: bool,
-    dt: f64,
-    n_particles: usize,
-    n_replicates: usize,
-    seed: u64,
-    binomial: sim::rng::BinomialAlgorithm,
-    max_substeps: u64,
-    time_format: crate::caltime_load::TimeFormat,
-    save_final_state: &'a Option<String>,
-    engine: &'a runid::inputs::EngineIdentity,
-    outputs: &'a crate::pfilter_config::PfilterOutputs,
-    parallel: usize,
-    pool: &'a Option<rayon::ThreadPool>,
-}
-
-/// Which evaluation a [`score_point`] call is.
-#[derive(Clone, Copy)]
-enum PointRole {
-    /// The one evaluation of a call without a design: every line the run
-    /// prints, the replicate progress bar, and the `camdl cat` hint.
-    Single,
-    /// One point of a `--sweep-file` design, written under `point_id`. The
-    /// `first` point prints the lines every point would print alike.
-    Design { point_id: usize, first: bool },
-}
-
-/// The result of scoring one parameter point.
-struct PointScore {
-    /// The estimated log-likelihood, or the mean over replicates; `-inf` when
-    /// any replicate collapsed.
-    loglik: f64,
-    /// The standard deviation over replicates; `None` for a single run.
-    loglik_sd: Option<f64>,
-    /// How many replicates failed: scored `-inf` (every particle's weight
-    /// zero at some observation) or, at a design point, returned an error.
-    n_failed: usize,
-    /// The message of the first replicate that failed.
-    failure: Option<String>,
-    /// The stored leaf: written by this call or found already stored. `None`
-    /// when every replicate collapsed, under `--no-store`, or when the store
-    /// did not record it.
-    leaf: Option<runid::ContentHash>,
-    /// Each replicate's log-likelihood, in replicate order.
-    replicate_logliks: Vec<f64>,
-}
-
-impl PointScore {
-    /// Every replicate failed, so the point has no likelihood and no leaf.
-    fn every_replicate_failed(&self) -> bool {
-        self.n_failed > 0 && self.n_failed == self.replicate_logliks.len()
-    }
-}
-
-/// Score one parameter point: resolve the parameters with `overrides` at
-/// tier 3.5 (a design point; empty for the single call), compile the model at
-/// them, bind the data, run the filter `--replicates` times, write the
-/// single-run outputs, and store the result as a `Pfilter` leaf.
-///
-/// `before_store` is called with the score before the leaf is written, unless
-/// every replicate failed, in which case no leaf is written. A refusal of the
-/// inputs ends the process. A filter that returns an error ends it too for the
-/// single call; at a design point the replicate fails, and the point, which a
-/// single call could not store, writes no leaf.
-fn score_point(
-    scorer: &PointScorer<'_>,
-    overrides: &[(String, f64)],
-    role: PointRole,
-    before_store: impl FnOnce(&PointScore),
-) -> PointScore {
-    let PointScorer {
-        out, ir_path, fit, objective, eval, forcing, model_in, scenario_name,
-        adhoc_enable, adhoc_disable, fixed_cli, fixed_files, external,
-        fit_fixed: ftf, fit_estimate: fte, bound_streams, data_flags_given, dt,
-        n_particles, n_replicates, seed, binomial, max_substeps, time_format,
-        save_final_state, engine, outputs, parallel, pool: pf_pool,
-    } = *scorer;
-    let crate::pfilter_config::PfilterOutputs {
-        trace: trace_path,
-        pf_health,
-        output: _,
-        save_paths,
-        save_filtering,
-        save_filtered_streams,
-        save_prequential,
-        score_from,
-        save_samples,
-        no_store,
-    } = outputs.clone();
-    // The lines every point of a call would print alike.
-    let announce = match role {
-        PointRole::Single => true,
-        PointRole::Design { first, .. } => first,
-    };
-    use crate::params_resolver::{ParameterInputs, resolve_parameters, emit_notices};
-
-    let resolved = resolve_parameters(ParameterInputs {
-        model: model_in,
-        scenario: scenario_name,
-        adhoc_enable,
-        adhoc_disable,
-        scenario_inline_name: None,
-        scenario_inline_set: &[],
-        scenario_inline_scale: &[],
-        point_overrides: overrides,
-        fixed_cli,
-        fixed_files,
-        fit_toml_fixed: ftf,
-        fit_toml_estimate: fte,
-        external,
-    }).unwrap_or_else(|e| {
-        out.fail(format!("error: {}", e.with_flags(crate::params_resolver::FlagStyle::Params)));
-    });
-    emit_notices(out, &[&resolved]);
-    let model = resolved.model.clone();
-
-    let compiled = CompiledModel::new(model.clone())
-        .unwrap_or_else(|e| { out.fail(format!("compile error: {:?}", e)); })
-        .with_eval_settings(eval);
-    // gh#122: the particle filter is a stochastic (chain_binomial) producer; a
-    // source that mixes a deterministic exit with another exit would over-draw
-    // the source. Reject it here (the standalone `pfilter` command bypasses
-    // `check_model_capabilities`).
-    compiled
-        .validate_deterministic_source_exits()
-        .unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
-    // gh#121: a multi-source stochastic transition (`A + B --> C`) is bounded by
-    // only its first source on chain_binomial, driving the secondary source
-    // negative. The standalone pfilter bypasses check_model_capabilities, so
-    // gate it here too.
-    compiled
-        .validate_single_source_transitions()
-        .unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
-    // A transition consuming more than one unit of its source per firing has no
-    // meaning in the chain-binomial kernel the filter steps with; refuse it here
-    // for the same reason.
-    compiled
-        .validate_unit_source_consumption()
-        .unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
-    // gh#191: the particle filter is a chain_binomial INFERENCE producer — it
-    // carries no real state and never advances a reservoir, so a real-coupled
-    // (REAL_COMPARTMENTS) model would be filtered with its reservoir frozen at
-    // its init value: silently mis-fit. `camdl fit`/`profile` route through
-    // `check_model_capabilities`, but the standalone `pfilter` command bypasses
-    // it — so gate here too, with the same shared inference gate.
-    crate::fit::methods::check_model_capabilities(
-        crate::run_meta::InferenceBackend::ChainBinomial, &compiled,
-    ).unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
-    let params = compiled.default_params.clone();
-
-    // The conditional objective (`ic_free = true`) is admitted by the check
-    // `fit run` applies to its `pfilter` method: it needs particles that
-    // differ in x₀, which a deterministic `init { }` does not give.
-    if let Some(f) = fit.as_ref() {
-        let fit_name = f.name();
-        if objective.skips_first_observation() {
-            let init_law = if compiled.has_init_law {
-                crate::fit::methods::InitLaw::Declared
-            } else {
-                crate::fit::methods::InitLaw::Absent
-            };
-            if let Err(msg) = crate::fit::methods::validate_ic_free(
-                crate::run_meta::FitAlgorithm::Pfilter, init_law,
-            ) {
-                out.fail(format!("error: the --fit config sets ic_free = true. {msg}"));
-            }
-            if announce {
-                out.say(format_args!("pfilter: objective: conditional on the first observation \
-                    (ic_free = true in {fit_name}); omit --fit and pass --data for the \
-                    full likelihood"));
-            }
-        } else if announce {
-            out.say(format_args!("pfilter: objective: full likelihood ({fit_name} does not set \
-                ic_free = true)"));
+/// End the single call's invocation, export the by-products asked for from
+/// the store, and print the stored log-likelihood. A filter that failed at
+/// every replicate exits with `FILTER_FAILED`, naming the stored failure.
+#[allow(clippy::too_many_arguments)]
+fn report_single(
+    out: &crate::out::Out,
+    result: PointResult,
+    store: store::Store,
+    info: store::RunInfo,
+    paths: &ExportPaths<'_>,
+    output_path: Option<&std::path::Path>,
+    no_store: bool,
+    model: &ir::Model,
+) {
+    use crate::pfilter_store::*;
+    let (stored, computed, by_products_failed) = match result {
+        PointResult::Stored { stored, kept, by_products_failed } => (stored, kept, by_products_failed),
+        PointResult::Failed(e) => {
+            let _ = info.finish(&store);
+            drop(store);
+            out.error(e).exit();
         }
-    }
-
-    // The missing-data refusal, reported here rather than where the binding was
-    // resolved, so every gate above keeps first say (see the binding block).
-    let bound_streams = bound_streams.unwrap_or_else(|| {
-        out.fail(format!("error: pfilter needs observation data to score: {PFILTER_SUPPLY}"));
-    });
-    if bound_streams.is_empty() {
-        out.fail("error: zero streams resolved from --data / --fit toml. \
-                   pfilter requires at least one observation stream.");
-    }
-
-    // Load data — route the time column through the calendar-time boundary
-    // translator (numeric or dated, per --time-format + the model origin).
-    let time_opts = TimeOpts {
-        origin: model.origin.as_deref(),
-        time_unit: &model.time_unit,
-        dt,
-        t_start: compiled.model.simulation.t_start,
-        format: time_format,
     };
+    let invocation = info.finish(&store).unwrap_or_else(|e| out.fail(format!("error: {e}")));
+    if let (Some(label), Some(before)) = (invocation.label(), invocation.took_label_from()) {
+        out.say(format_args!("pfilter: @{label} now names invocation {}, which held it from invocation {before}",
+            invocation.seq()));
+    }
+    let loglik = read_stored(&stored, LOGLIK_FILE)
+        .and_then(|b| Loglik::from_bytes(&b))
+        .unwrap_or_else(|e| out.fail(format!("error: {e}")));
+    let n_particles = loglik.n_particles;
+    let failed = loglik.n_failed > 0;
 
-    // Resolve the bound observation streams (BY SOURCE) and load each one's
-    // per-observation values + aux via the single shared seam that `fit run`
-    // and `profile` also route through (`fit::runner::resolve_and_load_obs_streams`).
-    // The seam filters `model.observations` by `source`, dispatches long-form vs
-    // wide loading (holes + aux), resolves each projection, and runs the per-
-    // stream origin / first-window guards — so a stratified family bound by its
-    // ROOT (`[data.observations] cases = FILE`, source `cases`) fans out to all
-    // its leaves exactly as `fit run` binds them. `bound_streams` (the CLI/toml
-    // key-space bindings) is mapped to the by-source `effective` map at the
-    // boundary; it is retained below only for the CAS data-hash + the unbound-
-    // streams warning, whose key-space (leaf name / family root) must not change.
-    let effective = crate::fit::runner::data_bindings_to_effective(&model, bound_streams)
-        .unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
-    let mut streams = crate::fit::runner::resolve_and_load_obs_streams(
-        &model, &compiled, &effective, &time_opts,
-    ).unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
-    let n_streams = streams.len();
-
-    // gh#1138: a saved final state is a forecast origin. Under the fit's
-    // `holdout_after`, one filtered through rows past the cutoff would already
-    // condition on the data a forecast from it is scored against, so a
-    // `--save-final-state` run binds only the training rows, cut by the rule
-    // the fit's partition uses, and saves the state at their end. Without
-    // `--save-final-state` the filter scores every bound row, held-out ones
-    // included: its log-likelihood and prequential outputs are what `compare`
-    // scores a holdout with.
+    // ── The exports ─────────────────────────────────────────────────────────
     //
-    // The cutoff resolves as `fit run` resolved it. A bare time or date needs
-    // no rows. An anchored one (`holdout_after = "last_obs - 4 weeks"`)
-    // resolves over the fit config's own files: resolved over `--data` files
-    // holding only the training rows, it would move back and cut the very
-    // rows that trained. Those files are read only in that case.
-    let mut training_cut: Option<TrainingCut> = None;
-    if save_final_state.is_some() {
-        let holdout_after = fit.as_ref().map(|f| &f.config.problem)
-            .and_then(|p| p.data.as_ref())
-            .and_then(|d| d.holdout_after.as_ref());
-        if let (Some(spec), Some(f)) = (holdout_after, fit.as_ref()) {
-            let anchored = matches!(
-                crate::fit::runner::parse_time_spec(
-                    "holdout_after", &spec.raw(), model.origin.as_deref(), &model.time_unit),
-                Ok(crate::fit::runner::TimeSpec::Anchored(_)));
-            let cutoff_rows = |ss: &[crate::fit::runner::ObsStream]| -> std::collections::BTreeMap<
-                String, Vec<crate::fit::observed_rows::ObservedRow>,
-            > {
-                ss.iter().map(|s| (s.name.clone(), s.rows.clone())).collect()
-            };
-            let rows = if !anchored || !data_flags_given {
-                cutoff_rows(&streams)
-            } else {
-                let fit_streams = data_observations_of(&f.config.problem, &model, &f.handle)
-                    .and_then(|b| crate::fit::runner::data_bindings_to_effective(&model, &b))
-                    .and_then(|e| crate::fit::runner::resolve_and_load_obs_streams(
-                        &model, &compiled, &e, &time_opts))
-                    .unwrap_or_else(|e| {
-                        out.fail(format!(
-                            "error: --fit toml data, read to resolve holdout_after: {e}"));
-                    });
-                cutoff_rows(&fit_streams)
-            };
-            let raw = spec.raw();
-            let cut = crate::fit::runner::resolve_holdout_cutoff(spec, &rows, &model)
-                .and_then(|at| cut_to_training_rows(at, &raw, &mut streams))
-                .unwrap_or_else(|e| { out.fail(format!("error: {e}")); });
-            // `--score-from` asks for a held-out window, and a cut that dropped
-            // rows leaves none: every row it could score trained. Scoring them
-            // would present in-sample rows as the held-out score.
-            if cut.dropped {
-                if let Some(raw_from) = score_from.as_ref() {
-                    out.fail(format!(
-                        "error: --score-from {raw_from} scores a held-out window, but under \
-                         --save-final-state this run binds only the training rows of \
-                         holdout_after = \"{raw}\" (t = {}), so every row it could score \
-                         trained.\n  Fix: run --save-prequential --score-from without \
-                         --save-final-state (the filter then scores the full series), and \
-                         save the state in a separate run.", cut.at));
-                }
-            }
-            out.say(format_args!(
-                "pfilter: --save-final-state under holdout_after = \"{raw}\" (t = {}): \
-                 state saved at t = {}, the end of the training rows (holdout_after); \
-                 the log-likelihood shown covers training rows only, as does every \
-                 other output of this run (--trace, --save-prequential, --save-paths, \
-                 --save-filtering, --save-filtered-streams, --pf-health)",
-                cut.at, cut.extent));
-            training_cut = Some(cut);
+    // A filter that stopped with an error stored no by-product, so a run that
+    // failed exports the ones it has.
+    let stored_bytes = |kind: &str, file: &str| -> Option<Vec<u8>> {
+        match by_product_bytes(&store, &invocation, kind, file) {
+            Ok(b) => Some(b),
+            Err(_) if failed => None,
+            Err(e) => out.fail(format!("error: {e}")),
+        }
+    };
+    let trace_to_stdout = paths.trace == Some("-");
+    if let Some(path) = paths.trace {
+        if let Some(bytes) = stored_bytes(Trace::KIND, Trace::FILE) {
+            export_bytes(out, path, &bytes, "trace");
         }
     }
+    if let Some(path) = paths.pf_health {
+        if let Some(bytes) = stored_bytes(PfHealth::KIND, PfHealth::FILE) {
+            export_bytes(out, path, &bytes, "pf-health");
+            say_pf_health_summary(out, &bytes, n_particles as usize);
+        }
+    }
+    if let Some(path) = paths.final_state {
+        if let Some(bytes) = stored_bytes(FinalState::KIND, FinalState::FILE) {
+            // The file's header names the origin, and each row after the two
+            // header lines is one particle.
+            let text = String::from_utf8_lossy(&bytes);
+            let origin = text.lines().next().and_then(|l| l.split_once("\tt=")).map(|(_, t)| t.to_string()).unwrap_or_default();
+            let n = text.lines().count().saturating_sub(2);
+            export_bytes(out, &path.to_string_lossy(), &bytes, &format!("final particle states ({n} particles) at t={origin}"));
+        }
+    }
+    if let Some((n_paths, path)) = paths.paths {
+        if let Some(bytes) = stored_bytes(SavedPaths::KIND, SavedPaths::FILE) {
+            export_bytes(out, &path.to_string_lossy(), &bytes, &format!("{n_paths} sample paths"));
+        }
+    }
+    if let Some(stem) = paths.prequential {
+        if let Some(json) = stored_bytes(Prequential::KIND, Prequential::JSON) {
+            let tsv = format!("{stem}.tsv");
+            let write = |to: &std::path::Path, file: &str| {
+                let bytes = stored_bytes(Prequential::KIND, file).unwrap_or_default();
+                std::fs::write(to, bytes)
+                    .unwrap_or_else(|e| out.fail(format!("error writing prequential: {e}")));
+            };
+            write(&crate::prequential_out::streams_sibling(std::path::Path::new(&tsv)), Prequential::STREAMS);
+            write(std::path::Path::new(&tsv), Prequential::JOINT);
+            write(std::path::Path::new(&format!("{stem}.json")), Prequential::JSON);
+            let trace: score::trace::PrequentialTrace = serde_json::from_slice(&json)
+                .unwrap_or_else(|e| out.fail(format!("error: the stored prequential trace: {e}")));
+            let calendar = ir::caltime::CalendarAxis::from_model(model)
+                .unwrap_or_else(|e| out.fail(format!("error: {e}")));
+            out.say(format_args!("prequential trace written: {}", crate::prequential_out::summary_line(&trace)));
+            out.say_raw(format_args!("{}", crate::prequential_out::surprise_table(&trace, &calendar)));
+        }
+    }
+    if let Some(path) = paths.filtering {
+        if let Some(bytes) = stored_bytes(Filtering::KIND, Filtering::FILE) {
+            export_bytes(out, &path.to_string_lossy(), &bytes, "filtering marginals");
+        }
+    }
+    if let Some(path) = paths.filtered_streams {
+        if let Some(bytes) = stored_bytes(FilteredStreams::KIND, FilteredStreams::FILE) {
+            export_bytes(out, &path.to_string_lossy(), &bytes, "filtered stream means");
+        }
+    }
+    if by_products_failed {
+        out.say("warning: no by-product asked for was stored or exported: the filter stopped with an \
+            error at these parameters, so it left no state to write them from");
+    }
+    let milestone = || {
+        if !no_store {
+            let folder = crate::run_paths::display_absolute(stored.folder());
+            out.milestone(if computed { "stored" } else { "cached" }, folder.display());
+            out.hint(format_args!("camdl cat {}", stored.id().key().to_hex()));
+        }
+    };
 
-    // Holes (missing observations via `NA`) are correct for the filter
-    // log-likelihood — a hole contributes no term but still resets the bin
-    // (the authoritative per-stream cells carry `None`). But the prequential
-    // and `--trace` outputs read the dense placeholder view, where a hole shows
-    // as 0: prequential would score elpd/CRPS/PIT against a fictitious observed
-    // 0, and the trace's `observed` column would report 0 at a missing week.
-    // Rather than emit a silently-wrong diagnostic, reject the combination until
-    // those paths thread holes through (follow-up). The plain filter loglik is
-    // unaffected.
-    // gh#636: holes are first-class in the diagnostic outputs — per-stream
-    // prequential scores skip hole (stream, time) cells (they carry no term),
-    // the joint scores cover the present streams only, and the trace's
-    // observed column prints NA where nothing is present. Say so once, so a
-    // reader of the outputs knows rows were skipped rather than zero-filled.
-    let has_holes = streams.iter().any(|s| s.cells.iter().any(|c| match c {
-        Some(sim::inference::ObsCell::Scalar(_)) => false,
-        Some(sim::inference::ObsCell::HeldOut(_)) | None => true,
-    }));
-    if announce && has_holes && (save_prequential.is_some() || trace_path.is_some()) {
-        out.say("pfilter: data has missing observations (NA) — prequential/trace \
-             scores skip the missing (stream, time) cells; a step with no \
-             present stream is omitted from the prequential and prints NA in \
-             the trace.");
+    // A filter that failed at every replicate has no likelihood to report:
+    // the run is stored with its failure, and the command fails with it.
+    if loglik.every_replicate_failed() {
+        milestone();
+        let first = loglik.failure.clone().unwrap_or_default();
+        let message = if loglik.n_replicates > 1 {
+            format!("{first} (all {} replicates; replicate 1 shown)", loglik.n_replicates)
+        } else {
+            first
+        };
+        drop(store);
+        out.error(filter_failed(message)).exit();
     }
 
-    if announce && n_streams > 1 {
-        out.say(format_args!("  streams: {}", streams.iter()
-            .map(|s| s.name.as_str()).collect::<Vec<_>>().join(", ")));
+    // ── The log-likelihood ──────────────────────────────────────────────────
+    if loglik.n_replicates > 1 {
+        match (loglik.loglik, loglik.loglik_sd) {
+            (Some(ll), sd) => out.say(format_args!("loglik = {:.1} ± {:.1} ({} replicates, N={})",
+                ll, sd.unwrap_or(0.0), loglik.n_replicates, loglik.n_particles)),
+            (None, _) => out.say(format_args!("loglik = -inf ({} replicates, N={})",
+                loglik.n_replicates, loglik.n_particles)),
+        }
+        if let Some(first) = &loglik.failure {
+            out.say(format_args!("warning: {} of {} replicates failed, so the mean is -inf; the first: {}",
+                loglik.n_failed, loglik.n_replicates, first.strip_prefix("error: ").unwrap_or(first)));
+        }
     }
+    match output_path {
+        Some(path) => {
+            invocation
+                .render::<LoglikTable>(&store, &(), &store::ExportPath(path.to_path_buf()))
+                .unwrap_or_else(|e| out.fail(format!("cannot write {}: {e}", path.display())));
+            if loglik.n_replicates > 1 {
+                out.say(format_args!("replicate logliks written to {}", path.display()));
+            } else {
+                out.say(format_args!("loglik written to {}", path.display()));
+            }
+        }
+        None => {
+            let mut table = Vec::new();
+            invocation
+                .render_to::<LoglikTable>(&store, &(), &mut table)
+                .unwrap_or_else(|e| out.fail(format!("error: {e}")));
+            let table = String::from_utf8_lossy(&table);
+            if trace_to_stdout && loglik.n_replicates <= 1 {
+                out.say(table.trim_end());
+            } else {
+                out.data_raw(table);
+            }
+        }
+    }
+    milestone();
+}
 
-    if announce { out.say(format_args!("pfilter: bound streams: {}", streams.iter()
-        .map(|s| format!("{}({})", s.name, match &s.obs_model_ir.likelihood {
-            ir::observation::Likelihood::NegBinomial(_)  => "neg_binomial",
-            ir::observation::Likelihood::Normal(_)       => "normal",
-            ir::observation::Likelihood::Poisson(_)      => "poisson",
-            ir::observation::Likelihood::Binomial(_)     => "binomial",
-            ir::observation::Likelihood::BetaBinomial(_) => "beta_binomial",
-            ir::observation::Likelihood::Beta(_)         => "beta",
-            ir::observation::Likelihood::Bernoulli(_)    => "bernoulli",
-            ir::observation::Likelihood::ZeroInflatedNegBinomial(_) => "zero_inflated_neg_binomial",
-        })).collect::<Vec<_>>().join(", "))); }
+/// The filter's outcome: one run, an error the filter stopped with, or each
+/// replicate's log-likelihood and the cause of each one that failed.
+enum Filtered {
+    Single(Box<sim::inference::particle_filter::PFilterResult>),
+    /// The filter stopped with an error the run's identity determines.
+    Failed(String),
+    Replicates { rows: Vec<(u64, f64)>, failures: Vec<Option<String>> },
+}
 
-    // gh#90: emit unbound-streams warning if a multi-block model is only
-    // partially covered. The bound set is the RESOLVED leaf names (a family root
-    // fans out to its leaves), not the raw binding keys — else an indexed family
-    // bound by its root would look entirely unbound and false-warn.
+/// Everything one computed run stores, in memory: the run's own files and
+/// each by-product asked for.
+struct RunFiles {
+    loglik: Loglik,
+    replicates: Option<Vec<u8>>,
+    parameters: Vec<u8>,
+    trace: Option<Vec<u8>>,
+    pf_health: Option<Vec<u8>>,
+    final_state: Option<Vec<u8>>,
+    paths: Option<Vec<u8>>,
+    prequential: Option<crate::prequential_out::PrequentialFiles>,
+    filtering: Option<Vec<u8>>,
+    filtered_streams: Option<Vec<u8>>,
+}
+
+/// Writes a run's own files and each by-product of it that was claimed.
+#[allow(clippy::result_large_err)] // the store's error carries the paths and owners a person acts on, returned once
+fn write_run(run: &mut store::Run<crate::pfilter_store::Pfilter>, f: &RunFiles) -> store::Result<()> {
+    use crate::pfilter_store::*;
+    run.result_file(LOGLIK_FILE)?.write_all(&f.loglik.to_bytes())?;
+    if let Some(b) = &f.replicates {
+        run.result_file(REPLICATES_FILE)?.write_all(b)?;
+    }
+    run.provenance_file(PROVENANCE_FILE)?.write_all(&f.parameters)?;
+    #[allow(clippy::result_large_err)] // the store's error carries the paths and owners a person acts on, returned once
+    fn one<B>(run: &mut store::Run<Pfilter>, files: &[(&str, &[u8])]) -> store::Result<()>
+    where
+        B: store::ByProduct<Of = Pfilter>,
+        B::Identity: Send + Sync,
     {
-        let all_names: Vec<String> = model.observations.iter()
-            .map(|o| o.name.clone()).collect();
-        let bound_names: Vec<String> = streams.iter()
-            .map(|s| s.name.clone()).collect();
-        if let Some(w) = crate::util::format_unbound_streams_warning(
-            "pfilter", &all_names, &bound_names,
-        ).filter(|_| announce) {
-            out.say_raw(format_args!("{}", w));
+        if let Some(bp) = run.also::<B>()? {
+            for (name, bytes) in files {
+                bp.result_file(name)?.write_all(bytes)?;
+            }
         }
+        Ok(())
     }
-
-    // Build process + observation model via traits. The `ObsStream -> StreamSpec`
-    // mapping is the single shared builder (`stream_specs_from_obs_streams`):
-    // authoritative per-grid-time cells (holes = `None`) + survey denominators
-    // (`aux`), each stream fed its OWN schedule; `bind` re-merges to the union
-    // and validates aux — identical to how `fit run` builds its obs model.
-    let compiled = std::sync::Arc::new(compiled);
-    let process = ChainBinomialProcess::new(compiled.clone());
-    let stream_specs = crate::fit::runner::stream_specs_from_obs_streams(&streams);
-    // The observed window `--score-from first_obs/last_obs` anchors to (D40):
-    // the earliest start and the latest end of a row with a value.
-    let observed_window =
-        crate::fit::training_partition::observed_window(streams.iter().flat_map(|s| &s.rows));
-    let (bound, report) = BoundObs::bind(compiled.model.simulation.t_start, stream_specs)
-        .unwrap_or_else(|report| {
-        out.fail(format!("error: observation data invalid:\n{}", report.render()));
-    });
-
-    // gh#812: a non-fatal bind report was previously discarded, so the
-    // Warn channel was write-only. Surface it — a zero denominator scores
-    // as zero, and the user must be told which rows and why.
-    if announce && !report.findings().is_empty() {
-        out.say(format_args!("{}", report.render()));
+    if let Some(b) = &f.trace {
+        one::<Trace>(run, &[(Trace::FILE, b)])?;
     }
-    let obs_model = MultiStreamObsModel::new(bound, compiled.clone())
-        .unwrap_or_else(|e| {
-            out.fail(format!("error: observation model construction failed: {:?}", e));
-        });
-
-    // Canonical observations: the UNION axis the bound model scores along —
-    // every stream's scoring boundaries plus every declared period's opening
-    // boundary inside the run (multi-cadence, proposal 2026-06-10 §3.3;
-    // periods, gh#833) — taken FROM the model, never rebuilt from the rows'
-    // labels, which agree with it only under `closing_at`. Downstream
-    // single-stream code paths (trace, prequential, save_filtering, save_paths,
-    // save_final_state) consume `obs.time` (the union grid) and `obs.value` (a
-    // never-scored placeholder 0.0 — the per-stream scored values live in each
-    // stream's cells).
-    let observations: Vec<Observation> = obs_model.obs_times().iter()
-        .map(|&time| Observation { time, value: 0.0 })
-        .collect();
-
-    if announce {
-        out.say(format_args!("pfilter: {} observation boundaries × {} streams, {} particles, dt={}, seed={}",
-            observations.len(), n_streams, n_particles, dt, seed));
+    if let Some(b) = &f.pf_health {
+        one::<PfHealth>(run, &[(PfHealth::FILE, b)])?;
     }
+    if let Some(b) = &f.final_state {
+        one::<FinalState>(run, &[(FinalState::FILE, b)])?;
+    }
+    if let Some(b) = &f.paths {
+        one::<SavedPaths>(run, &[(SavedPaths::FILE, b)])?;
+    }
+    if let Some(p) = &f.prequential {
+        one::<Prequential>(run, &[(Prequential::JOINT, &p.joint), (Prequential::STREAMS, &p.streams), (Prequential::JSON, &p.json)])?;
+    }
+    if let Some(b) = &f.filtering {
+        one::<Filtering>(run, &[(Filtering::FILE, b)])?;
+    }
+    if let Some(b) = &f.filtered_streams {
+        one::<FilteredStreams>(run, &[(FilteredStreams::FILE, b)])?;
+    }
+    Ok(())
+}
 
-    // Record ancestry when either --save-paths or --save-filtering is
-    // active. Both flags consume the same per-step snapshot data; the
-    // difference is only in what we write to disk at the end.
-    let need_ancestry = save_paths.is_some() || save_filtering.is_some();
-    // gh#520: the PredictionDiag block is only read by the single-run
-    // `--trace` writer below (`result.predictions`, ~line 660). It used to
-    // compute unconditionally whenever the obs model could project a state —
-    // which meant `--replicates N` (which never reads `.predictions` at all,
-    // only `.log_likelihood`) and a plain single run with no `--trace` both
-    // paid for it and threw it away.
-    let want_predictions = trace_path.is_some() && n_replicates <= 1;
-    let smc_config = SMCConfig {
-        n_particles,
-        dt,
-        t_start: compiled.model.simulation.t_start,
-        skip_first_obs_from_loglik: objective.skips_first_observation(),
-        record_ancestry: need_ancestry,
-        record_prequential: save_prequential.is_some(),
-        record_predictions: want_predictions,
-        // Single-run only: `--replicates` refuses `--save-filtered-streams`.
-        record_stream_means: save_filtered_streams.is_some() && n_replicates <= 1,
-        // gh#241: deterministic compute budget (the engine default unless the
-        // user passes `--pf-max-substeps`). Reproducible across machines — there
-        // is no wall-clock watchdog, so a content-addressed `pfilters/` leaf is
-        // produced identically regardless of hardware.
-        max_substeps,
-        // gh#747: `--binomial`; the run's stored address records it.
-        binomial,
+/// The bytes of one file of the by-product of kind `kind` this invocation
+/// asked for.
+fn by_product_bytes(store: &store::Store, invocation: &store::Invocation, kind: &str, file: &str) -> Result<Vec<u8>, String> {
+    use crate::pfilter_store::*;
+    macro_rules! read {
+        ($($t:ty),*) => {
+            $(if kind == <$t as store::Artifact>::KIND {
+                let (id, ()) = invocation.members::<$t>().map_err(|e| e.to_string())?.into_iter().next()
+                    .ok_or_else(|| format!("the invocation lists no {kind}"))?;
+                let stored = store.get(&id).map_err(|e| e.to_string())?
+                    .ok_or_else(|| format!("the {kind} {} is not stored", id.key().short12()))?;
+                return read_stored(&stored, file);
+            })*
+        };
+    }
+    read!(Trace, PfHealth, FinalState, SavedPaths, Prequential, Filtering, FilteredStreams);
+    Err(format!("no by-product of kind {kind}"))
+}
+
+/// Writes `bytes` to `path`, or to stdout when `path` is `-`, and says so.
+fn export_bytes(out: &crate::out::Out, path: &str, bytes: &[u8], what: &str) {
+    if path == "-" {
+        let _ = out.data().write_all(bytes);
+        return;
+    }
+    std::fs::write(path, bytes).unwrap_or_else(|e| out.fail(format!("cannot write {path}: {e}")));
+    out.say(format_args!("{what} written to {path}"));
+}
+
+/// The `--pf-health` summary, read from the stored report: ESS-fraction
+/// health and the Snyder implied-particle-count estimate.
+fn say_pf_health_summary(out: &crate::out::Out, bytes: &[u8], n_particles: usize) {
+    let text = String::from_utf8_lossy(bytes);
+    let rows: Vec<(f64, f64)> = text.lines().skip(1).filter_map(|l| {
+        let cols: Vec<&str> = l.split('\t').collect();
+        Some((cols.get(2)?.parse().ok()?, cols.get(3)?.parse().ok()?))
+    }).collect();
+    if rows.is_empty() {
+        return;
+    }
+    let median = |v: &[f64]| -> f64 {
+        let mut s = v.to_vec();
+        s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        s[s.len() / 2]
     };
-
-    // --save-filtering caveat log. Fires unconditionally (not quietable)
-    // because the failure mode — plotting filtering marginals as if
-    // they were smoothing paths — is silent. See
-    // docs/dev/proposals/2026-04-19-pf-latent-trajectories.md.
-    if save_filtering.is_some() {
-        out.say(format_args!("[info] --save-filtering emits filtering marginals \
-                   p(x_t | y_{{1..t}}), not smoothing paths. Joining \
-                   particles across time by index does NOT yield \
-                   trajectory samples from the posterior. For coherent \
-                   sample paths use --save-paths N PATH."));
-    }
-
-    // ── Default-CAS: record this eval as a content-addressed `Pfilter` leaf
-    // (gh#147 M3.3). A pfilter eval is a single leaf — replicates are averaged
-    // in-leaf, not an axis. Written after the loglik is computed, from both
-    // the replicate and single-run paths; the stdout `loglik = …` line and the
-    // explicit `--save-*` paths are unchanged. Idempotent: same inputs → same
-    // run_id → same path. Returns the leaf's run_id when it is stored, by this
-    // call or an earlier one.
-    let write_cas_leaf = |mean_ll: f64, sd_ll: f64, n_reps: usize| -> Option<runid::ContentHash> {
-        // `--no-store`: the caller wants the evaluation, not a stored leaf.
-        if no_store {
-            return None;
-        }
-        let data_hashes: Vec<(String, String)> = bound_streams.iter()
-            .filter_map(|(name, path)| std::fs::read(path).ok()
-                .map(|bytes| (name.clone(), runid::ContentHash::digest_bytes(&bytes).to_hex())))
-            .collect();
-        let scored: Vec<(String, f64)> = resolved.params.iter()
-            .map(|p| (p.name.clone(), p.value)).collect();
-        // Projection comes from each stream's `observations { }` block, so there
-        // is no CLI flow override. These stay empty (their pre-`--flow`-removal
-        // no-flow value) to keep the content-addressed `run_id` stable — the
-        // hash of a `--flow`-free pfilter run is unchanged by this removal.
-        let flow_indices: Vec<u32> = Vec::new();
-        let stem = crate::hashing::path_stem_slug(ir_path).unwrap_or_else(|| "model".to_string());
-        let ir_version_str = ir::IR_VERSION.trim().to_string();
-        let ctx = crate::pfilter_cas::PfilterCtx {
-            model: &model,
-            ir_version: &ir_version_str,
-            engine,
-            stem: &stem,
-            data: &data_hashes,
-            params: &scored,
-            particles: n_particles as u32,
-            replicates: n_reps as u32,
-            dt,
-            obs_block: "",
-            flow_indices: &flow_indices,
-            objective,
-            allow_forcing_extrapolation: forcing.allowed(),
-            allow_degenerate_rates: eval.allow_degenerate_rates,
-            training_rows: training_cut.as_ref().and_then(TrainingCut::identity),
-            binomial: smc_config.binomial,
-            seed,
-        };
-        let resolved_id = match crate::pfilter_cas::resolve_pfilter(&ctx) {
-            Ok(r) => r,
-            Err(e) => { out.say(format_args!("warning: pfilter CAS identity: {}", e)); return None; }
-        };
-        let root = crate::run_paths::output_root(None, None);
-        let cas_path = runid::store_path(&root, runid::ArtifactKind::Pfilter, &resolved_id.levels);
-        let store = runid::FsCasStore::new(&root);
-        let sd_field = if n_reps > 1 { serde_json::json!(sd_ll) } else { serde_json::Value::Null };
-        let inputs_json = serde_json::json!({
-            "loglik": mean_ll,
-            // A bootstrap particle filter estimates the marginal `log p(y | θ)`
-            // (gh#280) — the comparison-correct class, never PGAS's joint.
-            "loglik_type": crate::fit::loglik::LoglikType::Marginal.tag(),
-            // Which likelihood `loglik` is: `full` scores every observation,
-            // `conditional_on_first_observation` (the `--fit` config's
-            // `ic_free`) leaves y₁'s term out.
-            "likelihood_objective": objective,
-            "loglik_sd": sd_field,
-            "n_replicates": n_reps,
-            "n_particles": n_particles,
-            "params": scored.iter().map(|(n, v)| (n.as_str(), *v)).collect::<Vec<_>>(),
-            "data_hashes": data_hashes.iter().map(|(n, h)| (n.as_str(), h.as_str())).collect::<Vec<_>>(),
-            // Display, never hashed (the run_id is fixed above from `ctx`): where
-            // each scored value came from, every override of one tier's value by
-            // another's, and the notices the resolution reported.
-            "parameters_provenance":
-                crate::run_meta::ParameterProvenance::of_all(&resolved.params),
-            "notices": crate::params_resolver::notices(&[&resolved]),
-        });
-        // Streaming write through the one resolved-writer seam (gh#241 PR D).
-        // The running record carries Null inputs (the loglik is a post-run
-        // result); the final inputs are supplied to `finalize`.
-        let resolved_artifact = crate::resolve::ResolvedArtifact {
-            kind: runid::ArtifactKind::Pfilter,
-            levels: resolved_id.levels.clone(),
-            run_id: resolved_id.run_id,
-            display_inputs: serde_json::Value::Null,
-        };
-        let calendar = ir::caltime::CalendarAxis::from_model(&model)
-            .unwrap_or_else(|e| out.fail(format!("error: {e}")));
-        let mut meta = crate::resolve::RecordMeta::new(&ir_version_str, ir_path, None, calendar, forcing);
-        // The engine the leaf's identity keyed: `run.json` names its switches.
-        meta.engine = engine.clone();
-        let write = match crate::resolve::begin_resolved_write(
-            &store, &root, &resolved_artifact, &meta, crate::resolve::WriteMode::Streaming,
-        ) {
-            Ok(crate::resolve::ResolvedWrite::Streaming(c)) => c,
-            Ok(crate::resolve::ResolvedWrite::Committed(_)) => {
-                unreachable!("Streaming write mode never returns a committed path")
-            }
-            // The identical evaluation is already stored: this rerun recomputed
-            // it for nothing, which is a cache report, not a failure. The
-            // stored leaf may sit under another model file name's labels
-            // (`begin_resolved_write` finds it by identity), so report the
-            // path the store names, not this run's `cas_path`.
-            Err(runid::CasError::AlreadyCompleted { path }) => {
-                match role {
-                    PointRole::Single => out.milestone("cached", path),
-                    PointRole::Design { point_id, .. } =>
-                        out.milestone("cached", format_args!("point {point_id} {path}")),
-                }
-                return Some(resolved_id.run_id);
-            }
-            // Another process is computing this same evaluation right now. The
-            // loglik above is still correct and already printed; only the store
-            // write is skipped.
-            Err(e @ runid::CasError::FitInProgress { .. }) => {
-                out.say(format_args!("warning: not storing this pfilter leaf — {}", e));
-                return None;
-            }
-            // Anything else means the result was NOT recorded, and the run
-            // fails: the filter's outputs already delivered (the loglik
-            // above, `--save-final-state`, the trace files) are valid and
-            // stay on disk, but a caller that asked for a stored leaf (a
-            // script that follows with `camdl cat`, `compare`, a pipeline)
-            // must not read exit 0 as "stored". Exit 1, not `FILTER_FAILED`:
-            // the filter did not fail, and `compare` reads status 3 as the
-            // filter rejecting a posterior draw.
-            Err(e) => {
-                out.fail(format!("error: this pfilter result was NOT stored in the \
-                           run cache — {}\n  (the log-likelihood above is \
-                           valid; only the cached leaf at {} is missing)",
-                    e, cas_path.display()));
-            }
-        };
-        let mut body = format!("loglik = {}\nn_replicates = {}\nn_particles = {}\n",
-            mean_ll, n_reps, n_particles);
-        if n_reps > 1 { body.push_str(&format!("loglik_sd = {}\n", sd_ll)); }
-        // Through the claim (fsync'd), and the error is fatal: a discarded
-        // write error could finalize a Completed leaf with no loglik.toml in it.
-        if let Err(e) = write.write("loglik.toml", body.as_bytes()) {
-            out.fail_with_claim(write, "pfilter", format!(
-                "error: writing pfilter loglik.toml into {}: {}", cas_path.display(), e));
-        }
-        // A leaf that did not commit is not stored (the abandoned claim drops
-        // as `Failed`), so this is an error, like the `loglik.toml` write
-        // above, and not a warning under exit 0.
-        if let Err(e) = write.finalize(inputs_json) {
-            out.fail(format!("error: finalize pfilter leaf {}: {}", cas_path.display(), e));
-        }
-        match role {
-            PointRole::Single => {
-                out.milestone("stored", cas_path.display());
-                out.hint(format_args!("camdl cat {}", resolved_id.run_id.to_hex()));
-            }
-            PointRole::Design { point_id, .. } =>
-                out.milestone("stored", format_args!("point {point_id} {}", cas_path.display())),
-        }
-        Some(resolved_id.run_id)
-    };
-
-    // ── Replicates mode: run N independent pfilters, output loglik summary ──
-    if n_replicates > 1 {
-        if announce {
-            out.say(format_args!("pfilter: {} replicates × {} particles{}",
-                n_replicates, n_particles,
-                if parallel > 0 { format!(" (parallel = {})", parallel) }
-                else { String::new() }));
-        }
-        // Per-replicate progress bar; the metric is the running-mean loglik
-        // (replicates are noisy estimates of ONE loglik at fixed params, so
-        // the mean is the live estimate — not a search "best"). Ticked from
-        // the parallel loop (`Task` is `Send + Sync`); honors `--progress
-        // none/plain`. Finer per-obs-window progress would need a callback
-        // into `sim::bootstrap_filter` — deferred (an inference-crate change).
-        // A design point has no bar of its own: the design counts points.
-        let bar = matches!(role, PointRole::Single).then(|| {
-            crate::out::progress::Reporter::new().task(n_replicates as u64, "pfilter", "reps")
-        });
-        let acc = std::sync::Mutex::new((0.0_f64, 0usize)); // (Σ loglik, count)
-        let replicates: Vec<(f64, Option<String>, bool)> = run_pooled(pf_pool, || {
-            (0..n_replicates).into_par_iter().map(|rep| {
-                let rep_seed = seed.wrapping_add((rep as u64).wrapping_mul(SEED_STRIDE));
-                let result = match bootstrap_filter(
-                    &process, &obs_model, &params, &smc_config, rep_seed,
-                ) {
-                    Ok(result) => result,
-                    Err(e) => match role {
-                        PointRole::Single => {
-                            out.error(filter_failed(format!("pfilter replicate {} error: {:?}", rep + 1, e))).exit();
-                        }
-                        // At a design point the error is a property of the
-                        // point's values: the replicate fails and the run
-                        // goes on.
-                        PointRole::Design { .. } => {
-                            return (f64::NEG_INFINITY, Some(format!(
-                                "pfilter replicate {} error: {}", rep + 1, design_failure_text(&e))), true);
-                        }
-                    },
-                };
-                // The replicate is added to the running mean before its count
-                // is ticked, so the line printed at the last count names the
-                // mean of every finite replicate (the sibling of gh#1269).
-                if let (true, Some(bar)) = (result.log_likelihood.is_finite(), bar.as_ref()) {
-                    if let Ok(mut g) = acc.lock() {
-                        g.0 += result.log_likelihood;
-                        g.1 += 1;
-                        // Finite: only finite replicates are summed.
-                        bar.set(crate::out::progress::ll(g.0 / g.1 as f64));
-                    }
-                }
-                if let Some(bar) = bar.as_ref() { bar.inc(1); }
-                (result.log_likelihood, collapse_message(&result), false)
-            }).collect()
-        });
-        let errored = replicates.iter().any(|(_, _, e)| *e);
-        let (logliks, failures): (Vec<f64>, Vec<Option<String>>) =
-            replicates.into_iter().map(|(ll, f, _)| (ll, f)).unzip();
-        if let Some(bar) = bar { bar.finish(); }
-
-        // Every replicate failed: the filter rejects these parameters, there
-        // is no likelihood to store, and the caller reports the failure. When
-        // only some replicates scored `-inf`, the mean is still `-inf`, and is
-        // stored. A replicate that returned an error stores nothing: the
-        // single call at these values exits on that error, so a leaf here
-        // would be one no single call writes.
-        let n_failed = failures.iter().flatten().count();
-        let failure = failures.iter().flatten().next().cloned();
-        let mean_ll = logliks.iter().sum::<f64>() / n_replicates as f64;
-        let var_ll = logliks.iter().map(|&l| (l - mean_ll).powi(2)).sum::<f64>() / (n_replicates - 1) as f64;
-        let sd_ll = var_ll.sqrt();
-        let mut score = PointScore {
-            loglik: mean_ll,
-            loglik_sd: Some(sd_ll),
-            n_failed,
-            failure,
-            leaf: None,
-            replicate_logliks: logliks,
-        };
-        if score.every_replicate_failed() || errored {
-            return score;
-        }
-        before_store(&score);
-        score.leaf = write_cas_leaf(mean_ll, sd_ll, n_replicates);
-        return score;
-    }
-
-    // ── Single pfilter run ─────────────────────────────────────────────────
-    // gh#audit-H13: run on the scoped pool so --parallel throttles the
-    // particle-level parallelism inside bootstrap_filter (par_iter_mut over
-    // the swarm).
-    let result = match run_pooled(pf_pool, || {
-        bootstrap_filter(&process, &obs_model, &params, &smc_config, seed)
-    }) {
-        Ok(result) => result,
-        Err(e) => {
-            match role {
-                PointRole::Single => out.error(filter_failed(format!(
-                    "pfilter error: {}", crate::util::sim_error_text(&e)))).exit(),
-                // A failed replicate at a design point, as in the loop above.
-                PointRole::Design { .. } => return PointScore {
-                    loglik: f64::NEG_INFINITY,
-                    loglik_sd: None,
-                    n_failed: 1,
-                    failure: Some(format!("pfilter error: {}", design_failure_text(&e))),
-                    leaf: None,
-                    replicate_logliks: vec![f64::NEG_INFINITY],
-                },
-            }
-        }
-    };
-
-    // Write trace diagnostics
-    if let Some(ref path) = trace_path {
-        let mut w: Box<dyn Write> = if path == "-" {
-            Box::new(std::io::BufWriter::new(out.data()))
-        } else {
-            let f = std::fs::File::create(path)
-                .unwrap_or_else(|e| { out.fail(format!("cannot create {}: {}", path, e)); });
-            Box::new(std::io::BufWriter::new(f))
-        };
-        // gh#268: the real observed value per union step (cross-stream sum),
-        // not the never-scored 0.0 placeholder carried on the time axis.
-        let observed = obs_model.joint_observed();
-        // gh#636: a step where NO stream carries a present value prints NA in
-        // the observed column (the placeholder 0 was the reason --trace used
-        // to refuse holes); a partial-hole step prints the present-stream sum,
-        // consistent with the omitted-factor ll_increment.
-        let per_stream_view = obs_model.per_stream_observed();
-        let observed_cell = |i: usize| -> String {
-            if per_stream_view[i].iter().any(|v| v.is_finite()) {
-                format!("{}", observed[i])
-            } else {
-                "NA".to_string()
-            }
-        };
-        if let Some(ref preds) = result.predictions {
-            writeln!(w, "time\tll_increment\tESS\tobs_mean\tobs_q05\tobs_q50\tobs_q95\tstate_mean\tstate_q05\tstate_q50\tstate_q95\tobserved").unwrap();
-            for (i, obs) in observations.iter().enumerate() {
-                let p = &preds[i];
-                writeln!(w, "{}\t{:.4}\t{:.1}\t{:.1}\t{:.0}\t{:.0}\t{:.0}\t{:.1}\t{:.0}\t{:.0}\t{:.0}\t{:.0}",
-                    obs.time, result.ll_increments[i], result.ess_trace[i],
-                    p.obs_mean, p.obs_q05, p.obs_q50, p.obs_q95,
-                    p.state_mean, p.state_q05, p.state_q50, p.state_q95,
-                    observed_cell(i)).unwrap();
-            }
-        } else {
-            writeln!(w, "time\tll_increment\tESS\tobserved").unwrap();
-            for (i, obs) in observations.iter().enumerate() {
-                writeln!(w, "{}\t{:.4}\t{:.1}\t{:.0}",
-                    obs.time, result.ll_increments[i], result.ess_trace[i],
-                    observed_cell(i)).unwrap();
-            }
-        }
-        drop(w);
-        if path != "-" {
-            out.say(format_args!("trace written to {}", path));
-        }
-    }
-
-    // Particle-filter health report (ESS + Snyder τ²) — `--pf-health`.
-    if let Some(ref path) = pf_health {
-        let mut w: Box<dyn Write> = if path == "-" {
-            Box::new(std::io::BufWriter::new(out.data()))
-        } else {
-            let f = std::fs::File::create(path).unwrap_or_else(|e| {
-                out.fail(format!("cannot create {}: {}", path, e));
-            });
-            Box::new(std::io::BufWriter::new(f))
-        };
-        let n = n_particles as f64;
-        writeln!(w, "time\tESS\tESS_frac\ttau2").unwrap();
-        for i in 0..result.ess_trace.len() {
-            let t = observations.get(i).map(|o| o.time).unwrap_or(i as f64);
-            writeln!(w, "{}\t{:.2}\t{:.4}\t{:.4}",
-                t, result.ess_trace[i], result.ess_trace[i] / n, result.logw_var_trace[i]).unwrap();
-        }
-        drop(w);
-        if path != "-" {
-            out.say(format_args!("pf-health written to {}", path));
-        }
-
-        // Summary: ESS-fraction health + the Snyder implied-particle-count estimate.
-        if !result.ess_trace.is_empty() {
-            let median = |v: &[f64]| -> f64 {
-                let mut s = v.to_vec();
-                s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                s[s.len() / 2]
-            };
-            let ess_frac: Vec<f64> = result.ess_trace.iter().map(|&e| e / n).collect();
-            let min_ess_frac = ess_frac.iter().copied().fold(f64::INFINITY, f64::min);
-            let med_ess_frac = median(&ess_frac);
-            let med_tau2 = median(&result.logw_var_trace);
-            let max_tau2 = result.logw_var_trace.iter().copied().fold(0.0_f64, f64::max);
-            out.say(format_args!("\npf-health summary ({} obs, N={}):", result.ess_trace.len(), n_particles));
-            out.say(format_args!("  ESS fraction:           median {:.1}%, worst {:.1}%",
-                100.0 * med_ess_frac, 100.0 * min_ess_frac));
-            out.say(format_args!("  log-weight variance τ²: median {:.2}, max {:.2}", med_tau2, max_tau2));
-            out.say(format_args!("  implied N to avoid collapse exp(τ²/2): ~{} (median step), ~{} (worst step)",
-                fmt_implied_n((0.5 * med_tau2).exp()),
-                fmt_implied_n((0.5 * max_tau2).exp())));
-            out.say("  [Snyder et al. 2008 heuristic — an order-of-magnitude floor at THIS θ and N, not a guarantee]");
-        }
-    }
-
-    // Save final particle states — an unweighted sample from p(x_T | y_{1:T})
-    // at this θ. `origin_t` is the LAST observation time on the union grid: the
-    // swarm was resampled after scoring it, so that is the model time the saved
-    // states sit at. It rides in the file header because `simulate --init-state`
-    // (gh#641) has no other way to learn where the forecast origin is.
-    if let Some(ref path) = save_final_state {
-        if let Some(ref states) = result.final_states {
-            let origin_t = observations.last().map(|o| o.time).unwrap_or_else(|| {
-                // Unreachable in practice: a filter with no observations exits
-                // long before here. Fall back to the model start rather than
-                // inventing an origin.
-                model.simulation.t_start
-            });
-            let columns = io::trajectories::TrajColumnSpec::from_model(&model, &[]);
-            io::write_final_states(
-                std::path::Path::new(path), states, &columns, origin_t,
-            ).unwrap_or_else(|e| {
-                out.fail(format!("error writing final states: {}", e));
-            });
-            out.say(format_args!("final particle states ({} particles) at t={} written to {}",
-                states.len(), origin_t, path));
-        }
-    }
-
-    // Save smoothing paths (--save-paths N PATH): ancestor-trace
-    // N trajectory samples from the smoothing distribution.
-    if let Some((n_paths, ref path)) = save_paths {
-        let trace = result.ancestry.as_ref().expect(
-            "record_ancestry must be true when save_paths is set");
-        let paths = sim::inference::ancestor_trace::sample_paths(
-            trace, n_paths, seed);
-        write_paths_tsv(path, &paths, &model).unwrap_or_else(|e| {
-            out.fail(format!("error writing paths: {}", e));
-        });
-        out.say(format_args!("{} sample paths written to {}", n_paths, path));
-    }
-
-    // Save prequential trace (--save-prequential STEM): writes
-    // {STEM}.tsv (joint score per step) + {STEM}.streams.tsv (per-stream
-    // scores) + {STEM}.json (full trace,
-    // incl. predictive samples unless --no-save-samples).
-    if let Some(ref stem) = save_prequential {
-        let recorded = result.prequential.as_ref().expect(
-            "record_prequential must be true when save_prequential is set");
-        // gh#268/gh#269: score each stream against its real observed values,
-        // not the never-scored 0.0 placeholder.
-        let per_stream_obs = obs_model.per_stream_observed();
-        // gh#585 / Stage 3.2: `--score-from TIME` windows the trace. The
-        // boundary maps to the union-grid index t0 — observations at
-        // t <= TIME are assimilated but not scored; the trace records the
-        // time-axis boundary alongside.
-        let (t0, score_from_time) = match &score_from {
-            None => (0usize, None),
-            Some(raw) => {
-                let last = recorded.obs_times.last().copied().unwrap_or(0.0);
-                let (first_obs, last_obs) = observed_window.unwrap_or((0.0, last));
-                let spec = crate::fit::runner::parse_time_spec(
-                    "--score-from", raw, model.origin.as_deref(), &model.time_unit,
-                ).unwrap_or_else(|e| {
-                    out.fail(format!("error: {}", e));
-                });
-                let t = match spec {
-                    crate::fit::runner::TimeSpec::Absolute(v) => v,
-                    crate::fit::runner::TimeSpec::Anchored(at) => {
-                        let anchor = match at.anchor {
-                            crate::fit::runner::ObsAnchor::First => first_obs,
-                            crate::fit::runner::ObsAnchor::Last => last_obs,
-                        };
-                        at.resolve(anchor)
-                    }
-                };
-                if t >= last - 1e-9 {
-                    out.fail(format!(
-                        "error: --score-from {raw} resolves to t = {t}, at or \
-                         after the last observation (t = {last}) — nothing \
-                         would be scored."));
-                }
-                let t0 = crate::fit::runner::first_scored_index(&recorded.obs_times, t);
-                (t0, Some(t))
-            }
-        };
-        // gh#833: what each scored value was accumulated over, so `compare`
-        // can refuse to difference two traces that scored different windows
-        // at the same times.
-        let per_stream_cov = obs_model.per_stream_coverage();
-        let mut trace = sim::inference::prequential::build_trace(
-            recorded, &per_stream_obs, &per_stream_cov, &result.ess_trace, t0, seed,
-            obs_model.first_observation_opens_after_run_start(smc_config.t_start),
-            score_from_time);
-        // The forcings the filter held outside their ranges, with the scores
-        // they affected (`compare` reports them per row).
-        trace.warnings.extend(forcing.trace_warnings());
-        // Schema 5: how this trace was computed. One pass (`--replicates N`
-        // is refused beside `--save-prequential`), at the parameters this
-        // invocation was given.
-        trace.derivation = Some(score::trace::Derivation::single_pass(
-            &trace, n_particles, dt, seed,
-            score::trace::ThetaSource::Supplied,
-            adhoc_enable.clone(), adhoc_disable.clone()));
-        if !save_samples {
-            for step in &mut trace.steps {
-                for ss in &mut step.per_stream { ss.y_pred_samples.clear(); }
-            }
-            trace.warnings.push(
-                score::trace::PrequentialWarning::SamplesNotSaved);
-        }
-        let calendar = ir::caltime::CalendarAxis::from_model(&model)
-            .unwrap_or_else(|e| out.fail(format!("error: {e}")));
-        crate::prequential_out::write_prequential_outputs(stem, &trace, &calendar).unwrap_or_else(|e| {
-            out.fail(format!("error writing prequential: {}", e));
-        });
-        out.say(format_args!("prequential trace written: {}",
-            crate::prequential_out::summary_line(&trace)));
-        out.say_raw(format_args!("{}", crate::prequential_out::surprise_table(&trace, &calendar)));
-    }
-
-    // Save filtering marginals (--save-filtering PATH): per-step
-    // pre-resample particle states + log-weights. Caveat log fired
-    // earlier at SMCConfig construction.
-    if let Some(ref path) = save_filtering {
-        let trace = result.ancestry.as_ref().expect(
-            "record_ancestry must be true when save_filtering is set");
-        write_filtering_tsv(path, trace, &model).unwrap_or_else(|e| {
-            out.fail(format!("error writing filtering: {}", e));
-        });
-        out.say(format_args!("filtering marginals written to {}", path));
-    }
-
-    // Each stream's conditional mean before and after each step is scored
-    // (--save-filtered-streams PATH).
-    if let Some(ref path) = save_filtered_streams {
-        let steps = result.stream_means.as_deref().expect(
-            "record_stream_means must be true when save_filtered_streams is set");
-        write_filtered_streams_tsv(path, steps, &observations, &obs_model.stream_names())
-            .unwrap_or_else(|e| out.fail(format!("error writing filtered streams: {}", e)));
-        out.say(format_args!("filtered stream means written to {}", path));
-    }
-
-    // A filter that lost all its weight has no likelihood to report or store:
-    // the diagnostic outputs above (`--trace`'s `ll_increment`, `--pf-health`)
-    // are written, and the caller reports the cause. Storing the `-inf` would
-    // make the identical rerun a cache hit that says nothing about why.
-    let failure = collapse_message(&result);
-    let mut score = PointScore {
-        loglik: result.log_likelihood,
-        loglik_sd: None,
-        n_failed: usize::from(failure.is_some()),
-        failure,
-        leaf: None,
-        replicate_logliks: vec![result.log_likelihood],
-    };
-    if score.every_replicate_failed() {
-        return score;
-    }
-    before_store(&score);
-    // Single run → one replicate, no spread.
-    score.leaf = write_cas_leaf(result.log_likelihood, 0.0, 1);
-    score
-
-
+    let ess_frac: Vec<f64> = rows.iter().map(|r| r.0).collect();
+    let tau2: Vec<f64> = rows.iter().map(|r| r.1).collect();
+    let min_ess_frac = ess_frac.iter().copied().fold(f64::INFINITY, f64::min);
+    let med_ess_frac = median(&ess_frac);
+    let med_tau2 = median(&tau2);
+    let max_tau2 = tau2.iter().copied().fold(0.0_f64, f64::max);
+    out.say(format_args!("\npf-health summary ({} obs, N={}):", rows.len(), n_particles));
+    out.say(format_args!("  ESS fraction:           median {:.1}%, worst {:.1}%",
+        100.0 * med_ess_frac, 100.0 * min_ess_frac));
+    out.say(format_args!("  log-weight variance τ²: median {:.2}, max {:.2}", med_tau2, max_tau2));
+    out.say(format_args!("  implied N to avoid collapse exp(τ²/2): ~{} (median step), ~{} (worst step)",
+        fmt_implied_n((0.5 * med_tau2).exp()),
+        fmt_implied_n((0.5 * max_tau2).exp())));
+    out.say("  [Snyder et al. 2008 heuristic — an order-of-magnitude floor at THIS θ and N, not a guarantee]");
 }
 
 use crate::caltime_load::{check_substeps_and_grid, convert_time_column, TimeOpts};
@@ -2666,13 +2805,11 @@ use std::io::Write;
 /// columns `path`, `time`, and one column per integer compartment.
 /// Each `path ∈ 1..=N` is an equally-weighted sample from the
 /// smoothing distribution; no log_weight column needed.
-fn write_paths_tsv(
-    path: &str,
+fn paths_bytes(
     paths: &[sim::inference::ancestor_trace::SampledPath],
     model: &ir::Model,
-) -> Result<(), String> {
-    let mut f = std::fs::File::create(path)
-        .map_err(|e| format!("cannot create {}: {}", path, e))?;
+) -> Vec<u8> {
+    let mut f: Vec<u8> = Vec::new();
 
     write!(f, "path\ttime").unwrap();
     let comp_names: Vec<&str> = model.compartments.iter()
@@ -2729,7 +2866,7 @@ fn write_paths_tsv(
             writeln!(f).unwrap();
         }
     }
-    Ok(())
+    f
 }
 
 /// Write filtering marginals as a long-format TSV. Schema:
@@ -2737,13 +2874,11 @@ fn write_paths_tsv(
 /// `log_weight`. `particle` is an in-step index only — it is NOT
 /// stable across `time`, and joining particles across `time` by
 /// index is NOT a sample path.
-fn write_filtering_tsv(
-    path: &str,
+fn filtering_bytes(
     trace: &sim::inference::ancestor_trace::AncestorTrace,
     model: &ir::Model,
-) -> Result<(), String> {
-    let mut f = std::fs::File::create(path)
-        .map_err(|e| format!("cannot create {}: {}", path, e))?;
+) -> Vec<u8> {
+    let mut f: Vec<u8> = Vec::new();
 
     write!(f, "time\tparticle").unwrap();
     let comp_names: Vec<&str> = model.compartments.iter()
@@ -2764,7 +2899,7 @@ fn write_filtering_tsv(
             writeln!(f, "\t{:.6}", trace.log_weights[t_idx][i]).unwrap();
         }
     }
-    Ok(())
+    f
 }
 
 /// `--save-filtered-streams`: one row per stop of the observation axis,
@@ -2772,26 +2907,80 @@ fn write_filtering_tsv(
 /// the weighted mean and quantiles over the swarm of the stream's conditional
 /// mean `E[y_t | x_t, θ]`. `time` is the stop's model time, the `--trace`
 /// column of the same name. A summary with no weight behind it prints `NA`.
-fn write_filtered_streams_tsv(
-    path: &str,
+fn filtered_streams_bytes(
     steps: &[sim::inference::particle_filter::StreamMeanStep],
     observations: &[Observation],
     stream_names: &[String],
-) -> Result<(), String> {
+) -> Vec<u8> {
     let cell = |v: f64| if v.is_finite() { format!("{v}") } else { "NA".to_string() };
-    let mut w = std::io::BufWriter::new(std::fs::File::create(path)
-        .map_err(|e| format!("cannot create {}: {}", path, e))?);
-    let io = |e: std::io::Error| format!("writing {}: {}", path, e);
-    writeln!(w, "time\tstream\tphase\tmean\tq05\tq25\tq50\tq75\tq95").map_err(io)?;
+    let mut w: Vec<u8> = Vec::new();
+    writeln!(w, "time\tstream\tphase\tmean\tq05\tq25\tq50\tq75\tq95").unwrap();
     for step in steps {
         for (phase, s) in [("predictive", &step.predictive), ("filtered", &step.filtered)] {
             writeln!(w, "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                 observations[step.obs_idx].time, stream_names[step.stream], phase,
-                cell(s.mean), cell(s.q05), cell(s.q25), cell(s.q50), cell(s.q75), cell(s.q95))
-                .map_err(io)?;
+                cell(s.mean), cell(s.q05), cell(s.q25), cell(s.q50), cell(s.q75), cell(s.q95)).unwrap();
         }
     }
-    w.flush().map_err(io)
+    w
+}
+
+/// `--trace`: per observation, the time, the log-likelihood increment and
+/// the ESS, with the one-step predictive quantiles of the observation and the
+/// state when the filter recorded them, and the observed value (summed over
+/// the streams present at the step; `NA` where none is).
+fn trace_bytes(
+    result: &sim::inference::particle_filter::PFilterResult,
+    observations: &[Observation],
+    obs_model: &MultiStreamObsModel,
+) -> Vec<u8> {
+    let mut w: Vec<u8> = Vec::new();
+    let observed = obs_model.joint_observed();
+    let per_stream_view = obs_model.per_stream_observed();
+    let observed_cell = |i: usize| -> String {
+        if per_stream_view[i].iter().any(|v| v.is_finite()) {
+            format!("{}", observed[i])
+        } else {
+            "NA".to_string()
+        }
+    };
+    if let Some(ref preds) = result.predictions {
+        writeln!(w, "time\tll_increment\tESS\tobs_mean\tobs_q05\tobs_q50\tobs_q95\tstate_mean\tstate_q05\tstate_q50\tstate_q95\tobserved").unwrap();
+        for (i, obs) in observations.iter().enumerate() {
+            let p = &preds[i];
+            writeln!(w, "{}\t{:.4}\t{:.1}\t{:.1}\t{:.0}\t{:.0}\t{:.0}\t{:.1}\t{:.0}\t{:.0}\t{:.0}\t{:.0}",
+                obs.time, result.ll_increments[i], result.ess_trace[i],
+                p.obs_mean, p.obs_q05, p.obs_q50, p.obs_q95,
+                p.state_mean, p.state_q05, p.state_q50, p.state_q95,
+                observed_cell(i)).unwrap();
+        }
+    } else {
+        writeln!(w, "time\tll_increment\tESS\tobserved").unwrap();
+        for (i, obs) in observations.iter().enumerate() {
+            writeln!(w, "{}\t{:.4}\t{:.1}\t{:.0}",
+                obs.time, result.ll_increments[i], result.ess_trace[i],
+                observed_cell(i)).unwrap();
+        }
+    }
+    w
+}
+
+/// `--pf-health`: per observation, the ESS, its fraction of the swarm and
+/// the log-weight variance τ² (Snyder et al. 2008).
+fn pf_health_bytes(
+    result: &sim::inference::particle_filter::PFilterResult,
+    observations: &[Observation],
+    n_particles: usize,
+) -> Vec<u8> {
+    let mut w: Vec<u8> = Vec::new();
+    let n = n_particles as f64;
+    writeln!(w, "time\tESS\tESS_frac\ttau2").unwrap();
+    for i in 0..result.ess_trace.len() {
+        let t = observations.get(i).map(|o| o.time).unwrap_or(i as f64);
+        writeln!(w, "{}\t{:.2}\t{:.4}\t{:.4}",
+            t, result.ess_trace[i], result.ess_trace[i] / n, result.logw_var_trace[i]).unwrap();
+    }
+    w
 }
 
 /// Format a Snyder implied-particle-count estimate `exp(τ²/2)` for reading.

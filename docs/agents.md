@@ -678,7 +678,7 @@ with the source can reproduce the result bit-for-bit.
 | ----------- | --------------------------------------------------------------------------------------------- |
 | `models/`   | `.camdl` model files and their `fit.toml` configs, side by side                               |
 | `data/`     | committed input streams plus the lock/manifest pinning their provenance                       |
-| `results/`  | the content-addressed run store — `results/fits/`, `results/sims/`, `results/pfilters/`, …    |
+| `results/`  | the content-addressed run store — `results/fits/`, `results/sims/`, …                         |
 | `scripts/`  | everything the Makefile or workflow calls; no logic inline in a rule                          |
 | `workflow/` | the fit DAG (`*.smk`), once the project has enough fan-out to need one                        |
 | `tests/`    | offline contract tests — do the data's columns match what the model's `observations` declare? |

@@ -322,7 +322,6 @@ results/
 ├── sims/                 # one leaf per simulated cell
 ├── ensembles/            # combined wide-format TSV across a multi-cell simulate
 ├── fits/                 # fit segments, each holding its method leaves
-├── pfilters/             # standalone particle-filter loglik evaluations
 └── profiles/             # profile-likelihood grid points
 ```
 
@@ -361,7 +360,6 @@ The levels per kind:
 | `sim`           | `sims`      | model · config · params · scenario · seed |
 | `sim_ensemble`  | `ensembles` | model · config · params · grid            |
 | `fit_method`    | `fits`      | fit · method · seed                       |
-| `pfilter`       | `pfilters`  | model · config · params · seed            |
 | `profile_point` | `profiles`  | profile · point · method · seed · start   |
 
 **The one rule for consumers: resolve runs by reading `run.json`, never by
@@ -3207,26 +3205,28 @@ would score it:
   `--replicates` filters on the seeds of the single call with the same `--seed`,
   so the filters at different points share random numbers, and the errors of the
   rows are correlated.
-- **The store.** Each point is stored as the single call's `Pfilter` leaf, with
-  that call's `run_id`. A point already stored, by a single call or by another
-  design, is reported `cached` and not recomputed, so an interrupted design run
-  again computes only the remaining points. The design file's digest enters no
-  identity, and the table itself is not stored.
+- **The store.** Each point is stored as the single call's `Pfilter` result,
+  with that call's `run_id`. A point already stored, by a single call or by
+  another design, is reported `cached` and not recomputed, so an interrupted
+  design run again computes only the remaining points. The design file's digest
+  enters no identity, and the table itself is not stored: it is rendered from
+  the stored points, so `-o` and `camdl cat @L` of a design run with `--label L`
+  write the same table.
 
 Points run concurrently on the `--parallel` thread pool. The table does not
 depend on the schedule.
 
 **The table**, to `-o PATH` or stdout, one row per design point in file order:
 
-| column          | meaning                                                                                               |
-| --------------- | ----------------------------------------------------------------------------------------------------- |
-| `point_id`      | the row's `point_id`, else its 0-based row                                                            |
-| `sweep:<param>` | one per design column, name-sorted: the value scored                                                  |
-| `loglik`        | the mean over replicates of the estimated log-likelihood; `-inf` when any replicate failed            |
-| `loglik_sd`     | the standard deviation over replicates; empty under `--replicates 1` or when any replicate failed     |
-| `n_failed`      | how many replicates failed (below)                                                                    |
-| `failure`       | empty when every replicate scored; else the first failed replicate's message, on one line             |
-| `run_id`        | the stored leaf (`camdl cat <run_id>`); empty when no leaf was written, as under `--no-store` (below) |
+| column          | meaning                                                                                           |
+| --------------- | ------------------------------------------------------------------------------------------------- |
+| `point_id`      | the row's `point_id`, else its 0-based row                                                        |
+| `sweep:<param>` | one per design column, name-sorted: the value scored                                              |
+| `loglik`        | the mean over replicates of the estimated log-likelihood; `-inf` when any replicate failed        |
+| `loglik_sd`     | the standard deviation over replicates; empty under `--replicates 1` or when any replicate failed |
+| `n_failed`      | how many replicates failed (below)                                                                |
+| `failure`       | empty when every replicate scored; else the first failed replicate's message, on one line         |
+| `run_id`        | the stored result (`camdl cat <run_id>`); empty under `--no-store`, whose store is deleted        |
 
 Numbers are written in shortest round-trip form, so a `loglik` read back equals
 the stored one.
@@ -3237,16 +3237,21 @@ filter stops with an error, such as a degeneracy error when the effective sample
 size stays collapsed over several observations. Both are recorded in the row and
 neither stops the run. In the `failure` column the message is on one line: tabs
 and newlines are replaced by spaces, and a degeneracy error leaves out the
-wall-clock time it carries, so a rerun writes the same table. A point whose
-every replicate failed has `loglik = -inf`, `n_failed` equal to `--replicates`
-and an empty `run_id`. A point at which some replicate stopped with an error is
-not stored either, since the single call at its values exits on that error; a
-point at which some, but not all, replicates scored `-inf` is stored with
-`loglik = -inf`, as the single call stores it. After the table, the run prints
-how many points failed entirely and the first failure message. The run exits
-with status 3, the status of a single call whose filter failed, only when every
-point failed, and with 0 otherwise. A single call without `--sweep-file` exits
-with status 3 at a filter error at once.
+wall-clock time it carries, so a rerun writes the same table. Either failure is
+determined by the point, so the point is stored as a completed result holding no
+log-likelihood, the number of replicates that failed and the first one's
+message, and a rerun reuses it. A point whose every replicate failed has
+`loglik = -inf` and `n_failed` equal to `--replicates`. After the table, the run
+prints how many points failed entirely and the first failure message. The run
+exits with status 3, the status of a single call whose filter failed, only when
+every point failed, and with 0 otherwise. A single call without `--sweep-file`
+whose filter fails at every replicate is stored the same way and exits with
+status 3.
+
+A point that does not complete for a reason a rerun could change, such as the
+compute budget of `--pf-max-substeps` or a store or I/O error, is not stored.
+The run names each such point, writes no table and exits with status 1; a rerun
+computes only those points.
 
 **Refused beside `--sweep-file`**, before any filter runs:
 
@@ -5259,7 +5264,6 @@ different models (the `model` level; `config` is unchanged).
 | `Sim` (`sims/`)              | model · config · params · scenario · seed | `cli/src/resolve.rs`          |
 | `SimEnsemble` (`ensembles/`) | model · config · params · grid            | `cli/src/sim_ensemble_cas.rs` |
 | `FitMethod` (`fits/`)        | fit · method · seed                       | `cli/src/fit/cas.rs`          |
-| `Pfilter` (`pfilters/`)      | model · config · params · seed            | `cli/src/pfilter_cas.rs`      |
 | `ProfilePoint` (`profiles/`) | profile · point · method · seed · start   | `cli/src/profile_cas.rs`      |
 
 **`Sim` levels** (`resolve::resolve_trajectory`; the level types are in
@@ -5384,7 +5388,7 @@ done by `FiniteF64`'s constructor.
         seed_{n}-{h8}/
           run.json                 # RunRecord, kind = fit_method
           … method artifacts (§10.6)
-  pfilters/ profiles/              # same {label}-{h8} factoring per §9.2.4
+  profiles/                        # same {label}-{h8} factoring per §9.2.4
   profiles/{stem}-{h8}/invocations/{invocation_id}/
                                    # one per `camdl profile` run; not a leaf (§10.12)
 ```
@@ -7983,15 +7987,41 @@ camdl fit predict [FIT]
 --save-prequential STEM     {STEM}.tsv (joint score per step) + {STEM}.streams.tsv
                             (per-stream scores) + {STEM}.json
 --no-save-samples           with --save-prequential, drop per-particle samples
---no-store                  record no `pfilters/` leaf for this evaluation
+--no-store                  compute in a temporary store, deleted at the end
+--label L                   name this invocation, found again as `@L`
+--store DIR                 the run store's root (default $CAMDL_STORE, else
+                            ./camdl-store)
 ```
 
-`camdl pfilter` writes into the content-addressed store under
-`$CAMDL_OUTPUT_DIR` (there is no `--output-dir` flag; `--output` is the TSV
-mirror). `--no-store` skips that leaf and changes nothing else: the
-log-likelihood is still printed and every `--save-*` file is still written.
-`camdl compare` passes it to the filter runs it derives a trace from, so a
-comparison leaves no store entries in the directory it was run from.
+`camdl pfilter` stores its result in the run store, a root of its own
+(`camdl-store/` by default) that the commands still writing to `results/` do not
+share; `--output-dir` and `CAMDL_OUTPUT_DIR` do not apply to it. The store's
+layout and records are those of
+`docs/dev/proposals/2026-11-20-run-store-api.md`. A filter run is one result,
+written in place, under
+`<build>/pfilter/<model>/<settings>/params/seed_<seed>/`: its `loglik.toml`,
+each replicate's log-likelihood in `replicates.tsv` under `--replicates N`, and
+in `provenance.json` where each scored value came from and, under
+`--allow-forcing-extrapolation`, each forcing the run held outside its range.
+The compiled model and each data table are stored once each, under
+`compiled_model/` and `data_table/`, and the run depends on them.
+
+Every file the flags above write is a by-product of the run, stored inside its
+folder under its kind (`trace/`, `pf_health/`, `final_state/`, `saved_paths/`,
+`prequential/`, `filtering/`, `filtered_streams/`), and the flag exports a copy
+to the path it names. Asking for a by-product never changes the run's id. A
+rerun whose run and by-products are all stored computes nothing and writes the
+exports from the stored copies; a rerun that asks for a by-product the stored
+run lacks runs the filter again, checks that its log-likelihood reproduces the
+stored one, and stores the by-product. `-o` and the terminal show the
+log-likelihood rendered from the stored `loglik.toml` and `replicates.tsv`.
+`camdl cat`, `show` and `list` find a filter run in the store `--store` names,
+by id prefix, path or `@L`.
+
+`--no-store` computes in a temporary store and changes nothing else: the
+log-likelihood is printed and every export is written. `camdl compare` passes it
+to the filter runs it derives a trace from, so a comparison leaves no store
+entries in the directory it was run from.
 
 When the filter itself fails at the given parameters (its weights collapse, or
 the state goes negative), `pfilter` exits 3; every other error exits 1.

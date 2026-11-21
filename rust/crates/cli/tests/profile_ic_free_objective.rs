@@ -258,12 +258,13 @@ fn pfilter_with(bin: &Path, dir: &Path, mle: &Path, extra: &[&str]) -> (f64, Str
     (ll, stderr)
 }
 
-/// The stored pfilter leaves' `run.json` records, keyed by nothing — all of
-/// them under `results/pfilters`.
+/// The identity records of the stored filter runs in the run store
+/// `camdl-store/`.
 fn pfilter_records(dir: &Path) -> Vec<serde_json::Value> {
-    find_all(&dir.join("results/pfilters"), "run.json")
+    find_all(&dir.join("camdl-store"), "identity.json")
         .iter()
-        .map(|p| serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap())
+        .map(|p| serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(p).unwrap()).unwrap())
+        .filter(|r| r["kind"] == "pfilter")
         .collect()
 }
 
@@ -326,10 +327,10 @@ fn pfilter_with_fit_scores_the_fit_objective_and_without_it_the_full_likelihood(
 
     let objectives: Vec<String> = pfilter_records(d)
         .iter()
-        .map(|r| r["inputs"]["likelihood_objective"].as_str().unwrap_or("<missing>").to_string())
+        .map(|r| r["identity"]["config"]["objective"].as_str().unwrap_or("<missing>").to_string())
         .collect();
-    assert!(objectives.contains(&"conditional_on_first_observation".to_string()), "{objectives:?}");
-    assert!(objectives.contains(&"full".to_string()), "{objectives:?}");
+    assert!(objectives.contains(&"ConditionalOnFirstObservation".to_string()), "{objectives:?}");
+    assert!(objectives.contains(&"Full".to_string()), "{objectives:?}");
 }
 
 #[test]

@@ -50,9 +50,9 @@ impl StoreRequest {
         }
     }
 
-    /// The given root, else the default `./results`.
-    pub fn root(&self) -> PathBuf {
-        self.root.clone().unwrap_or_else(|| PathBuf::from("results"))
+    /// The given root, else `default`, the project's.
+    pub fn root(&self, default: &Path) -> PathBuf {
+        self.root.clone().unwrap_or_else(|| default.to_path_buf())
     }
 
     /// `Force` when force was asked for.

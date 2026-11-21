@@ -258,7 +258,7 @@ pfilter	stdout	line	-44.0696	-44.0696
 pfilter	stderr	line	pfilter: objective:	full likelihood (if2.toml does not set ic_free = true)
 pfilter	stderr	line	pfilter: bound streams:	cases(poisson)
 pfilter	stderr	line	pfilter:	14 observation boundaries × 1 streams, 200 particles, dt=1, seed=1
-pfilter	stderr	line	stored	results/pfilters/sir-
+pfilter	stderr	line	stored	pfilter/sir-
 stuck.excluded	stdout	line	pmmh	3 of 4 chains (excluded 2) · 150 draws
 stuck.excluded	stdout	line	chain 1 took no step after burn-in	its retained draws are one parameter vector
 stuck.excluded	stdout	line	none differs	(over every chain, not the retained subset)
@@ -337,7 +337,7 @@ pfilter.replicates	stdout	line	seed	loglik
 pfilter.replicates	stdout	line	-43.9979	-43.9979
 pfilter.replicates	stderr	line	pfilter:	3 replicates × 100 particles
 pfilter.replicates	stderr	line	loglik =	-44.1 ± 0.2 (3 replicates, N=100)
-pfilter.replicates	stderr	line	stored	results/pfilters/sir-
+pfilter.replicates	stderr	line	stored	pfilter/sir-
 pfilter.files	stderr	line	[info] --save-filtering	emits filtering marginals
 pfilter.files	stderr	line	trace written to	tr.tsv
 pfilter.files	stderr	line	pf-health written to	h.tsv

@@ -85,7 +85,7 @@ fn camdl(dir: &Path, args: &[&str]) -> Output {
     Command::new(camdl_bin())
         .env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
-        .env("CAMDL_OUTPUT_DIR", dir.join("out"))
+        .env("CAMDL_OUTPUT_DIR", dir.join("out")).env("CAMDL_STORE", std::path::Path::new(&dir.join("out")).join("camdl-store"))
         .current_dir(dir)
         .args(args)
         .output()
@@ -176,15 +176,15 @@ fn profile_applies_the_fit_configs_allow_degenerate_rates() {
 
 // ── pfilter ─────────────────────────────────────────────────────────────────
 
-/// Every stored pfilter leaf under `<dir>/out/pfilters/`: its run id and the
-/// loglik its record holds.
+/// Every stored filter run in the run store `<dir>/out/camdl-store/`: its run id and
+/// the loglik its `loglik.toml` holds.
 fn pfilter_leaves(dir: &Path) -> Vec<(String, f64)> {
     fn walk(d: &Path, out: &mut Vec<(String, f64)>) {
-        if let Ok(b) = std::fs::read_to_string(d.join("run.json")) {
+        if let Ok(b) = std::fs::read_to_string(d.join("identity.json")) {
             let v: serde_json::Value = serde_json::from_str(&b).unwrap();
             if v["kind"] == "pfilter" {
-                out.push((v["run_id"].as_str().unwrap().to_string(),
-                          v["inputs"]["loglik"].as_f64().unwrap()));
+                let ll: toml::Value = toml::from_str(&std::fs::read_to_string(d.join("loglik.toml")).unwrap()).unwrap();
+                out.push((v["run_id"].as_str().unwrap().to_string(), ll["loglik"].as_float().unwrap()));
             }
         }
         for e in std::fs::read_dir(d).into_iter().flatten().flatten() {
@@ -192,7 +192,7 @@ fn pfilter_leaves(dir: &Path) -> Vec<(String, f64)> {
         }
     }
     let mut out = Vec::new();
-    walk(&dir.join("out/pfilters"), &mut out);
+    walk(&dir.join("out/camdl-store"), &mut out);
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
 }

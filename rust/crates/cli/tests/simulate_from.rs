@@ -146,7 +146,7 @@ fn camdl(p: &Project, args: &[&str]) -> Output {
 fn camdl_in(p: &Project, args: &[&str], store: Option<&Path>) -> Output {
     let mut c = Command::new(bin());
     if let Some(s) = store {
-        c.env("CAMDL_OUTPUT_DIR", s);
+        c.env("CAMDL_OUTPUT_DIR", s).env("CAMDL_STORE", std::path::Path::new(&s).join("camdl-store"));
     } else {
         c.env_remove("CAMDL_OUTPUT_DIR");
     }
@@ -288,7 +288,7 @@ fn one_start_by_two_spellings_is_one_run_and_two_starts_are_two() {
         .args(["simulate", "m.camdl", "--params", "params.toml", "--seed", "1", "-o", "t.tsv"])
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDL_IR_CACHE_DIR", q.dir.join("irc"))
-        .env("CAMDL_OUTPUT_DIR", p.dir.join("cas"))
+        .env("CAMDL_OUTPUT_DIR", p.dir.join("cas")).env("CAMDL_STORE", std::path::Path::new(&p.dir.join("cas")).join("camdl-store"))
         .output().unwrap();
     ok(&o, "the literal-start model");
     assert_eq!(run_ids(&p).len(), 2,

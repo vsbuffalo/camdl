@@ -535,6 +535,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "sim",
+ "store",
  "tar",
  "tempfile",
  "toml",

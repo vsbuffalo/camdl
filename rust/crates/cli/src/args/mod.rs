@@ -66,18 +66,21 @@ PRECEDENCE (last wins, per docs/camdl-run-spec.md §1.3)
 /// Inference subcommands use [`InferenceModelOverrides`] instead;
 /// `--params` / `--param` were removed there (M-1 break per
 /// 2026-05-25 CLI UX rev 2).
-#[derive(Args, Clone, Default)]
+#[derive(Args, Clone, Default, store::Inputs)]
 pub struct ModelOverrides {
     /// Parameter TOML file (may be repeated)
     #[arg(long, value_name = "FILE")]
+    #[input(identity, vary = crate::input_fixtures::other_params)]
     pub params: Vec<PathBuf>,
 
     /// Single parameter override, e.g. --param R0=2.5 (may be repeated)
     #[arg(long, value_name = "NAME=VALUE")]
+    #[input(identity, vary = crate::input_fixtures::other_param)]
     pub param: Vec<ParamOverride>,
 
     /// External table for table-lookup expressions, e.g. --table contact=matrix.tsv
     #[arg(long, value_name = "NAME=FILE")]
+    #[input(identity, vary = crate::input_fixtures::other_table)]
     pub table: Vec<TableSpec>,
 }
 
@@ -148,18 +151,21 @@ impl InferenceModelOverrides {
 }
 
 /// `--scenario` XOR `--enable`/`--disable`
-#[derive(Args, Clone, Default)]
+#[derive(Args, Clone, Default, store::Inputs)]
 pub struct ScenarioArgs {
     /// Named scenario defined in the model (conflicts with --enable/--disable)
     #[arg(long, conflicts_with_all = ["enable", "disable"])]
+    #[input(identity, vary = crate::input_fixtures::other_scenario)]
     pub scenario: Option<String>,
 
     /// Enable an intervention (may be repeated; conflicts with --scenario)
     #[arg(long, conflicts_with = "scenario")]
+    #[input(identity, vary = crate::input_fixtures::an_intervention)]
     pub enable: Vec<String>,
 
     /// Disable an intervention (may be repeated; conflicts with --scenario)
     #[arg(long, conflicts_with = "scenario")]
+    #[input(identity, vary = crate::input_fixtures::an_intervention)]
     pub disable: Vec<String>,
 }
 
@@ -213,7 +219,7 @@ pub struct OutputView {
 
 /// The override for a forcing evaluated outside the range it is defined on,
 /// shared by every command that runs a model.
-#[derive(Args, Clone, Default)]
+#[derive(Args, Clone, Default, store::Inputs)]
 pub struct ForcingExtrapolationArg {
     /// Let the run evaluate a forcing outside the range it is defined on —
     /// an `interpolated` forcing before its first or after its last data
@@ -223,6 +229,7 @@ pub struct ForcingExtrapolationArg {
     /// error. A fit config sets it as `[config] allow_forcing_extrapolation =
     /// true`.
     #[arg(long, default_value_t = false)]
+    #[input(identity)]
     pub allow_forcing_extrapolation: bool,
 }
 
@@ -284,12 +291,73 @@ pub struct InferenceCore {
 /// (the modern observation system, as `fit run` uses) — there is no `--flow` /
 /// `--obs-model` projection override. `--obs` only selects WHICH declared
 /// stream (family) a single positional `--data FILE` binds to.
-#[derive(Args, Clone, Default)]
+#[derive(Args, Clone, Default, store::Inputs)]
 pub struct StreamSelection {
     /// Observation stream/family name a bare `--data FILE` binds to
     /// (required when the model declares more than one).
     #[arg(long)]
+    #[input(identity, vary = crate::input_fixtures::other_stream)]
     pub obs: Option<String>,
+}
+
+/// The inference knobs of `camdl pfilter`. The same flags as
+/// [`InferenceCore`], which `profile` flattens, declared here on their own
+/// because `--pf-max-substeps` is an execution input of a filter run (a
+/// tripped budget stores nothing) and an identity input of a profile point (a
+/// tripped budget is a stored log-likelihood of -inf).
+#[derive(Args, Clone, store::Inputs)]
+pub struct PfilterCore {
+    /// Step size (default 1.0).
+    #[arg(long)]
+    #[input(identity, vary = crate::input_fixtures::other_dt)]
+    pub dt: Option<f64>,
+
+    /// RNG seed
+    #[arg(long, default_value_t = 1)]
+    #[input(identity)]
+    pub seed: u64,
+
+    /// Rayon thread count (0 = all available cores)
+    #[arg(long, default_value_t = 0, env = "CAMDL_PARALLEL")]
+    #[input(execution, exercised_by = crate::input_fixtures::pfilter_parallel)]
+    pub parallel: usize,
+
+    /// Restore the legacy silent-zero behaviour for numerical-collapse paths
+    /// (division by zero, a power that is NaN, the square root of a negative)
+    /// in rate evaluation. Default: hard error. Use only when a model needs it,
+    /// such as a spatial model where an empty stratum's divisor is meant to
+    /// give a zero rate.
+    #[arg(long, default_value_t = false)]
+    #[input(identity)]
+    pub allow_degenerate_rates: bool,
+
+    #[command(flatten)]
+    #[input(group)]
+    pub forcing_extrapolation: ForcingExtrapolationArg,
+
+    /// Time-column format for `--data`: `auto` (detect numeric-vs-date over
+    /// the whole column), `numeric` (force `f64`), or `date` (force ISO
+    /// dates, requires the model's `origin`). A format the column does not
+    /// hold is refused.
+    #[arg(long, default_value = "auto")]
+    #[input(execution, exercised_by = crate::input_fixtures::pfilter_time_format)]
+    pub time_format: crate::caltime_load::TimeFormat,
+
+    /// The maximum cumulative particle-substep count one filter evaluation
+    /// may execute before it is refused (`PFIterationBudget`, exit status 3).
+    /// Unset: the engine default (1e10). A refused run stores nothing, so the
+    /// budget never changes a stored result.
+    #[arg(long, value_name = "N")]
+    #[input(execution, exercised_by = crate::input_fixtures::pfilter_max_substeps)]
+    pub pf_max_substeps: Option<u64>,
+
+    /// Binomial sampler for the chain-binomial draws: `btpe` (default) or
+    /// `btrs` (Hörmann 1993; faster). The two are not bit-compatible, so a
+    /// `btrs` run is a result of its own.
+    #[arg(long, value_name = "SAMPLER",
+          value_parser = |v: &str| v.parse::<sim::rng::BinomialAlgorithm>())]
+    #[input(identity, vary = crate::input_fixtures::other_binomial)]
+    pub binomial: Option<sim::rng::BinomialAlgorithm>,
 }
 
 // ─── simulate ─────────────────────────────────────────────────────────────────
@@ -1742,7 +1810,7 @@ pub struct LabelArgs {
 
 // ─── pfilter ──────────────────────────────────────────────────────────────────
 
-#[derive(Args)]
+#[derive(Args, Clone, store::Inputs)]
 #[command(after_help = colored_help!("\
 Examples:
   # Loglik at fixed parameters
@@ -1782,28 +1850,33 @@ Examples:
     .args(["params", "param"]).multiple(true).conflicts_with("scenario")))]
 pub struct PfilterArgs {
     /// IR JSON or .camdl model file
+    #[input(identity, vary = crate::input_fixtures::other_model)]
     pub model: PathBuf,
 
     #[command(flatten)]
+    #[input(group)]
     pub model_overrides: ModelOverrides,
 
     #[command(flatten)]
+    #[input(group)]
     pub scenario: ScenarioArgs,
 
     /// Number of particles
     #[arg(long)]
+    #[input(identity)]
     pub particles: usize,
 
     #[command(flatten)]
-    pub inference: InferenceCore,
+    #[input(group)]
+    pub inference: PfilterCore,
 
     #[command(flatten)]
+    #[input(group)]
     pub stream: StreamSelection,
 
     /// Observation data TSV (with time column).
     ///
-    /// gh#90: polymorphic, repeatable. Two forms (mutually exclusive
-    /// within a single invocation):
+    /// Two forms (mutually exclusive within a single invocation):
     ///   --data PATH         single-stream: binds to the model's only
     ///                       observation block (or the one selected by
     ///                       --obs NAME).
@@ -1812,105 +1885,161 @@ pub struct PfilterArgs {
     /// Mixing the two forms is a hard error. Multi-stream models must
     /// bind every block (warning fires when only a subset is bound).
     #[arg(long, value_name = "[NAME=]PATH")]
+    #[input(identity, vary = crate::input_fixtures::other_data)]
     pub data: Vec<DataSpec>,
 
     /// Optional fit toml. Supplies the multi-stream binding via its
-    /// `[data.observations]` map (gh#90) when no `--data` flags were
-    /// supplied (CLI flags win), the values of its `[fixed]` parameters
-    /// (`--params`, a scenario and `--param` override them), and always the
-    /// likelihood objective: under `ic_free = true` the first observation's
-    /// term is left out, as `fit run` scores it. Omit `--fit` for the full
-    /// likelihood.
+    /// `[data.observations]` map when no `--data` flags were supplied (CLI
+    /// flags win), the values of its `[fixed]` parameters (`--params`, a
+    /// scenario and `--param` override them), and always the likelihood
+    /// objective: under `ic_free = true` the first observation's term is left
+    /// out, as `fit run` scores it. Omit `--fit` for the full likelihood.
     #[arg(long, value_name = "PATH")]
+    #[input(identity, vary = crate::input_fixtures::other_fit)]
     pub fit: Option<PathBuf>,
 
     /// Number of independent filter runs
     #[arg(long, default_value_t = 1)]
+    #[input(identity)]
     pub replicates: usize,
 
     /// A TSV of design points (header: parameter names, optional `point_id`);
-    /// one log-likelihood row per point.
+    /// one log-likelihood row per point, each point stored as the single
+    /// call at its values.
     #[arg(long, value_name = "FILE")]
+    #[input(expands)]
     pub sweep_file: Option<PathBuf>,
 
-    /// Write per-observation diagnostics TSV; use "-" for stdout
+    /// Export the per-observation diagnostics TSV, a by-product of the run,
+    /// to this path; use "-" for stdout
     #[arg(long)]
+    #[input(adds)]
     pub trace: Option<String>,
 
-    /// Write a particle-filter health report: per-observation ESS and Snyder
-    /// τ² (log-weight variance), plus a printed summary with the implied
-    /// particles-to-avoid-collapse estimate exp(τ²/2). Use "-" for stdout.
+    /// Export a particle-filter health report, a by-product of the run:
+    /// per-observation ESS and Snyder τ² (log-weight variance), plus a
+    /// printed summary with the implied particles-to-avoid-collapse estimate
+    /// exp(τ²/2). Use "-" for stdout.
     #[arg(long)]
+    #[input(adds)]
     pub pf_health: Option<String>,
 
-    /// Output file (default: stdout)
+    /// Write the log-likelihood (each replicate's under `--replicates`) to
+    /// this file instead of stdout
     #[arg(short, long)]
+    #[input(export)]
     pub output: Option<PathBuf>,
 
-    /// Write final particle states to this TSV. Under a `--fit` config's
-    /// `holdout_after`, the run binds only the training rows (those ending at
-    /// or before the cutoff) and saves the state at their end; its
-    /// log-likelihood and every other output then cover the training rows
-    /// only, and `--score-from` is refused beside a cut that dropped rows
-    /// (gh#1138).
+    /// Export the final particle states, a by-product of the run, to this
+    /// TSV. Under a `--fit` config's `holdout_after`, the run binds only the
+    /// training rows (those ending at or before the cutoff) and saves the
+    /// state at their end; its log-likelihood and every other output then
+    /// cover the training rows only, and `--score-from` is refused beside a
+    /// cut that dropped rows.
     #[arg(long)]
+    #[input(identity, vary = crate::input_fixtures::a_final_state)]
     pub save_final_state: Option<PathBuf>,
 
-    /// Write N trajectory samples from smoothing distribution to this path
+    /// Export N trajectory samples from the smoothing distribution, a
+    /// by-product of the run, to this path
     #[arg(long)]
+    #[input(adds)]
     pub save_paths: Option<PathBuf>,
 
     /// Number of trajectories for --save-paths
     #[arg(long, default_value_t = 1)]
+    #[input(identity)]
     pub n_paths: usize,
 
-    /// Write per-step particle states and log-weights to this TSV
+    /// Export per-step particle states and log-weights, a by-product of the
+    /// run, to this TSV
     #[arg(long)]
+    #[input(adds)]
     pub save_filtering: Option<PathBuf>,
 
-    /// Write, per observation step and stream, the weighted mean and
+    /// Export, per observation step and stream, the weighted mean and
     /// 5/25/50/75/95% quantiles over the particles of the stream's conditional
     /// mean E[y_t | x_t, θ] (e.g. rho × the step's accumulated flow), twice:
     /// `predictive` (before y_t is scored, given the data through the step
     /// before) and `filtered` (after, given the data through t). Columns:
-    /// time, stream, phase, mean, q05, q25, q50, q75, q95.
+    /// time, stream, phase, mean, q05, q25, q50, q75, q95. A by-product of the
+    /// run.
     #[arg(long)]
+    #[input(adds)]
     pub save_filtered_streams: Option<PathBuf>,
 
-    /// Write {STEM}.tsv (the joint log score and ESS per step),
+    /// Export {STEM}.tsv (the joint log score and ESS per step),
     /// {STEM}.streams.tsv (each stream's observed value, predictive band,
     /// log score, CRPS and PIT per step) + {STEM}.json (full typed
     /// PrequentialTrace) for the plug-in one-step-ahead predictive at the
-    /// fixed parameters. See
+    /// fixed parameters, a by-product of the run. See
     /// docs/dev/proposals/2026-04-20-prequential-evaluation.md.
     #[arg(long)]
+    #[input(adds)]
     pub save_prequential: Option<String>,
 
     /// With --save-prequential, score the trace only at observations
-    /// strictly after TIME (gh#585 / the 2026-08-29 proposal, Stage 3.2):
-    /// earlier observations are still assimilated — the filter reweights
-    /// on them — but excluded from the trace. This is the held-out-tail
-    /// scoring mode `camdl compare` derives with (TIME = the fit's
-    /// `holdout_after`). Accepts the shared time grammar: a model-time
+    /// strictly after TIME: earlier observations are still assimilated (the
+    /// filter reweights on them) but excluded from the trace. This is the
+    /// held-out-tail scoring mode `camdl compare` derives with (TIME = the
+    /// fit's `holdout_after`). Accepts the shared time grammar: a model-time
     /// number, a date under a calendar-anchored model, or
-    /// `last_obs - N weeks`. The total log-likelihood output is
-    /// unchanged; only the trace is windowed, and it records the
-    /// boundary (`score_from`).
+    /// `last_obs - N weeks`. The total log-likelihood output is unchanged;
+    /// only the trace is windowed, and it records the boundary
+    /// (`score_from`).
     #[arg(long, value_name = "TIME", requires = "save_prequential")]
+    #[input(identity, vary = crate::input_fixtures::a_score_from)]
     pub score_from: Option<String>,
 
     /// With --save-prequential, drop per-particle predictive samples
     /// from {STEM}.json. Keeps scalar scores, shrinks the file.
     #[arg(long)]
+    #[input(identity)]
     pub no_save_samples: bool,
 
-    /// Do not record this evaluation as a `pfilters/` leaf in the run
-    /// store. The log-likelihood is still printed and every `--save-*`
-    /// output is still written; only the content-addressed leaf under the
-    /// output root is skipped. `camdl compare` passes it to the filter runs
-    /// it derives a trace from.
+    /// Compute in a temporary store, deleted when the command ends: the
+    /// log-likelihood is printed and every export is written, and nothing is
+    /// kept in the run store. `camdl compare` passes it to the filter runs it
+    /// derives a trace from.
     #[arg(long)]
+    #[input(store)]
     pub no_store: bool,
+
+    /// A name for this invocation, found again as `@LABEL`. It names the
+    /// invocation, never the result: rerunning with another label reuses the
+    /// stored result.
+    #[arg(long)]
+    #[input(store)]
+    pub label: Option<String>,
+
+    /// The run store's root (default `$CAMDL_STORE`, else `./camdl-store`).
+    #[arg(long, value_name = "DIR")]
+    #[input(store)]
+    pub store: Option<PathBuf>,
+}
+
+/// One `camdl pfilter` as its inputs reach the store: the command's
+/// arguments and the global options, each with its class. Built by the
+/// dispatch in `main.rs`; the global options are not `PfilterArgs`' own.
+#[derive(Clone, store::Inputs)]
+pub struct PfilterInvocation {
+    #[input(group)]
+    pub args: PfilterArgs,
+    /// `--no-licm`: compile without loop-invariant code motion. It changes
+    /// the compiled model, whose bytes the run's identity holds, so it
+    /// reaches the run id through the model and through nothing else.
+    #[input(identity)]
+    pub no_licm: bool,
+    /// `--no-ir-cache`: compile rather than reuse a cached IR, which is the
+    /// IR a compile emits.
+    #[input(execution, exercised_by = crate::input_fixtures::pfilter_no_ir_cache)]
+    pub no_ir_cache: bool,
+    #[input(skip)]
+    pub verbosity: Option<log::LevelFilter>,
+    #[input(skip)]
+    pub progress: types::ProgressMode,
+    #[input(skip)]
+    pub no_progress: bool,
 }
 
 // ─── if2 (removed; deprecation stub) ────────────────────────────────────────────
@@ -2506,6 +2635,11 @@ pub struct ListArgs {
     #[arg(long = "root", value_name = "DIR")]
     pub root_flag: Option<PathBuf>,
 
+    /// The run store's root, where the commands on it (`pfilter`) store their
+    /// results (default `$CAMDL_STORE`, else `./camdl-store`)
+    #[arg(long, value_name = "DIR")]
+    pub store: Option<PathBuf>,
+
     /// Filter by model path substring
     #[arg(long)]
     pub model: Option<String>,
@@ -2584,6 +2718,11 @@ pub struct ShowArgs {
     #[arg(long, default_value = "./results", env = "CAMDL_OUTPUT_DIR")]
     pub root: PathBuf,
 
+    /// The run store's root, where the commands on it (`pfilter`) store their
+    /// results (default `$CAMDL_STORE`, else `./camdl-store`)
+    #[arg(long, value_name = "DIR")]
+    pub store: Option<PathBuf>,
+
     /// Output format: human (default) or json
     #[arg(long)]
     pub format: Option<String>,
@@ -2605,6 +2744,11 @@ pub struct CatArgs {
     /// Root output directory to search (default: ./results)
     #[arg(long, default_value = "./results", env = "CAMDL_OUTPUT_DIR")]
     pub root: PathBuf,
+
+    /// The run store's root, where the commands on it (`pfilter`) store their
+    /// results (default `$CAMDL_STORE`, else `./camdl-store`)
+    #[arg(long, value_name = "DIR")]
+    pub store: Option<PathBuf>,
 
     /// Print a named stream instead of the run's default output: for a
     /// simulation, an observation stream (`cases`) or the event log

@@ -12,7 +12,7 @@ pub mod final_state;
 pub mod progress;
 pub mod trajectories;
 
-pub use final_state::{read_final_states, write_final_states, FinalStates};
+pub use final_state::{final_states_bytes, read_final_states, write_final_states, FinalStates};
 pub use progress::{
     Heartbeat, HeartbeatGuard, Phase, Progress, RunLiveness, RunState, SearchProgress, liveness,
     read_progress, write_progress, PROGRESS_FILE,

@@ -34,6 +34,7 @@ fn two_patch_ir() -> PathBuf {
 fn camdl(dir: &Path, args: &[&str]) -> Output {
     Command::new(binary()).env_remove("CLICOLOR_FORCE")
         .env_remove("CAMDL_OUTPUT_DIR")
+        .env_remove("CAMDL_STORE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDLC", camdlc())
         .args(args)

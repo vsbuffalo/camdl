@@ -101,6 +101,29 @@ fn run_jsons(root: &Path) -> Vec<serde_json::Value> {
 }
 
 /// The single leaf `run.json` under `root`.
+/// The one filter run in the run store `root`: its `identity.json` and its
+/// `provenance.json`.
+fn one_pfilter(root: &Path) -> (serde_json::Value, serde_json::Value) {
+    let mut found = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if !p.is_dir() { continue }
+            if let Ok(b) = std::fs::read_to_string(p.join("identity.json")) {
+                let id: serde_json::Value = serde_json::from_str(&b).unwrap();
+                if id["kind"] == "pfilter" {
+                    let params = serde_json::from_str(&std::fs::read_to_string(p.join("provenance.json")).unwrap()).unwrap();
+                    found.push((id, params));
+                }
+            }
+            stack.push(p);
+        }
+    }
+    assert_eq!(found.len(), 1, "expected one filter run under {}", root.display());
+    found.remove(0)
+}
+
 fn one_leaf(root: &Path) -> serde_json::Value {
     let mut leaves = run_jsons(root);
     assert_eq!(leaves.len(), 1, "expected one leaf under {}", root.display());
@@ -328,20 +351,20 @@ fn pfilter_routes_to_one_point_score_one_likelihood_under_one_run_id() {
         ("file_then_param", &["--params", "base.toml", "--param", "beta=0.3"]),
         ("scenario", &["--scenario", "both"]),
     ];
-    let mut results: Vec<(&str, String, Identity, Vec<String>)> = Vec::new();
+    let mut results: Vec<(&str, String, String, Vec<String>)> = Vec::new();
     for (name, args) in routes {
         let store = dir.join(format!("pf_{name}"));
         let mut argv = vec!["pfilter", "m.camdl", "--data", "cases.tsv",
             "--particles", "200", "--seed", "5"];
         argv.extend_from_slice(args);
         let out = Command::new(binary()).env_remove("CLICOLOR_FORCE").args(&argv).current_dir(dir)
-            .env("CAMDL_OUTPUT_DIR", &store).output().expect("spawn");
+            .env("CAMDL_STORE", &store).output().expect("spawn");
         let stderr = ok(&out, &format!("pfilter route {name}"));
         let loglik = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        let leaf = one_leaf(&store.join("pfilters"));
-        assert_eq!(leaf["inputs"]["params"],
-            serde_json::json!([["beta", 0.3], ["gamma", 0.1]]), "route {name}");
-        results.push((name, loglik, identity(&leaf), override_lines(&stderr)));
+        let (id, _) = one_pfilter(&store);
+        assert_eq!(id["identity"]["params"]["values"],
+            serde_json::json!({ "beta": 0.3, "gamma": 0.1 }), "route {name}");
+        results.push((name, loglik, id["run_id"].as_str().unwrap().to_string(), override_lines(&stderr)));
     }
     let (_, ref_ll, ref_id, _) = &results[0];
     for (name, ll, id, overrides) in &results {
@@ -366,12 +389,12 @@ fn pfilter_reports_a_later_params_file_over_an_earlier_one() {
     let out = Command::new(binary()).env_remove("CLICOLOR_FORCE")
         .args(["pfilter", "m.camdl", "--data", "cases.tsv", "--particles", "50",
                "--params", "base.toml", "--params", "p.toml"])
-        .current_dir(dir).env("CAMDL_OUTPUT_DIR", dir.join("pf")).output().expect("spawn");
+        .current_dir(dir).env("CAMDL_STORE", dir.join("pf")).output().expect("spawn");
     let stderr = ok(&out, "pfilter");
     assert_eq!(override_lines(&stderr),
         vec!["info: params file p.toml replaced beta = 0.15 (from base.toml) with 0.3"]);
-    let leaf = one_leaf(&dir.join("pf/pfilters"));
-    let prov = &leaf["inputs"]["parameters_provenance"];
+    let (_, leaf) = one_pfilter(&dir.join("pf"));
+    let prov = &leaf["parameters_provenance"];
     assert_eq!(prov["beta"]["value"], 0.3);
     assert_eq!(prov["beta"]["source"], "fixed_file");
     assert_eq!(prov["beta"]["overrides"], serde_json::json!([
@@ -381,7 +404,7 @@ fn pfilter_reports_a_later_params_file_over_an_earlier_one() {
     // gamma: base.toml's 0.1, then p.toml's equal 0.1 — not an override.
     assert_eq!(prov["gamma"]["value"], 0.1);
     assert!(prov["gamma"].get("overrides").is_none(), "{}", prov["gamma"]);
-    assert_eq!(leaf["inputs"]["notices"], serde_json::json!([{
+    assert_eq!(leaf["notices"], serde_json::json!([{
         "severity": "info", "code": "param-override",
         "message": "params file p.toml replaced beta = 0.15 (from base.toml) with 0.3",
     }]));
@@ -546,7 +569,7 @@ fn profile_run_rw(dir: &Path, store: &str, rw_sd: &str, extra: &[&str])
         "--n-starts", "1", "--rw-sd", rw_sd, "--output", "p.tsv", "--seed", "1"];
     argv.extend_from_slice(extra);
     let out = Command::new(binary()).env_remove("CLICOLOR_FORCE").args(&argv).current_dir(dir)
-        .env("CAMDL_OUTPUT_DIR", dir.join(store)).output().expect("spawn");
+        .env("CAMDL_OUTPUT_DIR", dir.join(store)).env("CAMDL_STORE", std::path::Path::new(&dir.join(store)).join("camdl-store")).output().expect("spawn");
     let stderr = ok(&out, &format!("profile {extra:?}"));
     let provs: Vec<serde_json::Value> = run_jsons(&dir.join(store)).into_iter()
         .filter(|l| l["inputs"]["provenance"].is_object())

@@ -25,7 +25,7 @@ fn model() -> PathBuf {
 
 fn camdl(bin: &Path, args: &[&str]) -> std::process::Output {
     let out = Command::new(bin)
-        .env_remove("CLICOLOR_FORCE")
+        .env_remove("CLICOLOR_FORCE").env("CAMDL_STORE", isolated_store())
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args(args)
         .output()
@@ -136,4 +136,16 @@ fn trace_file_is_identical_with_and_without_save_prequential() {
         "trace.tsv differs when --save-prequential is passed beside --trace \
          (one seed, same inputs): the prediction draws depend on --save-prequential"
     );
+}
+
+/// A run store of its own for one command, so tests that run the same filter
+/// at once do not meet in a shared root (a filter run another live process
+/// holds is refused).
+fn isolated_store() -> std::path::PathBuf {
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "camdl-store-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ))
 }

@@ -1,9 +1,9 @@
-//! Integration tests for the `camdl pfilter` content-addressed writer +
-//! reader (gh#147 M3.3). Drives the release binary end-to-end and asserts the
-//! write → read → visible contract: an eval writes a `Pfilter` leaf under
-//! `pfilters/`, and `camdl show`/`cat`/`list` surface its loglik + scored
-//! point. Plus the identity guard: distinct scored points land at distinct
-//! content-addressed leaves.
+//! Integration tests for `camdl pfilter` on the run store and its readers.
+//! Drives the release binary end-to-end and asserts the write → read →
+//! visible contract: an eval stores a `pfilter` result in the run store
+//! (`CAMDL_STORE`), and `camdl show`/`cat`/`list` surface its loglik + scored
+//! point. Plus the identity guard: distinct scored points are distinct
+//! results.
 //!
 //! Skipped when the release binary or `camdlc` isn't present (mirrors the
 //! rest of the integration suite).
@@ -85,8 +85,14 @@ fn run_pfilter(bin: &Path, out_root: &Path, ir: &Path, data: &Path, beta: f64) -
 fn run_pfilter_reps(
     bin: &Path, out_root: &Path, ir: &Path, data: &Path, beta: f64, replicates: usize,
 ) -> std::process::Output {
+    run_pfilter_with(bin, out_root, ir, data, beta, replicates, &[])
+}
+
+fn run_pfilter_with(
+    bin: &Path, out_root: &Path, ir: &Path, data: &Path, beta: f64, replicates: usize, extra: &[&str],
+) -> std::process::Output {
     Command::new(bin).env_remove("CLICOLOR_FORCE")
-        .env("CAMDL_OUTPUT_DIR", out_root)
+        .env("CAMDL_STORE", out_root)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args([
             "pfilter", &ir.to_string_lossy(),
@@ -96,34 +102,21 @@ fn run_pfilter_reps(
             "--particles", "30", "--dt", "1", "--seed", "1",
             "--replicates", &replicates.to_string(),
         ])
+        .args(extra)
         .output().expect("spawn camdl pfilter")
 }
 
-/// The single `Pfilter` leaf dir under `<out_root>/pfilters/` (run.json kind
-/// = "pfilter"), and its `run_id`.
+/// The single `pfilter` result folder in the run store `out_root`, and its
+/// run id.
 fn find_pfilter_leaf(out_root: &Path) -> (PathBuf, String) {
-    fn walk(dir: &Path, out: &mut Vec<(PathBuf, String)>) {
-        if let Ok(b) = std::fs::read_to_string(dir.join("run.json")) {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&b) {
-                if v.get("kind").and_then(|k| k.as_str()) == Some("pfilter") {
-                    let rid = v.get("run_id").and_then(|r| r.as_str()).unwrap_or("").to_string();
-                    out.push((dir.to_path_buf(), rid));
-                }
-            }
-        }
-        if let Ok(es) = std::fs::read_dir(dir) {
-            for e in es.flatten() { if e.path().is_dir() { walk(&e.path(), out); } }
-        }
-    }
-    let mut found = Vec::new();
-    walk(&out_root.join("pfilters"), &mut found);
-    assert_eq!(found.len(), 1, "expected exactly one pfilter leaf, got {:?}", found);
+    let found = all_pfilter_leaves(out_root);
+    assert_eq!(found.len(), 1, "expected exactly one pfilter result, got {:?}", found);
     found.into_iter().next().unwrap()
 }
 
 fn camdl_read(bin: &Path, out_root: &Path, args: &[&str]) -> String {
     let out = Command::new(bin).env_remove("CLICOLOR_FORCE")
-        .env("CAMDL_OUTPUT_DIR", out_root)
+        .env("CAMDL_STORE", out_root)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args(args).output().expect("spawn camdl reader");
     format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
@@ -150,27 +143,27 @@ fn pfilter_eval_round_trips_through_reader() {
     assert!(stdout.trim().parse::<f64>().is_ok(),
         "pfilter must still print a loglik to stdout, got: {:?}", stdout);
 
-    // Write side: the leaf carries run.json + loglik.toml, and the recorded
+    // Write side: the result holds its records + loglik.toml, and the recorded
     // loglik is finite + matches the stdout value.
     let (leaf, rid) = find_pfilter_leaf(&out_root);
     assert!(leaf.join("run.json").is_file() && leaf.join("loglik.toml").is_file(),
-        "leaf must hold run.json + loglik.toml: {}", leaf.display());
-    let rec: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(leaf.join("run.json")).unwrap()).unwrap();
-    let recorded = rec["inputs"]["loglik"].as_f64().expect("recorded loglik must be finite");
+        "the result must hold run.json + loglik.toml: {}", leaf.display());
+    let ll: toml::Value = toml::from_str(&std::fs::read_to_string(leaf.join("loglik.toml")).unwrap()).unwrap();
+    let recorded = ll["loglik"].as_float().expect("recorded loglik must be finite");
     let printed: f64 = stdout.trim().parse().unwrap();
     // stdout prints the loglik at 4 decimals (`{:.4}`); the recorded value is
     // full f64, so compare at the printed precision.
     assert!((recorded - printed).abs() < 1e-3,
         "recorded loglik {} must match stdout {} (to 4 decimals)", recorded, printed);
-    // The scored point is recorded.
-    let params = rec["inputs"]["params"].as_array().expect("params recorded");
-    assert!(params.iter().any(|p| p[0].as_str() == Some("beta")),
-        "scored point must record beta: {:?}", params);
+    // The scored point is in the identity record.
+    let id: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(leaf.join("identity.json")).unwrap()).unwrap();
+    assert!(id["identity"]["params"]["values"]["beta"].is_number(),
+        "scored point must record beta: {}", id["identity"]["params"]);
 
     // Read side: `show` surfaces the levels + loglik + scored point.
     let shown = camdl_read(&bin, &out_root, &["show", &rid[..12]]);
-    for needle in ["pfilter", "model", "config", "params", "seed", "loglik", "scored point", "beta"] {
+    for needle in ["pfilter", "model", "config", "seed", "loglik", "scored point", "beta"] {
         assert!(shown.contains(needle), "show must surface {:?}. Got:\n{}", needle, shown);
     }
     // `cat` returns the loglik.toml.
@@ -233,11 +226,8 @@ fn replicate_count_is_in_the_identity() {
          collision class). Got {:?}", leaves);
 }
 
-/// `camdl label` covers the pfilter kind (gh#147 item C): labelling a pfilter
-/// run by its `run_id` prefix writes `provenance.label` on the leaf's
-/// `run.json`, and `show`/`list` then surface that label. Before item C,
-/// `cmd_label` only resolved sims/fits/profiles, so this errored with
-/// "no run found" even though `show` could resolve the same leaf.
+/// `--label` names the invocation: `show` and `list` surface it, and `@L`
+/// names the run.
 #[test]
 fn label_works_on_pfilter_runs() {
     let bin = camdl_bin();
@@ -246,39 +236,22 @@ fn label_works_on_pfilter_runs() {
     let (ir, data) = write_fixture(tmp.path());
     let out_root = tmp.path().join("out");
 
-    assert!(run_pfilter(&bin, &out_root, &ir, &data, 0.3).status.success(),
+    assert!(run_pfilter_with(&bin, &out_root, &ir, &data, 0.3, 1, &["--label", "baseline-pfilter"]).status.success(),
         "pfilter must succeed");
-    let (leaf, rid) = find_pfilter_leaf(&out_root);
+    let (_, rid) = find_pfilter_leaf(&out_root);
 
-    // Label by run_id prefix. `--root` is honoured here; the env path is
-    // exercised by the reader helpers, which set CAMDL_OUTPUT_DIR.
-    let labelled = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .env("CAMDL_SKIP_VERSION_CHECK", "1")
-        .args(["label", &rid[..8], "baseline-pfilter",
-               "--root", &out_root.to_string_lossy()])
-        .output().expect("spawn camdl label");
-    assert!(labelled.status.success(),
-        "label on a pfilter run must succeed (item C). stderr=\n{}",
-        String::from_utf8_lossy(&labelled.stderr));
-
-    // Write side: the label persists on the leaf's RunRecord provenance.
-    let rec: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(leaf.join("run.json")).unwrap()).unwrap();
-    assert_eq!(rec["provenance"]["label"].as_str(), Some("baseline-pfilter"),
-        "label must persist on the pfilter leaf's RunRecord.provenance.label. \
-         got: {:?}", rec["provenance"]);
-
-    // Read side: show + list surface the label.
     let shown = camdl_read(&bin, &out_root, &["show", &rid[..12]]);
     assert!(shown.contains("baseline-pfilter"),
-        "show must surface the new label. Got:\n{}", shown);
+        "show must surface the label. Got:\n{}", shown);
     let listed = camdl_read(&bin, &out_root, &["list", "--kind", "pfilter"]);
     assert!(listed.contains("baseline-pfilter"),
-        "list --kind pfilter must surface the new label. Got:\n{}", listed);
+        "list --kind pfilter must surface the label. Got:\n{}", listed);
+    let by_label = camdl_read(&bin, &out_root, &["cat", "@baseline-pfilter"]);
+    assert_eq!(by_label, camdl_read(&bin, &out_root, &["cat", &rid[..12]]), "@L names the run");
 }
 
-/// `--no-store` evaluates without recording a `pfilters/` leaf, on both the
-/// single-run and the replicate path; without it the leaf is still written.
+/// `--no-store` evaluates without writing the run store, on both the
+/// single-run and the replicate path; without it the result is stored.
 /// `camdl compare` runs the filter once per draw per replicate and wants only
 /// the trace, so its children pass the flag.
 #[test]
@@ -290,7 +263,7 @@ fn no_store_writes_no_leaf_and_the_default_still_does() {
     for reps in [1usize, 3] {
         let out_root = tmp.path().join(format!("no_store_{reps}"));
         let output = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-            .env("CAMDL_OUTPUT_DIR", &out_root)
+            .env("CAMDL_STORE", &out_root)
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .args([
                 "pfilter", &ir.to_string_lossy(),
@@ -302,8 +275,8 @@ fn no_store_writes_no_leaf_and_the_default_still_does() {
             .output().expect("spawn camdl pfilter");
         assert!(output.status.success(), "pfilter --no-store (replicates {reps}) failed: {}",
             String::from_utf8_lossy(&output.stderr));
-        assert!(!out_root.join("pfilters").exists(),
-            "--no-store (replicates {reps}) must write no pfilters/ leaf under {}",
+        assert!(!out_root.exists(),
+            "--no-store (replicates {reps}) must write no store at {}",
             out_root.display());
 
         let out_root = tmp.path().join(format!("default_{reps}"));
@@ -313,9 +286,10 @@ fn no_store_writes_no_leaf_and_the_default_still_does() {
     }
 }
 
+/// Every `pfilter` result folder in the run store `out_root`, with its run id.
 fn all_pfilter_leaves(out_root: &Path) -> Vec<(PathBuf, String)> {
     fn walk(dir: &Path, out: &mut Vec<(PathBuf, String)>) {
-        if let Ok(b) = std::fs::read_to_string(dir.join("run.json")) {
+        if let Ok(b) = std::fs::read_to_string(dir.join("identity.json")) {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&b) {
                 if v.get("kind").and_then(|k| k.as_str()) == Some("pfilter") {
                     out.push((dir.to_path_buf(),
@@ -328,10 +302,32 @@ fn all_pfilter_leaves(out_root: &Path) -> Vec<(PathBuf, String)> {
         }
     }
     let mut v = Vec::new();
-    walk(&out_root.join("pfilters"), &mut v);
+    walk(out_root, &mut v);
     v
 }
 
 fn find_pfilter_leaf_first(out_root: &Path) -> (PathBuf, String) {
     all_pfilter_leaves(out_root).into_iter().next().expect("at least one pfilter leaf")
+}
+
+/// A filter run's record is sealed, so `camdl label` cannot name it after
+/// the fact: it says so, and names `--label` at run time.
+#[test]
+fn label_refuses_a_sealed_pfilter_run() {
+    let bin = camdl_bin();
+    if camdlc_bin().is_none() { return }
+    let tmp = tempdir("label_sealed");
+    let (ir, data) = write_fixture(tmp.path());
+    let out_root = tmp.path().join("out");
+    assert!(run_pfilter(&bin, &out_root, &ir, &data, 0.3).status.success());
+    let (_, rid) = find_pfilter_leaf(&out_root);
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
+        .env("CAMDL_STORE", &out_root)
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .current_dir(tmp.path())
+        .args(["label", &rid[..8], "late"])
+        .output().expect("spawn camdl label");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{stderr}");
+    assert!(stderr.contains("sealed") && stderr.contains("--label"), "{stderr}");
 }

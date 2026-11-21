@@ -67,7 +67,7 @@ observations {
 init { S = 9990  I = 10 }
 simulate { from = 0 'days  to = 20 'days }
 "#).unwrap();
-    let out = Command::new(&camdlc).env_remove("CLICOLOR_FORCE").arg(&model).output().unwrap();
+    let out = Command::new(&camdlc).env_remove("CLICOLOR_FORCE").env("CAMDL_STORE", isolated_store()).arg(&model).output().unwrap();
     assert!(out.status.success(), "camdlc: {}", String::from_utf8_lossy(&out.stderr));
     let ir = dir.join("sir.ir.json");
     std::fs::write(&ir, &out.stdout).unwrap();
@@ -102,7 +102,7 @@ starts = {{ from_params = "{theta}" }}
 "#, out = dir.join("out").display(), ir = ir.display(),
         data = dir.join("cases.tsv").display(), theta = dir.join("theta.toml").display())).unwrap();
     let mut cmd = Command::new(camdl_bin());
-    cmd.env_remove("CLICOLOR_FORCE");
+    cmd.env_remove("CLICOLOR_FORCE").env("CAMDL_STORE", isolated_store());
     cmd.args(["fit", "run"]).arg(&fit).env("CAMDL_SKIP_VERSION_CHECK", "1");
     if via_flag {
         cmd.arg("--starts").arg(format!("from_params={}", dir.join("theta.toml").display()));
@@ -135,4 +135,16 @@ fn the_refusal_names_the_flag_when_the_flag_set_the_rule() {
     let (ok, err) = run_pfilter_with(&tmp, "beta = 1.2\n", true);
     assert!(!ok, "{err}");
     assert!(err.contains("error: --starts from_params"), "{err}");
+}
+
+/// A run store of its own for one command, so tests that run the same filter
+/// at once do not meet in a shared root (a filter run another live process
+/// holds is refused).
+fn isolated_store() -> std::path::PathBuf {
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "camdl-store-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ))
 }

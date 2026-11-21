@@ -51,7 +51,7 @@ fn tempdir(tag: &str) -> PathBuf {
 }
 
 fn run(camdl: &Path, args: &[&str]) -> std::process::Output {
-    Command::new(camdl).env_remove("CLICOLOR_FORCE")
+    Command::new(camdl).env_remove("CLICOLOR_FORCE").env("CAMDL_STORE", isolated_store())
         .args(args)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output()
@@ -251,4 +251,16 @@ fn likelihood_profile_identifies_seed_time() {
     );
 
     let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// A run store of its own for one command, so tests that run the same filter
+/// at once do not meet in a shared root (a filter run another live process
+/// holds is refused).
+fn isolated_store() -> std::path::PathBuf {
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "camdl-store-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ))
 }

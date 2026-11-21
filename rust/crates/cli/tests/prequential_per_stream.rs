@@ -40,7 +40,7 @@ fn multi_block_model() -> PathBuf {
 fn synth_obs(bin: &Path, model: &Path, tmp: &Path, extra_args: &[&str]) -> PathBuf {
     let obs_path = tmp.join("obs.tsv");
     let mut cmd = Command::new(bin);
-    cmd.env_remove("CLICOLOR_FORCE");
+    cmd.env_remove("CLICOLOR_FORCE").env("CAMDL_STORE", isolated_store());
     cmd.env("CAMDL_SKIP_VERSION_CHECK", "1").args([
         "simulate",
         &model.to_string_lossy(),
@@ -108,7 +108,7 @@ fn prequential_tsv_writes_joint_scores_and_per_stream_scores_to_two_files() {
     let obs = synth_obs(&bin, &multi_block_model(), tmp.path(), &["--scenario", "true_params"]);
     let stem = tmp.path().join("preq");
 
-    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE").env("CAMDL_STORE", isolated_store())
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args([
             "pfilter",
@@ -164,4 +164,16 @@ fn prequential_tsv_writes_joint_scores_and_per_stream_scores_to_two_files() {
             );
         }
     }
+}
+
+/// A run store of its own for one command, so tests that run the same filter
+/// at once do not meet in a shared root (a filter run another live process
+/// holds is refused).
+fn isolated_store() -> std::path::PathBuf {
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "camdl-store-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ))
 }

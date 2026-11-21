@@ -26,8 +26,8 @@ camdl pfilter    sir.camdl --fit fit.toml --sweep-file design.tsv \
 
 Each design point is scored exactly as the single call
 `camdl pfilter sir.camdl --fit fit.toml --param beta=… --param gamma=… --particles 1000 --replicates 5 --seed 1`
-would score it, and is stored as that call's ordinary `Pfilter` leaf. The design
-adds no run kind, no identity field and no seed rule of its own.
+would score it, and is stored as that call's ordinary `Pfilter` result. The
+design adds no run kind, no identity field and no seed rule of its own.
 
 Together with `camdl design lhs`, this covers the scoring half of what
 `camdl survey` did.
@@ -89,8 +89,9 @@ model. For each design point, in file order:
    `[fixed]` (§3), `--params`, the scenario, `--param`.
 2. The filter runs `--replicates` times, on the same seeds a single call uses
    (§8, D1).
-3. The point is stored as an ordinary `Pfilter` leaf. When that leaf already
-   exists, the point is reported as cached and not recomputed (§8, D2).
+3. The point is stored as an ordinary `Pfilter` result on the run store. When
+   that result is already stored, the point is reported as cached and not
+   recomputed (§8, D2).
 
 Points run concurrently on the `--parallel` thread pool. Each row of the output
 depends only on its point's inputs and seeds, so the output does not depend on
@@ -99,15 +100,15 @@ the schedule.
 **Output table.** It goes to `-o PATH` or to stdout, one row per design point,
 in file order:
 
-| column          | meaning                                                                                           |
-| --------------- | ------------------------------------------------------------------------------------------------- |
-| `point_id`      | the row's id (D-C)                                                                                |
-| `sweep:<param>` | one per design column, the value scored; the same naming as `simulate`'s combined tables          |
-| `loglik`        | mean over replicates of the estimated log-likelihood; `-inf` when any replicate failed            |
-| `loglik_sd`     | standard deviation over replicates; empty when `--replicates 1` or when any replicate failed      |
-| `n_failed`      | how many replicates failed (below)                                                                |
-| `failure`       | empty when every replicate scored; else the first failed replicate's message, on one line         |
-| `run_id`        | the stored leaf (`camdl cat <run_id>`); empty when every replicate failed and no leaf was written |
+| column          | meaning                                                                                      |
+| --------------- | -------------------------------------------------------------------------------------------- |
+| `point_id`      | the row's id (D-C)                                                                           |
+| `sweep:<param>` | one per design column, the value scored; the same naming as `simulate`'s combined tables     |
+| `loglik`        | mean over replicates of the estimated log-likelihood; `-inf` when any replicate failed       |
+| `loglik_sd`     | standard deviation over replicates; empty when `--replicates 1` or when any replicate failed |
+| `n_failed`      | how many replicates failed (below)                                                           |
+| `failure`       | empty when every replicate scored; else the first failed replicate's message, on one line    |
+| `run_id`        | the stored result (`camdl cat <run_id>`)                                                     |
 
 `loglik` is printed with shortest round-trip formatting, so a value read back
 equals the stored one.
@@ -120,13 +121,18 @@ over several observations. Both are properties of the parameter values, since
 every input the points share is read and checked before the first point runs, so
 both are recorded in the row and neither stops the run. In the `failure` column,
 tabs and newlines in the message are replaced by spaces, so the table stays one
-row per point. A point whose every replicate fails has `loglik = -inf`,
-`n_failed = R` and an empty `run_id`. After the last point the run prints how
-many points failed entirely and the first failure message. It exits with
-`FILTER_FAILED` only when every point failed, and with 0 otherwise.
+row per point. A point whose every replicate fails has `loglik = -inf` and
+`n_failed = R`, and is stored with its failure (§5). After the last point the
+run prints how many points failed entirely and the first failure message. It
+exits with `FILTER_FAILED` only when every point failed, and with 0 otherwise.
 
-A single call without `--sweep-file` keeps its present behaviour: a filter error
-exits with `FILTER_FAILED` at once.
+A single call without `--sweep-file` stores a filter that failed at every
+replicate in the same way, and exits with `FILTER_FAILED`.
+
+A point that does not complete for a reason a rerun could change (the compute
+budget of `--pf-max-substeps`, an I/O or store error, another process holding
+the result) is not stored. The run reports each such point, writes no table and
+exits non-zero; a rerun computes only those points.
 
 **Refused beside `--sweep-file`**, each with a message naming both flags:
 
@@ -167,53 +173,56 @@ There is no new type in `runid` and no new run kind. In `cli`:
 pub sweep_file: Option<PathBuf>,
 ```
 
-`run_pfilter` currently resolves parameters, runs the filter and writes the leaf
-in one body. It splits at the parameter point:
+`run_pfilter` resolves parameters, runs the filter and stores the result in one
+body. It splits at the parameter point:
 
 ```
-before:  run_pfilter(config) = resolve θ → build process → filter × R → leaf
+before:  run_pfilter(config) = resolve θ → build process → filter × R → store
 
 after:   run_pfilter(config)
-           ├─ no design:  score_point(&shared, point_overrides = [])     → print, leaf
+           ├─ no design:  score_point(point_overrides = [])     → print, stored result
            └─ design:     for each row (parallel):
-                            score_point(&shared, point_overrides = row)  → table row, leaf
+                            score_point(point_overrides = row)  → stored result
+                          then the table, rendered from the stored results
 
          shared = everything resolved once: model load, data binding,
-                  dt, objective, observation model, engine, seed
-         score_point(shared, overrides) -> PointScore {
-             loglik: f64, loglik_sd: Option<f64>, n_failed: usize,
-             failure: Option<String>, leaf: Option<ContentHash>,
-         }
+                  dt, objective, engine, seed, the store and the compiled model
+         score_point(overrides) -> PointResult =
+             Stored { stored: Stored<Pfilter>, computed: bool }
+           | Failed(CommandError)          // not completed; a rerun computes it
 ```
 
-`score_point` runs the parameter resolution, the filter replicates and the leaf
-write, so the single-call path and the design path share one implementation, and
-the equality the tests check (§7) holds by construction. The parameters that
-`point_overrides` can change, and the compiled model built from them, are per
-point. Everything else is built once.
+`score_point` runs the parameter resolution, the filter replicates and the
+store's claim, so the single-call path and the design path share one
+implementation, and the equality the tests check (§7) holds by construction. The
+parameters that `point_overrides` can change, and the compiled model built from
+them, are per point. Everything else is built once.
 
 ## 5. Run identity and the store
 
-Each design point's leaf has exactly the identity of the single call at that
-point: `PfilterCtx` hashes the resolved `(name, value)` list, and a value that
-came from the design file is the same number as one passed with `--param`. The
-design file's digest is not part of any leaf's identity. Consequences:
+Each design point's result has exactly the identity of the single call at that
+point: `PfilterIdentity` holds the resolved `(name, value)` list, and a value
+that came from the design file is the same number as one passed with `--param`.
+The design file's digest is not part of any result's identity. Consequences:
 
 - a design run interrupted after k points, and run again, computes only the
   remaining points;
 - a point already scored by a single `pfilter` call is reused by a design that
   contains it, and the reverse;
-- two design files that share rows share those rows' leaves.
+- two design files that share rows share those rows' results.
 
-The output table itself is not stored. It is a deterministic function of the
-design file, the flags and the stored leaves, so a `make` rule that names
-`-o landscape.tsv` regenerates it byte-identically.
+A filter that failed at a point is a stored result, because the failure is
+determined by the point's identity: its `loglik.toml` holds no log-likelihood,
+the number of failed replicates and the first one's message. The output table
+itself is not stored. It is a rendering of the invocation's stored results, with
+each row's `point_id` and design values taken from the invocation's labels, so
+`-o landscape.tsv` and `camdl cat @L` write the same bytes, and a `make` rule
+that names `-o landscape.tsv` regenerates it byte-identically.
 
-For the store migration, this adds nothing: the design is a loop over
-`PfilterIdentity` leaves that the migration already plans
-(`2026-11-20-run-store-api.md`, `PfilterIdentity`). A thousand-point design puts
-a thousand directories in one parameters level, which that proposal already
-notes for `simulate` sweeps.
+On the run store this adds no kind: the design is a loop over `PfilterIdentity`
+results that the migration already plans (`2026-11-20-run-store-api.md`,
+`PfilterIdentity`). A thousand-point design puts a thousand directories in one
+parameters level, which that proposal already notes for `simulate` sweeps.
 
 ## 6. Documentation and release note
 
@@ -244,8 +253,9 @@ Each red first, then green, and mutation-checked.
 5. Failed points, one test per way of failing. A row placed where every
    replicate scores `-inf`, and a row placed where the filter returns
    `PFDegenerate`, each read `-inf`, `n_failed = R`, a non-empty one-line
-   `failure` and an empty `run_id`, while the other rows are scored and the run
-   exits 0. A design where every row fails exits `FILTER_FAILED`.
+   `failure` and the `run_id` of the stored result, while the other rows are
+   scored and the run exits 0. A design where every row fails exits
+   `FILTER_FAILED`.
 6. The refusals of §2: `--param` on a design column, a scenario setting one,
    each per-run output, and an `[estimate]` parameter with no column.
 7. End to end: `camdl design lhs` then `camdl pfilter --sweep-file` on the same
@@ -267,11 +277,11 @@ question, and test 2 does not settle it. The cost is that the errors at
 different points are correlated, so the table is not a set of independent
 estimates. Recommendation: solid.
 
-**D2. Each point is an ordinary `Pfilter` leaf; the table is not stored.** The
+**D2. Each point is an ordinary `Pfilter` result; the table is not stored.** The
 alternative is a stored design-level record, like `simulate`'s `SimEnsemble`
 grid level, holding the table and the design digest. That would make the table
 addressable by one run id, at the price of a new identity type now and another
-kind for the store migration to carry. Per-point leaves give resume and reuse
+kind for the store migration to carry. Per-point results give resume and reuse
 for free and add nothing to the migration. Recommendation: solid.
 
 **D3. A failed point is a row, not a failed run.** In a space-filling design

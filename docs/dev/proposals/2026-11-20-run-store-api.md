@@ -1163,8 +1163,8 @@ impl StoreRequest {
     pub fn new(label: Option<String>, force: bool, root: Option<PathBuf>) -> Self;
     /// Each value given in `self` wins over `other`'s; `force` is true if either is.
     pub fn merge(self, other: StoreRequest) -> StoreRequest;
-    /// The given root, else the default `./camdl-store`.
-    pub fn root(&self) -> PathBuf;
+    /// The given root, else the project's default (camdl's is `./camdl-store`).
+    pub fn root(&self, default: &Path) -> PathBuf;
     pub fn reuse(&self) -> Reuse;                  // Force when force was asked for
     pub fn label(&self) -> Option<&str>;
 }
@@ -1373,6 +1373,11 @@ impl<A: Artifact> Run<A> {
 
     /// True when A itself is already stored and this run exists only for by-products.
     pub fn reproducing(&self) -> bool;
+
+    /// End every wanted by-product as failed, with what was running and why, and
+    /// leave the run to finish: for a computation that completed without the state
+    /// its by-products are written from. None of them is committed.
+    pub fn fail_by_products(&mut self, operation: &str, reason: &str);
 }
 
 /// A by-product's files, claimed with its upstream. It has no finish or fail: the
@@ -1874,10 +1879,11 @@ one of `planned` (first version only), `computed`, `reused`, `failed` (with
 its calls: each `put` (a compiled model, a data table), each member of a
 `begin`, `begin_with` or `begin_many`, and each by-product wanted of one,
 directly after its upstream, each as an entry of its own with its kind. A result
-asked for twice is listed twice. `counts` counts every entry, so the example's
-nine are the compiled model, four cells and the four cells' observations.
-`Invocation::members::<A>` returns the entries of kind `A` only, so a rendering
-of the cells sees the four cells.
+asked for twice is listed twice. `counts` counts the entries by outcome: a
+computed or reused entry is completed, a failed one failed, and a planned or
+busy entry is in neither. The example's nine completed are the compiled model,
+four cells and the four cells' observations. `Invocation::members::<A>` returns
+the entries of kind `A` only, so a rendering of the cells sees the four cells.
 
 `argv` and `given` have one shape everywhere. `argv` is the command line as an
 array of strings. `given` is an object with one entry per field of the `Given`,
@@ -3762,7 +3768,7 @@ pub fn simulate(args: SimulateArgs, ambient: Build<Engine>, env: StoreRequest) -
 
     let request = StoreRequest::new(label, force, root).merge(env);   // a flag wins over the environment
     let reuse   = request.reuse();
-    let store   = Store::open(&request.root(), ambient, camdl_top_level(), camdl_kinds())?;
+    let store   = Store::open(&request.root(DEFAULT_ROOT), ambient, camdl_top_level(), camdl_kinds())?;
     let info    = RunInfo::new(&given, &execution, &request)?;
     let (shared, cells, by_products) = resolve(declared, &store, &info)?;
 
@@ -4312,7 +4318,7 @@ pub fn fit_run(args: FitRunArgs, ambient: Build<Engine>, env: StoreRequest) -> R
     let request = StoreRequest::new(label, force, root.map(PathBuf::from)).merge(env);
     let reuse   = request.reuse();
     let given   = given.with_file("config", file_given, &source);
-    let store   = Store::open(&request.root(), ambient, camdl_top_level(), camdl_kinds())?;
+    let store   = Store::open(&request.root(DEFAULT_ROOT), ambient, camdl_top_level(), camdl_kinds())?;
     let info    = RunInfo::new(&given, &execution, &request)?;
 
     let plan = resolve(file, problem_flags, run_flags, method_flags, &store, &info)?;
@@ -4754,6 +4760,53 @@ impl ByProduct for SavedPaths {
   because it cuts the data to the training rows. It is an identity input, as it
   is today.
 
+What the run and its by-products hold, where the sections above leave it open:
+
+| Kind               | Asked for by              | Its own settings, in its identity                      | Files                                                                                |
+| ------------------ | ------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------------ |
+| `pfilter`          | the command               | (the run's identity)                                   | `loglik.toml`; `replicates.tsv` under `--replicates`; `provenance.json` (provenance) |
+| `trace`            | `--trace`                 | none                                                   | `trace.tsv`                                                                          |
+| `pf_health`        | `--pf-health`             | none                                                   | `pf_health.tsv`                                                                      |
+| `final_state`      | `--save-final-state`      | none                                                   | `final_state.tsv`                                                                    |
+| `saved_paths`      | `--save-paths`            | `--n-paths`                                            | `paths.tsv`                                                                          |
+| `prequential`      | `--save-prequential`      | `--score-from` as model time; whether samples are kept | `prequential.tsv`, `prequential.streams.tsv`, `prequential.json`                     |
+| `filtering`        | `--save-filtering`        | none                                                   | `filtering.tsv`                                                                      |
+| `filtered_streams` | `--save-filtered-streams` | none                                                   | `filtered_streams.tsv`                                                               |
+
+- **A failure the run's identity determines is a completed result; any other
+  failure is a failed run.** The filter collapsing (every particle's weight
+  reaching zero at some observation) and an error the filter stops with at these
+  parameters (a numerical refusal, a non-finite propensity, a degenerate swarm)
+  are determined by the model, the parameters, the data, the particles and the
+  seed, so the run is completed: `loglik.toml` holds no log-likelihood, the
+  number of replicates that failed (`n_failed`) and the first one's message
+  (`failure`), as a profile point stores a non-finite log-likelihood. A rerun
+  reuses it, and `-o` renders it from the store. The single call exits with
+  `FILTER_FAILED`, naming the stored failure, only when every replicate failed;
+  when some did, it exits 0 with a warning naming the first failure, and the
+  stored log-likelihood is absent. A `--sweep-file` design exits 0 unless the
+  filter failed at every replicate of every point. A by-product the filter left
+  no state to write, after an error, is recorded as failed and not stored. A
+  failure a rerun could change is a failed run, as the batch rule in "Batches"
+  says: the compute budget of `--pf-max-substeps`, an execution input; an
+  interruption, an I/O error, running out of memory or a store error. The run is
+  failed, the batch carries on, reports each one at the end and exits non-zero,
+  and the next run computes it.
+- **The `--pf-health` summary is read from the stored report,** on a computed
+  run and a reused one alike, so the two print the same lines.
+- **The compiled model is keyed before the run's parameter values and scenario
+  selection are applied,** as "A model rewritten from data" says: only its
+  anchored times and bound tables are written in. The parameters are
+  `PfilterIdentity.params`, and the interventions the selection keeps are a
+  field the sketch above lacks, `scenario: ActiveInterventions`. Runs at other
+  parameters or under another selection share one compiled model.
+- **The engine runs the model it compiled,** and the run checks that it is the
+  stored model, read through `Run::load`, with the identity's parameters and
+  interventions applied, by the digest of its model part; the by-product writers
+  use that model, and the run's record lists the read.
+- **`camdl label` does not apply.** A filter run's record is sealed; a name is
+  given with `--label` when the command runs.
+
 ### Surveys
 
 A survey is one `InPlace` result, as today: `survey` claims a streaming write
@@ -5008,7 +5061,11 @@ are deleted with `runid` in the last step, and the new root does not move again.
 7. `camdl predict` from fixed points, born on the new store, then scores. A
    fixed-point prediction needs no fit artifact. Its command surface gets a
    short specification of its own when this step begins.
-8. `runid` and `runid-derive` are deleted when the last command has moved.
+8. `runid` and `runid-derive` are deleted when the last command has moved. The
+   clippy `disallowed-methods` guard against undeclared reads ("Guarding against
+   undeclared reads") is added in this step, on the crates that remain, because
+   most of today's 323 direct file and environment reads are old-store code this
+   step deletes.
 
 Steps 4 and 5 are independent of each other, as are steps 6 and 7. The
 `camdl survey` command is removed in a separate change and is not moved to the

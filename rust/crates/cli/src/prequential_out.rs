@@ -53,9 +53,27 @@ pub fn write_prequential_outputs(
     trace: &score::trace::PrequentialTrace,
     calendar: &ir::caltime::CalendarAxis,
 ) -> std::io::Result<()> {
+    let files = prequential_files(trace, calendar)?;
     let tsv_path = format!("{}.tsv", stem);
-    let streams_path = streams_sibling(Path::new(&tsv_path));
-    let json_path = format!("{}.json", stem);
+    std::fs::write(streams_sibling(Path::new(&tsv_path)), &files.streams)?;
+    std::fs::write(&tsv_path, &files.joint)?;
+    std::fs::write(format!("{}.json", stem), &files.json)?;
+    Ok(())
+}
+
+/// The three files of a prequential trace, as [`write_prequential_outputs`]
+/// writes them under a stem: the joint TSV, the per-stream TSV and the JSON.
+pub struct PrequentialFiles {
+    pub joint: Vec<u8>,
+    pub streams: Vec<u8>,
+    pub json: Vec<u8>,
+}
+
+/// The bytes of [`PrequentialFiles`] for `trace`.
+pub fn prequential_files(
+    trace: &score::trace::PrequentialTrace,
+    calendar: &ir::caltime::CalendarAxis,
+) -> std::io::Result<PrequentialFiles> {
     // On a model with an origin, a `date` column follows `t`: the step's
     // instant as `CalendarAxis::date_of` writes it, which the loader reads
     // back to the same `t`. An undated model's files keep their columns.
@@ -66,27 +84,25 @@ pub fn write_prequential_outputs(
         None => format!("{t}"),
     };
     let time_header = if dated { "t\tdate" } else { "t" };
-    let mut tsv = std::io::BufWriter::new(std::fs::File::create(&tsv_path)?);
-    writeln!(tsv, "{time_header}\tlog_score\tess")?;
+    let mut joint = Vec::new();
+    writeln!(joint, "{time_header}\tlog_score\tess")?;
     for s in &trace.steps {
-        writeln!(tsv, "{}\t{:.6}\t{:.2}", time_cells(s.t), s.log_score, s.ess)?;
+        writeln!(joint, "{}\t{:.6}\t{:.2}", time_cells(s.t), s.log_score, s.ess)?;
     }
-    drop(tsv);
-    let mut tsv = std::io::BufWriter::new(std::fs::File::create(&streams_path)?);
-    writeln!(tsv, "{time_header}\tstream\ty_obs\ty_pred_q05\ty_pred_q25\ty_pred_q50\ty_pred_q75\ty_pred_q95\tlog_score\tcrps\tpit")?;
+    let mut streams = Vec::new();
+    writeln!(streams, "{time_header}\tstream\ty_obs\ty_pred_q05\ty_pred_q25\ty_pred_q50\ty_pred_q75\ty_pred_q95\tlog_score\tcrps\tpit")?;
     for s in &trace.steps {
         for ss in &s.per_stream {
             let iv = &ss.interval;
-            writeln!(tsv, "{}\t{}\t{}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.6}",
+            writeln!(streams, "{}\t{}\t{}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.6}",
                 time_cells(s.t), ss.stream, ss.y_obs, iv.q05, iv.q25, iv.q50, iv.q75, iv.q95,
                 ss.log_score, ss.crps, ss.pit)?;
         }
     }
-    drop(tsv);
     let json = serde_json::to_string_pretty(trace)
-        .map_err(std::io::Error::other)?;
-    std::fs::write(&json_path, json)?;
-    Ok(())
+        .map_err(std::io::Error::other)?
+        .into_bytes();
+    Ok(PrequentialFiles { joint, streams, json })
 }
 
 /// The one-line summary `camdl pfilter --save-prequential` and `fit run`

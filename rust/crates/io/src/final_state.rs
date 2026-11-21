@@ -121,10 +121,19 @@ pub fn write_final_states(
     columns: &TrajColumnSpec,
     origin_t: f64,
 ) -> Result<(), String> {
-    let f = std::fs::File::create(path)
-        .map_err(|e| format!("cannot create {}: {}", path.display(), e))?;
-    let mut w = std::io::BufWriter::new(f);
-    let io_err = |e: std::io::Error| format!("cannot write {}: {}", path.display(), e);
+    let bytes = final_states_bytes(states, columns, origin_t)?;
+    std::fs::write(path, bytes).map_err(|e| format!("cannot write {}: {}", path.display(), e))
+}
+
+/// The bytes [`write_final_states`] writes, for a caller that stores them
+/// itself.
+pub fn final_states_bytes(
+    states: &[sim::inference::ParticleState],
+    columns: &TrajColumnSpec,
+    origin_t: f64,
+) -> Result<Vec<u8>, String> {
+    let mut w: Vec<u8> = Vec::new();
+    let io_err = |e: std::io::Error| format!("cannot write final states: {e}");
 
     writeln!(w, "{}\tt={}", FORMAT_TAG, origin_t).map_err(io_err)?;
 
@@ -150,11 +159,7 @@ pub fn write_final_states(
         }
         writeln!(w).map_err(io_err)?;
     }
-
-    // Explicit flush: BufWriter swallows write errors on drop, which would
-    // silently truncate the file if the disk filled during the final drain.
-    w.flush().map_err(io_err)?;
-    Ok(())
+    Ok(w)
 }
 
 /// Read a filtered-state file and permute it into the model's integer

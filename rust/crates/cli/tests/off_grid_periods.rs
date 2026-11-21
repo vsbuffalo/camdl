@@ -56,7 +56,7 @@ simulate {{ from = {from} 'days  to = 30 'days  dt = {dt} 'days }}
 "#);
     let model = dir.join("f1.camdl");
     std::fs::write(&model, src).unwrap();
-    let out = Command::new(camdlc_bin()).env_remove("CLICOLOR_FORCE").arg(&model).output().unwrap();
+    let out = Command::new(camdlc_bin()).env_remove("CLICOLOR_FORCE").env("CAMDL_STORE", isolated_store()).arg(&model).output().unwrap();
     assert!(out.status.success(), "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
     let ir = dir.join("f1.ir.json");
     std::fs::write(&ir, &out.stdout).unwrap();
@@ -116,7 +116,7 @@ backend = "chain_binomial"
 }
 
 fn fit_run(toml: &Path) -> std::process::Output {
-    Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
+    Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE").env("CAMDL_STORE", isolated_store())
         .args(["fit", "run"]).arg(toml).args(["--seed", "7", "--no-progress"])
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output().expect("spawn camdl")
@@ -187,4 +187,16 @@ fn a_fit_config_with_obs_alignment_is_refused() {
         assert!(stderr.contains("obs_alignment") && stderr.contains("removed"),
             "the refusal must say obs_alignment was removed:\n{stderr}");
     }
+}
+
+/// A run store of its own for one command, so tests that run the same filter
+/// at once do not meet in a shared root (a filter run another live process
+/// holds is refused).
+fn isolated_store() -> std::path::PathBuf {
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "camdl-store-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ))
 }

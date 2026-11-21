@@ -53,7 +53,7 @@ fn single_block_model() -> PathBuf {
 fn synth_obs(bin: &Path, model: &Path, tmp: &Path, extra_args: &[&str]) -> PathBuf {
     let obs_path = tmp.join("obs.tsv");
     let mut cmd = Command::new(bin);
-    cmd.env_remove("CLICOLOR_FORCE");
+    cmd.env_remove("CLICOLOR_FORCE").env("CAMDL_STORE", isolated_store());
     cmd.env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args([
             "simulate", &model.to_string_lossy(),
@@ -76,7 +76,7 @@ fn pfilter_single_stream_data_path_regression_on_single_block_model() {
     let tmp = tempfile::tempdir().unwrap();
     let obs = synth_obs(&bin, &single_block_model(), tmp.path(), &[]);
 
-    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE").env("CAMDL_STORE", isolated_store())
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args([
             "pfilter", &single_block_model().to_string_lossy(),
@@ -109,7 +109,7 @@ fn pfilter_multi_stream_named_pairs_joint_scoring() {
     let obs = synth_obs(&bin, &multi_block_model(), tmp.path(),
         &["--scenario", "true_params"]);
 
-    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE").env("CAMDL_STORE", isolated_store())
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args([
             "pfilter", &multi_block_model().to_string_lossy(),
@@ -143,7 +143,7 @@ fn pfilter_multi_stream_named_pairs_joint_scoring() {
     // be at least ~3× (in magnitude) the single-stream loglik. This
     // is the same shape as the gh#38 family-root test in
     // profile_multi_stream.rs.
-    let single_out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
+    let single_out = Command::new(&bin).env_remove("CLICOLOR_FORCE").env("CAMDL_STORE", isolated_store())
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args([
             "pfilter", &multi_block_model().to_string_lossy(),
@@ -173,7 +173,7 @@ fn pfilter_single_stream_with_obs_on_multi_block_emits_warning() {
     let obs = synth_obs(&bin, &multi_block_model(), tmp.path(),
         &["--scenario", "true_params"]);
 
-    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE").env("CAMDL_STORE", isolated_store())
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args([
             "pfilter", &multi_block_model().to_string_lossy(),
@@ -209,7 +209,7 @@ fn pfilter_mixed_data_forms_errors() {
     let obs = synth_obs(&bin, &multi_block_model(), tmp.path(),
         &["--scenario", "true_params"]);
 
-    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE").env("CAMDL_STORE", isolated_store())
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args([
             "pfilter", &multi_block_model().to_string_lossy(),
@@ -237,7 +237,7 @@ fn pfilter_multi_block_no_data_with_no_obs_errors_actionable() {
     let obs = synth_obs(&bin, &multi_block_model(), tmp.path(),
         &["--scenario", "true_params"]);
 
-    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE").env("CAMDL_STORE", isolated_store())
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args([
             "pfilter", &multi_block_model().to_string_lossy(),
@@ -292,7 +292,7 @@ cases_p4 = "/nonexistent/should_not_be_read.tsv"
 cases_p5 = "/nonexistent/should_not_be_read.tsv"
 "#, model = multi_block_model().to_string_lossy())).unwrap();
 
-    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE").env("CAMDL_STORE", isolated_store())
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args([
             "pfilter", &multi_block_model().to_string_lossy(),
@@ -350,7 +350,7 @@ cases_p4 = "{p}"
 cases_p5 = "{p}"
 "#, model = multi_block_model().to_string_lossy(), p = obs_lossy)).unwrap();
 
-    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE").env("CAMDL_STORE", isolated_store())
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args([
             "pfilter", &multi_block_model().to_string_lossy(),
@@ -366,4 +366,16 @@ cases_p5 = "{p}"
     // No silent-zero warning: all 5 streams bound via the toml.
     assert!(!stderr.contains("silently zero"),
         "all-streams-bound (via fit toml) must NOT emit warning: {}", stderr);
+}
+
+/// A run store of its own for one command, so tests that run the same filter
+/// at once do not meet in a shared root (a filter run another live process
+/// holds is refused).
+fn isolated_store() -> std::path::PathBuf {
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "camdl-store-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ))
 }

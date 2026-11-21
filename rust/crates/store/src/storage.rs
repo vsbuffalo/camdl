@@ -865,6 +865,7 @@ impl Inner {
             info: Arc::clone(info),
             entries: entries.upstream.clone(),
             by_products,
+            dropped: Vec::new(),
             events: Default::default(),
             settled: false,
         }
@@ -1249,12 +1250,16 @@ impl Inner {
         }
         let files_dir = reproduce_dir(&slots[0].dir);
         std::fs::create_dir_all(&files_dir).at("create directory", &files_dir)?;
+        // The reproducing run records the reads it makes itself, not the
+        // stored run's, which its by-products would otherwise list twice.
+        let mut record = (*run).clone();
+        record.reads.clear();
         let core = self.core(
             A::KIND,
             run_id,
             Place::Reproducing { stored_dir: dir.to_path_buf(), stored: run.clone(), files_dir: files_dir.clone() },
             files_dir,
-            *run,
+            record,
             identity.held_content(),
             info,
             entries,

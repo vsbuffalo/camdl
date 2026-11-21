@@ -223,19 +223,6 @@ pub fn resolve_profile_prefix(root: &Path, prefix: &str) -> Vec<Leaf> {
     resolve_prefix_indexed(root, ArtifactKind::ProfilePoint, prefix, walk_profile_leaves)
 }
 
-/// All `pfilters/` leaves of kind `Pfilter` (new-format particle-filter evals,
-/// M3.3). Each is one `(model × config × params × seed)` standalone eval —
-/// a single leaf, no grid.
-pub fn walk_pfilter_leaves(root: &Path) -> Vec<Leaf> {
-    walk_kind(root, ArtifactKind::Pfilter, Bounds::default())
-}
-
-/// New-format pfilter evals whose `run_id` hex matches `prefix` (for
-/// `show`/`cat` prefix resolution alongside `resolve_sim_prefix`).
-pub fn resolve_pfilter_prefix(root: &Path, prefix: &str) -> Vec<Leaf> {
-    resolve_prefix_indexed(root, ArtifactKind::Pfilter, prefix, walk_pfilter_leaves)
-}
-
 /// All `ensembles/` leaves of kind `SimEnsemble` (the combined-across-cells
 /// wide-format TSV of a multi-cell `simulate`). Each references its N per-cell
 /// `Sim` leaves via `deps`; the combined TSV is its `ensemble.tsv` artifact.

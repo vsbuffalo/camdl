@@ -39,7 +39,7 @@ fn golden(name: &str) -> PathBuf {
 #[test]
 fn pfilter_rejects_real_coupled_model() {
     let bin = skip_if_missing();
-    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE").env("CAMDL_STORE", isolated_store())
         .args([
             "pfilter", &golden("sir_reservoir_mixed").to_string_lossy(),
             "--param", "beta=0.3", "--param", "gamma=0.1", "--param", "xi=0.05",
@@ -70,7 +70,7 @@ fn pfilter_rejects_real_coupled_model() {
 #[test]
 fn pfilter_does_not_over_reject_real_free_model() {
     let bin = skip_if_missing();
-    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE").env("CAMDL_STORE", isolated_store())
         .args([
             "pfilter", &golden("sir_basic").to_string_lossy(),
             "--param", "beta=0.3", "--param", "gamma=0.1",
@@ -84,4 +84,16 @@ fn pfilter_does_not_over_reject_real_free_model() {
         !stderr.contains("gh#191"),
         "a real-compartment-free model must not trip the gh#191 gate; stderr={stderr}"
     );
+}
+
+/// A run store of its own for one command, so tests that run the same filter
+/// at once do not meet in a shared root (a filter run another live process
+/// holds is refused).
+fn isolated_store() -> std::path::PathBuf {
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "camdl-store-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ))
 }

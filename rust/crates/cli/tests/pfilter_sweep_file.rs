@@ -1,9 +1,12 @@
 //! `camdl pfilter --sweep-file FILE` scores every row of a design file and
 //! writes one row per design point (`docs/camdl-run-spec.md`, "Scoring a
 //! design"). Each point is scored exactly as the single call at its values
-//! would score it, on the same seeds, and stored as that call's `Pfilter`
-//! leaf, so a row equals the single call, a stored point is reused, and the
-//! table does not depend on the thread schedule.
+//! would score it, on the same seeds, and stored on the run store as that
+//! call's `Pfilter` result, so a row equals the single call, a stored point
+//! is reused, and the table, rendered from the stored points, does not depend
+//! on the thread schedule. A point at which the filter fails is a stored
+//! result too; a point that does not complete for a reason a rerun could
+//! change is not.
 //!
 //! End-to-end via the release `camdl` binary, with `camdlc.exe` on PATH.
 
@@ -91,7 +94,7 @@ fn pfilter(dir: &Path, args: &[&str]) -> Output {
     Command::new(camdl_bin())
         .env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
-        .env("CAMDL_OUTPUT_DIR", dir.join("store"))
+        .env("CAMDL_STORE", dir.join("store"))
         .env("PATH", format!("{}:{path}", dir.join("bin").display()))
         .current_dir(dir)
         .arg("pfilter")
@@ -282,14 +285,15 @@ fn failing(cases: &str, design: &str) -> (Option<i32>, Vec<Row>, String) {
     (out.status.code(), rows, stderr(&out))
 }
 
-/// Point 1 failed in every replicate and points 0 and 2 were scored.
+/// Point 1 failed in every replicate and points 0 and 2 were scored. The
+/// failure is a property of the point, so the point is a stored result.
 fn assert_point_1_failed(rows: &[Row], err: &str, cause: &str) {
     assert_eq!(rows.len(), 3, "{err}");
     let row = &rows[1];
     assert_eq!(row["loglik"], "-inf", "{err}");
     assert_eq!(row["loglik_sd"], "", "no spread over failed replicates");
     assert_eq!(row["n_failed"], "2");
-    assert_eq!(row["run_id"], "", "a failed point writes no leaf");
+    assert_eq!(row["run_id"].len(), 64, "a failed point is stored: {row:?}");
     assert!(row["failure"].contains(cause), "the failure names its cause: {:?}", row["failure"]);
     assert!(!row["failure"].starts_with("error: "), "{:?}", row["failure"]);
     for i in [0, 2] {
@@ -333,7 +337,7 @@ fn a_point_where_the_filter_stops_with_an_error_is_a_row() {
     let (code, rows, err) = failing(cases, "beta\tgamma\n0.1\t50\n0.12\t45\n");
     assert_eq!(code, Some(3), "every point failed:\n{err}");
     assert_eq!(rows.len(), 2, "the table is still written");
-    assert!(rows.iter().all(|r| r["loglik"] == "-inf" && r["run_id"].is_empty() && r["n_failed"] == "2"));
+    assert!(rows.iter().all(|r| r["loglik"] == "-inf" && r["run_id"].len() == 64 && r["n_failed"] == "2"));
     assert!(err.contains("every one of the 2 design points failed"), "{err}");
 }
 
@@ -421,9 +425,9 @@ fn a_design_from_design_lhs_is_scored() {
     for (row, point) in rows.iter().zip(&lhs) {
         assert_eq!(row["point_id"], point["point_id"]);
         assert_eq!(row["sweep:beta"], point["beta"], "the value scored is the design's");
-        match row["n_failed"].as_str() {
-            "0" => assert_eq!(row["run_id"].len(), 64, "{row:?}"),
-            _ => assert!(!row["failure"].is_empty(), "{row:?}"),
+        assert_eq!(row["run_id"].len(), 64, "every point is stored: {row:?}");
+        if row["n_failed"] != "0" {
+            assert!(!row["failure"].is_empty(), "{row:?}");
         }
     }
     let scored = rows.iter().find(|r| r["n_failed"] == "0").expect("a scored point");
@@ -435,4 +439,189 @@ fn a_design_from_design_lhs_is_scored() {
     let s = single(own.path(), &one);
     assert_eq!(scored["loglik"].parse::<f64>().unwrap().to_bits(), s.loglik.parse::<f64>().unwrap().to_bits());
     assert_eq!(scored["run_id"], s.run_id);
+}
+
+/// Observations under which the filter collapses at `gamma = 50`: every
+/// particle's `I` is 0 by the last observation, of 2 cases.
+const COLLAPSE_CASES: &str = "time\tcases\n2\t3\n4\t1\n6\t0\n8\t0\n10\t2\n";
+
+/// `camdl cat HANDLE` in `dir`, reading the store under `dir/store`.
+fn cat(dir: &Path, handle: &str) -> Output {
+    Command::new(camdl_bin())
+        .env_remove("CLICOLOR_FORCE")
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("CAMDL_STORE", dir.join("store"))
+        .current_dir(dir)
+        .args(["cat", handle])
+        .output()
+        .unwrap()
+}
+
+/// A single call at which the filter collapses is a completed result that
+/// holds the failure: the rerun finds it stored, and exits with the same
+/// status and message.
+#[test]
+fn a_collapsed_point_is_stored_and_reused() {
+    let dir = tempfile::tempdir().unwrap();
+    fixture(dir.path());
+    std::fs::write(dir.path().join("cases.tsv"), COLLAPSE_CASES).unwrap();
+    let args = ["--fit", "fit.toml", "--particles", "200", "--seed", "1", "--param", "beta=0.1", "--param", "gamma=50"];
+    let cause = |err: &str| -> String {
+        err.lines().find(|l| l.contains("the log-likelihood is -inf at these parameters"))
+            .unwrap_or_else(|| panic!("no failure line:\n{err}")).to_string()
+    };
+
+    let first = pfilter(dir.path(), &args);
+    let err = stderr(&first);
+    assert_eq!(first.status.code(), Some(3), "a collapsed filter is FILTER_FAILED:\n{err}");
+    let folder = err.lines()
+        .find_map(|l| l.trim_start().strip_prefix("stored "))
+        .unwrap_or_else(|| panic!("the collapsed run is stored:\n{err}"))
+        .trim().to_string();
+    let toml = std::fs::read_to_string(Path::new(&folder).join("loglik.toml")).unwrap();
+    assert!(!toml.contains("loglik = "), "a collapsed run has no log-likelihood:\n{toml}");
+    assert!(toml.contains("n_failed = 1\n"), "{toml}");
+    assert!(toml.contains("failure = ") && toml.contains("the log-likelihood is -inf"), "{toml}");
+
+    let again = pfilter(dir.path(), &args);
+    let err_again = stderr(&again);
+    assert_eq!(again.status.code(), Some(3), "{err_again}");
+    assert!(err_again.lines().any(|l| l.trim_start().starts_with(&format!("cached {folder}"))),
+        "the rerun is a cache hit:\n{err_again}");
+    assert!(!err_again.lines().any(|l| l.trim_start().starts_with("stored ")), "{err_again}");
+    assert_eq!(cause(&err_again), cause(&err), "the stored failure is the one reported");
+}
+
+/// A design with a point at which the filter collapses exits 0, holds its
+/// `--label`, and its table, failure row included, is rendered from the
+/// stored points: by `camdl cat @L`, and by a rerun that computes nothing.
+#[test]
+fn a_design_with_an_infeasible_point_takes_its_label() {
+    let dir = tempfile::tempdir().unwrap();
+    fixture(dir.path());
+    std::fs::write(dir.path().join("cases.tsv"), COLLAPSE_CASES).unwrap();
+    std::fs::write(dir.path().join("design.tsv"), "beta\tgamma\n1.0\t1.0\n0.1\t50\n1.1\t1.0\n").unwrap();
+    let mut args = vec!["--sweep-file", "design.tsv", "-o", "landscape.tsv", "--label", "scan"];
+    args.extend(COMMON);
+    args.extend(["1", "--replicates", "2"]);
+
+    let out = pfilter(dir.path(), &args);
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    let written = std::fs::read(dir.path().join("landscape.tsv")).unwrap();
+    assert_point_1_failed(&table(&String::from_utf8_lossy(&written)), &err,
+        "the log-likelihood is -inf at these parameters");
+
+    let shown = cat(dir.path(), "@scan");
+    assert!(shown.status.success(), "@scan names the design: {}", stderr(&shown));
+    assert_eq!(shown.stdout, written, "`camdl cat @scan` renders the design's table");
+
+    std::fs::remove_file(dir.path().join("landscape.tsv")).unwrap();
+    let out = pfilter(dir.path(), &args);
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert_eq!(err.matches("cached point ").count(), 3, "every point, the failed one included, is reused:\n{err}");
+    assert_eq!(err.matches("stored point ").count(), 0, "{err}");
+    assert_eq!(std::fs::read(dir.path().join("landscape.tsv")).unwrap(), written,
+        "the rerun's table, rendered from the store, is the first run's");
+}
+
+/// A point the store cannot write did not complete: the failure is not a
+/// property of the point. The design reports it, writes no table and exits
+/// non-zero; once the store is writable, a rerun computes only that point.
+#[test]
+fn a_point_the_store_cannot_write_is_not_completed() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    fixture(dir.path());
+    let mut args = vec!["--sweep-file", "design.tsv", "-o", "landscape.tsv"];
+    args.extend(COMMON);
+    args.push("1");
+
+    // Points 0 and 2 of the full design, stored first.
+    std::fs::write(dir.path().join("design.tsv"), "beta\tgamma\n0.8\t1.5\n0.6\t1.8\n").unwrap();
+    let out = pfilter(dir.path(), &args);
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    // The settings directory their parameter directories sit in is made
+    // read-only, so the one new point cannot be placed.
+    fn find(dir: &Path, prefix: &str) -> Option<PathBuf> {
+        for e in std::fs::read_dir(dir).ok()?.flatten() {
+            let p = e.path();
+            if !p.is_dir() {
+                continue;
+            }
+            if e.file_name().to_string_lossy().starts_with(prefix) {
+                return Some(p);
+            }
+            if let Some(found) = find(&p, prefix) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    let settings = find(&dir.path().join("store"), "pf-n200-r1-").expect("the settings directory");
+    std::fs::set_permissions(&settings, std::fs::Permissions::from_mode(0o555)).unwrap();
+    std::fs::write(dir.path().join("design.tsv"), DESIGN).unwrap();
+    std::fs::remove_file(dir.path().join("landscape.tsv")).unwrap();
+    let out = pfilter(dir.path(), &args);
+    std::fs::set_permissions(&settings, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(1), "a point that did not complete fails the run:\n{err}");
+    assert!(err.contains("1 of 3 design points did not complete"), "{err}");
+    assert!(err.contains("point 1: "), "the point and its cause are named:\n{err}");
+    assert!(!dir.path().join("landscape.tsv").exists(), "no table is written without every point");
+
+    let out = pfilter(dir.path(), &args);
+    let err = stderr(&out);
+    assert!(out.status.success(), "{err}");
+    assert_eq!(err.matches("stored point 1 ").count(), 1, "the point that did not complete is computed:\n{err}");
+    assert_eq!(err.matches("cached point ").count(), 2, "{err}");
+}
+
+/// A single call whose filter stops with an error, asked for its trace, is
+/// stored with the failure, and the trace it has no state to be written from
+/// is not stored: neither when the run is computed nor when a rerun computes
+/// it again to add the trace. Both exit with `FILTER_FAILED`.
+#[test]
+fn an_errored_run_stores_no_by_product() {
+    let dir = tempfile::tempdir().unwrap();
+    fixture(dir.path());
+    std::fs::write(dir.path().join("cases.tsv"), "time\tcases\n6\t8\n8\t9\n10\t8\n").unwrap();
+    let args = ["--fit", "fit.toml", "--particles", "200", "--seed", "1", "--param", "beta=0.1", "--param", "gamma=50",
+        "--trace", "trace.tsv"];
+    // The first call stores the run; the second reproduces it for its trace,
+    // keeps nothing, and says the run was reused.
+    let mut folders = Vec::new();
+    for verb in ["stored ", "cached "] {
+        let out = pfilter(dir.path(), &args);
+        let err = stderr(&out);
+        assert_eq!(out.status.code(), Some(3), "{err}");
+        assert!(err.contains("EssCollapsed"), "{err}");
+        assert!(!dir.path().join("trace.tsv").exists(), "no trace is exported:\n{err}");
+        assert!(err.contains("no by-product asked for was stored or exported"), "the failed trace is named:\n{err}");
+        let other = if verb == "stored " { "cached " } else { "stored " };
+        assert!(!err.lines().any(|l| l.trim_start().starts_with(other)), "{verb}call:\n{err}");
+        folders.push(err.lines()
+            .find_map(|l| l.trim_start().strip_prefix(verb))
+            .unwrap_or_else(|| panic!("the run is reported {verb}:\n{err}"))
+            .trim().to_string());
+    }
+    assert_eq!(folders[0], folders[1], "one stored run");
+    let run = Path::new(&folders[0]);
+    let toml = std::fs::read_to_string(run.join("loglik.toml")).unwrap();
+    assert!(toml.contains("n_failed = 1\n") && toml.contains("EssCollapsed"), "{toml}");
+    let left: Vec<String> = std::fs::read_dir(run).unwrap().flatten()
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n != ".attempts")
+        .flat_map(|n| {
+            let sub: Vec<String> = std::fs::read_dir(run.join(&n)).map(|d| d.flatten()
+                .map(|e| format!("{n}/{}", e.file_name().to_string_lossy())).collect()).unwrap_or_default();
+            // The store's own `.staging/` is left empty once a claim in it
+            // ends; a by-product's folder would be `<kind>/…`.
+            if !sub.is_empty() { sub } else if n.starts_with('.') { vec![] } else { vec![n] }
+        })
+        .collect();
+    assert!(left.is_empty(), "the run's folder holds no by-product and no claim: {left:?}");
 }

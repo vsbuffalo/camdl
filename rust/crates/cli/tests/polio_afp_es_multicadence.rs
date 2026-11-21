@@ -285,7 +285,7 @@ fn synthetic_fit_recovers_params() {
     let tmp = tempfile::tempdir().unwrap();
     let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .current_dir(tmp.path())
-        .env("CAMDL_OUTPUT_DIR", tmp.path().join("results"))
+        .env("CAMDL_OUTPUT_DIR", tmp.path().join("results")).env("CAMDL_STORE", std::path::Path::new(&tmp.path().join("results")).join("camdl-store"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         // Compile the model with the dune-built camdlc (a stale PATH camdlc
         // predates the stratified-observation header), mirroring compile_model.

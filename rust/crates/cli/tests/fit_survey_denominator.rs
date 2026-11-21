@@ -93,7 +93,7 @@ simulate { from = 0 'days  to = 6 'days }
     let model_path = dir.join("survey.camdl");
     std::fs::write(&model_path, src).unwrap();
     let ir_path = dir.join("survey.ir.json");
-    let out = Command::new(&camdlc).env_remove("CLICOLOR_FORCE").arg(&model_path).output().unwrap();
+    let out = Command::new(&camdlc).env_remove("CLICOLOR_FORCE").env("CAMDL_STORE", isolated_store()).arg(&model_path).output().unwrap();
     assert!(out.status.success(),
         "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
     std::fs::write(&ir_path, &out.stdout).unwrap();
@@ -184,7 +184,7 @@ cooling = 0.9
 }
 
 fn run_fit(bin: &Path, fit_toml: &Path, seed: &str) -> std::process::Output {
-    Command::new(bin).env_remove("CLICOLOR_FORCE")
+    Command::new(bin).env_remove("CLICOLOR_FORCE").env("CAMDL_STORE", isolated_store())
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args(["fit", "run", &fit_toml.to_string_lossy(), "--seed", seed])
         .output()
@@ -342,7 +342,7 @@ fn assert_zero_effort_row_is_a_hole(tmp: &Tmp, ir: &Path) {
 
     let pfilter = |data: &Path, tag: &str| -> (String, String) {
         let path = tmp.path().join(format!("{tag}.trace.tsv"));
-        let out = Command::new(&camdl).env_remove("CLICOLOR_FORCE")
+        let out = Command::new(&camdl).env_remove("CLICOLOR_FORCE").env("CAMDL_STORE", isolated_store())
             .arg("pfilter").arg(ir)
             .args(["--scenario", "baseline", "--particles", "200", "--seed", "1"])
             .arg("--data").arg(data)
@@ -396,7 +396,7 @@ fn a_zero_denominator_drops_out_of_the_prequential_record_as_a_hole_does() {
     let tmp = tempdir("zero_vs_na_preq");
     let ir = write_model(tmp.path());
     let run = |data: &Path, stem: &str| -> Vec<String> {
-        let out = Command::new(&camdl).env_remove("CLICOLOR_FORCE")
+        let out = Command::new(&camdl).env_remove("CLICOLOR_FORCE").env("CAMDL_STORE", isolated_store())
             .arg("pfilter").arg(&ir)
             .args(["--scenario", "baseline", "--particles", "200", "--seed", "1"])
             .arg("--data").arg(data)
@@ -504,4 +504,16 @@ fn a_positive_count_against_zero_trials_is_still_an_error() {
         "a positive count against a zero denominator must be rejected:\n{stderr}");
     assert!(stderr.contains("row 1") && stderr.contains("denominator"),
         "the error must locate the row and name the denominator:\n{stderr}");
+}
+
+/// A run store of its own for one command, so tests that run the same filter
+/// at once do not meet in a shared root (a filter run another live process
+/// holds is refused).
+fn isolated_store() -> std::path::PathBuf {
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "camdl-store-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ))
 }

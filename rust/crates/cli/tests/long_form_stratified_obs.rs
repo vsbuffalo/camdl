@@ -43,7 +43,7 @@ fn write(path: &Path, contents: &str) {
 }
 
 fn run_pfilter(bin: &Path, model: &Path, data: &Path, params: &Path) -> (bool, String, String) {
-    let out = Command::new(bin).env_remove("CLICOLOR_FORCE")
+    let out = Command::new(bin).env_remove("CLICOLOR_FORCE").env("CAMDL_STORE", isolated_store())
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args([
             "pfilter", &model.to_string_lossy(),
@@ -126,4 +126,16 @@ fn long_form_unknown_level_is_a_located_error() {
     assert!(stderr.contains("suburban"), "must name the offending level: {stderr}");
     assert!(stderr.contains("urban") && stderr.contains("rural"),
         "must list the valid levels [urban, rural]: {stderr}");
+}
+
+/// A run store of its own for one command, so tests that run the same filter
+/// at once do not meet in a shared root (a filter run another live process
+/// holds is refused).
+fn isolated_store() -> std::path::PathBuf {
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "camdl-store-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ))
 }

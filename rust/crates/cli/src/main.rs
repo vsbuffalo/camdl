@@ -38,7 +38,9 @@ mod eval;
 mod dt_rule;      // the one integration-step rule: the model's declared dt, else the written one
 mod pfilter;        // used internally by fit runner for data loading
 mod prequential_out; // the one prequential.tsv/.json writer (gh#650)
-mod pfilter_cas;    // gh#147 (M3.3): pfilter-eval CAS identity (model/config/params/seed)
+mod pfilter_store;  // camdl pfilter on the run store: its identity, result and by-products
+mod camdl_store;    // camdl on the run store: ambient identity, kinds, root, content artifacts
+mod input_fixtures; // the second values and fixtures of the input-class checks
 mod pfilter_config; // ResolvedPfilterConfig: pfilter's one resolved configuration; identity and filter derive from it
 mod caltime_load;   // dated-data loader: column detection + date→internal-time (2026-05-22)
 mod design;         // `camdl design lhs`: a Latin-hypercube design as a `--sweep-file` TSV
@@ -554,7 +556,14 @@ fn main() {
         Command::Fit(FitCmd::Predict(a)) => fit::predict::cmd_fit_predict(&a, compile),
         Command::Fit(FitCmd::Methods)   => fit::cmd_fit_methods(),
         Command::Label(a)               => fit::cmd_label(&a),
-        Command::Pfilter(a)             => pfilter::cmd_pfilter(&a, compile),
+        Command::Pfilter(a)             => pfilter::cmd_pfilter(args::PfilterInvocation {
+            args: a,
+            no_licm: cli.global.no_licm,
+            no_ir_cache: cli.global.no_ir_cache,
+            verbosity: cli.global.verbosity,
+            progress: cli.global.progress,
+            no_progress: cli.global.no_progress,
+        }),
         Command::If2(a)                 => if2::cmd_if2(&a),
         Command::Profile(a)             => profile::cmd_profile(&a, compile),
         Command::Design(DesignCmd::Lhs(a)) => design::cmd_design_lhs(&a, compile),

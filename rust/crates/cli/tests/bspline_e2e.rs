@@ -227,7 +227,7 @@ fn simulate(dir: &Path, model: &Path, fit: Option<&Path>, extra: &[&str]) -> (bo
         .args(extra)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDL_IR_CACHE_DIR", dir.join("irc"))
-        .env("CAMDL_OUTPUT_DIR", &cas);
+        .env("CAMDL_OUTPUT_DIR", &cas).env("CAMDL_STORE", std::path::Path::new(&&cas).join("camdl-store"));
     if let Some(f) = fit {
         cmd.args(["--fit", f.to_str().unwrap()]);
     }
@@ -340,7 +340,7 @@ fn pfilter_and_profile_refuse_or_warn_the_hold() {
                 .args(extra)
                 .env("CAMDL_SKIP_VERSION_CHECK", "1")
                 .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
-                .env("CAMDL_OUTPUT_DIR", tmp.path().join("cas"))
+                .env("CAMDL_OUTPUT_DIR", tmp.path().join("cas")).env("CAMDL_STORE", std::path::Path::new(&tmp.path().join("cas")).join("camdl-store"))
                 .output()
                 .expect("spawn");
             (o.status.success(), String::from_utf8_lossy(&o.stderr).into_owned())
@@ -384,7 +384,7 @@ fn pgas_fit(tmp: &Path, tag: &str, model: &Path, estimate: &str, fixed: &str) ->
         .args(["fit", "run", toml.to_str().unwrap()])
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDL_IR_CACHE_DIR", tmp.join("irc"))
-        .env("CAMDL_OUTPUT_DIR", tmp.join("cas"))
+        .env("CAMDL_OUTPUT_DIR", tmp.join("cas")).env("CAMDL_STORE", std::path::Path::new(&tmp.join("cas")).join("camdl-store"))
         .output().unwrap();
     (o.status.success(), String::from_utf8_lossy(&o.stderr).into_owned())
 }
@@ -455,7 +455,7 @@ fn smooth_coefficients_are_not_yet_available() {
                "--param", "gamma=0.15", "--param", "rho=0.5", "--seed", "1", "--stdout"])
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
-        .env("CAMDL_OUTPUT_DIR", tmp.path().join("cas"))
+        .env("CAMDL_OUTPUT_DIR", tmp.path().join("cas")).env("CAMDL_STORE", std::path::Path::new(&tmp.path().join("cas")).join("camdl-store"))
         .output().unwrap();
     let stderr = String::from_utf8_lossy(&o.stderr);
     assert!(!o.status.success() && stderr.contains("is not yet available in this release"), "simulate must refuse smooth:\n{stderr}");

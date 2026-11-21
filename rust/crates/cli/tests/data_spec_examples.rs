@@ -429,7 +429,7 @@ fn run_example(ex: &Example) -> Result<(), String> {
     std::fs::write(&model, format!("{preamble_src}\nobservations {{\n{}}}\n", ex.declaration))
         .unwrap();
     let ir = dir.join("model.ir.json");
-    let out = Command::new(camdlc()).env_remove("CLICOLOR_FORCE").arg(&model).arg("-o").arg(&ir).output().unwrap();
+    let out = Command::new(camdlc()).env_remove("CLICOLOR_FORCE").env("CAMDL_STORE", isolated_store()).arg(&model).arg("-o").arg(&ir).output().unwrap();
     if !out.status.success() {
         return Err(format!(
             "the stream declared at {}:{} does not compile under preamble '{}':\n{}",
@@ -450,7 +450,7 @@ fn run_example(ex: &Example) -> Result<(), String> {
     let data = dir.join("data.tsv");
     std::fs::write(&data, &ex.file).unwrap();
     let stem = dir.join("preq");
-    let out = Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
+    let out = Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE").env("CAMDL_STORE", isolated_store())
         .args([
             "pfilter",
             ir.to_str().unwrap(),
@@ -567,4 +567,16 @@ fn the_data_spec_examples_load_over_the_periods_the_document_states() {
         examples.len(),
         failures.join("\n\n")
     );
+}
+
+/// A run store of its own for one command, so tests that run the same filter
+/// at once do not meet in a shared root (a filter run another live process
+/// holds is refused).
+fn isolated_store() -> std::path::PathBuf {
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "camdl-store-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ))
 }

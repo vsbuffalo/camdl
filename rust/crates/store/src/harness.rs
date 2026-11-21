@@ -52,6 +52,10 @@ pub struct ObservedResult {
     pub files: BTreeMap<String, Key>,
     /// A by-product's upstream run id.
     pub upstream: Option<Key>,
+    /// A content artifact: an input the command stored for its results to
+    /// depend on (a compiled model, a data table), not a result of the
+    /// computation.
+    pub content: bool,
 }
 
 /// One field that broke its class's promise.
@@ -62,8 +66,12 @@ pub struct ClassFailure {
     pub what: String,
 }
 
+/// The run ids of the results a computation produced: its own and its
+/// by-products', never the content artifacts it stored as inputs. An input
+/// that moves only a content artifact's id (a second data file under the
+/// same identity) has not reached the result's identity.
 fn ids(o: &Observed) -> BTreeSet<Key> {
-    o.results.iter().map(|r| r.run_id).collect()
+    o.results.iter().filter(|r| !r.content).map(|r| r.run_id).collect()
 }
 
 fn files(o: &Observed) -> BTreeSet<(Key, String, Key)> {
@@ -102,6 +110,9 @@ pub fn check_input_classes<H: InputHarness>(fields: &[FieldInfo], harness: &H) -
                 let lost: Vec<Key> = ids(&a).difference(&ids(&b)).copied().collect();
                 if !lost.is_empty() {
                     found.push(fail(format!("{} member(s) of the smaller set changed run id in the larger", lost.len())));
+                }
+                if ids(&b).len() <= ids(&a).len() {
+                    found.push(fail("the larger set produced no result the smaller did not".into()));
                 }
             }
             Class::Adds => {
@@ -151,3 +162,6 @@ pub fn check_input_classes<H: InputHarness>(fields: &[FieldInfo], harness: &H) -
         Err(failures)
     }
 }
+
+#[cfg(test)]
+mod tests;

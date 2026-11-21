@@ -152,7 +152,7 @@ pub(crate) fn data_digests(data: &[(String, String)]) -> Result<Vec<DataDigest>,
 /// regardless of map iteration order (and robust to a future
 /// `serde_json/preserve_order` feature unification — a silent-collision
 /// hazard otherwise).
-fn canonical(v: &serde_json::Value) -> serde_json::Value {
+pub(crate) fn canonical(v: &serde_json::Value) -> serde_json::Value {
     match v {
         serde_json::Value::Object(m) => {
             let mut keys: Vec<&String> = m.keys().collect();

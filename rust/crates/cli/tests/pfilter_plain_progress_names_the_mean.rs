@@ -56,6 +56,7 @@ fn the_last_plain_progress_line_names_the_reported_mean() {
         .current_dir(dir)
         .env_remove("CLICOLOR_FORCE")
         .env_remove("CAMDL_OUTPUT_DIR")
+        .env_remove("CAMDL_STORE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args(["--progress", "plain", "pfilter", "m.ir.json", "--params", "p.toml", "--data", "cases.tsv"])
         .args(["--particles", "5", "--replicates", "3", "--parallel", "1", "--no-store"])

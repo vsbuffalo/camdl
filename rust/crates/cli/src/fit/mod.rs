@@ -3083,13 +3083,27 @@ pub fn cmd_label(args: &crate::args::LabelArgs) {
         }
     };
 
+    // A filter run lives on the run store, where a completed record is
+    // sealed: it is named by the invocation that runs it, never after.
+    if let Some(store) = crate::camdl_store::open_existing(&crate::camdl_store::read_root()) {
+        if let Ok(handle) = args.hash.parse::<store::RunRef<crate::pfilter_store::Pfilter>>() {
+            if let Ok(stored) = store.resolve(&handle) {
+                out.fail(format!(
+                    "error: the filter run {} is sealed: a stored result's record is never rewritten, so \
+                     it cannot be labelled after it ran. Name the run when it runs, with `--label`: \
+                     `camdl pfilter ... --label {new_label}` reuses the stored result and names it @{new_label}.",
+                    stored.id().key().short12()));
+            }
+        }
+    }
+
     let root = args.root.clone();
     if !root.exists() {
         out.fail(format!("error: no results root at {}", root.display()));
     }
 
     // Match by hash prefix. Two homes for the label, by kind:
-    //   - sims / pfilters / fit runs → a per-leaf `run.json` whose
+    //   - sims / fit runs → a per-leaf `run.json` whose
     //     `provenance.label` IS the label home; resolved by leaf `run_id`
     //     prefix via the same `cas_read::resolve_*_prefix` machinery `show`
     //     uses, so anything `show` can address, `label` can too.
@@ -3101,7 +3115,6 @@ pub fn cmd_label(args: &crate::args::LabelArgs) {
     let mut matches: Vec<std::path::PathBuf> = Vec::new();
     let mut seen_leaves: HashSet<std::path::PathBuf> = HashSet::new();
     for leaf in crate::cas_read::resolve_sim_prefix(&root, &args.hash).into_iter()
-        .chain(crate::cas_read::resolve_pfilter_prefix(&root, &args.hash))
     {
         if seen_leaves.insert(leaf.dir.clone()) {
             matches.push(leaf.dir);

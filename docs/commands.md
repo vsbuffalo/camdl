@@ -174,7 +174,7 @@ camdl pfilter model.camdl --fit fit.toml --sweep-file design.tsv \
 
 Each point is scored exactly as the single `pfilter` call with the point's
 values passed as `--param` would score it, on the same seeds, and is stored as
-that call's leaf. So any row can be reproduced by one plain `pfilter` call, a
+that call's result. So any row can be reproduced by one plain `pfilter` call, a
 point already stored is reported `cached` rather than recomputed, and a design
 run that was interrupted computes only the points it had not reached. The points
 share random numbers, so their errors are correlated. `--fit` supplies the data,
@@ -184,10 +184,10 @@ The table has `point_id`, one `sweep:<param>` column per design column, `loglik`
 (the mean over replicates), `loglik_sd` (empty under `--replicates 1` or when a
 replicate failed), `n_failed`, `failure` and `run_id`. A replicate fails when it
 scores `-inf` or the filter stops with an error; a point whose every replicate
-failed is a row with `loglik = -inf`, its first failure message and no `run_id`,
-and the run fails only when every point failed. A `--param` or `--scenario` that
-would override a design column is refused, as is every per-run output
-(`--trace`, `--save-paths` and the rest). Full reference: run spec §5.5,
+failed is a row with `loglik = -inf` and its first failure message, stored like
+any other point, and the run fails only when every point failed. A `--param` or
+`--scenario` that would override a design column is refused, as is every per-run
+output (`--trace`, `--save-paths` and the rest). Full reference: run spec §5.5,
 "Scoring a design".
 
 The points are not a posterior sample and are not a source of chain starts: a

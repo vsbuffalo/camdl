@@ -39,7 +39,7 @@ fn save_prequential_and_trace_accept_na_holes() {
 
     let stem = tmp.path().join("preq").to_string_lossy().into_owned();
     let trace = tmp.path().join("trace.tsv");
-    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE").env("CAMDL_STORE", isolated_store())
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args([
             "pfilter", &model.to_string_lossy(),
@@ -65,4 +65,16 @@ fn save_prequential_and_trace_accept_na_holes() {
         "no non-finite score leaked into the JSON:\n{json}");
     let trace_txt = std::fs::read_to_string(&trace).unwrap();
     assert!(trace_txt.lines().count() > 3, "trace has rows:\n{trace_txt}");
+}
+
+/// A run store of its own for one command, so tests that run the same filter
+/// at once do not meet in a shared root (a filter run another live process
+/// holds is refused).
+fn isolated_store() -> std::path::PathBuf {
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "camdl-store-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ))
 }

@@ -181,7 +181,7 @@ fn run_in_store(bin: &Path, args: &[String], store: Option<&Path>) -> std::proce
     cmd.env_remove("CLICOLOR_FORCE");
     cmd.args(args).env("CAMDL_SKIP_VERSION_CHECK", "1");
     if let Some(dir) = store {
-        cmd.env("CAMDL_OUTPUT_DIR", dir);
+        cmd.env("CAMDL_OUTPUT_DIR", dir).env("CAMDL_STORE", std::path::Path::new(&dir).join("camdl-store"));
     }
     cmd.output().expect("spawn camdl")
 }

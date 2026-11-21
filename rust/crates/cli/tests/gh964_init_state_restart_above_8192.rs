@@ -73,7 +73,7 @@ fn run(bin: &Path, args: &[String], store: &Path) -> std::process::Output {
     Command::new(bin).env_remove("CLICOLOR_FORCE")
         .args(args)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
-        .env("CAMDL_OUTPUT_DIR", store)
+        .env("CAMDL_OUTPUT_DIR", store).env("CAMDL_STORE", std::path::Path::new(&store).join("camdl-store"))
         .output()
         .expect("spawn camdl")
 }

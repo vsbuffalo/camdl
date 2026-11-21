@@ -138,7 +138,7 @@ pub struct SweptParam {
 use crate::fit::cas::{level, structural_level_hash};
 
 /// Compact `dt` rendering for the `config` segment label (`1`, `0.5`, …).
-fn fmt_dt(dt: f64) -> String {
+pub(crate) fn fmt_dt(dt: f64) -> String {
     if (dt.round() - dt).abs() < 1e-9 {
         format!("{}", dt.round() as i64)
     } else {

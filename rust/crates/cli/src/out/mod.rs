@@ -84,6 +84,10 @@ pub struct Out {
     /// An error reported while it is held marks it `failed` with the error's
     /// sentence, `process::exit` included, as the method's heartbeat is.
     command_heartbeat: std::sync::Mutex<Option<Arc<io::HeartbeatGuard>>>,
+    /// A temporary directory the command made (a `--no-store` run's
+    /// temporary store), removed when an error ends the command, since
+    /// `process::exit` runs no destructor.
+    temporary: std::sync::Mutex<Option<std::path::PathBuf>>,
     /// The forcing-extrapolation policy of the held claim's command, from
     /// [`hold_claim`](Self::hold_claim) to [`take_claim`](Self::take_claim).
     /// Kept apart from the claim, which the first error takes: every chain
@@ -147,6 +151,7 @@ impl Out {
             events: None,
             claim: std::sync::Mutex::new(None),
             command_heartbeat: std::sync::Mutex::new(None),
+            temporary: std::sync::Mutex::new(None),
             forcing: None,
         }
     }
@@ -409,6 +414,12 @@ impl Out {
         }
     }
 
+    /// Remove `dir` if an error ends the command: a temporary directory the
+    /// command removes itself when it ends without one.
+    pub fn remove_on_error(&self, dir: std::path::PathBuf) {
+        *self.temporary.lock().unwrap_or_else(|p| p.into_inner()) = Some(dir);
+    }
+
     /// Report `e` on stderr and return the status the command exits with.
     ///
     /// A held store claim is failed first: the leaf's `run.json` becomes
@@ -416,6 +427,9 @@ impl Out {
     /// status its event log and `progress.json` are about to record. A
     /// record that could not be written is added to the message.
     pub fn error(&self, mut e: CommandError) -> ExitCode {
+        if let Some(dir) = self.temporary.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
         let held = self.claim.lock().unwrap_or_else(|p| p.into_inner()).take();
         if let Some(held) = held {
             fail_claim(held.claim, &held.operation, &mut e.message);

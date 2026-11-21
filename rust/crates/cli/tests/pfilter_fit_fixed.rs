@@ -87,7 +87,7 @@ fn pfilter(dir: &Path, args: &[&str]) -> Output {
     Command::new(camdl_bin())
         .env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
-        .env("CAMDL_OUTPUT_DIR", dir.join("store"))
+        .env("CAMDL_STORE", dir.join("store"))
         .env("PATH", format!("{}:{path}", shim.display()))
         .current_dir(dir)
         .arg("pfilter")

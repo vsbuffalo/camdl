@@ -156,7 +156,7 @@ fn run_in(dir: &Path, store: &Path, args: &[&str]) -> Output {
     Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
         .current_dir(dir)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
-        .env("CAMDL_OUTPUT_DIR", store)
+        .env("CAMDL_OUTPUT_DIR", store).env("CAMDL_STORE", std::path::Path::new(&store).join("camdl-store"))
         .args(args)
         .output()
         .expect("spawn camdl")

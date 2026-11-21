@@ -60,6 +60,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
 sha2 = "0.10"
 sim = { path = "../sim", default-features = false }
+store = { path = "../store" }
 tar = "0.4"
 tempfile = "3"
 toml = { version = "0.8", features = ["parse", "display"] }

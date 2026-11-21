@@ -109,7 +109,7 @@ fn camdl(dir: &Path, args: &[&str]) -> Output {
         .args(args)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDL_IR_CACHE_DIR", dir.join("irc"))
-        .env("CAMDL_OUTPUT_DIR", dir.join("cas"))
+        .env("CAMDL_OUTPUT_DIR", dir.join("cas")).env("CAMDL_STORE", std::path::Path::new(&dir.join("cas")).join("camdl-store"))
         .output()
         .expect("spawn camdl")
 }
@@ -724,6 +724,9 @@ fn refused_fit_marks_its_claim_failed(chains: usize) -> Vec<(&'static str, PathB
 }
 
 /// Every `run.json` under `root`, with its path.
+/// Every record under `root`: an old-store leaf's `run.json`, and for a
+/// filter run in the run store its `run.json` with the `run_id` and `kind` of
+/// its `identity.json` and, as `inputs`, its `provenance.json`.
 fn statuses(root: &Path) -> Vec<(PathBuf, serde_json::Value)> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -734,7 +737,20 @@ fn statuses(root: &Path) -> Vec<(PathBuf, serde_json::Value)> {
             if p.is_dir() {
                 stack.push(p);
             } else if p.file_name().is_some_and(|n| n == "run.json") {
-                let v = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+                let mut v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+                if let Some(id) = run_store_identity(&p) {
+                    // The run store's content artifacts are inputs of a run,
+                    // not runs.
+                    if id["kind"] == "compiled_model" || id["kind"] == "data_table" {
+                        continue;
+                    }
+                    v["run_id"] = id["run_id"].clone();
+                    v["kind"] = id["kind"].clone();
+                    let prov = p.with_file_name("provenance.json");
+                    if let Ok(b) = std::fs::read_to_string(&prov) {
+                        v["inputs"] = serde_json::from_str(&b).unwrap();
+                    }
+                }
                 out.push((p, v));
             }
         }
@@ -836,6 +852,12 @@ fn the_override_is_in_the_run_identity() {
 }
 
 /// The distinct `run_id`s of the committed `run.json`s under `cas`.
+/// The `identity.json` beside a run store's `run.json`, if it is one.
+fn run_store_identity(run_json: &Path) -> Option<serde_json::Value> {
+    let b = std::fs::read_to_string(run_json.with_file_name("identity.json")).ok()?;
+    serde_json::from_str(&b).ok()
+}
+
 fn run_ids(cas: &Path) -> std::collections::BTreeSet<String> {
     let mut out = std::collections::BTreeSet::new();
     let mut stack = vec![cas.to_path_buf()];
@@ -846,7 +868,13 @@ fn run_ids(cas: &Path) -> std::collections::BTreeSet<String> {
             if p.is_dir() {
                 stack.push(p);
             } else if p.file_name().is_some_and(|n| n == "run.json") {
-                let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+                let v: serde_json::Value = match run_store_identity(&p) {
+                    // The run store's content artifacts are inputs of a run,
+                    // not runs.
+                    Some(id) if id["kind"] == "compiled_model" || id["kind"] == "data_table" => continue,
+                    Some(id) => id,
+                    None => serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap(),
+                };
                 if let Some(id) = v.get("run_id").and_then(|i| i.as_str()) {
                     out.insert(id.to_string());
                 }

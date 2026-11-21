@@ -101,7 +101,7 @@ dt = 1.0
     fn run(&self, args: &[&str]) -> Output {
         Command::new(binary()).env_remove("CLICOLOR_FORCE")
             .current_dir(self.dir())
-            .env("CAMDL_OUTPUT_DIR", self.dir().join("results"))
+            .env("CAMDL_OUTPUT_DIR", self.dir().join("results")).env("CAMDL_STORE", std::path::Path::new(&self.dir().join("results")).join("camdl-store"))
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .env("CAMDLC", camdlc_bin())
             .args(args)
@@ -782,7 +782,7 @@ fn concurrent_labels_leave_one_holder() {
             .map(|id| {
                 Command::new(binary()).env_remove("CLICOLOR_FORCE")
                     .current_dir(p.dir())
-                    .env("CAMDL_OUTPUT_DIR", p.dir().join("results"))
+                    .env("CAMDL_OUTPUT_DIR", p.dir().join("results")).env("CAMDL_STORE", std::path::Path::new(&p.dir().join("results")).join("camdl-store"))
                     .args(["label", &id[..12], &label])
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())

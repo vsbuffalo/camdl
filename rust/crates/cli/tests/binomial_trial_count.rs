@@ -165,11 +165,19 @@ fn a_run_time_n_below_a_count_makes_pfilter_name_the_guard() {
     let loglik = String::from_utf8_lossy(&out.stdout).lines().find_map(|l| l.trim().parse::<f64>().ok());
     assert!(loglik.is_some_and(f64::is_finite), "control loglik must be finite: {:?}", out.stdout);
 
+    // The completed filter runs in the run store under `dir`.
     let leaves = |dir: &Path| -> usize {
         fn walk(d: &Path, n: &mut usize) {
             for e in std::fs::read_dir(d).into_iter().flatten().flatten() {
                 let p = e.path();
-                if p.is_dir() { walk(&p, n) } else if e.file_name() == "run.json" { *n += 1 }
+                if !p.is_dir() { continue }
+                if let (Ok(id), Ok(run)) = (std::fs::read_to_string(p.join("identity.json")),
+                                            std::fs::read_to_string(p.join("run.json"))) {
+                    let id: serde_json::Value = serde_json::from_str(&id).unwrap();
+                    let run: serde_json::Value = serde_json::from_str(&run).unwrap();
+                    if id["kind"] == "pfilter" && run["status"] == "completed" { *n += 1 }
+                }
+                walk(&p, n)
             }
         }
         let mut n = 0;
@@ -189,8 +197,14 @@ fn a_run_time_n_below_a_count_makes_pfilter_name_the_guard() {
     assert!(err.contains("the observed count exceeds the denominator"), "names the guard:\n{err}");
     assert!(!String::from_utf8_lossy(&out.stdout).contains("inf"),
         "no bare -inf is printed as the answer: {:?}", out.stdout);
-    // No leaf is stored for a result that is not an answer.
-    assert_eq!(leaves(&tmp.0), stored, "no leaf is written");
+    // The collapse is determined by the run's identity, so the run is a
+    // completed result holding the failure, and a rerun reuses it.
+    assert_eq!(leaves(&tmp.0), stored + 1, "the collapsed run is stored");
+    let again = pfilter(&tmp.0, &ir, &bad);
+    let err_again = stderr(&again);
+    assert_eq!(again.status.code(), Some(3), "{err_again}");
+    assert!(err_again.contains("the observed count exceeds the denominator"), "{err_again}");
+    assert_eq!(leaves(&tmp.0), stored + 1, "the rerun reuses the stored run:\n{err_again}");
 
     // The same, over replicates.
     let out = pfilter_with(&tmp.0, &ir, &bad, &["--replicates", "3"]);

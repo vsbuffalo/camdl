@@ -171,7 +171,7 @@ scoring `-inf` or by stopping with an error, is a row with `loglik = -inf` and
 the first failure message, and the run goes on. Each row is the result the
 single call
 `camdl pfilter model.camdl --fit fit.toml --param beta=… --param gamma=…` gives
-with the same flags, stored as that call's leaf, so a run that was interrupted
+with the same flags, stored as that call's result, so a run that was interrupted
 computes only the points it had not reached. A table of this kind is worth
 building when:
 

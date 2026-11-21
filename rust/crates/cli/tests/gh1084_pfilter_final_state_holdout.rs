@@ -170,7 +170,7 @@ fn leaf(o: &Output) -> String {
         .find_map(|l| {
             let l = l.trim();
             l.strip_prefix("stored ").or_else(|| l.strip_prefix("cached "))
-                .filter(|p| p.contains("pfilters/"))
+                .filter(|p| p.contains("/pfilter/"))
                 .map(|p| p.trim().to_string())
         })
         .unwrap_or_else(|| panic!("no stored leaf named; stderr:\n{err}"))

@@ -43,7 +43,7 @@ fn tempdir(tag: &str) -> PathBuf {
 }
 
 fn run(camdl: &Path, args: &[&str]) -> std::process::Output {
-    Command::new(camdl).env_remove("CLICOLOR_FORCE")
+    Command::new(camdl).env_remove("CLICOLOR_FORCE").env("CAMDL_STORE", isolated_store())
         .args(args)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output()
@@ -247,4 +247,16 @@ fn the_horizon_override_does_not_waive_the_stream_check_at_shared_times() {
         String::from_utf8_lossy(&out.stderr));
     assert!(String::from_utf8_lossy(&out.stdout).contains("Δ columns suppressed"));
     let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// A run store of its own for one command, so tests that run the same filter
+/// at once do not meet in a shared root (a filter run another live process
+/// holds is refused).
+fn isolated_store() -> std::path::PathBuf {
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "camdl-store-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ))
 }

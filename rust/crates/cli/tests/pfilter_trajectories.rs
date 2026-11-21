@@ -47,7 +47,7 @@ fn save_paths_writes_n_times_t_rows() {
     let (data, params) = write_fixture(tmp.path());
     let paths = tmp.path().join("paths.tsv");
 
-    let status = Command::new(&bin).env_remove("CLICOLOR_FORCE")
+    let status = Command::new(&bin).env_remove("CLICOLOR_FORCE").env("CAMDL_STORE", isolated_store())
         .args(["pfilter", &golden_pure_death().to_string_lossy(),
                "--params", &params.to_string_lossy(),
                "--data",   &data.to_string_lossy(),
@@ -83,7 +83,7 @@ fn save_filtering_writes_n_times_t_particles() {
     let (data, params) = write_fixture(tmp.path());
     let filter = tmp.path().join("filter.tsv");
 
-    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE").env("CAMDL_STORE", isolated_store())
         .args(["pfilter", &golden_pure_death().to_string_lossy(),
                "--params", &params.to_string_lossy(),
                "--data",   &data.to_string_lossy(),
@@ -112,7 +112,7 @@ fn save_filtering_emits_mandatory_info_log() {
     let (data, params) = write_fixture(tmp.path());
     let filter = tmp.path().join("f.tsv");
 
-    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE").env("CAMDL_STORE", isolated_store())
         .args(["pfilter", &golden_pure_death().to_string_lossy(),
                "--params", &params.to_string_lossy(),
                "--data",   &data.to_string_lossy(),
@@ -137,7 +137,7 @@ fn save_paths_does_not_emit_filtering_caveat() {
     let (data, params) = write_fixture(tmp.path());
     let paths = tmp.path().join("p.tsv");
 
-    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE").env("CAMDL_STORE", isolated_store())
         .args(["pfilter", &golden_pure_death().to_string_lossy(),
                "--params", &params.to_string_lossy(),
                "--data",   &data.to_string_lossy(),
@@ -159,7 +159,7 @@ fn save_paths_values_are_monotone_nonincreasing_for_pure_death() {
     let (data, params) = write_fixture(tmp.path());
     let paths = tmp.path().join("paths.tsv");
 
-    Command::new(&bin).env_remove("CLICOLOR_FORCE")
+    Command::new(&bin).env_remove("CLICOLOR_FORCE").env("CAMDL_STORE", isolated_store())
         .args(["pfilter", &golden_pure_death().to_string_lossy(),
                "--params", &params.to_string_lossy(),
                "--data",   &data.to_string_lossy(),
@@ -184,4 +184,16 @@ fn save_paths_values_are_monotone_nonincreasing_for_pure_death() {
                  got {} → {}", path_id, pair[0], pair[1]);
         }
     }
+}
+
+/// A run store of its own for one command, so tests that run the same filter
+/// at once do not meet in a shared root (a filter run another live process
+/// holds is refused).
+fn isolated_store() -> std::path::PathBuf {
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "camdl-store-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ))
 }

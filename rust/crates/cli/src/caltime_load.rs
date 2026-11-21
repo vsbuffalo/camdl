@@ -23,7 +23,8 @@ use sim::time::interval_steps;
 
 /// Explicit `--time-format` override for a data file's time column.
 /// `Auto` (the default) runs whole-column detection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TimeFormat {
     /// Detect numeric-vs-date over the whole column.
     #[default]

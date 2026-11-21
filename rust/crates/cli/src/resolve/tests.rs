@@ -426,7 +426,6 @@ fn differential_presentation_inputs_are_inert() {
 //      kind is deliberate and reviewed.
 
 use crate::fit::config_v2::FitConfig;
-use crate::pfilter_cas::{resolve_pfilter, PfilterCtx};
 use crate::profile_cas::{resolve_profile_point, ProfilePointCtx};
 use crate::sim_ensemble_cas::{resolve_sim_ensemble, EnsembleCell, EnsembleCtx};
 
@@ -482,29 +481,6 @@ fn all_kind_identities(model: &Model) -> Vec<(&'static str, ContentHash, Content
     let data: Vec<(String, String)> =
         vec![("cases".to_string(), ContentHash::digest_bytes(b"cases").to_hex())];
 
-    // pfilter — levels[0] is the `model` level.
-    let pf_params = [("beta".to_string(), 0.3_f64)];
-    let pf = resolve_pfilter(&PfilterCtx {
-        model,
-        ir_version: IRV,
-        engine: &runid::inputs::EngineIdentity::of_build(ENGV),
-        stem: "sir",
-        data: &data,
-        params: &pf_params,
-        particles: 100,
-        replicates: 1,
-        dt: 1.0,
-        obs_block: "",
-        flow_indices: &[],
-        objective: crate::fit::config_v2::LikelihoodObjective::Full,
-        allow_forcing_extrapolation: false,
-        allow_degenerate_rates: false,
-        training_rows: None,
-        seed: 7,
-        binomial: sim::rng::BinomialAlgorithm::Btpe,
-    })
-    .expect("pfilter");
-    out.push(("pfilter", pf.levels[0].hash, pf.run_id));
 
     // sim_ensemble — levels[0] is the `model` level.
     let cells = [EnsembleCell {
@@ -747,7 +723,6 @@ fn cas_identity_pins() {
         // level's bytes changed.
         ("sim", "82ed170f4e0580051cbe8e064c60d982f095be8a3bb90f12536a088575e57dc2"),
         ("fit", "937d67de229bc67c23bf862cdc345332dd145f1b66283d4e2635f6022851979f"),
-        ("pfilter", "291de53592555457ee9872aec197db1f8c58a67c111f07b5806d320ea056b0a5"),
         ("sim_ensemble", "c784064470aee98529f7a4976382c3a51f85cea46434528ae49dd2d5cb861c37"),
         ("profile", "a3182ce7cbb9eae3f2f5f9bc2a782d2d6d4a5a19ca3921624f1f73ecdff5857b"),
     ];

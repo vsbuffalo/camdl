@@ -141,3 +141,43 @@ fn a_divergence_from_an_extra_file_leaves_the_stored_upstream_reused() {
     let inv = info.finish(&store).unwrap();
     assert_eq!(inv.file.results[0].outcome, crate::record::Outcome::Reused);
 }
+
+/// A by-product's record lists the reads of the run that wrote it, whether
+/// it was produced with its upstream or later, in reproducing mode.
+#[test]
+fn a_by_product_records_the_reads_made_to_write_it() {
+    let root = TempRoot::new("bp-reads");
+    let store = open(root.path());
+    let model = store
+        .put::<Model>(Hashed::new(ModelText("m".into())), &ModelLabels { name: "m".into() }, &crate::Provenance::none(), &info())
+        .unwrap()
+        .dep(Model::FILE)
+        .unwrap();
+    let reads_of_obs = |s: &crate::Stored<Sim>| -> serde_json::Value {
+        let dir = std::fs::read_dir(s.folder().join("obs")).unwrap().flatten().next().unwrap().path();
+        let run: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("run.json")).unwrap()).unwrap();
+        run["reads"].clone()
+    };
+    for (seed, later) in [(5, false), (6, true)] {
+        if later {
+            // The stored upstream read the model too, so a by-product added
+            // later is written from a run whose own reads repeat it.
+            let (id, labels) = sim(seed);
+            let Begin::Claimed(mut run) = store.begin(&id, &labels, &info(), Reuse::IfCompleted).unwrap() else { panic!() };
+            run.load(&model).unwrap();
+            write_sim(&run, seed);
+            run.finish().unwrap();
+        }
+        let (id, labels) = sim(seed);
+        let wanted = Wanted::<Sim>::none().with::<Obs>(obs_of(&id, 0.3), ());
+        let Begin::Claimed(mut run) = store.begin_with(&id, &labels, &wanted, &info(), Reuse::IfCompleted).unwrap() else { panic!() };
+        assert_eq!(run.reproducing(), later);
+        run.load(&model).unwrap();
+        write_sim(&run, seed);
+        run.also::<Obs>().unwrap().unwrap().result_file("obs.tsv").unwrap().write_all(b"o").unwrap();
+        let s = run.finish().unwrap();
+        let reads = reads_of_obs(&s);
+        assert_eq!(reads.as_array().map(Vec::len), Some(1), "later = {later}: each read is recorded once: {reads}");
+        assert_eq!(reads[0]["kind"], "compiled_model");
+    }
+}

@@ -50,6 +50,7 @@ fn profile(dir: &Path, w: &str) -> Output {
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDL_IR_CACHE_DIR", dir.join("irc"))
         .env_remove("CAMDL_OUTPUT_DIR")
+        .env_remove("CAMDL_STORE")
         .args(["profile", &p("patch.camdl"), "--fixed", "rho=0.5", "--starts", &format!("from_params={}", p("start.toml"))])
         .args(["--table", &format!("w={}", p(w)), "--data", &p("cases.tsv"), "--sweep", "gamma=0.2"])
         .args(["--rw-sd", "beta=0.05", "--particles", "20", "--iterations", "2", "--n-starts", "1", "--progress", "none"])
