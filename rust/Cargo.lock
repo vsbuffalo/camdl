@@ -2114,6 +2114,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
+name = "store"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "hex",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "store-derive",
+ "thiserror",
+ "toml",
+]
+
+[[package]]
+name = "store-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

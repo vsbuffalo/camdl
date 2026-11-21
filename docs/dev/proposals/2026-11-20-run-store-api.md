@@ -300,13 +300,14 @@ pub trait Inputs: Sized {
     type Execution;   // the execution fields
     type Exports;     // the export and render fields; () when there are none
     type Request;     // the store fields
-    const FIELDS: &'static [FieldInfo];
+    fn fields() -> &'static [FieldInfo];
     fn split(self) -> Split<Self>;
-    /// These arguments with one field changed to a second value: by `Vary` on the
-    /// field's type, or by the function its `vary = ...` names. For the class checks.
+    /// These arguments with one identity or render field changed to a second value:
+    /// by `Vary` on the field's type, or by the function its `vary = ...` names.
+    /// For the class checks; any other field panics, naming it.
     fn varied(&self, field: &str) -> Self;
-    /// The arguments of the fixture the field's `exercised_by = ...` names, at two
-    /// values of the field. For the class checks.
+    /// The arguments of the fixture this struct's own execution field's
+    /// `exercised_by = ...` names, at two values of the field. For the class checks.
     fn exercised(field: &str) -> (Self, Self);
 }
 
@@ -336,6 +337,16 @@ declaration order; `Execution` has public fields, since the engine reads them
 and nothing needs to prove they were all consumed, and derives `Serialize`,
 since `RunInfo::new` records it.
 
+A group contributes its own part to each of its parent's parts, as a field under
+the group's name, `()` when the group has no field of that class. A derive sees
+one type at a time and cannot tell whether a group's part is empty, so
+`ExampleExecution` holds `numerics: ()` beside `parallel`, and `ExampleExports`
+exists, holding `numerics: ()` alone.
+
+`fields()` is a function, not a constant: a group's field names are prefixed
+with the group's name (`numerics.dt`), which a constant cannot build from
+another type's list.
+
 A generated struct is named after the struct it came from, with a trailing
 `Args` removed, followed by its part: `ExampleArgs` gives `ExampleDeclared`,
 `ExampleExecution` and `ExampleRequest`, and would give `ExampleExports` if it
@@ -352,20 +363,26 @@ impl ExampleDeclared {
 }
 
 #[derive(Serialize)]
-pub struct ExampleExecution { pub parallel: usize }
+pub struct ExampleExecution { pub numerics: (), pub parallel: usize }
 
-pub struct ExampleRequest { /* label */ }
+pub struct ExampleExports { /* numerics */ }
+
+impl ExampleExports {
+    pub fn into_parts(self) -> ((),);
+}
+
+pub struct ExampleRequest { /* numerics, label */ }
 
 impl ExampleRequest {
-    pub fn into_parts(self) -> (Option<String>,);
+    pub fn into_parts(self) -> ((), Option<String>);
 }
 
 impl Inputs for ExampleArgs {
     type Declared  = ExampleDeclared;
     type Execution = ExampleExecution;
-    type Exports   = ();                      // this command has no export or render fields
+    type Exports   = ExampleExports;          // only the group's empty part
     type Request   = ExampleRequest;
-    const FIELDS: &'static [FieldInfo] = &[ /* numerics.dt, numerics.binomial, model, ... */ ];
+    fn fields() -> &'static [FieldInfo] { /* numerics.dt, numerics.binomial, model, ... */ }
     fn split(self) -> Split<Self> { /* generated */ }
     fn varied(&self, field: &str) -> Self { /* generated */ }
     fn exercised(field: &str) -> (Self, Self) { /* generated */ }
@@ -437,7 +454,7 @@ pub trait FileInputs: DeserializeOwned + Serialize + Sized {
     type Declared;
     type Execution;   // () when the file has no execution keys
     type Request;     // () when the file has no store keys
-    const FIELDS: &'static [FieldInfo];
+    fn fields() -> &'static [FieldInfo];
     /// Called by InputFile::parse with the bytes it read.
     fn split(self, source: SourceBytes) -> Parsed<Self>;
     /// As Inputs::varied, for one key.
@@ -521,10 +538,13 @@ pub trait EnvInputs: Sized {
     type Identity: Identity;
     type Execution;
     type Request;
-    const FIELDS: &'static [FieldInfo];
+    fn fields() -> &'static [FieldInfo];
     /// Read every declared variable once, and no other.
-    fn read() -> Result<(Self::Identity, Self::Execution, Self::Request, Given)>;
+    fn read() -> Result<EnvParts<Self>>;
 }
+
+/// The identity, execution and store parts, and the variables as given.
+pub type EnvParts<E> = (<E as EnvInputs>::Identity, <E as EnvInputs>::Execution, <E as EnvInputs>::Request, Given);
 ```
 
 For `CamdlEnv` the derive generates `CamdlEnvIdentity` (the three identity
@@ -686,11 +706,15 @@ came from.
 
 ```rust
 /// A value that can stand in an identity: it has a key and a record form.
-pub trait Identity: ContentAddressed + Clone {
-    type Record: ContentAddressed + Serialize + DeserializeOwned + Clone;
+pub trait Identity: ContentAddressed + Clone + 'static {
+    type Record: ContentAddressed + Serialize + DeserializeOwned + Clone + 'static;
     fn record(&self) -> Self::Record;
     /// The digest of every Hashed<T> this value holds, nested values included.
     fn held_content(&self) -> Vec<Key>;
+    /// Every Dep this value holds, nested values included, in field order: what
+    /// run.json lists under `deps` and the index records as edges. A record
+    /// holds none, so a by-product's copy of its upstream's record adds no edge.
+    fn deps(&self) -> Vec<DepInfo>;
     /// self.content_hash(), which equals self.record().content_hash().
     fn key(&self) -> Key { self.content_hash() }
 }
@@ -756,6 +780,10 @@ separately first. The bytes written are these.
 | `Key`                          | Its 32 bytes, with no prefix (`hash.rs:588-592`)                                                                                                                                                                         |
 | `Hashed<T>`                    | Its digest's 32 bytes, as a `Key`; the digest is the plain SHA-256 of the content's bytes                                                                                                                                |
 | `Dep<A>`                       | As a struct with tag `dep` and version 1 and three fields, in name order: `digest` (a `Key`), `file` (a string) and `run_id` (a `Key`), as API 3 defines them. The upstream's kind and build are recorded and not hashed |
+
+The hash version of this encoding is 9. It continues the numbering of `runid`'s
+encoding, whose last version is 8, because the three rules below change the
+bytes of every key.
 
 A run id is the SHA-256 of the hash version as a `u16`, the artifact's `KIND` as
 a string, the ambient key's 32 bytes and the identity key's 32 bytes. Today's
@@ -944,7 +972,7 @@ two values, compares every stored file, and fails naming the field and its
 class. Today the same protection needs a hand-written case per flag, and a flag
 added without one is caught only by a separate table test.
 
-The derives generate no test code. They emit `FIELDS`: each field's name and
+The derives generate no test code. They emit `fields()`: each field's name and
 class, with its `vary` and `exercised_by` values as text for messages. They also
 generate `Inputs::varied`, `Inputs::exercised` and `FileInputs::varied`, which
 is how a harness reaches a field's second value and its fixture. One library
@@ -1022,7 +1050,7 @@ the comparing (`assert_rekeys` at `:544`, `assert_same_result` at `:572`,
 a table test fails when an input of the command has no case
 (`cli/src/input_class.rs:542-584`). The target keeps the runner and the
 assertions and replaces the hand-written case per input with the loop over
-`FIELDS`.
+`fields()`.
 
 - **Identity.** Vary the field and require the run id to change.
 - **Expands.** Run a set and a larger set; require the shared members to keep
@@ -1417,7 +1445,8 @@ impl Invocation {
     pub fn seq(&self) -> u64;
     pub fn label(&self) -> Option<&str>;
     /// The results this invocation asked for, of kind A, in order, with their labels.
-    pub fn members<A: Artifact>(&self) -> Vec<(Id<A>, A::Labels)>;
+    /// Labels that do not read as A::Labels are refused with Error::Parse.
+    pub fn members<A: Artifact>(&self) -> Result<Vec<(Id<A>, A::Labels)>>;
 
     /// Render this invocation's results of kind R::Of to a path. Every one must be completed;
     /// otherwise Error::MemberNotCompleted, naming those that are not.
@@ -1763,11 +1792,20 @@ it again:
   "format": 1,
   "kind": "sim",
   "run_id": "<64 hex>",
-  "hash_version": 8,
+  "hash_version": 9,
   "ambient": { "build": "1ae16a5ce28b...", "env": { "eval_unresolved": false, "no_binding_cache": false, "experimental": {} } },
-  "identity": { "model": { "run_id": "...", "file": "model.ir.json", "digest": "..." }, "config": { "...": "..." } }
+  "identity": { "model": { "run_id": "...", "file": "model.ir.json", "digest": "...", "kind": "compiled_model", "build": "..." }, "config": { "...": "..." } },
+  "parent": null
 }
 ```
+
+`parent` is `null` for a result placed under its kind's directory, and
+`{ "relation": "upstream" | "inside", "kind": ..., "run_id": ... }` for a
+by-product and for a result placed with `Layout::inside`: it is how the
+completed-folder check tells a nested result from damage, and how a walk finds
+the parent of a result found by its id alone. A `Dep` is written with its
+recorded `kind`, `build` and, for a part, `whole`, beside the three hashed
+values.
 
 `run.json` holds the status and everything recorded about the run:
 
@@ -1781,13 +1819,20 @@ it again:
   "finished": "2026-11-20T09:14:06.410Z",
   "given": { "model": "models/sir.camdl", "...": "..." },
   "execution": { "parallel": 8 },
-  "files": { "traj.tsv": { "role": "result", "bytes": 10234, "mtime": "1763630046.410000000", "sha256": "..." } },
+  "files": { "traj.tsv": { "role": "result", "bytes": 10234, "mtime": "1763630046.410000000", "sha256": "..." },
+             "progress.json": { "role": "attempt" } },
   "deps": [ { "kind": "compiled_model", "run_id": "...", "file": "model.ir.json", "sha256": "...", "build": "..." } ],
   "lineage": [],
   "reads": [ { "kind": "compiled_model", "run_id": "...", "file": "model.ir.json" } ],
+  "recorded": {},
   "failure": null
 }
 ```
+
+An attempt file is listed with its role only; it is outside the manifest.
+`recorded` holds a content artifact's `Provenance` values, which
+`Stored::recorded` reads. `build`, here and in a `Dep`, is the 64 hex digits of
+the key of the ambient identity the upstream was made under.
 
 `failure` is `{ "operation": "...", "reason": "..." }`, or
 `{ "operation": null,
@@ -2099,6 +2144,101 @@ None exists today except `dev reindex`, which rebuilds `index.json`
   fit folder is the `FitProblem` result, and a profile's base folder is the
   profile's invocation. "Every cell of one model" has no handle today either.
 
+### Details of the library
+
+These rules complete the sections above for an implementer.
+
+- **Settings files** are TOML. A relative path inside one is read relative to
+  that file's directory, as a `fit.toml`'s paths are today
+  (`cli/src/fit/config_v2.rs:3677`), and is recorded as typed.
+- **A claim is created whole.** An atomic claim, and a by-product's claim under
+  `<upstream folder>/.staging/`, is built in a temporary folder beside its final
+  name, holding `identity.json` and `run.json`, and renamed to
+  `<64 hex of the run id>/`. The rename fails when another claimant's folder is
+  there. A staging folder whose `run.json` does not read is debris and is moved
+  to quarantine.
+- **Claim folders are made and removed under one lock.** Creating
+  `.staging/<64 hex>/` (by its rename), removing one whose owner is dead, and
+  moving one to quarantine under `Force` each take `.staging/<64 hex>.lock`
+  first, and a removal acts only if the folder's record still names the owner it
+  was decided from. Without it, a claimant that read a dead owner's claim could
+  remove the claim another process made after that read. A by-product's claim
+  under `<upstream folder>/.staging/` takes the same lock there. This adds one
+  lock create per atomic claim to "What a result costs".
+- **A damaged in-place folder** is moved to quarantine only under its `.lock`,
+  after the damage is seen again there.
+- **An atomic `finish` that finds its id already stored**, placed by a writer
+  whose claim this one did not see (a claim moved aside under `Force`), compares
+  the result files: a difference is `Error::Divergent`, with the staged files
+  kept in quarantine; on a match the stored copy is the result and is recorded
+  as reused. A by-product produced here that the stored copy lacks is recorded
+  as failed, so a later request produces it in reproducing mode. `put` keeps the
+  stored copy without comparing, since a content artifact is keyed by its bytes.
+- **A buffered writer** (`FileHandle::writer`) must be dropped before its run
+  ends: `finish` refuses with `Error::WriterOpen` while one is alive, because
+  its buffer would never reach the file and the manifest would record the file
+  without those bytes. The run is then failed.
+- **A folder whose `identity.json` does not read**, under a run id's name, is
+  damaged and moved to quarantine; it is never passed over, which would leave
+  its name taken.
+- **A lock file is never seen empty.** `.lock`, `.invocations/.lock` and the
+  serialiser beside each are written to a temporary file and hard-linked into
+  place. A lock whose owner is dead on this host is taken over as today's
+  `.lock` is (`store.rs:1689-1795`): the taker creates `<lock>.reclaim`, checks
+  that the lock still names the dead owner, and renames a lock naming itself
+  over it. A serialiser left by a dead taker is removed.
+- **A folder with no record and no lock** is decided under its lock, as today's
+  `quarantine_debris` decides (`store.rs:781-814`): empty beside the lock, it is
+  claimed; holding anything else, it is moved to quarantine. Deciding from
+  outside the lock would quarantine a claimant's folder between its creation and
+  its `.lock`.
+- **The beat** is raised every 2 seconds. A reader on another host calls an
+  owner stale when its counter has not changed for 6 seconds, three beats. A
+  waiting `begin` reads the claim and the owner's liveness once per beat. An
+  owner on this host whose process exists but whose start time cannot be read is
+  treated as alive.
+- **The store-wide lock**, when its holder is alive, is tried again every 20 ms,
+  today's `LOCK_RETRY_INTERVAL` (`store.rs:1616`). The sequence number is
+  reserved by writing `<seq>.json` before the lock is released.
+- **Names.** An owner's beat file and index log are named
+  `<host>-<pid>-<start>`, made safe as a label is. A run's file name may not
+  contain `:` or `,` or be `*`, which mark a part and a list of files in a
+  `Dep`'s `file`, and none of its components may start with `.`. `dep_files`
+  joins its names with `,` in name order. An empty label stays empty after
+  sanitising, as today's `path_label` leaves it (`runid/src/layout.rs:62-106`).
+- **Progress and events.** `progress.json` and `<seq>.progress.json` hold
+  `{ "format", "at", "snapshot" }`; each line of `events.jsonl` is
+  `{ "format", "n", "at", "event" }`, numbered from 1.
+- **Reads.** `Run::open` and `Stored::open` read the whole file and check its
+  digest before returning any byte of it.
+- **A by-product** is always staged and renamed into place; its kind's `WRITE`
+  does not change how it is produced.
+- **An invocation that ends** with a result still planned records that result as
+  failed, with the reason "the command ended before this result did".
+- **The note** that a label has a new holder is returned by
+  `Invocation::took_label_from` for the project to print; the library prints
+  nothing.
+- **Second values.** `Inputs::varied` gives one for identity and render fields;
+  a harness builds the second value of an `expands`, `adds` or `export` field
+  itself. `Vary` is provided for integers (plus one), `f64` (doubled, or 1 for
+  0), `bool`, `String`, and `Option`, `Vec` and `BTreeMap` of these, an empty
+  container gaining one default element. An environment variable's execution
+  field needs no `exercised_by`.
+- **Bounds.** A wanted by-product's identity is `Send + Sync`, and a content
+  artifact's content is `Send + Sync + 'static`, so a run can move between
+  threads and parsed content can be cached for the process.
+- **A handle** of up to 64 lowercase hex digits that names no file or directory
+  is an id prefix; anything else not starting with `@` is a path.
+- **`clean`** also removes empty kind directories, so a build directory that
+  held only empty ones goes too. After an id-only walk the index is compacted,
+  and another owner's log is removed when that owner has no beat file or its
+  beat file names a process dead on this host.
+- **`Store::scratch`** roots its store in the system's temporary directory and
+  writes no index.
+- **`Store` methods behind the commands:** `verify`, `clean`, `reindex`,
+  `invocations`, and `runs_of_configuration` with `configuration_not_a_run`,
+  which builds `Error::ConfigurationNotARun`.
+
 ### Errors
 
 ```rust
@@ -2115,7 +2255,8 @@ pub enum Error {
     Ambiguous { handle: String, matches: Vec<Key> },
     WrongKind { handle: String, expected: &'static str, found: String },
     NotOneResult { handle: String, members: Vec<Key> },     // a label on several results, where one is needed
-    LabelInUse { label: String, running: Key, owner: Owner },   // a result of a running invocation labelled L
+    LabelInUse { label: String, running: Option<Key>, owner: Owner },  // a running invocation labelled L, and a result it
+                                                            // has not ended; None when its record lists none yet
     InvocationLockHeld { owner: Owner, path: PathBuf },     // .invocations/.lock held from another host, stale
     MemberNotCompleted { invocation: u64, members: Vec<Key> },  // a rendering of an invocation not all completed
     ConfigurationNotARun { path: PathBuf, runs: Vec<Key> },     // a configuration file where one run is needed
@@ -2123,7 +2264,10 @@ pub enum Error {
     FileOpenedTwice { name: String },
     BadFileName { name: String },
     WriteAfterEnd { name: String },                         // a write through a handle after finish or fail
+    WriterOpen { name: String },                            // finish or fail while a buffered writer is alive
     ContentMissing { digest: Key },                         // finish: a held digest with no result file
+    Parse { what: String, why: String },                    // a settings file, an environment variable or a
+                                                            // content's bytes that do not read as their type
     Io { op: &'static str, path: PathBuf, source: std::io::Error },
 }
 
@@ -4864,10 +5008,11 @@ the two progress files, and that results are named by handle.
 ## Suspected defects in today's code
 
 The reviews turned up four places where today's code may give two different
-results under one run id, or may class an input wrongly, and one path that may
-be too long to create. None has been reproduced. Each is a question until its
-test fails, and each test is written against today's code, before the command it
-concerns moves to the new store.
+results under one run id, or may class an input wrongly, one path that may be
+too long to create, and one lock takeover that may admit two holders. None has
+been reproduced. Each is a question until its test fails, and each test is
+written against today's code, before the command it concerns moves to the new
+store.
 
 ### A profile's results may depend on the order of its `--sweep` flags
 
@@ -4932,6 +5077,22 @@ concerns moves to the new store.
   escalates to the 64-hex suffix, and require the commit to succeed.
 - **In the new design.** A label is capped at 64 bytes, so the longest component
   is 129 bytes ("How a run id becomes a folder").
+
+### Two takers can take over one dead lock
+
+- **What.** A taker that finds the `.reclaim` serialiser left by a dead taker
+  removes it by path after reading it (`runid/src/store.rs:1731-1735`). If that
+  file has meanwhile been replaced by a live taker's, the live one is removed,
+  and a third taker can then create its own: both find the lock still naming the
+  dead owner and both rename theirs over it. The new store keeps the protocol
+  (`fsutil.rs`, `take_over`). Not reproduced; it needs a crashed taker and three
+  concurrent ones.
+- **The test.** Leave a `.reclaim` naming a dead process beside a `.lock` naming
+  another, start several takers at once with the removal paused between reading
+  and removing, and require exactly one to hold the lock.
+- **In the new design.** Unchanged until the test fails; the fix would remove a
+  stranded serialiser only by renaming it to a name of the remover's own and
+  checking what it moved.
 
 ### Documentation found out of date
 
@@ -5085,7 +5246,7 @@ Stored<A>  --dep()-->  Dep<A>  -->  a field of the next result's Identity
 | `InputFile<T>`       | A path whose content type is known. The only way a file is read                       | `InputFile<ModelSource>`, `InputFile<Table>`          |
 | `Parsed<T>`          | A parsed settings file, taken apart in full like arguments                            | the five parts of `fit.toml`                          |
 | `SourceBytes`        | A settings file's raw bytes and their digest                                          | the `fit.toml` each run keeps                         |
-| `FieldInfo`, `Class` | One field's name and class, with its `vary` and `exercised_by`, for the class checks  | `SimulateArgs::FIELDS`                                |
+| `FieldInfo`, `Class` | One field's name and class, with its `vary` and `exercised_by`, for the class checks  | `SimulateArgs::fields()`                              |
 | `Vary`               | "Another valid value of this type", for the generated identity test                   | a second `dt`, a second model file                    |
 | `InputHarness`       | How to run one command for the class checks; `check_input_classes` drives it          | one per command                                       |
 | `release`            | Consumes a declared input a command does not use, with the reason                     | held-out tables in `fit run`                          |

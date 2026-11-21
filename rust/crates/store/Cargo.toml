@@ -1,0 +1,32 @@
+[package]
+name = "store"
+version = "0.1.0"
+edition = "2021"
+# Stated, not inferred: whether a build script exists is then a fact of this
+# manifest, which the engine fingerprint hashes (cli/src/engine_fingerprint.rs).
+build = false
+
+# `Begin`'s variants are built once per `begin` and matched at once; the
+# store's errors carry the paths, owners and digests a person needs to act on
+# them and are returned once per command; and the claim constructors take
+# every part of a claim by name. Boxing or bundling any of them adds an
+# indirection at each use and saves nothing measurable.
+[lints.clippy]
+large_enum_variant = "allow"
+result_large_err = "allow"
+too_many_arguments = "allow"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json.workspace = true
+sha2 = "0.10"
+store-derive = { path = "../store-derive" }
+thiserror = "1"
+toml = { version = "0.8", features = ["parse", "display"] }
+
+[target.'cfg(unix)'.dependencies]
+# Process liveness (kill(pid, 0)), the host name, and on macOS a process's
+# start time (proc_pidinfo).
+libc = "0.2"
