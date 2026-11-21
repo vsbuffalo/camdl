@@ -1046,6 +1046,10 @@ fn run_profile(
             param_idx: idx,
         });
     }
+    // Axes sorted by name, the order the point identity uses. Each leaf's
+    // `mle.toml` lists the focal values in this order, so the bytes stored
+    // under a run id do not depend on the order of the `--sweep` flags.
+    focal_grids.sort_by(|a, b| a.name.cmp(&b.name));
 
     // Build the resolved fixed set: CLI `--fixed` wins for collisions
     // with `--fit toml`'s `[fixed]` (per gh#73 §2 precedence). The
@@ -1687,8 +1691,8 @@ fn run_profile(
 
     // ── gh#147 (M3.3): pre-resolve every job's CAS identity ──────────
     // Job tuple (seed_idx, grid_idx, start_idx). The grid lives in the
-    // `point` level + the method in `method`; (seed, point, start) pins the
-    // job's RNG deterministically (job_seed below).
+    // `point` level + the method in `method`; the job's process seed is
+    // derived from (seed, point, start) by the identity resolver.
     let jobs: Vec<(usize, usize, usize)> = (0..seeds.len())
         .flat_map(|seed_idx| (0..grid_points.len())
             .flat_map(move |gi| (0..n_starts).map(move |si| (seed_idx, gi, si))))
@@ -1947,12 +1951,11 @@ fn run_profile(
         std::sync::Mutex::new((f64::NEG_INFINITY, None));
 
     let eval_job = |ji: usize| {
-        let (seed_idx, grid_idx, start_idx, ref resolved_pt_id, ref cas_path) = resolved_jobs[ji];
+        let (_, grid_idx, start_idx, ref resolved_pt_id, ref cas_path) = resolved_jobs[ji];
         let process = Arc::clone(&process);
         let obs_model_obj = Arc::clone(&obs_model_obj);
         let if2_params = Arc::clone(&if2_params);
         let focal_values: Vec<f64> = grid_points[grid_idx].iter().map(|&(_, v)| v).collect();
-        let seed = seeds[seed_idx];
 
         // Pin focal parameters
         let mut params = base_params.clone();
@@ -1960,7 +1963,7 @@ fn run_profile(
             params[idx] = val;
         }
 
-        let job_seed = seed ^ (grid_idx as u64 * 1000 + start_idx as u64);
+        let job_seed = resolved_pt_id.process_seed;
         let job_t0 = std::time::Instant::now();
 
         // gh#42: when --starts lhs/uniform, each start uses its own draw

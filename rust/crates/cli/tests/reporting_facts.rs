@@ -230,9 +230,11 @@ fn every_recorded_fact_is_shown() {
         "--save-filtering", "f.tsv", "--save-prequential", "preq", "-o", "ll.toml",
     ]))));
     runs.push(("pfilter.no_data", run(&a(&["pfilter", "sir.camdl", "--params", mle_s, "--particles", "100"]))));
+    // Seed 12: one start at the lowest beta scores -inf, so the run shows the
+    // non-finite warning and a cell completed by one of its two starts.
     let profile = a(&[
         "profile", "sir.camdl", "--fit", "if2.toml", "--sweep", "beta=lin(0.3,0.6,3)", "--particles", "100",
-        "--iterations", "3", "--n-starts", "2", "--seed", "1", "--rw-sd", "auto", "--progress", "none",
+        "--iterations", "3", "--n-starts", "2", "--seed", "12", "--rw-sd", "auto", "--progress", "none",
     ]);
     runs.push(("profile", run(&profile)));
     runs.push(("profile.cached", run(&profile)));

@@ -220,3 +220,110 @@ fn distinct_grids_get_distinct_base_dirs() {
     assert!(after_b.is_superset(&after_a),
         "grid A's base dir must still be present alongside grid B's");
 }
+
+/// Run a two-start profile with the sweep specs in the given order into `root`.
+fn run_profile_sweeps(bin: &Path, ir: &Path, data: &Path, root: &Path, sweeps: &[&str]) {
+    let mut cmd = Command::new(bin);
+    cmd.env_remove("CLICOLOR_FORCE")
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("CAMDL_OUTPUT_DIR", root)
+        .args([
+            "profile", &ir.to_string_lossy(),
+            "--starts", &starts_arg(ir),
+            "--data", &data.to_string_lossy(),
+            "--obs", "cases",
+        ]);
+    for s in sweeps {
+        cmd.args(["--sweep", s]);
+    }
+    let out = cmd
+        .args([
+            "--algorithm", "if2",
+            "--particles", "30",
+            "--iterations", "3",
+            "--n-starts", "2",
+            "--rw-sd", "N0=50.0",
+            "--seed", "1",
+        ])
+        .output().expect("spawn camdl profile");
+    assert!(out.status.success(),
+        "camdl profile must exit 0.\nstderr:\n{}", String::from_utf8_lossy(&out.stderr));
+}
+
+/// Every profile leaf under `root`: its `run_id` (from `run.json`) and the
+/// bytes of its `mle.toml`.
+fn leaves(root: &Path) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut stack = vec![root.join("profiles")];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() { stack.push(p); continue }
+            if e.file_name() != "mle.toml" { continue }
+            let run_json = p.with_file_name("run.json");
+            let v: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(&run_json).expect("leaf run.json")).unwrap();
+            let id = v["run_id"].as_str().expect("run.json run_id").to_string();
+            out.insert(id, std::fs::read_to_string(&p).unwrap());
+        }
+    }
+    out
+}
+
+/// The identity of a profile point sorts the sweep axes by name, so two
+/// commands that differ only in the order of their `--sweep` flags name the
+/// same leaves. They must then store the same result in each: a point's
+/// random stream may not depend on where the flag order puts it in the grid.
+/// The axes have different lengths (3 × 2), so swapping them moves the
+/// interior points to different positions in the grid.
+#[test]
+fn sweep_flag_order_changes_neither_run_ids_nor_results() {
+    let bin = camdl_bin();
+    let tmp = tempdir("order");
+    let (ir, data) = write_fixture(tmp.path());
+    let (beta, gamma) = ("beta=lin(0.1,0.5,3)", "gamma=lin(0.05,0.25,2)");
+
+    let root_a = tmp.path().join("out_a");
+    let root_b = tmp.path().join("out_b");
+    run_profile_sweeps(&bin, &ir, &data, &root_a, &[beta, gamma]);
+    run_profile_sweeps(&bin, &ir, &data, &root_b, &[gamma, beta]);
+    let a = leaves(&root_a);
+    let b = leaves(&root_b);
+
+    assert_eq!(a.len(), 12, "3 × 2 points × 2 starts = 12 leaves, got {}", a.len());
+    let ids_a: BTreeSet<&String> = a.keys().collect();
+    let ids_b: BTreeSet<&String> = b.keys().collect();
+    assert_eq!(ids_a, ids_b, "swapping the --sweep flags must not change any run id");
+    for (id, mle_a) in &a {
+        assert_eq!(mle_a, &b[id],
+            "leaf {id} stores a different mle.toml when the --sweep flags are swapped");
+    }
+}
+
+/// The identity sorts a listed grid's values, so `beta=0.1,0.5` and
+/// `beta=0.5,0.1` name the same leaves. Each leaf must hold the same result
+/// under both, or a store holds whichever order ran first under that run id.
+#[test]
+fn listed_value_order_changes_neither_run_ids_nor_results() {
+    let bin = camdl_bin();
+    let tmp = tempdir("valorder");
+    let (ir, data) = write_fixture(tmp.path());
+    let gamma = "gamma=0.05,0.25";
+
+    let root_a = tmp.path().join("out_a");
+    let root_b = tmp.path().join("out_b");
+    run_profile_sweeps(&bin, &ir, &data, &root_a, &["beta=0.1,0.3,0.5", gamma]);
+    run_profile_sweeps(&bin, &ir, &data, &root_b, &["beta=0.5,0.1,0.3", gamma]);
+    let a = leaves(&root_a);
+    let b = leaves(&root_b);
+
+    assert_eq!(a.len(), 12, "3 × 2 points × 2 starts = 12 leaves, got {}", a.len());
+    let ids_a: BTreeSet<&String> = a.keys().collect();
+    let ids_b: BTreeSet<&String> = b.keys().collect();
+    assert_eq!(ids_a, ids_b, "reordering a listed grid must not change any run id");
+    for (id, mle_a) in &a {
+        assert_eq!(mle_a, &b[id],
+            "leaf {id} stores a different mle.toml when the grid's values are reordered");
+    }
+}

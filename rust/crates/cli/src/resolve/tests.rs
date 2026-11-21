@@ -834,12 +834,17 @@ fn cas_identity_pins() {
         // every model level's bytes changed. Real runs re-key with the IR
         // version folded into their model digest anyway; this fixture pins a
         // fixed IR version, so the encoding is what moved it.
+        //
+        // The profile `seed` level hashing the job's process seed, derived
+        // from the point's position in the name-sorted grid, moved `profile`
+        // alone: this fixture's point is the second value of its grid, so
+        // its process seed is no longer the base seed.
         ("sim", "6953bbe5b76eb2416d2691eb6b0f58d816e2c7390846c46a45ca6f0731c47be7"),
         ("fit", "dbba2ae4a701d1f75fea5be82dd2379815ceb9db4d9cf7c14b757fba4fa8ac33"),
         ("pfilter", "856c94f609a1655aa8d9cb61d8692031379b905c10d603d1a93431b39683fb2b"),
         ("survey", "e5397cc9b86b22368671b27e0998f3dc18884f47a26ddafc7690eb89d762f329"),
         ("sim_ensemble", "f1cd909ce021ee87b67f97d69e3cf3d5708e0e27b40dfb87294d9cea48cb6de1"),
-        ("profile", "056e7f25cca4b714e2965b661196272c3447265456321ab12d62e83ee6b99bb9"),
+        ("profile", "b2c9d7d30b83c13c1757af863cd2d90ad41416f3043a635bd68928ac06ab1ef0"),
     ];
     // Compared as whole lists so a failure reports EVERY kind that moved, not
     // just the first — the re-key scope is the thing under review.
@@ -940,6 +945,46 @@ fn a_profile_points_method_level_is_named_method_and_naming_it_rekeys_nothing() 
         format!("if2-{}", method_level.hash.short8()),
         "the path segment is {{label}}-{{hash8}}; renaming the level moves no \
          directory on disk");
+}
+
+/// A profile point's run id and process seed depend on the set of grid cells,
+/// not on the order its axes, its focal values or a listed axis's values are
+/// given in. Distinct (point, start) pairs get distinct process seeds, also
+/// past 1000 starts.
+#[test]
+fn profile_point_identity_and_seed_ignore_sweep_order() {
+    let model = tiny_model();
+    let base_config = crate::fit::cas::canonical_config_hash(
+        &serde_json::json!({ "fixed": { "N0": 1000.0 } }), &[]).unwrap();
+    let method_config = crate::fit::cas::canonical_config_hash(
+        &serde_json::json!({ "algorithm": "if2" }), &[]).unwrap();
+    let engine = runid::inputs::EngineIdentity::of_build(ENGV);
+    let resolve = |focal: &[(String, f64)], grid: &[(String, Vec<f64>)], start: u32| {
+        resolve_profile_point(&ProfilePointCtx {
+            model: &model, ir_version: IRV, engine: &engine, stem: "sir",
+            method_name: "if2", data: &[], base_config, method_config,
+            focal, grid, seed: 7, start_index: start, deps: vec![],
+        }).expect("profile point resolves")
+    };
+    let b = |v: f64| ("beta".to_string(), v);
+    let g = |v: f64| ("gamma".to_string(), v);
+    let grid_bg = [("beta".to_string(), vec![0.1, 0.3, 0.5]), ("gamma".to_string(), vec![0.05, 0.25])];
+    let grid_gb = [("gamma".to_string(), vec![0.25, 0.05]), ("beta".to_string(), vec![0.5, 0.1, 0.3])];
+
+    let a = resolve(&[b(0.3), g(0.05)], &grid_bg, 1);
+    let z = resolve(&[g(0.05), b(0.3)], &grid_gb, 1);
+    assert_eq!(a.run_id, z.run_id, "axis, focal and value order must not change the run id");
+    assert_eq!(a.process_seed, z.process_seed, "nor the process seed");
+
+    let mut seeds = std::collections::HashSet::new();
+    for bv in [0.1, 0.3, 0.5] {
+        for gv in [0.05, 0.25] {
+            for start in [0, 1, 1000, 1001] {
+                seeds.insert(resolve(&[b(bv), g(gv)], &grid_bg, start).process_seed);
+            }
+        }
+    }
+    assert_eq!(seeds.len(), 24, "every (point, start) must get its own process seed");
 }
 
 // ── Run ids of compiled goldens, pinned ──────────────────────────────────────

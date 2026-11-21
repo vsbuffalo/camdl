@@ -11,9 +11,13 @@
 //!     with no base-level record (guardrail 2 — enforced by the writer).
 //!   - **point** — the single pinned focal value(s) for this grid point.
 //!   - **method** — the sub-fit method + hyperparams (shared across the grid).
-//!   - **seed** — the resolved profile seed (hashed; guardrail 3); **start** —
-//!     the multi-start index. The `(seed, point, start)` triple pins each job's
-//!     RNG deterministically (`job_seed = seed ^ (grid_idx*1000 + start_idx)`).
+//!   - **seed** — the job's process seed (hashed; guardrail 3); **start** —
+//!     the multi-start index. The process seed is derived here from the profile
+//!     seed, the point's position in the canonical grid (axes sorted by name,
+//!     values ascending) and the start index, by
+//!     [`crate::util::mix_cell_seed`]. Every input to it is part of the
+//!     identity and none depends on the order of the `--sweep` flags or of a
+//!     listed grid's values, so one leaf always holds one computation.
 
 use runid::float::FiniteF64;
 use runid::inputs::{
@@ -28,6 +32,8 @@ use runid::{run_id, ArtifactKind, ContentHash, LevelId};
 pub struct ResolvedProfilePoint {
     pub levels: Vec<LevelId>,
     pub run_id: ContentHash,
+    /// The seed the job's sub-fit runs with, the one the `seed` level hashes.
+    pub process_seed: u64,
 }
 
 /// Inputs to [`resolve_profile_point`], all resolved by the caller. The caller
@@ -60,7 +66,8 @@ pub struct ProfilePointCtx<'a> {
     /// a different grid (wider range, more points, shifted bounds) is a
     /// distinct run rather than a merge onto the previous grid's cells.
     pub grid: &'a [(String, Vec<f64>)],
-    /// The resolved profile seed (the `seed` level hashes this).
+    /// The profile seed (`--seed`, or one of `--seeds`), from which the job's
+    /// process seed is derived.
     pub seed: u64,
     pub start_index: u32,
     /// The base fit's `starts_from` lineage, folded into the base as deps.
@@ -109,18 +116,32 @@ pub fn resolve_profile_point(ctx: &ProfilePointCtx) -> Result<ResolvedProfilePoi
         deps: Deps(ctx.deps.clone()),
     };
 
-    let mut focal = Vec::with_capacity(ctx.focal.len());
-    for (name, v) in ctx.focal {
+    let mut sorted_focal: Vec<&(String, f64)> = ctx.focal.iter().collect();
+    sorted_focal.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut focal = Vec::with_capacity(sorted_focal.len());
+    for (name, v) in &sorted_focal {
         let fv = FiniteF64::new(*v).map_err(|_| format!("non-finite focal value for '{}'", name))?;
         focal.push((ParamId(name.clone()), fv));
     }
+
+    // The point's row-major position in the canonical grid, the first axis
+    // varying slowest.
+    let mut grid_position: u64 = 0;
+    for (axis, values) in &base.grid {
+        let v = focal.iter().find(|(n, _)| n == axis).map(|(_, v)| v.get())
+            .ok_or_else(|| format!("profile point has no value for grid axis '{}'", axis.0))?;
+        let pos = values.iter().position(|g| g.get() == v)
+            .ok_or_else(|| format!("profile point value {} is not on the grid of '{}'", v, axis.0))?;
+        grid_position = grid_position * values.len() as u64 + pos as u64;
+    }
+    let process_seed = crate::util::mix_cell_seed(ctx.seed, grid_position, ctx.start_index as u64);
+
     let point = ProfilePointConfig { focal };
     let method = ProfileMethod { config: ctx.method_config.into_inner() };
-    let seed = Seed { process_seed: ctx.seed, base_seed: ctx.seed };
+    let seed = Seed { process_seed, base_seed: ctx.seed };
     let start = StartLevel { index: ctx.start_index };
 
-    let point_label = ctx
-        .focal
+    let point_label = sorted_focal
         .iter()
         .map(|(n, v)| format!("{}={:.4}", n, v))
         .collect::<Vec<_>>()
@@ -139,7 +160,7 @@ pub fn resolve_profile_point(ctx: &ProfilePointCtx) -> Result<ResolvedProfilePoi
     ];
     let level_hashes: Vec<ContentHash> = levels.iter().map(|l| l.hash).collect();
     let rid = run_id(ArtifactKind::ProfilePoint, &level_hashes);
-    Ok(ResolvedProfilePoint { levels, run_id: rid })
+    Ok(ResolvedProfilePoint { levels, run_id: rid, process_seed })
 }
 
 #[cfg(test)]
