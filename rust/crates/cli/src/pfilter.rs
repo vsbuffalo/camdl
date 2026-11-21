@@ -210,11 +210,12 @@ fn run_pfilter(
     // two selections that differ are refused rather than one winning.
     //
     // A selection taken from the fit config contributes its intervention
-    // lists only ([`crate::util::FitBase`]): its parameter effect is already
-    // the fit's `[fixed]` value, and applying a named scenario's `set` at
-    // tier 4 here would override `--params` — the silent-wrong-θ hazard
-    // gh#194 refuses `--scenario` beside `--params` for. A `--scenario` flag
-    // keeps its full meaning, and that gh#194 refusal.
+    // lists only ([`crate::util::FitBase`]); its named scenario's `set` and
+    // `scale` are not applied. At tier 4 they would override `--params`,
+    // the silent wrong θ for which `--scenario` beside `--params` is refused.
+    // The parameter values the fit config supplies are its `[fixed]` table,
+    // resolved at tier 2 below. A `--scenario` flag keeps its full meaning,
+    // and that refusal.
     let flag_given = scenario_flags.any();
     let fit_base: Option<crate::util::FitBase> = fit_problem.map(|p| {
         crate::util::FitBase::of(p).unwrap_or_else(|e| {
@@ -373,11 +374,11 @@ fn run_pfilter(
         out.fail(format!("error: {e}"));
     }
 
-    // Unified resolver (2026-05-25 CLI UX rev 2). Maps the legacy
-    // surface (`--params FILE` (repeatable) + `--param NAME=VALUE` +
-    // scenario/enable/disable) onto the resolver inputs. pfilter is
-    // non-inference for the value-resolution perspective; the
-    // [estimate] set is empty and no `--fixed`-over-[estimate] notice can fire.
+    // The scored parameters, resolved by the tiers of `docs/camdl-run-spec.md`
+    // §1.3: the fit config's `[fixed]` (tier 2, with `--fit`), `--params`, the
+    // scenario and `--param`. pfilter scores one parameter set and estimates
+    // nothing, so the `[estimate]` set is empty and no
+    // `--fixed`-over-[estimate] notice can fire.
     use crate::params_resolver::{ParameterInputs, resolve_parameters, emit_notices};
     use indexmap::{IndexMap, IndexSet};
 
@@ -386,7 +387,17 @@ fn run_pfilter(
         .map(|f| f.config.problem.external_bindings())
         .unwrap_or_default()
         .overlay(crate::external_inputs::ExternalBindings::from_cli(table));
-    let ftf: IndexMap<String, f64> = IndexMap::new();
+    // The `[fixed]` table as `fit run` reads it: a `from_scenario` import or a
+    // `from_file` and the inline values, against the loaded model.
+    let ftf: IndexMap<String, f64> = match fit_problem {
+        Some(p) => {
+            let mut fixed = p.fixed.clone();
+            fixed.expand_from_scenario(&model_in, &p.estimate)
+                .and_then(|()| fixed.resolve_with_model(&model_in))
+                .unwrap_or_else(|e| { out.fail(format!("error: --fit [fixed]: {e}")); })
+        }
+        None => IndexMap::new(),
+    };
     let fte: IndexSet<String> = IndexSet::new();
 
     let resolved = resolve_parameters(ParameterInputs {
