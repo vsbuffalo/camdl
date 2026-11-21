@@ -5009,10 +5009,11 @@ the two progress files, and that results are named by handle.
 
 The reviews turned up four places where today's code may give two different
 results under one run id, or may class an input wrongly, one path that may be
-too long to create, and one lock takeover that may admit two holders. None has
-been reproduced. Each is a question until its test fails, and each test is
-written against today's code, before the command it concerns moves to the new
-store.
+too long to create, and one lock takeover that may admit two holders. Each was a
+question until its test failed, and each test is written against today's code,
+before the command it concerns moves to the new store. Four were reproduced and
+fixed, one was refuted, and the lock takeover is not yet reproduced; each item
+ends with its verdict.
 
 ### A profile's results may depend on the order of its `--sweep` flags
 
@@ -5027,6 +5028,13 @@ store.
 - **In the new design.** A point's seed comes from its own values, so its
   position cannot matter.
 - **Also.** `* 1000` collides once a profile has 1000 or more starts.
+- **Verdict.** Reproduced and fixed in `beaeb5be1`. Swapping the flags or the
+  order of a listed grid's values changed the seed at interior points, and
+  swapping two `--sweep` flags also changed every run id. The identity resolver
+  now derives the seed from the profile seed, the point's position in the grid
+  with axes sorted by name and values ascending, and the start index, with the
+  mix `simulate` and `survey` use, and hashes that seed. The `* 1000` collision
+  goes with it. Every profile run id re-keys.
 
 ### A combined table may differ under one ensemble id
 
@@ -5040,6 +5048,10 @@ store.
   require the second run either to match the stored bytes or to fail.
 - **In the new design.** The combined table is not stored, so there is nothing
   to disagree with.
+- **Verdict.** Reproduced, for scenario order and for seed order (`--seeds 1,2`
+  and `--seeds 2,1`), and fixed in `b00a0594a`: each cell enters the ensemble's
+  identity with its row in the table, so two layouts are two ids. Every
+  `sim_ensemble` run id re-keys.
 
 ### Saved prequential samples may depend on `--trace`
 
@@ -5052,6 +5064,14 @@ store.
 - **In the new design.** A stored by-product must be a function of its own
   identity, so this has to be fixed before `pfilter` moves: each diagnostic gets
   its own stream.
+- **Verdict.** Reproduced in both directions: `--trace` changed the CRPS and PIT
+  that `--save-prequential` writes, and `--save-prequential` changed the trace's
+  observation quantiles. Fixed in `b26e87241` by a stream base for each
+  diagnostic (2^62 for the prequential samples, 2^61 for the predictions); the
+  process and resampling streams are unchanged, so the log-likelihood is
+  byte-identical. Neither output is stored in a `pfilter` leaf, so no run id
+  re-keys. Reviewed independently before landing, as `particle_filter.rs`
+  requires.
 
 ### `--pf-max-substeps` is classed two ways
 
@@ -5062,6 +5082,13 @@ store.
   the log-likelihood differs, it is an identity input in `pfilter` too.
 - **In the new design.** A group shared between commands must mean the same in
   each, so the two classes cannot both stand.
+- **Verdict.** Refuted; the test is `b3bda818a`. In `pfilter` the budget check
+  draws nothing and changes no state, and a tripped budget ends the run before a
+  leaf is written. On the fixture a budget of 400, the cost of one pass, stores
+  the default's bytes under its run id, and 399 is refused with exit status 3
+  and stores nothing. `profile` differs because a cell records a tripped budget
+  as a log-likelihood of −inf and stores the cell. So both classes are correct,
+  and the shared group must leave the cap's class to each command.
 
 ### A leaf's segment may exceed the limit on one path component
 
@@ -5077,6 +5104,12 @@ store.
   escalates to the 64-hex suffix, and require the commit to succeed.
 - **In the new design.** A label is capped at 64 bytes, so the longest component
   is 129 bytes ("How a run id becomes a folder").
+- **Verdict.** Reproduced (a 300-byte label failed to commit with "File name too
+  long") and fixed in `9ae418855`: the cap is 181 bytes, 255 less the `-<8 hex>`
+  of every segment and the longest suffix the store adds. Labels enter no hash,
+  so nothing re-keys. Two quarantine names in `runid/src/store.rs` can still
+  exceed 255 bytes for a long segment; they are formed only when a folder is
+  quarantined, and `runid` is deleted at the end of this work.
 
 ### Two takers can take over one dead lock
 
@@ -5102,6 +5135,8 @@ store.
   label; labels live on runs.
 - `docs/dev/proposals/2026-11-14-moving-labels-and-run-level-handles.md` reads
   "Status: Proposal"; it landed in `2788a059b`.
+
+All three are corrected in `77b669e1c`, `7852b1154` and `c7f58b191`.
 
 ## Decisions
 
