@@ -22,7 +22,9 @@ expanded form can be written by hand.
 rate of the transition in the whole source population, in individuals per unit
 time. The compiler never multiplies a rate by a population: a per-capita rate is
 written with its population factor, `gamma * I`. Dimensional analysis refuses a
-rate that is not a population per unit time (**E300**, §2.2.1).
+rate that is not a population per unit time (**E300**, §2.2.1). A branching
+transition (§9.1.2) multiplies its rate by each destination's weight, so its
+total is the rate after `@` only when the weights sum to 1.
 
 **One model file, values supplied around it.** A `.camdl` file is the same file
 for simulation, calibration, scenario comparison and forecasting; what changes
@@ -33,9 +35,12 @@ shapes:
   dimensions only, and is given values by a `--params` TOML file, CLI flags or
   an inference method;
 - a **self-contained model**, which adds `~` priors (§20.2), an `init { }`
-  block (§15) and a `baseline` scenario whose `set = { … }` gives every
-  parameter a value (§17), so that the file runs end to end on its own. The
-  examples shipped with camdl take this shape.
+  block (§15) and a scenario, conventionally named `baseline`, whose
+  `set = { … }` gives every parameter a value (§17), so that
+  `--scenario baseline` runs the file end to end with nothing else supplied.
+  The examples shipped with camdl take this shape. `baseline` is an ordinary
+  scenario name: a run without `--scenario` applies no scenario, and its
+  parameters need values from outside.
 
 The `parameters { }` block never holds a value: it declares names, kinds,
 dimensions, bounds and priors (§4). A value comes from a `--params` file or a
@@ -49,28 +54,21 @@ parameter the scenario sets or scales is refused. The seed is always a CLI
 argument.
 
 A run's identity is factored into levels (§19.1). The `model` level hashes the
-structure (compartments, transitions, observations, ODE equations, tables,
-`init`, `time_unit`); parameter values, the backend and `dt`, and the scenario
-delta are hashed in their own levels. Two runs of one structural model
-therefore share the `model` hash whether the values were written in a scenario
-or supplied from outside, and a change of value re-keys only the level that
-holds it.
+compiled model, which includes every scenario the file declares; values
+supplied from outside the file, the backend and `dt`, and the selected
+scenario's change are hashed in their own levels. A value supplied from a
+`--params` file or a CLI flag therefore re-keys only its own level, while an
+edit to a scenario in the file, selected or not, also re-keys the `model`
+level.
 
-**Compile-time checks.** Index dimensions, table shapes, compartment arities,
-parameter domains and dimensions are checked when the model is compiled, with
-a diagnostic code for each failure (§26). A **named** index
-(`I[age = child]`) is resolved by the dimension it names, and a name that is not
-a dimension of the indexed family is **E332**. A **positional** index
-(`I[child]`) is checked against the levels of the dimension in that slot, and a
-level that is not one of them names no cell and is refused: **E100** on a
-compartment, **E504** on a parameter.
-
-The compiler does not record which dimension an index _variable_ was bound to.
-With `age = [low, high]` and `risk = [low, high]`, `I[r, a]` with `a` bound to
-`age` and `r` to `risk` names an existing cell and compiles without a
-diagnostic. Positional indexing is therefore checked only while the dimensions'
-level names are disjoint; where two dimensions could share a level name, use
-named indexing (§12.1).
+**Compile-time checks.** Index dimensions, table shapes, compartment arities and
+dimensions are checked when the model is compiled, with a diagnostic code for
+each failure (§26). An index is written by position or by dimension name
+(§5.1). A positional index is checked only against the levels of the dimension
+in its slot, and the compiler does not record which dimension an index variable
+was bound to, so where two dimensions share level names a swapped index names
+an existing cell and compiles without a diagnostic (§5.1, §5.2). Named indexing
+is the form the compiler checks in that case.
 
 **No auto-localization.** In model dynamics a bare compartment name of a
 stratified compartment is its total over all strata: `S` is all susceptibles
@@ -197,16 +195,12 @@ may be the total population or the force-of-infection denominator.
 let N[p in patch] = S[p] + E[p] + I[p] + C[p]
 ```
 
-A **typed** `let` with a constant body is a **model constant**:
-`let omega : rate = 0.01` compiles to an entry of the IR's `constants` section,
-with its value and its declared kind, and is not a parameter. It holds its value
-in every run. `--fixed`, `[fixed]`, `[estimate]`, `--sweep` and a scenario's
-`set` cannot name it; one that tries is refused as an unknown parameter, with a
-hint to declare it in `parameters { }` to set it from outside.
-`camdl fit summary --parameters` lists the constants under their own
-`constants` heading after the parameter legend, each with its value and its
-prose. Every other `let` is inlined into the expressions that use it; its prose
-is shown by `camdlc inspect --let <name>`. `@symbol` applies to both.
+A **typed** `let` with a constant body, such as `let omega : rate = 0.01`, is a
+**model constant** (§8.4): its value is fixed in the model file and cannot be
+set, swept or estimated from outside. `camdl fit summary --parameters` lists the
+constants, each with its value and its prose, under their own `constants`
+heading after the parameter legend. The prose of any other `let` is shown by
+`camdlc inspect --let <name>`. `@symbol` applies to both.
 
 Related sections: §8 (let bindings), §8.4 (typed let bindings), §16.4
 (quantities), §24.1 (the file-level grammar).
@@ -713,7 +707,11 @@ dimension and the scale of a value written in the model, and the compiler
 converts it to `time_unit`. The two cannot be merged into one syntax: a
 parameter's value has no scale of its own for a unit literal to convert, so
 `beta : positive 'per_day` is **E117**, with the fix `beta : positive dim 1/T`
-(§4.1.1).
+(§4.1.1). A forcing argument is the one place a parameter's value meets a unit
+literal's scale: a forcing's unit literal scales every value argument,
+parameters included, so `sinusoidal 'per_week { baseline = beta … }` under
+`time_unit = 'days` reads `beta / 7` (§7). A table with a unit annotation
+refuses a parameter entry instead (**E217**, §6.6).
 
 Every unit literal decomposes into a dimension and a scale. Its dimension plays
 the role of a `dim` clause, and its scale drives the conversion, so a unit
@@ -741,17 +739,26 @@ A table carries one unit for all its values:
 
 ```camdl
 tables {
-  fertility  : age 'per_day   = [0.0, 0.02]
+  fertility  : age 'per_year  = [0.0, 0.04]
   age_dur    : age 'years     = [5, 60]
-  C_age      : age × age      = [[12.0, 4.0], [4.0, 8.0]]  # dimensionless
+  C_age      : age × age 'ratio = [[12.0, 4.0], [4.0, 8.0]]  # dimensionless
+  w          : age            = [1.0, 0.5]                  # no declared dimension
 }
 ```
 
-`fertility : age 'per_day` declares every value of the table in `'per_day`; the
-compiler converts the values to `time_unit` (under `'days`, `age_dur` is stored
-as 1826.2125 and 21914.55). A dimensionless table, such as a contact matrix or
-a set of weights, has no annotation. A table value whose dimension disagrees
-with the annotation is **E302** (§2.2.1). Tables are specified in §6.
+`fertility : age 'per_year` declares every value of the table in `'per_year`;
+the compiler converts the values to `time_unit` (under `'days`, `age_dur` is
+stored as 1826.2125 and 21914.55). `'ratio` declares a dimensionless table,
+such as a contact matrix or a set of weights. A table value whose dimension
+disagrees with the annotation is **E302** (§2.2.1).
+
+A table without an annotation, such as `w`, has no declared dimension. Its
+cells' dimension is solved from its uses, as a `positive` parameter's is
+(§2.2.1), and its values are not converted. A use that is dimensionally wrong
+can therefore be absorbed into the table: with `w` unannotated,
+`beta * gamma * w[a] * S[a] * I[a] / N` compiles as a rate, with `w` solved as
+a time. A table meant to be dimensionless is annotated `'ratio` so that the
+check applies. Tables are specified in §6.
 
 ---
 
@@ -998,7 +1005,9 @@ camdl simulate model.ir.json --param-vec R0=/tmp/r0_posterior.tsv
 ```
 
 **Refused.** An unknown index dimension is **E330**, and a repeated one
-(`mu[village, village]`) is **E331**. A `let` binding whose name is a level of
+(`mu[village, village]`) is **E331**. A reference whose index is a level of
+another dimension names no parameter and is **E504** (`gamma[female]` on
+`gamma[age]`); one whose index is no level at all is **E100**. A `let` binding whose name is a level of
 any dimension raises the warning **W103**:
 
 ```camdl
@@ -1138,15 +1147,15 @@ compartment as declared.
 An index on a compartment is written by position or by name.
 
 **Positional.** Levels are given in the order of the compartment's dimensions,
-which is the order of the `stratify` declarations:
+which is the order of the `stratify` declarations. With `S` stratified by
+`[age, sex]`:
 
 ```camdl
-S[child]                # first dimension = age
 S[child, female]        # age, then sex
 S                       # bare = sum over ALL strata (always global)
-S[child]                # if S has [age, sex]: ERROR (E287) — a partial index
-                        #   has no defined cell; the bare name S sums, but
-                        #   S[child] neither sums nor picks a cell
+S[child]                # ERROR (E287) — a partial index has no defined cell;
+                        #   the bare name S sums, but S[child] neither sums
+                        #   nor picks a cell
 ```
 
 A level given in a slot whose dimension does not have it names a cell that
@@ -1157,9 +1166,9 @@ different existing cell and compiles without a diagnostic.
 **Named.** Each level is labelled with its dimension, in any order:
 
 ```camdl
-S[age = child]                    # equivalent to S[child]
+S[age = child, sex = female]      # equivalent to S[child, female]
 S[sex = female, age = child]      # order doesn't matter
-S[age = child, sex = female]      # a non-first dim named; every dim still specified
+S[age = child]                    # ERROR (E287) — still a partial index
 ```
 
 A label that is not a dimension of the compartment is **E332**, and a level
@@ -1474,7 +1483,9 @@ tables {
 `beta_mf` and `beta_fm` are parameters. The entries are evaluated when
 parameter values are supplied, so the table's entries can be estimated like any
 other parameter. A table with a parameter entry is not a compile-time constant
-and cannot appear in a `where` predicate (**E284**, §8.2.1).
+and cannot appear in a `where` predicate (**E284**, §8.2.1). A table with a
+parameter entry takes no unit annotation: `B : sex 'per_week = [beta_mf, 0.7]`
+is **E217**, since a parameter's value is already in `time_unit` (§2.4).
 
 ---
 
@@ -1871,6 +1882,10 @@ The rules, checked at compile time:
   constant (**E600**).
 
 The level, slope, scale and modes are declared without a range, as above.
+
+The rest of this subsection specifies what the runtime does with a `smooth`
+model behind the refusal above. No released command shows this behaviour.
+
 `fit run` gives a parameter with a finite search box (`in [lo, hi]` or
 `[estimate]` `bounds`) a transform that keeps it in the box: for the level,
 slope and modes the scaled logit, which would bend the whitened coordinates the
@@ -2075,8 +2090,11 @@ four forms:
   past the last entry is **E218**);
 - `let NAME : KIND = EXPR`, a typed binding (§8.4).
 
-A `let` is expanded at each use. Related sections: §5 (indexing), §25.1 (how
-`let` lowers to the IR).
+A `let` stands for its expression at each use: a model reads the same values
+whether the `let` is used or its body is written out in its place. The
+compiler stores some bindings once in the IR and inlines the others (§25.1);
+the choice does not change a value. Related sections: §5 (indexing), §25.1
+(how `let` lowers to the IR).
 
 ### 8.1 Scope Rules
 
@@ -2233,8 +2251,11 @@ A typed `let` with a constant body (a literal, a unit literal, or arithmetic and
 pure math functions over them) is evaluated once and stored in the IR's
 `constants` section with its declared kind. Every use reads the constant, so
 dimensional analysis sees the declared dimension and every gradient treats it as
-a constant, with derivative zero. It is not a parameter: it cannot be set to
-another value, estimated, swept or sampled (§1, doc comments). An untyped
+a constant, with derivative zero. It is not a parameter: it holds its value in
+every run, and cannot be set to another value, estimated, swept or sampled. A
+`--fixed`, `[fixed]`, `[estimate]`, `--sweep` or scenario `set` that names it
+is refused as an unknown parameter, with a hint to declare it in
+`parameters { }`; a value that must vary between runs is a parameter. An untyped
 constant is dimensionless, so `I + 1e-6` on a population compartment is
 **E302**; `I + iota`, with `iota : count`, adds two counts.
 
@@ -2666,8 +2687,10 @@ supplies the per-stage rate.
 
 #### 9.4.1 Staged residences: the `via` clause
 
-A compartment's residence time is exponential by default, with coefficient of
-variation (CV, the standard deviation over the mean) 1. Splitting a compartment
+An unstaged compartment left at a constant per-capita rate has an exponential
+residence time, with coefficient of variation (CV, the standard deviation over
+the mean) 1; a rate that varies with time or state gives a different law.
+Splitting a compartment
 into `k` sub-stages, each left at rate `k/τ`, makes the residence
 Erlang(`k`, `k/τ`), with mean `τ`, variance `τ²/k` and CV `1/√k`; this is the
 method of stages, also called the linear chain trick (Hurtado & Kirosingh 2019,
@@ -3061,19 +3084,21 @@ stratify(by = setting)
 stratify(by = age)
 
 tables {
-  age_dur : age = [2.0, 3.0, 5.0, 5.0, 0.0]   # years; last is open-ended
+  age_dur : age 'years = [2, 3, 5, 5, 0]   # the last band is open-ended
 }
 
 transitions {
   aging[c in compartments, s in setting, (a, a_next) in consecutive(age)]
     : c[s, a] --> c[s, a_next]
-    @ (1 / (age_dur[a] * 365.0)) * c[s, a]
+    @ c[s, a] / age_dur[a]
 }
 ```
 
 The declaration expands to 3 settings × 3 compartments × 4 age boundaries = 36
-transitions (`aging_S_low_burden_a02`, …). The last entry of `age_dur` is never
-read, because the last level is never the first of a pair.
+transitions (`aging_S_low_burden_a02`, …). `'years` makes `age_dur` a duration,
+converted to the model's `time_unit` (§2.5), so `c[s, a] / age_dur[a]` is a
+population per unit time under any `time_unit`. The last entry of `age_dur` is
+never read, because the last level is never the first of a pair.
 
 ### 9.5 Compartment Iteration
 
@@ -3277,8 +3302,13 @@ multiplier `G ~ Gamma(shape = dt/σ², scale = σ²/dt)`, so `E[G] = 1` and
 `Var(G) = σ²/dt`, and multiplies the rate by it. The variance of the multiplier
 therefore depends on the step. For an inflow, the count is Poisson given the
 noised rate, so its distribution is negative binomial; for an exit, the noised
-rate enters the Euler-multinomial draw of §9.1.2. A step at which `dt/σ²` is
-below `1e-6` draws no noise. A transition without the wrapper has no
+rate enters the Euler-multinomial draw of §9.1.2. Each step's `G·dt` is
+`Gamma(shape = dt/σ², scale = σ²)`, and the steps are independent, so the
+integrated noise over an interval of length Δ is `Gamma(Δ/σ², σ²)` however the
+interval is divided into steps: the gamma white noise of Bretó et al. (2009,
+[Ann. Appl. Stat. 3(1)](https://doi.org/10.1214/08-AOAS201)). The exception is
+a step at which `dt/σ²` is below `1e-6`, that is `dt < 10⁻⁶ σ²`, which draws no
+noise, and the run does not warn when it happens. A transition without the wrapper has no
 `overdispersion` in the IR.
 
 σ² may read parameters, time and constants. A σ² that reads compartment state
@@ -3378,10 +3408,12 @@ rate in the matrix can be estimated.
 
 ### 10.3 Multi-Strain Models
 
-In a multi-strain model the susceptible pool is shared: a susceptible person is
-susceptible to every strain. The strain dimension is on the compartments that
-record which strain a person was infected with or recovered from, here `E`, `I`
-and `R`, and not on `S`.
+In a multi-strain model a person never infected is susceptible to every strain,
+so `S` carries no strain dimension. The strain dimension is on the
+compartments that record which strain a person was infected with or recovered
+from, here `E`, `I` and `R`. Cross-immunity is partial protection against one
+strain conferred by recovery from another, so a recovered person is still at
+risk of the other strains, and that risk is a transition out of `R`.
 
 ```camdl
 compartments { S, E, I, R }
@@ -3401,21 +3433,25 @@ parameters {
 }
 
 tables {
-  C_age    : age × age       = [[12.0, 4.0], [4.0, 8.0]]
-  # X[w,v] = cross-protection against strain v from recovery from strain w
-  # X[wt,wt] = 1.0 (same-strain immunity), X[wt,delta] = 0.3 (partial)
-  X_strain : strain × strain = [[1.0, 0.3], [0.3, 1.0]]
+  C_age    : age × age 'ratio      = [[12.0, 4.0], [4.0, 8.0]]
+  # X[w,v] = protection against strain v conferred by recovery from strain w
+  X_strain : strain × strain 'ratio = [[1.0, 0.3], [0.3, 1.0]]
 }
 
 let N_local[a in age] = S[a] + sum(v in strain, E[a,v] + I[a,v] + R[a,v])
 
+# force of infection of strain v on a member of age group a
+let foi[a in age, v in strain] = beta * sum(b in age, C_age[a,b] * I[b, v] / N_local[b])
+
 transitions {
-  # Infection draws from the shared S pool into a specific strain
-  # Cross-immunity reduces susceptibility based on recovered fractions
+  # A susceptible person is infected by either strain at its full force
   infection[a in age, v in strain] : S[a] --> E[a, v]
-    @ beta * S[a]
-      * sum(b in age, C_age[a,b] * I[b, v] / N_local[b])
-      * (1 - sum(w in strain, X_strain[w, v] * R[a, w]) / N_local[a])
+    @ foi[a, v] * S[a]
+
+  # A person recovered from w is reinfected by v at the force reduced by X[w,v]
+  reinfection[a in age, w in strain, v in strain] : R[a, w] --> E[a, v]
+    @ (1 - X_strain[w, v]) * foi[a, v] * R[a, w]
+    where w != v
 
   progression[a in age, v in strain] : E[a,v] --> I[a,v]
     @ sigma * E[a,v]
@@ -3425,19 +3461,18 @@ transitions {
 }
 ```
 
-The cross-immunity factor `(1 - sum(w in strain, X[w,v] * R[a,w]) / N_local[a])`
-lowers the rate of infection with strain `v` by the fraction of the age group
-recovered from each strain `w`, weighted by the cross-protection `X[w,v]`. It is
-1 when no one has recovered. It is a mean-field approximation: the compartments
-record the strain of a person's last infection, not their history, so immunity
-from several past infections is not represented.
+`foi[a, v]` is the force of infection of strain `v` on age group `a`, the
+per-capita rate at which a fully susceptible member is infected. `infection`
+applies it to `S`. `reinfection` applies it to people recovered from strain
+`w`, reduced by the protection `X_strain[w, v]` that recovery from `w` gives
+against `v`: `X = 1` is full protection and no transition, `X = 0` none. The
+diagonal `w == v` is dropped by the guard, so same-strain immunity is complete.
+With entries of `X_strain` in `[0, 1]` every rate is non-negative.
 
-The factor is negative when `sum(w, X[w,v] * R[a,w]) > N_local[a]`, and a
-negative rate is refused when the model is run (§9.6). A cross-protection
-matrix with entries in `[0, 1]` keeps the factor non-negative when each age
-group's recovered count is at most its population; otherwise the factor is
-clamped in the rate,
-`max(0.0, 1 - sum(w in strain, X_strain[w,v] * R[a,w]) / N_local[a])`.
+The model is a mean-field approximation in one respect: `R[a, w]` records the
+strain of a person's last infection, not their history, so a person reinfected
+by `v` and recovered is protected as by `v` alone, and immunity from several
+past infections is not represented.
 
 ---
 
@@ -3485,7 +3520,8 @@ compartments evolve continuously between them.
   interval between events, and to each scheduled boundary, and are clamped at 0.
   The waiting time to the next event is drawn from the propensities at the
   start of the interval, so a rate that reads a real compartment uses the
-  compartment's value at the previous event.
+  compartment's value at the previous event, and the event times are
+  approximate (§18).
 - **ODE.** Every transition also contributes `stoichiometry × rate` to the
   derivatives of its compartments, so integer compartments evolve as
   deterministic flows, and the real compartments follow their equations. The
@@ -3907,7 +3943,9 @@ probability that a normal variable rounds to it,
 before scoring, and the probability is floored at `1e-18`. Simulated
 observations are a normal draw rounded to the nearest integer and floored at
 0. A non-integer observation is scored as its rounded value, with a run note
-saying so once.
+saying so once. This holds on a `real` column too (§2.2.1): there is no
+continuous normal density, so a real-valued series is scored after rounding,
+and a negative value is scored as 0.
 
 **Count arguments.** `neg_binomial`'s `mean`, `poisson`'s `rate`, and
 `binomial`'s and `beta_binomial`'s `n` carry the count dimension `[P]`: each is
@@ -4020,9 +4058,10 @@ P(y = 0)  =  pi  +  (1 - pi) * f_NB(0 | mean, r)
 P(y = k)  =        (1 - pi) * f_NB(k | mean, r)      for k > 0
 ```
 
-`pi` is the probability that a row is a structural zero. At `pi = 0` the family
-is exactly the plain `neg_binomial`, so the posterior of `pi` measures the share
-of zeros that the dynamics do not account for.
+`pi` is the probability that a row is a structural zero, so its posterior
+measures the share of all rows that are structural zeros. At `pi = 0` the family
+is exactly the plain `neg_binomial`. The probability that a particular observed
+zero is structural is `w = pi / P(y = 0)`, defined under **Gradients** below.
 
 ```camdl preamble=obs-sir
 observations {
@@ -4374,13 +4413,18 @@ interventions {
 ```
 
 `halve` expands to one `set` per cell (`S_north = 0.5 * S_north`, and so on for
-each compartment and patch). Every instance due at one instant reads the same
-state from before the effects (§13.10), so a family whose right-hand side reads
-other cells, such as an age shift `c[a] = … c[b] …`, is a simultaneous map
-whose result does not depend on the order of declaration or expansion. The
-target indexes every dimension of its compartment. A `set` does not fan out
-over an omitted dimension as a transition does (§9.5), because `c[a]` on its
-right-hand side would be ambiguous between the cell and the stratum total:
+each compartment and patch). In an `events {}` family every instance due at one
+instant reads the same state from before the effects (§13.10), so a family
+whose right-hand side reads other cells, such as an age shift
+`c[a] = … c[b] …`, is a simultaneous map whose result does not depend on the
+order of declaration or expansion. An `interventions {}` family is not: its
+members are scheduled interventions, applied one after another (§13.10,
+stage 4), so a member reads the cells that members expanded before it have
+already set. With `S[l1] = 10` and `S[l2] = 20`,
+`cp[i in x] : { S[i] = S[l1] + S[l2]  at = [5] }` leaves `S = (30, 30)` as an
+event and `S = (30, 50)` as an intervention. The target indexes every
+dimension of its compartment, as a transition's does (§9.5), because `c[a]` on
+its right-hand side would be ambiguous between the cell and the stratum total:
 `S[a]` on a compartment stratified by `[age, vx]` is **E265**, naming the
 unindexed dimension. Named indices (`S[vx = v, age = a]`) are placed in
 declaration order, as everywhere else.
@@ -4773,7 +4817,7 @@ name in an expression or a schedule is **E100**, an undeclared name.
 
 ```camdl
 timepoints {
-  midpoint     = 1 'year
+  midpoint     = 1 'years
   intervention = 180 'days
 }
 ```
@@ -5458,7 +5502,12 @@ at the last saved trajectory snapshot strictly before the time that
 intervention fires on the run's grid (§13.2: an intervention declared at 2.4
 fires at 2 under `dt = 1`, so with snapshots on the integer grid the fork is at
 1). Both arms start from that posterior draw's state at the fork and share its
-seed, so their difference is attributable to the intervention. When several
+seed, so before the intervention fires they are identical and their difference
+is zero. After it, the arms draw from one random stream, but the number of
+random numbers a step consumes depends on the state, so the draws of the two
+arms stop being paired once their states differ. The shared start removes the
+noise of the pre-intervention history from the difference; the noise after the
+intervention is reduced only as far as the draws stay aligned. When several
 interventions are toggled, the fork precedes the earliest. The results are
 banded over the draws that can be forked into `contrasts/<name>.tsv`. An
 operand of series shape gives a series contrast; a scalar gives a scalar one.
@@ -5520,9 +5569,11 @@ one leaves the model's `run_id` unchanged.
 
 A scenario is a named set of changes to the model, chosen per run with
 `--scenario` (run spec §4.1): interventions turned on or off, parameter values
-set or scaled, and the end time. The **baseline** is a run with no scenario,
-the model exactly as written; interventions are off in it unless enabled
-(§13.4).
+set or scaled, and the end time. A run without `--scenario` applies no
+scenario: it runs the model exactly as written, with interventions off unless
+enabled (§13.4), and is the **baseline** that the run spec and §20.4 refer to.
+No scenario name is special. A scenario named `baseline`, as below, is an
+ordinary scenario that applies only when selected with `--scenario baseline`.
 
 ```camdl-doctest-preamble scenario-sia
 compartments { S, V, I, R }
@@ -5612,10 +5663,13 @@ intervention family as well as one member: for a family declared
 
 **End time.** A scenario's `simulate {}` block sets `to` and nothing else. A
 scenario may change the end time because a different horizon leaves the
-trajectory over the shared span unchanged: the substep grid over
-`[from, old_to]` is the same, so two scenarios differing only in horizon are
-identical over their shared span and the paired-seed coupling of the run spec
-(§3.1) holds. `dt` and `integrator` change the substep grid, so arms would
+trajectory over the shared span unchanged: the substeps that end at or before
+the earlier `to` are the same, so two scenarios differing only in horizon,
+run with one seed, write identical rows at every output time on that grid and
+the paired-seed coupling of the run spec (§3.1) holds. On the chain-binomial
+backend every output time is a grid time (an output time off the `dt` grid is
+refused when the run starts), so no row falls inside a substep the shorter run
+cuts short. `dt` and `integrator` change the substep grid, so arms would
 diverge from `from` through discretization alone; `from` moves the grid and the
 time at which `init {}` is evaluated. Each of the three is **E106** in a
 scenario, and so is a `simulate {}` block without `to`, including an empty
@@ -5780,8 +5834,16 @@ A `dt` that is not positive is refused when a run starts.
 **The step.** `dt` is part of the model: a stochastic compartmental model's
 behaviour depends on the step, and its discretization error shrinks as
 `dt → 0`. It is the substep length of the chain-binomial backend and of the
-fixed-step ODE integrator; the Gillespie backend, which simulates exact event
-times, does not use it. The CLI `--dt` overrides the model's `dt` for one run,
+fixed-step ODE integrator; the Gillespie backend does not use it. Gillespie
+draws each waiting time from the total rate at the start of the wait, the
+stochastic simulation algorithm of Gillespie (1977,
+[J. Phys. Chem. 81(25)](https://doi.org/10.1021/j100540a008)), whose event
+times are exact when every rate is constant between events. A rate that reads
+`t`, a forcing or a real compartment changes during the wait; Gillespie holds
+it at its value at the last event or at the last output or effect time,
+whichever is later, so its event times are approximate, with an error that
+shrinks as the output grid is refined. A run with such a rate warns. The CLI
+`--dt` overrides the model's `dt` for one run,
 as a convergence check or a sensitivity sweep needs. With neither set, the step
 is 1 in the model's `time_unit`.
 
@@ -5930,10 +5992,8 @@ tag (the model's file stem, `chain_binomial-dt1`, `seed_1`) and `hash8` is the
 first eight hex characters of that level's content hash.
 
 Commands that list and display runs read `run.json`, never the segment text, so
-a label carries no identity. Renaming a scenario changes its directory name but
-not its identity: the result is a fresh directory and one redundant run, never
-a wrong answer. A baseline run's empty scenario hashes to a level hash like any
-other input.
+a label carries no identity. A run without `--scenario` has an empty scenario
+change, which hashes to a level hash like any other input.
 
 ### 19.1 Run identity
 
@@ -5945,8 +6005,8 @@ run_id = hash(HASH_VERSION, kind, [model, config, params, scenario, seed])
 ```
 
 recorded in full (64 hex characters) in `run.json`; the eight-character path
-segments are a readable factoring of it. Each level hashes a disjoint part of
-the resolved inputs, and together they cover all of them:
+segments are a readable factoring of it. Together the levels cover every
+resolved input:
 
 | Level      | Covers                                                                                                                                                                                                   |
 | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -5956,12 +6016,16 @@ the resolved inputs, and together they cover all of them:
 | `scenario` | the scenario's effective change only: the `enable` and `disable` lists and the `set` and `scale` parameter patch                                                                                         |
 | `seed`     | the run's process seed, derived from `--seed` or `--seeds` (run spec §3.5)                                                                                                                               |
 
-Two runs of one structural model share the `model` level when one writes
-calibrated values into the model and the other supplies them from a parameter
-file; changing a parameter value re-keys the `params` level and leaves the
-`model` level unchanged. The written-column selection is part of `config`, so
-two runs that write different columns are different leaves, and a leaf's file
-and its `run_id` always agree.
+The levels are not disjoint in two places. The scenarios a file declares are
+part of the compiled model, so editing or renaming any of them, selected or
+not, re-keys the `model` level, while the `scenario` level hashes only the
+selected scenario's effective change. And `--output-every` rewrites the
+compiled model's output schedule, which both `model` and `config` hash
+(§16.3). A value supplied from a `--params` file re-keys the `params` level and
+leaves the `model` level unchanged; the same value written into a scenario's
+`set` gives a different `model` level from a file without that scenario. The
+written-column selection is part of `config`, so two runs that write different
+columns are different leaves, and a leaf's file and its `run_id` always agree.
 
 **Collisions.** Eight hex characters per segment suffice because two leaves
 share a path only when every level on the path collides at once. The full
@@ -5979,9 +6043,9 @@ and every level below it, and the subtrees of unchanged levels are reused:
 | model / IR                          | `model` + all below  | none                                                                        |
 | base params or table data           | `params` + below     | none                                                                        |
 | backend, `dt`, or column selection  | `config` + below     | none                                                                        |
-| one scenario's enable/disable/patch | that `scenario` leaf | sibling scenarios reused                                                    |
+| a scenario in the file, edited or renamed | `model` + all below | none                                                                  |
+| the scenario selected, or `--enable`/`--disable` | that `scenario` leaf | other scenarios' leaves reused                                 |
 | add more seeds                      | new `seed` leaves    | existing seeds reused                                                       |
-| rename a scenario (same delta)      | nothing (label only) | identity unchanged; the renamed path is a fresh directory, so one re-run    |
 
 ### 19.3 Enumerating runs
 
@@ -6224,8 +6288,7 @@ camdl dev eval MODEL --params P.toml --expr "school" --at 0,100,200,300
 `dev eval` evaluates forcings and parameters, by name, on a time grid without
 simulating, and writes one column per name. A name that is not a forcing or a
 parameter is refused with a message listing the names available. A `let`
-binding is refused, since it is inlined into the expressions that use it, and so
-is a compartment, whose value needs a simulation.
+binding is refused, and so is a compartment, whose value needs a simulation.
 
 ### 21.4 Sweeps and scenario grids
 
@@ -6740,9 +6803,10 @@ parameters {
   sigma      : rate
   gamma      : rate
   mu         : rate
-  theta      : positive       # gravity model scale
+  theta      : positive       # gravity-model scale of the coupling weights
+  move_rate  : rate           # per-capita rate of moving to another patch, per unit weight
   alpha      : probability    # seasonal amplitude
-  phi_season : real           # seasonal phase (days from t=0 to peak)
+  phi_season : real           # seasonal phase: the rising zero crossing; the peak is a quarter period later
   rho        : probability
   k          : positive
   I0         : count
@@ -6753,23 +6817,22 @@ parameters {
 ## ── Tables ─────────────────────────────────────────────
 
 tables {
-  C_age     : age × age          = [[12.0, 4.0], [4.0, 8.0]]
-  mu_age    : age 'per_day       = [0.0000685, 0.0000411]
-  fertility : age 'per_day       = [0.0, 0.02]
-  age_dur   : age 'years         = [5, 60]
-  pop       : patch               = read("data/lga_pop.tsv")
-  distance  : patch × patch      = read("data/lga_dist.tsv", default = 0.0)
+  C_age     : age × age 'ratio      = [[12.0, 4.0], [4.0, 8.0]]
+  mu_age    : age 'per_day          = [0.0000685, 0.0000411]
+  fertility : age 'per_year         = [0.0, 0.04]
+  age_dur   : age 'years            = [5, 60]
+  pop       : patch 'count          = read("data/lga_pop.tsv")
+  distance  : patch × patch 'ratio  = read("data/lga_dist.tsv", default = 0.0)  # km, as a number
 }
 
 ## ── Computed quantities ────────────────────────────────
 
 let N_local[a in age, p in patch] = S[a,p] + E[a,p] + I[a,p] + R[a,p] + V[a,p]
 
-# Gravity kernel. The diagonal is excluded where the kernel is USED — by a
-# `where` predicate, which is decidable at compile time — rather than by an
-# `if` inside the binding: `if i == j` would compare index variables in an
-# expression, where they have already been substituted for level names.
-let mig[i in patch, j in patch] = theta * pop[j] / (distance[i,j] ^ 2)
+# Dimensionless gravity weight of patch j as seen from patch i. It is defined
+# only off the diagonal (the distance there is 0), so each use excludes the
+# diagonal with a `where` predicate, which is decided at compile time.
+let G[i in patch, j in patch] = theta * pop[j] / (distance[i,j] ^ 2)
 
 ## ── Functions ──────────────────────────────────────────
 
@@ -6785,11 +6848,12 @@ forcing {
 ## ── Transitions ────────────────────────────────────────
 
 transitions {
-  # Infection: age mixing, spatial coupling via gravity kernel
+  # Infection: age mixing within the patch, plus the other patches' prevalence
+  # weighted by their gravity weight
   infection[a in age, p in patch] : S[a,p] --> E[a,p]
     @ beta * seasonal * S[a,p]
-      * sum(b in age, q in patch where q != p,
-          C_age[a,b] * mig[p,q] * I[b,q] / N_local[b,q])
+      * sum(b in age, C_age[a,b] * (I[b,p] / N_local[b,p]
+          + sum(q in patch where q != p, G[p,q] * I[b,q] / N_local[b,q])))
 
   # Progression and recovery
   progression[a in age, p in patch] : E[a,p] --> I[a,p]
@@ -6798,9 +6862,10 @@ transitions {
   recovery[a in age, p in patch] : I[a,p] --> R[a,p]
     @ gamma * I[a,p]
 
-  # Importation: exogenous inflow, distributed across age/patch
+  # Importation: import_rate in total, shared across age groups and patches
+  # in proportion to their current population
   importation[a in age, p in patch] : --> I[a, p]
-    @ import_rate * pop[p] / sum(q in patch, pop[q])
+    @ import_rate * N_local[a, p] / N
 
   # Death: all integer compartments, age-specific rate
   death[c in compartments, a in age, p in patch] : c[a,p] -->
@@ -6810,10 +6875,11 @@ transitions {
   aging[c in compartments, p in patch] : c[child, p] --> c[adult, p]
     @ (1 / age_dur[child]) * c[child, p]
 
-  # Migration: all compartments across patches, no self-loops
+  # Migration: all compartments across patches, no self-loops; the per-capita
+  # rate from src to dst is move_rate times dst's gravity weight
   migrate[c in compartments, a in age, src in patch, dst in patch]
     : c[a,src] --> c[a,dst]
-    @ mig[dst,src] * c[a,src]
+    @ move_rate * G[src,dst] * c[a,src]
     where src != dst
 
   # Birth: fertility-weighted by age
@@ -6898,9 +6964,13 @@ model.ir.json + parameter values + data ─▶ camdl ─▶ simulations, fits, o
 
 `camdlc check FILE.camdl` runs all three stages and writes nothing.
 `camdlc FILE.camdl` writes the IR to standard output, one element per line;
-`--pretty` indents it, and `--set NAME=VALUE` overrides a parameter's value in
-it. Parameter values (§20), observation data and run settings are otherwise read
-by the runtime when a model is run (§21).
+`--pretty` indents it. Parameter values (§20), observation data and run
+settings are read by the runtime when a model is run (§21), with one exception:
+`--set NAME=VALUE` writes a fixed value for the parameter into the IR. That
+value is part of the compiled model, and so of its `model` hash (§19.1), and it
+is the lowest-precedence source of the parameter's value: any `--params` file,
+scenario or CLI flag that sets the parameter overrides it (run spec §1.3). A
+name that is not a parameter is refused.
 
 ### 24.1 File-Level Grammar
 
@@ -7208,31 +7278,27 @@ migrate[src in patch, dst in patch] : S[src] --> S[dst]
 
 ### 25.9 Compartment Iteration (`c in compartments`)
 
-`c in compartments` substitutes each integer compartment name for `c`. When a
-compartment has more dimensions than the index signature gives, the compiler
-iterates over the omitted dimensions, so that every source and destination names
-a full cell (§5.1).
+`c in compartments` substitutes each integer compartment name for `c`, and the
+rest of the declaration expands as written. Each member keeps the index it is
+written with, so every member's compartments must be stratified by exactly the
+indexed dimensions (§9.5).
 
 ```camdl
-# DSL:
+# DSL, with compartments = [S, I, R], all stratified by age:
 death[c in compartments, a in age] : c[a] -->  @ mu * c[a]
-# with compartments = [S, I, R], R stratified by an extra dimension
-# immunity = [natural, vaccine]
-# S dims: [age], R dims: [age, immunity]
 
-# For S:
+# IR, for S (and the same for I and R):
 {"name": "death_S_child", "stoichiometry": [["S_child", -1]],
  "rate": {"bin_op": {"op": "mul", "left": {"param": "mu"}, "right": {"pop": "S_child"}}}}
 {"name": "death_S_adult", "stoichiometry": [["S_adult", -1]],
  "rate": {"bin_op": {"op": "mul", "left": {"param": "mu"}, "right": {"pop": "S_adult"}}}}
-
-# For R, one transition per immunity level:
-{"name": "death_R_child_natural", "stoichiometry": [["R_child_natural", -1]],
- "rate": {"bin_op": {"op": "mul", "left": {"param": "mu"}, "right": {"pop": "R_child_natural"}}}}
-{"name": "death_R_child_vaccine", "stoichiometry": [["R_child_vaccine", -1]],
- "rate": {"bin_op": {"op": "mul", "left": {"param": "mu"}, "right": {"pop": "R_child_vaccine"}}}}
-# ... (adult × natural, adult × vaccine)
 ```
+
+The compiler does not iterate over a dimension the index leaves out. With `R`
+also stratified by `immunity = [natural, vaccine]`, the same declaration makes
+`c[a]` a partial index for `R`, refused as **E287** (`compartment 'R' has
+dimensions [age, immunity] but only 1 of 2 were indexed`), and the family is
+written once per shape of stratification.
 
 ### 25.10 Interventions (All Dimensions)
 
