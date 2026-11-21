@@ -83,9 +83,9 @@ let model_with_bindings bs =
     parameters = []; constants = []; bindings = bs; per_eval_bindings = [];
     initial_conditions = [];
     ic_grad = [];
-    output = { times = OutAtTimes []; format = "tsv";
+    output = { times = OutAtTimes [];
                trajectory = true; observations = true };
-    simulation = { t_start = 0.0; t_end = 1.0; time_semantics = "continuous";
+    simulation = { t_start = 0.0; t_end = 1.0;
                    dt = None; rng_seed = None;
                    integrator = Rk4; t_end_anchor = None; t_start_anchor = None };
     presets = []; model_structure = None; balance = None;

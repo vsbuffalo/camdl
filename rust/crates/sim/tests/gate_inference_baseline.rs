@@ -153,14 +153,12 @@ fn build_sir(obs_times: Vec<f64>) -> (MultiStreamObsModel, Arc<CompiledModel>, V
         }),
         output: OutputConfig {
             times: OutputSchedule::AtTimes(vec![0.0, 80.0]),
-            format: "tsv".into(),
             trajectory: true,
             observations: false,
         },
         simulation: SimulationConfig {
             t_start: 0.0,
             t_end: 80.0,
-            time_semantics: "continuous".into(),
             dt: Some(1.0),
             rng_seed: Some(42),
             integrator: Default::default(),

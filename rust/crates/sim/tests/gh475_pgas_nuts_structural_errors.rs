@@ -146,14 +146,12 @@ fn death_model(d_rate_d_n0: Expr) -> Arc<CompiledModel> {
         initial_conditions: initial,
         output: OutputConfig {
             times: OutputSchedule::AtTimes(OBS_TIMES.to_vec()),
-            format: "tsv".into(),
             trajectory: true,
             observations: false,
         },
         simulation: SimulationConfig {
             t_start: 0.0,
             t_end: T_END,
-            time_semantics: "continuous".into(),
             dt: Some(DT),
             rng_seed: Some(42),
             integrator: Default::default(),

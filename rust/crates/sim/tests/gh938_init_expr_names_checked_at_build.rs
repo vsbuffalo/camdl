@@ -75,14 +75,12 @@ fn death_model(
         initial_conditions: InitialConditions(std::iter::once(("N".to_string(), init)).collect()),
         output: OutputConfig {
             times: OutputSchedule::AtTimes(vec![5.0, 10.0]),
-            format: "tsv".into(),
             trajectory: true,
             observations: false,
         },
         simulation: SimulationConfig {
             t_start: 0.0,
             t_end: 10.0,
-            time_semantics: "continuous".into(),
             dt: Some(1.0),
             rng_seed: Some(42),
             integrator: Default::default(),

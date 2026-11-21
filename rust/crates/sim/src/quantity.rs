@@ -1063,14 +1063,12 @@ mod tests {
             ]),
             output: OutputConfig {
                 times: OutputSchedule::AtTimes(vec![0.0, 1.0]),
-                format: "tsv".into(),
                 trajectory: true,
                 observations: false,
             },
             simulation: SimulationConfig {
                 t_start: 0.0,
                 t_end: 30.0,
-                time_semantics: "discrete".into(),
                 dt: Some(1.0),
                 rng_seed: Some(1),
                 integrator: Default::default(),

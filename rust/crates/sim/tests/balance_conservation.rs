@@ -107,12 +107,11 @@ fn balance_model() -> CompiledModel {
         }),
         output: OutputConfig {
             times: OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 1.0 }),
-            format: "tsv".into(),
             trajectory: true,
             observations: false,
         },
         simulation: SimulationConfig {
-            t_start: 0.0, t_end: T_END, time_semantics: "continuous".into(),
+            t_start: 0.0, t_end: T_END,
             dt: Some(1.0), rng_seed: Some(11),
             integrator: Default::default(),
             t_end_anchor: None, t_start_anchor: None,

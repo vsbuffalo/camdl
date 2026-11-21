@@ -9558,7 +9558,7 @@ let expand_simulate ctx =
   match ctx.simulate with
   | None ->
     { Ir.t_start = 0.0; Ir.t_end = 100.0;
-      Ir.time_semantics = "continuous"; Ir.dt = None; Ir.rng_seed = None;
+      Ir.dt = None; Ir.rng_seed = None;
       Ir.integrator = Ir.Rk4; Ir.t_end_anchor = None; Ir.t_start_anchor = None }
   | Some sd ->
     (* `from = first_obs`: the start is resolved per run from the bound data,
@@ -9670,7 +9670,7 @@ let expand_simulate ctx =
         Ir.Rk4
     in
     { Ir.t_start; Ir.t_end;
-      Ir.time_semantics = "continuous"; Ir.dt; Ir.rng_seed = None;
+      Ir.dt; Ir.rng_seed = None;
       Ir.integrator; Ir.t_end_anchor; Ir.t_start_anchor }
 
 let expand_output ctx =
@@ -9679,10 +9679,6 @@ let expand_output ctx =
      runtime derives output times from `[start, t_end]` at emission. Only
      `start` is set here — defaulting to `t_start` (see below). *)
   let t_start = sim_t_start ctx in
-  let format = match ctx.output_decl with
-    | Some { out_trajectories = Some ot; _ } -> ot.otformat
-    | _ -> "tsv"
-  in
   (* Default the output schedule's start to the requested window origin,
      t_start, so the trajectory covers exactly [t_start, t_end] = [from, to].
      Two directions matter:
@@ -9711,7 +9707,6 @@ let expand_output ctx =
     | _ -> Ir.OutRegular { Ir.start; Ir.step = 1.0 }
   in
   { Ir.times;
-    Ir.format       = format;
     Ir.trajectory   = true;
     Ir.observations = true;
   }

@@ -11,8 +11,8 @@
 //!
 //! - [`ModelDigest`] is a whole-IR digest: an observation-only edit re-keys
 //!   the trajectory too (it over-invalidates, never under-invalidates). Its
-//!   `ir` component is [`model_ir_hash`] — the presentation-normalized model
-//!   hash every identity path shares (gh#442).
+//!   `ir` component is [`model_ir_hash`], the model hash every identity path
+//!   shares.
 //! - [`CalendarMode`]: every run resolves to `Numeric`; the variant set is
 //!   provisional.
 
@@ -337,29 +337,23 @@ pub struct ModelDigest {
 }
 
 impl ModelDigest {
-    /// Build the whole-IR digest from a compiled model.
-    ///
-    /// Presentation normalization happens **here** (gh#442), not in the caller.
-    /// This is the one constructor every identity path routes through — `sim`,
-    /// `fit`, `pfilter`, `survey`, `sim_ensemble`, `profile` — so
-    /// `output.format` / `simulation.time_semantics` are inert for all of them
-    /// or none. When the strip lived in the caller (`cli::resolve::model_digest`)
-    /// only `sim`/`fit` got it, and the four batch kinds keyed on `--format`.
+    /// Build the whole-IR digest from a compiled model. Every identity path
+    /// (`sim`, `fit`, `pfilter`, `survey`, `sim_ensemble`, `profile`) builds
+    /// its model level through this constructor, so all of them hash the
+    /// model by [`model_ir_hash`].
     pub fn from_model(model: &ir::Model, ir_version: String, engine: EngineIdentity) -> Self {
         Self { ir: model_ir_hash(model), ir_version, engine }
     }
 }
 
-/// The presentation-normalized model content hash: the [`ModelDigest::ir`]
-/// component, and the single answer to "which model is this?".
+/// The model's content hash: the [`ModelDigest::ir`] component.
 ///
-/// Every CAS path that needs a structural model identity goes through here —
+/// Every CAS path that needs a structural model identity goes through here:
 /// the per-level [`ModelDigest`] via [`ModelDigest::from_model`], and the bare
 /// structural identity string (the survey↔fit warm-start cross-check, which
-/// deliberately excludes the engine/IR-version fold). One function, so the
-/// normalization cannot be live on one path and absent on another (gh#442).
+/// leaves out the engine and IR-version fold).
 pub fn model_ir_hash(model: &ir::Model) -> ContentHash {
-    normalize_for_hash(model).content_hash()
+    model.content_hash()
 }
 
 /// [`model_ir_hash`] with the compiler-derived gradient maps folded in
@@ -375,29 +369,10 @@ pub fn model_ir_hash(model: &ir::Model) -> ContentHash {
 /// input of its identity sees. Two models with one forward model and
 /// different gradient maps share a [`model_ir_hash`] and differ here.
 pub fn model_ir_hash_with_gradients(model: &ir::Model) -> ContentHash {
-    let normalized = normalize_for_hash(model);
     let mut h = CanonicalHasher::new();
     h.write_u16(crate::hash::HASH_VERSION);
-    h.with_gradients(|h| normalized.hash_into(h));
+    h.with_gradients(|h| model.hash_into(h));
     h.finalize()
-}
-
-/// Strip the pure-presentation fields from a model before hashing, so they stay
-/// inert in identity. `output.format` (parquet/tsv) and
-/// `simulation.time_semantics` are *renderings* of the canonical artifact at
-/// `cat` time — they never change a computed value — so two models differing
-/// only in them are the same model and must share a `run_id`.
-///
-/// **Idempotent by construction**: it assigns a constant (the empty string)
-/// rather than transforming, so `normalize(normalize(m)) == normalize(m)`.
-/// That is what makes moving the call site into [`ModelDigest::from_model`]
-/// byte-neutral for the callers that already normalized — pinned by
-/// `ir_hash::tests::normalization_is_idempotent_and_sim_fit_bytes_unchanged`.
-pub(crate) fn normalize_for_hash(model: &ir::Model) -> ir::Model {
-    let mut m = model.clone();
-    m.output.format = String::new();
-    m.simulation.time_semantics = String::new();
-    m
 }
 
 // ── Lineage ──────────────────────────────────────────────────────────────────

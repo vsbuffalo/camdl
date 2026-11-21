@@ -43,13 +43,11 @@ fn model_with(kind: TimeFuncKind) -> Model {
         initial_conditions: InitialConditions::default(),
         output: OutputConfig {
             times: OutputSchedule::AtTimes(vec![0.0]),
-            format: "tsv".into(),
             trajectory: true,
             observations: false,
         },
         simulation: SimulationConfig {
             t_start: 0.0, t_end: 1.0,
-            time_semantics: "continuous".into(),
             dt: None, rng_seed: Some(1),
             integrator: Default::default(),
             t_end_anchor: None, t_start_anchor: None,

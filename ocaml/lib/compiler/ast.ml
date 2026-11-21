@@ -1276,9 +1276,10 @@ type output_traj_decl = {
       (** [every = 7 'days] or [at = [...]]. With neither, the parser fills
           [every = 1], in the model's time unit. *)
   otformat    : string;
-      (** [format = ...]; ["tsv"] when absent. It is copied into the compiled
-          model, but the language specification states that the writer always
-          emits wide TSV whatever it says. *)
+      (** [format = ...]; ["tsv"] when absent. It is kept in the declared
+          model and does not reach the compiled model; the language
+          specification states that the writer always emits wide TSV whatever
+          it says. *)
 }
 
 (** The [output] block. *)

@@ -453,14 +453,12 @@ fn zero_rate_model(
         }),
         output: OutputConfig {
             times: OutputSchedule::AtTimes(vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0]),
-            format: "tsv".into(),
             trajectory: true,
             observations: false,
         },
         simulation: SimulationConfig {
             t_start: 0.0,
             t_end: 5.0,
-            time_semantics: "continuous".into(),
             dt: Some(1.0),
             rng_seed: Some(1),
             integrator: Default::default(),

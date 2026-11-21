@@ -150,10 +150,10 @@ fn pathological_sir_model() -> (CompiledModel, Vec<f64>) {
         initial_conditions: InitialConditions::constants(ic),
         output: OutputConfig {
             times: OutputSchedule::AtTimes(vec![0.0, 50.0]),
-            format: "tsv".into(), trajectory: true, observations: false,
+            trajectory: true, observations: false,
         },
         simulation: SimulationConfig {
-            t_start: 0.0, t_end: 50.0, time_semantics: "continuous".into(),
+            t_start: 0.0, t_end: 50.0,
             dt: Some(1.0), rng_seed: Some(1),
             integrator: Default::default(),
             t_end_anchor: None, t_start_anchor: None,
@@ -387,10 +387,10 @@ fn healthy_sir_model() -> (CompiledModel, Vec<f64>) {
         initial_conditions: InitialConditions::constants(ic),
         output: OutputConfig {
             times: OutputSchedule::AtTimes(vec![0.0, 30.0]),
-            format: "tsv".into(), trajectory: true, observations: false,
+            trajectory: true, observations: false,
         },
         simulation: SimulationConfig {
-            t_start: 0.0, t_end: 30.0, time_semantics: "continuous".into(),
+            t_start: 0.0, t_end: 30.0,
             dt: Some(1.0), rng_seed: Some(1),
             integrator: Default::default(),
             t_end_anchor: None, t_start_anchor: None,

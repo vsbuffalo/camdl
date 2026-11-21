@@ -1495,10 +1495,9 @@ impl ContentAddressed for OutputConfig {
     fn hash_into(&self, h: &mut CanonicalHasher) {
         // Exhaustive destructure: a new IR field must not silently escape the
         // model hash — add it below, or bind it `_` with the reason.
-        let OutputConfig { times, format, trajectory, observations } = self;
+        let OutputConfig { times, trajectory, observations } = self;
         header(h, "ir::model::OutputConfig");
         times.hash_into(h);
-        h.write_str(format);
         trajectory.hash_into(h);
         observations.hash_into(h);
     }
@@ -1509,13 +1508,12 @@ impl ContentAddressed for SimulationConfig {
         // Exhaustive destructure: a new IR field must not silently escape the
         // model hash — add it below, or bind it `_` with the reason.
         let SimulationConfig {
-            t_start, t_end, time_semantics, dt, rng_seed, integrator, t_end_anchor,
+            t_start, t_end, dt, rng_seed, integrator, t_end_anchor,
             t_start_anchor,
         } = self;
         header(h, "ir::model::SimulationConfig");
         h.write_f64_bits(*t_start);
         h.write_f64_bits(*t_end);
-        h.write_str(time_semantics);
         hash_opt_f64(h, dt);
         rng_seed.hash_into(h);
         // gh#166: the integrator changes the trajectory, so it is identity —

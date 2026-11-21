@@ -16,7 +16,7 @@ field, a new identity level, an output-affecting CLI flag.
 - The `runid` crate doc (`rust/crates/runid/src/lib.rs`) — the two hashing paths
   and the version stack.
 - `rust/crates/cli/src/resolve.rs` — the factored model / config / params /
-  scenario / seed levels; `normalize_for_hash`, which they share, is in
+  scenario / seed levels; `model_ir_hash`, which they share, is in
   `rust/crates/runid/src/inputs.rs`.
 - `rust/crates/cli/src/fit/cas.rs` — the fit canonical-JSON hash.
 

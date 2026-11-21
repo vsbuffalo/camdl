@@ -2707,14 +2707,12 @@ mod tests {
             initial_conditions: InitialConditions::default(),
             output: OutputConfig {
                 times: OutputSchedule::AtTimes(vec![]),
-                format: "tsv".into(),
                 trajectory: true,
                 observations: false,
             },
             simulation: SimulationConfig {
                 t_start: 0.0,
                 t_end: 1.0,
-                time_semantics: "continuous".into(),
                 dt: None,
                 rng_seed: None,
                 integrator: Default::default(),

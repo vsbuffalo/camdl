@@ -138,14 +138,12 @@ fn dt_hidden_in_binding_requires_runtime_dt() {
         }),
         output: OutputConfig {
             times: OutputSchedule::AtTimes(vec![0.0, 5.0]),
-            format: "tsv".into(),
             trajectory: true,
             observations: false,
         },
         simulation: SimulationConfig {
             t_start: 0.0,
             t_end: 5.0,
-            time_semantics: "continuous".into(),
             dt: Some(1.0),
             rng_seed: Some(1),
             integrator: Default::default(),

@@ -19,9 +19,8 @@ the input does to the stored result:
   `--seed 7` draws a different trajectory, and `--no-flows` stores fewer
   columns, so each makes a new run.
 - **Presentation** is a different way of writing the same values, such as how
-  times are formatted in the output. It is stripped before hashing, so changing
-  it finds the same run. For example, the model's `output.format` changes how a
-  trajectory is written out, not which numbers it holds.
+  times are formatted in the output. It is not hashed, so changing it finds the
+  same run.
 - **Provenance** is how a run was asked for: the command line, the time, the
   host, a `--label`, the file name the model was read from, the thread count. It
   is recorded beside the result, in the run's `run.json`, and never hashed. For
@@ -188,13 +187,12 @@ two.
 
 The compiled model is a foreign type tree from the `ir` crate; its
 `ContentAddressed` impls are written by hand in
-[`runid::ir_hash`](rust:runid::ir_hash). Before any model is hashed,
-[`model_ir_hash`](rust:runid::inputs::model_ir_hash) passes it through
-[`normalize_for_hash`](rust:runid::inputs::normalize_for_hash), which blanks the
-two IR fields that only say how a result is rendered (`output.format` and
-`simulation.time_semantics`). Every identity path builds its model level through
+[`runid::ir_hash`](rust:runid::ir_hash), and
+[`model_ir_hash`](rust:runid::inputs::model_ir_hash) hashes every field of the
+model. The model has no field that only says how a result is rendered. Every
+identity path builds its model level through
 [`ModelDigest::from_model`](rust:runid::inputs::ModelDigest::from_model), which
-calls it, so no artifact kind can key on `--format`.
+calls it.
 
 ## The `RunInput` derive
 
@@ -649,15 +647,14 @@ the field set or to the bytes a leaf holds.
 
 ## Where a change lands
 
-| The change                                               | Edit                                                                                                                           | Version                                                                      | Pinned by                                                                                                                             |
-| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| A `simulate` flag that changes the stored trajectory     | a `keyed(config)` row in `input_class::SIMULATE`, a field of `RunConfig` and of `SimConfig` (or lower the flag into the model) | `SimConfig`'s `schema_version`                                               | a `keyed_<flag>` case in `simulate_input_classes.rs`; the moved hexes in `cas_identity_pins` and `tests/fixtures/golden_run_ids.tsv`  |
-| A key in the fit configuration                           | a field on the serde struct, with `skip_serializing_if` at its default if existing fits should keep their keys                 | none when skipped at its default                                             | a `fit/cas.rs` test that the default hashes as the absent key and another value re-keys                                               |
-| A `fit run` flag that changes a method's output          | `CliMethodOverrides`, an `OverrideFlag` row, the method's arm of `write_cli_overrides`, and the copy in `cmd_fit_run_v2`       | none: the method level hashes the method as written                          | `every_cli_sampler_flag_changes_the_method_identity`                                                                                  |
-| A field that is displayed but does not change the output | `#[run_input(provenance)]` on the field, or record it only in `run.json` (`Provenance`, `RecordMeta`)                          | none                                                                         | a case in `differential_presentation_inputs_are_inert`                                                                                |
-| A model field that only changes how a result is rendered | blank it in `normalize_for_hash`                                                                                               | none if the field is new; otherwise the move is a re-key and needs a version | `presentation_fields_are_inert_on_every_cas_kind`; `normalization_is_idempotent_and_sim_fit_bytes_unchanged`                          |
-| A float policy, or any other rule of the encoding        | `runid::hash` or `runid::float`, and the hand impls in `runid::ir_hash`                                                        | `HASH_VERSION`, with an entry in its doc                                     | the property tests in `rust/crates/runid/src/tests.rs`; `macro_eq.rs`; both golden tables                                             |
-| The IR schema                                            | the atomic OCaml, Rust and golden update (`.claude/skills/golden-update`)                                                      | `ir/VERSION`                                                                 | `rust/crates/runid/tests/golden_model_hashes.rs`, regenerated by `make update-golden-model-hashes` only when the re-key is the change |
+| The change                                               | Edit                                                                                                                           | Version                                             | Pinned by                                                                                                                             |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| A `simulate` flag that changes the stored trajectory     | a `keyed(config)` row in `input_class::SIMULATE`, a field of `RunConfig` and of `SimConfig` (or lower the flag into the model) | `SimConfig`'s `schema_version`                      | a `keyed_<flag>` case in `simulate_input_classes.rs`; the moved hexes in `cas_identity_pins` and `tests/fixtures/golden_run_ids.tsv`  |
+| A key in the fit configuration                           | a field on the serde struct, with `skip_serializing_if` at its default if existing fits should keep their keys                 | none when skipped at its default                    | a `fit/cas.rs` test that the default hashes as the absent key and another value re-keys                                               |
+| A `fit run` flag that changes a method's output          | `CliMethodOverrides`, an `OverrideFlag` row, the method's arm of `write_cli_overrides`, and the copy in `cmd_fit_run_v2`       | none: the method level hashes the method as written | `every_cli_sampler_flag_changes_the_method_identity`                                                                                  |
+| A field that is displayed but does not change the output | `#[run_input(provenance)]` on the field, or record it only in `run.json` (`Provenance`, `RecordMeta`)                          | none                                                | a case in `differential_presentation_inputs_are_inert`                                                                                |
+| A float policy, or any other rule of the encoding        | `runid::hash` or `runid::float`, and the hand impls in `runid::ir_hash`                                                        | `HASH_VERSION`, with an entry in its doc            | the property tests in `rust/crates/runid/src/tests.rs`; `macro_eq.rs`; both golden tables                                             |
+| The IR schema                                            | the atomic OCaml, Rust and golden update (`.claude/skills/golden-update`)                                                      | `ir/VERSION`                                        | `rust/crates/runid/tests/golden_model_hashes.rs`, regenerated by `make update-golden-model-hashes` only when the re-key is the change |
 
 The two golden tables pin absolute values.
 `rust/crates/cli/tests/fixtures/golden_run_ids.tsv`, read by

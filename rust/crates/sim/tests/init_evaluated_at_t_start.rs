@@ -62,14 +62,12 @@ fn model(t_start: f64, init: Vec<(&str, InitSpec)>) -> Model {
         ),
         output: OutputConfig {
             times: OutputSchedule::AtTimes(vec![t_start]),
-            format: "tsv".into(),
             trajectory: true,
             observations: false,
         },
         simulation: SimulationConfig {
             t_start,
             t_end: t_start + 1.0,
-            time_semantics: "continuous".into(),
             dt: None,
             rng_seed: Some(1),
             integrator: Default::default(),

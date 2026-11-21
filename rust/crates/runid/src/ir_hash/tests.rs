@@ -168,14 +168,12 @@ fn representative_model() -> Model {
                 start: 0.0,
                 step: 1.0,
             }),
-            format: "tsv".into(),
             trajectory: true,
             observations: true,
         },
         simulation: SimulationConfig {
             t_start: 0.0,
             t_end: 365.0,
-            time_semantics: "continuous".into(),
             dt: Some(1.0),
             rng_seed: Some(42),
             integrator: Default::default(),
@@ -317,7 +315,10 @@ fn model_golden_hash() {
     // observation-anchored `simulate { from }`), unconditionally, so the
     // representative model's absent anchor adds a presence byte and the hash
     // moves once — a deliberate, version-bumped re-key.
-    const GOLDEN: &str = "69ebe79def418b1eb7e3ec36db650cdefb657ef750efd035b681c62aa5fe36b1";
+    // IR 0.49: `output.format` and `simulation.time_semantics` leave the IR,
+    // so their two strings leave `hash_into` and the hash moves once — a
+    // deliberate, version-bumped re-key.
+    const GOLDEN: &str = "8775b6c24a6393402f3bf493415fd409fae05bc8677dd2b347170fe9c9654b46";
     let got = representative_model().content_hash().to_hex();
     assert_eq!(got, GOLDEN, "ir Model golden hash changed (got {got})");
 }
@@ -439,81 +440,6 @@ fn a_hoisted_rate_and_the_inline_rate_differ() {
     let mut inline = representative_model();
     inline.transitions[0].rate = Expr::bin_op(BinOp::Mul, rate_piece(), Expr::pop("I"));
     assert_ne!(hoisted.content_hash(), inline.content_hash());
-}
-
-// ── gh#442: the presentation strip, and why moving it did not re-key sim/fit ──
-
-/// gh#442 moved the presentation strip from the caller
-/// (`cli::resolve::model_digest`, which did `from_model(&normalize(m))`) into
-/// `ModelDigest::from_model` itself (which now does `from_model(m)` =
-/// `content_hash(normalize(m))`). The two agree **iff** the normalizer is
-/// idempotent — and it is, because it assigns a constant rather than
-/// transforming.
-///
-/// That is the whole no-collateral-re-key argument, made executable: the RHS
-/// below (`from_model(&normalize(m))`) is *literally the pre-gh#442 sim/fit code
-/// path*, so equality proves those two kinds' bytes did not move. If someone
-/// later makes normalization non-idempotent (e.g. appends instead of assigns),
-/// the double-normalize the sim/fit callers used to perform would silently
-/// re-key them — this test is the tripwire.
-#[test]
-fn normalization_is_idempotent_and_sim_fit_bytes_unchanged() {
-    use crate::inputs::{normalize_for_hash, EngineIdentity, ModelDigest};
-
-    // The fixture carries non-default presentation fields (`format = "tsv"`,
-    // `time_semantics = "continuous"`), so this is not vacuous.
-    let m = representative_model();
-    assert!(!m.output.format.is_empty() && !m.simulation.time_semantics.is_empty());
-
-    let digest = |model: &Model| {
-        ModelDigest::from_model(model, "0.7".into(), EngineIdentity::of_build("0.3.0")).content_hash()
-    };
-    assert_eq!(
-        digest(&normalize_for_hash(&m)),
-        digest(&m),
-        "pre-gh#442 (caller normalizes, then from_model) and post-gh#442 (from_model \
-         normalizes) must produce IDENTICAL bytes — else gh#442 collaterally re-keyed \
-         sim and fit, which it is NOT sanctioned to do"
-    );
-
-    // The property that makes the above true, asserted directly.
-    assert_eq!(
-        normalize_for_hash(&normalize_for_hash(&m)).content_hash(),
-        normalize_for_hash(&m).content_hash(),
-        "normalize_for_hash must be idempotent"
-    );
-
-    // Non-vacuous: the strip actually does something on this fixture.
-    assert_ne!(
-        normalize_for_hash(&m).content_hash(),
-        m.content_hash(),
-        "the fixture must carry presentation fields the strip removes, else the \
-         idempotence assertions above prove nothing"
-    );
-}
-
-/// gh#442: the two presentation fields are inert in the model digest, and each
-/// one on its own — a half-fix (one field stripped, the other not) must fail.
-#[test]
-fn presentation_fields_are_inert_in_the_model_digest() {
-    use crate::inputs::{EngineIdentity, ModelDigest};
-    let digest = |model: &Model| {
-        ModelDigest::from_model(model, "0.7".into(), EngineIdentity::of_build("0.3.0")).content_hash()
-    };
-    let base = digest(&representative_model());
-
-    let mut fmt = representative_model();
-    fmt.output.format = "parquet".into();
-    assert_eq!(base, digest(&fmt), "output.format must be inert in the model digest");
-
-    let mut ts = representative_model();
-    ts.simulation.time_semantics = "calendar".into();
-    assert_eq!(base, digest(&ts), "simulation.time_semantics must be inert");
-
-    // Negative control: a structural edit is NOT inert.
-    let mut longer = representative_model();
-    longer.simulation.t_end = 730.0;
-    assert_ne!(base, digest(&longer), "a different horizon must move the model digest");
 }
 
 /// Model identity is gradient-independent (proposal

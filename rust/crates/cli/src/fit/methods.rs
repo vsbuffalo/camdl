@@ -1010,12 +1010,11 @@ mod tests {
             ),
             output: OutputConfig {
                 times: OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 1.0 }),
-                format: "tsv".into(),
                 trajectory: true,
                 observations: false,
             },
             simulation: SimulationConfig {
-                t_start: 0.0, t_end: 5.0, time_semantics: "continuous".into(),
+                t_start: 0.0, t_end: 5.0,
                 dt: Some(1.0), rng_seed: Some(7), integrator: Default::default(),
                 t_end_anchor: None, t_start_anchor: None,
             },
@@ -1142,10 +1141,10 @@ mod tests {
                 ),
                 output: OutputConfig {
                     times: OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 1.0 }),
-                    format: "tsv".into(), trajectory: true, observations: false,
+                    trajectory: true, observations: false,
                 },
                 simulation: SimulationConfig {
-                    t_start: 0.0, t_end: 5.0, time_semantics: "continuous".into(),
+                    t_start: 0.0, t_end: 5.0,
                     dt: Some(1.0), rng_seed: Some(7), integrator: Default::default(),
                     t_end_anchor: None, t_start_anchor: None,
                 },

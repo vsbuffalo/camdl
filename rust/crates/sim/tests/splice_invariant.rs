@@ -134,14 +134,12 @@ fn sir_model_at(
         }),
         output: OutputConfig {
             times: OutputSchedule::AtTimes(output_times),
-            format: "tsv".into(),
             trajectory: true,
             observations: false,
         },
         simulation: SimulationConfig {
             t_start,
             t_end,
-            time_semantics: "continuous".into(),
             dt: Some(1.0),
             rng_seed: Some(42),
             integrator: Default::default(),

@@ -404,7 +404,7 @@ let anchor_serde_test () =
   in
   Alcotest.(check bool) "unknown anchor is rejected" true rejects_unknown;
   (* An anchored simulation config round-trips through the whole block. *)
-  let cfg = { t_start = 0.0; t_end = Float.nan; time_semantics = "continuous";
+  let cfg = { t_start = 0.0; t_end = Float.nan;
               dt = None; rng_seed = None; integrator = Rk4;
               t_end_anchor = Some { anchor = AnchorLast; offset = 28.0 };
               t_start_anchor = None } in
@@ -447,7 +447,7 @@ let no_anchor_wire_is_byte_identical_test () =
   let m = match Serde.model_of_string (read_golden "sir_basic") with
     | Ok m -> m | Error e -> Alcotest.failf "deserialise failed: %s" e in
   Alcotest.(check string) "unanchored simulation block is unchanged from 0.31"
-    {|{"t_start":0.0,"t_end":80.0,"time_semantics":"continuous","dt":null,"rng_seed":null}|}
+    {|{"t_start":0.0,"t_end":80.0,"dt":null,"rng_seed":null}|}
     (Yojson.Safe.to_string (Serde.simulation_config_to_json m.simulation));
   let baseline = List.find (fun (p : Ir.preset) -> p.preset_name = "baseline") m.presets in
   Alcotest.(check string) "unanchored preset is unchanged from 0.31"
@@ -466,7 +466,7 @@ let no_anchor_wire_is_byte_identical_test () =
                    t_end_anchor = Some { Ir.anchor = Ir.AnchorLast; offset = 28.0 } } in
   let anchored_json = Yojson.Safe.to_string (Serde.simulation_config_to_json anchored) in
   Alcotest.(check string) "an anchored simulation block appends one key"
-    {|{"t_start":0.0,"t_end":null,"time_semantics":"continuous","dt":null,"rng_seed":null,"t_end_anchor":{"anchor":"last_obs","offset":28.0}}|}
+    {|{"t_start":0.0,"t_end":null,"dt":null,"rng_seed":null,"t_end_anchor":{"anchor":"last_obs","offset":28.0}}|}
     anchored_json;
   (* The property the string above is a proxy for, asserted directly: what we
      emit must be parseable as JSON. A `NaN` token is not. *)
@@ -485,7 +485,7 @@ let no_anchor_wire_is_byte_identical_test () =
                          t_start_anchor = Some { Ir.anchor = Ir.AnchorFirst; offset = -7.0 } } in
   let start_json = Yojson.Safe.to_string (Serde.simulation_config_to_json start_anchored) in
   Alcotest.(check string) "an anchored start appends one key and nulls t_start"
-    {|{"t_start":null,"t_end":80.0,"time_semantics":"continuous","dt":null,"rng_seed":null,"t_start_anchor":{"anchor":"first_obs","offset":-7.0}}|}
+    {|{"t_start":null,"t_end":80.0,"dt":null,"rng_seed":null,"t_start_anchor":{"anchor":"first_obs","offset":-7.0}}|}
     start_json;
   let back = Serde.simulation_config_of_json (Yojson.Safe.from_string start_json) in
   Alcotest.(check bool) "the anchored start reads back as NaN" true (Float.is_nan back.t_start);

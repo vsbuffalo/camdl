@@ -1,13 +1,12 @@
 //! Gate properties for the Resolve bridge, proven end-to-end through the
 //! real CLI→runid mapping: gh#147 (a horizon change re-keys the run_id),
-//! presentation normalization (`--format`/`time_semantics` are inert), the
-//! resolved-`process_seed` rule (lone vs sweep-point with the same base seed
-//! → distinct paths), and non-finite params surfacing as `ResolveError`.
+//! the resolved-`process_seed` rule (lone vs sweep-point with the same base
+//! seed → distinct paths), and non-finite params surfacing as `ResolveError`.
 //!
-//! The presentation-normalization gate is **cross-kind** (gh#442): it is
-//! asserted for every CAS kind whose identity folds a model — `sim`, `fit`,
-//! `pfilter`, `survey`, `sim_ensemble`, `profile` — not just the two that
-//! route through this module. See the gh#442 section at the bottom.
+//! The model-identity gates at the bottom are **cross-kind**: they are
+//! asserted for every CAS kind whose identity folds a model (`sim`, `fit`,
+//! `pfilter`, `survey`, `sim_ensemble`, `profile`), not just the two that
+//! route through this module.
 
 use std::collections::HashMap;
 
@@ -41,14 +40,12 @@ pub(crate) fn tiny_model() -> Model {
         initial_conditions: InitialConditions::default(),
         output: OutputConfig {
             times: OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 1.0 }),
-            format: "tsv".into(),
             trajectory: true,
             observations: false,
         },
         simulation: SimulationConfig {
             t_start: 0.0,
             t_end: 100.0,
-            time_semantics: "continuous".into(),
             dt: Some(1.0),
             rng_seed: None,
             integrator: Default::default(),
@@ -101,9 +98,8 @@ fn test_model_digest(m: &Model) -> ModelDigest {
     crate::sim_config::ResolvedModel::new(m.clone(), "0.7", runid::inputs::EngineIdentity::of_build("0.3.0+test"), "sir.camdl").digest
 }
 
-/// The `model`-level digest hash under fixed versions — the unit the
-/// presentation / gradient inertness tests compare. Goes through the real
-/// `ModelDigest::from_model`, which owns the presentation strip (gh#442).
+/// The `model`-level digest hash under fixed versions, the unit the gradient
+/// inertness tests compare. Goes through the real `ModelDigest::from_model`.
 fn model_digest_hash(m: &Model) -> ContentHash {
     ModelDigest::from_model(m, "0.7".into(), runid::inputs::EngineIdentity::of_build("0.3.0")).content_hash()
 }
@@ -128,32 +124,6 @@ fn horizon_change_re_keys_the_run_id() {
     assert_eq!(a.levels[0].hash, b.levels[0].hash, "model level unchanged");
     assert_ne!(a.levels[1].hash, b.levels[1].hash, "config level (t_end) must differ");
     assert_ne!(a.run_id, b.run_id, "a t_end change must re-key the run_id (gh#147)");
-}
-
-#[test]
-fn presentation_fields_are_inert() {
-    // Two models differing only in output.format / time_semantics must
-    // produce the same model digest — those fields are normalized out, so
-    // --format and time rendering stay provenance.
-    let mut m1 = tiny_model();
-    let mut m2 = tiny_model();
-    m1.output.format = "tsv".into();
-    m1.simulation.time_semantics = "continuous".into();
-    m2.output.format = "parquet".into();
-    m2.simulation.time_semantics = "calendar".into();
-    assert_eq!(
-        model_digest_hash(&m1),
-        model_digest_hash(&m2),
-        "output.format / time_semantics must not affect the model digest"
-    );
-
-    // Negative control: a real structural change (a different horizon) does.
-    let mut m3 = tiny_model();
-    m3.simulation.t_end = 200.0;
-    assert_ne!(
-        model_digest_hash(&m1),
-        model_digest_hash(&m3)
-    );
 }
 
 #[test]
@@ -446,23 +416,14 @@ fn differential_presentation_inputs_are_inert() {
     }
 }
 
-// ── gh#442: presentation normalization is cross-kind ──────────────────────────
+// ── Model identity across every CAS kind ──────────────────────────────────────
 //
-// Model identity used to be normalized only on the paths routing through
-// `resolve::model_digest` (sim, fit). `pfilter` / `survey` / `sim_ensemble` /
-// `profile` called `ModelDigest::from_model` on the RAW model, so
-// `output.format` and `simulation.time_semantics` were inert for sim+fit and
-// LOAD-BEARING for those four — the same model keyed differently depending only
-// on `--format`. Normalization now lives inside `ModelDigest::from_model`, the
-// one constructor every identity path routes through, so the property below
-// cannot hold for some kinds and silently fail for others.
-//
-// Two gates here:
-//   1. `presentation_fields_are_inert_on_every_cas_kind` — the property.
-//   2. `cas_identity_pins` — the absolute run_id hexes, so the deliberate gh#442
-//      re-key of the four batch kinds is the last unannounced move any of them
-//      makes, and so the sim/fit keys (which this refactor must NOT touch) stay
-//      pinned to their pre-gh#442 values.
+// Every kind builds its model level through `ModelDigest::from_model`. Two
+// gates here:
+//   1. `model_name_is_inert_on_every_cas_kind`: the model's name moves no
+//      kind's identity, and a structural edit moves every kind's.
+//   2. `cas_identity_pins`: the absolute run_id hexes, so any re-key of any
+//      kind is deliberate and reviewed.
 
 use crate::fit::config_v2::FitConfig;
 use crate::pfilter_cas::{resolve_pfilter, PfilterCtx};
@@ -627,42 +588,7 @@ fn all_kind_identities(model: &Model) -> Vec<(&'static str, ContentHash, Content
 }
 
 #[test]
-fn presentation_fields_are_inert_on_every_cas_kind() {
-    // Two models identical but for the two pure-presentation fields.
-    let mut tsv = tiny_model();
-    tsv.output.format = "tsv".into();
-    tsv.simulation.time_semantics = "continuous".into();
-    let mut parquet = tiny_model();
-    parquet.output.format = "parquet".into();
-    parquet.simulation.time_semantics = "calendar".into();
-
-    for ((k, lh_a, rid_a), (_, lh_b, rid_b)) in
-        all_kind_identities(&tsv).into_iter().zip(all_kind_identities(&parquet))
-    {
-        assert_eq!(
-            lh_a, lh_b,
-            "[{k}] output.format / time_semantics must NOT affect the model-bearing \
-             level hash — they are presentation, not identity (gh#442)"
-        );
-        assert_eq!(rid_a, rid_b, "[{k}] ... and therefore must NOT re-key the run_id");
-    }
-
-    // Each field on its own must be inert too, so a half-fix (one field
-    // stripped, the other not) still fails here.
-    for field in ["output.format", "simulation.time_semantics"] {
-        let mut only = tiny_model();
-        if field == "output.format" {
-            only.output.format = "parquet".into();
-        } else {
-            only.simulation.time_semantics = "calendar".into();
-        }
-        for ((k, _, rid_base), (_, _, rid_only)) in
-            all_kind_identities(&tiny_model()).into_iter().zip(all_kind_identities(&only))
-        {
-            assert_eq!(rid_base, rid_only, "[{k}] `{field}` alone must not re-key the run_id");
-        }
-    }
-
+fn model_name_is_inert_on_every_cas_kind() {
     // The model's `name` is the source file's stem, a label: it is inert in
     // every kind's identity, like the leaf directory label it also feeds.
     let mut renamed = tiny_model();
@@ -840,12 +766,17 @@ fn cas_identity_pins() {
         // from the point's position in the name-sorted grid, moved `profile`
         // alone: this fixture's point is the second value of its grid, so
         // its process seed is no longer the base seed.
-        ("sim", "6953bbe5b76eb2416d2691eb6b0f58d816e2c7390846c46a45ca6f0731c47be7"),
-        ("fit", "dbba2ae4a701d1f75fea5be82dd2379815ceb9db4d9cf7c14b757fba4fa8ac33"),
-        ("pfilter", "856c94f609a1655aa8d9cb61d8692031379b905c10d603d1a93431b39683fb2b"),
-        ("survey", "e5397cc9b86b22368671b27e0998f3dc18884f47a26ddafc7690eb89d762f329"),
-        ("sim_ensemble", "dc3ddeafe905f04d6fbd8c68721ab830f2d8400028a5d7f14796f731909a6102"),
-        ("profile", "b2c9d7d30b83c13c1757af863cd2d90ad41416f3043a635bd68928ac06ab1ef0"),
+        //
+        // ir/VERSION 0.49 (`output.format` and `simulation.time_semantics`
+        // leave the IR) moved every kind once: the model hash no longer
+        // writes the two empty strings it hashed for them, so every model
+        // level's bytes changed.
+        ("sim", "82ed170f4e0580051cbe8e064c60d982f095be8a3bb90f12536a088575e57dc2"),
+        ("fit", "937d67de229bc67c23bf862cdc345332dd145f1b66283d4e2635f6022851979f"),
+        ("pfilter", "291de53592555457ee9872aec197db1f8c58a67c111f07b5806d320ea056b0a5"),
+        ("survey", "058ca0c9283a1ccf614dae56adc58820ebd9c8c489a07f59326e67e7022936cb"),
+        ("sim_ensemble", "c784064470aee98529f7a4976382c3a51f85cea46434528ae49dd2d5cb861c37"),
+        ("profile", "a3182ce7cbb9eae3f2f5f9bc2a782d2d6d4a5a19ca3921624f1f73ecdff5857b"),
     ];
     // Compared as whole lists so a failure reports EVERY kind that moved, not
     // just the first — the re-key scope is the thing under review.
@@ -858,42 +789,6 @@ fn cas_identity_pins() {
         "a run_id moved — this RE-KEYS the store for that kind. If deliberate, \
          state which kinds re-key and why, then re-pin (gh#442)."
     );
-}
-
-#[test]
-fn gh442_did_not_re_key_sim_or_fit() {
-    // The no-collateral gate, as a property rather than a captured constant.
-    //
-    // The PRE-gh#442 sim/fit path was `ModelDigest::from_model(&normalize(m))`
-    // — the caller stripped, then hashed. Resolving an already-stripped model
-    // therefore reproduces exactly what the old code computed. Post-fix,
-    // `from_model` strips internally, so resolving the RAW model must give the
-    // same answer. Equality on `sim` and `fit` is the statement "gh#442 moved
-    // no sim or fit key"; it holds because the strip is idempotent (assigns a
-    // constant), which is pinned in
-    // `runid::ir_hash::tests::normalization_is_idempotent_and_sim_fit_bytes_unchanged`.
-    //
-    // Non-vacuous: `tiny_model()` carries `format = "tsv"` and
-    // `time_semantics = "continuous"`, so the two models genuinely differ.
-    let raw = tiny_model();
-    assert!(!raw.output.format.is_empty() && !raw.simulation.time_semantics.is_empty());
-    let mut pre_stripped = tiny_model();
-    pre_stripped.output.format = String::new();
-    pre_stripped.simulation.time_semantics = String::new();
-
-    let now = all_kind_identities(&raw);
-    let old_path = all_kind_identities(&pre_stripped);
-    for ((k, _, rid_now), (_, _, rid_old)) in now.into_iter().zip(old_path) {
-        // Every kind agrees post-fix — but `sim` / `fit` agreeing is the load-
-        // bearing claim: those two took the pre-strip path before gh#442, so
-        // this says their stored keys did not move.
-        assert_eq!(
-            rid_now, rid_old,
-            "[{k}] resolving a pre-stripped model (the pre-gh#442 sim/fit code path) \
-             must give the same run_id as resolving the raw model — for sim/fit this \
-             IS the no-collateral-re-key guarantee"
-        );
-    }
 }
 
 

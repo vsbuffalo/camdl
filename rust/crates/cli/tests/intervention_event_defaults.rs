@@ -52,11 +52,11 @@ fn mixed_model_ir() -> String {
         "initial_conditions": { "S": { "deterministic": { "const": 1000.0 } }, "V": { "deterministic": { "const": 0.0 } } },
         "output": {
           "times": { "regular": { "start": 0.0, "step": 1.0, "end": 20.0 } },
-          "format": "tsv", "trajectory": true, "observations": false
+          "trajectory": true, "observations": false
         },
         "simulation": {
           "t_start": 0.0, "t_end": 20.0,
-          "time_semantics": "continuous", "dt": 1.0, "rng_seed": null
+          "dt": 1.0, "rng_seed": null
         },
         "scenarios": [
           { "name": "with_sia", "label": "with sia",

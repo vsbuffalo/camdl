@@ -127,14 +127,12 @@ fn model_full(
         initial_conditions: ic,
         output: OutputConfig {
             times: OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 1.0 }),
-            format: "tsv".into(),
             trajectory: true,
             observations: false,
         },
         simulation: SimulationConfig {
             t_start: 0.0,
             t_end: 3.0,
-            time_semantics: "continuous".into(),
             dt: Some(1.0),
             rng_seed: Some(7),
             integrator: Default::default(),

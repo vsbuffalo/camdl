@@ -242,14 +242,12 @@ fn mixed_death_model() -> Arc<CompiledModel> {
         ])),
         output: OutputConfig {
             times: OutputSchedule::AtTimes(vec![0.0, 2.0]),
-            format: "tsv".into(),
             trajectory: true,
             observations: false,
         },
         simulation: SimulationConfig {
             t_start: 0.0,
             t_end: 2.0,
-            time_semantics: "continuous".into(),
             dt: Some(DT),
             rng_seed: Some(1),
             integrator: Default::default(),
@@ -315,14 +313,12 @@ fn carrier(observations: Vec<IrObs>) -> Arc<CompiledModel> {
         ])),
         output: OutputConfig {
             times: OutputSchedule::AtTimes(vec![0.0, 30.0]),
-            format: "tsv".into(),
             trajectory: true,
             observations: false,
         },
         simulation: SimulationConfig {
             t_start: 0.0,
             t_end: 30.0,
-            time_semantics: "continuous".into(),
             dt: Some(DT),
             rng_seed: Some(1),
             integrator: Default::default(),

@@ -6338,8 +6338,8 @@ mod tests {
             ],
             "initial_conditions": {{ "S": {{ "deterministic": {{ "const": 1.0 }} }} }},
             "output": {{ "times": {{ "at_times": [0.0, 1.0] }},
-                         "format": "tsv", "trajectory": true, "observations": false }},
-            "simulation": {{ "t_start": 0.0, "t_end": 1.0, "time_semantics": "continuous",
+                         "trajectory": true, "observations": false }},
+            "simulation": {{ "t_start": 0.0, "t_end": 1.0,
                              "dt": null, "rng_seed": null }},
             "presets": [], "model_structure": null, "balance": null
           }}
@@ -6420,9 +6420,9 @@ mod tests {
             ],
             "initial_conditions": { "S": { "deterministic": { "const": 1.0 } } },
             "output": { "times": { "at_times": [0.0, 1.0] },
-                        "format": "tsv", "trajectory": true, "observations": false },
+                        "trajectory": true, "observations": false },
             "simulation": { "t_start": 0.0, "t_end": 1.0,
-                            "time_semantics": "continuous", "dt": null, "rng_seed": null },
+                            "dt": null, "rng_seed": null },
             "scenarios": [
               { "name": "baseline", "label": "default",
                 "params": { "N0": 1000.0 },
@@ -6790,9 +6790,9 @@ I0    = { bounds = [1, 1000] }
             ],
             "initial_conditions": { "S": { "deterministic": { "const": 1.0 } } },
             "output": { "times": { "at_times": [0.0, 1.0] },
-                        "format": "tsv", "trajectory": true, "observations": false },
+                        "trajectory": true, "observations": false },
             "simulation": { "t_start": 0.0, "t_end": 1.0,
-                            "time_semantics": "continuous", "dt": null, "rng_seed": null },
+                            "dt": null, "rng_seed": null },
             "presets": [], "model_structure": null, "balance": null
           }
         }"#;
@@ -6842,9 +6842,9 @@ gamma = { bounds = [0.05, 1.0] }
             ],
             "initial_conditions": { "S": { "deterministic": { "const": 1.0 } } },
             "output": { "times": { "at_times": [0.0, 1.0] },
-                        "format": "tsv", "trajectory": true, "observations": false },
+                        "trajectory": true, "observations": false },
             "simulation": { "t_start": 0.0, "t_end": 1.0,
-                            "time_semantics": "continuous", "dt": null, "rng_seed": null },
+                            "dt": null, "rng_seed": null },
             "presets": [], "model_structure": null, "balance": null
           }
         }"#;

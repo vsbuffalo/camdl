@@ -5,12 +5,9 @@
 //! Every field that enters a hash is a *resolved value*: param/scenario maps
 //! are concrete name→value, the seed is the resolved `process_seed` (never
 //! the base `--seed`), and a non-finite resolved float is a `ResolveError`
-//! surfaced before any hashing. Presentation-only IR fields
-//! (`output.format`, `simulation.time_semantics`) are normalized out of the
-//! hashed model so `--format`/time rendering stay inert (provenance) — that
-//! strip lives inside `runid::inputs::ModelDigest::from_model`, NOT here, so
-//! every artifact kind inherits it (gh#442). This module must never
-//! re-implement it.
+//! surfaced before any hashing. The model level is
+//! `runid::inputs::ModelDigest::from_model`, shared by every artifact kind;
+//! `--format` and time rendering are provenance and enter no hash.
 //!
 //! This is the identity half of the wiring; the caller supplies resolved
 //! config/params/scenario/seed (from `params_resolver`, the model, and the
@@ -77,8 +74,8 @@ pub struct TrajectoryCtx<'a> {
 }
 
 /// The model's *structural* content identity, hex-encoded: the `runid` model
-/// content hash ([`ModelDigest::ir`] = presentation-normalized
-/// `Model::content_hash`), rendered as hex. The single helper every recorded
+/// content hash ([`ModelDigest::ir`] = `Model::content_hash`), rendered as
+/// hex. The single helper every recorded
 /// "model identity" string and the survey↔fit warm-start cross-check goes
 /// through, so the survey writer and the fit's recompute can never disagree.
 ///

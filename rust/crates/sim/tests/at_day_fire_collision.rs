@@ -87,14 +87,12 @@ fn model_with_schedule(schedule: InterventionSchedule, end: f64) -> CompiledMode
         }),
         output: OutputConfig {
             times: OutputSchedule::AtTimes(vec![0.0, end]),
-            format: "tsv".into(),
             trajectory: true,
             observations: false,
         },
         simulation: SimulationConfig {
             t_start: 0.0,
             t_end: end,
-            time_semantics: "continuous".into(),
             dt: Some(1.0),
             rng_seed: Some(1),
             integrator: Default::default(),

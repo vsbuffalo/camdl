@@ -72,14 +72,12 @@ fn pure_death_model() -> (Arc<CompiledModel>, Vec<f64>) {
         }),
         output: OutputConfig {
             times: OutputSchedule::AtTimes(vec![0.0, 50.0]),
-            format: "tsv".into(),
             trajectory: true,
             observations: false,
         },
         simulation: SimulationConfig {
             t_start: 0.0,
             t_end: 50.0,
-            time_semantics: "continuous".into(),
             dt: Some(1.0),
             rng_seed: Some(42),
             integrator: Default::default(),

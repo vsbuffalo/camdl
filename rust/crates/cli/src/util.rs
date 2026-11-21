@@ -5294,10 +5294,10 @@ mod tests {
                 std::collections::HashMap::new()),
             output: ir::model::OutputConfig {
                 times: ir::model::OutputSchedule::AtTimes(vec![]),
-                format: "tsv".into(), trajectory: true, observations: false,
+                trajectory: true, observations: false,
             },
             simulation: ir::model::SimulationConfig {
-                t_start: 0.0, t_end: 1.0, time_semantics: "continuous".into(),
+                t_start: 0.0, t_end: 1.0,
                 dt: None, rng_seed: None,
                 integrator: Default::default(),
                 t_end_anchor: None, t_start_anchor: None,
@@ -5511,13 +5511,12 @@ mod tests {
             initial_conditions: ir::model::InitialConditions::default(),
             output: ir::model::OutputConfig {
                 times: ir::model::OutputSchedule::AtTimes(vec![0.0]),
-                format: "tsv".into(),
                 trajectory: true,
                 observations: false,
             },
             simulation: ir::model::SimulationConfig {
                 t_start: 0.0, t_end: 1.0,
-                time_semantics: "days".into(), dt: None, rng_seed: None,
+                dt: None, rng_seed: None,
                 integrator: Default::default(),
                 t_end_anchor: None, t_start_anchor: None,
             },

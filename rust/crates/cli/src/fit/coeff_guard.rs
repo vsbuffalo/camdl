@@ -548,14 +548,12 @@ mod tests {
             initial_conditions: InitialConditions::default(),
             output: ir::model::OutputConfig {
                 times: ir::model::OutputSchedule::AtTimes(vec![0.0]),
-                format: "tsv".into(),
                 trajectory: true,
                 observations: false,
             },
             simulation: ir::model::SimulationConfig {
                 t_start: 0.0,
                 t_end: 1.0,
-                time_semantics: "continuous".into(),
                 dt: None,
                 rng_seed: Some(1),
                 integrator: Default::default(),

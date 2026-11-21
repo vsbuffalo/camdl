@@ -980,8 +980,7 @@ let test_output_format_from_decl () =
   match Compiler.compile ~name:"test_output_fmt" src with
   | Error e -> Alcotest.failf "compile failed: %s" e
   | Ok m ->
-    (* output block present → format defaults to "tsv", step to 1.0 *)
-    Alcotest.(check string) "format" "tsv" m.Ir.output.Ir.format;
+    (* output block present → step defaults to 1.0 *)
     (match m.Ir.output.Ir.times with
      | Ir.OutRegular r ->
        Alcotest.(check (float 0.01)) "default step" 1.0 r.Ir.step
@@ -1158,9 +1157,15 @@ let test_output_at_times () =
 let test_output_format_parquet () =
   let src = output_model_body
             ^ "output { trajectories { every = 1 'days format = parquet } }" in
-  match Compiler.compile ~name:"test_output_fmt_parquet" src with
+  (* The declared format is kept in the declared model; the compiled model
+     has no format field. *)
+  match Compiler.compile_with_declared ~name:"test_output_fmt_parquet" src with
   | Error e -> Alcotest.failf "compile failed: %s" e
-  | Ok m -> Alcotest.(check string) "format parquet" "parquet" m.Ir.output.Ir.format
+  | Ok (_, _, d) ->
+    (match d.Declared.dm_output with
+     | Some { Declared.ou_trajectories = Some t; _ } ->
+       Alcotest.(check string) "format parquet" "parquet" t.Declared.to_format
+     | _ -> Alcotest.fail "expected a declared trajectories entry")
 
 let test_output_every_and_at_conflict () =
   (* specifying both schedules is ambiguous -> hard error, not silent pick *)

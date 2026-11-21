@@ -252,14 +252,12 @@ fn test_overdispersion_variance_chain_binomial() {
         }),
         output: OutputConfig {
             times: OutputSchedule::AtTimes(vec![0.0, 1.0]),
-            format: "tsv".into(),
             trajectory: true,
             observations: false,
         },
         simulation: SimulationConfig {
             t_start: 0.0,
             t_end: 1.0,
-            time_semantics: "continuous".into(),
             dt: Some(1.0),
             rng_seed: Some(42),
             integrator: Default::default(),
@@ -352,11 +350,11 @@ fn test_fraction_transfer_edge_cases() {
             initial_conditions: InitialConditions::default(),
             output: OutputConfig {
                 times: OutputSchedule::AtTimes(vec![0.0]),
-                format: "tsv".into(), trajectory: true, observations: false,
+                trajectory: true, observations: false,
             },
             simulation: SimulationConfig {
                 t_start: 0.0, t_end: 2.0,
-                time_semantics: "continuous".into(), dt: None, rng_seed: Some(42),
+                dt: None, rng_seed: Some(42),
                 integrator: Default::default(),
                 t_end_anchor: None, t_start_anchor: None,
             },

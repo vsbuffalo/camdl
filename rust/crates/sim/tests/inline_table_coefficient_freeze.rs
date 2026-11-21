@@ -81,13 +81,11 @@ fn decay_model() -> Model {
             // Capture the decay over time, not just t=0 — else both runs share
             // the identical initial snapshot and the assertion is vacuous.
             times: OutputSchedule::AtTimes(vec![0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0]),
-            format: "tsv".into(),
             trajectory: true,
             observations: false,
         },
         simulation: SimulationConfig {
             t_start: 0.0, t_end: 30.0,
-            time_semantics: "continuous".into(),
             dt: None, rng_seed: Some(42),
             integrator: Default::default(),
             t_end_anchor: None, t_start_anchor: None,

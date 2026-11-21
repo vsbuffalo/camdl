@@ -1219,7 +1219,6 @@ type output_schedule =
 (** What a simulation writes. *)
 type output_config = {
   times:        output_schedule;
-  format:       string;   (** The declared file format, ["tsv"] unless the model says otherwise. It does not enter the run's identity. *)
   trajectory:   bool;     (** Always [true]. *)
   observations: bool;     (** Always [true]. *)
 }
@@ -1244,7 +1243,6 @@ type simulation_config = {
       (** The end of the window, in model time units. While [t_end_anchor]
           is present it is NaN, serialised as [null], so no comparison of
           horizons can pass by coincidence. *)
-  time_semantics: string;   (** Always ["continuous"]. It does not enter the run's identity. *)
   dt:             float option;
       (** The step of the stepping backends, in model time units, from
           [simulate { dt = ... }]. [None] leaves it to the command, which

@@ -1873,10 +1873,9 @@
 
     "output_config": {
       "type": "object",
-      "required": ["times", "format", "trajectory", "observations"],
+      "required": ["times", "trajectory", "observations"],
       "properties": {
         "times": { "$ref": "#/definitions/output_schedule" },
-        "format": { "type": "string", "enum": ["tsv", "csv"] },
         "trajectory": { "type": "boolean" },
         "observations": { "type": "boolean" }
       },
@@ -1885,11 +1884,10 @@
 
     "simulation_config": {
       "type": "object",
-      "required": ["t_start", "t_end", "time_semantics"],
+      "required": ["t_start", "t_end"],
       "properties": {
         "t_start": { "type": ["number", "null"], "description": "null encodes NaN: an unresolved anchored start (see t_start_anchor)." },
         "t_end": { "type": ["number", "null"], "description": "null encodes NaN: an unresolved anchored horizon (see t_end_anchor)." },
-        "time_semantics": { "type": "string", "enum": ["continuous", "discrete"] },
         "dt": { "type": ["number", "null"] },
         "rng_seed": { "type": ["integer", "null"] },
         "integrator": {

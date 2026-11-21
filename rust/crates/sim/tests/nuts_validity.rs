@@ -426,14 +426,12 @@ fn prior_only_model() -> Arc<CompiledModel> {
         ),
         output: OutputConfig {
             times: OutputSchedule::AtTimes(vec![PRIOR_T_END]),
-            format: "tsv".into(),
             trajectory: true,
             observations: false,
         },
         simulation: SimulationConfig {
             t_start: 0.0,
             t_end: PRIOR_T_END,
-            time_semantics: "continuous".into(),
             dt: Some(1.0),
             rng_seed: Some(42),
             integrator: Default::default(),

@@ -632,7 +632,6 @@ times:
 ```
 output: {
   times: output_schedule,
-  format: "tsv" | "csv",
   trajectory: bool,          -- write state + flows
   observations: bool         -- write synthetic observed data
 }
@@ -892,8 +891,7 @@ model: {
   simulation: {
     t_start: float,
     t_end: float,
-    time_semantics: "continuous" | "discrete",
-    dt: float | null,                  -- required if discrete
+    dt: float | null,                  -- the stepping backends' step; null = one time unit
     rng_seed: int | null               -- null = random
   },
 
@@ -1010,19 +1008,14 @@ Backend selection is a runtime configuration choice, not part of the IR.
 
 ### 9.3 Discrete-Time Semantics
 
-When `time_semantics` is `"discrete"`, the model operates as a discrete-time
-Markov chain with fixed step size `dt`:
+Every rate in the IR is a propensity (events per unit time), consumed directly
+by Gillespie and ODE. A backend that steps in discrete time, with step `dt`,
+fires Binomial(n, p) events per transition per step, where n is the source
+population and p a probability per step derived from the rate.
 
-**Continuous-time IR (default).** The `rate` field is a propensity (events per
-unit time). Consumed directly by Gillespie, ODE.
-
-**Discrete-time IR.** The `rate` field is a **probability per time step** (in
-[0, 1]). At each step, transitions fire Binomial(n, p) events where n = source
-population, p = rate expression value.
-
-**Cross-compilation.** Continuous-time rates convert to discrete probabilities
-via `p = 1 - exp(-rate * dt)`. Exact for single events, approximate when
-multiple events compete for the same source compartment.
+**Conversion.** Continuous-time rates convert to discrete probabilities via
+`p = 1 - exp(-rate * dt)`. Exact for single events, approximate when multiple
+events compete for the same source compartment.
 
 When `rate * dt` is not small, competing events on the same compartment can
 produce incoherent probabilities (sum > 1). The multinomial competing-risks
@@ -1176,7 +1169,6 @@ objects, `bin_op` expression nodes, parameterized initial conditions,
 
   "output": {
     "times": { "regular": { "start": 0.0, "step": 1.0, "end": 80.0 } },
-    "format": "tsv",
     "trajectory": true,
     "observations": true
   },
@@ -1184,7 +1176,6 @@ objects, `bin_op` expression nodes, parameterized initial conditions,
   "simulation": {
     "t_start": 0.0,
     "t_end": 80.0,
-    "time_semantics": "continuous",
     "dt": null,
     "rng_seed": null
   },
@@ -1357,7 +1348,6 @@ one transition shown for brevity — the full file has eight.
 
   "output": {
     "times": { "regular": { "start": 0.0, "step": 1.0, "end": 100.0 } },
-    "format": "tsv",
     "trajectory": true,
     "observations": true
   },
@@ -1365,7 +1355,6 @@ one transition shown for brevity — the full file has eight.
   "simulation": {
     "t_start": 0.0,
     "t_end": 100.0,
-    "time_semantics": "continuous",
     "dt": null,
     "rng_seed": null
   },
@@ -1573,7 +1562,6 @@ projection output (§4.2).
 
   "output": {
     "times": { "regular": { "start": 0.0, "step": 7.0, "end": 365.0 } },
-    "format": "tsv",
     "trajectory": true,
     "observations": true
   },
@@ -1581,7 +1569,6 @@ projection output (§4.2).
   "simulation": {
     "t_start": 0.0,
     "t_end": 365.0,
-    "time_semantics": "continuous",
     "dt": null,
     "rng_seed": 42
   }

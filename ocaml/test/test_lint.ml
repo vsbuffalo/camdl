@@ -90,14 +90,12 @@ let empty_model
     ic_grad = [];
     output = {
       times = OutRegular { start = 0.0; step = 1.0 };
-      format = "tsv";
       trajectory = true;
       observations = false;
     };
     simulation = {
       t_start = 0.0;
       t_end = 100.0;
-      time_semantics = "continuous";
       dt = None;
       rng_seed = None;
       integrator = Rk4;

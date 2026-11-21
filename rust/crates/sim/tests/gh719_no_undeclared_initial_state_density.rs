@@ -128,14 +128,12 @@ fn count_ivp_model() -> CompiledModel {
         ]),
         output: OutputConfig {
             times: OutputSchedule::AtTimes(vec![0.0, 40.0]),
-            format: "tsv".into(),
             trajectory: true,
             observations: false,
         },
         simulation: SimulationConfig {
             t_start: 0.0,
             t_end: 40.0,
-            time_semantics: "continuous".into(),
             dt: Some(1.0),
             rng_seed: Some(42),
             integrator: Default::default(),

@@ -4,7 +4,7 @@
     The file [camdlc] writes is an envelope around the model:
 
     {@json[
-      {"ir_version":"0.48","validated_by":"ocaml-compiler-v0.48","model":{"name":"licm","version":"0.3","time_unit":"days","description":null,"compartments":[
+      {"ir_version":"0.49","validated_by":"ocaml-compiler-v0.49","model":{"name":"licm","version":"0.3","time_unit":"days","description":null,"compartments":[
       {"name":"S","kind":"integer"},
       {"name":"I","kind":"integer"},
       {"name":"R","kind":"integer"}
@@ -1854,14 +1854,12 @@ let output_schedule_of_json j =
 let output_config_to_json (o : output_config) : Yojson.Safe.t =
   obj [
     ("times",        output_schedule_to_json o.times);
-    ("format",       str o.format);
     ("trajectory",   bool o.trajectory);
     ("observations", bool o.observations);
   ]
 
 let output_config_of_json j =
   { times        = output_schedule_of_json (member "times"        j);
-    format       = as_string               (member "format"       j);
     trajectory   = as_bool                 (member "trajectory"   j);
     observations = as_bool                 (member "observations" j);
   }
@@ -1908,7 +1906,6 @@ let simulation_config_to_json (s : simulation_config) : Yojson.Safe.t =
          the NaN from that. Nothing on the wire can be mistaken for a real
          horizon. *)
       ("t_end",          if Float.is_nan s.t_end then null else flt s.t_end);
-      ("time_semantics", str s.time_semantics);
       ("dt",             match s.dt       with None -> null | Some v -> flt v);
       ("rng_seed",       match s.rng_seed with None -> null | Some n -> int n);
     ]
@@ -1940,7 +1937,6 @@ let simulation_config_of_json j =
     t_end          = (match member "t_end" j with
                       | `Null -> Float.nan
                       | v     -> as_float v);
-    time_semantics = as_string (member "time_semantics" j);
     dt             = (match member_opt "dt"       j with Some `Null | None -> None | Some v -> Some (as_float v));
     rng_seed       = (match member_opt "rng_seed" j with Some `Null | None -> None | Some v -> Some (as_int   v));
     integrator     = (match member_opt "integrator" j with Some `Null | None -> Rk4 | Some v -> integrator_of_json v);

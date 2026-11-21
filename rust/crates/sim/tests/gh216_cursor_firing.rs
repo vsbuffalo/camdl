@@ -156,12 +156,11 @@ fn build_model(interventions: Vec<Intervention>) -> CompiledModel {
         }),
         output: OutputConfig {
             times: OutputSchedule::AtTimes(vec![0.0, 10.0]),
-            format: "tsv".into(),
             trajectory: true,
             observations: false,
         },
         simulation: SimulationConfig {
-            t_start: 0.0, t_end: 10.0, time_semantics: "continuous".into(),
+            t_start: 0.0, t_end: 10.0,
             dt: Some(1.0), rng_seed: Some(42),
             integrator: Default::default(),
             t_end_anchor: None, t_start_anchor: None,

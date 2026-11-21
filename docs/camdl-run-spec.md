@@ -384,14 +384,13 @@ segment gets a `~{disambiguator}` suffix, escalating `~{hash16}` → `~{full64}`
 until unique. A reader enumerates sibling directories and reads each `run.json`
 rather than reconstructing an expected name.
 
-**Presentation is stripped before hashing.** IR fields that only change how a
-result is _rendered_ — `output.format`, `simulation.time_semantics` — are
-normalized out inside `ModelDigest::from_model`, which sits on every identity
-path, so a new artifact kind cannot silently opt out of the strip. A field that
-changes _which values are computed or stored_ is identity and must re-key; a
-re-encoding of the same values is presentation and must not. Re-keys are
-deliberate, version-bumped events: a per-struct `schema_version`, the crate-wide
-`HASH_VERSION`, or `ir/VERSION`.
+**Presentation is not in the model.** The compiled model holds no field that
+only changes how a result is _rendered_; every identity path hashes the model
+through `ModelDigest::from_model`. A field that changes _which values are
+computed or stored_ is identity and must re-key; a re-encoding of the same
+values is presentation and must not. Re-keys are deliberate, version-bumped
+events: a per-struct `schema_version`, the crate-wide `HASH_VERSION`, or
+`ir/VERSION`.
 
 ### 2.2 Fit Result Layout
 
@@ -2136,11 +2135,9 @@ Two rules govern membership, and they are the whole discipline:
   the leaf contains, so they ride in `SimConfig`. `--output-every` is not there
   because it lowers into the model's output schedule and therefore rides the
   model digest instead.
-- **A re-encoding of the same values is presentation and is stripped.**
-  `output.format` and `simulation.time_semantics` are blanked by
-  `inputs::normalize_for_hash` inside `ModelDigest::from_model` — the one
-  constructor every identity path uses, so no artifact kind can silently opt
-  out.
+- **A re-encoding of the same values is presentation and enters no hash.** A
+  rendering choice, such as a file format or a date format, has no field in the
+  compiled model.
 
 Fields marked `#[run_input(provenance)]` are recorded but never hashed:
 `Seed::base_seed` and `ArtifactRef::kind` are the two on the simulate path.
@@ -5131,12 +5128,6 @@ constructor every identity path uses:
 | `ir`         | `model_ir_hash(model)` — the whole canonical IR      |
 | `ir_version` | the `ir/VERSION` string (e.g. `"0.42"`)              |
 | `engine`     | `EngineVersion` = `"{CARGO_PKG_VERSION}+{git-hash}"` |
-
-`model_ir_hash` applies `normalize_for_hash`, which blanks the two
-pure-presentation IR fields — `output.format` and `simulation.time_semantics` —
-before hashing, so a rendering choice never re-keys a run. The normalization
-lives inside the constructor, not at any call site, so no artifact kind can opt
-out of it.
 
 The IR walk is hand-written (`rust/crates/runid/src/ir_hash.rs`, hashing-policy
 schema version `SV`, currently 4). `Model::hash_into` folds, in order:

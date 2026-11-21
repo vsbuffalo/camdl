@@ -140,11 +140,10 @@ fn sir_with_seed_event() -> Model {
         initial_conditions: InitialConditions::constants(init),
         output: OutputConfig {
             times: OutputSchedule::AtTimes((0..=20).map(|t| t as f64).collect()),
-            format: "tsv".into(), trajectory: true, observations: false,
+            trajectory: true, observations: false,
         },
         simulation: SimulationConfig {
             t_start: 0.0, t_end: 20.0,
-            time_semantics: "continuous".into(),
             dt: Some(1.0), rng_seed: Some(42),
             integrator: Default::default(),
             t_end_anchor: None, t_start_anchor: None,
@@ -233,11 +232,10 @@ fn seir_with_seed_event(n_seed: i64, tau: f64) -> Model {
         initial_conditions: InitialConditions::constants(init),
         output: OutputConfig {
             times: OutputSchedule::AtTimes((0..=30).map(|t| t as f64).collect()),
-            format: "tsv".into(), trajectory: true, observations: false,
+            trajectory: true, observations: false,
         },
         simulation: SimulationConfig {
             t_start: 0.0, t_end: 30.0,
-            time_semantics: "continuous".into(),
             dt: Some(0.5), rng_seed: Some(42),
             integrator: Default::default(),
             t_end_anchor: None, t_start_anchor: None,

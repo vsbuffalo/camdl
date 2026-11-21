@@ -109,8 +109,8 @@ The rate of [infection_urban] is [beta * S_urban * I_urban / N_urban], with
 [N_urban] serialised as [{"binding_ref": "N_urban"}], and the compiled
 transition also carries [rate_grad], the derivative of its rate with respect to
 [beta], which {!Autodiff} wrote. The envelope around the model reads
-[ir_version] ["0.48"] (the contents of [ir/VERSION]) and [validated_by]
-["ocaml-compiler-v0.48"], and its [declared] section holds the model as the
+[ir_version] ["0.49"] (the contents of [ir/VERSION]) and [validated_by]
+["ocaml-compiler-v0.49"], and its [declared] section holds the model as the
 author wrote it.
 
 {2 Where a change lands}

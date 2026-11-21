@@ -114,14 +114,12 @@ fn periodic_xfer_model(at_day: f64, period: f64, end: f64, model_dt: Option<f64>
         initial_conditions: InitialConditions::default(),
         output: OutputConfig {
             times: OutputSchedule::AtTimes(vec![0.0]),
-            format: "tsv".into(),
             trajectory: true,
             observations: false,
         },
         simulation: SimulationConfig {
             t_start: 0.0,
             t_end: end,
-            time_semantics: "continuous".into(),
             dt: model_dt,
             rng_seed: Some(42),
             integrator: Default::default(),

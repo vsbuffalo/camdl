@@ -283,7 +283,6 @@ pub enum OutputSchedule {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OutputConfig {
     pub times:        OutputSchedule,
-    pub format:       String,
     pub trajectory:   bool,
     pub observations: bool,
 }
@@ -303,7 +302,6 @@ pub struct SimulationConfig {
     /// refuses (two sentinels compare equal).
     #[serde(with = "crate::anchor::null_as_nan")]
     pub t_end:          f64,
-    pub time_semantics: String,
     pub dt:             Option<f64>,
     pub rng_seed:       Option<i64>,
     /// ODE integrator + (for rk45) its adaptive tolerances (gh#166). `default`/
