@@ -1,9 +1,10 @@
 # Proposal: fit labels that move, handles that name runs, one chain selector
 
-**Status:** Proposal **Date:** 2026-11-14 **Motivation:** A modeler iterating on
-a fit cannot reuse its label, cannot find one run's files from its label, and
-selects chains through two unrelated mechanisms. Each is a contained change to
-existing seams.
+**Status:** Implemented **Date:** 2026-11-14 **Implemented:** steps 1–5 in
+commits `982eca439`, `770013f76`, `0dda7e1d3`, `16e374b77` and `2788a059b`,
+2026-11-14 **Motivation:** A modeler iterating on a fit cannot reuse its label,
+cannot find one run's files from its label, and selects chains through two
+unrelated mechanisms. Each is a contained change to existing seams.
 
 ## Background: what exists today
 
