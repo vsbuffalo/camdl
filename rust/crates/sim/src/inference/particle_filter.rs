@@ -19,7 +19,7 @@ use crate::error::SimError;
 use crate::schedule::Cursor;
 use super::degeneracy::{check_pf_degeneracy, check_iteration_budget, window_substep_cost, pf_bail_error, DeathMask};
 use super::traits::{ProcessModel, ObservationModel, SMCConfig};
-use super::types::{ParticleState, ParticleSwarm, logw_variance, normalize_log_weights, RESAMPLE_RNG_STREAM, init_particle_rngs};
+use super::types::{ParticleState, ParticleSwarm, logw_variance, normalize_log_weights, RESAMPLE_RNG_STREAM, PREDICTION_RNG_STREAM, PREQUENTIAL_RNG_STREAM, init_particle_rngs};
 use numerics::log_sum_exp;
 use super::resampling::{log_weights_all_equal, systematic_resample};
 /// Observation: one data point at a specific time.
@@ -309,12 +309,6 @@ pub fn bootstrap_filter_recording_at<P: ProcessModel<State = ParticleState>>(
         p.counts.copy_from_slice(&x0.counts);
     }
 
-    // Separate RNG streams for diagnostic draws (rmeasure).
-    // Process RNG streams must be identical whether or not predictions are computed.
-    // Offset by 2^62 so process-RNG and diag-RNG streams never overlap
-    // (u64 stream id is 64 bits; 2^62 is a comfortable gap from low-indexed streams).
-    let mut diag_rngs = init_particle_rngs(seed, n_particles, 1u64 << 62, config.binomial);
-
     // Double-buffer for resampling (avoids clone allocation)
     let mut states_buf: Vec<ParticleState> = (0..n_particles)
         .map(|_| ParticleState::new(n_int, n_tr, n_acc))
@@ -365,6 +359,22 @@ pub fn bootstrap_filter_recording_at<P: ProcessModel<State = ParticleState>>(
     };
     let mut predictions: Vec<PredictionDiag> = if has_predictions {
         Vec::with_capacity(n_obs)
+    } else {
+        Vec::new()
+    };
+
+    // The observation draws of the two optional diagnostics, each on its own
+    // per-particle streams (`PREDICTION_RNG_STREAM`, `PREQUENTIAL_RNG_STREAM`),
+    // so neither the process streams, the resampling stream nor the other
+    // diagnostic's draws depend on whether a diagnostic is recorded.
+    // Constructing a stream draws nothing.
+    let mut prediction_rngs = if has_predictions {
+        init_particle_rngs(seed, n_particles, PREDICTION_RNG_STREAM, config.binomial)
+    } else {
+        Vec::new()
+    };
+    let mut prequential_rngs = if config.record_prequential {
+        init_particle_rngs(seed, n_particles, PREQUENTIAL_RNG_STREAM, config.binomial)
     } else {
         Vec::new()
     };
@@ -584,7 +594,7 @@ pub fn bootstrap_filter_recording_at<P: ProcessModel<State = ParticleState>>(
             let (state_mean, state_q05, state_q50, state_q95) = weighted_quantiles(&means, &equal_lw);
 
             let obs_draws: Vec<f64> = swarm.states.iter().enumerate()
-                .map(|(i, s)| obs_model.sample(s, obs_idx, params, &mut diag_rngs[i])
+                .map(|(i, s)| obs_model.sample(s, obs_idx, params, &mut prediction_rngs[i])
                     .into_iter().filter(|v| v.is_finite()).sum())
                 .collect();
             let (_, obs_q05, obs_q50, obs_q95) = weighted_quantiles(&obs_draws, &equal_lw);
@@ -696,7 +706,7 @@ pub fn bootstrap_filter_recording_at<P: ProcessModel<State = ParticleState>>(
             // stream's draw is NaN (multi-cadence); `build_trace` scores only
             // the streams present at the step.
             for (i, s) in swarm.states.iter().enumerate() {
-                let per_stream = obs_model.sample(s, obs_idx, params, &mut diag_rngs[i]);
+                let per_stream = obs_model.sample(s, obs_idx, params, &mut prequential_rngs[i]);
                 if keep {
                     for (si, &v) in per_stream.iter().enumerate() {
                         ps_samples[si].push(v);

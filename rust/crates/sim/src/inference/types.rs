@@ -496,6 +496,23 @@ pub const PROB_FRACTION_EPS: f64 = 1e-10;
 /// per-particle streams from the same base seed.
 pub const RESAMPLE_RNG_STREAM: u64 = 1u64 << 48;
 
+/// Base stream index of the bootstrap filter's per-particle draws for the
+/// prequential record (`SMCConfig::record_prequential`). Particle `i` draws
+/// from stream `PREQUENTIAL_RNG_STREAM | i`.
+///
+/// Each optional diagnostic of the filter that draws observations has its own
+/// base, so switching one on or off cannot move another's draws: what a
+/// diagnostic writes is a function of the seed and the run's inputs alone.
+/// None of these streams is the process or resampling stream, so no
+/// diagnostic can change the log-likelihood.
+pub const PREQUENTIAL_RNG_STREAM: u64 = 1u64 << 62;
+
+/// Base stream index of the bootstrap filter's per-particle draws for its
+/// one-step prediction summaries (`SMCConfig::record_predictions`, read by
+/// `camdl pfilter --trace`). Particle `i` draws from stream
+/// `PREDICTION_RNG_STREAM | i`. See [`PREQUENTIAL_RNG_STREAM`].
+pub const PREDICTION_RNG_STREAM: u64 = 1u64 << 61;
+
 // ── RNG helpers ───────────────────────────────────────────────────────────────
 
 /// Allocate `n` per-particle RNG streams derived from `seed`.

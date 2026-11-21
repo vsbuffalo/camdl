@@ -348,9 +348,9 @@ pfilter.files	stderr	line	implied N to avoid collapse	~1 (median step), ~15 (wor
 pfilter.files	stderr	line	Snyder et al. 2008 heuristic	not a guarantee
 pfilter.files	stderr	line	final particle states	(100 particles) at t=14 written to fs.tsv
 pfilter.files	stderr	line	sample paths written to	2 sample paths written to p.tsv
-pfilter.files	stderr	line	prequential trace written:	elpd=-44.58, mean_crps=3.825, PIT 90% cov=0.86
+pfilter.files	stderr	line	prequential trace written:	elpd=-44.58, mean_crps=3.666, PIT 90% cov=0.86
 pfilter.files	stderr	line	worst-scored observations	(5 of 14 scored; together 43.1% of elpd -44.6)
-pfilter.files	stderr	block	worst-scored observations	67         [66, 102]    -4.3 (-4.3)    9.7%  0.06     53.4
+pfilter.files	stderr	block	worst-scored observations	67         [62, 101]    -4.3 (-4.3)    9.7%  0.08     53.4
 pfilter.files	stderr	line	filtering marginals written to	f.tsv
 pfilter.files	stderr	line	loglik written to	ll.toml
 pfilter.no_data	stderr	line	error: pfilter needs observation data to score:	or `--fit FOO.toml` with a [data.observations] section.
