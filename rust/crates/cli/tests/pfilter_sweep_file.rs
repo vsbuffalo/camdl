@@ -218,7 +218,8 @@ fn each_row_equals_the_single_call_at_its_values() {
                     s.loglik_sd.as_deref().expect("a spread").parse::<f64>().unwrap().to_bits(),
                     "point {i}: the spread over replicates"),
             }
-            assert_eq!(row["n_collapsed"], "0");
+            assert_eq!(row["n_failed"], "0");
+            assert_eq!(row["failure"], "");
         }
     }
 }
@@ -264,40 +265,76 @@ fn the_table_is_byte_identical_across_thread_counts() {
     assert_eq!(tables[0], tables[1], "--parallel 1 and --parallel 4 must write the same bytes");
 }
 
-/// Test 5: a point where every replicate collapses is a row, not a failure;
-/// a design where every point collapses fails with `FILTER_FAILED` (3).
-///
-/// At `gamma = 50` every particle's `I` is 0 by the last observation, of 2
-/// cases, which a Poisson with rate 0 scores `-inf`. The collapse falls on the
-/// last observation, so it is the filter's `-inf` result rather than its
-/// degeneracy error, which several windows of an empty swarm would raise.
-#[test]
-fn a_collapsed_point_is_a_row() {
+/// The design run of `design` on observations `cases`, two replicates per
+/// point: the exit status, the table (when one was written) and stderr.
+fn failing(cases: &str, design: &str) -> (Option<i32>, Vec<Row>, String) {
     let dir = tempfile::tempdir().unwrap();
     fixture(dir.path());
-    std::fs::write(dir.path().join("cases.tsv"), "time\tcases\n2\t3\n4\t1\n6\t0\n8\t0\n10\t2\n").unwrap();
-    std::fs::write(dir.path().join("design.tsv"), "beta\tgamma\n1.0\t1.0\n0.1\t50\n1.1\t1.0\n").unwrap();
-    let mut args: Vec<&str> = COMMON.to_vec();
+    std::fs::write(dir.path().join("cases.tsv"), cases).unwrap();
+    std::fs::write(dir.path().join("design.tsv"), design).unwrap();
+    let mut args = vec!["--sweep-file", "design.tsv", "-o", "landscape.tsv"];
+    args.extend(COMMON);
     args.extend(["1", "--replicates", "2"]);
-    let (rows, err) = design(dir.path(), &args);
-    assert_eq!(rows[1]["loglik"], "-inf", "{err}");
-    assert_eq!(rows[1]["n_collapsed"], "2");
-    assert_eq!(rows[1]["run_id"], "", "a collapsed point writes no leaf");
+    let out = pfilter(dir.path(), &args);
+    let rows = std::fs::read_to_string(dir.path().join("landscape.tsv"))
+        .map(|t| table(&t))
+        .unwrap_or_default();
+    (out.status.code(), rows, stderr(&out))
+}
+
+/// Point 1 failed in every replicate and points 0 and 2 were scored.
+fn assert_point_1_failed(rows: &[Row], err: &str, cause: &str) {
+    assert_eq!(rows.len(), 3, "{err}");
+    let row = &rows[1];
+    assert_eq!(row["loglik"], "-inf", "{err}");
+    assert_eq!(row["loglik_sd"], "", "no spread over failed replicates");
+    assert_eq!(row["n_failed"], "2");
+    assert_eq!(row["run_id"], "", "a failed point writes no leaf");
+    assert!(row["failure"].contains(cause), "the failure names its cause: {:?}", row["failure"]);
+    assert!(!row["failure"].starts_with("error: "), "{:?}", row["failure"]);
     for i in [0, 2] {
         assert!(rows[i]["loglik"].parse::<f64>().unwrap().is_finite(), "point {i} is scored");
-        assert_eq!(rows[i]["n_collapsed"], "0");
+        assert!(rows[i]["loglik_sd"].parse::<f64>().unwrap().is_finite());
+        assert_eq!(rows[i]["n_failed"], "0");
+        assert_eq!(rows[i]["failure"], "");
         assert_eq!(rows[i]["run_id"].len(), 64);
     }
-    assert!(err.contains("1 of 3 design points collapsed"), "{err}");
+    assert!(err.contains("1 of 3 design points failed"), "{err}");
+}
 
-    std::fs::write(dir.path().join("design.tsv"), "beta\tgamma\n0.1\t50\n0.12\t45\n").unwrap();
-    let mut all = vec!["--sweep-file", "design.tsv", "-o", "landscape.tsv"];
-    all.extend_from_slice(&args);
-    let out = pfilter(dir.path(), &all);
-    assert_eq!(out.status.code(), Some(3), "every point collapsed:\n{}", stderr(&out));
-    let rows = table(&std::fs::read_to_string(dir.path().join("landscape.tsv")).unwrap());
+/// Test 5, first way of failing: every replicate scores `-inf`. At
+/// `gamma = 50` every particle's `I` is 0 by the last observation, of 2
+/// cases, which a Poisson with rate 0 scores `-inf`. The collapse falls on the
+/// last observation, so the filter returns `-inf` rather than an error.
+#[test]
+fn a_point_that_scores_minus_inf_is_a_row() {
+    let (code, rows, err) = failing(
+        "time\tcases\n2\t3\n4\t1\n6\t0\n8\t0\n10\t2\n",
+        "beta\tgamma\n1.0\t1.0\n0.1\t50\n1.1\t1.0\n",
+    );
+    assert_eq!(code, Some(0), "{err}");
+    assert_point_1_failed(&rows, &err, "the log-likelihood is -inf at these parameters");
+}
+
+/// Test 5, second way of failing: the filter returns an error. With the
+/// first observation at t = 6 the swarm at `gamma = 50` is empty for every
+/// window, and the filter stops with `PFDegenerate { EssCollapsed }`.
+#[test]
+fn a_point_where_the_filter_stops_with_an_error_is_a_row() {
+    let cases = "time\tcases\n6\t8\n8\t9\n10\t8\n";
+    let (code, rows, err) = failing(cases, "beta\tgamma\n1.0\t1.0\n0.1\t50\n1.2\t1.0\n");
+    assert_eq!(code, Some(0), "{err}");
+    assert_point_1_failed(&rows, &err, "EssCollapsed");
+    // The message depends only on the point, so the table does too.
+    let (_, again, _) = failing(cases, "beta\tgamma\n1.0\t1.0\n0.1\t50\n1.2\t1.0\n");
+    assert_eq!(rows, again, "a rerun writes the same table");
+
+    // Every point failed: the table is written and the run fails.
+    let (code, rows, err) = failing(cases, "beta\tgamma\n0.1\t50\n0.12\t45\n");
+    assert_eq!(code, Some(3), "every point failed:\n{err}");
     assert_eq!(rows.len(), 2, "the table is still written");
-    assert!(rows.iter().all(|r| r["loglik"] == "-inf" && r["run_id"].is_empty()));
+    assert!(rows.iter().all(|r| r["loglik"] == "-inf" && r["run_id"].is_empty() && r["n_failed"] == "2"));
+    assert!(err.contains("every one of the 2 design points failed"), "{err}");
 }
 
 /// Test 6: the refusals beside `--sweep-file`.

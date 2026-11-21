@@ -478,8 +478,8 @@ fn run_pfilter(
     let score = score_point(&scorer, &[], PointRole::Single, |score| {
         report_single(out, score, &outputs, seed, n_particles);
     });
-    if score.every_replicate_collapsed() {
-        let first = score.first_collapse.unwrap_or_default();
+    if score.every_replicate_failed() {
+        let first = score.failure.unwrap_or_default();
         let message = if n_replicates > 1 {
             format!("{first} (all {n_replicates} replicates; replicate 1 shown)")
         } else {
@@ -517,9 +517,9 @@ fn report_single(
     match score.loglik_sd {
         Some(sd_ll) => {
             let mean_ll = score.loglik;
-            let n_collapsed = score.n_collapsed;
+            let n_collapsed = score.n_failed;
             out.say(format_args!("loglik = {:.1} ± {:.1} ({} replicates, N={})", mean_ll, sd_ll, n_replicates, n_particles));
-            if let Some(first) = &score.first_collapse {
+            if let Some(first) = &score.failure {
                 out.say(format_args!("warning: {n_collapsed} of {n_replicates} replicates scored \
                     -inf, so the mean is -inf; the first: {}",
                     first.strip_prefix("error: ").unwrap_or(first)));
@@ -611,8 +611,9 @@ fn refuse_design_overrides(
 /// values, on the seeds the single call uses, so a row equals the single call
 /// at that point and its leaf is that call's. The first point runs alone and
 /// prints the lines every point would print alike; the rest run concurrently
-/// on the call's pool. A point whose every replicate collapsed is a row with
-/// no leaf; the run exits with `FILTER_FAILED` only when every point did.
+/// on the call's pool. A replicate that scores `-inf` or returns an error
+/// fails, and a point whose every replicate failed is a row with no leaf; the
+/// run exits with `FILTER_FAILED` only when every point did.
 fn score_design(
     scorer: &PointScorer<'_>,
     points: &[(usize, crate::sweep::DesignPoint)],
@@ -641,16 +642,19 @@ fn score_design(
     for c in &columns {
         table.push_str(&format!("\tsweep:{c}"));
     }
-    table.push_str("\tloglik\tloglik_sd\tn_collapsed\trun_id\n");
+    table.push_str("\tloglik\tloglik_sd\tn_failed\tfailure\trun_id\n");
     for ((point_id, point), score) in points.iter().zip(&scores) {
         table.push_str(&point_id.to_string());
         for (_, v) in point {
             table.push_str(&format!("\t{v}"));
         }
-        let sd = score.loglik_sd.map(|sd| sd.to_string()).unwrap_or_default();
+        // A spread over replicates that include a failed one is not a number.
+        let sd = score.loglik_sd.filter(|_| score.n_failed == 0)
+            .map(|sd| sd.to_string()).unwrap_or_default();
+        let failure = score.failure.as_deref().map(one_line).unwrap_or_default();
         let run_id = score.leaf.as_ref().map(|h| h.to_hex()).unwrap_or_default();
         // The shortest round-trip form, so a value read back is the one stored.
-        table.push_str(&format!("\t{}\t{sd}\t{}\t{run_id}\n", score.loglik, score.n_collapsed));
+        table.push_str(&format!("\t{}\t{sd}\t{}\t{failure}\t{run_id}\n", score.loglik, score.n_failed));
     }
     match output {
         Some(path) => {
@@ -661,20 +665,40 @@ fn score_design(
         None => out.data_raw(&table),
     }
 
-    let collapsed: Vec<&PointScore> = scores.iter().filter(|s| s.every_replicate_collapsed()).collect();
-    if let Some(first) = collapsed.first() {
-        let message = first.first_collapse.as_deref().unwrap_or_default();
-        let message = message.strip_prefix("error: ").unwrap_or(message);
-        if collapsed.len() == n_points {
+    let failed: Vec<&PointScore> = scores.iter().filter(|s| s.every_replicate_failed()).collect();
+    if let Some(first) = failed.first() {
+        let message = one_line(first.failure.as_deref().unwrap_or_default());
+        if failed.len() == n_points {
             out.error(filter_failed(format!(
-                "error: every one of the {n_points} design points collapsed (every replicate \
-                 scored -inf); the first: {message}"))).exit();
+                "error: every one of the {n_points} design points failed (every replicate \
+                 scored -inf or stopped with an error); the first: {message}"))).exit();
         }
         out.say(format_args!(
-            "warning: {} of {n_points} design points collapsed (every replicate scored \
-             -inf), so they have no leaf; the first: {message}",
-            collapsed.len()));
+            "warning: {} of {n_points} design points failed (every replicate scored -inf \
+             or stopped with an error), so they have no leaf; the first: {message}",
+            failed.len()));
     }
+}
+
+/// A filter error as a design table reports it. The text depends only on the
+/// point's inputs: a degeneracy error leaves out the wall-clock time it
+/// carries, so a rerun of the same design writes the same bytes.
+fn design_failure_text(e: &sim::SimError) -> String {
+    match e {
+        sim::SimError::PFDegenerate { kind, obs_window, .. } =>
+            format!("particle filter degeneracy ({kind:?}) at obs_window {obs_window}"),
+        other => other.to_string(),
+    }
+}
+
+/// A failure message as one cell of a table: without the `error: ` the
+/// command prints before it, and with each tab and newline replaced by a
+/// space.
+fn one_line(message: &str) -> String {
+    message.strip_prefix("error: ").unwrap_or(message)
+        .chars()
+        .map(|c| if matches!(c, '\t' | '\n' | '\r') { ' ' } else { c })
+        .collect()
 }
 
 /// Run a closure on the scoped pool if one was built, else on the global pool
@@ -749,11 +773,11 @@ struct PointScore {
     loglik: f64,
     /// The standard deviation over replicates; `None` for a single run.
     loglik_sd: Option<f64>,
-    /// How many replicates collapsed (every particle scored `-inf` at some
-    /// observation).
-    n_collapsed: usize,
-    /// The collapse message of the first replicate that collapsed.
-    first_collapse: Option<String>,
+    /// How many replicates failed: scored `-inf` (every particle's weight
+    /// zero at some observation) or, at a design point, returned an error.
+    n_failed: usize,
+    /// The message of the first replicate that failed.
+    failure: Option<String>,
     /// The stored leaf: written by this call or found already stored. `None`
     /// when every replicate collapsed, under `--no-store`, or when the store
     /// did not record it.
@@ -763,9 +787,9 @@ struct PointScore {
 }
 
 impl PointScore {
-    /// Every replicate collapsed, so the point has no likelihood and no leaf.
-    fn every_replicate_collapsed(&self) -> bool {
-        self.n_collapsed > 0 && self.n_collapsed == self.replicate_logliks.len()
+    /// Every replicate failed, so the point has no likelihood and no leaf.
+    fn every_replicate_failed(&self) -> bool {
+        self.n_failed > 0 && self.n_failed == self.replicate_logliks.len()
     }
 }
 
@@ -775,8 +799,10 @@ impl PointScore {
 /// single-run outputs, and store the result as a `Pfilter` leaf.
 ///
 /// `before_store` is called with the score before the leaf is written, unless
-/// every replicate collapsed, in which case no leaf is written. A refusal of
-/// the inputs, or a filter that returns an error, ends the process.
+/// every replicate failed, in which case no leaf is written. A refusal of the
+/// inputs ends the process. A filter that returns an error ends it too for the
+/// single call; at a design point the replicate fails, and the point, which a
+/// single call could not store, writes no leaf.
 fn score_point(
     scorer: &PointScorer<'_>,
     overrides: &[(String, f64)],
@@ -1319,14 +1345,26 @@ fn score_point(
             crate::out::progress::Reporter::new().task(n_replicates as u64, "pfilter", "reps")
         });
         let acc = std::sync::Mutex::new((0.0_f64, 0usize)); // (Σ loglik, count)
-        let (logliks, collapses): (Vec<f64>, Vec<Option<String>>) = run_pooled(pf_pool, || {
+        let replicates: Vec<(f64, Option<String>, bool)> = run_pooled(pf_pool, || {
             (0..n_replicates).into_par_iter().map(|rep| {
                 let rep_seed = seed.wrapping_add((rep as u64).wrapping_mul(SEED_STRIDE));
-                let result = bootstrap_filter(
+                let result = match bootstrap_filter(
                     &process, &obs_model, &params, &smc_config, rep_seed,
-                ).unwrap_or_else(|e| {
-                    out.error(filter_failed(format!("pfilter replicate {} error: {:?}", rep + 1, e))).exit();
-                });
+                ) {
+                    Ok(result) => result,
+                    Err(e) => match role {
+                        PointRole::Single => {
+                            out.error(filter_failed(format!("pfilter replicate {} error: {:?}", rep + 1, e))).exit();
+                        }
+                        // At a design point the error is a property of the
+                        // point's values: the replicate fails and the run
+                        // goes on.
+                        PointRole::Design { .. } => {
+                            return (f64::NEG_INFINITY, Some(format!(
+                                "pfilter replicate {} error: {}", rep + 1, design_failure_text(&e))), true);
+                        }
+                    },
+                };
                 // The replicate is added to the running mean before its count
                 // is ticked, so the line printed at the last count names the
                 // mean of every finite replicate (the sibling of gh#1269).
@@ -1339,29 +1377,34 @@ fn score_point(
                     }
                 }
                 if let Some(bar) = bar.as_ref() { bar.inc(1); }
-                (result.log_likelihood, collapse_message(&result))
-            }).unzip()
+                (result.log_likelihood, collapse_message(&result), false)
+            }).collect()
         });
+        let errored = replicates.iter().any(|(_, _, e)| *e);
+        let (logliks, failures): (Vec<f64>, Vec<Option<String>>) =
+            replicates.into_iter().map(|(ll, f, _)| (ll, f)).unzip();
         if let Some(bar) = bar { bar.finish(); }
 
-        // Every replicate lost all its weight: the filter rejects these
-        // parameters, there is no likelihood to store, and the caller reports
-        // the collapse. When only some replicates collapsed, the mean is still
-        // `-inf`, and is stored.
-        let n_collapsed = collapses.iter().flatten().count();
-        let first_collapse = collapses.iter().flatten().next().cloned();
+        // Every replicate failed: the filter rejects these parameters, there
+        // is no likelihood to store, and the caller reports the failure. When
+        // only some replicates scored `-inf`, the mean is still `-inf`, and is
+        // stored. A replicate that returned an error stores nothing: the
+        // single call at these values exits on that error, so a leaf here
+        // would be one no single call writes.
+        let n_failed = failures.iter().flatten().count();
+        let failure = failures.iter().flatten().next().cloned();
         let mean_ll = logliks.iter().sum::<f64>() / n_replicates as f64;
         let var_ll = logliks.iter().map(|&l| (l - mean_ll).powi(2)).sum::<f64>() / (n_replicates - 1) as f64;
         let sd_ll = var_ll.sqrt();
         let mut score = PointScore {
             loglik: mean_ll,
             loglik_sd: Some(sd_ll),
-            n_collapsed,
-            first_collapse,
+            n_failed,
+            failure,
             leaf: None,
             replicate_logliks: logliks,
         };
-        if score.every_replicate_collapsed() {
+        if score.every_replicate_failed() || errored {
             return score;
         }
         before_store(&score);
@@ -1373,13 +1416,26 @@ fn score_point(
     // gh#audit-H13: run on the scoped pool so --parallel throttles the
     // particle-level parallelism inside bootstrap_filter (par_iter_mut over
     // the swarm).
-    let result = run_pooled(pf_pool, || {
-        bootstrap_filter(
-            &process, &obs_model, &params, &smc_config, seed,
-        ).unwrap_or_else(|e| {
-            out.error(filter_failed(format!("pfilter error: {}", crate::util::sim_error_text(&e)))).exit();
-        })
-    });
+    let result = match run_pooled(pf_pool, || {
+        bootstrap_filter(&process, &obs_model, &params, &smc_config, seed)
+    }) {
+        Ok(result) => result,
+        Err(e) => {
+            match role {
+                PointRole::Single => out.error(filter_failed(format!(
+                    "pfilter error: {}", crate::util::sim_error_text(&e)))).exit(),
+                // A failed replicate at a design point, as in the loop above.
+                PointRole::Design { .. } => return PointScore {
+                    loglik: f64::NEG_INFINITY,
+                    loglik_sd: None,
+                    n_failed: 1,
+                    failure: Some(format!("pfilter error: {}", design_failure_text(&e))),
+                    leaf: None,
+                    replicate_logliks: vec![f64::NEG_INFINITY],
+                },
+            }
+        }
+    };
 
     // Write trace diagnostics
     if let Some(ref path) = trace_path {
@@ -1616,16 +1672,16 @@ fn score_point(
     // the diagnostic outputs above (`--trace`'s `ll_increment`, `--pf-health`)
     // are written, and the caller reports the cause. Storing the `-inf` would
     // make the identical rerun a cache hit that says nothing about why.
-    let first_collapse = collapse_message(&result);
+    let failure = collapse_message(&result);
     let mut score = PointScore {
         loglik: result.log_likelihood,
         loglik_sd: None,
-        n_collapsed: usize::from(first_collapse.is_some()),
-        first_collapse,
+        n_failed: usize::from(failure.is_some()),
+        failure,
         leaf: None,
         replicate_logliks: vec![result.log_likelihood],
     };
-    if score.every_replicate_collapsed() {
+    if score.every_replicate_failed() {
         return score;
     }
     before_store(&score);
