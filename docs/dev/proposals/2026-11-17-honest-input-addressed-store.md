@@ -1,7 +1,9 @@
 # Making the run store honestly input-addressed
 
 Status: Accepted — reviewed against the code and by two external design reviews;
-every design question is decided. Phases 1 and 2 are being implemented.
+every design question is decided. Phases 1 and 2 are being implemented. Phase 3
+and the named follow-up, the fit's typed identity, are superseded by
+`2026-11-20-run-store-api.md`.
 
 **Scope:** three phases. Phase 1 closes the known correctness holes. Phase 2
 separates a computation's result from its executions. Phase 3 builds a minimal
