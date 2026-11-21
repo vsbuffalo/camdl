@@ -527,7 +527,7 @@ pub struct CamdlEnv {
     #[env("CAMDL_EVAL_UNRESOLVED")]         #[input(identity)] pub eval_unresolved: bool,
     #[env("CAMDL_NO_BINDING_CACHE")]        #[input(identity)] pub no_binding_cache: bool,
     #[env(prefix = "CAMDL_EXPERIMENTAL_")]  #[input(identity)] pub experimental: BTreeMap<String, String>,
-    #[env("CAMDL_OUTPUT_DIR")]              #[input(store)]    pub output_dir: Option<PathBuf>,
+    #[env("CAMDL_STORE")]                   #[input(store)]    pub store: Option<PathBuf>,
 }
 
 /// Implemented by #[derive(EnvInputs)].
@@ -549,8 +549,8 @@ pub type EnvParts<E> = (<E as EnvInputs>::Identity, <E as EnvInputs>::Execution,
 
 For `CamdlEnv` the derive generates `CamdlEnvIdentity` (the three identity
 fields, public, with `#[derive(Identity)]` and the tag `camdl_env`),
-`CamdlEnvRequest` (`output_dir`, private, with `into_parts`), and an `Execution`
-of `()`. Every variable is parsed by one rule, by its field's type:
+`CamdlEnvRequest` (`store`, private, with `into_parts`), and an `Execution` of
+`()`. Every variable is parsed by one rule, by its field's type:
 
 - **A `bool` variable is true when the variable is set,** whatever its value,
   the empty string and `0` included.
@@ -1163,7 +1163,7 @@ impl StoreRequest {
     pub fn new(label: Option<String>, force: bool, root: Option<PathBuf>) -> Self;
     /// Each value given in `self` wins over `other`'s; `force` is true if either is.
     pub fn merge(self, other: StoreRequest) -> StoreRequest;
-    /// The given root, else the default `./results`.
+    /// The given root, else the default `./camdl-store`.
     pub fn root(&self) -> PathBuf;
     pub fn reuse(&self) -> Reuse;                  // Force when force was asked for
     pub fn label(&self) -> Option<&str>;
@@ -3096,7 +3096,7 @@ Every way camdl stores results today can be written with `Layout::in_kind`,
 `Layout::inside`, `group` and the result label. This section shows each case:
 the command, the layout, and the tree it makes. The names are invented but
 consistent with one another, and every tree starts in camdl's build directory,
-`results/0.1.0_ce78a5e-4b1f07d2a9e3/`, written `<build>/`: camdl
+`camdl-store/0.1.0_ce78a5e-4b1f07d2a9e3/`, written `<build>/`: camdl
 `0.1.0+ce78a5e`, sanitised, and 12 hex digits of the ambient key.
 
 | Kind              | Today's levels                                                                                                                                                                                                                                              | The proposal's groups, then the result label                                            | What differs                                                                                                                                           |
@@ -3487,7 +3487,7 @@ pub struct SimulateArgs {
                                               pub parallel: usize,
     #[arg(long)] #[input(store)]              pub force: bool,
     #[arg(long)] #[input(store)]              pub label: Option<String>,
-    #[arg(long)] #[input(store)]              pub output_dir: Option<PathBuf>,
+    #[arg(long)] #[input(store)]              pub store: Option<PathBuf>,
     #[arg(long)] #[input(skip)]               pub quiet: bool,
 }
 ```
@@ -3757,10 +3757,10 @@ The library places `Obs` and `EventLog` inside their upstream's folder.
 ```rust
 pub fn simulate(args: SimulateArgs, ambient: Build<Engine>, env: StoreRequest) -> Result<()> {
     let (declared, execution, exports, request, given) = args.split().into_parts();
-    let (force, label, output_dir) = request.into_parts();
+    let (force, label, root)      = request.into_parts();
     let (output, dates)            = exports.into_parts();
 
-    let request = StoreRequest::new(label, force, output_dir).merge(env);   // a flag wins over the environment
+    let request = StoreRequest::new(label, force, root).merge(env);   // a flag wins over the environment
     let reuse   = request.reuse();
     let store   = Store::open(&request.root(), ambient, camdl_top_level(), camdl_kinds())?;
     let info    = RunInfo::new(&given, &execution, &request)?;
@@ -3828,9 +3828,9 @@ pub fn simulate(run: &mut Run<Sim>, execution: &SimulateExecution) -> Result<()>
 in this sketch, and derives `Serialize`. `SimulateExports::into_parts` returns
 `(Option<ExportPath>, bool)`, the `-o` path and `--dates`;
 `SimulateRequest::into_parts` returns `(bool, Option<String>, Option<PathBuf>)`,
-`--force`, `--label` and `--output-dir`, in declaration order. A failed cell
-leaves the others computed and stored, so a rerun of the same command computes
-only the cells that failed.
+`--force`, `--label` and `--store`, in declaration order. A failed cell leaves
+the others computed and stored, so a rerun of the same command computes only the
+cells that failed.
 
 The engine takes the model and every setting from the run. It never sees the
 arguments or the labels, so what ran cannot differ from what was hashed.
@@ -3847,7 +3847,7 @@ always writes it, so it is an ordinary result file of the cell.
 ### 6. What lands in the store
 
 ```text
-results/
+camdl-store/
   store.json                                # { "format": 1, "top_level": "by_build" }
   0.1.0_ce78a5e-4b1f07d2a9e3/               # the build: camdl 0.1.0+ce78a5e, sanitised
     compiled_model/
@@ -3984,7 +3984,7 @@ pub struct FitToml {
     #[input(identity)] pub ic_free: Option<bool>,
     #[input(group)]    pub method: Option<MethodSpec>,             // algorithm, with its backend and settings; starts
     #[input(expands)]  pub fit_seeds: Option<Vec<u64>>,
-    #[input(store)]    pub output_dir: Option<String>,
+    #[input(store)]    pub store: Option<String>,
     #[input(recorded)] pub provenance: Option<FitProvenance>,
 }
 
@@ -4071,8 +4071,8 @@ flattened group of its own, and each is classified in `FIT_RUN`
 refuse an old spelling are left out of the sketch.
 
 - **`backend` is a key of `[method]`, and `dt` is in `[config]`.** `fit run` has
-  no `--dt` and no `--output-dir`; the store root comes from the file's
-  `output_dir`, then the environment, then the default.
+  no `--dt` and no `--store`; the store root comes from the file's `store` key,
+  then the environment, then the default.
 - **The method flags are a group,** `FitMethodFlags`, which `Method::merge`
   takes whole with the file's `[method]` table, each flag overriding one key.
 - **`--seed` with `fit_seeds` in the file is refused**
@@ -4306,10 +4306,10 @@ pub fn fit_run(args: FitRunArgs, ambient: Build<Engine>, env: StoreRequest) -> R
 
     // Every part of the file. fit.toml has no execution keys, so that part is the unit type.
     let (file, (), file_request, file_given, source) = config.parse()?.into_parts();
-    let (output_dir,) = file_request.into_parts();
+    let (root,) = file_request.into_parts();
 
-    // The root: the file's output_dir, then the environment, then the default.
-    let request = StoreRequest::new(label, force, output_dir.map(PathBuf::from)).merge(env);
+    // The root: the file's store key, then the environment, then the default.
+    let request = StoreRequest::new(label, force, root.map(PathBuf::from)).merge(env);
     let reuse   = request.reuse();
     let given   = given.with_file("config", file_given, &source);
     let store   = Store::open(&request.root(), ambient, camdl_top_level(), camdl_kinds())?;
@@ -4410,7 +4410,7 @@ impl FitPlan {
 is `{ pub allow_nonconverged_source: bool, pub parallel: usize }`. It derives
 `Serialize`. `FitRunRequest::into_parts` returns `(bool, Option<String>)`,
 `--force` and `--label`, in declaration order; the file's request part returns
-`(Option<String>,)`, its `output_dir`. A rerun of the same command computes only
+`(Option<String>,)`, its `store` key. A rerun of the same command computes only
 the problems and runs that are not stored.
 
 `write_problem` writes the training rows, the tables and the resolved settings
@@ -4454,7 +4454,7 @@ pub fn fit(run: &mut Run<FitRun>, execution: &FitRunExecution) -> Result<()> {
 ### 6. What lands in the store
 
 ```text
-results/
+camdl-store/
   0.1.0_ce78a5e-4b1f07d2a9e3/                 # the build
     compiled_model/
       seir-5d27e0b9a3c1/model.ir.json         # the ordinary compile
@@ -4976,6 +4976,14 @@ again.
 During the transition each command uses exactly one store: a command that has
 not moved keeps the old code and the old root.
 
+The new store has a root of its own, `camdl-store/`, chosen by `--store`, the
+fit file's `store` key or `CAMDL_STORE`. The old root stays `results/`, chosen
+by `--output-dir`, the fit file's `output_dir` or `CAMDL_OUTPUT_DIR`. The two
+never share a directory: `Store::open` refuses a non-empty directory without a
+`store.json`, and under `TopLevel::ByBuild` the store reads every directory at
+its root as a build. A moved command accepts only the new inputs. The old ones
+are deleted with `runid` in the last step, and the new root does not move again.
+
 1. The new `store` and `store-derive` crates, with the lifecycle carried over
    and its tests, beside `runid`. They hold no camdl types. The input derive is
    written fresh here; no earlier branch of it is merged.
@@ -5325,7 +5333,7 @@ Stored<A>  --dep()-->  Dep<A>  -->  a field of the next result's Identity
 | Trait or type                    | What it is                                                                                       | camdl example                                                                |
 | -------------------------------- | ------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------- |
 | `Store`                          | The only code that reads or writes stored folders. One root per command                          | `Store::open(&root, ambient, camdl_top_level(), camdl_kinds())`              |
-| `StoreRequest`                   | The store-class inputs merged from every source: label, force, root                              | `--label`, `--force`, `output_dir`                                           |
+| `StoreRequest`                   | The store-class inputs merged from every source: label, force, root                              | `--label`, `--force`, `--store`                                              |
 | `RunInfo`                        | What every result of one command records; owns the invocation record                             | built once in `simulate`, by reference                                       |
 | `Lineage`                        | An upstream recorded and not hashed                                                              | `simulate --fit`'s draws                                                     |
 | `Begin<A>`, `Reuse`              | The answer to "may I compute this": reused, busy, or claimed                                     |                                                                              |
