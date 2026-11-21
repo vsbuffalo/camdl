@@ -442,11 +442,24 @@ fn execution_time_format() {
     }
 }
 
+/// One filter pass on `sir.ir.json` costs exactly 400 particle-substeps
+/// (twenty particles, twenty one-day windows at `dt = 1`), and each replicate
+/// is its own pass. A budget of 400 is the tightest that admits the run, and
+/// it stores what the default budget stores. A budget of 399 is refused with
+/// exit status 3 before the last window and stores no leaf. So the budget
+/// decides only whether a run is refused, and a run it admits is the same run.
 #[test]
 fn execution_pf_max_substeps() {
     let fx = fx();
     for b in bases(&fx) {
         assert_same(&b, &b.with(&["--pf-max-substeps", "100000000"]));
+        assert_same(&b, &b.with(&["--pf-max-substeps", "400"]));
+        let store = tempfile::tempdir().unwrap();
+        let out = run_in(store.path(), &b.with(&["--pf-max-substeps", "399"]));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(3), "a budget below the pass's cost is refused:\n{stderr}");
+        assert!(stderr.contains("PFIterationBudget"), "the refusal names the budget:\n{stderr}");
+        assert!(leaves(store.path()).is_empty(), "a refused run stores no leaf");
     }
 }
 
