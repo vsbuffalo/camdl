@@ -668,11 +668,19 @@ fn a_resume_sits_beside_its_base_and_a_config_file_names_no_run() {
     assert_eq!(listed.len(), 1, "the refusal lists the one run the file made:\n{err}");
 }
 
-/// The bytes each method computes, as the old store held them for the same
-/// fit at seed 7: the digest of each result file of the run, with every line
-/// naming the build (`0.1.0+<commit>`) and `mle_params.toml`'s `fit_hash`
-/// (the problem's id, which the run store keys differently) dropped. A
-/// chain's `resume_state.bin` is left out: it holds the chain's identity.
+/// The bytes each method computes for the same fit at seed 7: the digest of
+/// each result file of the run, with every line naming the build
+/// (`0.1.0+<commit>`) and `mle_params.toml`'s `fit_hash` (the problem's id,
+/// which the run store keys differently) dropped. A chain's
+/// `resume_state.bin` is left out: it holds the chain's identity.
+///
+/// The pins are a regression pin per platform, keyed by `target_os` and
+/// `target_arch`, because the digests depend on the platform's libm (`ln`,
+/// `exp` and `lgamma` differ in their last bits between macOS and glibc). That
+/// the move onto the run store left these bytes unchanged was checked on macOS
+/// arm64 and on linux arm64, each against the code from before the move; linux
+/// x86-64 computes the linux arm64 bytes. On a platform with no pins the test
+/// fails and prints the table to add.
 #[test]
 fn each_method_computes_what_it_computed_before_the_move() {
     use sha2::{Digest, Sha256};
@@ -714,87 +722,195 @@ fn each_method_computes_what_it_computed_before_the_move() {
         let dir = run_folders(&store).into_iter().next().unwrap();
         got.insert(m.to_string(), digests(&dir));
     }
-    let want = pinned_digests();
+    let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
+    let Some(want) = pinned_digests(os, arch) else {
+        let name = format!("{}_{}", os, arch).to_uppercase();
+        panic!(
+            "no digests are pinned for {os}/{arch}; this platform computed the table below. \
+             Add it, and the row ((\"{os}\", \"{arch}\"), {name}) to PINS:\n\n{}",
+            render_pins(&name, &got)
+        );
+    };
     assert_eq!(got, want, "the files each method computes moved");
 }
 
-/// The digests of [`each_method_computes_what_it_computed_before_the_move`],
-/// taken from the old store's runs of the same fixtures.
-fn pinned_digests() -> BTreeMap<String, BTreeMap<String, String>> {
-    let pinned: &[(&str, &[(&str, &str)])] = &[
-        ("if2", &[
-            ("chain_0/final_params.toml", "b97b9ff5f353bf92"),
-            ("chain_0/parameter_traces.tsv", "cb84c128fdcbc9a3"),
-            ("chain_1/final_params.toml", "35f27452398c553f"),
-            ("chain_1/parameter_traces.tsv", "5e73e9296f17cebb"),
-            ("chain_evaluations.tsv", "2923ff37b508ffb3"),
-            ("chain_starts.tsv", "292f106ae1b81126"),
-            ("diagnostics.json", "5cd12af2ed706bbe"),
-            ("diagnostics.tsv", "f71d947e76c79190"),
-            ("final_params.toml", "a0dab3f9637a3c9a"),
-            ("fit_state.toml", "6e9941f83e6d8e7d"),
-            ("mle_params.toml", "f5d9f997522c36f9"),
-        ]),
-        ("pgas", &[
-            ("chain_0/trace.tsv", "3521d6750b3cc250"),
-            ("chain_0/trajectories.json", "eeaadccdfd0124cf"),
-            ("chain_0/trajectories.tsv", "4f929cad9a282ccc"),
-            ("chain_1/trace.tsv", "c17427750ba594be"),
-            ("chain_1/trajectories.json", "eeaadccdfd0124cf"),
-            ("chain_1/trajectories.tsv", "5ec1beba0b8ee3b0"),
-            ("chain_starts.tsv", "292f106ae1b81126"),
-            ("cross_chain_compat.json", "3e24690854c0a743"),
-            ("diagnostics.json", "04729676dd7c5f4f"),
-            ("draws.tsv", "79b665a9f1d748eb"),
-            ("filter_ess.tsv", "554688ea3f8badab"),
-            ("fit_state.toml", "e67fddbcdf771833"),
-            ("pgas_summary.json", "bbdcb6daca32e217"),
-        ]),
-        ("pmmh", &[
-            ("chain_0/trace.tsv", "92443daae545beb8"),
-            ("chain_1/trace.tsv", "db2aa4819183236f"),
-            ("chain_starts.tsv", "292f106ae1b81126"),
-            ("diagnostics.json", "4f53cda18c2baa0c"),
-            ("draws.tsv", "5994b706bd37af2b"),
-            ("fit_state.toml", "6c55b85981879ba8"),
-            ("pmmh_summary.json", "2be2a76600467f11"),
-        ]),
-        ("pfilter", &[
-            ("logliks.tsv", "a6ad8f50f8dc90c0"),
-            ("prequential.json", "5e41e81e467a7023"),
-            ("prequential.streams.tsv", "ef3604651959eab8"),
-            ("prequential.tsv", "c7945ecb9f5cc355"),
-        ]),
-        ("mh", &[
-            ("chain_0/trace.tsv", "eca3a76177c94127"),
-            ("chain_1/trace.tsv", "4fd257df73bd1dfc"),
-            ("chain_starts.tsv", "292f106ae1b81126"),
-            ("diagnostics.json", "e06e1a6aedf33167"),
-            ("draws.tsv", "fa9f7eec64e9b83d"),
-            ("fit_state.toml", "378f1260aac7388e"),
-            ("mh_summary.json", "73bd43f302f43a55"),
-        ]),
-        ("sbplx", &[
-            ("chain_results.tsv", "dbdead979318df7d"),
-            ("diagnostics.json", "4f53cda18c2baa0c"),
-            ("fit_state.toml", "e7280a7cdba437eb"),
-            ("mle_params.toml", "f06eaf34fa4e5387"),
-        ]),
-        ("bobyqa", &[
-            ("chain_results.tsv", "fffd90043409d23a"),
-            ("diagnostics.json", "4f53cda18c2baa0c"),
-            ("fit_state.toml", "b3f101419aae03fc"),
-            ("mle_params.toml", "6f5a3579b4a08831"),
-        ]),
-        ("lbfgs", &[
-            ("chain_results.tsv", "4db4a4b639626dc1"),
-            ("diagnostics.json", "4f53cda18c2baa0c"),
-            ("fit_state.toml", "9fbc652a646888de"),
-            ("mle_params.toml", "17f314a510b3923f"),
-        ]),
-    ];
-    pinned.iter().map(|(m, fs)| (m.to_string(), fs.iter().map(|(f, d)| (f.to_string(), d.to_string())).collect())).collect()
+/// A method's pinned files: `(file, digest)`, per method.
+type Pins = &'static [(&'static str, &'static [(&'static str, &'static str)])];
+
+/// The pins of [`each_method_computes_what_it_computed_before_the_move`], per
+/// `(target_os, target_arch)`.
+const PINS: &[((&str, &str), Pins)] = &[
+    (("macos", "aarch64"), MACOS_AARCH64),
+    (("linux", "aarch64"), LINUX),
+    (("linux", "x86_64"), LINUX),
+];
+
+fn pinned_digests(os: &str, arch: &str) -> Option<BTreeMap<String, BTreeMap<String, String>>> {
+    let (_, pinned) = PINS.iter().find(|((o, a), _)| *o == os && *a == arch)?;
+    Some(pinned.iter().map(|(m, fs)| (m.to_string(), fs.iter().map(|(f, d)| (f.to_string(), d.to_string())).collect())).collect())
 }
+
+/// `got` as the Rust source of a pin table named `name`.
+fn render_pins(name: &str, got: &BTreeMap<String, BTreeMap<String, String>>) -> String {
+    let mut s = format!("const {name}: Pins = &[\n");
+    for (m, fs) in got {
+        s += &format!("    (\"{m}\", &[\n");
+        for (f, d) in fs {
+            s += &format!("        (\"{f}\", \"{d}\"),\n");
+        }
+        s += "    ]),\n";
+    }
+    s + "];\n"
+}
+
+/// macOS arm64: taken from the old store's runs of the same fixtures.
+const MACOS_AARCH64: Pins = &[
+    ("if2", &[
+        ("chain_0/final_params.toml", "b97b9ff5f353bf92"),
+        ("chain_0/parameter_traces.tsv", "cb84c128fdcbc9a3"),
+        ("chain_1/final_params.toml", "35f27452398c553f"),
+        ("chain_1/parameter_traces.tsv", "5e73e9296f17cebb"),
+        ("chain_evaluations.tsv", "2923ff37b508ffb3"),
+        ("chain_starts.tsv", "292f106ae1b81126"),
+        ("diagnostics.json", "5cd12af2ed706bbe"),
+        ("diagnostics.tsv", "f71d947e76c79190"),
+        ("final_params.toml", "a0dab3f9637a3c9a"),
+        ("fit_state.toml", "6e9941f83e6d8e7d"),
+        ("mle_params.toml", "f5d9f997522c36f9"),
+    ]),
+    ("pgas", &[
+        ("chain_0/trace.tsv", "3521d6750b3cc250"),
+        ("chain_0/trajectories.json", "eeaadccdfd0124cf"),
+        ("chain_0/trajectories.tsv", "4f929cad9a282ccc"),
+        ("chain_1/trace.tsv", "c17427750ba594be"),
+        ("chain_1/trajectories.json", "eeaadccdfd0124cf"),
+        ("chain_1/trajectories.tsv", "5ec1beba0b8ee3b0"),
+        ("chain_starts.tsv", "292f106ae1b81126"),
+        ("cross_chain_compat.json", "3e24690854c0a743"),
+        ("diagnostics.json", "04729676dd7c5f4f"),
+        ("draws.tsv", "79b665a9f1d748eb"),
+        ("filter_ess.tsv", "554688ea3f8badab"),
+        ("fit_state.toml", "e67fddbcdf771833"),
+        ("pgas_summary.json", "bbdcb6daca32e217"),
+    ]),
+    ("pmmh", &[
+        ("chain_0/trace.tsv", "92443daae545beb8"),
+        ("chain_1/trace.tsv", "db2aa4819183236f"),
+        ("chain_starts.tsv", "292f106ae1b81126"),
+        ("diagnostics.json", "4f53cda18c2baa0c"),
+        ("draws.tsv", "5994b706bd37af2b"),
+        ("fit_state.toml", "6c55b85981879ba8"),
+        ("pmmh_summary.json", "2be2a76600467f11"),
+    ]),
+    ("pfilter", &[
+        ("logliks.tsv", "a6ad8f50f8dc90c0"),
+        ("prequential.json", "5e41e81e467a7023"),
+        ("prequential.streams.tsv", "ef3604651959eab8"),
+        ("prequential.tsv", "c7945ecb9f5cc355"),
+    ]),
+    ("mh", &[
+        ("chain_0/trace.tsv", "eca3a76177c94127"),
+        ("chain_1/trace.tsv", "4fd257df73bd1dfc"),
+        ("chain_starts.tsv", "292f106ae1b81126"),
+        ("diagnostics.json", "e06e1a6aedf33167"),
+        ("draws.tsv", "fa9f7eec64e9b83d"),
+        ("fit_state.toml", "378f1260aac7388e"),
+        ("mh_summary.json", "73bd43f302f43a55"),
+    ]),
+    ("sbplx", &[
+        ("chain_results.tsv", "dbdead979318df7d"),
+        ("diagnostics.json", "4f53cda18c2baa0c"),
+        ("fit_state.toml", "e7280a7cdba437eb"),
+        ("mle_params.toml", "f06eaf34fa4e5387"),
+    ]),
+    ("bobyqa", &[
+        ("chain_results.tsv", "fffd90043409d23a"),
+        ("diagnostics.json", "4f53cda18c2baa0c"),
+        ("fit_state.toml", "b3f101419aae03fc"),
+        ("mle_params.toml", "6f5a3579b4a08831"),
+    ]),
+    ("lbfgs", &[
+        ("chain_results.tsv", "4db4a4b639626dc1"),
+        ("diagnostics.json", "4f53cda18c2baa0c"),
+        ("fit_state.toml", "9fbc652a646888de"),
+        ("mle_params.toml", "17f314a510b3923f"),
+    ]),
+];
+
+/// linux (glibc), arm64 and x86-64 alike: computed on camdl-cloud (arm64),
+/// identical before and after the move, and on GitHub CI (x86-64) after it.
+const LINUX: Pins = &[
+    ("if2", &[
+        ("chain_0/final_params.toml", "b97b9ff5f353bf92"),
+        ("chain_0/parameter_traces.tsv", "323f55f46a4e7f40"),
+        ("chain_1/final_params.toml", "35f27452398c553f"),
+        ("chain_1/parameter_traces.tsv", "1c9eca97a3bf59f4"),
+        ("chain_evaluations.tsv", "3db3458c992b13bf"),
+        ("chain_starts.tsv", "292f106ae1b81126"),
+        ("diagnostics.json", "5cd12af2ed706bbe"),
+        ("diagnostics.tsv", "f71d947e76c79190"),
+        ("final_params.toml", "a0dab3f9637a3c9a"),
+        ("fit_state.toml", "7dbe99255bc21ff9"),
+        ("mle_params.toml", "f5d9f997522c36f9"),
+    ]),
+    ("pgas", &[
+        ("chain_0/trace.tsv", "3521d6750b3cc250"),
+        ("chain_0/trajectories.json", "eeaadccdfd0124cf"),
+        ("chain_0/trajectories.tsv", "4f929cad9a282ccc"),
+        ("chain_1/trace.tsv", "c17427750ba594be"),
+        ("chain_1/trajectories.json", "eeaadccdfd0124cf"),
+        ("chain_1/trajectories.tsv", "5ec1beba0b8ee3b0"),
+        ("chain_starts.tsv", "292f106ae1b81126"),
+        ("cross_chain_compat.json", "26d6b9c7cd8be49b"),
+        ("diagnostics.json", "04729676dd7c5f4f"),
+        ("draws.tsv", "79b665a9f1d748eb"),
+        ("filter_ess.tsv", "554688ea3f8badab"),
+        ("fit_state.toml", "e67fddbcdf771833"),
+        ("pgas_summary.json", "bbdcb6daca32e217"),
+    ]),
+    ("pmmh", &[
+        ("chain_0/trace.tsv", "92443daae545beb8"),
+        ("chain_1/trace.tsv", "db2aa4819183236f"),
+        ("chain_starts.tsv", "292f106ae1b81126"),
+        ("diagnostics.json", "4f53cda18c2baa0c"),
+        ("draws.tsv", "5994b706bd37af2b"),
+        ("fit_state.toml", "6c55b85981879ba8"),
+        ("pmmh_summary.json", "2be2a76600467f11"),
+    ]),
+    ("pfilter", &[
+        ("logliks.tsv", "a6ad8f50f8dc90c0"),
+        ("prequential.json", "5e41e81e467a7023"),
+        ("prequential.streams.tsv", "ef3604651959eab8"),
+        ("prequential.tsv", "c7945ecb9f5cc355"),
+    ]),
+    ("mh", &[
+        ("chain_0/trace.tsv", "eca3a76177c94127"),
+        ("chain_1/trace.tsv", "5644bd42bb0d5684"),
+        ("chain_starts.tsv", "292f106ae1b81126"),
+        ("diagnostics.json", "e06e1a6aedf33167"),
+        ("draws.tsv", "fa9f7eec64e9b83d"),
+        ("fit_state.toml", "378f1260aac7388e"),
+        ("mh_summary.json", "73bd43f302f43a55"),
+    ]),
+    ("sbplx", &[
+        ("chain_results.tsv", "dbdead979318df7d"),
+        ("diagnostics.json", "4f53cda18c2baa0c"),
+        ("fit_state.toml", "e7280a7cdba437eb"),
+        ("mle_params.toml", "f06eaf34fa4e5387"),
+    ]),
+    ("bobyqa", &[
+        ("chain_results.tsv", "13807c14836c3048"),
+        ("diagnostics.json", "4f53cda18c2baa0c"),
+        ("fit_state.toml", "597ac41b3e837bd4"),
+        ("mle_params.toml", "6f5a3579b4a08831"),
+    ]),
+    ("lbfgs", &[
+        ("chain_results.tsv", "4db4a4b639626dc1"),
+        ("diagnostics.json", "4f53cda18c2baa0c"),
+        ("fit_state.toml", "9fbc652a646888de"),
+        ("mle_params.toml", "17f314a510b3923f"),
+    ]),
+];
 
 /// `compare` refuses, before computing, to score the held-out rows of a
 /// stored fit, which keeps their dates and not their values: a
