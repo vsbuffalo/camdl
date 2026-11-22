@@ -16,6 +16,8 @@
 //!     data shares — does NOT move, so a cosmetic emission change cannot orphan
 //!     a completed fit (the gh#653 harm, which an IR rewrite would reintroduce).
 
+mod fit_store_support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -545,16 +547,10 @@ fn run_fit(fit_toml: &Path, extra: &[&str]) -> std::process::Output {
         .expect("camdl fit run")
 }
 
-fn fit_bases(out: &Path) -> Vec<String> {
-    let mut v: Vec<String> = std::fs::read_dir(out.join("fits"))
-        .map(|d| {
-            d.flatten()
-                .filter(|e| e.path().is_dir())
-                .map(|e| e.file_name().to_string_lossy().into_owned())
-                .collect()
-        })
-        .unwrap_or_default();
-    v.sort();
+/// Every stored fit problem and fit run under the store at `out`.
+fn fit_bases(out: &Path) -> Vec<PathBuf> {
+    let mut v = fit_store_support::problems(out);
+    v.extend(fit_store_support::runs(out));
     v
 }
 
@@ -585,7 +581,7 @@ fn fit_run_without_a_synthetic_block_refuses_the_flag_and_re_keys_nothing() {
     std::fs::write(
         &fit_toml,
         format!(
-            r#"output_dir = "{out}"
+            r#"store = "{out}"
 
 [model]
 camdl = "{ir}"
@@ -610,7 +606,7 @@ prevalent = "{data}"
         String::from_utf8_lossy(&plain.stderr)
     );
     let bases_before = fit_bases(&out_dir);
-    assert_eq!(bases_before.len(), 1, "one fit base: {bases_before:?}");
+    assert_eq!(bases_before.len(), 2, "one fit problem and one run: {bases_before:?}");
 
     let flagged = run_fit(&fit_toml, &["--emit-every", "7"]);
     let stderr = String::from_utf8_lossy(&flagged.stderr);
@@ -631,7 +627,8 @@ prevalent = "{data}"
 
 /// `[synthetic]` is the one fit path the cadence reaches: it changes the data
 /// that is then FITTED. So the generated file's times change, and — because the
-/// fit hashes each training stream's bytes — the fit re-keys onto a new base.
+/// fit hashes each training stream's bytes — the fit re-keys onto a new
+/// problem and run.
 /// That is correct: the data changed.
 #[test]
 fn a_synthetic_fit_re_keys_because_the_generated_data_changed() {
@@ -646,7 +643,7 @@ fn a_synthetic_fit_re_keys_because_the_generated_data_changed() {
         std::fs::write(
             &p,
             format!(
-                r#"output_dir = "{out}"
+                r#"store = "{out}"
 
 [model]
 camdl = "{ir}"
@@ -666,8 +663,8 @@ sim_seeds = [1]
         p
     };
 
-    // Both cadences into ONE store, so "did it re-key?" is "are there two
-    // dataset-generation segments?" rather than a cross-store comparison.
+    // Both cadences into one store, so "did it re-key?" is "are there two
+    // runs?" rather than a cross-store comparison.
     let out_dir = tmp.path().join("out");
     let toml = fit_for("a", &out_dir);
 
@@ -684,34 +681,17 @@ sim_seeds = [1]
         );
     }
 
-    // The generated datasets: one `ds_NN<tag>/` directory per cadence, each
-    // holding one file per stream (gh#831).
-    let mut generated: Vec<PathBuf> = Vec::new();
-    let mut stack = vec![out_dir.clone()];
-    while let Some(d) = stack.pop() {
-        if d.file_name().map(|n| n == "data").unwrap_or(false)
-            && d.parent().map(|p| p.ends_with("synthetic")).unwrap_or(false)
-        {
-            for ds in std::fs::read_dir(&d).unwrap().flatten() {
-                let p = ds.path().join("prevalent.tsv");
-                if p.is_file() {
-                    generated.push(p);
-                }
-            }
-        }
-        if let Ok(es) = std::fs::read_dir(&d) {
-            for e in es.flatten() {
-                if e.path().is_dir() {
-                    stack.push(e.path());
-                }
-            }
-        }
-    }
+    // The generated datasets: each cadence's stored problem holds the data it
+    // generated as its training input, one file per stream.
+    let generated: Vec<PathBuf> = fit_store_support::problems(&out_dir)
+        .into_iter()
+        .map(|p| p.join("inputs/prevalent.tsv"))
+        .filter(|p| p.is_file())
+        .collect();
     // `prevalent` is the stream the override names, and its own file carries
     // only its own rows: 29 daily readings (t = 0…28 inclusive) under
-    // `prevalent=1`, and 5 (0, 7, 14, 21, 28) under `prevalent=7`. The wide
-    // file this replaced padded the sparser cadence with `NA` on a shared time
-    // column, which is why both cadences used to have 29 rows.
+    // `prevalent=1`, and 5 (0, 7, 14, 21, 28) under `prevalent=7`, with no
+    // `NA` padding onto a shared time column.
     let mut row_counts: Vec<usize> =
         generated.iter().map(|p| obs_times(p).len()).collect();
     row_counts.sort();
@@ -728,11 +708,8 @@ sim_seeds = [1]
         "the two cadences must generate different data"
     );
 
-    // …and the fit followed the data onto a distinct base. The fit-level
-    // CONTAINER is keyed on model + config before any data exists, so both
-    // cadences share it (which is why the generated files are tagged, above);
-    // the CELL fits fold the generated bytes, so they are two.
-    let cells = cell_fit_bases(&out_dir);
+    // …and the fit followed the data onto a distinct run.
+    let cells = fit_store_support::runs(&out_dir);
     assert_eq!(
         cells.len(),
         2,
@@ -755,7 +732,7 @@ fn a_synthetic_fit_refuses_an_emit_every_that_contradicts_the_declared_window() 
     std::fs::write(
         &toml,
         format!(
-            "output_dir = \"{out}\"\n\n[model]\ncamdl = \"{ir}\"\n\n[synthetic]\n\
+            "store = \"{out}\"\n\n[model]\ncamdl = \"{ir}\"\n\n[synthetic]\n\
              true_params = \"{truth}\"\nsim_seeds = [1]\n{methods}\n",
             out = tmp.path().join("out").display(),
             ir = ir.display(),
@@ -770,41 +747,4 @@ fn a_synthetic_fit_refuses_an_emit_every_that_contradicts_the_declared_window() 
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("cases") && err.contains("covers") && err.contains("closing_at(time, 7 'days)"),
         "the refusal must name the stream, its declaration and the declaration that would emit weekly: {err}");
-}
-
-/// Fit bases holding at least one `fit_method` leaf — the cell fits, as opposed
-/// to the dataset-generation container (which carries no method leaf).
-fn cell_fit_bases(out: &Path) -> Vec<String> {
-    let mut v: Vec<String> = std::fs::read_dir(out.join("fits"))
-        .map(|d| {
-            d.flatten()
-                .map(|e| e.path())
-                .filter(|p| p.is_dir() && has_method_leaf(p))
-                .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
-                .collect()
-        })
-        .unwrap_or_default();
-    v.sort();
-    v
-}
-
-fn has_method_leaf(base: &Path) -> bool {
-    let mut stack = vec![base.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(
-            &std::fs::read_to_string(d.join("run.json")).unwrap_or_default(),
-        ) {
-            if v.get("kind").and_then(|k| k.as_str()) == Some("fit_method") {
-                return true;
-            }
-        }
-        if let Ok(es) = std::fs::read_dir(&d) {
-            for e in es.flatten() {
-                if e.path().is_dir() {
-                    stack.push(e.path());
-                }
-            }
-        }
-    }
-    false
 }

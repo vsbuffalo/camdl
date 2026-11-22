@@ -11,14 +11,15 @@
 //!   extended fit has its own run id;
 //! - the checkpoint, a state a longer computation can start from, which is
 //!   never served as a completed result: it is admitted only by the
-//!   extension-free key it records (`cas::resume_guard`), and only toward a
-//!   longer target;
-//! - the completed result at a target length: an ordinary leaf, the base's
+//!   extension-free key it records, and only toward a longer target;
+//! - the completed result at a target length: an ordinary fit run, the base's
 //!   unchanged by any extension of it;
-//! - the executions that produce or extend them, recorded per leaf outside its
-//!   stored bytes.
+//! - the executions that produce or extend them, recorded per run outside its
+//!   result files.
 //!
 //! Fixture: `tests/fixtures/reporting/sir.camdl` with `cases.tsv`.
+
+mod fit_store_support;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -56,7 +57,7 @@ fn camdl(dir: &Path, args: &[&str]) -> Output {
     Command::new(bin)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDLC", camdlc)
-        .env_remove("CAMDL_OUTPUT_DIR")
+        .env("CAMDL_STORE", dir.join("store"))
         .current_dir(dir)
         .args(args)
         .output()
@@ -69,36 +70,16 @@ fn ok(out: Output, what: &str) -> String {
     stderr
 }
 
-/// The `fit_method` leaves under the work dir's store, by their run id.
+/// The fit runs in the work dir's store, by their run id.
 fn leaves(dir: &Path) -> BTreeMap<String, PathBuf> {
-    fn walk(d: &Path, out: &mut BTreeMap<String, PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(d) else { return };
-        for e in entries.flatten() {
-            let p = e.path();
-            if p.file_name().is_some_and(|n| n == ".attempts") {
-                continue;
-            }
-            if p.is_dir() {
-                walk(&p, out);
-            } else if p.file_name().is_some_and(|n| n == "run.json") {
-                let rec: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
-                if rec["kind"] == "fit_method" {
-                    out.insert(rec["run_id"].as_str().unwrap().to_string(), p.parent().unwrap().to_path_buf());
-                }
-            }
-        }
-    }
-    let mut out = BTreeMap::new();
-    walk(&dir.join("results/fits"), &mut out);
-    out
+    fit_store_support::runs(&dir.join("store")).into_iter()
+        .map(|r| (fit_store_support::run_id(&r), r))
+        .collect()
 }
 
-fn record(leaf: &Path) -> serde_json::Value {
-    serde_json::from_slice(&std::fs::read(leaf.join("run.json")).unwrap()).unwrap()
-}
-
-/// Every file under `leaf`, by relative path, with its bytes: the whole
-/// leaf, records of the attempt included, so "unchanged" means unchanged.
+/// Every file under the run folder `leaf`, by relative path, with its bytes:
+/// the whole folder, records of the attempt included, so "unchanged" means
+/// unchanged.
 fn snapshot(leaf: &Path) -> BTreeMap<String, Vec<u8>> {
     fn walk(root: &Path, d: &Path, out: &mut BTreeMap<String, Vec<u8>>) {
         for e in std::fs::read_dir(d).unwrap().flatten() {
@@ -163,18 +144,18 @@ fn extend_and_check(tag: &str, base_toml: String, longer_toml: String, base_len:
     ok(camdl(&w.0, &[&["fit", "run", "longer.toml", "--resume", &base_leaf.to_string_lossy()][..], &fit].concat()),
         "the extension");
     let after = leaves(&w.0);
-    assert_eq!(after.len(), 2, "the extension is a leaf of its own: {after:?}");
+    assert_eq!(after.len(), 2, "the extension is a run of its own: {after:?}");
 
-    // The shorter fit's leaf is unchanged, byte for byte, records of its
-    // attempt included.
-    assert_eq!(snapshot(&base_leaf), base_bytes, "extending the fit changed its base's leaf");
+    // The shorter fit's run folder is unchanged, byte for byte, records of
+    // its attempt included.
+    assert_eq!(snapshot(&base_leaf), base_bytes, "extending the fit changed its base's run");
     // It is still found under its own run id, which it still records.
     assert_eq!(after.get(&base_id), Some(&base_leaf));
-    assert_eq!(record(&base_leaf)["run_id"], base_id.as_str());
+    assert_eq!(fit_store_support::run_id(&base_leaf), base_id);
     let (long_id, long_leaf) = after.iter().find(|(id, _)| **id != base_id).unwrap();
     assert_ne!(long_leaf, &base_leaf);
-    assert_eq!(record(long_leaf)["inputs"]["resume"]["parent_run_id"], base_id.as_str());
-    assert!(record(&base_leaf)["inputs"].get("resume").is_none());
+    assert_eq!(fit_store_support::run_inputs(long_leaf)["resume"]["parent_run_id"], base_id.as_str());
+    assert!(fit_store_support::run_inputs(&base_leaf).get("resume").is_none());
     // It is not reported as the longer one: its own chain still ends below its
     // own target, its summary reads as it did, and the extension's runs on.
     assert!(last_index(&base_leaf) < base_len);
@@ -199,9 +180,9 @@ fn extending_a_pgas_fit_is_a_new_computation_and_leaves_the_shorter_fit_intact()
 
 /// A checkpoint is never served as a completed result at a target it does
 /// not match. Resuming toward a target the base has already reached would
-/// address a leaf for that target holding the base's whole chain — a
+/// address a run for that target holding the base's whole chain — a
 /// 300-step chain filed as the 200-step computation — so it is refused before
-/// any leaf is claimed; at the base's own target, the base is the result.
+/// any run is claimed; at the base's own target, the base is the result.
 #[test]
 fn resuming_to_a_target_the_base_already_reached_is_refused() {
     for (tag, base, other, len, unit) in [
@@ -218,17 +199,17 @@ fn resuming_to_a_target_the_base_already_reached_is_refused() {
             let stderr = String::from_utf8_lossy(&out.stderr);
             assert!(!out.status.success(), "{tag} {cfg}: a resume toward a reached target ran:\n{stderr}");
             assert!(stderr.contains(&format!("already holds {len} {unit}")), "{tag} {cfg}: {stderr}");
-            assert_eq!(leaves(&w.0).len(), 1, "{tag} {cfg}: a leaf was written for the refused resume");
+            assert_eq!(leaves(&w.0).len(), 1, "{tag} {cfg}: a run was written for the refused resume");
         }
     }
 }
 
 /// A resume continues a completed result, never an attempt that did not
-/// finish. A leaf whose run died before its commit (status `running`, its
-/// owner gone) can already hold chain checkpoints — each chain writes its
-/// state when it ends, before the leaf commits — and resuming from it used
-/// to commit an extension whose lineage names a run that never completed.
-/// It is refused before any leaf is claimed.
+/// finish. A run that died before its commit (status `running`, its owner
+/// gone) can already hold chain checkpoints — each chain writes its state
+/// when it ends, before the run commits — and an extension of it would name
+/// in its lineage a run that never completed. It is refused before any run
+/// is claimed.
 #[test]
 fn resuming_from_a_run_that_never_completed_is_refused() {
     for (tag, base, longer) in [("pmmh", pmmh(300), pmmh(500)), ("pgas", pgas(200), pgas(300))] {
@@ -245,7 +226,8 @@ fn resuming_from_a_run_that_never_completed_is_refused() {
         let out = camdl(&w.0, &[&["fit", "run", "longer.toml", "--resume", &base_leaf.to_string_lossy()][..], &fit].concat());
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(!out.status.success(), "{tag}: a resume from a run that never completed ran:\n{stderr}");
-        assert!(stderr.contains("is not a completed run"), "{tag}: {stderr}");
-        assert_eq!(leaves(&w.0).len(), 1, "{tag}: a leaf was written for the refused resume");
+        assert!(stderr.contains("names a fit run that did not complete and is not read")
+                && stderr.contains("was interrupted"), "{tag}: {stderr}");
+        assert_eq!(leaves(&w.0).len(), 1, "{tag}: a run was written for the refused resume");
     }
 }

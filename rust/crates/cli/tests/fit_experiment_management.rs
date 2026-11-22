@@ -1,30 +1,23 @@
-//! Integration tests for the experiment-management foundation.
+//! Integration tests for the experiment-management surface over the fit run
+//! store: `fit summary` and `fit table` on what `fit run` stored, labels, and
+//! where a fit file's relative paths resolve.
 //!
-//! Covers Deliverables A, B, and C from
-//! `docs/dev/proposals/2026-04-28-fit-experiment-management.md`:
+//! - **`fit summary` reads a real run.** Runs `fit run`, then `camdl fit
+//!   summary --format json` on the stored run, and asserts the output
+//!   contains a non-empty `methods` array.
 //!
-//! - **A — end-to-end summary walks a real `cmd_fit_run_v2` output.**
-//!   Runs the runner, then `camdl fit summary --format json`, and
-//!   asserts the output contains a non-empty `methods` array. This is
-//!   the structural defence against the v1-layout bug (audit §2.3).
-//!
-//! - **B — spec/code parity check.** Parses every fenced code block
-//!   in `docs/camdl-inference-spec.md` and `docs/inference.md` for
-//!   paths shaped `<fit_dir>/...` and asserts each one exists under
-//!   the real fit_dir produced by the runner. Fragile-but-loud: if
-//!   the spec drifts (introduces a placeholder convention the
-//!   parser doesn't understand, or documents a path the runner
-//!   doesn't produce), the test fails immediately.
-//!
-//! - **C — `summary ⊆ table` byte-equality.** Asserts that
+//! - **`summary ⊆ table` byte-equality.** Asserts that
 //!   `summary_json["table_rows"][0]` is byte-equal to
 //!   `table_json["rows"][0]` for the same fit. The two surfaces
 //!   share one schema; any field added to one without the other
 //!   makes this fail.
 //!
-//! Both tests shell out to the built `camdl` and `camdlc.exe`
-//! binaries; skipped silently when either is absent so the suite
-//! stays runnable in rust-only CI and when tests run before a build.
+//! The tests shell out to the built `camdl` and `camdlc.exe` binaries;
+//! skipped silently when camdlc is absent so the suite stays runnable in
+//! rust-only CI and when tests run before a build. Each fit file names a
+//! store of its own in a temporary directory (`store = "..."`).
+
+mod fit_store_support;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -49,14 +42,6 @@ fn camdlc_bin() -> Option<PathBuf> {
     } else {
         None
     }
-}
-
-fn repo_root() -> PathBuf {
-    // CARGO_MANIFEST_DIR for `cli` = `<workspace>/rust/crates/cli/`.
-    // Workspace root (where `docs/` lives) is three levels up.
-    let manifest = std::env::var("CARGO_MANIFEST_DIR")
-        .expect("CARGO_MANIFEST_DIR is set during cargo test");
-    PathBuf::from(manifest).join("../../..")
 }
 
 struct TempDir(PathBuf);
@@ -133,15 +118,15 @@ simulate { from = 0 'days  to = 10 'days }
     (ir_path, data_path)
 }
 
-/// Write a tiny IF2 fit.toml that runs in seconds. 2 chains, 5 iters,
-/// 50 particles — enough to populate the v2 method tree without
-/// converging on anything meaningful (Deliverable A is structural,
+/// Write a tiny IF2 fit.toml, storing into the store `store`, that runs in
+/// seconds. 2 chains, 5 iters, 50 particles — enough to store a run
+/// without converging on anything meaningful (the tests are structural,
 /// not statistical).
-fn write_fit_toml(dir: &Path, ir: &Path, data: &Path, output_dir: &Path) -> PathBuf {
+fn write_fit_toml(dir: &Path, ir: &Path, data: &Path, store: &Path) -> PathBuf {
     let fit_toml = dir.join("fit.toml");
     let body = format!(
         r#"
-output_dir = "{out}"
+store = "{out}"
 
 [model]
 camdl = "{ir}"
@@ -164,7 +149,7 @@ particles  = 50
 iterations = 5
 cooling    = 0.7
 "#,
-        out = output_dir.display(),
+        out = store.display(),
         ir = ir.display(),
         data = data.display(),
     );
@@ -172,9 +157,9 @@ cooling    = 0.7
     fit_toml
 }
 
-/// Run `camdl fit run <fit_toml>` and return the produced fit_dir
-/// (the single child of `<output_dir>/fits/`).
-fn exec_fit_run_v2(camdl: &Path, fit_toml: &Path, output_dir: &Path) -> PathBuf {
+/// Run `camdl fit run <fit_toml>` and return the one fit run it stored in
+/// `store`.
+fn exec_fit_run(camdl: &Path, fit_toml: &Path, store: &Path) -> PathBuf {
     let status = Command::new(camdl).env_remove("CLICOLOR_FORCE")
         .arg("fit")
         .arg("run")
@@ -182,24 +167,13 @@ fn exec_fit_run_v2(camdl: &Path, fit_toml: &Path, output_dir: &Path) -> PathBuf 
         .status()
         .expect("camdl fit run must invoke");
     assert!(status.success(), "camdl fit run failed");
-    let fits = output_dir.join("fits");
-    let entries: Vec<PathBuf> = std::fs::read_dir(&fits)
-        .unwrap_or_else(|_| panic!("no fits/ dir under {}", output_dir.display()))
-        .flatten()
-        .map(|e| e.path())
-        .collect();
-    assert_eq!(
-        entries.len(),
-        1,
-        "expected exactly one fit dir under {}, got {:?}",
-        fits.display(),
-        entries
-    );
-    entries.into_iter().next().unwrap()
+    fit_store_support::the_run(store)
 }
 
-fn exec_fit_summary_json(camdl: &Path, fit_dir: &Path) -> serde_json::Value {
+/// `camdl fit summary --format json` on the run `fit_dir` of the store `store`.
+fn exec_fit_summary_json(camdl: &Path, store: &Path, fit_dir: &Path) -> serde_json::Value {
     let output = Command::new(camdl).env_remove("CLICOLOR_FORCE")
+        .env("CAMDL_STORE", store)
         .arg("fit")
         .arg("summary")
         .arg(fit_dir)
@@ -222,139 +196,49 @@ fn exec_fit_summary_json(camdl: &Path, fit_dir: &Path) -> serde_json::Value {
     })
 }
 
-/// gh#147 (M3.2): the fit-level (FitDigest) hash for a CAS fit, read from any
-/// method leaf's `levels[name=="fit"].hash`. A CAS fit has no fit-wide
-/// `run.json`; this is `Run.hash` for the derived fit-level entry — the value
-/// `fit table --hash` filters on and `camdl label` resolves. Replaces the
-/// pre-M3.2 read of `<fit_dir>/run.json` `.hash`.
-fn fit_level_hash(fit_dir: &Path) -> String {
-    let mut stack = vec![fit_dir.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        let rj = d.join("run.json");
-        if rj.is_file() {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(
-                &std::fs::read_to_string(&rj).unwrap_or_default(),
-            ) {
-                if v.get("kind").and_then(|k| k.as_str()) == Some("fit_method") {
-                    if let Some(h) = v["levels"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .find(|l| l["name"].as_str() == Some("fit"))
-                        .and_then(|l| l["hash"].as_str())
-                    {
-                        return h.to_string();
-                    }
-                }
-            }
-        }
-        if let Ok(es) = std::fs::read_dir(&d) {
-            for e in es.flatten() {
-                if e.path().is_dir() {
-                    stack.push(e.path());
-                }
-            }
-        }
-    }
-    panic!("no fit_method leaf with a `fit` level under {}", fit_dir.display());
+/// The id of the fit problem a run belongs to: the row's `fit_hash` in
+/// `fit table`, which `--hash` filters on.
+fn fit_level_hash(run: &Path) -> String {
+    fit_store_support::run_inputs(run)["problem_id"].as_str().unwrap().to_string()
 }
 
-/// The one fit run under `fit_dir`: its leaf `run.json` as JSON. A fit's
-/// label names one run and lives there (gh#896).
-fn only_run(fit_dir: &Path) -> serde_json::Value {
-    let mut stack = vec![fit_dir.to_path_buf()];
-    let mut runs = Vec::new();
-    while let Some(d) = stack.pop() {
-        let rj = d.join("run.json");
-        if rj.is_file() {
-            runs.push(serde_json::from_str::<serde_json::Value>(
-                &std::fs::read_to_string(&rj).unwrap()).unwrap());
-            continue;
-        }
-        for e in std::fs::read_dir(&d).unwrap().flatten() {
-            if e.path().is_dir() {
-                stack.push(e.path());
-            }
-        }
-    }
-    assert_eq!(runs.len(), 1, "expected one run under {}", fit_dir.display());
-    runs.pop().unwrap()
+/// The label `fit table` shows for the one run under `store`.
+fn table_label(camdl: &Path, store: &Path) -> Option<String> {
+    let out = Command::new(camdl).env_remove("CLICOLOR_FORCE")
+        .arg("fit").arg("table").arg(store)
+        .arg("--format").arg("json")
+        .output().expect("camdl fit table must invoke");
+    assert!(out.status.success(), "camdl fit table failed: {}", String::from_utf8_lossy(&out.stderr));
+    let table: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let rows = table["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "one run, one row: {table}");
+    rows[0]["label"].as_str().map(String::from)
 }
 
-fn run_label(fit_dir: &Path) -> Option<String> {
-    only_run(fit_dir)["provenance"]["label"].as_str().map(String::from)
-}
+// ── `fit summary` reads a real run ─────────────────────────────────
 
-/// gh#147 (M3.2): a method leaf for `method_substr` exists under `fit_dir` at the
-/// CAS shape `<fit_dir>/<method>-<h8>/seed_<N>-<h8>/run.json` (kind
-/// `fit_method`). Returns the leaf dir. Replaces the pre-M3.2 hard-coded
-/// `<fit_dir>/real/fit_<seed>/<method>` probe.
-fn cas_method_leaf(fit_dir: &Path, method_substr: &str) -> Option<PathBuf> {
-    let mut stack = vec![fit_dir.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        let rj = d.join("run.json");
-        if rj.is_file() {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(
-                &std::fs::read_to_string(&rj).unwrap_or_default(),
-            ) {
-                if v.get("kind").and_then(|k| k.as_str()) == Some("fit_method") {
-                    let method = v["levels"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .find(|l| l["name"].as_str() == Some("method"))
-                        .and_then(|l| l["label"].as_str())
-                        .unwrap_or("");
-                    if method.contains(method_substr) {
-                        return Some(d);
-                    }
-                }
-            }
-        }
-        if let Ok(es) = std::fs::read_dir(&d) {
-            for e in es.flatten() {
-                if e.path().is_dir() {
-                    stack.push(e.path());
-                }
-            }
-        }
-    }
-    None
-}
-
-// ── Deliverable A — end-to-end summary walks v2 output ─────────────
-
-/// The structural defence against the v1-layout bug from audit §2.3
-/// (`docs/dev/notes/2026-04-27-fit-experiment-management-audit.md`):
-/// `cmd_fit_summary` shipped with a walker hard-coded to
-/// `<fit_dir>/<method>/` while `cmd_fit_run_v2` writes to
-/// `<fit_dir>/real/fit_<seed>/<method>/`. Before this test existed,
-/// the failure mode was a silent "(no MLE methods found)" on every
-/// real fit dir.
+/// `fit summary` on the run `fit run` stored reports its method: a summary
+/// that cannot find the method's results reads as "(no MLE methods found)".
 #[test]
-fn fit_summary_walks_real_fit_run_v2_output() {
+fn fit_summary_reads_a_stored_fit_run() {
     let camdl = camdl_bin();
     let Some(camdlc) = camdlc_bin() else { return };
 
     let tmp = tempdir("xpt_a");
     let (ir, data) = build_fixture(&camdlc, tmp.path());
-    let output_dir = tmp.path().join("out");
-    let fit_toml = write_fit_toml(tmp.path(), &ir, &data, &output_dir);
+    let store = tmp.path().join("out");
+    let fit_toml = write_fit_toml(tmp.path(), &ir, &data, &store);
 
-    let fit_dir = exec_fit_run_v2(&camdl, &fit_toml, &output_dir);
+    let fit_dir = exec_fit_run(&camdl, &fit_toml, &store);
 
-    // Sanity-check the walker found at least one if2 method leaf somewhere
-    // under fit_dir. The summary command is the proxy: if its JSON
-    // `methods` is non-empty, the walker landed on a real
-    // run.json-bearing method leaf.
-    let json = exec_fit_summary_json(&camdl, &fit_dir);
+    let json = exec_fit_summary_json(&camdl, &store, &fit_dir);
     let methods = json
         .get("methods")
         .and_then(|s| s.as_array())
         .unwrap_or_else(|| panic!("summary JSON missing `methods` array: {}", json));
     assert!(
         !methods.is_empty(),
-        "summary JSON `methods` is empty — walker did not find any method leaf under {}",
+        "summary JSON `methods` is empty — the summary found no method result in {}",
         fit_dir.display()
     );
     // gh#901: the old spelling is gone, not kept beside the new one.
@@ -364,147 +248,22 @@ fn fit_summary_walks_real_fit_run_v2_output() {
         json
     );
 
-    // Spot-check: the canonical CAS method leaf is on disk where the runner
-    // promises — `<fit_dir>/<method>-<h8>/seed_<N>-<h8>/run.json` (gh#147
-    // M3.2). Hashes aren't predictable, so assert the *shape*: a `fit_method`
-    // leaf whose `method` level is "if2". Locks the CAS layout into the test
-    // surface so a future runner change can't silently break the walker.
-    let leaf = cas_method_leaf(&fit_dir, "if2").unwrap_or_else(|| {
-        panic!(
-            "expected a CAS `if2` method leaf under {} but none is present",
-            fit_dir.display()
-        )
-    });
+    // The run is stored where the store puts a fit run: an `if2` run folder
+    // whose `identity.json` names its kind, with its record beside it.
+    let if2_runs = fit_store_support::runs_of_method(&store, "if2");
+    assert_eq!(if2_runs, std::slice::from_ref(&fit_dir), "the if2 run is the one run stored");
     assert!(
-        leaf.join("run.json").is_file(),
-        "method leaf {} must hold a run.json",
-        leaf.display()
+        fit_dir.join("run.json").is_file(),
+        "fit run {} must hold a run.json",
+        fit_dir.display()
     );
 }
 
-// ── Deliverable B — spec/code parity ───────────────────────────────
-
-/// Force the spec and the runner to agree about what gets written
-/// where. Once this test exists, a spec layout diagram cannot drift
-/// from `cmd_fit_run_v2`'s actual output without breaking CI — the
-/// process gap that produced the audit §2.3 bug becomes mechanically
-/// detectable.
-///
-/// Implementation (proposal §B): regex over fenced code blocks for
-/// lines matching `<fit_dir>/...`, substitute `<seed>` → `1`, expand
-/// brace-lists, drop entries with unresolved placeholders or globs,
-/// and assert each resolved path exists under
-/// `exec_fit_run_v2()`'s output. Fragile-but-loud is intentional:
-/// no markdown AST, no special-casing.
-///
-/// gh#147 (M3.3-E): the grid cells now land in the content-addressed store
-/// (each dataset × fit-seed is its own CAS fit), so the legacy literal paths
-/// this test resolves (`real/fit_<seed>/`, `synthetic/ds_NN/fit_<seed>/`) no
-/// longer exist. Re-enabling is NOT a layout reframe: the spec docs still
-/// describe the legacy tree, and a CAS leaf path is hash-bearing
-/// (`fits/<base-h8>/<NN>-mle-<h8>/seed_<S>-<h8>/`), which cannot be matched by
-/// the current literal-path-on-disk model. It needs (1) the spec-doc rewrite
-/// to the CAS layout and (2) a shape/template verification model (match path
-/// *shape* with `<h8>` placeholders, not literal strings). Tracked in gh#159
-/// (M4); gh#150 (the grid migration) is closed by M3.3-E.
-#[test]
-#[ignore = "spec-vs-code parity test: literal-path model is incompatible with \
-            hash-bearing CAS paths; needs the spec-doc rewrite + a \
-            shape/template verification redesign — M4 (gh#159)"]
-fn spec_layout_diagrams_match_fit_run_v2_output() {
-    let camdl = camdl_bin();
-    let Some(camdlc) = camdlc_bin() else { return };
-
-    let tmp = tempdir("xpt_b");
-    let (ir, data) = build_fixture(&camdlc, tmp.path());
-    let output_dir = tmp.path().join("out");
-    let fit_toml = write_fit_toml(tmp.path(), &ir, &data, &output_dir);
-
-    // Rename the single declared method to `mle` (already in
-    // write_fit_toml). The spec diagrams reference scout / refine /
-    // validate, but the runner can be configured to use any method
-    // name. We compare against the spec by running its declared
-    // methods — but driving a real scout/refine/validate fit takes
-    // far longer than a structural test should. Instead: parse the
-    // spec for paths, but only assert on the *layout shape*
-    // (everything up through the method component), not on which
-    // exact method name was declared.
-    //
-    // Concretely: every documented path under `<fit_dir>/real/...`
-    // looks like `<fit_dir>/real/fit_<seed>/<method>/<...>`. We
-    // assert the prefix `<fit_dir>/real/fit_<seed>/` is real on
-    // disk. That's enough to catch the v1-layout bug class.
-    let fit_dir = exec_fit_run_v2(&camdl, &fit_toml, &output_dir);
-
-    let spec_path = repo_root().join("docs/camdl-inference-spec.md");
-    let inference_path = repo_root().join("docs/inference.md");
-    let mut documented_paths: Vec<String> = Vec::new();
-    for path in [&spec_path, &inference_path] {
-        let text = std::fs::read_to_string(path)
-            .unwrap_or_else(|e| panic!("cannot read {}: {}", path.display(), e));
-        let extracted = parse_layout_diagrams(&text);
-        for rel in extracted {
-            documented_paths.push(rel);
-        }
-    }
-
-    assert!(
-        !documented_paths.is_empty(),
-        "parse_layout_diagrams found zero `<fit_dir>/...` paths in either spec doc — \
-         either the parser is wrong or the spec has stopped using the canonical \
-         `<fit_dir>` placeholder"
-    );
-
-    // Whittle down to paths whose *prefix* we can assert against the
-    // real fit_dir. We can't reliably assert the leaf
-    // (method names differ between docs and this fixture, parameter
-    // placeholders like `{param}` don't substitute, etc.), but we
-    // can require that the directory components up through the method
-    // wrapper (`real/fit_<seed>/`) exist on disk. That's the test
-    // surface the v1-layout bug actually breaks.
-    let mut checked_prefixes: std::collections::BTreeSet<String> =
-        std::collections::BTreeSet::new();
-    for rel in &documented_paths {
-        // Take everything up through the `real/fit_<seed>/` wrapper.
-        // Synthetic paths use `synthetic/ds_<NN>/fit_<seed>/`; we
-        // skip those because the fixture is real-data only.
-        let comps: Vec<&str> = rel.split('/').collect();
-        let prefix = if comps.starts_with(&["real", "fit_1"]) || comps.starts_with(&["real"]) {
-            "real/fit_1".to_string()
-        } else {
-            // Unsupported (synthetic, top-level, etc.) — skip.
-            continue;
-        };
-        if checked_prefixes.insert(prefix.clone()) {
-            let abs = fit_dir.join(&prefix);
-            assert!(
-                abs.is_dir(),
-                "spec documents paths under `<fit_dir>/{}` but {} does not exist; \
-                 the runner did not produce the v2 layout the spec describes",
-                prefix,
-                abs.display()
-            );
-        }
-    }
-
-    // Belt-and-braces: the runner *must* produce the prefix the spec
-    // documents, even if the parser is conservative about which
-    // exact paths it asserts. Catches the case where the parser
-    // returned only synthetic-only paths and `checked_prefixes`
-    // ended up empty.
-    assert!(
-        !checked_prefixes.is_empty(),
-        "no real-data layout prefixes derived from the spec — spec may have been \
-         flipped to synthetic-only diagrams without the runner being updated"
-    );
-}
-
-// ── Deliverable C — `summary ⊆ table` byte-equality ────────────────
+// ── `summary ⊆ table` byte-equality ────────────────────────────────
 
 /// Force `fit summary --format json`'s `table_rows` entry to be
 /// byte-equal to a `fit table --hash <h> --format json` row for the
-/// same fit. Lands live (no `#[ignore]`) per proposal §3 + Tests/CI
-/// commitments.
+/// same fit.
 ///
 /// Map fields (`params`, `ess_posterior`, etc.) on `TableRow` use
 /// `BTreeMap` end-to-end so `serde_json` produces lex-ordered keys.
@@ -517,31 +276,27 @@ fn summary_table_row_equals_table_first_row() {
 
     let tmp = tempdir("xpt_c");
     let (ir, data) = build_fixture(&camdlc, tmp.path());
-    let output_dir = tmp.path().join("out");
-    let fit_toml = write_fit_toml(tmp.path(), &ir, &data, &output_dir);
+    let store = tmp.path().join("out");
+    let fit_toml = write_fit_toml(tmp.path(), &ir, &data, &store);
 
-    let fit_dir = exec_fit_run_v2(&camdl, &fit_toml, &output_dir);
+    let fit_dir = exec_fit_run(&camdl, &fit_toml, &store);
 
-    // The fit-level hash picks the prefix `--hash` filter for `fit table`.
-    // Eight characters is the proposal's documented short form. gh#147
-    // (M3.2): a CAS fit has no fit-wide `run.json`; the fit-level hash is the
-    // `fit` level shared by its method leaves.
+    // The problem id picks the prefix `--hash` filter for `fit table`.
+    // Eight characters is the documented short form.
     let full_hash = fit_level_hash(&fit_dir);
     let hash_prefix: String = full_hash.chars().take(8).collect();
 
-    let summary_json = exec_fit_summary_json(&camdl, &fit_dir);
+    let summary_json = exec_fit_summary_json(&camdl, &store, &fit_dir);
     let summary_rows = summary_json["table_rows"].as_array()
         .unwrap_or_else(|| panic!("summary JSON missing `table_rows`: {}", summary_json));
     assert_eq!(summary_rows.len(), 1, "one completed run, one row: {summary_json}");
     let summary_row = summary_rows[0].clone();
 
-    // Run `fit table` against the parent of fit_dir (results/fits/),
-    // filtered to a single row by --hash.
-    let fits_root = output_dir.join("fits");
+    // Run `fit table` on the store, filtered to a single row by --hash.
     let output = std::process::Command::new(&camdl).env_remove("CLICOLOR_FORCE")
         .arg("fit")
         .arg("table")
-        .arg(&fits_root)
+        .arg(&store)
         .arg("--hash")
         .arg(&hash_prefix)
         .arg("--format")
@@ -622,30 +377,28 @@ fn summary_table_row_equals_table_first_row() {
     );
 }
 
-/// gh#590: a `pfilter` leaf beside another method's leaf must not remove the
-/// fit from `fit table`, nor leave `fit summary` without the IF2 run's row.
+/// gh#590: a `pfilter` run beside another method's run of the same problem
+/// must not remove the fit from `fit table`, nor leave `fit summary` without
+/// the IF2 run's row.
 ///
-/// `pfilter` has no `MethodResult` shape. The row builder used to pick the
-/// terminal method by declared order alone, so a segment whose last leaf was a
-/// `pfilter` chose it, failed to load it (`UnknownMethod`), and the whole fit
-/// went to the error list — absent from the survey view, reading as "never
-/// ran". The row must instead be built from the method that has a result.
+/// `pfilter` has no `MethodResult` shape. A row built from a `pfilter` run
+/// would fail to load it (`UnknownMethod`) and send the whole fit to the
+/// error list — absent from the survey view, reading as "never ran". The row
+/// must instead be built from the method that has a result.
 #[test]
-fn a_pfilter_leaf_does_not_remove_the_fit_from_fit_table() {
+fn a_pfilter_run_does_not_remove_the_fit_from_fit_table() {
     let camdl = camdl_bin();
     let Some(camdlc) = camdlc_bin() else { return };
 
     let tmp = tempdir("xpt_pfilter");
     let (ir, data) = build_fixture(&camdlc, tmp.path());
-    let output_dir = tmp.path().join("out");
+    let store = tmp.path().join("out");
 
-    // Same problem, two methods → one fit segment with an if2 leaf and a
-    // pfilter leaf (the fit level hashes the problem, not the method).
-    let if2_toml = write_fit_toml(tmp.path(), &ir, &data, &output_dir);
+    // Same problem, two methods → one fit problem with an if2 run and a
+    // pfilter run (the problem's id hashes the problem, not the method).
+    let if2_toml = write_fit_toml(tmp.path(), &ir, &data, &store);
     let if2_body = std::fs::read_to_string(&if2_toml).unwrap();
     let method_at = if2_body.find("[method]").unwrap();
-    // Same file stem as the if2 config: the segment directory is named
-    // `<stem>-<fit h8>`, so a different stem would open a second segment.
     let pf_dir = tmp.path().join("pf");
     std::fs::create_dir_all(&pf_dir).unwrap();
     let pfilter_toml = pf_dir.join("fit.toml");
@@ -659,23 +412,22 @@ fn a_pfilter_leaf_does_not_remove_the_fit_from_fit_table() {
     )
     .unwrap();
 
-    let fit_dir = exec_fit_run_v2(&camdl, &if2_toml, &output_dir);
+    let fit_dir = exec_fit_run(&camdl, &if2_toml, &store);
     let status = Command::new(&camdl).env_remove("CLICOLOR_FORCE")
         .arg("fit").arg("run").arg(&pfilter_toml)
         .status()
         .expect("camdl fit run must invoke");
     assert!(status.success(), "camdl fit run (pfilter) failed");
 
-    // Precondition: both leaves really are in the one segment, or the test
-    // would pass without exercising the mixed segment.
-    let fits_root = output_dir.join("fits");
-    let segments: Vec<_> = std::fs::read_dir(&fits_root).unwrap().flatten().collect();
-    assert_eq!(segments.len(), 1, "both methods must share one fit segment");
-    assert!(cas_method_leaf(&fit_dir, "if2").is_some(), "no if2 leaf in {}", fit_dir.display());
-    assert!(cas_method_leaf(&fit_dir, "pfilter").is_some(), "no pfilter leaf in {}", fit_dir.display());
+    // Precondition: both runs really are of the one problem, or the test
+    // would pass without exercising the mixed problem.
+    let problems = fit_store_support::problems(&store);
+    assert_eq!(problems.len(), 1, "both methods must share one fit problem: {problems:?}");
+    assert_eq!(fit_store_support::runs_of_method(&store, "if2").len(), 1, "no if2 run in {}", store.display());
+    assert_eq!(fit_store_support::runs_of_method(&store, "pfilter").len(), 1, "no pfilter run in {}", store.display());
 
     let output = Command::new(&camdl).env_remove("CLICOLOR_FORCE")
-        .arg("fit").arg("table").arg(&fits_root)
+        .arg("fit").arg("table").arg(&store)
         .arg("--format").arg("json")
         .output()
         .expect("camdl fit table must invoke");
@@ -687,36 +439,36 @@ fn a_pfilter_leaf_does_not_remove_the_fit_from_fit_table() {
     assert_eq!(
         rows.len(),
         1,
-        "the fit with a pfilter leaf must appear in `fit table`; got {} rows. \
+        "the fit with a pfilter run must appear in `fit table`; got {} rows. \
          doc={table} stderr={stderr}",
         rows.len()
     );
     assert_eq!(rows[0]["method"].as_str(), Some("if2"),
         "the row is built from the method that has a result: {}", rows[0]);
 
-    let summary = exec_fit_summary_json(&camdl, &fit_dir);
+    let summary = exec_fit_summary_json(&camdl, &store, &fit_dir);
     let rows = summary["table_rows"].as_array().expect("table_rows");
     assert_eq!(rows.len(), 1, "the IF2 run has a row and the pfilter run has none: {summary}");
     assert_eq!(rows[0]["method"].as_str(), Some("if2"), "{summary}");
 }
 
-/// gh#587: a swept fit records each segment's own `[fixed]` values in its
-/// `fit.meta.json`, not the base config's.
+/// gh#587: a swept fit records each sweep point's own `[fixed]` values in
+/// its run's `fit.meta.json`, not the base config's.
 ///
-/// A sweep over a `[fixed]` parameter writes one fit segment per sweep point;
-/// the segment's identity already differs by the swept value. The sidecar was
-/// built once from the base config and written unchanged into every segment,
-/// so each recorded the base value — which `simulate --draws … --fit <segment>`
-/// then used to backfill the fixed parameters (`resolve_fixed_for_backfill`).
+/// A sweep over a `[fixed]` parameter stores one fit problem per sweep point,
+/// whose identity differs by the swept value. A sidecar built once from the
+/// base config would record the base value in every run — which
+/// `simulate --draws … --fit <run>` then uses to backfill the fixed
+/// parameters (`resolve_fixed_for_backfill`).
 #[test]
-fn a_swept_fit_records_each_segments_own_fixed_values() {
+fn a_swept_fit_records_each_sweep_points_own_fixed_values() {
     let camdl = camdl_bin();
     let Some(camdlc) = camdlc_bin() else { return };
 
     let tmp = tempdir("xpt_sweep_fixed");
     let (ir, data) = build_fixture(&camdlc, tmp.path());
-    let output_dir = tmp.path().join("out");
-    let fit_toml = write_fit_toml(tmp.path(), &ir, &data, &output_dir); // N0 = 1000
+    let store = tmp.path().join("out");
+    let fit_toml = write_fit_toml(tmp.path(), &ir, &data, &store); // N0 = 1000
 
     let status = Command::new(&camdl).env_remove("CLICOLOR_FORCE")
         .arg("fit").arg("run").arg(&fit_toml)
@@ -725,214 +477,33 @@ fn a_swept_fit_records_each_segments_own_fixed_values() {
         .expect("camdl fit run must invoke");
     assert!(status.success(), "camdl fit run --sweep failed");
 
-    let mut recorded: Vec<f64> = std::fs::read_dir(output_dir.join("fits"))
-        .unwrap()
-        .flatten()
-        .map(|seg| {
-            let side: serde_json::Value = serde_json::from_str(
-                &std::fs::read_to_string(seg.path().join("fit.meta.json")).unwrap(),
-            )
-            .unwrap();
+    let mut recorded: Vec<f64> = fit_store_support::runs(&store)
+        .into_iter()
+        .map(|run| {
+            let side = fit_store_support::json(&run.join("fit.meta.json"));
             side["fixed"]["N0"]
                 .as_f64()
-                .unwrap_or_else(|| panic!("no fixed.N0 in {}: {side}", seg.path().display()))
+                .unwrap_or_else(|| panic!("no fixed.N0 in {}: {side}", run.display()))
         })
         .collect();
     recorded.sort_by(f64::total_cmp);
     assert_eq!(
         recorded,
         vec![500.0, 2000.0],
-        "each sweep segment's fit.meta.json must record the N0 that segment \
+        "each sweep point's fit.meta.json must record the N0 that point \
          held fixed (the base config says 1000)"
     );
 }
 
-/// Extract every line from fenced code blocks matching
-/// `^\s*<fit_dir>/<rel>` and return `<rel>` (with `<seed>` → `1`
-/// substituted, brace-lists expanded, glob/range patterns dropped).
-///
-/// Fragile-but-loud by design (proposal §B). Does **not** use a
-/// markdown AST: walks the file byte-by-byte tracking ` ``` `
-/// fences. Lines outside fenced blocks are ignored.
-fn parse_layout_diagrams(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut in_fence = false;
-    for line in text.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("```") {
-            in_fence = !in_fence;
-            continue;
-        }
-        if !in_fence {
-            continue;
-        }
-        // Match `<fit_dir>/<rel>` anywhere in the line; allow
-        // leading whitespace.
-        let stripped = trimmed.strip_prefix("<fit_dir>/");
-        let rel = match stripped {
-            Some(s) => s,
-            None => continue,
-        };
-        // Trim trailing comment text — TSV/diagram lines often have
-        // an inline comment after the path. Heuristic: the path ends
-        // at the first whitespace **outside any brace-list**. Brace
-        // lists like `{fit_state.toml, mle_params.toml}` contain
-        // legitimate internal whitespace and must not be truncated.
-        let path_owned: String = {
-            let mut depth = 0i32;
-            let mut end = rel.len();
-            for (i, c) in rel.char_indices() {
-                match c {
-                    '{' => depth += 1,
-                    '}' => depth -= 1,
-                    ' ' | '\t' if depth == 0 => { end = i; break; }
-                    _ => {}
-                }
-            }
-            rel[..end].to_string()
-        };
-        let rel = path_owned
-            .trim_end_matches(',')
-            .trim_end_matches(':')
-            .trim_end_matches('.');
-        if rel.is_empty() {
-            continue;
-        }
-        // Drop entries with unresolved placeholders / globs.
-        // - `<NAME>` — unsubstituted placeholder (we handle <seed>
-        //   below; anything else is unsupported).
-        // - `{...}` — brace-list or glob. We expand simple comma-
-        //   lists below; ranges (`1..N`) and template params
-        //   (`{param}`, `{name}`) are dropped.
-        let resolved_seeds: Vec<String> =
-            substitute_placeholders(rel);
-        for r in resolved_seeds {
-            for expanded in expand_brace_lists(&r) {
-                if expanded.contains('<') || expanded.contains('{') {
-                    continue;
-                }
-                out.push(expanded);
-            }
-        }
-    }
-    out
-}
-
-/// Replace `<seed>` with `1` (the fixture's default seed). Other
-/// `<NAME>` placeholders pass through unchanged so the caller's
-/// "drop entries with `<`" filter excludes them.
-fn substitute_placeholders(s: &str) -> Vec<String> {
-    vec![s.replace("<seed>", "1")]
-}
-
-/// Expand `{a, b, c}` into one entry per element. Returns the
-/// original string when no brace-list is present, or when the
-/// brace-list looks like a range (`{1..N}`) or template
-/// (`{param}` / `{name}`).
-fn expand_brace_lists(s: &str) -> Vec<String> {
-    let lo = match s.find('{') {
-        Some(i) => i,
-        None => return vec![s.to_string()],
-    };
-    let hi = match s[lo..].find('}') {
-        Some(j) => lo + j,
-        None => return vec![s.to_string()],
-    };
-    let body = &s[lo + 1..hi];
-    if body.contains("..") {
-        // Range pattern — drop. The caller filters out entries
-        // containing `{`, which catches this.
-        return vec![s.to_string()];
-    }
-    if !body.contains(',') {
-        // Single-element brace = template placeholder, e.g. `{name}`.
-        return vec![s.to_string()];
-    }
-    let prefix = &s[..lo];
-    let suffix = &s[hi + 1..];
-    let mut out = Vec::new();
-    for elem in body.split(',') {
-        let elem = elem.trim();
-        // Each elem may itself contain brace-lists — recurse.
-        let combined = format!("{}{}{}", prefix, elem, suffix);
-        for sub in expand_brace_lists(&combined) {
-            out.push(sub);
-        }
-    }
-    out
-}
-
-#[cfg(test)]
-mod parser_tests {
-    use super::*;
-
-    #[test]
-    fn extracts_paths_from_simple_fenced_block() {
-        let text = "ignored\n\
-            ```\n\
-            <fit_dir>/real/fit_<seed>/scout/fit_state.toml\n\
-            <fit_dir>/real/fit_<seed>/refine/mle_params.toml\n\
-            ```\n\
-            <fit_dir>/this_should_be_ignored\n";
-        let mut paths = parse_layout_diagrams(text);
-        paths.sort();
-        assert_eq!(
-            paths,
-            vec![
-                "real/fit_1/refine/mle_params.toml".to_string(),
-                "real/fit_1/scout/fit_state.toml".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn expands_brace_lists() {
-        let text = "```\n\
-            <fit_dir>/real/fit_<seed>/scout/{fit_state.toml, mle_params.toml}\n\
-            ```\n";
-        let mut paths = parse_layout_diagrams(text);
-        paths.sort();
-        assert_eq!(
-            paths,
-            vec![
-                "real/fit_1/scout/fit_state.toml".to_string(),
-                "real/fit_1/scout/mle_params.toml".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn drops_unresolved_placeholders_and_ranges() {
-        let text = "```\n\
-            <fit_dir>/real/fit_<seed>/scout/chain_{1..8}/parameter_traces.tsv\n\
-            <fit_dir>/real/fit_<seed>/profiles/{param}_profile.tsv\n\
-            <fit_dir>/<unknown>/scout/x.toml\n\
-            ```\n";
-        let paths = parse_layout_diagrams(text);
-        assert!(
-            paths.is_empty(),
-            "range/template/unsubstituted placeholders must drop: {:?}",
-            paths
-        );
-    }
-
-    #[test]
-    fn ignores_lines_outside_fenced_blocks() {
-        let text =
-            "<fit_dir>/real/fit_<seed>/scout/x.toml\n\nThis line has <fit_dir>/foo too.\n";
-        let paths = parse_layout_diagrams(text);
-        assert!(paths.is_empty());
-    }
-}
-
-// ── Labels (proposal §5) — end-to-end ──────────────────────────────
+// ── Labels ─────────────────────────────────────────────────────────
 
 /// Full label workflow against the real binary:
-///   1. fit run --label "narrow R0, take 1" → label recorded on the run's run.json
-///   2. fit table picks up the label, renders it in the row
-///   3. `camdl label` refuses to move it: a fit id names a problem folder, not
-///      a run, and a run keeps the label it was given (gh#896)
-///   4. fit table still shows the label
+///   1. `fit run --label "narrow R0, take 1"` names the run it stores
+///   2. `fit table` shows the label in the run's row
+///   3. `camdl label` refuses a fit run: a stored run is sealed, and the
+///      refusal leaves its label as it was
+///   4. `fit run --label "narrow R0, take 2"` again reuses the stored run and
+///      names it by the new label, without changing the problem's id
 #[test]
 fn fit_label_workflow_persists_and_surfaces_in_table() {
     let camdl = camdl_bin();
@@ -940,107 +511,74 @@ fn fit_label_workflow_persists_and_surfaces_in_table() {
 
     let tmp = tempdir("xpt_label");
     let (ir, data) = build_fixture(&camdlc, tmp.path());
-    let output_dir = tmp.path().join("out");
-    let fit_toml = write_fit_toml(tmp.path(), &ir, &data, &output_dir);
+    let store = tmp.path().join("out");
+    let fit_toml = write_fit_toml(tmp.path(), &ir, &data, &store);
+    let fit_run = |label: &str| {
+        let out = Command::new(&camdl).env_remove("CLICOLOR_FORCE")
+            .arg("fit").arg("run")
+            .arg("--label").arg(label)
+            .arg(&fit_toml)
+            .output()
+            .expect("camdl fit run must invoke");
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(out.status.success(), "camdl fit run --label failed: {stderr}");
+        stderr
+    };
 
     // Step 1: fit run --label "..."
     let initial_label = "narrow R0, take 1";
-    let status = std::process::Command::new(&camdl).env_remove("CLICOLOR_FORCE")
-        .arg("fit").arg("run")
-        .arg("--label").arg(initial_label)
-        .arg(&fit_toml)
-        .status()
-        .expect("camdl fit run must invoke");
-    assert!(status.success(), "camdl fit run --label failed");
-
-    let fits = output_dir.join("fits");
-    let fit_dir: PathBuf = std::fs::read_dir(&fits).unwrap()
-        .flatten().map(|e| e.path()).next()
-        .expect("expected one fit dir under fits/");
+    fit_run(initial_label);
+    let fit_dir = fit_store_support::the_run(&store);
     let full_hash = fit_level_hash(&fit_dir);
-    let hash_prefix: String = full_hash.chars().take(8).collect();
 
-    // Step 2: --label is recorded on the run it names (gh#896): the leaf's
-    // run.json `provenance.label`, not the problem folder's sidecar.
-    assert_eq!(run_label(&fit_dir).as_deref(), Some(initial_label),
-        "--label must be recorded on the run");
+    // Step 2: fit table surfaces the label.
+    assert_eq!(table_label(&camdl, &store).as_deref(), Some(initial_label),
+        "table_row.label must be the run's label");
 
-    // Step 3: fit table surfaces the label.
-    let table_out = std::process::Command::new(&camdl).env_remove("CLICOLOR_FORCE")
-        .arg("fit").arg("table").arg(&fits)
-        .arg("--hash").arg(&hash_prefix)
-        .arg("--format").arg("json")
-        .output().expect("camdl fit table must invoke");
-    assert!(table_out.status.success(), "camdl fit table failed");
-    let table: serde_json::Value = serde_json::from_slice(&table_out.stdout).unwrap();
-    let row_label = table["rows"][0]["label"].as_str();
-    assert_eq!(row_label, Some(initial_label),
-        "table_row.label must reflect Run.label; got {:?}", row_label);
-
-    // Step 3: `camdl label` refuses a fit id (a problem folder, not a run),
-    // and relabels the run by its own id: a fit run's label is replaced.
-    let run_id: String = only_run(&fit_dir)["run_id"].as_str().unwrap().chars().take(12).collect();
-    let status = std::process::Command::new(&camdl).env_remove("CLICOLOR_FORCE")
-        .arg("label").arg(&hash_prefix).arg("narrow R0, take 2")
-        .arg("--root").arg(&output_dir)
-        .status().expect("camdl label must invoke");
-    assert!(!status.success(), "`camdl label <fit id>` names a folder, not a run");
-    assert_eq!(run_label(&fit_dir).as_deref(), Some(initial_label), "the folder refusal wrote nothing");
-    let relabel = std::process::Command::new(&camdl).env_remove("CLICOLOR_FORCE")
+    // Step 3: `camdl label` refuses the run, and writes nothing.
+    let run_id: String = fit_store_support::run_id(&fit_dir).chars().take(12).collect();
+    let relabel = Command::new(&camdl).env_remove("CLICOLOR_FORCE")
         .arg("label").arg(&run_id).arg("narrow R0, take 2")
-        .arg("--root").arg(&output_dir)
+        .env("CAMDL_STORE", &store)
         .output().expect("camdl label must invoke");
-    assert!(relabel.status.success(), "{}", String::from_utf8_lossy(&relabel.stderr));
-    assert!(String::from_utf8_lossy(&relabel.stderr).contains(&format!(
-        "label: run {} was @{initial_label}, now @narrow R0, take 2", &run_id[..6])),
-        "{}", String::from_utf8_lossy(&relabel.stderr));
-    let initial_label = "narrow R0, take 2";
-    assert_eq!(run_label(&fit_dir).as_deref(), Some(initial_label), "the run's label is replaced");
-    assert_eq!(fit_level_hash(&fit_dir), full_hash,
-        "a relabel must not change the fit-level hash");
+    let stderr = String::from_utf8_lossy(&relabel.stderr);
+    assert!(!relabel.status.success(), "`camdl label <fit run>` must be refused: {stderr}");
+    assert!(stderr.contains("is sealed") && stderr.contains("--label"),
+        "the refusal says the run is sealed and how to name it: {stderr}");
+    assert_eq!(table_label(&camdl, &store).as_deref(), Some(initial_label), "the refusal wrote nothing");
 
-    // Step 4: fit table still shows it.
-    let table_out2 = std::process::Command::new(&camdl).env_remove("CLICOLOR_FORCE")
-        .arg("fit").arg("table").arg(&fits)
-        .arg("--hash").arg(&hash_prefix)
-        .arg("--format").arg("json")
-        .output().unwrap();
-    let table2: serde_json::Value = serde_json::from_slice(&table_out2.stdout).unwrap();
-    assert_eq!(table2["rows"][0]["label"].as_str(), Some(initial_label),
-        "table_row.label is the run's label");
+    // Step 4: the same fit run under another label reuses the stored run.
+    let next_label = "narrow R0, take 2";
+    let stderr = fit_run(next_label);
+    assert!(stderr.contains("cache hit"), "the run is reused, not recomputed: {stderr}");
+    assert_eq!(fit_store_support::the_run(&store), fit_dir, "one run is stored");
+    assert_eq!(table_label(&camdl, &store).as_deref(), Some(next_label), "table_row.label is the run's label");
+    assert_eq!(fit_level_hash(&fit_dir), full_hash, "a label must not change the problem's id");
 }
 
-/// Empty / whitespace-only `--label "<text>"` is rejected at the CLI.
+/// An empty or whitespace-only `--label "<text>"` is rejected at the CLI,
+/// before anything is stored.
 #[test]
 fn fit_label_rejects_empty_label_at_cli() {
     let camdl = camdl_bin();
     let Some(camdlc) = camdlc_bin() else { return };
     let tmp = tempdir("xpt_label_empty");
     let (ir, data) = build_fixture(&camdlc, tmp.path());
-    let output_dir = tmp.path().join("out");
-    let fit_toml = write_fit_toml(tmp.path(), &ir, &data, &output_dir);
-    assert!(std::process::Command::new(&camdl).env_remove("CLICOLOR_FORCE")
-        .arg("fit").arg("run").arg(&fit_toml)
-        .status().unwrap().success());
-
-    let fits = output_dir.join("fits");
-    let fit_dir: PathBuf = std::fs::read_dir(&fits).unwrap()
-        .flatten().map(|e| e.path()).next().unwrap();
-    let hash_prefix: String = fit_level_hash(&fit_dir).chars().take(8).collect();
+    let store = tmp.path().join("out");
+    let fit_toml = write_fit_toml(tmp.path(), &ir, &data, &store);
 
     for empty in ["", "   "] {
-        let out = std::process::Command::new(&camdl).env_remove("CLICOLOR_FORCE")
-            .arg("label")
-            .arg(&hash_prefix)
-            .arg(empty)
-            .arg("--root").arg(&output_dir)
-            .output().expect("camdl label must invoke");
+        let out = Command::new(&camdl).env_remove("CLICOLOR_FORCE")
+            .arg("fit").arg("run").arg(&fit_toml)
+            .arg("--label").arg(empty)
+            .output().expect("camdl fit run must invoke");
         assert!(!out.status.success(),
             "empty label {:?} must be rejected", empty);
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(stderr.contains("empty"),
             "stderr should mention empty: {}", stderr);
     }
+    assert!(fit_store_support::runs(&store).is_empty(), "a refused label stores no run");
 }
 
 // ── Issue #22: toml-relative path resolution ──────────────────────
@@ -1084,11 +622,11 @@ fn fit_run_resolves_toml_relative_paths_from_any_cwd() {
 
     // Write a fit.toml in proj/fits/ that references the model and
     // data via toml-relative paths (../models/..., ../data/...).
-    let output_dir = proj.join("results");
+    let store = proj.join("results");
     let fit_toml = fits_dir.join("he2010.fit.toml");
     let body = format!(
         r#"
-output_dir = "{out}"
+store = "{out}"
 
 [model]
 camdl = "../models/sir.ir.json"
@@ -1111,7 +649,7 @@ particles  = 50
 iterations = 5
 cooling    = 0.7
 "#,
-        out = output_dir.display(),
+        out = store.display(),
     );
     std::fs::write(&fit_toml, body).unwrap();
 
@@ -1134,10 +672,8 @@ cooling    = 0.7
         String::from_utf8_lossy(&out.stderr),
         String::from_utf8_lossy(&out.stdout)
     );
-    // Sanity: a fit_dir was produced under the configured output_dir.
-    let fits_root = output_dir.join("fits");
-    let entries: Vec<_> = std::fs::read_dir(&fits_root).unwrap()
-        .flatten().map(|e| e.path()).collect();
-    assert_eq!(entries.len(), 1,
-        "expected one fit dir under {}; got {:?}", fits_root.display(), entries);
+    // Sanity: a fit run was stored in the configured store.
+    let runs = fit_store_support::runs(&store);
+    assert_eq!(runs.len(), 1,
+        "expected one fit run under {}; got {:?}", store.display(), runs);
 }

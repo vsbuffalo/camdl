@@ -1,9 +1,11 @@
 //! gh#312: `camdl compare` on fits that ran `mh` on the `ode` backend.
 //!
 //! Two ODE + MH fits of a small SIR (one estimates β and γ, the other fixes
-//! γ), both sealed at `holdout_after = 42` and compared on the two held-out
-//! weeks. The derived trace is the posterior predictive of the ODE skeleton,
-//! so its score at a held-out week is, exactly,
+//! γ), both sealed at `holdout_after = 42` and compared with `--in-sample` on
+//! their six training weeks: a stored fit keeps its held-out rows' periods
+//! and not their values, so `compare` scores no held-out row of it. The
+//! derived trace is the posterior predictive of the ODE skeleton, so its
+//! score at a scored week is, exactly,
 //!
 //!   log (1/M) Σ_m NB(y_t | mean = ρ_m · incidence_t(θ_m), size = k)
 //!
@@ -16,6 +18,8 @@
 //!
 //! Shells out to the release `camdl`; the `.camdl` model is compiled by the
 //! `camdlc` on PATH (`make test-rust` puts this checkout's first).
+
+mod fit_store_support;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -59,8 +63,10 @@ simulate { from = 0 'days  to = 80 'days }
 
 const DATA: &str = "time\tweekly_cases\n7\t16\n14\t166\n21\t626\n28\t1303\n35\t1260\n42\t1023\n49\t327\n56\t91\n";
 
-/// The held-out weeks (`t > 42`) and their counts.
-const HELD_OUT: [(f64, u64); 2] = [(49.0, 327), (56.0, 91)];
+/// The training weeks (`t ≤ 42`), which `compare --in-sample` scores, and
+/// their counts.
+const SCORED: [(f64, u64); 6] =
+    [(7.0, 16), (14.0, 166), (21.0, 626), (28.0, 1303), (35.0, 1260), (42.0, 1023)];
 const RHO: f64 = 0.6;
 const K: f64 = 10.0;
 const DRAWS: usize = 8;
@@ -74,7 +80,7 @@ fn fit_toml(estimate_gamma: bool, holdout: bool) -> String {
     } else { "" };
     let fixed_gamma = if estimate_gamma { "" } else { "gamma = 0.2\n" };
     let holdout = if holdout { "holdout_after = 42\n" } else { "" };
-    format!(r#"output_dir = "results"
+    format!(r#"store = "../store"
 [model]
 camdl = "model.camdl"
 [data]
@@ -97,10 +103,44 @@ starts = "single"
 "#)
 }
 
+/// The store every fit of a test is stored in, `<root>/store`, for `dir`
+/// either the test's root or one fit's directory `<root>/<name>`, which
+/// holds its `fit.toml`.
+fn store_for(dir: &Path) -> PathBuf {
+    let root = if dir.join("fit.toml").is_file() { dir.parent().unwrap() } else { dir };
+    root.join("store")
+}
+
+/// The folder of the fit run labelled `label` in `store`: the `fit_run`
+/// result of the last `fit run --label <label>` invocation the store recorded.
+fn run_with_label(store: &Path, label: &str) -> PathBuf {
+    let mut last: Option<(u64, String)> = None;
+    for e in std::fs::read_dir(store.join(".invocations")).unwrap().flatten() {
+        let v = fit_store_support::json(&e.path());
+        if v["label"] != label {
+            continue;
+        }
+        let seq = v["seq"].as_u64().unwrap();
+        let id = v["results"].as_array().unwrap().iter()
+            .find(|r| r["kind"] == "fit_run")
+            .and_then(|r| r["run_id"].as_str())
+            .map(str::to_string);
+        if let Some(id) = id {
+            if last.as_ref().is_none_or(|(s, _)| seq > *s) {
+                last = Some((seq, id));
+            }
+        }
+    }
+    let (_, id) = last.unwrap_or_else(|| panic!("no fit run labeled {label} under {}", store.display()));
+    fit_store_support::runs(store).into_iter()
+        .find(|r| fit_store_support::run_id(r) == id)
+        .unwrap_or_else(|| panic!("run {id} labeled {label} is not under {}", store.display()))
+}
+
 fn camdl(dir: &Path, args: &[&str]) -> Output {
     Command::new(binary()).env_remove("CLICOLOR_FORCE")
         .env_remove("CAMDL_OUTPUT_DIR")
-        .env_remove("CAMDL_STORE")
+        .env("CAMDL_STORE", store_for(dir))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args(args)
         .current_dir(dir)
@@ -113,7 +153,8 @@ fn ok(out: &Output, what: &str) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-/// Fit one model in `root/name` and return its directory.
+/// Fit one model in `root/name`, stored in `root/store` under the label
+/// `name`, and return its directory.
 fn fit(root: &Path, name: &str, estimate_gamma: bool) -> PathBuf {
     let dir = root.join(name);
     std::fs::create_dir_all(&dir).unwrap();
@@ -121,7 +162,7 @@ fn fit(root: &Path, name: &str, estimate_gamma: bool) -> PathBuf {
     std::fs::write(dir.join("cases.tsv"), DATA).unwrap();
     std::fs::write(dir.join("fit.toml"), fit_toml(estimate_gamma, true)).unwrap();
     std::fs::write(dir.join("design.toml"), fit_toml(estimate_gamma, false)).unwrap();
-    ok(&camdl(&dir, &["fit", "run", "fit.toml", "--seed", "1"]), "fit run");
+    ok(&camdl(&dir, &["fit", "run", "fit.toml", "--seed", "1", "--label", name]), "fit run");
     dir
 }
 
@@ -154,7 +195,7 @@ fn nb_logpmf(y: u64, mu: f64, r: f64) -> f64 {
     log_coef + r * (r / (r + mu)).ln() + y as f64 * (mu / (r + mu)).ln()
 }
 
-/// Each held-out week's per-draw log density `log NB(y_t | ρ·incidence_t(θ), k)`
+/// Each scored week's per-draw log density `log NB(y_t | ρ·incidence_t(θ), k)`
 /// for every θ in `thetas` (rows of a column-per-parameter TSV), from
 /// `camdl simulate`'s replay of those θ on the fit's simulator.
 fn per_draw_log_densities(dir: &Path, thetas: &Path) -> Vec<Vec<f64>> {
@@ -170,7 +211,7 @@ fn per_draw_log_densities(dir: &Path, thetas: &Path) -> Vec<Vec<f64>> {
         let (h, rows) = read_tsv(&file);
         let (ti, pi) = (h.iter().position(|c| c == "time").unwrap(),
                         h.iter().position(|c| c == "projected").unwrap());
-        HELD_OUT.iter().map(|&(t, y)| {
+        SCORED.iter().map(|&(t, y)| {
             let row = rows.iter().find(|r| r[ti].parse::<f64>().unwrap() == t)
                 .unwrap_or_else(|| panic!("no projection at t = {t} in {}", file.display()));
             nb_logpmf(y, RHO * row[pi].parse::<f64>().unwrap(), K)
@@ -178,10 +219,11 @@ fn per_draw_log_densities(dir: &Path, thetas: &Path) -> Vec<Vec<f64>> {
     }).collect()
 }
 
-/// The fit's posterior draws (estimated + fixed columns, the `chain`/`draw`
+/// The posterior draws of the fit run labelled by `dir`'s name (estimated + fixed columns, the `chain`/`draw`
 /// keys dropped) in file order.
 fn posterior(dir: &Path) -> (Vec<String>, Vec<Vec<String>>) {
-    let draws = find_named(&dir.join("results"), "draws.tsv");
+    let label = dir.file_name().unwrap().to_str().unwrap();
+    let draws = find_named(&run_with_label(&store_for(dir), label), "draws.tsv");
     assert_eq!(draws.len(), 1, "one draws.tsv under {}", dir.display());
     let (h, rows) = read_tsv(&draws[0]);
     (h[2..].to_vec(), rows.into_iter().map(|r| r[2..].to_vec()).collect())
@@ -199,7 +241,7 @@ fn log_mean_exp(v: &[f64]) -> f64 {
 }
 
 fn compare_json(root: &Path, extra: &[&str]) -> serde_json::Value {
-    let mut args = vec!["compare", "m0/fit.toml", "m1/fit.toml", "--format", "json",
+    let mut args = vec!["compare", "@m0", "@m1", "--in-sample", "--format", "json",
         "--particles", "200"];
     args.extend_from_slice(extra);
     serde_json::from_str(&ok(&camdl(root, &args), "compare")).unwrap()
@@ -211,20 +253,20 @@ fn row<'a>(v: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
 }
 
 #[test]
-fn ode_fits_compare_held_out_on_the_exact_posterior_mixture() {
+fn ode_fits_compare_on_the_exact_posterior_mixture() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     let m0 = fit(root, "m0", true);
     let m1 = fit(root, "m1", false);
 
     let v = compare_json(root, &["--draws", &DRAWS.to_string()]);
-    for (name, dir) in [("m0/fit.toml", &m0), ("m1/fit.toml", &m1)] {
+    for (name, dir) in [("@m0", &m0), ("@m1", &m1)] {
         let r = row(&v, name);
         assert_eq!(r["basis"], serde_json::json!({"ode_free_forward": {"samples_per_draw": 200}}),
             "{name}: stamped as the ODE skeleton's predictive: {r}");
         assert_eq!(r["provenance"], serde_json::json!({"posterior": {"n_draws": DRAWS}}), "{r}");
-        assert_eq!(r["conditioning"]["hold_out_tail"]["train_end"], 42.0, "{r}");
-        assert_eq!(r["t_score"], 2, "the two weeks past the boundary: {r}");
+        assert_eq!(r["conditioning"], "in_sample", "{r}");
+        assert_eq!(r["t_score"], 6, "the six training weeks: {r}");
         let d = &r["derivation"];
         assert_eq!((d["particles"].as_u64(), d["replicates"].as_u64()), (Some(0), Some(1)),
             "no filter ran, and a deterministic score has no replicates: {d}");
@@ -239,7 +281,7 @@ fn ode_fits_compare_held_out_on_the_exact_posterior_mixture() {
         let thetas = dir.join("thinned.tsv");
         write_thetas(&thetas, &header, &thinned);
         let per_draw = per_draw_log_densities(dir, &thetas);
-        let per_week: Vec<Vec<f64>> = (0..HELD_OUT.len())
+        let per_week: Vec<Vec<f64>> = (0..SCORED.len())
             .map(|w| per_draw.iter().map(|d| d[w]).collect()).collect();
         let hand: f64 = per_week.iter().map(|w| log_mean_exp(w)).sum();
         let mean_of_logs: f64 = per_week.iter()
@@ -251,12 +293,12 @@ fn ode_fits_compare_held_out_on_the_exact_posterior_mixture() {
             "non-vacuous: the mixture and the mean of logs differ ({hand} vs {mean_of_logs})");
     }
     // Two ODE fits on one basis and one window: a Δ is formed.
-    assert!(row(&v, "m1/fit.toml")["delta_elpd"].is_f64()
-        || row(&v, "m0/fit.toml")["delta_elpd"].is_f64(), "{v}");
+    assert!(row(&v, "@m1")["delta_elpd"].is_f64()
+        || row(&v, "@m0")["delta_elpd"].is_f64(), "{v}");
 
     // `--draws 1`: the plug-in predictive at the posterior mean, also exact.
     let v = compare_json(root, &["--draws", "1"]);
-    let r = row(&v, "m0/fit.toml");
+    let r = row(&v, "@m0");
     assert_eq!(r["provenance"], "plug_in", "{r}");
     let (header, rows) = posterior(&m0);
     let mean: Vec<String> = (0..header.len()).map(|c| {
@@ -287,7 +329,7 @@ fn an_ode_trace_is_not_differenced_against_a_filtered_one() {
 
     // Both in-sample, so the conditioning check passes and the basis check is
     // the one that refuses.
-    let out = camdl(root, &["compare", "m0/fit.toml", "m0/pf.json", "--in-sample",
+    let out = camdl(root, &["compare", "@m0", "m0/pf.json", "--in-sample",
         "--draws", "2", "--particles", "100", "--allow-mixed-provenance",
         "--allow-mismatched-filter-settings", "--allow-data-mismatch"]);
     assert_eq!(out.status.code(), Some(2), "refused as incommensurable:\n{}",

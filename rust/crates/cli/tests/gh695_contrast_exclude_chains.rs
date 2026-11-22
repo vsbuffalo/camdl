@@ -1,53 +1,41 @@
 //! gh#695 — `--exclude-chains` must reach the counterfactual contrast path.
 //!
 //! `fit predict` applies a read-side chain selection to the free-forward
-//! posterior cloud. Before this fix it did NOT apply it to the `(θ, X)` joint the
-//! contrast reducer forks from, so `contrasts/<name>.tsv` banded over the very
-//! chain `predictive.json`'s `chain_selection` recorded as excluded — the
+//! posterior cloud, and must apply it to the `(θ, X)` joint the contrast
+//! reducer forks from too; otherwise `contrasts/<name>.tsv` bands over the very
+//! chain `predictive.json`'s `chain_selection` records as excluded — the
 //! artifact and its manifest disagreeing, silently, on a number a policy
 //! question is answered from.
 //!
 //! The measurements here are the issue's own: with a two-chain PGAS fit,
 //!
 //!   * the contrast artifact under `--exclude-chains 2` must DIFFER from the
-//!     artifact of the same run without the flag (before the fix it was
-//!     byte-identical);
+//!     artifact of the same run without the flag;
 //!   * the contrast's `n_used` must equal the free-forward rows' `n_draws` —
 //!     both bands over one cloud;
 //!   * that cloud must be exactly the retained chain's draws.
 //!
-//! Plus the two edges a chain filter adds on top of the forkable subset (draws
-//! with a saved latent path): excluding chains narrows an already-partial set,
-//! so an EMPTY intersection is refused by name rather than emitted as a tiny or
-//! empty band, and excluding a chain that had no saved paths still behaves.
+//! Plus a run that lost one chain's saved latent paths after the fit: it is
+//! damaged, and refused under any chain selection rather than banded over the
+//! chain that kept its paths.
+
+mod fit_store_support;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Where the latest `fit predict` of a run in `seg` wrote:
-/// `<seg>/predict/<run id>-<address key>/` (gh#896), the directory whose
-/// `report*.json` (one written by every predict) is newest. A path that does not
-/// exist while nothing has been predicted.
-fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
-    std::fs::read_dir(seg.join("predict"))
-        .into_iter().flatten().flatten().map(|e| e.path())
-        .filter_map(|d| {
-            // Newest `report*.json` (keyed by chain selection) in the directory.
-            let t = std::fs::read_dir(&d).ok()?.flatten()
-                .filter(|e| {
-                    let n = e.file_name().to_string_lossy().into_owned();
-                    n.starts_with("report") && n.ends_with(".json")
-                })
-                .filter_map(|e| e.metadata().and_then(|m| m.modified()).ok())
-                .max()?;
-            Some((t, d))
-        })
-        .max_by_key(|(t, _)| *t)
-        .map(|(_, d)| d)
-        .unwrap_or_else(|| seg.join("predict").join("none"))
+/// `rel` inside the stored prediction of the run at `run` that holds it. Each
+/// chain selection is its own prediction (`predict/<mode>-<id12>/`) with its
+/// own artifact names, so at most one holds a given name. A path that does not
+/// exist when none does.
+fn predict_file(run: &Path, rel: &str) -> PathBuf {
+    fit_store_support::predictions(run)
+        .into_iter()
+        .map(|d| d.join(rel))
+        .find(|p| p.exists())
+        .unwrap_or_else(|| run.join("predict").join("none").join(rel))
 }
-
 
 fn binary() -> PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
@@ -68,6 +56,7 @@ fn run(bin: &Path, dir: &Path, args: &[&str]) -> std::process::Output {
     Command::new(bin).env_remove("CLICOLOR_FORCE")
         .args(args)
         .current_dir(dir)
+        .env("CAMDL_STORE", dir.join("results"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output()
         .expect("spawn camdl")
@@ -130,7 +119,7 @@ const DATA: &str =
 /// sweeps exist per chain, so the save stride is 1: every posterior draw carries
 /// a saved latent path. The forkable subset is therefore the whole cloud, and
 /// any shortfall in the contrast's `n_used` is the chain filter, not the stride.
-const FIT_TOML: &str = r#"output_dir = "results"
+const FIT_TOML: &str = r#"store = "results"
 [model]
 camdl = "model.camdl"
 [data.observations]
@@ -165,7 +154,7 @@ fn workspace(tag: &str) -> PathBuf {
 }
 
 fn fit_run(bin: &Path, tmp: &Path) {
-    let out = run(bin, tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    let out = run(bin, tmp, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(
         out.status.success(),
         "fit run failed:\nstdout={}\nstderr={}",
@@ -174,36 +163,16 @@ fn fit_run(bin: &Path, tmp: &Path) {
     );
 }
 
-/// The single fit segment under `results/fits/`.
+/// The one stored fit run, whose folder holds `draws.tsv` and the `chain_*/`
+/// path dirs.
 fn segment(tmp: &Path) -> PathBuf {
-    let fits = tmp.join("results").join("fits");
-    let mut dirs: Vec<PathBuf> = std::fs::read_dir(&fits)
-        .unwrap_or_else(|e| panic!("cannot read {}: {e}", fits.display()))
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .collect();
-    dirs.sort();
-    assert_eq!(dirs.len(), 1, "one fit segment expected, got {dirs:?}");
-    dirs.pop().unwrap()
+    fit_store_support::the_run(&tmp.join("results"))
 }
 
-/// The method leaf holding `draws.tsv` and the `chain_*/` path dirs.
+/// The run folder `seg`, which holds `draws.tsv` and the `chain_*/` path dirs.
 fn method_dir(seg: &Path) -> PathBuf {
-    fn walk(dir: &Path) -> Option<PathBuf> {
-        if dir.join("draws.tsv").is_file() {
-            return Some(dir.to_path_buf());
-        }
-        for e in std::fs::read_dir(dir).ok()?.flatten() {
-            if e.path().is_dir() {
-                if let Some(p) = walk(&e.path()) {
-                    return Some(p);
-                }
-            }
-        }
-        None
-    }
-    walk(seg).unwrap_or_else(|| panic!("no draws.tsv under {}", seg.display()))
+    assert!(seg.join("draws.tsv").is_file(), "no draws.tsv in {}", seg.display());
+    seg.to_path_buf()
 }
 
 /// Draw-row counts per 0-based chain id, read off the fit's own `draws.tsv` —
@@ -238,7 +207,7 @@ fn addr(family: &str, excl: Option<&str>) -> String {
 }
 
 fn contrast_path(seg: &Path, name: &str, excl: Option<&str>) -> PathBuf {
-    predict_out(seg).join(addr("contrasts", excl)).join(format!("{name}.tsv"))
+    predict_file(seg, &format!("{}/{name}.tsv", addr("contrasts", excl)))
 }
 
 /// The `n_used` cell of a scalar contrast's single band row — the count of
@@ -259,7 +228,7 @@ fn contrast_n_used(path: &Path) -> usize {
 /// The distinct `n_draws` values across a free-forward predictive stream — the
 /// size of the posterior cloud each banded cell pooled.
 fn predictive_n_draws(seg: &Path, stream: &str, excl: Option<&str>) -> Vec<usize> {
-    let path = predict_out(seg).join(addr("predictive", excl)).join(format!("{stream}.tsv"));
+    let path = predict_file(seg, &format!("{}/{stream}.tsv", addr("predictive", excl)));
     let txt = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
     let mut lines = txt.lines().filter(|l| !l.starts_with('#'));
@@ -283,7 +252,7 @@ fn predictive_n_draws(seg: &Path, stream: &str, excl: Option<&str>) -> Vec<usize
 /// The `chain_selection` object `fit predict` stamps into the manifest at the
 /// address the run wrote to.
 fn manifest_chain_selection(seg: &Path, excl: Option<&str>) -> Option<serde_json::Value> {
-    let path = predict_out(seg).join(format!("{}.json", addr("predictive", excl)));
+    let path = predict_file(seg, &format!("{}.json", addr("predictive", excl)));
     let txt = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
     let v: serde_json::Value =
@@ -292,7 +261,7 @@ fn manifest_chain_selection(seg: &Path, excl: Option<&str>) -> Option<serde_json
 }
 
 fn predict(bin: &Path, tmp: &Path, extra: &[&str]) -> std::process::Output {
-    let mut args = vec!["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward"];
+    let mut args = vec!["fit", "predict", "--fit", "@fit", "--mode", "free_forward"];
     args.extend_from_slice(extra);
     run(bin, tmp, &args)
 }
@@ -415,65 +384,36 @@ fn contrast_bands_over_the_retained_chains_only() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-/// The forkable subset and the chain filter intersect. A contrast can only fork
-/// a draw with a saved latent path; excluding chains narrows that set again. If
-/// the intersection is empty the run must refuse BY NAME — "this fit has no
-/// forkable draws" would blame the fit for a consequence of the selection, and
-/// an empty band would be a fabricated answer.
-///
-/// Constructed by deleting one chain's saved paths, which is the on-disk shape
-/// of "this chain saved nothing" (a PGAS method run with `n_trajectories = 0`,
-/// or an interrupted write).
+/// A run whose chain lost its saved latent paths after the fit is damaged:
+/// a contrast over it is refused, naming the missing file, under any chain
+/// selection, and leaves no artifact. Its paths are part of the run as
+/// stored, so a band over the remaining chain would be computed from a run
+/// other than the one the fit recorded.
 #[test]
-fn empty_forkable_intersection_refuses_by_name() {
+fn a_run_missing_a_chains_saved_paths_is_refused_as_damaged() {
     let bin = skip_if_missing_binary();
     let tmp = workspace("empty");
     fit_run(&bin, &tmp);
     let seg = segment(&tmp);
-    let per_chain = draws_per_chain(&seg);
-    let n_chain0 = per_chain[&0];
 
-    // Drop chain 1's saved paths (its directory is chain_1/).
     let orphaned = method_dir(&seg).join("chain_1");
     assert!(orphaned.is_dir(), "expected saved paths at {}", orphaned.display());
     std::fs::remove_dir_all(&orphaned).unwrap();
 
-    // Excluding chain 0 retains only the chain whose paths are gone → the
-    // (retained ∩ forkable) intersection is empty.
-    let out = predict(&bin, &tmp, &["--exclude-chains", "0"]);
-    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    assert!(
-        !out.status.success(),
-        "an empty forkable intersection must be refused, not banded; it \
-         succeeded.\nstderr:\n{stderr}"
-    );
-    assert!(
-        stderr.contains("--exclude-chains 0") && stderr.contains("no forkable posterior draws"),
-        "the refusal must name the selection as the cause; stderr:\n{stderr}"
-    );
-    assert!(
-        !contrast_path(&seg, "averted", Some("0")).exists()
-            && !contrast_path(&seg, "averted", None).exists(),
-        "a refused contrast must leave no artifact behind — at its own address \
-         or the pooled one"
-    );
-
-    // Negative control: excluding the chain that has NO saved paths is not an
-    // error at all — the retained chain still carries a full forkable cloud, and
-    // the band is over exactly its draws.
-    let out = predict(&bin, &tmp, &["--exclude-chains", "1"]);
-    assert!(
-        out.status.success(),
-        "excluding the path-less chain must still predict:\nstderr={}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let averted = contrast_path(&seg, "averted", Some("1"));
-    assert!(averted.is_file(), "the retained chain's contrast must be emitted");
-    assert_eq!(
-        contrast_n_used(&averted),
-        n_chain0,
-        "the band is over the retained chain's {n_chain0} draws"
-    );
+    for exclude in ["0", "1"] {
+        let out = predict(&bin, &tmp, &["--exclude-chains", exclude]);
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(!out.status.success(), "--exclude-chains {exclude}: a damaged run must be refused:\n{stderr}");
+        assert!(
+            stderr.contains("is damaged") && stderr.contains("chain_1/"),
+            "--exclude-chains {exclude}: the refusal names the missing file; stderr:\n{stderr}"
+        );
+        assert!(
+            !contrast_path(&seg, "averted", Some(exclude)).exists()
+                && !contrast_path(&seg, "averted", None).exists(),
+            "--exclude-chains {exclude}: a refused contrast must leave no artifact behind"
+        );
+    }
 
     let _ = std::fs::remove_dir_all(&tmp);
 }

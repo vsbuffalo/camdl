@@ -145,7 +145,7 @@ fn profile_fit_toml_family_root_resolves_to_strata() {
 
     let toml = tmp.path().join("prof.toml");
     write(&toml, &format!(r#"
-output_dir = "{out}"
+store = "{out}"
 [model]
 camdl = "{ir}"
 [data.observations]

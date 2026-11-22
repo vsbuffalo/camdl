@@ -301,31 +301,28 @@ project/
 ├── data/            # observation TSVs, lookup tables
 ├── params/          # parameter-point TOMLs
 ├── fits/            # fit.toml configs
-├── results/         # the content-addressed store of fits and profiles (see below)
-└── camdl-store/     # the run store of simulate and pfilter (§4.4)
+├── results/         # the content-addressed store of profiles (see below)
+└── camdl-store/     # the run store of simulate, pfilter and fits (§4.4, §2.2)
 ```
 
 Only `results/` and `camdl-store/` have meaning to camdl. They are two stores.
-`camdl simulate` and `camdl pfilter` store their results in the run store, whose
-root is `--store DIR`, else `CAMDL_STORE`, else `./camdl-store`; its layout is
-in §4.4. Fits and profiles store theirs under `results/`, whose location
-resolves with the precedence **CLI `--output-dir` > config-file `output_dir` >
-`CAMDL_OUTPUT_DIR` > `./results`** (`run_paths::output_root`). Project-specific
-config sits above ambient shell state deliberately: setting `CAMDL_OUTPUT_DIR`
-to keep scratch runs separate must not silently redirect a fit.toml that
-declared `output_dir = "results/he2010"`. Neither `--output-dir` nor
-`CAMDL_OUTPUT_DIR` applies to the run store.
+`camdl simulate`, `camdl pfilter` and `camdl fit run` store their results in the
+run store, whose root is `--store DIR` (`simulate`, `pfilter`), the fit file's
+`store` key (`fit run`, §6.2), else `CAMDL_STORE`, else `./camdl-store`; its
+layout is in §4.4 and, for fits, §2.2. Profiles store theirs under `results/`,
+whose location is `CAMDL_OUTPUT_DIR`, else `./results`
+(`run_paths::output_root`). Neither `--output-dir` nor `CAMDL_OUTPUT_DIR`
+applies to the run store.
 
 ### 2.1 The content-addressed store
 
-The results of fits and profiles live in one store under the output root,
-partitioned by artifact kind:
+The results of profiles live in a store under the output root, partitioned by
+artifact kind:
 
 ```
 results/
 ├── index.json            # rebuildable lookup cache (§2.6)
 ├── .staging/             # atomic-commit scratch (§2.6)
-├── fits/                 # fit segments, each holding its method leaves
 └── profiles/             # profile-likelihood grid points
 ```
 
@@ -361,8 +358,10 @@ The levels per kind:
 
 | kind            | partition  | levels, in path order                   |
 | --------------- | ---------- | --------------------------------------- |
-| `fit_method`    | `fits`     | fit · method · seed                     |
 | `profile_point` | `profiles` | profile · point · method · seed · start |
+
+A `fits/` directory under `results/` is not read: fits are stored in the run
+store (§2.2), and there is no import of a fit stored under `results/fits/`.
 
 **The one rule for consumers: resolve runs by reading `run.json`, never by
 parsing path segments.** Path segments mirror the `levels` array for human
@@ -388,83 +387,131 @@ events: a per-struct `schema_version`, the crate-wide `HASH_VERSION`, or
 
 ### 2.2 Fit Result Layout
 
-A fit occupies a **segment** directory `results/fits/{stem}-{fit_hash8}/`, where
-`stem` is the slugged basename of the `fit.toml` and `fit_hash8` is the
-fit-level content hash. The segment has **no `run.json` of its own** — it is a
-path level, not a leaf. Under it, one leaf per fit seed for the file's
-`[method]`; a second method file of the same problem shares the fit hash and
-lands in a sibling segment named by its own stem:
+`camdl fit run` stores a fit in the run store (§4.4) as two kinds of result. A
+**fit problem** (kind `fit`) holds what the fit is fitted to and how the problem
+is posed, and is written once. A **fit run** (kind `fit_run`) is one run of one
+method at one seed on that problem, stored inside it and written in place while
+it works. The layout is that of `docs/dev/proposals/2026-11-20-run-store-api.md`
+("Worked example: `camdl fit run`"). One IF2 fit with `holdout_after`:
 
 ```
-results/fits/{stem}-{fit_hash8}/
-  fit.meta.json                     # fit-wide provenance sidecar (§2.2.1)
-  fit.toml.original                 # the producing config, byte for byte
-  fit.resolved.toml                 # the configuration the fits ran under (generated)
-  model.camdl.original              # archived model source (when given as .camdl)
-  model.ir.json                     # archived compiled IR
-  model.render.json                 # archived display render (when given as .camdl)
-  model.graph.json                  # archived flow graph (when given as .camdl)
-  synthetic/truth.toml              # [synthetic] fits only
-  synthetic/data/ds_NN/<stream>.tsv # [synthetic] fits only, one directory per
-                                    #   sim seed, one file per stream
-  predict/{run_id12}-{key}/         # `fit predict` output for one run (§2.2.2),
-                                    #   keyed by the run, engine and options
-    predictive/<stream>.tsv
-    predictive.json                 #   records the full run_id it replays
-    observed/<stream>.tsv
-    observed.json
-    quantities/<name>.tsv           # `quantities {}` sidecar, when requested
-    quantities.json
-    report.json                     # what `fit predict` computed, and what
-                                    #   refused (§2.2.2)
-  {method}-{method_hash8}/          # the [method], labelled by its algorithm
-    seed_{n}-{seed_hash8}/          # one per fit seed — the leaf
-      run.json
-      ...method-specific artifacts...
+<root>/<build>/
+  compiled_model/<model stem>-<12 hex>/         # the compiled model, stored once
+    model.ir.json …
+  quantities/<model stem>-<12 hex>/             # the model's quantities and contrasts, stored once
+  fit/<model stem>-<12 hex>/                     # the fit problem
+    identity.json  run.json
+    problem.toml                                 # the resolved problem, in fit.toml syntax
+    partition.json                               # which rows trained
+    inputs/<source>.<ext>                        # each data file's training lines
+    inputs/tables/<name>.<ext>                   # each [data.tables] file, as read
+    held_out/<stream>.tsv                        # held-out rows' dates, no values; only when rows are held out
+    synthetic/truth.toml                         # a [synthetic] problem's true parameters
+    model.camdl                                  # the model file, under the name it was given (model.ir.json for IR)
+    runs/<method>-<12 hex>/                      # one group per set of method settings
+      seed_<n>-<12 hex>/                         # one fit run
+        identity.json  run.json
+        fit.toml                                 # the fit file this run was given, byte for byte
+        method.toml                              # the run's [method] and the run settings of [estimate]
+        run_inputs.json                          # what the run was asked to do and what it found
+        fit.meta.json                            # the problem's provenance as the run resolved it (§2.2.1)
+        execution.json  events.jsonl  progress.json
+        inputs/starts.<ext>                      # a --starts file named directly
+        fit_state.toml  mle_params.toml  chain_0/ …   # the method's results, below
+        predict/<mode>-<12 hex>/                 # `fit predict` output (§2.2.2)
 ```
 
-The archived files and the `predictive`/`observed`/`quantities` outputs are
-**regenerated sidecars**: they are not part of any leaf's file manifest, and a
-rerun of `fit predict` overwrites them in place. The predict outputs sit under
-`predict/<run_id12>-<key>/`, one directory per run they replay and set of
-inputs, and their manifests record that run's full `run_id`.
+`<build>` is the camdl version and 12 hex digits of the ambient key, as for
+every result in the run store (§4.4). Each folder name below it is a label
+followed by 12 hex digits of that result's or group's key; the label is not part
+of the identity. The problem's label is the model file's stem, slugged
+(`sir-beta.camdl` gives `sir_beta`), the method group's is the algorithm's name,
+and a run's is `seed_<n>`, the seed typed. A sweep point (§2.3) and each
+`[synthetic]` dataset is a problem of its own, in a sibling folder with the same
+label.
 
-**What the fit hash covers.** The fit level is a `FitDigest` over the whole
-model IR digest (which itself folds `ir/VERSION` and the engine version), the
-content digests of every training data stream, the content digests of every
-explicit `[data.holdout]` stream, the content digests of every `[data.tables]`
-file, the engine version, and the canonical JSON of the resolved fit config with
-three slices normalized out: `method` (the method level owns it), `fit_seeds`
-(the seed level owns the seed), and `output_dir` (pure write-location
-provenance). The fit level therefore hashes the _problem_ alone: two `fit.toml`
-files that share a problem and differ in `[method]` share one fit hash and are
-separated on disk only by their stems, and editing a `[method]` key re-keys that
-file's method leaf and nothing else.
+**What the problem's identity holds.** The compiled model it depends on; each
+data file's training lines; each stream's held-out rows, by date and without
+their values; the partition rule; the `[data.tables]` files; `[estimate]`'s
+estimated set with its bounds and priors; every `[fixed]` value after
+resolution, a sweep point's included; `simplex_groups`; the settings (`dt`,
+`allow_degenerate_rates`, `allow_forcing_extrapolation`); the scenario request
+(`scenario`, `enable`, `disable`) as given; `ic_free`; and, for a `[synthetic]`
+problem, what generated its data: the true parameters file's bytes, the
+dataset's one seed and the block's other settings. Two fit files that pose one
+problem and differ in `[method]` share one problem folder. `rw_sd`,
+`perturb_only_at_t0` and `start`, though written under `[estimate.<parameter>]`,
+belong to the run, so two runs that differ only in them share a problem.
+`[synthetic]` and `--emit-every` generate training rows, which the problem keys
+like any data. A `[data.holdout]` table's values enter no fit; its rows' dates
+are held-out rows like a cutoff's.
 
-Data files enter by **content**, not path: rewriting a holdout or training TSV
-in place re-keys the fit, so a stale held-out score cannot be reused. The same
-holds for chain-start sources — a `from_posterior` source's `draws.tsv` and a
-`from_params` TOML fold their file digest into the method's `deps`, and a
-`from_mle` source the digest of the `start_values` its `fit_state.toml` records.
-A fit's result files carry no time or path (below), so refitting a source with
-identical inputs leaves those digests, and every fit started from it, unchanged.
+Data enter by **content**, not path. A change to any column within the training
+lines re-keys the problem, and with `holdout_after` the lines past the cutoff
+are not in it, so a change to a held-out value does not.
 
-**Method levels and lineage.** The method level hashes the method's identity
-payload (the algorithm block and the resolved `starts` rule), the number of
-stored posterior trajectories, the target chain length, and the method's `deps`
-— the upstream artifacts a sourced `starts` rule consumes. Folding `deps` in is
-what makes cross-file invalidation work: a posterior file's hash contains the
-leaf its `from_mle = "@scout"` names, so regenerating the scout re-keys the
-posterior. The method's path label is the algorithm's name (`if2-<h8>`,
-`pgas-<h8>`); there is no execution order among methods and nothing for an
-ordinal to encode.
+**What a run's identity holds.** The problem it depends on, the method's
+settings without its length, the per-parameter run settings of `[estimate]`, the
+larger compile with the state Jacobian when the method needs it (`nl-lbfgs` on
+the ODE backend), the process seed, where the chains start, the length (PGAS
+`sweeps`, PMMH and `mh` `iterations`), and for a resume the base run (below). A
+sourced `starts` (`from_mle`, `from_posterior`, `from_params` on a stored fit)
+holds a dependency on the file it reads from the source run, so refitting the
+source with identical inputs leaves the dependency, and every run started from
+it, unchanged; a `--starts` file named directly is stored in the run as
+`inputs/starts.<ext>` and keyed by its bytes.
 
-**A leaf's result, apart from its executions.** A leaf's _stored bytes_ — the
-files its `run.json` manifest checksums — are a function of its computation. An
-_execution_ is one attempt to perform that computation: the first run, a run
-killed and re-run, a run on another host. Everything about an execution rather
-than its result is kept beside the leaf and outside its manifest, in three
-per-attempt records, and a fourth for an NLopt leaf:
+**The files a problem and a run hold.**
+
+- `problem.toml` is the problem in `fit.toml` syntax, written from the problem's
+  identity alone and parsed back by `fit run`'s own parser before it is stored.
+  `[model] camdl` names the stored model file, `[data.observations]` the stored
+  training files, one per source, never a wide `file`, and `[data.tables]` the
+  stored tables. It holds no `holdout_after` and no `[data.holdout]`, every
+  `[fixed]` value resolved (a `from_file` read in, a `from_scenario` expanded),
+  `[config]` with the step the one dt rule resolved, and `[simulate] from`. A
+  `[synthetic]` problem's file also holds `[synthetic]` with
+  `true_params = "synthetic/truth.toml"` and its dataset's one seed in
+  `sim_seeds`.
+- `partition.json` is the training partition (§6.2): `rule_version`; `rule`, one
+  of `{"kind": "all"}`, `{"kind": "cutoff", "at": {"t", "date"}}` and
+  `{"kind": "separate_files"}`; `extent`, `{"t", "date"}`, the latest end among
+  the training rows; and `streams`, per stream `{"stream", "rows", "digest"}`:
+  rows `[0, rows)` trained, and `digest` is the row digest of exactly those
+  rows.
+- `inputs/<source>.<ext>` is the source's data file with only the lines that
+  hold a training row of one of its streams and the lines that give no stream a
+  row, every column kept; when every stream trains on all its rows it is the
+  source's bytes. Binding the stored bytes must give each stream exactly its
+  training rows, by count and row digest, or the problem is refused.
+- `held_out/<stream>.tsv` lists each held-out row without its value: `file`
+  (`training` for a row past the cutoff, `holdout` for a row of a
+  `[data.holdout]` table), `position` in that file, `label`, `measures`
+  (`instant` or `period`) and `start`/`end`.
+- A run's `fit.toml` is the file it was given, comments included. Its
+  `method.toml` is the `[method]` table after the command line's method flags
+  are applied, followed by an `[estimate.<parameter>]` table per parameter that
+  sets `rw_sd`, `perturb_only_at_t0` or `start`; with `problem.toml` it parses
+  to the configuration the run computed. `run_inputs.json` records the method,
+  backend, seed, chain count, starts rule and source, binomial sampler, best
+  chain and log-likelihood, and resume lineage; every reader of a run reads its
+  method and backend there.
+
+A reader of a stored fit reads the problem through these files and the stored
+compile, never through the user's fit file, model or data: an edit to any of
+them after the fit does not reach a replay.
+
+**A rerun.** `fit run` reuses a completed run of the same identity
+(`cache hit — reusing <folder>`) and computes only the problems and runs the
+store does not hold. `--force` recomputes the run: the stored one is moved to
+quarantine, its predictions with it.
+
+**A run's result, apart from its executions.** A run's _result files_ — the
+files its `run.json` lists with role `result` — are a function of its
+computation. An _execution_ is one attempt to perform that computation: the
+first run, a run killed and re-run, a run on another host. Everything about an
+execution rather than its result is kept in files of another role (§10.6), in
+three per-attempt records, and a fourth for an NLopt run:
 
 | file             | what it records                                                                                                                                                                                                            |
 | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -473,14 +520,18 @@ per-attempt records, and a fourth for an NLopt leaf:
 | `events.jsonl`   | what the run reported, one line per event (§10.11); not the lineage event log of `simulate --event-log`                                                                                                                    |
 | `opt_trace.tsv`  | an NLopt leaf's live search trace: each search's running best log-likelihood, a row every 25 evaluations or 2 seconds (§10.13)                                                                                             |
 
-The run writes `execution.json` when it claims the leaf and again, with its
-finish, before the commit, so an attempt that dies still records when and where
-it ran. A re-run that reclaims a dead attempt's leaf moves that attempt's
-`run.json` (as `attempt.json`) and its records into `.attempts/<n>/` before
-recomputing, so a leaf keeps one set of records per attempt; the set at the leaf
-root belongs to the attempt that wrote the result. `fit summary`'s ESS per
-second and the end-of-run `complete in` line read wall time from
-`execution.json`; a leaf without one reports none.
+A fit run's method works in a directory of its own outside the store. While it
+runs, the run's folder holds its record, `fit.toml`, `method.toml`, and the
+method's `progress.json` and `events.jsonl`, passed on to the folder about every
+half second; the method's result files, `execution.json`, `run_inputs.json` and
+`fit.meta.json` are written into the folder when the method ends, or when camdl
+stops the run on an error. A run whose process is killed therefore leaves no
+chain files and no `execution.json` in its folder. A re-run that reclaims a dead
+attempt's run moves that attempt's `run.json` (as `attempt.json`) and its
+records into `.attempts/<n>/` before recomputing, so a leaf keeps one set of
+records per attempt; the set at the leaf root belongs to the attempt that wrote
+the result. `fit summary`'s ESS per second and the end-of-run `complete in` line
+read wall time from `execution.json`; a leaf without one reports none.
 
 Byte reproducibility — two executions of one computation writing identical
 stored bytes — is promised where it is tested: on the committed fixture
@@ -505,16 +556,19 @@ with a longer `iterations` / `sweeps` continues each chain of `<base>` from its
 checkpoint. Four things are distinct:
 
 - the _computation's identity_ includes its target length: the extended fit is a
-  different computation, with its own `run_id` (the target length is folded into
-  the method level, and the base into `deps`);
+  different computation, with its own `run_id` (the length is in the run's
+  identity, and the base run is a dependency of it over the files a resume
+  carries: each chain's `resume_state.bin`, `trace.tsv` and `trajectories.tsv`).
+  It is stored beside the base, under the same method group;
 - a _checkpoint_ — `chain_N/resume_state.bin`, the chain state at the end of the
-  base — is a state a longer computation can start from. It records the base's
-  identity with the target length taken out (`cas::resume_guard`), and a resume
-  is admitted only when the extension's matches, so only the target may differ.
-  A checkpoint is never served as a completed result: a resume toward a target
-  the base has already reached is refused before any leaf is claimed, since the
-  leaf it addressed would hold the base's whole, longer chain under the shorter
-  computation's identity; at the base's own target, the base is the result;
+  base — is a state a longer computation can start from. A resume is admitted
+  only when the extension's identity, with its length and its base taken out,
+  equals the base's, and the base came from the same build, so only the target
+  may differ. A checkpoint is never served as a completed result: a resume
+  toward a target the base has already reached is refused before any leaf is
+  claimed, since the leaf it addressed would hold the base's whole, longer chain
+  under the shorter computation's identity; at the base's own target, the base
+  is the result;
 - a _completed result_ at a target length is an ordinary leaf. Extending it
   reads the base and writes a new leaf: the base's leaf is unchanged, is found
   under its own `run_id`, and reports its own length
@@ -525,7 +579,7 @@ checkpoint. Four things are distinct:
 
 **Leaf contents by method.** An IF2 leaf holds `fit_state.toml`,
 `mle_params.toml`, `final_params.toml`, `chain_starts.tsv`,
-`chain_evaluations.tsv`, `diagnostics.tsv`, and per chain
+`chain_evaluations.tsv`, `diagnostics.tsv`, `diagnostics.json`, and per chain
 `chain_N/parameter_traces.tsv` + `chain_N/final_params.toml`. A PGAS or PMMH
 leaf holds `fit_state.toml`, `chain_starts.tsv`, `draws.tsv` (the thinned
 post-warm-up cloud), `diagnostics.json`, and per chain `chain_N/trace.tsv`,
@@ -536,14 +590,15 @@ post-warm-up cloud), `diagnostics.json`, and per chain `chain_N/trace.tsv`,
 so a bare `toml` reader still sees the parameters at the top level. The block
 records `camdl_version`, `content_hash` (a tamper hash over the numeric values
 only, at 12-decimal precision, so editing a provenance field does not invalidate
-it), `fit_hash`, `backend`, `dt`, `model_identity`, per-stream
-`[provenance.data.<stream>]` entries of `hash` (the full SHA-256 of each
-training file, the digest the fit's identity folds), `seed`, `method`, `chain`
-(counted from 0, §2), `log_likelihood`, `loglik_sd`, `n_particles`, and optional
-`ess_mean`/`ess_min`. It records the model and the data by content and holds no
-time and no path: the file is part of the leaf's stored bytes, and a path
-relative to the store would change with where the store is. The model's file is
-in the fit folder's `fit.meta.json` (`source_model`, §2.2.1). For IF2,
+it), `fit_hash` (the problem's id), `backend`, `dt`, `model_identity`,
+per-stream `[provenance.data.<stream>]` entries of `hash` (the full SHA-256 of
+the data file the fit file names, before the training cut; the problem's
+identity keys the stored training lines instead), `seed`, `method`, `chain`
+(counted from 0, §6.8), `log_likelihood`, `loglik_sd`, `n_particles`, and
+optional `ess_mean`/`ess_min`. It records the model and the data by content and
+holds no time and no path: the file is part of the run's stored bytes, and a
+path relative to the store would change with where the store is. The model's
+file is the problem folder's `model.camdl` (or `model.ir.json`). For IF2,
 `log_likelihood` is the loglik-eval re-score of the winning chain, so
 `loglik_sd` is that re-score's Monte Carlo standard error (the `±` on the stderr
 line), `n_particles` its particles per replicate (not the IF2 swarm's size), and
@@ -555,155 +610,55 @@ when its parameter values no longer hash to `content_hash` (they were edited
 after the fit), naming the file: re-run the fit, or remove the `[provenance]`
 block to run the edited values as a plain params file.
 
-#### 2.2.1 `fit.meta.json` — fit-level sidecar
+#### 2.2.1 `fit.meta.json` — the run's record of its problem
 
-The fit segment carries a `fit.meta.json` holding the fit-wide provenance that
-has no `RunRecord` of its own. It is **derived provenance, never a source of
-truth**: everything in it is a readable projection of inputs already hashed into
-the leaf identities, written after identity is fixed and never fed back into any
-hash. Its top-level keys serialize in a fixed order (the writer's field order,
-which is not alphabetical), and the keys inside each map (`data_hashes`,
-`fixed`, `parameters_provenance`, …) in sorted order (the maps are `BTreeMap`s),
-so two identical runs produce byte-identical sidecars and a diff of two runs'
+Each fit run holds a `fit.meta.json`, a provenance file recording the problem as
+that run resolved it. It is **derived provenance, never a source of truth**:
+everything in it is a readable projection of inputs already in the problem's and
+the run's identities, written after identity is fixed and never fed back into
+any hash. A reader that needs the problem reads `problem.toml`, `partition.json`
+and the stored inputs (§2.2). Its keys, top-level and inside each map
+(`data_hashes`, `fixed`, `parameters_provenance`, …), serialize in sorted order,
+so two identical runs produce byte-identical files and a diff of two runs'
 metadata is meaningful.
 
-Fields: `schema_version` (2; below), `store_layout` (the folder's store layout,
-§2.7; absent, and so 0, in a record written before layouts were numbered),
-`label` (a profile's label only; a fit's label lives on its runs' `run.json` and
-moves between them, see §6.8), `source_model` (the model file the fit ran on, a
-`.camdl` or `.ir.json`, as a path relative to the fit folder by the same rule as
-`source_config`; absent when the model was not a file; the archived copies are
-the folder's `model.camdl.original` and `model.ir.json`), `model_identity` (the
-hex structural model hash), `source_config` (the producing config file, as a
-path relative to the fit folder that holds this `fit.meta.json`, below; absent
-for a CLI-only fit), `fit_toml_hash` (SHA-256 of the producing config's raw
-bytes — provenance, i.e. which exact bytes produced this fit; a `fit.toml`
-handle is NOT looked up by it, see below), `data_hashes`, `holdout_hashes`,
-`estimated`, `fixed`, `partition` (the run's parameter roles, below),
-`resolved_priors` (one `{param, source}` entry per estimated parameter,
+Fields: `schema_version` (3), `store_layout`, `model_identity` (the hex
+structural model hash), `fit_toml_hash` (SHA-256 of the fit file's raw bytes,
+the run's `fit.toml`; provenance only, and no handle is looked up by it),
+`data_hashes`, `holdout_hashes`, `table_hashes`, `estimated`, `fixed`,
+`partition` (the run's parameter roles, below), `resolved_priors` (one
+`{param, source}` entry per estimated parameter,
 `source ∈ {fit_toml, model_ir, flat_explicit, flat_fallback}`, plus
-`overridden_model_prior` when the fit.toml's prior displaced a model `~` prior;
-recorded whichever method ran, because every method run on the problem shares
-this segment and the resolution is a fact about the problem, not the method —
+`overridden_model_prior` when the fit file's prior displaced a model `~` prior;
+recorded whichever method ran, since the resolution is a fact about the problem;
 `flat_fallback` appears only on a problem no posterior sampler can run on, since
 a sampler refuses an implicit flat prior before it starts),
 `parameters_provenance` (per parameter: resolved value, the tier that supplied
-it, and its role), `training_partition` (which rows the fit trained on, recorded
-for every fit, §6.2: `rule_version`; `rule`, one of `{"kind": "all"}`,
-`{"kind": "cutoff", "at": {"t", "date"}}` and `{"kind": "separate_files"}`;
-`extent`, `{"t", "date"}`, the latest end among the training rows; and
-`streams`, per stream `{"stream", "rows", "digest"}`: rows `[0, rows)` trained,
-and `digest` is the row digest of exactly those rows; `date` is present when the
-model has an `origin`), `dt` (the integration step every run in the segment ran
-at — the model's declared `simulate { dt }`, else the config's `[config] dt`,
-else 1.0) and `integrator` (the ODE integrator the model declares,
-`{"method": "rk4"}` when it declares none — what an ODE-backend run integrated
-with), which a replay of the fit's parameters runs on by default (§3.4; a
-sidecar written before these were recorded lacks them, and a replay recovers
-them from the archived config and model), `calendar` (the model's calendar axis,
-§2.2.2's block, so the fit's model times can be dated without the model;
-required, and a profile's sidecar carries it too), `schema` (the
-observation/dimension schema below), and `docs` (the model's `#'` documentation
-dictionary, keyed by declaration name, so a consumer can label any output
-column).
+it, and its role), `training_partition` (the problem's `partition.json`, §2.2;
+`date` is present when the model has an `origin`), `dt` (the integration step
+the run ran at — the model's declared `simulate { dt }`, else the config's
+`[config] dt`, else 1.0) and `integrator` (the ODE integrator the model
+declares, `{"method": "rk4"}` when it declares none), which a replay of the
+fit's parameters runs on by default (§3.4), `calendar` (the model's calendar
+axis, §2.2.2's block, so the fit's model times can be dated without the model;
+required), `schema` (the observation/dimension schema below), and `docs` (the
+model's `#'` documentation dictionary, keyed by declaration name, so a consumer
+can label any output column).
 
-**A fit folder keeps two configs.** `fit.toml.original`, beside `fit.meta.json`,
-is the user's config file byte for byte, comments included, as `fit run` read
-it; `fit_toml_hash` is its hash. It is kept for display and provenance, and no
-reader takes a fit's configuration from it. `fit.resolved.toml` is the
-configuration the folder's fits ran under, and is what every reader of a stored
-fit parses (`fit predict`, `compare` and `simulate --fit` on a run handle,
-`pfilter` and `profile` `--fit` on any stored-fit handle, and `fit table`'s
-config diff): the same config with every problem-half value the command line set
-written in (today `--allow-forcing-extrapolation`, as
-`[config] allow_forcing_extrapolation = true`) and `[fixed]` the folder's own
-values — a `--sweep` point's applied, a `from_scenario` expanded and a
-`from_file` read in, so the stored config names no fixed-values file and does
-not depend on that file's later contents. A sweep point named by its leaf,
-folder or run-id prefix is so read at its own values. A profile's folder stores
-the same pair for the fit it profiles, whichever form names it: the user's text
-as `fit.toml.original` and the resolved config as `fit.resolved.toml`. It is
-generated: it opens with a comment saying so, carries none of the file's
-comments or layout, and is written with the keys of every table sorted except
-`[estimate]`, `[data.observations]` and `[data.holdout]`, which keep the file's
-order because camdl reads them in order; so the same configuration always gives
-the same bytes. Relative `[model]`, `[data]` and `output_dir` paths in it
-resolve against the fit file's directory, below. Reading a stored config checks
-its `[fixed]` against the values `fit.meta.json` records the fit running at and
-refuses a difference, naming each parameter; `pfilter` and `profile` `--fit`,
-which also read and key the stored `fit.toml.original`, refuse one whose SHA-256
-is not `fit_toml_hash`. A command that can run without a fit
-(`simulate --draws posterior --fit` on a bare directory of draws) refuses a fit
-folder whose stored config cannot be read, rather than running without it. Its
-`[method]` is the file's: a fit folder holds every method run on its problem,
-and each run's own method settings are in its `run.json` (`inputs`). One
-command-line value a fit's identity keys is not written in: `--emit-every`, the
-cadence `[synthetic]` data are generated at. It has no fit-file spelling, and it
-reaches the fits only through the generated data, whose bytes key each synthetic
-fit, so two synthetic fits that differ only by it store the same
-`fit.resolved.toml`. Neither file enters any identity. A fit folder written
-before camdl stored `fit.resolved.toml` is at store layout 0 (§2.7), and every
-reader of a stored fit's config refuses it, naming `camdl dev migrate <folder>`,
-which writes the file from what the folder records. Re-running the fit does not
-repair such a folder: the engine build is in every fit's identity, so a newer
-camdl's run writes a new folder beside it. A folder at the current layout
-without the file is refused as incomplete.
+`schema_version` is 3, and every reader refuses any other value, naming it,
+rather than reading an older record's fields as if they meant the same thing.
 
-**A stored table is checked before it is bound.** A fit binds each
-`[data.tables]` file once, folds its SHA-256 into the fit's identity
-(`FitDigest.tables`), records it in `table_hashes`, and keeps the bytes in the
-folder as `inputs/NAME.EXT`. `fit.resolved.toml` keeps the `[data.tables]` paths
-the file wrote; a reader of the stored fit binds each input to its stored copy
-instead, so an edit to the source file after the fit does not reach a replay,
-and refuses a copy whose SHA-256 is not the recorded one, naming the input and
-both digests.
-
-**`source_config` and the stored configs are different files.** `source_config`
-names the user's own config file — which may since have changed or gone — and is
-recorded only for its location: the stored configs' relative `[model]` and
-`[data]` paths were written against the source config's directory, so a reader
-resolves them against `<fit folder>/<source_config>`, exactly as `fit run`
-resolved them against the config file. `fit run` computes the relative path
-between the canonical (symlink-resolved) fit folder and config, e.g.
-`../../../fits/sir.toml` for `fits/sir.toml` and `results/fits/sir-1a2b3c4d/`,
-so it names the same file from any working directory and after the project
-directory moves as a whole. A fit whose `results/` is moved apart from its
-configs and data no longer finds its data: the data are not archived in the fit
-(the store-lifecycle proposal's `pack` takes that on). A data file the recovered
-config names but that is not there is refused with the stream, the path it was
-looked for at and the hash recorded for it in `data_hashes`:
-
-```
-error: the fit's data is not where its config says:
-  stream `cases`: looked for results/fits/sir-1a2b3c4d/../../../fits/../data/cases.tsv (recorded hash b39b0a43)
-  The config's relative data paths resolve against the source config's directory, …
-```
-
-**`schema_version`.** `fit run` writes 2, and every reader refuses any other
-value, naming it, rather than reading an older record's fields as if they meant
-the same thing. A record without the key is version 1, whose `fit_toml_path` and
-`model_path` were relative to the directory `fit run` was started from:
-
-```
-error: …/fit.meta.json is fit.meta.json schema version 1; this camdl reads version 2 only (…). Re-run the fit with this camdl.
-```
-
-Two caveats a consumer must know. `data_hashes` holds, per observation source
-the fit binds (the `from <label>` a data file is bound to, which is the stream's
-name for a plain stream), the full SHA-256 of the training file bound to it: the
-same digest the fit's run identity folds. The `[data] file = "..."` shorthand
-records the one file under every source it binds (gh#771); `[data.observations]`
-records each file under the key written. `holdout_hashes` records each
-`[data.holdout]` file the same way and is omitted when there is none. A sidecar
-written by an older camdl may hold the first eight hex digits only, key a
-shorthand fit by observation leaf (`cases_urban`, `cases_rural` for one indexed
-`cases[p in patch]` block), and record no holdout files; `compare` reads such a
-record as its entry in Appendix A (`camdl compare`) describes. And under
-`fit run --sweep` each segment's `fixed` holds its own point's value of the
-swept parameter, as its `partition` and `fit.resolved.toml` do. `estimated`,
-`fixed`, `partition` and `parameters_provenance` are written per segment from
-that segment's own resolution; the fit-level record before any segment has run
-leaves them empty.
+`data_hashes` holds, per observation source the fit binds (the `from <label>` a
+data file is bound to, which is the stream's name for a plain stream), the full
+SHA-256 of the data file bound to it, as the fit file names it and before the
+training cut, so under `holdout_after` it is not the hash of the problem's
+stored `inputs/` file. The `[data] file = "..."` shorthand records the one file
+under every source it binds; `[data.observations]` records each file under the
+key written. `holdout_hashes` records each `[data.holdout]` file the same way
+and is omitted when there is none; `table_hashes` records each `[data.tables]`
+file and is omitted when there is none. Under `fit run --sweep` each point's run
+records its own point's value of the swept parameter in `fixed`, as its
+`partition` does.
 
 `partition` is the authoritative record of the run's roles. Its `parameters` map
 holds, per parameter, `role` (`estimated` or `fixed`), `declared_by`
@@ -713,30 +668,21 @@ its `search` box, the `transform`, and the `prior` that resolved (`dist` and
 `fixed` are generated from it. An IF2 fit records its priors in both places even
 though the method does not read them.
 
-A third thing to know, because it is the one field whose name invites the wrong
-inference. `fit_toml_hash` answers _provenance_ — which exact bytes produced
-this fit — and nothing resolves a handle by it. Handing a config to a verb
-(`camdl compare fit.toml`, `camdl fit summary fit.toml`) asks a different
-question: does this config MEAN what the stored fit was run from? That is
-answered by canonicalising the parsed value tree — comments, whitespace, table
-order, and the spelling of a float all discarded, `[estimate]` /
-`[data.observations]` order preserved because camdl reads those in order. Every
-run records that identity for each config it was written or reused from, in its
-`run.json` as `inputs.config_identities`, and a `fit.toml` handle names the run
-whose list holds the file's identity as the file now reads — not the run the
-problem folder's stored config (the latest run's) describes. The match is exact:
-the run named is the one this camdl build made (its `engine_version` is this
-binary's engine identity), the run `camdl fit run` of the file would reuse. A
-run another build made — another commit, or the same commit with other
-uncommitted changes — is never used in its place: when only other builds' runs
-match, the verb refuses and lists them, each with how its build differs ("stale"
-for another commit, "built from uncommitted changes" for the same one) and how
-to name it, by its run-id prefix or leaf directory. Several runs by this build
-(several fit seeds, a `--starts` override) are listed. A run stored before runs
-recorded the identity cannot be matched by file and is named by its directory or
-`run_id`. Reflowing a comment changes `fit_toml_hash` and leaves the lookup
-identity alone; changing a particle count or a data path changes the identity
-and the config no longer resolves to that run.
+**A fit file never names a run.** One unchanged fit file makes several runs
+whenever something outside its text changes: the data, its seeds, a sweep, or
+the build. A command that needs one run (`fit summary`, `fit predict`,
+`compare`, `simulate --draws posterior --fit`, `--starts from_mle=…`,
+`fit run --resume`) refuses a fit file and lists the runs the file has made,
+each with its id and folder:
+
+```
+error: fit_pmmh_all.toml is a fit configuration, and a configuration never names a run: one file makes several runs whenever its data, its seeds, a sweep or the build change.
+    9cd433e2dedb  camdl-store/0.1.0_f531753ac.dirty-a20ab6cb-4bff11f93f55/fit/sir-797c0b53281a/runs/pmmh-85f985a8c2a2/seed_1-9cd433e2dedb
+  Name one by its id or folder, or by `@label` (`fit run --label`).
+```
+
+A command that needs only the problem (`pfilter --fit`, `design`,
+`profile --fit`) accepts a fit file, resolved in process, or a stored fit.
 
 The `schema` block lets a consumer facet any stream and label panels with no DSL
 parsing:
@@ -771,47 +717,45 @@ disagree with what was fit.
 
 #### 2.2.2 `fit predict` predictive artifact
 
-`camdl fit predict <fit>` resolves the fit handle — `@label`, a `fit.toml` path,
-a leaf or problem-folder directory, or a hash prefix — to one run, refusing a
-problem folder that holds several with the runs listed. It writes two tidy,
-plot-ready families of files under `predict/<run_id12>-<key>/` in that run's
-segment — outside the leaf, whose exact-set manifest admits no regenerated files
-— plus a JSON manifest for each that records the full `run_id`. Two runs of one
-problem keep separate predictives, and each file is attributable to the run it
+`camdl fit predict <fit>` resolves the fit handle — `@label`, a run id prefix or
+a run's folder — to one run. A fit file is refused with the runs it made listed
+(§2.2.1). It stores one `prediction` result inside that run, at
+`predict/<mode>-<12 hex>/`, holding two tidy, plot-ready families of files plus
+a JSON manifest for each that records the run's full `run_id`. Two runs of one
+problem keep separate predictions, and each file is attributable to the run it
 replays.
 
-`<key>` is the first 32 hex digits (128 bits) of the SHA-256 of the full
-`run_id`, the engine (the build fingerprint and the engine switches that are on,
-as every stored run keys them), and every predict option that changes the
-output, resolved to the values used: `--mode`, `--horizon`, `--n-draws`,
-`--seed`, `--stream`, `--scenario`/`--enable`/`--disable`, `--sweep`,
-`--by-chain`, the chains `--exclude-chains`/`--chains` drop from the fit's cloud
-(so the two spellings of one selection are one key), the SHA-256 of a
-`--quantities` file, and `--allow-forcing-extrapolation`, and, for a forecast,
-`options.forecast`: the SHA-256 of its target set (each target's stream, period
-or instant, and design values where it reads any; D80, D81) and, when a target
-reads a design, the design mode (`prospective` or `ex_post`). Two predictions
-that differ in the run, the engine or any of those options therefore never share
-a directory. The held-out outcomes are not in the key: they change no prediction
-(D79), and a forecast whose held-out values change writes the same tables to the
-same directory. The key does not cover the observation data: `fit predict` reads
-the fit's data files from their paths as they are now, and the fit's recorded
-data digests are used only to name a file that has gone missing, so a data file
-changed in place under the same path is not detected and its prediction is
-written to the same directory. `predictive.json`, `observed.json` and
-`forecast.json` record the key under `address_key` and the options under
-`options`; `run_id12` is a label for a person listing the folder. Every manifest
-of a prediction (`predictive.json`, `observed.json`, the quantities manifest,
-`report.json`, `forecast.json`) records the engine that made it as `run.json`
-does: `engine_version`, the build fingerprint, and `engine_switches`, absent
-when no switch was on. `fit table --quantity` reads the address its own
-free-forward derivation writes. Inside the directory, `--exclude-chains` and
-`--quantities` also name the files (`predictive-excl3/`, `quantities-<key8>/`),
-so a chain-subset or other-vocabulary table says so in its name. A forecast's
-files carry no such suffix (D86): `forecast.json`, `forecast-samples.tsv`,
-`forecast/` and `report.json` keep their names, the directory alone is keyed by
-the selection, and `forecast.json` states `options.excluded_chains` (`[]` for
-the full cloud).
+A prediction's identity is the run whose draws it uses and that run's problem,
+the stored training data the filter conditions on, by stream, and every predict
+option that changes the output, resolved to the values used: the mode
+(`--mode`), `--horizon`, `--n-draws`, `--seed`, `--stream`,
+`--scenario`/`--enable`/`--disable`, `--sweep`, `--by-chain`, the chains
+`--exclude-chains`/`--chains` drop from the fit's cloud (so the two spellings of
+one selection are one key), the particle count, the SHA-256 of a `--quantities`
+file, `--allow-forcing-extrapolation`, and, for a forecast, its target set (each
+target's stream, period or instant, and design values where it reads any; D80,
+D81) and the design mode. The build is in the ambient key, as for every result
+in the run store. Two predictions that differ in the run, the build or any of
+those inputs therefore never share a folder. The held-out outcomes are not in
+the identity: they change no prediction (D79). The data are the problem's stored
+training files, so an edit to the user's data file after the fit does not reach
+a prediction. A forecast from a stored fit reads its targets from the problem's
+`held_out/` files, computes no held-out score, and refuses `--realised-design`,
+whose design values are held-out values; no command scores the held-out rows of
+a stored fit (`compare` refuses them, Appendix A, `camdl compare`). A rerun of
+`fit predict` with the same inputs is served from the store. `predictive.json`,
+`observed.json` and `forecast.json` record the key under `address_key` and the
+options under `options`. Every manifest of a prediction (`predictive.json`,
+`observed.json`, the quantities manifest, `report.json`, `forecast.json`)
+records the engine that made it as `run.json` does: `engine_version`, the build
+fingerprint, and `engine_switches`, absent when no switch was on.
+`fit table --quantity` reads the address its own free-forward derivation writes.
+Inside the directory, `--exclude-chains` and `--quantities` also name the files
+(`predictive-excl3/`, `quantities-<key8>/`), so a chain-subset or
+other-vocabulary table says so in its name. A forecast's files carry no such
+suffix (D86): `forecast.json`, `forecast-samples.tsv`, `forecast/` and
+`report.json` keep their names, the directory alone is keyed by the selection,
+and `forecast.json` states `options.excluded_chains` (`[]` for the full cloud).
 
 The free-forward replay projects each row off its own recorded trajectories, so
 it records a snapshot at every time a row reads — each data time and each
@@ -819,17 +763,17 @@ interval boundary — in addition to the model's output schedule. A data record
 whose times fall between output times (data every 2.5 days against the default
 1-day output) therefore needs no `output { trajectories { ... } }` line, which
 would re-key the model and orphan the fit. The extra snapshots are internal to
-the projection: they change no stored fit or run identity, and `quantities/`
-stays on the declared output grid.
+the projection: they change no stored fit or run identity, and the quantity
+tables stay on the declared output grid.
 
 ```
-results/fits/<stem>-<hash8>/predict/<run_id12>-<key>/predictive/<stream>.tsv
+<run folder>/predict/<mode>-<12 hex>/predictive/<stream>.tsv
   scenario | sweep:<param>… | time | <dims…> | horizon | treatment | role
            | fit_rhat_max | fit_ess_min
            | rhat_mean | ess_mean | rhat_pred | ess_pred
            | n_draws | q05 | q25 | q50 | q75 | q95
 
-results/fits/<stem>-<hash8>/predict/<run_id12>-<key>/observed/<stream>.tsv
+<run folder>/predict/<mode>-<12 hex>/observed/<stream>.tsv
   time | <dims…> | value
 ```
 
@@ -870,8 +814,8 @@ are mis-timed (gh#1151); `role` is read by row position and is right on both.
   `free_forward` is `{"conditioning": "none", "streams": []}`: the band is never
   conditioned on a row. `one_step` is `"conditioning": "filtered"` with, per
   stream, the `rows` the filter walked, how many of them are `held_out_rows`,
-  and the rows' digest. Whether held-out rows were filtered through is read from
-  `held_out_rows`; under `--stream` only the selected streams are listed.
+  and the rows' digest. The filter walks a stored fit's training rows, so
+  `held_out_rows` is 0; under `--stream` only the selected streams are listed.
 - `holdout_files`, at the top level: `null` without `[data.holdout]`, and under
   it `{"read": false, "sources": […]}`. These two modes do not read the holdout
   files, so their rows are neither filtered through nor predicted as data rows.
@@ -884,16 +828,15 @@ are mis-timed (gh#1151); `role` is read by row position and is right on both.
 Unless explicitly overridden, every downstream simulation inherits the
 stochastic configuration recorded by its parent fit. For the binomial sampler
 (`btpe` or `btrs`, the `binomial` key of the method), `fit predict` reads the
-sampler from the fit leaf's `run.json` (`inputs.binomial`; for a leaf written
-before that record, `fit run --binomial` from its recorded command line, else
-the method in `fit.toml`), and every simulation it runs draws with it: the
-one-step filters, the free-forward replay and its `y_rep` draws, the forecast's
-filters and the contrast forks. `predictive.json` and `forecast.json` record it
-as `binomial`. `fit predict` has no flag that overrides it. The guarantee is the
-same sampler and the same recorded configuration, not the same random numbers: a
-predict does not reproduce the draws the fit made. `simulate` does not yet
-follow this rule when it replays a fit (`--draws posterior --fit FIT`,
-`--init-state fit`): it draws with BTPE whatever the fit ran.
+sampler from the fit run's `run_inputs.json` (`binomial`), and every simulation
+it runs draws with it: the one-step filters, the free-forward replay and its
+`y_rep` draws, the forecast's filters and the contrast forks. `predictive.json`
+and `forecast.json` record it as `binomial`. `fit predict` has no flag that
+overrides it. The guarantee is the same sampler and the same recorded
+configuration, not the same random numbers: a predict does not reproduce the
+draws the fit made. `simulate` does not follow this rule when it replays a fit
+(`--draws posterior --fit FIT`, `--init-state fit`): it draws with BTPE whatever
+the fit ran.
 
 The `treatment` column is `posterior` when the band averages over the whole draw
 cloud — the only treatment the band-builder accepts today, enforced by typing
@@ -962,7 +905,7 @@ rows and one column rather than replacing an artifact with a different object,
 exactly as `--scenario` and `--sweep` do. A chain subset is a different
 posterior, so it keeps its own keyed directory, and the two compose:
 `camdl fit predict --by-chain --exclude-chains 3,5` writes
-`predictive-excl3,5/<stream>.tsv` with a `chain` column. Chain ids are the fit's
+`predictive-excl3_5/<stream>.tsv` with a `chain` column. Chain ids are the fit's
 own numbering and are never renumbered by an exclusion, so an excluded chain is
 simply absent from the column and the ids that remain name the same chains as in
 the pooled artifact.
@@ -1163,19 +1106,22 @@ each at the site it refused:
 a non-finite quantity is an error there, named, with nothing written.
 
 **A chain subset is a different address, not a rewrite of the pooled one.**
-`fit predict --exclude-chains 3,5` writes `predictive-excl3,5/<stream>.tsv` +
-`predictive-excl3,5.json`, and likewise `contrasts-excl3,5/`,
-`quantities-excl3,5/` and `report-excl3,5.json`; the full cloud keeps the bare
-names. The key is the excluded **set**, so `3,5` and `5,3` are one address, and
-it composes with the reporting-vocabulary key (`quantities-<key8>-excl3,5/`).
-Without this a subset would silently replace the run's canonical predictive and
-a second subset would replace that, leaving only a stamp inside the file that
-had already been overwritten. `observed/` is not keyed — it is the recorded
-data, identical under any selection. `camdl show <fit>` lists every address a
-fit holds, and `camdl cat <fit> --stream <address>/<stream>.tsv` reads one.
-`--chains` keeps the named chains instead of dropping them, and is addressed by
-the chains it drops: on a six-chain fit `--chains 0,1,2,4` and
-`--exclude-chains 3,5` both write `predictive-excl3,5/`. A `--chains` list that
+`fit predict --exclude-chains 3,5` writes `predictive-excl3_5/<stream>.tsv` +
+`predictive-excl3_5.json`, and likewise `contrasts-excl3_5/`,
+`quantities-model-excl3_5/` with its manifest `quantities-excl3_5.json`, and
+`report-excl3_5.json`; the full cloud keeps the bare names. The key is the
+excluded **set**, so `3,5` and `5,3` are one address, and it composes with the
+reporting-vocabulary key (`quantities-<key8>-excl3_5/`). Without this a subset
+would silently replace the run's canonical predictive and a second subset would
+replace that, leaving only a stamp inside the file that had already been
+overwritten. `observed/` is not keyed — it is the recorded data, identical under
+any selection. A prediction is a result of its own: `camdl show <prediction>`
+(its id prefix or folder, which `fit predict` prints) lists its files, and
+`camdl cat <prediction> --stream predictive/<stream>.tsv` reads one.
+`camdl show` and `camdl cat` on the fit run list and read only the run's own
+files. `--chains` keeps the named chains instead of dropping them, and is
+addressed by the chains it drops: on a six-chain fit `--chains 0,1,2,4` and
+`--exclude-chains 3,5` both write `predictive-excl3_5/`. A `--chains` list that
 names every chain of the fit selects nothing and is refused.
 
 **Calendar semantics travel with the artifact.** `predictive.json`,
@@ -1208,8 +1154,12 @@ loads back through `--data` to the time it was rendered from (`docs/dates.md`,
 #### 2.2.3 Which object a quantity is read on
 
 `fit predict` also writes the model's `quantities {}` block to
-`quantities/<name>.tsv` plus a `quantities.json` manifest. Those numbers are not
-all folded over the same object, and the manifest says which.
+`quantities-model/<name>.tsv` plus a `quantities.json` manifest (a
+`--quantities` vocabulary's tables are `quantities-<key8>/`). The run store
+keeps every result kind's name, `quantities` among them, out of a result's
+top-level directories; `simulate --quantities-out DIR` writes `DIR/quantities/`.
+Those numbers are not all folded over the same object, and the manifest says
+which.
 
 Every banded row there carries `rhat` and `ess` after `n_draws`: the
 rank-normalized split R̂ and bulk-ESS of _that row's_ reported value, reduced
@@ -1264,18 +1214,23 @@ Three consequences a reader has to know:
 
 `camdl fit run <config> --sweep NAME=SPEC` applies each sweep point to the
 resolved `[fixed]` block before identity is computed. A sweep point is therefore
-a different fit — different `[fixed]` values give a different `FitDigest` — and
-each point gets **its own fit segment**, a sibling directory sharing the stem:
+a different problem, and each point gets **its own problem folder**, a sibling
+with the same label:
 
 ```
-results/fits/03_rho_sweep-{h8_for_rho_0.5}/if2-{h8}/seed_1-{h8}/
-results/fits/03_rho_sweep-{h8_for_rho_0.7}/if2-{h8}/seed_1-{h8}/
+<build>/fit/<model stem>-<12 hex for rho = 0.5>/runs/if2-<12 hex>/seed_1-<12 hex>/
+<build>/fit/<model stem>-<12 hex for rho = 0.7>/runs/if2-<12 hex>/seed_1-<12 hex>/
 ```
 
-There is no nesting of sweep points under a shared fit directory: within a
-segment, the layout of a swept fit is identical to that of an unswept one.
+There is no nesting of sweep points under a shared folder: within a problem, the
+layout of a swept fit is identical to that of an unswept one.
 
 ### 2.3.1 Concurrency: the leaf lock
+
+This section describes the `results/` store of profiles. Fit runs, like every
+result in the run store, are claimed and written through the run store's owners
+and locks (`docs/dev/proposals/2026-11-20-run-store-api.md`, "Owners and the
+beat").
 
 The store enforces concurrency at the leaf, in two write modes.
 
@@ -1287,11 +1242,11 @@ then moved into place by `rename`. The staging name carries the process id and a
 process-local counter, so two concurrent same-identity commits never share a
 staging directory.
 
-**Mode B (streaming)** — used by fit methods and profile points, which write
-into the leaf as they go and whose display summary (a loglik) is only known at
-the end. The writer creates `.lock` with `O_EXCL` inside the leaf directory,
-writes a `Running` `run.json`, streams its files, and commits by flipping status
-to `Completed` and building the file manifest from what it actually wrote. A
+**Mode B (streaming)** — used by profile points, which write into the leaf as
+they go and whose display summary (a loglik) is only known at the end. The
+writer creates `.lock` with `O_EXCL` inside the leaf directory, writes a
+`Running` `run.json`, streams its files, and commits by flipping status to
+`Completed` and building the file manifest from what it actually wrote. A
 concurrent claimant that finds a live `.lock` gets `CasError::FitInProgress`
 naming the holding pid.
 
@@ -1305,19 +1260,18 @@ A crashed writer leaves its `.lock` and a `Running` `run.json` behind. A re-run
 reclaims such a leaf when its owner is a dead process on this host (keeping its
 record, below). A leaf held from another host is never reclaimed automatically
 and never reported as interrupted: the claim refuses it (`OwnedOnOtherHost`),
-naming the host and pid, and `--force` (`fit run`) is the way to clear it,
-moving the leaf, records included, into the store's `.quarantine/`. The reclaim:
-it liveness-checks the recorded pid (`kill(pid, 0)` on unix), and a dead
-holder's lock is removed and the leaf re-claimed. Reclaim is serialized through
-a second `.reclaim` lock — only the `.reclaim` holder may remove `.lock`, and it
-re-confirms the holder is dead while holding `.reclaim`, so two processes can
-never both delete the lock and both proceed. On a non-unix platform the pid
-cannot be checked, so a held lock always reports `FitInProgress`. As defense in
-depth, a claimant that wins the lock and then finds a `Completed` record refuses
-to clear it (`ReclaimRaceCompleted`) rather than blind-wiping a finished result,
-and a claimant that finds a `run.json` it cannot read (permission denied, an IO
-error) refuses the leaf (`RecordUnreadable`) rather than quarantine or clear it:
-an unreadable record is not an absent one. A leaf directory with no record is
+naming the host and pid. The reclaim: it liveness-checks the recorded pid
+(`kill(pid, 0)` on unix), and a dead holder's lock is removed and the leaf
+re-claimed. Reclaim is serialized through a second `.reclaim` lock — only the
+`.reclaim` holder may remove `.lock`, and it re-confirms the holder is dead
+while holding `.reclaim`, so two processes can never both delete the lock and
+both proceed. On a non-unix platform the pid cannot be checked, so a held lock
+always reports `FitInProgress`. As defense in depth, a claimant that wins the
+lock and then finds a `Completed` record refuses to clear it
+(`ReclaimRaceCompleted`) rather than blind-wiping a finished result, and a
+claimant that finds a `run.json` it cannot read (permission denied, an IO error)
+refuses the leaf (`RecordUnreadable`) rather than quarantine or clear it: an
+unreadable record is not an absent one. A leaf directory with no record is
 quarantined as debris only by a claimant holding its `.lock`, and only if it
 still has no record and holds something besides the lock: from outside the lock,
 a directory a concurrent claimant has just created, or has just finished, looks
@@ -1365,11 +1319,10 @@ recomputes it today. The manifest is an exact set over the leaf's whole subtree,
 except reserved files and _declared children_: a subdirectory the leaf's
 `run.json` declares as a child is a boundary, recognized and not recursed into.
 
-**Which commands skip on a cache hit.** `fit run` consults `lookup` and skips
-the computation on a `Hit` (unless `--force`); `profile` skips each start whose
-leaf is a `Hit` (reported as `N of M starts already cached`) and has no
-`--force`. `camdl simulate` and `camdl pfilter` store in the run store, whose
-reuse rule is in §4.4.
+**Which commands skip on a cache hit.** `profile` skips each start whose leaf is
+a `Hit` (reported as `N of M starts already cached`) and has no `--force`.
+`camdl simulate`, `camdl pfilter` and `camdl fit run` store in the run store,
+whose reuse rule is in §4.4 and, for fits, §2.2.
 
 ### 2.4 Simulation Result Layout
 
@@ -1424,7 +1377,7 @@ The full field-by-field contract is §9.5; the column-role vocabulary and the
 rendering rule it implies are §10.9. Both describe leaves under `results/`. A
 result in the run store (§4.4) has its own `identity.json` and `run.json`, whose
 format is that of `docs/dev/proposals/2026-11-20-run-store-api.md`; a `sim`
-cell's `run.json` carries no `output_schema`.
+cell's and a fit run's `run.json` carry no `output_schema`.
 
 ### 2.6 Store-root files
 
@@ -1437,105 +1390,17 @@ aspirational.
 `<root>/.staging/` holds in-flight atomic commits (§2.3.1). Entries left behind
 by a crash are inert debris; they are never read.
 
-### 2.7 Store layout and `camdl dev migrate`
+### 2.7 Store layout
 
-A store's folders change shape between camdl versions in two ways. A change to
-what a record or a result means is a new identity or a new record format
-(`hash_version`, `format_version`, `fit.meta.json`'s `schema_version`), and an
-older folder of that kind is recomputed rather than read. A change to what a
-folder holds _beside_ its record, derivable from what the folder already
-records, is a new **store layout**: an older folder is brought up to date in
-place instead.
-
-**The number.** Every folder records the layout it was written at, as an integer
-`store_layout`: a leaf in its `run.json` (§9.5), a fit or profile folder, which
-has no `run.json`, in its `fit.meta.json` (§2.2.1). Every command that writes a
-folder writes the current layout; a rewrite of a record that was read back (a
-recorded training partition, a relabel) keeps the layout it read, so an update
-to an older folder never claims what a newer layout promises. A record without
-the field is layout 0; only the migration reads that absence.
-
-| layout | what it adds                                                                                                                                                    |
-| ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0      | layouts not yet numbered                                                                                                                                        |
-| 1      | a fit folder that keeps its fit file (`fit.toml.original`) keeps `fit.resolved.toml` beside it, the configuration its fits ran under (§2.2.1). The current one. |
-
-**Readers.** Every reader of a stored fit's configuration (`fit predict`,
-`compare` and `simulate --fit` on a run handle; `pfilter` and `profile` `--fit`
-on a stored-fit handle; `fit table`'s config diff) refuses a fit folder at any
-layout but the current one. An older folder is refused naming the command that
-brings it up to date:
-
-```
-error: results/fits/sir-1a2b3c4d is at store layout 0, older than this camdl's layout 1: it was written by an older camdl, and lacks what a reader here needs (a fit folder's fit.resolved.toml, the configuration its fits ran under). Run `camdl dev migrate results/fits/sir-1a2b3c4d`, which adds it from what the folder records.
-```
-
-A newer folder is refused as written by a newer camdl. No other reader checks
-the layout today, because nothing else a layout-0 folder holds differs from
-layout 1; a step that changes what another kind of folder holds adds the check
-to that kind's readers.
-
-**`camdl dev migrate PATH [--dry-run]`** takes every folder at or under `PATH` —
-one run folder, one fit folder with its runs, or a whole store — through each
-step from its layout to the current one. Each step has a precondition, a
-derivation that reads only what the folder already records, and a verification
-of what it derived, run before anything is written. Each file a step writes goes
-to a temporary file in the same directory and is renamed over its name, and the
-folder's layout is raised last, the same way, so a crash leaves the folder at
-its old layout. A file a migration writes opens with a comment naming the step
-and the records it was derived from, so it is told apart from one the folder's
-own command wrote. A folder whose records are missing or disagree is refused
-with the reason and left as it was; the others are migrated, and the command
-exits 1. A record the store already treats as stale (an older `format_version`
-or `hash_version`, a renamed `kind`) is left as it is and said; it is
-recomputed, never read. `--dry-run` derives and verifies the first step of each
-folder, lists what it would write, and writes nothing.
-
-```
-$ camdl dev migrate results
-migrated results/fits/sir-1a2b3c4d: store layout 0 to 1, writing fit.resolved.toml
-migrated results/fits/sir-1a2b3c4d/pmmh-955d9298/seed_1-91d7d8da: store layout 0 to 1
-2 folder(s) migrated, 0 already at layout 1, 0 stale left as they are, 0 refused
-```
-
-**Step 0 to 1.** A fit folder (its runs are `fit_method` leaves) with a fit file
-gains `fit.resolved.toml`, built by the function `fit run` builds it with, from
-three records: `fit.toml.original`, whose SHA-256 must be the recorded
-`fit_toml_hash`; the `[fixed]` values `fit.meta.json`'s `partition` records the
-folder running at (each parameter its `[fixed]` declared, inline, from a file or
-from a scenario, and a sweep point's design parameters, at the recorded value);
-and whether the folder's runs record forcing extrapolation as allowed
-(`inputs.forcing_extrapolation` in each `run.json`, which must agree), the one
-command-line value of the problem half. The result is verified as a reader
-parses it: its `[fixed]` against the values the record says the fit ran at, its
-estimated names against `estimated`, every inline `[fixed]` value of the file
-against it, and, when the folder already holds a `fit.resolved.toml` (one the
-fit wrote, or one a migration wrote before it stopped), that file's text below
-its header against the derived text; an agreeing file is kept as written. A
-CLI-only fit holds no configuration and a leaf holds nothing that changed, so
-both have their layout raised alone. So does a profile folder: no reader takes a
-configuration from one (a `--fit` handle naming a profile's folder, or a profile
-point, is refused as such, naming the fit config it profiles), and its resolved
-configuration cannot be derived from what it records (a profile of a stored fit
-stores that fit's, under the fit's flags rather than its own), so a profile
-folder migrated from layout 0 keeps only its `fit.toml.original`.
-
-**Folders this step refuses.** From c60d0401c until `fit.resolved.toml`, a fit
-run with `--allow-forcing-extrapolation` stored its fit file with the flag
-folded in (the file parsed, `[config] allow_forcing_extrapolation = true` set,
-the table written back), while `fit_toml_hash` hashes the file as read. The file
-the fit read is then in no record, so the stored file cannot be checked, and
-such a folder is refused, saying so: re-run the fit with this camdl. A fit
-folder whose `fit.toml.original` is not its `fit_toml_hash` for any other reason
-is refused as not the file the fit read.
-
-**Adding a step.** Raise `runid::STORE_LAYOUT`, append a step to
-`store_migrate::STEPS` whose `from` is the previous layout (precondition,
-derivation from recorded facts only, verification), add a row to the table
-above, and make every reader of what the new layout adds refuse another layout
-(`store_migrate::check_layout`). **Retiring steps.** Before 1.0, a step older
-than the previous release may be dropped from the front of `STEPS`; a folder at
-a layout older than the oldest step kept is refused with its layout number.
+A change to what a record or a result means is a new identity or a new record
+format (`hash_version`, `format_version`, `fit.meta.json`'s `schema_version`),
+and an older folder of that kind is recomputed rather than read. A `results/`
+leaf records the store layout it was written at as `store_layout` in its
+`run.json` (§9.5), and a profile folder in its `fit.meta.json`; a record without
+the field is layout 0. This camdl writes layout 1, and no reader checks it.
+`camdl dev migrate PATH [--dry-run]` raises the recorded layout of every
+`results/` folder at or under `PATH` to the current one; a profile folder's
+layout is raised alone.
 
 ---
 
@@ -1859,9 +1724,10 @@ Every `--fit` form above replays a fit's parameters — its posterior draws, its
 those parameters mean something only under the model they were written or
 estimated for. So before anything runs, `simulate` compares the two:
 
-- a **stored fit** (a run or problem-folder directory, `@label`, run-id prefix,
-  or a `fit.toml` naming its run under `--draws posterior`) is compared with the
-  model the fit archived, `<fit-dir>/model.ir.json`;
+- a **stored fit** (a run's folder, `@label` or a run-id prefix) is compared
+  with the compiled model its problem depends on,
+  `<build>/compiled_model/<model stem>-<12 hex>/model.ir.json`. A `fit.toml`
+  under `--draws posterior` names no run and is refused (§2.2.1);
 - a **fit config** (`--draws prior|<file> --fit fit.toml`) is compared with the
   model its `[model]` names, compiled now.
 
@@ -1873,15 +1739,18 @@ run, applied after the check). A model that differs is refused, naming the fit,
 both identities, and the fix:
 
 ```
-error: --fit results/fits/mh-8d0c7e80: edited.camdl is not the model this fit ran on (fitted model 9bca0399, edited.camdl e905ea63), so its parameters would be replayed through different dynamics. Quantities and contrasts are excluded from this comparison: the difference is in the dynamics, observations, parameters or simulation settings.
-  Fix: run with the fitted model, results/fits/mh-8d0c7e80/model.ir.json (the fit's archived IR), or refit edited.camdl. The fit was run from model.camdl (use it only if it still compiles to model 9bca0399).
+$ camdl simulate edited.camdl --draws posterior --fit @r0 -n 2
+error: --fit @r0: edited.camdl is not the model this fit ran on (fitted model da9d008d, edited.camdl 745472eb), so its parameters would be replayed through different dynamics. Quantities and contrasts are excluded from this comparison: the difference is in the dynamics, observations, parameters or simulation settings.
 ```
 
-The archived IR is itself a valid model argument, so the fitted model can always
-be replayed. A model that differs only in its quantities or contrasts runs, and
-says on stderr that the command line's quantities and contrasts apply. A bare
-directory holding a `draws.tsv` outside any fit has no archived model and is not
-checked (it is said to run "as written").
+A second line, `Fix:`, names the model file the problem stored
+(`<problem folder>/model.camdl`) to run with instead, or a refit of the edited
+model. The stored compile, `model.ir.json`, is itself a valid model argument, so
+the fitted model can always be replayed. A model that differs only in its
+quantities or contrasts runs, and says on stderr that the command line's
+quantities and contrasts apply. A bare directory holding a `draws.tsv` outside
+any fit has no archived model and is not checked (it is said to run "as
+written").
 
 A model anchored to observed data (`simulate { to = last_obs + 2 'weeks }`, a
 scenario's `to`, a forcing's `breakpoints`) is archived by `fit run` with its
@@ -1889,24 +1758,23 @@ anchors resolved against the fit's `[data]`, so before the comparison the
 command-line model is resolved the same way, against the fit's data as it reads
 now. The fit's own source therefore replays. If that data has changed since the
 fit, the anchors resolve to a different horizon and the replay is refused,
-saying so: the source is byte-identical to the fit's archived copy
-(`model.camdl.original`), and the message names the horizon each side runs to. A
-refusal calls the source "edited since" only when its bytes differ from that
-archived copy.
+saying so: the source is byte-identical to the problem's stored copy
+(`model.camdl`), and the message names the horizon each side runs to. A refusal
+calls the source "edited since" only when its bytes differ from that stored
+copy.
 
 **A replay runs on the simulator the parameters were estimated on.** The same
 `--fit` forms also fix the simulator: the fit's forward backend, its integration
 step, and, on ODE, its integrator. Without a flag, every arm of
 `--draws posterior|prior|<file> --fit` (and `--init-state fit`) runs on them:
 
-- **backend** — a stored run's own record (its method's `backend` in
-  `run.json`); for a problem-folder handle or a fit config, the config's
-  `[method] backend`. A fit config with no `[method]` names no backend, and the
-  command's default applies.
-- **dt** — a stored fit's recorded `fit.meta.json` `dt` (§2.2.1), else the dt
-  rule over the archived model's step and the archived config's `[config] dt`;
-  for a fit config, the same rule over the command-line model and the config,
-  which refuses a `[config] dt` that disagrees with the model's declared step as
+- **backend** — a stored run's own record (`backend` in its `run_inputs.json`);
+  for a fit config, the config's `[method] backend`. A fit config with no
+  `[method]` names no backend, and the command's default applies.
+- **dt** — a stored run's recorded `fit.meta.json` `dt` (§2.2.1), else the dt
+  rule over the stored model's step and `problem.toml`'s `[config] dt`; for a
+  fit config, the same rule over the command-line model and the config, which
+  refuses a `[config] dt` that disagrees with the model's declared step as
   `fit run` does.
 - **integrator** — the model's own, which is the fit's: the model check above
   makes the command-line model the fitted one, and the integrator is part of
@@ -1916,7 +1784,7 @@ A `--backend`, `--dt` or `--integrator` that differs from the fit's still runs,
 with one stderr line naming both simulators:
 
 ```
-note: results/fits/cb-3e073494/pmmh-b7a0a81d/seed_1-e6a47b86 was fitted on chain_binomial at dt = 0.5; this replay runs on chain_binomial at dt = 1 (--dt as given), so the parameters drive a different simulator from the one they were estimated on
+note: @r0 was fitted on chain_binomial at dt = 0.1; this replay runs on chain_binomial at dt = 0.5 (--dt as given), so the parameters drive a different simulator from the one they were estimated on
 ```
 
 Each flag replaces its own setting and nothing else. `dt` is a `[config]`
@@ -2465,14 +2333,13 @@ camdl simulate seir_vaccine.camdl --params params.toml --scenario baseline,with_
 ### 4.5 `camdl list` / `show` / `cat` / `label` — the primary access path
 
 Because output goes to the store by default, these are **the** way you reach
-results. They read two roots: the run store, for `simulate` and `pfilter`
-(`--store
-DIR`, else `CAMDL_STORE`, else `./camdl-store`), and `results/`, for
-fits and profiles (positional `ROOT` of `list`, `--root DIR`, or
-`CAMDL_OUTPUT_DIR`, else `./results`). When a run store is named, by `--store`
-or `CAMDL_STORE`, and no results root is, `list`, `show` and `cat` read that
-store alone: a `./results` in the working directory is not read beside it. Every
-run's banner hands you the exact `camdl cat` to run next.
+results. They read two roots: the run store, for `simulate`, `pfilter` and fits
+(`--store DIR`, else `CAMDL_STORE`, else `./camdl-store`), and `results/`, for
+profiles (positional `ROOT` of `list`, `--root DIR`, or `CAMDL_OUTPUT_DIR`, else
+`./results`). When a run store is named, by `--store` or `CAMDL_STORE`, and no
+results root is, `list`, `show` and `cat` read that store alone: a `./results`
+in the working directory is not read beside it. Every run's banner hands you the
+exact `camdl cat` to run next.
 
 ```bash
 # Tabular overview, most recent first, one section per artifact kind
@@ -2523,27 +2390,21 @@ labelled `L` (§4.4). `--limit` defaults to 50; `--all` removes the cap.
 `--kind ensemble` lists `SimEnsemble` leaves under `results/ensembles/`, a kind
 no command of this camdl writes.
 
-Fits are listed one row per run, grouped under a `problem` line per problem
-folder (its fit id, model, config and path):
+Fits are listed one row per fit run, in a `fits` table:
 
 ```
 fits
-problem 76aecea7 · models/m0_seir_terms.camdl · configs/m0_mh.toml · results/fits/m0_mh-76aecea7
-  LABEL         RUN     METHOD  SEED  STARTS                                            STATUS     VERDICT
-  m0_mh         3a63b6  mh      2     from_prior                                        completed  not converged (R̂ 2.18)
-  m0_mh_mode_a  9f2c1d  mh      1     from_posterior run 3a63b6 (@m0_mh) chains 0,1,2,4  completed  converged (R̂ 1.006)
+ CREATED  RUN_ID    FIT_ID    LABEL  MODEL   METHOD  SEED  BEST_LL  PATH
+ 4m ago   44fbdf1c  c39a2f44  r0     sir_r0  pmmh    4     -60.70   camdl-store/0.1.0_f531753ac.dirty-a20ab6cb-4bff11f93f55/fit/sir_r0-c39a2f446d42/runs/pmmh-fc5c33ebd296/seed_4-44fbdf1c80d9
+ 5m ago   690f27db  c39a2f44  r0     sir_r0  pmmh    4     -60.70   camdl-store/0.1.0_f531753ac.dirty-a20ab6cb-4bff11f93f55/fit/sir_r0-c39a2f446d42/runs/pmmh-fc5c33ebd296/seed_4-690f27db3418
 ```
 
-`STARTS` prints the recorded source run id with the handle as typed beside it,
-since the handle may since have moved (§6.8). `STATUS` is the run's live state
-(`completed`, `running`, `interrupted`, `failed`). `VERDICT` is the run's stored
-verdict, the line `fit summary` leads with: a sampler's from its schema-tagged
-`<method>_summary.json`, IF2's and the optimizers' gate from `fit_state.toml`,
-and `—` when there is nothing to judge (one chain, a `pfilter`). A verdict that
-cannot be read renders as `unreadable: <reason>`, and `list` still exits zero.
-Unlabelled runs of one method in one folder that differ only in seed share a row
-with a `SEED` range and a combined verdict; `--runs` lists each. `--history`
-adds each label's earlier holders as `L~1`, `L~2`. `--limit` counts runs.
+`RUN_ID` is the run's id and `FIT_ID` its problem's. `LABEL` is the label of an
+invocation that holds the run (§6.8), so both runs above show `r0`: the second
+was made by an earlier invocation labelled `r0`, and is `@r0~1`. `BEST_LL` is
+the run's best log-likelihood, from its `run_inputs.json`. Interrupted and
+failed runs are not listed. `--history` and `--runs` change nothing in the fits
+table.
 
 Paths are printed relative to the root you asked for, so they are copy-paste
 ready into `camdl show` / `camdl cat`. Short-hash prefix resolution is
@@ -2560,33 +2421,21 @@ error: `3` matches 3 results: 35f6c644d453, 3766108b8da9, 3e4f1379e077
 
 A `results/` leaf shown by `camdl show` prints its path, kind, model, scenario,
 seed, config, the full `run_id`, every level with its hash, artifact sizes,
-creation time, engine version, and the `argv` that produced the run.
+creation time, engine version, and the `argv` that produced the run. A fit run
+shown by `camdl show` prints its path, kind, full `run_id`, problem id, method,
+seed, length and files; `camdl cat <run> --stream NAME` prints one of its files
+(`camdl cat @r0 --stream draws.tsv`).
 
 `--format json` emits the sim, fit, profile, pfilter, and ensemble sections as
 JSON Lines (one object per line). The stream is therefore not a single JSON
-document; parse it per line or filter with `--kind`.
-
-A fit row is one run, `schema = {"name": "fit_list_row", "version": 3}`:
+document; parse it per line or filter with `--kind`. A fit row is one run:
 
 ```json
-{"schema":{"name":"fit_list_row","version":3},"kind":"fit",
- "problem":{"fit_id":"76aecea7…","model":"models/m0.camdl","config":"configs/m0.toml"},
- "label":"m0_mh","label_set_at":"2026-11-14T09:30:43.042Z","history_index":0,
- "run_id":"3a63b6…","method":"mh","seed":2,
- "starts":{"rule":"from_prior","handle":null,"run_id":null,"chains":null},
- "status":"completed",
- "verdict":{"kind":"not_converged","max_rhat":2.18,"min_ess_bulk":12.0},
- "path":"./results/fits/m0_mh-76aecea7/mh-8914c832/seed_2-e6a47b86"}
+{"best_loglik":-60.69877640031929,"kind":"fit_run","label":"r0","method":"pmmh","model":"sir_r0","path":"camdl-store/0.1.0_f531753ac.dirty-a20ab6cb-4bff11f93f55/fit/sir_r0-c39a2f446d42/runs/pmmh-fc5c33ebd296/seed_4-44fbdf1c80d9","problem_id":"c39a2f446d42c89dc3cfa679f49cdf99bd1ff0e58b296269e084a9f9d6981771","run_id":"44fbdf1c80d99fc484a400970e0183922961fc530972199790790b5425cbb2d5","seed":4}
 ```
 
-`problem.model` and `problem.config` are `fit.meta.json`'s `source_model` and
-`source_config`, relative to the fit folder (§2.2.1). `history_index` is the
-run's place in its label's history (`0` for the holder, `n` for `@label~n`,
-§6.8; `null` without a label or for a run that is not completed). `verdict.kind`
-is one of `converged`, `not_converged`, `chains_frozen`, `unassessable`,
-`not_assessed`, `not_applicable`, `gate` (with `gate`, the IF2 or optimizer
-verdict), `none`, `not_completed` or `unreadable` (with `reason`). `run_id` and
-`path` are the addresses `camdl show` and `fit predict` accept.
+`camdl label` refuses a fit run: a completed record is sealed, and a run is
+named when it runs, with `fit run --label` (§6.8).
 
 `<root>/index.json` is a derived run_id → leaf index, rebuilt lazily on a
 prefix-resolution miss and by `camdl dev reindex <root>`. Deleting it is safe.
@@ -2855,7 +2704,7 @@ camdl simulate sir_priors.camdl --draws prior -n 500 --replicates 5 --obs-dir pr
 camdl simulate sir_priors.camdl --draws uniform -n 500 --replicates 5 --obs-dir uniform_pred/
 
 # ── Draws from a completed fit's posterior cloud ─────────
-camdl simulate sir_priors.camdl --draws posterior --fit results/fits/sir-8a3f12b4 --replicates 10
+camdl simulate sir_priors.camdl --draws posterior --fit @posterior --replicates 10
 
 # ── Record the sampled parameter vectors ─────────────────
 camdl simulate sir_priors.camdl --draws uniform -n 5 --draws-out draws_uniform.tsv
@@ -3308,7 +3157,7 @@ Three properties govern the whole surface:
   `#[serde(flatten)]` map of arbitrary `param = value` entries is incompatible
   with the attribute. The `[method]` table needs a separate mechanism — see
   §6.9.
-- **Paths in the file anchor at the file.** `[model] camdl`, `output_dir`,
+- **Paths in the file anchor at the file.** `[model] camdl`, `store`,
   `[data] file`, `[data.observations]`, and `[data.holdout]` are resolved
   against the `fit.toml`'s own directory at load time (`anchor_paths_at`,
   `config_v2.rs`), so a config is relocatable as a unit and runs the same from
@@ -3335,7 +3184,8 @@ with the serde list quoted in §6.9.
 | `[fixed]`        | table           | **yes**   | —                      | The held-constant parameters. See §6.4.                                                                                                                                                                                                                                                                                                                                                                              |
 | `[method]`       | table           | `fit run` | —                      | One algorithm, its settings, and the chains' `starts`. Absent, the file is a complete problem for every other reader and `fit run` refuses it. See §6.5.                                                                                                                                                                                                                                                             |
 | `[config]`       | table           | no        | `{ dt = 1.0 }`         | Fit-wide simulator settings. See the sub-table below.                                                                                                                                                                                                                                                                                                                                                                |
-| `output_dir`     | string          | no        | `results`              | Output root. Anchored at the `fit.toml`. Not part of the fit identity.                                                                                                                                                                                                                                                                                                                                               |
+| `store`          | string          | no        | `camdl-store`          | The run store's root (§2.2). Anchored at the `fit.toml`. Overrides `CAMDL_STORE`. Not part of any identity.                                                                                                                                                                                                                                                                                                          |
+| `output_dir`     | string          | no        | —                      | Refused, naming `store`: `fit run` stores every fit in the run store.                                                                                                                                                                                                                                                                                                                                                |
 | `fit_seeds`      | list of ints    | no        | `[--seed]` (CLI, or 1) | One fit per listed seed. Duplicates rejected.                                                                                                                                                                                                                                                                                                                                                                        |
 | `simplex_groups` | array of tables | no        | `[]`                   | `[[simplex_groups]] params = ["a","b",…]` — members must form a probability simplex. Honored by IF2 only; other algorithms warn.                                                                                                                                                                                                                                                                                     |
 | `scenario`       | string          | no        | none                   | Named scenario from the model; applies its enable/disable lists and param overrides before inference. Exclusive with `enable`/`disable`.                                                                                                                                                                                                                                                                             |
@@ -3357,12 +3207,12 @@ and refused with a message saying so.
 
 `[data]` (`DataSpec`, `config_v2.rs`):
 
-| key             | type            | meaning                                                                                                                                                      |
-| --------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `file`          | string          | Single wide TSV holding one column per model-declared observation stream. Exclusive with `observations`.                                                     |
-| `observations`  | map name → path | Per-stream file paths, keyed on the `observations { }` block names in the `.camdl`. Exclusive with `file`.                                                   |
-| `holdout_after` | time spec       | Temporal split: observation rows whose end is after this value are removed from training (see below). Exclusive with `holdout`.                              |
-| `holdout`       | map name → path | Explicit held-out files, tail-only; the training streams stay whole and the files' bytes are digested into the fit `run_id`. Exclusive with `holdout_after`. |
+| key             | type            | meaning                                                                                                                                                                                 |
+| --------------- | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `file`          | string          | Single wide TSV holding one column per model-declared observation stream. Exclusive with `observations`.                                                                                |
+| `observations`  | map name → path | Per-stream file paths, keyed on the `observations { }` block names in the `.camdl`. Exclusive with `file`.                                                                              |
+| `holdout_after` | time spec       | Temporal split: observation rows whose end is after this value are removed from training (see below). Exclusive with `holdout`.                                                         |
+| `holdout`       | map name → path | Explicit held-out files, tail-only; the training streams stay whole, and each held-out row's date, not its value, enters the problem's identity (§2.2). Exclusive with `holdout_after`. |
 
 Exactly one of `file` / `observations` must be set. The observation model
 (likelihood family) and projection (which flow or compartment is accumulated)
@@ -3372,15 +3222,15 @@ A holdout declaration is applied when the fit loads its data
 (`apply_holdout_declaration`, `fit/runner.rs`), which decides the fit's training
 partition (`fit/training_partition.rs`). `profile --fit` applies it to its bound
 data through the same function; the training rows a cutoff leaves each stream
-enter the profile's base identity, omitted without one. `pfilter` and
-`compare`'s holdout scoring see the full series. The one exception is
-`pfilter --save-final-state` under `holdout_after`: it binds only the training
-rows, cut by the training rule below (`cutoff_prefix`,
-`fit/training_partition.rs`), and saves the state at their end, since a state
-filtered through held-out rows would be a forecast origin that has seen the data
-its forecast is scored against (gh#1138). Every per-run output of that run then
-covers the training rows only: the log-likelihood, `--trace`,
-`--save-prequential`, `--save-paths`, `--save-filtering`,
+enter the profile's base identity, omitted without one. `pfilter` sees the full
+series, and `compare` refuses the held-out rows of a stored fit (Appendix A,
+`camdl compare`). The one exception is `pfilter --save-final-state` under
+`holdout_after`: it binds only the training rows, cut by the training rule below
+(`cutoff_prefix`, `fit/training_partition.rs`), and saves the state at their
+end, since a state filtered through held-out rows would be a forecast origin
+that has seen the data its forecast is scored against (gh#1138). Every per-run
+output of that run then covers the training rows only: the log-likelihood,
+`--trace`, `--save-prequential`, `--save-paths`, `--save-filtering`,
 `--save-filtered-streams` and `--pf-health`. `--score-from` is refused beside a
 cut that dropped rows, since every row it could score trained. When the cut
 drops a row, the training rows it kept enter the run's `config` level; a cut
@@ -3547,8 +3397,8 @@ does not set it.
 
 A file carries one `[method]`: one algorithm with its settings and the chains'
 `starts` rule (§6.6). A second way of fitting the same problem is a second file
-— `camdl fit new --from fit.toml fit-pgas.toml` — and the two share a fit-level
-hash (§6.8). The table is tagged by `algorithm` (`Method`, `config_v2.rs`,
+— `camdl fit new --from fit.toml fit-pgas.toml` — and the two share one fit
+problem (§2.2). The table is tagged by `algorithm` (`Method`, `config_v2.rs`,
 `Algorithm` with `#[serde(tag = "algorithm")]`) and carries an explicit
 `backend`. Each algorithm is valid on exactly one backend; the pair is checked
 at load against the `METHODS` registry (`rust/crates/cli/src/fit/methods.rs`),
@@ -3742,27 +3592,24 @@ default: no sampleable prior on beta`. A file
 that spells the default out hashes the same as one that omits it, because the
 hashed payload always carries the resolved rule.
 
-**Handles.** A sourced rule names its source by a fit handle (`handle.rs`):
-`@<label>` (the one run given that `--label`), the source's `fit.toml` path, its
-segment directory, a fit-id prefix, its leaf directory, or a prefix of the
-leaf's own `run_id`. A segment handle names a leaf only while the segment holds
-exactly one, and a handle resolving to several runs is refused with the runs
-listed and the axes on which they differ (`[method]` settings or `--starts`, fit
-seed, the problem, the camdl build). The source is resolved before the model is
-loaded, and its stored convergence verdict is checked where it is consumed: a
-`from_mle` or `from_posterior` source whose verdict is not converged is refused,
-naming the verdict, unless `--allow-nonconverged-source` is passed (§7.3).
+**Handles.** A sourced rule names its source run by `@<label>` (§6.8), a prefix
+of the run's `run_id`, or the run's folder. A `fit.toml` path names no run and
+is refused with the runs it made listed (§2.2.1). The source is resolved before
+the model is loaded, and its stored convergence verdict is checked where it is
+consumed: a `from_mle` or `from_posterior` source whose verdict is not converged
+is refused, naming the verdict, unless `--allow-nonconverged-source` is passed
+(§7.3).
 
-`starts` is identity-bearing: `Method::identity_payload` folds the resolved rule
-into the method hash, and a sourced rule's consumed file (the leaf's
-`fit_state.toml` or `draws.tsv`, a params TOML) enters the method's `deps` by
-content and by the source run's `run_id`, so two runs differing only in `starts`
-are two artifacts and a regenerated source re-keys its consumer (§9.2.4). A
-sourced rule enters the method hash by its kind alone (`from_mle`,
-`from_posterior`, `from_params`), not by its handle as typed: `@scout`, the
-scout's leaf directory and a prefix of its `run_id` name one source and key one
-run. `camdl profile --starts` keys the same way. The handle as typed is kept,
-unhashed, in run.json `inputs.starts_source`.
+`starts` is identity-bearing: the resolved rule is in the run's identity, and a
+sourced rule's consumed file (the source run's `fit_state.toml` or `draws.tsv`,
+a params TOML) is a dependency of the run on that file, so two runs differing
+only in `starts` are two results and a regenerated source re-keys its consumer.
+A sourced rule enters the identity by its kind (`from_mle`, `from_posterior`,
+`from_params`) and its source, not by its handle as typed: `@scout`, the scout's
+folder and a prefix of its `run_id` name one source and key one run. A
+`--starts` file named directly is stored in the run as `inputs/starts.<ext>` and
+keyed by its bytes. The handle as typed is kept, unhashed, in the run's
+`run_inputs.json` (`starts_source`).
 
 **A refused spread start is redrawn** (gh#887). A spread rule is a lottery over
 one draw, so a start the filter cannot score is one unlucky draw rather than a
@@ -3808,7 +3655,7 @@ gate verdict `incomplete` (§13.1), not `not_assessed`, even when one chain is
 left. `fit_state.toml` carries the same rule as `chain_init_source` beside
 `chain_starts_kind = "spread" | "point"`, and `fit summary` prints both under
 the leaf's identity line, with the run id the handle resolved to when the run
-started (run.json `inputs.starts_source.run_id`):
+started (`run_inputs.json`'s `starts_source.run_id`):
 
 ```
 seeded from:  from_mle @scout, run 4b1e0c9a2f77 (every chain at one point)
@@ -3840,24 +3687,22 @@ Both fields are optional strings (`FitProvenance`, `config_v2.rs`). No runner
 reads them; `camdl fit new` writes `derived_from` when deriving one config from
 another, and the block is otherwise for human navigation.
 
-It is nonetheless **identity-bearing**: the fit-level hash covers the whole
-serialized config with only `method`, `fit_seeds`, and `output_dir` removed
-(`cas.rs`), so editing `reason` changes the fit hash and forces a re-fit into a
-new segment.
+It is not part of any identity: the problem's identity holds the typed fields of
+§2.2, so editing `reason` reuses the stored fit. Each run keeps the file it was
+given as its `fit.toml`, so the text is kept with the run.
 
 ### 6.8 Where output goes
 
-Fits are content-addressed. There are no configured output paths beyond the root
-— the directory names are hashes of the inputs, and the layout is factored into
-three levels (`fit/cas.rs`, module comment):
+Fits are content-addressed in the run store. There are no configured output
+paths beyond the root; the folder names are labels and hashes of the inputs, in
+the layout of §2.2:
 
 ```
-<root>/fits/<stem>-<h8>/                          fit level
-        model.ir.json  model.render.json  model.graph.json
-        model.camdl.original  fit.toml.original  fit.resolved.toml  fit.meta.json
-    <method>-<h8>/                                method level
-        <seed_N>-<h8>/                            seed level (the leaf)
-            run.json  fit_state.toml  chain_starts.tsv
+<root>/<build>/fit/<model stem>-<12 hex>/          the fit problem
+        problem.toml  partition.json  inputs/  held_out/  model.camdl
+    runs/<method>-<12 hex>/                        the method's settings
+        seed_<n>-<12 hex>/                         one fit run
+            fit.toml  method.toml  run_inputs.json  fit_state.toml  chain_starts.tsv
             chain_0/ … chain_{N-1}/
 ```
 
@@ -3865,37 +3710,25 @@ three levels (`fit/cas.rs`, module comment):
 single rule, stated once here and relied on everywhere below. A fit's chains are
 `0 … N-1` in every place that names one: the `chain_N/` directories, the
 progress and refusal lines, `chain_starts.tsv`'s `chain_id`, `fit_state.toml`'s
-`best_chain` and `chain_eval_ids`, `run.json`'s `inputs.best_chain`,
+`best_chain` and `chain_eval_ids`, `run_inputs.json`'s `best_chain`,
 `mle_params.toml`'s `[provenance] chain`, every `fit summary` table,
 `--exclude-chains`, the `chain` column of `draws.tsv` and `trajectories.tsv`,
 the `chain` column `fit predict --by-chain` adds, `progress.json`'s per-chain
 rows and `cross_chain_compat.json`'s `chains`. `simulate`'s `replicate`, `draw`
 and `point_id` count from 0 too. Joining any two of these takes no arithmetic,
-and no artifact carries a second base to convert from. A leaf written by a camdl
-that numbered its directories from 1 (`chain_1/` with no `chain_0/`) is refused
-by every reader that addresses a chain by name or reads the posterior cloud —
-`fit summary` (every `--format`), `fit predict`, `fit table --quantity`,
-`compare` when it derives a prequential, `simulate --draws posterior`, and
-`fit run --resume`, which refuses the base leaf before copying any chain state —
-rather than read with every chain shifted by one.
+and no artifact carries a second base to convert from.
 
-- **`<root>`** is `output_dir` from the `fit.toml` (anchored at the `fit.toml`),
-  else `$CAMDL_OUTPUT_DIR` (anchored at the working directory), else `results`
-  (`run_paths::DEFAULT_OUTPUT_ROOT`). `fit run` has no `--output-dir` flag.
-- **`<stem>`** is the `fit.toml`'s file stem; **`<h8>`** at the fit level is the
-  first eight hex digits of the fit hash — the whole-IR model digest, the
-  per-stream training and holdout data digests, the canonicalized config (less
-  `method` / `fit_seeds` / `output_dir`), and the engine version. Two files that
-  share a problem and differ in `[method]` share this hash and sit in sibling
-  segments named by their stems.
-- **`<method>`** is the algorithm's name; the method `<h8>` folds the method's
-  `identity_payload` (its settings and the resolved `starts` rule) with its
-  `deps`, so a posterior file starting `from_mle = "@scout"` keys on the scout
-  leaf's identity.
-- **The leaf** is per seed. `run.json` is the CAS record; there is no manifest
-  and no fit-wide `run.json` — the fit level is a path segment, and
-  `fit.meta.json` is its sidecar (model hash, config archive). A run's label is
-  on its own `run.json` (`provenance.label`).
+- **`<root>`** is the `fit.toml`'s `store` key (anchored at the `fit.toml`),
+  else `$CAMDL_STORE`, else `./camdl-store`. `fit run` has no `--store` flag.
+  `--output-dir` and `CAMDL_OUTPUT_DIR` do not apply, and a fit file's
+  `output_dir` key is refused, naming `store`.
+- **The problem** is labelled by the model file's stem; its 12 hex digits are of
+  the problem's identity (§2.2). Two files that pose one problem and differ in
+  `[method]` share it.
+- **`<method>`** is the algorithm's name; the group's 12 hex digits are of the
+  method's settings without its length.
+- **The run** is per seed, labelled by the seed typed. Its `run.json` records
+  its status and files; its label is not in any record of the run (below).
 
 Per-algorithm leaf contents: IF2 writes `mle_params.toml`, `final_params.toml`,
 `diagnostics.tsv`, `chain_evaluations.tsv`, and
@@ -3923,78 +3756,57 @@ it.
 `method`, not `stage`. A rename under an unchanged tag is the vintage problem
 the tag exists to prevent, so it is a version rather than a silent edit.
 
-A completed leaf is reused on a second identical invocation ("cache hit"); pass
-`--force` to re-run it: the old leaf is quarantined and the result stored
-afresh.
+A completed run is reused on a second identical invocation
+(`cache hit — reusing <folder>`); pass `--force` to re-run it: the stored run is
+moved to quarantine and the result stored afresh.
 
-Fits are addressed downstream by handle (`fit/handle.rs`, `FitRef`): `@label`, a
-`fit.toml` path, a leaf or problem-folder directory, or a hash prefix (a run's
-`run_id`, else the fit id). `@label`, a leaf directory and a `run_id` prefix
-name one run; the others name a problem folder. Ambiguity is listed git-style
-rather than guessed. `camdl show` and `camdl cat` resolve through the same
-module, so a handle names the same run there as in every fit verb: `show` on a
-run handle describes the run and its recorded outputs (`run.json` `artifacts`
-plus its predictions under `predict/<run id>-<key>/`, never a directory
-listing), and `cat --stream <name>` on a run looks in the leaf, then the
-directory of its default-options predict, then the problem folder.
-`show --format json` writes one `fit_show` (schema 1) object per run,
-`{schema, run_id, label, label_set_at, history_index, problem {fit_id, model, config}, method, seed, chains, starts {rule, handle, run_id, chains}, status, verdict {kind, max_rhat, min_ess_bulk}, path, outputs [{path, role}]}`,
-with `role` from `run.json` `output_schema`; on a problem folder,
-`{schema, problem, runs: [<fit_show>…]}`. For every other kind it writes
-`run_show` (schema 1), `{schema, kind, path, record}`, where `record` is the
-leaf's `run.json`.
+Fits are addressed downstream by handle: `@label`, a prefix of a run's or a
+problem's id, or a stored folder. A run handle names one run; a problem handle
+(its id or folder) names the problem. A folder handle is read from the store
+that holds it, the nearest directory above it with a `store.json`, whatever
+`CAMDL_STORE` names. A handle to a run that did not complete (still running,
+failed, interrupted or damaged) is refused with the run's folder, its state and
+the reason the store recorded:
 
-A fit label is a name that moves, with history. It is recorded on a run's
-`run.json` as `provenance.label`, beside `provenance.label_set_at`, the time the
-run was given it (RFC 3339 UTC, millisecond resolution). Neither is hashed. A
-label's **holder** is, among the fit runs carrying it whose live state is
-completed, the one with the latest `label_set_at`, ties broken by `run_id`; a
-run labelled before the stamp existed counts with its `created_at`. A run whose
-state is interrupted (recorded running, its lock gone) or failed never holds a
-label.
+```
+error: camdl-store/0.1.0_f531753ac.dirty-a20ab6cb-4bff11f93f55/fit/sir-797c0b53281a/runs/pmmh-85f985a8c2a2/seed_1-37ee86900a72 names a fit run that did not complete and is not read: camdl-store/0.1.0_f531753ac.dirty-a20ab6cb-4bff11f93f55/fit/sir-797c0b53281a/runs/pmmh-85f985a8c2a2/seed_1-37ee86900a72 was interrupted: its process ended before it completed
+```
 
-Every path that gives a fit run a label stamps it, under the store's label lock
-(`<root>/.fit-labels.lock`), and that is the only way a run becomes a holder:
-the run you just invoked with `--label L`, or labelled `L`, is `@L`.
+A command that needs a run (`fit summary`, `fit predict`, `compare`,
+`simulate --draws posterior --fit`, a sourced `starts`, `--resume`) refuses a
+problem handle, listing the problem's runs
+(`error: 8bcb names a fit problem, and this reads one run of it. Its runs:`),
+and refuses a `fit.toml` path with the runs it made listed (§2.2.1). A command
+that needs only the problem (`pfilter --fit`, `design`, `profile --fit`) accepts
+either kind of handle or a `fit.toml`. `camdl show` and `camdl cat` resolve
+through the run store's handles (§4.5): `show` on a fit run prints its record,
+and `cat --stream <name>` prints one of its files.
 
-| Event                                                  | Result                                                                         |
-| ------------------------------------------------------ | ------------------------------------------------------------------------------ |
-| `fit run --label L`, new identity                      | The new run gets `L`, stamped when it completes.                               |
-| `fit run --label L`, cache hit, stored run unlabelled  | `L` written and stamped: the run becomes `@L`.                                 |
-| `fit run --label L`, cache hit, stored run carries `L` | Re-stamped: the run becomes `@L` again (reverting a change points `@L` back).  |
-| `fit run --label L`, cache hit, stored run carries `M` | `M` is replaced by `L` and stamped; prints `label: run 3a63b6 was @M, now @L`. |
-| `camdl label <run_id> L`                               | As the cache-hit rows: the named run becomes `@L`, whatever its age.           |
+**Labels.** `fit run --label L` names the invocation, as every command on the
+run store does (`docs/dev/proposals/2026-11-20-run-store-api.md`, "Labels"); no
+record of the run holds the label. `@L` is the latest invocation labelled `L`
+whose results all completed, and `@L~n` counts back through such invocations. A
+rerun of the same command with `--label L` reuses the stored run and makes it
+`@L`:
 
-When another run held `L`, the command prints, after the lock is released,
-`note: @L now names run 7c01e2 (previously run 3a63b6, labelled 2026-11-14, max R̂ 2.18)`.
-A move rewrites one `run.json`, the gaining run's, through the store's record
-update (the leaf lock, `run.json.tmp`, fsync, rename); the run losing the label
-is not touched. `fit run --label L` and `camdl label … L` are refused while
-another fit run carrying `L` is in flight (its live state running, or held on
-another host), since two runs in flight under one name is a race;
-`fit run
---label` is refused when the invocation writes several runs (several
-`fit_seeds`, synthetic datasets or sweep points); and `camdl label` refuses a
-run still running and a fit id, which names a problem folder rather than a run.
-A run carries at most one label.
+```
+$ camdl fit run fit_if2.toml --seed 3 --label i
+…
+── method: if2 ──
+  cache hit — reusing 0.1.0_f531753ac.dirty-a20ab6cb-4bff11f93f55/fit/sir-8bcb39805e9d/runs/if2-e5e94eb7c269/seed_3-be6657446294
+```
 
-**History.** `@L~N` names the Nth earlier holder: the completed runs carrying
-`L`, ordered by `label_set_at` descending, `@L~0` being `@L`. `~` is outside the
-label alphabet, so it cannot be part of a label; `@L~` and `@L~x` are refused
-naming the form, and `@L~N` past the end is refused with the history listed (run
-id, `label_set_at`, verdict). History is derived from the runs that still carry
-`L`, so relabelling one of them, or rerunning one with `--force` (which
-quarantines the old leaf), renumbers the rest; `camdl list --history` shows the
-current numbering.
+`camdl label` refuses a fit run, since a completed record is sealed:
 
-**Every resolution says what it resolved to.** Every verb that resolves `@L` or
-`@L~N` prints `@L → run 7c01e2 (results/fits/…)` to stderr, followed by
-`(2 earlier holders)` when the history is non-empty. A script that must pin one
-run uses its run id. A run started from a labelled source (`from_mle`,
-`from_posterior`) records the handle as typed and the source run's `run_id` in
-`deps` and `inputs.starts_source`, so moving the label cannot change what an
-existing run was started from; rerunning it after the move resolves the new
-source, a new dependency, and re-keys.
+```
+$ camdl label 9cd433e2 foo
+error: the fit run 9cd433e2dedb is sealed: a stored result's record is never rewritten, so it cannot be labelled after it ran. Name the run when it runs, with `--label`: `camdl fit run ... --label foo` reuses the stored run and names it @foo.
+```
+
+A run started from a labelled source (`from_mle`, `from_posterior`) records the
+handle as typed and depends on the source run's file, so moving the label cannot
+change what an existing run was started from; rerunning it after the move
+resolves the new source, a new dependency, and re-keys.
 
 ### 6.9 Load-time validation
 
@@ -4043,7 +3855,7 @@ method executes.
 
 - An unknown top-level key:
 
-  > `` unknown field `dt`, expected one of `model`, `data`, `synthetic`, `fit_seeds`, `simplex_groups`, `output_dir`, `estimate`, `fixed`, `method`, `config`, `scenario`, `enable`, `disable`, `ic_free`, `provenance` ``
+  > `` unknown field `bogus`, expected one of `model`, `data`, `synthetic`, `fit_seeds`, `simplex_groups`, `output_dir`, `store`, `estimate`, `fixed`, `method`, `config`, `simulate`, `scenario`, `enable`, `disable`, `ic_free`, `provenance` ``
 
 - An unknown key inside `[method]`. `Algorithm` is internally tagged, so serde
   cannot deny unknown fields on it; a post-parse pass compares the raw keys
@@ -4130,20 +3942,20 @@ a run left behind; two work on configs; one is a static capability listing.
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `fit run`     | run the `[method]` of a `fit.toml`                                                                                                                     |
 | `fit summary` | render one fit's convergence verdict, θ̂ table and provenance checks; `--explain` defines each column, `--parameters` adds the model's parameter legend |
-| `fit table`   | walk a results tree and render one row per run                                                                                                         |
+| `fit table`   | walk a run store and render one row per fit run                                                                                                        |
 | `fit diff`    | compare two `fit.toml` configs                                                                                                                         |
 | `fit new`     | scaffold a new `fit.toml` derived from an existing one                                                                                                 |
 | `fit predict` | write the posterior-predictive (predicted-vs-observed) artifact                                                                                        |
 | `fit methods` | list the supported (algorithm, backend) pairs                                                                                                          |
 
 There is no `camdl fit list` and no `camdl fit where`. Browsing every cached run
-— fits, simulations, profiles — is the top-level `camdl list`; attaching or
-changing a display label after the fact is the top-level `camdl label`.
+— fits, simulations, profiles — is the top-level `camdl list`. A fit run is
+named when it runs, with `fit run --label` (§6.8).
 
 ### 7.1 Invocations
 
-Every command below was run against the worked project of §8 (`models/`,
-`data/`, `fits/`, `results/`).
+The commands below use the worked project of §8 (`models/`, `data/`, `fits/`,
+with fits stored in `camdl-store/`).
 
 ```bash
 # Run the file's [method].
@@ -4164,35 +3976,32 @@ camdl fit run fits/01_mle.toml --label mle
 # Start the chains from another fit, overriding the file's `starts`.
 camdl fit run fits/09_pgas_only.toml --starts from_mle=@mle
 camdl fit run fits/09_pgas_only.toml --starts from_posterior=@short-run
-camdl fit run fits/09_pgas_only.toml \
-    --starts from_mle=results/fits/01_mle-2030ba2b/if2-fee126b1/seed_1-e6a47b86
+camdl fit run fits/09_pgas_only.toml --starts from_mle=089bc0f3   # a run id prefix
 
 # Read side.
-camdl fit summary results/fits/01_mle-2030ba2b
+camdl fit summary @mle
 camdl fit summary '@auto rw_sd, take 1'
-camdl fit summary results/fits/01_mle-2030ba2b --params-only
-camdl fit summary results/fits/01_mle-2030ba2b --explain      # define each column
-camdl fit summary results/fits/01_mle-2030ba2b --parameters   # the parameter legend
-camdl fit table results/fits
-camdl fit table results/fits --with-method pgas --format md
+camdl fit summary @mle --params-only
+camdl fit summary @mle --explain      # define each column
+camdl fit summary @mle --parameters   # the parameter legend
+camdl fit table camdl-store
+camdl fit table camdl-store --with-method pgas --format md
 camdl fit diff fits/01_mle.toml fits/02_posterior.toml
 camdl fit new --from fits/01_mle.toml fits/04_derived.toml
-camdl fit predict fits/02_posterior.toml --n-draws 20
+camdl fit predict @posterior --n-draws 20
 camdl fit methods
 camdl list
 ```
 
-**Fit handles.** `fit summary` and `fit predict` take a _handle_, not only a
-path: `@<label>`, a fit-level hash prefix, a run directory, or the `fit.toml`
-itself. A handle that maps to more than one fit is a hard error that lists the
-candidates:
+**Fit handles.** `fit summary` and `fit predict` take a _handle_ naming one run:
+`@<label>`, a run id prefix, or the run's folder (§6.8). A `fit.toml` is
+refused, with the runs it made listed:
 
 ```
-$ camdl fit summary fits/01_mle.toml --params-only
-error: fits/01_mle.toml resolves to 2 fits:
-    fits/../results/fits/01_mle-2030ba2b
-    fits/../results/fits/01_mle-cc381195
-  Pass a run directory or a longer hash prefix to disambiguate.
+$ camdl fit summary fit_pmmh_all.toml
+error: fit_pmmh_all.toml is a fit configuration, and a configuration never names a run: one file makes several runs whenever its data, its seeds, a sweep or the build change.
+    9cd433e2dedb  camdl-store/0.1.0_f531753ac.dirty-a20ab6cb-4bff11f93f55/fit/sir-797c0b53281a/runs/pmmh-85f985a8c2a2/seed_1-9cd433e2dedb
+  Name one by its id or folder, or by `@label` (`fit run --label`).
 ```
 
 **Chaining files by handle.** A `fit.toml` carries one `[method]`, so a pipeline
@@ -4209,13 +4018,14 @@ starts = { from_mle = "@scout" }
 
 The handle is resolved when the second file runs, so the scout has to have run
 (and been labelled) first; a handle that names nothing, or a source that did not
-converge, is refused where it is consumed (§7.3). A completed leaf is served
-from the content-addressed store, so re-running the first file is a cache hit:
+converge, is refused where it is consumed (§7.3). A completed run is served from
+the store, so re-running the first file is a cache hit:
 
 ```
-$ camdl fit run fits/01_scout.toml --label scout
+$ camdl fit run fit_if2.toml --seed 3 --label i
+…
 ── method: if2 ──
-  cache hit — reusing fits/01_scout-77595169/if2-fee126b1/seed_1-e6a47b86
+  cache hit — reusing 0.1.0_f531753ac.dirty-a20ab6cb-4bff11f93f55/fit/sir-8bcb39805e9d/runs/if2-e5e94eb7c269/seed_3-be6657446294
 ```
 
 **The flags the split removed are parsed only to reject them**, so the error
@@ -4272,7 +4082,7 @@ pub struct FitRunArgs {
     pub force: bool,
 
     /// Extend a completed PGAS/PMMH run from a base run, addressed by
-    /// run_id prefix or leaf path.
+    /// `@label`, run_id prefix or run folder.
     #[arg(long, value_name = "BASE_REF", conflicts_with = "force")]
     pub resume: Option<String>,
 
@@ -4289,48 +4099,47 @@ pub struct FitRunArgs {
 
 Note the shapes. `--resume` carries a **base reference**, not a boolean;
 `--parallel` is a plain `usize` with a `0` default meaning "all cores"; there is
-**no `--output-dir`** (the output root is the `fit.toml`'s `output_dir` key, or
-`CAMDL_OUTPUT_DIR`, or `./results`) and **no `--skip-chains`** (chain exclusion
+**no `--store`** (the run store's root is the `fit.toml`'s `store` key, or
+`CAMDL_STORE`, or `./camdl-store`) and **no `--skip-chains`** (chain exclusion
 is a read-side view: `fit summary --exclude-chains`,
 `fit predict --exclude-chains`, `fit table --exclude-chains`).
 
-`--force` on `fit run` recomputes a method leaf that already exists: the stored
-leaf is moved to `<root>/.quarantine/` (never deleted) and the fresh result is
-stored at the same address. Without the flag the same command reports a cache
-hit and exits 0. A leaf another live process is still writing is not displaced;
-the run stops with an in-progress error naming the pid. `simulate` takes
-`--force` with the same meaning (`WritePolicy::Force`, `resolve::check_reuse`).
-`pfilter --force` computes the run and its by-products again. The completed
-result is moved to `<root>/.quarantine/` before the recompute starts, so a
-recompute that fails leaves nothing at the result's address; the old result is
-recovered from `.quarantine/`. A run held by an owner not known to be stopped is
-refused without the flag, naming the owner's host and `--force`. With it, the
-run is taken unless its owner is on this host and running, or on another host
-with a beat that changes; an owner on another host whose beat is stale or cannot
-be read is taken, so pass `--force` there only once that process is known to
-have stopped. `profile` has no `--force`.
+`--force` on `fit run` recomputes a run that already exists: the stored run, its
+predictions included, is moved to `<root>/.quarantine/` (never deleted) and the
+fresh result is stored at the same address. Without the flag the same command
+reports a cache hit and exits 0. A run another live process is still writing is
+not displaced; the run stops with an in-progress error naming the owner.
+`simulate` takes `--force` with the same meaning. `pfilter --force` computes the
+run and its by-products again. The completed result is moved to
+`<root>/.quarantine/` before the recompute starts, so a recompute that fails
+leaves nothing at the result's address; the old result is recovered from
+`.quarantine/`. A run held by an owner not known to be stopped is refused
+without the flag, naming the owner's host and `--force`. With it, the run is
+taken unless its owner is on this host and running, or on another host with a
+beat that changes; an owner on another host whose beat is stale or cannot be
+read is taken, so pass `--force` there only once that process is known to have
+stopped. `profile` has no `--force`.
 
-`--resume <BASE_REF>` extends a completed PGAS or PMMH run: the base leaf is
-read read-only and the longer chain is written to a new content-addressed leaf
-keyed on the new `sweeps` / `iterations` with a dependency on the base — a
-distinct deterministic artifact, not bit-identical to an uninterrupted fit of
-the same length. The new leaf holds the whole chain, the base's rows and the new
-ones, and records where each segment begins (§9.5, "A resumed leaf"). Running
-the same resume again, of the same base to the same length, is a cache hit on
-that leaf, as any identical invocation is. The file's `starts` (or `--starts`)
-is resolved as on any run, so a file that starts from another fit resumes like
-any other:
+`--resume <BASE_REF>` extends a completed PGAS or PMMH run: the base run is read
+read-only and the longer chain is written to a new run beside it, under the same
+method group, keyed on the new `sweeps` / `iterations` with a dependency on the
+base — a distinct deterministic result, not bit-identical to an uninterrupted
+fit of the same length. The new run holds the whole chain, the base's rows and
+the new ones, and records where each segment begins (§9.5, "A resumed run").
+Running the same resume again, of the same base to the same length, is a cache
+hit on that run, as any identical invocation is. The file's `starts` (or
+`--starts`) is resolved as on any run, so a file that starts from another fit
+resumes like any other:
 
 ```
-$ camdl fit run fits/09_pgas_only.toml --starts from_mle=@mle
-   stored pgas · …/09_pgas_only-649b2ecc/pgas-7107153d/seed_1-e6a47b86/
+$ camdl fit run fit_pmmh_all.toml --label post
+   stored pmmh · 0.1.0_f531753ac.dirty-a20ab6cb-4bff11f93f55/fit/sir-797c0b53281a/runs/pmmh-85f985a8c2a2/seed_1-9cd433e2dedb · 0.3s
 
-# raise `sweeps` in the toml, then extend that leaf
-$ camdl fit run fits/09_pgas_only.toml --starts from_mle=@mle \
-    --resume results/fits/09_pgas_only-649b2ecc/pgas-7107153d/seed_1-e6a47b86
-  chain 0: resuming from sweep 100
-  chain 1: resuming from sweep 100
-   stored pgas · …/09_pgas_only-649b2ecc/pgas-05ea6411/seed_1-e6a47b86/
+# raise `iterations` from 20 to 40 in a copy of the file, then extend that run
+$ camdl fit run fit_pmmh_40.toml --resume @post
+  chain 0: resuming from step 20
+  chain 1: resuming from step 20
+   stored pmmh · 0.1.0_f531753ac.dirty-a20ab6cb-4bff11f93f55/fit/sir-797c0b53281a/runs/pmmh-85f985a8c2a2/seed_1-a372ef8992fa · 0.3s
 ```
 
 **Chain starts.** `--starts <SPEC>` overrides the file's `starts` with the same
@@ -4396,21 +4205,21 @@ with the dt-check off, and `--dt-check-strict` beside a declared
 and derives each chain's seed from it by a golden-ratio mix,
 `base ^ (chain_index · 0x9e3779b97f4a7c15)`, not by addition. For a
 start-sensitivity sweep, the `fit.toml` also accepts a top-level `fit_seeds`
-list; each entry becomes its own cell and its own leaf:
+list; each entry becomes its own run:
 
 ```toml
 fit_seeds = [1, 2]
 ```
 
 ```
-━━━ cell 1/2: fit_seed=1 ━━━
-   stored if2 · …/if2-fee126b1/seed_1-e6a47b86/
-━━━ cell 2/2: fit_seed=2 ━━━
-   stored if2 · …/if2-fee126b1/seed_2-f69dd668/
+━━━ fit_seed=1 ━━━
+   stored if2 · 0.1.0_f531753ac.dirty-a20ab6cb-4bff11f93f55/fit/sir-8bcb39805e9d/runs/if2-e5e94eb7c269/seed_1-556beb126546 · 0.8s
+━━━ fit_seed=2 ━━━
+   stored if2 · 0.1.0_f531753ac.dirty-a20ab6cb-4bff11f93f55/fit/sir-8bcb39805e9d/runs/if2-e5e94eb7c269/seed_2-603b688f7602 · 1.1s
 ```
 
-`fit_seeds` is stripped from the fit-level hash, so adding seeds extends a fit
-rather than re-keying it.
+The seed is in the run's identity and not the problem's, so adding seeds adds
+runs to a problem rather than re-keying it.
 
 ### 7.3 Sweep Semantics for Fits
 
@@ -4439,7 +4248,7 @@ camdl fit run fits/01_mle.toml --sweep "rho=0.4,0.6"
 ```
 
 Repeating the flag takes the Cartesian product, and each point runs the method
-independently into its own content-addressed fit segment:
+independently on its own problem (§2.3):
 
 ```
 $ camdl fit run fits/01_mle.toml --sweep "rho=0.5,0.6" --sweep "k=5,10"
@@ -4460,11 +4269,10 @@ handle is resolved, before the model is loaded. An IF2 source is judged by its
 own gate — the tail chain-agreement Â leg and the inter-chain log-likelihood
 spread in decibans — an `nl-*` source by the verdict its optimizer recorded at
 the end of its run (every chain converged, the chains' estimates agree, and
-their log-likelihoods agree in decibans; a leaf written before that verdict was
-recorded is refused, and `--force` re-runs it), and a sampler source by the same
-R̂ classification `fit summary` renders. A source that did not converge is
-refused with the verdict, so a warm start cannot launder one fit's
-multi-modality into the next:
+their log-likelihoods agree in decibans), and a sampler source by the same R̂
+classification `fit summary` renders. A source that did not converge is refused
+with the verdict, so a warm start cannot launder one fit's multi-modality into
+the next:
 
 ```
 $ camdl fit run fits/02_posterior.toml
@@ -4516,7 +4324,8 @@ over its own `--sweep` grid.
 
 ## 8. fit.toml Examples
 
-The configs in §8.1 to §8.3 were executed end to end, and their output is shown;
+The configs in §8.1 to §8.3 were executed end to end, and their output is shown,
+with each stored folder written `<build>/fit/sir-…/runs/<method>-…/seed_1-…`;
 §8.4's config is shown without output. They share one project layout; every path
 inside a `fit.toml` resolves **relative to that file**, which is why the configs
 in `fits/` reach back out with `../`.
@@ -4526,7 +4335,7 @@ models/sir.camdl          # closed SIR, weekly NegBinomial reported cases
 data/cases.tsv            # time, weekly_cases
 params/sir_fixed.toml     # shared [fixed] block
 fits/*.toml
-results/                  # output_dir
+camdl-store/              # the run store, the fit files' `store` key
 ```
 
 The iteration counts are deliberately small so each example finishes in seconds.
@@ -4538,7 +4347,7 @@ The minimum useful fit: an IF2 method maximising the stochastic-process
 likelihood.
 
 ```toml
-output_dir = "../results"
+store = "../camdl-store"
 
 [model]
 camdl = "../models/sir.camdl"
@@ -4576,7 +4385,7 @@ fit: fits/01_mle.toml (method=if2)
   estimate: beta, gamma
   fixed:    N0, I0, rho, k
   starts:   uniform_unconstrained (one independent draw per chain) — default: no sampleable prior on beta, gamma
-  output:   …/results/fits/01_mle-2030ba2b
+  output:   fits/../camdl-store
 
 ── method: if2 ──
   note: `starts = "uniform_unconstrained"` draws every chain's start, so `[estimate].start` is unused here for: beta, gamma. Use `starts = "single"` to start every chain at the declared values, or drop the `start` entries.
@@ -4613,7 +4422,7 @@ dt-convergence at θ̂: PASS  (|Δ_leg1| = 0.65, |Δ_leg2| = 1.16 nats (vs τ = 
   ! 1/2 parameters have Â > 1.1 (max 1.15).
   0 error(s), 1 warning(s), 2 info
 
-   stored if2 · fits/../results/fits/01_mle-2030ba2b/if2-fee126b1/seed_1-e6a47b86/
+   stored if2 · <build>/fit/sir-…/runs/if2-…/seed_1-… · 8.5s
           best ll=-58.4 (chain 1) in 8.5s
 ```
 
@@ -4626,14 +4435,13 @@ have not agreed on a basin. `camdl fit summary` renders the same run as a
 verdict:
 
 ```
-$ camdl fit summary results/fits/01_mle-2030ba2b
-results/fits/01_mle-2030ba2b/
-  camdl 0.1.0+3e2b2888
+$ camdl fit summary @mle
 
-══ if2 ═══════════════════════════════════════════════════════════════════════
+camdl-store/<build>/fit/sir-…/runs/if2-…/seed_1-…/
+  camdl 0.1.0+3e2b2888 · if2 · 4 chains
   seeded from:  uniform_unconstrained (one independent draw per chain)
+
   best loglik:  -58.4 (if2)  (loglik-eval, max across chains)
-  chains:       4
 
   compound convergence gate
     Â leg:           max Â = 1.145 (gamma)  ✗  (threshold 1.01)
@@ -4689,7 +4497,7 @@ priors added:
 
 ```toml
 # fits/02_scout.toml
-output_dir = "../results"
+store = "../camdl-store"
 
 [provenance]
 derived_from = "01_mle.toml"
@@ -4725,8 +4533,8 @@ cooling = 0.7
 
 The posterior and evaluation files repeat the problem half and change only
 `[method]`; `camdl fit new --from fits/02_scout.toml fits/02_posterior.toml`
-copies it. Because the problem is the same, all three land under one fit-level
-hash, in sibling segments named by their stems.
+copies it. Because the problem is the same, all three runs land in one problem
+folder, in sibling method groups.
 
 ```toml
 # fits/02_posterior.toml — [method] only; the rest as 02_scout.toml
@@ -4756,17 +4564,17 @@ $ camdl fit run fits/02_posterior.toml --seed 1
 $ camdl fit run fits/02_evaluate.toml --seed 1
 ```
 
-TOML ordering bites here: `output_dir` is a top-level key, so it must appear
-_before_ the first `[table]` header. Written after `[provenance]` it is parsed
-as a provenance field and rejected:
+TOML ordering bites here: `store` is a top-level key, so it must appear _before_
+the first `[table]` header. Written after `[provenance]` it is parsed as a
+provenance field and rejected:
 
 ```
 error: error in fits/02_posterior.toml:
 parse error: TOML parse error at line 5, column 1
   |
-5 | output_dir = "../results"
-  | ^^^^^^^^^^
-unknown field `output_dir`, expected `derived_from` or `reason`
+5 | store = "../camdl-store"
+  | ^^^^^
+unknown field `store`, expected `derived_from` or `reason`
 ```
 
 The PGAS file resolves its source first, then runs NUTS on θ given the
@@ -4812,7 +4620,7 @@ R̂ of 2.07 at 200 sweeps is a not-converged posterior, reported as errors rathe
 than buried — a real run needs thousands of sweeps. There is a second thing to
 read here: `from_mle` is a point rule, so both chains began at the scout's
 estimate and the between-chain R̂ cannot say whether the posterior was explored.
-`fit summary` on this leaf prints
+`fit summary` on this run prints
 `seeded from:  from_mle @scout, run <scout run id>
 (every chain at one point)`
 and
@@ -4862,22 +4670,22 @@ observation dominates. A row carrying a tenth of the elpd by itself, with `pit`
 at 0 or 1 and `ess` in the single digits, is one observation the filter could
 not explain — check the data row at that `t` before anything else.
 
-Once a sampler leaf exists, `fit predict` replays the posterior forward and
+Once a sampler run exists, `fit predict` replays the posterior forward and
 writes the predicted-vs-observed pair:
 
 ```
-$ camdl fit predict fits/02_posterior.toml --n-draws 20
+$ camdl fit predict @posterior --n-draws 20
 fit predict: free_forward horizon — subsampling 20 of 60 posterior draws (raise with --n-draws)
 fit predict: one_step horizon — subsampling 20 of 60 posterior draws (raise with --n-draws)
 fit predict: mode=free_forward+one_step(20 draws) treatment=posterior, 1 scenario(s) [fitted], 1 stream(s), 60 draws from pgas method 'pgas'
-wrote fits/../results/fits/02_posterior-77595169/predict/<run_id12>-<key>/predictive/weekly_cases.tsv
-wrote fits/../results/fits/02_posterior-77595169/predict/<run_id12>-<key>/predictive.json
-wrote fits/../results/fits/02_posterior-77595169/predict/<run_id12>-<key>/observed/weekly_cases.tsv
-wrote fits/../results/fits/02_posterior-77595169/predict/<run_id12>-<key>/observed.json
+wrote camdl-store/<build>/fit/sir-…/runs/pgas-…/seed_1-…/predict/all-…/predictive/weekly_cases.tsv
+wrote camdl-store/<build>/fit/sir-…/runs/pgas-…/seed_1-…/predict/all-…/predictive.json
+wrote camdl-store/<build>/fit/sir-…/runs/pgas-…/seed_1-…/predict/all-…/observed/weekly_cases.tsv
+wrote camdl-store/<build>/fit/sir-…/runs/pgas-…/seed_1-…/predict/all-…/observed.json
 ```
 
 ```
-$ cut -f1-7 results/fits/02_posterior-77595169/predictive/weekly_cases.tsv | head -3
+$ cut -f1-7 camdl-store/<build>/fit/sir-…/runs/pgas-…/seed_1-…/predict/all-…/predictive/weekly_cases.tsv | head -3
 scenario	time	horizon	treatment	role	fit_rhat_max	fit_ess_min
 fitted	0	free_forward	posterior	trained	2.0652	
 fitted	7	free_forward	posterior	trained	2.0652
@@ -4909,7 +4717,7 @@ particle filter is structurally redundant. The runtime says so for every method:
 ```
 
 ```toml
-output_dir = "../results"
+store = "../camdl-store"
 
 [model]
 camdl = "../models/sir.camdl"
@@ -4997,7 +4805,7 @@ trains on the rows whose period ends at or before the cutoff (§6.2) and leaves
 the data file whole:
 
 ```toml
-output_dir = "../results"
+store = "../camdl-store"
 
 [model]
 camdl = "../models/sir.camdl"
@@ -5025,10 +4833,10 @@ cooling = 0.7
 ```
 
 The fit prints the rows it trained on and the first held-out row of each stream
-(§6.2) and records its training partition in `fit.meta.json`. `camdl compare`
-then scores the withheld rows out of sample: it filters the full series at θ̂, so
-each held-out row is scored one step ahead with the training window assimilated.
-To score them by hand instead, write θ̂ with
+(§6.2) and records its training partition in `fit.meta.json`. The stored problem
+keeps the withheld rows' dates and not their values, so `camdl compare` refuses
+to score them (scores of held-out rows arrive with the run store's scores);
+`--in-sample` compares the training rows. To score them by hand, write θ̂ with
 `camdl fit summary FIT --params-only` and run `camdl pfilter` over the full file
 with `--score-from` (`docs/inference.md`, "Out-of-sample validation").
 
@@ -5075,36 +4883,31 @@ the new file can start from the source fit's results:
 ```
 $ camdl fit new --from fits/01_mle.toml fits/04_derived.toml
   [provenance] derived_from = "fits/01_mle.toml"
-  hint: to warm-start the derived fit from fits/../results/fits/01_mle-2030ba2b, write under its [method]
+  hint: to warm-start the derived fit from a run of the source, write under its [method]
         starts = { from_posterior = "@<label>" }   # one draw per chain
         starts = { from_mle = "@<label>" }         # every chain at its estimate
-        (a handle is @label, a fit-id prefix, or the leaf directory; `camdl list` shows them)
+        (a handle is @label, a run-id prefix or the run's folder; `camdl list` shows them)
 created fits/04_derived.toml
 ```
 
-`fit table` renders every run under a results root, one row each — a problem
-folder holding several runs has several rows, sharing a `fit_id` and told apart
-by `run` (the run id's first 12 hex), and every cell in a row is that run's own:
+`fit table` renders every fit run in a run store, one row each — a problem
+holding several runs has several rows, sharing a `fit_id` and told apart by
+`run` (the run id's first 12 hex), and every cell in a row is that run's own.
+`stem` is the stem of the fit file the run was given:
 
 ```
-$ camdl fit table results/fits
+$ camdl fit table camdl-store
 fit_id     run          label                  stem           method   methods converged     best_ll ll_type          age
----------------------------------------------------------------------------------------------------------------------------
-649b2ecc   ea2edd7cbeb3 <unlabelled>           09_pgas_only   pgas     pgas    no                  — complete_data     4m
-2030ba2b   ec3425f877b3 mle                    01_mle         if2      if2     no              -58.4 if2              11m
-812b33c5   26529d207a4b <unlabelled>           08_holdoutfil… if2      if2     no              -48.0 if2              13m
-77595169   0c6804051770 scout                  02_scout       if2      if2     no              -58.4 if2              23m
-8e6e8964   f3c3c026516b ode-mle                05_ode         nl-sbplx nl-sb…  no              -58.9 marginal         23m
+----------------------------------------------------------------------------------------------------------------------------
+8bcb3980   d7e6f2f4e33a hold                   fit_pmmh       pmmh     pmmh    no              -38.3 marginal         11s
+797c0b53   a372ef8992fa <unlabelled>           fit_pmmh_40    pmmh     pmmh    no              -52.1 marginal         12s
+797c0b53   9cd433e2dedb post                   fit_pmmh_all   pmmh     pmmh    no              -53.0 marginal         13s
+8bcb3980   603b688f7602 <unlabelled>           fit_seeds      if2      if2     no              -36.7 if2              30s
+8bcb3980   556beb126546 <unlabelled>           fit_seeds      if2      if2     no              -37.6 if2              31s
+8bcb3980   be6657446294 i                      fit_if2        if2      if2     no              -36.9 if2               4m
 ```
 
-Labels come from `--label` at run time or from the top-level `camdl label`
-afterwards, addressed by the run's `run_id` (the run labelled becomes the
-label's holder, §6.8):
-
-```
-$ camdl label 4b1e0c9a2f77 mle
-ok: label set to "mle" on ./results/fits/01_mle-2030ba2b/if2-6c1d8e02/seed_1-e6a47b86
-```
+Labels come from `--label` at run time (§6.8); `camdl label` refuses a fit run.
 
 Filters: `--converged` / `--gate-failed`, `--with-method if2|pgas|pmmh`,
 `--model <hash-prefix>`, `--hash <hash-prefix>`, `--since-seconds <n>`,
@@ -5113,21 +4916,20 @@ Filters: `--converged` / `--gate-failed`, `--with-method if2|pgas|pmmh`,
 generated quantity, deriving it on demand for a fit that has not been predicted
 yet.
 
-Note that `fit_id` is the **fit-level** hash — model, data, `[estimate]`,
-`[fixed]` — computed with `method`, `fit_seeds` and `output_dir` deliberately
-excluded. Two configs that differ only in `[method]` therefore share a `fit_id`,
-and `--hash <prefix>` can return more than one row; the directory stem is what
-separates them.
+Note that `fit_id` is the **problem's** id — model, data, `[estimate]`,
+`[fixed]`, settings (§2.2) — with the method and seeds excluded. Two configs
+that differ only in `[method]` therefore share a `fit_id`, and `--hash <prefix>`
+can return more than one row; the `run` column separates them.
 
 ## 9. Provenance and Cache Invalidation
 
 ### 9.1 The identity model
 
-A fit's method leaf and a profile grid point are each stored as a
-**content-addressed leaf** in one store rooted at the output directory (default
-`results/`, see `run_paths::DEFAULT_OUTPUT_ROOT`). This section describes that
-store. A forward simulation and a particle filter evaluation are stored in the
-run store instead (§3.7, §4.4). The only thing that is "named" about a fit
+A profile grid point is stored as a **content-addressed leaf** in a store rooted
+at the output directory (default `results/`, see
+`run_paths::DEFAULT_OUTPUT_ROOT`). This section describes that store. A fit, a
+forward simulation and a particle filter evaluation are stored in the run store
+instead (§2.2, §3.7, §4.4). The only thing that is "named" about a profile
 directory is the human-readable _label_ in each path segment, which is
 provenance and never identity.
 
@@ -5199,7 +5001,7 @@ that turnover is intended, not a bug to engineer around. Two attributes exist:
 A field whose type is not `ContentAddressed` is a compile error, so an input
 cannot be made unhashable by accident.
 
-The **fit** level takes the other path: `FitConfigV2` is serde-only and enters
+A profile of a fit takes the other path for the fit file: the file enters its
 identity as the digest of its key-sorted canonical JSON, so
 `#[serde(skip_serializing_if = …)]` controls hash membership there — a
 default-skipped field stays out of the hash.
@@ -5235,12 +5037,11 @@ The `ir::Model` fields below are deliberately **not** hashed:
   `rate_state_grad`, `sigma_sq_grad`, `projection_state_grad`, each obs
   `Diffable`'s `grad`/`proj_grad`) — deterministic autodiff of already-hashed
   rates over already-hashed parameters, so model identity is
-  gradient-independent and a `--no-state-grad` compile keys the same. A fit
-  whose method reads them — PGAS with NUTS, `nl-lbfgs`, and an `nl-lbfgs`
-  profile — hashes them in its `method` level instead
+  gradient-independent and a `--no-state-grad` compile keys the same. A profile
+  whose method reads them (`nl-lbfgs`) hashes them in its `method` level instead
   (`runid::inputs::model_ir_hash_with_gradients`): its result depends on the
   gradients, and they on the compiler's autodiff, so a compiler that emits other
-  gradients for one forward model re-keys those fits and no other.
+  gradients for one forward model re-keys those profiles and no other.
 - `quantities` and `contrasts` — reporting-only reductions written to a
   regenerated sidecar outside the leaf (§10.8), never to the leaf itself.
 
@@ -5254,31 +5055,9 @@ different models (the `model` level; `config` is unchanged).
 
 | kind (`store_dir`)           | levels, in path order                   | resolver                 |
 | ---------------------------- | --------------------------------------- | ------------------------ |
-| `FitMethod` (`fits/`)        | fit · method · seed                     | `cli/src/fit/cas.rs`     |
 | `ProfilePoint` (`profiles/`) | profile · point · method · seed · start | `cli/src/profile_cas.rs` |
 
-**`FitMethod` levels** (`fit::cas::resolve_fit_method`):
-
-- `fit` — `FitDigest`: the `ModelDigest` (of the model with its external inputs
-  bound); the content digest of each resolved _training_ stream; the content
-  digest of each `[data.holdout]` stream; the content digest of each
-  `[data.tables]` file, by input name; the digest of the whole canonicalized
-  fit.toml **less** `method`, `fit_seeds`, `output_dir` and the `[data.tables]`
-  paths; the engine version; and the version of the rule that decides which rows
-  train (`PARTITION_RULE_VERSION`, §6.2), so a change to the rule re-keys every
-  fit. The fit level hashes the problem alone, so two files that differ only in
-  `[method]` share it. Model and data _paths_ stay in the blob — a rename
-  over-invalidates harmlessly.
-- `method` — `MethodLevel` = `MethodConfig` folded with `deps`. `MethodConfig`
-  carries the digest of `Method::identity_payload()` — the algorithm block and
-  the resolved `starts` rule — re-augmented with `n_trajectories`, plus
-  `target_length`. Folding `deps` here is what makes a posterior file re-key
-  when the scout its `starts` names changes. The label is the algorithm's name.
-- `seed` — the resolved fit RNG seed.
-
-`Method::identity_payload()` deliberately omits the _extension dimension_ (PGAS
-sweeps, PMMH iterations) so `--resume` can lengthen a chain without re-keying;
-the resume length is keyed separately as `target_length`.
+A fit's problem and run identities are in §2.2.
 
 **`Pfilter` `config`** digests
 `{particles, replicates, dt, obs_block,
@@ -5311,19 +5090,6 @@ done by `FiniteF64`'s constructor.
   index.json                       # derived, rebuildable (§9.6)
   .staging/                        # in-flight commits
   .quarantine/                     # unidentifiable debris moved aside
-  fits/
-    {fit_stem}-{h8}/               # the fit level; also holds fit-wide sidecars
-      fit.meta.json
-      fit.toml.original
-      fit.resolved.toml
-      model.camdl.original
-      model.ir.json
-      model.graph.json
-      model.render.json
-      {method}-{h8}/
-        seed_{n}-{h8}/
-          run.json                 # RunRecord, kind = fit_method
-          … method artifacts (§10.6)
   profiles/                        # same {label}-{h8} factoring per §9.2.4
   profiles/{stem}-{h8}/invocations/{invocation_id}/
                                    # one per `camdl profile` run; not a leaf (§10.12)
@@ -5395,44 +5161,41 @@ input changes a cell's id when it changes the cell's identity (§3.7):
 ### 9.4 Fit identity and re-running a changed fit
 
 There is no staleness _error_. A fit whose config changed simply resolves to a
-different `run_id`, lands in a different leaf, and runs; the previous leaf stays
-addressable. There is no `provenance.json`, no stored `config_hash` compared on
-re-run, and no `--force` prompt on the fit path.
+different problem or run id, lands in a different folder, and runs; the previous
+one stays addressable. There is no stored `config_hash` compared on re-run, and
+no `--force` prompt on the fit path.
 
-What each edit does:
+What each edit does (§2.2 lists what each identity holds):
 
-| edit                                                                   | effect                                                 |
-| ---------------------------------------------------------------------- | ------------------------------------------------------ |
-| model, training data bytes, holdout data bytes                         | new `fit` level → the method re-runs                   |
-| any fit.toml field outside `method`/`fit_seeds`/`output_dir`           | new `fit` level → the method re-runs                   |
-| a `[method]` field, `starts` included                                  | new `method` level for this file only; siblings reused |
-| a sourced start's source (`from_mle`, `from_posterior`, `from_params`) | new `deps` → new `method` level for the consumer       |
-| `fit_seeds`                                                            | new `seed` level                                       |
-| `output_dir`                                                           | nothing (write location is provenance)                 |
+| edit                                                                                                 | effect                                                      |
+| ---------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| model, training lines of a data file, held-out dates, `[data.tables]` bytes                          | new problem → every run on it re-runs                       |
+| `[estimate]` bounds or priors, `[fixed]`, `simplex_groups`, `[config]`, the scenario keys, `ic_free` | new problem → every run on it re-runs                       |
+| a held-out value, under `holdout_after` or in a `[data.holdout]` table                               | nothing                                                     |
+| a `[method]` field, `starts` included, or `rw_sd` / `perturb_only_at_t0` / `start`                   | new run on the same problem; other method groups are reused |
+| a sourced start's source (`from_mle`, `from_posterior`, `from_params`)                               | new dependency → new run for the consumer                   |
+| `fit_seeds`, `--seed`                                                                                | new run                                                     |
+| the camdl build                                                                                      | new build directory → new problem and runs                  |
+| `[provenance]`, comments, `store`, `--label`                                                         | nothing                                                     |
 
 Chain-start _sources_ are keyed by content, not path: a `from_posterior`
 source's `draws.tsv`, a `from_mle` source's `fit_state.toml` and a `from_params`
-TOML each enter `deps` as their file digest, so rewriting the file in place
-re-keys the fit.
+TOML each enter the run's identity as a dependency on that file, so rewriting
+the file in place re-keys the run.
 
 **`--resume` is guarded by the run's own identity, less its length.** A resumed
 PMMH or PGAS run (the two methods `--resume` accepts) extends its base's chains,
-so it lands in a leaf of its own: its `method` level carries the new target
-length and a dep on the base. That dep, `cas::cas_resume_dep`, is the base
-leaf's `run_id` plus one digest over every chain's carried files in chain order
-(`artifact` `chain_*/{resume_state.bin,trace.tsv,trajectories.tsv}`): the chain
-state the resume continues from and the rows the resumed leaf copies, so a base
-whose rows differ is a different base. It is not the base's `fit_state.toml`,
-which records when the base finished, so two runs of one fixed-seed base address
-one resumed leaf (gh#1015).
+so it is a run of its own beside the base: its identity carries the new length
+and a dependency on the base's carried files, every chain's `resume_state.bin`,
+`trace.tsv` and `trajectories.tsv`: the chain state the resume continues from
+and the rows the resumed run copies, so a base whose rows differ is a different
+base. It is not the base's `fit_state.toml`, which records when the base
+finished, so two runs of one fixed-seed base address one resumed run.
 
 Continuing a base's chain state is sound only if every other input is the one
-the base ran under. The key that checks this, `cas::resume_guard`, hashes the
-same three levels (`fit` / `method` / `seed`) as the leaf's `run_id`, with the
-target length set to zero and the method level's deps taken without the resume
-base's dep, so only a sourced start's dep remains. Each chain's
-`resume_state.bin` records the key as `config_hash`, and a resume refuses a
-chain whose recorded key differs:
+the base ran under. The key that checks this is the run's identity with its
+length and its base taken out. Each chain's `resume_state.bin` records the key
+as `config_hash`, and a resume refuses a chain whose recorded key differs:
 
 ```
 error: config hash mismatch for chain 0 — cannot resume. Either the
@@ -5442,7 +5205,7 @@ from scratch with --force.
 ```
 
 Because the key is the run's identity, it covers every input that re-keys a fit
-(`[config]` with its `dt`, the scenario, `ic_free`, the holdout,
+(`[config]` with its `dt`, the scenario, `ic_free`, the held-out dates,
 `n_trajectories`) and nothing else.
 
 ### 9.5 run.json — the per-run metadata contract
@@ -5544,72 +5307,60 @@ Every leaf carries `calendar`, the model's calendar axis (§2.2.2): with it, the
 stores, maps to dates without the model source, and a model with no `origin`
 records `"origin": null`. The record cannot be built without it.
 
-A `fits/` method leaf adds `deps` (when its `starts` consumed a source), nests
-artifact keys (`chain_0/trace.tsv`), keys per-chain schema entries under a `{n}`
-wildcard, and carries a populated `inputs`. A fit leaf's `inputs` are written
-with its claim — what the run was asked to do — so a failed or running leaf
-carries them too; `finalize` adds the two only the run can tell (`best_loglik`,
-`best_chain`). The run's wall time is the execution's, in `execution.json`
+A fit run is a result in the run store, and its record is the run store's
+(§2.5). What the run was asked to do and what it found is its `run_inputs.json`
 (§2.2):
 
 ```json
-"inputs": {
-  "algorithm": { "algorithm": "if2", "backend": "chain_binomial",
-                 "chains": 2, "cooling": 0.7, "iterations": 8, "particles": 1000 },
+{
+  "algorithm": { "algorithm": "if2", "backend": "chain_binomial", "chains": 2,
+                 "cooling": 0.9, "iterations": 3, "particles": 30 },
   "backend": "chain_binomial",
-  "best_chain": 1,
-  "best_loglik": -163.87886531306089,
+  "best_chain": 0,
+  "best_loglik": -36.852364006324976,
+  "binomial": "btpe",
   "chain_starts_kind": "spread",
-  "config_identities": ["3f0c9e1d…77b2"],
-  "fit_hash": "7aac3a33…a90a",
+  "header": { "config": "fit_if2.toml", "method": "if2", "model": "sir.camdl",
+              "output": "0.1.0_f531753ac.dirty-a20ab6cb-4bff11f93f55/fit/sir-8bcb39805e9d/runs/if2-e5e94eb7c269/seed_3-be6657446294", … },
   "method": "if2",
   "n_chains": 2,
-  "seed": 1,
+  "problem_id": "8bcb39805e9d…b0ce",
+  "run_id": "be6657446294…b968",
+  "seed": 3,
   "starts": "from_prior",
-  "starts_source": null
+  "starts_source": null,
+  …
 }
 ```
 
-`inputs.config_identities` holds the canonical identity of each `fit.toml` the
-run was written from or reused by (a cache hit from a second config with the
-same run identity adds its own); a `fit.toml` handle names the run whose list
-holds the file's identity (§2.2.1). A config is listed only on the run the file
-alone makes: `fit run` recomputes, per cell, the run_id that `fit run <file>`
-with no options would key (the file's own method and starts source, the problem
-before `--sweep`) and lists the config only when it equals the run's own. Every
-identity-bearing option — `--starts`, a sampler flag, `--decibans-thresh`,
-`--sweep`, `--resume` — therefore makes a run the file does not name; so do a
-`--seed` outside the file's seeds and `--emit-every`, which changes the
-[synthetic] data generated before the identity is taken. `inputs.starts_source`
-is `null` unless `starts` read a source, and then
-`{"handle": "@scout", "run_id": "<64-hex>", "artifact": "fit_state.toml"}`: the
-handle as written and the run it resolved to when this run started (`run_id` is
-`null` for a file named directly). The source's `run_id` is also this run's
-`deps` entry, which is what keys it.
+`starts_source` is `null` unless `starts` read a source, and then
+`{"handle": "@scout", "chains": …, "run_id": "<64-hex>"}`: the handle as
+written, the chains a `--starts-chains` selection kept, and the run it resolved
+to when this run started (`run_id` is `null` for a file named directly).
 
-`inputs.best_chain` is the chain number that produced `inputs.best_loglik` — the
-number of a `chain_N/` directory on this leaf, the same value the leaf's
-`fit_state.toml` stores and the method's own stderr line prints, so
-`chain_<best_chain>/` opens with no arithmetic. It is `null` for a method with
-replicates rather than competing chains (`pfilter`). `camdl show` and
-`camdl list --format json` print it as recorded.
+`best_chain` is the chain number that produced `best_loglik` — the number of a
+`chain_N/` directory in this run, the same value the run's `fit_state.toml`
+stores and the method's own stderr line prints, so `chain_<best_chain>/` opens
+with no arithmetic. It is `null` for a method with replicates rather than
+competing chains (`pfilter`). `camdl show` and `camdl list --format json` print
+it as recorded.
 
-**A resumed leaf.** A `--resume` run's leaf is the complete artifact for the
-longer chain; no reader follows the lineage back. Before the new segment runs,
-each `chain_N/resume_state.bin`, `chain_N/trace.tsv` and (PGAS, when the base
-saved paths) `chain_N/trajectories.tsv` is copied from the base with
-`std::fs::copy` — a copy-on-write clone on APFS, a `copy_file_range` (a reflink
-where the filesystem supports one) on Linux — and the new segment's rows are
-appended to it. The index (`step` for PMMH, `sweep` for PGAS) continues from the
-base's: the new segment's first row is one past the base's last, never a repeat
-of it and never a restart from 0, and `fit run` refuses a trace whose index does
-not increase strictly. Everything a reader takes as the posterior is over the
-whole chain: `draws.tsv` (PGAS keyed by sweep, the base's draws first in each
-chain), the summary's R̂ and ESS, `trajectories.json`'s `n_draws` and the
-summary's saved-path counts, `latent_convergence`, PMMH's acceptance rate and
-MAP, PGAS's NUTS divergence counts, and `fit_state.toml`'s best (PGAS takes the
-better of the base's best and the new segment's). ESS per second divides by the
-segments' summed wall time.
+**A resumed run.** A `--resume` run is the complete result for the longer chain;
+no reader follows the lineage back. Before the new segment runs, each
+`chain_N/resume_state.bin`, `chain_N/trace.tsv` and (PGAS, when the base saved
+paths) `chain_N/trajectories.tsv` is copied from the base with `std::fs::copy` —
+a copy-on-write clone on APFS, a `copy_file_range` (a reflink where the
+filesystem supports one) on Linux — and the new segment's rows are appended to
+it. The index (`step` for PMMH, `sweep` for PGAS) continues from the base's: the
+new segment's first row is one past the base's last, never a repeat of it and
+never a restart from 0, and `fit run` refuses a trace whose index does not
+increase strictly. Everything a reader takes as the posterior is over the whole
+chain: `draws.tsv` (PGAS keyed by sweep, the base's draws first in each chain),
+the summary's R̂ and ESS, `trajectories.json`'s `n_draws` and the summary's
+saved-path counts, `latent_convergence`, PMMH's acceptance rate and MAP, PGAS's
+NUTS divergence counts, and `fit_state.toml`'s best (PGAS takes the better of
+the base's best and the new segment's). ESS per second divides by the segments'
+summed wall time.
 
 `fit_state.toml`'s `acceptance_rate` is the best chain's over its post-burn-in
 steps or retained sweeps. PMMH's covers the whole chain, its accept count
@@ -5627,7 +5378,7 @@ and the conditional-SMC findings in `diagnostics.json`
 `filter_weight_collapse`, `path_renewal_coalesced`, `filter_starved`). The
 sampling cost in the resumed leaf's `execution.json` is this execution's.
 
-`inputs.resume` records the lineage, and is absent on a fresh run:
+`run_inputs.json`'s `resume` records the lineage, and is absent on a fresh run:
 
 ```json
 "resume": {
@@ -5641,7 +5392,7 @@ sampling cost in the resumed leaf's `execution.json` is this execution's.
 ```
 
 `segments` lists every run that contributed rows, oldest first, ending with this
-leaf's own; `first_index` is indexed by chain number. A row of chain `c` whose
+run's own; `first_index` is indexed by chain number. A row of chain `c` whose
 index is `i` — `index_column` in `chain_c/trace.tsv`, `draw` in
 `trajectories.tsv`, the sweep in PGAS's `draws.tsv` — belongs to the last
 segment whose `first_index[c] <= i`, so the last segment's `first_index` is the
@@ -5674,15 +5425,15 @@ carries no step: draw `k` of chain `c` is the `k`-th retained row of
 
 `status` transitions depend on the write mode. A leaf written in Mode A (§2.3.1)
 commits **atomically**: it appears only once complete, and there is no
-discoverable in-flight record. `fit_method` and `profile_point` **stream**: they
-claim the directory, write a `"running"` record and an exclusive `.lock`, stream
-output in, then finalize to `"completed"` with the exact-set manifest and the
-post-run `inputs`. A run camdl stops on an error records `"failed"`, with its
-`failure`, before it exits, and releases the `.lock`; a `"running"` record left
-behind is what a killed or crashed run leaves, and stays `"running"` (§2.3.1, "A
-run's end is recorded, never inferred"). A stale `.lock` whose PID is dead is
-reclaimed, the prior attempt's record preserved under `.attempts/`; a live one
-refuses with `fit in progress`.
+discoverable in-flight record. `profile_point` leaves **stream**: they claim the
+directory, write a `"running"` record and an exclusive `.lock`, stream output
+in, then finalize to `"completed"` with the exact-set manifest and the post-run
+`inputs`. A run camdl stops on an error records `"failed"`, with its `failure`,
+before it exits, and releases the `.lock`; a `"running"` record left behind is
+what a killed or crashed run leaves, and stays `"running"` (§2.3.1, "A run's end
+is recorded, never inferred"). A stale `.lock` whose PID is dead is reclaimed,
+the prior attempt's record preserved under `.attempts/`; a live one refuses with
+`fit in progress`.
 
 Three `provenance` fields — `finished_at`, `host`, `thread_count` — exist in the
 schema and are never populated by any writer.
@@ -5702,11 +5453,6 @@ Sub-artifacts that are _not_ `RunRecord`s:
   with the hash `SHA256("{run_id}:event_log")`. A second `--event-log` run of
   the same run id leaves a complete child as it is, and refuses one whose
   recorded digest differs from the bytes it recorded, overwriting nothing.
-- `fits/{fit_stem}-{h8}/fit.meta.json` — the fit-wide sidecar:
-  `{schema_version, source_model, model_identity, source_config, fit_toml_hash, data_hashes,
-  holdout_hashes, estimated, fixed, resolved_priors, parameters_provenance, schema}`,
-  where `schema` describes each observation stream (`name`, `index_dims`,
-  `value_column`, `value_kind`, `likelihood`).
 - `profiles/{stem}-{h8}/invocations/{invocation_id}/` — one `camdl profile`
   invocation's `invocation.json` and `progress.json` (§10.12). Neither enters
   any hash or record, and a reader that walks `run.json` leaves never meets
@@ -5856,7 +5602,7 @@ chain	draw	beta	gamma	rho	k	N0	I0
 
 - `chain` is the chain's number in every method, matching `PosteriorDraw.chain`
   in `trajectories.tsv` — the join key — and the `chain_N/` directory the
-  chain's trace is under (§2, one index base).
+  chain's trace is under (§6.8, one index base).
 - Rows are the post-burn-in, thinned set. PGAS writes the set the sim-side
   recorder already retained and re-applies neither burn-in nor thinning; PMMH
   rebuilds the file from each `chain_N/trace.tsv`, dropping rows with
@@ -5885,7 +5631,10 @@ companion `--params`.
 ### 10.4 Sampler traces (`chain_N/trace.tsv`, `chain_N/parameter_traces.tsv`)
 
 One file per chain, streamed during sampling (header flushed immediately, rows
-batched, so a live tail works). `N` is the chain's number (§2, one index base).
+batched). `N` is the chain's number (§6.8, one index base). A fit run's method
+writes them in its working directory outside the store, and they reach the run's
+folder when the method ends (§2.2): while the method runs, the run's folder
+holds no trace to tail.
 
 PGAS, PMMH and MH write `chain_N/trace.tsv` via the shared
 `fit::trace_writer::TraceWriter`:
@@ -5946,7 +5695,7 @@ iteration	loglik	if2_perturbed_loglik	beta	gamma
 ```
 
 A resumed leaf's `trace.tsv` starts as a copy of its base's and the new segment
-is appended under the base's header (§9.5, "A resumed leaf").
+is appended under the base's header (§9.5, "A resumed run").
 
 ### 10.5 Observation draws
 
@@ -6016,7 +5765,7 @@ actually determines:
 | path                         | what re-keys                                                                                      |
 | ---------------------------- | ------------------------------------------------------------------------------------------------- |
 | `simulate --obs*`            | the `obs` by-product's identity, so two cadences are two `obs` by-products inside one stored cell |
-| `fit run` with `[synthetic]` | the generated data's own bytes, which `FitDigest.data` already hashes — correct, the data changed |
+| `fit run` with `[synthetic]` | the generated data's own bytes, which the problem's identity hashes — correct, the data changed   |
 | `fit run` on real data       | nothing; the flag is refused there, since it could only do nothing                                |
 
 Two cadences share one cell because the trajectory bytes do not depend on the
@@ -6024,25 +5773,28 @@ emission cadence.
 
 ### 10.6 Fit sidecars
 
-Fit-wide, at `fits/{fit_stem}-{h8}/` (outside any leaf, so not exact-set
-checked):
+In the fit problem's folder (§2.2), result files of the problem:
 
-| file                   | content                                                                                                                                                                                                         |
-| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `fit.meta.json`        | source model + `model_identity`, source config (both relative to the fit folder) + hash, per-stream data hashes, estimated/fixed sets, resolved priors, parameter provenance, and the observation-stream schema |
-| `fit.resolved.toml`    | the configuration the fits ran under: the config with the command line's problem values and the folder's own `[fixed]` written in (generated)                                                                   |
-| `fit.toml.original`    | verbatim copy of the config as read                                                                                                                                                                             |
-| `model.camdl.original` | verbatim copy of the model source                                                                                                                                                                               |
-| `model.ir.json`        | the compiled IR the fit ran against                                                                                                                                                                             |
-| `model.graph.json`     | the model flow graph                                                                                                                                                                                            |
-| `model.render.json`    | the display/LaTeX rendering payload                                                                                                                                                                             |
+| file                         | content                                                                                   |
+| ---------------------------- | ----------------------------------------------------------------------------------------- |
+| `problem.toml`               | the resolved problem, in `fit.toml` syntax, naming the stored files                       |
+| `partition.json`             | which rows of each stream trained                                                         |
+| `inputs/<source>.<ext>`      | each data file's training lines                                                           |
+| `inputs/tables/<name>.<ext>` | each `[data.tables]` file, as read                                                        |
+| `held_out/<stream>.tsv`      | each held-out row's file, position, label and time, without its value                     |
+| `model.camdl`                | the model file the fit was given (`model.ir.json` when it was compiled IR), as provenance |
 
-Per method leaf, alongside `run.json`. The set is method-dependent; every file
-present is listed in `run.json.artifacts` and subject to the exact-set gate,
-except the records of the attempt — `execution.json`, `progress.json`,
-`events.jsonl` and an NLopt leaf's `opt_trace.tsv` (§2.2) — which are not a
-function of the computation (the run appends to `events.jsonl` after the leaf
-commits, §10.11).
+The compiled IR the fit ran against is the compiled-model result the problem
+depends on, `<build>/compiled_model/<model stem>-<12 hex>/model.ir.json`.
+
+In each fit run's folder, beside `identity.json` and `run.json`, the files of
+§2.2 (`fit.toml`, `method.toml`, `run_inputs.json`, `fit.meta.json`, §2.2.1) and
+the method's result files below. The set is method-dependent. `run.json`'s
+`files` lists every file with its role: `result` for the method's files and
+`method.toml`; `provenance` for `fit.toml`, `fit.meta.json`, `run_inputs.json`,
+`execution.json` and an NLopt run's `opt_trace.tsv`; `attempt` for
+`progress.json` and `events.jsonl`. Only result files are a function of the
+computation, and only they are listed by `camdl show`.
 
 Common to both families:
 
@@ -6293,9 +6045,11 @@ omitted from `run.json` when empty.
 
 A background thread rewrites `progress.json` every five seconds — a fixed
 wall-clock timer, not a step boundary, because one national-scale PGAS sweep can
-take minutes — so it is the one thing a watcher can read while a method runs.
-Alongside `updated_at`, `pid` and the `state` counter it carries a `chains`
-block for any method that reports per-chain liveness:
+take minutes — so it is the one thing a watcher can read while a method runs. In
+a fit run's folder the run store writes the method's record inside an envelope,
+`{"at": <time written>, "format": 1, "snapshot": {…}}`; the fields below are
+those of `snapshot`. Alongside `updated_at`, `pid` and the `state` counter it
+carries a `chains` block for any method that reports per-chain liveness:
 
 ```json
 {
@@ -6704,28 +6458,29 @@ run reports per-parameter rejection counts when truncation was active.
 
 _"Does my fitted model generate data that looks like the real data?"_
 
-Prefer `--draws posterior --fit <fit results dir>`, which resolves the fit's
-canonical post-warm-up cloud for you rather than making you find the file:
+Prefer `--draws posterior --fit <fit run>`, which resolves the run's canonical
+post-warm-up cloud for you rather than making you find the file:
 
 ```bash
 camdl simulate models/sir.camdl \
-    --draws posterior --fit results/fits/fit_pgas-4dadedae \
+    --draws posterior --fit @posterior \
     --replicates 10 --obs-dir ppc/
 ```
 
-It prints what it resolved:
+It prints what it resolved on a `draws: posterior` line: the number of draws,
+the method that wrote them, and the `draws.tsv` it read.
 
-```
-draws: posterior — 2 draws from pgas method 'pgas' (…/pgas-a0b1da4f/seed_1-e6a47b86/draws.tsv)
-```
-
-Resolution is **by artifact, not by method name**: a leaf has a posterior iff it
+Resolution is **by artifact, not by method name**: a run has a posterior iff it
 wrote `draws.tsv`. An optimizer-only fit (IF2, `nl-sbplx`, `nl-bobyqa`,
 `nl-lbfgs`) resolves to an error rather than dressing a single point up as a
-distribution. The canonical file is the method leaf's `draws.tsv` — post-warm-up
-and thinned — **not** `trace.tsv`, which carries warm-up rows for live
-observability. There is no `<fit-dir>/posterior/` directory; the path is
-`<fit-dir>/<method>-<h8>/seed_<N>-<h8>/draws.tsv`.
+distribution:
+
+```
+error: --fit @mle: the run holds no posterior draws (draws.tsv); a sampler (pgas, pmmh, mh) writes them
+```
+
+The canonical file is the run's `draws.tsv` — post-warm-up and thinned — **not**
+`trace.tsv`, which carries warm-up rows for live observability.
 
 A raw TSV path still works. If the file carries only the estimated columns (a
 posterior trace tail), pass `--fit` alongside it and the fit's `[fixed]` block
@@ -6741,10 +6496,10 @@ predicted-vs-observed artifact directly from a completed fit, banded over the
 posterior, with no re-plumbing of draws:
 
 ```bash
-camdl fit predict results/fits/fit_pgas-4dadedae
+camdl fit predict @posterior
 ```
 
-It emits, under the run directory:
+It emits, under the run's `predict/<mode>-<12 hex>/` (§2.2.2):
 
 ```
 predictive/<stream>.tsv   time | <dims…> | horizon | treatment | role | fit_rhat_max | fit_ess_min
@@ -6764,7 +6519,7 @@ _"What would happen under an SIA, given what we learned from the data?"_
 
 ```bash
 camdl simulate models/sir.camdl \
-    --draws posterior --fit results/fits/<run>/ \
+    --draws posterior --fit @posterior \
     --scenario baseline,with_sia \
     --replicates 10 --obs-dir obs/
 ```
@@ -6781,8 +6536,8 @@ applies it — `simulate --draws posterior --fit`, `fit predict` (the `fitted`
 arm, every `--scenario` arm, the one-step filter), the contrast arms,
 `pfilter
 --fit` and the prequential `compare` derives. For a stored fit the
-selection is read from its `fit.resolved.toml`; the fit's `run_id` already
-hashes it, as part of the config's problem half.
+selection is read from its `problem.toml`; the problem's identity already holds
+it (§2.2).
 
 On the replaying commands each arm's own changes apply **on top of** the fit's
 selection, the way a scenario `compose`s a sub-scenario: the fit's
@@ -7073,24 +6828,32 @@ prior whose support covers the box), and the resolved prior's source
 
 ### 13.1 `camdl fit table`
 
-Walks a results tree and renders one row per run — its run id, method,
+Walks a run store and renders one row per fit run — its run id, method,
 convergence verdict, best log-likelihood and its type, age. Rows of one problem
 share a `fit_id`; the JSON row carries the full `run_id` (table_row schema v4,
 in which a non-finite number is the string `"NaN"`, `"inf"` or `"-inf"`), the
-CSV appends it as the last fixed column. The `<ROOT>` argument is **required**.
+CSV appends it as the last fixed column. The optional `ROOT` argument names the
+run store's root; without it `fit table` reads `$CAMDL_STORE`, else
+`./camdl-store`.
 
 ```
-$ camdl fit table results/fits
+$ camdl fit table camdl-store
 fit_id     run          label                  stem           method   methods converged     best_ll ll_type          age
----------------------------------------------------------------------------------------------------------------------------
-4dadedae   9df5b6b9cf23 <unlabelled>           fit_pgas       pgas     pgas    yes                 — complete_data    15s
+----------------------------------------------------------------------------------------------------------------------------
+8bcb3980   d7e6f2f4e33a hold                   fit_pmmh       pmmh     pmmh    no              -38.3 marginal         11s
+797c0b53   a372ef8992fa <unlabelled>           fit_pmmh_40    pmmh     pmmh    no              -52.1 marginal         12s
+797c0b53   9cd433e2dedb post                   fit_pmmh_all   pmmh     pmmh    no              -53.0 marginal         13s
+8bcb3980   603b688f7602 <unlabelled>           fit_seeds      if2      if2     no              -36.7 if2              30s
+8bcb3980   556beb126546 <unlabelled>           fit_seeds      if2      if2     no              -37.6 if2              31s
+8bcb3980   be6657446294 i                      fit_if2        if2      if2     no              -36.9 if2               4m
 ```
 
-Read-only by default: every cell is recovered from the on-disk `run.json` and
-the leaf's outputs. **One flag breaks that rule** — `--quantity <NAME>` may
-_derive_ a value on demand, running `fit predict --mode free_forward` for any
-fit that has not been predicted yet, and writing that fit's `quantities/`
-outputs. Optimizer fits have no posterior cloud, so their cell renders `—`.
+Read-only by default: every cell is recovered from the stored run's files. **One
+flag breaks that rule** — `--quantity <NAME>` may _derive_ a value on demand,
+running `fit predict --mode free_forward` for any fit run that has not been
+predicted yet, and storing that prediction, with its `quantities-model/` tables,
+inside the run. Optimizer fits have no posterior cloud, so their cell renders
+`—`.
 
 Filters: `--converged`, `--gate-failed`, `--with-method if2|pgas|pmmh`,
 `--model <HASH_PREFIX>`, `--hash <HASH_PREFIX>`, `--since-seconds <N>`,
@@ -7207,13 +6970,13 @@ Copies a fit config to a new path and injects a `[provenance]` block. It does
 in `reason`.
 
 ```
-$ camdl fit new --from fit_pgas.toml fit_v2.toml
-  [provenance] derived_from = "fit_pgas.toml"
-  hint: to warm-start the derived fit from …/results/fits/fit_pgas-4dadedae, write under its [method]
+$ camdl fit new --from fit-if2.toml derived.toml
+  [provenance] derived_from = "fit-if2.toml"
+  hint: to warm-start the derived fit from a run of the source, write under its [method]
         starts = { from_posterior = "@<label>" }   # one draw per chain
         starts = { from_mle = "@<label>" }         # every chain at its estimate
-        (a handle is @label, a fit-id prefix, or the leaf directory; `camdl list` shows them)
-created fit_v2.toml
+        (a handle is @label, a run-id prefix or the run's folder; `camdl list` shows them)
+created derived.toml
 ```
 
 The written file is the source verbatim with:
@@ -7755,10 +7518,10 @@ Store
 ```
 
 `--output-dir` is not accepted, and `CAMDL_OUTPUT_DIR` is not read (§4.4).
-`--draws posterior --fit` reads the fit from `results/`. There is no `--resume`
-flag: a run reads back the cells the store already holds by default, and
-`--force` overrides it. `camdl fit run --sweep` sweeps a `[fixed]` parameter of
-a fit (§7.3).
+`--draws posterior --fit` reads the fit from the run store. There is no
+`--resume` flag: a run reads back the cells the store already holds by default,
+and `--force` overrides it. `camdl fit run --sweep` sweeps a `[fixed]` parameter
+of a fit (§7.3).
 
 ### `camdl fit run CONFIG`
 
@@ -7766,14 +7529,13 @@ a fit (§7.3).
   --seed N                    RNG seed (default 1)
   --parallel N                Rayon thread cap; bit-identical regardless of value
                               (default 0 = all cores; env CAMDL_PARALLEL)
-  --force                     re-run; the existing leaf is quarantined
+  --force                     re-run; the stored run is quarantined
   --resume BASE_REF           extend a completed PGAS/PMMH run from a base run
-                              (run_id prefix or leaf path); conflicts with --force
+                              (@label, run_id prefix or run folder); conflicts
+                              with --force
   --sweep NAME=SPEC           Cartesian sweep over a fixed parameter (repeatable).
                               SPEC = V1,V2,... | lin(min,max,n) | log10(min,max,n)
-  --label TEXT                the run's label; `@label` names this one run.
-                              Refused if another run holds it or this
-                              invocation writes several runs
+  --label TEXT                name this invocation, found again as `@TEXT`
   --emit-every N | NAME=N     override a `[synthetic]` fit's observation emission
                               cadence (same grammar as `simulate --emit-every`);
                               refused on a fit with no `[synthetic]` block; the
@@ -7817,13 +7579,15 @@ Per-algorithm overrides
 `--stage`, `--init`, `--posterior`, `--mle`, `--params`, `--survey-path`,
 `--survey-top-k`, `--allow-nonconverged-scout`, `--starts-from` and
 `--init-method` are parsed only to be refused, each naming its replacement
-(§7.1).
+(§7.1). `fit run` has no `--output-dir` and no `--store`: the run store's root
+is the fit file's `store` key, else `CAMDL_STORE`, else `./camdl-store`.
 
 ### `camdl fit` — the other subcommands
 
 ```
 camdl fit summary FIT
-  FIT is a handle: @label, a fit-level hash prefix, a results directory, or a fit.toml
+  FIT is a handle naming one run: @label, a run id prefix, or the run's folder;
+  a fit.toml is refused with the runs it made listed
   --format text|json|md|latex (default text)
   --params-only               print only θ̂ as a flat params TOML (pipeable)
   --no-color                  disable ANSI colour (NO_COLOR is honoured regardless)
@@ -7914,11 +7678,10 @@ camdl fit predict [FIT]
                             ./camdl-store)
 ```
 
-`camdl pfilter` stores its result in the run store, a root of its own
-(`camdl-store/` by default) that the commands still writing to `results/` do not
-share; `--output-dir` and `CAMDL_OUTPUT_DIR` do not apply to it. The store's
-layout and records are those of
-`docs/dev/proposals/2026-11-20-run-store-api.md`. A filter run is one result,
+`camdl pfilter` stores its result in the run store (`camdl-store/` by default),
+which `profile`, still writing to `results/`, does not share; `--output-dir` and
+`CAMDL_OUTPUT_DIR` do not apply to it. The store's layout and records are those
+of `docs/dev/proposals/2026-11-20-run-store-api.md`. A filter run is one result,
 written in place, under
 `<build>/pfilter/<model>/<settings>/params/seed_<seed>/`: its `loglik.toml`,
 each replicate's log-likelihood in `replicates.tsv` under `--replicates N`, and
@@ -8077,7 +7840,9 @@ PATHS                       ≥2 when --config is absent. Each is a prequential.
 --allow-mixed-provenance    render rows whose provenance kinds differ
                             (plug-in vs posterior mixture) rather than refusing
 --in-sample                 score every fit in-sample even when it declares a
-                            holdout; stamped in_sample, with the optimism caveat
+                            holdout; stamped in_sample, with the optimism caveat.
+                            A stored fit that held rows out is refused without
+                            it (below)
 --particles N               for derived prequentials (default 1000, applied uniformly)
 --seed N                    for derived prequentials (default 1)
                             (a derived prequential filters at the fit's own dt,
@@ -8091,6 +7856,14 @@ PATHS                       ≥2 when --config is absent. Each is a prequential.
                             before its extension (under --streams: only the
                             .streams file, for the selected streams)
 ```
+
+A stored fit run that held rows out of its training data (`holdout_after`, or
+`[data.holdout]`, whole or partial) is refused before anything is computed: its
+problem keeps the held-out rows' dates and not their values, so they cannot be
+scored. The refusal names the run store's scores (step 7 of
+`docs/dev/proposals/2026-11-20-run-store-api.md`), which this camdl does not
+write, and `--in-sample`, which compares the fits on their training rows. An
+explicit `prequential.json` is read as-is.
 
 Columns: `T_score`, `elpd`, `Δelpd`, `LR` (= exp(Δelpd), the in-sample
 likelihood ratio against the baseline on the same scored observations — not an
@@ -8213,8 +7986,8 @@ camdl list [ROOT]
   --root DIR                  alias for the positional; wins when both are given
                               (default $CAMDL_OUTPUT_DIR, else ./results; none
                               when --store or $CAMDL_STORE names a store)
-  --store DIR                 the run store's root, for simulate and pfilter
-                              results (default $CAMDL_STORE, else ./camdl-store)
+  --store DIR                 the run store's root, for simulate, pfilter and
+                              fit results (default $CAMDL_STORE, else ./camdl-store)
   --model SUBSTR   --scenario NAME   --since 1h|30m|2d
   --kind sim|fit|profile|pfilter|ensemble|all             (default all)
   --parent HASH               children of a specific parent run (8+ char prefix)

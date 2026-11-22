@@ -122,7 +122,7 @@ impl RunInfo {
 
     /// Records an upstream in `run.json` without hashing it. Applies to every
     /// result this `RunInfo` is passed to from now on.
-    pub fn lineage(&mut self, item: impl Into<Lineage>) {
+    pub fn lineage(&self, item: impl Into<Lineage>) {
         self.shared.lock().lineage.push(item.into());
     }
 

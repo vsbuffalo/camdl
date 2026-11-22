@@ -15,7 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::args::{FitTableArgs, FitTableFormat};
 use crate::fit::config_diff::ConfigDiff;
-use crate::fit::config_v2::FitConfig;
+
 use crate::fit::fit_tree::{self, FitDirEntry};
 use crate::fit::fit_view::FitView;
 use crate::fit::table_row::{self, TableRow};
@@ -26,10 +26,11 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
     // fit table has no `--no-color`: its painters follow the environment
     // and whether each stream is a terminal.
     let out = crate::out::Out::new(false);
-    let entries = match fit_tree::walk_fits_root(&args.root) {
+    let root = args.root.clone().unwrap_or_else(crate::camdl_store::read_root);
+    let entries = match fit_tree::walk_fits_root(&root) {
         Ok(es) => es,
         Err(e) => {
-            out.fail(format!("error: cannot walk fits root {}: {}", args.root.display(), e));
+            out.fail(format!("error: cannot walk fits root {}: {}", root.display(), e));
         }
     };
 
@@ -59,24 +60,16 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
             .min_by(|(_, a), (_, b)| a.view.fit_hash.cmp(&b.view.fit_hash))
             .map(|(i, _)| i),
     };
-    let baseline_loaded = baseline_idx.and_then(|i| {
+    let baseline_loaded = baseline_idx.map(|i| {
         let entry = pre_filtered[i];
-        load_resolved_config(&entry.fit_dir)
-            .ok()
-            .map(|cfg| (entry, cfg))
+        (entry, entry.opened.config())
     });
 
     // Build rows with config_diffs against the chosen baseline.
     let mut rows: Vec<TableRow> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
     for entry in &pre_filtered {
-        let cfg = match load_resolved_config(&entry.fit_dir) {
-            Ok(c) => Some(c),
-            Err(e) => {
-                errors.push(format!("{}: {}", entry.fit_dir.display(), e));
-                None
-            }
-        };
+        let cfg = Some(entry.opened.config());
         let diff = match (&cfg, &baseline_loaded) {
             (Some(this_cfg), Some((base_entry, base_cfg))) => {
                 if base_entry.view.fit_hash == entry.view.fit_hash {
@@ -105,7 +98,7 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
             {
                 continue;
             }
-            match table_row::build_row(&method.method_dir, diff.clone(), 0.0, now_unix) {
+            match table_row::build_row_of(&entry.view, diff.clone(), 0.0, now_unix) {
                 Ok(r) => rows.push(r),
                 Err(e) => {
                     // A run whose result cannot be read is listed as a warning,
@@ -155,17 +148,17 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
         // gh#896: a row reports one run, and `fit predict` writes that run's
         // quantities under `<segment>/predict/<run id>-<key>/`; so each cell is read
         // from, and derived by predicting, the row's own run.
-        let run_by_id: std::collections::HashMap<&str, (&std::path::Path, &std::path::Path)> =
+        let run_by_id: std::collections::HashMap<&str, (&crate::fit_store::OpenedFit, &std::path::Path)> =
             pre_filtered
                 .iter()
                 .flat_map(|e| {
                     e.view.methods.iter().map(move |st| {
-                        (st.run_id.as_str(), (e.fit_dir.as_path(), st.method_dir.as_path()))
+                        (st.run_id.as_str(), (e.opened.as_ref(), st.method_dir.as_path()))
                     })
                 })
                 .collect();
         for r in &mut rows {
-            let Some((fit_dir, leaf)) = run_by_id.get(r.run_id.as_str()).copied() else {
+            let Some((fit, leaf)) = run_by_id.get(r.run_id.as_str()).copied() else {
                 continue;
             };
             // Does this run carry a posterior cloud? Resolved once per row
@@ -184,7 +177,7 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
             };
             for name in &args.quantities {
                 if let Some(median) =
-                    resolve_quantity_median(fit_dir, leaf, &r.run_id, name, selection.as_ref(), has_cloud)
+                    resolve_quantity_median(&root, fit, leaf, &r.run_id, name, selection.as_ref(), has_cloud)
                 {
                     r.quantities.insert(name.clone(), median);
                 }
@@ -232,19 +225,17 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
     }
 }
 
-/// The two ways to attach a label, as the hint prints them: at fit time, and
-/// afterwards on a stored run.
+/// The way to attach a label, as the hint prints it: at fit time. A stored
+/// run is sealed, so `fit run --label` on the same file names the run it
+/// reuses.
 ///
 /// This is the only labelling guidance camdl volunteers, and it goes to
-/// exactly the users who were about to label something — so each line has to
-/// be a command that exists. `camdl fit label` was not one (gh#701); the
-/// labeller is top-level `camdl label`, which works on any kind of run, not
-/// just a fit. `unlabelled_hint_commands_parse` runs both through the real
-/// command tree so a rename cannot leave this printing a command again.
-pub(crate) const UNLABELLED_HINT_COMMANDS: [&str; 2] = [
+/// exactly the users who were about to label something, so each line has to
+/// be a command that exists: `unlabelled_hint_commands_parse` runs each
+/// through the real command tree.
+pub(crate) const UNLABELLED_HINT_COMMANDS: [&str; 1] = [
+    // A stored fit run is sealed: its label is the invocation's.
     "camdl fit run --label \"<short description>\" fit.toml",
-    // A run id, not the fit id the table shows: a label names one run (gh#896).
-    "camdl label <run_id> \"<short description>\"",
 ];
 
 /// Emit a one-line stderr hint when the count of unlabelled fits in
@@ -322,16 +313,6 @@ mod unlabelled_hint_tests {
     }
 }
 
-/// Load the configuration a fit folder's fits ran under, its
-/// `fit.resolved.toml`. Hard-cut on a missing file: per the
-/// back-compat-is-a-non-goal posture the reader errors with an actionable
-/// message rather than falling back to the verbatim `fit.toml.original` or the
-/// source config (`FitView.source_config`, which can move or change), neither
-/// of which holds a command-line override or a sweep point's values.
-fn load_resolved_config(fit_dir: &std::path::Path) -> Result<FitConfig, String> {
-    let resolved = crate::run_meta::require_resolved_config(fit_dir)?;
-    FitConfig::load(&resolved.to_string_lossy())
-}
 
 fn matches_outer_filters(entry: &FitDirEntry, args: &FitTableArgs) -> bool {
     let view: &FitView = &entry.view;
@@ -452,7 +433,8 @@ fn parse_iso_to_unix(s: &str) -> Option<i64> {
 /// malformed or scalar-less TSV) yields `None` — a single uncomputable
 /// cell renders `—` and never fails the whole table.
 fn resolve_quantity_median(
-    fit_dir: &std::path::Path,
+    root: &std::path::Path,
+    fit: &crate::fit_store::OpenedFit,
     leaf: &std::path::Path,
     run_id: &str,
     name: &str,
@@ -480,17 +462,20 @@ fn resolve_quantity_median(
             Some(sel.resolve(&present).ok()?)
         }
     };
-    let sub = crate::chain_selection::artifact_name("quantities", info.as_ref());
+    let sub = crate::chain_selection::artifact_name(&crate::quantities_file::stored_quantities_dir_name(None), info.as_ref());
     // The address the derivation below writes: the run's, keyed by the
     // free-forward options it passes, the chain selection among them (gh#896).
-    let key = crate::fit::predict::PredictOptions::free_forward(info.as_ref()).address_key(run_id);
-    let tsv = crate::fit::fit_view::predictions_dir(fit_dir, run_id, &key)
-        .join(&sub)
-        .join(format!("{name}.tsv"));
+    let options = crate::fit::predict::PredictOptions::free_forward(info.as_ref());
+    let file = format!("{sub}/{name}.tsv");
+    let read = || -> Option<f64> {
+        let store = crate::camdl_store::open_existing(root)?;
+        let stored = crate::fit::predict::stored_prediction(&store, fit, &options).ok()??;
+        let bytes = crate::camdl_store::read_stored(&stored, &file).ok()?;
+        read_scalar_quantity_q50(&String::from_utf8(bytes).ok()?)
+    };
 
-    // (1) Fast path: an already-computed quantities TSV at that address. It was
-    // banded over exactly this cloud, so it answers this cell.
-    if let Some(median) = read_scalar_quantity_q50(&tsv) {
+    // (1) Fast path: the prediction of exactly this cloud, already stored.
+    if let Some(median) = read() {
         return Some(median);
     }
 
@@ -509,9 +494,10 @@ fn resolve_quantity_median(
     let mut cmd = std::process::Command::new(&exe);
     cmd.arg("fit")
         .arg("predict")
-        .arg(leaf)
+        .arg(run_id)
         .arg("--mode")
         .arg("free_forward")
+        .env("CAMDL_STORE", root)
         .env("CAMDL_SKIP_VERSION_CHECK", "1");
     // Forward the chain selection so the derived quantity is banded over the
     // same subset, in its canonical spelling — the one that resolves to `sub`
@@ -526,7 +512,7 @@ fn resolve_quantity_median(
         // some other failure) — leave the cell absent, don't abort.
         return None;
     }
-    read_scalar_quantity_q50(&tsv)
+    read()
 }
 
 /// Parse a SCALAR generated-quantity TSV and return the no-overlay
@@ -538,8 +524,7 @@ fn resolve_quantity_median(
 /// that is not a scalar, so we return `None` rather than silently
 /// surface its first time point's median. Returns `None` on an absent
 /// or malformed file, or when there is no `fitted` row or no `q50`.
-fn read_scalar_quantity_q50(tsv: &std::path::Path) -> Option<f64> {
-    let text = std::fs::read_to_string(tsv).ok()?;
+fn read_scalar_quantity_q50(text: &str) -> Option<f64> {
     let mut lines = text.lines();
     let header: Vec<&str> = lines.next()?.split('\t').collect();
     // A `time` column means this is a series, not a scalar.
@@ -795,54 +780,6 @@ fn format_age(seconds: i64) -> String {
 mod tests {
     use super::*;
 
-    /// A stored fit is read back by the same parser `fit run` uses, so a
-    /// check that refuses a config at `fit run` must not live in it: a fit
-    /// stored before the check (here: `max_tree_depth` beside
-    /// `use_nuts = false`, refused at `fit run` since ecde1ad2) would stop
-    /// being listed by `fit table` and resolvable by handle.
-    #[test]
-    fn an_archived_config_with_a_now_refused_key_still_loads() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(crate::run_meta::RESOLVED_CONFIG), "\
-[model]\ncamdl = \"m.camdl\"\n\
-[estimate]\nbeta = { bounds = [0.01, 2.0], prior = { half_normal = { sigma = 1.0 } } }\n\
-[fixed]\nN0 = 1000\n\
-[method]\nalgorithm = \"pgas\"\nbackend = \"chain_binomial\"\nchains = 2\n\
-particles = 100\nsweeps = 10\nuse_nuts = false\nmax_tree_depth = 8\n").unwrap();
-        let side = crate::run_meta::FitSidecar { store_layout: runid::STORE_LAYOUT, ..Default::default() };
-        crate::run_meta::store_fit_sidecar(dir.path(), &side).unwrap();
-        load_resolved_config(dir.path())
-            .expect("fit table and handle resolution read the stored config");
-    }
-    use std::path::{Path, PathBuf};
-
-    /// One-off tempdir helper that cleans up on Drop.
-    struct TempDir(PathBuf);
-    impl TempDir {
-        fn path(&self) -> &Path {
-            &self.0
-        }
-    }
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-    fn tempdir(tag: &str) -> TempDir {
-        let ns = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let p = std::env::temp_dir().join(format!(
-            "camdl_fittable_{}_{}_{}",
-            tag,
-            std::process::id(),
-            ns
-        ));
-        std::fs::create_dir_all(&p).unwrap();
-        TempDir(p)
-    }
-
     #[test]
     fn format_age_uses_compact_units() {
         assert_eq!(format_age(0), "0s");
@@ -966,43 +903,4 @@ particles = 100\nsweeps = 10\nuse_nuts = false\nmax_tree_depth = 8\n").unwrap();
         assert!(s.contains("(no fits matched)"));
     }
 
-    /// gh#147 (M3.2): write a CAS fit segment at `seg` — one `FitMethod` leaf
-    /// (`01-mle-<h8>/seed_1-<h8>/run.json`, a `runid::RunRecord`) plus the
-    /// fit-level sidecar — the shape `walk_fits_root` reads now. No
-    /// `mle_params.toml`/`fit_state.toml`, so the row's MethodResult won't load
-    /// (the property under test); the fit entry itself is still discovered.
-    fn write_cas_fit_seg(seg: &Path, fit_h8: &str) {
-        let leaf = seg.join("if2-1fb03eee").join("seed_1-06cbd6b3");
-        std::fs::create_dir_all(&leaf).unwrap();
-        let fit_hash = format!("{fit_h8}{}", "0".repeat(64 - fit_h8.len()));
-        let run_id = format!("{:0<64}", format!("{fit_h8}01"));
-        let rec = format!(
-            r#"{{"format_version":1,"kind":"fit_method","run_id":"{run_id}","hash_version":1,"calendar":{{"days_per_unit":1.0,"origin":null,"time_unit":"days"}},"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"fit","hash":"{fit_hash}","schema_version":1}},{{"name":"method","label":"if2","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"method":"if2","backend":"chain_binomial","seed":1,"n_chains":2}},"provenance":{{"created_at":"2026-04-27T00:00:00Z","argv":["camdl","fit","run"]}}}}"#
-        );
-        std::fs::write(leaf.join("run.json"), rec).unwrap();
-        std::fs::write(
-            seg.join("fit.meta.json"),
-            r#"{"model_identity":"f00d","source_model":"sir.camdl","schema_version":3,"calendar":{"days_per_unit":1.0,"origin":null,"time_unit":"days"},"source_config":"fit.toml"}"#,
-        )
-        .unwrap();
-    }
-
-    /// The walker integration: write two CAS fit segments whose leaves carry no
-    /// loadable MethodResults, and ensure `walk_fits_root` still discovers both
-    /// fit entries (the row's MethodResult load failing is handled downstream in
-    /// `cmd_fit_table`; loadable-result coverage lives in the integration test
-    /// in `tests/fit_experiment_management.rs`, which has the FitState fixtures).
-    #[test]
-    fn walker_returns_empty_rows_when_no_method_results_loadable() {
-        let tmp = tempdir("empty_results");
-        let fits_root = tmp.path().join("fits");
-        std::fs::create_dir_all(&fits_root).unwrap();
-        for name in &["fit_a-aaaaaaaa", "fit_b-bbbbbbbb"] {
-            let d = fits_root.join(name);
-            let h8 = name.split('-').next_back().unwrap();
-            write_cas_fit_seg(&d, h8);
-        }
-        let entries = fit_tree::walk_fits_root(&fits_root).unwrap();
-        assert_eq!(entries.len(), 2);
-    }
 }

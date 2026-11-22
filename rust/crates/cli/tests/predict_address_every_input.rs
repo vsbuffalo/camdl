@@ -1,5 +1,5 @@
-//! `fit predict` writes under `<segment>/predict/<run id>-<key>/`, and readers
-//! find a prediction by that address. The key must therefore cover every input
+//! `fit predict` stores each prediction as a result of its own, under the fit
+//! run's `predict/<mode>-<id>/`, and readers find a prediction by that address. The key must therefore cover every input
 //! that changes what predict writes: two predictions computed from different
 //! inputs never share a directory (proposal 2026-11-17, phase 1e).
 //!
@@ -11,6 +11,8 @@
 //!
 //! Fixture: `tests/fixtures/forecast/two_cadence_sir.camdl`, fitted by a
 //! two-chain PMMH with `holdout_after = 24`.
+
+mod fit_store_support;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -30,6 +32,7 @@ fn run(dir: &Path, args: &[&str]) -> std::process::Output {
         .env_remove("CLICOLOR_FORCE")
         .args(args)
         .current_dir(dir)
+        .env("CAMDL_STORE", dir.join("results"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output()
         .expect("spawn camdl")
@@ -45,7 +48,7 @@ fn fit(dir: &Path) {
         let to = if f.ends_with(".camdl") { "model.camdl" } else { f };
         std::fs::copy(fixture(f), dir.join(to)).unwrap();
     }
-    std::fs::write(dir.join("fit.toml"), r#"output_dir = "results"
+    std::fs::write(dir.join("fit.toml"), r#"store = "results"
 
 [model]
 camdl = "model.camdl"
@@ -76,21 +79,14 @@ iterations = 60
 burn_in = 20
 thin = 1
 "#).unwrap();
-    assert_ok(&run(dir, &["fit", "run", "fit.toml", "--seed", "1"]), "fit run");
+    assert_ok(&run(dir, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fc"]), "fit run");
 }
 
-/// Every directory under the fit's `predict/` holding a `forecast.json`.
+/// Every stored prediction in the store `dir/results` holding a `forecast.json`.
 fn forecast_dirs(dir: &Path) -> Vec<PathBuf> {
-    let mut found = Vec::new();
-    for seg in std::fs::read_dir(dir.join("results/fits")).unwrap().flatten() {
-        for d in std::fs::read_dir(seg.path().join("predict")).into_iter().flatten().flatten() {
-            if d.path().join("forecast.json").is_file() {
-                found.push(d.path());
-            }
-        }
-    }
-    found.sort();
-    found
+    fit_store_support::predictions(&dir.join("results")).into_iter()
+        .filter(|d| d.join("forecast.json").is_file())
+        .collect()
 }
 
 /// The chains the forecast in `d` drew from, per its manifest.
@@ -107,7 +103,7 @@ fn two_chain_selections_are_two_forecast_addresses() {
     let dir = tmp.path();
     fit(dir);
 
-    let base = ["fit", "predict", "--fit", "fit.toml", "--horizon", "2 weeks", "--n-draws", "8"];
+    let base = ["fit", "predict", "--fit", "@fc", "--horizon", "2 weeks", "--n-draws", "8"];
     assert_ok(&run(dir, &base), "pooled forecast");
     let pooled = forecast_dirs(dir);
     assert_eq!(pooled.len(), 1, "{pooled:?}");
@@ -132,14 +128,15 @@ fn two_chain_selections_are_two_forecast_addresses() {
     let other = dirs.iter().find(|d| **d != pooled).unwrap();
     assert_eq!(chains_drawn(other), [0].into(), "the subset forecast draws chain 0 only");
 
-    // Each manifest records the key of the directory it sits in, in full.
-    for d in &dirs {
+    // Each manifest records the key of the inputs it was computed from, in
+    // full, and the two selections record two keys.
+    let keys: std::collections::BTreeSet<String> = dirs.iter().map(|d| {
         let j: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(d.join("forecast.json")).unwrap()).unwrap();
-        let key = j["address_key"].as_str().expect("forecast.json records its address key");
+        let key = j["address_key"].as_str().expect("forecast.json records its address key").to_string();
         assert!(key.len() >= 32 && key.chars().all(|c| c.is_ascii_hexdigit()),
             "the key is at least 128 bits of hex: {key}");
-        let name = d.file_name().unwrap().to_string_lossy().into_owned();
-        assert!(name.ends_with(&format!("-{key}")), "{name} is addressed by {key}");
-    }
+        key
+    }).collect();
+    assert_eq!(keys.len(), 2, "two selections, two keys: {keys:?}");
 }

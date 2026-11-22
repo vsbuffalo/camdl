@@ -105,6 +105,11 @@ struct ParameterSet {
     /// The sources with a `[data.holdout]` file, sorted. Those files are not
     /// read here, so none of their rows is predicted.
     holdout_sources: Vec<String>,
+    /// The labels (the times rows are emitted at) of each stream's rows past
+    /// the training prefix of its training file, from the stored problem's
+    /// `held_out/`. A stored problem keeps only its training rows as data, so
+    /// a predicted row past them at one of these times is a held-out row.
+    held_out_times: BTreeMap<String, Vec<f64>>,
 }
 
 impl ParameterSet {
@@ -117,6 +122,7 @@ impl ParameterSet {
         config: &crate::fit::config_v2::Problem,
         dt: f64,
         segment: &Path,
+        held_out: &BTreeMap<String, Vec<u8>>,
     ) -> Result<Self, String> {
         let data = config.data_spec().map_err(|e| {
             format!("this fit has no [data] block to read its training rows from: {e}")
@@ -139,8 +145,33 @@ impl ParameterSet {
         let (record, partition) =
             crate::fit::training_partition::TrainingPartition::read_recorded(segment, &rows)?;
         let mut holdout_sources: Vec<String> = bindings.holdout_by_source().keys().cloned().collect();
+        let mut held_out_times: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+        for (stream, bytes) in held_out {
+            for h in crate::fit::forecast_output::held_out_rows(bytes)? {
+                if h.file == crate::fit::forecast_plan::RowFile::Holdout {
+                    if let Some(o) = model.observations.iter().find(|o| &o.name == stream) {
+                        holdout_sources.push(o.source.clone());
+                    }
+                }
+                // A `[data.holdout]` file is not read here, so a row in a
+                // period it covers stays `future`; a row past the training
+                // prefix of the training file is held out.
+                if h.file == crate::fit::forecast_plan::RowFile::Training {
+                    held_out_times.entry(stream.clone()).or_default().push(h.row.label);
+                }
+            }
+        }
         holdout_sources.sort();
-        Ok(ParameterSet { record, partition, holdout_sources })
+        holdout_sources.dedup();
+        Ok(ParameterSet { record, partition, holdout_sources, held_out_times })
+    }
+
+    /// The role of a predicted row past the stream's data rows, at time `t`:
+    /// held out when the stored problem holds a row of `stream` there, else
+    /// future.
+    fn role_past_data(&self, stream: &str, t: f64) -> RowRole {
+        let held = self.held_out_times.get(stream).is_some_and(|ts| ts.iter().any(|h| (h - t).abs() <= 1e-9 * h.abs().max(1.0)));
+        if held { RowRole::HeldOut } else { RowRole::Future }
     }
 
     /// The role of the data row at `position` of the leaf stream `stream`.
@@ -1524,6 +1555,20 @@ struct PredictOutcome {
     /// Streams left out without failing the run (D76): named on stderr and in
     /// `report.json`, and no effect on the exit status.
     skipped: Vec<SkippedStream>,
+    /// Where the files were written, to be stored as the prediction.
+    stored: ToStore,
+}
+
+/// What `fit predict` stores its files as: a prediction inside the run whose
+/// draws it used.
+struct ToStore {
+    fit: std::sync::Arc<crate::fit_store::OpenedFit>,
+    /// The scratch directory the files were written into.
+    dir: tempfile::TempDir,
+    /// The options that change what is written, as keyed.
+    options: PredictOptions,
+    /// The `--design SOURCE=FILE` arguments, as given.
+    design: Vec<String>,
 }
 
 /// `camdl fit predict` — write the free-forward posterior predictive artifact.
@@ -1538,10 +1583,12 @@ pub(crate) fn cmd_fit_predict(args: &crate::args::FitPredictArgs, compile: crate
     let out = crate::out::Out::new(false);
     match run_predict(&out, args, compile) {
         Ok(outcome) => {
+            let folder = store_prediction(&outcome.stored).unwrap_or_else(|e| out.fail(format!("error: {e}")));
             // What it wrote is the command's account of itself, not data:
             // stderr, like every other command's `wrote` lines.
             for p in &outcome.written {
-                out.say(format_args!("wrote {}", p.display()));
+                let name = p.strip_prefix(outcome.stored.dir.path()).unwrap_or(p);
+                out.say(format_args!("wrote {}", folder.join(name).display()));
             }
             // A skipped stream was never eligible: it is named so the reader
             // knows the artifact leaves it out, and it does not fail the run.
@@ -1569,6 +1616,113 @@ pub(crate) fn cmd_fit_predict(args: &crate::args::FitPredictArgs, compile: crate
         Err(e) => {
             out.fail(format!("error: {e}"));
         }
+    }
+}
+
+/// Store the prediction `p` describes inside the run whose draws it used, at
+/// `predict/`: its files are the result files, and its identity is the run,
+/// its problem and the options. A prediction already stored is reused, and
+/// the files just written are dropped. Returns the prediction's folder.
+#[allow(clippy::result_large_err)] // the store's error carries the paths a person acts on, returned once
+fn store_prediction(p: &ToStore) -> Result<PathBuf, String> {
+    use crate::fit_store::Prediction;
+    let root = crate::fit_store::reader_root();
+    let store = crate::camdl_store::open_existing(&root)
+        .ok_or_else(|| format!("no run store at {}", root.display()))?;
+    let info = store::RunInfo::new(&store::Given::default(), &(), &store::StoreRequest::default())
+        .map_err(|e| e.to_string())?;
+    // Each design file, stored as a data table the prediction depends on.
+    let mut design = std::collections::BTreeMap::new();
+    for spec in &p.design {
+        let (source, path) = spec.split_once('=').ok_or_else(|| format!("--design {spec:?}: expected SOURCE=FILE"))?;
+        let bytes = std::fs::read(path).map_err(|e| format!("--design {spec:?}: cannot read {path}: {e}"))?;
+        let table = store::Hashed::new(
+            <crate::camdl_store::Table as store::Content>::from_bytes(&bytes).map_err(|e| e.to_string())?,
+        );
+        let labels = crate::camdl_store::TableLabels { stream: source.to_string(), path: path.to_string() };
+        let dep = store
+            .put::<crate::camdl_store::DataTable>(table, &labels, &store::Provenance::none(), &info)
+            .and_then(|s| s.dep(<crate::camdl_store::DataTable as store::ContentArtifact>::FILE))
+            .map_err(|e| format!("storing the design file of `{source}`: {e}"))?;
+        design.insert(source.to_string(), dep);
+    }
+    let (identity, labels) = prediction_identity(&p.fit, &p.options, design)?;
+    let folder = match store.begin::<Prediction>(&identity, &labels, &info, store::Reuse::IfCompleted)
+        .map_err(|e| e.to_string())?
+    {
+        store::Begin::Reused(stored) => stored.folder().to_path_buf(),
+        store::Begin::Busy(owner) => return Err(store::Error::InProgress(owner).to_string()),
+        store::Begin::Claimed(run) => {
+            let mut files: Vec<PathBuf> = Vec::new();
+            let mut stack = vec![p.dir.path().to_path_buf()];
+            while let Some(d) = stack.pop() {
+                for e in std::fs::read_dir(&d).map_err(|e| format!("cannot read {}: {e}", d.display()))? {
+                    let path = e.map_err(|e| e.to_string())?.path();
+                    if path.is_dir() { stack.push(path) } else { files.push(path) }
+                }
+            }
+            files.sort();
+            for f in files {
+                let name = f.strip_prefix(p.dir.path()).expect("under the scratch directory").to_string_lossy().into_owned();
+                let bytes = std::fs::read(&f).map_err(|e| format!("cannot read {}: {e}", f.display()))?;
+                run.result_file(&name).and_then(|h| h.write_all(&bytes)).map_err(|e| format!("{name}: {e}"))?;
+            }
+            run.finish().map_err(|e| e.to_string())?.folder().to_path_buf()
+        }
+    };
+    info.finish(&store).map_err(|e| e.to_string())?;
+    Ok(folder)
+}
+
+/// The identity and labels of the prediction of the run `fit` names under
+/// `options`: the run's draws and its problem, and every option that changes
+/// what is written.
+pub(crate) fn prediction_identity(
+    fit: &crate::fit_store::OpenedFit,
+    options: &PredictOptions,
+    design: std::collections::BTreeMap<String, store::Dep<crate::camdl_store::DataTable>>,
+) -> Result<(crate::fit_store::PredictIdentity, crate::fit_store::PredictionLabels), String> {
+    use crate::fit_store::{ParameterSource, PredictIdentity, PredictMode, PredictionLabels};
+    let run = fit.fit.run.as_ref().ok_or("a prediction is made from a run, and the handle names a problem")?;
+    let mode = match options.mode {
+        "free_forward" => PredictMode::FreeForward,
+        "one_step" => PredictMode::OneStep,
+        "forecast" => PredictMode::Forecast,
+        _ => PredictMode::All,
+    };
+    let settings = serde_json::to_value(options).map_err(|e| e.to_string())?;
+    crate::canonical_json::ensure_finite(options)?;
+    let identity = PredictIdentity {
+        source: ParameterSource::Posterior { draws: run.dep_all(), problem: fit.fit.problem.dep_all() },
+        data: std::collections::BTreeMap::new(),
+        quantities: fit.quantities.clone(),
+        options: crate::fit_store::PredictOptions {
+            mode,
+            settings: serde_json::to_string(&crate::canonical_json::canonical(&settings)).map_err(|e| e.to_string())?,
+            design,
+        },
+    };
+    let labels = PredictionLabels {
+        mode: mode.label().to_string(),
+        scenarios: options.scenarios.clone(),
+        model: fit.model_name(),
+    };
+    Ok((identity, labels))
+}
+
+/// The stored prediction of the run `fit` names under `options`, if one is
+/// stored in `store`.
+pub(crate) fn stored_prediction(
+    store: &store::Store,
+    fit: &crate::fit_store::OpenedFit,
+    options: &PredictOptions,
+) -> Result<Option<store::Stored<crate::fit_store::Prediction>>, String> {
+    // A table's derived prediction reads no design file.
+    let (identity, labels) = prediction_identity(fit, options, std::collections::BTreeMap::new())?;
+    let planned = store.plan::<crate::fit_store::Prediction>(&[(identity, labels)]).map_err(|e| e.to_string())?;
+    match planned.first() {
+        Some(p) => store.get(&p.id).map_err(|e| e.to_string()),
+        None => Ok(None),
     }
 }
 
@@ -1627,12 +1781,12 @@ fn run_predict(
     compile: crate::util::CompileSettings,
 ) -> Result<PredictOutcome, String> {
     predict_mode(args)?;
-    // 1. Resolve the fit handle (@label / hash prefix / run-dir / fit.toml) →
-    //    its segment + config.
-    let resolved = crate::fit::handle::resolve_fit_run(args.fit()?).map_err(|e| e.to_string())?;
-    // The run the draws come from: the one the handle named, else the folder's.
-    let run_dir = resolved.run_dir().to_path_buf();
-    let crate::fit::handle::ResolvedFit { segment, config, .. } = resolved;
+    // 1. The run the handle names (`@label`, a run-id prefix, its folder),
+    //    read through the store into a copy of its files.
+    let fit = crate::fit_store::opened_run(args.fit()?)?;
+    let run_dir = fit.run_dir().expect("a run handle has its files").to_path_buf();
+    let segment = fit.segment.clone();
+    let config = fit.config.clone();
     // The sampler the fit's method ran, as written in fit.toml; the leaf's own
     // record, read in forecast mode, takes precedence (gh#747).
     let configured_binomial = config.method().ok().map(|m| m.algorithm.binomial());
@@ -1645,8 +1799,11 @@ fn run_predict(
     // gh#896: everything predict writes goes under a directory keyed by the
     // run it read, so a second run's predict cannot overwrite this one's and
     // every file is attributable to one run.
-    let run_id: String = crate::fit::fit_view::leaf_run_id(&run_dir)?
-        .ok_or_else(|| format!("{} is not a fit run (no run.json)", run_dir.display()))?;
+    let run_id: String = fit.fit.run.as_ref().expect("a run handle names a run").id().key().to_hex();
+    // Every file is written into a scratch directory, then stored as one
+    // prediction inside the run.
+    let scratch = tempfile::Builder::new().prefix("camdl-predict-").tempdir()
+        .map_err(|e| format!("cannot make a scratch directory: {e}"))?;
     // D85: the filters' particle count, the PMMH fit's own by default.
     let fit_pmmh_particles = fit_pmmh_particles(&run_dir)?;
     let particles = PredictParticles::resolve(args.particles, fit_pmmh_particles)?;
@@ -1769,7 +1926,10 @@ fn run_predict(
             if args.realised_design { "--realised-design" } else { "--design" }));
     }
     if let Some(v) = &vocabulary {
-        model.quantities = quantities_from_vocabulary(&model, &config, v, compile)?;
+        // The vocabulary compiles against the model file the problem keeps.
+        let mut posed = config.clone();
+        posed.model.camdl = fit.model_source()?.to_string_lossy().into_owned();
+        model.quantities = quantities_from_vocabulary(&model, &posed, v, compile)?;
     }
 
     // gh#616: `fit predict` HAS the fit's data, so it resolves the model's
@@ -2021,7 +2181,7 @@ fn run_predict(
     // The forecast mode: the fixed-origin forecast and nothing else.
     if mode == Some(PredictModeArg::Forecast) {
         let schema = crate::run_meta::read_fit_sidecar(&segment)?.and_then(|s| s.schema);
-        let (out_dir, mut written, failures, skipped) = crate::fit::forecast_output::run_forecast(
+        let (out_dir, mut written, failures, skipped, forecast_options) = crate::fit::forecast_output::run_forecast(
             out,
             crate::fit::forecast_output::ForecastJob {
                 args,
@@ -2032,6 +2192,8 @@ fn run_predict(
                 fit_base: &fit_base,
                 posterior: &posterior,
                 segment: &segment,
+                out_dir: scratch.path(),
+                held_out: &fit.fit.held_out,
                 run_id: &run_id,
                 options: &options,
                 calendar: &calendar,
@@ -2053,7 +2215,10 @@ fn run_predict(
             &failures,
             &skipped,
         )?);
-        return Ok(PredictOutcome { written, failures, skipped });
+        return Ok(PredictOutcome {
+            written, failures, skipped,
+            stored: ToStore { fit: fit.clone(), dir: scratch, options: forecast_options, design: args.design.clone() },
+        });
     }
 
     // The output directory, keyed by every input that changes what is written
@@ -2061,9 +2226,7 @@ fn run_predict(
     // selection against this fit's chains, the vocabulary by its bytes). Two
     // predictions from different inputs never share it.
     let address_key = options.address_key(&run_id);
-    let out_dir = crate::fit::fit_view::predictions_dir(&segment, &run_id, &address_key);
-    std::fs::create_dir_all(&out_dir)
-        .map_err(|e| format!("cannot create {}: {e}", out_dir.display()))?;
+    let out_dir = scratch.path().to_path_buf();
 
     // 5. Load the observed data per leaf (the cadence, the observed half, and
     // what each row covers — resolved against the compiled model's projections).
@@ -2073,7 +2236,7 @@ fn run_predict(
     // to, read from the fit's record and checked against the files. Every
     // predictive row's `role` is read off it, and a fit that recorded none is
     // refused here, before anything is computed.
-    let parameter_set = ParameterSet::read(&model, &compiled, &config, dt, &segment)?;
+    let parameter_set = ParameterSet::read(&model, &compiled, &config, dt, &segment, &fit.fit.held_out)?;
 
     let schema = crate::run_meta::read_fit_sidecar(&segment)?.and_then(|s| s.schema);
     let seed = args.seed.unwrap_or(1);
@@ -2922,8 +3085,8 @@ fn run_predict(
 
     // WHERE the predictive lands is keyed by the chain selection it was banded
     // over (gh#795): the full cloud keeps `predictive/` + `predictive.json`,
-    // a `--exclude-chains 3,5` subset writes `predictive-excl3,5/` +
-    // `predictive-excl3,5.json`. A subset is a different posterior — its own
+    // a `--exclude-chains 3,5` subset writes `predictive-excl3_5/` +
+    // `predictive-excl3_5.json`. A subset is a different posterior — its own
     // warning says so — and writing it at the pooled address REPLACED the run's
     // canonical predictive with a cherry-picked one, silently, with only a
     // `chain_selection` stamp inside the file it had already overwritten.
@@ -3217,9 +3380,9 @@ fn run_predict(
     // A quantity is read off the posterior cloud, so the CHAIN SELECTION keys it
     // for exactly the same reason (gh#795) — a chain-subset table is a different
     // table. The two keys are independent and compose:
-    // `quantities-<key8>-excl3,5/`.
+    // `quantities-<key8>-excl3_5/`.
     let quantities_sub = crate::chain_selection::artifact_name(
-        &crate::quantities_file::quantities_dir_name(vocabulary.as_ref()),
+        &crate::quantities_file::stored_quantities_dir_name(vocabulary.as_ref()),
         posterior.selection(),
     );
     for (name, content) in &quantity_outputs {
@@ -3233,7 +3396,13 @@ fn run_predict(
         stamp_engine(&mut manifest);
         let manifest = serde_json::to_string_pretty(&manifest)
             .map_err(|e| format!("serializing the quantities manifest: {e}"))?;
-        let path = out_dir.join(format!("{quantities_sub}.json"));
+        // The manifest keeps the name `quantities_dir_name` gives, a file the
+        // store allows at the top level.
+        let manifest_name = crate::chain_selection::artifact_name(
+            &crate::quantities_file::quantities_dir_name(vocabulary.as_ref()),
+            posterior.selection(),
+        );
+        let path = out_dir.join(format!("{manifest_name}.json"));
         std::fs::write(&path, &manifest)
             .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
         written.push(path);
@@ -3314,7 +3483,10 @@ fn run_predict(
         method_label,
         posterior.name,
     ));
-    Ok(PredictOutcome { written, failures, skipped: streams_in.skipped })
+    Ok(PredictOutcome {
+        written, failures, skipped: streams_in.skipped,
+        stored: ToStore { fit: fit.clone(), dir: scratch, options, design: args.design.clone() },
+    })
 }
 
 /// Compile `vocabulary` against the fit's model SOURCE and return the quantity
@@ -3655,7 +3827,7 @@ fn assemble_predictive(
                 let role = if ti < n_data_rows {
                     parameter_set.role(leaf_name, ti)
                 } else {
-                    RowRole::Future
+                    parameter_set.role_past_data(leaf_name, t)
                 };
                 rows.push(
                     band_row(
@@ -4043,12 +4215,9 @@ impl ParticlesSource {
 /// `run.json` (`inputs.algorithm`, written by `fit run`), as the forecast
 /// reads the fit's binomial sampler there; `None` for any other method (D85).
 pub(crate) fn fit_pmmh_particles(leaf: &Path) -> Result<Option<usize>, String> {
-    let path = leaf.join("run.json");
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    let record: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|e| format!("{} is not JSON: {e}", path.display()))?;
-    let algorithm = record.pointer("/inputs/algorithm");
+    let path = leaf.join(crate::fit_store::RUN_INPUTS_FILE);
+    let inputs = crate::fit_store::read_run_inputs(leaf)?;
+    let algorithm = inputs.get("algorithm");
     if algorithm.and_then(|a| a.get("algorithm")).and_then(|a| a.as_str()) != Some("pmmh") {
         return Ok(None);
     }
@@ -4057,22 +4226,6 @@ pub(crate) fn fit_pmmh_particles(leaf: &Path) -> Result<Option<usize>, String> {
         .ok_or_else(|| format!(
             "{} records a PMMH fit but not its particle count; re-run the fit, or pass \
              --particles", path.display()))
-}
-
-/// The options `fit predict <run>` with no flags resolves for the run whose
-/// leaf is `leaf`, run on `backend`: the defaults, with the particle count
-/// when the default mode runs the one-step band (a chain-binomial posterior).
-/// [`crate::fit::fit_view::default_predictions_dir`] addresses it.
-pub(crate) fn default_options_for(
-    leaf: &Path,
-    backend: crate::run_meta::InferenceBackend,
-) -> Result<PredictOptions, String> {
-    let filters = backend == crate::run_meta::InferenceBackend::ChainBinomial;
-    let particles = match filters {
-        true => Some(PredictParticles::resolve(None, fit_pmmh_particles(leaf)?)?.n),
-        false => None,
-    };
-    Ok(PredictOptions { particles, ..PredictOptions::defaults() })
 }
 
 /// The particle count every filter `fit predict` runs per posterior draw

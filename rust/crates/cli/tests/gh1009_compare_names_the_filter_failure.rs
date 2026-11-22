@@ -1,6 +1,7 @@
 //! gh#1009 — when `camdl compare` cannot derive a prequential because the
 //! `camdl pfilter` it runs failed for a reason unrelated to the posterior draw
-//! it was scoring (here, the fit's data file cannot be read), the error says so. It
+//! it was scoring (here, the data file its problem stored cannot be read), the
+//! error says so. It
 //! must not lead with the diagnosis that belongs to a draw the filter rejected
 //! ("the posterior holds θ the filter cannot track"), which sends the reader
 //! to drop chains from a good fit.
@@ -8,10 +9,11 @@
 //! The rejected-draw diagnosis itself stays, for the case it describes:
 //! `compare_auto_prequential.rs` pins it on a deliberately stuck chain.
 //!
-//! The file is made unreadable rather than removed: a data file that is not
-//! there at all is refused before any filter runs, when the fit's config is
-//! recovered (`gh1009_stored_paths_resolve_from_any_directory.rs`), so only a
-//! file that exists but cannot be read still reaches `camdl pfilter`.
+//! A fit problem stores its data as `inputs/<stream>.tsv`, and that copy is
+//! what the filter reads; it is made unreadable rather than removed, so it
+//! still reaches `camdl pfilter`.
+
+mod fit_store_support;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -102,6 +104,7 @@ fn run(bin: &Path, dir: &Path, args: &[&str]) -> std::process::Output {
         .args(args)
         .current_dir(dir)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("CAMDL_STORE", dir.join("camdl-store"))
         .output()
         .expect("spawn camdl")
 }
@@ -126,9 +129,14 @@ fn a_missing_data_file_is_reported_as_itself_not_as_an_unscorable_draw() {
         );
     }
 
-    // The fits are sound; only their data cannot be read.
+    // The fits are sound; only their stored data cannot be read. The two fits
+    // differ in a fixed value, so each has a problem, and a stored copy, of
+    // its own: `@a`'s is made unreadable.
     use std::os::unix::fs::PermissionsExt;
-    let data = tmp.join("data/weekly_cases.tsv");
+    let run_a = fit_store_support::runs(&tmp.join("camdl-store")).into_iter()
+        .find(|r| fit_store_support::json(&r.join("fit.meta.json"))["fixed"]["rho"] == 0.5)
+        .expect("the run labelled a");
+    let data = fit_store_support::problem_of(&run_a).join("inputs/weekly_cases.tsv");
     std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o000)).unwrap();
 
     let out = run(
@@ -140,7 +148,7 @@ fn a_missing_data_file_is_reported_as_itself_not_as_an_unscorable_draw() {
     std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o644)).unwrap();
     assert!(!out.status.success(), "compare cannot score without data:\n{stderr}");
     assert!(
-        stderr.contains("data/weekly_cases.tsv: Permission denied"),
+        stderr.contains("inputs/weekly_cases.tsv: Permission denied"),
         "the cause is named:\n{stderr}"
     );
     for blame in ["could not be scored", "the posterior holds θ", "--exclude-chains"] {

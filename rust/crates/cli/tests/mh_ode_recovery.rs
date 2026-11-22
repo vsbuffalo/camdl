@@ -190,7 +190,7 @@ fn recover_beta_integ(
     let out = tmp.path().join("out");
     let fit_toml = tmp.path().join("fit.toml");
     std::fs::write(&fit_toml, format!(r#"
-output_dir = "{out}"
+store = "{out}"
 
 [model]
 camdl = "{ir}"
@@ -349,6 +349,7 @@ fn mh_records_its_loglik_as_the_ode_marginal() {
     let summary = Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
         .args(["fit", "summary"]).arg(leaf).args(["--format", "json"])
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("CAMDL_STORE", &out)
         .output().unwrap();
     assert!(summary.status.success(), "fit summary: {}", String::from_utf8_lossy(&summary.stderr));
     let doc: serde_json::Value = serde_json::from_slice(&summary.stdout).unwrap();

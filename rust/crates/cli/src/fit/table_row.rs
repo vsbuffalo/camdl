@@ -17,7 +17,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::fit::config_diff::ConfigDiff;
-use crate::fit::fit_tree::{self, MethodNode};
+use crate::fit::fit_tree::MethodNode;
 use crate::fit::fit_view::FitView;
 use crate::fit::method_result::{
     EssSummary, If2Run, MethodResult, MethodResultError,
@@ -74,8 +74,8 @@ pub struct TableRow {
     pub fit_id: String,
     /// Full 64-char fit-level hash (`FitView.fit_hash`).
     pub fit_hash: String,
-    /// The labels of this fit's runs ([`FitView::label`]), each set at
-    /// `fit run --label "..."` or post-hoc by `camdl label <run_id> "<text>"`.
+    /// The run's label, the one the latest `fit run --label "..."` that
+    /// asked for it gave.
     /// None when no run is labelled.
     pub label: Option<String>,
     /// fit.toml stem — the basename of `FitView.source_config` minus
@@ -165,16 +165,13 @@ pub struct TableRow {
 /// Errors building a `TableRow` from a fit_dir.
 #[derive(Debug)]
 pub enum TableRowError {
-    /// The fit_dir's top-level `run.json` couldn't be read.
+    /// The run's files could not be read as a fit run.
     TopLevelRun {
         fit_dir: std::path::PathBuf,
         message: String,
     },
-    /// The walker found no completed methods under this fit_dir.
+    /// The run has no tabulated result (a `pfilter` run).
     NoMethods { fit_dir: std::path::PathBuf },
-    /// The directory holds more than one completed run with a result, and a
-    /// row reports one run: it names them rather than choosing (gh#896).
-    SeveralRuns { fit_dir: std::path::PathBuf, runs: Vec<std::path::PathBuf> },
     /// Loading the run's `MethodResult` failed.
     Method(MethodResultError),
 }
@@ -184,23 +181,15 @@ impl std::fmt::Display for TableRowError {
         match self {
             TableRowError::TopLevelRun { fit_dir, message } => write!(
                 f,
-                "loading top-level run.json at {}: {}",
+                "reading the fit run at {}: {}",
                 fit_dir.display(),
                 message
             ),
             TableRowError::NoMethods { fit_dir } => write!(
                 f,
-                "no completed method leaves found under {}",
+                "no tabulated fit result in {}",
                 fit_dir.display()
             ),
-            TableRowError::SeveralRuns { fit_dir, runs } => {
-                write!(f, "{} holds {} completed runs and a row reports one; pass one of:",
-                    fit_dir.display(), runs.len())?;
-                for r in runs {
-                    write!(f, "\n  {}", r.display())?;
-                }
-                Ok(())
-            }
             TableRowError::Method(e) => write!(f, "{}", e),
         }
     }
@@ -214,12 +203,11 @@ impl From<MethodResultError> for TableRowError {
     }
 }
 
-/// Build one `TableRow` for `fit_dir`. The `config_diff` argument is
-/// computed by the caller (`fit table` picks a baseline from the
-/// cohort; `fit summary` uses [`ConfigDiff::identity`]). `delta_ll`
-/// and `now_unix` are also caller-supplied so the same row builder
-/// powers single-fit and cohort callers without baking in scope
-/// assumptions.
+/// Build one `TableRow` for the run whose files `fit_dir` holds. The
+/// `config_diff` argument is computed by the caller (`fit table` picks a
+/// baseline from the cohort; `fit summary` uses [`ConfigDiff::identity`]).
+/// `delta_ll` and `now_unix` are also caller-supplied so the same row builder
+/// powers single-fit and cohort callers without baking in scope assumptions.
 pub fn build_row(
     fit_dir: &Path,
     config_diff: ConfigDiff,
@@ -228,28 +216,28 @@ pub fn build_row(
 ) -> Result<TableRow, TableRowError> {
     let view = FitView::read(fit_dir).ok_or_else(|| TableRowError::TopLevelRun {
         fit_dir: fit_dir.to_path_buf(),
-        message: "not a fit segment (no FitMethod leaves + sidecar)".into(),
+        message: "not a fit run's files (no run_inputs.json)".into(),
     })?;
+    build_row_of(&view, config_diff, delta_ll_vs_best, now_unix)
+}
 
-    let nodes = fit_tree::walk_fit_dir(fit_dir).map_err(|e| TableRowError::TopLevelRun {
-        fit_dir: fit_dir.to_path_buf(),
-        message: format!("walker: {}", e),
-    })?;
-    // The one completed run with a result. A row reports one run, so a
-    // directory holding several is refused with them listed, never resolved
-    // by an ordering rule (gh#896). A `pfilter` leaf has no `MethodResult`
-    // shape and is not a candidate (gh#590).
-    let mut candidates: Vec<&MethodNode> = nodes.iter()
-        .filter(|n| n.view.completed() && MethodResult::is_fitted(n.view.method))
-        .collect();
-    let terminal = match candidates.len() {
-        0 => return Err(TableRowError::NoMethods { fit_dir: fit_dir.to_path_buf() }),
-        1 => candidates.remove(0),
-        _ => return Err(TableRowError::SeveralRuns {
-            fit_dir: fit_dir.to_path_buf(),
-            runs: candidates.iter().map(|n| n.method_dir.clone()).collect(),
-        }),
+/// [`build_row`] from a view already read, with what the store records of
+/// the run (its label, fit file and start time) filled in.
+pub fn build_row_of(
+    view: &FitView,
+    config_diff: ConfigDiff,
+    delta_ll_vs_best: f64,
+    now_unix: i64,
+) -> Result<TableRow, TableRowError> {
+    let fit_dir = view.segment.as_path();
+    // The one completed run with a result. A `pfilter` run has no
+    // `MethodResult` shape and is not a candidate (gh#590).
+    let terminal = match view.methods.iter().find(|m| m.completed() && MethodResult::is_fitted(m.method)) {
+        Some(m) => m,
+        None => return Err(TableRowError::NoMethods { fit_dir: fit_dir.to_path_buf() }),
     };
+    let terminal = MethodNode { method_dir: terminal.method_dir.clone(), view: terminal.clone() };
+    let terminal = &terminal;
     let completed_methods = vec![terminal.view.method.as_str().to_string()];
 
     let method = terminal.view.method.as_str().to_string();
@@ -454,8 +442,16 @@ fn stem_from_fit_toml_path(path: &str) -> String {
 /// `<YYYY>-<MM>-<DD>T<HH>:<MM>:<SS>Z`; this parser accepts that
 /// strictly. A more permissive parser would invite drift.
 fn parse_iso8601_to_unix(s: &str) -> Option<i64> {
+    // `YYYY-MM-DDTHH:MM:SSZ`, or with a fraction of a second before the `Z`
+    // (`.sssZ`, as the run store records), which is dropped.
     let bytes = s.as_bytes();
-    if bytes.len() != 20 || bytes[10] != b'T' || bytes[19] != b'Z' {
+    let fraction_ok = match bytes.get(19) {
+        Some(b'Z') => bytes.len() == 20,
+        Some(b'.') => bytes.len() > 21 && bytes[bytes.len() - 1] == b'Z'
+            && bytes[20..bytes.len() - 1].iter().all(u8::is_ascii_digit),
+        _ => false,
+    };
+    if bytes.len() < 20 || bytes[10] != b'T' || !fraction_ok {
         return None;
     }
     let year: i32 = s[0..4].parse().ok()?;
@@ -552,6 +548,13 @@ mod tests {
         };
         assert!(MethodView::from_pgas(&ok).converged,
             "an assessed, converged fit must still report converged");
+    }
+
+    #[test]
+    fn a_time_with_a_fraction_of_a_second_parses_to_the_second() {
+        assert_eq!(parse_iso8601_to_unix("2026-11-22T11:52:11.214Z"), parse_iso8601_to_unix("2026-11-22T11:52:11Z"));
+        assert!(parse_iso8601_to_unix("2026-11-22T11:52:11Z").is_some());
+        assert!(parse_iso8601_to_unix("2026-11-22T11:52:11.Z").is_none());
     }
 
     #[test]

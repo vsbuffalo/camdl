@@ -693,26 +693,12 @@ impl MethodResult {
     }
 }
 
-/// Read the method leaf's `inputs` map from its `run.json` (`runid::RunRecord`).
-/// Convenience for loaders that need method-level metadata (`n_chains`,
-/// `algorithm`) recorded alongside the leaf. Errors with a typed
-/// [`MethodResultError::Io`] on a missing / malformed file or a non-`FitMethod`
-/// record — the contract is "every fit-method writes a `RunRecord` leaf whose
-/// `inputs` carries its config".
+/// The run's inputs (`run_inputs.json`), for loaders that need method-level
+/// metadata (`n_chains`, `algorithm`). A missing or malformed file is a typed
+/// [`MethodResultError::Io`].
 fn read_method_inputs(method_dir: &Path) -> Result<serde_json::Value, MethodResultError> {
     let io = |message: String| MethodResultError::Io { method_dir: method_dir.to_owned(), message };
-    let rec = match runid::read_leaf(method_dir) {
-        Ok(Some(leaf)) => leaf.record,
-        Ok(None) => return Err(io("run.json: no such file".into())),
-        Err(u) => return Err(io(u.reason.to_string())),
-    };
-    if rec.kind != runid::ArtifactKind::FitMethod {
-        return Err(MethodResultError::Io {
-            method_dir: method_dir.to_owned(),
-            message: "run.json is not a fit-method record".into(),
-        });
-    }
-    Ok(rec.inputs)
+    crate::fit_store::read_run_inputs(method_dir).map_err(io)
 }
 
 /// `inputs.n_chains` as a `usize` (0 when absent).
@@ -1564,6 +1550,7 @@ mod tests {
             "provenance": {"created_at": "2026-04-27T00:00:00Z", "argv": ["camdl"]}
         });
         std::fs::write(dir.join("run.json"), serde_json::to_string(&rec).unwrap()).unwrap();
+        crate::fit_store::write_test_inputs(dir, &rec);
     }
 
     fn synthetic_if2_state() -> FitState {

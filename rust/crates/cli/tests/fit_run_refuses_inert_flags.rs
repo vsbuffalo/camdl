@@ -85,7 +85,7 @@ simulate { from = 0 'days  to = 20 'days SIMDT}
     std::fs::write(&data, tsv).unwrap();
     let fit = dir.join("fit.toml");
     std::fs::write(&fit, format!(r#"
-output_dir = "{out}"
+store = "{out}"
 {extra}
 
 [model]

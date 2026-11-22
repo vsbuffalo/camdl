@@ -51,7 +51,7 @@ scenarios {
 }
 "#;
 
-const FIT: &str = r#"output_dir = "res"
+const FIT: &str = r#"store = "res"
 [model]
 camdl = "m.ir.json"
 [synthetic]

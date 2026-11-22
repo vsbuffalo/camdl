@@ -32,13 +32,15 @@
 //!
 //!   6. `fit_run_priors_cache_invalidates_on_model_ir_prior_change` —
 //!      run fit twice against a model whose `~` prior changes between
-//!      runs; assert the produced fit dir (CAS hash) differs.
+//!      runs; assert the two runs belong to different fit problems.
 //!
 //! Tests skip silently when the release binary or the `camdlc`
 //! compiler isn't present (mirrors the rest of the integration
 //! suite). The fixture is a tiny SIR with Poisson observations; the
 //! fits use PMMH with a small particle / sweep count so they finish
 //! in seconds.
+
+mod fit_store_support;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -204,7 +206,7 @@ fn write_fit_toml(dir: &Path, ir: &Path, data: &Path, mode: FitTomlMode, tag: &s
         ),
     };
     let toml = format!(r#"
-output_dir = "{out}"
+store = "{out}"
 [model]
 camdl = "{ir}"
 [data.observations]
@@ -234,25 +236,15 @@ burn_in = 2
     p
 }
 
-/// Locate the single fit dir under `<out_root>/fits/` produced by a
-/// successful `camdl fit run`.
+/// The one fit run a successful `camdl fit run` stored in the store
+/// `out_root`.
 fn find_fit_dir(out_root: &Path) -> PathBuf {
-    let fits = out_root.join("fits");
-    let entries: Vec<_> = std::fs::read_dir(&fits)
-        .unwrap_or_else(|e| panic!("read_dir {}: {}", fits.display(), e))
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .collect();
-    assert_eq!(entries.len(), 1,
-        "expected exactly one fit dir under {}, found {:?}",
-        fits.display(), entries);
-    entries.into_iter().next().unwrap()
+    fit_store_support::the_run(out_root)
 }
 
-/// Read the `resolved_priors` array from a fit's provenance sidecar
-/// (`fit.meta.json`). gh#147 (M3.2): a CAS fit has no fit-wide `run.json`; the
-/// gh#75 per-parameter prior-source provenance lives in the fit-level sidecar
-/// (`run_meta::FitSidecar`), at the top level (flattened FitMeta provenance).
+/// Read the `resolved_priors` array from a fit run's provenance sidecar
+/// (`fit.meta.json`), where the per-parameter prior source is recorded at
+/// the top level.
 fn read_resolved_priors(fit_dir: &Path) -> Vec<serde_json::Value> {
     let body = std::fs::read_to_string(fit_dir.join("fit.meta.json"))
         .unwrap_or_else(|e| panic!("read_to_string fit.meta.json: {}", e));
@@ -404,21 +396,14 @@ fn fit_run_with_no_priors_anywhere_fails_at_config_load() {
     assert!(stderr.contains("flat") || stderr.contains("Flat"),
         "error must mention explicit flat priors as remedy (iii); got:\n{}", stderr);
 
-    // No fit dir produced (or, if a dir was created, it must NOT have
-    // a populated run.json — we want the failure to land at config
-    // validation before any fit work happens).
-    let fits_dir = tmp.path().join("results/fits");
-    if fits_dir.exists() {
-        let entries: Vec<_> = std::fs::read_dir(&fits_dir).unwrap()
-            .filter_map(|e| e.ok()).map(|e| e.path()).collect();
-        for d in &entries {
-            // A "running" run.json that flips status by an error counts
-            // as work-having-happened; assert we never even got that far.
-            assert!(!d.join("run.json").exists(),
-                "validation failure must surface BEFORE any fit dir is populated, \
-                 but {} exists", d.join("run.json").display());
-        }
-    }
+    // No fit problem or run stored: the failure lands at config validation
+    // before any fit work happens. A claimed run that an error later marks
+    // failed counts as work having happened.
+    let store = tmp.path().join("results");
+    let stored: Vec<PathBuf> = fit_store_support::problems(&store).into_iter()
+        .chain(fit_store_support::runs(&store)).collect();
+    assert!(stored.is_empty(),
+        "validation failure must surface before any fit is stored, but found {stored:?}");
 }
 
 /// Explicit opt-in path: `prior = { flat = {} }` in the fit TOML is
@@ -493,7 +478,7 @@ fn fit_run_priors_cache_invalidates_on_model_ir_prior_change() {
     assert!(out_a.status.success(),
         "run A must succeed; stderr=\n{}", String::from_utf8_lossy(&out_a.stderr));
     let fit_dir_a = find_fit_dir(&dir_a.join("results"));
-    let name_a = fit_dir_a.file_name().unwrap().to_owned();
+    let name_a = fit_store_support::run_inputs(&fit_dir_a)["problem_id"].clone();
 
     // Run B: same fit TOML, but the model file's `~` priors are
     // changed (different mu/sigma values).
@@ -505,11 +490,11 @@ fn fit_run_priors_cache_invalidates_on_model_ir_prior_change() {
     assert!(out_b.status.success(),
         "run B must succeed; stderr=\n{}", String::from_utf8_lossy(&out_b.stderr));
     let fit_dir_b = find_fit_dir(&dir_b.join("results"));
-    let name_b = fit_dir_b.file_name().unwrap().to_owned();
+    let name_b = fit_store_support::run_inputs(&fit_dir_b)["problem_id"].clone();
 
     assert_ne!(name_a, name_b,
-        "changing the model's `~` prior must produce a different fit dir \
-         (CAS cache must invalidate). A={:?} B={:?}", name_a, name_b);
+        "changing the model's `~` prior must produce a different fit problem \
+         (the stored fit must not be reused). A={:?} B={:?}", name_a, name_b);
 }
 
 // ─── gh#763: `probability` carries [0, 1] into the fit ───────────────────────
@@ -582,7 +567,7 @@ fn write_probability_fit_toml(
     dir: &Path, ir: &Path, data: &Path, rho_spec: &str, method: &str, tag: &str,
 ) -> PathBuf {
     let toml = format!(r#"
-output_dir = "{out}"
+store = "{out}"
 [model]
 camdl = "{ir}"
 [data.observations]

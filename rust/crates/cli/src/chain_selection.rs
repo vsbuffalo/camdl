@@ -96,6 +96,17 @@ pub struct ChainSelection {
     polarity: Polarity,
 }
 
+/// Recorded as given: the polarity and the ids, as the CLI spells them.
+impl serde::Serialize for ChainSelection {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let polarity = match self.polarity {
+            Polarity::Keep => "keep",
+            Polarity::Drop => "drop",
+        };
+        serde::Serialize::serialize(&serde_json::json!({ "polarity": polarity, "ids": self.ids_csv() }), s)
+    }
+}
+
 /// What a chain selection actually did to a cloud — the provenance record, and
 /// the normal form of a selection resolved against a fit's chains.
 ///
@@ -641,10 +652,10 @@ pub fn eprint_bias_caveat(out: &crate::out::Out, ) {
 /// The address is built from the selection's normal form, the [`SubsetInfo`]
 /// it resolved to against the fit's chains, so `4,2` and `2,4` are one
 /// address, and on a six-chain fit `--chains 0,1,3,5` and
-/// `--exclude-chains 2,4` are one address too. [`SubsetInfo::excluded_csv`]
-/// is the single canonical rendering (the same one the `fit summary` header
-/// prints), so a name here can never disagree with what the user was told
-/// was dropped.
+/// `--exclude-chains 2,4` are one address too. The ids are
+/// [`SubsetInfo::excluded_csv`]'s, the rendering the `fit summary` header
+/// prints, joined by `_` in place of `,` (`predictive-excl2_4`), so a name
+/// here lists the chains the user was told were dropped.
 ///
 /// The ids are spelled out rather than digested: a reader who lists the run
 /// directory must be able to see which artifact is which without opening a
@@ -655,7 +666,8 @@ pub fn eprint_bias_caveat(out: &crate::out::Out, ) {
 pub fn artifact_name(base: &str, selection: Option<&SubsetInfo>) -> String {
     match selection {
         None => base.to_string(),
-        Some(info) => format!("{base}-excl{}", info.excluded_csv()),
+        // Joined by `_`: a stored file's name holds no comma.
+        Some(info) => format!("{base}-excl{}", info.excluded_csv().replace(',', "_")),
     }
 }
 
@@ -869,7 +881,7 @@ mod tests {
         let b = ChainSelection::parse_exclude("4,2").unwrap();
         let c = ChainSelection::parse_exclude(" 4 , 2 ").unwrap();
         let k = ChainSelection::parse_keep("0,1,3,5").unwrap();
-        assert_eq!(name("predictive", &a), "predictive-excl2,4");
+        assert_eq!(name("predictive", &a), "predictive-excl2_4");
         assert_eq!(name("predictive", &b), name("predictive", &a), "order must not make a second artifact");
         assert_eq!(name("predictive", &c), name("predictive", &a), "whitespace must not make a third");
         assert_eq!(name("predictive", &k), name("predictive", &a),
@@ -885,8 +897,8 @@ mod tests {
 
         // Composes with the vocabulary key: a reporting vocabulary AND a chain
         // subset are two independent report keys over one fit.
-        assert_eq!(name("quantities-a1b2c3d4", &a), "quantities-a1b2c3d4-excl2,4");
-        assert_eq!(name("contrasts", &a), "contrasts-excl2,4");
+        assert_eq!(name("quantities-a1b2c3d4", &a), "quantities-a1b2c3d4-excl2_4");
+        assert_eq!(name("contrasts", &a), "contrasts-excl2_4");
     }
 
     /// `--chains` naming every chain selects nothing, and is refused rather

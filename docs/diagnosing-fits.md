@@ -634,14 +634,13 @@ one hides the very misfit you're hunting.
   honest short-horizon forecast `p(y_t | y_{1:t-1})`: re-conditions on the data
   at every step, so it stays tight **iff** the filter can track the data. The
   right tool for _timing_ questions (does the model anticipate each next
-  observation?). Chain-binomial only. Under `[data] holdout_after` the band at a
-  held-out row uses parameters fitted without that row and a state filtered
-  through the earlier held-out rows, so it is not a forecast from the end of the
-  training rows; the `role` column of `predictive/<stream>.tsv` marks which rows
-  those are. A model can pass the free-forward check (wide enough to contain the
-  data) yet fail one-step (can't predict next week), and vice versa — which is
-  why both are worth emitting and carry a typed `horizon` column so neither is
-  read as the other.
+  observation?). Chain-binomial only. Under `[data] holdout_after` the band
+  covers the training rows only, since a stored fit keeps its held-out rows'
+  dates and not their values; the `free_forward` rows at those dates are marked
+  `held_out` in the `role` column of `predictive/<stream>.tsv`. A model can pass
+  the free-forward check (wide enough to contain the data) yet fail one-step
+  (can't predict next week), and vice versa — which is why both are worth
+  emitting and carry a typed `horizon` column so neither is read as the other.
 - **Conditioned / smoothed path** — `camdl pfilter --save-paths`. This is pulled
   toward the data by construction and will track it even for a misspecified
   model. It **cheats** for the purpose of model-checking: a smoothed ribbon that

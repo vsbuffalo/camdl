@@ -1,520 +1,113 @@
-//! New-format fit reader: project a CAS fit segment into the fit-level and
-//! per-method views every fit consumer needs.
+//! The view of one stored fit run that every reader of its files takes: what
+//! it ran (its method and backend), its run id and its problem's, and the
+//! problem's provenance, read from a copy of the run's files
+//! ([`crate::fit_store::RunFiles`]).
 //!
-//! A content-addressed fit is a segment directory `fits/{stem}-{h8}/` holding
-//! one `FitMethod` `runid::RunRecord` leaf per (cell × method) plus a single
-//! fit-level provenance sidecar (`fit.meta.json`). There is no fit-wide
-//! `run.json`: the fit-level identity is the `fit`-level hash shared by every
-//! leaf, and the fit-wide attributes the leaves don't carry (user `--label`,
-//! the gh#75 prior sources, `estimated`/`fixed`/`data_hashes`/`model_identity`)
-//! live once on the sidecar.
-//!
-//! [`FitView::read`] folds those leaves + sidecar into one fit-level view; each
-//! [`FitMethodView`] carries the per-method fields (`method`, `run_id`,
-//! `label`, `status`, `backend`) read directly from the leaf's `RunRecord`. This is the single consumer-facing projection
-//! of the new format — `walk_fits_root`, `table_row`, `fit summary`, `browse`
-//! all read it instead of synthesizing a legacy `run_meta::Run`.
+//! A run's folder holds its result files, `run_inputs.json` (what it was
+//! asked to do and what it found) and `fit.meta.json` (the problem's
+//! provenance as the run resolved it); the copy a reader opens also holds
+//! `model.ir.json`, the stored compile the problem was posed on
+//! ([`crate::fit_store::open_fit`]). [`FitView::read`] reads that directory
+//! and nothing else.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use runid::{ArtifactKind, RunRecord};
+use crate::run_meta::{FitAlgorithm, InferenceBackend};
 
-use crate::run_meta::{InferenceBackend, FitAlgorithm};
-
-/// One fit-method leaf, projected to the headline numbers the fit consumers
-/// read directly from the leaf's `RunRecord` (`inputs` + path-derived `axes`).
+/// The stored run a view reads.
 #[derive(Debug, Clone)]
 pub struct FitMethodView {
-    /// Method directory holding this leaf's `run.json` (the consumer loads the
-    /// typed θ̂ / diagnostics from sibling `fit_state.toml` etc. itself).
+    /// The directory holding the run's files.
     pub method_dir: PathBuf,
-    /// Inference algorithm tag. Its `as_str()` is also the leaf's label —
-    /// the `method` store level's directory name — so there is no separate
-    /// name field to drift from it (gh#901).
+    /// Inference algorithm tag.
     pub method: FitAlgorithm,
-    /// The leaf's own `run_id` (full 64-char hex) — the address `camdl show`
-    /// and `fit predict` accept.
+    /// The run's id (64 hex digits): the address `camdl show` and `fit
+    /// predict` accept.
     pub run_id: String,
-    /// The run's label (`run.json` `provenance.label`): the one run `@label`
-    /// names (gh#896). `None` when the run was not given one.
+    /// The run's label: a stored run's files hold none, so [`FitView::read`]
+    /// leaves it `None` and the store's walker fills it from the invocation
+    /// that named the run.
     pub label: Option<String>,
-    /// When the run was written (`provenance.created_at`, ISO 8601 UTC).
+    /// When the run started; empty from [`FitView::read`], which reads the
+    /// run's files alone, and filled by the store's walker from its record.
     pub created_at: String,
-    /// What the run's record says it is: `completed`, `running` (or stopped
-    /// without recording an outcome) or `failed`. Only a completed run has a
-    /// result; every reader that lists runs lists the others too, by status.
-    pub status: runid::RunStatus,
-    /// Simulation backend the method ran on. Defaults to `ChainBinomial` when
-    /// absent.
+    /// Simulation backend the method ran on.
     pub backend: InferenceBackend,
 }
 
-/// Fit-level view of a CAS fit segment: the fit-wide identity + provenance plus
-/// one [`FitMethodView`] per method leaf, folded from the segment's method-leaf
-/// `RunRecord`s and the fit-level `FitSidecar`.
+/// The view of one stored fit run and its problem.
 #[derive(Debug, Clone)]
 pub struct FitView {
-    // ── identity / provenance (some from leaves, some from the sidecar) ──
-    /// The `fit`-level (FitDigest) hash shared by every leaf; the
-    /// `camdl show`/`label` address for the fit. The sidecar is never
-    /// identity-bearing.
+    /// The problem's run id: the fit id `fit table` and `camdl list` show.
     pub fit_hash: String,
-    /// Latest leaf `created_at` (ISO 8601 UTC).
-    pub created_at: String,
-
-    /// The fit folder (`fits/<stem>-<h8>/`) this view was read from: the
-    /// directory `source_config` and `source_model` are relative to.
+    /// The directory the view was read from.
     pub segment: PathBuf,
-
-    // ── sidecar provenance (never defaulted on a well-formed segment) ──
-    /// The model file, relative to [`Self::segment`]
-    /// ([`crate::run_meta::FitSidecar::source_model`]); `None` when it was not
-    /// a file when the fit ran. [`Self::model_path`] resolves it.
+    /// The compiled model, relative to [`Self::segment`]: `model.ir.json` when
+    /// the copy holds it.
     pub source_model: Option<String>,
     pub model_identity: String,
-    /// The producing config, relative to the fit folder
-    /// ([`crate::run_meta::FitSidecar::source_config`]); `None` for a
-    /// CLI-only fit.
+    /// The fit file the run was given, as typed; `None` from
+    /// [`FitView::read`], and filled by the store's walker from the run's
+    /// record.
     pub source_config: Option<String>,
     pub fit_toml_hash: String,
     pub data_hashes: HashMap<String, String>,
-
-    // ── from the leaves ──
-    /// The method labels found among the leaves, in label order,
-    /// deduplicated. One per method that ran on this problem.
-    pub methods_declared: Vec<String>,
-    /// One view per discovered method leaf, sorted by method label then seed.
+    /// The run, alone.
     pub methods: Vec<FitMethodView>,
 }
 
-/// The `method` level's readable label (the algorithm's name); `""` when
-/// absent.
-fn method_label(r: &RunRecord) -> String {
-    r.levels
-        .iter()
-        .find(|l| l.name == "method")
-        .map(|l| l.label.clone())
-        .unwrap_or_default()
-}
-
-/// The `seed` level's label, for a stable order among one method's leaves.
-fn seed_label(r: &RunRecord) -> String {
-    r.levels
-        .iter()
-        .find(|l| l.name == "seed")
-        .map(|l| l.label.clone())
-        .unwrap_or_default()
-}
-
-/// The one stderr line for a fit leaf the view cannot read and skips, so a
-/// stored fit that `fit summary` / `fit table` / `fit predict` leave out says
-/// why instead of vanishing.
-fn skipped_leaf_line(dir: &Path, why: &str) -> String {
-    format!("warning: skipping fit leaf {}: {why}", dir.display())
-}
-
-/// Build a [`FitMethodView`] from a fit-method leaf record + its directory.
-/// Errs, with the reason, when the record is not a `FitMethod` or its `inputs`
-/// lacks a `method` this camdl knows — a leaf written by a removed algorithm
-/// (`nuts` on the ODE backend) is the case that matters. The caller says so
-/// on stderr ([`skipped_leaf_line`]) rather than dropping the leaf silently.
-fn method_view_from_record(dir: &Path, rec: &RunRecord) -> Result<FitMethodView, String> {
-    if rec.kind != ArtifactKind::FitMethod {
-        return Err("not a fit-method record".into());
-    }
-    let inputs = rec
-        .inputs
-        .as_object()
-        .ok_or_else(|| "its run.json has no `inputs` object".to_string())?;
-    let method: FitAlgorithm = match inputs.get("method") {
-        None => return Err("its run.json records no `method`".into()),
-        Some(v) => serde_json::from_value(v.clone()).map_err(|_| {
-            format!(
-                "it records method {v}, which this camdl does not know (a method \
-                 removed since the fit ran is read by the camdl that wrote it)"
-            )
-        })?,
-    };
-    let backend: InferenceBackend = inputs
-        .get("backend")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or(InferenceBackend::ChainBinomial);
-    Ok(FitMethodView {
-        method_dir: dir.to_path_buf(),
-        method,
-        run_id: rec.run_id.to_hex(),
-        label: rec.provenance.label.clone(),
-        created_at: rec.provenance.created_at.clone().unwrap_or_default(),
-        status: rec.status,
-        backend,
-    })
-}
-
-/// The segment a fit leaf directory sits in (`<seg>/<algorithm>-<h8>/seed_<n>-<h8>`),
-/// or `Ok(None)` when `dir` is not a fit leaf (holds no `run.json`, or one of
-/// another kind). `Err` when its `run.json` cannot be read
-/// ([`crate::leaf_use::unreadable`]).
-pub fn leaf_segment(dir: &Path) -> Result<Option<PathBuf>, String> {
-    match crate::leaf_use::read(dir)? {
-        Some(leaf) if leaf.record.kind == ArtifactKind::FitMethod => {}
-        _ => return Ok(None),
-    }
-    let lexical = dir.parent().and_then(Path::parent).filter(|p| !p.as_os_str().is_empty());
-    Ok(match lexical {
-        Some(seg) => Some(seg.to_path_buf()),
-        None => std::fs::canonicalize(dir)
-            .ok()
-            .and_then(|d| d.parent()?.parent().map(Path::to_path_buf)),
-    })
-}
-
-/// Where `fit predict` writes for one run: `<segment>/predict/<run id, 12
-/// hex>-<address key>/` (gh#896), outside the leaf, whose exact-set manifest
-/// admits no regenerated files. The address key
-/// (`fit::predict::PredictOptions::address_key`, 128 bits) hashes the full
-/// run id, the engine and every option that changes the output, so two
-/// predictions from different inputs never share a directory; the 12-hex run
-/// prefix is a label for a person listing the folder. The full run id, the key
-/// and the options are recorded in the manifests written there
-/// (`predictive.json`, `observed.json`, `forecast.json`; `report.json` records
-/// the failures, not the options).
-pub fn predictions_dir(segment: &Path, run_id: &str, address_key: &str) -> PathBuf {
-    segment.join("predict").join(format!("{}-{address_key}", predictions_label(run_id)))
-}
-
-/// The run's label in its prediction directories' names, the 12-hex prefix
-/// of its run id: every directory `fit predict` wrote for the run is named
-/// `<label>-<key>`.
-pub fn predictions_label(run_id: &str) -> &str {
-    &run_id[..12.min(run_id.len())]
-}
-
-/// The directory `fit predict <run>` with every option at its default writes
-/// to, under this engine. The default options carry the particle count the
-/// run resolves when the default mode runs a filter (D85), so the run's leaf
-/// is read; a run that cannot be found or read falls back to the options
-/// with no particle count.
-pub fn default_predictions_dir(segment: &Path, run_id: &str) -> PathBuf {
-    let options = FitView::read(segment)
-        .and_then(|v| v.methods.into_iter().find(|m| m.run_id == run_id))
-        .and_then(|m| crate::fit::predict::default_options_for(&m.method_dir, m.backend).ok())
-        .unwrap_or_else(crate::fit::predict::PredictOptions::defaults);
-    predictions_dir(segment, run_id, &options.address_key(run_id))
-}
-
-/// The `run_id` (full hex) a fit leaf's `run.json` records; `Ok(None)` when
-/// `dir` is not a fit leaf, `Err` when its `run.json` cannot be read.
-pub fn leaf_run_id(dir: &Path) -> Result<Option<String>, String> {
-    Ok(crate::leaf_use::read(dir)?
-        .filter(|l| l.record.kind == ArtifactKind::FitMethod)
-        .map(|l| l.record.run_id.to_hex()))
-}
-
-/// Whether two paths name one directory, lexically or after resolving links.
-fn same_dir(a: &Path, b: &Path) -> bool {
-    a == b
-        || match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
-            (Ok(x), Ok(y)) => x == y,
-            _ => false,
-        }
-}
-
 impl FitMethodView {
-    /// Whether the run completed, so has a result to report.
+    /// A stored run is a completed one.
     pub fn completed(&self) -> bool {
-        self.status == runid::RunStatus::Completed
+        true
     }
 }
 
 impl FitView {
-    /// The model file the fit ran on, resolved against the fit folder, so it
-    /// names the same file from any working directory; `None` when none was
-    /// recorded.
+    /// The compiled model the problem was posed on; `None` when the copy holds
+    /// none.
     pub fn model_path(&self) -> Option<PathBuf> {
         self.source_model.as_deref().map(|m| self.segment.join(m))
     }
 
-    /// The labels of this problem's runs, in run order, joined for display —
-    /// `None` when no run is labelled. A label names one run, not the problem
-    /// (gh#896), so a folder with several labelled runs shows each.
-    pub fn label(&self) -> Option<String> {
-        let labels: Vec<&str> = self.methods.iter().filter_map(|s| s.label.as_deref()).collect();
-        (!labels.is_empty()).then(|| labels.join(", "))
-    }
-
-    /// Project a CAS fit segment (`fits/{stem}-{h8}/`) into a fit-level view.
-    /// Collects its `FitMethod` leaves, sorts by method label then seed, reads
-    /// the fit-level sidecar, and folds them.
-    ///
-    /// Provenance integrity (gh#147): a segment with method leaves but no
-    /// sidecar is malformed — skipped with a loud error rather than surfaced
-    /// with empty provenance. For a Bayesian fit (`pgas`/`pmmh` leaf), an empty
-    /// `resolved_priors` is a dropped-provenance bug signal (gh#75) and is
-    /// flagged. Returns `None` when `seg` holds no `FitMethod` leaves.
-    ///
-    /// A leaf directory reads as the view of that one run (gh#896): the
-    /// problem's provenance from the segment the leaf sits in, and `methods`
-    /// holding the leaf alone. Every reader that takes a fit directory
-    /// therefore reads exactly the run a leaf path names, never a sibling.
+    /// The view of the run whose files `dir` holds: `None` when `dir` holds
+    /// no `run_inputs.json`, or one that names no method this camdl knows.
     pub fn read(dir: &Path) -> Option<FitView> {
-        // A leaf whose record cannot be read is neither a run nor a problem
-        // folder: there is no view of it.
-        let (seg, only): (PathBuf, Option<&Path>) = match leaf_segment(dir).ok()? {
-            Some(seg) => (seg, Some(dir)),
-            None => (dir.to_path_buf(), None),
-        };
-        let seg = seg.as_path();
-        let mut leaves: Vec<(PathBuf, RunRecord)> = crate::cas_read::walk_records(seg)
-            .into_iter()
-            .filter(|(_, r)| r.kind == ArtifactKind::FitMethod)
-            .filter(|(d, _)| only.is_none_or(|o| same_dir(d, o)))
-            .collect();
-        if leaves.is_empty() {
-            return None;
-        }
-        // Label order, then seed: there is no execution order among methods.
-        leaves.sort_by(|a, b| {
-            (method_label(&a.1), seed_label(&a.1)).cmp(&(method_label(&b.1), seed_label(&b.1)))
-        });
-
-        let fit_hash = leaves
-            .iter()
-            .find_map(|(_, r)| {
-                r.levels
-                    .iter()
-                    .find(|l| l.name == "fit")
-                    .map(|l| l.hash.to_hex())
-            })
-            .unwrap_or_default();
-        let created_at = leaves
-            .iter()
-            .filter_map(|(_, r)| r.provenance.created_at.clone())
-            .max()
-            .unwrap_or_default();
-        // Method labels in label order, dedup preserving order.
-        let mut methods_declared: Vec<String> = Vec::new();
-        for (_, r) in &leaves {
-            let label = method_label(r);
-            if !methods_declared.contains(&label) {
-                methods_declared.push(label);
-            }
-        }
-
-        // Provenance: from the sidecar, never defaulted. A fit with leaves but
-        // no sidecar is malformed — skip it loudly (the writer always writes
-        // one).
-        let side = match crate::run_meta::read_fit_sidecar(seg) {
-            Ok(Some(s)) => s,
-            Err(e) => {
-                crate::out::detached().say(format_args!("warning: skipping fit {}: {e}", seg.display()));
-                return None;
-            }
-            Ok(None) => {
+        let inputs = crate::fit_store::read_run_inputs(dir).ok()?;
+        let method: FitAlgorithm = match inputs.get("method").map(|v| serde_json::from_value(v.clone())) {
+            Some(Ok(m)) => m,
+            Some(Err(_)) | None => {
                 crate::out::detached().say(format_args!(
-                    "warning: fit {} has method leaves but no fit.meta.json provenance \
-                     sidecar — skipping (provenance missing)",
-                    seg.display()
+                    "warning: skipping fit run {}: it records no method this camdl knows",
+                    dir.display()
                 ));
                 return None;
             }
         };
-        // A Bayesian fit (`pgas`/`pmmh` leaf consumes priors) with empty
-        // resolved_priors is a dropped-provenance bug (gh#75), not a valid
-        // state.
-        let is_bayesian = leaves.iter().any(|(_, r)| {
-            matches!(
-                r.inputs.get("method").and_then(|m| m.as_str()),
-                Some("pgas") | Some("pmmh")
-            )
-        });
-        if is_bayesian && side.resolved_priors.is_empty() {
-            crate::out::detached().say(format_args!(
-                "error: Bayesian fit {} has empty resolved_priors in its sidecar — \
-                 prior-source provenance was dropped (gh#75)",
-                seg.display()
-            ));
-        }
-
-        let methods: Vec<FitMethodView> = leaves
-            .iter()
-            .filter_map(|(dir, r)| match method_view_from_record(dir, r) {
-                Ok(v) => Some(v),
-                Err(why) => {
-                    crate::out::detached().say(format_args!("{}", skipped_leaf_line(dir, &why)));
-                    None
-                }
-            })
-            .collect();
-
-        Some(FitView {
-            fit_hash,
-            created_at,
-            segment: seg.to_path_buf(),
-            source_model: side.source_model,
-            model_identity: side.model_identity,
-            source_config: side.source_config,
-            fit_toml_hash: side.fit_toml_hash,
-            data_hashes: side.data_hashes.into_iter().collect(),
-            methods_declared,
-            methods,
-        })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A leaf whose run.json names an algorithm this camdl does not know (a
-    /// stored NUTS-on-ODE fit, after that method's removal) is skipped with a
-    /// line naming the leaf and the reason, not dropped silently.
-    #[test]
-    fn a_leaf_with_an_unknown_algorithm_is_skipped_with_a_reason() {
-        let dir = std::env::temp_dir().join(format!(
-            "camdl_unknown_algo_{}_{}", std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-        let leaf = dir.join("nuts-1fb03eee").join("seed_1-06cbd6b3");
-        std::fs::create_dir_all(&leaf).unwrap();
-        let rec: RunRecord = serde_json::from_str(&format!(
-            r#"{{"format_version":1,"kind":"fit_method","run_id":"{run_id}","hash_version":1,"calendar":{{"days_per_unit":1.0,"origin":null,"time_unit":"days"}},"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"method","label":"nuts","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"method":"nuts","backend":"ode","seed":1,"n_chains":2}},"provenance":{{"created_at":"2026-07-07T00:00:00Z","argv":["camdl","fit","run"]}}}}"#,
-            run_id = "ab".repeat(32),
-        ))
-        .unwrap();
-        let why = method_view_from_record(&leaf, &rec)
-            .expect_err("`nuts` is not a FitAlgorithm any more");
-        let line = skipped_leaf_line(&leaf, &why);
-        assert!(line.starts_with("warning: skipping fit leaf "), "{line}");
-        assert!(line.contains(&leaf.display().to_string()), "names the leaf: {line}");
-        assert!(line.contains("\"nuts\"") && line.contains("does not know"),
-            "names the method and the reason: {line}");
-        std::fs::remove_dir_all(&dir).ok();
-    }
-    use crate::run_meta::{write_fit_sidecar, FitSidecar};
-
-    /// Write a realistic two-method CAS fit segment under `seg` — the shape
-    /// two files with one problem half produce:
-    /// `{if2,pgas}-<h8>/seed_1-<h8>/run.json` `FitMethod` leaves plus the
-    /// fit-level `fit.meta.json` sidecar. Mirrors the on-disk shape the
-    /// runner writes. `fit_h8` seeds the shared `fit`-level hash.
-    fn write_two_method_fit(seg: &Path, fit_h8: &str) {
-        let fit_hash = format!("{fit_h8}{}", "0".repeat(64 - fit_h8.len()));
-        let methods = [
-            // (ordinal, method label, method, best_loglik, best_chain, created_at)
-            (1_u8, "if2", "if2", -120.5_f64, 2_u64, "2026-04-27T00:00:01Z"),
-            (2_u8, "pgas", "pgas", -56.7_f64, 1_u64, "2026-04-27T00:00:02Z"),
-        ];
-        for (ord, label, method, best_ll, best_chain, created_at) in methods {
-            let leaf = seg.join(format!("{label}-1fb03eee")).join("seed_1-06cbd6b3");
-            std::fs::create_dir_all(&leaf).unwrap();
-            // run_id must be valid 64-char hex (ContentHash rejects non-hex).
-            let run_id = format!("{:0<64}", format!("{fit_h8}0{ord}"));
-            let rec = format!(
-                r#"{{"format_version":1,"kind":"fit_method","run_id":"{run_id}","hash_version":1,"calendar":{{"days_per_unit":1.0,"origin":null,"time_unit":"days"}},"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"demo","hash":"{fit_hash}","schema_version":1}},{{"name":"method","label":"{label}","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"method":"{method}","backend":"chain_binomial","seed":1,"n_chains":4,"best_loglik":{best_ll},"best_chain":{best_chain}}},"provenance":{{"created_at":"{created_at}","argv":["camdl","fit","run"]}}}}"#
-            );
-            std::fs::write(leaf.join("run.json"), rec).unwrap();
-        }
-        let sidecar = FitSidecar {
-            store_layout: runid::STORE_LAYOUT,
-            label: Some("a fit".into()),
-            table_hashes: Default::default(),
-            model_identity: "f00d".repeat(16),
-            schema_version: crate::run_meta::FIT_META_SCHEMA_VERSION,
-            source_config: None,
-            source_model: None,
-            fit_toml_hash: "cafe".repeat(16),
-            data_hashes: std::collections::BTreeMap::from([("cases".to_string(), "d4ta".repeat(2))]),
-            holdout_hashes: Default::default(),
-            estimated: vec!["beta".into(), "gamma".into()],
-            fixed: std::collections::BTreeMap::from([("N0".to_string(), 1000.0)]),
-            partition: None,
-            resolved_priors: vec![crate::run_meta::ResolvedPriorEntry {
-                param: "beta".into(),
-                source: "model_ir".into(),
-                overridden_model_prior: None,
-            }],
-            parameters_provenance: std::collections::BTreeMap::new(),
-            schema: None,
-            docs: Default::default(),
-            training_partition: None,
-            dt: None,
-            integrator: None,
-            calendar: ir::caltime::CalendarAxis::parse("days", None).unwrap(),
+        let backend: InferenceBackend = inputs
+            .get("backend")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or(InferenceBackend::ChainBinomial);
+        let text = |k: &str| inputs.get(k).and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        let side = crate::run_meta::read_fit_sidecar(dir).ok().flatten();
+        let run = FitMethodView {
+            method_dir: dir.to_path_buf(),
+            method,
+            run_id: text("run_id"),
+            label: None,
+            created_at: String::new(),
+            backend,
         };
-        // The model file two levels above the fit folder (`<root>/sir.camdl`
-        // for `<root>/fits/<stem>-<h8>/`). No fit.toml on disk → the archive
-        // step is skipped; the sidecar still writes.
-        let model = seg.parent().unwrap().parent().unwrap().join("sir.camdl");
-        std::fs::write(&model, "compartments { S }\n").unwrap();
-        write_fit_sidecar(seg, &model, &sidecar).unwrap();
-    }
-
-    /// Pins the N→1 aggregation `FitView` performs over a realistic
-    /// two-method fixture: the fit-level fold (fit_hash, latest created_at,
-    /// sidecar provenance, label-order `methods_declared`) and the per-leaf
-    /// fold (method / backend). Asserts real values — not `None == None` —
-    /// so a degenerate projection (all-empty / all-None) fails.
-    #[test]
-    fn fit_view_folds_segment_field_for_field() {
-        let tmp = crate::test_support::unique_temp_dir("fit_view_equiv");
-        let seg = tmp.join("fits").join("demo-abcd1234");
-        write_two_method_fit(&seg, "abcd1234");
-
-        let view = FitView::read(&seg).expect("FitView::read must derive a fit");
-
-        // Fit-level identity / provenance.
-        assert_eq!(view.fit_hash, "abcd1234".to_string() + &"0".repeat(56), "fit_hash");
-        assert!(!view.fit_hash.is_empty(), "fit_hash must be non-empty");
-        assert_eq!(view.created_at, "2026-04-27T00:00:02Z", "latest of the two leaves");
-        assert_eq!(view.label(), None, "no run is labelled; the sidecar's label is not a run's");
-
-        // Sidecar provenance.
-        assert_eq!(view.source_model.as_deref(), Some("../../sir.camdl"),
-            "the model, relative to the fit folder");
-        assert_eq!(std::fs::canonicalize(view.model_path().unwrap()).unwrap(),
-            std::fs::canonicalize(tmp.join("sir.camdl")).unwrap(),
-            "and resolved against it, whatever the working directory");
-        assert_eq!(view.model_identity, "f00d".repeat(16), "model_identity");
-        assert!(!view.model_identity.is_empty(), "model_identity must be non-empty");
-        assert_eq!(view.source_config, None, "no config file was given to the writer");
-        assert_eq!(view.fit_toml_hash, "cafe".repeat(16), "fit_toml_hash");
-        assert_eq!(view.data_hashes.get("cases").map(String::as_str), Some("d4tad4ta"), "data_hashes");
-
-        // methods_declared: label order, deduped.
-        assert_eq!(view.methods_declared, vec!["if2", "pgas"], "label order");
-
-        // Per-leaf fold, leaf-for-leaf.
-        assert_eq!(view.methods.len(), 2, "two method leaves");
-        let scout = view.methods.iter().find(|s| s.method == FitAlgorithm::If2).unwrap();
-        assert_eq!(scout.method, FitAlgorithm::If2, "if2 method");
-        assert_eq!(scout.backend, InferenceBackend::ChainBinomial, "if2 backend");
-        let refine = view.methods.iter().find(|s| s.method == FitAlgorithm::Pgas).unwrap();
-        assert_eq!(refine.method, FitAlgorithm::Pgas, "pgas method");
-
-        std::fs::remove_dir_all(&tmp).ok();
-    }
-
-    /// gh#896: a leaf directory is a fit view of that one run. The problem's
-    /// provenance comes from the segment the leaf sits in; the runs are the
-    /// leaf alone, so a reader handed a leaf reads that run and no sibling.
-    #[test]
-    fn a_leaf_directory_reads_as_the_view_of_that_one_run() {
-        let tmp = crate::test_support::unique_temp_dir("fit_view_leaf");
-        let seg = tmp.join("fits").join("demo-abcd1234");
-        write_two_method_fit(&seg, "abcd1234");
-        let leaf = seg.join("if2-1fb03eee").join("seed_1-06cbd6b3");
-
-        let view = FitView::read(&leaf).expect("a leaf directory is a fit view");
-        assert_eq!(view.methods.len(), 1, "the leaf alone, not its sibling");
-        assert_eq!(view.methods[0].method, FitAlgorithm::If2);
-        assert_eq!(view.methods[0].method_dir, leaf);
-        assert_eq!(view.methods_declared, vec!["if2"]);
-        assert_eq!(view.created_at, "2026-04-27T00:00:01Z", "this run's time, not the latest");
-        // Problem provenance is the segment's.
-        assert_eq!(view.source_model.as_deref(), Some("../../sir.camdl"));
-        assert_eq!(view.fit_hash, "abcd1234".to_string() + &"0".repeat(56));
-
-        std::fs::remove_dir_all(&tmp).ok();
+        Some(FitView {
+            fit_hash: text("problem_id"),
+            segment: dir.to_path_buf(),
+            source_model: dir.join("model.ir.json").is_file().then(|| "model.ir.json".to_string()),
+            model_identity: side.as_ref().map(|s| s.model_identity.clone()).unwrap_or_default(),
+            source_config: None,
+            fit_toml_hash: side.as_ref().map(|s| s.fit_toml_hash.clone()).unwrap_or_default(),
+            data_hashes: side.map(|s| s.data_hashes.into_iter().collect()).unwrap_or_default(),
+            methods: vec![run],
+        })
     }
 }

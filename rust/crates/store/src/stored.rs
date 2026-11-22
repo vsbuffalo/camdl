@@ -114,6 +114,26 @@ impl<A: Artifact> Stored<A> {
         Ok(std::io::Cursor::new(read_checked(&self.dir, file, &digest)?))
     }
 
+    /// The provenance file names, in name order: files in the manifest that a
+    /// recompute does not compare.
+    pub fn provenance_files(&self) -> Vec<&str> {
+        self.run.files.iter().filter(|(_, e)| e.role == Role::Provenance).map(|(n, _)| n.as_str()).collect()
+    }
+
+    /// Reads one provenance file, checked against the digest the manifest
+    /// recorded for it.
+    pub fn open_provenance(&self, file: &str) -> Result<std::io::Cursor<Vec<u8>>> {
+        let digest = match self.run.files.get(file) {
+            Some(e) if e.role == Role::Provenance => e.sha256.expect("a provenance file has a digest"),
+            _ => {
+                return Err(Error::BadFileName {
+                    name: format!("{file} (not a provenance file of {})", self.id.key().short12()),
+                })
+            }
+        };
+        Ok(std::io::Cursor::new(read_checked(&self.dir, file, &digest)?))
+    }
+
     /// A byte copy of one stored result file.
     pub fn export(&self, file: &str, to: &ExportPath) -> Result<()> {
         let digest = self.result_digest(file)?;
@@ -130,6 +150,11 @@ impl<A: Artifact> Stored<A> {
     /// The dependencies its identity holds, as recorded.
     pub fn deps(&self) -> &[DepInfo] {
         &self.run.deps
+    }
+
+    /// The upstreams its record names without hashing them, as recorded.
+    pub fn lineage(&self) -> &[Lineage] {
+        &self.run.lineage
     }
 }
 
@@ -360,6 +385,11 @@ impl<A: Artifact> Entry<A> {
 
     pub fn state(&self) -> &EntryState {
         &self.state
+    }
+
+    /// The result's folder.
+    pub fn folder(&self) -> &Path {
+        &self.dir
     }
 
     /// The latest progress snapshot.

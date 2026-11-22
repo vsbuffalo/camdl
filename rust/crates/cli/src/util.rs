@@ -1466,47 +1466,6 @@ pub fn model_is_camdl_source(model_path: &str) -> bool {
     model_path.ends_with(".camdl")
 }
 
-pub fn render_model_json(model_camdl: &std::path::Path) -> Result<Vec<u8>, String> {
-    // No compile settings: `camdlc render` renders the parsed, pre-expansion
-    // declarations (`Latex.run`), which LICM, a pass over the compiled IR,
-    // never touches.
-    let camdlc = find_camdlc()?;
-    let out = std::process::Command::new(&camdlc)
-        .args(["render", "--format", "json"])
-        .arg(model_camdl)
-        .output()
-        .map_err(|e| format!("cannot run camdlc render: {}", e))?;
-    if !out.status.success() {
-        return Err(format!(
-            "camdlc render failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    Ok(out.stdout)
-}
-
-/// Render a `.camdl` model to its structured flow graph
-/// (`camdlc render --format graph`), capturing the bytes. Archived as
-/// `model.graph.json` beside `model.render.json` so a viewer can draw the
-/// model's compartmental flow diagram without recompiling. Best-effort — the
-/// caller treats an `Err` as "skip the archive", never a hard failure.
-pub fn render_model_graph_json(model_camdl: &std::path::Path) -> Result<Vec<u8>, String> {
-    // No compile settings, as for `render_model_json`.
-    let camdlc = find_camdlc()?;
-    let out = std::process::Command::new(&camdlc)
-        .args(["render", "--format", "graph"])
-        .arg(model_camdl)
-        .output()
-        .map_err(|e| format!("cannot run camdlc render: {}", e))?;
-    if !out.status.success() {
-        return Err(format!(
-            "camdlc render failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    Ok(out.stdout)
-}
-
 
 // ─── Multi-stream binding diagnostics (gh#90) ───────────────────────────────
 

@@ -126,7 +126,7 @@ fn run_nlsbplx_fit(tag: &str, extra_args: &[&str]) -> Option<String> {
     let out = tmp.path().join("out");
     let fit_toml = tmp.path().join("fit.toml");
     std::fs::write(&fit_toml, format!(r#"
-output_dir = "{out}"
+store = "{out}"
 
 [model]
 camdl = "{ir}"

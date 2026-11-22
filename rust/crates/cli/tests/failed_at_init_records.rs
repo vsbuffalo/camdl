@@ -1,9 +1,11 @@
-//! What a PMMH leaf whose every start is refused at chain init records about
-//! itself, as values a reader keys on.
+//! What a stored PMMH run whose every start is refused at chain init records
+//! about itself, as values a reader keys on.
 //!
 //! The fixture is a PMMH fit whose every start is refused at chain init (see
 //! [`FIT`]): the filter degenerates at every start, each chain is refused
 //! with a `bad_init` finding, and the method fails with every chain refused.
+
+mod fit_store_support;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -62,12 +64,13 @@ fn camdl_in(dir: &Path) -> Command {
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDLC", camdlc())
         .env("CAMDL_IR_CACHE_DIR", dir.join(".ir-cache"))
+        .env("CAMDL_STORE", dir.join("camdl-store"))
         .current_dir(dir);
     c
 }
 
-/// Run the failing fit; return its stderr, the one leaf it claimed, and the
-/// directory holding both.
+/// Run the failing fit; return its stderr, the one run it claimed in the
+/// store, and the directory holding both.
 fn failed_run() -> (String, PathBuf, tempfile::TempDir) {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
@@ -85,15 +88,8 @@ fn failed_run() -> (String, PathBuf, tempfile::TempDir) {
     assert_eq!(out.status.code(), Some(1), "the run fails with status 1:\n{stderr}");
     assert!(stderr.contains("all 2 chains failed init-eval"),
         "the run fails at chain init, every chain refused:\n{stderr}");
-    let subdirs = |d: &Path| -> Vec<PathBuf> {
-        std::fs::read_dir(d).unwrap().flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect()
-    };
-    let leaves: Vec<PathBuf> = subdirs(&dir.join("results/fits")).iter()
-        .flat_map(|fit| subdirs(fit))
-        .flat_map(|m| subdirs(&m))
-        .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with("seed_"))
-        .collect();
-    assert_eq!(leaves.len(), 1, "one claimed leaf: {leaves:?}");
+    let leaves = fit_store_support::runs(&dir.join("camdl-store"));
+    assert_eq!(leaves.len(), 1, "one claimed run: {leaves:?}");
     (stderr, leaves[0].clone(), tmp)
 }
 
@@ -102,9 +98,10 @@ fn json(path: &Path) -> serde_json::Value {
     serde_json::from_str(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 
+/// The events of a run's stored event log, each record's `event`.
 fn events(leaf: &Path) -> Vec<serde_json::Value> {
     std::fs::read_to_string(leaf.join("events.jsonl")).unwrap()
-        .lines().map(|l| serde_json::from_str(l).unwrap()).collect()
+        .lines().map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()["event"].clone()).collect()
 }
 
 /// The band the run's acceptance diagnostics apply is published as values on
@@ -124,9 +121,10 @@ fn the_begin_event_publishes_the_acceptance_band() {
 
 /// A refused chain is named by one number everywhere: a `bad_init` finding's
 /// sentence ("Chain N starting parameters …"), its `chain_id`, the stderr
-/// refusal line, `chain_starts.tsv`'s `chain_id` column and the `chain_N/`
-/// directory all carry the runner's own index, counted from 0 (gh#990,
-/// `chain_index.rs`), in `diagnostics.json` and in the event log alike.
+/// refusal line and `chain_starts.tsv`'s `chain_id` column all carry the
+/// runner's own index, counted from 0 (gh#990, `chain_index.rs`), in
+/// `diagnostics.json` and in the event log alike. A chain refused at init
+/// writes no file, so the stored run holds no `chain_N/` directory for it.
 #[test]
 fn a_refused_chains_number_agrees_across_its_records() {
     let (stderr, leaf, _tmp) = failed_run();
@@ -155,7 +153,6 @@ fn a_refused_chains_number_agrees_across_its_records() {
         let message = f["message"].as_str().unwrap();
         assert!(message.starts_with(&format!("Chain {id} starting parameters")),
             "the sentence names the chain the record names: chain_id {id}, {message:?}");
-        assert!(leaf.join(format!("chain_{id}")).is_dir(), "chain_{id}/ is that chain's directory");
         assert!(stderr.contains(&format!("chain {id}: ✗ BadInit")), "and stderr names it so:\n{stderr}");
         assert!(start_ids.contains(&id), "and chain_starts.tsv: {start_ids:?}");
         ids.push(id);

@@ -102,7 +102,7 @@ scenarios {{
 fn fit_src(variant: &str) -> String {
     format!(
         r#"ic_free = true
-output_dir = "results-{variant}"
+store = "results-{variant}"
 
 [model]
 camdl = "{variant}.camdl"

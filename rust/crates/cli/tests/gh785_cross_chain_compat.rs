@@ -21,6 +21,8 @@
 //!
 //! Skipped when the release binary or camdlc isn't present.
 
+mod fit_store_support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -121,7 +123,7 @@ fn write_fit_toml(
         format!("iterations = {SWEEPS}")
     };
     let toml = format!(r#"
-output_dir = "{out}"
+store = "{out}"
 [model]
 camdl = "{ir}"
 [data.observations]
@@ -149,26 +151,10 @@ burn_in = {BURN_IN}
     (p, out)
 }
 
-/// The method leaf directory under `<out>/fits/` — the one holding
+/// The one stored fit run under the store at `out`: the folder holding
 /// `diagnostics.json` and the `chain_N/` dirs.
 fn method_leaf(out: &Path) -> PathBuf {
-    let mut stack = vec![out.join("fits")];
-    while let Some(d) = stack.pop() {
-        let rj = d.join("run.json");
-        if rj.is_file() {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(
-                &std::fs::read_to_string(&rj).unwrap_or_default(),
-            ) {
-                if v.get("kind").and_then(|k| k.as_str()) == Some("fit_method") {
-                    return d;
-                }
-            }
-        }
-        if let Ok(es) = std::fs::read_dir(&d) {
-            for e in es.flatten() { if e.path().is_dir() { stack.push(e.path()); } }
-        }
-    }
-    panic!("no fit_method leaf under {}", out.join("fits").display());
+    fit_store_support::the_run(out)
 }
 
 fn run_fit(bin: &Path, fit: &Path) {

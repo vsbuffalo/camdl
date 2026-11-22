@@ -182,7 +182,7 @@ fn burnin_dt_below_dt_is_rejected() {
 
 fn fit_toml_mh(out_dir: &Path, ir: &Path, data: &Path, stream: &str, burnin_line: &str) -> String {
     format!(r#"
-output_dir = "{out}"
+store = "{out}"
 [model]
 camdl = "{ir}"
 [data.observations]

@@ -4,12 +4,13 @@
 //! The particle filter scores each row from integrator state at its data time,
 //! so a record whose times (here every 2.5 days) miss the default 1-day output
 //! grid fits fine. `fit predict --mode free_forward` replays its own
-//! trajectories and reads each row off the *recorded* snapshots, so it used to
-//! refuse — "observation stream 'prev' needs a value at t = 2.5, which is not a
-//! recorded output time" — leaving only an `output { trajectories { every } }`
-//! line, which re-keys the model and orphans the fit. Predict now records a
-//! snapshot at every time its projection reads; these tests pin that, and that
-//! the extra snapshots stay internal (`quantities/` keeps the declared grid).
+//! trajectories and reads each row off the *recorded* snapshots, so it must
+//! record a snapshot at every time its projection reads rather than refuse
+//! with "… which is not a recorded output time". These tests pin that, and
+//! that the extra snapshots stay internal (`quantities/` keeps the declared
+//! grid).
+
+mod fit_store_support;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -23,6 +24,7 @@ fn run(bin: &Path, dir: &Path, args: &[&str]) -> std::process::Output {
     Command::new(bin).env_remove("CLICOLOR_FORCE")
         .args(args)
         .current_dir(dir)
+        .env("CAMDL_STORE", dir.join("results"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output()
         .expect("spawn camdl")
@@ -39,17 +41,13 @@ fn tempdir(tag: &str) -> PathBuf {
     p
 }
 
-/// Newest `fits/<segment>/predict/<run id>-<address key>/` directory holding `sub/name.tsv`.
+/// `sub/name.tsv` in the first stored prediction under the store at `root`
+/// that holds it.
 fn find_artifact(root: &Path, sub: &str, name: &str) -> Option<PathBuf> {
-    for seg in std::fs::read_dir(root.join("fits")).ok()?.flatten() {
-        for d in std::fs::read_dir(seg.path().join("predict")).into_iter().flatten().flatten() {
-            let p = d.path().join(sub).join(format!("{name}.tsv"));
-            if p.is_file() {
-                return Some(p);
-            }
-        }
-    }
-    None
+    fit_store_support::predictions(root)
+        .into_iter()
+        .map(|d| d.join(sub).join(format!("{name}.tsv")))
+        .find(|p| p.is_file())
 }
 
 /// The `time` column of a TSV, optionally restricted to one `horizon` value.
@@ -114,7 +112,7 @@ const PREV: &str = "time\tprev\n2.5\t18\n5\t30\n7.5\t52\n10\t80\n12.5\t96\n15\t9
 const INC: &str = "win_start\twin_stop\tinc\n0\t2.5\t20\n2.5\t5\t35\n5\t7.5\t60\n7.5\t10\t85\n\
 10\t12.5\t80\n12.5\t15\t70\n";
 
-const FIT_TOML: &str = r#"output_dir = "results"
+const FIT_TOML: &str = r#"store = "results"
 
 [model]
 camdl = "model.camdl"
@@ -154,7 +152,7 @@ fn setup(tag: &str, model: &str) -> PathBuf {
 fn fit_then_predict(tmp: &Path) -> std::process::Output {
     let bin = binary();
     assert!(bin.exists(), "release camdl binary missing: {} — run `make build-rust`", bin.display());
-    let out = run(&bin, tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    let out = run(&bin, tmp, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(
         out.status.success(),
         "the off-grid record must fit (the filter scores from integrator state):\nstderr={}",
@@ -163,7 +161,7 @@ fn fit_then_predict(tmp: &Path) -> std::process::Output {
     run(
         &bin,
         tmp,
-        &["fit", "predict", "--fit", "fit.toml", "--seed", "1", "--n-draws", "10",
+        &["fit", "predict", "--fit", "@fit", "--seed", "1", "--n-draws", "10",
           "--mode", "free_forward"],
     )
 }
@@ -236,7 +234,7 @@ fn the_extra_snapshots_do_not_reach_the_quantities_sidecar() {
         String::from_utf8_lossy(&out.stderr)
     );
     let q = std::fs::read_to_string(
-        find_artifact(&tmp.join("results"), "quantities", "cum_r").expect("quantities/cum_r.tsv"),
+        find_artifact(&tmp.join("results"), "quantities-model", "cum_r").expect("quantities/cum_r.tsv"),
     )
     .unwrap();
     let want: Vec<f64> = (0..=20).map(f64::from).collect();

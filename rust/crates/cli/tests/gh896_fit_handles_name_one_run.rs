@@ -1,15 +1,17 @@
-//! gh#896 — a fit handle names one run, and a label never moves.
+//! gh#896 — a fit handle names one run.
 //!
-//! A problem folder (`results/fits/<stem>-<h8>/`) holds every run of one
-//! problem: rerunning a file with a changed `[method]` setting writes a second
-//! leaf beside the first. These tests pin what each handle names in that
-//! store: a leaf directory, a label, a `fit.toml`, and a problem folder that
-//! holds several runs.
+//! A problem folder (`<build>/fit/<model>-<id12>/`) holds every run of one
+//! problem under `runs/`: rerunning a file with a changed `[method]` setting
+//! writes a second run beside the first. These tests pin what each handle
+//! names in that store: a run's folder, a label, a run-id prefix, a `fit.toml`
+//! (never a run) and a problem folder (a problem, not a run).
 //!
 //! End to end because the defects are process exit codes, what the store
 //! records, and which run a verb reads — none of which a unit test over one
 //! resolver observes. Deliberately cheap: the SEIR golden IR, one estimated
 //! parameter, IF2 at 2 chains × 10 particles × 2 iterations.
+
+mod fit_store_support;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -54,8 +56,9 @@ impl Project {
         self.tmp.path()
     }
 
-    fn fits(&self) -> PathBuf {
-        self.dir().join("results").join("fits")
+    /// The run store every command of the project reads and writes.
+    fn store(&self) -> PathBuf {
+        self.dir().join("results")
     }
 
     /// Write `name` holding the shared problem and `method` as its `[method]`.
@@ -101,7 +104,7 @@ dt = 1.0
     fn run(&self, args: &[&str]) -> Output {
         Command::new(binary()).env_remove("CLICOLOR_FORCE")
             .current_dir(self.dir())
-            .env("CAMDL_OUTPUT_DIR", self.dir().join("results")).env("CAMDL_STORE", std::path::Path::new(&self.dir().join("results")).join("camdl-store"))
+            .env("CAMDL_STORE", self.store())
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .env("CAMDLC", camdlc_bin())
             .args(args)
@@ -117,24 +120,9 @@ dt = 1.0
         format!("{}{}", String::from_utf8_lossy(&out.stdout), stderr)
     }
 
-    /// Every fit leaf directory in the store (the directories holding a
-    /// `run.json`), sorted.
+    /// Every stored fit run's folder in the store, sorted.
     fn leaves(&self) -> Vec<PathBuf> {
-        let mut out = Vec::new();
-        let mut stack = vec![self.fits()];
-        while let Some(d) = stack.pop() {
-            let Ok(rd) = std::fs::read_dir(&d) else { continue };
-            for e in rd.flatten() {
-                let p = e.path();
-                if p.is_dir() {
-                    if p.join("run.json").is_file() {
-                        out.push(p);
-                    } else {
-                        stack.push(p);
-                    }
-                }
-            }
-        }
+        let mut out = fit_store_support::runs(&self.store());
         out.sort();
         out
     }
@@ -151,9 +139,7 @@ fn text(out: &Output) -> String {
     format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
 }
 
-/// `fit summary <leaf directory>` summarises that run. It used to read the
-/// leaf as a problem folder, find no sidecar beside it, print "(no completed
-/// methods found …)" and exit 0.
+/// `fit summary <run folder>` summarises that run.
 #[test]
 fn summary_of_a_leaf_directory_summarises_that_run() {
     let p = Project::new();
@@ -187,9 +173,9 @@ fn pgas_from(starts: &str) -> String {
     )
 }
 
-/// The problem folder (`results/fits/<stem>-<h8>`) a leaf sits in.
+/// The problem folder (`<build>/fit/<model>-<id12>/`) a run sits in.
 fn segment_of(leaf: &Path) -> PathBuf {
-    leaf.parent().and_then(Path::parent).unwrap().to_path_buf()
+    fit_store_support::problem_of(leaf)
 }
 
 /// One file run twice with a changed `[method]` setting: two runs in one
@@ -205,29 +191,27 @@ fn two_runs_of_one_file(p: &Project) -> (PathBuf, Vec<PathBuf>) {
     (segment_of(&leaves[0]), leaves)
 }
 
-/// A handle naming a folder that holds two runs is refused, and the refusal
-/// says what actually sets them apart. It used to say "several seeds or
-/// cells" for two runs with one seed that differ in `[method]`.
+/// A problem folder offered as a starts source names a problem, not a run, so
+/// it is refused, and the refusal lists the runs the folder holds so the user
+/// can name one.
 #[test]
-fn an_ambiguous_starts_source_names_what_sets_the_runs_apart() {
+fn a_problem_folder_as_a_starts_source_lists_its_runs() {
     let p = Project::new();
     let (segment, leaves) = two_runs_of_one_file(&p);
     p.config("post.toml", &pgas_from(&format!("{{ from_mle = \"{}\" }}", segment.display())));
 
     let out = p.run(&["fit", "run", "post.toml", "--seed", "1"]);
     let all = text(&out);
-    assert!(!out.status.success(), "two candidate runs must be refused:\n{all}");
-    assert!(!all.contains("several seeds or cells"), "the runs share a seed:\n{all}");
-    assert!(all.contains("names 2 runs, which differ in `[method]` settings or `--starts`:"),
-        "the refusal names the axis the runs differ on:\n{all}");
-    assert!(!all.contains("fit seed"), "the seeds are equal:\n{all}");
+    assert!(!out.status.success(), "a problem is not a run:\n{all}");
+    assert!(all.contains("names a fit problem") && all.contains("Name one by its id or folder"),
+        "the refusal says what the folder names:\n{all}");
     for leaf in &leaves {
-        assert!(all.contains(&leaf.display().to_string()), "lists {}:\n{all}", leaf.display());
+        assert!(all.contains(&folder_name(leaf)), "lists {}:\n{all}", leaf.display());
     }
 }
 
-/// `fit summary` of a problem folder holding two runs of one method lists
-/// them and fails instead of reporting the one that sorts first.
+/// `fit summary` of a problem folder holding two runs refuses, listing them,
+/// instead of reporting one; each run is summarised when named.
 #[test]
 fn summary_of_a_folder_with_two_runs_of_one_method_lists_them() {
     let p = Project::new();
@@ -237,9 +221,8 @@ fn summary_of_a_folder_with_two_runs_of_one_method_lists_them() {
     let all = text(&out);
     assert!(!out.status.success(), "a choice between two runs is the user's:\n{all}");
     for leaf in &leaves {
-        assert!(all.contains(&leaf.display().to_string()), "lists {}:\n{all}", leaf.display());
+        assert!(all.contains(&folder_name(leaf)), "lists {}:\n{all}", leaf.display());
     }
-    // Each run is still summarised when named.
     for leaf in &leaves {
         p.ok(&["fit", "summary", &leaf.to_string_lossy()]);
     }
@@ -252,9 +235,8 @@ fn pgas(sweeps: u32) -> String {
     )
 }
 
-/// `fit predict <leaf>` replays that run's draws. Two PGAS runs of one file
-/// differ in `sweeps`, so their draw counts tell which was read; a leaf
-/// directory used to be refused for having no `fit.meta.json` beside it.
+/// `fit predict <run folder>` replays that run's draws. Two PGAS runs of one
+/// file differ in `sweeps`, so their draw counts tell which was read.
 #[test]
 fn predict_of_a_leaf_reads_that_run() {
     let p = Project::new();
@@ -274,13 +256,12 @@ fn predict_of_a_leaf_reads_that_run() {
     }
 }
 
-/// The `run_id` a leaf's `run.json` records, and its label.
+/// A run's id, the label of the invocation that stored or reused it (the
+/// newest such row `camdl list` shows), and its `run_inputs.json`.
 fn record(leaf: &Path) -> (String, Option<String>, serde_json::Value) {
-    let v: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(leaf.join("run.json")).unwrap()).unwrap();
-    let id = v["run_id"].as_str().unwrap().to_string();
-    let label = v["provenance"]["label"].as_str().map(String::from);
-    (id, label, v)
+    let inputs = fit_store_support::run_inputs(leaf);
+    let id = inputs["run_id"].as_str().unwrap().to_string();
+    (id, None, inputs)
 }
 
 /// The leaves in the store that `before` did not hold.
@@ -288,39 +269,67 @@ fn new_leaves(p: &Project, before: &[PathBuf]) -> Vec<PathBuf> {
     p.leaves().into_iter().filter(|l| !before.contains(l)).collect()
 }
 
-/// A fit label moves to the run most recently given it. A changed file under
-/// the same label runs and takes it; the earlier holder is `@L~1`; a cache
-/// hit on a run carrying the label, another label, or none makes that run
-/// `@L`; and the handle forms that name no run are refused by name.
+/// A fit label names the run most recently given it. A changed file under the
+/// same label runs and takes it; the earlier holder is `@L~1`; a cache hit
+/// given the label makes that run `@L` again; a cache hit given another label
+/// is named by that label too; and the handle forms that name no run are
+/// refused by name.
 #[test]
 fn a_label_moves_to_the_run_last_given_it() {
     let p = Project::new();
     p.config("scout.toml", &if2(2));
     p.ok(&["fit", "run", "scout.toml", "--seed", "1", "--label", "scout"]);
     let two = p.leaves();
-    let (two_id, _, two_rec) = record(&two[0]);
-    assert!(two_rec["provenance"]["label_set_at"].as_str().is_some(),
-        "a labelled run is stamped when it completes: {two_rec}");
+    let (two_id, ..) = record(&two[0]);
 
     // A new identity under the held label runs, and the label moves to it.
     p.config("scout.toml", &if2(3));
-    let all = p.ok(&["fit", "run", "scout.toml", "--seed", "1", "--label", "scout"]);
+    p.ok(&["fit", "run", "scout.toml", "--seed", "1", "--label", "scout"]);
     let three = new_leaves(&p, &two);
     assert_eq!(three.len(), 1);
-    let (three_id, three_label, _) = record(&three[0]);
-    assert_eq!(three_label.as_deref(), Some("scout"));
-    assert!(all.contains(&format!("note: @scout now names run {} (previously run {}",
-        &three_id[..6], &two_id[..6])), "the move is said once:\n{all}");
-    assert_eq!(record(&two[0]).1.as_deref(), Some("scout"),
-        "the displaced run is not rewritten: it keeps the label as an earlier holder");
+    let (three_id, ..) = record(&three[0]);
 
     // `@scout` is the 3-chain run, `@scout~0` the same, `@scout~1` the 2-chain run.
-    let now = p.ok(&["fit", "summary", "@scout"]);
-    assert!(now.contains("3 chains"), "{now}");
-    assert!(now.contains(&format!("@scout → run {}", &three_id[..6])) && now.contains("(1 earlier holder)"),
-        "the resolution line names the run and the history:\n{now}");
-    assert!(p.ok(&["fit", "summary", "@scout~0"]).contains("3 chains"));
-    assert!(p.ok(&["fit", "summary", "@scout~1"]).contains("2 chains"));
+    assert!(p.ok(&["fit", "summary", "@scout"]).contains(&folder_name(&three[0])));
+    assert!(p.ok(&["fit", "summary", "@scout~0"]).contains(&folder_name(&three[0])));
+    assert!(p.ok(&["fit", "summary", "@scout~1"]).contains(&folder_name(&two[0])));
+    assert_ne!(two_id, three_id);
+
+    // Reverting the change: a cache hit given `scout` makes that run `@scout`.
+    p.config("scout.toml", &if2(2));
+    let all = p.ok(&["fit", "run", "scout.toml", "--seed", "1", "--label", "scout"]);
+    assert!(all.contains("cache hit"), "{all}");
+    assert!(p.ok(&["fit", "summary", "@scout"]).contains(&folder_name(&two[0])));
+    assert!(p.ok(&["fit", "summary", "@scout~1"]).contains(&folder_name(&three[0])));
+
+    // A cache hit given another label: that label names the run.
+    p.config("scout.toml", &if2(3));
+    let all = p.ok(&["fit", "run", "scout.toml", "--seed", "1", "--label", "wide"]);
+    assert!(all.contains("cache hit"), "{all}");
+    assert!(p.ok(&["fit", "summary", "@wide"]).contains(&folder_name(&three[0])));
+
+    // A cache hit on an unlabelled run: it takes the label.
+    p.config("scout.toml", &if2(4));
+    p.ok(&["fit", "run", "scout.toml", "--seed", "1"]);
+    let four = new_leaves(&p, &[two.clone(), three.clone()].concat());
+    assert_eq!(four.len(), 1);
+    p.ok(&["fit", "run", "scout.toml", "--seed", "1", "--label", "four"]);
+    assert!(p.ok(&["fit", "summary", "@four"]).contains(&folder_name(&four[0])));
+}
+
+/// A malformed label offset is refused naming the form `@<label>~<N>`, and an
+/// offset past a label's last earlier holder is refused listing the runs that
+/// held it.
+#[test]
+fn a_label_offset_that_names_no_holder_is_refused_with_the_form_and_the_history() {
+    let p = Project::new();
+    p.config("scout.toml", &if2(2));
+    p.ok(&["fit", "run", "scout.toml", "--seed", "1", "--label", "scout"]);
+    let (two_id, ..) = record(&p.leaves()[0]);
+    p.config("scout.toml", &if2(3));
+    let before = p.leaves();
+    p.ok(&["fit", "run", "scout.toml", "--seed", "1", "--label", "scout"]);
+    let (three_id, ..) = record(&new_leaves(&p, &before)[0]);
     for bad in ["@scout~", "@scout~x", "@scout~+1"] {
         let out = p.run(&["fit", "summary", bad]);
         assert!(!out.status.success(), "{bad} is refused");
@@ -329,35 +338,8 @@ fn a_label_moves_to_the_run_last_given_it() {
     let out = p.run(&["fit", "summary", "@scout~2"]);
     assert!(!out.status.success());
     let past = text(&out);
-    assert!(past.contains("@scout~2 names no run") && past.contains(&two_id[..12])
+    assert!(past.contains("@scout~2") && past.contains(&two_id[..12])
         && past.contains(&three_id[..12]), "past the end lists the history:\n{past}");
-
-    // Reverting the change: a cache hit on a run that carries `scout` is
-    // re-stamped, and `@scout` points back at it.
-    p.config("scout.toml", &if2(2));
-    let all = p.ok(&["fit", "run", "scout.toml", "--seed", "1", "--label", "scout"]);
-    assert!(all.contains("cache hit"), "{all}");
-    assert!(all.contains(&format!("note: @scout now names run {}", &two_id[..6])), "{all}");
-    assert!(p.ok(&["fit", "summary", "@scout"]).contains("2 chains"));
-    assert!(p.ok(&["fit", "summary", "@scout~1"]).contains("3 chains"));
-
-    // A cache hit on a run carrying another label: replaced, and said.
-    p.config("scout.toml", &if2(3));
-    let all = p.ok(&["fit", "run", "scout.toml", "--seed", "1", "--label", "wide"]);
-    assert!(all.contains(&format!("label: run {} was @scout, now @wide", &three_id[..6])), "{all}");
-    assert_eq!(record(&three[0]).1.as_deref(), Some("wide"));
-    assert!(p.ok(&["fit", "summary", "@wide"]).contains("3 chains"));
-    let out = p.run(&["fit", "summary", "@scout~1"]);
-    assert!(!out.status.success(), "relabelling an earlier holder renumbers the history");
-
-    // A cache hit on an unlabelled run: it takes the label.
-    p.config("scout.toml", &if2(4));
-    p.ok(&["fit", "run", "scout.toml", "--seed", "1"]);
-    let four = new_leaves(&p, &[two.clone(), three.clone()].concat());
-    assert_eq!(record(&four[0]).1, None);
-    p.ok(&["fit", "run", "scout.toml", "--seed", "1", "--label", "four"]);
-    assert_eq!(record(&four[0]).1.as_deref(), Some("four"));
-    assert!(p.ok(&["fit", "summary", "@four"]).contains("4 chains"));
 }
 
 /// A run started from `@scout` records the run `@scout` named, so moving the
@@ -374,73 +356,21 @@ fn a_downstream_run_rekeys_after_its_source_label_moves() {
     // watchdog, so its verdict may not pass; this test is about identity.
     p.ok(&["fit", "run", "post.toml", "--seed", "1", "--allow-nonconverged-source"]);
     let before = p.leaves();
-    let post_a = before.iter().find(|l| record(l).2["inputs"]["starts_source"]["handle"] == "@scout")
+    let post_a = before.iter().find(|l| record(l).2["starts_source"]["handle"] == "@scout")
         .unwrap().clone();
-    assert_eq!(record(&post_a).2["inputs"]["starts_source"]["run_id"], scout_a.as_str());
+    assert_eq!(record(&post_a).2["starts_source"]["run_id"], scout_a.as_str());
 
     p.config("scout.toml", &if2(3));
     p.ok(&["fit", "run", "scout.toml", "--seed", "1", "--label", "scout"]);
-    let (_, _, a_rec) = record(&post_a);
-    assert_eq!(a_rec["deps"][0]["run_id"], scout_a.as_str(), "the existing run's source is unchanged");
+    assert_eq!(record(&post_a).2["starts_source"]["run_id"], scout_a.as_str(),
+        "the existing run's source is unchanged");
 
     let all = p.ok(&["fit", "run", "post.toml", "--seed", "1", "--allow-nonconverged-source"]);
     assert!(!all.contains("cache hit"), "the moved source is a new dependency:\n{all}");
     let post_b: Vec<PathBuf> = new_leaves(&p, &before).into_iter()
-        .filter(|l| record(l).2["inputs"]["starts_source"]["handle"] == "@scout").collect();
-    assert_eq!(post_b.len(), 1, "the downstream run re-keyed to a new leaf");
-    assert_ne!(record(&post_b[0]).2["deps"][0]["run_id"], scout_a.as_str());
-}
-
-/// Rewrite a leaf's `run.json` through `edit` (a test fixture: a record a
-/// run in flight, interrupted, or written before `label_set_at` existed).
-fn edit_record(leaf: &Path, edit: impl FnOnce(&mut serde_json::Value)) {
-    let mut v: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(leaf.join("run.json")).unwrap()).unwrap();
-    edit(&mut v);
-    std::fs::write(leaf.join("run.json"), serde_json::to_vec_pretty(&v).unwrap()).unwrap();
-}
-
-/// A run in flight under a label blocks it; an interrupted one neither holds
-/// nor blocks it; a run recorded before `label_set_at` orders by `created_at`.
-#[test]
-fn a_live_run_blocks_its_label_and_an_interrupted_one_does_not() {
-    let p = Project::new();
-    p.config("scout.toml", &if2(2));
-    p.ok(&["fit", "run", "scout.toml", "--seed", "1", "--label", "scout"]);
-    let two = p.leaves();
-    p.config("scout.toml", &if2(3));
-    p.ok(&["fit", "run", "scout.toml", "--seed", "1"]);
-    let three = new_leaves(&p, &two);
-    let (three_id, ..) = record(&three[0]);
-
-    // The 2-chain run "in flight": recorded running, its lock held by a live
-    // process (this test's).
-    edit_record(&two[0], |v| v["status"] = "running".into());
-    std::fs::write(two[0].join(".lock"), format!("{}\n", std::process::id())).unwrap();
-    let out = p.run(&["label", &three_id[..12], "scout"]);
-    assert!(!out.status.success(), "a live run carrying the label blocks it:\n{}", text(&out));
-    assert!(text(&out).contains("still running"), "{}", text(&out));
-    let out = p.run(&["fit", "run", "scout.toml", "--seed", "1", "--label", "scout"]);
-    assert!(!out.status.success() && text(&out).contains("still running"), "{}", text(&out));
-
-    // Its lock gone, the run is interrupted: it holds nothing and blocks nothing.
-    std::fs::remove_file(two[0].join(".lock")).unwrap();
-    let out = p.run(&["fit", "summary", "@scout"]);
-    assert!(!out.status.success(), "an interrupted run does not hold its label:\n{}", text(&out));
-    p.ok(&["label", &three_id[..12], "scout"]);
-    assert!(p.ok(&["fit", "summary", "@scout"]).contains("3 chains"));
-
-    // Restored, and stamped before the label existed: the order is by
-    // `created_at`, so the run written earlier is the earlier holder.
-    edit_record(&two[0], |v| {
-        v["status"] = "completed".into();
-        v["provenance"].as_object_mut().unwrap().remove("label_set_at");
-        v["provenance"]["created_at"] = "2099-01-01T00:00:00Z".into();
-    });
-    assert!(p.ok(&["fit", "summary", "@scout"]).contains("2 chains"),
-        "a run with no label_set_at counts with its created_at");
-    edit_record(&two[0], |v| v["provenance"]["created_at"] = "2000-01-01T00:00:00Z".into());
-    assert!(p.ok(&["fit", "summary", "@scout"]).contains("3 chains"));
+        .filter(|l| record(l).2["starts_source"]["handle"] == "@scout").collect();
+    assert_eq!(post_b.len(), 1, "the downstream run re-keyed to a new run");
+    assert_ne!(record(&post_b[0]).2["starts_source"]["run_id"], scout_a.as_str());
 }
 
 /// Every verb that resolves `@L` says which run it resolved to, on stderr.
@@ -450,7 +380,7 @@ fn every_resolving_verb_prints_the_resolution_line() {
     p.config("post.toml", &pgas(4));
     p.ok(&["fit", "run", "post.toml", "--seed", "1", "--label", "post"]);
     let (id, ..) = record(&p.leaves()[0]);
-    let root = p.dir().join("results").to_string_lossy().into_owned();
+    let root = p.store().to_string_lossy().into_owned();
     let want = format!("@post → run {}", &id[..6]);
     for args in [
         vec!["fit", "summary", "@post"],
@@ -466,62 +396,60 @@ fn every_resolving_verb_prints_the_resolution_line() {
     }
 }
 
-/// One invocation writing several runs has no one run to give a label to.
+/// A label given to an invocation that writes several runs names no one run:
+/// `@L` is refused with the runs listed.
 #[test]
-fn a_label_on_an_invocation_that_writes_several_runs_is_refused() {
+fn a_label_on_an_invocation_that_writes_several_runs_names_no_one_run() {
     let p = Project::new();
     p.config_with("seeds.toml", "fit_seeds = [1, 2]", &if2(2));
-    let out = p.run(&["fit", "run", "seeds.toml", "--label", "both"]);
+    p.ok(&["fit", "run", "seeds.toml", "--label", "both"]);
+    let leaves = p.leaves();
+    assert_eq!(leaves.len(), 2, "premise: two seeds, two runs");
+    let out = p.run(&["fit", "summary", "@both"]);
     let all = text(&out);
     assert!(!out.status.success(), "{all}");
-    assert!(all.contains("names one run, but this invocation writes 2 method leaves"), "{all}");
-    assert!(p.leaves().is_empty(), "nothing ran");
+    assert!(all.contains("names 2 results, where one is needed"), "{all}");
+    for leaf in &leaves {
+        assert!(all.contains(&record(leaf).0[..12]), "lists {}:\n{all}", leaf.display());
+    }
 }
 
-/// `camdl label` moves a label to the run it names, whatever its age, and a
-/// fit id (a problem folder, not a run) is refused with its runs listed.
+/// `camdl label` of a stored fit run is refused: a run's record is never
+/// rewritten, and the refusal names the `fit run --label` that labels it.
 #[test]
-fn camdl_label_moves_a_label_to_the_run_it_names() {
+fn camdl_label_of_a_fit_run_is_refused() {
     let p = Project::new();
     p.config("scout.toml", &if2(2));
     p.ok(&["fit", "run", "scout.toml", "--seed", "1"]);
-    let older = p.leaves();
-    p.config("scout.toml", &if2(3));
-    p.ok(&["fit", "run", "scout.toml", "--seed", "1", "--label", "scout"]);
-    let (older_id, ..) = record(&older[0]);
-    assert!(p.ok(&["fit", "summary", "@scout"]).contains("3 chains"));
-
-    let all = p.ok(&["label", &older_id[..12], "scout"]);
-    assert!(all.contains(&format!("note: @scout now names run {}", &older_id[..6])), "{all}");
-    assert!(p.ok(&["fit", "summary", "@scout"]).contains("2 chains"), "@scout follows the label");
-    assert!(p.ok(&["fit", "summary", "@scout~1"]).contains("3 chains"));
-
-    let leaves = p.leaves();
-    let fit_id = record(&leaves[0]).2["levels"][0]["hash"].as_str().unwrap()[..8].to_string();
-    let folder = p.run(&["label", &fit_id, "folder"]);
-    assert!(!folder.status.success(), "{}", text(&folder));
-    assert!(text(&folder).contains("a problem folder, not a run"), "{}", text(&folder));
+    let (id, ..) = record(&p.leaves()[0]);
+    let out = p.run(&["label", &id[..12], "scout"]);
+    let all = text(&out);
+    assert!(!out.status.success(), "{all}");
+    assert!(all.contains("sealed") && all.contains("--label"), "{all}");
+    let out = p.run(&["fit", "summary", "@scout"]);
+    assert!(!out.status.success(), "the refused label names nothing:\n{}", text(&out));
 }
 
-/// A `fit.toml` names the run made from the file as it now reads. One file
-/// run with 2 chains then 3 leaves both runs in one folder whose archive is
-/// the 3-chain config; `fit summary scout.toml` used to report whichever run
-/// sorted first.
+/// A `fit.toml` is not a run handle: `fit summary scout.toml` is refused,
+/// listing the run the file as it now reads produced, so the user can name it.
 #[test]
-fn a_config_names_the_run_made_from_it() {
+fn a_config_is_refused_as_a_handle_with_its_runs_listed() {
     let p = Project::new();
-    let (_segment, _leaves) = two_runs_of_one_file(&p); // 2 chains, then 3
-    let now = p.ok(&["fit", "summary", "scout.toml"]);
-    assert!(now.contains("3 chains"), "the file says 3 chains:\n{now}");
-    p.config("scout.toml", &if2(2));
-    let back = p.ok(&["fit", "summary", "scout.toml"]);
-    assert!(back.contains("2 chains"), "the file says 2 chains again:\n{back}");
+    let (_segment, leaves) = two_runs_of_one_file(&p); // 2 chains, then 3
+    let three = leaves.iter().find(|l| record(l).2["n_chains"] == 3).unwrap();
+    let out = p.run(&["fit", "summary", "scout.toml"]);
+    let all = text(&out);
+    assert!(!out.status.success(), "{all}");
+    assert!(all.contains("a configuration never names a run"), "{all}");
+    assert!(all.contains(&record(three).0[..12]) && all.contains(&folder_name(three)),
+        "lists the run the file now makes:\n{all}");
 }
 
-/// A second config that reaches a stored run by a cache hit names it too:
-/// `fit_seeds = [1]` and `--seed 1` are one run from two config texts.
+/// A second config that reaches a stored run by a cache hit lists that run
+/// when offered as a handle: `fit_seeds = [1]` and `--seed 1` are one run
+/// from two config texts.
 #[test]
-fn a_config_that_reused_a_stored_run_names_it() {
+fn a_config_that_reused_a_stored_run_lists_it() {
     let p = Project::new();
     p.config("scout.toml", &if2(2));
     p.ok(&["fit", "run", "scout.toml", "--seed", "1"]);
@@ -529,7 +457,10 @@ fn a_config_that_reused_a_stored_run_names_it() {
     let run = p.ok(&["fit", "run", "seeded.toml"]);
     assert!(run.contains("cache hit"), "premise: one run, reused:\n{run}");
     assert_eq!(p.leaves().len(), 1);
-    p.ok(&["fit", "summary", "seeded.toml"]);
+    let out = p.run(&["fit", "summary", "seeded.toml"]);
+    let all = text(&out);
+    assert!(!out.status.success() && all.contains("a configuration never names a run"), "{all}");
+    assert!(all.contains(&record(&p.leaves()[0]).0[..12]), "lists the reused run:\n{all}");
 }
 
 /// Two PGAS runs of one file, sweeps 4 then 7: (folder, short run, long run).
@@ -544,8 +475,7 @@ fn two_pgas_runs(p: &Project) -> (PathBuf, PathBuf, PathBuf) {
     (segment_of(&short[0]), short[0].clone(), long[0].clone())
 }
 
-/// `fit predict <folder>` holding two runs lists them and fails. It used to
-/// replay the last leaf with draws in directory order.
+/// `fit predict <problem folder>` holding two runs is refused, listing them.
 #[test]
 fn predict_of_a_folder_with_two_runs_lists_them() {
     let p = Project::new();
@@ -553,16 +483,15 @@ fn predict_of_a_folder_with_two_runs_lists_them() {
     let out = p.run(&["fit", "predict", &segment.to_string_lossy(), "--mode", "free_forward"]);
     let all = text(&out);
     assert!(!out.status.success(), "a choice between two runs is the user's:\n{all}");
-    assert!(all.contains("names 2 runs"), "{all}");
+    assert!(all.contains("names a fit problem"), "{all}");
     for leaf in [&short, &long] {
-        assert!(all.contains(&leaf.display().to_string()), "lists {}:\n{all}", leaf.display());
+        assert!(all.contains(&folder_name(leaf)), "lists {}:\n{all}", leaf.display());
     }
 }
 
-/// `fit predict` writes under a directory keyed by the run it read, and its
-/// manifests record that run's id. Two runs of one problem used to write into
-/// the shared folder, the second overwriting the first, and `predictive.json`
-/// named no run.
+/// `fit predict` writes inside the run it read (`<run>/predict/<mode>-<id12>/`),
+/// and its manifests record that run's id; nothing is written into the
+/// problem folder the two runs share.
 #[test]
 fn predict_writes_under_the_run_it_read() {
     let p = Project::new();
@@ -570,15 +499,14 @@ fn predict_writes_under_the_run_it_read() {
     for leaf in [&short, &long] {
         p.ok(&["fit", "predict", &leaf.to_string_lossy(), "--mode", "free_forward"]);
     }
-    assert!(!segment.join("predictive").exists() && !segment.join("predictive.json").exists(),
+    assert!(!segment.join("predictive").exists() && !segment.join("predictive.json").exists()
+        && !segment.join("predict").exists(),
         "nothing is written into the shared folder");
     for (leaf, draws) in [(&short, 6), (&long, 12)] {
         let (id, _, _) = record(leaf);
-        // `--mode free_forward` keys the address: `<id12>-<address key>`.
-        let out = std::fs::read_dir(segment.join("predict")).unwrap().flatten()
-            .map(|e| e.path())
-            .find(|d| d.file_name().unwrap().to_string_lossy().starts_with(&id[..12]))
-            .unwrap_or_else(|| panic!("no predict directory for run {id}"));
+        let outs = fit_store_support::predictions(leaf);
+        assert_eq!(outs.len(), 1, "one prediction inside {}: {outs:?}", leaf.display());
+        let out = &outs[0];
         let manifest: serde_json::Value = serde_json::from_slice(
             &std::fs::read(out.join("predictive.json")).unwrap()).unwrap();
         assert_eq!(manifest["run_id"], id.as_str(), "predictive.json names its run");
@@ -668,198 +596,101 @@ fn the_starts_handle_spelling_is_not_identity() {
 }
 
 /// `fit table` gives each run its own row, with that run's label, time and
-/// numbers. With two runs in one folder it used to print one row whose label
-/// and time were the newest run's and whose run id and estimates were the
-/// other's.
+/// numbers.
 #[test]
 fn fit_table_gives_each_run_its_own_row() {
     let p = Project::new();
     p.config("post.toml", &pgas(4));
     p.ok(&["fit", "run", "post.toml", "--seed", "1", "--label", "short"]);
+    let short = p.leaves();
     p.config("post.toml", &pgas(7));
     p.ok(&["fit", "run", "post.toml", "--seed", "1", "--label", "long"]);
     let leaves = p.leaves();
     assert_eq!(leaves.len(), 2);
 
-    let out = p.run(&["fit", "table", &p.fits().to_string_lossy(), "--format", "json"]);
+    let out = p.run(&["fit", "table", &p.store().to_string_lossy(), "--format", "json"]);
     assert!(out.status.success(), "{}", text(&out));
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let rows = v["rows"].as_array().unwrap();
     assert_eq!(rows.len(), 2, "one row per run: {v}");
     for leaf in &leaves {
-        let (id, label, rec) = record(leaf);
+        let (id, ..) = record(leaf);
+        let label = if short.contains(leaf) { "short" } else { "long" };
         let row = rows.iter().find(|r| r["run_id"] == id.as_str())
             .unwrap_or_else(|| panic!("no row for run {id}: {v}"));
-        assert_eq!(row["label"].as_str(), label.as_deref(), "the row's label is its run's");
-        assert_eq!(row["created_at"], rec["provenance"]["created_at"], "and its time");
+        assert_eq!(row["label"].as_str(), Some(label), "the row's label is its run's: {row}");
+        let run_json = fit_store_support::json(&leaf.join("run.json"));
+        assert_eq!(row["created_at"], run_json["started"], "and its time: {row}");
     }
 
-    let csv = p.ok(&["fit", "table", &p.fits().to_string_lossy(), "--format", "csv"]);
+    let csv = p.ok(&["fit", "table", &p.store().to_string_lossy(), "--format", "csv"]);
     assert!(csv.lines().next().unwrap().split(',').any(|c| c == "run_id"), "{csv}");
-    let txt = p.ok(&["fit", "table", &p.fits().to_string_lossy()]);
+    let txt = p.ok(&["fit", "table", &p.store().to_string_lossy()]);
     for leaf in &leaves {
         assert!(txt.contains(&record(leaf).0[..12]), "the text table names each run:\n{txt}");
     }
 }
 
 /// `simulate --draws posterior --fit` reads the run its handle names: a
-/// folder holding two runs is refused with them listed (it used to replay the
-/// last in directory order), and `@label` is accepted.
+/// problem folder holding two runs is refused with them listed, and `@label`
+/// is accepted.
 #[test]
 fn simulate_posterior_draws_come_from_the_named_run() {
     let p = Project::new();
     p.config("post.toml", &pgas(4));
     p.ok(&["fit", "run", "post.toml", "--seed", "1", "--label", "short"]);
+    let short = p.leaves().remove(0);
     p.config("post.toml", &pgas(7));
     p.ok(&["fit", "run", "post.toml", "--seed", "1"]);
     let leaves = p.leaves();
-    let short = leaves.iter().find(|l| record(l).1.as_deref() == Some("short")).unwrap().clone();
+    assert_eq!(leaves.len(), 2);
     let segment = segment_of(&short);
     let ir = golden_ir().to_string_lossy().into_owned();
     let sim = |fit: &str| p.run(&["simulate", &ir, "--draws", "posterior", "--fit", fit,
-        "--seed", "1", "--store", "sims"]);
+        "--seed", "1"]);
 
     let out = sim(&segment.to_string_lossy());
     let all = text(&out);
     assert!(!out.status.success(), "a folder holding two runs is refused:\n{all}");
-    assert!(all.contains("names 2 runs"), "{all}");
+    for leaf in &leaves {
+        assert!(all.contains(&folder_name(leaf)), "lists {}:\n{all}", leaf.display());
+    }
 
     let out = sim("@short");
     let all = text(&out);
     assert!(out.status.success(), "@label names one run:\n{all}");
-    assert!(all.contains("6 draws from") && all.contains(&short.display().to_string()),
+    assert!(all.contains("6 draws from") && all.contains(&folder_name(&short)),
         "the draws are the labelled run's:\n{all}");
 }
 
-/// A `fit.toml` handle names only a run the file alone makes. A run made with
-/// an identity-bearing override — `--seed`, `--starts`, `--sweep`,
-/// `--decibans-thresh` — is not the file's run, so the file does not name it:
-/// `fit summary seedy.toml` used to report the `--seed 7` run although
-/// `fit run seedy.toml` computes seed 1.
-#[test]
-fn a_config_does_not_name_a_run_made_with_overrides() {
-    let p = Project::new();
-    p.config("seedy.toml", &if2(2));
-    let overridden: [&[&str]; 4] = [
-        &["--seed", "7"],
-        &["--seed", "1", "--starts", "lhs"],
-        &["--seed", "1", "--sweep", "gamma=0.25"],
-        &["--seed", "1", "--decibans-thresh", "3"],
-    ];
-    for extra in overridden {
-        let mut args = vec!["fit", "run", "seedy.toml"];
-        args.extend_from_slice(extra);
-        p.ok(&args);
-        let out = p.run(&["fit", "summary", "seedy.toml"]);
-        assert!(!out.status.success(),
-            "the file does not name a run made with {extra:?}:\n{}", text(&out));
-    }
-    // An override that restates the file is the file's run.
-    p.ok(&["fit", "run", "seedy.toml", "--seed", "1"]);
-    let made = p.leaves();
-    let out = p.ok(&["fit", "summary", "seedy.toml"]);
-    assert!(out.contains("2 chains"), "{out}");
-    assert_eq!(made.len(), 5, "four overridden runs and the file's own: {made:?}");
-}
-
-/// Concurrent `camdl label` of different runs with one label: every run
-/// takes it, each stamped under the store-wide lock, and `@label` names
-/// exactly one of them, the run stamped last (ties broken by run id).
-#[test]
-fn concurrent_labels_leave_one_holder() {
-    let p = Project::new();
-    for k in 0..6 {
-        // Six runs of one cheap method, told apart by their cooling.
-        p.config("scout.toml", &if2(2).replace("cooling = 0.7", &format!("cooling = 0.7{k}")));
-        p.ok(&["fit", "run", "scout.toml", "--seed", "1"]);
-    }
-    let ids: Vec<String> = p.leaves().iter().map(|l| record(l).0).collect();
-    assert_eq!(ids.len(), 6);
-    for _round in 0..3 {
-        let label = format!("race{_round}");
-        let children: Vec<std::process::Child> = ids
-            .iter()
-            .map(|id| {
-                Command::new(binary()).env_remove("CLICOLOR_FORCE")
-                    .current_dir(p.dir())
-                    .env("CAMDL_OUTPUT_DIR", p.dir().join("results")).env("CAMDL_STORE", std::path::Path::new(&p.dir().join("results")).join("camdl-store"))
-                    .args(["label", &id[..12], &label])
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .spawn()
-                    .unwrap()
-            })
-            .collect();
-        let ok = children.into_iter()
-            .map(|c| c.wait_with_output().unwrap().status.success())
-            .filter(|s| *s)
-            .count();
-        let carrying: Vec<(String, String)> = p.leaves().iter()
-            .map(|l| record(l))
-            .filter(|(_, l, _)| l.as_deref() == Some(label.as_str()))
-            .map(|(id, _, rec)| (rec["provenance"]["label_set_at"].as_str().unwrap().to_string(), id))
-            .collect();
-        assert_eq!((ok, carrying.len()), (6, 6), "every run takes {label}, stamped");
-        // The holder: the latest stamp, the smallest run id among equal ones.
-        let latest = carrying.iter().map(|(at, _)| at.clone()).max().unwrap();
-        let holder = carrying.iter().filter(|(at, _)| *at == latest).map(|(_, id)| id).min().unwrap();
-        let out = p.ok(&["fit", "summary", &format!("@{label}")]);
-        assert!(out.contains(&format!("@{label} → run {}", &holder[..6])) && out.contains("(5 earlier holders)"),
-            "@{label} names the run stamped last:\n{out}");
-    }
-}
-
-/// A label stored by an older camdl on the problem folder's fit.meta.json is
-/// no longer read; `@label` says where it is and prints the command that
-/// gives it to a run.
-#[test]
-fn a_folder_label_from_an_older_camdl_gets_the_relabel_command() {
-    let p = Project::new();
-    p.config("scout.toml", &if2(2));
-    p.ok(&["fit", "run", "scout.toml", "--seed", "1"]);
-    let leaf = p.leaves().remove(0);
-    let meta = segment_of(&leaf).join("fit.meta.json");
-    let mut side: serde_json::Value = serde_json::from_slice(&std::fs::read(&meta).unwrap()).unwrap();
-    side["label"] = serde_json::json!("old");
-    std::fs::write(&meta, side.to_string()).unwrap();
-
-    let out = p.run(&["fit", "summary", "@old"]);
-    let all = text(&out);
-    assert!(!out.status.success(), "{all}");
-    let id = record(&leaf).0;
-    assert!(all.contains(&format!("camdl label {} \"old\"", &id[..12])),
-        "names the command that labels the folder's run:\n{all}");
-}
-
-/// `camdl list --format json` is one `fit_list_row` per run, each with its
+/// `camdl list --kind fit --format json` is one row per run, each with its
 /// own label.
 #[test]
 fn camdl_list_json_labels_each_run() {
     let p = Project::new();
     p.config("post.toml", &pgas(4));
     p.ok(&["fit", "run", "post.toml", "--seed", "1", "--label", "short"]);
+    let short = p.leaves();
     p.config("post.toml", &pgas(7));
     p.ok(&["fit", "run", "post.toml", "--seed", "1", "--label", "long"]);
     let out = p.run(&["list", "--kind", "fit", "--format", "json",
-        &p.dir().join("results").to_string_lossy()]);
+        &p.store().to_string_lossy()]);
     assert!(out.status.success(), "{}", text(&out));
     let rows: Vec<serde_json::Value> = String::from_utf8_lossy(&out.stdout).lines()
-        .filter(|l| l.contains("\"kind\":\"fit\""))
+        .filter(|l| l.contains("\"kind\":\"fit_run\""))
         .map(|l| serde_json::from_str(l).unwrap()).collect();
     assert_eq!(rows.len(), 2, "{rows:?}");
     for leaf in p.leaves() {
-        let (id, label, _) = record(&leaf);
+        let (id, ..) = record(&leaf);
+        let label = if short.contains(&leaf) { "short" } else { "long" };
         let row = rows.iter().find(|r| r["run_id"] == id.as_str()).unwrap_or_else(|| panic!("{rows:?}"));
-        assert_eq!(row["label"].as_str(), label.as_deref(), "{row}");
-        assert_eq!(row["history_index"], 0, "each label's only holder: {row}");
-        assert!(row["verdict"]["kind"].is_string(), "{row}");
+        assert_eq!(row["label"].as_str(), Some(label), "{row}");
     }
 }
 
 /// A predict output's address is keyed by the options that shape it, as well
-/// as by its run. `--n-draws 3` used to overwrite the default predict of the
-/// same run in place; each now has its own directory, whose manifest records
-/// the options.
+/// as by its run: the default predict and `--n-draws 3` each have their own
+/// folder, whose manifest records the options.
 #[test]
 fn predict_options_key_their_own_output() {
     let p = Project::new();
@@ -869,8 +700,7 @@ fn predict_options_key_their_own_output() {
     let l = leaf.to_string_lossy().into_owned();
     p.ok(&["fit", "predict", &l, "--mode", "free_forward"]);
     p.ok(&["fit", "predict", &l, "--mode", "free_forward", "--n-draws", "3"]);
-    let dirs: Vec<PathBuf> = std::fs::read_dir(segment_of(&leaf).join("predict")).unwrap()
-        .flatten().map(|e| e.path()).collect();
+    let dirs = fit_store_support::predictions(&leaf);
     assert_eq!(dirs.len(), 2, "two option sets, two addresses: {dirs:?}");
     let mut n_draws: Vec<u64> = dirs.iter().map(|d| {
         let m: serde_json::Value = serde_json::from_slice(
@@ -881,33 +711,8 @@ fn predict_options_key_their_own_output() {
     assert_eq!(n_draws[0], 3, "{n_draws:?}");
 }
 
-/// A crash in the middle of a record update (`camdl label`, a cache hit's
-/// config record) leaves only what the store's own write protocol leaves — the
-/// reserved `run.json.tmp` and a `.lock` naming a dead process — so the next
-/// `fit run` is still a cache hit and the next update takes the lock over. A
-/// temp file the store does not reserve would stale the completed run.
-#[test]
-fn a_crashed_record_update_leaves_a_cache_hit() {
-    let p = Project::new();
-    p.config("scout.toml", &if2(2));
-    p.ok(&["fit", "run", "scout.toml", "--seed", "1"]);
-    let leaf = p.leaves().remove(0);
-    let mut child = Command::new("true").spawn().unwrap();
-    let dead = child.id();
-    child.wait().unwrap();
-    std::fs::write(leaf.join(".lock"), dead.to_string()).unwrap();
-    std::fs::write(leaf.join("run.json.tmp"), "{ half written").unwrap();
-
-    let out = p.ok(&["fit", "run", "scout.toml", "--seed", "1"]);
-    assert!(out.contains("cache hit"), "the crashed update did not stale the run:\n{out}");
-    let id = record(&leaf).0;
-    p.ok(&["label", &id[..12], "after-crash"]);
-    assert_eq!(record(&leaf).1.as_deref(), Some("after-crash"));
-}
-
-/// `fit table --label-pattern` and `--since-seconds` select runs, the unit a
-/// row is. They used to select folders, so a folder holding a matching run
-/// kept every one of its rows.
+/// `fit table --label-pattern` selects runs, the unit a row is: of two runs
+/// in one problem folder, only the matching one has a row.
 #[test]
 fn fit_table_filters_select_runs() {
     let p = Project::new();
@@ -917,7 +722,7 @@ fn fit_table_filters_select_runs() {
     p.ok(&["fit", "run", "post.toml", "--seed", "1", "--label", "long"]);
     let rows = |extra: &[&str]| -> Vec<String> {
         let mut args = vec!["fit", "table"];
-        let fits = p.fits().to_string_lossy().into_owned();
+        let fits = p.store().to_string_lossy().into_owned();
         args.push(&fits);
         args.extend_from_slice(&["--format", "json"]);
         args.extend_from_slice(extra);
@@ -928,218 +733,34 @@ fn fit_table_filters_select_runs() {
             .map(|r| r["label"].as_str().unwrap_or("").to_string()).collect()
     };
     assert_eq!(rows(&["--label-pattern", "short"]), vec!["short"]);
-
-    // Age the `long` run's record by six years: `--since-seconds` keeps `short`.
-    let long = p.leaves().into_iter().find(|l| record(l).1.as_deref() == Some("long")).unwrap();
-    let mut rec = record(&long).2;
-    rec["provenance"]["created_at"] = serde_json::json!("2020-01-01T00:00:00Z");
-    std::fs::write(long.join("run.json"), serde_json::to_string_pretty(&rec).unwrap()).unwrap();
-    assert_eq!(rows(&["--since-seconds", "3600"]), vec!["short"]);
 }
 
-/// A synthetic fit run with `--emit-every` fits data the file alone would not
-/// generate, so the file does not name that run. The rule is the run's
-/// identity, not a list of flags: the run the file names is the one whose
-/// run_id `fit run <file>` keys.
+/// A prediction is a result of its own inside its run
+/// (`<run>/predict/<mode>-<id12>/`): `cat <run> --stream predictive/…` names
+/// nothing in the run, and the prediction's own folder shows and reads its
+/// files.
 #[test]
-fn a_config_does_not_name_a_run_made_with_emit_every() {
-    let p = Project::new();
-    std::fs::write(p.dir().join("truth.toml"),
-        "beta = 0.3\nsigma = 0.25\ngamma = 0.3\nrho = 0.5\nk = 10.0\np_detect = 0.5\nN0 = 1000\nI0 = 1\n").unwrap();
-    std::fs::write(p.dir().join("synth.toml"), format!(r#"
-[model]
-camdl = "{ir}"
-
-[synthetic]
-true_params = "truth.toml"
-sim_seeds = [1]
-
-[estimate.beta]
-bounds = [0.01, 0.5]
-start  = 0.123
-
-[fixed]
-sigma    = 0.25
-gamma    = 0.3
-rho      = 0.5
-k        = 10.0
-p_detect = 0.5
-N0       = 1000
-I0       = 1
-
-[method]
-{method}
-
-[config]
-dt = 1.0
-"#, ir = golden_ir().display(), method = if2(2))).unwrap();
-
-    p.ok(&["fit", "run", "synth.toml", "--seed", "1", "--emit-every", "detection=7"]);
-    let out = p.run(&["fit", "summary", "synth.toml"]);
-    assert!(!out.status.success(),
-        "the file does not name a run fitted to --emit-every data:\n{}", text(&out));
-    p.ok(&["fit", "run", "synth.toml", "--seed", "1"]);
-    p.ok(&["fit", "summary", "synth.toml"]);
-}
-
-/// In `camdl show`/`cat` of a fit, a bare path (`predictive/…`) always means
-/// the run's default-options predict, and an options-keyed predict is always
-/// named under its `predict/<dir>/` prefix, so one path never names different
-/// artifacts as predicts come and go.
-#[test]
-fn bare_envelope_paths_mean_the_default_options_only() {
+fn a_prediction_is_read_through_its_own_folder() {
     let p = Project::new();
     p.config("post.toml", &pgas(7));
     p.ok(&["fit", "run", "post.toml", "--seed", "1", "--label", "post"]);
     p.ok(&["fit", "predict", "@post", "--mode", "free_forward", "--n-draws", "3"]);
-    let root = p.dir().join("results").to_string_lossy().into_owned();
+    let root = p.store().to_string_lossy().into_owned();
 
     let out = p.run(&["cat", "@post", "--stream", "predictive/weekly_cases.tsv", "--root", &root]);
     assert!(!out.status.success(),
-        "no default-options predict exists, so the bare path names nothing:\n{}", text(&out));
-    let show = p.ok(&["show", "@post", "--root", &root]);
-    let keyed = show.lines().filter_map(|l| l.split_whitespace().next())
-        .find(|l| l.starts_with("predict/") && l.ends_with("/predictive/weekly_cases.tsv"))
-        .unwrap_or_else(|| panic!("the keyed predict is listed under its prefix:\n{show}"))
-        .to_string();
-    p.ok(&["cat", "@post", "--stream", &keyed, "--root", &root]);
-}
-
-/// `fit table` rows are completed runs: a run still running (or failed) has
-/// no row.
-#[test]
-fn fit_table_skips_runs_that_have_not_completed() {
-    let p = Project::new();
-    p.config("scout.toml", &if2(2));
-    p.ok(&["fit", "run", "scout.toml", "--seed", "1"]);
-    p.config("scout.toml", &if2(3));
-    p.ok(&["fit", "run", "scout.toml", "--seed", "1"]);
-    let leaves = p.leaves();
-    let mut rec = record(&leaves[0]).2;
-    rec["status"] = serde_json::json!("running");
-    std::fs::write(leaves[0].join("run.json"), serde_json::to_string_pretty(&rec).unwrap()).unwrap();
-
-    let out = p.run(&["fit", "table", &p.fits().to_string_lossy(), "--format", "json"]);
+        "the run holds no predictive file of its own:\n{}", text(&out));
+    let leaf = p.leaves().remove(0);
+    let preds = fit_store_support::predictions(&leaf);
+    assert_eq!(preds.len(), 1, "{preds:?}");
+    let pred = preds[0].to_string_lossy().into_owned();
+    let show = p.ok(&["show", &pred]);
+    assert!(show.contains("prediction") && show.contains("predictive/weekly_cases.tsv"),
+        "the prediction lists its files:\n{show}");
+    let out = p.run(&["cat", &pred, "--stream", "predictive/weekly_cases.tsv"]);
     assert!(out.status.success(), "{}", text(&out));
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    let ids: Vec<&str> = v["rows"].as_array().unwrap().iter()
-        .map(|r| r["run_id"].as_str().unwrap()).collect();
-    assert_eq!(ids, vec![record(&leaves[1]).0.as_str()], "only the completed run has a row");
+    assert_eq!(out.stdout, std::fs::read(preds[0].join("predictive/weekly_cases.tsv")).unwrap());
 }
-
-/// `simulate --draws posterior --fit <folder>` counts only runs that hold
-/// posterior draws: a folder with one IF2 and one PGAS run names the PGAS run,
-/// and the message says which.
-#[test]
-fn simulate_posterior_draws_narrow_to_runs_with_draws() {
-    let p = Project::new();
-    p.config("mix.toml", &if2(2));
-    p.ok(&["fit", "run", "mix.toml", "--seed", "1"]);
-    p.config("mix.toml", &pgas(4));
-    p.ok(&["fit", "run", "mix.toml", "--seed", "1"]);
-    let leaves = p.leaves();
-    assert_eq!(leaves.len(), 2);
-    let segment = segment_of(&leaves[0]);
-    assert_eq!(segment, segment_of(&leaves[1]), "premise: one folder");
-    let pgas_leaf = leaves.iter().find(|l| l.join("draws.tsv").is_file()).unwrap();
-    let ir = golden_ir().to_string_lossy().into_owned();
-    let all = p.ok(&["simulate", &ir, "--draws", "posterior", "--fit", &segment.to_string_lossy(),
-        "--seed", "1", "--store", "sims"]);
-    assert!(all.contains(&pgas_leaf.display().to_string()), "the PGAS run is used and named:\n{all}");
-}
-
-/// One folder holding an IF2 run and a PGAS run: the IF2 run, then the PGAS
-/// run, from one file whose `[method]` changed.
-fn an_if2_and_a_pgas_run(p: &Project) -> (PathBuf, PathBuf, PathBuf) {
-    p.config("mix.toml", &if2(2));
-    p.ok(&["fit", "run", "mix.toml", "--seed", "1"]);
-    p.config("mix.toml", &pgas(4));
-    p.ok(&["fit", "run", "mix.toml", "--seed", "1"]);
-    let leaves = p.leaves();
-    assert_eq!(leaves.len(), 2);
-    let segment = segment_of(&leaves[0]);
-    assert_eq!(segment, segment_of(&leaves[1]), "premise: one folder");
-    let pgas_leaf = leaves.iter().find(|l| l.join("draws.tsv").is_file()).unwrap().clone();
-    let if2_leaf = leaves.iter().find(|l| !l.join("draws.tsv").is_file()).unwrap().clone();
-    (segment, if2_leaf, pgas_leaf)
-}
-
-/// `fit summary` of a folder holding runs of two methods reports every run —
-/// one index row and one section each, in text and JSON — instead of
-/// building its single table row from the one that sorts last.
-#[test]
-fn summary_of_a_folder_with_two_methods_reports_each_run() {
-    let p = Project::new();
-    let (segment, if2_leaf, pgas_leaf) = an_if2_and_a_pgas_run(&p);
-    let seg = segment.to_string_lossy().into_owned();
-
-    let out = p.run(&["fit", "summary", &seg, "--no-color"]);
-    let all = text(&out);
-    assert!(out.status.success(), "{all}");
-    assert!(all.contains("2 runs in this fit, each reported below:"), "{all}");
-    for leaf in [&if2_leaf, &pgas_leaf] {
-        let row = all.lines().find(|l| l.contains(&leaf.display().to_string()) && l.contains("completed"))
-            .unwrap_or_else(|| panic!("an index row for {}:\n{all}", leaf.display()));
-        assert!(row.trim_start().starts_with(if leaf == &if2_leaf { "if2" } else { "pgas" }), "{row}");
-    }
-
-    let out = p.run(&["fit", "summary", &seg, "--format", "json"]);
-    assert!(out.status.success(), "{}", text(&out));
-    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(doc["schema"]["version"], 5);
-    let leaves = doc["leaves"].as_array().unwrap();
-    let methods: Vec<&str> = leaves.iter().map(|l| l["method"].as_str().unwrap()).collect();
-    assert_eq!(methods, vec!["if2", "pgas"], "{doc}");
-    assert!(leaves.iter().all(|l| l["status"] == "completed" && !l["verdict"].is_null()), "{doc}");
-    assert_eq!(doc["methods"].as_array().unwrap().len(), 2);
-    let rows: Vec<&str> = doc["table_rows"].as_array().unwrap().iter()
-        .map(|r| r["method"].as_str().unwrap()).collect();
-    assert_eq!(rows, vec!["if2", "pgas"], "one table row per run: {doc}");
-    assert!(doc.get("table_row").is_none(), "no single row chosen for the folder: {doc}");
-
-    // A reader that needs one run's estimate refuses, listing both.
-    let out = p.run(&["fit", "summary", &seg, "--params-only"]);
-    let all = text(&out);
-    assert!(!out.status.success(), "--params-only prints one run, so the choice is the user's:\n{all}");
-    for leaf in [&if2_leaf, &pgas_leaf] {
-        assert!(all.contains(&leaf.display().to_string()), "lists {}:\n{all}", leaf.display());
-    }
-    p.ok(&["fit", "summary", &if2_leaf.to_string_lossy(), "--params-only"]);
-}
-
-/// A failed run beside a completed one is listed, with its status, in the
-/// index, the sections and the JSON — not hidden behind the completed run.
-#[test]
-fn a_failed_run_is_listed_beside_a_completed_one() {
-    let p = Project::new();
-    let (segment, if2_leaf, pgas_leaf) = an_if2_and_a_pgas_run(&p);
-    let mut rec = record(&pgas_leaf).2;
-    rec["status"] = serde_json::json!("failed");
-    std::fs::write(pgas_leaf.join("run.json"), serde_json::to_string_pretty(&rec).unwrap()).unwrap();
-    let seg = segment.to_string_lossy().into_owned();
-
-    let out = p.run(&["fit", "summary", &seg, "--no-color"]);
-    let all = text(&out);
-    assert!(out.status.success(), "the IF2 run still answers:\n{all}");
-    let row = all.lines().find(|l| l.contains(&pgas_leaf.display().to_string()) && l.contains("failed"))
-        .unwrap_or_else(|| panic!("the failed run has an index row:\n{all}"));
-    assert!(row.trim_start().starts_with("pgas"), "{row}");
-    assert!(all.contains(&format!("pgas · failed · {}", pgas_leaf.display())),
-        "and a section of its own:\n{all}");
-
-    let out = p.run(&["fit", "summary", &seg, "--format", "json"]);
-    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    let failed: Vec<&serde_json::Value> = doc["leaves"].as_array().unwrap().iter()
-        .filter(|l| l["status"] == "failed").collect();
-    assert_eq!(failed.len(), 1, "{doc}");
-    assert_eq!(failed[0]["method"], "pgas");
-    assert!(failed[0]["verdict"].is_null(), "a failed run has no verdict: {doc}");
-    let rows: Vec<&str> = doc["table_rows"].as_array().unwrap().iter()
-        .map(|r| r["run_id"].as_str().unwrap()).collect();
-    assert_eq!(rows, vec![record(&if2_leaf).0.as_str()], "only the completed run has a row: {doc}");
-}
-
-// ── `show` and `cat` resolve a run handle to that run ────────────────────────
 
 /// Two labelled PGAS runs of one problem folder, `@short` (4 sweeps) and
 /// `@long` (7): the same folder, so only the run each label names tells them
@@ -1168,65 +789,57 @@ fn show_of_a_label_describes_that_run() {
     let (short, long) = two_labelled_posteriors(&p);
     let (short_id, ..) = record(&short);
     let (long_id, ..) = record(&long);
-    let root = p.dir().join("results").to_string_lossy().into_owned();
+    let root = p.store().to_string_lossy().into_owned();
 
     let out = p.run(&["show", "@short", "--root", &root]);
     assert!(out.status.success(), "{}", text(&out));
     let shown = stdout(&out);
-    assert!(shown.contains(&short_id[..12]) && shown.contains("(@short)"), "{shown}");
+    assert!(shown.contains(&short_id[..12]), "{shown}");
     assert!(!shown.contains(&long_id[..12]), "the other run is not described:\n{shown}");
     assert!(shown.lines().any(|l| l.trim_start().starts_with("draws.tsv")),
         "the run's draws.tsv is among its outputs:\n{shown}");
-    assert!(shown.contains("pgas") && shown.contains("seed 1"), "{shown}");
+    let field = |name: &str| shown.lines().skip_while(|l| l.trim() != name).nth(1).map(str::trim);
+    assert_eq!((field("method"), field("seed")), (Some("pgas"), Some("1")), "{shown}");
 }
 
-/// `show --format json` on a run is one `fit_show` object; on a folder it is
-/// the folder's problem and one object per run.
+/// `show --format json` on a run is the run's record: its kind, id, folder,
+/// files and identity; on a problem folder it is the problem's.
 #[test]
 fn show_format_json_on_a_run_and_on_a_folder() {
     let p = Project::new();
     let (short, _long) = two_labelled_posteriors(&p);
     let (short_id, ..) = record(&short);
-    let root = p.dir().join("results").to_string_lossy().into_owned();
+    let root = p.store().to_string_lossy().into_owned();
 
     let out = p.run(&["show", "@short", "--root", &root, "--format", "json"]);
     assert!(out.status.success(), "{}", text(&out));
     let v: serde_json::Value = serde_json::from_slice(&out.stdout)
         .unwrap_or_else(|e| panic!("show --format json is JSON ({e}):\n{}", text(&out)));
-    assert_eq!(v["schema"]["name"], "fit_show");
-    assert_eq!(v["schema"]["version"], 1);
+    assert_eq!(v["kind"], "fit_run", "{v}");
     assert_eq!(v["run_id"], short_id.as_str());
-    assert_eq!(v["label"], "short");
-    assert_eq!(v["method"], "pgas");
-    assert_eq!(v["chains"], 2);
-    assert_eq!(v["status"], "completed");
-    assert_eq!(v["starts"]["rule"], "from_prior");
-    assert!(v["verdict"]["kind"].is_string(), "{v}");
     assert!(v["path"].as_str().unwrap().ends_with(
         short.file_name().unwrap().to_str().unwrap()), "{v}");
-    let draws = v["outputs"].as_array().unwrap().iter()
-        .find(|o| o["path"] == "draws.tsv").unwrap_or_else(|| panic!("draws.tsv listed: {v}"));
-    assert_eq!(draws["role"], "posterior_cloud");
-    assert!(v["problem"]["fit_id"].as_str().is_some_and(|s| s.len() == 64), "{v}");
+    assert!(v["files"].as_array().unwrap().iter().any(|f| f == "draws.tsv"), "draws.tsv listed: {v}");
+    assert!(v["identity"].is_object(), "{v}");
 
     let seg = segment_of(&short).to_string_lossy().into_owned();
     let out = p.run(&["show", &seg, "--format", "json"]);
     assert!(out.status.success(), "{}", text(&out));
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["schema"]["name"], "fit_show");
-    assert_eq!(v["runs"].as_array().map(Vec::len), Some(2), "{v}");
+    assert!(v["files"].as_array().unwrap().iter().any(|f| f == "problem.toml"), "{v}");
 
     let out = p.run(&["show", "@short", "--root", &root, "--format", "yaml"]);
     assert!(!out.status.success(), "an unknown format is refused:\n{}", text(&out));
 }
 
-/// `cat @L --stream draws.tsv` reads the run's own draws; on a folder holding
-/// two runs it is an ambiguity listing them.
+/// `cat @L --stream draws.tsv` reads the run's own draws; a problem folder
+/// holds the problem's files, not a run's, so its `draws.tsv` is refused with
+/// the files it does hold.
 #[test]
-fn cat_of_a_label_reads_the_runs_draws_and_a_folder_is_ambiguous() {
+fn cat_of_a_label_reads_the_runs_draws_and_a_folder_reads_its_problem() {
     let p = Project::new();
     let (short, long) = two_labelled_posteriors(&p);
-    let root = p.dir().join("results").to_string_lossy().into_owned();
+    let root = p.store().to_string_lossy().into_owned();
 
     let out = p.run(&["cat", "@long", "--stream", "draws.tsv", "--root", &root]);
     assert!(out.status.success(), "{}", text(&out));
@@ -1235,30 +848,26 @@ fn cat_of_a_label_reads_the_runs_draws_and_a_folder_is_ambiguous() {
 
     let seg = segment_of(&short).to_string_lossy().into_owned();
     let out = p.run(&["cat", &seg, "--stream", "draws.tsv"]);
-    assert!(!out.status.success(), "a folder of two runs names neither:\n{}", text(&out));
     let all = text(&out);
-    assert!(all.contains("names 2 runs"), "{all}");
-    for leaf in [&short, &long] {
-        assert!(all.contains(&leaf.display().to_string()), "lists {}:\n{all}", leaf.display());
-    }
+    assert!(!out.status.success(), "a problem folder holds no draws:\n{all}");
+    assert!(all.contains("problem.toml"), "the refusal lists the problem's files:\n{all}");
 
     // A path the folder itself holds still reads.
-    p.ok(&["cat", &seg, "--stream", "fit.meta.json"]);
+    p.ok(&["cat", &seg, "--stream", "problem.toml"]);
 }
 
-// ── `camdl list`: one row per run ────────────────────────────────────────────
-
-/// The data rows of `camdl list --kind fit` (stdout lines under a table
-/// header, not the header or the problem line).
+/// The data rows of `camdl list --kind fit` (stdout lines under the table
+/// header, not the header or the section title).
 fn list_rows(stdout: &str) -> Vec<String> {
     stdout.lines()
-        .filter(|l| !l.starts_with("problem ") && !l.trim().is_empty() && !l.contains("VERDICT"))
+        .filter(|l| !l.trim().is_empty() && l.trim() != "fits" && !l.contains("RUN_ID"))
         .map(str::to_string)
         .collect()
 }
 
-/// A folder of two runs lists two rows, each naming its run, its method and
-/// its verdict; a run started from another names that run's id in STARTS.
+/// Two runs list two rows, each naming its run, its method and its label; a
+/// run started from another records that run's id with the handle that named
+/// it.
 #[test]
 fn list_shows_one_row_per_run_with_its_source() {
     let p = Project::new();
@@ -1267,67 +876,68 @@ fn list_shows_one_row_per_run_with_its_source() {
     let (scout_id, ..) = record(&p.leaves()[0]);
     p.config("post.toml", &pgas_from("{ from_mle = \"@scout\" }"));
     p.ok(&["fit", "run", "post.toml", "--seed", "1", "--allow-nonconverged-source"]);
-    let root = p.dir().join("results").to_string_lossy().into_owned();
+    let root = p.store().to_string_lossy().into_owned();
     let out = p.run(&["list", "--kind", "fit", &root]);
     assert!(out.status.success(), "{}", text(&out));
     let stdout = stdout(&out);
     let rows = list_rows(&stdout);
-    let post = rows.iter().find(|r| r.contains("pgas")).unwrap_or_else(|| panic!("{stdout}"));
-    assert!(post.contains(&format!("from_mle run {} (@scout)", &scout_id[..6])),
-        "STARTS names the source run id with the handle beside it:\n{stdout}");
     let scout = rows.iter().find(|r| r.contains("if2")).unwrap_or_else(|| panic!("{stdout}"));
-    assert!(scout.trim_start().starts_with("scout") && scout.contains(&scout_id[..6]), "{stdout}");
-    assert!(stdout.contains("LABEL") && stdout.contains("STARTS") && stdout.contains("VERDICT"), "{stdout}");
+    assert!(scout.contains("scout") && scout.contains(&scout_id[..8]), "{stdout}");
+    let post_leaf = p.leaves().into_iter().find(|l| l.join("draws.tsv").is_file()).unwrap();
+    let (post_id, _, post) = record(&post_leaf);
+    assert!(rows.iter().any(|r| r.contains("pgas") && r.contains(&post_id[..8])), "{stdout}");
+    assert_eq!(post["starts_source"]["run_id"], scout_id.as_str(), "{post}");
+    assert_eq!(post["starts_source"]["handle"], "@scout", "{post}");
 }
 
-/// Two seeds of one method share a row with their seed range; `--runs` lists
-/// each; `--limit` counts runs.
+/// Two seeds of one method are two runs and two rows; `--limit` counts runs.
 #[test]
-fn list_collapses_seeds_unless_asked_for_runs() {
+fn list_shows_each_seed_as_a_run() {
     let p = Project::new();
     p.config_with("seeds.toml", "fit_seeds = [1, 2]", &if2(2));
     p.ok(&["fit", "run", "seeds.toml"]);
-    let root = p.dir().join("results").to_string_lossy().into_owned();
-    let collapsed = stdout(&p.run(&["list", "--kind", "fit", &root]));
-    let rows = list_rows(&collapsed);
-    assert_eq!(rows.len(), 1, "one row for two seeds of one method:\n{collapsed}");
-    assert!(rows[0].contains("2 runs") && rows[0].contains("1-2"), "{collapsed}");
-    let expanded = stdout(&p.run(&["list", "--kind", "fit", "--runs", &root]));
-    assert_eq!(list_rows(&expanded).len(), 2, "--runs lists each run:\n{expanded}");
+    let root = p.store().to_string_lossy().into_owned();
+    let listed = stdout(&p.run(&["list", "--kind", "fit", &root]));
+    for leaf in p.leaves() {
+        assert!(listed.contains(&record(&leaf).0[..8]), "each run has a row:\n{listed}");
+    }
     let json = stdout(&p.run(&["list", "--kind", "fit", "--format", "json", "--limit", "1", &root]));
-    assert_eq!(json.lines().filter(|l| l.contains("fit_list_row")).count(), 1,
+    assert_eq!(json.lines().filter(|l| l.contains("\"kind\":\"fit_run\"")).count(), 1,
         "--limit counts runs:\n{json}");
 }
 
-/// `--history` adds a label's earlier holders, as `L~1`, and the JSON row
-/// carries the run's history index. (Two runs carrying one label are written
-/// by hand here; `fit run --label` and `camdl label` make them by moving it.)
+/// A label given to a second run moves to it, and the first is its earlier
+/// holder, `@L~1`. The fits table lists every run, each with the label of an
+/// invocation that holds it, so both rows show `scout`; `--history` lists the
+/// same rows.
 #[test]
-fn list_history_shows_earlier_holders() {
+fn list_labels_each_run_with_the_label_that_held_it() {
     let p = Project::new();
     p.config("scout.toml", &if2(2));
     p.ok(&["fit", "run", "scout.toml", "--seed", "1", "--label", "scout"]);
     let first = p.leaves();
     p.config("scout.toml", &if2(3));
-    p.ok(&["fit", "run", "scout.toml", "--seed", "1"]);
-    let second: Vec<PathBuf> = p.leaves().into_iter().filter(|l| !first.contains(l)).collect();
-    let mut v: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(second[0].join("run.json")).unwrap()).unwrap();
-    v["provenance"]["label"] = "scout".into();
-    v["provenance"]["created_at"] = "2099-01-01T00:00:00Z".into();
-    std::fs::write(second[0].join("run.json"), serde_json::to_vec_pretty(&v).unwrap()).unwrap();
-    let root = p.dir().join("results").to_string_lossy().into_owned();
+    p.ok(&["fit", "run", "scout.toml", "--seed", "1", "--label", "scout"]);
+    assert_eq!(p.leaves().len(), 2, "premise: two runs");
+    let root = p.store().to_string_lossy().into_owned();
 
     let plain = stdout(&p.run(&["list", "--kind", "fit", &root]));
-    assert_eq!(list_rows(&plain).len(), 1, "only the holder by default:\n{plain}");
+    let rows = list_rows(&plain);
+    assert_eq!(rows.len(), 2, "one row per run:\n{plain}");
+    for leaf in p.leaves() {
+        let id = record(&leaf).0;
+        assert!(rows.iter().any(|r| r.contains(&id[..8]) && r.contains("scout")),
+            "run {id} is listed labelled scout:\n{plain}");
+    }
+    assert!(p.ok(&["fit", "summary", "@scout~1"]).contains(&folder_name(&first[0])),
+        "the earlier holder is @scout~1");
     let hist = stdout(&p.run(&["list", "--kind", "fit", "--history", &root]));
-    let rows = list_rows(&hist);
-    assert_eq!(rows.len(), 2, "{hist}");
-    assert!(rows.iter().any(|r| r.trim_start().starts_with("scout~1")), "{hist}");
-    let json = stdout(&p.run(&["list", "--kind", "fit", "--history", "--format", "json", &root]));
-    let idx: std::collections::BTreeSet<i64> = json.lines()
-        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-        .filter_map(|r| r["history_index"].as_i64())
-        .collect();
-    assert_eq!(idx, [0, 1].into_iter().collect(), "{json}");
+    assert_eq!(list_rows(&hist), rows, "--history changes nothing in the fits table");
+}
+
+/// A run folder's name (`seed_<n>-<id12>`), unique among runs, which every
+/// message naming the run carries whether it spells the path relative or
+/// absolute.
+fn folder_name(run: &std::path::Path) -> String {
+    run.file_name().unwrap().to_string_lossy().into_owned()
 }

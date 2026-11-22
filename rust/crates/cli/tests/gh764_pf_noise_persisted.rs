@@ -98,7 +98,7 @@ simulate { from = 0 'days  to = 20 'days }
 
 fn write_fit_toml(dir: &Path, ir: &Path, data: &Path) -> PathBuf {
     let toml = format!(r#"
-output_dir = "{out}"
+store = "{out}"
 [model]
 camdl = "{ir}"
 [data.observations]
@@ -145,8 +145,8 @@ fn pf_noise_field(state_toml: &str, key: &str) -> Option<f64> {
         })
 }
 
-/// The one `fit_state.toml` the method wrote, under its content-addressed run
-/// directory (`results/fits/fit-<hash>/01-<method>-<hash>/seed_N-<hash>/`).
+/// The one `fit_state.toml` the method wrote, in the stored run's folder
+/// (`<build>/fit/<model>-<id12>/runs/<method>-<id12>/seed_<n>-<id12>/`).
 fn method_state(results: &Path) -> String {
     let mut found = Vec::new();
     let mut stack = vec![results.to_path_buf()];

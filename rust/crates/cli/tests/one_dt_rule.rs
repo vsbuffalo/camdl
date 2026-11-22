@@ -5,6 +5,8 @@
 //!
 //! A missing release binary or `camdlc.exe` fails the test (run `make build`).
 
+mod fit_store_support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -74,7 +76,7 @@ simulate {{ from = 0 'days  to = 20 'days {sim_dt}}}
 fn write_fit(dir: &Path, ir: &Path, config: &str, method: &str) -> PathBuf {
     let fit = dir.join("fit.toml");
     std::fs::write(&fit, format!(r#"
-output_dir = "{out}"
+store = "{out}"
 {config}
 [model]
 camdl = "{ir}"
@@ -113,14 +115,11 @@ const PFILTER: &str = "algorithm = \"pfilter\"\nbackend = \"chain_binomial\"\npa
 const PGAS: &str = "algorithm = \"pgas\"\nbackend = \"chain_binomial\"\nchains = 1\n\
     particles = 50\nsweeps = 6\nburn_in = 2\nstarts = \"single\"\n";
 
-/// The fit directory a run stored under `dir/out/fits` (one segment).
-fn fit_segment_name(dir: &Path) -> String {
-    let mut names: Vec<String> = std::fs::read_dir(dir.join("out").join("fits"))
-        .expect("out/fits")
-        .filter_map(|d| d.ok().map(|d| d.file_name().to_string_lossy().into_owned()))
-        .collect();
-    assert_eq!(names.len(), 1, "one stored fit: {names:?}");
-    names.pop().unwrap()
+/// The one fit problem stored in the store `dir/out`, as its path.
+fn fit_segment_name(dir: &Path) -> PathBuf {
+    let mut problems = fit_store_support::problems(&dir.join("out"));
+    assert_eq!(problems.len(), 1, "one stored fit problem: {problems:?}");
+    problems.pop().unwrap()
 }
 
 /// A chain-binomial fit runs at the model's declared step, not the

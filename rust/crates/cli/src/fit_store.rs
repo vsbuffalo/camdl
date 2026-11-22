@@ -43,7 +43,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use indexmap::IndexMap;
-use store::{Artifact, Content, Dep, Finite, Handle, Hashed, Kinds, Layout, Placed, Primary, Run, RunRef, Store, Stored, WriteMode};
+use store::{Artifact, Content, ContentArtifact, Dep, Finite, Handle, Hashed, Key, Kinds, Layout, Placed, Primary, Run, RunRef, Store, Stored, WriteMode};
 
 use crate::camdl_store::{CompiledModel, DataTable, ProcessSeed, ResolvedParams, Table};
 use crate::fit::config_v2::{self, EstimateSpecV2, FitConfig, Method, Problem};
@@ -63,7 +63,7 @@ pub(crate) struct InputFile {
 }
 
 impl InputFile {
-    fn bytes(&self) -> Vec<u8> {
+    pub(crate) fn bytes(&self) -> Vec<u8> {
         self.content.get().to_bytes()
     }
 }
@@ -211,7 +211,25 @@ pub(crate) struct FitProblemIdentity {
     pub settings: FitSettings,
     pub scenario: ScenarioRequest,
     pub ic_free: bool,
+    /// For a problem whose data a `[synthetic]` table generated: what
+    /// generated it. `None` for a problem posed on data files.
+    pub synthetic: Option<SyntheticOrigin>,
 }
+
+/// How a `[synthetic]` table generated a problem's data: the true parameters
+/// file's bytes, the dataset's simulation seed, and the table's other
+/// settings (its scenario and backend) as canonical JSON. The truth sets the
+/// data, and the readers that judge an estimate against it read it here.
+#[derive(store::Identity, Clone, Debug)]
+#[identity(tag = "fit_synthetic", version = 1)]
+pub(crate) struct SyntheticOrigin {
+    pub truth: InputFile,
+    pub sim_seed: u64,
+    pub generation: String,
+}
+
+/// The stored copy of a synthetic problem's true parameters file.
+const SYNTHETIC_TRUTH_FILE: &str = "synthetic/truth.toml";
 
 /// The model file's stem and, in a sweep, the point's values as typed.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -298,11 +316,18 @@ pub(crate) struct FitRunIdentity {
     pub resumed_from: Option<Dep<FitRun>>,
 }
 
-/// The method's name and the seed the user typed.
+/// The method's name and the seed the user typed, and the compile's
+/// quantities part the invocation that named the run compiled. Labels are
+/// recorded per invocation, so an invocation that reuses a run with edited
+/// quantities records its own: the quantities do not change the run, and a
+/// prediction evaluates the ones the command that names the run compiled.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct RunLabels {
     pub method: String,
     pub seed: u64,
+    /// The run id (hex) of the `Quantities` content the invocation stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantities: Option<String>,
 }
 
 /// One fit run, written in place.
@@ -328,7 +353,7 @@ impl MethodSettings {
     /// and a value that is NaN or infinite is refused: JSON writes either as
     /// `null`, so two such methods would otherwise share a key.
     pub fn of(method: &Method) -> Result<(MethodSettings, u64), String> {
-        crate::fit::cas::ensure_finite(method)?;
+        crate::canonical_json::ensure_finite(method)?;
         let whole = serde_json::to_value(method).map_err(|e| format!("cannot encode [method]: {e}"))?;
         let algorithm = whole
             .get("algorithm")
@@ -344,7 +369,7 @@ impl MethodSettings {
         };
         let mut exclude = vec!["starts"];
         exclude.extend(method.algorithm.extension_key());
-        let rest = crate::fit::cas::serialize_minus(method, &exclude)?;
+        let rest = crate::canonical_json::serialize_minus(method, &exclude)?;
         Ok((MethodSettings { algorithm, settings: canonical_json(&rest)? }, length))
     }
 }
@@ -354,7 +379,7 @@ impl StartSource {
     /// A NaN or infinite value in the method is refused, as for
     /// [`MethodSettings::of`].
     pub fn of(method: &Method, input: StartInput) -> Result<StartSource, String> {
-        crate::fit::cas::ensure_finite(method)?;
+        crate::canonical_json::ensure_finite(method)?;
         let rule = method.starts()?.identity_value();
         Ok(StartSource { rule: canonical_json(&rule)?, input })
     }
@@ -388,20 +413,16 @@ impl PredictMode {
 #[identity(tag = "predict_options", version = 1)]
 pub(crate) struct PredictOptions {
     pub mode: PredictMode,
-    /// A forecast's reach past its origin, in model time.
-    pub reach: Option<Finite>,
-    pub draws: u64,
-    pub seed: ProcessSeed,
-    /// The streams predicted; empty for every eligible stream.
-    pub streams: Vec<String>,
-    /// The arms, each a scenario selection, in the order asked for.
-    pub scenarios: Vec<ScenarioRequest>,
-    /// Sweep arms: a parameter and its values.
-    pub sweep: Vec<(String, Vec<Finite>)>,
-    pub by_chain: bool,
-    pub excluded_chains: Vec<u64>,
-    pub particles: Option<u64>,
-    pub allow_forcing_extrapolation: bool,
+    /// Every option that changes what is written — the reach, the draws, the
+    /// seed, the streams, the scenario and sweep arms, the chain selection,
+    /// the particle count, a `--quantities` vocabulary's digest, a
+    /// forecast's targets and design mode — as canonical JSON of the options
+    /// `fit predict` resolved. A new option is in it unless it is named as
+    /// left out there.
+    pub settings: String,
+    /// The design files a forecast reads its targets' design values from
+    /// (`--design SOURCE=FILE`), by stream source; empty without one.
+    pub design: BTreeMap<String, Dep<crate::camdl_store::DataTable>>,
 }
 
 /// Where a prediction's parameters come from.
@@ -410,8 +431,6 @@ pub(crate) struct PredictOptions {
 pub(crate) enum ParameterSource {
     /// A fit run's draws, and the problem they were fitted on.
     Posterior { draws: Dep<FitRun>, problem: Dep<FitProblem> },
-    /// One point, with no parameter uncertainty.
-    FixedPoint { model: Dep<CompiledModel>, params: ResolvedParams, trained_through: Option<Finite> },
 }
 
 /// One prediction.
@@ -421,6 +440,10 @@ pub(crate) struct PredictIdentity {
     pub source: ParameterSource,
     /// The data the filter conditions on, by stream; never held-out outcomes.
     pub data: BTreeMap<String, Dep<DataTable>>,
+    /// The model's quantities and contrasts the prediction evaluates: the
+    /// part of the compile the fit's problem names in its lineage. Two models
+    /// that differ only here pose one fit problem and make two predictions.
+    pub quantities: Option<Dep<crate::camdl_store::Quantities>>,
     pub options: PredictOptions,
 }
 
@@ -444,11 +467,8 @@ impl Artifact for Prediction {
 
 impl Primary for Prediction {
     fn layout(id: &PredictIdentity, labels: &PredictionLabels) -> Placed {
-        match &id.source {
-            ParameterSource::Posterior { draws, .. } => Layout::inside(draws.id(), "predict"),
-            ParameterSource::FixedPoint { model, .. } => Layout::in_kind().group(&labels.model, model),
-        }
-        .result(&labels.mode)
+        let ParameterSource::Posterior { draws, .. } = &id.source;
+        Layout::inside(draws.id(), "predict").result(&labels.mode)
     }
 }
 
@@ -480,12 +500,35 @@ impl ModelSourceFile {
 /// it needs besides.
 pub(crate) struct ResolvedProblem {
     pub identity: FitProblemIdentity,
-    pub labels: ProblemLabels,
     /// The model `identity.model` names, as compiled.
     model: ir::Model,
     source: ModelSourceFile,
     partition: TrainingPartitionRecord,
+    /// A real-data fit's `[synthetic]` table (`fit recovery`'s truth), kept
+    /// as provenance files outside the identity.
+    recovery: Option<RecoveryTruth>,
 }
+
+/// Where a problem's observation data came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DataOrigin {
+    /// Files the fit file names. A `[synthetic]` table beside them is the
+    /// truth `fit recovery` compares estimates with, not the data's origin.
+    Files,
+    /// One dataset the fit file's `[synthetic]` table generated, at one seed.
+    Generated,
+}
+
+/// A real-data fit's `[synthetic]` table, as the problem's provenance: the
+/// table in `fit.toml` syntax, naming the stored truth file, and that file's
+/// bytes.
+struct RecoveryTruth {
+    table: String,
+    truth: Vec<u8>,
+}
+
+/// A real-data problem's `[synthetic]` table, a provenance file.
+const RECOVERY_TABLE_FILE: &str = "synthetic.toml";
 
 /// The stored problem's files.
 pub(crate) const PROBLEM_FILE: &str = "problem.toml";
@@ -514,7 +557,7 @@ fn finite(x: f64, what: &str) -> Result<Finite, String> {
 }
 
 fn canonical_json(v: &serde_json::Value) -> Result<String, String> {
-    serde_json::to_string(&crate::fit::cas::canonical(v)).map_err(|e| e.to_string())
+    serde_json::to_string(&crate::canonical_json::canonical(v)).map_err(|e| e.to_string())
 }
 
 fn read_file(path: &str, what: &str) -> Result<Vec<u8>, String> {
@@ -543,14 +586,14 @@ pub(crate) fn resolve_problem(
     model: &ir::Model,
     model_dep: Dep<CompiledModel>,
     source: ModelSourceFile,
-    labels: ProblemLabels,
+    origin: DataOrigin,
 ) -> Result<ResolvedProblem, String> {
     let Problem {
         model: _,
         data,
         synthetic,
         simplex_groups,
-        output_dir: _,
+        store: _,
         estimate,
         fixed,
         config,
@@ -565,9 +608,42 @@ pub(crate) fn resolve_problem(
     if model_dep.digest() != crate::camdl_store::model_part_digest(model) {
         return Err("internal error: the model given is not the stored compile the problem names".into());
     }
-    if synthetic.is_some() {
-        return Err("internal error: a [synthetic] problem is resolved once its datasets are written as data".into());
-    }
+    let mut recovery = None;
+    let synthetic = match (synthetic, origin) {
+        (None, _) => None,
+        (Some(spec), DataOrigin::Files) => {
+            let bytes = std::fs::read(&spec.true_params)
+                .map_err(|e| format!("cannot read [synthetic] true_params {}: {e}", spec.true_params))?;
+            let mut stored = spec.clone();
+            stored.true_params = SYNTHETIC_TRUTH_FILE.into();
+            let mut doc = toml::Table::new();
+            doc.insert("synthetic".into(), toml::Value::try_from(&stored).map_err(|e| e.to_string())?);
+            recovery = Some(RecoveryTruth { table: toml::to_string(&doc).map_err(|e| e.to_string())?, truth: bytes });
+            None
+        }
+        (Some(spec), DataOrigin::Generated) => {
+            let seeds = spec.sim_seeds.to_vec()?;
+            let [sim_seed] = seeds[..] else {
+                return Err("internal error: a synthetic problem is one dataset, generated at one seed".into());
+            };
+            let bytes = std::fs::read(&spec.true_params)
+                .map_err(|e| format!("cannot read [synthetic] true_params {}: {e}", spec.true_params))?;
+            let content = Hashed::new(<Table as store::Content>::from_bytes(&bytes).map_err(|e| e.to_string())?);
+            let mut generation = serde_json::to_value(spec).map_err(|e| e.to_string())?;
+            if let Some(o) = generation.as_object_mut() {
+                for k in ["true_params", "sim_seeds", "datasets"] {
+                    o.remove(k);
+                }
+                // An unset setting is left out, as `problem.toml` writes it.
+                o.retain(|_, v| !v.is_null());
+            }
+            Some(SyntheticOrigin {
+                truth: InputFile { ext: "toml".into(), content },
+                sim_seed,
+                generation: crate::canonical_json::canonical(&generation).to_string(),
+            })
+        }
+    };
     let data = data.as_ref().ok_or("a fit problem needs a [data] table")?;
     let config_v2::DataSpec { file: _, observations: _, holdout_after, holdout: _, tables } = data;
 
@@ -590,6 +666,9 @@ pub(crate) fn resolve_problem(
     let mut rows: BTreeMap<String, Vec<ObservedRow>> = BTreeMap::new();
     for (leaf, source) in bindings.leaves() {
         let path = &bindings.training_by_source()[source];
+        if !Path::new(path).is_file() {
+            return Err(format!("cannot read data file {path}, bound to `{source}`: it does not exist"));
+        }
         rows.insert(leaf.to_string(), load(path, leaf)?);
     }
 
@@ -672,8 +751,9 @@ pub(crate) fn resolve_problem(
         },
         scenario: ScenarioRequest { scenario: scenario.clone(), enable: enable.clone(), disable: disable.clone() },
         ic_free: ic_free.unwrap_or(false),
+        synthetic,
     };
-    Ok(ResolvedProblem { identity, labels, model: model.clone(), source, partition: record })
+    Ok(ResolvedProblem { identity, model: model.clone(), source, partition: record, recovery })
 }
 
 /// The problem's half of `[estimate]`, and the settings that belong to the run.
@@ -823,8 +903,15 @@ fn problem_toml(id: &FitProblemIdentity, model: &ir::Model, source: &ModelSource
         settings,
         scenario,
         ic_free,
+        synthetic,
     } = id;
     let mut doc = toml::Table::new();
+    if let Some(SyntheticOrigin { truth: _, sim_seed, generation }) = synthetic {
+        let mut t: toml::Table = serde_json::from_str::<toml::Table>(generation).map_err(|e| e.to_string())?;
+        t.insert("true_params".into(), Value::String(SYNTHETIC_TRUTH_FILE.into()));
+        t.insert("sim_seeds".into(), Value::Array(vec![Value::Integer(*sim_seed as i64)]));
+        doc.insert("synthetic".into(), Value::Table(t));
+    }
     doc.insert("model".into(), Value::Table([("camdl".to_string(), Value::String(source.name().into()))].into_iter().collect()));
     doc.insert(
         "fixed".into(),
@@ -922,6 +1009,13 @@ pub(crate) fn write_problem(run: &mut Run<FitProblem>, problem: &ResolvedProblem
     for (stream, dates) in &id.held_out {
         run.result_file(&held_out_file(stream)).map_err(e)?.write_all(&dates.get().to_bytes()).map_err(e)?;
     }
+    if let Some(origin) = &id.synthetic {
+        run.result_file(SYNTHETIC_TRUTH_FILE).map_err(e)?.write_all(&origin.truth.bytes()).map_err(e)?;
+    }
+    if let Some(r) = &problem.recovery {
+        run.provenance_file(SYNTHETIC_TRUTH_FILE).map_err(e)?.write_all(&r.truth).map_err(e)?;
+        run.provenance_file(RECOVERY_TABLE_FILE).map_err(e)?.write_all(r.table.as_bytes()).map_err(e)?;
+    }
     run.provenance_file(problem.source.name()).map_err(e)?.write_all(&problem.source.bytes).map_err(e)?;
     Ok(())
 }
@@ -987,8 +1081,6 @@ pub(crate) fn write_method(run: &mut Run<FitRun>, method: &Method) -> Result<(),
 pub(crate) struct StoredInput {
     /// The file's name in the problem, which `config` names it by.
     pub name: String,
-    /// The extension the loader reads it under.
-    pub ext: String,
     /// The bytes, checked against the file's digest.
     pub bytes: Vec<u8>,
 }
@@ -1014,9 +1106,21 @@ pub(crate) struct StoredFit {
     pub held_out: BTreeMap<String, Vec<u8>>,
     /// Which rows trained, from `partition.json`.
     pub partition: TrainingPartitionRecord,
+    /// A synthetic problem's true parameters file.
+    pub synthetic_truth: Option<StoredInput>,
 }
 
 impl StoredFit {
+    /// Each stream that held rows out of training, with how many: the rows of
+    /// its `held_out/<stream>.tsv`. Empty when the problem holds none out.
+    pub fn held_out_rows(&self) -> Vec<(String, usize)> {
+        self.held_out
+            .iter()
+            .map(|(stream, bytes)| (stream.clone(), bytes.split(|b| *b == b'\n').skip(1).filter(|l| !l.is_empty()).count()))
+            .filter(|(_, n)| *n > 0)
+            .collect()
+    }
+
     /// The problem with each input written to `dir` and its `[data]` naming
     /// those copies, for the data loader, which reads a file by its path. The
     /// copies are the checked bytes of [`Self::training`] and [`Self::tables`].
@@ -1038,6 +1142,9 @@ impl StoredFit {
             .collect::<Result<_, String>>()?;
         data.tables =
             self.tables.iter().map(|(name, input)| Ok((name.clone(), write(input)?))).collect::<Result<_, String>>()?;
+        if let (Some(spec), Some(truth)) = (problem.synthetic.as_mut(), &self.synthetic_truth) {
+            spec.true_params = write(truth)?;
+        }
         Ok(problem)
     }
 }
@@ -1058,10 +1165,16 @@ pub(crate) fn read_fit(store: &Store, handle: &Handle) -> Result<StoredFit, Stri
     let problem = match &run {
         Some(r) => {
             let id = r.identity().chain.problem.id();
-            store
-                .get(id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("{handle}: the run's problem {} is not stored", id.key().to_hex()))?
+            match store.get(id).map_err(|e| e.to_string())? {
+                Some(p) => p,
+                None => {
+                    let why = match store.inspect(id) {
+                        Ok(Some(e)) => format!("is in {}: {}", crate::fit::report::display_path(e.folder()), entry_state(e.state())),
+                        _ => "is not stored".to_string(),
+                    };
+                    return Err(format!("{handle}: the run's problem {} {why}", id.key().short12()));
+                }
+            }
         }
         None => store.resolve::<FitProblem>(&RunRef::new(handle.clone())).map_err(|e| e.to_string())?,
     };
@@ -1072,7 +1185,8 @@ pub(crate) fn read_fit(store: &Store, handle: &Handle) -> Result<StoredFit, Stri
     let record = problem.identity();
     let input = |name: String, ext: &str| -> Result<StoredInput, String> {
         let bytes = read_stored(&problem, &name)?;
-        Ok(StoredInput { name, ext: ext.to_string(), bytes })
+        let _ = ext;
+        Ok(StoredInput { name, bytes })
     };
     let training = record
         .training
@@ -1089,6 +1203,29 @@ pub(crate) fn read_fit(store: &Store, handle: &Handle) -> Result<StoredFit, Stri
         .keys()
         .map(|stream| Ok((stream.clone(), read_stored(&problem, &held_out_file(stream))?)))
         .collect::<Result<BTreeMap<_, _>, String>>()?;
+    let provenance = |name: &str| -> Result<Vec<u8>, String> {
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut problem.open_provenance(name).map_err(|e| e.to_string())?, &mut bytes)
+            .map_err(|e| e.to_string())?;
+        Ok(bytes)
+    };
+    let synthetic_truth = match &record.synthetic {
+        Some(_) => Some(input(SYNTHETIC_TRUTH_FILE.to_string(), "toml")?),
+        // A real-data fit's recovery truth, kept as provenance.
+        None if problem.provenance_files().contains(&RECOVERY_TABLE_FILE) => {
+            let table = String::from_utf8(provenance(RECOVERY_TABLE_FILE)?).map_err(|e| e.to_string())?;
+            let doc: toml::Table = table.parse().map_err(|e| format!("{RECOVERY_TABLE_FILE}: {e}"))?;
+            let spec: config_v2::SyntheticSpec = doc
+                .get("synthetic")
+                .cloned()
+                .ok_or_else(|| format!("{RECOVERY_TABLE_FILE}: no [synthetic] table"))?
+                .try_into()
+                .map_err(|e| format!("{RECOVERY_TABLE_FILE}: {e}"))?;
+            config.problem.synthetic = Some(spec);
+            Some(StoredInput { name: SYNTHETIC_TRUTH_FILE.to_string(), bytes: provenance(SYNTHETIC_TRUTH_FILE)? })
+        }
+        None => None,
+    };
     let model = record.model.clone();
     if let Some(r) = &run {
         let text = String::from_utf8(read_stored(r, METHOD_FILE)?).map_err(|e| format!("{METHOD_FILE}: {e}"))?;
@@ -1106,7 +1243,694 @@ pub(crate) fn read_fit(store: &Store, handle: &Handle) -> Result<StoredFit, Stri
         }
         config.inference.method = Some(method);
     }
-    Ok(StoredFit { problem, run, model, config, training, tables, held_out, partition })
+    Ok(StoredFit { problem, run, model, config, training, tables, held_out, partition, synthetic_truth })
+}
+
+// ── A stored run's files, for readers that read by path ─────────────────────
+
+/// What a run was asked to do and what it found, as the method's readers
+/// read it (`method_result`, `fit summary`): the method, the seed, the
+/// header the run printed, the starts and their source, and the best
+/// log-likelihood and chain. A provenance file: it names the fit file as
+/// typed.
+pub(crate) const RUN_INPUTS_FILE: &str = "run_inputs.json";
+
+/// The fit's provenance as the run resolved it (`run_meta::FitSidecar`):
+/// where each prior came from, every parameter's value and source, the
+/// partition into estimated and fixed. A provenance file.
+pub(crate) const FIT_META_FILE: &str = "fit.meta.json";
+
+/// The fit file the run was given, as read.
+pub(crate) const FIT_TOML_FILE: &str = "fit.toml";
+
+/// A stored run's result and provenance files, each read through the store
+/// and checked against its digest, copied into a scratch directory that is
+/// removed when this is dropped. For the readers of a run's files (the method
+/// result, `fit summary`, `compare`, a sourced start), which read them by
+/// path; the scratch copy is never a path into the store.
+pub(crate) struct RunFiles {
+    dir: tempfile::TempDir,
+}
+
+/// Each copy of a stored fit's files, with the path in the store it stands
+/// for, so a reader that shows a path shows the store and never the copy. A
+/// file's entry comes before its directory's, and the first match is used.
+static SHOWN: std::sync::Mutex<Vec<(std::path::PathBuf, std::path::PathBuf)>> = std::sync::Mutex::new(Vec::new());
+
+/// `p`, a path inside a copy of a stored run's files, as the same path in the
+/// run's folder; any other path unchanged.
+pub(crate) fn shown(p: &Path) -> std::path::PathBuf {
+    let copies = SHOWN.lock().unwrap_or_else(|e| e.into_inner());
+    for (copy, folder) in copies.iter() {
+        if let Ok(rest) = p.strip_prefix(copy) {
+            return folder.join(rest);
+        }
+    }
+    p.to_path_buf()
+}
+
+/// Shows `copy` as `stored`, ahead of every mapping already registered.
+fn show_as(copy: &Path, stored: &Path) {
+    SHOWN.lock().unwrap_or_else(|e| e.into_inner()).insert(0, (copy.to_path_buf(), stored.to_path_buf()));
+}
+
+impl RunFiles {
+    pub fn of(run: &Stored<FitRun>) -> Result<RunFiles, String> {
+        let dir = tempfile::Builder::new()
+            .prefix("camdl-run-")
+            .tempdir()
+            .map_err(|e| format!("cannot make a scratch directory: {e}"))?;
+        SHOWN.lock().unwrap_or_else(|e| e.into_inner()).push((dir.path().to_path_buf(), run.folder().to_path_buf()));
+        let write = |name: &str, bytes: &[u8]| -> Result<(), String> {
+            let path = dir.path().join(name);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+            }
+            std::fs::write(&path, bytes).map_err(|e| format!("cannot write {}: {e}", path.display()))
+        };
+        for name in run.result_files() {
+            write(name, &read_stored(run, name)?)?;
+        }
+        for name in run.provenance_files() {
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut run.open_provenance(name).map_err(|e| e.to_string())?, &mut bytes)
+                .map_err(|e| format!("reading {name}: {e}"))?;
+            write(name, &bytes)?;
+        }
+        Ok(RunFiles { dir })
+    }
+
+    /// The scratch directory, laid out as the run's folder is.
+    pub fn path(&self) -> &Path {
+        self.dir.path()
+    }
+}
+
+/// The inputs `dir`, a run's folder or a copy of it, records
+/// ([`RUN_INPUTS_FILE`]).
+pub(crate) fn read_run_inputs(dir: &Path) -> Result<serde_json::Value, String> {
+    let path = dir.join(RUN_INPUTS_FILE);
+    let bytes = std::fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// A stored fit opened for a reader that reads it by path: the fit as
+/// [`read_fit`] gives it, its problem with `[data]` and `[model]` naming
+/// checked copies in a scratch directory, the stored compile as an IR file
+/// there, and, when the handle named a run, the run's files copied out. The
+/// scratch directory is removed when this is dropped.
+pub(crate) struct OpenedFit {
+    pub fit: StoredFit,
+    /// The stored compile, with the model's name, description and `#'`
+    /// documentation, which are not part of it, read back from its
+    /// provenance, as an IR file in the scratch directory.
+    pub model_ir: std::path::PathBuf,
+    /// The run's files, with `model.ir.json` beside them; `None` for a
+    /// problem handle.
+    pub run: Option<RunFiles>,
+    /// The problem's labels, from the invocation that stored it.
+    pub labels: Option<ProblemLabels>,
+    /// The directory holding `model.ir.json`: the copy of the run's files,
+    /// or for a problem handle the scratch directory.
+    pub segment: std::path::PathBuf,
+    /// The copy of the run's files; `None` for a problem handle.
+    pub leaf: Option<std::path::PathBuf>,
+    /// The config the problem (and the run, when one is named) was resolved
+    /// to, with every path naming a copy in the scratch directory.
+    pub config: FitConfig,
+    /// The compile's quantities and contrasts, which the problem names in its
+    /// lineage; restored into [`Self::model_ir`].
+    pub quantities: Option<Dep<crate::camdl_store::Quantities>>,
+    _scratch: tempfile::TempDir,
+}
+
+impl OpenedFit {
+    /// The model file the problem keeps (`model.camdl`, or the IR it was
+    /// given), copied out of the store into the scratch directory under its
+    /// stored name, for a reader that compiles against the model's source.
+    pub fn model_source(&self) -> Result<std::path::PathBuf, String> {
+        let problem = &self.fit.problem;
+        let name = problem
+            .provenance_files()
+            .into_iter()
+            .find(|f| f.starts_with("model."))
+            .ok_or("the stored problem keeps no model file")?
+            .to_string();
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut problem.open_provenance(&name).map_err(|e| e.to_string())?, &mut bytes)
+            .map_err(|e| e.to_string())?;
+        let path = self._scratch.path().join("source").join(&name);
+        std::fs::create_dir_all(path.parent().expect("a file in the scratch directory")).map_err(|e| e.to_string())?;
+        std::fs::write(&path, bytes).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        show_as(&path, &problem.folder().join(&name));
+        Ok(path)
+    }
+
+    /// The directory a reader reads the run from: the copy of the run's
+    /// files.
+    pub fn run_dir(&self) -> Option<&Path> {
+        self.run.as_ref().map(RunFiles::path)
+    }
+
+    /// [`Self::config`], cloned.
+    pub fn config(&self) -> FitConfig {
+        self.config.clone()
+    }
+
+    /// The model's name: the stem of the file the problem was posed on.
+    pub fn model_name(&self) -> String {
+        self.labels.as_ref().map(|l| l.model.clone()).unwrap_or_else(|| "model".to_string())
+    }
+}
+
+/// The compiled model a stored problem names, as an IR envelope: the model
+/// part with the name, the description and the documentation the compile's
+/// provenance records restored.
+fn stored_envelope(store: &Store, dep: &Dep<CompiledModel>, name: &str) -> Result<ir::IrEnvelope, String> {
+    let stored: Stored<CompiledModel> = store
+        .get(dep.id())
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("the compiled model {} is not stored", dep.id().key().short12()))?;
+    let content = read_stored(&stored, CompiledModel::FILE)?;
+    if Key::digest_bytes(&content) != dep.digest() {
+        return Err(format!("the stored compiled model {} is not the one the fit names", dep.id().key().short12()));
+    }
+    let part = <crate::camdl_store::CompiledModelContent as Content>::from_bytes(&content).map_err(|e| e.to_string())?;
+    let mut model = part.model().clone();
+    model.name = name.to_string();
+    model.description = stored.recorded("description").and_then(|v| v.as_str()).map(str::to_string);
+    let mut envelope = ir::IrEnvelope::wrap(model, None, declared::DeclaredSection::not_recorded());
+    if let Ok(mut docs) = stored.open_provenance("docs.json") {
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut docs, &mut bytes).map_err(|e| e.to_string())?;
+        envelope.docs = serde_json::from_slice(&bytes).map_err(|e| format!("docs.json: {e}"))?;
+    }
+    Ok(envelope)
+}
+
+/// The quantities part the invocation that `handle` names recorded for
+/// `run`: for `@label`, the invocation holding the label; for an id or a
+/// folder, the one every invocation that named the run recorded. An id or
+/// folder whose invocations recorded different quantities is refused, since
+/// which the user means is not said. `None` when no invocation recorded one.
+fn run_quantities(
+    store: &Store,
+    handle: &Handle,
+    text: &str,
+    run: &Stored<FitRun>,
+) -> Result<Option<(Dep<crate::camdl_store::Quantities>, crate::camdl_store::QuantitiesContent)>, String> {
+    let recorded = |inv: &store::Invocation| -> Option<String> {
+        inv.members::<FitRun>().ok()?.into_iter().find(|(id, _)| id == run.id()).and_then(|(_, l)| l.quantities)
+    };
+    let hex = match handle {
+        Handle::Label { .. } => store.invocation(handle).ok().as_ref().and_then(recorded),
+        _ => {
+            let mut seen: Vec<(u64, String)> = Vec::new();
+            for inv in store.invocations() {
+                if let Some(q) = recorded(&inv) {
+                    seen.push((inv.seq(), q));
+                }
+            }
+            let distinct: std::collections::BTreeSet<&String> = seen.iter().map(|(_, q)| q).collect();
+            if distinct.len() > 1 {
+                let list: Vec<String> = seen
+                    .iter()
+                    .map(|(seq, q)| format!("    invocation {seq}: quantities {}", &q[..12.min(q.len())]))
+                    .collect();
+                return Err(format!(
+                    "{text} names a run that invocations compiled with different quantities blocks:\n{}\n  \
+                     Name the run by the @label of the `fit run` whose model's quantities you mean \
+                     (`fit run --label`), so the prediction evaluates those.",
+                    list.join("\n")
+                ));
+            }
+            seen.pop().map(|(_, q)| q)
+        }
+    };
+    let Some(hex) = hex else { return Ok(None) };
+    use crate::camdl_store::Quantities;
+    let stored: Stored<Quantities> = store
+        .resolve(&RunRef::new(Handle::IdPrefix(hex.clone())))
+        .map_err(|e| format!("the run's quantities {}: {e}", &hex[..12.min(hex.len())]))?;
+    let dep = stored.dep(Quantities::FILE).map_err(|e| e.to_string())?;
+    let bytes = read_stored(&stored, Quantities::FILE)?;
+    let content = <crate::camdl_store::QuantitiesContent as Content>::from_bytes(&bytes).map_err(|e| e.to_string())?;
+    Ok(Some((dep, content)))
+}
+
+/// The quantities and contrasts `problem`'s lineage names, read and checked
+/// against the digest the lineage recorded; `None` for a problem whose
+/// lineage names none.
+fn problem_quantities(
+    store: &Store,
+    problem: &Stored<FitProblem>,
+) -> Result<Option<(Dep<crate::camdl_store::Quantities>, crate::camdl_store::QuantitiesContent)>, String> {
+    use crate::camdl_store::Quantities;
+    let Some((run_id, digest)) = problem.lineage().iter().find_map(|l| match l {
+        store::Lineage::Result { kind, run_id, digest, .. } if kind == Quantities::KIND => Some((*run_id, *digest)),
+        _ => None,
+    }) else {
+        return Ok(None);
+    };
+    let stored: Stored<Quantities> = store
+        .resolve(&RunRef::new(Handle::IdPrefix(run_id.to_hex())))
+        .map_err(|e| format!("the fit's quantities {}: {e}", run_id.short12()))?;
+    let dep = stored.dep(Quantities::FILE).map_err(|e| e.to_string())?;
+    if dep.digest() != digest {
+        return Err(format!("the stored quantities {} are not the ones the fit names", run_id.short12()));
+    }
+    let bytes = read_stored(&stored, Quantities::FILE)?;
+    let content = <crate::camdl_store::QuantitiesContent as Content>::from_bytes(&bytes).map_err(|e| e.to_string())?;
+    Ok(Some((dep, content)))
+}
+
+/// The labels the invocation that stored `problem` gave it.
+fn problem_labels(store: &Store, problem: &Stored<FitProblem>) -> Option<ProblemLabels> {
+    let inv = store.invocation(&Handle::IdPrefix(problem.id().key().to_hex())).ok()?;
+    inv.members::<FitProblem>().ok()?.into_iter().find(|(id, _)| id == problem.id()).map(|(_, l)| l)
+}
+
+/// Opens the fit `text` names in `store` for a reader: `@label`, a run-id or
+/// problem-id prefix, or a result's folder. A fit file is never a handle:
+/// it is refused, with the runs it produced listed, by [`resolve_run`]'s
+/// rule.
+pub(crate) fn open_fit(store: &Store, text: &str) -> Result<OpenedFit, String> {
+    if is_config_file(text) {
+        let source = store::SourceBytes::read(text).map_err(|e| e.to_string())?;
+        return Err(not_a_run(store, &source));
+    }
+    let handle = parse_handle(text)?;
+    let fit = read_fit(store, &handle).map_err(|e| {
+        not_completed(store, text)
+            .or_else(|| match &handle {
+                Handle::Label { name, back } if *back > 0 => past_the_history(store, text, name),
+                _ => None,
+            })
+            .unwrap_or(e)
+    })?;
+    say_resolution(store, text, &fit);
+    let scratch = tempfile::Builder::new()
+        .prefix("camdl-fit-")
+        .tempdir()
+        .map_err(|e| format!("cannot make a scratch directory: {e}"))?;
+    let labels = problem_labels(store, &fit.problem);
+    let name = labels.as_ref().map(|l| l.model.clone()).unwrap_or_else(|| "model".to_string());
+    let mut envelope = stored_envelope(store, &fit.model, &name)?;
+    let quantities = match &fit.run {
+        Some(run) => match run_quantities(store, &handle, text, run)? {
+            Some(q) => Some(q),
+            None => problem_quantities(store, &fit.problem)?,
+        },
+        None => problem_quantities(store, &fit.problem)?,
+    };
+    if let Some((_, content)) = &quantities {
+        envelope.model.quantities = content.quantities()?;
+        envelope.model.contrasts = content.contrasts()?;
+    }
+    let quantities = quantities.map(|(dep, _)| dep);
+    let json = serde_json::to_string(&envelope).map_err(|e| e.to_string())?;
+    let model_ir = scratch.path().join("model.ir.json");
+    std::fs::write(&model_ir, &json).map_err(|e| format!("cannot write {}: {e}", model_ir.display()))?;
+    let mut problem = fit.bind_in(&scratch.path().join("problem"))?;
+    problem.model.camdl = model_ir.to_string_lossy().into_owned();
+    problem.compiled_ir = Some(problem.model.camdl.clone());
+    let run = match &fit.run {
+        Some(r) => {
+            let files = RunFiles::of(r)?;
+            std::fs::write(files.path().join("model.ir.json"), &json).map_err(|e| e.to_string())?;
+            Some(files)
+        }
+        None => None,
+    };
+    // The copies show as the store's files: the problem's inputs as its
+    // folder, and the compile as the model file the problem keeps, which a
+    // user can run again.
+    show_as(&scratch.path().join("problem"), fit.problem.folder());
+    if let Some(given) = fit.problem.provenance_files().into_iter().find(|f| f.starts_with("model.")) {
+        let stored_model = fit.problem.folder().join(given);
+        show_as(&model_ir, &stored_model);
+        if let Some(r) = &run {
+            show_as(&r.path().join("model.ir.json"), &stored_model);
+        }
+    }
+    let config = FitConfig { problem, inference: fit.config.inference.clone() };
+    let leaf = run.as_ref().map(|r| r.path().to_path_buf());
+    let segment = leaf.clone().unwrap_or_else(|| scratch.path().to_path_buf());
+    Ok(OpenedFit { fit, model_ir, run, labels, segment, leaf, config, quantities, _scratch: scratch })
+}
+
+/// The run store a reader of a stored fit opens: the one the command stores
+/// in, set by the command before it reads a fit; else `CAMDL_STORE`, else the
+/// default.
+static READER_ROOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Name the run store this command reads stored fits from. The first call
+/// wins.
+pub(crate) fn set_reader_root(root: std::path::PathBuf) {
+    let _ = READER_ROOT.set(root);
+}
+
+/// The run store this command reads stored fits from.
+pub(crate) fn reader_root() -> std::path::PathBuf {
+    READER_ROOT.get().cloned().unwrap_or_else(crate::camdl_store::read_root)
+}
+
+/// The root of the run store `path` lies in: the nearest directory at or
+/// above it holding a `store.json`. `None` for a path in no store.
+pub(crate) fn store_holding(path: &Path) -> Option<std::path::PathBuf> {
+    let abs = std::fs::canonicalize(path).ok()?;
+    abs.ancestors().find(|d| d.join("store.json").is_file()).map(Path::to_path_buf)
+}
+
+type OpenedCache = std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<OpenedFit>>>;
+
+/// The fit `text` names, opened once per command in [`reader_root`]'s store
+/// and shared by every reader of it.
+pub(crate) fn opened(text: &str) -> Result<std::sync::Arc<OpenedFit>, String> {
+    static CACHE: std::sync::OnceLock<OpenedCache> = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(o) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(text) {
+        return Ok(std::sync::Arc::clone(o));
+    }
+    // A result's folder names its own store.
+    let root = store_holding(Path::new(text)).unwrap_or_else(reader_root);
+    let Some(store) = crate::camdl_store::open_existing(&root) else {
+        if is_config_file(text) {
+            return Err(format!(
+                "{text} is a fit configuration, and a configuration never names a run; there is \
+                 no run store at {}, so no run has been made from it. Run `camdl fit run {text}`, \
+                 then name the run by its @label, its id or its folder.",
+                root.display()
+            ));
+        }
+        return Err(format!("{text} names a stored fit, and there is no run store at {}", root.display()));
+    };
+    let o = std::sync::Arc::new(open_fit(&store, text)?);
+    cache.lock().unwrap_or_else(|e| e.into_inner()).insert(text.to_string(), std::sync::Arc::clone(&o));
+    Ok(o)
+}
+
+/// [`opened`] for a reader that reads one run: a problem handle is refused.
+pub(crate) fn opened_run(text: &str) -> Result<std::sync::Arc<OpenedFit>, String> {
+    let o = opened(text)?;
+    if o.run.is_none() {
+        let store = crate::camdl_store::open_existing(&store_holding(Path::new(text)).unwrap_or_else(reader_root));
+        return Err(match store {
+            Some(store) => not_one_run_of(&store, text, o.fit.problem.id()),
+            None => format!("{text} names a fit problem, and this reads one run of it; name the run"),
+        });
+    }
+    Ok(o)
+}
+
+/// The fit problem a `--fit` argument names, for a reader of the problem
+/// alone (`pfilter`, `design lhs`, `profile`): a fit file, read in process and
+/// stored nowhere, or a stored fit, opened through the store.
+pub(crate) struct FitArg {
+    /// The argument as typed, for messages.
+    pub handle: String,
+    /// The problem (and the run's method, for a run handle). For a stored
+    /// fit every path in it names a checked copy in a scratch directory.
+    pub config: FitConfig,
+    /// The text `config` was parsed from: the fit file, or the stored
+    /// problem's `problem.toml`.
+    text: String,
+    /// The stored fit, kept open so its copies stay; `None` for a fit file.
+    pub stored: Option<Box<OpenedFit>>,
+    /// What a reader on the old store keys and archives as the fit's config
+    /// (`profile`): the fit file as written, or the stored `problem.toml`
+    /// followed by the run's `method.toml` when a run is named.
+    pub original: String,
+    /// The stored `problem.toml`, which is already resolved; `None` for a fit
+    /// file, whose resolution needs the model.
+    pub resolved: Option<String>,
+    /// The path `config`'s relative paths were written against: the fit
+    /// file, or the stored problem's copy of `problem.toml`.
+    pub anchor: std::path::PathBuf,
+}
+
+impl FitArg {
+    /// A `--fit` argument: a fit file when it names one, else a handle in
+    /// `store`.
+    pub fn read(text: &str, store: Option<&Store>) -> Result<FitArg, String> {
+        if is_config_file(text) {
+            let path = std::path::PathBuf::from(text);
+            let body = std::fs::read_to_string(&path).map_err(|e| format!("cannot read fit config {text}: {e}"))?;
+            let config = FitConfig::parse_anchored_at(&body, &path, &path)
+                .map_err(|e| format!("cannot load fit config {text}: {e}"))?;
+            return Ok(FitArg {
+                handle: text.to_string(),
+                config,
+                original: body.clone(),
+                resolved: None,
+                anchor: path,
+                text: body,
+                stored: None,
+            });
+        }
+        let store = store.ok_or_else(|| format!("{text} names a stored fit, and there is no run store"))?;
+        let opened = open_fit(store, text)?;
+        let body = String::from_utf8(read_stored(&opened.fit.problem, PROBLEM_FILE)?)
+            .map_err(|e| format!("{PROBLEM_FILE}: {e}"))?;
+        let mut original = body.clone();
+        if let Some(run) = &opened.fit.run {
+            let method = String::from_utf8(read_stored(run, METHOD_FILE)?).map_err(|e| format!("{METHOD_FILE}: {e}"))?;
+            original.push_str(&method);
+        }
+        let anchor = opened.run_dir().map(Path::to_path_buf).unwrap_or_else(|| opened.model_ir.clone());
+        Ok(FitArg {
+            handle: text.to_string(),
+            config: opened.config(),
+            original,
+            resolved: Some(body.clone()),
+            anchor,
+            text: body,
+            stored: Some(Box::new(opened)),
+        })
+    }
+
+    /// The text [`Self::config`] was parsed from, for a reader that asks what
+    /// the config writes (`[config] dt`).
+    pub fn config_text(&self) -> &str {
+        &self.text
+    }
+
+    /// The argument's file name, for messages.
+    pub fn name(&self) -> String {
+        Path::new(&self.handle)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.handle.clone())
+    }
+
+    /// The stored problem, as a dependency; `None` for a fit file.
+    pub fn problem_dep(&self) -> Option<Dep<FitProblem>> {
+        self.stored.as_ref().map(|o| o.fit.problem.dep_all())
+    }
+}
+
+/// The handle a reader was given, parsed. A configuration file is never a
+/// handle: a fit file names a problem and, through its invocations, the runs
+/// it produced.
+pub(crate) fn parse_handle(text: &str) -> Result<Handle, String> {
+    // A label's earlier holder is `@<label>~<N>`, `N` a whole number.
+    if let Some((name, back)) = text.strip_prefix('@').and_then(|r| r.rsplit_once('~')) {
+        if back.is_empty() || !back.chars().all(|c| c.is_ascii_digit()) {
+            return Err(format!(
+                "{text}: a label names its latest holder as @{name}, and an earlier one as \
+                 @<label>~<N>, N a whole number counting back (@{name}~1 is the one before)"
+            ));
+        }
+    }
+    text.parse::<Handle>().map_err(|e| format!("{text}: {e}"))
+}
+
+/// The invocations that hold or held label `name`, as the store counts them
+/// (`@name` first, then `@name~1`, ...): each one's sequence number and the
+/// fit runs it named.
+fn label_history(store: &Store, name: &str) -> Vec<(u64, Vec<store::Key>)> {
+    store
+        .label_holders(name)
+        .into_iter()
+        .map(|inv| {
+            let runs = inv.members::<FitRun>().map(|m| m.into_iter().map(|(id, _)| id.key()).collect()).unwrap_or_default();
+            (inv.seq(), runs)
+        })
+        .collect()
+}
+
+/// The refusal of `@name~back` past the end of the label's history, listing
+/// it.
+fn past_the_history(store: &Store, text: &str, name: &str) -> Option<String> {
+    let held = label_history(store, name);
+    if held.is_empty() {
+        return None;
+    }
+    let mut msg = format!("{text}: @{name} has {} holder(s); counting back, they are:", held.len());
+    for (i, (seq, runs)) in held.iter().enumerate() {
+        let ids: Vec<String> = runs.iter().map(|k| k.short12()).collect();
+        let form = if i == 0 { format!("@{name}") } else { format!("@{name}~{i}") };
+        msg.push_str(&format!("\n    {form:<12} invocation {seq}  run {}", ids.join(", ")));
+    }
+    Some(msg)
+}
+
+/// Whether `text` names a fit configuration file rather than a stored result.
+pub(crate) fn is_config_file(text: &str) -> bool {
+    let p = Path::new(text);
+    p.extension().is_some_and(|e| e.eq_ignore_ascii_case("toml")) || (p.is_file() && !p.is_dir())
+}
+
+/// The one completed fit run `text` names in `store`: `@label`, a run-id
+/// prefix or the run's folder. A fit file is refused with the runs its
+/// invocations produced, newest first, and a handle naming a problem or
+/// several runs is refused with them listed.
+pub(crate) fn resolve_run(store: &Store, text: &str) -> Result<Stored<FitRun>, String> {
+    if is_config_file(text) {
+        let source = store::SourceBytes::read(text).map_err(|e| e.to_string())?;
+        return Err(not_a_run(store, &source));
+    }
+    let handle = parse_handle(text)?;
+    match store.resolve::<FitRun>(&RunRef::new(handle)) {
+        Ok(run) => Ok(run),
+        Err(store::Error::WrongKind { found, .. }) if found == FitProblem::KIND => {
+            match store.resolve::<FitProblem>(&RunRef::new(parse_handle(text)?)) {
+                Ok(problem) => Err(not_one_run_of(store, text, problem.id())),
+                Err(_) => Err(format!("{text} names a fit problem, and this reads one run of it; name the run")),
+            }
+        }
+        Err(e) => Err(not_completed(store, text).unwrap_or_else(|| e.to_string())),
+    }
+}
+
+/// Why the fit run or problem `text` names is not one a reader can read, when
+/// the store holds it in another state than completed: its folder, its state
+/// and the reason the store recorded. `None` when `text` names no such result.
+pub(crate) fn not_completed(store: &Store, text: &str) -> Option<String> {
+    let handle = parse_handle(text).ok()?;
+    let (kind, folder, state) = match store.resolve_entry::<FitRun>(&RunRef::new(handle.clone())) {
+        Ok(e) => ("fit run", e.folder().to_path_buf(), e.state().clone()),
+        Err(_) => {
+            let e = store.resolve_entry::<FitProblem>(&RunRef::new(handle)).ok()?;
+            ("fit problem", e.folder().to_path_buf(), e.state().clone())
+        }
+    };
+    if matches!(state, store::EntryState::Completed) {
+        return None;
+    }
+    let why = entry_state(&state);
+    Some(format!(
+        "{text} names a {kind} that did not complete and is not read: {} {why}",
+        crate::fit::report::display_path(&folder)
+    ))
+}
+
+/// For a handle that is a label, the line saying which result it names, on
+/// stderr: `@post → run 69fda5 (<folder>)`.
+pub(crate) fn say_resolution(store: &Store, text: &str, fit: &StoredFit) {
+    let Ok(Handle::Label { name, back }) = text.parse::<Handle>() else { return };
+    // The holders the label had before the one named.
+    let earlier = label_history(store, &name).len().saturating_sub(1 + back as usize);
+    let tail = match earlier {
+        0 => String::new(),
+        1 => " (1 earlier holder)".to_string(),
+        n => format!(" ({n} earlier holders)"),
+    };
+    let (kind, key, folder) = match &fit.run {
+        Some(r) => ("run", r.id().key(), r.folder().to_path_buf()),
+        None => ("problem", fit.problem.id().key(), fit.problem.folder().to_path_buf()),
+    };
+    crate::out::detached().say(format_args!(
+        "{text} → {kind} {} ({}){tail}",
+        &key.to_hex()[..6],
+        crate::fit::report::display_path(&folder)
+    ));
+}
+
+/// A result's state other than completed, as a refusal says it.
+fn entry_state(state: &store::EntryState) -> String {
+    match state {
+        store::EntryState::Completed => "completed".to_string(),
+        store::EntryState::Failed { operation, reason } => format!(
+            "failed{}{}",
+            operation.as_ref().map(|o| format!(" while {o}")).unwrap_or_default(),
+            reason.as_ref().map(|r| format!(": {r}")).unwrap_or_default()
+        ),
+        store::EntryState::Interrupted { .. } => "was interrupted: its process ended before it completed".to_string(),
+        store::EntryState::Running { .. } => "is still running".to_string(),
+        store::EntryState::Damaged { what } => format!("is damaged: {what}"),
+    }
+}
+
+/// The refusal of a problem handle offered where one run is needed: the
+/// problem's stored runs, each with its folder. A problem names no one run,
+/// even when it holds one, since a later run of it would change the answer.
+fn not_one_run_of(store: &Store, text: &str, problem: &store::Id<FitProblem>) -> String {
+    let mut runs: Vec<(store::Key, std::path::PathBuf)> = Vec::new();
+    for inv in store.invocations() {
+        let Ok(members) = inv.members::<FitRun>() else { continue };
+        for (id, _) in members {
+            if runs.iter().any(|(k, _)| *k == id.key()) {
+                continue;
+            }
+            if let Ok(Some(run)) = store.get(&id) {
+                if run.identity().chain.problem.id() == problem {
+                    runs.push((id.key(), run.folder().to_path_buf()));
+                }
+            }
+        }
+    }
+    let mut msg = format!("{text} names a fit problem, and this reads one run of it.");
+    if runs.is_empty() {
+        msg.push_str("\n  No run of it is stored.");
+    } else {
+        msg.push_str(" Its runs:");
+        for (key, folder) in &runs {
+            msg.push_str(&format!("\n    {}  {}", key.short12(), folder.display()));
+        }
+        msg.push_str("\n  Name one by its id or folder, or by `@label` (`fit run --label`).");
+    }
+    msg
+}
+
+/// The refusal of a fit file offered where one run is needed: the runs the
+/// file's invocations produced, newest first, each with its folder.
+pub(crate) fn not_a_run(store: &Store, source: &store::SourceBytes) -> String {
+    let runs = store.runs_of_configuration(source.digest());
+    let mut text = format!(
+        "{} is a fit configuration, and a configuration never names a run: one file makes \
+         several runs whenever its data, its seeds, a sweep or the build change.",
+        source.path().display()
+    );
+    let mut listed = 0;
+    for id in &runs {
+        if let Ok(run) = store.resolve::<FitRun>(&RunRef::new(Handle::IdPrefix(id.to_hex()))) {
+            text.push_str(&format!("\n    {}  {}", id.short12(), run.folder().display()));
+            listed += 1;
+        }
+    }
+    if listed == 0 {
+        text.push_str("\n  No run of it is stored. Run `camdl fit run` on it, then name the run by \
+                       `@label` (`--label`) or by its id.");
+    } else {
+        text.push_str("\n  Name one by its id or folder, or by `@label` (`fit run --label`).");
+    }
+    text
+}
+
+/// For a test that writes a run's folder by hand: the run's inputs a
+/// record's `inputs` carries, with its run id and its problem's (the first
+/// level's hash), as `run_inputs.json` beside it.
+#[cfg(test)]
+pub(crate) fn write_test_inputs(dir: &Path, record: &serde_json::Value) {
+    let mut inputs = record["inputs"].clone();
+    if let Some(o) = inputs.as_object_mut() {
+        o.insert("run_id".into(), record["run_id"].clone());
+        if let Some(h) = record.pointer("/levels/0/hash") {
+            o.insert("problem_id".into(), h.clone());
+        }
+    }
+    std::fs::write(dir.join(RUN_INPUTS_FILE), serde_json::to_vec(&inputs).unwrap()).unwrap();
 }
 
 #[cfg(test)]

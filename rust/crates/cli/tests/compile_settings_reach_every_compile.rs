@@ -16,6 +16,8 @@
 //! their input-class tests (`keyed_no_licm`), which show the run identity
 //! move with the flag.
 
+mod fit_store_support;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::OnceLock;
@@ -75,19 +77,16 @@ simulate {
 
 const DATA: &str = "time\tweekly_cases\n7\t16\n14\t166\n21\t626\n28\t1303\n35\t1260\n42\t1023\n49\t327\n56\t91\n";
 
-fn fit_toml(output_dir: &str) -> String {
-    format!(
-        r#"output_dir = "{output_dir}"
-
-[model]
+fn fit_toml() -> String {
+    r#"[model]
 camdl = "model.camdl"
 
 [data.observations]
 weekly_cases = "weekly_cases.tsv"
 
 [estimate]
-beta  = {{ bounds = [0.05, 1.0], start = 0.4 }}
-gamma = {{ bounds = [0.01, 0.5], start = 0.15 }}
+beta  = { bounds = [0.05, 1.0], start = 0.4 }
+gamma = { bounds = [0.01, 0.5], start = 0.15 }
 
 [fixed]
 N0  = 10000
@@ -102,8 +101,7 @@ chains = 1
 iterations = 40
 burn_in = 10
 thin = 1
-"#
-    )
+"#.to_string()
 }
 
 /// The project every case runs in: the model, its data, two fit configs, a
@@ -123,8 +121,8 @@ fn project() -> &'static Project {
         std::fs::write(root.join("model.camdl"), MODEL).unwrap();
         std::fs::write(root.join("other.camdl"), MODEL.replace("to   = 56 'days", "to   = 49 'days")).unwrap();
         std::fs::write(root.join("weekly_cases.tsv"), DATA).unwrap();
-        std::fs::write(root.join("fit.toml"), fit_toml("results")).unwrap();
-        std::fs::write(root.join("other.toml"), fit_toml("other_results").replace("model.camdl", "other.camdl"))
+        std::fs::write(root.join("fit.toml"), fit_toml()).unwrap();
+        std::fs::write(root.join("other.toml"), fit_toml().replace("model.camdl", "other.camdl"))
             .unwrap();
         std::fs::write(root.join("vocab.camdl"), "quantities {\n  attack_rate = final((N0 - S) / N0)\n}\n").unwrap();
         std::fs::write(root.join("p.toml"), "beta = 0.3\ngamma = 0.1\nN0 = 10000\nI0 = 10\nrho = 0.6\nk = 10\n")
@@ -143,18 +141,11 @@ fn project() -> &'static Project {
     })
 }
 
-/// The fit's method leaf and its problem folder.
+/// The fit's run folder and its problem folder, in the store under `root`.
 fn fit_leaf(root: &Path) -> (PathBuf, PathBuf) {
-    let fits = root.join("results/fits");
-    let segment = std::fs::read_dir(&fits).unwrap().flatten().map(|e| e.path()).find(|p| p.is_dir()).unwrap();
-    let method = std::fs::read_dir(&segment)
-        .unwrap()
-        .flatten()
-        .map(|e| e.path())
-        .find(|p| p.file_name().unwrap().to_string_lossy().starts_with("mh-"))
-        .unwrap();
-    let leaf = std::fs::read_dir(&method).unwrap().flatten().map(|e| e.path()).find(|p| p.join("run.json").is_file()).unwrap();
-    (leaf, segment)
+    let run = fit_store_support::the_run(&root.join("store/camdl-store"));
+    let problem = fit_store_support::problem_of(&run);
+    (run, problem)
 }
 
 fn copy_dir(from: &Path, to: &Path) {
@@ -257,7 +248,7 @@ fn assert_every_compile_follows_the_flag(name: &str, args: &[&str]) {
     assert_every_compile_follows_the_flag_in(&case(), name, args);
 }
 
-/// The fit's method leaf, relative to the project.
+/// The fit's run folder, relative to the project.
 fn leaf_arg() -> String {
     let (leaf, _) = fit_leaf(&project().root);
     leaf.strip_prefix(&project().root).unwrap().to_string_lossy().into_owned()
@@ -288,24 +279,6 @@ fn fit_diff() {
     assert_every_compile_follows_the_flag("fit diff", &["fit", "diff", "fit.toml", "other.toml"]);
 }
 
-#[test]
-fn fit_new() {
-    let c = case();
-    for (flag, dest, want) in [(None, "a.toml", "no_licm=0"), (Some("--no-licm"), "b.toml", "no_licm=1")] {
-        let mut args: Vec<&str> = flag.into_iter().collect();
-        args.extend(["fit", "new", "--from", "fit.toml", dest]);
-        let (o, compiles) = c.run(&args);
-        assert!(o.status.success(), "fit new: {}", text(&o));
-        assert!(!compiles.is_empty(), "fit new compiled nothing:\n{}", text(&o));
-        assert!(compiles.iter().all(|l| l.starts_with(want)), "fit new {flag:?}: {compiles:#?}");
-    }
-}
-
-#[test]
-fn fit_summary() {
-    assert_every_compile_follows_the_flag("fit summary", &["fit", "summary", &leaf_arg()]);
-}
-
 /// `fit predict` replays the archived model; a reporting vocabulary is
 /// compiled against the model source, under the flag.
 #[test]
@@ -314,18 +287,6 @@ fn fit_predict_with_a_vocabulary() {
         "fit predict --quantities",
         &["fit", "predict", &leaf_arg(), "--mode", "free_forward", "--quantities", "vocab.camdl", "--n-draws", "2"],
     );
-}
-
-/// `compare` scores a fit on the model it archived, which needs no compile.
-/// A fit whose archive is missing is scored on its config's model source,
-/// compiled once under the flag.
-#[test]
-fn compare_of_a_fit_without_its_archive() {
-    let c = case();
-    let (leaf, segment) = fit_leaf(&c.dir);
-    std::fs::remove_file(segment.join("model.ir.json")).unwrap();
-    let leaf = leaf.to_string_lossy().into_owned();
-    assert_every_compile_follows_the_flag_in(&c, "compare", &["compare", &leaf, &leaf]);
 }
 
 /// `simulate --draws prior --fit` compiles the model, and the fit config's

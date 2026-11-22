@@ -2,6 +2,10 @@
 //! once binding both of its observation sources and once binding one, and
 //! the two fits compared on the stream they share.
 //!
+//! The fits that hold rows out are compared with `--in-sample`, on their
+//! training rows: a stored fit keeps its held-out rows' periods and not
+//! their values, so `compare` scores no held-out row of it.
+//!
 //! The model is the golden `seir_observations` IR: `weekly_cases` (a
 //! negative-binomial count every 7 days) and `detection` (a Bernoulli reading
 //! every 14 days), each its own source. A derived row is scored by a
@@ -25,10 +29,13 @@ fn golden_ir() -> PathBuf {
     manifest().join("../../../ocaml/golden/seir_observations.ir.json").canonicalize().unwrap()
 }
 
+/// Run `camdl` in `dir`, where `dir` is a test's root or one of its fit
+/// directories; every fit of a test is stored in `<root>/store`.
 fn camdl(dir: &Path, args: &[&str]) -> Output {
+    let root = if dir.join("fit.toml").is_file() { dir.parent().unwrap() } else { dir };
     Command::new(binary()).env_remove("CLICOLOR_FORCE")
         .env_remove("CAMDL_OUTPUT_DIR")
-        .env_remove("CAMDL_STORE")
+        .env("CAMDL_STORE", root.join("store"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args(args)
         .current_dir(dir)
@@ -39,7 +46,8 @@ const CASES: &str = "time\tweekly_cases\n7\t1\n14\t2\n21\t3\n28\t4\n35\t5\n";
 const DETECTION: &str = "time\tdetection\n14\t1\n28\t0\n";
 
 /// Fit the model in `dir/name`, binding `sources` through
-/// `[data.observations]`, with `holdout` written into `[data]`.
+/// `[data.observations]`, with `holdout` written into `[data]`; the run is
+/// stored in `dir/store` under the label `name`.
 fn fit(dir: &Path, name: &str, sources: &[&str], holdout: &str) {
     let sub = dir.join(name);
     std::fs::create_dir_all(&sub).unwrap();
@@ -51,7 +59,7 @@ fn fit(dir: &Path, name: &str, sources: &[&str], holdout: &str) {
         bound.push_str(&format!("{s} = \"{file}\"\n"));
     }
     std::fs::write(sub.join("fit.toml"), format!(r#"
-output_dir = "results"
+store = "../store"
 
 [model]
 camdl = "{ir}"
@@ -84,13 +92,13 @@ cooling    = 0.5
 [config]
 dt = 1.0
 "#, ir = golden_ir().display())).unwrap();
-    let out = camdl(&sub, &["fit", "run", "fit.toml", "--seed", "1"]);
+    let out = camdl(&sub, &["fit", "run", "fit.toml", "--seed", "1", "--label", name]);
     assert!(out.status.success(), "fit run in {} failed:\n{}",
         sub.display(), String::from_utf8_lossy(&out.stderr));
 }
 
 fn compare(dir: &Path, extra: &[&str]) -> Output {
-    let mut args = vec!["compare", "full/fit.toml", "cases_only/fit.toml",
+    let mut args = vec!["compare", "@full", "@cases_only",
                         "--particles", "100", "--replicates", "2"];
     args.extend_from_slice(extra);
     camdl(dir, &args)
@@ -115,18 +123,19 @@ fn pointwise_sum(tsv: &str, stream: &str, model: &str) -> f64 {
         .sum()
 }
 
-/// Held out at the same boundary: the joint comparison is refused and names
-/// `--streams` with the shared stream; with it, one table scores both fits on
-/// `weekly_cases` alone, and each row's elpd is the sum of that stream's own
-/// scores in the pointwise file.
+/// Held out at the same boundary and compared on their training rows: the
+/// joint comparison is refused and names `--streams` with the shared stream;
+/// with it (and `--allow-in-sample-ablation`, the in-sample ablation's
+/// waiver), one table scores both fits on `weekly_cases` alone, and each
+/// row's elpd is the sum of that stream's own scores in the pointwise file.
 #[test]
-fn fits_of_different_stream_sets_compare_held_out_on_the_stream_they_share() {
+fn fits_of_different_stream_sets_compare_on_the_stream_they_share() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     fit(dir, "full", &["weekly_cases", "detection"], "holdout_after = 21.0");
     fit(dir, "cases_only", &["weekly_cases"], "holdout_after = 21.0");
 
-    let out = compare(dir, &[]);
+    let out = compare(dir, &["--in-sample"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(2), "the joint comparison is refused:\n{stderr}");
     assert!(stderr.contains("did not score the same streams")
@@ -134,7 +143,8 @@ fn fits_of_different_stream_sets_compare_held_out_on_the_stream_they_share() {
     assert!(!stderr.contains("--allow-mismatched-horizon"), "{stderr}");
 
     let pw = dir.join("scores.tsv");
-    let out = compare(dir, &["--streams", "weekly_cases", "--format", "json",
+    let out = compare(dir, &["--in-sample", "--allow-in-sample-ablation",
+                             "--streams", "weekly_cases", "--format", "json",
                              "--pointwise", pw.to_str().unwrap()]);
     assert!(out.status.success(), "compare --streams failed:\n{}",
         String::from_utf8_lossy(&out.stderr));
@@ -144,7 +154,10 @@ fn fits_of_different_stream_sets_compare_held_out_on_the_stream_they_share() {
     assert_eq!(tables.len(), 1, "{v}");
     let t = &tables[0];
     assert_eq!(t["stream"], "weekly_cases");
-    assert!(t["overrides"].as_array().unwrap().is_empty(), "held out, nothing waived: {t}");
+    let waived: Vec<&str> = t["overrides"].as_array().unwrap().iter()
+        .map(|o| o["flag"].as_str().unwrap()).collect();
+    assert_eq!(waived, ["--allow-in-sample-ablation"],
+        "scored in sample, the stream ablation is the one check waived: {t}");
 
     assert!(!pw.exists(), "no joint pointwise file under --streams");
     let streams_file = dir.join("scores.streams.tsv");
@@ -154,14 +167,13 @@ fn fits_of_different_stream_sets_compare_held_out_on_the_stream_they_share() {
 
     for row in t["rows"].as_array().unwrap() {
         let name = row["name"].as_str().unwrap();
-        assert_eq!(row["conditioning"]["hold_out_tail"]["train_end"], serde_json::json!(21.0),
-            "{row}");
-        assert_eq!(row["t_score"], 2, "t = 28 and 35 lie past the boundary: {row}");
+        assert_eq!(row["conditioning"], "in_sample", "{row}");
+        assert_eq!(row["t_score"], 3, "t = 7, 14 and 21 are the training rows: {row}");
         let elpd = row["elpd"].as_f64().unwrap();
         let summed = pointwise_sum(&tsv, "weekly_cases", name);
         assert!((elpd - summed).abs() < 1e-8,
             "'{name}': elpd {elpd} is the sum of its weekly_cases scores {summed}\n{tsv}");
-        let assimilated = if name.starts_with("full") {
+        let assimilated = if name == "@full" {
             serde_json::json!(["detection", "weekly_cases"])
         } else {
             serde_json::json!(["weekly_cases"])
@@ -172,7 +184,7 @@ fn fits_of_different_stream_sets_compare_held_out_on_the_stream_they_share() {
     }
 
     // The text table names its stream and the assimilated sets.
-    let out = compare(dir, &["--streams", "weekly_cases"]);
+    let out = compare(dir, &["--in-sample", "--allow-in-sample-ablation", "--streams", "weekly_cases"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let table = String::from_utf8_lossy(&out.stdout);
     assert!(table.starts_with("Stream: weekly_cases"), "{table}");
@@ -180,7 +192,7 @@ fn fits_of_different_stream_sets_compare_held_out_on_the_stream_they_share() {
             && table.contains("assimilated weekly_cases."), "{table}");
 
     // A stream one fit never bound cannot be scored for it.
-    let out = compare(dir, &["--streams", "detection"]);
+    let out = compare(dir, &["--in-sample", "--allow-in-sample-ablation", "--streams", "detection"]);
     assert_eq!(out.status.code(), Some(2), "{}", String::from_utf8_lossy(&out.stderr));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("stream 'detection'") && stderr.contains("does not score 'detection'"),

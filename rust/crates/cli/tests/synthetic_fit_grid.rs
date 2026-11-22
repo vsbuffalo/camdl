@@ -6,6 +6,8 @@
 //! the release binary or `camdlc.exe` isn't present so the suite
 //! stays runnable in rust-only CI and when tests run before a build.
 
+mod fit_store_support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -39,22 +41,11 @@ fn tempdir(tag: &str) -> TempDir {
     TempDir(base)
 }
 
-/// Fit directories are named `<stem>-<fit_hash[:8]>/` — the test can't
-/// know the hash up front, so it discovers the single directory under
-/// `<out>/fits/` and asserts it starts with the expected stem.
-fn find_fit_dir(out: &Path, stem: &str) -> PathBuf {
-    let fits = out.join("fits");
-    let entries: Vec<_> = std::fs::read_dir(&fits)
-        .unwrap_or_else(|_| panic!("no fits/ dir under {}", out.display()))
-        .flatten().map(|e| e.path()).collect();
-    assert_eq!(entries.len(), 1,
-        "expected exactly one fit dir under {}, got {:?}", fits.display(), entries);
-    let p = &entries[0];
-    let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
-    let prefix = format!("{}-", stem);
-    assert!(name.starts_with(&prefix),
-        "expected {}-<hash> under fits/, got {}", stem, name);
-    p.clone()
+/// The one fit problem in the run store at `out`.
+fn find_fit_dir(out: &Path) -> PathBuf {
+    let problems = fit_store_support::problems(out);
+    assert_eq!(problems.len(), 1, "expected exactly one fit problem under {}, got {problems:?}", out.display());
+    problems[0].clone()
 }
 
 /// Minimal SIR with Poisson prevalence obs, fit config skeleton.
@@ -128,100 +119,49 @@ fn run_fit(bin: &Path, fit_toml: &Path) {
     assert!(status.success(), "fit run failed for {}", fit_toml.display());
 }
 
-/// gh#147 (M3.2): the CAS method leaf for `method_substr` under `fit_dir` —
-/// `<fit_dir>/<method>-<h8>/seed_<N>-<h8>/` (the dir holding a `fit_method`
-/// run.json whose `method` level contains `method_substr`). Replaces the pre-M3.2
-/// `real/fit_<seed>/<method>` / `synthetic/ds_NN/fit_<seed>/<method>` probe.
-fn cas_method_leaf(fit_dir: &Path, method_substr: &str) -> PathBuf {
-    let mut stack = vec![fit_dir.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        let rj = d.join("run.json");
-        if rj.is_file() {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(
-                &std::fs::read_to_string(&rj).unwrap_or_default(),
-            ) {
-                if v.get("kind").and_then(|k| k.as_str()) == Some("fit_method") {
-                    let method = v["levels"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .find(|l| l["name"].as_str() == Some("method"))
-                        .and_then(|l| l["label"].as_str())
-                        .unwrap_or("");
-                    if method.contains(method_substr) {
-                        return d;
-                    }
-                }
-            }
-        }
-        if let Ok(es) = std::fs::read_dir(&d) {
-            for e in es.flatten() {
-                if e.path().is_dir() {
-                    stack.push(e.path());
-                }
-            }
-        }
-    }
-    panic!("no CAS '{}' method leaf under {}", method_substr, fit_dir.display());
+/// A fit run of method `method` under `dir` (a store root or a problem
+/// folder).
+fn cas_method_leaf(dir: &Path, method: &str) -> PathBuf {
+    all_method_leaves(dir, method)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("no '{method}' fit run under {}", dir.display()))
 }
 
-/// Every CAS fit-method leaf dir under `root` whose `method` level contains
-/// `method_substr` — the multi-cell analog of `cas_method_leaf` (one entry per
-/// `seed_<S>` leaf, across one or more fit-bases).
-fn all_method_leaves(root: &Path, method_substr: &str) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(
-            &std::fs::read_to_string(d.join("run.json")).unwrap_or_default(),
-        ) {
-            if v.get("kind").and_then(|k| k.as_str()) == Some("fit_method") {
-                let method = v["levels"].as_array().into_iter().flatten()
-                    .find(|l| l["name"].as_str() == Some("method"))
-                    .and_then(|l| l["label"].as_str()).unwrap_or("");
-                if method.contains(method_substr) { out.push(d.clone()); }
-            }
-        }
-        if let Ok(es) = std::fs::read_dir(&d) {
-            for e in es.flatten() { if e.path().is_dir() { stack.push(e.path()); } }
-        }
-    }
-    out
+/// Every fit run of method `method` under `root` (a store root or a problem
+/// folder).
+fn all_method_leaves(root: &Path, method: &str) -> Vec<PathBuf> {
+    fit_store_support::runs_of_method(root, method)
 }
 
-/// The `seed` level (`seed_<N>`) of a CAS fit-method leaf, parsed to `N`.
+/// The seed a fit run was run with (its `run_inputs.json`).
 fn seed_of(leaf: &Path) -> u64 {
-    let v: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(leaf.join("run.json")).unwrap()).unwrap();
-    v["levels"].as_array().into_iter().flatten()
-        .find(|l| l["name"].as_str() == Some("seed"))
-        .and_then(|l| l["label"].as_str())
-        .and_then(|s| s.strip_prefix("seed_"))
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| panic!("no seed level on {}", leaf.display()))
+    fit_store_support::run_inputs(leaf)["seed"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("no seed recorded for {}", leaf.display()))
 }
 
-/// The distinct CAS fit-base dirs under `fits/` holding an `mle` method leaf —
-/// the cell fits (one per dataset for a synthetic grid), excluding the
-/// synthetic dataset-generation segment (which carries no method leaf).
+/// The fit problems in the store at `out` that hold an IF2 run: one per
+/// dataset for a synthetic grid.
 fn cell_fit_bases(out: &Path) -> Vec<PathBuf> {
-    let fits = out.join("fits");
-    let mut bases: Vec<PathBuf> = std::fs::read_dir(&fits).unwrap()
-        .flatten().map(|e| e.path())
-        .filter(|p| p.is_dir() && !all_method_leaves(p, "if2").is_empty())
-        .collect();
-    bases.sort();
-    bases
+    fit_store_support::problems(out).into_iter().filter(|p| !all_method_leaves(p, "if2").is_empty()).collect()
 }
 
-/// The synthetic dataset-generation segment under `fits/` — the fit-base that
-/// holds `synthetic/data/` (one `ds_NN/` directory of per-stream files, plus
-/// `truth.toml`), distinct from the per-dataset cell fits.
-fn datagen_segment(out: &Path) -> PathBuf {
-    let fits = out.join("fits");
-    std::fs::read_dir(&fits).unwrap().flatten().map(|e| e.path())
-        .find(|p| p.join("synthetic").join("data").is_dir())
-        .unwrap_or_else(|| panic!("no synthetic dataset-gen segment under {}", fits.display()))
+/// Whether some file in the store at `out` holds exactly the bytes of `file`.
+fn stores_bytes_of(out: &Path, file: &Path) -> bool {
+    let want = std::fs::read(file).unwrap();
+    let mut stack = vec![out.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if std::fs::read(&p).ok().as_deref() == Some(&want[..]) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 // ── mode 1: a single fit lands at its CAS method leaf ───────────────────
@@ -236,7 +176,7 @@ fn single_fit_lands_at_cas_method_leaf() {
     std::fs::write(&data_tsv, "time\tcases\n1\t5\n2\t7\n3\t12\n4\t18\n5\t25\n6\t30\n7\t28\n8\t22\n9\t15\n10\t10\n").unwrap();
     let fit_toml = tmp.path().join("fit.toml");
     std::fs::write(&fit_toml, format!(r#"
-output_dir = "{}"
+store = "{}"
 
 [model]
 camdl = "{}"
@@ -248,16 +188,12 @@ cases = "{}"
 
     run_fit(&bin, &fit_toml);
 
-    // gh#147 (M3.2): the `mle` method lands at the content-addressed leaf
-    // `<fit_dir>/<NN>-mle-<h8>/seed_<N>-<h8>/`, not the legacy
-    // `real/fit_1/mle/` wrapper.
-    let fit_dir = find_fit_dir(&out, "fit");
+    // The IF2 run lands in the fit's problem, at
+    // `<problem>/runs/if2-<id>/seed_<N>-<id>/`.
+    let fit_dir = find_fit_dir(&out);
     let leaf = cas_method_leaf(&fit_dir, "if2");
     assert!(leaf.join("run.json").is_file(),
-        "the mle method leaf {} must hold a run.json", leaf.display());
-    // The retired per-seed wrapper must NOT exist.
-    assert!(!fit_dir.join("real").exists(),
-        "the legacy real/fit_<seed>/ wrapper must NOT exist under {}", fit_dir.display());
+        "the IF2 run {} must hold a run.json", leaf.display());
 }
 
 // ── mode 2: fit_seeds list → one CAS method leaf per seed ───────────────
@@ -272,7 +208,7 @@ fn fit_seeds_list_produces_per_seed_dirs() {
     std::fs::write(&data_tsv, "time\tcases\n1\t5\n2\t7\n3\t12\n4\t18\n5\t25\n6\t30\n7\t28\n8\t22\n9\t15\n10\t10\n").unwrap();
     let fit_toml = tmp.path().join("fit.toml");
     std::fs::write(&fit_toml, format!(r#"
-output_dir = "{}"
+store = "{}"
 fit_seeds = [11, 22, 33]
 
 [model]
@@ -285,10 +221,9 @@ cases = "{}"
 
     run_fit(&bin, &fit_toml);
 
-    // Real multi-seed: one fit-base (same model + data + config), one CAS
-    // `mle` method leaf per fit-seed. The legacy `real/fit_<seed>/` wrapper is
-    // retired; the cross-seed summary.tsv is the deferred M4 view (gh#150).
-    let fit_dir = find_fit_dir(&out, "fit");
+    // Real multi-seed: one problem (same model + data + config), one IF2 run
+    // per fit-seed. The cross-seed summary.tsv is the deferred M4 view (gh#150).
+    let fit_dir = find_fit_dir(&out);
     let leaves = all_method_leaves(&fit_dir, "if2");
     let seeds: std::collections::HashSet<u64> = leaves.iter().map(|l| seed_of(l)).collect();
     assert_eq!(seeds, [11u64, 22, 33].into_iter().collect(),
@@ -298,8 +233,6 @@ cases = "{}"
         assert!(l.join("mle_params.toml").is_file(),
             "each seed leaf must hold mle_params.toml: {}", l.display());
     }
-    assert!(!fit_dir.join("real").exists(),
-        "the legacy real/fit_<seed>/ wrapper must NOT exist under {}", fit_dir.display());
 }
 
 // ── gh#110 follow-up: IF2 skips a degenerate chain instead of aborting ──
@@ -324,7 +257,7 @@ fn fit_run_skips_degenerate_if2_chain_and_continues() {
     std::fs::write(&data_tsv, "time\tcases\n1\t5\n2\t7\n3\t12\n4\t18\n5\t25\n6\t30\n7\t28\n8\t22\n9\t15\n10\t10\n").unwrap();
     let fit_toml = tmp.path().join("fit.toml");
     std::fs::write(&fit_toml, format!(r#"
-output_dir = "{}"
+store = "{}"
 fit_seeds = [2]
 
 [model]
@@ -372,7 +305,7 @@ cooling = 0.7
 
     // Acceptance 3: the surviving chains still produced the fit output —
     // the `mle` method leaf (gh#147 M3.2 CAS layout).
-    let leaf = cas_method_leaf(&find_fit_dir(&out, "fit"), "if2");
+    let leaf = cas_method_leaf(&find_fit_dir(&out), "if2");
     assert!(leaf.join("run.json").is_file(),
         "surviving chains must still write the mle method leaf at {}", leaf.display());
 }
@@ -387,7 +320,7 @@ fn synthetic_generates_n_datasets_and_fits() {
     let out = tmp.path().join("out");
     let fit_toml = tmp.path().join("fit.toml");
     std::fs::write(&fit_toml, format!(r#"
-output_dir = "{}"
+store = "{}"
 
 [model]
 camdl = "{}"
@@ -400,31 +333,25 @@ sim_seeds = [1, 2, 3]
 
     run_fit(&bin, &fit_toml);
 
-    // The dataset-generation segment holds the N generated datasets + truth;
-    // each dataset is then fit as its own content-addressed cell (distinct
-    // data digest → distinct fit-base). The cross-dataset summary.tsv and the
-    // parameter-recovery coverage.tsv are the deferred M4 views (gh#150).
-    let datagen = datagen_segment(&out);
-    for i in 1..=3 {
-        // One file per observation stream, under the stream's declared column
-        // names, so the loader the real data uses reads it back (gh#831).
-        let f = datagen.join("synthetic").join("data")
-            .join(format!("ds_{:02}", i)).join("cases.tsv");
-        assert!(f.is_file(), "ds_{:02}/cases.tsv must be generated at {}",
-            i, f.display());
-        let text = std::fs::read_to_string(&f).unwrap();
-        assert_eq!(text.lines().next().unwrap(), "time\tcases",
-            "the declared time column and the scored column");
-    }
-    assert!(datagen.join("synthetic").join("truth.toml").is_file(),
-        "truth.toml must be recorded for provenance");
+    // Each generated dataset is the training data of its own problem
+    // (distinct data digest → distinct problem). The cross-dataset
+    // summary.tsv and the parameter-recovery coverage.tsv are the deferred M4
+    // views (gh#150).
     let bases = cell_fit_bases(&out);
     assert_eq!(bases.len(), 3,
         "3 datasets → 3 distinct content-addressed cell fits; got {:?}", bases);
     for b in &bases {
+        // One file per observation stream, under the stream's declared column
+        // names, so the loader the real data uses reads it back (gh#831).
+        let f = b.join("inputs").join("cases.tsv");
+        assert!(f.is_file(), "the generated cases.tsv must be stored at {}", f.display());
+        let text = std::fs::read_to_string(&f).unwrap();
+        assert_eq!(text.lines().next().unwrap(), "time\tcases",
+            "the declared time column and the scored column");
         assert!(!all_method_leaves(b, "if2").is_empty(),
-            "each cell fit must have an mle method leaf: {}", b.display());
+            "each cell fit must have an IF2 run: {}", b.display());
     }
+    assert!(stores_bytes_of(&out, &truth), "the true parameters must be stored for provenance");
 }
 
 // ── mode 4: synthetic × fit_seeds full matrix ─────────────────────────
@@ -437,7 +364,7 @@ fn synthetic_and_fit_seeds_full_matrix() {
     let out = tmp.path().join("out");
     let fit_toml = tmp.path().join("fit.toml");
     std::fs::write(&fit_toml, format!(r#"
-output_dir = "{}"
+store = "{}"
 fit_seeds = [1, 2]
 
 [model]
@@ -451,8 +378,8 @@ sim_seeds = [10, 20]
 
     run_fit(&bin, &fit_toml);
 
-    // 2 datasets × 2 fit-seeds: 2 distinct cell fit-bases (one per dataset),
-    // each with one CAS `mle` method leaf per fit-seed. The 2×2 summary.tsv is
+    // 2 datasets × 2 fit-seeds: 2 distinct problems (one per dataset), each
+    // with one IF2 run per fit-seed. The 2×2 summary.tsv is
     // the deferred M4 view (gh#150).
     let bases = cell_fit_bases(&out);
     assert_eq!(bases.len(), 2, "2 datasets → 2 cell fit-bases; got {:?}", bases);
@@ -481,7 +408,7 @@ fn v2_if2_chains_diverge_at_iter_0_when_no_starts_from() {
     let fit_toml = tmp.path().join("fit.toml");
     // 8 chains to get a readable spread across the beta bounds.
     std::fs::write(&fit_toml, format!(r#"
-output_dir = "{}"
+store = "{}"
 
 [model]
 camdl = "{}"
@@ -507,11 +434,7 @@ cooling    = 0.9
 "#, out.display(), ir.display(), truth.display())).unwrap();
     run_fit(&bin, &fit_toml);
 
-    // gh#147 (M3.2): the synthetic fit's `mle` method lands at its CAS leaf,
-    // not the legacy `synthetic/ds_01/fit_1/mle/` wrapper. A synthetic fit
-    // writes two segments (the generated dataset + the fit), so search the
-    // `fits/` root for the method leaf rather than assuming one segment.
-    let method = cas_method_leaf(&out.join("fits"), "if2");
+    let method = cas_method_leaf(&out, "if2");
     let starts_text = std::fs::read_to_string(method.join("chain_starts.tsv"))
         .expect("chain_starts.tsv must exist");
     let mut body = starts_text.lines()
@@ -633,7 +556,7 @@ fn obs_only_dir_and_synthetic_agree_byte_for_byte_at_same_seed() {
     let out = tmp.path().join("out");
     let fit_toml = tmp.path().join("fit.toml");
     std::fs::write(&fit_toml, format!(r#"
-output_dir = "{}"
+store = "{}"
 
 [model]
 camdl = "{}"
@@ -645,8 +568,7 @@ sim_seeds = [10]
 "#, out.display(), ir.display(), truth.display(), methods_block())).unwrap();
     run_fit(&bin, &fit_toml);
 
-    let syn_tsv = datagen_segment(&out).join("synthetic").join("data")
-        .join("ds_01").join("cases.tsv");
+    let syn_tsv = find_fit_dir(&out).join("inputs").join("cases.tsv");
 
     // `--obs-only-dir` writes the coordinate columns (`replicate`, `scenario`,
     // `seed`) before the stream's own; the stream's columns are compared.
@@ -683,7 +605,7 @@ fn data_beside_synthetic_fits_the_real_data() {
     std::fs::write(&data_tsv, "time\tcases\n1\t5\n").unwrap();
     let fit_toml = tmp.path().join("fit.toml");
     std::fs::write(&fit_toml, format!(r#"
-output_dir = "{}"
+store = "{}"
 
 [model]
 camdl = "{}"
@@ -705,7 +627,9 @@ sim_seeds = [1]
          2026-09-08 §8, item 19); it must run: {stderr}");
     // The real data were fitted: one leaf, no synthetic dataset generated.
     assert_eq!(all_method_leaves(&out, "if2").len(), 1, "one real-data leaf\n{stderr}");
-    assert!(!out.join("fits").join("synthetic").exists()
-            && !stderr.contains("ds_01"),
+    assert_eq!(std::fs::read(find_fit_dir(&out).join("inputs").join("cases.tsv")).unwrap(),
+        std::fs::read(&data_tsv).unwrap(),
+        "the problem trains on the real data, not a generated dataset:\n{stderr}");
+    assert!(!stderr.contains("synthetic: generated"),
         "no synthetic dataset may be generated when [data] is present:\n{stderr}");
 }

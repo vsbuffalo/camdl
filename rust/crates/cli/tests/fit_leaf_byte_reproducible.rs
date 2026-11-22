@@ -1,29 +1,37 @@
-//! A fit leaf's stored bytes are a function of its computation.
+//! A fit run's stored bytes are a function of its computation.
 //!
-//! The store is input-addressed: a leaf's address is computed from the run's
-//! inputs, and the leaf holds the result. Byte reproducibility — two executions
+//! The store is input-addressed: a run folder's address is computed from the
+//! run's inputs, and the folder holds the result. Byte reproducibility — two executions
 //! of one computation writing exactly the same bytes — is the strongest of the
 //! store's three reproducibility claims, and camdl promises it only where it is
 //! tested. This file is that test, for one method of each kind: PMMH and PGAS
 //! (samplers), IF2 (iterated filtering) and `nl-sbplx` (an optimiser).
 //!
 //! Each method runs twice, uninterrupted, in two fresh working directories with
-//! fresh stores, and the two leaves' manifests — every checksummed file, by path,
-//! length and SHA-256 — must be equal, for the method leaf and every child leaf
-//! under it. Separately, each method runs once uninterrupted and once killed with
-//! SIGKILL mid-method and then re-run, which reclaims the dead attempt's leaf and
-//! recomputes it; the two manifests must again be equal.
+//! fresh stores, and the two runs' manifests — every file the run's `run.json`
+//! checksums, by path, length and SHA-256 — must be equal, for the run folder
+//! and every result folder inside it. Separately, each method runs once
+//! uninterrupted and once killed with SIGKILL mid-method and then re-run, which
+//! reclaims the dead attempt's folder and recomputes it; the two manifests must
+//! again be equal.
 //!
 //! What may differ is everything about an execution rather than its result —
-//! when it ran, for how long, under which process — and it lives in the
-//! per-attempt records beside the leaf (`execution.json`, `progress.json`,
-//! `events.jsonl`), outside the manifest. A manifest also records each file's
-//! mtime, for the store's cheap integrity check; that is a property of the
-//! write, not of the bytes, and is not compared.
+//! when it ran, for how long, under which process. It lives in the attempt's
+//! records (`progress.json`, `events.jsonl`, which the manifest lists without a
+//! checksum) and in two provenance files the manifest checksums but which
+//! record the execution itself: `execution.json`, and an optimiser's
+//! `opt_trace.tsv`, whose rows from parallel chains are in the order the
+//! chains' evaluations completed. Both are left out of the comparison, and
+//! only while their `run.json` entry gives them the role `provenance`. A
+//! manifest also records each file's mtime, for the store's cheap integrity
+//! check; that is a property of the write, not of the bytes, and is not
+//! compared.
 //!
 //! An equal manifest on these fixtures is regression evidence, not proof: a
 //! different model could reach a parallel reduction or a scheduling path these
 //! do not. Fixture: `tests/fixtures/reporting/sir.camdl` with `cases.tsv`.
+
+mod fit_store_support;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -74,7 +82,7 @@ fn fit_command(dir: &Path, store: &str) -> Command {
     let mut c = Command::new(camdl());
     c.env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDLC", camdlc())
-        .env("CAMDL_OUTPUT_DIR", store)
+        .env("CAMDL_STORE", store)
         .current_dir(dir)
         .args(["fit", "run", "fit.toml", "--seed", "1", "--progress", "none"]);
     c
@@ -89,24 +97,14 @@ fn run_fit_into(dir: &Path, store: &str) {
     assert!(out.status.success(), "camdl fit run in {}: {}", dir.display(), String::from_utf8_lossy(&out.stderr));
 }
 
-/// The fit method leaf under `dir/results/fits`: the one directory whose
-/// `run.json` has kind `fit_method`, outside any preserved attempt.
+/// The fit run folder in the store `dir/results`: the one result folder of
+/// kind `fit_run`.
 fn method_leaf(dir: &Path) -> PathBuf {
     method_leaf_in(dir, STORE)
 }
 
 fn method_leaf_in(dir: &Path, store: &str) -> PathBuf {
-    let mut found = Vec::new();
-    walk(&dir.join(store).join("fits"), &mut |p| {
-        if p.file_name().is_some_and(|n| n == "run.json") {
-            let rec: serde_json::Value = serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap();
-            if rec["kind"] == "fit_method" {
-                found.push(p.parent().unwrap().to_path_buf());
-            }
-        }
-    });
-    assert_eq!(found.len(), 1, "expected one fit_method leaf under {}: {found:?}", dir.display());
-    found.pop().unwrap()
+    fit_store_support::the_run(&dir.join(store))
 }
 
 fn walk(dir: &Path, f: &mut dyn FnMut(&Path)) {
@@ -124,9 +122,14 @@ fn walk(dir: &Path, f: &mut dyn FnMut(&Path)) {
     }
 }
 
-/// Every leaf at or under `leaf` (the method leaf and its declared children),
-/// by its path relative to `leaf`: its run id, status, and its manifest as
-/// `file -> (bytes, digest)`.
+/// Every result folder at or under the run folder `leaf` (the run and any
+/// result folder inside it), by its path relative to `leaf`: its run id,
+/// status, and the files its `run.json` checksums other than the execution
+/// records [`EXECUTION_RECORDS`], as `file -> (bytes, sha256)`.
+/// The provenance files that record an execution rather than its result, and
+/// so may differ between two executions of one computation.
+const EXECUTION_RECORDS: [&str; 2] = ["execution.json", "opt_trace.tsv"];
+
 type Leaves = BTreeMap<String, (String, String, BTreeMap<String, (u64, String)>)>;
 
 fn leaves(leaf: &Path) -> Leaves {
@@ -136,12 +139,15 @@ fn leaves(leaf: &Path) -> Leaves {
             return;
         }
         let rec: serde_json::Value = serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap();
-        let files = rec["artifacts"].as_object().unwrap().iter()
-            .map(|(k, v)| (k.clone(), (v["bytes"].as_u64().unwrap(), v["digest"].as_str().unwrap().to_string())))
+        let folder = p.parent().unwrap();
+        let files = rec["files"].as_object().unwrap().iter()
+            .filter(|(k, v)| v.get("sha256").is_some()
+                && !(EXECUTION_RECORDS.contains(&k.as_str()) && v["role"] == "provenance"))
+            .map(|(k, v)| (k.clone(), (v["bytes"].as_u64().unwrap(), v["sha256"].as_str().unwrap().to_string())))
             .collect();
-        let rel = p.parent().unwrap().strip_prefix(leaf).unwrap().display().to_string();
-        out.insert(rel, (rec["run_id"].as_str().unwrap().to_string(),
-            rec["status"].as_str().unwrap().to_string(), files));
+        let id = fit_store_support::json(&folder.join("identity.json"))["run_id"].as_str().unwrap().to_string();
+        let rel = folder.strip_prefix(leaf).unwrap().display().to_string();
+        out.insert(rel, (id, rec["status"].as_str().unwrap().to_string(), files));
     });
     out
 }
@@ -268,7 +274,7 @@ fn nl_sbplx_twice_uninterrupted_writes_the_same_bytes() {
     assert_same("nl-sbplx", "two uninterrupted runs", &a, &b);
 }
 
-/// Where the store lives is not part of the computation: a leaf written into a
+/// Where the store lives is not part of the computation: a run written into a
 /// store two directories deeper, relative to the model and data it read, holds
 /// the same bytes. A path recorded relative to the store would differ.
 #[test]
@@ -282,17 +288,17 @@ fn a_leaf_holds_the_same_bytes_wherever_its_store_is() {
     assert_same("if2", "a store beside the model and one deeper", &la, &lb);
 }
 
-/// Start the fit, wait until its method has begun writing into the leaf (the
-/// event log's first line), let it run `into` longer, and SIGKILL it. The
-/// leaf must still be `running`: the kill landed before the commit. Then run
-/// the same command again, which finds the leaf's lock held by a dead
-/// process, preserves the dead attempt under `.attempts/` and recomputes.
+/// Start the fit, wait until its method has begun writing into the run folder
+/// (the event log's first line), let it run `into` longer, and SIGKILL it.
+/// The run must still be `running`: the kill landed before the commit. Then
+/// run the same command again, which finds the run claimed by a dead process,
+/// preserves the dead attempt under `.attempts/` and recomputes.
 fn killed_then_rerun(dir: &Path, into: Duration) {
     let mut child = fit_command(dir, STORE).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
     let deadline = Instant::now() + Duration::from_secs(120);
     let began = loop {
         let mut log = None;
-        walk(&dir.join(STORE).join("fits"), &mut |p| {
+        walk(&dir.join(STORE), &mut |p| {
             if p.file_name().is_some_and(|n| n == "events.jsonl") {
                 log = Some(p.to_path_buf());
             }
@@ -349,12 +355,12 @@ fn nl_sbplx_killed_and_rerun_writes_the_uninterrupted_bytes() {
 }
 
 
-/// The execution record is outside the manifest, so nothing protects it: a
-/// record that exists and does not parse is said, never read silently as no
-/// record (which would report the run's wall time as unknown without saying
-/// why).
+/// A damaged execution record is said, never read silently as no record
+/// (which would report the run's wall time as unknown without saying why).
+/// The record is one of the files the run's `run.json` checksums, so a record
+/// that does not parse is named whether the command warns or refuses.
 #[test]
-fn an_unreadable_execution_record_is_warned_about() {
+fn an_unreadable_execution_record_is_named() {
     let w = work("bad_execution", &pmmh(150));
     run_fit(&w.0);
     let leaf = method_leaf(&w.0);
@@ -362,12 +368,15 @@ fn an_unreadable_execution_record_is_warned_about() {
     let out = Command::new(camdl())
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDLC", camdlc())
+        .env("CAMDL_STORE", w.0.join(STORE))
         .current_dir(&w.0)
         .args(["fit", "summary", &leaf.to_string_lossy()])
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "fit summary: {stderr}");
-    assert!(stderr.contains("warning:") && stderr.contains("execution.json"),
-        "an unparseable execution record was read silently:\n{stderr}");
+    assert!(stderr.contains("execution.json"),
+        "an unparseable execution record was not named:\n{stderr}");
+    if out.status.success() {
+        assert!(stderr.contains("warning:"), "read without a warning:\n{stderr}");
+    }
 }

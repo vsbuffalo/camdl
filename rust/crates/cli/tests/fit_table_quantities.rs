@@ -1,7 +1,7 @@
 //! End-to-end acceptance for `camdl fit table --quantity <NAME>` — Phase 2b of
 //! the predictive-ergonomics work. A `fit table` column surfaces the posterior
 //! median (q50) of a scalar generated quantity per fit, read from
-//! `<fit_dir>/quantities/<NAME>.tsv` or DERIVED on demand by spawning
+//! `quantities/<NAME>.tsv` of the run's prediction or DERIVED on demand by spawning
 //! `fit predict --mode free_forward` for fits that carry a posterior cloud.
 //!
 //! Properties under test:
@@ -19,15 +19,16 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Where the latest `fit predict` of a run in `seg` wrote:
-/// `<seg>/predict/<run id>-<address key>/` (gh#896), the directory whose
-/// `report*.json` (one written by every predict) is newest. A path that does not
-/// exist while nothing has been predicted.
-fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
-    std::fs::read_dir(seg.join("predict"))
-        .into_iter().flatten().flatten().map(|e| e.path())
+mod fit_store_support;
+
+/// The prediction folder the latest `fit predict` of the run `run` wrote: of
+/// its `predict/<mode>-<id12>/` folders, the one whose `report*.json` (one
+/// written by every predict) is newest. A path that does not exist while
+/// nothing has been predicted.
+fn predict_out(run: &Path) -> PathBuf {
+    fit_store_support::predictions(run).into_iter()
         .filter_map(|d| {
-            // Newest `report*.json` (keyed by chain selection) in the directory.
+            // Newest `report*.json` (keyed by chain selection) in the folder.
             let t = std::fs::read_dir(&d).ok()?.flatten()
                 .filter(|e| {
                     let n = e.file_name().to_string_lossy().into_owned();
@@ -39,9 +40,8 @@ fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
         })
         .max_by_key(|(t, _)| *t)
         .map(|(_, d)| d)
-        .unwrap_or_else(|| seg.join("predict").join("none"))
+        .unwrap_or_else(|| run.join("predict").join("none"))
 }
-
 
 fn binary() -> PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
@@ -108,9 +108,9 @@ simulate {
 
 const DATA: &str = "time\tweekly_cases\n7\t16\n14\t166\n21\t626\n28\t1303\n35\t1260\n42\t1023\n49\t327\n56\t91\n";
 
-fn fit_toml(algorithm_block: &str, output_dir: &str) -> String {
+fn fit_toml(algorithm_block: &str, store: &str) -> String {
     format!(
-        r#"output_dir = "{output_dir}"
+        r#"store = "{store}"
 
 [model]
 camdl = "model.camdl"
@@ -138,22 +138,16 @@ fn run(bin: &Path, dir: &Path, args: &[&str]) -> std::process::Output {
         .args(args)
         .current_dir(dir)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("CAMDL_STORE", dir.join("results"))
         .output()
         .expect("spawn camdl")
 }
 
-/// The single fit segment dir under `<results>/fits/`.
-fn fit_segment_dir(results: &Path) -> PathBuf {
-    let fits = results.join("fits");
-    std::fs::read_dir(&fits)
-        .unwrap()
-        .flatten()
-        .map(|e| e.path())
-        .find(|p| p.is_dir())
-        .expect("a fit segment")
+/// The one fit run in the store `results`.
+fn the_fit_run(results: &Path) -> PathBuf {
+    fit_store_support::the_run(results)
 }
 
-/// Parse a CSV: header + first data row, returning the cell under `column`.
 fn csv_cell(csv: &str, column: &str) -> Option<String> {
     let mut lines = csv.lines();
     let header: Vec<&str> = lines.next()?.split(',').collect();
@@ -226,7 +220,7 @@ fn quantity_fills_for_mh_fit_not_just_a_method_allowlist() {
     let out = run(
         &bin,
         &tmp,
-        &["fit", "table", "results/fits", "--quantity", "peak", "--format", "csv"],
+        &["fit", "table", "results", "--quantity", "peak", "--format", "csv"],
     );
     assert!(
         out.status.success(),
@@ -263,8 +257,8 @@ fn quantity_derives_on_demand_then_reads_existing() {
     );
 
     let results = tmp.join("results");
-    let seg = fit_segment_dir(&results);
-    let peak_tsv = predict_out(&seg).join("quantities").join("peak.tsv");
+    let run_dir = the_fit_run(&results);
+    let peak_tsv = predict_out(&run_dir).join("quantities-model").join("peak.tsv");
     assert!(
         !peak_tsv.exists(),
         "precondition: the fit must not be predicted yet (no quantities/peak.tsv)"
@@ -274,7 +268,7 @@ fn quantity_derives_on_demand_then_reads_existing() {
     let out = run(
         &bin,
         &tmp,
-        &["fit", "table", "results/fits", "--quantity", "peak", "--format", "csv"],
+        &["fit", "table", "results", "--quantity", "peak", "--format", "csv"],
     );
     assert!(
         out.status.success(),
@@ -297,7 +291,7 @@ fn quantity_derives_on_demand_then_reads_existing() {
         "derived peak median must be finite and positive, got {peak}"
     );
     // The derive populated the run's `quantities/` output on disk.
-    let peak_tsv = predict_out(&seg).join("quantities").join("peak.tsv");
+    let peak_tsv = predict_out(&run_dir).join("quantities-model").join("peak.tsv");
     assert!(
         peak_tsv.exists(),
         "--quantity must have DERIVED quantities/peak.tsv via fit predict"
@@ -307,7 +301,7 @@ fn quantity_derives_on_demand_then_reads_existing() {
     let out = run(
         &bin,
         &tmp,
-        &["fit", "table", "results/fits", "--quantity", "peak", "--format", "json"],
+        &["fit", "table", "results", "--quantity", "peak", "--format", "json"],
     );
     assert!(out.status.success(), "fit table --format json failed");
     let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
@@ -351,10 +345,10 @@ cooling = 0.7
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let seg = fit_segment_dir(&tmp.join("results"));
+    let run_dir = the_fit_run(&tmp.join("results"));
 
     // ── (c) IF2 → `—`: predict refuses an optimizer fit; the table still renders.
-    let out = run(&bin, &tmp, &["fit", "table", "results/fits", "--quantity", "peak"]);
+    let out = run(&bin, &tmp, &["fit", "table", "results", "--quantity", "peak"]);
     assert!(
         out.status.success(),
         "fit table --quantity on an IF2 fit must not crash:\nstderr={}",
@@ -371,12 +365,12 @@ cooling = 0.7
     );
     // Not derivable → no spawn → no derived output on disk.
     assert!(
-        !predict_out(&seg).join("quantities").join("peak.tsv").exists(),
+        !predict_out(&run_dir).join("quantities-model").join("peak.tsv").exists(),
         "an optimizer fit must not derive a quantities TSV"
     );
 
     // ── (d) default `fit table` (no --quantity) emits no `peak` column.
-    let out = run(&bin, &tmp, &["fit", "table", "results/fits", "--format", "csv"]);
+    let out = run(&bin, &tmp, &["fit", "table", "results", "--format", "csv"]);
     assert!(out.status.success(), "default fit table failed");
     let csv = String::from_utf8_lossy(&out.stdout);
     let header = csv.lines().next().unwrap();

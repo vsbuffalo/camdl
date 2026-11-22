@@ -90,7 +90,7 @@ fn method_block(algorithm: &str) -> &'static str {
 
 fn write_fit_toml(dir: &Path, ir: &Path, data: &Path, algorithm: &str, config_extra: &str) -> PathBuf {
     let toml = format!(r#"
-output_dir = "{out}"
+store = "{out}"
 [model]
 camdl = "{ir}"
 [data.observations]

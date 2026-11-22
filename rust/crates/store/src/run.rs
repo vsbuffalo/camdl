@@ -309,6 +309,15 @@ impl<A: Artifact> Run<A> {
 
     /// True when `A` itself is already stored and this run exists only for
     /// by-products.
+    /// The folder an in-place run is written in, which is its result's
+    /// folder once it finishes; `None` for a run staged elsewhere first.
+    pub fn folder(&self) -> Option<&Path> {
+        match &self.core.place {
+            Place::Final { dir, .. } => Some(dir),
+            _ => None,
+        }
+    }
+
     pub fn reproducing(&self) -> bool {
         matches!(self.core.place, Place::Reproducing { .. })
     }

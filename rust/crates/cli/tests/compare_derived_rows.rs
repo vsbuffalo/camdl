@@ -2,8 +2,11 @@
 //! out to, and what it checks about the inputs it re-reads.
 //!
 //! Every test fits two small IF2 fits of the committed SEIR golden (no
-//! `camdlc` needed) and compares them by `fit.toml` path, so the
-//! prequential traces are derived by `camdl pfilter` children.
+//! `camdlc` needed), stores them in the store `fits/` labelled `a` and `b`,
+//! and compares them by label, so the prequential traces are derived by
+//! `camdl pfilter` children.
+
+mod fit_store_support;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -25,13 +28,14 @@ fn golden_ir() -> PathBuf {
 
 const OBS: &str = "time\tweekly_cases\n7\t1\n14\t2\n21\t3\n28\t4\n35\t5\n";
 
-/// Write and run one IF2 fit in `dir/name`, training on `dir/name/obs.tsv`.
+/// Write and run one IF2 fit in `dir/name`, training on `dir/name/obs.tsv`,
+/// stored in `dir/fits` under the label `name`.
 fn fit(dir: &Path, name: &str, beta: f64) -> PathBuf {
     let sub = dir.join(name);
     std::fs::create_dir_all(&sub).unwrap();
     std::fs::write(sub.join("obs.tsv"), OBS).unwrap();
     std::fs::write(sub.join("fit.toml"), format!(r#"
-output_dir = "results"
+store = "../fits"
 
 [model]
 camdl = "{ir}"
@@ -67,7 +71,7 @@ dt = 1.0
         .env_remove("CAMDL_OUTPUT_DIR")
         .env_remove("CAMDL_STORE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
-        .args(["fit", "run", "fit.toml", "--seed", "1"])
+        .args(["fit", "run", "fit.toml", "--seed", "1", "--label", name])
         .current_dir(&sub)
         .output().expect("spawn camdl fit run");
     assert!(out.status.success(), "fit run in {} failed:\n{}",
@@ -75,101 +79,61 @@ dt = 1.0
     sub
 }
 
-/// `camdl compare a/fit.toml b/fit.toml` run from `dir`, with no output
-/// root in the environment: a child that recorded a leaf would put it under
-/// `dir/results`.
+/// `camdl compare @a @b` run from `dir`, reading the fits from the store
+/// `dir/fits`.
 fn compare(dir: &Path, extra: &[&str]) -> Output {
-    let mut args = vec!["compare", "a/fit.toml", "b/fit.toml",
+    let mut args = vec!["compare", "@a", "@b",
         "--particles", "100", "--draws", "1", "--replicates", "2"];
     args.extend_from_slice(extra);
     Command::new(binary()).env_remove("CLICOLOR_FORCE")
         .env_remove("CAMDL_OUTPUT_DIR")
-        .env_remove("CAMDL_STORE")
+        .env("CAMDL_STORE", dir.join("fits"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args(&args)
         .current_dir(dir)
         .output().expect("spawn camdl compare")
 }
 
-fn find_fit_meta(root: &Path) -> PathBuf {
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&d) else { continue };
-        for e in entries.flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                stack.push(p);
-            } else if p.file_name().is_some_and(|n| n == "fit.meta.json") {
-                return p;
-            }
-        }
-    }
-    panic!("no fit.meta.json under {}", root.display());
+/// The folder of the run labelled `label` in the store `dir/fits`: the run
+/// whose `fit.toml` is the one `dir/<label>/fit.toml` holds.
+fn run_of(dir: &Path, label: &str) -> PathBuf {
+    let given = std::fs::read(dir.join(label).join("fit.toml")).unwrap();
+    let runs: Vec<PathBuf> = fit_store_support::runs(&dir.join("fits")).into_iter()
+        .filter(|r| std::fs::read(r.join("fit.toml")).ok().as_deref() == Some(&given[..]))
+        .collect();
+    assert_eq!(runs.len(), 1, "one run of {label}/fit.toml: {runs:?}");
+    runs.into_iter().next().unwrap()
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    hex::encode(Sha256::digest(bytes))
-}
-
-/// `compare` re-reads each fit's training file from its path. A file edited
-/// in place after the fit ran used to be scored at a θ̂ fitted to other
-/// bytes with nothing said: the shared-data check reads only the hashes
-/// recorded at fit time, and they still agree. Now it is a refusal (exit 2)
-/// naming the row, the stream, the path and both hashes; with
-/// `--allow-changed-data` the comparison renders and every format says so.
+/// `compare` scores each fit against the training data its stored problem
+/// holds (`inputs/<stream>.tsv`), not the file the fit file names. Editing
+/// that file after the fit ran changes nothing `compare` reports: every row
+/// scores as before, and no data change is stated.
 #[test]
-fn a_training_file_edited_after_the_fit_is_refused_and_overridable() {
+fn a_training_file_edited_after_the_fit_does_not_change_what_compare_scores() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     let fit_a = fit(dir, "a", 0.10);
     fit(dir, "b", 0.15);
 
-    // Unedited: no statement either way.
-    let out = compare(dir, &["--format", "json"]);
-    assert!(out.status.success(), "compare failed:\n{}", String::from_utf8_lossy(&out.stderr));
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
-    assert!(v["data_changed"].is_null(), "nothing changed:\n{v}");
-    assert!(v["data_change_unchecked"].is_null(), "every file was checked:\n{v}");
+    let scores = |out: &Output| -> Vec<(String, f64)> {
+        assert!(out.status.success(), "compare failed:\n{}", String::from_utf8_lossy(&out.stderr));
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+        assert!(v["data_changed"].is_null(), "nothing changed:\n{v}");
+        assert!(v["data_change_unchecked"].is_null(), "every file was checked:\n{v}");
+        v["rows"].as_array().unwrap().iter()
+            .map(|r| (r["name"].as_str().unwrap().to_string(), r["elpd"].as_f64().unwrap()))
+            .collect()
+    };
+    let before = scores(&compare(dir, &["--format", "json"]));
 
-    let meta: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(find_fit_meta(&fit_a.join("results"))).unwrap()).unwrap();
-    let recorded = meta["data_hashes"]["weekly_cases"].as_str()
-        .expect("the fit recorded a hash for weekly_cases").to_string();
-    let edited = OBS.replace("35\t5", "35\t9");
-    std::fs::write(fit_a.join("obs.tsv"), &edited).unwrap();
-    let current = sha256_hex(edited.as_bytes());
+    let stored = std::fs::read_to_string(
+        fit_store_support::problem_of(&run_of(dir, "a")).join("inputs/weekly_cases.tsv")).unwrap();
+    assert_eq!(stored, OBS, "the problem stores the training data it was fitted to");
+    std::fs::write(fit_a.join("obs.tsv"), OBS.replace("35\t5", "35\t9")).unwrap();
 
-    let out = compare(dir, &[]);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(2),
-        "an edited training file is a commensurability refusal:\n{stderr}");
-    for needle in ["changed after the fit ran", "'a/fit.toml'", "'weekly_cases'",
-                   "obs.tsv", &recorded[..8], &current[..8], "--allow-changed-data"] {
-        assert!(stderr.contains(needle), "the refusal names {needle:?}:\n{stderr}");
-    }
-    assert!(!stderr.contains("'b/fit.toml' stream"),
-        "the unedited fit is not named:\n{stderr}");
-
-    let out = compare(dir, &["--allow-changed-data"]);
-    let table = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "the override renders:\n{}", String::from_utf8_lossy(&out.stderr));
-    assert!(table.contains("changed after the fit ran") && table.contains(&current[..8]),
-        "the table states the mismatch:\n{table}");
-
-    let out = compare(dir, &["--allow-changed-data", "--format", "json"]);
-    assert!(out.status.success());
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
-    assert!(v["data_changed"].as_str().is_some_and(|s|
-            s.contains("weekly_cases") && s.contains(&recorded[..8]) && s.contains(&current[..8])),
-        "the JSON states the mismatch as a field:\n{v}");
-    // And the trace scored on the changed file records the waiver itself.
-    let row = |name: &str| v["rows"].as_array().unwrap().iter()
-        .find(|r| r["name"] == name).unwrap().clone();
-    assert_eq!(row("a/fit.toml")["derivation"]["overrides"],
-        serde_json::json!([{"changed_data": {"streams": ["weekly_cases"]}}]), "{v}");
-    assert!(row("b/fit.toml")["derivation"].get("overrides").is_none(),
-        "the unedited fit's trace waives nothing: {v}");
+    let after = scores(&compare(dir, &["--format", "json"]));
+    assert_eq!(before, after, "the edit must not change what compare scores");
 }
 
 /// A trace records how it was computed (schema 5): `pfilter
@@ -243,12 +207,12 @@ fn the_trace_records_its_filter_settings_and_compare_checks_them() {
     // The pfilter trace (200 particles, 1 replicate) against a derived row
     // (100 particles, 2 replicates).
     let run = |extra: &[&str]| {
-        let mut args = vec!["compare", "manual.json", "b/fit.toml",
+        let mut args = vec!["compare", "manual.json", "@b",
             "--particles", "100", "--draws", "1", "--replicates", "2"];
         args.extend_from_slice(extra);
         Command::new(binary()).env_remove("CLICOLOR_FORCE")
             .env_remove("CAMDL_OUTPUT_DIR")
-            .env_remove("CAMDL_STORE")
+            .env("CAMDL_STORE", dir.join("fits"))
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .args(&args).current_dir(dir)
             .output().expect("spawn camdl compare")
@@ -257,8 +221,7 @@ fn the_trace_records_its_filter_settings_and_compare_checks_them() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(2),
         "different filter settings are a commensurability refusal:\n{stderr}");
-    // `b/fit.toml` is the only `fit.toml` here, so its row is `fit.toml`.
-    for needle in ["'manual.json'", "'fit.toml'", "particles 200", "particles 100",
+    for needle in ["'manual.json'", "'@b'", "particles 200", "particles 100",
                    "replicates 1", "replicates 2", "biased downward",
                    "--allow-mismatched-filter-settings"] {
         assert!(stderr.contains(needle), "the refusal names {needle:?}:\n{stderr}");
@@ -279,7 +242,8 @@ fn the_trace_records_its_filter_settings_and_compare_checks_them() {
 
 /// `compare` derives each row by running `camdl pfilter` once per draw per
 /// replicate, with `--no-store`: none of those runs writes a run store in the
-/// directory `compare` was run from.
+/// directory `compare` was run from, or a filter run into the store the fits
+/// are read from.
 #[test]
 fn deriving_a_trace_writes_no_pfilter_leaf() {
     let tmp = tempfile::tempdir().unwrap();
@@ -291,4 +255,6 @@ fn deriving_a_trace_writes_no_pfilter_leaf() {
     assert!(out.status.success(), "compare failed:\n{}", String::from_utf8_lossy(&out.stderr));
     assert!(!dir.join("camdl-store").exists(),
         "compare's filter runs must not write a run store under {}", dir.display());
+    assert!(fit_store_support::folders_of(&dir.join("fits"), "pfilter").is_empty(),
+        "compare's filter runs must not store a filter run in the fits' store");
 }

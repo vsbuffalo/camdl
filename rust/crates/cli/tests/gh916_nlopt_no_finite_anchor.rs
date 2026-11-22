@@ -104,7 +104,7 @@ simulate {{ from = 0 'days  to = 20 'days }}
     let outdir = tmp.path().join("out");
     let fit_toml = tmp.path().join("fit.toml");
     std::fs::write(&fit_toml, format!(r#"
-output_dir = "{out}"
+store = "{out}"
 
 [model]
 camdl = "{ir}"

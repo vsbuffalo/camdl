@@ -4,7 +4,9 @@
 //! under `CLICOLOR_FORCE=1` it still means no escape codes — on stdout, where
 //! the summary goes, and on stderr, where its warnings and notes go.
 
-use std::path::{Path, PathBuf};
+mod fit_store_support;
+
+use std::path::PathBuf;
 use std::process::Command;
 
 fn manifest() -> PathBuf {
@@ -30,15 +32,6 @@ impl Drop for Tmp {
     }
 }
 
-fn only_fit(work: &Path, prefix: &str) -> PathBuf {
-    let hits: Vec<PathBuf> = std::fs::read_dir(work.join("results/fits")).unwrap().flatten()
-        .map(|e| e.path())
-        .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with(prefix))
-        .collect();
-    assert_eq!(hits.len(), 1, "{hits:?}");
-    hits.into_iter().next().unwrap()
-}
-
 #[test]
 fn no_color_holds_on_stderr_under_clicolor_force() {
     let ns = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
@@ -53,6 +46,7 @@ fn no_color_holds_on_stderr_under_clicolor_force() {
         c.env_remove("CLICOLOR_FORCE").env_remove("NO_COLOR")
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .env("CAMDLC", camdlc())
+            .env("CAMDL_STORE", work.join("store"))
             .current_dir(&work)
             .args(args);
         if force {
@@ -63,7 +57,7 @@ fn no_color_holds_on_stderr_under_clicolor_force() {
         (String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
     };
     camdl(&["fit", "run", "pmmh_stuck.toml", "--seed", "8", "--progress", "none"], false);
-    let fit = only_fit(&work, "pmmh_stuck-");
+    let fit = fit_store_support::the_run(&work.join("store"));
     // `--exclude-chains 2` drops a frozen chain, so the summary's stderr
     // carries the exclusion warning.
     let (stdout, stderr) = camdl(

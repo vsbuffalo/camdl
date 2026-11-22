@@ -45,38 +45,9 @@ fn skip_if_missing_binary() -> PathBuf {
     bin
 }
 
-/// Every `run_id` found in a `run.json` under `root`, sorted (so two runs are
-/// compared as sets, robust to extra umbrella leaves).
-fn run_ids(root: &Path) -> Vec<String> {
-    let mut ids = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let rj = dir.join("run.json");
-        if rj.is_file() {
-            if let Ok(txt) = std::fs::read_to_string(&rj) {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) {
-                    if let Some(id) = v.get("run_id").and_then(|x| x.as_str()) {
-                        ids.push(id.to_string());
-                    }
-                }
-            }
-        }
-        if let Ok(es) = std::fs::read_dir(&dir) {
-            for e in es.flatten() {
-                let p = e.path();
-                if p.is_dir() {
-                    stack.push(p);
-                }
-            }
-        }
-    }
-    ids.sort();
-    ids
-}
-
 /// Every `run_id` recorded in an `identity.json` under a run store `root`,
-/// sorted. A `camdl simulate` cell and the compiled model it depends on each
-/// keep their id there.
+/// sorted. A `camdl simulate` cell, a fit problem, a fit run and the compiled
+/// model they depend on each keep their id there.
 fn store_run_ids(root: &Path) -> Vec<String> {
     let mut ids = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -129,6 +100,8 @@ fn mre_bundle_reproduces_fit_by_run_id() {
         .arg(fixture.join("fit.toml"))
         .arg("-b")
         .arg(&bundle)
+        // Keeps anything the packing run stores out of the fixture directory.
+        .env("CAMDL_STORE", work.path().join("pack_store"))
         .output()
         .expect("spawn `mre fit`");
     assert!(
@@ -149,16 +122,13 @@ fn mre_bundle_reproduces_fit_by_run_id() {
 
     // 2. run the fit in place (from the project dir). Both this and the
     //    bundled run below use the canonical `cd <project> && fit run fit.toml`
-    //    invocation — the `run_id` folds in the fit.toml-relative path *string*
-    //    of the model/data, so addressing the same fit via a different relative
-    //    path would change the id. The natural usage (run from the project
-    //    dir) is location-independent, which is what makes the bundle
-    //    reproduce; the test mirrors that.
+    //    invocation, the natural usage, so the two runs differ only in where
+    //    the project lives. Each run is stored in a store of its own.
     let out_a = work.path().join("out_a");
     let run_a = Command::new(&camdl).env_remove("CLICOLOR_FORCE")
         .args(["fit", "run", "fit.toml", "--seed", "1"])
         .current_dir(&fixture)
-        .env("CAMDL_OUTPUT_DIR", &out_a)
+        .env("CAMDL_STORE", &out_a)
         .output()
         .expect("spawn in-place `fit run`");
     assert!(
@@ -166,8 +136,8 @@ fn mre_bundle_reproduces_fit_by_run_id() {
         "in-place fit failed:\n{}",
         String::from_utf8_lossy(&run_a.stderr)
     );
-    let ids_a = run_ids(&out_a);
-    assert!(!ids_a.is_empty(), "in-place run produced no run.json");
+    let ids_a = store_run_ids(&out_a);
+    assert!(!ids_a.is_empty(), "in-place run produced no identity.json");
 
     // 3. unpack the bundle into an ISOLATED dir (no path back to the repo)
     let iso = work.path().join("iso");
@@ -192,7 +162,7 @@ fn mre_bundle_reproduces_fit_by_run_id() {
     let run_b = Command::new(&camdl).env_remove("CLICOLOR_FORCE")
         .args(["fit", "run", "fit.toml", "--seed", "1"])
         .current_dir(&bundle_root)
-        .env("CAMDL_OUTPUT_DIR", &out_b)
+        .env("CAMDL_STORE", &out_b)
         .output()
         .expect("spawn bundled `fit run`");
     assert!(
@@ -200,7 +170,7 @@ fn mre_bundle_reproduces_fit_by_run_id() {
         "bundled fit failed — bundle is NOT self-contained:\n{}",
         String::from_utf8_lossy(&run_b.stderr)
     );
-    let ids_b = run_ids(&out_b);
+    let ids_b = store_run_ids(&out_b);
 
     // 5. identity-faithful + complete closure
     assert_eq!(

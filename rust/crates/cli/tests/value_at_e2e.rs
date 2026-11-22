@@ -18,18 +18,18 @@
 //! The `.camdl` source is compiled in-process by the `camdlc` the gate puts on
 //! PATH (`make test-rust` prepends the freshly-built compiler).
 
+mod fit_store_support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Where the latest `fit predict` of a run in `seg` wrote:
-/// `<seg>/predict/<run id>-<address key>/` (gh#896), the directory whose
-/// `report*.json` (one written by every predict) is newest. A path that does not
-/// exist while nothing has been predicted.
-fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
-    std::fs::read_dir(seg.join("predict"))
-        .into_iter().flatten().flatten().map(|e| e.path())
+/// The prediction folder in the fit run `run` that the latest `fit predict`
+/// wrote: the one whose `report*.json` (one written by every predict) is
+/// newest. A path that does not exist while nothing has been predicted.
+fn predict_out(run: &Path) -> PathBuf {
+    fit_store_support::predictions(run)
+        .into_iter()
         .filter_map(|d| {
-            // Newest `report*.json` (keyed by chain selection) in the directory.
             let t = std::fs::read_dir(&d).ok()?.flatten()
                 .filter(|e| {
                     let n = e.file_name().to_string_lossy().into_owned();
@@ -41,9 +41,8 @@ fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
         })
         .max_by_key(|(t, _)| *t)
         .map(|(_, d)| d)
-        .unwrap_or_else(|| seg.join("predict").join("none"))
+        .unwrap_or_else(|| run.join("predict").join("none"))
 }
-
 
 fn bin() -> PathBuf {
     let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/release/camdl");
@@ -123,7 +122,7 @@ fn write_data(dir: &Path) -> PathBuf {
 
 fn write_fit_toml(dir: &Path, model: &Path, data: &Path) -> PathBuf {
     let body = format!(
-        r#"output_dir = "{out}"
+        r#"store = "{out}"
 
 [model]
 camdl = "{model}"
@@ -157,16 +156,9 @@ thin = 5
     p
 }
 
-/// The stored fit segment dir (`fits/<stem>-<h8>/`) under `out/`.
+/// The one stored fit run in the run store `out/`.
 fn fit_segment(out: &Path) -> PathBuf {
-    let fits = out.join("fits");
-    let mut dirs: Vec<PathBuf> = std::fs::read_dir(&fits)
-        .unwrap_or_else(|e| panic!("no fits dir {}: {e}", fits.display()))
-        .filter_map(|d| d.ok().map(|d| d.path()))
-        .filter(|p| p.is_dir())
-        .collect();
-    assert_eq!(dirs.len(), 1, "expected one fit segment, got {dirs:?}");
-    dirs.pop().unwrap()
+    fit_store_support::the_run(out)
 }
 
 #[test]
@@ -194,6 +186,7 @@ fn predict_resolves_last_obs_and_censors_past_horizon() {
         .args(["fit", "predict"])
         .arg(&segment)
         .arg("--no-progress")
+        .env("CAMDL_STORE", tmp.path().join("out"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output()
         .expect("fit predict");
@@ -229,7 +222,7 @@ fn predict_resolves_last_obs_and_censors_past_horizon() {
 
     // The censoring trio + the median, from the banded TSVs.
     let read = |name: &str| -> (u64, u64, f64) {
-        let path = predict_out(&segment).join("quantities").join(format!("{name}.tsv"));
+        let path = predict_out(&segment).join("quantities-model").join(format!("{name}.tsv"));
         let body = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("no {}: {e}", path.display()));
         let mut lines = body.lines();

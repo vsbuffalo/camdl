@@ -15,6 +15,8 @@
 //! re-loads under the model that produced it, with the periods it was written
 //! with.
 
+mod fit_store_support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -235,7 +237,7 @@ fn a_synthetic_fit_on_a_windowed_model_completes() {
 
     let fit_toml = tmp.path().join("fit.toml");
     std::fs::write(&fit_toml, format!(
-        "output_dir = \"{}\"\n\n[model]\ncamdl = \"{}\"\n\n\
+        "store = \"{}\"\n\n[model]\ncamdl = \"{}\"\n\n\
          [synthetic]\ntrue_params = \"{}\"\nsim_seeds = [3]\n{}",
         out.display(), ir.display(), truth.display(), METHODS)).unwrap();
 
@@ -244,23 +246,12 @@ fn a_synthetic_fit_on_a_windowed_model_completes() {
         "a [synthetic] fit on a windowed model must complete:\n{}",
         String::from_utf8_lossy(&output.stderr));
 
-    // The generated dataset: one file per stream, under the declared window
-    // columns, contiguous over the run.
-    let mut generated: Option<PathBuf> = None;
-    let mut stack = vec![out.clone()];
-    while let Some(d) = stack.pop() {
-        let candidate = d.join("cases.tsv");
-        if candidate.is_file() && d.file_name().map(|n| n == "ds_01").unwrap_or(false) {
-            generated = Some(candidate);
-        }
-        if let Ok(es) = std::fs::read_dir(&d) {
-            for e in es.flatten() {
-                if e.path().is_dir() { stack.push(e.path()); }
-            }
-        }
-    }
-    let generated = generated.unwrap_or_else(
-        || panic!("no synthetic/data/ds_01/cases.tsv under {}", out.display()));
+    // The generated dataset is the one problem's training rows: one file per
+    // stream, under the declared window columns, contiguous over the run.
+    let problems = fit_store_support::problems(&out);
+    assert_eq!(problems.len(), 1, "one dataset, one problem: {problems:?}");
+    let generated = problems[0].join("inputs/cases.tsv");
+    assert!(generated.is_file(), "no inputs/cases.tsv in {}", problems[0].display());
     let rows = window_rows(&generated);
     assert_eq!(rows.first().map(|(a, b, _)| (a.as_str(), b.as_str())), Some(("0", "1")),
         "windows open at the run's start: {rows:?}");
@@ -524,7 +515,7 @@ fn a_synthetic_fit_on_the_real_shaped_model_is_refused_by_name() {
 
     let fit_toml = tmp.path().join("fit.toml");
     std::fs::write(&fit_toml, format!(
-        "output_dir = \"{}\"\n\n[model]\ncamdl = \"{}\"\n\n\
+        "store = \"{}\"\n\n[model]\ncamdl = \"{}\"\n\n\
          [synthetic]\ntrue_params = \"{}\"\nsim_seeds = [3]\n{}",
         out.display(), ir.display(), truth.display(), REAL_SHAPED_METHODS)).unwrap();
 
@@ -805,7 +796,7 @@ fn a_synthetic_fit_refuses_a_covariate_stream_by_name() {
 
     let fit_toml = tmp.path().join("fit.toml");
     std::fs::write(&fit_toml, format!(
-        "output_dir = \"{}\"\n\n[model]\ncamdl = \"{}\"\n\n\
+        "store = \"{}\"\n\n[model]\ncamdl = \"{}\"\n\n\
          [synthetic]\ntrue_params = \"{}\"\nsim_seeds = [3]\n{}",
         out.display(), ir.display(), truth.display(), METHODS)).unwrap();
 
@@ -975,7 +966,7 @@ fn a_synthetic_fit_on_a_ratio_stream_completes() {
 
     let fit_toml = tmp.path().join("fit.toml");
     std::fs::write(&fit_toml, format!(
-        "output_dir = \"{}\"\n\n[model]\ncamdl = \"{}\"\n\n\
+        "store = \"{}\"\n\n[model]\ncamdl = \"{}\"\n\n\
          [synthetic]\ntrue_params = \"{}\"\nsim_seeds = [3]\n{}",
         out.display(), ir.display(), truth.display(), RATIO_METHODS)).unwrap();
 

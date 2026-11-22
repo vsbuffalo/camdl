@@ -271,7 +271,7 @@ fn fit_toml_rejects_scenario_and_enable_simultaneously() {
     std::fs::write(&fit_path, format!(r#"
 scenario = "baseline"
 enable = ["something"]
-output_dir = "{out}/out"
+store = "{out}/out"
 
 [model]
 camdl = "{model}"

@@ -9,6 +9,8 @@
 //!
 //! Incident: docs/dev/incidents/2026-06-28-pgas-draws-double-thinning.md
 
+mod fit_store_support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -74,34 +76,11 @@ fn run(bin: &Path, dir: &Path, args: &[&str]) -> std::process::Output {
         .expect("spawn camdl")
 }
 
+/// The rows of the one fit run's `draws.tsv` in the store at `out_root`, less
+/// its header line.
 fn draws_row_count(out_root: &Path) -> usize {
-    let fits = out_root.join("fits");
-    for e in std::fs::read_dir(&fits).unwrap().flatten() {
-        // draws.tsv lives at <segment>/<NN-method>/seed_*/draws.tsv
-        for d in walk(&e.path()) {
-            if d.file_name().map(|n| n == "draws.tsv").unwrap_or(false) {
-                let txt = std::fs::read_to_string(&d).unwrap();
-                // rows minus the header line
-                return txt.lines().count().saturating_sub(1);
-            }
-        }
-    }
-    panic!("no draws.tsv under {}", fits.display());
-}
-
-fn walk(dir: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(dir) {
-        for e in rd.flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                out.extend(walk(&p));
-            } else {
-                out.push(p);
-            }
-        }
-    }
-    out
+    let txt = std::fs::read_to_string(fit_store_support::the_run(out_root).join("draws.tsv")).unwrap();
+    txt.lines().count().saturating_sub(1)
 }
 
 /// Run one PGAS fit and assert `draws.tsv` carries exactly the retained count.
@@ -113,7 +92,7 @@ fn assert_draws_count(slug: &str, n_chains: usize, sweeps: usize, burn_in: usize
     std::fs::write(tmp.join("model.camdl"), MODEL).unwrap();
     std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
     let fit_toml = format!(
-        r#"output_dir = "results"
+        r#"store = "results"
 [model]
 camdl = "model.camdl"
 [data.observations]

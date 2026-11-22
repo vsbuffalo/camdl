@@ -193,19 +193,14 @@ pub(crate) fn cmd_fit_summary(args: &FitSummaryArgs, compile: crate::util::Compi
     // which one method has several runs is refused with the runs listed,
     // rather than one chosen by directory order (gh#896). summary operates on
     // the directory; it needs no config.
-    use crate::fit::handle::{self, FitTarget};
     let mut out = Out::new(args.no_color);
-    let target = handle::resolve_target(&args.fit).and_then(|t| match t {
-        FitTarget::Leaf(leaf) => Ok(leaf.dir),
-        FitTarget::Segment(seg) => {
-            handle::refuse_several_runs_of_one_method(&args.fit, &seg).map(|()| seg)
-        }
-    });
-    let segment = match target {
-        Ok(dir) => dir,
+    // The run, read through the store into a copy of its files, which the
+    // summary reads.
+    let opened = match crate::fit_store::opened_run(&args.fit) {
+        Ok(o) => o,
         Err(e) => out.error(CommandError::new(format!("error: {e}"))).exit(),
     };
-    let dir = segment.to_string_lossy().into_owned();
+    let dir = opened.run_dir().expect("a run handle has its files").to_string_lossy().into_owned();
 
     let strict = args.strict || ci_env_set();
     // Warnings and notes go to stderr under the same `--no-color` as the
@@ -300,18 +295,10 @@ pub(crate) fn cmd_fit_summary(args: &FitSummaryArgs, compile: crate::util::Compi
 /// model moved/unparseable) degrades to an empty context (numeric-only
 /// rendering) — never panics.
 pub(crate) fn load_calendar_context(fit_dir: &Path, compile: crate::util::CompileSettings) -> CalendarContext {
-    // Legacy fits carried the model path on the top-level `Fit` run.json. A
-    // content-addressed fit (gh#147 M3.2) has no fit-wide record — the fit
-    // level is a path segment — so recover the model path from any method
-    // leaf's `run.json` `provenance.source_paths`.
+    // The stored compile the run's copy holds beside its files.
     let model_path = FitView::read(fit_dir)
         .and_then(|v| v.model_path())
-        .map(|p| p.to_string_lossy().into_owned())
-        .or_else(|| {
-            crate::cas_read::walk_records(fit_dir)
-                .into_iter()
-                .find_map(|(_, rec)| rec.provenance.source_paths.first().cloned())
-        });
+        .map(|p| p.to_string_lossy().into_owned());
     let Some(model_path) = model_path else {
         return CalendarContext::default();
     };
@@ -325,12 +312,7 @@ pub(crate) fn load_calendar_context(fit_dir: &Path, compile: crate::util::Compil
 fn load_fit_envelope(fit_dir: &Path, compile: crate::util::CompileSettings) -> Option<ir::IrEnvelope> {
     let model_path = FitView::read(fit_dir)
         .and_then(|v| v.model_path())
-        .map(|p| p.to_string_lossy().into_owned())
-        .or_else(|| {
-            crate::cas_read::walk_records(fit_dir)
-                .into_iter()
-                .find_map(|(_, rec)| rec.provenance.source_paths.first().cloned())
-        });
+        .map(|p| p.to_string_lossy().into_owned());
     crate::util::load_model_envelope(&model_path?, compile).ok()
 }
 
@@ -390,14 +372,10 @@ pub(crate) fn status_word(status: runid::RunStatus) -> &'static str {
     }
 }
 
-/// The leaf's state from its `run.json` (authoritative for status and
-/// failure) and its `.lock` (whether a `running` record is live), through
-/// [`runid::read_leaf`], whose second read of `run.json` keeps a run that
-/// completes while it is read from being called interrupted. `None` when
-/// the record cannot be read now; the entry then shows the status the
-/// view read.
-fn recorded_state(leaf: &Path) -> Option<runid::LeafState> {
-    runid::read_leaf(leaf).ok().flatten().map(|l| l.state)
+/// A stored run's state: every run a reader opens through the store is a
+/// completed one.
+fn recorded_state(_leaf: &Path) -> Option<runid::LeafState> {
+    Some(runid::LeafState::Completed)
 }
 
 
@@ -440,7 +418,7 @@ impl LeafEntry {
             None => (status_word(r.status).into(), None),
         };
         LeafEntry {
-            leaf: r.method_dir.to_string_lossy().into_owned(),
+            leaf: crate::fit::report::display_path(&r.method_dir),
             method: r.method.clone(),
             run_id: r.run_id.clone(),
             status: r.status,
@@ -504,8 +482,8 @@ fn not_completed_section(
         Span::styled(status_word(r.status), style),
         Span::plain(format!(" · {}", r.method_dir.display())),
     ])];
-    let header: Option<crate::fit::report::RunHeader> = runid::read_leaf(&r.method_dir).ok().flatten()
-        .and_then(|leaf| leaf.record.inputs.get("header").cloned())
+    let header: Option<crate::fit::report::RunHeader> = crate::fit_store::read_run_inputs(&r.method_dir).ok()
+        .and_then(|inputs| inputs.get("header").cloned())
         .and_then(|h| serde_json::from_value(h).ok());
     match (r.status, header) {
         (runid::RunStatus::Failed, Some(header)) => {
@@ -595,7 +573,7 @@ fn discover_methods(fit_dir: &Path) -> Vec<ResolvedMethod> {
             method_dir: m.method_dir,
             algorithm: m.method,
             run_id: m.run_id,
-            status: m.status,
+            status: runid::RunStatus::Completed,
         })
         .collect()
 }
@@ -628,7 +606,8 @@ fn format_text(
         .map(|env| (env.docs.clone(), env.model.constants.clone()))
         .unwrap_or_default();
     let has_legend = !docs.parameters.is_empty() || !constants.is_empty();
-    out.report(&summary_head(dir, &docs, &constants, args.parameters));
+    let shown = crate::fit::report::display_path(Path::new(dir));
+    out.report(&summary_head(&shown, &docs, &constants, args.parameters));
 
     // The camdl version is a fact about the FIT, so it opens the first method's
     // identity line and is not repeated on the others'. A fit with no method at
@@ -641,7 +620,7 @@ fn format_text(
 
     for resolved in methods {
         let version_lead = std::mem::replace(&mut first, false);
-        let method_dir_str = resolved.method_dir.to_string_lossy().into_owned();
+        let method_dir_str = crate::fit::report::display_path(&resolved.method_dir);
         if resolved.status != runid::RunStatus::Completed {
             let entry = LeafEntry::of(resolved);
             let view = View::Summary(SummaryView { explain: args.explain, version_lead });
@@ -881,6 +860,25 @@ pub struct SchemaInfo {
 /// Walk the method dirs and build a `FitSummaryDoc`. Used by JSON, MD,
 /// and LaTeX formatters. Pure on its inputs (file system + the args
 /// it was called with).
+/// The `fit table` row of the run whose files `dir` holds, with what the
+/// store records of it (its label, fit file and start time) filled in as
+/// `fit table` fills them, when `dir` is a copy of a stored run's files.
+fn stored_row(dir: &Path, diff: ConfigDiff, now_unix: i64) -> Result<table_row::TableRow, table_row::TableRowError> {
+    let folder = crate::fit_store::shown(dir);
+    let stored = (folder != dir).then(|| crate::fit_store::opened(&folder.to_string_lossy()).ok()).flatten();
+    let Some(opened) = stored else { return table_row::build_row(dir, diff, 0.0, now_unix) };
+    let mut view = crate::fit::fit_view::FitView::read(dir).ok_or_else(|| table_row::TableRowError::TopLevelRun {
+        fit_dir: dir.to_path_buf(),
+        message: "not a fit run's files (no run_inputs.json)".into(),
+    })?;
+    let label = opened.fit.run.as_ref().and_then(|r| {
+        let root = crate::fit_store::store_holding(r.folder())?;
+        crate::fit::fit_tree::run_label(&root, &r.id().key())
+    });
+    crate::fit::fit_tree::fill_from_record(&mut view, &opened, label);
+    table_row::build_row_of(&view, diff, 0.0, now_unix)
+}
+
 fn build_summary_doc(
     out: &mut Out,
     dir: &str,
@@ -906,7 +904,7 @@ fn build_summary_doc(
         .unwrap_or(0);
     let fit_hash = FitView::read(Path::new(dir)).map(|v| v.fit_hash).unwrap_or_default();
     for resolved in methods {
-        let method_dir_str = resolved.method_dir.to_string_lossy().into_owned();
+        let method_dir_str = crate::fit::report::display_path(&resolved.method_dir);
         if resolved.status != runid::RunStatus::Completed {
             leaves.push(LeafEntry::of(resolved));
             continue;
@@ -977,7 +975,7 @@ fn build_summary_doc(
         // The run's `fit table` row, built from the leaf alone. A run with no
         // tabulated result (pfilter) has no row, as in `fit table`.
         if MethodResult::is_fitted(resolved.algorithm) {
-            match table_row::build_row(&resolved.method_dir, ConfigDiff::identity(&fit_hash), 0.0, now_unix) {
+            match stored_row(&resolved.method_dir, ConfigDiff::identity(&fit_hash), now_unix) {
                 Ok(row) => table_rows.push(row),
                 Err(e) => out.say(format_args!(
                     "warning: cannot build the table row for {}: {}", method_dir_str, e)),
@@ -990,7 +988,7 @@ fn build_summary_doc(
             version: SCHEMA_VERSION,
             camdl_version: version::VERSION_SHORT.to_string(),
         },
-        fit_dir: dir.to_string(),
+        fit_dir: crate::fit::report::display_path(std::path::Path::new(dir)),
         leaves,
         table_rows,
         methods: method_reports,
@@ -1011,9 +1009,7 @@ fn load_method_facts(
     mut chain_detail: Option<ChainDetail>,
 ) -> Result<MethodFacts, String> {
     let dir = &resolved.method_dir;
-    let inputs: serde_json::Value = crate::leaf_use::read(dir)?
-        .map(|l| l.record.inputs)
-        .unwrap_or(serde_json::Value::Null);
+    let inputs: serde_json::Value = crate::fit_store::read_run_inputs(dir)?;
     let header: Option<crate::fit::report::RunHeader> = inputs.get("header")
         .and_then(|h| serde_json::from_value(h.clone()).ok());
     let method = resolved.method.as_str();
@@ -1144,7 +1140,7 @@ fn dump_params_only(
     keys.sort();
     let mut out = String::new();
     out.push_str(&format!("# camdl fit summary --params-only ({})\n", target_method));
-    out.push_str(&format!("# source: {}\n", path));
+    out.push_str(&format!("# source: {}\n", crate::fit::report::display_path(std::path::Path::new(&path))));
     out.push_str(&format!("# camdl: {}\n\n", version::VERSION_SHORT));
     for k in keys {
         let v = params[k];
@@ -3251,10 +3247,9 @@ mod tests {
         let dir = crate::test_support::unique_temp_dir(&format!("summary_format_{method}"));
         std::fs::create_dir_all(&dir).unwrap();
         let parent_hash: String = "deadbeef".repeat(8);
-        write_top_level_fit_run(&dir, &parent_hash);
-
-        let method_dir = dir.join("real").join("fit_1").join(method);
-        std::fs::create_dir_all(&method_dir).unwrap();
+        // A run's folder: its files, its inputs and its provenance side by side.
+        let method_dir = dir.clone();
+        write_top_level_fit_run(&method_dir, &parent_hash);
         state.save(&method_dir.to_string_lossy()).unwrap();
         write_method_run(&method_dir, &parent_hash, method, crate::run_meta::FitAlgorithm::If2);
 
@@ -3327,6 +3322,7 @@ mod tests {
             "provenance": {"created_at": "2026-04-27T00:00:00Z", "argv": ["camdl"]}
         });
         std::fs::write(method_dir.join("run.json"), serde_json::to_string(&rec).unwrap()).unwrap();
+        crate::fit_store::write_test_inputs(method_dir, &rec);
     }
 
     /// JSON output is parseable, `schema.version` is the current one, and the
@@ -3994,6 +3990,7 @@ mod tests {
             "provenance": {"camdl_version": crate::version::VERSION_SHORT},
         });
         std::fs::write(dir.join("run.json"), rec.to_string()).unwrap();
+        crate::fit_store::write_test_inputs(&dir, &rec);
         let mut state = synthetic_fit_state();
         state.camdl_version = Some(crate::version::VERSION_SHORT.to_string());
         let method_dir = dir.to_string_lossy().into_owned();

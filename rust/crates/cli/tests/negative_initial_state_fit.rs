@@ -83,7 +83,7 @@ scenarios {{
 /// PMMH over `<variant>.camdl`. `estimate` is the `[estimate]` body.
 fn fit_src(variant: &str, estimate: &str, fixed: &str) -> String {
     format!(
-        r#"output_dir = "results-{variant}"
+        r#"store = "results-{variant}"
 
 [model]
 camdl = "{variant}.camdl"

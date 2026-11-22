@@ -10,9 +10,10 @@
 //!
 //! [`resolve`] takes the declared inputs of `pfilter` (`crate::args::PfilterArgs`,
 //! split by its `#[derive(Inputs)]`) apart in full, so an input added to the
-//! command does not compile until it is placed here. The `--fit` handle is
-//! resolved here, once ([`crate::fit::handle::resolve_fit_problem`]: a
-//! `fit.toml` names the file's problem, a run handle the stored fit's), and its
+//! command does not compile until it is placed here. The `--fit` argument is
+//! resolved here, once ([`crate::fit_store::FitArg::read`]: a fit file names
+//! the problem it states, read in process; a handle names a stored fit's
+//! problem, read through the run store), and its
 //! `[config] allow_degenerate_rates` and `allow_forcing_extrapolation` are
 //! folded with the flags into [`ResolvedPfilterConfig::eval`] and
 //! [`ResolvedPfilterConfig::forcing`]. What reaches the filter run's identity
@@ -26,7 +27,7 @@ use std::path::PathBuf;
 use crate::args::types::DataSpec;
 use crate::fit::config_v2::LikelihoodObjective;
 use crate::fit::fitted_model::FittedSettings;
-use crate::fit::handle::FitProblem;
+use crate::fit_store::FitArg;
 
 /// The resolved configuration of one `camdl pfilter`.
 pub(crate) struct ResolvedPfilterConfig {
@@ -37,7 +38,7 @@ pub(crate) struct ResolvedPfilterConfig {
     /// The fit `--fit` names, read once: its problem supplies the objective,
     /// the scenario selection, the data when no `--data` is given, the written
     /// `[config] dt`, `holdout_after` and the two policies below.
-    pub fit: Option<FitProblem>,
+    pub fit: Option<FitArg>,
     /// The likelihood scored: the fit's `ic_free`, else full.
     pub objective: LikelihoodObjective,
     /// `--allow-degenerate-rates`, or the fit's `[config]
@@ -130,6 +131,7 @@ pub(crate) fn resolve(
     declared: crate::args::PfilterDeclared,
     compile: crate::util::CompileSettings,
     out: &crate::out::Out,
+    store_root: &std::path::Path,
 ) -> (ResolvedPfilterConfig, ByProductRequests, crate::forcing_extrapolation::Installed) {
     let (
         model,
@@ -161,11 +163,32 @@ pub(crate) fn resolve(
     let path = |p: &PathBuf| p.to_string_lossy().into_owned();
 
     // The fit `--fit` names: read once, here.
-    let fit: Option<FitProblem> = fit.as_ref().map(|handle| {
-        crate::fit::handle::resolve_fit_problem(&handle.to_string_lossy()).unwrap_or_else(|e| {
+    // A stored fit is read in the store this filter run is stored in.
+    crate::fit_store::set_reader_root(store_root.to_path_buf());
+    let fit_store = crate::camdl_store::open_existing(store_root);
+    let fit: Option<FitArg> = fit.as_ref().map(|handle| {
+        FitArg::read(&handle.to_string_lossy(), fit_store.as_ref()).unwrap_or_else(|e| {
             out.fail(format!("error: --fit {}: {e}", handle.display()));
         })
     });
+    // A stored problem keeps its training lines only: filtering it would score
+    // fewer rows than the same problem named by its fit file. Under
+    // `--save-final-state` the filter binds the training rows alone either
+    // way, so the two are one computation.
+    if let Some(stored) = fit.as_ref().and_then(|f| f.stored.as_ref()).filter(|_| save_final_state.is_none()) {
+        let held = stored.fit.held_out_rows();
+        if !held.is_empty() {
+            let rows: Vec<String> = held.iter().map(|(s, n)| format!("{s}: {n}")).collect();
+            out.fail(format!(
+                "error: --fit {}: the fit held rows out of training ({}), and a stored fit keeps no \
+                 held-out values, so a filter run on it would score its training rows only. \
+                 `--fit <the fit config>` scores every row; held-out scoring of stored fits \
+                 arrives with the run store's scores (step 7).",
+                fit.as_ref().map(|f| f.handle.as_str()).unwrap_or_default(),
+                rows.join(", ")
+            ));
+        }
+    }
     let problem = fit.as_ref().map(|f| &f.config.problem);
     // A rate that collapses (a division by an empty compartment) is 0 under
     // `--allow-degenerate-rates` or the fit's `[config] allow_degenerate_rates`,

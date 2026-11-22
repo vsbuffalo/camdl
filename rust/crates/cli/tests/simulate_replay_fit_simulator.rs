@@ -5,13 +5,16 @@
 //! command's own defaults: a chain-binomial fit at `[config] dt = 0.5` was
 //! replayed at dt 1, and an ODE fit on chain_binomial, both at exit 0 with no
 //! notice. The store path names the simulator a run used
-//! (`<backend>-dt<dt>-…`), so it is what these tests read.
+//! (`<backend>-dt<dt>-…`), so it is what these tests read. Each `simulate`
+//! runs in a copy of the run store that holds the fit, so that its cells are
+//! the only ones there, and names the fit run by its run-id prefix.
 //!
 //! The reader is `fit::fitted_model::stored_fit_simulator` (and
 //! `fit_config_simulator` for a fit config); the flags-over-fit rule is
 //! `replay_simulator`, unit-tested beside it.
 
 use std::path::{Path, PathBuf};
+mod fit_store_support;
 mod sim_store_cells;
 
 use std::process::{Command, Output};
@@ -52,7 +55,7 @@ simulate { from = 0 'days  to = 80 'days }
 
 const DATA: &str = "time\tweekly_cases\n7\t16\n14\t166\n21\t626\n28\t1303\n35\t1260\n42\t1023\n49\t327\n56\t91\n";
 
-const PROBLEM: &str = r#"output_dir = "results"
+const PROBLEM: &str = r#"store = "store"
 [model]
 camdl = "model.camdl"
 [data.observations]
@@ -93,6 +96,7 @@ fn run(dir: &Path, args: &[&str]) -> Output {
     Command::new(binary()).env_remove("CLICOLOR_FORCE")
         .args(args)
         .current_dir(dir)
+        .env("CAMDL_STORE", dir.join("store"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output()
         .expect("spawn camdl")
@@ -100,7 +104,23 @@ fn run(dir: &Path, args: &[&str]) -> Output {
 
 struct Fixture {
     dir: PathBuf,
+    /// The fit run's folder in the run store `dir/store`.
     segment: PathBuf,
+    /// The fit run's run-id prefix, which names it in any copy of the store.
+    handle: String,
+}
+
+/// Copy the directory `from` to `to`, recursively.
+fn copy_dir(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(from).unwrap().flatten() {
+        let (src, dst) = (e.path(), to.join(e.file_name()));
+        if src.is_dir() {
+            copy_dir(&src, &dst);
+        } else {
+            std::fs::copy(&src, &dst).unwrap();
+        }
+    }
 }
 
 fn fixture(tag: &str, method: &str) -> Fixture {
@@ -115,21 +135,19 @@ fn fixture(tag: &str, method: &str) -> Fixture {
     std::fs::write(dir.join("d.tsv"), "beta\tgamma\n0.3\t0.1\n0.5\t0.2\n").unwrap();
     let out = run(&dir, &["fit", "run", "fit.toml", "--seed", "1"]);
     assert!(out.status.success(), "fit run failed:\n{}", String::from_utf8_lossy(&out.stderr));
-    let segment = std::fs::read_dir(dir.join("results").join("fits"))
-        .unwrap()
-        .flatten()
-        .map(|e| e.path())
-        .find(|p| p.is_dir())
-        .expect("fit segment dir");
-    Fixture { dir, segment }
+    let segment = fit_store_support::the_run(&dir.join("store"));
+    let handle = fit_store_support::run_id(&segment)[..12].to_string();
+    Fixture { dir, segment, handle }
 }
 
 /// `simulate model.camdl <rest>`: success, stderr, and the `<backend>-dt<dt>`
-/// config folder its cells were stored under (each call gets its own store).
+/// config folder its cells were stored under (each call gets its own copy of
+/// the store holding the fit).
 fn simulate(f: &Fixture, rest: &[&str]) -> (bool, String, Option<String>) {
     static CALL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = CALL.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let store = f.dir.join(format!("store-{n}"));
+    copy_dir(&f.dir.join("store"), &store);
     let store_arg = store.to_string_lossy().into_owned();
     let mut args = vec!["simulate", "model.camdl"];
     args.extend_from_slice(rest);
@@ -150,7 +168,7 @@ fn meta(f: &Fixture) -> serde_json::Value {
 #[test]
 fn a_chain_binomial_fit_replays_at_its_own_dt_and_records_it() {
     let f = fixture("cb", CB_METHOD);
-    let seg = f.segment.to_string_lossy().into_owned();
+    let seg = f.handle.clone();
 
     // The fit states the step it ran at.
     let m = meta(&f);
@@ -184,26 +202,17 @@ fn a_chain_binomial_fit_replays_at_its_own_dt_and_records_it() {
     // The child `pfilter` names its step on stderr, which `compare` relays
     // only when the child fails, so it is made to: one particle has an
     // effective sample size of 1 and collapses at the first observation.
-    let out = run(&f.dir, &["compare", &seg, &seg, "--draws", "1", "--replicates", "1", "--particles", "1"]);
+    let path = f.segment.to_string_lossy().into_owned();
+    let out = run(&f.dir, &["compare", &path, &path, "--draws", "1", "--replicates", "1", "--particles", "1"]);
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("1 particles, dt=0.5,"), "compare must filter at the fit's dt:\n{err}");
-
-    // A recorded step wins over the archived config, and an older fit with no
-    // record recovers it from the archived config.
-    let path = f.segment.join("fit.meta.json");
-    let mut m = meta(&f);
-    m.as_object_mut().unwrap().remove("dt");
-    std::fs::write(&path, serde_json::to_vec_pretty(&m).unwrap()).unwrap();
-    let (ok, err, config) = simulate(&f, &["--draws", "posterior", "--fit", &seg, "-n", "2"]);
-    assert!(ok, "{err}");
-    assert_eq!(config.as_deref(), Some("chain_binomial-dt0.5"), "a fit without a recorded dt:\n{err}");
     let _ = std::fs::remove_dir_all(&f.dir);
 }
 
 #[test]
 fn an_ode_fit_replays_on_ode_and_a_differing_backend_runs_with_a_notice() {
     let f = fixture("ode", ODE_METHOD);
-    let seg = f.segment.to_string_lossy().into_owned();
+    let seg = f.handle.clone();
 
     let (ok, err, config) = simulate(&f, &["--draws", "posterior", "--fit", &seg, "-n", "2"]);
     assert!(ok, "{err}");

@@ -358,18 +358,38 @@ impl std::error::Error for InitError {}
 
 // ─── Source resolution ───────────────────────────────────────────────────────
 
-/// A sourced rule's handle, resolved to the file it reads and the lineage
-/// dep that keys the run on that file's content.
-#[derive(Debug, Clone)]
+/// A sourced rule's handle, resolved to the file it reads and what the run's
+/// identity holds of it.
+#[derive(Clone)]
 pub struct ResolvedSource {
     /// The file the draw reads: `fit_state.toml` (`from_mle`), `draws.tsv`
-    /// (`from_posterior`), or the params TOML (`from_params`).
+    /// (`from_posterior`), or the params TOML (`from_params`). For a stored
+    /// run, the copy of its file read through the store.
     pub file: PathBuf,
-    /// The stored fit leaf the file came from, when the handle named one.
-    pub leaf_dir: Option<PathBuf>,
-    /// Folded into the method level's `deps`, so a regenerated source
-    /// re-keys the run even at the same path.
-    pub dep: runid::inputs::ArtifactRef,
+    /// The copies of the stored run's files `file` is among, kept for as long
+    /// as the source is; `None` for a loose file.
+    pub _copies: Option<std::sync::Arc<crate::fit_store::RunFiles>>,
+    /// What the run's identity holds of the source: the part of the stored
+    /// run's file the starts are read from, or a loose file's bytes.
+    pub input: crate::fit_store::StartInput,
+}
+
+impl std::fmt::Debug for ResolvedSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedSource").field("file", &self.file).finish_non_exhaustive()
+    }
+}
+
+impl ResolvedSource {
+    /// The stored run the source was read from: its run id, when the handle
+    /// named one.
+    pub fn run_id(&self) -> Option<String> {
+        match &self.input {
+            crate::fit_store::StartInput::Run { source } => Some(source.id().key().to_hex()),
+            _ => None,
+        }
+    }
+
 }
 
 /// A starts rule with its source, if any, resolved.
@@ -385,45 +405,32 @@ impl ResolvedStarts {
         ResolvedStarts { rule, source: None }
     }
 
-    /// A sourced rule bound directly to a file — the test seam, and the
-    /// shape [`resolve_starts`] produces for a file-shaped handle.
+    /// A sourced rule bound directly to a loose file — the test seam, and the
+    /// shape [`resolve_starts`] produces for a file-shaped handle. The file's
+    /// bytes are what the run's identity holds of it.
     pub fn from_file(rule: ChainStarts, file: PathBuf) -> Result<Self, String> {
-        // A `from_mle` source keys on its `start_values` alone
-        // (`cas_mle_start_dep`); a draws TSV or params TOML is keyed by its
-        // bytes. For a params TOML that includes a `[provenance]` table the
-        // loader skips, so a change there re-keys a run whose start did not
-        // move: a spare cache miss, never a stale hit.
-        let dep = match rule {
-            ChainStarts::Point(Point::FromMle { .. }) => super::cas::cas_mle_start_dep(&file)
-                .map_err(|e| format!("starts = {}: {e}", rule.spelled()))?,
-            _ => super::cas::cas_file_dep(&file, source_artifact_name(&rule)),
-        }
-            .ok_or_else(|| format!("starts = {}: cannot read `{}`", rule.spelled(), file.display()))?;
-        Ok(ResolvedStarts { rule, source: Some(ResolvedSource { file, leaf_dir: None, dep }) })
+        let bytes = std::fs::read(&file)
+            .map_err(|e| format!("starts = {}: cannot read `{}`: {e}", rule.spelled(), file.display()))?;
+        let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("tsv").to_string();
+        let content = store::Hashed::new(
+            <crate::camdl_store::Table as store::Content>::from_bytes(&bytes).map_err(|e| e.to_string())?,
+        );
+        let input = crate::fit_store::StartInput::File { file: crate::fit_store::InputFile { ext, content } };
+        Ok(ResolvedStarts { rule, source: Some(ResolvedSource { file, _copies: None, input }) })
     }
 }
 
-/// The artifact name a sourced rule's dep records.
-fn source_artifact_name(rule: &ChainStarts) -> &'static str {
-    match rule {
-        ChainStarts::Spread(Spread::FromPosterior { .. }) => "draws.tsv",
-        ChainStarts::Point(Point::FromMle { .. }) => super::cas::MLE_START_ARTIFACT,
-        ChainStarts::Point(Point::FromParams { .. }) => "params.toml",
-        _ => "",
-    }
+/// The part of a fit's `fit_state.toml` a `from_mle` start reads: its
+/// `start_values` table, as canonical JSON, so a summary field written beside
+/// it does not change what the starts depend on.
+pub fn start_values_part(fit_state: &[u8]) -> Result<Vec<u8>, String> {
+    let text = std::str::from_utf8(fit_state).map_err(|e| format!("fit_state.toml: {e}"))?;
+    let doc: toml::Table = text.parse().map_err(|e| format!("fit_state.toml: {e}"))?;
+    let values = doc.get("start_values").cloned().unwrap_or(toml::Value::Table(toml::Table::new()));
+    let json = serde_json::to_value(&values).map_err(|e| e.to_string())?;
+    serde_json::to_vec(&crate::canonical_json::canonical(&json)).map_err(|e| e.to_string())
 }
 
-/// Resolve a rule's handle (proposal §3.1): `from_params` names a flat
-/// params TOML directly; `from_posterior` names a draws TSV directly or a
-/// fit handle whose leaf wrote one; `from_mle` names a fit handle and reads
-/// the point estimate its `fit_state.toml` records. A fit handle goes
-/// through [`crate::fit::handle::FitRef::classify`] (`@label`, hash prefix,
-/// run directory, `fit.toml`); a segment with one method leaf resolves to
-/// it, and one with several is refused with the leaves listed.
-///
-/// A fit source whose stored verdict is not converged is refused unless
-/// `allow_nonconverged` — the purpose of the old pre-refine gate, kept at the
-/// one seam where an upstream fit is consumed (proposal §8, item 11).
 /// `--allow-nonconverged-source` lifts the refusal of a `from_mle` or
 /// `from_posterior` source whose verdict is not converged; on any other rule
 /// it would change nothing, so it is refused. `run` names what starts from
@@ -440,7 +447,24 @@ pub fn refuse_inert_allow_nonconverged(rule: &ChainStarts, run: &str) -> Result<
         rule.tag()))
 }
 
-pub fn resolve_starts(rule: &ChainStarts, allow_nonconverged: bool) -> Result<ResolvedStarts, String> {
+/// Resolve a rule's handle (proposal §3.1): `from_params` names a flat
+/// params TOML directly; `from_posterior` names a draws TSV directly or a
+/// stored fit run that wrote one; `from_mle` names a stored fit run and reads
+/// the point estimate its `fit_state.toml` records. A fit handle (`@label`, a
+/// run-id prefix or a run's folder) is resolved in `store`, which is the
+/// command's one root; a `fit.toml` never names a run, and is refused with
+/// the runs it has produced listed. `store` is `None` when the command has no
+/// run store, and a fit handle is then refused.
+///
+/// A fit source whose stored verdict is not converged is refused unless
+/// `allow_nonconverged` — the purpose of the old pre-refine gate, kept at the
+/// one seam where an upstream fit is consumed (proposal §8, item 11).
+#[allow(clippy::result_large_err)] // the store's error carries the paths a person acts on, returned once
+pub fn resolve_starts(
+    rule: &ChainStarts,
+    allow_nonconverged: bool,
+    store: Option<&store::Store>,
+) -> Result<ResolvedStarts, String> {
     let handle = match rule {
         ChainStarts::Point(Point::FromParams { path }) => {
             return ResolvedStarts::from_file(rule.clone(), path.clone());
@@ -459,12 +483,19 @@ pub fn resolve_starts(rule: &ChainStarts, allow_nonconverged: bool) -> Result<Re
         }
         return ResolvedStarts::from_file(rule.clone(), PathBuf::from(&handle));
     }
-    let leaf = resolve_fit_leaf(&handle)
-        .map_err(|e| format!("starts = {}: {}", rule.spelled(), e))?;
+    let spelled = rule.spelled();
+    let store = store.ok_or_else(|| {
+        format!("starts = {spelled}: `{handle}` names a stored fit, and this command reads no run store")
+    })?;
+    let run = crate::fit_store::resolve_run(store, &handle).map_err(|e| format!("starts = {spelled}: {e}"))?;
+    let files = std::sync::Arc::new(
+        crate::fit_store::RunFiles::of(&run).map_err(|e| format!("starts = {spelled}: {e}"))?,
+    );
+    let leaf = files.path().to_path_buf();
     if matches!(rule, ChainStarts::Point(Point::FromMle { .. })) {
         let method = super::state::FitState::load(&leaf.to_string_lossy())
             .map(|s| s.method)
-            .map_err(|e| format!("starts = {}: cannot read its fit_state.toml: {e}", rule.spelled()))?;
+            .map_err(|e| format!("starts = {spelled}: cannot read its fit_state.toml: {e}"))?;
         refuse_sampler_as_mle_source(&method, &handle)?;
     }
     // gh#1056: a chain subset is judged by its own R̂, in place of the whole
@@ -480,22 +511,24 @@ pub fn resolve_starts(rule: &ChainStarts, allow_nonconverged: bool) -> Result<Re
     };
     if !file.is_file() {
         return Err(format!(
-            "starts = {}: {} holds no {} — an optimizer-only method writes no \
-             posterior cloud; use `from_mle` for its point estimate",
-            rule.spelled(),
-            leaf.display(),
-            artifact
+            "starts = {spelled}: {handle} holds no {artifact} — an optimizer-only method writes no \
+             posterior cloud; use `from_mle` for its point estimate"
         ));
     }
     let dep = match rule {
-        ChainStarts::Point(Point::FromMle { .. }) => super::cas::cas_mle_start_dep(&file),
-        _ => super::cas::cas_leaf_file_dep(&leaf, artifact),
+        ChainStarts::Point(Point::FromMle { .. }) => run.dep_part("fit_state.toml", "start_values", |b| {
+            start_values_part(b).map_err(|why| store::Error::Parse { what: "fit_state.toml".into(), why })
+        }),
+        _ => run.dep(artifact),
     }
-        .map_err(|e| format!("starts = {}: {e}", rule.spelled()))?
-        .ok_or_else(|| format!("starts = {}: cannot read {}", rule.spelled(), file.display()))?;
+    .map_err(|e| format!("starts = {spelled}: {e}"))?;
     Ok(ResolvedStarts {
         rule: rule.clone(),
-        source: Some(ResolvedSource { file, leaf_dir: Some(leaf), dep }),
+        source: Some(ResolvedSource {
+            file,
+            _copies: Some(files),
+            input: crate::fit_store::StartInput::Run { source: dep },
+        }),
     })
 }
 
@@ -517,29 +550,6 @@ pub fn refuse_sampler_as_mle_source(method: &str, handle: &str) -> Result<(), St
         )),
         _ => Ok(()),
     }
-}
-
-/// A fit handle → the one method leaf it names
-/// ([`super::handle::resolve_leaf`]): a leaf directory, a run-id prefix or
-/// `@label` names one run; a problem folder names one only while it holds
-/// one, and holding several is refused with the runs listed and what sets
-/// them apart. A directory holding a `fit_state.toml` is taken as named.
-///
-/// The source must be a completed run: its `fit_state.toml` and `draws.tsv`
-/// are written before the steps that end a run, so a run that failed or was
-/// killed after them leaves files that look like a result. Such a leaf is
-/// refused with its state; a directory with a `fit_state.toml` and no
-/// `run.json` (a source assembled by hand) is taken as named, and one whose
-/// `run.json` cannot be read is refused naming why.
-pub fn resolve_fit_leaf(handle: &str) -> Result<PathBuf, String> {
-    let dir = match super::handle::FitRef::classify(handle) {
-        super::handle::FitRef::RunDir(dir) if dir.join("fit_state.toml").is_file() => dir,
-        _ => super::handle::resolve_leaf(handle).map(|leaf| leaf.dir).map_err(|e| e.to_string())?,
-    };
-    if let Some(leaf) = crate::leaf_use::read(&dir)? {
-        crate::leaf_use::require_completed(&leaf)?;
-    }
-    Ok(dir)
 }
 
 // ─── Context and entry point ─────────────────────────────────────────────────
@@ -1732,19 +1742,11 @@ mod tests {
     #[test]
     fn from_mle_refuses_a_sampler_leaf() {
         for method in ["pgas", "pmmh", "mh"] {
-            let dir = write_tmp(&format!("mle_of_{method}"), "");
-            std::fs::remove_file(&dir).unwrap();
-            std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(dir.join("fit_state.toml"), format!(
-                "method = \"{method}\"\nseed = 1\ntimestamp = \"t\"\nbest_loglik = -1.0\n\
-                 initial_loglik = -2.0\nbest_chain = 0\nn_chains = 2\n\
-                 [start_values]\nbeta = 0.4\n")).unwrap();
-            let rule: ChainStarts = format!("from_mle={}", dir.display()).parse().unwrap();
-            let err = resolve_starts(&rule, true)
-                .err().unwrap_or_else(|| panic!("from_mle of a {method} leaf must be refused"));
+            let err = refuse_sampler_as_mle_source(method, "@scout")
+                .err().unwrap_or_else(|| panic!("from_mle of a {method} run must be refused"));
             assert!(err.contains("from_posterior") && err.contains(method), "{err}");
-            std::fs::remove_dir_all(&dir).ok();
         }
+        refuse_sampler_as_mle_source("if2", "@scout").expect("an optimizer's estimate is a start");
     }
 
     // ─── `from_params` ────────────────────────────────────────────────

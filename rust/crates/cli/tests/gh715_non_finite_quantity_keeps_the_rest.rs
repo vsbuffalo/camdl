@@ -20,18 +20,18 @@
 //! above 1. That makes the non-finite value deterministic — no dependence on
 //! which corner of the posterior a seed lands in.
 
+mod fit_store_support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Where the latest `fit predict` of a run in `seg` wrote:
-/// `<seg>/predict/<run id>-<address key>/` (gh#896), the directory whose
-/// `report*.json` (one written by every predict) is newest. A path that does not
-/// exist while nothing has been predicted.
+/// The stored prediction under `seg` (a run folder, or any folder above
+/// runs) whose `report*.json` is newest: the latest `fit predict`'s output. A
+/// path that does not exist while nothing has been predicted.
 fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
-    std::fs::read_dir(seg.join("predict"))
-        .into_iter().flatten().flatten().map(|e| e.path())
+    fit_store_support::predictions(seg)
+        .into_iter()
         .filter_map(|d| {
-            // Newest `report*.json` (keyed by chain selection) in the directory.
             let t = std::fs::read_dir(&d).ok()?.flatten()
                 .filter(|e| {
                     let n = e.file_name().to_string_lossy().into_owned();
@@ -115,7 +115,7 @@ simulate {
 const DATA: &str =
     "time\tweekly_cases\n7\t16\n14\t166\n21\t626\n28\t1303\n35\t1260\n42\t1023\n49\t327\n56\t91\n";
 
-const FIT_TOML: &str = r#"output_dir = "results"
+const FIT_TOML: &str = r#"store = "results"
 
 [model]
 camdl = "model.camdl"
@@ -147,20 +147,15 @@ fn run(bin: &Path, dir: &Path, args: &[&str]) -> std::process::Output {
     Command::new(bin).env_remove("CLICOLOR_FORCE")
         .args(args)
         .current_dir(dir)
+        .env("CAMDL_STORE", dir.join("results"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output()
         .expect("spawn camdl")
 }
 
+/// The one stored fit run under the store at `results`.
 fn segment(results: &Path) -> PathBuf {
-    let fits = results.join("fits");
-    for e in std::fs::read_dir(&fits).expect("results/fits exists").flatten() {
-        let p = e.path();
-        if p.join("fit.meta.json").is_file() {
-            return p;
-        }
-    }
-    panic!("no fit segment under {}", fits.display());
+    fit_store_support::the_run(results)
 }
 
 #[test]
@@ -173,7 +168,7 @@ fn one_non_finite_quantity_drops_out_and_everything_else_is_written() {
     std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
     std::fs::write(tmp.join("fit.toml"), FIT_TOML).unwrap();
 
-    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(
         out.status.success(),
         "fit run failed:\nstdout={}\nstderr={}",
@@ -181,7 +176,7 @@ fn one_non_finite_quantity_drops_out_and_everything_else_is_written() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml"]);
+    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "@fit"]);
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
 
@@ -204,7 +199,7 @@ fn one_non_finite_quantity_drops_out_and_everything_else_is_written() {
     assert!(predict_out(&seg).join("observed").join("weekly_cases.tsv").is_file());
 
     // 3. The other quantities are written; only the offending one is missing.
-    let qdir = predict_out(&seg).join("quantities");
+    let qdir = predict_out(&seg).join("quantities-model");
     for name in ["prevalence", "peak", "never"] {
         assert!(
             qdir.join(format!("{name}.tsv")).is_file(),

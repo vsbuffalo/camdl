@@ -3,12 +3,10 @@
 //!
 //! Three surfaces name the winning chain and a reader will line them up:
 //! the method's own stderr line (`… (chain N)`), `fit_state.toml`'s
-//! `best_chain`, and `run.json`'s `inputs.best_chain` (which is what
-//! `camdl show` and `camdl list --format json` print). They were not the
-//! same number: the two files carried one index while the stderr line and
-//! every `chain_N/` directory carried another, so on a two-chain fit the
-//! stored value named the chain that did NOT win. Since gh#990 there is one
-//! base, 0, and nothing to convert.
+//! `best_chain`, and the run's `run_inputs.json` `best_chain`. If the two
+//! files carried one index while the stderr line and every `chain_N/`
+//! directory carried another, on a two-chain fit the stored value would name
+//! the chain that did not win. There is one base, 0, and nothing to convert.
 //!
 //! What this pins, per method, on a real leaf:
 //!
@@ -22,6 +20,8 @@
 //! Both fits are the committed spatial polio AFP+ES fixture
 //! (`tests/fixtures/polio_afp_es/`) shrunk to a test-sized method block: a
 //! real multi-stream problem, small enough to run in the default gate.
+
+mod fit_store_support;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -121,10 +121,10 @@ fn shrunk_config(
 fn run_fit(config: &Path, out_root: &Path) -> String {
     let r = Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
         .current_dir(config.parent().expect("config parent"))
-        // The fixture declares no `output_dir` (one would write into the
-        // committed fixture directory), so the destination is pinned here —
-        // which also keeps the test off a developer's ambient value.
-        .env("CAMDL_OUTPUT_DIR", out_root)
+        // The fixture declares no `store` (one would write into the committed
+        // fixture directory), so the store is pinned here — which also keeps
+        // the test off a developer's ambient value.
+        .env("CAMDL_STORE", out_root)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args(["fit", "run", &config.to_string_lossy()])
         .output()
@@ -134,27 +134,9 @@ fn run_fit(config: &Path, out_root: &Path) -> String {
     stderr
 }
 
-/// The single `fit_method` leaf under `<out_root>/fits/`.
+/// The one stored fit run under the store at `out_root`.
 fn method_leaf(out_root: &Path) -> PathBuf {
-    let mut stack = vec![out_root.join("fits")];
-    while let Some(d) = stack.pop() {
-        let rj = d.join("run.json");
-        if rj.is_file() {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(
-                &std::fs::read_to_string(&rj).unwrap_or_default())
-            {
-                if v.get("kind").and_then(|k| k.as_str()) == Some("fit_method") {
-                    return d;
-                }
-            }
-        }
-        if let Ok(es) = std::fs::read_dir(&d) {
-            for e in es.flatten() {
-                if e.path().is_dir() { stack.push(e.path()); }
-            }
-        }
-    }
-    panic!("no fit_method leaf under {}", out_root.join("fits").display());
+    fit_store_support::the_run(out_root)
 }
 
 fn fit_state_best_chain(leaf: &Path) -> i64 {
@@ -173,13 +155,10 @@ fn fit_state_best_chain(leaf: &Path) -> i64 {
 }
 
 fn run_json_best_chain(leaf: &Path) -> i64 {
-    let p = leaf.join("run.json");
-    let v: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display())))
-        .expect("parse run.json");
-    v["inputs"]["best_chain"].as_i64().unwrap_or_else(|| {
-        panic!("inputs.best_chain absent or not an integer in {}: {}",
-            p.display(), v["inputs"])
+    let v = fit_store_support::run_inputs(leaf);
+    v["best_chain"].as_i64().unwrap_or_else(|| {
+        panic!("best_chain absent or not an integer in {}: {v}",
+            leaf.join("run_inputs.json").display())
     })
 }
 
@@ -231,9 +210,9 @@ fn assert_best_chain_names_a_chain_dir(
          chain {printed} — the stored value must be the chain number the run \
          named (gh#912, gh#990).\nleaf: {}", leaf.display());
     assert_eq!(recorded, printed,
-        "{method}: run.json inputs.best_chain = {recorded} but the run printed \
-         chain {printed} — `camdl show` and `camdl list --format json` print this \
-         value raw, so it must be the chain number (gh#912, gh#990).\nleaf: {}",
+        "{method}: run_inputs.json best_chain = {recorded} but the run printed \
+         chain {printed} — the stored value must be the chain number \
+         (gh#912, gh#990).\nleaf: {}",
         leaf.display());
 
     assert!((0..n_chains).contains(&stored),
@@ -306,6 +285,6 @@ fn if2_best_chain_agrees_with_the_mle_provenance_chain() {
     let prov = mle_provenance_chain(&leaf);
     assert_eq!(prov, stored,
         "if2: mle_params.toml [provenance] chain = {prov} but fit_state.toml / \
-         run.json say best_chain = {stored} — one leaf must not name two chains \
+         run_inputs.json say best_chain = {stored} — one leaf must not name two chains \
          (gh#912).\nleaf: {}", leaf.display());
 }

@@ -60,7 +60,7 @@ const CASES_TSV: &str =
 /// `<name>.toml`: a fit of beta and gamma with the `[method]` body given.
 fn fit_toml(dir: &Path, name: &str, method: &str) {
     std::fs::write(dir.join(format!("{name}.toml")), format!(
-        "output_dir = \"res_{name}\"\n[model]\ncamdl = \"m.ir.json\"\n\
+        "store = \"res_{name}\"\n[model]\ncamdl = \"m.ir.json\"\n\
          [data.observations]\ncases = \"cases.tsv\"\n\
          [estimate]\nbeta = {{ bounds = [0.01, 3.0] }}\ngamma = {{ bounds = [0.01, 1.0] }}\n\
          [fixed]\nN0 = 1000\n\

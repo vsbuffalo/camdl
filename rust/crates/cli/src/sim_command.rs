@@ -134,7 +134,7 @@ pub(crate) fn run(ctx: StoreRun<'_>) {
 
     let store = crate::camdl_store::open(&ctx.request)
         .unwrap_or_else(|e| fail(format!("the run store at {}: {e}", crate::camdl_store::root_of(&ctx.request).display())));
-    let mut info = store::RunInfo::new(&ctx.given, &ctx.execution, &ctx.request).unwrap_or_else(|e| fail(e.to_string()));
+    let info = store::RunInfo::new(&ctx.given, &ctx.execution, &ctx.request).unwrap_or_else(|e| fail(e.to_string()));
     for item in &ctx.lineage {
         info.lineage(item.clone());
     }

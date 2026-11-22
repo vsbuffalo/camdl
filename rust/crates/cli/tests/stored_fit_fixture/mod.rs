@@ -1,7 +1,7 @@
-//! A fit store made by the release `camdl` for tests of the readers of a
-//! stored fit and of `camdl dev migrate`: a small SIR model observed weekly,
-//! a PMMH fit config, and helpers to run `camdl` in a cleared environment and
-//! to read the store's files.
+//! A run store made by the release `camdl` for tests of the readers of a
+//! stored fit: a small SIR model observed weekly, a PMMH fit config, and
+//! helpers to run `camdl` in a cleared environment, against the run store
+//! `camdl-store/` of the fixture directory, and to read the store's files.
 
 #![allow(dead_code)] // each test file uses part of it
 
@@ -99,13 +99,18 @@ impl Fixture {
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .env("CAMDLC", &self.camdlc)
             .env("CAMDL_IR_CACHE_DIR", self.dir.join("ir-cache"))
+            .env("CAMDL_STORE", self.store())
             .args(args)
             .output()
             .expect("spawn camdl")
     }
 
-    /// `fit run`, returning every leaf it stored or reused, relative to the
-    /// fixture directory.
+    /// The run store every command here reads and writes.
+    pub fn store(&self) -> PathBuf {
+        self.dir.join("camdl-store")
+    }
+
+    /// `fit run`, returning the folder of every fit run it stored or reused.
     pub fn fit(&self, args: &[&str]) -> Vec<String> {
         let mut all = vec!["fit", "run"];
         all.extend(args);
@@ -115,35 +120,19 @@ impl Fixture {
             .lines()
             .filter_map(|l| {
                 let l = l.trim();
-                l.strip_prefix("stored ").and_then(|r| r.split(" · ").nth(1)).map(str::to_string)
-                    .or_else(|| l.strip_prefix("cache hit — reusing ").map(|r| format!("results/{r}")))
+                l.strip_prefix("stored ").and_then(|r| r.split(" · ").nth(1))
+                    .or_else(|| l.strip_prefix("cache hit — reusing "))
+                    .map(|r| self.store().join(r).to_string_lossy().into_owned())
             })
             .collect();
         assert!(!leaves.is_empty(), "no stored leaf in:\n{stderr}");
         leaves
     }
 
-    /// The fit folder holding `leaf`.
+    /// The problem folder holding the fit run `leaf`
+    /// (`<problem>/runs/<method>-…/seed_…`).
     pub fn folder(&self, leaf: &str) -> PathBuf {
-        self.dir.join(leaf).ancestors().nth(2).unwrap().to_path_buf()
-    }
-
-    /// `fit predict <leaf>`'s files, by path under the folder's `predict/`.
-    pub fn predict(&self, leaf: &str) -> Result<BTreeMap<String, Vec<u8>>, String> {
-        let folder = self.folder(leaf);
-        let _ = std::fs::remove_dir_all(folder.join("predict"));
-        let out = self.camdl(&["fit", "predict", &self.dir.join(leaf).to_string_lossy(), "--n-draws", "5",
-                               "--seed", "1", "--progress", "none"]);
-        if !out.status.success() {
-            return Err(String::from_utf8_lossy(&out.stderr).into_owned());
-        }
-        Ok(files_under(&folder.join("predict")))
-    }
-
-    pub fn migrate(&self, args: &[&str]) -> Output {
-        let mut all = vec!["dev", "migrate"];
-        all.extend(args);
-        self.camdl(&all)
+        Path::new(leaf).ancestors().nth(3).unwrap().to_path_buf()
     }
 }
 

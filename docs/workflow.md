@@ -246,21 +246,22 @@ camdl fit run fit.toml --label baseline --seed 1
 a prior and rerun with `--label baseline`, and `@baseline` names the new run
 while `@baseline~1` names the one before (`camdl compare @baseline~1 @baseline`
 compares them). Reverting the edit and rerunning is a cache hit that points
-`@baseline` back at the first run. Every command that resolves `@baseline` says
-on stderr which run it resolved to; a script that must pin one run uses its run
-id.
+`@baseline` back at the first run. A script that must pin one run uses its run
+id. The fit is stored in the run store, `camdl-store/` in the working directory
+unless the fit file's `store` key or `CAMDL_STORE` names another root.
 
 ## 5. Read the diagnostics
 
 ```bash
-camdl fit summary @baseline      # or the run directory `fit run` printed, or a hash prefix
+camdl fit summary @baseline      # or the run folder `fit run` printed, or a run-id prefix
 ```
 
 Every fit command (`fit summary`, `fit predict`, `compare`) takes the same
-**handle**: an `@label`, a fit hash prefix, the run directory `camdl fit run`
-prints, or the `fit.toml` itself (resolved to its one run; an ambiguous match is
-listed rather than guessed). Each run archives its own compiled model, so a
-handle keeps working even if the `.camdl` file moves. `camdl list` enumerates
+**handle**: an `@label`, a run-id prefix, or the run folder `camdl fit run`
+prints. A `fit.toml` is refused, with the runs it made listed: one file makes a
+new run whenever its data, seeds, a sweep or the camdl build changes. Each fit
+stores its compiled model, data and resolved problem, so a handle keeps working
+even if the `.camdl` file or the data move or change. `camdl list` enumerates
 every run.
 
 ### A posterior fit
@@ -282,7 +283,7 @@ chains) or `--exclude-chains 3,5` (drop those) to `fit summary`, `fit predict`,
 `fit table --quantity`, `compare`, `simulate --draws posterior` and
 `cat --stream draws.tsv`. The two flags name one selection two ways: on a
 six-chain fit `--chains 0,1,2,4` and `--exclude-chains 3,5` are the same
-selection, and `fit predict` stores both under one name (`predictive-excl3,5/`).
+selection, and `fit predict` stores both under one name (`predictive-excl3_5/`).
 A selection is a view of the stored run and never re-runs it. It always prints a
 warning, because dropping chains biases the posterior toward the chains kept. To
 start a new fit from some chains of an earlier one, use `--starts-chains`
@@ -416,8 +417,8 @@ plot-ready artifact:
 
 ```bash
 camdl fit predict @baseline --stream onset
-# wrote results/fits/sle-8a3f12b4/predictive/onset.tsv
-# wrote results/fits/sle-8a3f12b4/observed/onset.tsv
+# wrote camdl-store/<build>/fit/sle-…/runs/pgas-…/seed_1-…/predict/all-…/predictive/onset.tsv
+# wrote camdl-store/<build>/fit/sle-…/runs/pgas-…/seed_1-…/predict/all-…/observed/onset.tsv
 ```
 
 `fit predict` resolves the fit's canonical post-warm-up posterior draws,
@@ -483,13 +484,13 @@ the run directory:
   chains) and reports its own `n_draws`. Without the flag no `chain` column is
   written.
 
-  `quantities/<name>.tsv` carries the same reduction under `rhat` / `ess` — one
-  pair, since a quantity has a single value per draw. Those are the reported
-  estimands, so they are the first numbers to read. A quantity over latent state
-  or derived arithmetic is noise-free and its `rhat` is the undiluted kind; a
-  quantity whose manifest `source` is `observations` reduces sampled `y_rep`,
-  carries observation noise, and so reads like `rhat_pred`. `simulate --draws`
-  has no chains behind it and writes neither column.
+  `quantities-model/<name>.tsv` carries the same reduction under `rhat` / `ess`
+  — one pair, since a quantity has a single value per draw. Those are the
+  reported estimands, so they are the first numbers to read. A quantity over
+  latent state or derived arithmetic is noise-free and its `rhat` is the
+  undiluted kind; a quantity whose manifest `source` is `observations` reduces
+  sampled `y_rep`, carries observation noise, and so reads like `rhat_pred`.
+  `simulate --draws` has no chains behind it and writes neither column.
 
   The two per-row pairs and the parameter R̂ can disagree in either direction,
   and both directions are ordinary. A reportable quantity is often far better
@@ -529,8 +530,9 @@ posterior band to draw; get its parameters with
 `camdl simulate --params …` instead.
 
 If the model declares a `quantities {}` block, `fit predict` also bands each
-derived quantity over the same posterior draws into `quantities/<name>.tsv` with
-a `quantities.json` manifest. These are either **series** — a channel the model
+derived quantity over the same posterior draws into
+`quantities-model/<name>.tsv`, inside the prediction's folder, with a
+`quantities.json` manifest. These are either **series** — a channel the model
 computes but doesn't track as a compartment (force of infection, effective
 reproduction number, cumulative incidence, EIR), one value per output time — or
 **scalar** summaries (peak size, attack rate, time-to-peak): the posterior of a

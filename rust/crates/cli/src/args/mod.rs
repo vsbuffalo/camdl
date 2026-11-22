@@ -512,8 +512,8 @@ pub struct SimulateArgs {
     pub replicates: Option<usize>,
 
     /// Parameter draw source: path to a params TSV, "uniform", "prior", or
-    /// "posterior". "posterior" reads a completed fit's canonical post-warm-up
-    /// draws cloud — requires `--fit <fit results dir>`. "prior" samples the
+    /// "posterior". "posterior" reads a stored fit run's post-warm-up draws —
+    /// requires `--fit <run>` (its @label, id or folder). "prior" samples the
     /// parameters with a prior and "uniform" the ones with declared bounds;
     /// every other parameter comes from the model default, `--params`, the
     /// scenario or `--param`. A draw is a SAMPLE from a measure; a value you
@@ -555,11 +555,11 @@ pub struct SimulateArgs {
     pub sweep_file: Option<PathBuf>,
 
     /// Companion for `--draws`. With `--draws prior`, a fit.toml supplying
-    /// priors. With `--draws posterior`, the fit run to read the posterior
-    /// draws from, by handle (`@label`, a leaf or results directory, a run-id
-    /// prefix, a fit.toml); a results directory holding several runs is
-    /// refused with them listed (gh#896). With `--draws <file.tsv>`, a fit.toml (or results
-    /// dir) whose `[fixed]` block gives the parameters absent from the file's
+    /// priors. With `--draws posterior`, the stored fit run to read the
+    /// posterior draws from: its `@label`, a run-id prefix or its folder; a
+    /// fit.toml names no run and is refused with the runs it made listed.
+    /// With `--draws <file.tsv>`, a fit.toml or a stored fit run whose
+    /// `[fixed]` block gives the parameters absent from the file's
     /// columns their value, at the fit.toml `[fixed]` tier: `--params` and the
     /// scenario outrank it, and a column the file provides outranks it (#273).
     /// Also consulted (without --draws) by an anchored `--to`: the fit's
@@ -829,7 +829,7 @@ pub struct SimulateInvocation {
 
 // ─── fit ──────────────────────────────────────────────────────────────────────
 
-#[derive(Args)]
+#[derive(Args, Clone, store::Inputs)]
 #[command(after_help = colored_help!("\
 Examples:
   # Run the full inference pipeline declared in fit.toml
@@ -856,8 +856,10 @@ Examples:
 
 Notes:
   - PGAS/PMMH fits can resume a partial run with `--resume`.
-  - Output goes under `<root>/fits/<stem>-<hash>/`; resolve with
-    `camdl fit where fit.toml`.
+  - The problem is stored under `<store>/<build>/fit/<model>-<hash>/`, and
+    each run inside it under `runs/<method>-<hash>/seed_<n>-<hash>/`. The
+    store is the file's `store` key, else `$CAMDL_STORE`, else
+    `./camdl-store`.
 
 Priors (Bayesian methods: PGAS, PMMH):
   Each estimated parameter must have a prior available from one of
@@ -875,20 +877,155 @@ Priors (Bayesian methods: PGAS, PMMH):
        a hard error — `fit run`'s chain is treated authoritatively
        downstream, so silent demotion is not allowed.
 
-  Per-parameter provenance is recorded in the fit folder's
-  `fit.meta.json` under `resolved_priors` (sources: fit_toml,
-  model_ir, flat_explicit).
+  Per-parameter provenance is recorded in each run's `provenance.json`
+  under `resolved_priors` (sources: fit_toml, model_ir, flat_explicit).
   See `docs/inference.md` § \"Priors and precedence\" for the full
   spec including the asymmetry with `camdl profile`.
 "))]
 pub struct FitRunArgs {
-    /// Fit configuration file (v2 TOML)
+    /// Fit configuration file (v2 TOML). Its problem half poses the fit
+    /// problem every run of it shares; its `[method]` is this run's.
+    #[input(identity, vary = crate::input_fixtures::fit_other_config)]
     pub config: PathBuf,
 
-    // Sets the config's `[config] allow_forcing_extrapolation = true`, so it
-    // keys the fit as the config line does.
     #[command(flatten)]
+    #[input(group)]
+    pub problem: FitProblemFlags,
+
+    #[command(flatten)]
+    #[input(group)]
+    pub run: FitRunFlags,
+
+    #[command(flatten)]
+    #[input(group)]
+    pub method: FitMethodFlags,
+
+    /// Start from a `from_mle` / `from_posterior` source whose stored verdict
+    /// is not converged. Without this the source is refused, since starting
+    /// from an unconverged fit launders its multi-modality into this one.
+    #[arg(long)]
+    #[input(execution, exercised_by = crate::input_fixtures::fit_allow_nonconverged_source)]
+    pub allow_nonconverged_source: bool,
+
+    /// Max worker threads for the Rayon pool that runs the chains and, within
+    /// each chain, the particle filter. `0` (the default) uses all logical
+    /// cores. Results are bit-identical regardless of this value — it caps the
+    /// thread budget / CPU footprint, not the numerics. Mirrors `--parallel`
+    /// on pfilter/profile; also honored via `CAMDL_PARALLEL`.
+    #[arg(long, default_value_t = 0, env = "CAMDL_PARALLEL")]
+    #[input(execution, exercised_by = crate::input_fixtures::fit_parallel)]
+    pub parallel: usize,
+
+    /// Recompute every run even when it is stored; the stored run is moved
+    /// to the store's quarantine first. Also reclaims a run held by a process
+    /// on another host, which camdl cannot check and never reclaims on its
+    /// own. Conflicts with --resume.
+    #[arg(long, conflicts_with = "resume")]
+    #[input(store)]
+    pub force: bool,
+
+    /// A name for this invocation, found again as `@LABEL` (1–64 chars after
+    /// trim; allowed: letters, digits, spaces, commas, dot, underscore,
+    /// hyphen). It names the invocation, never a run: rerunning under another
+    /// label reuses every stored run, and an invocation that makes one run
+    /// lets `@LABEL` name that run. Refused while a run of an invocation
+    /// labelled LABEL is still running.
+    #[arg(long, value_name = "TEXT")]
+    #[input(store)]
+    pub label: Option<String>,
+
+    // ── Removed-flag traps ───────────────────────────────────────────
+    //
+    // Each of these was renamed or removed with the `[stages]` → `[method]`
+    // split (proposal 2026-09-08); the dispatch site answers every one it
+    // sees with its replacement in one message. Per CLAUDE.md alpha posture,
+    // no back-compat shims — they exist purely so the error names the right
+    // replacement.
+    #[arg(long = "stage", value_name = "STAGE", hide = true)]
+    #[input(skip)]
+    pub _removed_stage: Option<String>,
+    #[arg(long = "init", value_name = "MODE", hide = true)]
+    #[input(skip)]
+    pub _removed_init: Option<String>,
+    #[arg(long = "posterior", value_name = "PATH", hide = true)]
+    #[input(skip)]
+    pub _removed_posterior: Option<String>,
+    #[arg(long = "mle", value_name = "PATH", hide = true)]
+    #[input(skip)]
+    pub _removed_mle: Option<String>,
+    #[arg(long = "params", value_name = "TOML", hide = true)]
+    #[input(skip)]
+    pub _removed_params: Option<String>,
+    #[arg(long = "survey-path", value_name = "DIR", hide = true)]
+    #[input(skip)]
+    pub _removed_survey_path: Option<String>,
+    #[arg(long = "survey-top-k", value_name = "N", hide = true)]
+    #[input(skip)]
+    pub _removed_survey_top_k: Option<String>,
+    #[arg(long = "allow-nonconverged-scout", hide = true)]
+    #[input(skip)]
+    pub _removed_allow_nonconverged_scout: bool,
+    #[arg(long = "init-method", value_name = "MODE", hide = true)]
+    #[input(skip)]
+    pub _removed_init_method: Option<String>,
+    #[arg(long = "starts-from", value_name = "DIR_OR_HASH", hide = true)]
+    #[input(skip)]
+    pub _removed_starts_from: Option<String>,
+    // `--tempering` went with PGAS parallel tempering (gh#789); same shape,
+    // its own message.
+    #[arg(long = "tempering", value_name = "B1,B2,...", hide = true)]
+    #[input(skip)]
+    pub _removed_tempering: Option<String>,
+    // `--rho` went with correlated pseudo-marginal PMMH; same shape, its own
+    // message.
+    #[arg(long = "rho", value_name = "F", hide = true)]
+    #[input(skip)]
+    pub _removed_rho: Option<String>,
+    // `--output-dir` named the old store's root; the run store's root is the
+    // fit file's `store` key, else `CAMDL_STORE`, else `./camdl-store`.
+    #[arg(long = "output-dir", value_name = "DIR", hide = true)]
+    #[input(skip)]
+    pub _removed_output_dir: Option<String>,
+}
+
+/// The flags of `fit run` that change the problem.
+#[derive(Args, Clone, Default, store::Inputs)]
+pub struct FitProblemFlags {
+    // Sets the config's `[config] allow_forcing_extrapolation = true`, so it
+    // keys the problem as the config line does.
+    #[command(flatten)]
+    #[input(group)]
     pub forcing_extrapolation: ForcingExtrapolationArg,
+
+    /// Override the cadence at which `[synthetic]` data is GENERATED
+    /// (`emit_schedule`), gh#656. Same grammar as `camdl simulate
+    /// --emit-every`: a plain number in the model's own `time_unit` for every
+    /// stream, or `NAME=N` (repeatable) for one stream by its
+    /// observation-block label. This is the only fit path the emission cadence
+    /// reaches — a fit against real data scores at its data files' own times
+    /// and never consults `emit_schedule` — so the flag is REFUSED on a fit
+    /// with no `[synthetic]` block rather than silently doing nothing. It
+    /// changes the generated data, so the problem re-keys.
+    #[arg(long = "emit-every", value_name = "N | NAME=N")]
+    #[input(identity, vary = crate::input_fixtures::fit_emit_every)]
+    pub emit_every: Vec<String>,
+
+    /// Cartesian sweep over a fixed parameter (may repeat): one problem per
+    /// point. SPEC is `V1,V2,...` | `lin(min,max,n)` | `log10(min,max,n)`.
+    #[arg(long, value_name = "NAME=SPEC")]
+    #[input(expands)]
+    pub sweep: Vec<SweepSpec>,
+}
+
+/// The flags of `fit run` that change the run, other than the method's
+/// settings.
+#[derive(Args, Clone, Default, store::Inputs)]
+pub struct FitRunFlags {
+    /// RNG seed (default: 1). Refused beside a file that declares
+    /// `fit_seeds`, which replaces it.
+    #[arg(long)]
+    #[input(identity)]
+    pub seed: Option<u64>,
 
     /// Where the method's chains begin, overriding the file's `starts`. A
     /// rule name — `uniform_unconstrained`, `lhs`, `uniform`, `from_prior`,
@@ -899,6 +1036,7 @@ pub struct FitRunArgs {
     /// declares a prior, `uniform_unconstrained` otherwise. Keyed into the
     /// run's identity, like the file's own `starts`.
     #[arg(long, value_name = "SPEC")]
+    #[input(identity, vary = crate::input_fixtures::fit_starts)]
     pub starts: Option<crate::fit::starts::ChainStarts>,
 
     /// Restrict a `from_posterior` rule to these chains of its source,
@@ -908,111 +1046,29 @@ pub struct FitRunArgs {
     /// source's whole-run verdict), and the subset is keyed into the run's
     /// identity (gh#1056).
     #[arg(long, value_name = "IDS", value_parser = crate::fit::starts::parse_starts_chains)]
+    #[input(identity, vary = crate::input_fixtures::fit_starts_chains)]
     pub starts_chains: Option<crate::chain_selection::ChainSelection>,
 
-    /// Start from a `from_mle` / `from_posterior` source whose stored verdict
-    /// is not converged. Without this the source is refused, since starting
-    /// from an unconverged fit launders its multi-modality into this one.
-    #[arg(long)]
-    pub allow_nonconverged_source: bool,
-
-    /// Max worker threads for the Rayon pool that runs the chains and, within
-    /// each chain, the particle filter. `0` (the default) uses all logical
-    /// cores. Results are bit-identical regardless of this value — it caps the
-    /// thread budget / CPU footprint, not the numerics. Mirrors `--parallel`
-    /// on pfilter/profile; also honored via `CAMDL_PARALLEL`.
-    #[arg(long, default_value_t = 0, env = "CAMDL_PARALLEL")]
-    pub parallel: usize,
-
-    /// RNG seed (default: 1)
-    #[arg(long)]
-    pub seed: Option<u64>,
-
-    /// Re-run even if the run is stored: the stored leaf moves to the
-    /// store's .quarantine/. Also clears a leaf held by a run on another
-    /// host, which camdl cannot check and never reclaims on its own.
-    #[arg(long)]
-    pub force: bool,
-
-    /// Resume a previously-completed PGAS or PMMH run from a base run
-    /// addressed by `<run_id prefix>` or a leaf path. gh#147 (M3.2): the
-    /// base leaf is read **read-only**; the resumed run is written to a new
-    /// content-addressed leaf keyed on the new extension dimension (PGAS
-    /// `sweeps` / PMMH `iterations`) with a dep on the base — a distinct
-    /// deterministic artifact, not bit-identical to an uninterrupted fit of
-    /// the same length. Conflicts with --force.
-    #[arg(long, value_name = "BASE_REF", conflicts_with = "force")]
+    /// Resume a completed PGAS or PMMH run, named by handle (`@label`, a
+    /// run-id prefix or its folder), to the longer length this file's
+    /// `[method]` asks for. The base is read through the store; the resumed
+    /// run is a new run beside its base with the same method settings and
+    /// seed, a longer length, and a dependency on the base's carried chain
+    /// files. Conflicts with --force.
+    #[arg(long, value_name = "BASE")]
+    #[input(identity, vary = crate::input_fixtures::fit_resume)]
     pub resume: Option<String>,
+}
 
-    /// Cartesian sweep over a fixed parameter (may repeat).
-    /// SPEC is `V1,V2,...` | `lin(min,max,n)` | `log10(min,max,n)`.
-    #[arg(long, value_name = "NAME=SPEC")]
-    pub sweep: Vec<SweepSpec>,
-
-    /// Override the cadence at which `[synthetic]` data is GENERATED
-    /// (`emit_schedule`), gh#656. Same grammar as `camdl simulate
-    /// --emit-every`: a plain number in the model's own `time_unit` for every
-    /// stream, or `NAME=N` (repeatable) for one stream by its
-    /// observation-block label. This is the only fit path the emission cadence
-    /// reaches — a fit against real data scores at its data files' own times
-    /// and never consults `emit_schedule` — so the flag is REFUSED on a fit
-    /// with no `[synthetic]` block rather than silently doing nothing. It
-    /// changes the generated data, so the fit re-keys.
-    #[arg(long = "emit-every", value_name = "N | NAME=N")]
-    pub emit_every: Vec<String>,
-
+/// The method flags of `fit run`. Each overrides one key of `[method]`, and
+/// a flag the method does not read is refused.
+#[derive(Args, Clone, Default, store::Inputs)]
+pub struct FitMethodFlags {
     /// Override [method.gate] decibans_thresh (the inter-chain
     /// log-likelihood-spread floor, in decibans).
     #[arg(long, value_name = "DB")]
+    #[input(identity)]
     pub decibans_thresh: Option<f64>,
-
-    // ── Removed-flag traps ───────────────────────────────────────────
-    //
-    // Each of these was renamed or removed with the `[stages]` → `[method]`
-    // split (proposal 2026-09-08); the dispatch site answers every one it
-    // sees with its replacement in one message. Per CLAUDE.md alpha posture,
-    // no back-compat shims — they exist purely so the error names the right
-    // replacement.
-    #[arg(long = "stage", value_name = "STAGE", hide = true)]
-    pub _removed_stage: Option<String>,
-    #[arg(long = "init", value_name = "MODE", hide = true)]
-    pub _removed_init: Option<String>,
-    #[arg(long = "posterior", value_name = "PATH", hide = true)]
-    pub _removed_posterior: Option<String>,
-    #[arg(long = "mle", value_name = "PATH", hide = true)]
-    pub _removed_mle: Option<String>,
-    #[arg(long = "params", value_name = "TOML", hide = true)]
-    pub _removed_params: Option<String>,
-    #[arg(long = "survey-path", value_name = "DIR", hide = true)]
-    pub _removed_survey_path: Option<String>,
-    #[arg(long = "survey-top-k", value_name = "N", hide = true)]
-    pub _removed_survey_top_k: Option<String>,
-    #[arg(long = "allow-nonconverged-scout", hide = true)]
-    pub _removed_allow_nonconverged_scout: bool,
-    #[arg(long = "init-method", value_name = "MODE", hide = true)]
-    pub _removed_init_method: Option<String>,
-    #[arg(long = "starts-from", value_name = "DIR_OR_HASH", hide = true)]
-    pub _removed_starts_from: Option<String>,
-    // `--tempering` went with PGAS parallel tempering (gh#789); same shape,
-    // its own message.
-    #[arg(long = "tempering", value_name = "B1,B2,...", hide = true)]
-    pub _removed_tempering: Option<String>,
-    // `--rho` went with correlated pseudo-marginal PMMH; same shape, its own
-    // message.
-    #[arg(long = "rho", value_name = "F", hide = true)]
-    pub _removed_rho: Option<String>,
-
-    /// The run's label (1–64 chars after trim; allowed: letters, digits,
-    /// spaces, commas, dot, underscore, hyphen). The run this invocation
-    /// writes or reuses becomes `@label`: a label moves to the run most
-    /// recently given it, and the run that held it before stays reachable as
-    /// `@label~1`. A run stored under another label is relabelled. Refused
-    /// while another run carrying the label is still running, and when the
-    /// invocation writes several runs (fit seeds, datasets, sweep points).
-    /// Surfaced in `camdl list` and `camdl fit table`.
-    /// Examples: --label "narrow R0, take 1", --label "iota free".
-    #[arg(long, value_name = "TEXT")]
-    pub label: Option<String>,
 
     // ── Richardson dt-convergence check (gh#52) ─────────────────────
 
@@ -1020,48 +1076,42 @@ pub struct FitRunArgs {
     /// Default: the check runs on every IF2 method (PF likelihood) and
     /// every ODE inference method — nl-sbplx, nl-bobyqa, nl-lbfgs, and mh
     /// (deterministic likelihood). Use this for CI smoke fits or
-    /// known-converged-dt rerenders where the audit cost is unwelcome.
-    ///: the dt-check result is stored in the leaf, so
-    /// the override is keyed into that method's identity (gh#540 seam;
-    /// gh#726 for the mh/nl-* dt_check field).
+    /// known-converged-dt rerenders where the audit cost is unwelcome. The
+    /// dt-check result is stored in the run, so the override is keyed into
+    /// its identity.
     #[arg(long)]
+    #[input(identity)]
     pub no_dt_check: bool,
 
     /// Drop the dt-check warning threshold to the strict default
     /// (0.5 nats for chain_binomial, 0.1 nats for ode_rk4). Targets
     /// research-quality fits where sub-nat differences matter for
     /// paper-grade conclusions; the routine default (2.0 / 0.5)
-    /// allows more give before flagging.
-    ///: the threshold it selects is stored in the leaf
-    /// (fit_state.toml.dt_check), so it is resolved into that method's
-    /// dt_check.threshold_nats and keyed into its identity (gh#730). A method
-    /// that declares its own threshold_nats is unaffected.
+    /// allows more give before flagging. The threshold it selects is stored
+    /// in the run (fit_state.toml.dt_check), so it is keyed into the run's
+    /// identity. A method that declares its own threshold_nats is unaffected.
     #[arg(long)]
+    #[input(identity)]
     pub dt_check_strict: bool,
 
     /// Binomial sampler for the chain-binomial draws of a `pgas`, `pmmh`,
     /// `if2` or `pfilter` method: `btpe` (default) or `btrs` (Hörmann 1993;
-    /// faster, gh#747).
-    ///
-    /// For the same reason as the flags above: the two
-    /// samplers are NOT bit-compatible — a different rejection scheme accepts
-    /// different draws from the same stream — so this is resolved into the
-    /// method's `binomial` field and keyed into its identity. Two runs differing
-    /// only in this flag get different addresses and cannot be served from one
-    /// another's leaf. It is a flag rather than an environment variable for
-    /// exactly that reason (gh#241 removed the last env-var input rather than
-    /// hash it).
+    /// faster, gh#747). The two samplers are not bit-compatible — a different
+    /// rejection scheme accepts different draws from the same stream — so
+    /// this is resolved into the method's `binomial` field and keyed into
+    /// the run's identity.
     #[arg(long, value_name = "SAMPLER",
           value_parser = |v: &str| v.parse::<sim::rng::BinomialAlgorithm>())]
+    #[input(identity, vary = crate::input_fixtures::other_binomial)]
     pub binomial: Option<sim::rng::BinomialAlgorithm>,
 
     /// Override `n_halvings` on the dt-check (gh#52). Default 2
     /// (evaluates at dt_fit, dt_fit/2, dt_fit/4 — 7× the
-    /// loglik-eval cost). Use 3 for ambiguous cases at 15×.
-    ///: the ladder result is stored in the leaf, so
-    /// the override is keyed into that method's identity (gh#540 seam;
-    /// gh#726 for the mh/nl-* dt_check field).
+    /// loglik-eval cost). Use 3 for ambiguous cases at 15×. The ladder
+    /// result is stored in the run, so the override is keyed into its
+    /// identity.
     #[arg(long, value_name = "N")]
+    #[input(identity)]
     pub dt_check_halvings: Option<usize>,
 
     // ── IF2-specific algorithm overrides ────────────────────────────
@@ -1070,39 +1120,45 @@ pub struct FitRunArgs {
     /// over which the cooling fraction is reached (pomp's
     /// cooling.fraction.50 default).
     #[arg(long, value_name = "N")]
+    #[input(identity)]
     pub cooling_target_iters: Option<usize>,
 
     // ── PGAS-specific algorithm overrides  ──────────
 
     /// Override [method.max_tree_depth] (NUTS depth ceiling).
-    ///
     #[arg(long, value_name = "N")]
+    #[input(identity)]
     pub max_tree_depth: Option<usize>,
 
     /// Override [method.trajectory_warmup] (CSMC-only sweeps
     /// before parameter updates begin).
     #[arg(long, value_name = "N")]
+    #[input(identity)]
     pub trajectory_warmup: Option<usize>,
 
     /// Override [method.csmc_sweeps_per_nuts] (CSMC trajectory
     /// updates per parameter update).
     #[arg(long, value_name = "N")]
+    #[input(identity)]
     pub csmc_sweeps_per_nuts: Option<usize>,
 
     /// Override [method.n_trajectories] (posterior trajectories
     /// saved).
     #[arg(long, value_name = "N")]
+    #[input(identity)]
     pub n_trajectories: Option<usize>,
 
     /// Override [method.dense_mass] to false (use diagonal NUTS
     /// mass matrix). One-way: edit TOML to flip back.
     #[arg(long)]
+    #[input(identity)]
     pub diagonal_mass: bool,
 
     /// Override [method.use_nuts] to false (fall back to
     /// MH-within-Gibbs for the θ|X update). One-way: edit TOML to
     /// flip back.
     #[arg(long)]
+    #[input(identity)]
     pub no_nuts: bool,
 
     /// Override [method.ancestor_sampling] to false: run the CSMC
@@ -1111,6 +1167,7 @@ pub struct FitRunArgs {
     /// density pass cost?); changes the sampled draws, so the run stores
     /// under its own address. One-way: edit TOML to flip back.
     #[arg(long)]
+    #[input(identity)]
     pub no_ancestor_sampling: bool,
 
     // ── PMMH-specific algorithm overrides  ──────────
@@ -1119,11 +1176,13 @@ pub struct FitRunArgs {
     /// disables Haario-style adaptation). One-way: edit TOML to flip
     /// back.
     #[arg(long)]
+    #[input(identity)]
     pub no_adapt: bool,
 
     /// Override [method.adapt_start] (MCMC step at which
     /// proposal-SD adaptation begins).
     #[arg(long, value_name = "N")]
+    #[input(identity)]
     pub adapt_start: Option<usize>,
 
     // ── PFilter-specific algorithm overrides  ───────
@@ -1131,12 +1190,37 @@ pub struct FitRunArgs {
     /// Override [method.record_ancestry] to true (record
     /// ancestor indices for smoothing-path reconstruction).
     #[arg(long)]
+    #[input(identity)]
     pub record_ancestry: bool,
 
     /// Override [method.record_prequential] to true (record
     /// per-step predictive samples for `camdl compare`).
     #[arg(long)]
+    #[input(identity)]
     pub record_prequential: bool,
+}
+
+/// One `camdl fit run` as its inputs reach the store: the command's
+/// arguments and the global options, each with its class. Built by the
+/// dispatch in `main.rs`; the global options are not `FitRunArgs`' own.
+#[derive(Clone, store::Inputs)]
+pub struct FitRunInvocation {
+    #[input(group)]
+    pub args: FitRunArgs,
+    /// `--no-licm`: compile without loop-invariant code motion. It changes
+    /// the compiled model, whose bytes the problem's identity holds.
+    #[input(identity)]
+    pub no_licm: bool,
+    /// `--no-ir-cache`: compile rather than reuse a cached IR, which is the
+    /// IR a compile emits.
+    #[input(execution, exercised_by = crate::input_fixtures::fit_no_ir_cache)]
+    pub no_ir_cache: bool,
+    #[input(skip)]
+    pub verbosity: Option<log::LevelFilter>,
+    #[input(skip)]
+    pub progress: types::ProgressMode,
+    #[input(skip)]
+    pub no_progress: bool,
 }
 
 /// Output format for `camdl fit summary`. `text` is the default
@@ -1194,10 +1278,9 @@ Nothing is hidden behind a verbosity flag: every section carries its full
 table. `--parameters` and `--explain` only ADD to it.
 "))]
 pub struct FitSummaryArgs {
-    /// The fit, by handle: `@label`, a run-id or fit-level hash prefix, a run's
-    /// leaf directory or a fit results directory (e.g. `results/fits/he2010-…`),
-    /// or a `fit.toml` config (the run made from it). A directory in which one
-    /// method has several runs errors and lists them.
+    /// The fit run, by handle: `@label` (`fit run --label`), a run-id prefix
+    /// or the run's folder in the store. A `fit.toml` names no run: it is
+    /// refused, with the runs it made listed.
     pub fit: String,
 
     /// Output format. `text` (default) emits the terminal block;
@@ -1272,20 +1355,17 @@ pub struct FitSummaryArgs {
 #[derive(Args)]
 #[command(after_help = colored_help!("\
 Examples:
-  # Write the free-forward posterior predictive for a completed fit
-  camdl fit predict --fit fit.toml
+  # Write the free-forward posterior predictive for a stored fit run
+  camdl fit predict @post
 
   # Just one stream (logical name or an expanded leaf name)
-  camdl fit predict --fit fit.toml --stream onset
-
-  # Point at a run directory directly (instead of the config)
-  camdl fit predict results/fits/sle-8a3f12b4/
+  camdl fit predict @post --stream onset
 
   # Look at a disagreement rhat_mean flagged: one band per chain, beside
   # the pooled one, under a leading `chain` column
-  camdl fit predict --fit fit.toml --by-chain
+  camdl fit predict @post --by-chain
 
-Outputs, under the run directory:
+Outputs, stored inside the run at predict/<mode>-<id>/:
   predictive/<stream>.tsv   scenario | time | <dims...> | horizon | treatment
                             | role | fit_rhat_max | fit_ess_min | rhat_mean
                             | ess_mean | rhat_pred | ess_pred | n_draws | q05..q95
@@ -1341,7 +1421,7 @@ than 2 chains, fewer than 4 draws per chain, a draws.tsv with no chain column,
 or a constant row. The one_step horizon leaves both pairs empty (its cells
 pool over particles as well as draws).
 
-quantities/<name>.tsv carries the same reduction as `rhat` and `ess` — one
+quantities-model/<name>.tsv carries the same reduction as `rhat` and `ess` — one
 pair, because a quantity has one value per draw. Those are the numbers that
 get published, so read them first. A quantity over latent state or derived
 arithmetic is noise-free, so its `rhat` is the undiluted kind; a quantity
@@ -1374,22 +1454,21 @@ nothing). Without the flag no `chain` column is written at all.
 It adds no artifact address of its own — the `all` rows are byte-identical, so
 the file is a superset of the pooled one — and composes with
 --exclude-chains, which does: --by-chain
---exclude-chains 3,5 writes predictive-excl3,5/ with a `chain` column, and the
+--exclude-chains 3,5 writes predictive-excl3_5/ with a `chain` column, and the
 ids there are the fit's own numbering with 3 and 5 simply absent."))]
 pub struct FitPredictArgs {
     // Also on when the fit's own config set it.
     #[command(flatten)]
     pub forcing_extrapolation: ForcingExtrapolationArg,
 
-    /// The fit, by handle: `@label`, a run-id or fit-level hash prefix, a run's
-    /// leaf directory or a fit results directory, or a `fit.toml` config (the
-    /// run made from it). A handle that maps to several runs errors and lists
-    /// them — pass a leaf directory or a longer prefix to disambiguate.
+    /// The stored fit run, by handle: its `@label`, a run-id prefix or its
+    /// folder. A `fit.toml` names no run and is refused, with the runs it made
+    /// listed.
     #[arg(long = "fit", value_name = "FIT")]
     pub fit_flag: Option<String>,
 
     /// Positional form of the fit handle, so `camdl fit predict @jigawa-baseline`
-    /// or `camdl fit predict results/fits/<run>/` works like `fit summary`.
+    /// works like `fit summary`.
     #[arg(value_name = "FIT", conflicts_with = "fit_flag")]
     pub fit_pos: Option<String>,
 
@@ -1521,7 +1600,7 @@ pub struct FitPredictArgs {
     /// `rhat_*`/`ess_*` (gh#798), not a reason to leave them pooled.
     ///
     /// Composes with `--exclude-chains`, and adds no address of its own: the
-    /// keyed directory is the exclusion's (`predictive-excl3,5/`), because a
+    /// keyed directory is the exclusion's (`predictive-excl3_5/`), because a
     /// `--by-chain` file is a strict superset of the pooled one — the `all`
     /// rows are byte-identical — while a chain subset is a different posterior.
     /// Chain ids are the fit's own numbering, never renumbered by an exclusion,
@@ -1548,7 +1627,7 @@ pub struct FitPredictArgs {
     /// from 0, e.g. `--chains 3,5`): the complement of `--exclude-chains`,
     /// which it cannot be given with. The artifacts are addressed by the
     /// chains dropped, so on a six-chain fit `--chains 3,5` writes the same
-    /// `predictive-excl0,1,2,4/` as `--exclude-chains 0,1,2,4`. Always warns;
+    /// `predictive-excl0_1_2_4/` as `--exclude-chains 0,1,2,4`. Always warns;
     /// a chain id not in the fit, or naming every chain, is a hard error.
     #[arg(long, value_name = "IDS", conflicts_with = "exclude_chains")]
     pub chains: Option<String>,
@@ -1728,23 +1807,22 @@ pub enum FitTableFormat {
 #[derive(Args)]
 #[command(after_help = colored_help!("\
 Examples:
-  # Show every fit under results/fits/, default text view
-  camdl fit table results/fits
+  # Every fit run in the run store, default text view
+  camdl fit table
 
   # Just the converged ones
-  camdl fit table results/fits --converged
+  camdl fit table --converged
 
   # Project to one row in JSON for downstream tooling
-  camdl fit table results/fits --hash 04ab12cd --format json
+  camdl fit table --hash 04ab12cd --format json
 
-  # Filter by method
-  camdl fit table results/fits --with-method pgas
+  # Filter by method, in another store
+  camdl fit table runs/camdl-store --with-method pgas
 "))]
 pub struct FitTableArgs {
-    /// Path to the fits root (`results/fits/` or wherever the project
-    /// stores them). Walks every `<root>/<dir>/run.json` of kind
-    /// `Fit`.
-    pub root: PathBuf,
+    /// The run store's root: every fit run stored there is one row. Without
+    /// it, `$CAMDL_STORE`, else `./camdl-store`.
+    pub root: Option<PathBuf>,
 
     /// Show only converged rows (IF2: gate Pass; PGAS / PMMH: max R̂ < 1.05).
     #[arg(long)]
@@ -1798,7 +1876,7 @@ pub struct FitTableArgs {
     /// quantities. Unlike the default read-only table, `--quantity`
     /// may DERIVE the value on demand: for a fit that has not been
     /// predicted yet it runs `fit predict --mode free_forward`,
-    /// populating that fit's `quantities/` outputs. Optimizer fits
+    /// populating that run's `quantities-model/` outputs. Optimizer fits
     /// (IF2 / NLopt) have no posterior cloud, so their cell renders `—`.
     #[arg(long = "quantity", value_name = "NAME")]
     pub quantities: Vec<String>,
@@ -2779,8 +2857,8 @@ Examples:
   # Resolve a run by short hash prefix
   camdl show abc1234
 
-  # Path to a method directory also works
-  camdl show results/fits/sir-8a3f12b4/refine
+  # A label, or a result's folder in the store, also works
+  camdl show @scout
 
   # JSON output for scripting
   camdl show abc1234 --format json
@@ -2895,8 +2973,8 @@ Examples:
   # See what would change in the default ./results store, writing nothing
   camdl dev migrate results --dry-run
 
-  # Migrate one fit folder a reader refused
-  camdl dev migrate results/fits/sir-0123abcd
+  # Migrate one profile folder a reader refused
+  camdl dev migrate results/profiles/sir-0123abcd
 "))]
 pub struct MigrateArgs {
     /// A run folder, a fit folder, or a store root: every folder at or under it
@@ -2976,7 +3054,7 @@ Examples:
 pub struct CompareArgs {
     /// Models to compare — need ≥2 when --config is not used. Each is
     /// either a prequential.json (or a method dir holding one), read
-    /// as-is, OR a fit handle (@label / hash prefix / run dir / fit.toml),
+    /// as-is, OR a stored fit run (its @label, a run-id prefix or its folder),
     /// whose prequential is auto-derived from its sealed θ̂ + data: by a
     /// particle filter for a chain-binomial fit, and for an ODE fit by the
     /// fit's own ODE likelihood, the exact density of each observation at the
@@ -3438,7 +3516,7 @@ mod tests {
         ]).expect("hidden traps must accept --stage and --init");
         assert_eq!(a._removed_stage.as_deref(), Some("posterior"));
         assert_eq!(a._removed_init.as_deref(), Some("from_prior"));
-        assert!(a.starts.is_none(), "a trapped --init must not populate --starts");
+        assert!(a.run.starts.is_none(), "a trapped --init must not populate --starts");
 
         let a = try_parse_fit_run(&[
             "fit.toml", "--posterior", "fits/a", "--mle", "fits/b",
@@ -3480,7 +3558,7 @@ mod tests {
         for (spec, want) in cases {
             let a = try_parse_fit_run(&["fit.toml", "--starts", spec])
                 .unwrap_or_else(|e| panic!("--starts {spec} must parse: {e}"));
-            assert_eq!(a.starts.as_ref(), Some(want), "--starts {spec}");
+            assert_eq!(a.run.starts.as_ref(), Some(want), "--starts {spec}");
         }
         // A sourced rule without its source, and an unknown name, are refused
         // at parse time with the rule named.
@@ -3501,13 +3579,13 @@ mod tests {
         let a = try_parse_fit_run(&[
             "fit.toml", "--decibans-thresh", "60.0",
         ]).expect("should parse");
-        assert_eq!(a.decibans_thresh, Some(60.0));
+        assert_eq!(a.method.decibans_thresh, Some(60.0));
     }
 
     #[test]
     fn fit_run_gate_override_default_is_none() {
         let a = try_parse_fit_run(&["fit.toml"]).unwrap();
-        assert!(a.decibans_thresh.is_none());
+        assert!(a.method.decibans_thresh.is_none());
     }
 
     #[test]

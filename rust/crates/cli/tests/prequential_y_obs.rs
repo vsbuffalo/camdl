@@ -279,7 +279,7 @@ const SIR_DATA: &str =
 /// A single PFilter method — no estimation. `start` values plus `[fixed]` fully
 /// determine `FitRunConfig::base_params`, which is the θ the method filters at,
 /// so `SIR_THETA` below reproduces it verbatim for the manual `camdl pfilter`.
-const SIR_FIT_TOML: &str = r#"output_dir = "results"
+const SIR_FIT_TOML: &str = r#"store = "store"
 
 [model]
 camdl = "model.camdl"
@@ -308,7 +308,7 @@ particles = 300
 
 const SIR_THETA: &str = "beta = 0.4\ngamma = 0.15\nN0 = 10000\nI0 = 10\nrho = 0.5\nk = 10.0\n";
 
-/// The lone `prequential.json` under a `fit run` output tree.
+/// The lone `prequential.json` under a run store.
 fn find_prequential_json(dir: &Path) -> Option<PathBuf> {
     for e in std::fs::read_dir(dir).ok()?.flatten() {
         let p = e.path();
@@ -358,6 +358,7 @@ fn fit_run_prequential_equals_pfilter_prequential() {
         Command::new(&bin).env_remove("CLICOLOR_FORCE")
             .args(args)
             .current_dir(dir)
+            .env("CAMDL_STORE", dir.join("store"))
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .output()
             .expect("spawn camdl")
@@ -394,8 +395,8 @@ fn fit_run_prequential_equals_pfilter_prequential() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let fit_json = find_prequential_json(&dir.join("results"))
-        .expect("the pfilter method wrote a prequential.json under results/");
+    let fit_json = find_prequential_json(&dir.join("store"))
+        .expect("the pfilter method wrote a prequential.json in the run store");
     let from_fit = read_trace(&fit_json);
     let from_pfilter = read_trace(&dir.join("manual.json"));
 

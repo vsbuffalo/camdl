@@ -7,6 +7,8 @@
 //! `holdout_after = 24`: the training rows end at day 24, inside the week
 //! [21, 28).
 
+mod fit_store_support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -25,6 +27,7 @@ fn run(dir: &Path, args: &[&str]) -> std::process::Output {
         .args(args)
         .current_dir(dir)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("CAMDL_STORE", dir.join("results"))
         .output()
         .expect("spawn camdl")
 }
@@ -53,7 +56,7 @@ fn copy_fixture(dir: &Path) {
 /// Write `fit.toml` (`[data]` body `data`, bindings `bound`, then `tail`,
 /// e.g. a `[data.holdout]` block) and run the fit.
 fn fit_config(dir: &Path, method: &str, data: &str, bound: &str, tail: &str) {
-    std::fs::write(dir.join("fit.toml"), format!(r#"output_dir = "results"
+    std::fs::write(dir.join("fit.toml"), format!(r#"store = "results"
 
 [model]
 camdl = "model.camdl"
@@ -75,7 +78,7 @@ I0    = 5
 
 {method}
 "#)).unwrap();
-    let out = run(dir, &["fit", "run", "fit.toml", "--seed", "1"]);
+    let out = run(dir, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(out.status.success(), "fit run: {}", stderr(&out));
 }
 
@@ -88,16 +91,12 @@ iterations = 60
 burn_in = 20
 thin = 1"#;
 
-/// The directory the latest predict wrote: `<segment>/predict/<run id>-<key>/`.
+/// The one forecast stored in `dir`'s store: the prediction folder
+/// (`<run>/predict/forecast-<id12>/`) holding a `forecast.json`.
 fn forecast_dir(dir: &Path) -> PathBuf {
-    let mut found = Vec::new();
-    for seg in std::fs::read_dir(dir.join("results/fits")).unwrap().flatten() {
-        for d in std::fs::read_dir(seg.path().join("predict")).into_iter().flatten().flatten() {
-            if d.path().join("forecast.json").is_file() {
-                found.push(d.path());
-            }
-        }
-    }
+    let mut found: Vec<PathBuf> = fit_store_support::predictions(&dir.join("results")).into_iter()
+        .filter(|d| d.join("forecast.json").is_file())
+        .collect();
     assert_eq!(found.len(), 1, "one forecast directory: {found:?}");
     found.remove(0)
 }
@@ -120,22 +119,21 @@ fn a_forecast_starts_at_the_training_extent_and_counts_each_streams_own_periods(
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     fit(dir, PMMH, "");
-    let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "4 weeks", "--n-draws", "8"]);
+    let out = run(dir, &["fit", "predict", "--fit", "@fit", "--horizon", "4 weeks", "--n-draws", "8"]);
     assert!(out.status.success(), "fit predict: {}", stderr(&out));
     let fdir = forecast_dir(dir);
 
     let manifest: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(fdir.join("forecast.json")).unwrap()).unwrap();
     assert_eq!(manifest["schema"], "camdl.forecast/v4");
-    let leaf_run: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
-        walk(&dir.join("results")).into_iter().find(|p| p.file_name().is_some_and(|n| n == "run.json")).unwrap(),
-    ).unwrap()).unwrap();
-    // The engine stamp is spelled as `run.json` spells it: the build
-    // fingerprint the fit's own record names (one binary made both), and no
-    // `engine_switches` for a prediction made with none.
-    assert_eq!(manifest["engine_version"], leaf_run["engine_version"]);
+    let fit_run = fit_store_support::the_run(&dir.join("results"));
+    let identity = fit_store_support::json(&fit_run.join("identity.json"));
+    // The engine stamp is spelled as the run's `identity.json` spells it: the
+    // build fingerprint the fit's own record names (one binary made both),
+    // and no `engine_switches` for a prediction made with none.
+    assert_eq!(manifest["engine_version"], identity["ambient"]["build"]);
     assert!(manifest.get("engine_switches").is_none(), "{manifest}");
-    assert_eq!(manifest["run_id"], leaf_run["run_id"]);
+    assert_eq!(manifest["run_id"], identity["run_id"]);
     assert_eq!((&manifest["samples"]["per_draw"], &manifest["samples"]["of_particles"]),
         (&serde_json::json!(5), &serde_json::json!(100)));
     assert!(manifest["samples"]["description"].as_str().unwrap().contains("use all 100 particles"));
@@ -233,14 +231,14 @@ chains = 2
 particles = 100
 iterations = 3
 cooling = 0.7"#, "");
-    let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "2 weeks"]);
+    let out = run(dir, &["fit", "predict", "--fit", "@fit", "--horizon", "2 weeks"]);
     assert!(!out.status.success());
     assert!(stderr(&out).contains("single"), "IF2 is a single estimate: {}", stderr(&out));
 
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     fit(dir, PMMH, "");
-    let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "2 weeks",
+    let out = run(dir, &["fit", "predict", "--fit", "@fit", "--horizon", "2 weeks",
                          "--by-chain"]);
     assert!(!out.status.success());
     assert!(stderr(&out).contains("cannot be combined with --mode forecast"), "{}", stderr(&out));
@@ -256,7 +254,7 @@ fn held_out_rows_in_either_file_leave_no_trace_in_the_forecast_tables() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     fit(dir, PMMH, "");
-    let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "1 weeks", "--n-draws", "2"]);
+    let out = run(dir, &["fit", "predict", "--fit", "@fit", "--horizon", "1 weeks", "--n-draws", "2"]);
     assert!(out.status.success(), "{}", stderr(&out));
     let week = rows(&forecast_dir(dir).join("forecast/weekly_cases.tsv")).remove(0);
     assert_eq!(week["t_start"].as_str(), "21");
@@ -284,7 +282,7 @@ fn held_out_rows_in_either_file_leave_no_trace_in_the_forecast_tables() {
     fit_config(dir, PMMH, "",
         "daily_cases = \"daily_cases.tsv\"\nweekly_cases = \"weekly_cases.tsv\"",
         "\n[data.holdout]\nweekly_cases = \"weekly_hold.tsv\"\n");
-    let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "1 weeks", "--n-draws", "2"]);
+    let out = run(dir, &["fit", "predict", "--fit", "@fit", "--horizon", "1 weeks", "--n-draws", "2"]);
     assert!(out.status.success(), "{}", stderr(&out));
     let week = rows(&forecast_dir(dir).join("forecast/weekly_cases.tsv")).remove(0);
     assert_eq!(week["t_start"].as_str(), "21");
@@ -307,7 +305,7 @@ fn walk(root: &Path) -> Vec<PathBuf> {
 
 /// gh#747: a forecast continues the fit's filter on the binomial sampler the
 /// fit ran. One problem fitted twice, the second time with `--binomial btrs`:
-/// each leaf records its sampler, each forecast names the leaf's, and the two
+/// each run records its sampler, each forecast names its run's, and the two
 /// forecasts of the same seed differ.
 #[test]
 fn a_forecast_uses_the_binomial_sampler_its_fit_ran() {
@@ -316,30 +314,21 @@ fn a_forecast_uses_the_binomial_sampler_its_fit_ran() {
     fit(dir, PMMH, "");
     let out = run(dir, &["fit", "run", "fit.toml", "--seed", "1", "--binomial", "btrs"]);
     assert!(out.status.success(), "fit run --binomial btrs: {}", stderr(&out));
-    let leaves: Vec<PathBuf> = walk(&dir.join("results")).into_iter()
-        .filter(|p| p.file_name().is_some_and(|n| n == "run.json"))
-        .map(|p| p.parent().unwrap().to_path_buf())
-        .collect();
+    let leaves = fit_store_support::runs(&dir.join("results"));
     assert_eq!(leaves.len(), 2, "{leaves:?}");
     let sampler_of = |leaf: &Path| -> String {
-        let r: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(leaf.join("run.json")).unwrap()).unwrap();
-        r["inputs"]["binomial"].as_str().unwrap().to_string()
+        fit_store_support::run_inputs(leaf)["binomial"].as_str().unwrap().to_string()
     };
     let mut forecasts = Vec::new();
     for leaf in &leaves {
         let out = run(dir, &["fit", "predict", leaf.to_str().unwrap(), "--horizon", "1 weeks", "--n-draws", "2"]);
         assert!(out.status.success(), "{}", stderr(&out));
-        let fdir = walk(&leaf.parent().unwrap().parent().unwrap().join("predict")).into_iter()
-            .filter(|p| p.file_name().is_some_and(|n| n == "forecast.json"))
-            .find(|p| {
-                let m: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap();
-                let r: serde_json::Value =
-                    serde_json::from_str(&std::fs::read_to_string(leaf.join("run.json")).unwrap()).unwrap();
-                m["run_id"] == r["run_id"]
+        let fdir = fit_store_support::predictions(leaf).into_iter()
+            .find(|d| {
+                d.join("forecast.json").is_file()
+                    && fit_store_support::json(&d.join("forecast.json"))["run_id"] == fit_store_support::run_id(leaf).as_str()
             })
-            .unwrap_or_else(|| panic!("no forecast of {}", leaf.display()))
-            .parent().unwrap().to_path_buf();
+            .unwrap_or_else(|| panic!("no forecast of {}", leaf.display()));
         let m: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(fdir.join("forecast.json")).unwrap()).unwrap();
         assert_eq!(m["binomial"].as_str().unwrap(), sampler_of(leaf), "{}", leaf.display());
@@ -383,7 +372,7 @@ fn each_written_joint_sample_is_one_particles_trajectory() {
         "daily_cases = \"daily_cases.tsv\"\nweekly_cases = \"weekly_cases.tsv\"\n\
          S_count = \"S.tsv\"\nI_count = \"I.tsv\"\nR_count = \"R.tsv\"",
         "");
-    let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "4 weeks", "--n-draws", "4"]);
+    let out = run(dir, &["fit", "predict", "--fit", "@fit", "--horizon", "4 weeks", "--n-draws", "4"]);
     assert!(out.status.success(), "fit predict: {}", stderr(&out));
 
     let mut by_sample: std::collections::BTreeMap<u64, Sample> = std::collections::BTreeMap::new();
@@ -425,7 +414,7 @@ fn a_forecast_from_a_chain_selection_records_it() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
         fit(dir, PMMH, "");
-        let mut args = vec!["fit", "predict", "--fit", "fit.toml", "--horizon", "1 weeks", "--n-draws", "2"];
+        let mut args = vec!["fit", "predict", "--fit", "@fit", "--horizon", "1 weeks", "--n-draws", "2"];
         args.extend_from_slice(extra);
         let out = run(dir, &args);
         assert!(out.status.success(), "fit predict: {}", stderr(&out));
@@ -453,7 +442,7 @@ fn a_forecast_past_the_models_end_records_the_extension() {
     std::fs::write(dir.join("model.camdl"), model).unwrap();
     fit_config(dir, PMMH, "holdout_after = 24.0\n",
         "daily_cases = \"daily_cases.tsv\"\nweekly_cases = \"weekly_cases.tsv\"", "");
-    let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "2 weeks", "--n-draws", "2"]);
+    let out = run(dir, &["fit", "predict", "--fit", "@fit", "--horizon", "2 weeks", "--n-draws", "2"]);
     assert!(out.status.success(), "fit predict: {}", stderr(&out));
     let m: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(forecast_dir(dir).join("forecast.json")).unwrap()).unwrap();
@@ -501,7 +490,7 @@ fn scenario_arms_that_act_after_the_origin_are_forecast_and_earlier_ones_refused
     let dir = tmp.path();
     fit_with_scenarios(dir);
     let predict = |extra: &[&str]| {
-        let mut args = vec!["fit", "predict", "--fit", "fit.toml", "--horizon", "2 weeks", "--n-draws", "4"];
+        let mut args = vec!["fit", "predict", "--fit", "@fit", "--horizon", "2 weeks", "--n-draws", "4"];
         args.extend_from_slice(extra);
         run(dir, &args)
     };
@@ -548,7 +537,7 @@ fn scenario_arms_that_act_after_the_origin_are_forecast_and_earlier_ones_refused
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     fit_with_scenarios(dir);
-    let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "2 weeks", "--n-draws", "4",
+    let out = run(dir, &["fit", "predict", "--fit", "@fit", "--horizon", "2 weeks", "--n-draws", "4",
                          "--scenario", "late", "--sweep", "cull_frac=0.5,1.0"]);
     assert!(out.status.success(), "fit predict: {}", stderr(&out));
     let fdir = forecast_dir(dir);
@@ -576,7 +565,7 @@ fn a_scenario_forecast_writes_the_difference_of_means_and_its_monte_carlo_error(
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     fit_with_scenarios(dir);
-    let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "2 weeks", "--n-draws", "80",
+    let out = run(dir, &["fit", "predict", "--fit", "@fit", "--horizon", "2 weeks", "--n-draws", "80",
                          "--scenario", "late"]);
     assert!(out.status.success(), "fit predict: {}", stderr(&out));
     let fdir = forecast_dir(dir);
@@ -633,7 +622,7 @@ fn the_particle_count_defaults_to_the_fits_and_is_recorded_and_addressed() {
         serde_json::from_str(&std::fs::read_to_string(d.join("forecast.json")).unwrap()).unwrap()
     };
     let forecast = |extra: &[&str]| {
-        let mut args = vec!["fit", "predict", "--fit", "fit.toml", "--horizon", "1 weeks", "--n-draws", "3"];
+        let mut args = vec!["fit", "predict", "--fit", "@fit", "--horizon", "1 weeks", "--n-draws", "3"];
         args.extend_from_slice(extra);
         let out = run(dir, &args);
         assert!(out.status.success(), "fit predict: {}", stderr(&out));
@@ -661,12 +650,15 @@ fn the_particle_count_defaults_to_the_fits_and_is_recorded_and_addressed() {
     assert!(last.iter().any(|a| a["ess"].as_f64().unwrap() < 100.0 - 1e-6),
         "some draw's ESS before resampling is below N: {last:?}");
 
+    // The default count given as a flag is the same computation: the stored
+    // forecast is reused, its manifest as the first predict wrote it, so
+    // where the count came from is not part of the address.
+    let manifest_before = std::fs::read(default_dir.join("forecast.json")).unwrap();
     forecast(&["--particles", "100"]);
     assert_eq!(predict_dirs(), vec![default_dir.clone()], "the default count keeps the default address");
     assert_eq!(samples(), before, "and the same output");
-    let m = manifest(&default_dir);
-    assert_eq!((&m["particles"]["source"], &m["options"]["particles"]), (&serde_json::json!("flag"), &serde_json::json!(100)),
-        "the source is recorded, not addressed");
+    assert_eq!(std::fs::read(default_dir.join("forecast.json")).unwrap(), manifest_before,
+        "the source is not addressed: the stored forecast is the one reused");
     forecast(&["--particles", "40"]);
     let dirs = predict_dirs();
     assert_eq!(dirs.len(), 2, "another count, another directory: {dirs:?}");
@@ -676,14 +668,14 @@ fn the_particle_count_defaults_to_the_fits_and_is_recorded_and_addressed() {
     let weekly = rows(&other.join("forecast/weekly_cases.tsv"));
     assert_eq!(weekly[0]["n_samples"], (3 * 40).to_string());
 
-    let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--mode", "one_step", "--n-draws", "3",
+    let out = run(dir, &["fit", "predict", "--fit", "@fit", "--mode", "one_step", "--n-draws", "3",
                          "--particles", "40"]);
     assert!(out.status.success(), "fit predict: {}", stderr(&out));
     let p = walk(&dir.join("results")).into_iter().find(|p| p.file_name().is_some_and(|n| n == "predictive.json"))
         .expect("the one-step predictive.json");
     let pj: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap();
     assert_eq!(pj["particles"], serde_json::json!({"n": 40, "source": "flag"}));
-    let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward", "--particles", "40"]);
+    let out = run(dir, &["fit", "predict", "--fit", "@fit", "--mode", "free_forward", "--particles", "40"]);
     assert!(!out.status.success(), "{}", stderr(&out));
     assert!(stderr(&out).contains("this predict runs neither (--mode free_forward)"), "{}", stderr(&out));
 }
@@ -697,7 +689,7 @@ fn removing_held_out_rows_changes_nothing_the_forecast_writes() {
     let dir = tmp.path();
     fit(dir, PMMH, "");
     let snapshot = || {
-        let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "4 weeks", "--n-draws", "2"]);
+        let out = run(dir, &["fit", "predict", "--fit", "@fit", "--horizon", "4 weeks", "--n-draws", "2"]);
         assert!(out.status.success(), "fit predict: {}", stderr(&out));
         let d = forecast_dir(dir);
         ["forecast.json", "forecast-samples.tsv", "forecast/weekly_cases.tsv", "forecast/daily_cases.tsv"]
@@ -743,7 +735,7 @@ fn a_holdout_files_values_change_nothing_the_forecast_writes() {
         "daily_cases = \"daily_cases.tsv\"\nweekly_cases = \"weekly_cases.tsv\"",
         "\n[data.holdout]\nweekly_cases = \"weekly_hold.tsv\"\n");
     let snapshot = || {
-        let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "2 weeks", "--n-draws", "2"]);
+        let out = run(dir, &["fit", "predict", "--fit", "@fit", "--horizon", "2 weeks", "--n-draws", "2"]);
         assert!(out.status.success(), "fit predict: {}", stderr(&out));
         let d = forecast_dir(dir);
         ["forecast.json", "forecast-samples.tsv", "forecast/weekly_cases.tsv"]
@@ -771,7 +763,7 @@ fn a_chain_subset_forecast_names_each_draw_by_its_draws_tsv_row() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     fit(dir, PMMH, "");
-    let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "1 weeks", "--n-draws", "4",
+    let out = run(dir, &["fit", "predict", "--fit", "@fit", "--horizon", "1 weeks", "--n-draws", "4",
                          "--exclude-chains", "0"]);
     assert!(out.status.success(), "fit predict: {}", stderr(&out));
     let fdir = forecast_dir(dir);
@@ -804,7 +796,7 @@ fn a_chain_selection_keys_the_forecasts_directory_and_not_its_file_names() {
     let dir = tmp.path();
     fit(dir, PMMH, "");
     for extra in [&[][..], &["--exclude-chains", "1"][..]] {
-        let mut args = vec!["fit", "predict", "--fit", "fit.toml", "--horizon", "1 weeks", "--n-draws", "2"];
+        let mut args = vec!["fit", "predict", "--fit", "@fit", "--horizon", "1 weeks", "--n-draws", "2"];
         args.extend_from_slice(extra);
         let out = run(dir, &args);
         assert!(out.status.success(), "fit predict: {}", stderr(&out));
@@ -816,16 +808,20 @@ fn a_chain_selection_keys_the_forecasts_directory_and_not_its_file_names() {
     dirs.sort();
     assert_eq!(dirs.len(), 2, "two selections, two directories: {dirs:?}");
     let mut excluded: Vec<serde_json::Value> = Vec::new();
+    let mut keys: Vec<String> = Vec::new();
     for d in &dirs {
         let names: Vec<String> = std::fs::read_dir(d).unwrap().flatten()
             .map(|e| e.file_name().to_string_lossy().into_owned()).collect();
         assert!(names.iter().all(|n| !n.contains("-excl")), "no selection suffix in {d:?}: {names:?}");
         assert!(d.join("report.json").is_file(), "report.json in {d:?}: {names:?}");
         let m = read_json(&d.join("forecast.json"));
-        assert_eq!(m["address_key"].as_str().unwrap(),
-            d.file_name().unwrap().to_str().unwrap().rsplit('-').next().unwrap(), "{d:?}");
+        // The folder is named by the prediction's id, which the selection keys.
+        let id = fit_store_support::json(&d.join("identity.json"))["run_id"].as_str().unwrap().to_string();
+        assert!(id.starts_with(d.file_name().unwrap().to_str().unwrap().rsplit('-').next().unwrap()), "{d:?}");
+        keys.push(m["address_key"].as_str().unwrap().to_string());
         excluded.push(m["options"]["excluded_chains"].clone());
     }
+    assert_ne!(keys[0], keys[1], "the selection keys the forecast's address");
     excluded.sort_by_key(|v| v.as_array().unwrap().len());
     assert_eq!(excluded, vec![serde_json::json!([]), serde_json::json!([1])]);
 }
@@ -852,83 +848,48 @@ fn forecast_dirs(dir: &Path) -> Vec<PathBuf> {
     d
 }
 
-/// D81, ex post, end to end: the survey is forecast from its held-out rows'
-/// realised `tested`, labelled a conditional score using realised future
-/// design. Changing the held-out positives (the outcomes), with the training
-/// rows, the design values and the targets fixed, writes to the same address
-/// and leaves the forecast's tables and samples byte-identical.
+/// D81, ex post: a forecast from the held-out rows' realised design is
+/// refused. A stored fit holds the dates of its held-out rows, not their
+/// values, so there is no realised design to read; the refusal says so and
+/// names `--design`, and nothing is stored.
 #[test]
-fn a_realised_design_forecast_is_labelled_and_its_address_ignores_held_out_outcomes() {
+fn a_realised_design_forecast_is_refused() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     fit_survey(dir);
-    let predict = || {
-        let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "2 weeks", "--n-draws", "2",
-                             "--realised-design"]);
-        assert!(out.status.success(), "fit predict: {}", stderr(&out));
-    };
-    predict();
-    let d = forecast_dirs(dir);
-    assert_eq!(d.len(), 1);
-    let m = read_json(&d[0].join("forecast.json"));
-    assert_eq!(m["schema"], "camdl.forecast/v4");
-    assert_eq!(m["design"]["mode"], "ex_post");
-    assert!(m["design"]["label"].as_str().unwrap().contains("a conditional score using realised future design"),
-        "{}", m["design"]);
-    assert_eq!(m["design"]["streams"], serde_json::json!(["survey"]));
-    assert_eq!(m["options"]["forecast"]["design_mode"], "ex_post");
-    let survey: Vec<&serde_json::Value> = m["targets"].as_array().unwrap().iter()
-        .filter(|t| t["stream"] == "survey").collect();
-    let tested: Vec<(f64, f64)> = survey.iter()
-        .map(|t| (t["end"]["t"].as_f64().unwrap(), t["design"]["tested"].as_f64().unwrap())).collect();
-    assert_eq!(tested, vec![(28.0, 40.0), (35.0, 50.0)]);
-    let snapshot = |d: &Path| ["forecast.json", "forecast-samples.tsv", "forecast/survey.tsv", "forecast/weekly_cases.tsv"]
-        .map(|f| std::fs::read(d.join(f)).unwrap());
-    let before = snapshot(&d[0]);
-
-    // The outcomes of the held-out rows change; nothing else does.
-    let text = std::fs::read_to_string(dir.join("survey.tsv")).unwrap()
-        .replace("28\t6\t40", "28\t19\t40").replace("35\t2\t50", "35\t11\t50");
-    std::fs::write(dir.join("survey.tsv"), text).unwrap();
-    predict();
-    let after = forecast_dirs(dir);
-    assert_eq!(after, d, "the same address: no second directory");
-    let m2 = read_json(&after[0].join("forecast.json"));
-    assert_eq!(m2["address_key"], m["address_key"]);
-    let names = ["forecast.json", "forecast-samples.tsv", "forecast/survey.tsv", "forecast/weekly_cases.tsv"];
-    for (name, (a, b)) in names.iter().zip(snapshot(&after[0]).iter().zip(&before)) {
-        assert!(a == b, "{name} is byte-identical when only held-out outcomes change");
-    }
+    let out = run(dir, &["fit", "predict", "--fit", "@fit", "--horizon", "2 weeks", "--n-draws", "2",
+                         "--realised-design"]);
+    assert!(!out.status.success(), "fit predict --realised-design ran: {}", stderr(&out));
+    assert!(stderr(&out).contains("--realised-design") && stderr(&out).contains("held-out")
+        && stderr(&out).contains("--design SOURCE=FILE"), "{}", stderr(&out));
+    assert!(forecast_dirs(dir).is_empty(), "a refused forecast stores nothing");
 }
 
-/// D81: without a design the survey is refused, naming both ways to supply
-/// it, and the other streams are still forecast (exit status 1, D76). With
+/// D81: without a design the survey is refused, naming `--design`, and the
+/// other streams are still forecast (exit status 1, D76). With
 /// `--design survey=FILE` the forecast is prospective, reads the file's
 /// `tested` (the file has no outcome column), and is a different address
-/// from the ex-post forecast.
+/// from the forecast without one.
 #[test]
 fn a_design_reading_stream_needs_a_design_and_a_prospective_one_is_its_own_address() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     fit_survey(dir);
-    let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "2 weeks", "--n-draws", "2"]);
+    let out = run(dir, &["fit", "predict", "--fit", "@fit", "--horizon", "2 weeks", "--n-draws", "2"]);
     assert_eq!(out.status.code(), Some(1), "fit predict: {}", stderr(&out));
     let m = read_json(&forecast_dirs(dir)[0].join("forecast.json"));
     let failed = m["failed"].to_string();
     assert!(failed.contains("survey"), "{failed}");
-    assert!(stderr(&out).contains("--design") && stderr(&out).contains("--realised-design"), "{}", stderr(&out));
+    assert!(stderr(&out).contains("--design"), "{}", stderr(&out));
     assert!(m["design"].is_null());
     assert!(m["produced"].as_array().unwrap().contains(&serde_json::json!("weekly_cases")));
 
     std::fs::write(dir.join("design.tsv"), "time\ttested\n28\t60\n35\t70\n").unwrap();
-    let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "2 weeks", "--n-draws", "2",
+    let out = run(dir, &["fit", "predict", "--fit", "@fit", "--horizon", "2 weeks", "--n-draws", "2",
                          "--design", "survey=design.tsv"]);
     assert!(out.status.success(), "fit predict: {}", stderr(&out));
-    let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "2 weeks", "--n-draws", "2",
-                         "--realised-design"]);
-    assert!(out.status.success(), "fit predict: {}", stderr(&out));
     let manifests: Vec<serde_json::Value> = forecast_dirs(dir).iter().map(|d| read_json(&d.join("forecast.json"))).collect();
-    assert_eq!(manifests.len(), 3, "three addresses: no design, prospective, ex post");
+    assert_eq!(manifests.len(), 2, "two addresses: no design, prospective");
     let prospective = manifests.iter().find(|m| m["design"]["mode"] == "prospective").expect("a prospective forecast");
     assert!(prospective["design"]["label"].as_str().unwrap().starts_with("a prospective forecast"));
     // The design file is recorded by its content, not by the path typed.
@@ -940,13 +901,29 @@ fn a_design_reading_stream_needs_a_design_and_a_prospective_one_is_its_own_addre
         .filter(|t| t["stream"] == "survey").map(|t| t["design"]["tested"].as_f64().unwrap()).collect();
     assert_eq!(tested, vec![60.0, 70.0]);
 
+    // Another design file is another prediction, with its own folder: the
+    // file is part of the prediction's identity, by its bytes. This one gives
+    // every target the same design values as `design.tsv` and differs in a
+    // column no target reads, so only the file tells the two apart. The same
+    // file again is the stored one.
+    let before = forecast_dirs(dir).len();
+    std::fs::write(dir.join("design2.tsv"), "time\ttested\tnote\n28\t60\ta\n35\t70\tb\n").unwrap();
+    let out = run(dir, &["fit", "predict", "--fit", "@fit", "--horizon", "2 weeks", "--n-draws", "2",
+                         "--design", "survey=design2.tsv"]);
+    assert!(out.status.success(), "fit predict: {}", stderr(&out));
+    assert_eq!(forecast_dirs(dir).len(), before + 1, "a different design file is a different prediction");
+    let out = run(dir, &["fit", "predict", "--fit", "@fit", "--horizon", "2 weeks", "--n-draws", "2",
+                         "--design", "survey=design2.tsv"]);
+    assert!(out.status.success(), "fit predict: {}", stderr(&out));
+    assert_eq!(forecast_dirs(dir).len(), before + 1, "the same design file is the stored prediction");
+
     // A design row missing for a target is refused, not filled in.
     std::fs::write(dir.join("design.tsv"), "time\ttested\n28\t60\n").unwrap();
-    let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--horizon", "2 weeks", "--n-draws", "2",
+    let out = run(dir, &["fit", "predict", "--fit", "@fit", "--horizon", "2 weeks", "--n-draws", "2",
                          "--design", "survey=design.tsv"]);
     assert_eq!(out.status.code(), Some(1));
     assert!(stderr(&out).contains("has no value of the design column 'tested'"), "{}", stderr(&out));
     // Outside forecast mode the flags are refused.
-    let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward", "--realised-design"]);
+    let out = run(dir, &["fit", "predict", "--fit", "@fit", "--mode", "free_forward", "--realised-design"]);
     assert!(!out.status.success() && stderr(&out).contains("not a forecast"), "{}", stderr(&out));
 }

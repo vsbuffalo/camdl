@@ -56,7 +56,7 @@ fn write_data(dir: &Path) -> PathBuf {
 /// test. Everything else is a working config.
 fn write_fit_toml(dir: &Path, observations: &str) -> PathBuf {
     let body = format!(
-        r#"output_dir = "{out}"
+        r#"store = "{out}"
 
 [model]
 camdl = "{ir}"

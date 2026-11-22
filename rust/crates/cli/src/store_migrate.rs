@@ -10,29 +10,8 @@ use std::path::{Path, PathBuf};
 
 use runid::{ArtifactKind, STORE_LAYOUT};
 
+use crate::fit::config_v2::FitConfig;
 use crate::run_meta::{FitSidecar, OriginalError, ARCHIVED_CONFIG, RESOLVED_CONFIG};
-
-/// `Err` naming `folder` when its recorded layout `found` is not the current
-/// one: an older folder with the command that brings it up to date, a newer
-/// one with the camdl that can read it.
-pub fn check_layout(folder: &Path, found: u32) -> Result<(), String> {
-    match found.cmp(&STORE_LAYOUT) {
-        std::cmp::Ordering::Equal => Ok(()),
-        std::cmp::Ordering::Less => Err(format!(
-            "{} is at store layout {found}, older than this camdl's layout {STORE_LAYOUT}: it was \
-             written by an older camdl, and lacks what a reader here needs ({}). Run \
-             `camdl dev migrate {}`, which adds it from what the folder records.",
-            folder.display(),
-            STEPS.iter().filter(|s| s.from >= found).map(|s| s.adds).collect::<Vec<_>>().join("; "),
-            folder.display()
-        )),
-        std::cmp::Ordering::Greater => Err(format!(
-            "{} is at store layout {found}, written by a newer camdl than this one, which reads \
-             layout {STORE_LAYOUT}. Read it with that camdl or a newer one.",
-            folder.display()
-        )),
-    }
-}
 
 /// The oldest layout [`STEPS`] can migrate from.
 pub fn oldest_migratable() -> u32 {
@@ -74,8 +53,6 @@ pub struct Write {
 /// One step of the migration, from layout `from` to `from + 1`.
 pub struct Step {
     pub from: u32,
-    /// What the step adds, in a phrase, for messages.
-    pub adds: &'static str,
     /// The precondition: `Err` when the folder cannot take this step.
     pub check: fn(&Folder) -> Result<(), String>,
     /// The files the step writes, derived from what the folder records alone.
@@ -89,7 +66,6 @@ pub struct Step {
 /// last step ends at [`runid::STORE_LAYOUT`].
 pub static STEPS: &[Step] = &[Step {
     from: 0,
-    adds: "a fit folder's fit.resolved.toml, the configuration its fits ran under",
     check: step0::check,
     derive: step0::derive,
     verify: step0::verify,
@@ -148,7 +124,7 @@ mod step0 {
                 "fit.meta.json names a fit file (source_config) but {} cannot be read: {error}",
                 path.display()
             )),
-            Err(OriginalError::NoRecordedHash { .. }) => Err("fit.meta.json records no fit_toml_hash, so \
+            Err(OriginalError::NoRecordedHash) => Err("fit.meta.json records no fit_toml_hash, so \
                 fit.toml.original cannot be checked to be the file the fit read"
                 .to_string()),
             Err(OriginalError::Mismatch { found, recorded, bytes }) => {
@@ -295,7 +271,7 @@ mod step0 {
         let path = dir.join(RESOLVED_CONFIG);
         let config = crate::fit::config_v2::FitConfig::parse_anchored_at(text, &path, &dir.join(source_config))
             .map_err(|e| format!("the derived {RESOLVED_CONFIG} does not parse: {e}"))?;
-        crate::fit::handle::refuse_fixed_not_run(&config, side, dir)?;
+        refuse_fixed_not_run(&config, side, dir)?;
         let derived_fixed = config.problem.fixed.resolve()?;
         let recorded: std::collections::BTreeSet<&str> = side.estimated.iter().map(String::as_str).collect();
         let derived: std::collections::BTreeSet<&str> = config.problem.estimate.keys().map(String::as_str).collect();
@@ -563,6 +539,40 @@ pub fn cmd_migrate(a: &crate::args::MigrateArgs) {
     }
 }
 
+/// `Err` naming every parameter whose value in the stored config's `[fixed]`
+/// is not the value `fit.meta.json` records the fit running at (`fixed`),
+/// with both values: a config that would not compute the stored fit. A name
+/// the record holds that the config's `[fixed]` lacks passes unless the config
+/// estimates it. The config's `[fixed]` is resolved as the fit resolves it.
+fn refuse_fixed_not_run(
+    config: &FitConfig,
+    side: &crate::run_meta::FitSidecar,
+    segment: &Path,
+) -> Result<(), String> {
+    let problem = &config.problem;
+    let stored = problem.fixed.resolve()?;
+    let differs: Vec<String> = side
+        .fixed
+        .iter()
+        .filter_map(|(name, &ran)| match stored.get(name) {
+            Some(&v) if v != ran => Some(format!("{name} = {v} in the stored config, {ran} in the run")),
+            None if problem.estimate.contains_key(name) => {
+                Some(format!("{name} estimated in the stored config, fixed at {ran} in the run"))
+            }
+            _ => None,
+        })
+        .collect();
+    if differs.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "{}: the stored config's [fixed] is not what the fit ran at ({}), as recorded in its \
+         fit.meta.json, so it would not compute the stored fit.",
+        segment.display(),
+        differs.join("; ")
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -646,16 +656,4 @@ mod tests {
         assert_eq!(STEPS.last().map(|s| s.from + 1), Some(STORE_LAYOUT), "the last step ends at the current layout");
     }
 
-    #[test]
-    fn a_layout_other_than_the_current_one_is_refused_by_name() {
-        let dir = Path::new("results/fits/sir-0123abcd");
-        assert!(check_layout(dir, STORE_LAYOUT).is_ok());
-        let older = check_layout(dir, 0).unwrap_err();
-        assert!(older.contains("store layout 0") && older.contains("camdl dev migrate results/fits/sir-0123abcd"),
-            "{older}");
-        assert!(older.contains("fit.resolved.toml"), "names what the folder lacks: {older}");
-        let newer = check_layout(dir, STORE_LAYOUT + 1).unwrap_err();
-        assert!(newer.contains("written by a newer camdl"), "{newer}");
-        assert!(!newer.contains("migrate"), "{newer}");
-    }
 }

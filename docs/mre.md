@@ -79,12 +79,13 @@ mkdir /tmp/iso && tar xzf /tmp/bug.tar.gz -C /tmp/iso
 cd /tmp/iso/<bundle> && camdl fit run fit.toml --seed 1
 ```
 
-The fit's `run_id` (the `fit-<hash>` leaf under `results/fits/`) is a content
-hash of `(model, data, config)`. If the unpacked bundle yields the **same**
-`fit-<hash>` as your in-place run, the bundle is a faithful, complete
-reproduction. Run from the project directory both times — the id folds in the
-`fit.toml`-relative path string, so addressing the same fit via a different
-relative path changes the id.
+The fit's `run_id` (the `seed_<n>-<hash>` folder under
+`camdl-store/<build>/fit/<model>-<hash>/runs/`) is a hash of the problem (the
+compiled model, the training data by content, the resolved settings), the
+method, the seed and the camdl build. If the unpacked bundle, run with the same
+camdl build, yields the **same** run id as your in-place run, the bundle is a
+faithful, complete reproduction. A build from other source gives every run a new
+id.
 
 ## Requirements and current limits
 

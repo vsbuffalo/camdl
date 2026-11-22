@@ -29,7 +29,7 @@
 //! preflight, stacking, plotting.
 
 use crate::chain_selection::ChainSelection;
-use crate::fit::handle::ResolvedFit;
+use crate::fit_store::OpenedFit as ResolvedFit;
 use crate::fit::stream_bindings::StreamBindings;
 use crate::posterior_draws::PosteriorDrawsRef;
 use serde::Deserialize;
@@ -619,7 +619,7 @@ pub(crate) fn cmd_compare(a: &crate::args::CompareArgs, compile: crate::util::Co
         }).collect();
         (models, None, None, None, None)
     } else {
-        out.fail("error: compare requires either --config FILE or ≥2 fit leaf paths");
+        out.fail("error: compare requires either --config FILE or ≥2 stored fit runs (@label, run id or folder)");
     };
 
     if models.len() < 2 {
@@ -2282,7 +2282,7 @@ fn load_trace(
         });
     }
     // Not an explicit prequential → treat as a fit handle and derive.
-    match crate::fit::handle::resolve_fit_run(path) {
+    match crate::fit_store::opened_run(path) {
         Ok(resolved) => derive_prequential(out, &resolved, derive, selection)
             .map(|d| Loaded {
                 trace: d.trace, data: d.data, freshness: d.freshness, streams: d.streams,
@@ -2534,6 +2534,17 @@ fn fit_data_identity(
     bindings: &StreamBindings,
     scores_holdout_files: bool,
 ) -> DataIdentity {
+    // A stored fit's data is the training files it stores, read through the
+    // store and checked: their digests are what it trained on, and the copies
+    // compare reads are written from them. The sidecar's hashes are of the
+    // source files, which hold rows the problem held out.
+    if !resolved.fit.training.is_empty() {
+        let mut recorded = RecordedData::default();
+        for (source, input) in &resolved.fit.training {
+            recorded.training.insert(source.clone(), crate::hashing::sha256_hex(&input.bytes));
+        }
+        return DataIdentity::Digests(recorded);
+    }
     match crate::run_meta::read_fit_sidecar(&resolved.segment) {
         Ok(Some(s)) if !s.data_hashes.is_empty() =>
             DataIdentity::Digests(recorded_by_source(&s, bindings, scores_holdout_files)),
@@ -2606,6 +2617,27 @@ enum PassError {
 /// fit's data, as `--data LEAF=PATH` for every leaf it binds; (d) run `pfilter
 /// --save-prequential` to a temp stem; (e) read back the `{stem}.json` trace.
 /// All temp files live in the system temp dir and are best-effort cleaned up.
+/// Refuses to score a stored fit that held rows out. A stored fit keeps its
+/// held-out rows' dates and not their values (`held_out/`), so no held-out
+/// score can be computed from it; scores on held-out rows arrive with the
+/// scores of step 7 of the run-store work. Scoring such a fit's training rows
+/// in sample is `--in-sample`, which is never chosen for the caller.
+fn refuse_held_out_scoring(resolved: &ResolvedFit) -> Result<(), String> {
+    let held = resolved.fit.held_out_rows();
+    if held.is_empty() {
+        return Ok(());
+    }
+    let rows: Vec<String> = held.iter().map(|(s, n)| format!("{s}: {n}")).collect();
+    Err(format!(
+        "{} held rows out of its training data ({}), and a stored fit keeps those rows' dates, \
+         not their values, so compare cannot score them. Held-out scores arrive with the \
+         run store's scores (step 7). To compare the fits on their training rows, pass \
+         --in-sample.",
+        crate::fit::report::display_path(&resolved.segment),
+        rows.join(", ")
+    ))
+}
+
 fn derive_prequential(
     out: &crate::out::Out,
     resolved: &ResolvedFit,
@@ -2614,8 +2646,11 @@ fn derive_prequential(
 ) -> Result<Derived, String> {
     let segment = &resolved.segment;
     // The run θ̂ comes from: the leaf the handle named, else the folder's.
-    let run_dir = resolved.run_dir();
+    let run_dir = resolved.run_dir().unwrap_or(&resolved.segment);
     let config = &resolved.config.problem;
+    if !derive.force_in_sample {
+        refuse_held_out_scoring(resolved)?;
+    }
 
     // gh#729 / gh#312: the score must come from the forward process the fit
     // ran on. The θ̂ below comes from the fit's method leaf (both
@@ -2899,7 +2934,7 @@ fn derive_prequential(
         out.say(format_args!(
             "compare: {}: {} filter passes ({} draw(s) × {} replicate(s), \
              {} particles each; --draws 1 / --replicates 1 for the cheap modes)",
-            seg_slug, n_theta * derive.replicates, n_theta, derive.replicates,
+            crate::fit::report::display_path(segment), n_theta * derive.replicates, n_theta, derive.replicates,
             derive.particles));
     }
     // The filter passes; none for an ODE fit, scored above.
@@ -3005,9 +3040,8 @@ fn derive_prequential(
         // The stamp records the fit's training extent.
         trace.conditioning = Conditioning::HoldOutTail {
             train_end: h.train_end(),
-            theta_source: segment.file_name()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| segment.display().to_string()),
+            // The fit's folder in the store, never the copy read here.
+            theta_source: crate::fit::report::display_path(segment),
         };
     }
     let streams = RowStreams::Derived {

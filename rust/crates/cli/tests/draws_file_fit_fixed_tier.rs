@@ -53,7 +53,7 @@ init { S = 990  I = 10 }
 simulate { from = 0 'days  to = 6 'days }
 "#;
 
-const FIT: &str = r#"output_dir = "res"
+const FIT: &str = r#"store = "res"
 [model]
 camdl = "m.ir.json"
 [data.observations]

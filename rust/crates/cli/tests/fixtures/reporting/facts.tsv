@@ -37,7 +37,7 @@ stuck	stderr	line	estimate:	beta, gamma
 stuck	stderr	line	fixed:	rho, N0
 stuck	stderr	line	starts:	from_prior (one independent draw per chain)
 stuck	stderr	line	starts:	default: every estimated parameter declares a prior
-stuck	stderr	line	output:	results/fits/pmmh_stuck-
+stuck	stderr	line	output:	camdl-store
 stuck	stderr	line	── method:	pmmh
 stuck	stderr	line	Acceptance rates degrade for long observation series	(T > 500)
 stuck	stderr	line	Acceptance rates degrade for long observation series	This series has T = 14.
@@ -83,7 +83,7 @@ stuck	stderr	line	rank-normalized split R̂ for 'gamma'	2.157 (threshold 1.100)
 stuck	stderr	line	error(s)	4 error(s), 2 warning(s), 0 info
 stuck	stderr	line	pmmh complete in	(6000 PF evaluations
 stuck	stderr	line	loglik at the highest log-posterior draw	-44.3 (chain 0)
-stuck	stderr	line	stored pmmh	results/fits/pmmh_stuck-
+stuck	stderr	line	stored pmmh	/runs/pmmh-
 stuck	stderr	block	pfilter noise check	⚠ ceiling below target
 stuck	events	line	"event":"begin"	"method":"pmmh"
 stuck	events	line	"event":"begin"	"config":"pmmh_stuck.toml"
@@ -98,8 +98,8 @@ stuck	events	line	"type":"rhat_high"	"param":"beta"
 stuck	events	line	"type":"scale_at_floor"	"steps_at_floor":415
 stuck	events	line	"type":"scale_at_floor"	"steps_at_floor":331
 stuck	events	line	"event":"method_report"	"outcome":"completed"
-stuck.cached	stderr	line	cache hit	reusing fits/pmmh_stuck-
-stuck.summary	stdout	line	results/fits/pmmh_stuck-	/
+stuck.cached	stderr	line	cache hit	/runs/pmmh-
+stuck.summary	stdout	line	/runs/pmmh-	/seed_8-
 stuck.summary	stdout	line	Closed SIR with daily reported cases	Fitted to one stream
 stuck.summary	stdout	line	pmmh	4 chains · 200 draws · loglik -44.3 at the highest log-posterior draw
 stuck.summary	stdout	line	seeded from:	from_prior (one independent draw per chain)
@@ -140,7 +140,7 @@ converged	stderr	line	✓ converged	✓ converged
 converged	stderr	line	max R̂	1.001 (gamma), threshold 1.05
 converged	stderr	line	pmmh complete in	(8000 PF evaluations
 converged	stderr	line	loglik at the highest log-posterior draw	-44.3 (chain 3)
-converged	stderr	line	stored pmmh	results/fits/pmmh_converged-
+converged	stderr	line	stored pmmh	/runs/pmmh-
 converged.summary	stdout	line	pmmh	4 chains · 400 draws · loglik -44.3
 converged.summary	stdout	line	✓ converged	✓ converged
 converged.summary	stdout	line	max R̂	1.001 (gamma), threshold 1.05
@@ -166,7 +166,7 @@ resumed	stderr	line	beta         Rhat=	0.998 ✓ ESS bulk=498 tail=521 (83.1% of
 resumed	stderr	line	gamma        Rhat=	1.000 ✓ ESS bulk=510 tail=540 (85.1% of 600 draws)
 resumed	stderr	line	draws.tsv:	600 posterior samples (all 4 params)
 resumed	stderr	line	pmmh complete in	(2000 PF evaluations
-resumed	stderr	line	stored pmmh	results/fits/pmmh_resumed-
+resumed	stderr	line	stored pmmh	/runs/pmmh-
 pgas	stderr	line	fit:	pgas.toml (method=pgas)
 pgas	stderr	line	── method:	pgas
 pgas	stderr	line	beta         LogNormal	(mu=-1.0000, sigma=0.5000) → median=0.4
@@ -202,7 +202,7 @@ pgas	stderr	line	error(s)	2 error(s), 0 warning(s), 0 info
 pgas	stderr	line	cross-chain diagonal dominance:	77.1 nats
 pgas	stderr	line	cross-chain asymmetry:	10.3 nats
 pgas	stderr	line	best complete-data ll:	-114.9 (chain 1)
-pgas	stderr	line	stored pgas	results/fits/pgas-
+pgas	stderr	line	stored pgas	/runs/pgas-
 if2	stderr	line	fit:	if2.toml (method=if2)
 if2	stderr	line	running	4 chains × 200 particles × 20 iterations, cooling=0.9, dt=1
 if2	stderr	line	beta         log_interval	[0.05, 2]  start=0.4928 z=0.49  step(z)=0.050 ≈ rw_sd 0.0146 at the midpoint (auto)
@@ -221,7 +221,7 @@ if2	stderr	line	Auto step for 'beta'	0.0500 in its transformed coordinate
 if2	stderr	line	parameters have Â > 1.1	2/2 parameters have Â > 1.1 (max 1.17)
 if2	stderr	line	error(s)	0 error(s), 1 warning(s), 2 info
 if2	stderr	line	best ll=	-44.2 (chain 3)
-if2	stderr	line	stored if2	results/fits/if2-
+if2	stderr	line	stored if2	/runs/if2-
 nlopt	stderr	line	fit:	nlopt.toml (method=nl-sbplx)
 nlopt	stderr	line	── method:	nl-sbplx
 nlopt	stderr	line	ℹ nl-sbplx	(Subspace simplex; robust to boundary non-smoothness): deterministic MLE on the ODE-skeleton likelihood.
@@ -230,7 +230,7 @@ nlopt	stderr	line	chain-agreement:	rel range = 0.00% bound
 nlopt	stderr	line	chain-agreement:	✓
 nlopt	stderr	line	loglik-eval:	Δ = 0.0 dB / threshold 30 dB
 nlopt	stderr	line	dt-convergence at θ̂:	PASS
-nlopt	stderr	line	stored nl-sbplx	results/fits/nlopt-
+nlopt	stderr	line	stored nl-sbplx	/runs/nl-sbplx-
 fail	stderr	line	note: `starts = single`	puts all 2 chains at one point
 fail	stderr	line	starts:	single (every chain at one point)
 fail	stderr	line	pfilter noise check	(2 particles, 20 evaluation pairs)
@@ -252,8 +252,8 @@ compare	stdout	line	@if2	14   -44.20       —       —       —              
 compare	stdout	line	Scored steps:	14 (t0=0).  Baseline: @if2.
 compare	stdout	line	filter-noise MC SE of elpd:	@if2 ±0.03, @converged ±0.03
 compare	stdout	line	lag-1 autocorrelation	@converged +0.14
-compare	stderr	line	compare: if2_	5 filter passes (1 draw(s) × 5 replicate(s), 1000 particles each
-compare	stderr	line	compare: pmmh_converged_	5 filter passes (1 draw(s) × 5 replicate(s), 1000 particles each
+compare	stderr	line	/runs/if2-	5 filter passes (1 draw(s) × 5 replicate(s), 1000 particles each
+compare	stderr	line	/runs/pmmh-	5 filter passes (1 draw(s) × 5 replicate(s), 1000 particles each
 pfilter	stdout	line	-44.0696	-44.0696
 pfilter	stderr	line	pfilter: objective:	full likelihood (if2.toml does not set ic_free = true)
 pfilter	stderr	line	pfilter: bound streams:	cases(poisson)
@@ -269,7 +269,7 @@ stuck.excluded	stdout	line	ESS/iter =	0.00383  (min-param ESS 6 / 1500 raw sampl
 stuck.excluded	stdout	block	(every chain is listed, including the excluded 2	the chains are compared over all of them)
 stuck.excluded	stdout	line	      2  	-679.42         —       —   not assessed
 stuck.excluded	stderr	line	warning: --exclude-chains dropped chain(s) 2	(3 of 4 chains kept)
-pgas.summary	stdout	line	results/fits/pgas-	/
+pgas.summary	stdout	line	/runs/pgas-	/seed_1-
 pgas.summary	stdout	line	pgas	2 chains · 40 draws · 2 chains saved paths
 pgas.summary	stdout	line	seeded from:	from_prior (one independent draw per chain)
 pgas.summary	stdout	line	✗ NOT converged	the chains are in different places
@@ -326,9 +326,9 @@ nlopt.summary	stdout	line	loglik:	-43.14 (ode_marginal)     converged chains: 2/
 nlopt.summary	stdout	line	chain-agreement:	max rel range = 0.00% bound
 nlopt.summary	stdout	block	θ̂ (2 estimated params):	beta           = 0.4594461659761758
 nlopt.summary	stdout	block	θ̂ (2 estimated params):	gamma          = 0.05243062755769633
-fail.summary	stderr	line	pmmh failed: 	seed_1-
-fail.summary	stderr	line	error: error running pmmh	all 2 chains failed init-eval with PFDegenerate
-fail.summary	stderr	line	error: no completed method leaf under	so there is nothing to summarise
+fail.summary	stderr	line	names a fit run that did not complete and is not read:	/runs/pmmh-
+fail.summary	stderr	line	names a fit run that did not complete and is not read:	failed while pmmh: error running pmmh
+fail.summary	stderr	line	names a fit run that did not complete and is not read:	all 2 chains failed init-eval with PFDegenerate
 pfilter_fit	stderr	line	── method:	pfilter
 pfilter_fit	stderr	line	loglik =	-64.5 ± 0.5 (3 reps, 200 particles
 pfilter_fit.summary	stdout	line	pfilter	pfilter
@@ -368,13 +368,13 @@ profile.cached	stderr	line	profile:	6 of 6 starts already cached — resuming
 profile.cached	stderr	line	profile:	3 cells written (6 starts) under results/profiles
 profile.cached	stdout	line	loglik_spread_starts	starts_n_completed
 profile.refused	stderr	line	error:	--particles is required for an if2 profile
-compare.refused	stderr	line	error:	compare requires either --config FILE or ≥2 fit leaf paths
+compare.refused	stderr	line	error:	compare requires either --config FILE or ≥2 stored fit runs (@label, run id or folder)
 predict	stderr	line	fit predict: free_forward horizon	subsampling 5 of 400 posterior draws (raise with --n-draws)
 predict	stderr	line	fit predict: mode=free_forward	treatment=posterior, 1 scenario(s) [fitted], 1 stream(s), 400 draws from pmmh method 'pmmh'
 predict	stderr	line	wrote	/predictive/cases.tsv
 predict	stderr	line	wrote	/observed/cases.tsv
 predict	stderr	line	wrote	/report.json
-predict.refused	stderr	line	error:	no completed fit run labelled @nope under results/fits
+predict.refused	stderr	line	error:	no stored result matches `@nope`
 simulate	stderr	line	simulate · chain_binomial:	running …
 simulate	stderr	line	stored	/camdl-store/
 simulate	stderr	line	stored	/sim/sir-
@@ -402,15 +402,15 @@ lineage.cohort	stderr	line	lineage cohort:	2 window(s), 99 total events
 lineage.refused	stderr	line	error:	read line list nope.tsv
 list	stderr	line	fits	fits
 list	stderr	line	sims	sims
-list	stdout	line	problem	./results/fits/pmmh_converged-
-list	stdout	line	LABEL	VERDICT
-list	stdout	line	problem	pmmh_converged.toml
-show	stdout	block	kind	fit_method
+list	stdout	line	converged	/runs/pmmh-
+list	stdout	line	LABEL	BEST_LL
+list	stdout	line	converged	-44.26
+show	stdout	block	kind	fit_run
 show	stdout	block	method	if2
-show	stdout	line	method	seed 1
+show	stdout	block	seed	1
 cat	stdout	line	t_start	flow_infection
 cat	stdout	line	1076	619
-show.refused	stderr	line	error:	no run matches 'zzzzzzzz' in ./results
+show.refused	stderr	line	error:	no run matches 'zzzzzzzz' in the run store camdl-store
 fit.diff	stdout	line	diff:	if2.toml → pmmh_converged.toml
 fit.diff	stdout	block	Model:	(no model changes)
 fit.diff	stdout	line	algorithm:	"if2" → "pmmh"

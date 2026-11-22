@@ -2,7 +2,7 @@
 //!
 //! A row trains if the end of what it measures is at or before the
 //! `holdout_after` cutoff; under `[data.holdout]` every row of the training
-//! files trains. The fit records the decision in `fit.meta.json` as
+//! files trains. The fit run records the decision in its `fit.meta.json` as
 //! `training_partition`: per stream, how many leading rows trained and the
 //! row digest of exactly those rows, and the training extent, the latest end
 //! among them. `last_obs` in a model anchor is the latest end of an observed
@@ -29,6 +29,9 @@ fn camdl(dir: &Path, args: &[&str]) -> Output {
         .current_dir(dir)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDL_IR_CACHE_DIR", dir.join("irc"))
+        // The store a reader of a stored fit (`compare`) opens; a fit file's
+        // `store` key names its own.
+        .env("CAMDL_STORE", dir.join("results"))
         .output()
         .expect("spawn camdl")
 }
@@ -95,13 +98,14 @@ fn rows_tsv(column: &str, labels: impl IntoIterator<Item = u32>) -> String {
 }
 
 /// A fit config binding each stream to `<name>.tsv` under `data` (the
-/// `[data]` table body), fitted by a short IF2 run.
-fn fit_toml(streams: &[Stream], data: &str, rho: f64, output_dir: &str) -> String {
+/// `[data]` table body), fitted by a short IF2 run into the run store
+/// `store` (relative to the config).
+fn fit_toml(streams: &[Stream], data: &str, rho: f64, store: &str) -> String {
     let mut observations = String::from("[data.observations]\n");
     for s in streams {
         observations.push_str(&format!("{0} = \"{0}.tsv\"\n", s.name));
     }
-    format!(r#"output_dir = "{output_dir}"
+    format!(r#"store = "{store}"
 
 [model]
 camdl = "model.camdl"
@@ -142,12 +146,12 @@ fn find_fit_meta(root: &Path) -> PathBuf {
     panic!("no fit.meta.json under {}", root.display());
 }
 
-/// Fit `toml` in `dir` and return its `training_partition` record and the
-/// fit's stderr.
-fn fit_partition(dir: &Path, toml: &str, output_dir: &str) -> (serde_json::Value, String) {
+/// Fit `toml` in `dir` into the run store `dir/store` and return its
+/// `training_partition` record and the fit's stderr.
+fn fit_partition(dir: &Path, toml: &str, store: &str) -> (serde_json::Value, String) {
     let out = ok(camdl(dir, &["fit", "run", toml, "--seed", "1"]), "fit run");
     let meta: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(find_fit_meta(&dir.join(output_dir))).unwrap()).unwrap();
+        &std::fs::read_to_string(find_fit_meta(&dir.join(store))).unwrap()).unwrap();
     (meta["training_partition"].clone(), String::from_utf8_lossy(&out.stderr).into_owned())
 }
 
@@ -208,8 +212,8 @@ fn a_day_stream_trains_the_rows_ending_by_the_cutoff() {
 /// Fixture F2: a weekly `closing_at` stream labelled 7–70 and a daily
 /// `day(time)` stream labelled 0–69 under `holdout_after = 24`. Daily rows
 /// 0–23 and weekly rows 7, 14 and 21 train; the extent is 24. The weekly row
-/// labelled 28 (days 21–27) did not train, and a held-out `compare` scores
-/// it, although its period overlaps daily training days.
+/// labelled 28 (days 21–27) did not train, although its period overlaps daily
+/// training days, so it is among the rows `compare` counts as held out.
 #[test]
 fn f2_two_streams_at_different_rates() {
     let tmp = tempfile::tempdir().unwrap();
@@ -222,35 +226,29 @@ fn f2_two_streams_at_different_rates() {
     std::fs::write(dir.join("weekly.tsv"), rows_tsv("weekly", (7..=70).step_by(7))).unwrap();
     std::fs::write(dir.join("daily.tsv"), rows_tsv("daily", 0..=69)).unwrap();
     std::fs::write(dir.join("a.toml"),
-        fit_toml(&streams, "holdout_after = 24.0", 0.5, "results_a")).unwrap();
+        fit_toml(&streams, "holdout_after = 24.0", 0.5, "results")).unwrap();
     std::fs::write(dir.join("b.toml"),
-        fit_toml(&streams, "holdout_after = 24.0", 0.6, "results_b")).unwrap();
-    let (p, _) = fit_partition(dir, "a.toml", "results_a");
+        fit_toml(&streams, "holdout_after = 24.0", 0.6, "results")).unwrap();
+    // Both fits in one run store, so `compare` names each by its label.
+    ok(camdl(dir, &["fit", "run", "a.toml", "--seed", "1", "--label", "a"]), "fit run a");
+    let p = serde_json::from_str::<serde_json::Value>(
+        &std::fs::read_to_string(find_fit_meta(&dir.join("results"))).unwrap()).unwrap()["training_partition"].clone();
     assert_eq!(rows_of(&p),
         vec![("daily".to_string(), 24), ("weekly".to_string(), 3)], "{p}");
     assert_eq!(extent(&p), 24.0, "{p}");
-    ok(camdl(dir, &["fit", "run", "b.toml", "--seed", "1"]), "fit run b");
+    ok(camdl(dir, &["fit", "run", "b.toml", "--seed", "1", "--label", "b"]), "fit run b");
 
-    let out = ok(camdl(dir, &["compare", "a.toml", "b.toml", "--baseline", "b.toml",
+    // `compare` refuses to score a stored fit's held-out rows, and counts
+    // them per stream: the weekly rows labelled 28–70 (7 rows, the row
+    // labelled 28 among them) and the daily rows 24–69 (46 rows).
+    let out = camdl(dir, &["compare", "@a", "@b", "--baseline", "@b",
         "--format", "json", "--particles", "50", "--draws", "1", "--replicates", "1",
-        "--seed", "1", "--pointwise", "pw.tsv"]), "compare");
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("compare json");
-    let row = v["rows"].as_array().unwrap().iter()
-        .find(|r| r["name"] == "a.toml").expect("a.toml row").clone();
-    assert_eq!(row["conditioning"]["hold_out_tail"]["train_end"], 24.0,
-        "stamped at the training extent: {row}");
-    let pw = std::fs::read_to_string(dir.join("pw.streams.tsv")).unwrap();
-    let mut lines = pw.lines().filter(|l| !l.starts_with('#'));
-    let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
-    let col = |name: &str| header.iter().position(|h| *h == name).unwrap();
-    let (c_model, c_t, c_stream, c_score) = (col("model"), col("t"), col("stream"), col("log_score"));
-    let weekly: Vec<f64> = lines
-        .map(|l| l.split('\t').collect::<Vec<_>>())
-        .filter(|f| f[c_model] == "a.toml" && f[c_stream] == "weekly" && !f[c_score].is_empty())
-        .map(|f| f[c_t].parse().unwrap())
-        .collect();
-    assert_eq!(weekly.first(), Some(&28.0), "the weekly row labelled 28 is scored: {weekly:?}");
-    assert!(!weekly.contains(&21.0), "the weekly training row 21 is not scored: {weekly:?}");
+        "--seed", "1"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "held-out rows are not scored:\n{stderr}");
+    assert!(stderr.contains("held rows out of its training data (daily: 46, weekly: 7)")
+        && stderr.contains("step 7") && stderr.contains("--in-sample"),
+        "the refusal counts each stream's held-out rows:\n{stderr}");
 }
 
 /// `[data.holdout]` and `holdout_after` describing the same split record the

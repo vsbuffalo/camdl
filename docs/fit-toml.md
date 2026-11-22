@@ -11,8 +11,9 @@ For the workflow these configs drive, see `camdl docs workflow`.
 ## A complete example
 
 ```toml
-output_dir = "results"            # where runs are stored (optional; relative
-                                  # to this file — see "How paths resolve")
+store = "camdl-store"             # the run store's root (optional; relative
+                                  # to this file — see "How paths resolve").
+                                  # An `output_dir` key is refused.
 
 [model]
 camdl = "model.camdl"
@@ -48,8 +49,9 @@ those. `[method]` is the **inference**: how `fit run` fits that problem. A
 second way of fitting the same problem is a second file with the same problem
 half and a different `[method]` (`camdl fit new --from fit.toml
 fit-if2.toml`
-copies the file with provenance; edit the table). The store puts both under one
-`fits/<stem>-<h8>/` segment, because that level hashes the problem alone.
+copies the file with provenance; edit the table). The run store puts both runs
+in one problem folder, `camdl-store/<build>/fit/<model>-<hash>/`, because the
+problem's identity leaves the method out.
 
 ## Sections
 
@@ -78,11 +80,11 @@ every stream (tail-only).
 Every fit records which rows it trained on in `fit.meta.json` as
 `training_partition`: per stream the number of leading rows that trained and
 their row digest, and the training extent. The fit prints the rows trained, the
-extent and the first held-out row of each stream. `camdl compare` scores a
-holdout fit held-out by default (`--in-sample` opts out): every row that did not
-train and ends after the training extent. To score a held-out window by hand,
-score the **full** series with
-`camdl pfilter --save-prequential --score-from <extent>`, summing the
+extent and the first held-out row of each stream. A stored fit keeps the
+held-out rows' dates and not their values, so `camdl compare` refuses to score
+the held-out rows of a stored fit run, and `--in-sample` compares fits on their
+training rows. To score a held-out window by hand, score the **full** series
+with `camdl pfilter --save-prequential --score-from <extent>`, summing the
 `log_score` of the `{STEM}.tsv` rows (the joint score per step). Scoring the
 full series matters: scoring the held-out file on its own starts the filter from
 the prior with nothing assimilated from the training window, which is a
@@ -310,15 +312,15 @@ from = "1961-01-01"   # a date needs `origin = date(...)` in the model
 
 **Every path written in the `fit.toml` is relative to the `fit.toml` itself** —
 `[model].camdl`, `[data].file`, each `[data.observations]`, `[data.holdout]` and
-`[data.tables]` stream, `output_dir`, and a `starts` source that is a file
+`[data.tables]` stream, `store`, and a `starts` source that is a file
 (`from_params = "theta.toml"`). Absolute paths pass through unchanged (and draw
 a portability warning, since they pin the config to one machine's layout).
 
 The rule is the one Cargo and `pyproject.toml` use: a path written **in a file**
 anchors at that file, so the config is relocatable as a unit and runs the same
-from any working directory. What does _not_ come from the file — the `results/`
-default when no `output_dir` is declared, and `CAMDL_OUTPUT_DIR` — anchors at
-the working directory instead, since that is the frame you typed it in.
+from any working directory. What does _not_ come from the file — the
+`camdl-store/` default when no `store` is declared, and `CAMDL_STORE` — anchors
+at the working directory instead, since that is the frame you typed it in.
 
 Concretely, for this layout:
 
@@ -331,7 +333,7 @@ Concretely, for this layout:
 every path takes the same base, whichever directory you run from:
 
 ```toml
-output_dir = "../results" # <repo>/results
+store = "../camdl-store" # <repo>/camdl-store
 
 [model]
 camdl = "bvd_province.camdl" # <repo>/camdl/bvd_province.camdl
@@ -389,16 +391,17 @@ reporting a pass:
 | `{ from_mle = "<handle>" }`  | every chain at a stored optimizer fit's point estimate (`if2`, `nl-*`; a `pgas`/`pmmh`/`mh` source is refused, since a sampler writes no MLE: use `from_posterior`); a parameter absent from the source falls back to bounds-uniform |
 | `{ from_params = "<toml>" }` | every chain at the values in a flat params TOML                                                                                                                                                                                      |
 
-A **handle** is any fit reference: `@label`, a fit-id prefix, a method leaf's
-`run_id` prefix, the leaf directory, or a `fit.toml`. A source whose stored
-verdict is not converged is refused, since starting from an unconverged fit
-launders its multi-modality into this one; `fit run --allow-nonconverged-source`
-records the choice to start from it anyway. A `@label` names the run that
-currently holds the label, and `@label~1` the one that held it before; a label
-moves to the run most recently given it (`camdl-run-spec.md` §6.8). The run the
-handle resolved to is recorded by its `run_id` beside the handle as typed, and
-that run id is what the new run's identity keys on, so moving the label later
-does not change what this run started from.
+A **handle** names one stored fit run: `@label`, a prefix of the run's `run_id`,
+or the run's folder. A `fit.toml` never names a run and is refused, with the
+runs it made listed. A source whose stored verdict is not converged is refused,
+since starting from an unconverged fit launders its multi-modality into this
+one; `fit run --allow-nonconverged-source` records the choice to start from it
+anyway. A `@label` names the latest invocation of `fit run --label` with that
+label whose runs all completed, and `@label~1` the one before it
+(`camdl-run-spec.md` §6.8). The run the handle resolved to is recorded by its
+`run_id` beside the handle as typed, and that run id is what the new run's
+identity keys on, so moving the label later does not change what this run
+started from.
 
 **Starting from some of a source's chains.** When a source run is multimodal —
 some chains settled in a mode with far lower posterior density than the others —

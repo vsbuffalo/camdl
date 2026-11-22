@@ -85,6 +85,16 @@ pub(crate) fn quantities_dir_name(q: Option<&QuantitiesOverride>) -> String {
     }
 }
 
+/// [`quantities_dir_name`] inside a stored prediction: the model's own block
+/// is `quantities-model`, since the run store keeps every kind's name,
+/// `quantities` among them, out of a result's top-level directories.
+pub(crate) fn stored_quantities_dir_name(q: Option<&QuantitiesOverride>) -> String {
+    match q {
+        None => "quantities-model".to_string(),
+        Some(_) => quantities_dir_name(q),
+    }
+}
+
 /// The manifest filename that pairs with [`quantities_dir_name`].
 pub(crate) fn quantities_manifest_name(q: Option<&QuantitiesOverride>) -> String {
     format!("{}.json", quantities_dir_name(q))

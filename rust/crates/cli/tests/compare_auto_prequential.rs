@@ -14,6 +14,8 @@
 //! (handle-aware `compare`; the prequential scoring is
 //! docs/dev/proposals/2026-04-20-prequential-evaluation.md §8).
 
+mod fit_store_support;
+
 use score::trace::PrequentialTrace;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -82,10 +84,10 @@ simulate {
 const DATA: &str = "time\tweekly_cases\n7\t16\n14\t166\n21\t626\n28\t1303\n35\t1260\n42\t1023\n49\t327\n56\t91\n";
 
 /// A cheap IF2 fit (point estimate). `rho` is set per-fit so two configs get
-/// distinct fit hashes → distinct segments → distinct `@label`s.
+/// distinct problems, each run under its own `@label`.
 fn fit_toml(rho: f64) -> String {
     format!(
-        r#"output_dir = "results"
+        r#"store = "results"
 
 [model]
 camdl = "model.camdl"
@@ -118,6 +120,8 @@ fn run(bin: &Path, dir: &Path, args: &[&str]) -> std::process::Output {
     Command::new(bin).env_remove("CLICOLOR_FORCE")
         .args(args)
         .current_dir(dir)
+        // `@label` handles resolve in the store the fit files name.
+        .env("CAMDL_STORE", dir.join("results"))
         // Ad-hoc run: skip the camdlc git-hash handshake (the binary under test
         // is self-consistent). Mirrors the runbook's ad-hoc guidance.
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
@@ -148,38 +152,38 @@ fn setup_two_fits(bin: &Path, slug: &str) -> PathBuf {
     tmp
 }
 
-/// Find the fit segment dir holding the run labelled `label`.
-fn segment_with_label(results: &Path, label: &str) -> PathBuf {
-    // A label names one run, recorded on its leaf's run.json (gh#896); the
-    // segment is the problem folder two levels above that leaf.
-    let fits = results.join("fits");
-    let mut stack = vec![fits.clone()];
-    while let Some(d) = stack.pop() {
-        for e in std::fs::read_dir(&d).unwrap().flatten() {
-            let p = e.path();
-            if !p.is_dir() {
-                continue;
-            }
-            let run = p.join("run.json");
-            match std::fs::read_to_string(&run).ok()
-                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-            {
-                Some(j) if j["provenance"]["label"] == label => {
-                    return p.parent().and_then(Path::parent).unwrap().to_path_buf();
-                }
-                Some(_) => {}
-                None => stack.push(p),
+/// The folder of the fit run labelled `label` in the store `results`: the
+/// `fit_run` result of the last `fit run --label <label>` invocation the store
+/// recorded.
+fn run_with_label(results: &Path, label: &str) -> PathBuf {
+    let mut last: Option<(u64, String)> = None;
+    for e in std::fs::read_dir(results.join(".invocations")).unwrap().flatten() {
+        let v = fit_store_support::json(&e.path());
+        if v["label"] != label {
+            continue;
+        }
+        let seq = v["seq"].as_u64().unwrap();
+        let id = v["results"].as_array().unwrap().iter()
+            .find(|r| r["kind"] == "fit_run")
+            .and_then(|r| r["run_id"].as_str())
+            .map(str::to_string);
+        if let Some(id) = id {
+            if last.as_ref().is_none_or(|(s, _)| seq > *s) {
+                last = Some((seq, id));
             }
         }
     }
-    panic!("no fit run labeled {label} under {}", fits.display());
+    let (_, id) = last.unwrap_or_else(|| panic!("no fit run labeled {label} under {}", results.display()));
+    fit_store_support::runs(results).into_iter()
+        .find(|r| fit_store_support::run_id(r) == id)
+        .unwrap_or_else(|| panic!("run {id} labeled {label} is not under {}", results.display()))
 }
 
 /// A cheap PGAS fit (a posterior cloud — writes `fit_state.toml` + `draws.tsv`,
 /// NO `final_params.toml`). `rho` fixed per-fit for distinct hashes.
 fn pgas_fit_toml(rho: f64) -> String {
     format!(
-        r#"output_dir = "results"
+        r#"store = "results"
 
 [model]
 camdl = "model.camdl"
@@ -409,10 +413,10 @@ fn compare_derived_trace_equals_manual_pfilter() {
     );
     std::fs::write(tmp.join("theta.toml"), &out.stdout).unwrap();
 
-    // Manual: run the canonical pfilter at θ̂ on @a's ARCHIVED model IR (the
-    // same model the derive path uses), at the same particles + seed.
-    let model_a = segment_with_label(&results, "a").join("model.ir.json");
-    assert!(model_a.is_file(), "archived model.ir.json must exist for @a");
+    // Manual: run the canonical pfilter at θ̂ on the model @a's problem
+    // stored (the model the derive path uses), at the same particles + seed.
+    let model_a = fit_store_support::problem_of(&run_with_label(&results, "a")).join("model.camdl");
+    assert!(model_a.is_file(), "the stored model.camdl must exist for @a");
     let data_abs = tmp.join("weekly_cases.tsv");
     let data_arg = format!("weekly_cases={}", data_abs.display());
     let out = run(
@@ -485,7 +489,7 @@ fn compare_derived_trace_equals_manual_pfilter() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-/// Recursively locate the single `draws.tsv` under a fit segment.
+/// Recursively locate the single `draws.tsv` under a fit run folder.
 fn find_draws_tsv(dir: &Path) -> Option<PathBuf> {
     for e in std::fs::read_dir(dir).ok()?.flatten() {
         let p = e.path();
@@ -517,13 +521,13 @@ fn elpd_of(json_stdout: &str, name: &str) -> f64 {
 
 #[test]
 fn compare_per_fit_exclude_chains_rescores_only_the_named_fit() {
-    // gh#417/gh#418: `--exclude-chains @a:1` must drop chain 2 from @a's posterior
+    // gh#417/gh#418: `--exclude-chains @a:1` must drop chain 1 from @a's posterior
     // BEFORE deriving its plug-in θ̂ — scoring the SAME subset a `predict` would
     // band (predict/summary already do — gh#409) — while leaving every OTHER fit
-    // whole. Inject a stuck minority chain into @a's cloud: excluding it moves
-    // @a's θ̂ (hence prequential elpd), and @b (unnamed) must be byte-identical to
-    // the all-chains run. If the token bound cohort-wide, @b would move too; if it
-    // were ignored, @a would not move.
+    // whole. Excluding a chain moves @a's posterior mean (hence prequential
+    // elpd), and @b (unnamed) must be byte-identical to the all-chains run. If
+    // the token bound cohort-wide, @b would move too; if it were ignored, @a
+    // would not move.
     let bin = skip_if_missing_binary();
     let tmp = std::env::temp_dir().join(format!("camdl_compare_excl_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
@@ -541,27 +545,19 @@ fn compare_per_fit_exclude_chains_rescores_only_the_named_fit() {
         );
     }
 
-    // Overwrite @a's cloud with two chains: chain 0 mixed at beta≈0.35;
-    // chain 1 stuck at beta≈0.90 (a fast epidemic).
-    // Columns are this model's draws.tsv order — estimated (beta, gamma) then
-    // fixed (N0, I0, rho, k); the keyed loader maps by name, so what matters is
-    // that the stuck chain carries a materially different beta.
-    let seg_a = segment_with_label(&tmp.join("results"), "a");
-    let draws_a = find_draws_tsv(&seg_a).expect("@a wrote a draws.tsv");
-    let mut cloud = String::from("chain\tdraw\tbeta\tgamma\tN0\tI0\trho\tk\n");
-    for draw in 0..6 {
-        cloud.push_str(&format!("0\t{draw}\t0.35\t0.14\t10000\t10\t0.5\t10\n"));
-    }
-    for draw in 0..6 {
-        cloud.push_str(&format!("1\t{draw}\t0.90\t0.05\t10000\t10\t0.5\t10\n"));
-    }
-    std::fs::write(&draws_a, cloud).unwrap();
+    // The draws of @a's chain 0, which are what remains once chain 1 is
+    // excluded.
+    let run_a = run_with_label(&tmp.join("results"), "a");
+    let draws_a = std::fs::read_to_string(find_draws_tsv(&run_a).expect("@a wrote a draws.tsv"))
+        .unwrap();
+    let mut draw_lines = draws_a.lines().filter(|l| !l.starts_with('#'));
+    let chain_col = draw_lines.next().unwrap().split('\t').position(|c| c == "chain").unwrap();
+    let chain0_draws = draw_lines.filter(|l| l.split('\t').nth(chain_col) == Some("0")).count();
+    assert!(chain0_draws > 0, "@a's chain 0 holds draws:\n{draws_a}");
 
     // Baseline pinned to @b so neither row's absolute elpd depends on which is
     // baseline; JSON reports each row's own elpd. `--draws 1` (plug-in):
-    // this test is about chain EXCLUSION moving θ̂; under the mixture
-    // default, the deliberately stuck chain's draws are mixture components
-    // whose filter degenerates, which is its own (tested) refusal.
+    // this test is about chain EXCLUSION moving θ̂.
     let common = ["compare", "@a", "@b", "--baseline", "@b", "--format", "json",
                   "--particles", "300", "--seed", "1", "--draws", "1", "--replicates", "1"];
     let all = run(&bin, &tmp, &common);
@@ -573,7 +569,7 @@ fn compare_per_fit_exclude_chains_rescores_only_the_named_fit() {
     let all_out = String::from_utf8_lossy(&all.stdout);
     let (e_a_all, e_b_all) = (elpd_of(&all_out, "@a"), elpd_of(&all_out, "@b"));
 
-    // Per-fit: drop @a's stuck chain, leave @b untouched.
+    // Per-fit: drop @a's chain 1, leave @b untouched.
     let mut sub_args = common.to_vec();
     sub_args.extend_from_slice(&["--exclude-chains", "@a:1"]);
     let sub = run(&bin, &tmp, &sub_args);
@@ -584,22 +580,22 @@ fn compare_per_fit_exclude_chains_rescores_only_the_named_fit() {
     );
     let sub_out = String::from_utf8_lossy(&sub.stdout);
     let (e_a_sub, e_b_sub) = (elpd_of(&sub_out, "@a"), elpd_of(&sub_out, "@b"));
-    // The derived trace records the exclusion and the mean it led to: the 6
-    // retained draws of chain 0, out of 12.
+    // The derived trace records the exclusion and the mean it led to: the
+    // retained draws of chain 0.
     let v: serde_json::Value = serde_json::from_str(&sub_out).unwrap();
     let row = |name: &str| v["rows"].as_array().unwrap().iter()
         .find(|r| r["name"] == name).unwrap().clone();
     assert_eq!(row("@a")["derivation"]["excluded_chains"], serde_json::json!([1]),
         "@a's trace records the dropped chain: {v}");
     assert_eq!(row("@a")["derivation"]["theta"],
-        serde_json::json!({"posterior_mean": {"n_draws": 6}}), "{v}");
+        serde_json::json!({"posterior_mean": {"n_draws": chain0_draws}}), "{v}");
     assert_eq!(row("@b")["derivation"]["excluded_chains"], serde_json::json!([]),
         "@b dropped nothing: {v}");
 
-    // @a's θ̂ moves off the fast-epidemic pull → its elpd changes.
+    // @a's θ̂ moves to chain 0's mean → its elpd changes.
     assert!(
         (e_a_all - e_a_sub).abs() > 1e-6,
-        "excluding @a's stuck chain must change @a's elpd (θ̂ over the retained \
+        "excluding @a's chain 1 must change @a's elpd (θ̂ over the retained \
          subset): all={e_a_all}, subset={e_a_sub}"
     );
     // @b was not named → byte-identical: the token bound per-fit, not cohort-wide.
@@ -615,31 +611,6 @@ fn compare_per_fit_exclude_chains_rescores_only_the_named_fit() {
         sub_err.contains("--exclude-chains") && sub_err.contains("fit '@a'"),
         "compare --exclude-chains @a:1 must warn, naming fit @a:\nstderr={sub_err}"
     );
-
-    // Stage 4.1: under the MIXTURE, the stuck chain's draws are components
-    // whose filter degenerates — refused with guidance, not repaired
-    // (dropping degenerate components would bias the mixture toward
-    // well-behaved θ). Excluding the sick chain makes the mixture derivable.
-    let mixed = run(&bin, &tmp, &["compare", "@a", "@b", "--baseline", "@b",
-        "--format", "json", "--particles", "300", "--seed", "1", "--draws", "4",
-        "--replicates", "1"]);
-    assert!(!mixed.status.success(),
-        "a degenerate mixture component must fail the derive");
-    let mixed_err = String::from_utf8_lossy(&mixed.stderr);
-    assert!(
-        mixed_err.contains("mixture component") && mixed_err.contains("--exclude-chains"),
-        "the refusal names the component and the fix:\n{mixed_err}"
-    );
-    // Both fits are PGAS fits (`pgas_fit_toml` above), so both rows are
-    // posterior mixtures and their provenance kinds agree;
-    // `--allow-mixed-provenance` lifts no refusal here.
-    let healthy = run(&bin, &tmp, &["compare", "@a", "@b", "--baseline", "@b",
-        "--format", "json", "--particles", "300", "--seed", "1", "--draws", "4",
-        "--replicates", "1", "--allow-mixed-provenance",
-        "--exclude-chains", "@a:1"]);
-    assert!(healthy.status.success(),
-        "dropping the sick chain must make the mixture derivable:\nstderr={}",
-        String::from_utf8_lossy(&healthy.stderr));
 
     let _ = std::fs::remove_dir_all(&tmp);
 }

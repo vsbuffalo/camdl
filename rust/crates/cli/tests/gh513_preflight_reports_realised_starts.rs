@@ -155,7 +155,7 @@ dt = 1.0
 "#, ir = golden_ir().display(), data = data.display())).unwrap();
 
     let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .env("CAMDL_OUTPUT_DIR", dir.join("results"))
+        .env("CAMDL_STORE", dir.join("store"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDLC", &camdlc)
         .args(["fit", "run", &fit_toml.to_string_lossy(),
@@ -166,7 +166,7 @@ dt = 1.0
     assert!(out.status.success(), "fit run failed:\nstderr={stderr}");
 
     let shown = preflight_beta(&stderr);
-    let ran_from = first_chain_beta(&dir.join("results"));
+    let ran_from = first_chain_beta(&dir.join("store"));
 
     // The invariant: the table and the audit sidecar describe one run.
     assert!((shown - ran_from).abs() < 1e-4,

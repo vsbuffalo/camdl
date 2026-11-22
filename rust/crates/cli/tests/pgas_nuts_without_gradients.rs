@@ -69,7 +69,7 @@ simulate { from = 0 'days  to = 20 'days }
     std::fs::write(dir.join("cases.tsv"), tsv).unwrap();
     let fit = dir.join("fit.toml");
     std::fs::write(&fit, format!(r#"
-output_dir = "{out}"
+store = "{out}"
 
 [model]
 camdl = "{ir}"

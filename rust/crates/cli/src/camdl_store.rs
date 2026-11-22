@@ -78,7 +78,7 @@ pub(crate) fn camdl_top_level() -> TopLevel {
 /// Every kind camdl stores on the run store.
 pub(crate) fn camdl_kinds() -> Kinds {
     let kinds = Kinds::new().register::<CompiledModel>().register::<Quantities>().register::<DataTable>();
-    crate::sim_store::register(crate::pfilter_store::register(kinds))
+    crate::fit_store::register(crate::sim_store::register(crate::pfilter_store::register(kinds)))
 }
 
 // ── The store root and the request ───────────────────────────────────────────
@@ -265,7 +265,7 @@ const NOT_THE_MODEL_PART: [&str; 4] = ["name", "description", "quantities", "con
 /// The canonical JSON bytes of any value.
 fn canonical_bytes(v: &impl serde::Serialize) -> Vec<u8> {
     let value = serde_json::to_value(v).expect("an IR value encodes as JSON");
-    serde_json::to_vec(&crate::fit::cas::canonical(&value)).expect("a JSON value encodes")
+    serde_json::to_vec(&crate::canonical_json::canonical(&value)).expect("a JSON value encodes")
 }
 
 impl CompiledModelContent {
@@ -283,7 +283,7 @@ impl CompiledModelContent {
                 .collect();
             o.insert(INITIAL_CONDITIONS.into(), serde_json::Value::Array(ordered));
         }
-        let bytes = serde_json::to_vec(&crate::fit::cas::canonical(&v)).expect("a JSON value encodes");
+        let bytes = serde_json::to_vec(&crate::canonical_json::canonical(&v)).expect("a JSON value encodes");
         CompiledModelContent { model, bytes }
     }
 }
@@ -327,6 +327,12 @@ impl QuantitiesContent {
     pub fn quantities(&self) -> Result<Vec<ir::quantity::Quantity>, String> {
         let v: serde_json::Value = serde_json::from_slice(&self.bytes).map_err(|e| format!("the stored quantities: {e}"))?;
         serde_json::from_value(v["quantities"].clone()).map_err(|e| format!("the stored quantities: {e}"))
+    }
+
+    /// The contrasts, as the model declares them.
+    pub fn contrasts(&self) -> Result<Vec<ir::contrast::Contrast>, String> {
+        let v: serde_json::Value = serde_json::from_slice(&self.bytes).map_err(|e| format!("the stored contrasts: {e}"))?;
+        serde_json::from_value(v["contrasts"].clone()).map_err(|e| format!("the stored contrasts: {e}"))
     }
 }
 

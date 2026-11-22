@@ -142,52 +142,6 @@ pub enum WritePolicy {
     Force,
 }
 
-/// The answer to "does this artifact need computing?", asked BEFORE the work.
-///
-/// **Deviation from the proposal** (§S2 sketched one `WriteVerdict` returned by
-/// `begin_resolved_write`): reuse and write happen at two different moments —
-/// the reuse question must be answered before a cell is computed, while
-/// `begin_resolved_write` is called after, with results in hand. Folding both
-/// into one call would force every command to compute first and ask later,
-/// which is precisely the wasted work the cache exists to avoid. So the policy
-/// seam is two functions sharing one `WritePolicy`: [`check_reuse`] before,
-/// `begin_resolved_write` after.
-pub enum ReuseVerdict {
-    /// A valid stored artifact exists; skip the work. Carries the leaf dir —
-    /// a caller that also needs the stored record reads it from there (the
-    /// verdict deliberately does not carry one: the only caller that wants it
-    /// asks at a different point in the run than this decision is made).
-    CacheHit { dir: PathBuf },
-    /// Nothing usable is stored (or `Force` displaced it): do the work, then
-    /// write through `begin_resolved_write`, which derives the same leaf path
-    /// from the same identity — so the verdict carries none.
-    MustRun,
-}
-
-/// The one cache-hit decision. Ask this instead of hand-rolling a `lookup`,
-/// an `exists()` check, or a bespoke cache scan: a file's existence says
-/// nothing about the identity of the run that wrote it.
-///
-/// The leaf is found by its hashes, not its labels ([`runid::find_leaf`]):
-/// a leaf's `run_id` is its level hashes alone, while its directory is
-/// `{label}-{hash8}` per level, so a lookup built from the current labels
-/// missed every leaf whose model file, params file or scenario preset had
-/// since been renamed, and the derived arm label would have orphaned every
-/// stored ad-hoc leaf the same way. A store that renamed nothing answers
-/// exactly as before: the exact-label path is tried first.
-///
-/// Under [`WritePolicy::Force`] a matching `Completed` leaf, or one held by a
-/// process on another host, is quarantined first, so the caller always gets `MustRun` and the recompute lands on a
-/// clean leaf rather than colliding with the incumbent at commit time.
-pub fn check_reuse(
-    store: &FsCasStore,
-    root: &Path,
-    resolved: &ResolvedArtifact,
-    policy: WritePolicy,
-) -> Result<ReuseVerdict, CasError> {
-    check_reuse_with(store, root, resolved, policy, crate::version::ENGINE_REUSE)
-}
-
 /// The policy a reuse decision runs under for a build whose identity is
 /// `engine`: the one asked for, or [`WritePolicy::Force`] when the build's
 /// fingerprint is incomplete ([`crate::version::EngineReuse::Unreusable`]).
@@ -209,73 +163,6 @@ pub(crate) fn engine_write_policy(policy: WritePolicy, engine: crate::version::E
             });
             WritePolicy::Force
         }
-    }
-}
-
-/// [`check_reuse`] for a build whose identity is `engine`.
-pub(crate) fn check_reuse_with(
-    store: &FsCasStore,
-    root: &Path,
-    resolved: &ResolvedArtifact,
-    policy: WritePolicy,
-    engine: crate::version::EngineReuse,
-) -> Result<ReuseVerdict, CasError> {
-    let policy = engine_write_policy(policy, engine);
-    let found = runid::find_leaf(root, resolved.kind, &resolved.levels);
-    if policy == WritePolicy::Force {
-        // A completed leaf is found by its hashes; a leaf held from another
-        // host is not complete, so it is looked for where the claim will
-        // write (`begin_resolved_write`).
-        let dir = found.clone()
-            .unwrap_or_else(|| store_path(root, resolved.kind, &resolved.levels));
-        store.displace(&dir, &runid::LeafIdentity::new(resolved.run_id))?;
-        return Ok(ReuseVerdict::MustRun);
-    }
-    Ok(match found {
-        Some(dir) => ReuseVerdict::CacheHit { dir },
-        None => ReuseVerdict::MustRun,
-    })
-}
-
-/// Warn when a leaf found by its hashes ([`runid::find_leaf`]) was computed from
-/// a model file of another name than `model_path`.
-///
-/// A model's file name is a label, not identity, so a byte-identical model
-/// under another name has the same run identity and is served the leaf the
-/// other file stored — under that file's directory label, with that file in its
-/// `provenance.source_paths`. The answer is right; the warning says whose file
-/// it was computed from, so a renamed or copied model is not mistaken for a
-/// fresh run of the new name. Printed once per (stored, current) file-name pair
-/// per process, however many leaves the run reuses. Silent when the leaf
-/// records no source path or the same file name (a model moved between
-/// directories keeps its label).
-pub(crate) fn note_leaf_from_another_model_file(leaf: &Path, model_path: &str) {
-    use std::sync::{Mutex, OnceLock};
-    static WARNED: OnceLock<Mutex<std::collections::BTreeSet<(String, String)>>> = OnceLock::new();
-    let file_name = |p: &str| {
-        Path::new(p).file_name().map(|n| n.to_string_lossy().into_owned())
-    };
-    // A record that cannot be read says nothing about its model file; the
-    // reuse itself is decided by the store's lookup, not here.
-    let stored = runid::read_leaf(leaf)
-        .ok()
-        .flatten()
-        .and_then(|l| l.record.provenance.source_paths.into_iter().next());
-    let (Some(stored), Some(current)) = (stored.as_deref().and_then(file_name), file_name(model_path))
-    else {
-        return;
-    };
-    if stored == current {
-        return;
-    }
-    let mut warned = WARNED.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
-    if warned.insert((stored.clone(), current.clone())) {
-        crate::out::detached().say(format_args!(
-            "warning: reusing stored runs computed from `{stored}`: `{current}` is the same \
-             model under another file name (the file name is a label, not part of the run \
-             identity). The stored runs keep `{stored}`'s directory names; first: {}",
-            leaf.display()
-        ));
     }
 }
 
@@ -302,28 +189,6 @@ impl ResolvedClaim {
     /// `Completed` leaf whose payload file was never written.
     pub fn write(&self, name: &str, bytes: &[u8]) -> Result<(), CasError> {
         self.claim.write(name, bytes)
-    }
-
-    /// The writing command's forcing-extrapolation policy.
-    pub fn forcing(&self) -> &crate::forcing_extrapolation::ForcingPolicy {
-        &self.forcing
-    }
-
-    /// Attach the tabular outputs' column schema, keyed by leaf-relative path,
-    /// before `finalize`. Recorded in `run.json`, never hashed — identity was
-    /// fixed at claim time, so this cannot re-key the run.
-    pub fn set_output_schema(
-        &mut self,
-        schema: std::collections::BTreeMap<String, runid::record::TableSchema>,
-    ) {
-        self.record.output_schema = schema;
-    }
-
-    /// Stamp the run's label as given now (`provenance.label_set_at`), before
-    /// `finalize`: a fit run that completes under `--label L` becomes `@L`.
-    /// Recorded, not hashed.
-    pub fn set_label_set_at(&mut self, stamp: String) {
-        self.record.provenance.label_set_at = Some(stamp);
     }
 
     /// Commit Running → Completed, writing the post-run `display_inputs` into
@@ -404,6 +269,8 @@ pub fn begin_resolved_write(
     Ok(ResolvedClaim { claim, record, forcing: meta.forcing.clone() })
 }
 
+#[cfg(test)]
+mod legacy_fit;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

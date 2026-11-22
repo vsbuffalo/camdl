@@ -89,7 +89,7 @@ fn stderr(out: &Output) -> String {
 fn fit_toml(dir: &Path, name: &str, scen: &str) -> PathBuf {
     let p = dir.join(format!("{name}.toml"));
     std::fs::write(&p, format!(
-        "output_dir = \"res_{name}\"\n[model]\ncamdl = \"m.ir.json\"\n\
+        "store = \"res_{name}\"\n[model]\ncamdl = \"m.ir.json\"\n\
          [data.observations]\nprev = \"prev.tsv\"\n\
          [estimate]\nbeta = {{ bounds = [0.01, 2.0], start = 0.5 }}\n\
          [fixed]\nfrom_scenario = \"{scen}\"\n\

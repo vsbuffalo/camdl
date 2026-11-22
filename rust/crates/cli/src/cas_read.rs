@@ -199,17 +199,6 @@ pub fn resolve_sim_prefix(root: &Path, prefix: &str) -> Vec<Leaf> {
     resolve_prefix_indexed(root, ArtifactKind::Sim, prefix, walk_sim_leaves)
 }
 
-/// All `fits/` leaves of kind `FitMethod` (new-format fit-method runs, M3.2).
-pub fn walk_fit_leaves(root: &Path) -> Vec<Leaf> {
-    walk_kind(root, ArtifactKind::FitMethod, Bounds::default())
-}
-
-/// New-format fit methods whose `run_id` hex matches `prefix` (for `show`/`cat`
-/// prefix resolution alongside `resolve_sim_prefix`).
-pub fn resolve_fit_prefix(root: &Path, prefix: &str) -> Vec<Leaf> {
-    resolve_prefix_indexed(root, ArtifactKind::FitMethod, prefix, walk_fit_leaves)
-}
-
 /// All `profiles/` leaves of kind `ProfilePoint` (new-format profile-point
 /// mini-fits, M3.3). Each is one `(grid point × seed × start)` cell under the
 /// factored `profile/point/method/seed/start` tree.

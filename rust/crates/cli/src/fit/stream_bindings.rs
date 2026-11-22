@@ -16,7 +16,7 @@
 use std::collections::BTreeMap;
 
 use indexmap::IndexMap;
-use runid::inputs::DataDigest;
+
 use runid::ContentHash;
 
 use super::config_v2::DataSpec;
@@ -116,12 +116,7 @@ impl StreamBindings {
         };
         let training = read(&self.training)?;
         let holdout = read(&self.holdout)?;
-        let identity_training = if self.shorthand {
-            self.leaves.iter().map(|(_, source)| DataDigest(training[source].1)).collect()
-        } else {
-            training.values().map(|(_, h)| DataDigest(*h)).collect()
-        };
-        Ok(BoundDataDigests { training, holdout, identity_training, tables: BTreeMap::new() })
+        Ok(BoundDataDigests { training, holdout, tables: BTreeMap::new() })
     }
 
     /// The training files keyed as the run identities of `fit`, `profile`
@@ -156,20 +151,12 @@ pub(crate) struct BoundDataDigests {
     /// Source → (holdout file, its digest), sorted by source; empty without
     /// an explicit `[data.holdout]`.
     holdout: BTreeMap<String, (String, ContentHash)>,
-    /// `FitDigest.data`, in the layout [`StreamBindings::identity_keyed_training`]
-    /// gives it.
-    identity_training: Vec<DataDigest>,
     /// The files bound to the model's external inputs, by external name
     /// ([`BoundDataDigests::with_tables`]).
     tables: BTreeMap<String, ContentHash>,
 }
 
 impl BoundDataDigests {
-    /// `FitDigest.data`: one digest per [`StreamBindings::identity_keyed_training`]
-    /// key, in key order.
-    pub(crate) fn identity_training(&self) -> Vec<DataDigest> {
-        self.identity_training.clone()
-    }
 
     /// These digests with the files `bound` read for the model's external
     /// inputs, so the fit level keys on them as on its data.
@@ -178,20 +165,9 @@ impl BoundDataDigests {
         self
     }
 
-    /// `FitDigest.tables`, in external-name order.
-    pub(crate) fn identity_tables(&self) -> Vec<DataDigest> {
-        self.tables.values().map(|h| DataDigest(*h)).collect()
-    }
-
     /// External input name → full hex digest of its bound file.
     pub(crate) fn tables_hex(&self) -> BTreeMap<String, String> {
         self.tables.iter().map(|(n, h)| (n.clone(), h.to_hex())).collect()
-    }
-
-    /// `FitDigest.holdout_data`: one digest per holdout source, in source
-    /// order.
-    pub(crate) fn identity_holdout(&self) -> Vec<DataDigest> {
-        self.holdout.values().map(|(_, h)| DataDigest(*h)).collect()
     }
 
     /// Source → full hex digest of its training file.

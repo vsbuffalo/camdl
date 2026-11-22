@@ -1345,8 +1345,11 @@ fn run_profile(
             out.fail(format!("error: {e}"));
         }
     }
+    // A stored fit a sourced rule names is read in the run store, where `fit
+    // run` stores fits.
+    let fit_store = crate::camdl_store::open_existing(&crate::camdl_store::read_root());
     let resolved_starts = crate::fit::chain_starts::resolve_starts(
-        &init_method, allow_nonconverged_source)
+        &init_method, allow_nonconverged_source, fit_store.as_ref())
         .unwrap_or_else(|e| {
             out.fail(format!("error: profile --starts {}: {}", init_method, e));
         });
@@ -1584,7 +1587,7 @@ fn run_profile(
     // join it in the base (`profile_cas::resolve_profile_point`).
     let mut priors_blob = resolved_priors_kv.clone();
     priors_blob.sort_by(|a, b| a.0.cmp(&b.0));
-    let base_config_hash = crate::fit::cas::canonical_config_hash(&ProfileBaseLevel {
+    let base_config_hash = crate::profile_cas::canonical_config_hash(&ProfileBaseLevel {
         base_params: &base_params_hash,
         fixed: &fixed_for_cas,
         obs_family: &obs_family_key,
@@ -1620,7 +1623,7 @@ fn run_profile(
                   if matches!(profile_algo, ProfileAlgo::If2) { s.rw_sd } else { None }))
         .collect();
     rw_sd_blob.sort_by(|a, b| a.0.cmp(b.0));
-    let method_config_hash = crate::fit::cas::canonical_config_hash(&ProfileMethodLevel {
+    let method_config_hash = crate::profile_cas::canonical_config_hash(&ProfileMethodLevel {
         algorithm: &algorithm,
         if2: matches!(profile_algo, ProfileAlgo::If2).then(|| ProfileIf2Knobs {
             particles: n_particles, iterations: n_iterations,
@@ -1645,12 +1648,11 @@ fn run_profile(
     // the resolved `init` in the method level names which source, and the dep
     // digests what is in it, so rewriting a draws.tsv or params.toml in place,
     // or re-running the fit a `from_mle` names, re-keys the profile.
-    let profile_deps: Vec<runid::inputs::ArtifactRef> = resolved_starts
-        .source
-        .as_ref()
-        .map(|src| src.dep.clone())
-        .into_iter()
-        .collect();
+    let profile_deps: Vec<runid::inputs::ArtifactRef> = match &resolved_starts.source {
+        Some(src) => vec![crate::profile_cas::start_source_dep(&resolved_starts.rule, src)
+            .unwrap_or_else(|e| out.fail(format!("error: profile --starts {init_method}: {e}")))],
+        None => Vec::new(),
+    };
     let store = runid::FsCasStore::new(&root);
     let ir_version_str = ir::IR_VERSION.trim().to_string();
     let stem_label = stem.clone().unwrap_or_else(|| "profile".to_string());
@@ -2419,10 +2421,15 @@ fn starts_values_from_init_method(
             (StartsOrigin::Params { path: path.clone() }, values)
         }
         ChainStarts::Point(Point::FromMle { source }) => {
-            // The stored fit's point estimate, from the leaf the handle names.
-            let leaf = crate::fit::chain_starts::resolve_fit_leaf(&source.0)
-                .map_err(|e| format!("--starts from_mle={}: {}", source, e))?;
-            let state = crate::fit::state::FitState::load(&leaf.to_string_lossy())
+            // The stored fit's point estimate, from the run the handle names.
+            let store = crate::camdl_store::open_existing(&crate::camdl_store::read_root())
+                .ok_or_else(|| format!("--starts from_mle={source}: no run store at {}",
+                    crate::camdl_store::read_root().display()))?;
+            let run = crate::fit_store::resolve_run(&store, &source.0)
+                .map_err(|e| format!("--starts from_mle={source}: {e}"))?;
+            let files = crate::fit_store::RunFiles::of(&run)
+                .map_err(|e| format!("--starts from_mle={source}: {e}"))?;
+            let state = crate::fit::state::FitState::load(&files.path().to_string_lossy())
                 .map_err(|e| format!("--starts from_mle={}: {}", source, e))?;
             crate::fit::chain_starts::refuse_sampler_as_mle_source(&state.method, &source.0)?;
             (StartsOrigin::Mle { fit: source.0.clone() },
@@ -2736,7 +2743,7 @@ mod tests {
         let fixed: Vec<String> = vec!["N0".into(), "rho".into()];
         let priors: Vec<(String, String)> = vec![("beta".into(), "fit_toml".into())];
         let fit_toml: Option<String> = Some("abc123".into());
-        let base = crate::fit::cas::canonical_config_hash(&ProfileBaseLevel {
+        let base = crate::profile_cas::canonical_config_hash(&ProfileBaseLevel {
             base_params: "bp-hash",
             fixed: &fixed,
             obs_family: "weekly_cases",
@@ -2749,7 +2756,7 @@ mod tests {
         }, &[]).unwrap().into_inner().to_hex();
         let rw_sd: Vec<(&str, Option<f64>)> = vec![("beta", None)];
         let uniform = crate::fit::starts::ChainStarts::Spread(crate::fit::starts::Spread::Uniform);
-        let method = crate::fit::cas::canonical_config_hash(&ProfileMethodLevel {
+        let method = crate::profile_cas::canonical_config_hash(&ProfileMethodLevel {
             algorithm: "nlopt(sbplx)",
             if2: None,
             nlopt: Some(ProfileNloptKnobs { tolerance: 1e-4, max_evals: 1500, dt: 1.0, starts: 2 }),
@@ -2805,45 +2812,6 @@ mod tests {
         assert_eq!(origin, crate::params_resolver::StartsOrigin::Params { path: toml_path });
         assert_eq!(values, vec![("beta".to_string(), 0.5), ("gamma".to_string(), 0.1)],
             "every value in the file, sorted by name");
-    }
-
-    #[test]
-    fn starts_from_mle_reads_the_leaf_point_estimate() {
-        // `from_mle=<leaf dir>` reads the stored fit's `fit_state.toml`
-        // `start_values` — the same file `fit run`'s `from_mle` reads — and is
-        // attributed to the fit handle as given.
-        let tmp = tempfile::tempdir().unwrap();
-        let leaf = tmp.path().join("if2-abcdef12").join("seed_1-01234567");
-        std::fs::create_dir_all(&leaf).unwrap();
-        write_toml(&leaf, "fit_state.toml",
-            "method = \"if2\"\nseed = 1\ntimestamp = \"2026-01-01T00:00:00Z\"\n\
-             best_loglik = -311.13\ninitial_loglik = -400.0\nbest_chain = 1\nn_chains = 2\n\n\
-             [start_values]\nbeta = 0.5\n\n[rw_sd]\n");
-        let handle = leaf.to_string_lossy().into_owned();
-        let init = crate::fit::starts::ChainStarts::Point(crate::fit::starts::Point::FromMle {
-            source: crate::fit::starts::Handle(handle.clone()),
-        });
-        let (origin, values) = starts_values_from_init_method(&init).unwrap().unwrap();
-        assert_eq!(origin, crate::params_resolver::StartsOrigin::Mle { fit: handle });
-        assert_eq!(values, vec![("beta".to_string(), 0.5)]);
-    }
-
-    /// `profile --starts from_mle=<sampler leaf>` is refused, as `fit run`'s
-    /// is: a sampler's stored point is one visited state, not an MLE.
-    #[test]
-    fn starts_from_mle_refuses_a_sampler_leaf() {
-        let tmp = tempfile::tempdir().unwrap();
-        let leaf = tmp.path().join("pmmh-abcdef12").join("seed_1-01234567");
-        std::fs::create_dir_all(&leaf).unwrap();
-        write_toml(&leaf, "fit_state.toml",
-            "method = \"pmmh\"\nseed = 1\ntimestamp = \"2026-01-01T00:00:00Z\"\n\
-             best_loglik = -311.13\ninitial_loglik = -400.0\nbest_chain = 1\nn_chains = 2\n\n\
-             [start_values]\nbeta = 0.5\n");
-        let init = crate::fit::starts::ChainStarts::Point(crate::fit::starts::Point::FromMle {
-            source: crate::fit::starts::Handle(leaf.to_string_lossy().into_owned()),
-        });
-        let err = starts_values_from_init_method(&init).unwrap_err();
-        assert!(err.contains("from_posterior") && err.contains("pmmh"), "{err}");
     }
 
     #[test]

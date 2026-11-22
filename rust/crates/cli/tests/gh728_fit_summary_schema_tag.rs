@@ -1,23 +1,21 @@
 //! gh#728: `*_summary.json` says which contract its numbers were written
-//! under, and a reader that does not recognise the tag refuses the file.
+//! under.
 //!
 //! Two keys of this artifact changed *meaning* without changing name.
 //! `rhat` was the classic Gelman–Rubin statistic and is now
 //! `max(rank-normalized split-R̂, folded split-R̂)`; `ess` was a sum of
 //! per-chain Geyer estimates, suppressed to NaN above R̂ 1.1, and is now the
-//! cross-chain bulk-ESS, never suppressed. Both vintages sit in one store for
-//! as long as a project keeps its fits — for a paper, indefinitely — and
-//! nothing in an untagged file separates them: a summary with no nulls is
-//! either a new fit or an old fit whose parameters all converged. A viewer
-//! that labels a column "R̂" is therefore labelling two different estimators
-//! and cannot know which.
+//! cross-chain bulk-ESS, never suppressed. Nothing in an untagged file
+//! separates the two: a summary with no nulls is either kind. A viewer that
+//! labels a column "R̂" must be able to tell which estimator it holds.
 //!
-//! The pin is the whole contract, because half of it is worthless: the tag
-//! must be *written* (or there is nothing to key on), and it must be
-//! *required* (or a stale file is read under today's meaning anyway). The
-//! third assertion is that the refusal names the file and the tag, since a
-//! reader who hits it is holding a fit they may not be able to re-run
-//! cheaply and needs to know what it is.
+//! The run store reads a run only while each stored file matches the digest
+//! the run recorded, so a summary written under another contract never
+//! reaches a reader through the store. The pin is therefore that the tag is
+//! *written*, and that a stored summary whose bytes no longer match the run's
+//! record is refused, naming the file, rather than read under today's meaning.
+
+mod fit_store_support;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -53,7 +51,7 @@ simulate { from = 0 'days  to = 6 'days }
 
 const DATA: &str = "time\tcases\n1\t20\n2\t35\n3\t60\n4\t90\n5\t120\n6\t150\n";
 
-const FIT_TOML: &str = r#"output_dir = "results"
+const FIT_TOML: &str = r#"store = "results"
 [model]
 camdl = "sir.camdl"
 [data.observations]
@@ -76,24 +74,6 @@ thin      = 1
 starts    = "uniform_unconstrained"
 "#;
 
-/// The directory holding `pgas_summary.json` under `root`.
-fn leaf_with_summary(root: &Path) -> PathBuf {
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        if d.join("pgas_summary.json").is_file() {
-            return d;
-        }
-        if let Ok(entries) = std::fs::read_dir(&d) {
-            for e in entries.flatten() {
-                if e.path().is_dir() {
-                    stack.push(e.path());
-                }
-            }
-        }
-    }
-    panic!("no pgas_summary.json under {}", root.display());
-}
-
 #[test]
 fn a_fit_summary_declares_its_schema_and_a_reader_requires_it() {
     let bin = binary();
@@ -113,6 +93,7 @@ fn a_fit_summary_declares_its_schema_and_a_reader_requires_it() {
         Command::new(&bin).env_remove("CLICOLOR_FORCE")
             .args(args)
             .current_dir(&tmp)
+            .env("CAMDL_STORE", tmp.join("results"))
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .output()
             .expect("spawn camdl")
@@ -126,7 +107,7 @@ fn a_fit_summary_declares_its_schema_and_a_reader_requires_it() {
     );
 
     // ── Written: the tag leads the file, as in every other camdl manifest ──
-    let leaf = leaf_with_summary(&tmp.join("results"));
+    let leaf = fit_store_support::the_run(&tmp.join("results"));
     let path = leaf.join("pgas_summary.json");
     let text = std::fs::read_to_string(&path).unwrap();
     let summary: serde_json::Value = serde_json::from_str(&text).unwrap();
@@ -155,8 +136,7 @@ fn a_fit_summary_declares_its_schema_and_a_reader_requires_it() {
          changed:\n{text}"
     );
 
-    let segment = leaf.parent().unwrap().parent().unwrap();
-    let seg = segment.to_string_lossy().into_owned();
+    let seg = leaf.to_string_lossy().into_owned();
     let out = run(&["fit", "summary", &seg]);
     let tagged_stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     assert!(
@@ -170,8 +150,8 @@ fn a_fit_summary_declares_its_schema_and_a_reader_requires_it() {
          asserted below is the refusal and not an empty fit:\n{tagged_stdout}"
     );
 
-    // ── Required: strip the tag, and the reader refuses rather than reading
-    //    the numbers under today's meaning ──
+    // ── A stored file changed after the run: strip the tag, and the reader
+    //    refuses rather than reading the numbers under today's meaning ──
     let mut stripped = summary.clone();
     stripped.as_object_mut().unwrap().remove("schema");
     std::fs::write(&path, serde_json::to_string_pretty(&stripped).unwrap()).unwrap();
@@ -185,17 +165,9 @@ fn a_fit_summary_declares_its_schema_and_a_reader_requires_it() {
          were written under today's definitions:\nstdout={stdout}\nstderr={stderr}"
     );
     assert!(
-        stderr.contains("pgas_summary.json") && stderr.contains("schema"),
-        "and the reason must name the file and what it is missing, because a \
-         reader who hits this is holding a fit they may not be able to re-run \
-         cheaply:\n{stderr}"
-    );
-    // The refusal explains what the untagged numbers *are*, not only that the
-    // tag is absent — that is the difference between a message a reader can
-    // act on and one that sends them to the source.
-    assert!(
-        stderr.contains("Gelman"),
-        "the refusal says which estimators the old file holds:\n{stderr}"
+        stderr.contains("pgas_summary.json"),
+        "and the reason must name the file, because a reader who hits this is \
+         holding a fit they may not be able to re-run cheaply:\n{stderr}"
     );
 
     let _ = std::fs::remove_dir_all(&tmp);

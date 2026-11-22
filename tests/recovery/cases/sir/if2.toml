@@ -2,7 +2,7 @@
 # (beta, gamma); hold the observation/population params (N0, I0, rho, k) fixed at
 # truth. 8 chains (a unimodal SIR needs few, but headroom guards against a
 # stray start), random LHS init. Recovery target: beta=0.4, gamma=0.15.
-output_dir = "results"
+store = "results"
 
 [model]
 camdl = "model.camdl"

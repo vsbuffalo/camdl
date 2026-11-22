@@ -23,6 +23,8 @@
 //!
 //! Skipped when the release binary or camdlc isn't present.
 
+mod fit_store_support;
+
 use sim::inference::convergence::rank_convergence;
 use score::convergence::ConvergenceError;
 use std::collections::BTreeMap;
@@ -118,7 +120,7 @@ simulate {{ from = 0 'days  to = {T_END} 'days }}
 fn write_fit_toml(dir: &Path, ir: &Path, data: &Path) -> (PathBuf, PathBuf) {
     let out = dir.join("results");
     let toml = format!(r#"
-output_dir = "{out}"
+store = "{out}"
 [model]
 camdl = "{ir}"
 [data.observations]
@@ -148,23 +150,7 @@ starts = "uniform_unconstrained"
 }
 
 fn method_leaf(out: &Path) -> PathBuf {
-    let mut stack = vec![out.join("fits")];
-    while let Some(d) = stack.pop() {
-        let rj = d.join("run.json");
-        if rj.is_file() {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(
-                &std::fs::read_to_string(&rj).unwrap_or_default(),
-            ) {
-                if v.get("kind").and_then(|k| k.as_str()) == Some("fit_method") {
-                    return d;
-                }
-            }
-        }
-        if let Ok(es) = std::fs::read_dir(&d) {
-            for e in es.flatten() { if e.path().is_dir() { stack.push(e.path()); } }
-        }
-    }
-    panic!("no fit_method leaf under {}", out.join("fits").display());
+    fit_store_support::the_run(out)
 }
 
 /// A TSV as header + rows, skipping `#` provenance lines.
@@ -407,6 +393,7 @@ fn pgas_method_publishes_latent_path_convergence_that_matches_its_own_paths() {
     // file alone does not make, so the file does not name it (gh#896).
     let s = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .arg("fit").arg("summary").arg(&method)
+        .env("CAMDL_STORE", &out)
         .output().expect("spawn camdl");
     assert!(s.status.success(),
         "fit summary failed: {}", String::from_utf8_lossy(&s.stderr));

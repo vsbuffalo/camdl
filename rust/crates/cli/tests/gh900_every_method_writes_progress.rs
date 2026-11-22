@@ -15,6 +15,8 @@
 //! method ends `done`, and a failed PGAS run ends `failed` carrying the reason
 //! the command printed.
 
+mod fit_store_support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -52,22 +54,20 @@ fn compile(dir: &Path, stem: &str, src: &str) -> PathBuf {
     ir
 }
 
-/// The seed leaf: the directory holding `progress.json`.
+/// The one stored fit run under the store at `root`, whose folder holds
+/// `progress.json`.
 fn seed_leaf(root: &Path) -> PathBuf {
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        if d.join("progress.json").is_file() {
-            return d;
-        }
-        if let Ok(entries) = std::fs::read_dir(&d) {
-            for e in entries.flatten() {
-                if e.path().is_dir() {
-                    stack.push(e.path());
-                }
-            }
-        }
-    }
-    panic!("no progress.json anywhere under {}", root.display());
+    let run = fit_store_support::the_run(root);
+    assert!(run.join("progress.json").is_file(), "no progress.json in {}", run.display());
+    run
+}
+
+/// The method's last progress snapshot: `progress.json` holds it under
+/// `snapshot`, beside the time and format the run store stamps on it.
+fn snapshot(run: &Path) -> serde_json::Value {
+    let stored = read_json(&run.join("progress.json"));
+    assert!(stored["snapshot"].is_object(), "progress.json holds a snapshot:\n{stored:#}");
+    stored["snapshot"].clone()
 }
 
 fn read_json(p: &Path) -> serde_json::Value {
@@ -223,7 +223,7 @@ fn every_method_leaves_a_terminal_progress_record() {
             dir,
             method,
             format!(
-                r#"output_dir = "{out}"
+                r#"store = "{out}"
 [model]
 camdl = "{ir}"
 [data.observations]
@@ -246,13 +246,12 @@ N0 = 1000
         assert!(run.ok, "{method}: the fit must complete\nstderr:\n{}", run.stderr);
 
         let leaf = seed_leaf(&run.out);
-        let progress = read_json(&leaf.join("progress.json"));
+        let progress = snapshot(&leaf);
         assert_eq!(
             progress["state"], "done",
-            "{method}: a completed method's last self-report must be `done`. Before \
-             gh#900 only PGAS wrote this file at all, and a reader deciding liveness \
-             from its freshness saw every other method as a run that had not started \
-             yet.\n{progress:#}"
+            "{method}: a completed method's last self-report must be `done`; a \
+             reader deciding liveness from its freshness would otherwise see the \
+             method as a run that had not started yet.\n{progress:#}"
         );
         // The envelope every reader already has.
         assert!(progress["updated_at"].is_u64(), "{method}: {progress:#}");
@@ -305,7 +304,7 @@ fn a_pgas_method_that_fails_records_why_it_stopped() {
         dir,
         "refused",
         format!(
-            r#"output_dir = "{out}"
+            r#"store = "{out}"
 [model]
 camdl = "{ir}"
 [data.observations]
@@ -340,7 +339,7 @@ starts    = "single"
     );
 
     let leaf = seed_leaf(&run.out);
-    let progress = read_json(&leaf.join("progress.json"));
+    let progress = snapshot(&leaf);
     let failed = progress["state"]["failed"].as_object().unwrap_or_else(|| {
         panic!(
             "a method that stopped because camdl refused it must say `failed`. A \

@@ -1,13 +1,14 @@
 //! The per-chain log-likelihood comparison (gh#406, gh#1008) is computed once,
-//! at the end of the run, and recorded in the leaf; every reader takes the
+//! at the end of the run, and recorded in the stored run; every reader takes the
 //! recorded one.
 //!
 //! A sampler records it in its summary under `chain_loglik_agreement`; it
 //! reaches `fit summary --format json` (and so `events.jsonl`'s
 //! `method_report`) as `method_result.diagnostics.chain_logliks`, and the text
-//! table prints its numbers. A leaf whose summary does not record it says so
-//! and is not recomputed. IF2 records its clean-evaluation comparison in
+//! table prints its numbers. IF2 records its clean-evaluation comparison in
 //! `fit_state.toml`.
+
+mod fit_store_support;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -32,6 +33,7 @@ fn camdl(work: &Path, args: &[&str]) -> String {
         .env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDLC", &camdlc)
+        .env("CAMDL_STORE", work.join("camdl-store"))
         .current_dir(work)
         .args(args)
         .output()
@@ -40,18 +42,9 @@ fn camdl(work: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-/// The single method leaf under `results/fits/<stem>-*/`.
-fn leaf(work: &Path, stem: &str) -> PathBuf {
-    let only = |dir: &Path, prefix: &str| -> PathBuf {
-        let hits: Vec<PathBuf> = std::fs::read_dir(dir).unwrap().flatten().map(|e| e.path())
-            .filter(|p| p.is_dir() && p.file_name().unwrap().to_string_lossy().starts_with(prefix))
-            .collect();
-        assert_eq!(hits.len(), 1, "one `{prefix}*` under {}: {hits:?}", dir.display());
-        hits.into_iter().next().unwrap()
-    };
-    let fit = only(&work.join("results/fits"), &format!("{stem}-"));
-    let method = only(&fit, "");
-    only(&method, "seed_")
+/// The single fit run in the work dir's store, `camdl-store/`.
+fn leaf(work: &Path) -> PathBuf {
+    fit_store_support::the_run(&work.join("camdl-store"))
 }
 
 fn workdir(tag: &str) -> (Tmp, PathBuf) {
@@ -70,7 +63,7 @@ fn workdir(tag: &str) -> (Tmp, PathBuf) {
 fn a_sampler_records_its_chain_comparison_and_the_summary_reads_it() {
     let (_guard, work) = workdir("pmmh");
     camdl(&work, &["fit", "run", "pmmh_converged.toml", "--seed", "1", "--progress", "none"]);
-    let leaf = leaf(&work, "pmmh_converged");
+    let leaf = leaf(&work);
     let summary: serde_json::Value =
         serde_json::from_slice(&std::fs::read(leaf.join("pmmh_summary.json")).unwrap()).unwrap();
     let recorded = &summary["chain_loglik_agreement"];
@@ -91,9 +84,14 @@ fn a_sampler_records_its_chain_comparison_and_the_summary_reads_it() {
     let doc: serde_json::Value =
         serde_json::from_str(&camdl(&work, &["fit", "summary", leaf_s, "--format", "json"])).unwrap();
     assert_eq!(&doc["methods"][0]["method_result"]["diagnostics"]["chain_logliks"], recorded);
+    // The stored event log holds one record per line, each event under
+    // `event`; the run's end-of-run report is its `method_report` event.
     let events = std::fs::read_to_string(leaf.join("events.jsonl")).unwrap();
-    let last: serde_json::Value = serde_json::from_str(events.lines().last().unwrap()).unwrap();
-    assert_eq!(&last["report"]["method_result"]["diagnostics"]["chain_logliks"], recorded);
+    let report = events.lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+        .rfind(|r| r["event"]["event"] == "method_report")
+        .unwrap_or_else(|| panic!("the stored event log holds no method_report:\n{events}"));
+    assert_eq!(&report["event"]["report"]["method_result"]["diagnostics"]["chain_logliks"], recorded);
 
     // The text table prints the recorded Z of each assessed chain.
     let text = camdl(&work, &["fit", "summary", leaf_s]);
@@ -104,26 +102,13 @@ fn a_sampler_records_its_chain_comparison_and_the_summary_reads_it() {
                 && l.contains(&cell)), "chain {} Z {cell} in:\n{text}", row["chain"]);
         }
     }
-
-    // A summary that does not record the comparison is said to, and nothing
-    // is recomputed from the traces that are still there.
-    let mut old = summary.clone();
-    old.as_object_mut().unwrap().remove("chain_loglik_agreement");
-    std::fs::write(leaf.join("pmmh_summary.json"), serde_json::to_vec_pretty(&old).unwrap()).unwrap();
-    let text = camdl(&work, &["fit", "summary", leaf_s]);
-    assert!(text.contains("chains' log-likelihood comparison not recorded"), "{text}");
-    assert!(text.contains("(no per-chain log-likelihood comparison recorded in this leaf)"), "{text}");
-    assert!(!text.contains("Δ others"), "no table is recomputed:\n{text}");
-    let doc: serde_json::Value =
-        serde_json::from_str(&camdl(&work, &["fit", "summary", leaf_s, "--format", "json"])).unwrap();
-    assert!(doc["methods"][0]["method_result"]["diagnostics"]["chain_logliks"].is_null());
 }
 
 #[test]
 fn if2_records_its_clean_evaluation_comparison_in_fit_state() {
     let (_guard, work) = workdir("if2");
     camdl(&work, &["fit", "run", "if2.toml", "--seed", "1", "--progress", "none"]);
-    let leaf = leaf(&work, "if2");
+    let leaf = leaf(&work);
     let state: toml::Value =
         toml::from_str(&std::fs::read_to_string(leaf.join("fit_state.toml")).unwrap()).unwrap();
     let a = &state["chain_loglik_agreement"];

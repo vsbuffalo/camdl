@@ -8,6 +8,8 @@
 //! the resume are the reporting fixture's `pmmh_converged.toml` and
 //! `pmmh_resumed.toml`.
 
+mod fit_store_support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -22,20 +24,17 @@ impl Drop for Tmp {
     }
 }
 
-/// The single directory under `dir` whose name starts with `prefix`.
-fn only_child(dir: &Path, prefix: &str) -> PathBuf {
-    let hits: Vec<PathBuf> = std::fs::read_dir(dir)
-        .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with(prefix))
-        .collect();
-    assert_eq!(hits.len(), 1, "expected one `{prefix}*` under {}: {hits:?}", dir.display());
-    hits.into_iter().next().unwrap()
-}
-
+/// The one stored fit run of the fit file `fit` (`<fit>.toml` in `work`):
+/// the run in the store at `work/camdl-store` whose `fit.toml`, the file as
+/// given, is that file's bytes.
 fn leaf(work: &Path, fit: &str) -> PathBuf {
-    only_child(&only_child(&only_child(&work.join("results/fits"), &format!("{fit}-")), "pmmh-"), "seed_")
+    let text = std::fs::read(work.join(format!("{fit}.toml"))).unwrap();
+    let hits: Vec<PathBuf> = fit_store_support::runs(&work.join("camdl-store"))
+        .into_iter()
+        .filter(|r| std::fs::read(r.join("fit.toml")).ok().as_deref() == Some(&text[..]))
+        .collect();
+    assert_eq!(hits.len(), 1, "expected one fit run of {fit}.toml: {hits:?}");
+    hits.into_iter().next().unwrap()
 }
 
 #[test]
@@ -57,6 +56,7 @@ fn a_resumed_chain_reports_its_own_step() {
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .env("CAMDLC", &camdlc)
             .env("CAMDL_IR_CACHE_DIR", work.join(".ir-cache"))
+            .env("CAMDL_STORE", work.join("camdl-store"))
             .current_dir(&work)
             .args(args)
             .output()
@@ -84,7 +84,9 @@ fn a_resumed_chain_reports_its_own_step() {
     let log = std::fs::read_to_string(leaf(&work, "pmmh_resumed").join("events.jsonl")).unwrap();
     let mut firsts = std::collections::BTreeMap::new();
     for line in log.lines() {
-        let e: serde_json::Value = serde_json::from_str(line).unwrap();
+        // Each stored line is `{at, event, format, n}`, the event itself in `event`.
+        let line: serde_json::Value = serde_json::from_str(line).unwrap();
+        let e = &line["event"];
         if e["event"] == "progress" {
             firsts.entry(e["chain"].as_u64().unwrap())
                 .or_insert((e["step"].as_u64().unwrap(), e["of"].as_u64().unwrap()));

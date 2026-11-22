@@ -51,7 +51,7 @@ simulate { from = 0 'days  to = 56 'days }
 "#;
 
 fn fit_toml(out: &str, gamma: f64, scenario: &str) -> String {
-    format!(r#"output_dir = "{out}"
+    format!(r#"store = "{out}"
 {scenario}
 [model]
 camdl = "model.camdl"

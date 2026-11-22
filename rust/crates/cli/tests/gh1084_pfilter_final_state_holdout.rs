@@ -73,7 +73,7 @@ fn fixture(dir: &Path, holdout_line: &str) {
     std::fs::write(dir.join("cases.tsv"), FULL).unwrap();
     std::fs::write(dir.join("training.tsv"), TRAINING).unwrap();
     std::fs::write(dir.join("fit.toml"), format!(r#"
-output_dir = "results"
+store = "results"
 
 [model]
 camdl = "sir.ir.json"

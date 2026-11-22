@@ -55,7 +55,7 @@ simulate { from = 0 'days  to = 30 'days }
 "#;
 
 fn fit_toml(rw_sd: f64) -> String {
-    format!(r#"output_dir = "out"
+    format!(r#"store = "out"
 [model]
 camdl = "m.ir.json"
 [data.observations]

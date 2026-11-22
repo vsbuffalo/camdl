@@ -81,7 +81,7 @@ const DATA: &str = "time\tweekly_cases\n7\t47\n14\t111\n21\t474\n28\t1066\n\
                     35\t1471\n42\t533\n49\t300\n56\t40\n";
 
 const FIT: &str = r#"ic_free = true
-output_dir = "results"
+store = "camdl-store"
 
 [model]
 camdl = "sir.camdl"
@@ -113,6 +113,7 @@ fn camdl(bin: &Path, dir: &Path) -> Command {
     c.env_remove("CLICOLOR_FORCE");
     c.env("CAMDL_SKIP_VERSION_CHECK", "1");
     c.env("CAMDLC", camdlc_bin());
+    c.env("CAMDL_STORE", dir.join("camdl-store"));
     c.current_dir(dir);
     c
 }
@@ -175,7 +176,7 @@ fn profile_scores_the_ic_free_objective_of_the_fit_it_profiles() {
     std::fs::write(d.join("fit.toml"), FIT).unwrap();
 
     run(camdl(&bin, d).args(["fit", "run", "fit.toml", "--seed", "3", "--no-progress"]), "fit run");
-    let mle_paths = find_all(&d.join("results/fits"), "mle_params.toml");
+    let mle_paths = find_all(&d.join("camdl-store"), "mle_params.toml");
     assert_eq!(mle_paths.len(), 1, "one fit leaf expected: {mle_paths:?}");
     let mle_path = &mle_paths[0];
     let mle: toml::Value = toml::from_str(&std::fs::read_to_string(mle_path).unwrap()).unwrap();
@@ -282,7 +283,7 @@ fn pfilter_with_fit_scores_the_fit_objective_and_without_it_the_full_likelihood(
     std::fs::write(d.join("full.toml"), FIT.replace("ic_free = true", "ic_free = false")).unwrap();
 
     run(camdl(&bin, d).args(["fit", "run", "fit.toml", "--seed", "3", "--no-progress"]), "fit run");
-    let mle_paths = find_all(&d.join("results/fits"), "mle_params.toml");
+    let mle_paths = find_all(&d.join("camdl-store"), "mle_params.toml");
     assert_eq!(mle_paths.len(), 1, "one fit leaf expected: {mle_paths:?}");
     let mle_path = &mle_paths[0];
     let mle: toml::Value = toml::from_str(&std::fs::read_to_string(mle_path).unwrap()).unwrap();

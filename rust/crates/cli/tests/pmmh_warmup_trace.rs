@@ -94,7 +94,7 @@ simulate { from = 0 'days  to = 20 'days }
 
 fn write_fit_toml(dir: &Path, ir: &Path, data: &Path) -> PathBuf {
     let toml = format!(r#"
-output_dir = "{out}"
+store = "{out}"
 [model]
 camdl = "{ir}"
 [data.observations]

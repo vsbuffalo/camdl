@@ -11,6 +11,8 @@
 //! the model can reach, under a binomial whose `n` is the projection), wrote
 //! the report but no `diagnostics.json`.
 
+mod fit_store_support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -44,7 +46,7 @@ simulate { from = 0 'days  to = 10 'days }
 
 /// Run `fit run` on a fit of beta and gamma under `method`, with the
 /// observation `likelihood` and `cases` rows; return the stderr and the
-/// one leaf the run claimed.
+/// one run folder the run claimed.
 fn failing_run(tag: &str, likelihood: &str, cases: &str, method: &str) -> (String, PathBuf, tempfile::TempDir) {
     let camdl = manifest().join("../../target/release/camdl");
     assert!(camdl.exists(), "release camdl binary missing: {} — run `make build-rust`", camdl.display());
@@ -64,30 +66,27 @@ fn failing_run(tag: &str, likelihood: &str, cases: &str, method: &str) -> (Strin
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDLC", &camdlc)
         .env("CAMDL_IR_CACHE_DIR", dir.join(".ir-cache"))
+        .env("CAMDL_STORE", dir.join("store"))
         .current_dir(dir)
         .args(["fit", "run", &format!("{tag}.toml"), "--seed", "1", "--progress", "none"])
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert_eq!(out.status.code(), Some(1), "the run fails with status 1:\n{stderr}");
-    let subdirs = |d: &Path| -> Vec<PathBuf> {
-        std::fs::read_dir(d).unwrap().flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect()
-    };
-    let leaves: Vec<PathBuf> = subdirs(&dir.join("results/fits")).iter()
-        .flat_map(|fit| subdirs(fit))
-        .flat_map(|m| subdirs(&m))
-        .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with("seed_"))
-        .collect();
-    assert_eq!(leaves.len(), 1, "one claimed leaf: {leaves:?}");
+    let leaves = fit_store_support::runs(&dir.join("store"));
+    assert_eq!(leaves.len(), 1, "one claimed run: {leaves:?}");
     (stderr, leaves[0].clone(), tmp)
 }
 
-/// The leaf's `diagnostics.json` holds the findings its log recorded, in
+/// The run's `diagnostics.json` holds the findings its log recorded, in
 /// order, and the log ends with a `failed` report whose error is the one
 /// printed, which names `expect`.
 fn assert_failure_recorded(leaf: &Path, stderr: &str, expect: &str) -> Vec<serde_json::Value> {
     let log = std::fs::read_to_string(leaf.join("events.jsonl")).unwrap();
-    let events: Vec<serde_json::Value> = log.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    // Each line is an envelope (`at`, `format`, `n`) around the event itself.
+    let events: Vec<serde_json::Value> = log.lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()["event"].clone())
+        .collect();
     let last = events.last().unwrap();
     assert_eq!(last["event"], "method_report", "the log ends with the method's report:\n{log}");
     assert_eq!(last["outcome"], "failed", "{last}");

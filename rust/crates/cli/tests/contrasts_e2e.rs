@@ -17,29 +17,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Where the latest `fit predict` of a run in `seg` wrote:
-/// `<seg>/predict/<run id>-<address key>/` (gh#896), the directory whose
-/// `report*.json` (one written by every predict) is newest. A path that does not
-/// exist while nothing has been predicted.
-fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
-    std::fs::read_dir(seg.join("predict"))
-        .into_iter().flatten().flatten().map(|e| e.path())
-        .filter_map(|d| {
-            // Newest `report*.json` (keyed by chain selection) in the directory.
-            let t = std::fs::read_dir(&d).ok()?.flatten()
-                .filter(|e| {
-                    let n = e.file_name().to_string_lossy().into_owned();
-                    n.starts_with("report") && n.ends_with(".json")
-                })
-                .filter_map(|e| e.metadata().and_then(|m| m.modified()).ok())
-                .max()?;
-            Some((t, d))
-        })
-        .max_by_key(|(t, _)| *t)
-        .map(|(_, d)| d)
-        .unwrap_or_else(|| seg.join("predict").join("none"))
-}
-
+mod fit_store_support;
 
 fn binary() -> PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
@@ -52,47 +30,35 @@ fn skip_if_missing_binary() -> PathBuf {
     bin
 }
 
+/// Run `camdl` in `dir`, whose fits are stored in `dir/results`; `@fit`
+/// names the run of the last `fit run --label fit`.
 fn run(bin: &Path, dir: &Path, args: &[&str]) -> std::process::Output {
     Command::new(bin).env_remove("CLICOLOR_FORCE")
         .args(args)
         .current_dir(dir)
+        .env("CAMDL_STORE", dir.join("results"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output()
         .expect("spawn camdl")
 }
 
-/// `results/fits/<stem>-<hash>/predict/<run id>-<address key>/<sub>/<stream>.tsv`, if present.
+/// `<prediction>/<sub>/<stream>.tsv` of the latest `fit predict` stored
+/// under the store `root` (the prediction whose `run.json` finished last),
+/// if present.
 fn find_artifact(root: &Path, sub: &str, stream: &str) -> Option<PathBuf> {
-    let fits = root.join("fits");
-    for e in std::fs::read_dir(&fits).ok()?.flatten() {
-        // gh#896: the latest `fit predict` of the run writes under
-        // `<segment>/predict/<run id>-<address key>/`.
-        let p = predict_out(&e.path()).join(sub).join(format!("{stream}.tsv"));
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    None
+    let latest = fit_store_support::predictions(root).into_iter()
+        .max_by_key(|p| fit_store_support::json(&p.join("run.json"))["finished"]
+            .as_str().unwrap_or_default().to_string())?;
+    let p = latest.join(sub).join(format!("{stream}.tsv"));
+    p.is_file().then_some(p)
 }
 
-/// The first `chain_0/trajectories.tsv` under `results/fits/` — the fit's saved
-/// smoothed paths. Recursive, since the method/seed nesting under a fit dir varies.
+/// The first `chain_0/trajectories.tsv` of a fit run stored under `root`:
+/// the fit's saved smoothed paths.
 fn find_chain_traj(root: &Path) -> Option<PathBuf> {
-    fn walk(dir: &Path) -> Option<PathBuf> {
-        let hit = dir.join("chain_0").join("trajectories.tsv");
-        if hit.is_file() {
-            return Some(hit);
-        }
-        for e in std::fs::read_dir(dir).ok()?.flatten() {
-            if e.path().is_dir() {
-                if let Some(p) = walk(&e.path()) {
-                    return Some(p);
-                }
-            }
-        }
-        None
-    }
-    walk(&root.join("fits"))
+    fit_store_support::runs(root).into_iter()
+        .map(|r| r.join("chain_0").join("trajectories.tsv"))
+        .find(|p| p.is_file())
 }
 
 /// The derived fork time the reducer reported for `contrast` on stderr (the
@@ -185,7 +151,7 @@ const DATA: &str =
 
 fn fit_toml(algorithm_block: &str) -> String {
     format!(
-        r#"output_dir = "results"
+        r#"store = "results"
 [model]
 camdl = "model.camdl"
 [data.observations]
@@ -251,7 +217,7 @@ fn fit_predict_emits_deaths_averted_contrast_with_positive_median() {
     std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
     std::fs::write(tmp.join("fit.toml"), fit_toml(PGAS)).unwrap();
 
-    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(
         out.status.success(),
         "fit run failed:\nstdout={}\nstderr={}",
@@ -262,7 +228,7 @@ fn fit_predict_emits_deaths_averted_contrast_with_positive_median() {
     // `--mode free_forward`: the contrast is a forward counterfactual object;
     // this also sidesteps the one-step exact-filter's unrelated limitation with the
     // parametric `at [origin + 4 'weeks]` schedule. Contrasts are horizon-independent.
-    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward"]);
+    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "@fit", "--mode", "free_forward"]);
     assert!(
         out.status.success(),
         "fit predict failed:\nstdout={}\nstderr={}",
@@ -333,12 +299,12 @@ fn point_estimate_fit_emits_no_contrast_file() {
     std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
     std::fs::write(tmp.join("fit.toml"), fit_toml(IF2)).unwrap();
 
-    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(out.status.success(), "if2 fit run failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
 
     // An IF2 fit is a point estimate (no posterior cloud) → `fit predict` refuses
     // before any output. No contrast file is written, and the error names the gate.
-    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml"]);
+    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "@fit"]);
     assert!(!out.status.success(), "fit predict must refuse a point-estimate fit");
     let stderr = String::from_utf8_lossy(&out.stderr).to_lowercase();
     assert!(
@@ -411,12 +377,12 @@ fn series_minus_scalar_contrast_is_a_located_shape_error() {
     std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
     std::fs::write(tmp.join("fit.toml"), fit_toml(PGAS)).unwrap();
 
-    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(out.status.success(), "fit run failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
 
     // The shape mismatch is a Rust reducer check (the OCaml dim check passes: both
     // operands are counts). `fit predict` fails with a located message.
-    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward"]);
+    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "@fit", "--mode", "free_forward"]);
     assert!(!out.status.success(), "a series−scalar contrast must fail fit predict");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -482,12 +448,12 @@ fn parameter_only_contrast_skips_with_a_located_note_and_no_file() {
     std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
     std::fs::write(tmp.join("fit.toml"), fit_toml(PGAS)).unwrap();
 
-    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(out.status.success(), "fit run failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
 
     // A param-only contrast has no toggled intervention → the reducer skips it with
     // a note (gh#327) and `fit predict` still succeeds. No contrast file is written.
-    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward"]);
+    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "@fit", "--mode", "free_forward"]);
     assert!(
         out.status.success(),
         "fit predict must succeed (the contrast is skipped, not a hard error):\nstderr={}",
@@ -577,7 +543,7 @@ fn ode_fit_with_contrasts_skips_with_gh325_note_and_no_file() {
     std::fs::write(tmp.join("model.camdl"), ODE_MODEL).unwrap();
     std::fs::write(tmp.join("prevalence.tsv"), PREVALENCE_DATA).unwrap();
     let fit = format!(
-        r#"output_dir = "results"
+        r#"store = "results"
 [model]
 camdl = "model.camdl"
 [data.observations]
@@ -594,13 +560,13 @@ I0 = 10
     );
     std::fs::write(tmp.join("fit.toml"), fit).unwrap();
 
-    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(out.status.success(), "mh+ode fit run failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
 
     // ODE is forkable (Deterministic), so the reducer passes the latent gate but
     // hits the ODE-backend deferral: skip-with-note (gh#325), predict succeeds,
     // no file is written.
-    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward"]);
+    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "@fit", "--mode", "free_forward"]);
     assert!(
         out.status.success(),
         "fit predict must succeed (the contrast is skipped, not a hard error):\nstderr={}",
@@ -681,10 +647,10 @@ fn obs_sourced_contrast_skips_with_gh326_state_sourced_emits() {
     std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
     std::fs::write(tmp.join("fit.toml"), fit_toml(PGAS)).unwrap();
 
-    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(out.status.success(), "fit run failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
 
-    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward"]);
+    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "@fit", "--mode", "free_forward"]);
     assert!(
         out.status.success(),
         "fit predict must succeed (the obs-sourced contrast is skipped, not fatal):\nstderr={}",
@@ -776,7 +742,7 @@ fn stratified_quantity_contrast_emits_per_stratum_output() {
     std::fs::write(tmp.join("model.camdl"), STRAT_MODEL).unwrap();
     std::fs::write(tmp.join("cases.tsv"), STRAT_DATA).unwrap();
     let fit = format!(
-        r#"output_dir = "results"
+        r#"store = "results"
 [model]
 camdl = "model.camdl"
 [data.observations]
@@ -795,10 +761,10 @@ k   = 10.0
     );
     std::fs::write(tmp.join("fit.toml"), fit).unwrap();
 
-    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(out.status.success(), "fit run failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
 
-    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward"]);
+    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "@fit", "--mode", "free_forward"]);
     assert!(
         out.status.success(),
         "fit predict failed:\nstderr={}",
@@ -953,7 +919,7 @@ fn contrast_arms_agreeing_on_a_non_model_horizon_are_refused() {
     std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
     std::fs::write(tmp.join("fit.toml"), fit_toml(PGAS)).unwrap();
 
-    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(
         out.status.success(),
         "fit run failed:\nstdout={}\nstderr={}",
@@ -962,7 +928,7 @@ fn contrast_arms_agreeing_on_a_non_model_horizon_are_refused() {
     );
 
     let out =
-        run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward"]);
+        run(&bin, &tmp, &["fit", "predict", "--fit", "@fit", "--mode", "free_forward"]);
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
         !out.status.success(),
@@ -992,7 +958,7 @@ fn contrast_arms_with_different_horizons_are_refused() {
     std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
     std::fs::write(tmp.join("fit.toml"), fit_toml(PGAS)).unwrap();
 
-    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(
         out.status.success(),
         "fit run failed:\nstdout={}\nstderr={}",
@@ -1001,7 +967,7 @@ fn contrast_arms_with_different_horizons_are_refused() {
     );
 
     let out =
-        run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward"]);
+        run(&bin, &tmp, &["fit", "predict", "--fit", "@fit", "--mode", "free_forward"]);
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
         !out.status.success(),
@@ -1089,7 +1055,7 @@ fn fit_predict_scenario_with_its_own_horizon_is_refused() {
     // and never exercise this guard.
     std::fs::write(tmp.join("fit.toml"), fit_toml(PGAS)).unwrap();
 
-    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(
         out.status.success(),
         "fit run failed:\nstdout={}\nstderr={}",
@@ -1102,7 +1068,7 @@ fn fit_predict_scenario_with_its_own_horizon_is_refused() {
         &bin,
         &tmp,
         &[
-            "fit", "predict", "--fit", "fit.toml", "--mode", "free_forward", "--scenario",
+            "fit", "predict", "--fit", "@fit", "--mode", "free_forward", "--scenario",
             "with_sia",
         ],
     );
@@ -1129,7 +1095,7 @@ fn fit_predict_scenario_with_its_own_horizon_is_refused() {
         &bin,
         &tmp,
         &[
-            "fit", "predict", "--fit", "fit.toml", "--mode", "free_forward", "--scenario",
+            "fit", "predict", "--fit", "@fit", "--mode", "free_forward", "--scenario",
             "no_sia",
         ],
     );
@@ -1227,10 +1193,10 @@ fn anchored_quantity_no_contrast_references_still_predicts() {
     std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
     std::fs::write(tmp.join("fit.toml"), fit_toml(PGAS)).unwrap();
 
-    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(out.status.success(), "fit run failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
 
-    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward"]);
+    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "@fit", "--mode", "free_forward"]);
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
         out.status.success(),
@@ -1241,7 +1207,7 @@ fn anchored_quantity_no_contrast_references_still_predicts() {
     let results = tmp.join("results");
     let quantity = |name: &str| {
         quantity_row(
-            &find_artifact(&results, "quantities", name)
+            &find_artifact(&results, "quantities-model", name)
                 .unwrap_or_else(|| panic!("quantities/{name}.tsv must be written")),
         )
     };
@@ -1358,10 +1324,10 @@ fn contrast_over_an_anchored_quantity_resolves_in_both_arms() {
     std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
     std::fs::write(tmp.join("fit.toml"), fit_toml(PGAS)).unwrap();
 
-    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(out.status.success(), "fit run failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
 
-    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward"]);
+    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "@fit", "--mode", "free_forward"]);
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
         out.status.success(),
@@ -1471,10 +1437,10 @@ fn an_anchor_before_the_fork_censors_with_a_located_note() {
     std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
     std::fs::write(tmp.join("fit.toml"), fit_toml(PGAS)).unwrap();
 
-    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(out.status.success(), "fit run failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
 
-    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward"]);
+    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "@fit", "--mode", "free_forward"]);
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
         out.status.success(),
@@ -1528,10 +1494,10 @@ fn ratio_contrast_with_a_zero_denominator_censors_those_draws() {
     std::fs::write(tmp.join("fit.toml"), fit_toml(PGAS).replace("mu  = 0.05", "mu  = 0.0002"))
         .unwrap();
 
-    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(out.status.success(), "fit run failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
 
-    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward"]);
+    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "@fit", "--mode", "free_forward"]);
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
         out.status.success(),

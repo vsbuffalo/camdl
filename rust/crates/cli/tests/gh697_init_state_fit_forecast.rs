@@ -12,6 +12,8 @@
 //! These tests shell out to the release binary, so they exercise the real
 //! `fit run` → `trajectories.tsv` → `simulate` → CAS path.
 
+mod fit_store_support;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -82,7 +84,7 @@ const HORIZON: &str = "120";
 /// 40 posterior draws per chain; `n_trajectories = 8` saves a path every 5th
 /// sweep. The forkable subset is therefore a STRICT subset of the parameter
 /// posterior — the 606-saved / 300-forkable shape of a real run, in miniature.
-const FIT_TOML: &str = r#"output_dir = "results"
+const FIT_TOML: &str = r#"store = "results"
 [model]
 camdl = "model.camdl"
 [data.observations]
@@ -111,9 +113,9 @@ n_trajectories = 8
 struct Fixture {
     dir: PathBuf,
     model: PathBuf,
-    /// The fit results segment (`results/fits/<stem>-<hash>/`).
+    /// The stored fit run's folder, the handle `--fit` is given.
     fit: PathBuf,
-    /// The method directory holding `draws.tsv` + `chain_*/trajectories.tsv`.
+    /// The same folder, which holds `draws.tsv` + `chain_*/trajectories.tsv`.
     method: PathBuf,
 }
 
@@ -121,6 +123,7 @@ fn run_in(bin: &Path, dir: &Path, args: &[String]) -> std::process::Output {
     Command::new(bin).env_remove("CLICOLOR_FORCE")
         .args(args)
         .current_dir(dir)
+        .env("CAMDL_STORE", dir.join("results"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output()
         .expect("spawn camdl")
@@ -152,30 +155,13 @@ fn fixture() -> &'static Fixture {
             String::from_utf8_lossy(&out.stderr)
         );
 
-        let fits = dir.join("results").join("fits");
-        let fit = std::fs::read_dir(&fits)
-            .unwrap_or_else(|e| panic!("read {}: {e}", fits.display()))
-            .flatten()
-            .map(|e| e.path())
-            .find(|p| p.is_dir())
-            .expect("one fit segment");
-        let method = find_method(&fit).expect("a method leaf holding draws.tsv");
+        let fit = fit_store_support::the_run(&dir.join("results"));
+        assert!(fit.join("draws.tsv").is_file(), "the run holds draws.tsv: {}", fit.display());
+        let method = fit.clone();
 
         let model = dir.join("model.camdl");
         Fixture { dir, model, fit, method }
     })
-}
-
-/// The method leaf under a fit segment: `<fit>/NN-<method>-<hash>/seed_N-<hash>/`,
-/// found by the artifact it holds rather than by its path shape.
-fn find_method(root: &Path) -> Option<PathBuf> {
-    if root.join("draws.tsv").is_file() {
-        return Some(root.to_path_buf());
-    }
-    let mut kids: Vec<PathBuf> =
-        std::fs::read_dir(root).ok()?.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
-    kids.sort();
-    kids.iter().find_map(|k| find_method(k))
 }
 
 // ── TSV helpers ──────────────────────────────────────────────────────────────
@@ -706,32 +692,33 @@ fn draws_without_init_state_still_free_forwards_from_t_start() {
 /// must be refused BY NAME — never quietly fall back to `init {}`, which would
 /// look like a forecast and be a free-forward replay.
 ///
-/// The classification is by ARTIFACT, not by method name (`fit::joint`), so the
-/// control is built by removing the artifact: a copy of the fit with its
-/// `chain_*/trajectories.tsv` deleted is exactly the PMMH / particle-filter
-/// case, deterministically and without a second fit.
+/// The classification is by ARTIFACT, not by method name (`fit::joint`): the
+/// control is the fixture's PGAS fit with `n_trajectories = 0`, which saves no
+/// `chain_*/trajectories.tsv`, the case of a PMMH or particle-filter fit.
 #[test]
 fn a_fit_with_no_saved_trajectories_refuses_by_name() {
     let bin = skip_if_missing();
     let f = fixture();
 
-    // At the fit folder's depth below the fixture, so the copy's recorded
-    // `source_config` still names the fit file and its data resolve.
-    let bare = f.dir.join("copies").join("fits").join("fit_no_paths");
-    let _ = std::fs::remove_dir_all(&bare);
-    copy_tree(&f.fit, &bare);
-    let saved = find_all(&bare, "trajectories.tsv");
-    assert!(!saved.is_empty(), "the fixture fit must have had saved paths to remove");
-    for traj in saved {
-        std::fs::remove_file(&traj).unwrap();
-    }
+    let dir = f.dir.join("no_paths");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("model.camdl"), MODEL).unwrap();
+    std::fs::write(dir.join("weekly_cases.tsv"), DATA).unwrap();
+    let no_paths = FIT_TOML.replace("n_trajectories = 8", "n_trajectories = 0");
+    assert_ne!(no_paths, FIT_TOML);
+    std::fs::write(dir.join("fit.toml"), no_paths).unwrap();
+    let out = run_in(&bin, &dir, &["fit".into(), "run".into(), "fit.toml".into(), "--seed".into(), "1".into()]);
+    assert!(out.status.success(), "fit run failed: {}", String::from_utf8_lossy(&out.stderr));
+    let bare = fit_store_support::the_run(&dir.join("results"));
+    assert!(find_all(&bare, "trajectories.tsv").is_empty(), "the control fit saved no latent paths");
 
     let out = run_in(
         &bin,
-        &f.dir,
+        &dir,
         &[
             "simulate".into(),
-            s(&f.model),
+            s(&dir.join("model.camdl")),
             "--fit".into(),
             s(&bare),
             "--draws".into(),
@@ -742,11 +729,11 @@ fn a_fit_with_no_saved_trajectories_refuses_by_name() {
             HORIZON.into(),
         ],
     );
+    let err = String::from_utf8_lossy(&out.stderr);
     assert!(
         !out.status.success(),
-        "a fit with no saved latent paths must be refused, not silently free-forwarded"
+        "a fit with no saved latent paths must be refused, not silently free-forwarded:\n{err}"
     );
-    let err = String::from_utf8_lossy(&out.stderr);
     assert!(
         err.contains("no forkable posterior draws") && err.contains("trajectories.tsv"),
         "the refusal must name the missing artifact; stderr was:\n{err}"
@@ -821,9 +808,9 @@ fn a_changed_paired_ensemble_re_keys_every_cell() {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(sim_leaf_ids(&root_a), first, "an unchanged ensemble must re-key to itself");
 
-    // Perturb ONE restored state in the fit's saved paths and re-run into a
-    // fresh store: the ensemble digest changes, so no cell may reuse an id.
-    // At the fit folder's depth, so its data resolve (as above).
+    // Perturb ONE restored state in a copy of the fit's saved paths and re-run
+    // into a fresh store: the ensemble digest changes, so no cell may reuse an
+    // id.
     let bumped = f.dir.join("copies").join("fits").join("fit_bumped");
     let _ = std::fs::remove_dir_all(&bumped);
     copy_tree(&f.fit, &bumped);
@@ -845,33 +832,31 @@ fn a_changed_paired_ensemble_re_keys_every_cell() {
         std::fs::write(&traj, lines.join("\n") + "\n").unwrap();
     }
 
+    // A copy outside a store is read as a directory of draws, which applies no
+    // fit selection and so keys apart from the stored run whatever its paths
+    // hold. The control is therefore an unperturbed copy, read the same way.
+    let plain = f.dir.join("copies").join("fits").join("fit_plain");
+    let _ = std::fs::remove_dir_all(&plain);
+    copy_tree(&f.fit, &plain);
+    let copy_args = |copy: &Path, root: &Path| -> Vec<String> {
+        let mut a = args(root);
+        a[3] = s(copy);
+        a
+    };
+    let root_c = f.dir.join("cas_c");
+    let out = run_in(&bin, &f.dir, &copy_args(&plain, &root_c));
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let control = sim_leaf_ids(&root_c);
+    assert!(!control.is_empty(), "the unperturbed copy must commit sim leaves");
+
     let root_b = f.dir.join("cas_b");
-    let out = run_in(
-        &bin,
-        &f.dir,
-        &[
-            "simulate".into(),
-            s(&f.model),
-            "--fit".into(),
-            s(&bumped),
-            "--draws".into(),
-            "posterior".into(),
-            "--init-state".into(),
-            "fit".into(),
-            "--to".into(),
-            HORIZON.into(),
-            "--seed".into(),
-            "11".into(),
-            "--store".into(),
-            s(&root_b),
-        ],
-    );
+    let out = run_in(&bin, &f.dir, &copy_args(&bumped, &root_b));
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let second = sim_leaf_ids(&root_b);
     assert!(!second.is_empty());
     for id in &second {
         assert!(
-            !first.contains(id),
+            !first.contains(id) && !control.contains(id),
             "a perturbed paired ensemble must re-key EVERY cell — run_id {id} was \
              reused, so the store would serve a stale forecast"
         );

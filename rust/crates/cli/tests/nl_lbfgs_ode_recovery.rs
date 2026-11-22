@@ -232,7 +232,7 @@ fn nl_lbfgs_recovers_the_truth_and_matches_the_derivative_free_optimum() {
         let out_dir = tmp.path().join(format!("out-{algorithm}"));
         let fit_toml = tmp.path().join(format!("fit-{algorithm}.toml"));
         std::fs::write(&fit_toml, format!(
-            r#"output_dir = "{out}"
+            r#"store = "{out}"
 
 [model]
 camdl = "{ir}"
@@ -331,7 +331,7 @@ N0 = 10000
         &std::fs::read_to_string(lbfgs_leaf.join("progress.json")).unwrap(),
     ).unwrap();
     assert_eq!(
-        progress["state"], "done",
+        progress["snapshot"]["state"], "done",
         "a completed nl-lbfgs method's last self-report must be `done`:\n{progress:#}"
     );
 }
@@ -363,7 +363,7 @@ fn nl_lbfgs_on_a_scheduled_intervention_is_refused_before_any_leaf() {
     let out_dir = tmp.path().join("out");
     let fit_toml = tmp.path().join("fit.toml");
     std::fs::write(&fit_toml, format!(
-        r#"output_dir = "{out}"
+        r#"store = "{out}"
 enable = ["sia"]
 
 [model]

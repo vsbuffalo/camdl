@@ -190,20 +190,25 @@ The leaves it replaces are not deleted. They are moved to
 ls results/.quarantine/
 ```
 
-`camdl fit run --force` likewise computes a stored fit again and moves the old
-one to `results/.quarantine/`.
+`camdl fit run --force` likewise computes a stored fit run again and moves the
+old one to the run store's quarantine, `camdl-store/.quarantine/`.
 
 ## Fits
 
-`camdl fit run fit.toml` resolves the fit's identity before it starts, from the
-compiled model, the contents of the data files, the fit configuration, the
-method and the seed. If the store holds a completed fit with that identity, it
-reports a cache hit and returns at once, which is why a fit that took an hour
-the first time takes a moment the second. Comments, whitespace and the
-`output_dir` and `[provenance]` entries of `fit.toml` are not part of the
-identity, so editing them keeps the stored fit. Changing the `[method]` table
-or the seed makes a new run alongside the old ones, under the same fit
-directory. [The fit workflow](../workflow.md) covers how fits are found by
+`camdl fit run fit.toml` stores the fit in the run store, `camdl-store/` in the
+working directory unless the file's `store` key or `CAMDL_STORE` names another.
+It resolves two identities before it starts. The fit problem's is the compiled
+model, the training rows of the data files by content, and the resolved
+problem half of the fit configuration; a run's is the problem, the method and
+the seed. If the store holds a completed run with that identity, it reports a
+cache hit and returns at once, which is why a fit that took an hour the first
+time takes a moment the second. Comments, whitespace and the `store` and
+`[provenance]` entries of `fit.toml` are not part of either identity, so
+editing them keeps the stored fit. Changing the `[method]` table or the seed
+makes a new run alongside the old ones, in the same problem folder. A
+`fit.toml` is never a name for a stored run, since one file makes a new run
+whenever its data or the camdl build changes: later commands name a run by
+`@label`, its run id or its folder. [The fit workflow](../workflow.md) covers how fits are found by
 label and by file.
 
 ## Why camdl is built this way

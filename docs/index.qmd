@@ -8,7 +8,7 @@ camdl-run-scratch: guide/first-fit
 ```{.camdl-run show="figure" figure="ppc-r0.svg" caption="An SIR model fitted to a 1978 boarding-school influenza outbreak, re-run on every site build. [Fitting the boarding-school outbreak](guide/first-fit.qmd) walks through it."}
 camdl fit run fit-r0.toml --label r0 --seed 4
 camdl fit predict @r0
-uv run plot_predictive.py ppc-r0.svg SIR=results/fits/fit_r0-*/predict/*/
+uv run plot_predictive.py ppc-r0.svg SIR=camdl-store/*/fit/sir_r0-*/runs/pmmh-*/seed_4-*/predict/*/
 ```
 
 camdl is a modeling language and toolkit for stochastic and deterministic

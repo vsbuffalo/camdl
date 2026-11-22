@@ -17,7 +17,7 @@
 /// documentation dictionary survives; a fit sidecar's parameter legend reads it
 /// back off this path.
 fn resolve_anchors_into_temp_ir(
-    out: &crate::out::Out, ir_path: &str,
+    out: Option<&crate::out::Out>, ir_path: &str,
     config: &config_v2::Problem,
 ) -> Result<String, String> {
     let src = std::fs::read_to_string(ir_path)
@@ -31,7 +31,9 @@ fn resolve_anchors_into_temp_ir(
     }
     let moved = crate::obs_anchor::resolve_for_fit(&mut env.model, config)
         .map_err(|e| format!("resolving this model's start and observation anchors from [data]: {e}"))?;
-    crate::obs_anchor::report(out, &moved, &env.model);
+    if let Some(out) = out {
+        crate::obs_anchor::report(out, &moved, &env.model);
+    }
 
     // A fresh temp, never the input path: `resolve_ir_path` returns a
     // user-supplied `.ir.json` unchanged, and a command must not rewrite the
@@ -87,7 +89,6 @@ fn bind_tables_into_temp_ir(
     Ok((out.to_string_lossy().into_owned(), bound))
 }
 
-pub mod cas;  // gh#147 M3.2: fit-method CAS identity (resolve_fit_method)
 pub mod coeff_guard;  // gh#342 P4: NUTS guard — param reaching a coefficient only via an init
 pub mod config_v2;
 pub(crate) mod run_config; // ResolvedFitConfig: fit run's one resolved configuration
@@ -144,8 +145,6 @@ pub mod nlopt_method;
 #[cfg(feature = "ode")]
 pub(crate) mod opt_trace; // opt_trace.tsv: each NLopt search's running best, written live
 pub mod fitted_model; // is the given model the one a fit ran on (the replay check)
-pub mod handle;   // gh#322: fit handles (@label / hash / run-dir / fit.toml) → segment
-pub mod run_view; // one stored fit run as `show` and `list` present it
 pub mod joint;    // gh#322: keyed-joint (θ, X) read — LatentPath classifier + join
 pub mod failures; // the deterministic-failure record a predictive run writes as report.json
 pub mod predict;  // `camdl fit predict`: free-forward posterior predictive verb + types
@@ -164,7 +163,7 @@ pub fn cmd_fit_methods() {
 /// Where the run's `starts` rule came from, for the prefix of an error about
 /// it: `--starts <spec>` when the flag set it, else the fit file.
 fn starts_origin(a: &crate::args::FitRunArgs, fit_path: &str) -> String {
-    match &a.starts {
+    match &a.run.starts {
         Some(rule) => format!("--starts {}", rule.spelled()),
         None => fit_path.to_string(),
     }
@@ -174,7 +173,7 @@ fn starts_origin(a: &crate::args::FitRunArgs, fit_path: &str) -> String {
 /// parameter leaves the missing ones to a bounds-uniform draw. Under a
 /// `pfilter`, which scores exactly one θ, that is a random θ: refused, naming
 /// the parameters. (`from_posterior` already refuses a missing column.)
-fn refuse_pfilter_point_source_missing(
+pub(crate) fn refuse_pfilter_point_source_missing(
     rule: &starts::ChainStarts,
     file: &std::path::Path,
     estimated: &[&str],
@@ -281,7 +280,7 @@ pub(crate) const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::
 /// A method whose options fail to parse also gets an inert guard: the dispatch
 /// arm reports that error and exits, and there is no run to report progress
 /// for.
-fn method_heartbeat(
+pub(crate) fn method_heartbeat(
     method_dir: &std::path::Path,
     algorithm: &config_v2::Algorithm,
 ) -> io::HeartbeatGuard {
@@ -382,1934 +381,779 @@ pub(crate) fn abandon_method(out: &crate::out::Out, message: String) -> ! {
     out.error(crate::out::CommandError::new(message)).exit()
 }
 
-/// The engine a fit's identity folds in this process: this build and the
-/// engine switches set (`env::Environment::engine_identity`), so a fit made
-/// with `CAMDL_EVAL_UNRESOLVED` or an experimental input never shares a leaf
-/// with a default one. Every identity reader of a fit (`fit run`, a
-/// `fit.toml` handle, `fit new --from`'s segment hint) takes it from here, so
-/// they agree on which runs this engine made.
-pub(crate) fn fit_engine() -> runid::inputs::EngineIdentity {
-    crate::env::get().engine_identity(crate::version::ENGINE_ID)
+/// What one method's run needs besides the `Out` it reports through: the
+/// problem and method it runs, the directory it writes its files into, its
+/// seed and starts, the base it resumes, and the heartbeat and collector the
+/// command began it with.
+pub(crate) struct MethodContext<'a> {
+    pub problem: &'a config_v2::Problem,
+    pub method: &'a config_v2::Method,
+    pub model: &'a ir::Model,
+    pub method_dir: &'a std::path::Path,
+    pub seed: u64,
+    pub starts: &'a chain_starts::ResolvedStarts,
+    /// The base's carried chain files are already in `method_dir`; this is
+    /// the scratch copy of the base's own files, read for its warm-up record.
+    pub resume_base: Option<&'a std::path::Path>,
+    /// The key a resumed chain's state must carry: the run's chain identity.
+    pub resume_guard: &'a str,
+    pub heartbeat: &'a std::sync::Arc<io::HeartbeatGuard>,
+    pub collector: &'a std::sync::Arc<sim::inference::diagnostic::DiagnosticCollector>,
+    /// Each bound source's data digest, for the provenance block of
+    /// `mle_params.toml`.
+    pub data_hashes: Vec<(String, String)>,
+    /// The problem's run id, which `mle_params.toml` records as the fit it
+    /// came from.
+    pub input_hash: &'a str,
+    pub forcing: &'a crate::forcing_extrapolation::ForcingPolicy,
 }
 
-/// How `fit run` computes its leaves, never what: the thread budget and
-/// whether a stored leaf is recomputed.
-pub(crate) struct FitExecution {
-    /// `--parallel` / CAMDL_PARALLEL: the global Rayon pool's size (0 = every
-    /// core).
-    pub parallel: usize,
-    /// `--force`: recompute a leaf the store holds, quarantining it.
-    pub force: bool,
+/// What a method's run hands back to the command.
+pub(crate) struct MethodRan {
+    pub best_loglik: Option<f64>,
+    pub best_chain: Option<score::convergence::ChainIndex>,
+    pub warmup: Vec<report::ChainWarmup>,
+    /// Per chain, the index the resumed segment begins at; empty for a fresh
+    /// run.
+    pub resume_boundary: Vec<usize>,
+    /// A hint said under the `stored` line (IF2's best chain).
+    pub stored_hint: Option<String>,
 }
 
-/// `camdl fit run`, under the compile settings `compile` (`--no-licm`), which
-/// every compile the fit makes is given. The arguments are read here and in
-/// [`run_config::resolve`] only: the run itself takes the resolved
-/// configuration, the execution settings and the label.
-pub fn cmd_fit_run_v2(a: &crate::args::FitRunArgs, compile: crate::util::CompileSettings) {
-    // `fit run` has no `--no-color`: its painters follow the environment and
-    // whether each stream is a terminal.
-    let out = crate::out::Out::new(false);
-
-    let _eval_stats_guard = crate::util::EvalStatsReportGuard::start();  // gh#audit-H5
-    let execution = FitExecution { parallel: a.parallel, force: a.force };
-    // gh#162: a fit nests Rayon parallelism (chains × particle filter) on the
-    // global pool, which otherwise defaults to ALL logical cores regardless of
-    // `chains`. Cap it from `--parallel` / CAMDL_PARALLEL (0 = all cores) so the
-    // thread budget is explicit and matches pfilter/profile.
-    // `build_global` is one-shot per process; ignore the already-initialised
-    // Err so re-entry (tests) stays safe. Mirrors pfilter.rs.
-    if execution.parallel > 0 {
-        let _ = rayon::ThreadPoolBuilder::new()
-            .num_threads(execution.parallel)
-            .build_global();
-    }
-    // Validate --label early so we fail before any I/O. The same
-    // validator is reused by `cmd_label` (post-hoc relabel). Provenance: it
-    // names the run, never changes it.
-    let label = match a.label.as_deref() {
-        Some(raw) => match validate_label(raw) {
-            Ok(l) => Some(l),
-            Err(e) => {
-                out.fail(format!("error: invalid --label: {}", e));
-            }
-        },
-        None => None,
-    };
-    let fit_path = a.config.to_string_lossy().into_owned();
-    // The one resolved configuration: every flag, the file and every default
-    // resolved once, before anything runs. The identity and every method's
-    // run are built from it, and the fit folder stores its config.
-    let (resolved, _forcing_route) = run_config::resolve(a, compile, &out);
-    run_fit(out, fit_path, resolved, execution, label);
-}
-
-/// Run the fit `resolved` describes: compute or reuse each leaf. Its
-/// destructure names every field of the resolved value, so a field added to
-/// it does not compile here until it is used.
-fn run_fit(
-    mut out: crate::out::Out,
-    fit_path: String,
-    resolved: run_config::ResolvedFitConfig,
-    execution: FitExecution,
-    validated_label: Option<String>,
-) {
+/// Run `cx.method` on `cx.problem`, writing every file it makes into
+/// `cx.method_dir`. A fatal error abandons the method through
+/// [`abandon_method`], which ends the command.
+pub(crate) fn run_method(out: &mut crate::out::Out, cx: MethodContext<'_>) -> MethodRan {
     use config_v2::Algorithm;
-    let FitExecution { parallel: _, force } = execution;
-    let run_config::ResolvedFitConfig {
-        config_text,
-        config,
-        model,
-        tables,
-        engine,
-        forcing,
-        seeds: fit_seeds,
-        sweep: sweep_specs,
-        emit_every,
-        resume,
-        nuts_tuning_flags,
-        problem_flags,
-        fixed_via,
-        starts: run_config::StartsPlan {
-            early: early_resolved_starts,
-            resolution: starts_resolution,
-            allow_nonconverged_source,
-            origin: starts_origin,
-        },
-        file_only: run_config::FileOnly { method: file_method, seeds: file_seeds },
-    } = resolved;
-    let method: config_v2::Method = config.inference.method.clone().expect("resolved with a method");
+    let MethodContext { problem: sweep_config, method, model, method_dir, seed, starts: resolved_starts,
+        resume_base, resume_guard, heartbeat, collector, .. } = cx;
+    let method_name = method.algorithm.method_name();
+    let method_dir = method_dir.to_path_buf();
+    let method_best_loglik: Option<f64>;
+    let mut method_best_chain: Option<score::convergence::ChainIndex> = None;
+    let mut method_warmup: Vec<report::ChainWarmup> = Vec::new();
+    let mut resume_boundary: Vec<usize> = Vec::new();
+    let mut stored_hint: Option<String> = None;
+    match &method.algorithm {
+        Algorithm::IF2 { backend, chains, particles, iterations, cooling, cooling_target_iters, loglik_eval, gate, dt_check, .. } => {
+            // clean_eval comes straight from the `[method]` table — it is part
+            // of the fit's identity (folded into the IF2 method's
+            // whole-serialize identity_payload), so it has no CLI override
+            // (gh#189: a CLI override bypassed the run_id and silently
+            // re-scored under the same key). The gate's `--decibans-thresh`
+            // override is applied through `apply_cli_overrides` BEFORE the
+            // identity is taken, so `gate` here already carries it (gh#540
+            // seam).
+            let effective_loglik_eval = loglik_eval.clone();
+            let effective_gate = gate.clone();
 
-    // ── Validate sweeps ───────────────────────────────────────────────────
-    // Validate: swept params must be in [fixed], not [estimate]
-    let fixed_resolved = config.problem.fixed.resolve().unwrap_or_default();
-    for (name, _) in &sweep_specs {
-        if config.problem.estimate.contains_key(name) {
-            out.fail(format!("error: cannot sweep '{}' — it is in [estimate].\n  \
-                       Sweeps override [fixed] parameters. Move '{}' to [fixed] first.",
-                name, name));
-        }
-        if !fixed_resolved.contains_key(name) {
-            out.fail(format!("error: sweep parameter '{}' not found in [fixed].\n  \
-                       Available fixed params: {}",
-                name, fixed_resolved.keys().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
-        }
-    }
-
-    // ── Refuse a scenario that disagrees with [estimate], [fixed] or the sweep
-    // The resolver is the one writer of every parameter value a fit runs at,
-    // and it puts the scenario above both [fixed] and a sweep point (spec
-    // §1.3). On the same parameter that would silently discard what the user
-    // wrote, so the combination is refused before anything is generated or
-    // written: [estimate] whenever the scenario touches an estimated
-    // parameter (the estimate would discard the scenario's value), [fixed]
-    // when the scenario lands on a different value, a sweep whenever the
-    // scenario touches a swept parameter (gh#572, as `simulate` and
-    // `fit predict` refuse it).
-    if let Some(scenario) = config.problem.scenario.as_deref() {
-        let mut refusals: Vec<String> = Vec::new();
-        let estimated: Vec<&str> = config.problem.estimate.keys().map(|k| k.as_str()).collect();
-        let estimate_clash = crate::params_resolver::scenario_estimate_collision(
-            &model, scenario, &estimated,
-            crate::params_resolver::EstimatedBy::FitToml(&fit_path),
-        )
-        .unwrap_or_else(|e| {
-            out.fail(format!("error: {}", e));
-        });
-        refusals.extend(estimate_clash);
-        let fixed_clash = crate::params_resolver::scenario_fixed_collision(
-            &model, scenario, &fixed_resolved, &fit_path,
-        )
-        .unwrap_or_else(|e| {
-            out.fail(format!("error: {}", e));
-        });
-        refusals.extend(fixed_clash);
-        if !sweep_specs.is_empty() {
-            let varied = crate::params_resolver::coordinate_values(
-                sweep_specs.iter().flat_map(|(k, vs)| vs.iter().map(move |v| (k.as_str(), *v))),
-            );
-            let sweep_clash = crate::params_resolver::scenario_coordinate_collision(
-                &model,
-                &crate::sim_job::ScenarioRef::Named(scenario.to_string()),
-                crate::params_resolver::UserCoordinate::Sweep,
-                &varied,
-            )
-            .unwrap_or_else(|e| {
-                out.fail(format!("error: {}", e));
-            });
-            refusals.extend(sweep_clash);
-        }
-        if !refusals.is_empty() {
-            out.fail(format!("error: {}", refusals.join("\n\nerror: ")));
-        }
-    }
-
-    // The fit's partition, from its role declarations. Recorded in each
-    // segment's `fit.meta.json`; nothing above or below reads it to decide
-    // what runs.
-    let fit_roles = resolve_fit_roles(&config.problem, &model, fixed_via, &sweep_specs);
-
-    // Expand Cartesian product of sweep points
-    let sweep_points: Vec<Vec<(String, f64)>> = if sweep_specs.is_empty() {
-        vec![vec![]]
-    } else {
-        let mut points: Vec<Vec<(String, f64)>> = vec![vec![]];
-        for (name, values) in &sweep_specs {
-            let mut next = Vec::new();
-            for pt in &points {
-                for &v in values {
-                    let mut new_pt = pt.clone();
-                    new_pt.push((name.clone(), v));
-                    next.push(new_pt);
-                }
-            }
-            points = next;
-        }
-        points
-    };
-    let has_sweep = sweep_points.len() > 1;
-    if has_sweep {
-        out.say(format_args!("sweep: {} points", sweep_points.len()));
-    }
-
-    // gh#191: gate the model's required capabilities against the method's
-    // declared backend, before any fitting work. `profile` already runs this
-    // check, but `fit run` never did — so a real-compartment (ODE-coupled)
-    // model on a chain_binomial method was silently mis-fit (the filter loops
-    // freeze the real reservoir at its init value). Fail fast with the
-    // actionable message instead.
-    //
-    // The same structural model decides which kernel's band the method's
-    // acceptance diagnostics apply, published in its event log's `begin`.
-    let acceptance_kernel: Option<sim::inference::diagnostic::AcceptanceKernel>;
-    {
-        // `required_capabilities()` is STRUCTURAL (transitions / compartments /
-        // balance) — the parameter VALUES are irrelevant to it. But
-        // `CompiledModel::new` requires every parameter to carry a value, and
-        // estimated parameters carry `value = None` in the IR (their start is
-        // resolved from `[estimate].start` later). So fill any value-less
-        // parameter with a harmless placeholder purely for this capability
-        // scan — without it the gate errored "parameter '<estimated>' has no
-        // value" on every estimate-only fit (gh#191: the gate must not demand
-        // resolved params it doesn't use).
-        let mut cap_model = model.clone();
-        for p in &mut cap_model.parameters {
-            if p.value.resolved_value().is_none() {
-                let placeholder = p.initial_value()
-                    .or_else(|| crate::params_resolver::resolved_bounds(p)
-                        .map(|(lo, hi)| 0.5 * (lo + hi)))
-                    .unwrap_or(1.0);
-                p.value = p.value.with_value(placeholder);
-            }
-        }
-        let compiled = sim::CompiledModel::new(cap_model).unwrap_or_else(|e| {
-            out.fail(format!("error: {:?}", e));
-        }).with_eval_settings(config.problem.config.eval_settings());
-        if let Err(msg) = gate_run_method_against_model(&method.algorithm, &compiled, config.problem.config.dt) {
-            out.fail(format!("error: {}", msg));
-        }
-        acceptance_kernel = methods::acceptance_kernel(&method.algorithm, &compiled);
-        // PGAS runs NUTS only where the compiler emitted rate gradients
-        // (`nuts_active`, the predicate the sampler itself uses); elsewhere it
-        // falls back to Metropolis-within-Gibbs. Say so — and refuse an
-        // explicit `use_nuts = true` the model cannot honour.
-        if let Algorithm::PGAS { use_nuts: true, .. } = &method.algorithm {
-            if !sim::inference::pgas::nuts_active(true, &compiled) {
-                let contents = &config_text;
-                let declared = config_v2::method_declares_key(contents, "use_nuts");
-                // The NUTS tuning settings, inert on the fallback as they are
-                // under `use_nuts = false`.
-                let tuning: Vec<&str> = [
-                    (config_v2::method_declares_key(contents, "max_tree_depth"), "max_tree_depth"),
-                    (config_v2::method_declares_key(contents, "dense_mass"), "dense_mass"),
-                ].into_iter().filter_map(|(on, name)| on.then_some(name))
-                    .chain(nuts_tuning_flags.iter().copied())
-                    .collect();
-                match config_v2::nuts_unavailable(declared, &tuning) {
-                    Ok(note) => out.say(format_args!("{} {note}", crate::out::paint::note_tag())),
-                    Err(e) => {
-                        out.fail(format!("error: {fit_path}: {e}"));
-                    }
-                }
-            }
-        }
-    }
-
-    // gh#604: every key the user typed under `[data.observations]` /
-    // `[data.holdout]` must name a declared observation source. Checked HERE —
-    // before the identity digests below read a single byte — because those
-    // digests open each bound path, so an unbound key would otherwise surface
-    // as "cannot read data file '<key>'", diagnosing a missing file when the
-    // real fault is a binding that names no stream. The motivating case is a
-    // top-level key such as `ic_free` written below the `[data.observations]`
-    // header, which TOML scopes into the table.
-    if let Ok(ds) = config.problem.data_spec() {
-        if let Err(e) = stream_bindings::StreamBindings::resolve(&model, ds) {
-            out.fail(format!("error: {}", e));
-        }
-    }
-
-    // ── Compute the fit-wide identity + sidecar (no fit-root run.json) ──
-    //
-    // The method leaf's run.json lives inside the leaf; the fit as a whole is
-    // the `fits/{stem}-{h8}/` path segment, not a separate record. The
-    // seed-independent parent fit hash computed here is reused by every leaf
-    // as its `fit`-level hash — computing it once avoids the O(cells × full-I/O
-    // rehash) pattern.
-    let fit_start = std::time::Instant::now();
-    // gh#147 (M3.2): the fit identity is a CAS *path segment*
-    // (`fits/{fit}-{h8}/`), not a separate fit-wide `run.json` — so there is no
-    // fit-wide record; the segment is the fit-level home. Fit-level outputs
-    // (synthetic data) live directly under it.
-    // The fit-level identity (the `fit` CAS level) and the directory its
-    // method leaves actually land in. `parent_fit_hash` is the fit-level
-    // `ContentHash` (the same hash `resolve_fit_method` puts on the `fit`
-    // level, and the same one `FitView.fit_hash` reads back from `run.json`),
-    // and `announced_fit_dir` is `fits/{stem}-{h8}/` built from it — so the
-    // path `fit run` announces is exactly where the `{method}-{h8}` leaves
-    // are written.
-    //
-    // Real and synthetic share this one `runid` fit-level digest. A real fit
-    // folds its base `[data]` stream digests; a synthetic fit has no input
-    // data (it generates data per-cell from the model + `[synthetic]`, both
-    // already in the digest), so it hashes with an EMPTY data map. Either way
-    // the container is keyed on the problem + engine, and the per-cell method
-    // leaves resolve their own segment (folding the generated data).
-    let announce_cas_root = crate::run_paths::output_root(None, config.problem.output_dir.as_deref());
-    let announce_stem = crate::hashing::path_stem_slug(&fit_path)
-        .unwrap_or_else(|| "fit".to_string());
-    let announce_ir_version = ir::IR_VERSION.trim().to_string();
-    // Real fits hash the files their `[data]` binds, once: the identity, the
-    // sidecar and every method's provenance read these digests. Synthetic
-    // fits have none (no data digests folded); each synthetic cell hashes
-    // its own generated files below.
-    let fit_data_digests: stream_bindings::BoundDataDigests = match config.problem.data_spec() {
-        Ok(ds) => read_data_digests(ds, &model).unwrap_or_else(|e| {
-            out.fail(format!("error: fit-level identity: {}", e));
-        }),
-        Err(_) => stream_bindings::BoundDataDigests::default(),
-    }
-    .with_tables(&tables);
-    let parent_fit_hash_ch = cas::fit_level_hash(
-        &model,
-        &announce_ir_version,
-        &engine,
-        &config.problem,
-        &fit_data_digests,
-    )
-    .unwrap_or_else(|e| {
-        out.fail(format!("error: fit-level identity: {}", e));
-    });
-    let announced_fit_dir = cas::fit_segment_dir(
-        &announce_cas_root, &announce_stem, &parent_fit_hash_ch);
-    let parent_fit_hash = parent_fit_hash_ch.to_hex();
-    // Synthetic-data generation writes under the same content-addressed
-    // segment.
-    let fit_dir = announced_fit_dir.clone();
-
-    let fit_sidecar = build_fit_sidecar(&config, config_text.as_bytes(), &model, &fit_data_digests)
-        .unwrap_or_else(|e| out.fail(format!("error: {e}")));
-    // gh#896: the identity of the config this run was read from, recorded on
-    // every leaf it writes or reuses (`inputs.config_identities`), so a
-    // `fit.toml` handle names the runs made from the file as it now reads, not
-    // the problem folder's latest archive. Taken from the text resolved, as
-    // `handle::resolve_config` takes it from the file's.
-    let run_config_identity: Option<String> = crate::fit::handle::config_identity(&config_text).ok();
-
-    // The opening block, as a record first: `run.json` keeps it
-    // (`inputs.header`) so `fit summary` can show what this run showed.
-    let run_header = report::RunHeader {
-        config: fit_path.to_string(),
-        method: method.algorithm.method_name().to_string(),
-        model: config.problem.model.camdl.clone(),
-        estimate: config.problem.estimate.keys().cloned().collect(),
-        fixed: config.problem.fixed.resolve().unwrap_or_default().keys().cloned().collect(),
-        starts: starts_resolution.describe(),
-        output: report::display_path(&announced_fit_dir),
-    };
-    out.say(format_args!("fit: {} (method={})", run_header.config, run_header.method));
-    out.say(format_args!("  model:    {}", run_header.model));
-    out.say(format_args!("  estimate: {}", run_header.estimate.join(", ")));
-    out.say(format_args!("  fixed:    {}", run_header.fixed.join(", ")));
-    out.say(format_args!("  starts:   {}", run_header.starts));
-    // Relative to the working directory when the fit lands under it, else
-    // absolute (`report::display_path`): either way there is one base to
-    // read it against, which is what gh#507 asked of this line.
-    out.say(format_args!("  output:   {}", run_header.output));
-
-    // IC-free inference diagnostic: when ic_free = true, make it
-    // visible on the startup block so the user can confirm the PF is
-    // computing log L_c (conditional on y₁) rather than log L. Silent
-    // when ic_free is false or absent. See
-    // docs/dev/proposals/archive/pre-alpha/2026-04-18-ic-free-inference.md.
-    if config.problem.likelihood_objective().skips_first_observation() {
-        let perturb_only_at_t0_params: Vec<&str> = config.problem.estimate.iter()
-            .filter(|(_, spec)| spec.perturb_only_at_t0)
-            .map(|(n, _)| n.as_str())
-            .collect();
-        out.say(format_args!("\n  {} conditioning on y₁",
-            crate::out::paint::stderr().paint("ic-free inference:", crate::out::paint::Style::Info)));
-        // Name every ACTUAL source of the t=0 spread. There are two — a
-        // declared `init { }` law, which every filter draws per particle
-        // (gh#732), and, under IF2, a `perturb_only_at_t0` parameter (gh#364).
-        // Reporting only the second told a user with a law that the list was
-        // empty, i.e. that there was no spread — the one thing this line exists
-        // to confirm.
-        let mut sources: Vec<String> = Vec::new();
-        let drawn: Vec<&str> = model.initial_conditions.iter()
-            .filter(|(_, s)| s.is_law())
-            .map(|(name, _)| name.as_str())
-            .collect();
-        if !drawn.is_empty() {
-            sources.push(format!("`init {{ }}` laws on [{}]", drawn.join(", ")));
-        }
-        if !perturb_only_at_t0_params.is_empty() {
-            sources.push(format!("perturb_only_at_t0 params [{}] (if2 only)",
-                perturb_only_at_t0_params.join(", ")));
-        }
-        out.say(format_args!("    - initial state spread from: {}", sources.join("; ")));
-        out.say("    - log-likelihood accumulation from t = 2 (y₁ reweights and resamples only)");
-    }
-
-    // ── Build the replicate grid: (dataset_idx, fit_seed) cells ──────────
-    //
-    // Four canonical modes, all routed through the same grid. Each cell is a
-    // content-addressed fit (its own FitDigest base).
-    //   Mode                           synthetic?  fit_seeds     Cells
-    //   Single fit                     no          None/scalar   1
-    //   Start-sensitivity              no          list of M     M  (seed levels, one base)
-    //   Parameter recovery             yes         None/scalar   N  (one base per dataset)
-    //   Parameter recovery × starts    yes         list of M     N × M
-    //
-    // For synthetic modes the datasets are generated once up front and the
-    // per-cell DataSpec is materialised from their on-disk paths. See
-    // docs/dev/proposals/2026-04-17-synthetic-fit-replicates.md. A file that
-    // declares `[data]` beside `[synthetic]` is a real-data fit here: the
-    // truth is `fit recovery`'s to read (proposal §8, item 19).
-    //
-    // Multi-seed fits produce sibling CAS cells under one `fit`-level base
-    // (the seed is a factored `runid` level), with no cross-cell aggregator.
-    // A cross-seed roll-up view (per-method chain-R̂ across fit_seeds) is a
-    // derived index, deferred to M4 (gh#154) — the same home as the profile
-    // and grid roll-ups. The same applies to `dataset_idx` for synthetic fits.
-    // `fit_seeds` in the file replaces the single base seed, so `--seed`
-    // beside it would be read nowhere.
-
-    let synthetic_datasets: Vec<synthetic::SyntheticDataset> = match &config.problem.synthetic {
-        Some(spec) if config.problem.is_synthetic_fit() => {
-            let datasets = synthetic::generate_synthetic_datasets(
-                spec,
-                // Pre-compiled IR (compiled once above) so per-dataset generation
-                // doesn't re-invoke camdlc.
-                config.problem.compiled_model().unwrap_or_else(|e| out.fail(format!("error: {e}"))),
-                &fit_dir,
-                config.problem.config.dt,
-                config.problem.config.eval_settings(),
-                emit_every.as_ref(),
+            let mut run_config = runner::FitRunConfig::build(
+                sweep_config,
+                Some(&method.algorithm),
+                *chains, *particles, *iterations,
+                *cooling, *cooling_target_iters,
+                // gh#506: per-chain dispersion is the starts rule's job;
+                // the base point carries `[estimate].start`.
+                seed, false,
             ).unwrap_or_else(|e| {
-                out.fail(format!("error: synthetic-data generation failed: {}", e));
+                abandon_method(out, format!("error building run config: {e}"))
             });
-            out.say(format_args!("synthetic: generated {} dataset{} under {}/synthetic/data/",
-                datasets.len(),
-                if datasets.len() == 1 { "" } else { "s" },
-                fit_dir.display()));
-            datasets
-        }
-        _ => Vec::new(),
-    };
+            run_config.loglik_eval = effective_loglik_eval.clone();
+            run_config.gate = effective_gate.clone();
 
-    // A cell is one (data_source, fit_seed) pair. Real-data cells carry
-    // `dataset_idx = None` and leave the existing `[data]` in place;
-    // synthetic cells carry `Some(idx)` and replace `[data]` with a
-    // DataSpec pointing at the generated TSV.
-    struct Cell {
-        dataset_idx: Option<usize>,
-        fit_seed: u64,
-        // None → keep the problem's data; Some → overwrite with synthetic path.
-        data_override: Option<config_v2::DataSpec>,
-    }
-    let cells: Vec<Cell> = if synthetic_datasets.is_empty() {
-        fit_seeds.iter().map(|&s| Cell {
-            dataset_idx: None,
-            fit_seed: s,
-            data_override: None,
-        }).collect()
-    } else {
-        // Synthetic generation writes one file per observation stream, keyed
-        // by the `source` the loader binds it to — the same `[data.observations]`
-        // shape a real fit declares, so the generated dataset is read back
-        // through the loader the real data uses (gh#831).
-        let mut out = Vec::with_capacity(synthetic_datasets.len() * fit_seeds.len());
-        for ds in &synthetic_datasets {
-            let observations: indexmap::IndexMap<String, String> = ds.files.iter()
-                .map(|(source, path)| (source.clone(), path.to_string_lossy().to_string()))
-                .collect();
-            let data_spec = config_v2::DataSpec {
-                file: None,
-                observations,
-                holdout_after: None,
-                holdout: None,
-                // Generated data replaces the observations only: the model's
-                // external inputs stay bound to the files the config names.
-                tables: config.problem.data.as_ref().map(|d| d.tables.clone()).unwrap_or_default(),
-            };
-            for &fs in &fit_seeds {
-                out.push(Cell {
-                    dataset_idx: Some(ds.idx),
-                    fit_seed: fs,
-                    data_override: Some(data_spec.clone()),
-                });
-            }
-        }
-        out
-    };
-
-    let total_cells = cells.len();
-    // gh#896: a label names one run. An invocation that writes several leaves
-    // has no one run to give it to, so it is refused before any work.
-    if let Some(label) = &validated_label {
-        let n_leaves = total_cells * sweep_points.len();
-        if n_leaves > 1 {
-            out.fail(format!(
-                "error: --label \"{label}\" names one run, but this invocation writes {n_leaves} \
-                 method leaves ({} fit seed(s) × {} dataset(s) × {} sweep point(s)).\n  \
-                 Run without --label, then label the run you mean: \
-                 camdl label <run_id> \"{label}\"",
-                fit_seeds.len(),
-                synthetic_datasets.len().max(1),
-                sweep_points.len(),
-            ));
-        }
-    }
-    if total_cells > 1 {
-        out.say(format_args!("grid: {} cell{}", total_cells,
-            if total_cells == 1 { "" } else { "s" }));
-    }
-
-    // ── gh#147 (M3.2): content-addressed store root + fit-level label ──
-    // Fits write to `<output_root>/fits/{fit}-{h8}/{method}-{h8}/seed_N-{h8}/`
-    // (symmetric to sims under `<output_root>/sims/`). The fit level is a
-    // path segment, so there is no separate fit-wide record.
-    let cas_root = crate::run_paths::output_root(None, config.problem.output_dir.as_deref());
-    let fit_stem = crate::hashing::path_stem_slug(&fit_path)
-        .unwrap_or_else(|| "fit".to_string());
-    let ir_version_str = ir::IR_VERSION.trim().to_string();
-    // gh#147 (M3.2): fit segments whose fit-level sidecar (label + model hash
-    // + `fit.toml.original` and `fit.resolved.toml`) has been written this
-    // run. The fit level is a path segment with no CAS record, so this sidecar
-    // is the fit-wide home `walk_fits_root` / `table_row` read; write it once
-    // per segment (each sweep point keys its own FitDigest → its own segment).
-    let mut written_fit_segments: std::collections::HashSet<std::path::PathBuf> =
-        std::collections::HashSet::new();
-
-    // The rule every cell draws from and folds into its identity: the sourced
-    // resolution taken above, or the bare rule (declared or defaulted) now.
-    let starts_rule = method.starts().cloned().unwrap_or_else(|e| {
-        out.fail(format!("error: {}", e));
-    });
-    let resolved_starts = early_resolved_starts.unwrap_or_else(|| {
-        chain_starts::resolve_starts(&starts_rule, allow_nonconverged_source).unwrap_or_else(|e| {
-            out.fail(format!("error: {}", e));
-        })
-    });
-    // gh#896: the deps the file's own starts rule folds — the same as this
-    // run's when no `--starts` override changed the rule; `None` when the
-    // file's own source cannot be resolved (then the file names no run).
-    let file_starts_deps: Option<Vec<runid::inputs::ArtifactRef>> = match file_method.starts() {
-        Ok(rule) if *rule == starts_rule => {
-            Some(resolved_starts.source.iter().map(|s| s.dep.clone()).collect())
-        }
-        Ok(rule) => chain_starts::resolve_starts(rule, true)
-            .ok()
-            .map(|r| r.source.iter().map(|s| s.dep.clone()).collect()),
-        Err(_) => None,
-    };
-    // gh#896: the run a sourced rule read, beside the handle as written. The
-    // source's run id is already identity through `deps`; this is the
-    // readable link `fit summary` prints, so no later label can obscure what
-    // the run was started from.
-    let starts_source_record: serde_json::Value = match &resolved_starts.source {
-        None => serde_json::Value::Null,
-        Some(src) => serde_json::json!({
-            "handle": starts_rule.source(),
-            // gh#1056: the source chains the rows were drawn from; absent
-            // for the whole cloud. Identity already carries it (the method
-            // payload's `starts`); this is the readable record.
-            "chains": starts_rule.chains().map(crate::fit::starts::kept_ids),
-            // A stored run's id; none for a file named directly, or a
-            // directory with no run.json, whose dep is the file's digest.
-            "run_id": src.leaf_dir.as_ref()
-                .filter(|d| d.join("run.json").is_file())
-                .map(|_| src.dep.run_id.to_hex()),
-            "artifact": src.dep.artifact,
-        }),
-    };
-    if let Some(src) = &resolved_starts.source {
-        match &src.leaf_dir {
-            Some(leaf) => out.say(format_args!(
-                "  starts source: {} ({})",
-                leaf.display(),
-                src.file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
-            )),
-            None => out.say(format_args!("  starts source: {}", src.file.display())),
-        }
-    }
-
-    // A pfilter scores one θ (`Method::resolve_pfilter_point`), so a point
-    // source must name every estimated parameter: the draw would otherwise
-    // fill a missing one from a bounds-uniform draw.
-    if matches!(method.algorithm, Algorithm::PFilter { .. }) {
-        if let Some(src) = &resolved_starts.source {
-            let estimated: Vec<&str> = config.problem.estimate.keys().map(|k| k.as_str()).collect();
-            if let Err(e) = refuse_pfilter_point_source_missing(&resolved_starts.rule, &src.file, &estimated) {
-                out.fail(format!("error: {}: {e}", starts_origin));
-            }
-        }
-    }
-
-    // ── Execute grid: cell × sweep_point ──
-    for (cell_i, cell) in cells.iter().enumerate() {
-        let mut cell_problem = config.problem.clone();
-        if let Some(spec) = &cell.data_override {
-            // Materialise the synthetic cell's data path. `[synthetic]`
-            // stays set — `data_spec()` returns `data` when both are
-            // present, which is the per-cell behaviour we want.
-            cell_problem.data = Some(spec.clone());
-        }
-        let seed = cell.fit_seed;
-        if total_cells > 1 {
-            match cell.dataset_idx {
-                Some(idx) => out.say(format_args!("\n━━━ cell {}/{}: ds_{:02} × fit_seed={} ━━━",
-                    cell_i + 1, total_cells, idx, seed)),
-                None      => out.say(format_args!("\n━━━ cell {}/{}: fit_seed={} ━━━",
-                    cell_i + 1, total_cells, seed)),
-            }
-        }
-
-    // Execute: sweep_point
-    for (pt_idx, sweep_point) in sweep_points.iter().enumerate() {
-        // The problem with the swept values applied to [fixed]. The method is
-        // unchanged by a sweep.
-        let mut sweep_config = cell_problem.clone();
-        for (name, val) in sweep_point {
-            sweep_config.fixed.values.insert(name.clone(), *val);
-        }
-
-        // IC4 in 2026-04-19 inference review batch 3: reject
-        // prior × transform combinations that silently produce a
-        // different prior than the user wrote (log_normal on
-        // Transform::Identity → Normal; log_normal on Logit → logit-
-        // normal; etc.). Runs after sweep-value substitution since
-        // sweep can change a param's role, but the prior/transform
-        // binding itself is fixed across sweep points — this is
-        // equivalent to a one-shot check at config load, but
-        // putting it here means every cell sees its own validation.
-        if let Err(e) = runner::validate_prior_transform_compat(&sweep_config.estimate, &model) {
-            out.fail(format!("error: {}", e));
-        }
-
-        if has_sweep {
-            let slug: String = sweep_point.iter()
-                .map(|(k, v)| format!("{}_{:.3}", k, v))
-                .collect::<Vec<_>>()
-                .join("__");
-            if pt_idx == 0 {
-                out.say("");
-            }
-            out.say(format_args!("═══ sweep point {}/{}: {} ═══", pt_idx + 1, sweep_points.len(), slug));
-        }
-
-        let method_name = method.algorithm.method_name();
-        out.say(format_args!("\n── method: {} ──", method_name));
-
-        // The cell's data digests: the fit's own, read once above, or a
-        // synthetic cell's generated files, read here.
-        let data_spec = sweep_config.data_spec().unwrap_or_else(|e| {
-            out.fail(format!("error: {}", e));
-        });
-        let data_digests = match &cell.data_override {
-            None => fit_data_digests.clone(),
-            Some(_) => read_data_digests(data_spec, &model).unwrap_or_else(|e| {
-                out.fail(format!("error: {}", e));
-            }).with_tables(&tables),
-        };
-        // The method level's `deps`: the content of a sourced `starts` rule's
-        // file, so a regenerated source re-keys this run (gh#541), plus the
-        // `--resume` base.
-        let mut deps: Vec<runid::inputs::ArtifactRef> =
-            resolved_starts.source.iter().map(|s| s.dep.clone()).collect();
-        // The resume key is taken over these deps only — without the resume
-        // base's, which the base's own key never saw (`cas::resume_guard`).
-        let starts_deps = deps.clone();
-
-        // gh#147 (M3.2): --resume <base ref> reads a prior leaf read-only; the
-        // resumed run writes a distinct leaf keyed on the new target_length
-        // plus a dep on the base. Resolve the ref and fold the dep here; the
-        // chain state is copied into the new leaf after the claim below.
-        let resume_base: Option<std::path::PathBuf> = resume.as_deref().map(|r| {
-            let base = resolve_base_ref(r, &cas_root).unwrap_or_else(|| {
-                out.fail(format!("error: --resume base '{}' not found (run_id prefix or leaf path)", r));
-            });
-            // A base whose chain directories count from 1 would hand chain k
-            // the state of chain k - 1 and find none for the last chain.
-            // Refused here, naming the base, before a new leaf is claimed or
-            // any chain state is copied into one (gh#990).
-            if let Err(e) = crate::chain_index::refuse_one_based_layout(&base) {
-                out.fail(format!("error: --resume: {e}"));
-            }
-            // A resume continues a completed result. A run that died before
-            // its commit can already hold chain checkpoints (each chain writes
-            // its state when it ends, before the leaf commits); an extension of
-            // it would name a parent that never completed. A directory that is
-            // no store leaf at all is keyed by its contents (`cas_resume_dep`).
-            match crate::leaf_use::read(&base) {
-                Ok(Some(leaf)) => if let Err(e) = crate::leaf_use::require_completed(&leaf) {
-                    out.fail(format!("error: --resume: {e}"));
-                },
-                Ok(None) => {}
-                Err(e) => out.fail(format!("error: --resume: {e}")),
-            }
-            // A checkpoint is never served as a completed result. Resuming
-            // toward a target the base has already reached would address a
-            // leaf for that target holding the base's whole, longer chain —
-            // the shorter computation's identity on the longer one's result.
-            // At the base's own target the base is the result; below it, no
-            // stored chain is that computation's.
-            let target = method.algorithm.cas_target_length() as usize;
-            if let Some((done, unit)) = resumed_chain::checkpoint_length(&base, &method.algorithm) {
-                if target <= done {
-                    out.fail(format!(
-                        "error: --resume: the base {} already holds {done} {unit}, and this fit's \
-                         target is {target}. A resume extends its base to a longer target; the \
-                         base is itself the completed fit at its own length, and a shorter one \
-                         is a fresh run without --resume.",
-                        base.display()));
-                }
-            }
-            match cas::cas_resume_dep(&base) {
-                Ok(Some(dep)) => deps.push(dep),
-                Ok(None) => {}
-                Err(e) => out.fail(format!("error: --resume base: {e}")),
-            }
-            base
-        });
-
-        // ── CAS identity + claim ──
-        // sweep_config is the authoritative problem inside the sweep loop.
-        let ctx = cas::FitMethodCtx {
-            model: &model,
-            fit_stem: &fit_stem,
-            ir_version: &ir_version_str,
-            engine: &engine,
-            problem: &sweep_config,
-            data: &data_digests,
-            method: &method,
-            seed,
-            deps: deps.clone(),
-        };
-        let resolved = cas::resolve_fit_method(&ctx).unwrap_or_else(|e| {
-            out.fail(format!("error: fit-method identity: {}", e));
-        });
-        // gh#896: the config identity is recorded on this run only when it is
-        // the run `fit run <file>` with no CLI options keys: this cell's
-        // identity recomputed from the file's own method, the file's starts
-        // source, and the problem before `--sweep`, must equal this run's.
-        // Every identity-bearing option (`--starts`, sampler knobs,
-        // `--decibans-thresh`, `--sweep`, `--resume`) shows up as a different
-        // run_id rather than through a list of flags. Two inputs cannot be
-        // recomputed here: a seed the file does not run has no file cell, and
-        // `--emit-every` changes the [synthetic] data generated before this
-        // point, which the file alone would generate without it.
-        // The problem the file alone resolves to: this cell's, without what
-        // the command line set in it (`--allow-forcing-extrapolation`).
-        let file_problem = problem_flags.unfold(&cell_problem);
-        let file_run_id: Option<runid::ContentHash> =
-            if emit_every.is_some() || !file_seeds.contains(&seed) {
-                None
-            } else {
-                file_starts_deps.as_ref().and_then(|file_deps| {
-                    cas::resolve_fit_method(&cas::FitMethodCtx {
-                        model: &model,
-                        fit_stem: &fit_stem,
-                        ir_version: &ir_version_str,
-                        engine: &engine,
-                        problem: &file_problem,
-                        data: &data_digests,
-                        method: &file_method,
-                        seed,
-                        deps: file_deps.clone(),
-                    })
-                    .ok()
-                    .map(|r| r.run_id)
-                })
-            };
-        let cell_config_identity: Option<&String> = run_config_identity
-            .as_ref()
-            .filter(|_| file_run_id == Some(resolved.run_id));
-        // A run read from the file but changed by a command-line option is not
-        // the file's run; it records the file's identity apart, so a `fit.toml`
-        // handle can name it when it refuses to stand in for the file's run.
-        let options_config_identity: Option<&String> = run_config_identity
-            .as_ref()
-            .filter(|_| file_run_id != Some(resolved.run_id));
-        // gh#583 item G: the `--resume` key is this identity less its
-        // extension dimension — the same levels, not a second hand-listed hash.
-        let resume_guard = cas::resume_guard(&cas::FitMethodCtx { deps: starts_deps, ..ctx })
-            .unwrap_or_else(|e| {
-                out.fail(format!("error: fit-method resume key: {}", e));
-            });
-        let cas_path = runid::store_path(&cas_root, runid::ArtifactKind::FitMethod, &resolved.levels);
-        // gh#147 (M3.2): write the fit-level sidecar once per fit segment
-        // (`cas_path`'s grandparent: `.../fits/{stem}-{h8}/`). Done before the
-        // cache-hit short-circuit below so the label/archive stay current even
-        // on an all-cache-hit rerun.
-        if let Some(seg) = cas_path.parent().and_then(|p| p.parent()) {
-            if written_fit_segments.insert(seg.to_path_buf()) {
-                // gh#147 (M3.2): the fit-level provenance sidecar — a faithful
-                // readable projection of the fit-wide provenance `build_fit_run`
-                // computed (resolved_priors with gh#75 sources,
-                // estimated/fixed/data_hashes/model_identity). Derived provenance,
-                // never identity-bearing (the priors are already hashed into the
-                // FitDigest); written once per segment, even on a cached rerun.
-                //
-                // gh#587: `fixed` is this segment's, not the base config's. A
-                // sweep point overrides `[fixed]` values and gets a segment of
-                // its own, so the base sidecar recorded a value the segment
-                // never held — and `simulate --draws … --fit <segment>`
-                // backfills fixed parameters from exactly this map.
-                let mut seg_sidecar = fit_sidecar.clone();
-                // The segment's parameter resolution: every parameter's
-                // source and value and every override of one tier's value by
-                // another's, recorded here and reported once, before any method
-                // runs (each method's `FitRunConfig::build` resolves the same
-                // problem and reports nothing). A resolution that fails is
-                // left to that build, which reports it as the error it is.
-                // The resolver is the one writer of the values the fit runs
-                // at, so what is recorded is what the chains start from.
-                let fp = runner::resolve_fit_parameters(&sweep_config, seed);
-                if let Ok(fp) = &fp {
-                    crate::params_resolver::emit_notices(&out, &[&fp.resolved]);
-                    seg_sidecar.parameters_provenance =
-                        crate::run_meta::ParameterProvenance::of_all(&fp.resolved.params);
-                }
-                // The segment's partition is the cell's: a swept parameter is
-                // fixed at this point's value. `estimated` and `fixed` are
-                // generated from it.
-                let roles = crate::roles::RoleRecord::new(
-                    fit_roles.as_ref().map_err(String::clone)
-                        .and_then(|p| p.cell(sweep_point))
-                        .and_then(|cell| fp.as_ref().map(|fp| cell.record(&fp.resolved))
-                            .map_err(String::clone)),
-                    || unpartitioned_role_fields(&sweep_config),
-                );
-                seg_sidecar.estimated = roles.estimated;
-                seg_sidecar.fixed = roles.fixed;
-                seg_sidecar.partition = Some(roles.partition);
-                // The folder keeps the text read once, as written, and the
-                // configuration its fits ran under: that text with what the
-                // command line set in the problem half (gh#1268) and the
-                // folder's own `[fixed]` values: a sweep point's applied, a
-                // `from_file` read as the fit reads it.
-                let folder_fixed = sweep_config.fixed.resolve()
-                    .unwrap_or_else(|e| out.fail(format!("error: {e}")));
-                let resolved_config = run_config::resolved_config_text(
-                    &config_text, problem_flags, &folder_fixed,
+            std::fs::create_dir_all(&method_dir).unwrap_or_else(|e| {
+                abandon_method(out, format!("error creating {}: {e}", method_dir.display()),
                 )
-                .unwrap_or_else(|e| out.fail(format!("error: {e}")));
-                if let Err(e) = crate::run_meta::write_fit_sidecar_with_config(
-                    seg,
-                    std::path::Path::new(&fit_path),
-                    &config_text,
-                    &resolved_config,
-                    std::path::Path::new(&sweep_config.model.camdl),
-                    &seg_sidecar,
-                ) {
-                    out.say(format_args!("warning: cannot write fit-level sidecar {}: {}", seg.display(), e));
-                }
-                // The bytes each external input was bound to, read once at
-                // resolution: what a replay of this fit binds.
-                if let Err(e) = crate::run_meta::store_bound_inputs(seg, &tables) {
-                    out.fail(format!("error: cannot store the fit's bound input files in {}: {e}",
-                        seg.display()));
-                }
-                // gh#322: archive the compiled base-model IR in the fit segment so
-                // downstream verbs (`fit predict`) are self-contained and the run
-                // is portable — they resolve the model from this archive rather
-                // than recompiling the loose `.camdl`, which may have moved. An
-                // artifact addition, identity-neutral (not a hashed level; the
-                // sim leaf has its own `model.ir.json`). The base model IR is
-                // structurally identical across sweep cells (a sweep overrides
-                // parameter *values* at resolve time), so one archive per segment.
-                if let Some(ir_src) = config.problem.compiled_ir.as_deref() {
-                    let dest = seg.join("model.ir.json");
-                    match std::fs::read(ir_src) {
-                        Ok(bytes) => {
-                            if let Err(e) = std::fs::write(&dest, &bytes) {
-                                out.say(format_args!("warning: cannot archive model IR {}: {}",
-                                    dest.display(), e));
-                            }
-                        }
-                        Err(e) => out.say(format_args!(
-                            "warning: cannot read compiled IR {} to archive: {}", ir_src, e)),
-                    }
-                }
-                // Archive the model's display render (`model.render.json`) and
-                // the flow graph (`model.graph.json`) beside the IR so a viewer
-                // (camdl-scope) can show the model's math without recompiling.
-                // Best-effort + identity-neutral, like the IR archive above; a
-                // render failure never aborts the fit.
-                //
-                // gh#536: guarded on the model being SOURCE. `camdlc render`
-                // does not read IR, and `[model] camdl` accepts a compiled
-                // `.ir.json` — several tests fit against one. Unguarded, every
-                // such fit printed "parse error in …/sir.ir.json" twice, which
-                // reads as "your compiled IR is malformed" when nothing is
-                // wrong. gh#496 fixed exactly this for the grid writer and reasoned
-                // that the fit path was safe because `config.model.camdl` "is
-                // source by construction"; it is not. One guard over both
-                // blocks, since they share the precondition.
-                if !crate::util::model_is_camdl_source(&config.problem.model.camdl) {
-                    out.say("note: model given as compiled IR; skipping model.render.json / \
-                         model.graph.json (pass the .camdl source to archive the display render)");
+            });
+
+            let t0 = std::time::Instant::now();
+            // Per-chain starting points, through the one seam every runner
+            // draws from, under the resolved `starts` rule.
+            let drawn = runner::draw_chain_starts_for(
+                &run_config, &sweep_config.estimate, resolved_starts, *chains, seed,
+            ).unwrap_or_else(|e| abandon_method(out, format!("error: {e}")));
+            runner::refuse_starts_on_an_end(&run_config, &drawn)
+                .unwrap_or_else(|e| abandon_method(out, format!("error: {e}")));
+            // gh#887: a spread start the filter cannot score is redrawn,
+            // up to MAX_START_ATTEMPTS, before any chain runs; every
+            // attempt is on the record below.
+            let drawn = runner::preflight_spread_starts(
+                out,
+                &run_config, &sweep_config.estimate, resolved_starts, drawn, seed,
+            ).unwrap_or_else(|e| abandon_method(out, format!("error: {e}")));
+            let per_chain_params: Vec<Vec<sim::inference::types::EstimatedParam>> =
+                drawn.to_estimated_params(&run_config.estimated_params);
+            // The audit sidecar, captured before the first filter pass.
+            runner::record_chain_starts(out, &method_dir, &run_config, &drawn);
+            let chain_init_source = drawn.rule.spelled();
+            let chain_starts_kind = drawn.rule.kind();
+            let method_dir_str = method_dir.to_string_lossy();
+            let chain_results = runner::run_chains_with_per_chain_params(
+                out,
+                &run_config, Some(&per_chain_params), collector,
+                Some(method_dir_str.as_ref()), heartbeat)
+                .unwrap_or_else(|e| abandon_method(out, format!("error: {e}")));
+            let elapsed = t0.elapsed();
+            // A chain skipped mid-run started from an accepted start, so
+            // the file written before the run calls it `accepted`. Write
+            // it again marking each such chain `skipped`: the file is the
+            // record of what every chain did.
+            if !chain_results.skipped.is_empty() {
+                let drawn = drawn.clone().with_skipped(chain_results.skipped.clone());
+                runner::record_chain_starts(out, &method_dir, &run_config, &drawn);
+            }
+
+            // Write outputs
+            let param_names: Vec<String> = model.parameters.iter().map(|p| p.name.clone()).collect();
+            runner::write_chain_outputs(
+                &method_dir.to_string_lossy(), &chain_results.results,
+                &run_config.estimated_params, &param_names,
+                &run_config.base_params, &run_config.compiled,
+                Some(&chain_results.loglik_eval),
+            ).unwrap_or_else(|e| out.say(format_args!("warning: {}", e)));
+            runner::write_clean_eval_tsv(
+                &method_dir.to_string_lossy(),
+                &chain_results.loglik_eval, &run_config.estimated_params,
+            ).unwrap_or_else(|e| out.say(format_args!("warning: {}", e)));
+            runner::write_run_root_final_params(
+                &method_dir.to_string_lossy(),
+                &chain_results.loglik_eval, &run_config.estimated_params,
+                &param_names, &run_config.base_params, &run_config.compiled,
+            ).unwrap_or_else(|e| out.say(format_args!("warning: {}", e)));
+            runner::write_iteration_trace(&method_dir.to_string_lossy(), &chain_results.results)
+                .unwrap_or_else(|e| out.say(format_args!("warning: {}", e)));
+
+            // Write fit_state.toml — the leaf's result record.
+            // Source params from the clean-eval winner θ̂ (GH #16) so
+            // mle_params.toml and final_params.toml agree, and so a
+            // `from_mle` start from this leaf lands in the basin clean-eval
+            // actually picked.
+            let winner_theta = chain_results.winner_theta();
+            let start_values = runner::collect_all_params(
+                winner_theta, &run_config.estimated_params, &run_config.model,
+                &run_config.base_params, &run_config.compiled,
+            );
+
+            // Post-fit Richardson dt-convergence check at θ̂
+            // (gh#52). Auto-runs when `dt_check.enabled = true`
+            // (default); evaluates loglik(θ̂; dt) on a halving
+            // ladder and warns when the MLE is discretization-
+            // dependent. Catches the silent-wrong-answer mode
+            // where coarse dt creates a fake basin that synth-
+            // recovery can't detect (it shares the same dt).
+            // See docs/dev/proposals/2026-05-07-richardson-dt-check.md.
+            // --no-dt-check / --dt-check-halvings are applied through
+            // `apply_cli_overrides` BEFORE the identity is taken, so
+            // `dt_check` here already carries them (gh#540 seam — the
+            // result is stored in fit_state.toml, so the knobs are
+            // identity-defining). --dt-check-strict is resolved into the
+            // stored threshold the same way (gh#730).
+            let effective_dt_check = dt_check.clone();
+            // Grouped to spell its mnemonic, not in equal-width groups.
+            #[allow(clippy::unusual_byte_groupings)]
+            let dt_check_seed = seed.wrapping_add(0xd7c4ec_5eed); // "dtchec seed"
+            let dt_check_result = dt_check::run_richardson_ladder(
+                &run_config,
+                winner_theta,
+                &effective_dt_check,
+                *backend,
+                &dt_check::DtCheckInherits {
+                    n_particles:  effective_loglik_eval.n_particles,
+                    n_replicates: effective_loglik_eval.n_replicates,
+                    combine:      effective_loglik_eval.combine,
+                },
+                dt_check_seed,
+            )
+            .unwrap_or_else(|e| abandon_method(out, format!("error: {e}")));
+            dt_check::print_terminal_report(out, &dt_check_result);
+            let fit_state = state::FitState {
+                method: method_name.to_string(),
+                seed,
+                input_hash: None,
+                camdl_version: Some(crate::version::VERSION_SHORT.into()),
+                best_loglik: chain_results.best_loglik,
+                initial_loglik: f64::NEG_INFINITY,
+                best_chain: chain_results.best_chain,
+                n_chains: *chains,
+                // The chains that reached the end. Fewer than `n_chains`
+                // makes the gate verdict `incomplete` (`gating::assess_if2`).
+                n_good_chains: Some(chain_results.results.len()),
+                start_values,
+                loglik_type: Some(loglik::LoglikType::If2),
+                acceptance_rate: None,
+                tail_chain_agreement: chain_results.chain_agreement.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+                perturb_only_at_t0_params: run_config.estimated_params.iter()
+                    .filter(|p| p.perturb_only_at_t0)
+                    .map(|p| p.name.clone()).collect(),
+                chain_logliks: chain_results.results.iter()
+                    .map(|(_, r)| r.final_loglik).collect(),
+                chain_eval_logliks: chain_results.chain_eval_logliks(),
+                chain_eval_ids: chain_results.chain_eval_ids(),
+                chain_eval_ses: chain_results.chain_eval_ses(),
+                // Persist the gate / clean-eval config that was
+                // *actually in force* — `effective_gate` and
+                // `effective_loglik_eval` above already collapsed the
+                // priority chain (CLI flag > `[method]` table > defaults).
+                // `summary` reads these so its verdict line reports
+                // against the threshold the run was judged by, not
+                // whatever `fit.toml` says at summary-time.
+                // See proposal §Phase 3.
+                resolved_gate: Some(effective_gate.clone()),
+                resolved_loglik_eval: Some(effective_loglik_eval.clone()),
+                chain_init_source: Some(chain_init_source.clone()),
+                chain_starts_kind: Some(chain_starts_kind),
+                dt_check: if matches!(dt_check_result.verdict,
+                    dt_check::DtCheckVerdict::Skipped)
+                {
+                    None  // skipped → omit the block, mirroring legacy semantics
                 } else {
-                match crate::util::render_model_json(std::path::Path::new(&config.problem.model.camdl)) {
-                    Ok(json) => {
-                        let dest = seg.join("model.render.json");
-                        if let Err(e) = std::fs::write(&dest, &json) {
-                            out.say(format_args!("warning: cannot archive model render {}: {}",
-                                dest.display(), e));
-                        }
-                    }
-                    Err(e) => out.say(format_args!("warning: cannot render model for archive: {}", e)),
-                }
-                // Archive the structured flow graph (`model.graph.json`) beside
-                // the display render so a viewer can draw the compartmental flow
-                // diagram. Same best-effort, identity-neutral treatment.
-                match crate::util::render_model_graph_json(std::path::Path::new(&config.problem.model.camdl)) {
-                    Ok(json) => {
-                        let dest = seg.join("model.graph.json");
-                        if let Err(e) = std::fs::write(&dest, &json) {
-                            out.say(format_args!("warning: cannot archive model graph {}: {}",
-                                dest.display(), e));
-                        }
-                    }
-                    Err(e) => out.say(format_args!("warning: cannot render model graph for archive: {}", e)),
-                }
-                }
-            }
-        }
-        let store = runid::FsCasStore::new(&cas_root);
-        // The run's inputs (`run.json` `inputs`, recorded, never hashed): what
-        // the run was asked to do, written with the claim so a leaf that fails
-        // or is still running records them too. `finalize` adds what only the
-        // run can tell (best log-likelihood and chain, wall time).
-        //
-        // A declared `start` that the chosen starts rule discards (gh#506
-        // follow-up, gh#881) is recorded here and said below, once the method
-        // is recorded (`report::Check::Starts`).
-        let unused_starts: Vec<String> = if starts_rule.ignores_base_point(method.algorithm.chains()) {
-            sweep_config.estimate.iter()
-                .filter(|(_, spec)| spec.start.is_some())
-                .map(|(n, _)| n.clone())
-                .collect()
-        } else {
-            Vec::new()
-        };
-        let algo_tag = method.algorithm.method_name();
-        let backend_tag = method.algorithm.backend().as_str();
-        let algo_json = match &method.algorithm {
-            Algorithm::IF2 { chains, particles, iterations, cooling, .. } =>
-                serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "chains": chains, "particles": particles, "iterations": iterations, "cooling": cooling }),
-            Algorithm::PGAS { chains, particles, sweeps, .. } =>
-                serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "chains": chains, "particles": particles, "sweeps": sweeps }),
-            Algorithm::PMMH { chains, particles, iterations, .. } =>
-                serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "chains": chains, "particles": particles, "iterations": iterations }),
-            Algorithm::Mh { chains, iterations, .. } =>
-                serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "chains": chains, "iterations": iterations }),
-            Algorithm::PFilter { particles, replicates, .. } =>
-                serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "particles": particles, "replicates": replicates }),
-            Algorithm::NlSbplx(c) | Algorithm::NlBobyqa(c) | Algorithm::NlLbfgs(c) =>
-                serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "chains": c.chains, "tolerance": c.tolerance, "max_evals": c.max_evals }),
-        };
-        // gh#901: no `stage` key. It held exactly `algo_tag` — the method's
-        // own name — so the leaf carried the same string twice under two
-        // vocabularies, and `FitMethodView` now reads the label off `method`.
-        let run_inputs = serde_json::json!({
-            "method": algo_tag,
-            "backend": backend_tag,
-            "seed": seed,
-            "n_chains": method.algorithm.chains(),
-            "algorithm": algo_json,
-            // gh#747: the binomial sampler this leaf's filters drew with, for a
-            // reader that continues them (`fit predict --mode forecast`). Absent
-            // for a method that runs no chain-binomial filter.
-            "binomial": match &method.algorithm {
-                Algorithm::IF2 { .. } | Algorithm::PGAS { .. } | Algorithm::PMMH { .. }
-                | Algorithm::PFilter { .. } => serde_json::to_value(method.algorithm.binomial())
-                    .unwrap_or(serde_json::Value::Null),
-                _ => serde_json::Value::Null,
-            },
-            "starts": starts_rule.spelled(),
-            "chain_starts_kind": starts_rule.kind().as_str(),
-            "fit_hash": resolved.levels.first().map(|l| l.hash.to_hex()),
-            "config_identities": cell_config_identity.into_iter().collect::<Vec<_>>(),
-            "config_identities_with_options": options_config_identity.into_iter().collect::<Vec<_>>(),
-            "starts_source": starts_source_record,
-            "header": run_header,
-            "unused_starts": { "rule": starts_rule.tag(), "params": unused_starts },
-        });
-        // Streaming write through the one resolved-writer seam (gh#241 PR D).
-        // The upstream lineage deps ride in `RecordMeta`.
-        let resolved_artifact = crate::resolve::ResolvedArtifact {
-            kind: runid::ArtifactKind::FitMethod,
-            levels: resolved.levels.clone(),
-            run_id: resolved.run_id,
-            display_inputs: run_inputs.clone(),
-        };
-        let calendar = ir::caltime::CalendarAxis::from_model(&model)
-            .unwrap_or_else(|e| out.fail(format!("error: {e}")));
-        let mut meta = crate::resolve::RecordMeta::new(
-            &ir_version_str, &sweep_config.model.camdl, validated_label.clone(), calendar, &forcing)
-            .with_deps(deps.clone());
-        // The engine the identity keyed, so a leaf keyed by an engine switch
-        // names it (`run.json`'s `engine_switches`).
-        meta.engine = engine.clone();
-        // Reuse decision through the one policy seam. A resumed run is no
-        // exception: its identity carries the longer chain's length and a dep
-        // on the base leaf, so it never names the base or a fresh run of the
-        // same file, and the same resume run again names the same inputs, whose
-        // completed leaf is reused like any other. `--force` displaces the
-        // incumbent (quarantined); clap refuses it beside `--resume`.
-        let policy = if force {
-            crate::resolve::WritePolicy::Force
-        } else {
-            crate::resolve::WritePolicy::Reuse
-        };
-        // gh#585: the training partition — the §3.7.3(b) proof `compare`
-        // requires before it stamps a score `hold_out_tail` — recorded into the
-        // fit-level sidecar written above, for every method, and on a cache hit
-        // as well as a fresh run. Each method's runner builds its config with
-        // `FitRunConfig::build` from this same problem, and that build is where
-        // the partition is decided; this is the same build, run once here so
-        // that no method can leave the record out, and before the reuse check
-        // so that re-running a stored fit that predates the record (a cache hit
-        // when the engine version is unchanged) writes it: the partition is a
-        // function of the problem the stored run's identity seals. Without the
-        // record `compare` cannot certify a score as held out. A build that
-        // fails here fails again in the method's own runner, which reports it.
-        if let Some(seg) = cas_path.parent().and_then(|p| p.parent()) {
-            if let Ok(window_config) = runner::FitRunConfig::build(
-                &sweep_config, Some(&method.algorithm), 1, 1, 1, 1.0, 1, seed, false,
-            ) {
-                // The one place `fit run` says which rows train: the method's
-                // own build below decides the same partition silently.
-                window_config.partition_lines.say();
-                match ir::caltime::CalendarAxis::from_model(&window_config.model) {
-                    Ok(calendar) => crate::run_meta::record_training_partition(
-                        seg, window_config.training_partition.record(&calendar)),
-                    Err(e) => out.say(format_args!(
-                        "warning: cannot record the training partition: {e}")),
-                }
-            }
-        }
-
-        // gh#896: the label is checked against this run's identity before any
-        // sampling, under the store-wide label lock, which is held only from
-        // here to the write that takes the label — the claim below, or the
-        // cache-hit record — and dropped before every exit on the way, so two
-        // concurrent runs cannot both find the label free.
-        let label_lock: Option<crate::cas_sink::LabelLock> = match &validated_label {
-            Some(label) => {
-                let lock = crate::cas_sink::fit_label_lock(&cas_root).unwrap_or_else(|e| {
-                    out.fail(format!("error: {e}"));
-                });
-                if let Err(e) = check_label_movable(&cas_root, label, &resolved.run_id) {
-                    drop(lock);
-                    out.fail(format!("error: {e}"));
-                }
-                Some(lock)
-            }
-            None => None,
-        };
-        match crate::resolve::check_reuse(&store, &cas_root, &resolved_artifact, policy) {
-            Ok(crate::resolve::ReuseVerdict::CacheHit { dir, .. }) => {
-                out.say(format_args!("  {}", crate::out::paint::stderr().paint(
-                    &format!("cache hit — reusing {}",
-                        dir.strip_prefix(&cas_root).unwrap_or(&dir).display()),
-                    crate::out::paint::Style::Warn)));
-                crate::resolve::note_leaf_from_another_model_file(
-                    &dir, &sweep_config.model.camdl);
-                // This config now names the stored run too.
-                let listed = cell_config_identity.map(|id| ("config_identities", id))
-                    .or(options_config_identity.map(|id| ("config_identities_with_options", id)));
-                if let Some((key, id)) = listed {
-                    if let Err(e) = crate::cas_sink::ensure_input_listed(&dir, key, id) {
-                        out.say(format_args!("warning: record this config on {}: {e}", dir.display()));
-                    }
-                }
-                // The stored run takes the label, stamped now, whatever it
-                // carried: the run just invoked with `--label L` is `@L`.
-                if let Some(label) = &validated_label {
-                    let before = crate::fit::handle::label_history(&cas_root, label).into_iter().next();
-                    let written = crate::cas_sink::set_fit_label(&dir, label, &crate::cas_sink::label_stamp());
-                    drop(label_lock);
-                    match written {
-                        Err(e) => out.fail(format!("error: label the stored run {}: {e}", dir.display())),
-                        Ok(previous) => {
-                            say_label_replaced(&out, &dir, previous.as_deref(), label);
-                            say_label_moved(&out, label, before.as_ref(), &dir);
-                        }
-                    }
-                }
-                continue;
-            }
-            Ok(crate::resolve::ReuseVerdict::MustRun) => {}
-            Err(e) => {
-                drop(label_lock);
-                out.fail(format!("error: fit method cache check {}: {}", cas_path.display(), e));
-            }
-        }
-        let write = match crate::resolve::begin_resolved_write(
-            &store, &cas_root, &resolved_artifact, &meta,
-        ) {
-            Ok(c) => c,
-            Err(e) => {
-                drop(label_lock);
-                out.fail(format!("error: claim fit method {}: {}", cas_path.display(), e));
-            }
-        };
-        let method_dir = write.dir().to_path_buf();
-        // The claimed record carries the label; another run's check now sees it.
-        drop(label_lock);
-        // `Out` holds the claim until the finalize below, so every error it
-        // reports on the way — `abandon_method` from the dispatch, the
-        // runners and the chain workers, and each `out.fail` — marks the
-        // leaf `failed` before the process exits (`Out::error`).
-        out.hold_claim(write, method_name);
-        // A forcing refused from here on fails this claim, through `out`.
-        let _refusal_deferred = forcing.defer_while_claimed();
-
-        // gh#147 (M3.2): seed the resumed leaf with the base chain's files —
-        // its resume state and the rows it has written — copied from the
-        // read-only base. The runner continues the state and appends the new
-        // segment to the rows, so the leaf holds the whole chain
-        // (`resumed_chain`).
-        if let Some(base) = &resume_base {
-            resumed_chain::copy_parent_chains(base, &method_dir).unwrap_or_else(|e| {
-                out.fail(format!("error: staging resume carry-over from {}: {}", base.display(), e));
-            });
-        }
-        // Per chain, the index the resumed segment begins at, as the runner
-        // read it from the base's chain state; empty for a fresh run.
-        let mut resume_boundary: Vec<usize> = Vec::new();
-
-        // This attempt's execution record (`execution.json`), written now so
-        // an attempt that dies still records when and where it ran, and
-        // rewritten with its finish before the commit. Outside the leaf's
-        // manifest: none of it is a function of the computation.
-        let mut attempt = execution::Execution::begin();
-        attempt.write(&method_dir).unwrap_or_else(|e| out.fail(format!("error: {e}")));
-        let method_t0 = std::time::Instant::now();
-        // Uninitialized on purpose: every dispatch arm must assign a
-        // loglik (or exit) — the compiler enforces that no arm can fall
-        // through to the finalize below with a silent None.
-        let method_best_loglik: Option<f64>;
-        // The chain that won, as it goes into run.json's `inputs.best_chain`
-        // — the same value the method's `fit_state.toml` stores, naming an
-        // existing `chain_N/` directory (gh#912, gh#990). PFilter has
-        // replicates, not competing chains, so it legitimately leaves this
-        // None.
-        let mut method_best_chain: Option<score::convergence::ChainIndex> = None;
-
-        // gh#278, gh#900: the method's liveness/progress heartbeat. A background
-        // thread writes `progress.json` into the method dir on a fixed
-        // wall-clock timer, and the guard writes the terminal record however
-        // the method exits — `Out::method_done` below when it returns,
-        // `abandon_method` (through `Out::error`) on every fatal path, its
-        // `Drop` on a panic. Built here, before the dispatch, so no method can
-        // silently be the one without a heartbeat. `Out` records the method
-        // from here: the checks it shows and the findings it draws, in memory
-        // and in the leaf's `events.jsonl`.
-        let heartbeat = std::sync::Arc::new(method_heartbeat(&method_dir, &method.algorithm));
-        let collector = out.begin_method(run_header.clone(), method_name, acceptance_kernel,
-                heartbeat.clone(), &method_dir)
-            .unwrap_or_else(|e| {
-                // No method is recorded yet, so there is no report or
-                // findings record to write; the heartbeat's terminal record
-                // is the run's.
-                heartbeat.failed(format!("error: {e}").as_str());
-                out.fail(format!("error: {e}"))
+                    Some(dt_check_result.clone())
+                },
+                // gh#764: IF2 maximises, it does not accept on a likelihood
+                // ratio, so the acceptance ceiling does not apply to it.
+                pf_noise: None,
+                optimizer_convergence: None,
+                // The per-chain comparison of the clean evaluations, computed
+                // once here and read by the warm-start source check. Not
+                // raised as findings: the clean-eval standard error of a
+                // replicate mean is small enough that starts 0.07 nats apart
+                // differ "significantly" (the reporting fixture's IF2 fit),
+                // and whether such a spread matters is the decibans leg's
+                // question, which has a floor in log-likelihood units. The
+                // comparison names chains inside that refusal.
+                chain_loglik_agreement: chain_diagnostics::clean_eval_agreement(
+                    &chain_results.chain_eval_ids(),
+                    &chain_results.chain_eval_logliks(),
+                    &chain_results.chain_eval_ses(),
+                ),
+            };
+            fit_state.save(&method_dir.to_string_lossy()).unwrap_or_else(|e| {
+                out.say(format_args!("warning: could not save fit_state: {}", e));
             });
 
-        // Surface the registry caveat for Beta/Experimental methods, once per
-        // executing method (after the cache-hit skip above, so reused leaves
-        // stay silent). Registry-driven so it can't drift from `fit methods`.
-        // PMMH says its caveat itself, once its data is bound, so the caveat
-        // can carry the series length it is about (`pmmh::run_method`).
-        if !matches!(method.algorithm, Algorithm::PMMH { .. }) {
-            methods::emit_status_banner(&out, method.algorithm.method_kind(), method.algorithm.backend(), None);
-            if let Some(note) = methods::status_note(method.algorithm.method_kind(), method.algorithm.backend()) {
-                out.check(report::Check::MethodCaveat {
-                    method: method_name.to_string(), note: note.to_string(), series_len: None,
-                });
-            }
-        }
+            // Write mle_params.toml — clean-eval winner θ̂ (GH #16).
+            let all_params = runner::collect_all_params(
+                winner_theta, &run_config.estimated_params, &run_config.model,
+                &run_config.base_params, &run_config.compiled,
+            );
+            let mle_path = format!("{}/mle_params.toml", method_dir.display());
+            let model_identity =
+                crate::resolve::model_identity_from_ir(&run_config.model_ir_json);
+            let data_hashes = cx.data_hashes.clone();
+            let rescore = &chain_results.loglik_eval.per_chain
+                [chain_results.loglik_eval.overall_winner_idx];
+            let metadata = provenance::MleMetadata {
+                // Full fit-level hash — lets a reader locate the
+                // originating fit dir from just the mle_params.toml.
+                // The fit hash (not a model-only digest) so it pins
+                // the model+data+config triple, not just the model.
+                input_hash: cx.input_hash.to_string(),
+                // The leaf is `<fit folder>/<method>-<h8>/seed_<n>-<h8>`.
+                model_identity: model_identity.clone(),
+                data_hashes: data_hashes.clone(),
+                seed,
+                method: method_name.to_string(),
+                best_chain: chain_results.best_chain,
+                // Record the backend the method actually fit on (gh#241):
+                // the `simulate --params` guardrail replays θ̂ with this,
+                // so it must be the method's backend. `InferenceBackend`
+                // is a valid `ForwardBackend` (total `From`).
+                backend: method.algorithm.backend().into(),
+                dt: sweep_config.config.dt,
+                // The recorded log-likelihood is the loglik-eval re-score
+                // of the winning chain, so its uncertainty is that
+                // re-score's: the Monte Carlo standard error of the
+                // combined estimate, the particles of each replicate, and
+                // the filter's effective sample size at the estimate. The
+                // IF2 swarm's own size (`particles`) is not the precision
+                // of this number.
+                loglik: chain_results.best_loglik,
+                loglik_sd: rescore.se,
+                n_particles: effective_loglik_eval.n_particles,
+                ess_at_mle: (rescore.filter_stats.ess_mean.is_finite()
+                    && rescore.filter_stats.ess_min.is_finite())
+                    .then_some((rescore.filter_stats.ess_mean,
+                                rescore.filter_stats.ess_min)),
+            };
+            provenance::write_mle_params(&mle_path, &all_params, &metadata)
+                .unwrap_or_else(|e| out.say(format_args!("warning: {}", e)));
 
-        // gh#506 follow-up, gh#881: a declared `start` that the chosen starts
-        // rule discards is a silent no-op. Not an error — the spread rules
-        // ignore it on purpose — but the user who wrote the value should hear
-        // that it had no effect, rather than inferring a start that never
-        // happened. Every method kind draws its chain starts the same way, so
-        // this runs once here, before the dispatch.
-        // Recorded (`run.json` `inputs.unused_starts`) so `fit summary` can
-        // show the same check (`report::Check::Starts`).
-        // (`unused_starts` is computed before the claim, as part of the
-        // record's inputs.)
-        if !unused_starts.is_empty() {
-            // PMMH and MH still read the declared point: their pre-run
-            // likelihood check is evaluated there, and the initial proposal
-            // scale is converted to the transformed scale at it
-            // (`pmmh::build_proposal_sd`). Only where the chains begin
-            // ignores it.
-            let note = report::unused_starts_note(starts_rule.tag(), &unused_starts,
-                still_reads_declared_starts(&method.algorithm));
-            out.say(format_args!("  {} {}", crate::out::paint::note_tag(), note));
-            out.check(report::Check::Starts {
-                mode: starts_rule.tag().to_string(), params: unused_starts.clone(), note,
+            // Recorded, as every other method's are, so `fit summary`
+            // shows the findings this run printed; the end of the run
+            // prints them.
+            write_diagnostics(collector, &method_dir)
+                .unwrap_or_else(|e| abandon_method(out, format!("error: {e}")));
+
+            method_best_loglik = Some(chain_results.best_loglik);
+            method_best_chain = Some(chain_results.best_chain);
+            stored_hint = Some(format!("best ll={:.1} (chain {}) in {:.1}s",
+                chain_results.best_loglik, chain_results.best_chain, elapsed.as_secs_f64()));
+        }
+        Algorithm::PGAS { .. } => {
+            let pgas_opts = pgas::PgasMethodOpts::from_algorithm(&method.algorithm)
+                .unwrap_or_else(|e| abandon_method(out, format!("error: {e}")));
+            // gh#540: no CLI overrides here. Every flag that reaches this
+            // method was written into it before its content address was
+            // taken, so `from_algorithm` above already carries them.
+            resume_boundary = pgas::run_method(
+                sweep_config,
+                method,
+                &method_dir,
+                pgas_opts,
+                seed, false,
+                resume_base,
+                resume_guard,
+                resolved_starts,
+                heartbeat,
+                out,
+            ).unwrap_or_else(|e| {
+                abandon_method(out, format!("error running pgas: {e}"))
             });
+            // Bubble loglik from fit_state.toml written by PGAS runner
+            let fs = load_method_result_or_exit(out, method_name, &method_dir);
+            method_best_loglik = Some(fs.best_loglik);
+            method_best_chain = Some(fs.best_chain);
         }
-        // The method's warm-up record (PMMH, `mh`), as the run kept it, and a
-        // hint said under the `stored` line (IF2's best chain).
-        let mut method_warmup: Vec<report::ChainWarmup> = Vec::new();
-        let mut stored_hint: Option<String> = None;
+        Algorithm::PMMH { .. } => {
+            let pmmh_opts = pmmh::PmmhMethodOpts::from_algorithm(&method.algorithm)
+                .unwrap_or_else(|e| abandon_method(out, format!("error: {e}")));
+            (method_warmup, resume_boundary) = pmmh::run_method(
+                sweep_config,
+                method,
+                &method_dir,
+                pmmh_opts,
+                seed, false,
+                resume_base,
+                resume_guard,
+                resolved_starts,
+                // A resumed chain extends its base's warm-up record.
+                &base_warmup(resume_base, &method.algorithm),
+                // PMMH's dt-check is the PF-based one wired on the IF2 path.
+                /* dt_check_opt */ None,
+                heartbeat,
+                out,
+            ).unwrap_or_else(|e| {
+                abandon_method(out, format!("error running pmmh: {e}"))
+            });
+            let fs = load_method_result_or_exit(out, method_name, &method_dir);
+            method_best_loglik = Some(fs.best_loglik);
+            method_best_chain = Some(fs.best_chain);
+        }
+        Algorithm::Mh { dt_check, .. } => {
+            // Deterministic-ODE Metropolis-Hastings. Routes through the
+            // shared PMMH machinery (chains, adaptive proposal, priors,
+            // MAP, R̂/ESS, trace output); `pmmh::run_method` swaps the PF
+            // likelihood for `compute_ode_loglik` when the algorithm is the
+            // Mh variant. `PmmhMethodOpts::from_algorithm` parses the Mh
+            // fields with `n_particles = 0` (the deterministic path has
+            // no filter).
+            let pmmh_opts = pmmh::PmmhMethodOpts::from_algorithm(&method.algorithm)
+                .unwrap_or_else(|e| abandon_method(out, format!("error: {e}")));
+            // Deterministic ODE dt-check at the MAP (gh#52, gh#227). On by
+            // default; honours the same CLI flags as the IF2 path
+            // (--no-dt-check / --dt-check-halvings / --dt-check-strict).
+            // gh#726: the method's dt_check field — CLI overrides were
+            // applied through `apply_cli_overrides` BEFORE the identity
+            // was taken, and the field is in Mh's identity_payload (the
+            // result is stored in fit_state.toml.dt_check).
+            let mh_dt_check = dt_check.clone();
+            (method_warmup, resume_boundary) = pmmh::run_method(
+                sweep_config,
+                method,
+                &method_dir,
+                pmmh_opts,
+                seed, false,
+                resume_base,
+                resume_guard,
+                resolved_starts,
+                // A resumed chain extends its base's warm-up record.
+                &base_warmup(resume_base, &method.algorithm),
+                Some(mh_dt_check),
+                heartbeat,
+                out,
+            ).unwrap_or_else(|e| {
+                abandon_method(out, format!("error running mh: {e}"))
+            });
+            let fs = load_method_result_or_exit(out, method_name, &method_dir);
+            method_best_loglik = Some(fs.best_loglik);
+            method_best_chain = Some(fs.best_chain);
+        }
+        Algorithm::NlSbplx(nl_cfg)
+        | Algorithm::NlBobyqa(nl_cfg)
+        | Algorithm::NlLbfgs(nl_cfg) => {
+            #[cfg(feature = "ode")]
+            {
+                // Model identity + data digests for the mle_params.toml
+                // provenance block (same shape as the IF2 path uses).
+                // Load the canonical IR JSON from the pre-compiled IR so this
+                // provenance read doesn't re-invoke camdlc.
+                let model_ir_json = sweep_config.compiled_model()
+                    .and_then(crate::util::load_ir)
+                    .map(|(_, ir_json)| ir_json)
+                    .unwrap_or_else(|e| abandon_method(out, format!("error: {e}")));
+                let model_identity_for_prov =
+                    crate::resolve::model_identity_from_ir(&model_ir_json);
+                let data_hashes_for_prov = cx.data_hashes.clone();
+                // Deterministic ODE dt-check at θ̂ (gh#52, gh#227). On by
+                // default. gh#726: the method's dt_check field — CLI
+                // overrides were applied through `apply_cli_overrides`
+                // BEFORE the identity was taken, and NloptConfig
+                // full-serializes into its identity (the result is
+                // stored in fit_state.toml.dt_check).
+                let nl_dt_check = nl_cfg.dt_check.clone();
 
-        match &method.algorithm {
-            Algorithm::IF2 { backend, chains, particles, iterations, cooling, cooling_target_iters, loglik_eval, gate, dt_check, .. } => {
-                // clean_eval comes straight from the `[method]` table — it is part
-                // of the fit's identity (folded into the IF2 method's
-                // whole-serialize identity_payload), so it has no CLI override
-                // (gh#189: a CLI override bypassed the run_id and silently
-                // re-scored under the same key). The gate's `--decibans-thresh`
-                // override is applied through `apply_cli_overrides` BEFORE the
-                // identity is taken, so `gate` here already carries it (gh#540
-                // seam).
-                let effective_loglik_eval = loglik_eval.clone();
-                let effective_gate = gate.clone();
-
-                let mut run_config = runner::FitRunConfig::build(
-                    &sweep_config,
-                    Some(&method.algorithm),
-                    *chains, *particles, *iterations,
-                    *cooling, *cooling_target_iters,
-                    // gh#506: per-chain dispersion is the starts rule's job;
-                    // the base point carries `[estimate].start`.
-                    seed, false,
+                nlopt_method::run_method(
+                    out,
+                    sweep_config,
+                    method,
+                    &method_dir,
+                    seed,
+                    resolved_starts,
+                    cx.input_hash,
+                    &model_identity_for_prov,
+                    &data_hashes_for_prov,
+                    &nl_dt_check,
+                    heartbeat,
                 ).unwrap_or_else(|e| {
-                    abandon_method(&out, format!("error building run config: {e}"))
-                });
-                run_config.loglik_eval = effective_loglik_eval.clone();
-                run_config.gate = effective_gate.clone();
-
-                std::fs::create_dir_all(&method_dir).unwrap_or_else(|e| {
-                    abandon_method(&out, format!("error creating {}: {e}", method_dir.display()),
+                    abandon_method(out, format!("error running {method_name}: {e}"),
                     )
                 });
-
-                let t0 = std::time::Instant::now();
-                // Per-chain starting points, through the one seam every runner
-                // draws from, under the resolved `starts` rule.
-                let drawn = runner::draw_chain_starts_for(
-                    &run_config, &sweep_config.estimate, &resolved_starts, *chains, seed,
-                ).unwrap_or_else(|e| abandon_method(&out, format!("error: {e}")));
-                runner::refuse_starts_on_an_end(&run_config, &drawn)
-                    .unwrap_or_else(|e| abandon_method(&out, format!("error: {e}")));
-                // gh#887: a spread start the filter cannot score is redrawn,
-                // up to MAX_START_ATTEMPTS, before any chain runs; every
-                // attempt is on the record below.
-                let drawn = runner::preflight_spread_starts(
-                    &out,
-                    &run_config, &sweep_config.estimate, &resolved_starts, drawn, seed,
-                ).unwrap_or_else(|e| abandon_method(&out, format!("error: {e}")));
-                let per_chain_params: Vec<Vec<sim::inference::types::EstimatedParam>> =
-                    drawn.to_estimated_params(&run_config.estimated_params);
-                // The audit sidecar, captured before the first filter pass.
-                runner::record_chain_starts(&out, &method_dir, &run_config, &drawn);
-                let chain_init_source = drawn.rule.spelled();
-                let chain_starts_kind = drawn.rule.kind();
-                let method_dir_str = method_dir.to_string_lossy();
-                let chain_results = runner::run_chains_with_per_chain_params(
-                    &out,
-                    &run_config, Some(&per_chain_params), &collector,
-                    Some(method_dir_str.as_ref()), &heartbeat)
-                    .unwrap_or_else(|e| abandon_method(&out, format!("error: {e}")));
-                let elapsed = t0.elapsed();
-                // A chain skipped mid-run started from an accepted start, so
-                // the file written before the run calls it `accepted`. Write
-                // it again marking each such chain `skipped`: the file is the
-                // record of what every chain did.
-                if !chain_results.skipped.is_empty() {
-                    let drawn = drawn.clone().with_skipped(chain_results.skipped.clone());
-                    runner::record_chain_starts(&out, &method_dir, &run_config, &drawn);
-                }
-
-                // Write outputs
-                let param_names: Vec<String> = model.parameters.iter().map(|p| p.name.clone()).collect();
-                runner::write_chain_outputs(
-                    &method_dir.to_string_lossy(), &chain_results.results,
-                    &run_config.estimated_params, &param_names,
-                    &run_config.base_params, &run_config.compiled,
-                    Some(&chain_results.loglik_eval),
-                ).unwrap_or_else(|e| out.say(format_args!("warning: {}", e)));
-                runner::write_clean_eval_tsv(
-                    &method_dir.to_string_lossy(),
-                    &chain_results.loglik_eval, &run_config.estimated_params,
-                ).unwrap_or_else(|e| out.say(format_args!("warning: {}", e)));
-                runner::write_run_root_final_params(
-                    &method_dir.to_string_lossy(),
-                    &chain_results.loglik_eval, &run_config.estimated_params,
-                    &param_names, &run_config.base_params, &run_config.compiled,
-                ).unwrap_or_else(|e| out.say(format_args!("warning: {}", e)));
-                runner::write_iteration_trace(&method_dir.to_string_lossy(), &chain_results.results)
-                    .unwrap_or_else(|e| out.say(format_args!("warning: {}", e)));
-
-                // Write fit_state.toml — the leaf's result record.
-                // Source params from the clean-eval winner θ̂ (GH #16) so
-                // mle_params.toml and final_params.toml agree, and so a
-                // `from_mle` start from this leaf lands in the basin clean-eval
-                // actually picked.
-                let winner_theta = chain_results.winner_theta();
-                let start_values = runner::collect_all_params(
-                    winner_theta, &run_config.estimated_params, &run_config.model,
-                    &run_config.base_params, &run_config.compiled,
-                );
-
-                // Post-fit Richardson dt-convergence check at θ̂
-                // (gh#52). Auto-runs when `dt_check.enabled = true`
-                // (default); evaluates loglik(θ̂; dt) on a halving
-                // ladder and warns when the MLE is discretization-
-                // dependent. Catches the silent-wrong-answer mode
-                // where coarse dt creates a fake basin that synth-
-                // recovery can't detect (it shares the same dt).
-                // See docs/dev/proposals/2026-05-07-richardson-dt-check.md.
-                // --no-dt-check / --dt-check-halvings are applied through
-                // `apply_cli_overrides` BEFORE the identity is taken, so
-                // `dt_check` here already carries them (gh#540 seam — the
-                // result is stored in fit_state.toml, so the knobs are
-                // identity-defining). --dt-check-strict is resolved into the
-                // stored threshold the same way (gh#730).
-                let effective_dt_check = dt_check.clone();
-                // Grouped to spell its mnemonic, not in equal-width groups.
-                #[allow(clippy::unusual_byte_groupings)]
-                let dt_check_seed = seed.wrapping_add(0xd7c4ec_5eed); // "dtchec seed"
-                let dt_check_result = dt_check::run_richardson_ladder(
-                    &run_config,
-                    winner_theta,
-                    &effective_dt_check,
-                    *backend,
-                    &dt_check::DtCheckInherits {
-                        n_particles:  effective_loglik_eval.n_particles,
-                        n_replicates: effective_loglik_eval.n_replicates,
-                        combine:      effective_loglik_eval.combine,
-                    },
-                    dt_check_seed,
-                )
-                .unwrap_or_else(|e| abandon_method(&out, format!("error: {e}")));
-                dt_check::print_terminal_report(&out, &dt_check_result);
-                let fit_state = state::FitState {
-                    method: method_name.to_string(),
-                    seed,
-                    input_hash: None,
-                    camdl_version: Some(crate::version::VERSION_SHORT.into()),
-                    best_loglik: chain_results.best_loglik,
-                    initial_loglik: f64::NEG_INFINITY,
-                    best_chain: chain_results.best_chain,
-                    n_chains: *chains,
-                    // The chains that reached the end. Fewer than `n_chains`
-                    // makes the gate verdict `incomplete` (`gating::assess_if2`).
-                    n_good_chains: Some(chain_results.results.len()),
-                    start_values,
-                    loglik_type: Some(loglik::LoglikType::If2),
-                    acceptance_rate: None,
-                    tail_chain_agreement: chain_results.chain_agreement.iter().map(|(k, v)| (k.clone(), *v)).collect(),
-                    perturb_only_at_t0_params: run_config.estimated_params.iter()
-                        .filter(|p| p.perturb_only_at_t0)
-                        .map(|p| p.name.clone()).collect(),
-                    chain_logliks: chain_results.results.iter()
-                        .map(|(_, r)| r.final_loglik).collect(),
-                    chain_eval_logliks: chain_results.chain_eval_logliks(),
-                    chain_eval_ids: chain_results.chain_eval_ids(),
-                    chain_eval_ses: chain_results.chain_eval_ses(),
-                    // Persist the gate / clean-eval config that was
-                    // *actually in force* — `effective_gate` and
-                    // `effective_loglik_eval` above already collapsed the
-                    // priority chain (CLI flag > `[method]` table > defaults).
-                    // `summary` reads these so its verdict line reports
-                    // against the threshold the run was judged by, not
-                    // whatever `fit.toml` says at summary-time.
-                    // See proposal §Phase 3.
-                    resolved_gate: Some(effective_gate.clone()),
-                    resolved_loglik_eval: Some(effective_loglik_eval.clone()),
-                    chain_init_source: Some(chain_init_source.clone()),
-                    chain_starts_kind: Some(chain_starts_kind),
-                    dt_check: if matches!(dt_check_result.verdict,
-                        dt_check::DtCheckVerdict::Skipped)
-                    {
-                        None  // skipped → omit the block, mirroring legacy semantics
-                    } else {
-                        Some(dt_check_result.clone())
-                    },
-                    // gh#764: IF2 maximises, it does not accept on a likelihood
-                    // ratio, so the acceptance ceiling does not apply to it.
-                    pf_noise: None,
-                    optimizer_convergence: None,
-                    // The per-chain comparison of the clean evaluations, computed
-                    // once here and read by the warm-start source check. Not
-                    // raised as findings: the clean-eval standard error of a
-                    // replicate mean is small enough that starts 0.07 nats apart
-                    // differ "significantly" (the reporting fixture's IF2 fit),
-                    // and whether such a spread matters is the decibans leg's
-                    // question, which has a floor in log-likelihood units. The
-                    // comparison names chains inside that refusal.
-                    chain_loglik_agreement: chain_diagnostics::clean_eval_agreement(
-                        &chain_results.chain_eval_ids(),
-                        &chain_results.chain_eval_logliks(),
-                        &chain_results.chain_eval_ses(),
+                // Recorded as every other method's findings are. The
+                // optimiser raises none of the sampler diagnostics, so the
+                // file holds what the run pushed (possibly nothing): an
+                // empty `diagnostics.json` says the run raised no
+                // findings, where no file says only that nobody asked.
+                write_diagnostics(&out.collector(), &method_dir)
+                    .unwrap_or_else(|e| abandon_method(out, format!("error: {e}")));
+                let fs = load_method_result_or_exit(out, method_name, &method_dir);
+                method_best_loglik = Some(fs.best_loglik);
+                method_best_chain = Some(fs.best_chain);
+            }
+            #[cfg(not(feature = "ode"))]
+            {
+                let _ = (method_name, &sweep_config, &method_dir, seed, nl_cfg, &resolved_starts);
+                abandon_method(&out, format!(
+                        "error: this binary was built without --features ode, \
+                         which is required for algorithm = \"{}\". Rebuild \
+                         with `cargo build --features ode` (default).",
+                        method.algorithm.method_name()
                     ),
-                };
-                fit_state.save(&method_dir.to_string_lossy()).unwrap_or_else(|e| {
-                    out.say(format_args!("warning: could not save fit_state: {}", e));
-                });
-
-                // Write mle_params.toml — clean-eval winner θ̂ (GH #16).
-                let all_params = runner::collect_all_params(
-                    winner_theta, &run_config.estimated_params, &run_config.model,
-                    &run_config.base_params, &run_config.compiled,
                 );
-                let mle_path = format!("{}/mle_params.toml", method_dir.display());
-                let model_identity =
-                    crate::resolve::model_identity_from_ir(&run_config.model_ir_json);
-                let data_hashes = provenance_data_hashes(&data_digests);
-                let rescore = &chain_results.loglik_eval.per_chain
-                    [chain_results.loglik_eval.overall_winner_idx];
-                let metadata = provenance::MleMetadata {
-                    // Full fit-level hash — lets a reader locate the
-                    // originating fit dir from just the mle_params.toml.
-                    // The fit hash (not a model-only digest) so it pins
-                    // the model+data+config triple, not just the model.
-                    input_hash: parent_fit_hash.clone(),
-                    // The leaf is `<fit folder>/<method>-<h8>/seed_<n>-<h8>`.
-                    model_identity: model_identity.clone(),
-                    data_hashes: data_hashes.clone(),
-                    seed,
-                    method: method_name.to_string(),
-                    best_chain: chain_results.best_chain,
-                    // Record the backend the method actually fit on (gh#241):
-                    // the `simulate --params` guardrail replays θ̂ with this,
-                    // so it must be the method's backend. `InferenceBackend`
-                    // is a valid `ForwardBackend` (total `From`).
-                    backend: method.algorithm.backend().into(),
-                    dt: sweep_config.config.dt,
-                    // The recorded log-likelihood is the loglik-eval re-score
-                    // of the winning chain, so its uncertainty is that
-                    // re-score's: the Monte Carlo standard error of the
-                    // combined estimate, the particles of each replicate, and
-                    // the filter's effective sample size at the estimate. The
-                    // IF2 swarm's own size (`particles`) is not the precision
-                    // of this number.
-                    loglik: chain_results.best_loglik,
-                    loglik_sd: rescore.se,
-                    n_particles: effective_loglik_eval.n_particles,
-                    ess_at_mle: (rescore.filter_stats.ess_mean.is_finite()
-                        && rescore.filter_stats.ess_min.is_finite())
-                        .then_some((rescore.filter_stats.ess_mean,
-                                    rescore.filter_stats.ess_min)),
+            }
+        }
+        Algorithm::PFilter { particles, replicates, record_ancestry, record_prequential, .. } => {
+            let n_reps = replicates.unwrap_or(1);
+            // record_ancestry: CLI flag is a one-way override to true
+            // (TOML default false); no flag means use TOML.
+            // record_prequential: TOML default true (per the
+            // 2026-04-20 prequential proposal); explicit
+            // `record_prequential = false` in [method] opts out,
+            // and the CLI flag can re-enable it on a per-invocation
+            // basis without editing the TOML.
+            let record_ancestry = *record_ancestry;
+            let want_prequential = *record_prequential;
+
+            // Build run config (reuse IF2 builder with 1 chain, N particles).
+            // cooling_target_iters=1 here is harmless: PFilter doesn't
+            // cool, so the IF2-shaped config field is never read.
+            let run_config = runner::FitRunConfig::build(
+                sweep_config,
+                Some(&method.algorithm),
+                1, *particles, 1, 1.0, 1, seed, false,
+            ).unwrap_or_else(|e| {
+                abandon_method(out, format!("error building pfilter config: {e}"))
+            });
+
+            std::fs::create_dir_all(&method_dir).unwrap_or_else(|e| {
+                abandon_method(out, format!("error creating {}: {e}", method_dir.display()),
+                )
+            });
+
+            // The point the filter scores: the base point, or the point a
+            // sourced `starts` rule names (`from_mle = "@fit"` scores at
+            // that fit's estimate). A pfilter runs replicates of one point,
+            // so one draw of the rule is the point.
+            let drawn = runner::draw_chain_starts_for(
+                &run_config, &sweep_config.estimate, resolved_starts, 1, seed,
+            ).unwrap_or_else(|e| abandon_method(out, format!("error: {e}")));
+            let mle_params: Vec<f64> = drawn
+                .to_param_vecs(&run_config.estimated_params, &run_config.base_params)
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| run_config.base_params.clone());
+            let t0 = std::time::Instant::now();
+
+            let mut logliks = Vec::new();
+            // Prequential: record on the first replicate only; scoring
+            // is a property of the point estimate, not a per-rep
+            // quantity. Subsequent reps just build the loglik SD.
+            let mut preq_trace: Option<score::trace::PrequentialTrace> = None;
+            for r in 0..n_reps {
+                let pf_seed = seed ^ ((r as u64).wrapping_mul(0x7f4a7c15_u64));
+                let process = run_config.build_process();
+                let obs_model = run_config.build_obs_model();
+                // Prequential / ancestry recording: gated by the
+                // user-facing flags from Algorithm::PFilter. Prequential
+                // is per-method scoring (point-estimate property),
+                // so we only record it on the first replicate;
+                // subsequent reps just build the loglik SD.
+                let record_preq = want_prequential && r == 0;
+                let smc_config = sim::inference::traits::SMCConfig {
+                    record_prequential: record_preq,
+                    record_ancestry,
+                    ..run_config.smc_config()
                 };
-                provenance::write_mle_params(&mle_path, &all_params, &metadata)
-                    .unwrap_or_else(|e| out.say(format_args!("warning: {}", e)));
-
-                // Recorded, as every other method's are, so `fit summary`
-                // shows the findings this run printed; the end of the run
-                // prints them.
-                write_diagnostics(&collector, &method_dir)
-                    .unwrap_or_else(|e| abandon_method(&out, format!("error: {e}")));
-
-                method_best_loglik = Some(chain_results.best_loglik);
-                method_best_chain = Some(chain_results.best_chain);
-                stored_hint = Some(format!("best ll={:.1} (chain {}) in {:.1}s",
-                    chain_results.best_loglik, chain_results.best_chain, elapsed.as_secs_f64()));
-            }
-            Algorithm::PGAS { .. } => {
-                let pgas_opts = pgas::PgasMethodOpts::from_algorithm(&method.algorithm)
-                    .unwrap_or_else(|e| abandon_method(&out, format!("error: {e}")));
-                // gh#540: no CLI overrides here. Every flag that reaches this
-                // method was written into it before its content address was
-                // taken, so `from_algorithm` above already carries them.
-                resume_boundary = pgas::run_method(
-                    &sweep_config,
-                    &method,
-                    &method_dir,
-                    pgas_opts,
-                    seed, force,
-                    resume_base.as_deref(),
-                    &resume_guard,
-                    &resolved_starts,
-                    &heartbeat,
-                    &mut out,
+                let result = sim::inference::bootstrap_filter(
+                    &process, &obs_model, &mle_params, &smc_config, pf_seed,
                 ).unwrap_or_else(|e| {
-                    abandon_method(&out, format!("error running pgas: {e}"))
+                    abandon_method(out, format!("pfilter error: {}", crate::util::sim_error_text(&e)))
                 });
-                // Bubble loglik from fit_state.toml written by PGAS runner
-                let fs = load_method_result_or_exit(&mut out, method_name, &method_dir);
-                method_best_loglik = Some(fs.best_loglik);
-                method_best_chain = Some(fs.best_chain);
+                if record_preq {
+                    if let Some(ref recorded) = result.prequential {
+                        // gh#268/gh#648/gh#269: score each stream against
+                        // its real observed values, the same seam `camdl
+                        // pfilter --save-prequential` uses. NOT
+                        // `run_config.observations[i].value` — that is the
+                        // canonical union TIME axis, whose `value` is a
+                        // never-scored 0.0 placeholder (`runner.rs`), so it
+                        // scored every forecast against a vector of zeros.
+                        let per_stream_obs = obs_model.per_stream_observed();
+                        // gh#833: what each value was accumulated over,
+                        // for `compare`'s window gate.
+                        let per_stream_cov = obs_model.per_stream_coverage();
+                        let mut trace = sim::inference::prequential::build_trace(
+                            recorded, &per_stream_obs, &per_stream_cov,
+                            &result.ess_trace, 0,
+                            pf_seed,
+                            obs_model.first_observation_opens_after_run_start(smc_config.t_start),
+                            None);
+                        // The forcings the fit's policy held outside their
+                        // ranges, as `camdl pfilter --save-prequential`
+                        // records them, so `compare` reading this trace
+                        // reports them on its row. The policy is the
+                        // command's: every sweep point and seed of this fit
+                        // shares it, as do the steps before its one
+                        // `[method]` runs (the capability scan, the
+                        // training-partition build, the `[synthetic]`
+                        // generator). So the list can name a forcing held
+                        // by one of those and not by this trace's pass, an
+                        // over-report; it never misses one this pass held.
+                        trace.warnings.extend(cx.forcing.trace_warnings());
+                        // Schema 5: how this trace was computed, recorded
+                        // as `camdl pfilter --save-prequential` records
+                        // it — one pass (replicate 0) at the point this
+                        // method evaluates, under the fit's intervention
+                        // selection.
+                        let base = crate::util::FitBase::of(sweep_config)
+                            .unwrap_or_else(|e| abandon_method(out, format!("error: {e}")));
+                        let (enabled, disabled) = if base.is_empty() {
+                            (Vec::new(), Vec::new())
+                        } else {
+                            base.lists(&run_config.model_declared).unwrap_or_else(|e| {
+                                abandon_method(out, format!("error: {e}"))
+                            })
+                        };
+                        trace.derivation = Some(
+                            score::trace::Derivation::single_pass(
+                                &trace, *particles, smc_config.dt, pf_seed,
+                                score::trace::ThetaSource::Supplied,
+                                enabled, disabled));
+                        preq_trace = Some(trace);
+                    }
+                }
+                logliks.push(result.log_likelihood);
+                if n_reps <= 10 || r % (n_reps / 10) == 0 {
+                    out.say(format_args!("  pfilter rep {}/{}: loglik={:.1}", r + 1, n_reps, result.log_likelihood));
+                }
             }
-            Algorithm::PMMH { .. } => {
-                let pmmh_opts = pmmh::PmmhMethodOpts::from_algorithm(&method.algorithm)
-                    .unwrap_or_else(|e| abandon_method(&out, format!("error: {e}")));
-                (method_warmup, resume_boundary) = pmmh::run_method(
-                    &sweep_config,
-                    &method,
-                    &method_dir,
-                    pmmh_opts,
-                    seed, force,
-                    resume_base.as_deref(),
-                    &resume_guard,
-                    &resolved_starts,
-                    // A resumed chain extends its base's warm-up record.
-                    &base_warmup(resume_base.as_deref(), &method.algorithm),
-                    // PMMH's dt-check is the PF-based one wired on the IF2 path.
-                    /* dt_check_opt */ None,
-                    &heartbeat,
-                    &mut out,
-                ).unwrap_or_else(|e| {
-                    abandon_method(&out, format!("error running pmmh: {e}"))
-                });
-                let fs = load_method_result_or_exit(&mut out, method_name, &method_dir);
-                method_best_loglik = Some(fs.best_loglik);
-                method_best_chain = Some(fs.best_chain);
-            }
-            Algorithm::Mh { dt_check, .. } => {
-                // Deterministic-ODE Metropolis-Hastings. Routes through the
-                // shared PMMH machinery (chains, adaptive proposal, priors,
-                // MAP, R̂/ESS, trace output); `pmmh::run_method` swaps the PF
-                // likelihood for `compute_ode_loglik` when the algorithm is the
-                // Mh variant. `PmmhMethodOpts::from_algorithm` parses the Mh
-                // fields with `n_particles = 0` (the deterministic path has
-                // no filter).
-                let pmmh_opts = pmmh::PmmhMethodOpts::from_algorithm(&method.algorithm)
-                    .unwrap_or_else(|e| abandon_method(&out, format!("error: {e}")));
-                // Deterministic ODE dt-check at the MAP (gh#52, gh#227). On by
-                // default; honours the same CLI flags as the IF2 path
-                // (--no-dt-check / --dt-check-halvings / --dt-check-strict).
-                // gh#726: the method's dt_check field — CLI overrides were
-                // applied through `apply_cli_overrides` BEFORE the identity
-                // was taken, and the field is in Mh's identity_payload (the
-                // result is stored in fit_state.toml.dt_check).
-                let mh_dt_check = dt_check.clone();
-                (method_warmup, resume_boundary) = pmmh::run_method(
-                    &sweep_config,
-                    &method,
-                    &method_dir,
-                    pmmh_opts,
-                    seed, force,
-                    resume_base.as_deref(),
-                    &resume_guard,
-                    &resolved_starts,
-                    // A resumed chain extends its base's warm-up record.
-                    &base_warmup(resume_base.as_deref(), &method.algorithm),
-                    Some(mh_dt_check),
-                    &heartbeat,
-                    &mut out,
-                ).unwrap_or_else(|e| {
-                    abandon_method(&out, format!("error running mh: {e}"))
-                });
-                let fs = load_method_result_or_exit(&mut out, method_name, &method_dir);
-                method_best_loglik = Some(fs.best_loglik);
-                method_best_chain = Some(fs.best_chain);
-            }
-            Algorithm::NlSbplx(nl_cfg)
-            | Algorithm::NlBobyqa(nl_cfg)
-            | Algorithm::NlLbfgs(nl_cfg) => {
-                #[cfg(feature = "ode")]
-                {
-                    // Model identity + data digests for the mle_params.toml
-                    // provenance block (same shape as the IF2 path uses).
-                    // Load the canonical IR JSON from the pre-compiled IR so this
-                    // provenance read doesn't re-invoke camdlc.
-                    let model_ir_json = sweep_config.compiled_model()
-                        .and_then(crate::util::load_ir)
-                        .map(|(_, ir_json)| ir_json)
-                        .unwrap_or_else(|e| abandon_method(&out, format!("error: {e}")));
-                    let model_identity_for_prov =
-                        crate::resolve::model_identity_from_ir(&model_ir_json);
-                    let data_hashes_for_prov = provenance_data_hashes(&data_digests);
-                    // Deterministic ODE dt-check at θ̂ (gh#52, gh#227). On by
-                    // default. gh#726: the method's dt_check field — CLI
-                    // overrides were applied through `apply_cli_overrides`
-                    // BEFORE the identity was taken, and NloptConfig
-                    // full-serializes into its identity (the result is
-                    // stored in fit_state.toml.dt_check).
-                    let nl_dt_check = nl_cfg.dt_check.clone();
+            let elapsed = t0.elapsed();
 
-                    nlopt_method::run_method(
-                        &out,
-                        &sweep_config,
-                        &method,
-                        &method_dir,
-                        seed,
-                        &resolved_starts,
-                        &parent_fit_hash,
-                        &model_identity_for_prov,
-                        &data_hashes_for_prov,
-                        &nl_dt_check,
-                        &heartbeat,
-                    ).unwrap_or_else(|e| {
-                        abandon_method(&out, format!("error running {method_name}: {e}"),
+            let result = crate::fit::method_result::PfilterRun::from_run(&logliks, *particles);
+            out.say(format_args!("\n  loglik = {:.1} ± {:.1} ({} reps, {} particles, {:.1}s)",
+                result.ll_mean, result.ll_sd, n_reps, particles, elapsed.as_secs_f64()));
+
+            // Write logliks.tsv
+            {
+                use std::io::Write;
+                let path = format!("{}/logliks.tsv", method_dir.display());
+                let mut f = std::fs::File::create(&path).unwrap();
+                writeln!(f, "replicate\tloglik").unwrap();
+                for (i, ll) in logliks.iter().enumerate() {
+                    writeln!(f, "{}\t{}", i + 1, crate::fit::method_result::loglik_tsv_cell(*ll)).unwrap();
+                }
+            }
+
+            // Write prequential trace (plug-in predictive at MLE).
+            // Scoring is a point-estimate property — rep 0 only.
+            // Routed through the shared writer so the fit-method TSV
+            // carries the same tidy/long schema as `camdl pfilter
+            // --save-prequential` (gh#650).
+            if let Some(ref trace) = preq_trace {
+                let stem = format!("{}/prequential", method_dir.display());
+                let calendar = ir::caltime::CalendarAxis::from_model(&run_config.model)
+                    .unwrap_or_else(|e| abandon_method(out, format!("error: {e}")));
+                crate::prequential_out::write_prequential_outputs(&stem, trace, &calendar)
+                    .unwrap_or_else(|e| {
+                        abandon_method(out, format!("error writing prequential: {e}"),
                         )
                     });
-                    // Recorded as every other method's findings are. The
-                    // optimiser raises none of the sampler diagnostics, so the
-                    // file holds what the run pushed (possibly nothing): an
-                    // empty `diagnostics.json` says the run raised no
-                    // findings, where no file says only that nobody asked.
-                    write_diagnostics(&out.collector(), &method_dir)
-                        .unwrap_or_else(|e| abandon_method(&out, format!("error: {e}")));
-                    let fs = load_method_result_or_exit(&mut out, method_name, &method_dir);
-                    method_best_loglik = Some(fs.best_loglik);
-                    method_best_chain = Some(fs.best_chain);
-                }
-                #[cfg(not(feature = "ode"))]
-                {
-                    let _ = (method_name, &sweep_config, &method_dir, seed, nl_cfg, &resolved_starts);
-                    abandon_method(&out, format!(
-                            "error: this binary was built without --features ode, \
-                             which is required for algorithm = \"{}\". Rebuild \
-                             with `cargo build --features ode` (default).",
-                            method.algorithm.method_name()
-                        ),
-                    );
-                }
+                out.say(format_args!("  prequential: {}",
+                    crate::prequential_out::summary_line(trace)));
+                out.say_raw(format_args!("{}", crate::prequential_out::surprise_table(trace, &calendar)));
             }
-            Algorithm::PFilter { particles, replicates, record_ancestry, record_prequential, .. } => {
-                let n_reps = replicates.unwrap_or(1);
-                // record_ancestry: CLI flag is a one-way override to true
-                // (TOML default false); no flag means use TOML.
-                // record_prequential: TOML default true (per the
-                // 2026-04-20 prequential proposal); explicit
-                // `record_prequential = false` in [method] opts out,
-                // and the CLI flag can re-enable it on a per-invocation
-                // basis without editing the TOML.
-                let record_ancestry = *record_ancestry;
-                let want_prequential = *record_prequential;
-
-                // Build run config (reuse IF2 builder with 1 chain, N particles).
-                // cooling_target_iters=1 here is harmless: PFilter doesn't
-                // cool, so the IF2-shaped config field is never read.
-                let run_config = runner::FitRunConfig::build(
-                    &sweep_config,
-                    Some(&method.algorithm),
-                    1, *particles, 1, 1.0, 1, seed, false,
-                ).unwrap_or_else(|e| {
-                    abandon_method(&out, format!("error building pfilter config: {e}"))
-                });
-
-                std::fs::create_dir_all(&method_dir).unwrap_or_else(|e| {
-                    abandon_method(&out, format!("error creating {}: {e}", method_dir.display()),
-                    )
-                });
-
-                // The point the filter scores: the base point, or the point a
-                // sourced `starts` rule names (`from_mle = "@fit"` scores at
-                // that fit's estimate). A pfilter runs replicates of one point,
-                // so one draw of the rule is the point.
-                let drawn = runner::draw_chain_starts_for(
-                    &run_config, &sweep_config.estimate, &resolved_starts, 1, seed,
-                ).unwrap_or_else(|e| abandon_method(&out, format!("error: {e}")));
-                let mle_params: Vec<f64> = drawn
-                    .to_param_vecs(&run_config.estimated_params, &run_config.base_params)
-                    .into_iter()
-                    .next()
-                    .unwrap_or_else(|| run_config.base_params.clone());
-                let t0 = std::time::Instant::now();
-
-                let mut logliks = Vec::new();
-                // Prequential: record on the first replicate only; scoring
-                // is a property of the point estimate, not a per-rep
-                // quantity. Subsequent reps just build the loglik SD.
-                let mut preq_trace: Option<score::trace::PrequentialTrace> = None;
-                for r in 0..n_reps {
-                    let pf_seed = seed ^ ((r as u64).wrapping_mul(0x7f4a7c15_u64));
-                    let process = run_config.build_process();
-                    let obs_model = run_config.build_obs_model();
-                    // Prequential / ancestry recording: gated by the
-                    // user-facing flags from Algorithm::PFilter. Prequential
-                    // is per-method scoring (point-estimate property),
-                    // so we only record it on the first replicate;
-                    // subsequent reps just build the loglik SD.
-                    let record_preq = want_prequential && r == 0;
-                    let smc_config = sim::inference::traits::SMCConfig {
-                        record_prequential: record_preq,
-                        record_ancestry,
-                        ..run_config.smc_config()
-                    };
-                    let result = sim::inference::bootstrap_filter(
-                        &process, &obs_model, &mle_params, &smc_config, pf_seed,
-                    ).unwrap_or_else(|e| {
-                        abandon_method(&out, format!("pfilter error: {}", crate::util::sim_error_text(&e)))
-                    });
-                    if record_preq {
-                        if let Some(ref recorded) = result.prequential {
-                            // gh#268/gh#648/gh#269: score each stream against
-                            // its real observed values, the same seam `camdl
-                            // pfilter --save-prequential` uses. NOT
-                            // `run_config.observations[i].value` — that is the
-                            // canonical union TIME axis, whose `value` is a
-                            // never-scored 0.0 placeholder (`runner.rs`), so it
-                            // scored every forecast against a vector of zeros.
-                            let per_stream_obs = obs_model.per_stream_observed();
-                            // gh#833: what each value was accumulated over,
-                            // for `compare`'s window gate.
-                            let per_stream_cov = obs_model.per_stream_coverage();
-                            let mut trace = sim::inference::prequential::build_trace(
-                                recorded, &per_stream_obs, &per_stream_cov,
-                                &result.ess_trace, 0,
-                                pf_seed,
-                                obs_model.first_observation_opens_after_run_start(smc_config.t_start),
-                                None);
-                            // The forcings the fit's policy held outside their
-                            // ranges, as `camdl pfilter --save-prequential`
-                            // records them, so `compare` reading this trace
-                            // reports them on its row. The policy is the
-                            // command's: every sweep point and seed of this fit
-                            // shares it, as do the steps before its one
-                            // `[method]` runs (the capability scan, the
-                            // training-partition build, the `[synthetic]`
-                            // generator). So the list can name a forcing held
-                            // by one of those and not by this trace's pass, an
-                            // over-report; it never misses one this pass held.
-                            trace.warnings.extend(forcing.trace_warnings());
-                            // Schema 5: how this trace was computed, recorded
-                            // as `camdl pfilter --save-prequential` records
-                            // it — one pass (replicate 0) at the point this
-                            // method evaluates, under the fit's intervention
-                            // selection.
-                            let base = crate::util::FitBase::of(&sweep_config)
-                                .unwrap_or_else(|e| abandon_method(&out, format!("error: {e}")));
-                            let (enabled, disabled) = if base.is_empty() {
-                                (Vec::new(), Vec::new())
-                            } else {
-                                base.lists(&run_config.model_declared).unwrap_or_else(|e| {
-                                    abandon_method(&out, format!("error: {e}"))
-                                })
-                            };
-                            trace.derivation = Some(
-                                score::trace::Derivation::single_pass(
-                                    &trace, *particles, smc_config.dt, pf_seed,
-                                    score::trace::ThetaSource::Supplied,
-                                    enabled, disabled));
-                            preq_trace = Some(trace);
-                        }
-                    }
-                    logliks.push(result.log_likelihood);
-                    if n_reps <= 10 || r % (n_reps / 10) == 0 {
-                        out.say(format_args!("  pfilter rep {}/{}: loglik={:.1}", r + 1, n_reps, result.log_likelihood));
-                    }
-                }
-                let elapsed = t0.elapsed();
-
-                let result = crate::fit::method_result::PfilterRun::from_run(&logliks, *particles);
-                out.say(format_args!("\n  loglik = {:.1} ± {:.1} ({} reps, {} particles, {:.1}s)",
-                    result.ll_mean, result.ll_sd, n_reps, particles, elapsed.as_secs_f64()));
-
-                // Write logliks.tsv
-                {
-                    use std::io::Write;
-                    let path = format!("{}/logliks.tsv", method_dir.display());
-                    let mut f = std::fs::File::create(&path).unwrap();
-                    writeln!(f, "replicate\tloglik").unwrap();
-                    for (i, ll) in logliks.iter().enumerate() {
-                        writeln!(f, "{}\t{}", i + 1, crate::fit::method_result::loglik_tsv_cell(*ll)).unwrap();
-                    }
-                }
-
-                // Write prequential trace (plug-in predictive at MLE).
-                // Scoring is a point-estimate property — rep 0 only.
-                // Routed through the shared writer so the fit-method TSV
-                // carries the same tidy/long schema as `camdl pfilter
-                // --save-prequential` (gh#650).
-                if let Some(ref trace) = preq_trace {
-                    let stem = format!("{}/prequential", method_dir.display());
-                    let calendar = ir::caltime::CalendarAxis::from_model(&run_config.model)
-                        .unwrap_or_else(|e| abandon_method(&out, format!("error: {e}")));
-                    crate::prequential_out::write_prequential_outputs(&stem, trace, &calendar)
-                        .unwrap_or_else(|e| {
-                            abandon_method(&out, format!("error writing prequential: {e}"),
-                            )
-                        });
-                    out.say(format_args!("  prequential: {}",
-                        crate::prequential_out::summary_line(trace)));
-                    out.say_raw(format_args!("{}", crate::prequential_out::surprise_table(trace, &calendar)));
-                }
-                method_best_loglik = Some(result.ll_mean);
-            }
+            method_best_loglik = Some(result.ll_mean);
         }
-
-        // The method is done: every arm either reached here or abandoned the run
-        // through `abandon_method`. The terminal write goes down BEFORE
-        // `finalize` below (provisionally: a failure up to the commit replaces
-        // it with `failed`, so `progress.json` and `run.json` agree), so the timer thread is stopped before the leaf's
-        // manifest is taken over its files — the heartbeat's temporary file,
-        // written during the manifest walk, would be taken into it
-        // (`progress.json` itself is a record of the attempt, outside the
-        // manifest: `runid::PER_ATTEMPT_RECORDS`). An event that was not
-        // recorded fails the run here, before it is called done.
-        if let Err(e) = out.events_result() {
-            // Closed first, so the failure is said once, not again as the
-            // abandoned run's unrecorded events.
-            let _ = out.close_events();
-            abandon_method(&out, format!("error: {e}"));
-        }
-        out.method_done();
-
-        // ── finalize the CAS fit-method leaf ──
-        // The runners streamed every output (chains, fit_state.toml,
-        // draws.tsv, trajectories/, …) into `method_dir = claim.dir()`;
-        // `finalize` builds the recursive exact-set manifest over them and
-        // commits Running→Completed. The display fields ride in `run.json`
-        // `inputs` (recorded, never hashed) for show/status.
-        let method_elapsed = method_t0.elapsed();
-        // The run's inputs, written at the claim, gain what only the run
-        // could tell: its best log-likelihood and chain. Its wall time is the
-        // execution's, and goes to the execution record below.
-        let mut inputs_json = run_inputs;
-        if let Some(fields) = inputs_json.as_object_mut() {
-            fields.insert("best_loglik".into(), serde_json::json!(method_best_loglik));
-            fields.insert("best_chain".into(), serde_json::json!(method_best_chain));
-        }
-        // A resumed leaf names its parent and where each segment of the chain
-        // it holds begins (`resumed_chain::ResumeLineage`); a fresh run
-        // records no `resume` key.
-        if let Some(base) = &resume_base {
-            let index_column = match &method.algorithm {
-                Algorithm::PGAS { .. } => "sweep",
-                _ => "step",
-            };
-            let lineage = resumed_chain::ResumeLineage::extend(
-                base, index_column, &resolved.run_id.to_hex(),
-                std::mem::take(&mut resume_boundary),
-            ).unwrap_or_else(|e| abandon_method(&out, format!("error: --resume lineage: {e}")));
-            attempt.earlier_segments = execution::Execution::segments_resuming(base, &lineage.parent_run_id);
-            inputs_json[resumed_chain::RESUME_KEY] = serde_json::to_value(&lineage)
-                .unwrap_or_else(|e| abandon_method(&out, format!("error: --resume lineage: {e}")));
-        }
-        attempt.finish(method_elapsed.as_secs_f64());
-        if let Some(sampling) = out.sampling() {
-            attempt.record(sampling);
-        }
-        attempt.write(&method_dir).unwrap_or_else(|e| abandon_method(&out, format!("error: {e}")));
-        // The command's own policy, whether or not `out` still holds the
-        // claim: a refusal kept at any point of the run fails it here.
-        if let Some(message) = forcing.refused() {
-            abandon_method(&out, message);
-        }
-        let mut write = out.take_claim().expect("the claim is held from the claim to here");
-        // A run that completes under `--label L` is stamped as it completes,
-        // under the store's label lock, and so becomes `@L`; the holder it
-        // displaces is read under the same lock for the note below.
-        let label_move = match &validated_label {
-            Some(label) => {
-                let lock = crate::cas_sink::fit_label_lock(&cas_root)
-                    .unwrap_or_else(|e| abandon_method(&out, format!("error: {e}")));
-                let before = crate::fit::handle::label_history(&cas_root, label).into_iter().next();
-                write.set_label_set_at(crate::cas_sink::label_stamp());
-                Some((label.clone(), lock, before))
-            }
-            None => None,
-        };
-        // Declare the tabular outputs' column schema in run.json (proposal
-        // 2026-07-15): classify each written file's real header so a consumer
-        // reads roles instead of reverse-engineering columns. Recorded, not
-        // hashed — the run's identity was fixed at claim time.
-        {
-            let (estimated_names, held) = match &fit_roles {
-                Ok(p) => (
-                    p.names_with(crate::roles::RoleKind::Estimated)
-                        .map(str::to_string).collect::<Vec<_>>(),
-                    p.all_names().map(str::to_string).collect::<Vec<_>>(),
-                ),
-                Err(_) => {
-                    let (e, f) = unpartitioned_role_fields(&sweep_config);
-                    (e, f.into_keys().collect())
-                }
-            };
-            let estimated: std::collections::HashSet<&str> =
-                estimated_names.iter().map(String::as_str).collect();
-            let all_params: std::collections::HashSet<&str> = estimated_names
-                .iter()
-                .chain(held.iter())
-                .map(String::as_str)
-                .collect();
-            let schema =
-                crate::output_schema::fit_output_schema(write.dir(), &all_params, &estimated);
-            write.set_output_schema(schema);
-        }
-        // A finalize that fails leaves the leaf `failed` (the claim's guard),
-        // and the run records its failure as every other fatal path does.
-        let dest = match write.finalize(inputs_json) {
-            Ok(d) => d,
-            Err(e) => abandon_method(&out, format!(
-                "error: could not finalize fit method leaf {}: {}", cas_path.display(), e)),
-        };
-        if let Some((label, lock, before)) = label_move {
-            drop(lock);
-            say_label_moved(&out, &label, before.as_ref(), &dest);
-        }
-        // The leaf is `completed`: the `done` already in `progress.json` is
-        // final. Before this point a failure rewrites it as `failed`.
-        out.method_committed();
-        // The end-of-run block, from the report built over what the run kept
-        // in memory and the leaf it finalized; then the `stored` milestone.
-        let record = out.end_method().expect("the method was begun before its dispatch");
-        match completed_outcome(method_name, &dest, record, method_warmup,
-            method_elapsed.as_secs_f64(), &model)
-        {
-            Ok(outcome) => out.method_report(&outcome),
-            Err(e) => out.say(format_args!("warning: the run's report could not be built from {}: {e}",
-                dest.display())),
-        }
-        out.milestone("stored",
-            format!("{} \u{b7} {} \u{b7} {:.1}s", method_name, dest.display(), method_elapsed.as_secs_f64()));
-        if let Some(hint) = stored_hint {
-            out.hint(hint);
-        }
-        // The report was the event log's last line; a write that failed since
-        // the method was called done fails the command, its leaf committed.
-        if let Err(e) = out.close_events() {
-            out.fail(format!("error: {e}"));
-        }
-
-    } // end sweep_points
-    } // end cells
-
-    // ── Grid roll-ups (summary.tsv / coverage.tsv): deferred to M4 ──
-    //
-    // Each grid cell is now a content-addressed fit — its own FitDigest base,
-    // keyed by that cell's dataset digest × fit-seed — readable individually
-    // via `camdl list`/`show`/`cat`. The cross-cell summary and the synthetic
-    // parameter-recovery coverage table are derived views with no home in the
-    // per-cell tree; `fit recovery` (proposal increment 3) owes the roll-up
-    // (gh#150 / gh#154), where coverage gains a truth-within-interval
-    // correctness check.
-    if cells.len() > 1 || config.problem.is_synthetic_fit() {
-        out.say("note: grid summary / coverage are derived views — \
-                   owed by `fit recovery` (gh#150 / gh#154)");
     }
+    MethodRan {
+        best_loglik: method_best_loglik,
+        best_chain: method_best_chain,
+        warmup: method_warmup,
+        resume_boundary,
+        stored_hint,
+    }
+}
 
-    // gh#147 (M3.2): no fit-wide `run.json` rewrite — the fit identity is a
-    // CAS path segment, and each method leaf records its own wall time in
-    // `run.json` `inputs` at `finalize`. `fit_start` paces the run; per-leaf
-    // timing is the honest unit now.
-    let _ = fit_start;
+/// gh#191: gate the model's required capabilities against the method's
+/// declared backend, before any fitting work, and say when PGAS falls back
+/// from NUTS. Returns the kernel whose band the method's acceptance
+/// diagnostics apply.
+pub(crate) fn capability_gate(
+    out: &crate::out::Out,
+    method: &config_v2::Method,
+    model: &ir::Model,
+    config: &config_v2::FitConfig,
+    config_text: &str,
+    nuts_tuning_flags: &[&'static str],
+    fit_path: &str,
+) -> Option<sim::inference::diagnostic::AcceptanceKernel> {
+    use config_v2::Algorithm;
+    // `required_capabilities()` is structural; the parameter values are
+    // irrelevant to it, but `CompiledModel::new` requires every parameter to
+    // carry one, so a value-less parameter gets a placeholder for the scan.
+    let mut cap_model = model.clone();
+    for p in &mut cap_model.parameters {
+        if p.value.resolved_value().is_none() {
+            let placeholder = p.initial_value()
+                .or_else(|| crate::params_resolver::resolved_bounds(p).map(|(lo, hi)| 0.5 * (lo + hi)))
+                .unwrap_or(1.0);
+            p.value = p.value.with_value(placeholder);
+        }
+    }
+    let compiled = sim::CompiledModel::new(cap_model)
+        .unwrap_or_else(|e| out.fail(format!("error: {e:?}")))
+        .with_eval_settings(config.problem.config.eval_settings());
+    if let Err(msg) = gate_run_method_against_model(&method.algorithm, &compiled, config.problem.config.dt) {
+        out.fail(format!("error: {msg}"));
+    }
+    let kernel = methods::acceptance_kernel(&method.algorithm, &compiled);
+    // PGAS runs NUTS only where the compiler emitted rate gradients; elsewhere
+    // it falls back to Metropolis-within-Gibbs. Say so, and refuse an explicit
+    // `use_nuts = true` the model cannot honour.
+    if let Algorithm::PGAS { use_nuts: true, .. } = &method.algorithm {
+        if !sim::inference::pgas::nuts_active(true, &compiled) {
+            let declared = config_v2::method_declares_key(config_text, "use_nuts");
+            let tuning: Vec<&str> = [
+                (config_v2::method_declares_key(config_text, "max_tree_depth"), "max_tree_depth"),
+                (config_v2::method_declares_key(config_text, "dense_mass"), "dense_mass"),
+            ].into_iter().filter_map(|(on, name)| on.then_some(name))
+                .chain(nuts_tuning_flags.iter().copied())
+                .collect();
+            match config_v2::nuts_unavailable(declared, &tuning) {
+                Ok(note) => out.say(format_args!("{} {note}", crate::out::paint::note_tag())),
+                Err(e) => out.fail(format!("error: {fit_path}: {e}")),
+            }
+        }
+    }
+    kernel
+}
+
+/// IC-free inference: when `ic_free = true`, the startup block says the
+/// filter computes log L conditional on y₁, and names every source of the
+/// t = 0 spread.
+pub(crate) fn say_ic_free(out: &crate::out::Out, config: &config_v2::FitConfig, model: &ir::Model) {
+    if !config.problem.likelihood_objective().skips_first_observation() {
+        return;
+    }
+    let perturb_only_at_t0: Vec<&str> = config.problem.estimate.iter()
+        .filter(|(_, spec)| spec.perturb_only_at_t0)
+        .map(|(n, _)| n.as_str())
+        .collect();
+    out.say(format_args!("\n  {} conditioning on y₁",
+        crate::out::paint::stderr().paint("ic-free inference:", crate::out::paint::Style::Info)));
+    let mut sources: Vec<String> = Vec::new();
+    let drawn: Vec<&str> = model.initial_conditions.iter()
+        .filter(|(_, s)| s.is_law())
+        .map(|(name, _)| name.as_str())
+        .collect();
+    if !drawn.is_empty() {
+        sources.push(format!("`init {{ }}` laws on [{}]", drawn.join(", ")));
+    }
+    if !perturb_only_at_t0.is_empty() {
+        sources.push(format!("perturb_only_at_t0 params [{}] (if2 only)", perturb_only_at_t0.join(", ")));
+    }
+    out.say(format_args!("    - initial state spread from: {}", sources.join("; ")));
+    out.say("    - log-likelihood accumulation from t = 2 (y₁ reweights and resamples only)");
+}
+
+/// The method's settings a reader shows, as the run's inputs record them.
+pub(crate) fn algorithm_record(algorithm: &config_v2::Algorithm) -> serde_json::Value {
+    use config_v2::Algorithm;
+    let algo_tag = algorithm.method_name();
+    let backend_tag = algorithm.backend().as_str();
+    match algorithm {
+        Algorithm::IF2 { chains, particles, iterations, cooling, .. } =>
+            serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "chains": chains, "particles": particles, "iterations": iterations, "cooling": cooling }),
+        Algorithm::PGAS { chains, particles, sweeps, .. } =>
+            serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "chains": chains, "particles": particles, "sweeps": sweeps }),
+        Algorithm::PMMH { chains, particles, iterations, .. } =>
+            serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "chains": chains, "particles": particles, "iterations": iterations }),
+        Algorithm::Mh { chains, iterations, .. } =>
+            serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "chains": chains, "iterations": iterations }),
+        Algorithm::PFilter { particles, replicates, .. } =>
+            serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "particles": particles, "replicates": replicates }),
+        Algorithm::NlSbplx(c) | Algorithm::NlBobyqa(c) | Algorithm::NlLbfgs(c) =>
+            serde_json::json!({ "algorithm": algo_tag, "backend": backend_tag, "chains": c.chains, "tolerance": c.tolerance, "max_evals": c.max_evals }),
+    }
+}
+
+/// What a run's `fit.meta.json` is built from.
+pub(crate) struct SidecarInputs<'a> {
+    pub config: &'a config_v2::FitConfig,
+    pub config_text: &'a str,
+    pub model: &'a ir::Model,
+    /// The run's problem: a sweep point's values in `[fixed]`.
+    pub problem: &'a config_v2::Problem,
+    pub data: &'a stream_bindings::BoundDataDigests,
+    pub roles: &'a Result<crate::roles::Partition, String>,
+    pub sweep_point: &'a [(String, f64)],
+    pub seed: u64,
+    /// Which rows trained, as the stored problem records it.
+    pub partition: crate::run_meta::TrainingPartitionRecord,
+}
+
+/// The run's `fit.meta.json`: the fit's provenance as the run resolved it —
+/// each prior's source, every parameter's value and source, the partition
+/// into estimated and fixed. A provenance file of the run; no path in it is
+/// read back.
+pub(crate) fn run_sidecar(i: &SidecarInputs<'_>, out: &crate::out::Out) -> Result<serde_json::Value, String> {
+    let mut side = build_fit_sidecar(i.config, i.config_text.as_bytes(), i.model, i.data)?;
+    let fp = runner::resolve_fit_parameters(i.problem, i.seed);
+    if let Ok(fp) = &fp {
+        crate::params_resolver::emit_notices(out, &[&fp.resolved]);
+        side.parameters_provenance = crate::run_meta::ParameterProvenance::of_all(&fp.resolved.params);
+    }
+    let roles = crate::roles::RoleRecord::new(
+        i.roles.as_ref().map_err(String::clone)
+            .and_then(|p| p.cell(i.sweep_point))
+            .and_then(|cell| fp.as_ref().map(|fp| cell.record(&fp.resolved)).map_err(String::clone)),
+        || unpartitioned_role_fields(i.problem),
+    );
+    side.estimated = roles.estimated;
+    side.fixed = roles.fixed;
+    side.partition = Some(roles.partition);
+    side.training_partition = Some(i.partition.clone());
+    side.schema_version = crate::run_meta::FIT_META_SCHEMA_VERSION;
+    serde_json::to_value(&side).map_err(|e| format!("cannot encode fit.meta.json: {e}"))
 }
 
 /// The `--init` / `--posterior` / `--mle` / `--params` family, each answered
@@ -2365,7 +1209,7 @@ pub(crate) fn removed_flags_message(command: &str, lines: Vec<String>) -> Option
 /// The removed `fit run` flags, each answered with its replacement. Every
 /// one the user passed is named in one message, so a habitual
 /// `--stage posterior --init from_prior` is corrected in one round.
-fn removed_flag_message(a: &crate::args::FitRunArgs) -> Option<String> {
+pub(crate) fn removed_flag_message(a: &crate::args::FitRunArgs) -> Option<String> {
     let mut lines: Vec<String> = Vec::new();
     if let Some(s) = a._removed_stage.as_deref() {
         lines.push(format!(
@@ -2411,9 +1255,10 @@ fn removed_flag_message(a: &crate::args::FitRunArgs) -> Option<String> {
 /// it finalized (`MethodResult::load_from`, which reads `run.json` `inputs`,
 /// written by `finalize`). `fit summary` builds the same report from the leaf
 /// alone (`fit_summary::load_method_facts`).
-fn completed_outcome(
+pub(crate) fn completed_outcome(
     method_name: &str,
     leaf: &std::path::Path,
+    shown: &std::path::Path,
     record: crate::out::MethodRecord,
     warmup: Vec<report::ChainWarmup>,
     total_seconds: f64,
@@ -2421,15 +1266,13 @@ fn completed_outcome(
 ) -> Result<report::build::MethodOutcome, String> {
     use method_result::MethodResult;
     let result = MethodResult::load_from(leaf, method_name).map_err(|e| e.to_string())?;
-    // The fit directory: `<fit>/<method>-<hash>/<seed leaf>`.
-    let fit_dir = leaf.parent().and_then(|p| p.parent()).unwrap_or(leaf);
     let chain_detail = match &result {
         MethodResult::Pgas(_) | MethodResult::Pmmh(_) => Some(report::ChainDetail::gather(
             leaf,
             fit_summary::recorded_chain_logliks(&result),
             matches!(result, MethodResult::Pgas(_)),
             None,
-            fit_summary::forkability(&fit_dir.to_string_lossy(), method_name, None),
+            fit_summary::forkability(&leaf.to_string_lossy(), method_name, None),
         )),
         MethodResult::If2(_) => Some(report::ChainDetail::default()),
         MethodResult::Nlopt(_) | MethodResult::Pfilter(_) => None,
@@ -2445,7 +1288,7 @@ fn completed_outcome(
         findings: record.findings,
         findings_unreadable: Vec::new(),
         stored: Some(report::Stored {
-            leaf: report::display_path(leaf),
+            leaf: report::display_path(shown),
             total_seconds: Some(total_seconds),
         }),
         chain_detail,
@@ -2478,22 +1321,6 @@ fn load_method_result_or_exit(
     })
 }
 
-/// Resolve a `--resume <base ref>` to a base method-leaf dir: an existing
-/// path, else a `run_id` hex prefix matched under `<cas_root>/fits/`. `None`
-/// when no unique match (caller errors).
-fn resolve_base_ref(reference: &str, cas_root: &std::path::Path) -> Option<std::path::PathBuf> {
-    let p = std::path::Path::new(reference);
-    if p.is_dir() {
-        return Some(p.to_path_buf());
-    }
-    let mut matches = crate::cas_read::resolve_fit_prefix(cas_root, reference);
-    if matches.len() == 1 {
-        Some(matches.remove(0).dir)
-    } else {
-        None
-    }
-}
-
 /// Whether the method's pre-run likelihood check and initial proposal read the
 /// declared `[estimate].start` values even when its starts rule does not
 /// start chains there: PMMH and `mh`.
@@ -2504,7 +1331,7 @@ pub(crate) fn still_reads_declared_starts(algorithm: &config_v2::Algorithm) -> b
 /// The base leaf's per-chain warm-up record, for a resumed PMMH or `mh` run
 /// (`report::ChainWarmup`). Empty for a fresh run, and for a base written
 /// before the record existed.
-fn base_warmup(
+pub(crate) fn base_warmup(
     base: Option<&std::path::Path>,
     algorithm: &config_v2::Algorithm,
 ) -> Vec<report::ChainWarmup> {
@@ -2525,7 +1352,7 @@ fn base_warmup(
 /// ([`stream_bindings::StreamBindings::digests`]). Every site that computes a
 /// fit-level or method-level identity takes its data digests from here, so
 /// they agree.
-fn read_data_digests(
+pub(crate) fn read_data_digests(
     data: &config_v2::DataSpec,
     model: &ir::Model,
 ) -> Result<stream_bindings::BoundDataDigests, String> {
@@ -2535,7 +1362,7 @@ fn read_data_digests(
 /// `mle_params.toml`'s `[provenance.data]` entries: `"<source> (<path>)"` →
 /// the full SHA-256 of the training file, from the digests the run identity
 /// was built from.
-fn provenance_data_hashes(data: &stream_bindings::BoundDataDigests) -> Vec<(String, String)> {
+pub(crate) fn provenance_data_hashes(data: &stream_bindings::BoundDataDigests) -> Vec<(String, String)> {
     data.training_files()
         .map(|(source, path, hex)| (format!("{source} ({path})"), hex))
         .collect()
@@ -2573,7 +1400,7 @@ fn resolved_data_hashes(
 ///
 /// `Err` says why the fit's roles form no partition, for an `unresolved`
 /// record.
-fn resolve_fit_roles(
+pub(crate) fn resolve_fit_roles(
     problem: &config_v2::Problem,
     model: &ir::Model,
     fixed_via: Result<Vec<(String, crate::roles::FitFixedVia)>, String>,
@@ -2898,39 +1725,13 @@ pub fn cmd_fit_new(a: &crate::args::FitNewArgs, compile: crate::util::CompileSet
         out.say(format_args!("note: {} already has [provenance]. Update derived_from manually.", to));
     }
 
-    // Best-effort: name the source fit's content-addressed segment, so the
-    // derived file can warm-start from it by handle. The exact leaf path
-    // (`{method}-{h8}/seed_N-{h8}`) needs the method + seed hashes, so we name
-    // the segment and defer the leaf to `camdl list`.
-    if let Ok(cfg) = config_v2::Problem::load(&from) {
-        let seg = crate::util::load_model(&cfg.model.camdl, compile).ok().and_then(|(mut m, _)| {
-            let ir_version = ir::IR_VERSION.trim().to_string();
-            // The model the fit hashed is the bound one, with the bound files'
-            // digests beside it.
-            let tables = crate::external_inputs::bind(&mut m, &cfg.external_bindings()).ok()?;
-            let data = cfg.data_spec().ok()
-                .and_then(|ds| read_data_digests(ds, &m).ok())
-                .unwrap_or_default()
-                .with_tables(&tables);
-            cas::fit_level_hash(&m, &ir_version, &fit_engine(), &cfg, &data)
-                .ok()
-                .map(|h| {
-                    let root = crate::run_paths::output_root(None, cfg.output_dir.as_deref());
-                    let stem = crate::hashing::path_stem_slug(&from)
-                        .unwrap_or_else(|| "fit".to_string());
-                    cas::fit_segment_dir(&root, &stem, &h)
-                })
-        });
-        if let Some(seg) = seg {
-            out.say(format_args!("  [provenance] derived_from = \"{}\"", from));
-            out.say(format_args!("  hint: to warm-start the derived fit from {}, write under its \
-                       [method]", seg.display()));
-            out.say(format_args!("        starts = {{ from_posterior = \"@<label>\" }}   # one draw per chain"));
-            out.say(format_args!("        starts = {{ from_mle = \"@<label>\" }}         # every chain at its estimate"));
-            out.say("        (a handle is @label, a fit-id prefix, or the leaf directory; \
-                       `camdl list` shows them)");
-        }
-    }
+    // How the derived file can warm-start from a run of the source, by handle.
+    out.say(format_args!("  [provenance] derived_from = \"{}\"", from));
+    out.say("  hint: to warm-start the derived fit from a run of the source, write under its [method]");
+    out.say("        starts = { from_posterior = \"@<label>\" }   # one draw per chain");
+    out.say("        starts = { from_mle = \"@<label>\" }         # every chain at its estimate");
+    out.say("        (a handle is @label, a run-id prefix or the run's folder; `camdl list` shows them)");
+    let _ = compile;
 
     std::fs::write(&to, &content).unwrap_or_else(|e| {
         out.fail(format!("error writing {}: {}", to, e));
@@ -2940,81 +1741,6 @@ pub fn cmd_fit_new(a: &crate::args::FitNewArgs, compile: crate::util::CompileSet
 }
 
 // ─── Labels (proposal §5) ─────────────────────────────────────────────
-
-/// Refuse to give `label` to the run identified by `run_id` while another
-/// fit run carrying it is in flight — its live state running, or held by a
-/// process on another host whose liveness cannot be checked. Two runs in
-/// flight under one name is a race. A run that was interrupted or failed
-/// carries the label without holding it, and does not block it.
-fn check_label_movable(
-    root: &std::path::Path,
-    label: &str,
-    run_id: &runid::ContentHash,
-) -> Result<(), String> {
-    use runid::store::LeafState;
-    let live = crate::fit::handle::runs_labelled(root, label).into_iter().find(|l| {
-        &l.record.run_id != run_id
-            && matches!(
-                runid::store::leaf_state(&l.dir, &l.record),
-                LeafState::Running { .. } | LeafState::OwnerUnknown { .. }
-            )
-    });
-    match live {
-        None => Ok(()),
-        Some(l) => {
-            let id = l.run_id_hex();
-            Err(format!(
-                "the label \"{label}\" is on run {} ({}), which is still running; two runs \
-                 in flight under one label is a race.\n  Wait for it to finish, or give this \
-                 run another label.",
-                &id[..12.min(id.len())],
-                l.dir.display(),
-            ))
-        }
-    }
-}
-
-/// `label: run 3a63b6 was @M, now @L` — said when a fit run's own label was
-/// replaced.
-fn say_label_replaced(out: &crate::out::Out, dir: &std::path::Path, previous: Option<&str>, label: &str) {
-    if let Some(m) = previous {
-        let id = crate::fit::fit_view::leaf_run_id(dir).ok().flatten().unwrap_or_default();
-        out.say(format_args!("label: run {} was @{m}, now @{label}", &id[..6.min(id.len())]));
-    }
-}
-
-/// `note: @L now names run 7c01e2 (previously run 3a63b6, completed
-/// 2026-11-14, max R̂ 2.18)` — said, after the label lock is released, when
-/// `label` moved to the run at `now` from another run, `before`.
-fn say_label_moved(
-    out: &crate::out::Out,
-    label: &str,
-    before: Option<&crate::cas_read::Leaf>,
-    now: &std::path::Path,
-) {
-    let Some(prev) = before.filter(|b| b.dir != now) else { return };
-    let new_id = crate::fit::fit_view::leaf_run_id(now).ok().flatten().unwrap_or_default();
-    let old_id = prev.run_id_hex();
-    let mut what = vec![format!("previously run {}", &old_id[..6.min(old_id.len())])];
-    if let Some(at) = crate::fit::handle::label_set_at(prev) {
-        what.push(format!("labelled {}", at.get(..10).unwrap_or(&at)));
-    }
-    if let crate::fit::run_view::RunVerdict::Posterior { verdict, .. } =
-        crate::fit::run_view::RunVerdict::of(prev)
-    {
-        use score::convergence::Verdict;
-        if let Verdict::Converged { max_rhat, .. } | Verdict::NotConverged { max_rhat, .. } = verdict {
-            if max_rhat.is_finite() {
-                what.push(format!("max R̂ {max_rhat:.2}"));
-            }
-        }
-    }
-    out.say(format_args!(
-        "note: @{label} now names run {} ({})",
-        &new_id[..6.min(new_id.len())],
-        what.join(", ")
-    ));
-}
 
 /// Validate a user-supplied label string against the proposal's
 /// rule: 1–64 characters after trim, restricted to letters, digits,
@@ -3079,9 +1805,19 @@ pub fn cmd_label(args: &crate::args::LabelArgs) {
         }
     };
 
-    // A filter run lives on the run store, where a completed record is
-    // sealed: it is named by the invocation that runs it, never after.
+    // A filter run and a fit run live on the run store, where a completed
+    // record is sealed: each is named by the invocation that runs it, never
+    // after.
     if let Some(store) = crate::camdl_store::open_existing(&crate::camdl_store::read_root()) {
+        let fit = crate::fit_store::parse_handle(&args.hash).ok()
+            .and_then(|h| store.resolve::<crate::fit_store::FitRun>(&store::RunRef::new(h)).ok());
+        if let Some(stored) = fit {
+            out.fail(format!(
+                "error: the fit run {} is sealed: a stored result's record is never rewritten, so \
+                 it cannot be labelled after it ran. Name the run when it runs, with `--label`: \
+                 `camdl fit run ... --label {new_label}` reuses the stored run and names it @{new_label}.",
+                stored.id().key().short12()));
+        }
         if let Ok(handle) = args.hash.parse::<store::RunRef<crate::pfilter_store::Pfilter>>() {
             if let Ok(stored) = store.resolve(&handle) {
                 out.fail(format!(
@@ -3116,8 +1852,6 @@ pub fn cmd_label(args: &crate::args::LabelArgs) {
             matches.push(leaf.dir);
         }
     }
-    let fit_runs: Vec<crate::cas_read::Leaf> =
-        crate::cas_read::resolve_fit_prefix(&root, &args.hash);
     let mut profile_segments: Vec<std::path::PathBuf> = Vec::new();
     // Profiles (gh#147 M3.3): resolve by the profile-base hash (the `profile`
     // level of any leaf) → base segment; relabel via the sidecar rewrite.
@@ -3136,32 +1870,8 @@ pub fn cmd_label(args: &crate::args::LabelArgs) {
         }
     }
 
-    let total = matches.len() + fit_runs.len() + profile_segments.len();
+    let total = matches.len() + profile_segments.len();
     if total == 0 {
-        // A fit-id prefix names a problem folder, which holds runs but is not
-        // one; say which runs it holds rather than "not found".
-        let folders: Vec<std::path::PathBuf> = std::fs::read_dir(root.join("fits"))
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|e| e.path())
-            .filter(|seg| {
-                crate::fit::fit_view::FitView::read(seg)
-                    .is_some_and(|v| v.fit_hash.starts_with(&args.hash))
-            })
-            .collect();
-        if let Some(seg) = folders.first() {
-            let view = crate::fit::fit_view::FitView::read(seg);
-            out.say(format_args!(
-                "error: `{}` is the fit id of {}, a problem folder, not a run; a label \
-                 names one run. Label one of its runs by its run_id:",
-                args.hash, seg.display()));
-            for st in view.iter().flat_map(|v| v.methods.iter()) {
-                out.say(format_args!("    camdl label {} \"{}\"    # {}", &st.run_id[..12], new_label,
-                    st.method_dir.display()));
-            }
-            crate::out::ExitCode(1).exit();
-        }
         out.fail(format!("error: no run found with hash prefix `{}` under {}",
             args.hash, root.display()));
     }
@@ -3169,39 +1879,12 @@ pub fn cmd_label(args: &crate::args::LabelArgs) {
         out.say(format_args!("error: hash prefix `{}` matches {} runs — \
                    use a longer prefix", args.hash, total));
         for p in matches.iter()
-            .chain(fit_runs.iter().map(|l| &l.dir))
             .chain(profile_segments.iter())
             .take(8)
         {
             out.say(format_args!("  {}", p.display()));
         }
         crate::out::ExitCode(1).exit();
-    }
-
-    // A fit run: it becomes the label's holder, stamped now.
-    if let Some(run) = fit_runs.into_iter().next() {
-        if run.record.status == runid::RunStatus::Running {
-            out.fail(format!("error: {} is still running; label it when it has finished",
-                run.dir.display()));
-        }
-        // Check and write under the store-wide label lock.
-        let lock = crate::cas_sink::fit_label_lock(&root).unwrap_or_else(|e| {
-            out.fail(format!("error: {e}"));
-        });
-        let before = crate::fit::handle::label_history(&root, &new_label).into_iter().next();
-        let written = check_label_movable(&root, &new_label, &run.record.run_id).and_then(|()| {
-            crate::cas_sink::set_fit_label(&run.dir, &new_label, &crate::cas_sink::label_stamp())
-        });
-        drop(lock); // released before any `exit`, which runs no destructors
-        match written {
-            Err(e) => out.fail(format!("error: {e}")),
-            Ok(previous) => {
-                out.say(format_args!("ok: label set to \"{}\" on {}", new_label, run.dir.display()));
-                say_label_replaced(&out, &run.dir, previous.as_deref(), &new_label);
-                say_label_moved(&out, &new_label, before.as_ref(), &run.dir);
-            }
-        }
-        return;
     }
 
     // A profile: rewrite the base sidecar's label (its authoritative home),
@@ -3613,78 +2296,6 @@ mod tests {
             serde_json::from_str(&json).unwrap_or_else(|e| panic!("parse {path}: {e}"));
         serde_json::from_value(envv["model"].clone())
             .unwrap_or_else(|e| panic!("deserialize {path}: {e}"))
-    }
-
-    /// The data half of a fit's run identity, pinned for both `[data]` forms
-    /// on a model whose one observation block expands to two leaves
-    /// (`cases[p in patch]` → `cases_urban`, `cases_rural`, both of source
-    /// `cases`). `FitDigest.data` is a sorted list of file digests with the
-    /// keys dropped, so the pin is its length and order: the shorthand folds
-    /// the file once per leaf, `[data.observations]` once per source. A change
-    /// to how `[data]` is resolved must leave both byte-identical: changing
-    /// either re-keys every stored fit of that form.
-    #[test]
-    fn fit_identity_data_digests_are_pinned_for_both_data_forms() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let train = tmp.path().join("cases_long.tsv");
-        std::fs::write(&train, b"time\tpatch\tcases\n7\turban\t12\n7\trural\t3\n").unwrap();
-        let holdout = tmp.path().join("cases_holdout.tsv");
-        std::fs::write(&holdout, b"time\tpatch\tcases\n14\turban\t18\n14\trural\t6\n").unwrap();
-        let model = golden_model("ocaml/golden/sir_two_patch_long_obs.ir.json");
-        let config = |data: &str| config_v2::FitConfig::from_toml_str(&format!(
-            "[model]\ncamdl = \"m.ir.json\"\n{data}\n\
-             [estimate]\nbeta = {{ bounds = [0.01, 0.5] }}\n[fixed]\nrho = 0.5\n\
-             [method]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\n\
-             chains = 1\nparticles = 10\niterations = 1\ncooling = 0.7\n"))
-            .expect("fixture fit.toml parses").problem;
-        let digest = |problem: &config_v2::Problem| {
-            let data = read_data_digests(problem.data_spec().unwrap(), &model).unwrap();
-            let d = cas::fit_level_digest(&model, "pin-ir", &runid::inputs::EngineIdentity::of_build("pin-engine"), problem, &data).unwrap();
-            let hex = |v: &[runid::inputs::DataDigest]| -> Vec<String> {
-                v.iter().map(|x| x.0.to_hex()).collect()
-            };
-            (hex(&d.data), hex(&d.holdout_data))
-        };
-        let t = "8ba0c3256c5b1f3c7162167e1cb8d3763ab91807869a1686c10974e7cbd1e5d9".to_string();
-        let h = "1cca7b9d54288f7525f39f73e573151cbc23516850f5fee46716fef2f4859f76".to_string();
-        let shorthand = config(&format!(
-            "[data]\nfile = \"{}\"\n[data.holdout]\ncases = \"{}\"",
-            train.display(), holdout.display()));
-        assert_eq!(digest(&shorthand), (vec![t.clone(), t.clone()], vec![h.clone()]),
-            "shorthand: one training digest per leaf, one holdout digest per source");
-        let per_source = config(&format!(
-            "[data.observations]\ncases = \"{}\"\n[data.holdout]\ncases = \"{}\"",
-            train.display(), holdout.display()));
-        assert_eq!(digest(&per_source), (vec![t], vec![h]),
-            "[data.observations]: one training digest per source");
-    }
-
-    /// The version of the rule that decides which rows train is part of the
-    /// fit identity. The identity keys the training files' bytes and the
-    /// config, not the rows the rule picks from them, so a change to the rule
-    /// would otherwise serve a stored fit for a run that trains on other rows
-    /// unless someone remembered to bump `HASH_VERSION` by hand.
-    #[test]
-    fn the_partition_rule_version_is_in_the_fit_identity() {
-        use runid::ContentAddressed;
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let train = tmp.path().join("cases_long.tsv");
-        std::fs::write(&train, b"time\tpatch\tcases\n7\turban\t12\n7\trural\t3\n").unwrap();
-        let model = golden_model("ocaml/golden/sir_two_patch_long_obs.ir.json");
-        let problem = config_v2::FitConfig::from_toml_str(&format!(
-            "[model]\ncamdl = \"m.ir.json\"\n[data]\nfile = \"{}\"\n\
-             [estimate]\nbeta = {{ bounds = [0.01, 0.5] }}\n[fixed]\nrho = 0.5\n\
-             [method]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\n\
-             chains = 1\nparticles = 10\niterations = 1\ncooling = 0.7\n",
-            train.display()))
-            .expect("fixture fit.toml parses").problem;
-        let data = read_data_digests(problem.data_spec().unwrap(), &model).unwrap();
-        let d = cas::fit_level_digest(&model, "pin-ir", &runid::inputs::EngineIdentity::of_build("pin-engine"), &problem, &data).unwrap();
-        assert_eq!(d.partition_rule_version, training_partition::PARTITION_RULE_VERSION);
-        let mut next_rule = d.clone();
-        next_rule.partition_rule_version += 1;
-        assert_ne!(d.content_hash(), next_rule.content_hash(),
-            "a new partition rule must re-key the fit");
     }
 
     /// `fit.meta.json`'s `data_hashes` is keyed by source in every `[data]`

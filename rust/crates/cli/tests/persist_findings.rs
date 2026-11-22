@@ -1,12 +1,14 @@
 //! Every method leaf persists its findings, and a run that could not store its
 //! result fails.
 //!
-//! A successful IF2 or NLopt `fit run` leaves `diagnostics.json` in its leaf
-//! (a JSON array of findings, empty when the run raised none); a `pfilter` run
+//! A successful IF2 or NLopt `fit run` leaves `diagnostics.json` in its run
+//! folder (a JSON array of findings, empty when the run raised none); a `pfilter` run
 //! whose output cannot be claimed in the run store exits non-zero instead of
 //! warning and exiting 0; and an observation file that does not bind to the
 //! model stops a fit through the one path every other failure takes (a
-//! `failed` report in the leaf's event log, the error printed, status 1).
+//! `failed` report in the run's event log, the error printed, status 1).
+
+mod fit_store_support;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -39,8 +41,7 @@ fn workdir() -> tempfile::TempDir {
 fn command(dir: &Path) -> Command {
     let mut c = Command::new(camdl());
     c.env_remove("CLICOLOR_FORCE")
-        .env_remove("CAMDL_OUTPUT_DIR")
-        .env_remove("CAMDL_STORE")
+        .env("CAMDL_STORE", dir.join("camdl-store"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDLC", camdlc())
         .env("CAMDL_IR_CACHE_DIR", dir.join(".ir-cache"))
@@ -48,18 +49,9 @@ fn command(dir: &Path) -> Command {
     c
 }
 
-/// The one claimed method leaf (`seed_*`) under `dir/results/fits`.
+/// The one stored fit run in the store under `dir`.
 fn the_leaf(dir: &Path) -> PathBuf {
-    let subdirs = |d: &Path| -> Vec<PathBuf> {
-        std::fs::read_dir(d).unwrap().flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect()
-    };
-    let leaves: Vec<PathBuf> = subdirs(&dir.join("results/fits")).iter()
-        .flat_map(|fit| subdirs(fit))
-        .flat_map(|m| subdirs(&m))
-        .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with("seed_"))
-        .collect();
-    assert_eq!(leaves.len(), 1, "one claimed leaf: {leaves:?}");
-    leaves.into_iter().next().unwrap()
+    fit_store_support::the_run(&dir.join("camdl-store"))
 }
 
 fn findings_of(leaf: &Path) -> Vec<serde_json::Value> {
@@ -126,7 +118,9 @@ fn an_observation_file_that_does_not_bind_abandons_the_fit_with_its_record() {
     assert_eq!(out.status.code(), Some(1), "{stderr}");
     let leaf = the_leaf(tmp.path());
     let log = std::fs::read_to_string(leaf.join("events.jsonl")).unwrap();
-    let last: serde_json::Value = serde_json::from_str(log.lines().last().unwrap()).unwrap();
+    // Each line of the stored event log carries the event under `event`.
+    let line: serde_json::Value = serde_json::from_str(log.lines().last().unwrap()).unwrap();
+    let last = &line["event"];
     assert_eq!(last["event"], "method_report", "{log}");
     assert_eq!(last["outcome"], "failed", "{last}");
     let _ = findings_of(&leaf);

@@ -47,8 +47,12 @@ struct FitConfigWire {
     fit_seeds: Option<Vec<u64>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     simplex_groups: Vec<SimplexGroup>,
-    #[serde(default)]
+    /// Read only to refuse it: a fit is stored on the run store, under
+    /// `store`.
+    #[serde(default, skip_serializing)]
     output_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    store: Option<String>,
     estimate: IndexMap<String, EstimateSpecV2>,
     fixed: FixedParams,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -109,9 +113,10 @@ pub struct Problem {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub simplex_groups: Vec<SimplexGroup>,
 
-    /// Where the run tree is written. Provenance, never identity
-    /// (`fit_level_hash` strips it).
-    pub output_dir: Option<String>,
+    /// The run store's root (`camdl fit run`, and the commands that read a
+    /// stored fit). A request to the store, never identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub store: Option<String>,
 
     /// The free parameters: what the inference algorithm estimates.
     pub estimate: IndexMap<String, EstimateSpecV2>,
@@ -199,12 +204,12 @@ pub struct FitConfig {
 impl FitConfigWire {
     fn split(self) -> FitConfig {
         let FitConfigWire {
-            model, data, synthetic, fit_seeds, simplex_groups, output_dir, estimate, fixed,
+            model, data, synthetic, fit_seeds, simplex_groups, output_dir: _, store, estimate, fixed,
             method, config, simulate, scenario, enable, disable, ic_free, provenance,
         } = self;
         FitConfig {
             problem: Problem {
-                model, data, synthetic, simplex_groups, output_dir, estimate, fixed, config,
+                model, data, synthetic, simplex_groups, store, estimate, fixed, config,
                 simulate, scenario, enable, disable, ic_free, provenance, compiled_ir: None,
             },
             inference: Inference { method, fit_seeds },
@@ -217,12 +222,12 @@ impl FitConfig {
     /// (`config_identity_hash`).
     fn to_wire(&self) -> FitConfigWire {
         let Problem {
-            model, data, synthetic, simplex_groups, output_dir, estimate, fixed, config,
+            model, data, synthetic, simplex_groups, store, estimate, fixed, config,
             simulate, scenario, enable, disable, ic_free, provenance, compiled_ir: _,
         } = self.problem.clone();
         let Inference { method, fit_seeds } = self.inference.clone();
         FitConfigWire {
-            model, data, synthetic, fit_seeds, simplex_groups, output_dir, estimate, fixed,
+            model, data, synthetic, fit_seeds, simplex_groups, output_dir: None, store, estimate, fixed,
             method, config, simulate, scenario, enable, disable, ic_free, provenance,
         }
     }
@@ -1385,80 +1390,6 @@ impl Method {
         }
     }
 
-    /// Hashable subset of the method that defines its statistical
-    /// identity: the algorithm's fields plus `starts`. For PGAS / PMMH this
-    /// *omits* the extension dimension (`sweeps` / `iterations`
-    /// respectively), which the method level folds separately as its target
-    /// length — so `cas::resume_guard`, which zeroes that length, lets
-    /// `--resume` extend a chain by changing only that field. Every other
-    /// field is identity-defining: changing chains, particles, burn_in, thin,
-    /// or starts requires a fresh run.
-    ///
-    /// IF2 has no extension dimension — its cooling schedule is
-    /// determined by the total iteration count, so resuming from the
-    /// middle of a different schedule is statistically incoherent.
-    /// PFilter is single-pass; nothing to extend.
-    ///
-    /// Returned as `serde_json::Value` for `cas::method_config_hash` to digest;
-    /// stable across recompiles because `serde_json` sorts object keys
-    /// lexically when serializing maps.
-    pub fn identity_payload(&self) -> serde_json::Value {
-        // SUBTRACTIVE, not enumerated: serialize the whole method and remove
-        // only the keys that must not be hashed. The four sampler arms used
-        // to LIST their included fields and destructure the rest with `..`,
-        // which made method identity exclude-by-default — a field added to a
-        // variant but forgotten here was silently absent from the key, and
-        // two fits differing only in it collided. That is the shape behind
-        // gh#514, gh#540 and the 2026-08-23 batch; the invariant even lived
-        // in a comment ("`burnin_dt` … MUST be listed here"), because nothing
-        // enforced it. Now a new field is hashed unless it is deliberately
-        // named below.
-        //
-        // What is subtracted, and why:
-        //  - the EXTENSION DIMENSION (PGAS `sweeps`, PMMH/Mh `iterations`):
-        //    a resumed run extends a base run, so the two
-        //    must share a prefix identity; the length is folded separately
-        //    by `cas_target_length`.
-        //  - PGAS `n_trajectories`: an output-shaping count, folded by
-        //    `cas_n_trajectories` (count-in-the-key) rather than here, so
-        //    hashing it in both places would double-fold it.
-        //
-        // IF2/PFilter/NLopt have no extension dimension and subtract nothing.
-        //
-        // Keys are the TOML-side spellings because they come from the
-        // method's own serialization; the enumerated arms used the Rust field
-        // names, so those two spellings disagreed across variants. `starts`
-        // is always concrete here: `resolve_starts` runs before any identity
-        // is taken, and `method_config_hash` refuses an unresolved method.
-        //
-        // `starts` is hashed by [`ChainStarts::identity_value`]: a sourced
-        // rule by its kind, its source through `deps` (gh#896).
-        let mut exclude: Vec<&str> = self.algorithm.extension_key().into_iter().collect();
-        if matches!(self.algorithm, Algorithm::PGAS { .. }) {
-            exclude.push("n_trajectories");
-        }
-        let mut payload = self.payload_minus(&exclude);
-        if let (Some(starts), Some(obj)) = (&self.starts, payload.as_object_mut()) {
-            obj.insert("starts".to_string(), starts.identity_value());
-        }
-        payload
-    }
-
-    /// The method serialized in full, minus `exclude`d top-level keys.
-    ///
-    /// The subtractive primitive behind [`Self::identity_payload`]: include
-    /// by default, and name every omission. A missing key here is a
-    /// deliberate, greppable decision; a missing field in an enumerated
-    /// `json!` was invisible.
-    fn payload_minus(&self, exclude: &[&str]) -> serde_json::Value {
-        // The shared subtraction (`fit::cas::serialize_minus`), not a third
-        // copy of it. Infallible here by the same fallback this always had:
-        // `identity_payload` returns a `Value`, and a method that cannot
-        // serialize is caught by `method_config_hash`'s gate, which runs on the
-        // method itself.
-        super::cas::serialize_minus(self, exclude).unwrap_or_else(|_| serde_json::json!({}))
-    }
-
 }
 
 /// The chain-starts rule a run that names none draws under (§3.4), for the
@@ -1607,46 +1538,6 @@ impl Algorithm {
         }
     }
 
-    /// gh#147 (M3.2). The method's *extension dimension* (the field
-    /// `identity_payload` omits so `--resume` can extend a chain): PGAS
-    /// `sweeps`, IF2/PMMH `iterations`. A resumed run is a distinct artifact
-    /// keyed on this value, so the CAS method level folds it in. Single-pass
-    /// methods (PFilter) and the NLopt MLE methods (whose `max_evals` is a
-    /// budget already in `identity_payload`, not an extension) report 0.
-    pub fn cas_target_length(&self) -> u64 {
-        match self {
-            Algorithm::IF2 { iterations, .. } => *iterations as u64,
-            Algorithm::PGAS { sweeps, .. } => *sweeps as u64,
-            Algorithm::PMMH { iterations, .. } => *iterations as u64,
-            Algorithm::Mh { iterations, .. } => *iterations as u64,
-            Algorithm::PFilter { .. }
-            | Algorithm::NlSbplx(_)
-            | Algorithm::NlBobyqa(_)
-            | Algorithm::NlLbfgs(_) => 0,
-        }
-    }
-
-    /// Whether this method's result depends on the compiler-emitted gradient
-    /// maps, so that its method level hashes them
-    /// ([`crate::fit::cas`]'s `gradients_read`; proposal 2026-11-17 §1b).
-    /// PGAS with NUTS takes its θ step along the gradient of the
-    /// complete-data likelihood (`sim::inference::pgas_grad`), and `nl-lbfgs`
-    /// climbs the ODE forward-sensitivity gradient (`det_grad`, from
-    /// `nlopt_method`). Every other method, PGAS under `--no-nuts` included,
-    /// evaluates the likelihood and never a gradient.
-    pub fn reads_gradients(&self) -> bool {
-        match self {
-            Algorithm::PGAS { use_nuts, .. } => *use_nuts,
-            Algorithm::NlLbfgs(_) => true,
-            Algorithm::IF2 { .. }
-            | Algorithm::PMMH { .. }
-            | Algorithm::Mh { .. }
-            | Algorithm::PFilter { .. }
-            | Algorithm::NlSbplx(_)
-            | Algorithm::NlBobyqa(_) => false,
-        }
-    }
-
     /// The `[method]` key that holds the method's length, for a method a
     /// resume can extend: PGAS `sweeps`, PMMH and MH `iterations`. A resumed
     /// run shares every other key with its base, so the length is left out of
@@ -1660,19 +1551,6 @@ impl Algorithm {
             | Algorithm::NlSbplx(_)
             | Algorithm::NlBobyqa(_)
             | Algorithm::NlLbfgs(_) => None,
-        }
-    }
-
-    /// The number of posterior trajectory samples saved to disk (PGAS only;
-    /// default 200). An output-shaping knob that `identity_payload` otherwise
-    /// omits, but it is folded into the method identity (count-in-the-key):
-    /// because it changes stored output, changing it yields a distinct leaf
-    /// rather than silently reusing the wrong trajectory count, at the cost of
-    /// re-fitting when it changes.
-    pub fn cas_n_trajectories(&self) -> u64 {
-        match self {
-            Algorithm::PGAS { n_trajectories, .. } => *n_trajectories as u64,
-            _ => 0,
         }
     }
 
@@ -2824,6 +2702,13 @@ impl FitConfig {
         detect_nuts_algorithm(contents)?;
         let wire: FitConfigWire = toml::from_str(contents)
             .map_err(|e| format!("parse error: {}", e))?;
+        if let Some(dir) = &wire.output_dir {
+            return Err(format!(
+                "`output_dir = \"{dir}\"` is not read: a fit is stored on the run store. Name \
+                 its root with `store = \"{dir}\"` (relative to this file), or set \
+                 CAMDL_STORE; without either it is ./camdl-store."
+            ));
+        }
         // gh#241 (C3): catch typo'd method keys serde silently drops.
         if let Some(method) = &wire.method {
             validate_method_keys(contents, method)?;
@@ -3671,7 +3556,7 @@ impl Problem {
     /// machine's filesystem layout into the config, breaking sharing and
     /// reproducibility (the content-addressable design) — the fit-config
     /// counterpart of the compiler's W104 on model-file paths. Covered
-    /// surfaces: `[model] camdl`, `output_dir`, the wide-TSV `[data] file`, and
+    /// surfaces: `[model] camdl`, `store`, the wide-TSV `[data] file`, and
     /// every `[data.observations]` stream source.
     ///
     /// Checked on the AS-WRITTEN strings, so it must run BEFORE
@@ -3690,8 +3575,8 @@ impl Problem {
             }
         };
         check("[model] camdl", &self.model.camdl);
-        if let Some(dir) = &self.output_dir {
-            check("output_dir", dir);
+        if let Some(dir) = &self.store {
+            check("store", dir);
         }
         if let Some(data) = &self.data {
             if let Some(file) = &data.file {
@@ -3717,26 +3602,9 @@ impl Problem {
     /// Absolute paths in the toml pass through unchanged.
     fn anchor_paths_at(&mut self, toml_path: &std::path::Path) {
         self.model.camdl = crate::util::resolve_relative_to_toml(toml_path, &self.model.camdl);
-        // gh#507: `output_dir` anchors here too. It is the one path written in
-        // the fit.toml that used to resolve against the process CWD instead,
-        // so a single `../` could not be correct for both the inputs and the
-        // output — `output_dir = "../data/runs"` in a fit.toml one level down
-        // wrote the whole run tree to a SIBLING OF THE REPOSITORY, silently,
-        // with the fit reporting success and the announced path (echoed
-        // as-written) consistent with either reading.
-        //
-        // The rule this restores: a path written IN a file anchors at that
-        // file; what does not come from the file anchors at the CWD, which is
-        // the frame it was typed in — the `results/` default when no
-        // `output_dir` is declared, and `CAMDL_OUTPUT_DIR`.
-        //
-        // gh#531: this used to cite `--output-dir` as the command-line case.
-        // `fit run` has no such flag — `FitRunArgs` carries no `output_dir`,
-        // and both call sites pass `output_root(None, config.output_dir…)`.
-        // The flag exists on `simulate`, which does not load a fit.toml, so
-        // it documented a precedence layer unreachable
-        // from here.
-        if let Some(dir) = &mut self.output_dir {
+        // The store root is written in the file, so it anchors at the file
+        // like every other path in it.
+        if let Some(dir) = &mut self.store {
             *dir = crate::util::resolve_relative_to_toml(toml_path, dir);
         }
         if let Some(data) = &mut self.data {
@@ -3968,6 +3836,41 @@ pub(crate) fn format_dataset_dir(idx: usize) -> String {
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
+
+/// What a run's identity keys of a method, for the tests below: the settings
+/// `MethodSettings::of` keys (every key but the length and `starts`), with
+/// the algorithm and the starts rule `StartSource::of` keys beside them.
+#[cfg(test)]
+impl Method {
+    fn identity_payload(&self) -> serde_json::Value {
+        let (settings, _) = crate::fit_store::MethodSettings::of(self).expect("a finite method keys");
+        let mut v: serde_json::Value = serde_json::from_str(&settings.settings).expect("the settings are JSON");
+        let o = v.as_object_mut().expect("the settings are an object");
+        o.insert("algorithm".into(), serde_json::Value::String(settings.algorithm));
+        if let Ok(rule) = self.starts() {
+            o.insert("starts".into(), rule.identity_value());
+        }
+        v
+    }
+}
+
+/// The length a run's identity holds apart from its settings, and the
+/// trajectory count its settings hold, for the tests below.
+#[cfg(test)]
+impl Algorithm {
+    fn cas_target_length(&self) -> u64 {
+        let m = Method { algorithm: self.clone(), starts: Some(crate::fit::starts::ChainStarts::from_prior()) };
+        crate::fit_store::MethodSettings::of(&m).expect("a finite method keys").1
+    }
+
+    fn cas_n_trajectories(&self) -> usize {
+        match self {
+            Algorithm::PGAS { n_trajectories, .. } => *n_trajectories,
+            _ => 0,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4061,10 +3964,10 @@ cooling = 0.70
     /// A minimal but valid fit config parametrized by the four file-reference
     /// surfaces the lint covers, so a test can flip any of them absolute/relative
     /// without repeating the boilerplate.
-    fn cfg_with_paths(camdl: &str, obs: &str, output_dir: &str) -> FitConfig {
+    fn cfg_with_paths(camdl: &str, obs: &str, store: &str) -> FitConfig {
         parse(&format!(
             r#"
-output_dir = "{output_dir}"
+store = "{store}"
 
 [model]
 camdl = "{camdl}"
@@ -4386,8 +4289,8 @@ starts     = "{starts}"
         // the ONLY omissions.
         assert!(!obj.contains_key("sweeps"),
             "the extension dimension stays out (folded by cas_target_length)");
-        assert!(!obj.contains_key("n_trajectories"),
-            "folded by cas_n_trajectories instead — hashing it here double-folds");
+        assert!(obj.contains_key("n_trajectories"),
+            "the trajectory count is one of the method's settings");
         // Everything else the method carries is present, under its TOML spelling.
         for key in ["algorithm", "backend", "chains", "particles", "burn_in", "thin",
                     "use_nuts", "dense_mass", "max_tree_depth",
@@ -4690,7 +4593,7 @@ starts     = "{starts}"
         assert_eq!(
             warnings.len(),
             3,
-            "one warning each for [model] camdl, [data.observations] weekly_cases, output_dir; got: {warnings:?}"
+            "one warning each for [model] camdl, [data.observations] weekly_cases, store; got: {warnings:?}"
         );
         // Each warning names its surface and the offending path, and flags it as
         // non-portable (not just "absolute").
@@ -4699,24 +4602,19 @@ starts     = "{starts}"
         assert!(warnings.iter().any(|w|
             w.contains("[data.observations] weekly_cases") && w.contains("/abs/data/cases.tsv")));
         assert!(warnings.iter().any(|w|
-            w.contains("output_dir") && w.contains("/abs/out")));
+            w.contains("store") && w.contains("/abs/out")));
         assert!(warnings.iter().all(|w| w.contains("non-portable")));
     }
 
-    /// gh#507: every path WRITTEN IN the fit.toml anchors at the fit.toml,
-    /// `output_dir` included. Before this, `[model] camdl` and the data
-    /// streams anchored at the toml while `output_dir` anchored at the
-    /// process CWD, so one `../` could not be correct for both — a config
-    /// with `camdl = "m.camdl"` and `output_dir = "../data/runs"` wrote its
-    /// entire run tree to a sibling of the repository, silently, with the
-    /// fit reporting success.
+    /// Every path written in the fit.toml anchors at the fit.toml, `store`
+    /// included: one `../` must mean the same for the inputs and the store.
     #[test]
-    fn load_anchors_output_dir_at_the_toml_like_every_other_path() {
+    fn load_anchors_the_store_at_the_toml_like_every_other_path() {
         let dir = std::env::temp_dir().join("camdl_gh507_anchor");
         std::fs::create_dir_all(&dir).unwrap();
         let toml_path = dir.join("fit.toml");
         std::fs::write(&toml_path, r#"
-output_dir = "../runs"
+store = "../runs"
 
 [model]
 camdl = "sir.camdl"
@@ -4750,24 +4648,23 @@ cooling = 0.7
         assert!(obs.starts_with(&*anchor),
             "[data.observations] must anchor at the toml: {obs}");
 
-        // The one that did not.
-        let out = cfg.problem.output_dir.as_deref().unwrap();
+        let out = cfg.problem.store.as_deref().unwrap();
         assert!(out.starts_with(&*anchor),
-            "output_dir must anchor at the toml, not the CWD: {out}");
+            "store must anchor at the toml, not the CWD: {out}");
         assert!(std::path::Path::new(out).is_absolute(),
-            "a resolved output_dir is absolute, so nothing downstream can \
+            "a resolved store is absolute, so nothing downstream can \
              re-anchor it at the CWD: {out}");
     }
 
-    /// An absolute `output_dir` is the user saying exactly where they want
-    /// it; anchoring must not touch it (it already warns, via gh#307).
+    /// An absolute `store` is the user saying exactly where they want it;
+    /// anchoring must not touch it (it warns as non-portable).
     #[test]
-    fn load_passes_an_absolute_output_dir_through_unchanged() {
+    fn load_passes_an_absolute_store_through_unchanged() {
         let dir = std::env::temp_dir().join("camdl_gh507_abs");
         std::fs::create_dir_all(&dir).unwrap();
         let toml_path = dir.join("fit.toml");
         std::fs::write(&toml_path, r#"
-output_dir = "/tmp/camdl_gh507_explicit"
+store = "/tmp/camdl_gh507_explicit"
 
 [model]
 camdl = "sir.camdl"
@@ -4788,7 +4685,19 @@ cooling = 0.7
 "#).unwrap();
 
         let cfg = FitConfig::load(toml_path.to_str().unwrap()).unwrap();
-        assert_eq!(cfg.problem.output_dir.as_deref(), Some("/tmp/camdl_gh507_explicit"));
+        assert_eq!(cfg.problem.store.as_deref(), Some("/tmp/camdl_gh507_explicit"));
+    }
+
+    /// The old store's `output_dir` is refused, naming the key that replaces
+    /// it, so a fit is never stored somewhere other than the file asks.
+    #[test]
+    fn output_dir_is_refused_naming_the_store_key() {
+        let err = FitConfig::from_toml_str_named(
+            "output_dir = \"runs\"\n[model]\ncamdl = \"m.camdl\"\n[estimate]\nbeta = { bounds = [0.01, 2.0] }\n[fixed]\n",
+            "fit.toml",
+        )
+        .unwrap_err();
+        assert!(err.contains("output_dir") && err.contains("store = \"runs\""), "{err}");
     }
 
     #[test]
@@ -8208,8 +8117,8 @@ decibans_thresh = 100.0
         let mut s_many = make_pgas_method(1000);
         if let Algorithm::PGAS { ref mut n_trajectories, .. } = s_few.algorithm { *n_trajectories = 100; }
         if let Algorithm::PGAS { ref mut n_trajectories, .. } = s_many.algorithm { *n_trajectories = 1000; }
-        assert_eq!(s_few.identity_payload(), s_many.identity_payload(),
-            "n_trajectories is output-only and must not affect identity");
+        assert_ne!(s_few.identity_payload(), s_many.identity_payload(),
+            "n_trajectories changes the stored trajectories, so it is in the method's settings");
     }
 
     #[test]
@@ -8404,15 +8313,10 @@ decibans_thresh = 100.0
         let method = make_pgas_method(1000);
         let payload_bytes = serde_json::to_vec(&method.identity_payload()).unwrap();
         let payload_str = String::from_utf8(payload_bytes).unwrap();
-        // Updated with the `[stages]` → `[method]` split (proposal
-        // 2026-09-08): the payload is the method's own serialization, so the
-        // one chain-start key is `starts` under its TOML spelling, and the
-        // retired `init` / `init_mle` / `survey_*` keys are gone. A deliberate
-        // re-key of every method leaf, ruled in §8 item 22; see the commit for
-        // the --resume consequence. Moved again when PGAS parallel tempering
-        // was removed (gh#789): the `tempering` key left the payload, so every
-        // PGAS leaf re-keys — the release notes' Run-identity entry.
-        let expected = r#"{"algorithm":"pgas","backend":"chain_binomial","burn_in":200,"chains":4,"csmc_sweeps_per_nuts":1,"dense_mass":true,"max_tree_depth":10,"particles":100,"starts":"uniform_unconstrained","thin":2,"trajectory_warmup":0,"use_nuts":true}"#;
+        // The method's own serialization less its length, with the starts
+        // rule: what a run's chain identity holds of its method, and what a
+        // resumed chain's state must match.
+        let expected = r#"{"algorithm":"pgas","backend":"chain_binomial","burn_in":200,"chains":4,"csmc_sweeps_per_nuts":1,"dense_mass":true,"max_tree_depth":10,"n_trajectories":200,"particles":100,"starts":"uniform_unconstrained","thin":2,"trajectory_warmup":0,"use_nuts":true}"#;
         assert_eq!(payload_str, expected,
             "identity_payload byte format drifted — every existing \
              resume_state.bin would be invalidated. If this change is \

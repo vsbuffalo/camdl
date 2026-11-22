@@ -59,6 +59,7 @@ fn camdl(dir: &Path, args: &[&str]) -> Output {
         .args(args)
         .current_dir(dir)
         .env("CAMDL_OUTPUT_DIR", dir.join("out"))
+        .env("CAMDL_STORE", dir.join("out").join("camdl-store"))
         .output()
         .expect("spawn camdl")
 }

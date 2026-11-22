@@ -112,7 +112,7 @@ simulate { from = 0 'days  to = 6 'days }
 /// same file also serves `fit run`.
 fn write_fit_toml_with_priors(dir: &Path, ir: &Path, data: &Path, name: &str) -> PathBuf {
     let toml = format!(r#"
-output_dir = "{out}"
+store = "{out}"
 [model]
 camdl = "{ir}"
 [data.observations]
@@ -146,7 +146,7 @@ cooling    = 0.5
 /// priors must produce a different CAS dir.
 fn write_fit_toml_with_priors_variant(dir: &Path, ir: &Path, data: &Path) -> PathBuf {
     let toml = format!(r#"
-output_dir = "{out}"
+store = "{out}"
 [model]
 camdl = "{ir}"
 [data.observations]

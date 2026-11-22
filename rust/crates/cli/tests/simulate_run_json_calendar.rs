@@ -1,13 +1,14 @@
 //! A stored simulation cell can be dated without the model source: its
 //! `run.json` names the compiled model it ran, and that stored model carries
 //! the calendar axis (`docs/dev/temporal-architecture.md` §5.3; M1, gh#838).
-//! A fit's records carry the axis themselves.
+//! A fit run's `fit.meta.json` carries the axis itself.
 //!
 //! Shells out to the release `camdl` binary.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod fit_store_support;
 mod sim_store_cells;
 
 fn binary() -> PathBuf {
@@ -112,7 +113,7 @@ fn an_undated_simulation_record_says_it_has_no_origin() {
     );
 }
 
-/// Fit a dated model with if2 in `dir`, writing `results/fits/…`.
+/// Fit a dated model with if2 in `dir`, into the run store `dir/camdl-store`.
 fn run_dated_fit(dir: &Path) {
     let src = model(r#"origin = date("2020-03-01")"#).replace(
         "simulate {",
@@ -136,70 +137,21 @@ fn camdl(dir: &Path, args: &[&str]) -> std::process::Output {
     Command::new(binary())
         .env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("CAMDL_STORE", dir.join("camdl-store"))
         .current_dir(dir)
         .args(args)
         .output()
         .expect("spawn camdl")
 }
 
-/// Every file named `name` under `root`.
-fn files_named(root: &Path, name: &str) -> Vec<PathBuf> {
-    let mut found = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        if d.join(name).is_file() {
-            found.push(d.join(name));
-        }
-        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
-            if e.path().is_dir() {
-                stack.push(e.path());
-            }
-        }
-    }
-    found
-}
-
 /// Every record carries the axis, not only a simulation's (D59): a fit
-/// method's `run.json` and its segment's `fit.meta.json` both record it.
+/// run's `fit.meta.json` records it.
 #[test]
-fn a_fit_records_its_calendar_in_run_json_and_fit_meta() {
+fn a_fit_records_its_calendar_in_fit_meta() {
     let dir = tempfile::tempdir().unwrap();
     run_dated_fit(dir.path());
     let expected = serde_json::json!({"days_per_unit": 1.0, "origin": "2020-03-01", "time_unit": "days"});
-    let fits = dir.path().join("results").join("fits");
-    let (runs, metas) = (files_named(&fits, "run.json"), files_named(&fits, "fit.meta.json"));
-    assert!(!runs.is_empty() && !metas.is_empty(), "a fit writes both records");
-    for path in runs.iter().chain(&metas) {
-        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        assert_eq!(v["calendar"], expected, "{}: {v:#}", path.display());
-    }
-}
-
-/// A `run.json` written before the calendar block was required is named as
-/// such: `camdl list` warns once and skips it, and `camdl show` refuses it
-/// with the same sentence instead of a parse error.
-#[test]
-fn a_record_written_before_the_calendar_block_is_named_by_list_and_show() {
-    let dir = tempfile::tempdir().unwrap();
-    run_dated_fit(dir.path());
-    let runs = files_named(&dir.path().join("results").join("fits"), "run.json");
-    assert_eq!(runs.len(), 1, "one fit method leaf: {runs:?}");
-    // The shape an older camdl wrote: the same record with no `calendar`.
-    let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&runs[0]).unwrap()).unwrap();
-    v.as_object_mut().unwrap().remove("calendar").expect("the block was there");
-    std::fs::write(&runs[0], serde_json::to_vec_pretty(&v).unwrap()).unwrap();
-    let sentence = "written before the calendar axis was recorded";
-
-    let out = camdl(dir.path(), &["list", "results"]);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(stderr.matches(sentence).count(), 1, "list names the record once:\n{stderr}");
-    let rel = runs[0].strip_prefix(dir.path()).unwrap();
-    assert!(stderr.contains(&rel.display().to_string()), "and its path:\n{stderr}");
-
-    let leaf = runs[0].parent().unwrap();
-    let out = camdl(dir.path(), &["show", leaf.to_str().unwrap()]);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success(), "show refuses it:\n{stderr}");
-    assert!(stderr.contains(sentence) && !stderr.contains("missing field"),
-        "show names why, not the parse error:\n{stderr}");
+    let run = fit_store_support::the_run(&dir.path().join("camdl-store"));
+    let meta = fit_store_support::json(&run.join("fit.meta.json"));
+    assert_eq!(meta["calendar"], expected, "{}: {meta:#}", run.display());
 }

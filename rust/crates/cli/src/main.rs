@@ -10,8 +10,8 @@ mod cas_read;       // generic RunRecord reader (new-format sims); transitional 
 mod leaf_use;       // command-side checks on a read leaf: a result consumer requires a completed run
 mod cas_index;      // derived run_id→leaf index + `camdl reindex` (gh#147 M4)
 mod hashing;
+mod canonical_json; // canonical JSON text and the finiteness gate for values an identity holds as text
 mod resolve;        // Resolve bridge: CLI inputs → runid identity (CAS run-identity refactor, gh#147)
-mod output_schema;  // run.json output_schema: column roles for tabular outputs (proposal 2026-07-15)
 mod store_migrate;  // `camdl dev migrate`: raise store folders to the current layout, in place
 mod run_meta;       // cross-cutting run-metadata value types (FitAlgorithm, Backend, provenance records, FitSidecar)
 mod posterior_draws; // resolve a fit run's canonical posterior draws (--draws posterior, fit predict)
@@ -39,10 +39,8 @@ mod dt_rule;      // the one integration-step rule: the model's declared dt, els
 mod pfilter;        // used internally by fit runner for data loading
 mod prequential_out; // the one prequential.tsv/.json writer (gh#650)
 mod pfilter_store;  // camdl pfilter on the run store: its identity, result and by-products
-// A fit on the run store: the problem, its runs and their predictions. No
-// command stores a fit here yet, so only its tests use it.
-#[allow(dead_code)]
-mod fit_store;
+mod fit_store;      // a fit on the run store: the problem, its runs and their predictions
+mod fit_command;    // camdl fit run on the run store: the problems, the runs on each, the method under each claim
 mod store_commands; // `camdl status`, `verify`, `clean`, `reindex`: the run store's maintenance commands
 mod camdl_store;    // camdl on the run store: ambient identity, kinds, root, content artifacts
 mod input_fixtures; // the second values and fixtures of the input-class checks
@@ -385,11 +383,12 @@ Examples:
   # Run the full inference pipeline declared in fit.toml
   camdl fit run fit.toml --seed 1
 
-  # Render the convergence + MLE table for a completed fit
-  camdl fit summary results/fits/he2010-abc123/
+  # Name the run and render its convergence verdict and estimates
+  camdl fit run fit.toml --label scout
+  camdl fit summary @scout
 
-  # Browse every fit under a results tree
-  camdl fit table results/fits/
+  # One row per fit run in the run store
+  camdl fit table
 
 See `camdl fit <subcommand> --help` for full options."))]
 pub(crate) enum FitCmd {
@@ -400,7 +399,7 @@ pub(crate) enum FitCmd {
     Summary(args::FitSummaryArgs),
     /// Compare two fit.toml configs
     Diff(args::FitDiffArgs),
-    /// Cross-fit aggregator: walk results/fits/, render one row per fit
+    /// One row per fit run in the run store
     Table(args::FitTableArgs),
     /// Derive a new fit.toml from an existing one
     New(args::FitNewArgs),
@@ -573,7 +572,14 @@ fn main() {
             progress: cli.global.progress,
             no_progress: cli.global.no_progress,
         }),
-        Command::Fit(FitCmd::Run(a))    => fit::cmd_fit_run_v2(&a, compile),
+        Command::Fit(FitCmd::Run(a))    => fit_command::cmd_fit_run(args::FitRunInvocation {
+            args: a,
+            no_licm: cli.global.no_licm,
+            no_ir_cache: cli.global.no_ir_cache,
+            verbosity: cli.global.verbosity,
+            progress: cli.global.progress,
+            no_progress: cli.global.no_progress,
+        }),
         Command::Fit(FitCmd::Summary(a))=> fit::cmd_fit_summary(&a, compile),
         Command::Fit(FitCmd::Diff(a))   => fit::cmd_fit_diff(&a, compile),
         Command::Fit(FitCmd::Table(a))  => fit::cmd_fit_table(&a),
@@ -856,6 +862,8 @@ fn run_simulate(inv: args::SimulateInvocation) {
     let args::SimulateInvocationExecution { args: args::SimulateExecution { parallel, .. }, no_ir_cache } = execution;
     let compile = util::CompileSettings::resolve(no_licm, no_ir_cache);
     let request = crate::camdl_store::store_request(label.clone(), force, store_root.clone());
+    // A stored fit `--fit` names is read in the store this command stores in.
+    crate::fit_store::set_reader_root(crate::camdl_store::root_of(&request));
     let execution_record = args::SimulateInvocationExecution {
         args: args::SimulateExecution { forcing_extrapolation: (), model_overrides: (), backend: (), output_view: (), parallel },
         no_ir_cache,
@@ -1473,17 +1481,23 @@ fn run_simulate(inv: args::SimulateInvocation) {
             // rather than one picked by directory order; runs without draws
             // (an optimizer beside a sampler) are no rival. A bare directory
             // holding a draws.tsv is taken as named.
-            Some(if std::path::Path::new(fit_handle).join("draws.tsv").is_file() {
+            // A stored run is tried first: its folder holds a draws.tsv too.
+            let stored = crate::fit_store::opened_run(fit_handle);
+            // A folder inside a store is never a bare directory of draws.
+            let bare = crate::fit_store::store_holding(std::path::Path::new(fit_handle)).is_none()
+                && std::path::Path::new(fit_handle).join("draws.tsv").is_file();
+            Some(if stored.is_err() && bare {
                 fit_handle.clone()
             } else {
-                let (leaf, note) = crate::fit::handle::resolve_run_with_draws(fit_handle)
-                    .unwrap_or_else(|e| {
-                        out.fail(format!("error: --fit {fit_handle}: {e}"));
-                    });
-                if let Some(note) = note {
-                    out.say(format_args!("draws: {note}"));
+                let run = stored.unwrap_or_else(|e| {
+                    out.fail(format!("error: --fit {fit_handle}: {e}"));
+                });
+                let dir = run.run_dir().expect("a run handle has its files");
+                if !dir.join("draws.tsv").is_file() {
+                    out.fail(format!("error: --fit {fit_handle}: the run holds no posterior draws \
+                        (draws.tsv); a sampler (pgas, pmmh, mh) writes them"));
                 }
-                leaf.dir.to_string_lossy().into_owned()
+                fit_handle.clone()
             })
         }
         _ => None,
@@ -1494,16 +1508,19 @@ fn run_simulate(inv: args::SimulateInvocation) {
     // neither its simulator nor its selection is what runs without it. Any
     // other failure is a bare directory holding a `draws.tsv` outside any fit,
     // which each reader says.
-    let posterior_fit: Option<Result<crate::fit::handle::ResolvedFit, crate::fit::handle::ResolveError>> =
-        posterior_fit_ref.as_deref().map(|run| match crate::fit::handle::resolve_fit(run) {
-            Err(e @ crate::fit::handle::ResolveError::StoredConfig(_)) => {
-                let fit_handle = fit_path_for_draws.as_deref().unwrap_or_default();
-                out.fail(format!("error: --fit {fit_handle}: {e}"));
-            }
-            resolved => resolved,
+    let posterior_fit: Option<Result<std::sync::Arc<crate::fit_store::OpenedFit>, String>> =
+        posterior_fit_ref.as_deref().map(|run| {
+            crate::fit_store::opened(run).map_err(|_| format!("{run} is a directory of draws outside any stored fit"))
         });
+    // The directory the posterior's files are read from: the copy of the run's
+    // files, or the bare directory of draws as named.
+    let posterior_dir: Option<String> = match (posterior_fit_ref.as_ref(), posterior_fit.as_ref()) {
+        (Some(_), Some(Ok(run))) => run.run_dir().map(|d| d.to_string_lossy().into_owned()),
+        (Some(named), _) => Some(named.clone()),
+        _ => None,
+    };
     // The simulator a stored fit ran on, read from the model it ran on.
-    let stored_simulator = |r: &crate::fit::handle::ResolvedFit| {
+    let stored_simulator = |r: &std::sync::Arc<crate::fit_store::OpenedFit>| {
         crate::fit::fitted_model::stored_fit_model(r, compile)
             .and_then(|m| crate::fit::fitted_model::stored_fit_simulator(r, &m))
     };
@@ -1528,9 +1545,7 @@ fn run_simulate(inv: args::SimulateInvocation) {
                         crate::fit::fitted_model::fit_config_simulator(fit_ref, &m)
                     })
                 } else {
-                    crate::fit::handle::resolve_fit(fit_ref)
-                        .map_err(|e| e.to_string())
-                        .and_then(|r| stored_simulator(&r))
+                    crate::fit_store::opened(fit_ref).and_then(|r| stored_simulator(&r))
                 };
                 Some((
                     fit_ref.clone(),
@@ -1946,15 +1961,16 @@ fn run_simulate(inv: args::SimulateInvocation) {
                 }
             }
         } else if source == "posterior" {
-            // Resolve the fit run's canonical post-warm-up draws cloud (the
-            // terminal Bayesian method's draws.tsv). --fit names the fit results
-            // directory here, not a config TOML.
+            // Resolve the fit run's post-warm-up draws cloud (its draws.tsv).
+            // --fit names a stored run here, not a config TOML.
             let fit_handle = fit_path_for_draws.as_ref().unwrap_or_else(|| {
-                out.fail("error: --draws posterior requires --fit <fit results dir> \
-                    (the directory `camdl fit run` printed)");
+                out.fail("error: --draws posterior requires --fit <run>: the stored fit run's \
+                    @label (`fit run --label`), its id or its folder");
             });
-            // The run the handle names, resolved with the fit's simulator above.
+            // The run the handle names, resolved with the fit's simulator above,
+            // and the directory its files are read from.
             let fit_ref: &String = posterior_fit_ref.as_ref().expect("resolved with --fit");
+            let run_dir: &String = posterior_dir.as_ref().expect("resolved with --fit");
             // The posterior is the fitted model's, so every arm replays on the
             // fit's own intervention selection (its `scenario` / `enable` /
             // `disable`): the implicit arm is the model that was fitted, and a
@@ -1998,12 +2014,12 @@ fn run_simulate(inv: args::SimulateInvocation) {
             }
             if matches!(init_state_arg, Some(InitStateSourceArg::Fit)) {
                 let (rows, source) = resolve_paired_posterior(&out,
-                    fit_ref, &ir_path_compiled, a.n_draws, posterior_selection.as_ref(),
+                    run_dir, &ir_path_compiled, a.n_draws, posterior_selection.as_ref(),
                 );
                 init_state_source = Some(std::sync::Arc::new(source));
                 rows
             } else {
-            let resolved = posterior_draws::resolve_posterior_draws(fit_ref, None)
+            let resolved = posterior_draws::resolve_posterior_draws(run_dir, None)
                 .unwrap_or_else(|e| {
                     out.fail(format!("error: {}", e));
                 });
@@ -2042,7 +2058,7 @@ fn run_simulate(inv: args::SimulateInvocation) {
                 loaded
             };
             out.say(format_args!("draws: posterior — {} draws from {} method '{}' ({})",
-                loaded.len(), method_label, resolved.name, resolved.draws_path.display()));
+                loaded.len(), method_label, resolved.name, crate::fit::report::display_path(&resolved.draws_path)));
             loaded
             }
         } else {
@@ -2431,10 +2447,10 @@ fn fit_table_files(fit_ref: &str) -> Result<Vec<(String, String)>, String> {
         let problem = crate::fit::config_v2::Problem::load(fit_ref)?;
         return Ok(tables(&problem));
     }
-    if path.join("draws.tsv").is_file() && crate::fit::handle::resolve_fit(fit_ref).is_err() {
+    if path.join("draws.tsv").is_file() {
         return Ok(Vec::new());
     }
-    let resolved = crate::fit::handle::resolve_fit(fit_ref).map_err(|e| e.to_string())?;
+    let resolved = crate::fit_store::opened(fit_ref)?;
     Ok(tables(&resolved.config.problem))
 }
 
@@ -2767,10 +2783,8 @@ fn simulate_on_bound_design(
 
 /// gh#626: resolve the global observation anchors (`first_obs`, `last_obs`)
 /// for an anchored `--to`, from the fit's `[data.observations]` bindings.
-/// `--fit` accepts a fit toml, run directory, `@label`, or hash — the same
-/// resolution `fit predict` uses (`fit::handle::resolve_fit`; for a run
-/// handle the stored `fit.resolved.toml`, whose relative data paths resolve
-/// against the fit file's directory, `source_config` in `fit.meta.json`).
+/// `--fit` accepts a fit toml, or a stored fit by handle (`@label`, an id
+/// prefix or its folder), whose stored training files it reads.
 /// Streams load through the same shared seam as
 /// pfilter/profile, so dated time columns, long-form families, and holes
 /// resolve exactly as at fit time; anchors fold over the training rows the
@@ -2799,29 +2813,30 @@ fn resolve_simulate_obs_anchors(
 /// (another store layout, its resolved config gone) is `Err`: passed over, the
 /// run would start where the model says rather than where the fit did.
 fn simulate_fit_config_start(fit_ref: &std::path::Path) -> Result<Option<String>, String> {
-    use crate::fit::handle::{FitRef, FitTarget};
     let raw = fit_ref.to_string_lossy();
-    let text = match FitRef::classify(&raw) {
-        FitRef::Config(path) => match std::fs::read_to_string(path) {
+    let text = if crate::fit_store::is_config_file(&raw) {
+        match std::fs::read_to_string(fit_ref) {
             Ok(t) => t,
             Err(_) => return Ok(None),
-        },
-        _ => {
-            let segment = match crate::fit::handle::resolve_target(&raw) {
-                Ok(FitTarget::Segment(seg)) => seg,
-                Ok(FitTarget::Leaf(l)) => match crate::fit::fit_view::leaf_segment(&l.dir) {
-                    Ok(Some(seg)) => seg,
-                    _ => return Ok(None),
-                },
-                Err(_) => return Ok(None),
-            };
-            let keeps_a_config = crate::run_meta::read_fit_sidecar(&segment)?
-                .is_some_and(|side| side.source_config.is_some());
-            if !keeps_a_config {
-                return Ok(None);
-            }
-            let path = crate::run_meta::require_resolved_config(&segment)?;
-            std::fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?
+        }
+    } else {
+        // A stored run's start as its fit file set one: the run keeps that
+        // file as given (`fit.toml`). The stored `problem.toml` writes the
+        // resolved start, the model's own included, so it cannot say whether
+        // the file set one; for a problem, which keeps no fit file, it is the
+        // start the problem's compile records.
+        match crate::fit_store::opened(&raw) {
+            Ok(o) => match o.run_dir().map(|d| d.join(crate::fit_store::FIT_TOML_FILE)) {
+                Some(given) if given.is_file() => std::fs::read_to_string(&given)
+                    .map_err(|e| format!("cannot read {}: {e}", given.display()))?,
+                Some(_) => return Ok(None),
+                None => crate::camdl_store::read_stored(&o.fit.problem, crate::fit_store::PROBLEM_FILE)
+                    .and_then(|b| String::from_utf8(b).map_err(|e| e.to_string()))?,
+            },
+            // A stored fit that cannot be read is refused, saying why; a bare
+            // directory of draws outside any store sets no start.
+            Err(e) if raw.starts_with('@') || crate::fit_store::store_holding(fit_ref).is_some() => return Err(e),
+            Err(_) => return Ok(None),
         }
     };
     let Ok(doc) = text.parse::<toml::Table>() else { return Ok(None) };
@@ -2839,15 +2854,12 @@ fn simulate_fit_config_start(fit_ref: &std::path::Path) -> Result<Option<String>
 fn simulate_fit_problem(
     fit_ref: &std::path::Path,
 ) -> Result<crate::fit::config_v2::Problem, String> {
-    Ok(match crate::fit::handle::FitRef::classify(&fit_ref.to_string_lossy()) {
-        crate::fit::handle::FitRef::Config(path) => {
-            crate::fit::config_v2::Problem::load(&path.to_string_lossy())
-                .map_err(|e| format!("failed to load fit toml '{}': {e}", path.display()))?
+    Ok(match crate::fit_store::is_config_file(&fit_ref.to_string_lossy()) {
+        true => {
+            crate::fit::config_v2::Problem::load(&fit_ref.to_string_lossy())
+                .map_err(|e| format!("failed to load fit toml '{}': {e}", fit_ref.display()))?
         }
-        _ => crate::fit::handle::resolve_fit(&fit_ref.to_string_lossy())
-            .map_err(|e| e.to_string())?
-            .config
-            .problem,
+        _ => crate::fit_store::opened(&fit_ref.to_string_lossy())?.config.problem.clone(),
     })
 }
 
@@ -3616,7 +3628,7 @@ fn check_replay_model(
             .map_err(|e| wrap_fit_load_error(fit_ref, e))?;
         crate::fit::fitted_model::check_fit_config(fit_ref, &problem.model.camdl, &given, model_path, compile)
     } else {
-        let resolved = crate::fit::handle::resolve_fit(fit_ref).map_err(|e| e.to_string())?;
+        let resolved = crate::fit_store::opened(fit_ref)?;
         crate::fit::fitted_model::check_stored_fit(
             fit_ref,
             &resolved.segment,
@@ -3649,7 +3661,7 @@ fn fit_base_for_draws(out: &crate::out::Out, fit_ref: &str, source: &str) -> Res
             .map_err(|e| wrap_fit_load_error(fit_ref, e))?;
         util::FitBase::of(&problem)?
     } else {
-        let resolved = crate::fit::handle::resolve_fit(fit_ref).map_err(|e| e.to_string())?;
+        let resolved = crate::fit_store::opened(fit_ref)?;
         util::FitBase::of(&resolved.config.problem)?
     };
     if !base.is_empty() {
@@ -4713,7 +4725,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let fit = dir.path().join("empty.toml");
         std::fs::write(&fit, format!(
-            "output_dir = \"res\"\n[model]\ncamdl = \"{ir}\"\n[estimate]\n[fixed]\n\
+            "store = \"res\"\n[model]\ncamdl = \"{ir}\"\n[estimate]\n[fixed]\n\
              beta = 0.3\ngamma = 0.1\nN0 = 1000\nI0 = 10\n")).unwrap();
         let err = generate_prior_draws(&crate::out::Out::new(true), fit.to_str().unwrap(), 3, 1, &model).unwrap_err();
         assert!(err.starts_with("--draws prior: the fit config's [estimate] is empty"),

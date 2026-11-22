@@ -204,8 +204,8 @@ Run-time errors from `camdl simulate` / `pfilter` / `fit`:
 
 ## Diagnostics → interpretation table
 
-After `camdl fit run`, `camdl fit summary <fit-dir>` shows diagnostics. They're
-not all "the fit failed"; they're typed signals.
+After `camdl fit run`, `camdl fit summary <run>` shows diagnostics. They're not
+all "the fit failed"; they're typed signals.
 
 | Diagnostic                   | Threshold                                               | What it means                                                                                                  | What to do                                                                                                                                                        |
 | ---------------------------- | ------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -534,9 +534,9 @@ than alphabetized among the healthy parameters. Two flags add material that is
 off by default:
 
 ```bash
-camdl fit summary <fit-dir>                # verdict, estimates, diagnostics
-camdl fit summary <fit-dir> --explain      # + what each column means
-camdl fit summary <fit-dir> --parameters   # + the model's parameter legend
+camdl fit summary <run>                # verdict, estimates, diagnostics
+camdl fit summary <run> --explain      # + what each column means
+camdl fit summary <run> --parameters   # + the model's parameter legend
 ```
 
 `--explain` appends a short prose block after each section defining that
@@ -559,14 +559,15 @@ you want a time-varying quantity the model computes but doesn't carry as a
 compartment — force of infection `λ(t)`, effective reproduction number `Rₑ(t)`,
 cumulative incidence, EIR, prevalence `I/N` — declare it in a `quantities {}`
 block as an **unreduced** expression. camdl evaluates it at every output time,
-writes `quantities/<name>.tsv`, and `fit predict` bands it over the posterior
-alongside the observed streams. Do **not** reconstruct it in a pandas/matplotlib
-script from `traj.tsv`: a hand-rolled recomputation drifts from the model's own
-arithmetic (a subtly different `N`, a dropped `cond` guard), is not banded over
-the posterior, and has to be rewritten for every run. A reduction (`max`,
-`final`, `time_of_max`, …) collapses the same expression to a scalar summary
-(peak, attack rate, time-to-peak); omit the reduction to keep the full series.
-See `camdl docs user-features` ("Reporting derived quantities").
+writes `quantities/<name>.tsv` (`quantities-model/<name>.tsv` in a stored
+prediction), and `fit predict` bands it over the posterior alongside the
+observed streams. Do **not** reconstruct it in a pandas/matplotlib script from
+`traj.tsv`: a hand-rolled recomputation drifts from the model's own arithmetic
+(a subtly different `N`, a dropped `cond` guard), is not banded over the
+posterior, and has to be rewritten for every run. A reduction (`max`, `final`,
+`time_of_max`, …) collapses the same expression to a scalar summary (peak,
+attack rate, time-to-peak); omit the reduction to keep the full series. See
+`camdl docs user-features` ("Reporting derived quantities").
 
 **A shared reporting vocabulary is a file, not a copy-paste.** When several
 models want the same summaries, put the `quantities {}` block in its own
@@ -637,18 +638,19 @@ algorithm config, tool version)`. Same inputs →
 same hash → cache hit (no re-run).
 
 ```bash
-camdl list                        # all cached runs; fits one row per run, by problem folder
+camdl list                        # all cached runs; fits one row per fit run
+camdl list --kind fit             # fit runs only
 camdl show <run>                  # full metadata for one run
-camdl show @label --format json   # one fit run as JSON: run_id, path, verdict, outputs
-camdl show @label~1               # the run that held the label before
+camdl show @label --format json   # one result as JSON
+camdl show @label~1               # the result the label named before
 camdl cat  <run>                  # emit a simulated cell's trajectory
 camdl cat  <run> --stream cases.tsv    # one file of a cell or of its by-products
 camdl cat  @label                 # a simulate run's combined table, rendered from its cells
-camdl cat  @label --stream draws.tsv   # one file of a fit run (leaf, then its predictions)
-camdl fit summary <fit-dir>       # convergence, gate verdict, MLE table for a fit
-camdl fit summary <fit-dir> --explain      # ... plus what each column means
-camdl fit summary <fit-dir> --parameters   # ... plus the model's parameter legend
-camdl fit table   results/fits/   # one row per fit across a results tree
+camdl cat  @label --stream draws.tsv   # one file of a fit run
+camdl fit summary @label          # convergence, gate verdict, MLE table for a fit run
+camdl fit summary @label --explain      # ... plus what each column means
+camdl fit summary @label --parameters   # ... plus the model's parameter legend
+camdl fit table   camdl-store     # one row per fit run in a run store
 camdl fit diff <a.toml> <b.toml>  # diff two fit.toml *configs* (not run hashes)
 ```
 
@@ -658,15 +660,21 @@ The iterative model-building loop:
 cp fit.toml fit_prev.toml               # snapshot the config you're about to change
 # edit fit.toml — say, widen a prior
 camdl fit diff fit_prev.toml fit.toml   # what changed in the config
-camdl fit run fit.toml                  # output lands in a new content-addressed leaf
+camdl fit run fit.toml                  # output lands in a new content-addressed run
 camdl list                              # the new run appears alongside the previous one
 ```
 
-A fit label moves: rerunning a changed fit under `--label m0` makes `@m0` the
-new run and `@m0~1` the previous one. Resolve each label once per session with
-`camdl show @m0 --format json`, read its `run_id` and `path`, and use the run id
-from then on; when using `@m0` directly, read the `@m0 → run …` line every
-resolving command prints on stderr.
+A label names an invocation and moves: rerunning a changed fit under
+`--label m0` makes `@m0` the new run and `@m0~1` the previous one. A fit run is
+named only when it runs; `camdl label` refuses one. Resolve each label once per
+session with `camdl show @m0 --format json`, read its `run_id` and `path`, and
+use the run id from then on.
+
+A `fit.toml` path never names a run: one file makes a new run whenever its data,
+its seeds, a sweep or the camdl build changes. `fit summary`, `fit predict`,
+`compare`, `simulate --draws posterior --fit`, `--starts from_mle=…` and
+`--resume` refuse one and list the runs it made; `pfilter --fit`, `design` and
+`profile --fit`, which need only the problem, accept it.
 
 Cite a fit hash in writeups — paste it into a methods section and any reader
 with the source can reproduce the result bit-for-bit.
@@ -677,26 +685,27 @@ with the source can reproduce the result bit-for-bit.
 
 ### The layout the tools expect
 
-| Path           | What                                                                                          |
-| -------------- | --------------------------------------------------------------------------------------------- |
-| `models/`      | `.camdl` model files and their `fit.toml` configs, side by side                               |
-| `data/`        | committed input streams plus the lock/manifest pinning their provenance                       |
-| `results/`     | the content-addressed store of fits and profiles — `results/fits/`, `results/profiles/`, …    |
-| `camdl-store/` | the run store of `simulate` and `pfilter` (`--store DIR` or `CAMDL_STORE` to move it)         |
-| `scripts/`     | everything the Makefile or workflow calls; no logic inline in a rule                          |
-| `workflow/`    | the fit DAG (`*.smk`), once the project has enough fan-out to need one                        |
-| `tests/`       | offline contract tests — do the data's columns match what the model's `observations` declare? |
-| `notes/`       | dated working notes                                                                           |
-| `Makefile`     | the named entry points, including the networked/offline split                                 |
+| Path           | What                                                                                                                   |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `models/`      | `.camdl` model files and their `fit.toml` configs, side by side                                                        |
+| `data/`        | committed input streams plus the lock/manifest pinning their provenance                                                |
+| `results/`     | the content-addressed store of profiles — `results/profiles/`                                                          |
+| `camdl-store/` | the run store of `simulate`, `pfilter` and fits (`--store DIR`, `CAMDL_STORE`, or a fit file's `store` key to move it) |
+| `scripts/`     | everything the Makefile or workflow calls; no logic inline in a rule                                                   |
+| `workflow/`    | the fit DAG (`*.smk`), once the project has enough fan-out to need one                                                 |
+| `tests/`       | offline contract tests — do the data's columns match what the model's `observations` declare?                          |
+| `notes/`       | dated working notes                                                                                                    |
+| `Makefile`     | the named entry points, including the networked/offline split                                                          |
 
 `results/` and `camdl-store/` are the ones that are not a matter of taste. Every
 run is content-addressed on the tuple above, so keeping them all under these
 roots is what makes a run **addressable**: `camdl list`, `camdl show <run>` and
-`camdl fit table results/fits/` work off them, an identical re-run is a cache
-hit rather than a recompute, and a refit on updated data forks a new leaf beside
-the old one instead of overwriting it. Scatter fits into per-experiment
-directories and all three are lost. A leaf belongs to camdl — never write a
-derived summary into one.
+`camdl fit table camdl-store` work off them, an identical re-run is a cache hit
+rather than a recompute, and a refit on updated data forks a new problem folder
+beside the old one instead of overwriting it. Scatter fits into per-experiment
+stores and all three are lost. A stored folder belongs to camdl — never write a
+derived summary into one. Fits stored under `results/fits/` are not read, and
+there is no import.
 
 The reasoning behind each directory, and the house style for a model file's
 header, is `docs/camdl-style.md` in the camdl repo.
@@ -727,8 +736,8 @@ uvx --from git+https://github.com/vsbuffalo/camdl-scope camdl-scope --port 8800
 ```
 
 Run it from the project root. `--store` defaults to `results/fits` under the
-current directory — which is precisely why the layout above needs no
-configuration:
+current directory. `camdl fit run` stores fits in `camdl-store/`, which that
+default does not name:
 
 ```sh
 camdl-scope --port 8800                  # http://127.0.0.1:8800
@@ -749,41 +758,43 @@ per-chain table in `camdl fit summary`, `--exclude-chains 3,5`, `best_chain`,
 and the `chain` column inside `draws.tsv` and `trajectories.tsv` all carry the
 same number: chain `k` is `chain_k/`, and its draws are the rows whose `chain`
 field is `k`. There is no second base, so no `k - 1` anywhere. (Spec:
-`docs/camdl-run-spec.md` §2, "One index base"; gh#990.) A leaf written by a
-camdl from before this rule — `chain_1/` with no `chain_0/` — is refused by
-`fit summary`, `fit predict`, `fit table --quantity`, `compare`,
-`simulate --draws posterior` and `fit run --resume` rather than read shifted;
-re-run the fit.
+`docs/camdl-run-spec.md` §6.8, "One index base".)
 
 **Read `run.json`'s `output_schema` rather than reverse-engineering a header.**
-Each leaf's `run.json` declares, for every tabular file that leaf wrote, which
-column is the time or iteration axis, which are grouping keys (`chain`,
+A `results/` leaf's `run.json` declares, for every tabular file that leaf wrote,
+which column is the time or iteration axis, which are grouping keys (`chain`,
 `replicate`, `scenario`), which are model quantities, and which are sampler
 diagnostics. It is built by classifying each file's **actual** header, so it
 cannot disagree with the file it describes. Consume the _role_, never the name —
 the iteration column is spelled `sweep`, `step`, `draw` or `iteration` depending
 on the method, and `time` (physical) and `iteration` (a sampler index) are
-deliberately distinct roles. Not every producer declares one: completed fit
-leaves do; `profile`, the `fit predict` outputs, and the cells `simulate` and
-the runs `pfilter` store in the run store do not. A simulated cell's `traj.tsv`
-has the fixed layout of `docs/camdl-run-spec.md` §10.1.
+deliberately distinct roles. Not every producer declares one: `profile`, the
+`fit predict` outputs, and every result in the run store (fit runs, the cells
+`simulate` stores and the runs `pfilter` stores) do not. A simulated cell's
+`traj.tsv` has the fixed layout of `docs/camdl-run-spec.md` §10.1.
 
 **To ask whether a long fit is still alive, read `progress.json`, not the
-mtimes.** Every method but `pfilter` writes one into its leaf and a background
-thread refreshes it every five seconds, independent of step cadence — one
-national-scale sweep can take minutes, so `trace.tsv`'s mtime is not a
-heartbeat. Its `state` is `{"running": {phase, step, total}}`, `"done"`, or
-`{"failed": {"reason": …}}`, where the failure reason is the sentence the
-command printed. Deadness is **your** inference from staleness, never a claim
-the file makes: a `running` record that has stopped being refreshed is a run
-that was killed or panicked, and a run that was SIGKILLed cannot write anything
-at all. Spec: `docs/camdl-run-spec.md` §10.10, which tabulates what one step
-means for each method.
+mtimes.** Every method but `pfilter` writes one and a background thread
+refreshes it every five seconds, independent of step cadence — one
+national-scale sweep can take minutes. A fit run's method works in a directory
+outside the store, and only `progress.json` and `events.jsonl` reach the run's
+folder while it runs; `trace.tsv` and the other chain files arrive when the
+method ends. In the run's folder the method's record is under `snapshot`, beside
+the time the store wrote it (`at`). Its `state` is
+`{"running": {phase, step, total}}`, `"done"`, or `{"failed": {"reason": …}}`,
+where the failure reason is the sentence the command printed. Deadness is
+**your** inference from staleness, never a claim the file makes: a `running`
+record that has stopped being refreshed is a run that was killed or panicked,
+and a run that was SIGKILLed cannot write anything at all. Spec:
+`docs/camdl-run-spec.md` §10.10, which tabulates what one step means for each
+method.
 
 **To see whether an NLopt search is still climbing, read `opt_trace.tsv`.** An
 `nl-sbplx`, `nl-bobyqa` or `nl-lbfgs` leaf holds it beside `chain_results.tsv`:
 rows of `chain`, `eval`, `loglik`, `best_loglik` and the best point so far,
-written every 25 evaluations or 2 seconds while the searches run. A search whose
+written every 25 evaluations or 2 seconds while the searches run, and copied
+into the fit run's folder when the method ends. While it runs, the `searches`
+array of `progress.json` is the view from the run's folder. A search whose
 `best_loglik` was still rising at its last row when it stopped at `max_evals`
 had not converged; raise `max_evals`. `progress.json` carries the same
 per-search count and best in its `searches` array. Spec:

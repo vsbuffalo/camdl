@@ -114,7 +114,7 @@ fn pfilter_fit_toml_family_root_resolves_to_strata() {
 
     let toml = tmp.path().join("pf.toml");
     write(&toml, &format!(r#"
-output_dir = "{out}"
+store = "{out}"
 [model]
 camdl = "{ir}"
 [data.observations]

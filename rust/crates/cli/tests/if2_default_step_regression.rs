@@ -62,7 +62,7 @@ fn fit(camdlc: &Path, fixture: &str, estimate: &str, iterations: usize, starts: 
     std::fs::write(dir.join("m.ir.json"), &out.stdout).unwrap();
     std::fs::copy(bench_dir().join("fixtures/sir/data/weekly_cases.tsv"), dir.join("cases.tsv")).unwrap();
     std::fs::write(dir.join("fit.toml"), format!(
-        "output_dir = \"out\"\n[model]\ncamdl = \"m.ir.json\"\n[data.observations]\n\
+        "store = \"out\"\n[model]\ncamdl = \"m.ir.json\"\n[data.observations]\n\
          weekly_cases = \"cases.tsv\"\n[estimate]\n{estimate}\n[fixed]\nN0 = 10000\nI0 = 10\n\
          rho = 0.6\nk = 10.0\n[method]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\n\
          chains = 4\nparticles = 1000\niterations = {iterations}\ncooling = 0.7\nstarts = \"{starts}\"\n"

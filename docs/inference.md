@@ -245,10 +245,9 @@ particles at each observation time, and pools over (particles × draws) into the
 `horizon=one_step,
 treatment=posterior`. This is chain-binomial only (an ODE
 fit's one-step reduces to its free-forward band). Under `[data] holdout_after`
-the band at a held-out row uses parameters fitted without that row and a state
-filtered through the earlier held-out rows; the `role` column marks which rows
-those are (`trained` or `held_out`). See [`camdl docs workflow`](workflow.md)
-§7.
+the band covers the training rows only, since a stored fit keeps its held-out
+rows' dates and not their values; the `free_forward` rows at those dates carry
+`role` `held_out`. See [`camdl docs workflow`](workflow.md) §7.
 
 ### Forecasts from the end of the training rows
 
@@ -1658,25 +1657,25 @@ per file:
 scout.toml + model.camdl + data.tsv
     │
     ├── camdl fit run scout.toml --label scout
-    │       results/fits/scout-<h8>/if2-<h8>/seed_1-<h8>/   fit_state.toml, mle_params.toml, chain_starts.tsv
+    │       <build>/fit/<model>-<h12>/runs/if2-<h12>/seed_1-<h12>/   fit_state.toml, mle_params.toml, chain_starts.tsv
     │
     └── camdl fit run posterior.toml         # [method] starts = { from_mle = "@scout" }
-            results/fits/posterior-<h8>/pgas-<h8>/seed_1-<h8>/   draws.tsv, chain_N/trace.tsv, chain_starts.tsv
+            <build>/fit/<model>-<h12>/runs/pgas-<h12>/seed_1-<h12>/  draws.tsv, chain_N/trace.tsv, chain_starts.tsv
 ```
 
 <!-- /figure -->
 
-Two files that share a problem half share the fit-level hash (`<h8>`); each is
-its own segment, named by its stem, with its own `--label`. A method reads a
-stored fit only through a `starts` handle, and every multi-chain sampler writes
-`chain_starts.tsv`, the record of where each chain actually began. An IF2 leaf's
-`mle_params.toml` is a standard params file with provenance hashing that feeds
-directly into `camdl simulate`.
+Two files that share a problem half share one problem folder in the run store;
+each run is its own folder under `runs/`, grouped by its method's settings, with
+its own `--label`. A method reads a stored fit only through a `starts` handle,
+and every multi-chain sampler writes `chain_starts.tsv`, the record of where
+each chain actually began. An IF2 run's `mle_params.toml` is a standard params
+file with provenance hashing that feeds directly into `camdl simulate`.
 
 `from_mle` reads the scout's point estimate from its `fit_state.toml` and starts
 every chain there, so the posterior fit's R̂ is not assessed: R̂ compares chains
 that began apart, and chains that all begin at one point can agree without
-having explored the posterior. An IF2 leaf writes no `draws.tsv`, so
+having explored the posterior. An IF2 run writes no `draws.tsv`, so
 `from_posterior = "@scout"` is refused. To keep R̂, seed from a short posterior
 run instead (`starts = { from_posterior = "@short" }`, above).
 
@@ -1685,7 +1684,7 @@ camdl fit run    scout.toml --seed 1 --label scout
 camdl fit run    posterior.toml --seed 1
 camdl fit summary @scout
 camdl fit summary @scout --chains 0,1,2   # diagnostics over chains 0-2 only (a view)
-camdl fit summary results/fits/<dir>/
+camdl fit summary 089bc0f3               # a run-id prefix, or the run's folder
 ```
 
 ### When `start =` is omitted in `[estimate]`
@@ -1803,8 +1802,7 @@ explicit held-out files, every row of which must end strictly after the latest
 training row of every stream (tail-only; an interior holdout is refused). The
 fit banner prints the rows trained and the first held-out row of each stream,
 and the training partition (per stream the training rows and their digest) is
-recorded in the fit's `fit.meta.json` — the machine-checked proof
-`camdl compare` requires before labelling any score `hold_out_tail`.
+recorded in the fit run's `fit.meta.json` and in its problem's `partition.json`.
 
 ```toml
 [data]
@@ -1814,22 +1812,22 @@ holdout_after = "2020-03-01"
 weekly_cases = "data/cases.tsv"
 ```
 
-`camdl compare` then scores such fits held-out by default: it runs the filter
-over the full series at the sealed θ̂, scores only the observations past the
-training boundary (each held-out week one-step-ahead, with earlier observations
-assimilated), verifies no leakage into θ̂, and stamps the trace `hold_out_tail`.
-Pass `--in-sample` to force the old full-series in-sample scoring. Comparing a
-holdout fit against a non-holdout fit is refused — those scores answer different
-questions.
+A stored fit keeps the held-out rows' dates and not their values, so
+`camdl compare` refuses to score the held-out rows of a stored fit run, whether
+it held them out with `holdout_after` or with `[data.holdout]`, wholly or in
+part. The refusal names the run store's scores, which this camdl does not write;
+`--in-sample` compares the fits on their training rows. To score a held-out
+window, use the `pfilter --save-prequential --score-from` recipe below.
 
 A fit on the ODE backend (`mh`, or an NLopt optimizer, with `backend = "ode"`)
 is scored without a filter: given θ its trajectory is fixed, so `compare`
 evaluates each observation's exact density at the trajectory run from the start
 at that θ, through the fit's own likelihood, and averages the densities over the
-thinned posterior draws (`basis = ode_free_forward`). Held-out scoring works as
-above. An ODE row is not differenced against a filtered row: the filter's
-log-likelihood estimate is biased downward and the ODE score is not, so their Δ
-would carry that bias. `camdl docs model-comparison` §8 gives the details.
+thinned posterior draws (`basis = ode_free_forward`). A stored fit's held-out
+rows are refused as above. An ODE row is not differenced against a filtered row:
+the filter's log-likelihood estimate is biased downward and the ODE score is
+not, so their Δ would carry that bias. `camdl docs model-comparison` §8 gives
+the details.
 
 The equivalent manual construction scores the held-out window with `pfilter`
 yourself, from the θ̂ of a fit that declared the cutoff:
@@ -1872,9 +1870,8 @@ Two numbers not to mis-read:
   It is not a held-out score.
 - the trace `pfilter --save-prequential` emits is stamped
   `conditioning = "in_sample"` whatever window you score; the stamp is fixed in
-  its trace builder. Only `camdl compare` stamps a trace held-out, and only for
-  a fit that recorded its training partition. The row subset is the honest
-  number, not the trace's own label.
+  its trace builder, and `camdl compare` refuses the held-out rows of a stored
+  fit (above). The row subset is the honest number, not the trace's own label.
 
 ### Prediction quantiles
 
@@ -2008,22 +2005,23 @@ is both at once: draw _i_ restores the terminal state of its **own** saved
 latent path and runs forward under its **own** θ_i.
 
 ```bash
-camdl simulate model.camdl --fit results/fits/<stem>-<hash>/ \
+camdl simulate model.camdl --fit @posterior \
     --draws posterior --init-state fit \
     --to "last_obs + 8 weeks" --scenario control_25
 ```
 
 The origin is the last snapshot of each posterior draw's saved latent path,
-which a PGAS run writes to `<method>/chain_*/trajectories.tsv`. At the terminal
-observation time the smoothing distribution equals the filtering distribution —
-no future data remains to condition on — so that row is a draw from p(x_T |
-y_{1:T}) carrying its own parameters. Interior origins are deliberately not
-offered: iterating forward from a smoothing distribution is not one of the three
-objects in Särkkä's taxonomy (Särkkä 2013, _Bayesian Filtering and Smoothing_,
-CUP, doi:10.1017/CBO9781139344203, §1.3). This is the published idiom for the
-workflow — Funk, Camacho, Kucharski, Lowe, Eggo & Edmunds (2019), _PLoS Comput
-Biol_ 15(2):e1006785, doi:10.1371/journal.pcbi.1006785, use "the final values of
-estimated state trajectories as initial values for the forecasts".
+which a PGAS run writes to `chain_*/trajectories.tsv` in its run folder. At the
+terminal observation time the smoothing distribution equals the filtering
+distribution — no future data remains to condition on — so that row is a draw
+from p(x_T | y_{1:T}) carrying its own parameters. Interior origins are
+deliberately not offered: iterating forward from a smoothing distribution is not
+one of the three objects in Särkkä's taxonomy (Särkkä 2013, _Bayesian Filtering
+and Smoothing_, CUP, doi:10.1017/CBO9781139344203, §1.3). This is the published
+idiom for the workflow — Funk, Camacho, Kucharski, Lowe, Eggo & Edmunds (2019),
+_PLoS Comput Biol_ 15(2):e1006785, doi:10.1371/journal.pcbi.1006785, use "the
+final values of estimated state trajectories as initial values for the
+forecasts".
 
 **Only draws with a saved path can be forecast, and the run says how many.**
 `n_trajectories` and `thin` are independent knobs, so a run that retains 606
@@ -2034,7 +2032,7 @@ it used against the full posterior:
 simulate: --init-state fit → 300/606 posterior draws have a saved latent path;
 forecasting that paired (θ_i, X_i) subset from t = 196 (the other 306 draws have
 no state to fork)
-  method 'pgas' (results/fits/…/draws.tsv)
+  method 'pgas' (camdl-store/…/draws.tsv)
 ```
 
 Raise `n_trajectories` on the fit's `[method]` if you want the whole posterior

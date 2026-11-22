@@ -20,6 +20,8 @@
 //! (`weekly_cases`), fitted by PMMH with `holdout_after = 24`. A fit that
 //! binds only the daily file leaves `weekly_cases` with no bound data.
 
+mod fit_store_support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -37,6 +39,7 @@ fn run(dir: &Path, args: &[&str]) -> std::process::Output {
     Command::new(binary()).env_remove("CLICOLOR_FORCE")
         .args(args)
         .current_dir(dir)
+        .env("CAMDL_STORE", dir.join("store"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output()
         .expect("spawn camdl")
@@ -50,12 +53,12 @@ const BOTH: &str = "daily_cases = \"daily_cases.tsv\"\nweekly_cases = \"weekly_c
 const DAILY_ONLY: &str = "daily_cases = \"daily_cases.tsv\"";
 
 /// Fit `model` (the fixture's text, possibly edited) in `dir` with the
-/// `[data.observations]` bindings `bound`.
+/// `[data.observations]` bindings `bound`, labelled `fit`.
 fn fit_model(dir: &Path, model: &str, bound: &str) {
     std::fs::write(dir.join("model.camdl"), model).unwrap();
     std::fs::copy(fixture("daily_cases.tsv"), dir.join("daily_cases.tsv")).unwrap();
     std::fs::copy(fixture("weekly_cases.tsv"), dir.join("weekly_cases.tsv")).unwrap();
-    std::fs::write(dir.join("fit.toml"), format!(r#"output_dir = "results"
+    std::fs::write(dir.join("fit.toml"), format!(r#"store = "store"
 
 [model]
 camdl = "model.camdl"
@@ -85,7 +88,7 @@ iterations = 60
 burn_in = 20
 thin = 1
 "#)).unwrap();
-    let out = run(dir, &["fit", "run", "fit.toml", "--seed", "1"]);
+    let out = run(dir, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(out.status.success(), "fit run: {}", stderr(&out));
 }
 
@@ -93,16 +96,10 @@ fn fit(dir: &Path, bound: &str) {
     fit_model(dir, &std::fs::read_to_string(fixture("two_cadence_sir.camdl")).unwrap(), bound);
 }
 
-/// The one predict directory under `dir` holding `file`.
+/// The one prediction folder in the store under `dir` holding `file`.
 fn predict_dir(dir: &Path, file: &str) -> PathBuf {
-    let mut found = Vec::new();
-    for seg in std::fs::read_dir(dir.join("results/fits")).unwrap().flatten() {
-        for d in std::fs::read_dir(seg.path().join("predict")).into_iter().flatten().flatten() {
-            if d.path().join(file).is_file() {
-                found.push(d.path());
-            }
-        }
-    }
+    let mut found: Vec<PathBuf> =
+        fit_store_support::predictions(&dir.join("store")).into_iter().filter(|d| d.join(file).is_file()).collect();
     assert_eq!(found.len(), 1, "one predict directory holding {file}: {found:?}");
     found.remove(0)
 }
@@ -118,13 +115,13 @@ fn names(v: &serde_json::Value) -> Vec<String> {
 }
 
 fn forecast(dir: &Path, extra: &[&str]) -> std::process::Output {
-    let mut args = vec!["fit", "predict", "--fit", "fit.toml", "--horizon", "1 weeks", "--n-draws", "2"];
+    let mut args = vec!["fit", "predict", "@fit", "--horizon", "1 weeks", "--n-draws", "2"];
     args.extend_from_slice(extra);
     run(dir, &args)
 }
 
 fn free_forward(dir: &Path, extra: &[&str]) -> std::process::Output {
-    let mut args = vec!["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward", "--n-draws", "2"];
+    let mut args = vec!["fit", "predict", "@fit", "--mode", "free_forward", "--n-draws", "2"];
     args.extend_from_slice(extra);
     run(dir, &args)
 }
@@ -227,7 +224,7 @@ fn d76_row6_an_eligible_stream_that_fails_makes_the_exit_status_1() {
 fn d76_row1_the_default_mode_produces_every_eligible_stream_and_exits_0() {
     let tmp = tempfile::tempdir().unwrap();
     fit(tmp.path(), BOTH);
-    let out = run(tmp.path(), &["fit", "predict", "--fit", "fit.toml", "--n-draws", "2"]);
+    let out = run(tmp.path(), &["fit", "predict", "@fit", "--n-draws", "2"]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     let m = json(&predict_dir(tmp.path(), "predictive.json").join("predictive.json"));
     assert_eq!(names(&m["produced"]), ["daily_cases", "weekly_cases"]);

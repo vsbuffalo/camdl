@@ -2139,8 +2139,8 @@ pub(crate) fn partition_lines(
         PartitionRule::Cutoff { at } => {
             lines.push(format!(
                 "  {h} trained on {trained} row(s) through {}; {} observation row(s) \
-                 ending after {} withheld from training (scored out-of-sample by \
-                 `camdl compare`)",
+                 ending after {} withheld from training (their dates are stored; \
+                 scoring them arrives with the run store's scores)",
                 q(partition.extent()), total - trained, q(at)));
             for (stream, rs) in rows {
                 if let Some(r) = rs.get(partition.rows(stream)) {
@@ -2159,8 +2159,8 @@ pub(crate) fn partition_lines(
         PartitionRule::SeparateFiles => {
             lines.push(format!(
                 "  {h} trained on {trained} row(s) through {}; {held_out_file_rows} \
-                 held-out observation row(s) bound as the tail (scored out-of-sample by \
-                 `camdl compare`)",
+                 held-out observation row(s) bound as the tail (their dates are \
+                 stored; scoring them arrives with the run store's scores)",
                 q(partition.extent())));
         }
     }
@@ -4699,7 +4699,7 @@ mod tests {
             if perturb_t0 { "perturb_only_at_t0 = true\n" } else { "" };
         let fit_toml_path = dir.join("fit.toml");
         let toml_src = format!(r#"
-output_dir = "{}"
+store = "{}"
 ic_free = {}
 
 [model]
@@ -5130,7 +5130,7 @@ dt = 1.0
         // this would fail with "parameter 'beta' has no value".
         let fit_toml_path = data_dir.join("fit.toml");
         let toml = format!(r#"
-output_dir = "{}"
+store = "{}"
 
 [model]
 camdl = "{}"
@@ -6798,7 +6798,7 @@ dt = 1.0
             };
             let fit_toml_path = dir.join("fit.toml");
             let toml_src = format!(r#"
-output_dir = "{}"
+store = "{}"
 
 [model]
 camdl = "{ir_path}"

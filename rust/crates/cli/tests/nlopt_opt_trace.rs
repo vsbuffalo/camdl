@@ -5,6 +5,8 @@
 //! finite value traces an empty best; a profile, whose cells run the same
 //! optimiser, writes no trace (`docs/camdl-run-spec.md` §10.13).
 
+mod fit_store_support;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -69,7 +71,7 @@ const DATA: &str = "time\tweekly_cases\n7\t47\n14\t111\n21\t474\n28\t1066\n\
 /// `starts`, the epidemic seeded with `i0` infecteds.
 fn fit_toml(chains: usize, starts: &str, i0: u32) -> String {
     format!(
-        r#"output_dir = "results"
+        r#"store = "results"
 
 [model]
 camdl = "sir.camdl"
@@ -142,19 +144,17 @@ fn read_tsv(path: &Path) -> (Vec<String>, Vec<Vec<String>>) {
     (header, lines.collect())
 }
 
-/// The one leaf a fit run wrote: the directory holding `chain_results.tsv`.
+/// The one fit run in the store `results` under `dir`.
 fn the_leaf(dir: &Path) -> PathBuf {
-    let found = find_all(&dir.join("results"), "chain_results.tsv");
-    assert_eq!(found.len(), 1, "one NLopt leaf: {found:?}");
-    found[0].parent().unwrap().to_path_buf()
+    fit_store_support::the_run(&dir.join("results"))
 }
 
 /// Three searches from spread starts: the trace's columns are
 /// `chain_results.tsv`'s, each search's best never decreases, and its last
 /// row is the result `chain_results.tsv` reports for it — the same value, the
 /// same point, at the same evaluation count. The heartbeat's per-search block
-/// ends on the same counts, and the trace is a record of the attempt, outside
-/// the leaf's manifest.
+/// ends on the same counts, and the run's record files the trace as
+/// provenance, a record of the attempt, not as part of the result.
 #[test]
 fn every_search_is_traced_up_to_the_result_it_reports() {
     let tmp = workdir(&fit_toml(3, "lhs", 10));
@@ -199,8 +199,8 @@ fn every_search_is_traced_up_to_the_result_it_reports() {
 
     let progress: serde_json::Value =
         serde_json::from_slice(&std::fs::read(leaf.join("progress.json")).unwrap()).unwrap();
-    assert_eq!(progress["state"], "done");
-    let searches = progress["searches"].as_array().expect("a searches block");
+    assert_eq!(progress["snapshot"]["state"], "done");
+    let searches = progress["snapshot"]["searches"].as_array().expect("a searches block");
     assert_eq!(searches.len(), 3);
     for (s, result) in searches.iter().zip(&results) {
         assert_eq!(s["chain"].to_string(), result[0]);
@@ -209,8 +209,9 @@ fn every_search_is_traced_up_to_the_result_it_reports() {
         assert_eq!(format!("{b:.6}"), result[1]);
     }
 
-    let record = std::fs::read_to_string(leaf.join("run.json")).unwrap();
-    assert!(!record.contains("opt_trace.tsv"), "the trace is outside the manifest");
+    let record = fit_store_support::json(&leaf.join("run.json"));
+    assert_eq!(record["files"]["opt_trace.tsv"]["role"], "provenance",
+        "the trace is a record of the attempt, not part of the result: {}", record["files"]);
 }
 
 /// A search that never scores a finite value — the epidemic is seeded with no
@@ -232,7 +233,7 @@ fn a_search_with_no_finite_value_traces_an_empty_best() {
     }
     let progress: serde_json::Value =
         serde_json::from_slice(&std::fs::read(leaf.join("progress.json")).unwrap()).unwrap();
-    assert_eq!(progress["searches"][0]["best_loglik"], serde_json::Value::Null);
+    assert_eq!(progress["snapshot"]["searches"][0]["best_loglik"], serde_json::Value::Null);
 }
 
 /// A profile's cells run the same NLopt search, and write no trace.

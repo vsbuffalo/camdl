@@ -28,18 +28,18 @@
 //!     wrongly routed to it would come back fully censored — `n_value = 0` is
 //!     the sharp failure signal.
 
+mod fit_store_support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Where the latest `fit predict` of a run in `seg` wrote:
-/// `<seg>/predict/<run id>-<address key>/` (gh#896), the directory whose
-/// `report*.json` (one written by every predict) is newest. A path that does not
-/// exist while nothing has been predicted.
+/// The stored prediction under `seg` (a run folder, or any folder above
+/// runs) whose `report*.json` is newest: the latest `fit predict`'s output. A
+/// path that does not exist while nothing has been predicted.
 fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
-    std::fs::read_dir(seg.join("predict"))
-        .into_iter().flatten().flatten().map(|e| e.path())
+    fit_store_support::predictions(seg)
+        .into_iter()
         .filter_map(|d| {
-            // Newest `report*.json` (keyed by chain selection) in the directory.
             let t = std::fs::read_dir(&d).ok()?.flatten()
                 .filter(|e| {
                     let n = e.file_name().to_string_lossy().into_owned();
@@ -74,6 +74,7 @@ fn run(bin: &Path, dir: &Path, args: &[&str]) -> std::process::Output {
     Command::new(bin).env_remove("CLICOLOR_FORCE")
         .args(args)
         .current_dir(dir)
+        .env("CAMDL_STORE", dir.join("results"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output()
         .expect("spawn camdl")
@@ -130,7 +131,7 @@ const DATA: &str = "time\tweekly_cases\n\
 /// `n_trajectories = 20` per chain against 30 post-burn-in draws per chain, so
 /// the saved subset is a PROPER subset (40 of 80): the reported forkable count
 /// is exercised rather than trivially equal to the cloud.
-const FIT_TOML: &str = r#"output_dir = "results"
+const FIT_TOML: &str = r#"store = "results"
 [model]
 camdl = "model.camdl"
 [data.observations]
@@ -194,7 +195,7 @@ simulate { from = 0  to = 40 }
 
 const DATA_NO_PATHS: &str = "time\tcases\n7\t6\n14\t14\n21\t9\n28\t4\n";
 
-const FIT_TOML_NO_PATHS: &str = r#"output_dir = "results"
+const FIT_TOML_NO_PATHS: &str = r#"store = "results"
 [model]
 camdl = "model.camdl"
 [data.observations]
@@ -233,14 +234,10 @@ fn quantile(xs: &[f64], q: f64) -> f64 {
     v[lo] * (1.0 - frac) + v[hi] * frac
 }
 
-/// The fit segment directory under `results/fits/`.
+/// The one stored fit run under the store at `root`; it holds the saved
+/// smoothing paths and, under `predict/`, its predictions.
 fn segment(root: &Path) -> PathBuf {
-    std::fs::read_dir(root.join("fits"))
-        .expect("results/fits")
-        .flatten()
-        .map(|e| e.path())
-        .find(|p| p.is_dir())
-        .expect("one fit segment")
+    fit_store_support::the_run(root)
 }
 
 /// `N0 - S` at `LAST_OBS` for every saved smoothing path under the segment —
@@ -283,7 +280,7 @@ fn cumulative_infections_on_saved_paths(seg: &Path) -> Vec<f64> {
 
 /// One quantity TSV's single banded row, as `column -> cell`.
 fn banded_row(seg: &Path, name: &str) -> std::collections::HashMap<String, String> {
-    let path = predict_out(seg).join("quantities").join(format!("{name}.tsv"));
+    let path = predict_out(seg).join("quantities-model").join(format!("{name}.tsv"));
     let txt = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
     let mut lines = txt.lines();
@@ -314,13 +311,13 @@ fn in_window_value_at_reads_the_conditioned_path() {
     std::fs::write(dir.join("weekly_cases.tsv"), DATA).unwrap();
     std::fs::write(dir.join("fit.toml"), FIT_TOML).unwrap();
 
-    let fit = run(&bin, &dir, &["fit", "run", "fit.toml"]);
+    let fit = run(&bin, &dir, &["fit", "run", "fit.toml", "--label", "fit"]);
     assert!(
         fit.status.success(),
         "fit run failed:\n{}",
         String::from_utf8_lossy(&fit.stderr)
     );
-    let pred = run(&bin, &dir, &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward"]);
+    let pred = run(&bin, &dir, &["fit", "predict", "--fit", "@fit", "--mode", "free_forward"]);
     assert!(
         pred.status.success(),
         "fit predict failed:\n{}",
@@ -431,10 +428,10 @@ fn a_fit_with_no_saved_paths_censors_instead_of_falling_back() {
     std::fs::write(dir.join("cases.tsv"), DATA_NO_PATHS).unwrap();
     std::fs::write(dir.join("fit.toml"), FIT_TOML_NO_PATHS).unwrap();
 
-    let fit = run(&bin, &dir, &["fit", "run", "fit.toml"]);
+    let fit = run(&bin, &dir, &["fit", "run", "fit.toml", "--label", "fit"]);
     assert!(fit.status.success(), "fit run failed:\n{}", String::from_utf8_lossy(&fit.stderr));
     let pred =
-        run(&bin, &dir, &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward"]);
+        run(&bin, &dir, &["fit", "predict", "--fit", "@fit", "--mode", "free_forward"]);
     assert!(
         pred.status.success(),
         "fit predict must still produce the rest of the artifact:\n{}",

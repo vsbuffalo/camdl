@@ -38,9 +38,14 @@ pub struct RunHeader {
 /// command from where they stand; a path outside the working directory is
 /// absolute so it cannot be read against the wrong base (gh#507).
 pub fn display_path(p: &Path) -> String {
-    let abs = crate::run_paths::display_absolute(p);
-    match std::env::current_dir() {
-        Ok(cwd) => match abs.strip_prefix(&cwd) {
+    let shown = crate::fit_store::shown(p);
+    let abs = crate::run_paths::display_absolute(&shown);
+    // Under the working directory is decided through symbolic links, so a
+    // path is relative whichever spelling of the store's root named it; a
+    // path outside it keeps the spelling it was named by.
+    let canonical = std::fs::canonicalize(&shown).unwrap_or_else(|_| abs.clone());
+    match std::env::current_dir().and_then(std::fs::canonicalize) {
+        Ok(cwd) => match canonical.strip_prefix(&cwd) {
             Ok(rel) if !rel.as_os_str().is_empty() => rel.display().to_string(),
             _ => abs.display().to_string(),
         },

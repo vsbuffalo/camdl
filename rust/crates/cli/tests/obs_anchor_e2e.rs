@@ -15,6 +15,8 @@
 //!  2. The anchored horizon actually moves the run, is announced on stderr, and
 //!     is refused (by name) where no data is bound.
 
+mod fit_store_support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -145,7 +147,7 @@ fn write_fit_toml(dir: &Path, model: &Path, data: &Path) -> PathBuf {
         &toml,
         format!(
             r#"
-output_dir = "{out}"
+store = "{out}"
 [model]
 camdl = "{model}"
 [data.observations]
@@ -431,14 +433,10 @@ fn predict_refuses_a_scenario_horizon_that_differs_after_resolution() {
         String::from_utf8_lossy(&fit.stderr)
     );
 
-    // The stored fit segment (`fits/<stem>-<h8>/`), which is what `fit predict`
-    // takes — the output_dir root holds many.
-    let fits = tmp.path().join("results").join("fits");
-    let segment = std::fs::read_dir(&fits)
-        .unwrap_or_else(|e| panic!("no fits dir {}: {e}", fits.display()))
-        .filter_map(|d| d.ok().map(|d| d.path()))
-        .find(|p| p.is_dir())
-        .expect("one fit segment");
+    // The stored fit run, which is what `fit predict` takes, read from the
+    // store the fit file names.
+    let store = tmp.path().join("results");
+    let segment = fit_store_support::the_run(&store);
 
     let predict = || -> (bool, String) {
         let o = Command::new(&bin).env_remove("CLICOLOR_FORCE").env("CAMDL_STORE", isolated_store())
@@ -446,6 +444,7 @@ fn predict_refuses_a_scenario_horizon_that_differs_after_resolution() {
             .arg(&segment)
             .args(["--scenario", "forecast"])
             .args(["--n-draws", "5"])
+            .env("CAMDL_STORE", &store)
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
             .output()
@@ -474,20 +473,10 @@ fn predict_refuses_a_scenario_horizon_that_differs_after_resolution() {
         );
     };
 
-    // (a) The normal path: `fit run` archived an already-resolved IR, so
-    //     predict reads resolved numbers straight off the segment.
+    // `fit run` stored an already-resolved IR, so predict reads resolved
+    // numbers straight off the stored fit.
     let (ok, stderr) = predict();
-    check(ok, stderr, "archived IR");
-
-    // (b) The fallback path: an older run archived no IR, so predict recompiles
-    //     `config.model.camdl` — which is STILL ANCHORED — and must resolve it
-    //     itself before the guard. Without predict's own resolution the guard
-    //     would compare NaN to NaN: it would still refuse (fail-closed), but the
-    //     message would name no horizon a reader could check, and any command
-    //     that proceeded would inherit an unresolved window.
-    std::fs::remove_file(segment.join("model.ir.json")).expect("archived IR present to remove");
-    let (ok, stderr) = predict();
-    check(ok, stderr, "recompiled from model.camdl");
+    check(ok, stderr, "stored IR");
 }
 
 /// gh#616 × gh#641: an anchored model forecast from a saved filtered state.
@@ -985,16 +974,13 @@ fn anchors_resolve_at_the_step_the_fit_runs_at() {
     );
 
     // `fit predict` reads the stored fit; it must not refuse the anchors.
-    let fits = tmp.path().join("results").join("fits");
-    let segment = std::fs::read_dir(&fits)
-        .unwrap_or_else(|e| panic!("no fits dir {}: {e}", fits.display()))
-        .filter_map(|d| d.ok().map(|d| d.path()))
-        .find(|p| p.is_dir())
-        .expect("one fit segment");
-    let o = Command::new(&bin).env_remove("CLICOLOR_FORCE").env("CAMDL_STORE", isolated_store())
+    let store = tmp.path().join("results");
+    let segment = fit_store_support::the_run(&store);
+    let o = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["fit", "predict"])
         .arg(&segment)
         .args(["--n-draws", "5"])
+        .env("CAMDL_STORE", &store)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
         .output()

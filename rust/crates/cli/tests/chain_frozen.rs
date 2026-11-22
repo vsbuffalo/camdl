@@ -12,6 +12,8 @@
 //! 10` with 20 particles (frozen on both chains at seed 1), and `burn_in =
 //! 100` with 50 particles (moving).
 
+mod fit_store_support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -50,6 +52,7 @@ fn camdl(work: &Path, args: &[&str]) -> (String, String) {
     let out = Command::new(&bin)
         .env_remove("CLICOLOR_FORCE")
         .current_dir(work)
+        .env("CAMDL_STORE", work.join("camdl-store"))
         .args(args)
         .args(["--progress", "none"])
         .output()
@@ -58,18 +61,9 @@ fn camdl(work: &Path, args: &[&str]) -> (String, String) {
     (String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
 }
 
-/// The single method leaf under `results/fits/<stem>-*/`.
-fn leaf(work: &Path, stem: &str) -> PathBuf {
-    let only = |dir: &Path, prefix: &str| -> PathBuf {
-        let hits: Vec<PathBuf> = std::fs::read_dir(dir).unwrap().flatten().map(|e| e.path())
-            .filter(|p| p.is_dir() && p.file_name().unwrap().to_string_lossy().starts_with(prefix))
-            .collect();
-        assert_eq!(hits.len(), 1, "one `{prefix}*` under {}: {hits:?}", dir.display());
-        hits.into_iter().next().unwrap()
-    };
-    let fit = only(&work.join("results/fits"), &format!("{stem}-"));
-    let method = only(&fit, "");
-    only(&method, "seed_")
+/// The single fit run in the work dir's store, `camdl-store/`.
+fn leaf(work: &Path) -> PathBuf {
+    fit_store_support::the_run(&work.join("camdl-store"))
 }
 
 fn json(path: &Path) -> serde_json::Value {
@@ -85,8 +79,8 @@ fn findings_of(leaf: &Path, ty: &str) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// Run one PGAS fit of the reporting model at seed 1 and return its leaf and
-/// the run's stderr.
+/// Run one PGAS fit of the reporting model at seed 1 and return its run
+/// folder and the run's stderr.
 fn pgas(work: &Path, stem: &str, particles: usize, sweeps: usize, burn_in: usize) -> (PathBuf, String) {
     std::fs::write(work.join(format!("{stem}.toml")), format!(r#"
 [model]
@@ -110,7 +104,7 @@ thin      = 1
 n_trajectories = 4
 "#)).unwrap();
     let (_, stderr) = camdl(work, &["fit", "run", &format!("{stem}.toml"), "--seed", "1"]);
-    (leaf(work, stem), stderr)
+    (leaf(work), stderr)
 }
 
 #[test]

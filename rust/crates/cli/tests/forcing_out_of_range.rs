@@ -103,13 +103,21 @@ simulate {{ from = 0 'days  to = 100 'days }}
 /// neighbours so a hold is visible.
 const ROWS_TO_50: [(u32, f64); 6] = [(0, 1.0), (10, 0.9), (20, 0.7), (30, 0.8), (40, 0.6), (50, 0.5)];
 
+/// The run store of the work directory `dir`: every command here stores into
+/// it, a fit through its config's `store` key and the rest through
+/// `CAMDL_STORE`.
+fn store_of(dir: &Path) -> PathBuf {
+    dir.join("cas").join("camdl-store")
+}
+
 fn camdl(dir: &Path, args: &[&str]) -> Output {
     Command::new(bin())
         .env_remove("CLICOLOR_FORCE")
         .args(args)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDL_IR_CACHE_DIR", dir.join("irc"))
-        .env("CAMDL_OUTPUT_DIR", dir.join("cas")).env("CAMDL_STORE", std::path::Path::new(&dir.join("cas")).join("camdl-store"))
+        .env("CAMDL_OUTPUT_DIR", dir.join("cas"))
+        .env("CAMDL_STORE", store_of(dir))
         .output()
         .expect("spawn camdl")
 }
@@ -160,13 +168,13 @@ fn fit_toml(dir: &Path, model: &Path, config_extra: &str) -> PathBuf {
     std::fs::write(
         &toml,
         format!(
-            "output_dir = \"{out}\"\n[model]\ncamdl = \"{model}\"\n[data.observations]\ncases = \"{data}\"\n\
+            "store = \"{out}\"\n[model]\ncamdl = \"{model}\"\n[data.observations]\ncases = \"{data}\"\n\
              [config]\ndt = 1.0\n{config_extra}[estimate]\n\
              gamma = {{ bounds = [0.01, 1.0], start = 0.1, prior = {{ uniform = {{}} }} }}\n\
              [fixed]\nbeta = 0.3\nrho = 0.6\n\
              [method]\nalgorithm = \"pgas\"\nbackend = \"chain_binomial\"\nchains = 1\nparticles = 8\n\
              sweeps = 4\nburn_in = 2\n",
-            out = dir.join("results").display(),
+            out = store_of(dir).display(),
             model = model.display(),
             data = data.display(),
         ),
@@ -236,25 +244,26 @@ fn held_mult_past_50() -> serde_json::Value {
 }
 
 /// A fit under `[config] allow_forcing_extrapolation = true` records the
-/// override and the one forcing it held in its method leaf's `run.json`, as a
-/// simulate under the flag does in its leaf's: the record is the command's,
-/// whichever way the override was given.
+/// override and the one forcing it held in its run's `run_inputs.json`, as a
+/// simulate under the flag does in its cell's provenance: the record is the
+/// command's, whichever way the override was given.
 #[test]
 fn the_override_records_the_forcing_it_held() {
     let tmp = tempfile::tempdir().unwrap();
     let m = model(tmp.path(), "linear", &ROWS_TO_50);
     let o = fit_run(tmp.path(), &m, "allow_forcing_extrapolation = true\n");
     assert!(o.status.success(), "{}", stderr(&o));
-    let records = statuses(&tmp.path().join("results"));
-    let method: Vec<_> = records.iter().filter(|(_, v)| v["kind"] != "fit").collect();
-    assert!(!method.is_empty(), "a method leaf was written: {records:?}");
-    for (path, v) in method {
+    let method = fit_records(tmp.path());
+    assert!(!method.is_empty(), "a fit run was written");
+    for (path, v) in &method {
         assert_eq!(v["inputs"]["forcing_extrapolation"], held_mult_past_50(), "{}:\n{v:#}", path.display());
     }
 
     let o = simulate(tmp.path(), &m, &["--allow-forcing-extrapolation"]);
     assert!(o.status.success(), "{}", stderr(&o));
-    let records = statuses(&tmp.path().join("cas"));
+    let records: Vec<_> = statuses(&tmp.path().join("cas")).into_iter()
+        .filter(|(_, v)| v["kind"] != "fit_run" && v["kind"] != "fit" && v["kind"] != "quantities")
+        .collect();
     assert!(!records.is_empty(), "the simulate leaf was written");
     for (path, v) in records {
         assert_eq!(v["inputs"]["forcing_extrapolation"], held_mult_past_50(), "{}:\n{v:#}", path.display());
@@ -309,11 +318,11 @@ fn fit_aware_commands_read_the_configs_override() {
 }
 
 /// A fit made with `--allow-forcing-extrapolation` on the command line, not in
-/// its config, stores the config it ran under: the fit folder keeps the file
-/// byte for byte as `fit.toml.original`, comments included, and its
-/// `fit.resolved.toml` records `[config] allow_forcing_extrapolation = true`,
-/// so every reader of it — `fit predict` here — runs under the override
-/// without being given the flag again (gh#1268).
+/// its config, stores the config it ran under: the run folder keeps the file
+/// byte for byte as `fit.toml`, comments included, and its problem's
+/// `problem.toml` records `[config] allow_forcing_extrapolation = true`, so
+/// every reader of it — `fit predict` here — runs under the override without
+/// being given the flag again (gh#1268).
 #[test]
 fn a_fit_made_under_the_flag_stores_the_override_in_its_config() {
     let tmp = tempfile::tempdir().unwrap();
@@ -323,16 +332,16 @@ fn a_fit_made_under_the_flag_stores_the_override_in_its_config() {
     std::fs::write(&toml, &written).unwrap();
     let o = camdl(tmp.path(), &["fit", "run", toml.to_str().unwrap(), "--allow-forcing-extrapolation"]);
     assert!(o.status.success(), "the flag lets the fit run:\n{}", stderr(&o));
-    let leaf = statuses(&tmp.path().join("results"))
+    let leaf = fit_records(tmp.path())
         .into_iter()
-        .find(|(_, v)| v["kind"] == "fit_method")
         .map(|(p, _)| p.parent().unwrap().to_path_buf())
-        .expect("the fit's method leaf");
-    let segment = leaf.parent().unwrap().parent().unwrap();
-    let archived = std::fs::read_to_string(segment.join("fit.toml.original")).unwrap();
-    assert_eq!(archived, written, "fit.toml.original is the user's file, byte for byte");
-    let resolved = std::fs::read_to_string(segment.join("fit.resolved.toml")).unwrap();
-    assert!(resolved.starts_with("# fit.resolved.toml:"), "the resolved config says what it is:\n{resolved}");
+        .next()
+        .expect("the fit run");
+    let archived = std::fs::read_to_string(leaf.join("fit.toml")).unwrap();
+    assert_eq!(archived, written, "the run's fit.toml is the user's file, byte for byte");
+    let resolved = std::fs::read_to_string(
+        leaf.parent().unwrap().parent().unwrap().parent().unwrap().join("problem.toml")).unwrap();
+    assert!(resolved.starts_with("# problem.toml:"), "the resolved config says what it is:\n{resolved}");
     let parsed: toml::Table = resolved.parse().unwrap_or_else(|e| panic!("the resolved config parses: {e}\n{resolved}"));
     let o = camdl(tmp.path(), &["fit", "predict", leaf.to_str().unwrap(), "--mode", "free_forward"]);
     let err = stderr(&o);
@@ -345,12 +354,12 @@ fn a_fit_made_under_the_flag_stores_the_override_in_its_config() {
     );
 }
 
-/// The same fit, named by its `fit.toml`: the file alone does not hold the
-/// override, so the flag-made run is not the run `fit run fit.toml` makes,
-/// and a `fit.toml` handle names only that run (gh#896). `fit predict` and
+/// The same fit, named by its `fit.toml`: a configuration names no run (one
+/// file makes a run per data, seed, sweep and build, and here the flag-made
+/// run is not even the run the file alone makes). `fit predict` and
 /// `compare` refuse it rather than replay the flag-made fit under a config
-/// without the override, and the refusal names the flag-made run's leaf
-/// directory so the reader can name it instead (gh#1268).
+/// without the override, and the refusal lists the stored run's folder so
+/// the reader can name it instead (gh#1268).
 #[test]
 fn a_fit_toml_handle_does_not_stand_for_a_flag_made_fit() {
     let tmp = tempfile::tempdir().unwrap();
@@ -359,11 +368,11 @@ fn a_fit_toml_handle_does_not_stand_for_a_flag_made_fit() {
     let toml = toml.to_str().unwrap();
     let o = camdl(tmp.path(), &["fit", "run", toml, "--allow-forcing-extrapolation"]);
     assert!(o.status.success(), "the flag lets the fit run:\n{}", stderr(&o));
-    let leaf = statuses(&tmp.path().join("results"))
+    let leaf = fit_records(tmp.path())
         .into_iter()
-        .find(|(_, v)| v["kind"] == "fit_method")
         .map(|(p, _)| p.parent().unwrap().to_path_buf())
-        .expect("the fit's method leaf");
+        .next()
+        .expect("the fit run");
     let leaf_name = leaf.file_name().unwrap().to_string_lossy().into_owned();
     for args in [
         vec!["fit", "predict", toml, "--mode", "free_forward"],
@@ -373,8 +382,8 @@ fn a_fit_toml_handle_does_not_stand_for_a_flag_made_fit() {
         let err = stderr(&o);
         assert!(!o.status.success(), "{args:?}: the file alone names no run here:\n{err}");
         assert!(!err.contains("forcing `mult` was evaluated"), "{args:?}: not replayed without the override:\n{err}");
-        assert!(err.contains("command-line options"), "{args:?}: says why the stored run is not the file's:\n{err}");
-        assert!(err.contains(&leaf_name), "{args:?}: names the flag-made run's leaf:\n{err}");
+        assert!(err.contains("a configuration never names a run"), "{args:?}: says why the file names no run:\n{err}");
+        assert!(err.contains(&leaf_name), "{args:?}: lists the flag-made run's folder:\n{err}");
     }
 }
 
@@ -382,10 +391,10 @@ fn a_fit_toml_handle_does_not_stand_for_a_flag_made_fit() {
 /// `profile`), given a fit made with `--allow-forcing-extrapolation` on the
 /// command line: named by its leaf, the fit's stored config holds the
 /// override, so the command runs past the forcing's range and records what it
-/// held (gh#1235, gh#1268). For `pfilter` it is the same
-/// computation as the file under the flag; `profile` keys the config's text as read, and the
-/// stored config is the file with the override written in, so the two are
-/// stored apart (a conservative re-key, not a shared leaf). Named by its
+/// held (gh#1235, gh#1268). Neither is the same stored computation as the file
+/// under the flag: a filter run given a stored fit depends on its problem,
+/// and `profile` keys the config's text as read, which for a stored fit is
+/// its `problem.toml`. Named by its
 /// `fit.toml`, the problem is the file's, which does not hold the override
 /// (gh#896), so the same command is refused at the forcing rather than run as
 /// the flag-made fit.
@@ -398,11 +407,11 @@ fn a_flag_made_fit_is_read_under_its_stored_override_through_its_leaf() {
     let params = tmp.path().join("params.toml");
     let o = camdl(tmp.path(), &["fit", "run", toml.to_str().unwrap(), "--allow-forcing-extrapolation"]);
     assert!(o.status.success(), "the flag lets the fit run:\n{}", stderr(&o));
-    let leaf = statuses(&tmp.path().join("results"))
+    let leaf = fit_records(tmp.path())
         .into_iter()
-        .find(|(_, v)| v["kind"] == "fit_method")
         .map(|(p, _)| p.parent().unwrap().to_path_buf())
-        .expect("the fit's method leaf");
+        .next()
+        .expect("the fit run");
     let (m, toml, params, leaf) = (m.to_str().unwrap(), toml.to_str().unwrap(), params.to_str().unwrap(), leaf.to_str().unwrap());
     let prof = tmp.path().join("prof");
     let prof = prof.to_str().unwrap();
@@ -417,7 +426,9 @@ fn a_flag_made_fit_is_read_under_its_stored_override_through_its_leaf() {
                     .map(String::from)
                     .to_vec()
             }),
-            true,
+            // A filter run given a stored fit depends on its problem, and one
+            // given a fit file does not: two runs.
+            false,
         ),
         (
             "profile",
@@ -443,7 +454,8 @@ fn a_flag_made_fit_is_read_under_its_stored_override_through_its_leaf() {
         let new: Vec<_> = statuses(tmp.path())
             .into_iter()
             .filter(|(_, v)| v["run_id"].as_str().is_some_and(|id| !before.contains(id)))
-            .filter(|(_, v)| v["status"] == "completed" && v["kind"] != "profile_invocation" && v["kind"] != "fit_method")
+            .filter(|(_, v)| v["status"] == "completed" && v["kind"] != "profile_invocation" && v["kind"] != "fit_method"
+                && v["kind"] != "quantities" && v["kind"] != "compiled_model" && v["kind"] != "data_table")
             .collect();
         assert!(!new.is_empty(), "{name}: a completed leaf");
         for (path, v) in &new {
@@ -473,25 +485,21 @@ fn compare_scores_a_fit_under_its_configs_override() {
     let m = model(tmp.path(), "linear", &ROWS_TO_50);
     let o = fit_run(tmp.path(), &m, "allow_forcing_extrapolation = true\n");
     assert!(o.status.success(), "{}", stderr(&o));
-    let leaf = statuses(&tmp.path().join("results"))
-        .into_iter()
-        .find(|(p, v)| v["kind"] != "fit" && p.to_string_lossy().contains("pgas-"))
-        .map(|(p, _)| p.parent().unwrap().to_string_lossy().into_owned())
-        .expect("the fit's method leaf");
+    let leaf = method_leaf(tmp.path(), "pgas");
     let o = camdl(tmp.path(), &["compare", &leaf, &leaf]);
     let err = stderr(&o);
     assert!(!err.contains("camdl does not extend a forcing past its range"), "the child must not refuse:\n{err}");
     assert!(o.status.success(), "{err}");
 }
 
-/// The method leaf of the one fit under `results` in `dir` whose method
-/// directory starts with `method`.
+/// The run folder of the one fit run in `dir`'s store whose method directory
+/// (`runs/<method>-<id12>/`) starts with `method`.
 fn method_leaf(dir: &Path, method: &str) -> String {
-    statuses(&dir.join("results"))
+    fit_records(dir)
         .into_iter()
-        .find(|(p, v)| v["kind"] != "fit" && p.to_string_lossy().contains(&format!("{method}-")))
+        .find(|(p, _)| p.to_string_lossy().contains(&format!("/{method}-")))
         .map(|(p, _)| p.parent().unwrap().to_string_lossy().into_owned())
-        .expect("the fit's method leaf")
+        .expect("the fit run")
 }
 
 /// `compare` scores an ODE fit in-process, by the fit's own ODE likelihood
@@ -520,17 +528,19 @@ fn compare_scores_an_ode_fit_under_its_configs_override() {
     assert!(o.status.success(), "{err}");
 }
 
-/// A fit of the linear-forcing model in `dir` held out after day 49, with
-/// `config_extra` appended to `[config]`, by the method `fit_toml` writes
-/// (PGAS on the chain-binomial backend) or, with `ode`, MH on the ODE
-/// backend; returns its method leaf. The held-out score reaches day 70, past
+/// A fit of the linear-forcing model in `dir`, with `config_extra` appended
+/// to `[config]`, by the method `fit_toml` writes (PGAS on the chain-binomial
+/// backend) or, with `ode`, MH on the ODE backend; returns its run folder.
+/// With `holdout`, the fit holds out the rows after day 49 and trains only on
+/// days the forcing covers; without, it trains on every row, to day 70, past
 /// the forcing's range.
-fn held_out_fit(dir: &Path, config_extra: &str, ode: bool) -> String {
+fn compared_fit(dir: &Path, config_extra: &str, ode: bool, holdout: bool) -> String {
     let m = model(dir, "linear", &ROWS_TO_50);
     let toml = fit_toml(dir, &m, config_extra);
-    let mut text = std::fs::read_to_string(&toml)
-        .unwrap()
-        .replace("[data.observations]", "[data]\nholdout_after = 49\n[data.observations]");
+    let mut text = std::fs::read_to_string(&toml).unwrap();
+    if holdout {
+        text = text.replace("[data.observations]", "[data]\nholdout_after = 49\n[data.observations]");
+    }
     if ode {
         text = text.replace(
             "[method]\nalgorithm = \"pgas\"\nbackend = \"chain_binomial\"\nchains = 1\nparticles = 8\n\
@@ -539,7 +549,7 @@ fn held_out_fit(dir: &Path, config_extra: &str, ode: bool) -> String {
              starts = \"single\"\n",
         );
     }
-    assert!(text.contains("holdout_after") && (!ode || text.contains("algorithm = \"mh\"")), "{text}");
+    assert!(text.contains("holdout_after") == holdout && (!ode || text.contains("algorithm = \"mh\"")), "{text}");
     std::fs::write(&toml, text).unwrap();
     let o = camdl(dir, &["fit", "run", toml.to_str().unwrap()]);
     assert!(o.status.success(), "{}", stderr(&o));
@@ -556,12 +566,12 @@ fn held_lines(o: &Output) -> Vec<String> {
 /// `compare` reports, per row, every forcing held while that row was
 /// scored. A chain-binomial fit is scored by a `camdl pfilter` child, which
 /// records what it held in the trace it writes; a fit made under the
-/// override, held out after day 49, holds the forcing only when its held-out
-/// days are scored, so its fit never said so (gh#1235).
+/// override on data past the forcing's range holds the forcing on the days
+/// after 50 (gh#1235).
 #[test]
 fn compare_reports_a_hold_made_while_scoring_each_row() {
     let tmp = tempfile::tempdir().unwrap();
-    let leaf = held_out_fit(tmp.path(), "allow_forcing_extrapolation = true\n", false);
+    let leaf = compared_fit(tmp.path(), "allow_forcing_extrapolation = true\n", false, false);
     let o = camdl(tmp.path(), &["compare", &leaf, &leaf]);
     assert!(o.status.success(), "{}", stderr(&o));
     assert_eq!(held_lines(&o).len(), 2, "one line per row:\n{}\n{}", String::from_utf8_lossy(&o.stdout), stderr(&o));
@@ -593,35 +603,54 @@ fn compare_reports_a_hold_recorded_by_a_pfilter_method_fit() {
 
 /// A fit made without the override, scored under compare's
 /// `--allow-forcing-extrapolation`: compare says the flag turned the setting
-/// on for it, and reports the hold on its rows.
+/// on for it, and records it in each row's trace derivation. The fit holds
+/// out the days past the forcing's range, and compare scores only the
+/// training rows (`--in-sample`), which the forcing covers, so no row holds
+/// it.
 #[test]
 fn compare_says_when_its_flag_scores_a_fit_under_the_override() {
     let tmp = tempfile::tempdir().unwrap();
-    let leaf = held_out_fit(tmp.path(), "", false);
-    let o = camdl(tmp.path(), &["compare", &leaf, &leaf, "--allow-forcing-extrapolation"]);
+    let leaf = compared_fit(tmp.path(), "", false, true);
+    let o = camdl(tmp.path(), &["compare", &leaf, &leaf, "--in-sample", "--allow-forcing-extrapolation"]);
     let err = stderr(&o);
     assert!(o.status.success(), "{err}");
     assert!(err.contains("was fitted without --allow-forcing-extrapolation; compare scores it under it, as given"),
         "{err}");
-    assert_eq!(held_lines(&o).len(), 2, "{}\n{err}", String::from_utf8_lossy(&o.stdout));
+    assert_eq!(held_lines(&o).len(), 0, "{}\n{err}", String::from_utf8_lossy(&o.stdout));
     // `--format json` records it in each row's trace derivation.
-    let o = camdl(tmp.path(), &["compare", &leaf, &leaf, "--allow-forcing-extrapolation", "--format", "json"]);
+    let o = camdl(tmp.path(),
+        &["compare", &leaf, &leaf, "--in-sample", "--allow-forcing-extrapolation", "--format", "json"]);
     assert!(o.status.success(), "{}", stderr(&o));
     let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
     let text = v.to_string();
     assert_eq!(text.matches("\"forcing_extrapolation_allowed\"").count(), 2, "one per row: {v:#}");
 }
 
-/// Two ODE fits, each made under the override and each holding the forcing
-/// when scored in compare's process: each row reports its own hold.
+/// A fit that held rows out is refused by `compare` before anything is
+/// scored: its held-out score is not computed from a stored fit, and the
+/// refusal points at `--in-sample`.
+#[test]
+fn compare_refuses_a_fit_that_held_rows_out() {
+    let tmp = tempfile::tempdir().unwrap();
+    let leaf = compared_fit(tmp.path(), "allow_forcing_extrapolation = true\n", false, true);
+    let o = camdl(tmp.path(), &["compare", &leaf, &leaf]);
+    let err = stderr(&o);
+    assert!(!o.status.success(), "{err}");
+    assert!(err.contains("held rows out of its training data") && err.contains("--in-sample"), "{err}");
+    assert!(held_lines(&o).is_empty(), "nothing is scored:\n{err}");
+}
+
+/// Two ODE fits, each made under the override on data past the forcing's
+/// range and each holding the forcing when scored in compare's process: each
+/// row reports its own hold.
 #[test]
 fn compare_reports_each_ode_fits_hold() {
     let tmp = tempfile::tempdir().unwrap();
     let (a_dir, c_dir) = (tmp.path().join("a"), tmp.path().join("c"));
     std::fs::create_dir_all(&a_dir).unwrap();
     std::fs::create_dir_all(&c_dir).unwrap();
-    let a = held_out_fit(&a_dir, "allow_forcing_extrapolation = true\n", true);
-    let c = held_out_fit(&c_dir, "allow_forcing_extrapolation = true\n", true);
+    let a = compared_fit(&a_dir, "allow_forcing_extrapolation = true\n", true, false);
+    let c = compared_fit(&c_dir, "allow_forcing_extrapolation = true\n", true, false);
     let o = camdl(tmp.path(), &["compare", &a, &c]);
     assert!(o.status.success(), "{}", stderr(&o));
     let lines = held_lines(&o);
@@ -709,12 +738,11 @@ fn refused_fit_marks_its_claim_failed(chains: usize) -> Vec<(&'static str, PathB
         let err = stderr(&o);
         assert!(!o.status.success(), "{algorithm}: refused:\n{err}");
         assert!(err.contains("--allow-forcing-extrapolation"), "{algorithm}: the refusal:\n{err}");
-        let records = statuses(&tmp.path().join("results"));
-        let method: Vec<_> = records.iter().filter(|(_, v)| v["kind"] != "fit").collect();
-        assert!(!method.is_empty(), "{algorithm}: the method leaf was claimed: {records:?}");
+        let method = fit_records(tmp.path());
+        assert!(!method.is_empty(), "{algorithm}: the fit run was claimed");
         for (path, v) in &method {
             assert_eq!(v["status"], "failed", "{algorithm}: {} must be failed, not left open:\n{v:#}", path.display());
-            let failure = v.pointer("/failure/message").and_then(|m| m.as_str()).unwrap_or_default();
+            let failure = v.pointer("/failure/reason").and_then(|m| m.as_str()).unwrap_or_default();
             assert!(failure.contains("forcing `mult`"), "{algorithm}: the failure records the refusal:\n{v:#}");
             assert!(!path.with_file_name(".lock").exists(), "{algorithm}: no lock left at {}", path.display());
         }
@@ -723,10 +751,10 @@ fn refused_fit_marks_its_claim_failed(chains: usize) -> Vec<(&'static str, PathB
     leaves
 }
 
-/// Every `run.json` under `root`, with its path.
 /// Every record under `root`: an old-store leaf's `run.json`, and for a
-/// filter run in the run store its `run.json` with the `run_id` and `kind` of
-/// its `identity.json` and, as `inputs`, its `provenance.json`.
+/// result folder in the run store its `run.json` with the `run_id` and `kind`
+/// of its `identity.json` and, as `inputs`, its `provenance.json` (a filter
+/// run's) or `run_inputs.json` (a fit run's).
 fn statuses(root: &Path) -> Vec<(PathBuf, serde_json::Value)> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -746,9 +774,10 @@ fn statuses(root: &Path) -> Vec<(PathBuf, serde_json::Value)> {
                     }
                     v["run_id"] = id["run_id"].clone();
                     v["kind"] = id["kind"].clone();
-                    let prov = p.with_file_name("provenance.json");
-                    if let Ok(b) = std::fs::read_to_string(&prov) {
-                        v["inputs"] = serde_json::from_str(&b).unwrap();
+                    for inputs in ["provenance.json", "run_inputs.json"] {
+                        if let Ok(b) = std::fs::read_to_string(p.with_file_name(inputs)) {
+                            v["inputs"] = serde_json::from_str(&b).unwrap();
+                        }
                     }
                 }
                 out.push((p, v));
@@ -756,6 +785,11 @@ fn statuses(root: &Path) -> Vec<(PathBuf, serde_json::Value)> {
         }
     }
     out
+}
+
+/// The record of every fit run in `dir`'s store, as [`statuses`] reads it.
+fn fit_records(dir: &Path) -> Vec<(PathBuf, serde_json::Value)> {
+    statuses(&store_of(dir)).into_iter().filter(|(_, v)| v["kind"] == "fit_run").collect()
 }
 
 /// Under `--allow-forcing-extrapolation` each kind runs, says so once, and
@@ -871,7 +905,7 @@ fn run_ids(cas: &Path) -> std::collections::BTreeSet<String> {
                 let v: serde_json::Value = match run_store_identity(&p) {
                     // The run store's content artifacts are inputs of a run,
                     // not runs.
-                    Some(id) if id["kind"] == "compiled_model" || id["kind"] == "data_table" => continue,
+                    Some(id) if id["kind"] == "compiled_model" || id["kind"] == "data_table" || id["kind"] == "quantities" => continue,
                     Some(id) => id,
                     None => serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap(),
                 };

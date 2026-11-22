@@ -25,6 +25,8 @@
 //! Starting points are fixed before either sampler updates anything, so
 //! nothing here depends on either method converging.
 
+mod fit_store_support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -43,31 +45,14 @@ fn golden_ir() -> PathBuf {
     Path::new(&manifest).join("../../../ocaml/golden/seir_observations.ir.json")
 }
 
-/// The `chain_starts.tsv` written by the method whose CAS leaf sits under a
-/// `<method>-<h8>` directory.
+/// The `chain_starts.tsv` of the one stored `method` run under the store at
+/// `root`.
 fn chain_starts_for_method(root: &Path, method: &str) -> PathBuf {
-    let marker = format!("{method}-");
-    let mut found: Vec<PathBuf> = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-        for e in entries.flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                stack.push(p);
-            } else if p.file_name().is_some_and(|n| n == "chain_starts.tsv")
-                && p.components().any(|c| {
-                    c.as_os_str().to_string_lossy().starts_with(&marker)
-                })
-            {
-                found.push(p);
-            }
-        }
-    }
-    assert_eq!(found.len(), 1,
-        "expected exactly one chain_starts.tsv under a `{method}` method \
-         leaf below {}, found {found:?}", root.display());
-    found.pop().unwrap()
+    let runs = fit_store_support::runs_of_method(root, method);
+    assert_eq!(runs.len(), 1, "expected one `{method}` run under {}, found {runs:?}", root.display());
+    let p = runs[0].join("chain_starts.tsv");
+    assert!(p.is_file(), "no chain_starts.tsv in {}", runs[0].display());
+    p
 }
 
 /// Parse `chain_starts.tsv` into (comment lines, column names, data rows).
@@ -163,7 +148,7 @@ starts    = \"uniform_unconstrained\"
 
     for toml in [&if2_toml, &pgas_toml] {
         let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-            .env("CAMDL_OUTPUT_DIR", dir.join("results"))
+            .env("CAMDL_STORE", dir.join("results"))
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .env("CAMDLC", &camdlc)
             .args(["fit", "run", &toml.to_string_lossy(), "--seed", "1", "--no-progress"])
@@ -252,10 +237,11 @@ starts    = \"uniform_unconstrained\"
         assert!(state.contains("chain_starts_kind = \"spread\""), "{method}: {state}");
     }
     let pgas_leaf = chain_starts_for_method(&results, "pgas");
-    let segment = pgas_leaf.parent().unwrap().parent().unwrap().parent().unwrap();
+    let pgas_run = pgas_leaf.parent().unwrap();
     let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
+        .env("CAMDL_STORE", &results)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
-        .args(["fit", "summary", &segment.to_string_lossy()])
+        .args(["fit", "summary", &pgas_run.to_string_lossy()])
         .output()
         .expect("spawn fit summary");
     let summary = String::from_utf8_lossy(&out.stdout).into_owned();

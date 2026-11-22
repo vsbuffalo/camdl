@@ -16,6 +16,7 @@
 //!  5. `pfilter --fit` and `fit predict` use the start the config gives.
 
 use std::path::{Path, PathBuf};
+mod fit_store_support;
 mod sim_store_cells;
 
 use std::process::{Command, Output};
@@ -107,8 +108,7 @@ fn fit_toml(p: &Project, file: &str, simulate_from: Option<&str>) -> PathBuf {
     std::fs::write(
         &path,
         format!(
-            r#"output_dir = "results"
-[model]
+            r#"[model]
 camdl = "m.camdl"
 [data.observations]
 cases = "cases.tsv"
@@ -143,14 +143,14 @@ fn camdl(p: &Project, args: &[&str]) -> Output {
     camdl_in(p, args, Some(&p.dir.join("cas")))
 }
 
-/// As [`camdl`], with the store root `CAMDL_OUTPUT_DIR` given or (`None`) left
-/// to the fit config's `output_dir`.
+/// As [`camdl`], with the run store under `store` given, or (`None`) the
+/// project's own, `results/`.
 fn camdl_in(p: &Project, args: &[&str], store: Option<&Path>) -> Output {
     let mut c = Command::new(bin());
     if let Some(s) = store {
         c.env("CAMDL_OUTPUT_DIR", s).env("CAMDL_STORE", std::path::Path::new(&s).join("camdl-store"));
     } else {
-        c.env_remove("CAMDL_OUTPUT_DIR");
+        c.env_remove("CAMDL_OUTPUT_DIR").env("CAMDL_STORE", p.dir.join("results"));
     }
     c
         .env_remove("CLICOLOR_FORCE")
@@ -292,13 +292,16 @@ fn a_config_start_is_one_fit_with_the_literal_and_replays() {
     let fit_b = fit_toml(&b, "fit.toml", None);
     let fit_a5 = fit_toml(&a, "fit5.toml", None);
 
+    // The fit run of `<stem>.toml` in the project's store: the run whose
+    // `fit.toml`, the file as given, is that file's bytes.
     let segment = |p: &Project, stem: &str| -> PathBuf {
-        std::fs::read_dir(p.dir.join("results/fits")).unwrap()
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .find(|d| d.file_name().unwrap().to_string_lossy().starts_with(&format!("{stem}-")))
-            .unwrap_or_else(|| panic!("no {stem} fit segment"))
+        let text = std::fs::read(p.dir.join(format!("{stem}.toml"))).unwrap();
+        fit_store_support::runs(&p.dir.join("results"))
+            .into_iter()
+            .find(|r| std::fs::read(r.join("fit.toml")).ok().as_deref() == Some(&text[..]))
+            .unwrap_or_else(|| panic!("no fit run of {stem}.toml"))
     };
-    let hash = |d: &Path| d.file_name().unwrap().to_string_lossy().rsplit('-').next().unwrap().to_string();
+    let hash = |run: &Path| fit_store_support::run_inputs(run)["problem_id"].as_str().unwrap().to_string();
 
     ok(&camdl_in(&a, &["fit", "run", file_name(&fit_a), "--seed", "1"], None), "fit a");
     ok(&camdl_in(&b, &["fit", "run", file_name(&fit_b), "--seed", "1"], None), "fit b");
@@ -308,17 +311,17 @@ fn a_config_start_is_one_fit_with_the_literal_and_replays() {
         "[simulate] from resolving to -2 and `from = -2 'days` in the model are one fit");
     assert_ne!(hash(&sa), hash(&sa5), "start -2 and start 5 are two fits");
 
-    let archived: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(sa.join("model.ir.json")).unwrap()).unwrap();
-    let m = archived.get("model").unwrap_or(&archived);
-    assert_eq!(m["simulation"]["t_start"], -2.0, "the fit archives the start it ran from");
+    let problem: toml::Table = std::fs::read_to_string(fit_store_support::problem_of(&sa).join("problem.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(problem["simulate"]["from"].as_float(), Some(-2.0), "the fit stores the start it ran from");
 
     let predict = |p: &Project, seg: &Path| -> String {
         ok(&camdl_in(p, &["fit", "predict", seg.to_str().unwrap(), "--n-draws", "3", "--seed", "1",
                                    "--mode", "free_forward"], None),
            "fit predict");
-        let dir = std::fs::read_dir(seg.join("predict")).unwrap()
-            .filter_map(|e| e.ok().map(|e| e.path())).find(|d| d.is_dir()).unwrap();
+        let dir = fit_store_support::predictions(seg).pop().expect("the prediction");
         std::fs::read_to_string(dir.join("predictive/cases.tsv")).unwrap()
     };
     assert_eq!(predict(&a, &sa), predict(&b, &sb),

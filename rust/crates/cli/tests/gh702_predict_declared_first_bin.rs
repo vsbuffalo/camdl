@@ -30,18 +30,18 @@
 //! reset, so its t = 150 row must stay at the whole-run cumulative level —
 //! ~3× the incidence row, not equal to it.
 
+mod fit_store_support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Where the latest `fit predict` of a run in `seg` wrote:
-/// `<seg>/predict/<run id>-<address key>/` (gh#896), the directory whose
-/// `report*.json` (one written by every predict) is newest. A path that does not
-/// exist while nothing has been predicted.
+/// The stored prediction under `seg` (a run folder, or any folder above
+/// runs) whose `report*.json` is newest: the latest `fit predict`'s output. A
+/// path that does not exist while nothing has been predicted.
 fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
-    std::fs::read_dir(seg.join("predict"))
-        .into_iter().flatten().flatten().map(|e| e.path())
+    fit_store_support::predictions(seg)
+        .into_iter()
         .filter_map(|d| {
-            // Newest `report*.json` (keyed by chain selection) in the directory.
             let t = std::fs::read_dir(&d).ok()?.flatten()
                 .filter(|e| {
                     let n = e.file_name().to_string_lossy().into_owned();
@@ -76,6 +76,7 @@ fn run(bin: &Path, dir: &Path, args: &[&str]) -> std::process::Output {
     Command::new(bin).env_remove("CLICOLOR_FORCE")
         .args(args)
         .current_dir(dir)
+        .env("CAMDL_STORE", dir.join("results"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output()
         .expect("spawn camdl")
@@ -92,17 +93,11 @@ fn tempdir(tag: &str) -> PathBuf {
     p
 }
 
-/// `results/fits/<stem>-<hash>/predict/<run id>-<address key>/<sub>/<stream>.tsv`.
+/// `<sub>/<stream>.tsv` in the latest `fit predict`'s output under the store
+/// at `root`.
 fn find_artifact(root: &Path, sub: &str, stream: &str) -> Option<PathBuf> {
-    for e in std::fs::read_dir(root.join("fits")).ok()?.flatten() {
-        // gh#896: the latest `fit predict` of the run writes under
-        // `<segment>/predict/<run id>-<address key>/`.
-        let p = predict_out(&e.path()).join(sub).join(format!("{stream}.tsv"));
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    None
+    let p = predict_out(root).join(sub).join(format!("{stream}.tsv"));
+    p.is_file().then_some(p)
 }
 
 /// `(time, q50)` for every row of a predictive TSV on the given horizon.
@@ -209,7 +204,7 @@ const STOCK: &str = "time\tstock\n150\t14888\n200\t19801\n";
 /// (`--mode one_step` needs a filterable fit).
 fn fit_toml(out_dir: &str) -> String {
     format!(
-        r#"output_dir = "{out_dir}"
+        r#"store = "{out_dir}"
 
 [model]
 camdl = "model.camdl"
@@ -241,7 +236,7 @@ thin = 1
 /// trajectory), and this pins that.
 fn ode_fit_toml(out_dir: &str) -> String {
     format!(
-        r#"output_dir = "{out_dir}"
+        r#"store = "{out_dir}"
 
 [model]
 camdl = "model.camdl"
@@ -281,14 +276,14 @@ fn setup_with_model(tag: &str, toml: &str, cases: &str, model: &str) -> PathBuf 
 }
 
 fn fit_then_predict(bin: &Path, tmp: &Path, extra: &[&str]) -> std::process::Output {
-    let out = run(bin, tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    let out = run(bin, tmp, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(
         out.status.success(),
         "fit run failed:\nstdout={}\nstderr={}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    let mut args = vec!["fit", "predict", "--fit", "fit.toml", "--seed", "1", "--n-draws", "60"];
+    let mut args = vec!["fit", "predict", "--fit", "@fit", "--seed", "1", "--n-draws", "60"];
     args.extend_from_slice(extra);
     run(bin, tmp, &args)
 }

@@ -52,7 +52,6 @@ data to decision is auditable.
 ```toml
 [fit]
 model = "models/he2010_london.camdl"
-output_dir = "fit/he2010"
 
 # Data sources — one per observation block in the model.
 # Keys must match observation block names in the .camdl file.
@@ -72,9 +71,9 @@ weekly_cases = "data/london_cases.tsv"
 # Applied at fit load (gh#585): [data.holdout] files bind as the held-out
 # tail (every held-out row ending strictly after the latest training row),
 # and holdout_after = <time> trains the rows ending at or before <time>.
-# The training partition is recorded in fit.meta.json, and `camdl compare`
-# scores such fits held-out by default (stamped hold_out_tail after a
-# non-leakage check; --in-sample opts out).
+# The training partition is recorded in the problem's partition.json. A
+# stored fit keeps held-out rows' dates, not their values: `camdl compare`
+# refuses to score them, and --in-sample compares the training rows.
 # [data.holdout]
 # weekly_cases = "data/london_cases_holdout.tsv"
 
@@ -346,53 +345,31 @@ scenario = "baseline" # optional
 
 #### Canonical modes
 
-| Mode                    | `[synthetic]` | `fit_seeds`     | Output layout                     | Cells |
-| ----------------------- | ------------- | --------------- | --------------------------------- | ----- |
-| Single fit              | —             | scalar / absent | `real/fit_<seed>/`                | 1     |
-| Start-sensitivity       | —             | list, len M     | `real/fit_<seed>/` × M            | M     |
-| SBC (classical)         | N datasets    | scalar / absent | `synthetic/ds_NN/fit_<seed>/`     | N     |
-| SBC × start-sensitivity | N datasets    | list, len M     | `synthetic/ds_NN/fit_<seed>/` × M | N × M |
+| Mode                    | `[synthetic]` | `fit_seeds`     | Stored as                | Cells |
+| ----------------------- | ------------- | --------------- | ------------------------ | ----- |
+| Single fit              | —             | scalar / absent | one problem, one run     | 1     |
+| Start-sensitivity       | —             | list, len M     | one problem, M runs      | M     |
+| SBC (classical)         | N datasets    | scalar / absent | N problems, one run each | N     |
+| SBC × start-sensitivity | N datasets    | list, len M     | N problems, M runs each  | N × M |
 
 #### Output directory
 
-Every fit lives under a data-source subdirectory. No single-fit exception — the
-seed is always the leaf:
-
-```
-results/fits/<name>/
-  real/                       or    synthetic/
-    fit_101/                            ds_01/
-      scout/ refine/ …                    fit_101/
-    fit_102/                                scout/ refine/ …
-      …                                   fit_102/ …
-    summary.tsv                         …
-                                        summary.tsv
-                                        coverage.tsv
-                                        truth.toml
-                                        data/
-                                          ds_01/<stream>.tsv
-                                          …
-```
-
-`summary.tsv` (always): one row per `(dataset, fit_seed)` with every estimated
-parameter's MLE, the log-likelihood, and the content hash.
-
-`coverage.tsv` (synthetic mode only): one row per estimated parameter with
-`truth`, `mean_mle`, `bias`, `sd_mle`, `q05`, `q95`, `covers_truth`,
-`n_datasets`. `covers_truth = 1` when the central 90 % MLE window brackets the
-declared ground truth.
+Every fit is stored in the run store, one problem folder per dataset and sweep
+point, with one run per seed inside it; the layout is `docs/camdl-run-spec.md`
+§2.2. No grid summary or coverage table is written; a multi-cell run says so on
+stderr.
 
 #### Synthetic data semantics
 
 When `[synthetic]` is present, the runner generates `len(sim_seeds)` datasets
 before dispatching any fits. Each dataset is a single run of the chosen backend
 at `true_params` with `sim_seed`, sampled through every declared observation
-stream at its declared schedule. Each dataset is written as one file per stream
-under `<fit_dir>/synthetic/data/ds_NN/`, in the columns that stream declared,
-and handed to the fit runner as if the user had supplied it via
-`[data.observations]` — so a dataset is read back by the loader real data uses,
-and a stream declaring `window_start`/`window_stop` columns generates and fits
-like any other.
+stream at its declared schedule. Each dataset is one file per stream, in the
+columns that stream declared, handed to the fit runner as if the user had
+supplied it via `[data.observations]` and stored in its problem's `inputs/`,
+beside the true parameters at `synthetic/truth.toml` — so a dataset is read back
+by the loader real data uses, and a stream declaring
+`window_start`/`window_stop` columns generates and fits like any other.
 
 Generation is deterministic: same `(true_params, sim_seed)` produces
 bit-identical data. The content hash of each dataset participates in the
@@ -530,7 +507,7 @@ method's fit_state.toml and produces its own. The user never needs to edit it
 ### 4.2 Schema
 
 ```toml
-# results/fits/<stem>-<h8>/if2-<h8>/seed_1-<h8>/fit_state.toml
+# camdl-store/<build>/fit/<model>-<h12>/runs/if2-<h12>/seed_1-<h12>/fit_state.toml
 # Auto-generated by camdl fit run.
 
 method = "if2"
@@ -610,18 +587,18 @@ scout.toml                                   [method] algorithm = "if2"
   │
   ├─ camdl fit run scout.toml --label scout
   │    reads: scout.toml (config + rw_sd)
-  │    writes: results/fits/scout-<h8>/if2-<h8>/seed_<N>-<h8>/fit_state.toml
+  │    writes: camdl-store/<build>/fit/<model>-<h12>/runs/if2-<h12>/seed_<N>-<h12>/fit_state.toml
   │
 refine.toml                                  [method] starts = { from_mle = "@scout" }
   │
   └─ camdl fit run refine.toml
        reads: refine.toml (config) + @scout's fit_state.toml (start_values)
-       writes: results/fits/refine-<h8>/if2-<h8>/seed_<N>-<h8>/{fit_state.toml, mle_params.toml}
+       writes: camdl-store/<build>/fit/<model>-<h12>/runs/if2-<h12>/seed_<N>-<h12>/{fit_state.toml, mle_params.toml}
 ```
 
 When the method declares `starts = { from_mle = "<handle>" }`:
 
-- Starting values come from the source leaf's `fit_state.toml [start_values]`
+- Starting values come from the source run's `fit_state.toml [start_values]`
   (every chain at that point; R̂ is not assessed, Â is annotated)
 - rw_sd comes from this file's `[estimate]` rw_sd values, else auto-scaled
 - Explicit `--rw-sd` CLI flags override everything
@@ -803,20 +780,16 @@ when any start exists).
 **Writes:**
 
 ```
-<fit_dir>/real/fit_<seed>/scout/
-  chain_{1..8}/parameter_traces.tsv
-  chain_{1..8}/final_params.toml    ← per-chain winner + [provenance]
+<run folder>/
+  chain_{0..7}/parameter_traces.tsv
+  chain_{0..7}/final_params.toml    ← per-chain winner + [provenance]
   fit_state.toml                    ← inter-method handoff
   mle_params.toml                   ← winner θ̂ + [provenance]
   final_params.toml                 ← winner θ̂ + [provenance] (run-root)
   chain_evaluations.tsv             ← full loglik-eval score table
   diagnostics.json                  ← structured warnings
-  run.json                          ← method-leaf metadata (post-Phase-3)
+  run.json                          ← the run's record
 ```
-
-> **v2 layout note.** The `real/fit_<seed>/` wrapper was added in commit
-> `5f1e704` (2026-04-18). Pre-v2 paths (`fit/{name}/scout/...`) are stale; no
-> fit produced by `cmd_fit_run_v2` writes that shape.
 
 For an interpretation surface — gate verdict, parameter table, filter health —
 read `camdl fit summary --format json` (§7.2.2). There is no separate
@@ -882,7 +855,7 @@ camdl fit run refine.toml [--seed 1]
 **Defaults:** 4 chains, 1000 particles, 50 iterations, cooling_fraction=0.95
 over 50 iterations.
 
-**Reads:** the scout leaf's `fit_state.toml` for start values (resolved from the
+**Reads:** the scout run's `fit_state.toml` for start values (resolved from the
 `starts` handle).
 
 **Writes:** same shape as scout (above). Use `camdl fit summary --format json`
@@ -924,8 +897,8 @@ ESS at MLE: mean=312, min=8  ✗ filter is degenerate
 **Writes:**
 
 ```
-<fit_dir>/real/fit_<seed>/validate/
-  chain_{1..4}/
+<run folder>/
+  chain_{0..3}/
     parameter_traces.tsv
     final_params.toml
   profiles/
@@ -935,11 +908,8 @@ ESS at MLE: mean=312, min=8  ✗ filter is degenerate
   mle_params.toml             ← final MLE (provenance-hashed)
   pfilter_loglik.txt          ← precise loglik at MLE
   ess_at_mle.tsv              ← per-observation ESS trace at MLE
-  run.json                    ← method-leaf metadata
+  run.json                    ← the run's record
 ```
-
-> **v2 layout note.** Same `real/fit_<seed>/` wrapper convention as
-> scout/refine; introduced in commit `5f1e704` (2026-04-18).
 
 For an interpretation surface, `camdl fit summary --format json` (§7.2.2) covers
 every method uniformly.
@@ -953,21 +923,22 @@ responsibilities:
 
 | command                   | answers                                  | scope                     |
 | ------------------------- | ---------------------------------------- | ------------------------- |
-| `camdl fit table <dir>`   | "what fits live under this tree?"        | cross-fit aggregator      |
-| `camdl fit summary <dir>` | "what does this fit say?"                | single-fit interpretation |
+| `camdl fit table <store>` | "what fits live in this run store?"      | cross-fit aggregator      |
+| `camdl fit summary <run>` | "what does this fit say?"                | single-fit interpretation |
 | `camdl compare`           | "which of these models predicts better?" | multi-model comparison    |
 
 ### 7.1 Summary
 
 ```bash
-camdl fit summary results/fits/<dir>/
+camdl fit summary @label
 ```
 
-Walks the fit dir, checks which method leaves have completed, reports
-convergence and identifiability:
+Reads one fit run (`@label`, a run-id prefix or the run's folder; a `fit.toml`
+is refused with the runs it made listed) and reports convergence and
+identifiability:
 
 ```
-fit/he2010/ — He et al. 2010 London measles
+camdl-store/<build>/fit/he2010_london-…/runs/if2-…/seed_1-…/ — He et al. 2010 London measles
 
   scout:     ✓ complete (8 chains, best loglik -3891.2, 6/8 good)
   refine:    ✓ complete (4 chains, Â < 1.05, loglik -3804.9)
@@ -997,15 +968,15 @@ fit/he2010/ — He et al. 2010 London measles
     fit_record.json: ✓ input hash 7f2c1d3a
 
   Next: camdl simulate model.camdl \
-          --params <fit_dir>/real/fit_<seed>/validate/mle_params.toml
+          --params <run folder>/mle_params.toml
 ```
 
 A method leaf that ran IF2 + loglik-eval but failed the compound gate (no
 `run.json`) is reported with a one-line pointer:
 
 ```
-fit/he2010/
-    scout       ✗ gate failed — see `camdl fit summary fit/he2010`
+camdl-store/<build>/fit/he2010_london-…/runs/if2-…/seed_1-…/
+    scout       ✗ gate failed — see `camdl fit summary @he2010`
 ```
 
 — rather than the pre-Phase-1 lie "(no completed leaves found)".
@@ -1013,7 +984,7 @@ fit/he2010/
 ### 7.2 Summary
 
 ```bash
-camdl fit summary fit/he2010
+camdl fit summary @he2010
 ```
 
 Reads each MLE method leaf's `fit_state.toml` + `final_params.toml` +
@@ -1044,9 +1015,9 @@ Top-level shape:
 ```json
 {
   "schema": {"version": 5, "camdl_version": "0.1.0+abc1234"},
-  "fit_dir": "fit/he2010",
+  "fit_dir": "camdl-store/<build>/fit/he2010_london-…/runs/if2-…/seed_1-…",
   "leaves": [
-    {"leaf": "fit/he2010/if2-1a2b3c4d/seed_1-5e6f7a8b", "method": "if2",
+    {"leaf": "camdl-store/<build>/fit/he2010_london-…/runs/if2-…/seed_1-…", "method": "if2",
      "run_id": "…", "status": "completed", "verdict": {"kind": "not_applicable"},
      "verdict_text": "IF2 gate failed"}
   ],
@@ -1142,10 +1113,9 @@ Schema-stability rules:
 - **`method_result.method` names the method that ran**: `mh` (which shares
   PMMH's result shape) is `"mh"`, and the three NLopt algorithms are
   `"nl-sbplx"`, `"nl-bobyqa"` and `"nl-lbfgs"`.
-- **A reader that needs one run refuses a folder holding several**, listing
-  them: `--params-only`, and `fit predict`, `compare` and `simulate --fit` of a
-  folder. Pass the run's directory, `@label` or run-id prefix. A folder holding
-  two completed runs of one method is refused by `fit summary` too.
+- **A reader that needs one run refuses a problem handle and a `fit.toml`**:
+  `fit summary`, `--params-only`, `fit predict`, `compare` and `simulate --fit`.
+  Pass the run's folder, `@label` or run-id prefix.
 - **`failures` is always present**, one entry per method leaf the walker found
   and could not read back. Each entry carries `leaf` (the method-leaf directory)
   and `reason` (which file, and what was wrong with it), and is also warned
@@ -1172,7 +1142,7 @@ the `failures` entry) names the ones it is missing.
 
 ```bash
 camdl pfilter model.camdl --data cases.tsv \
-    --params <(camdl fit summary --params-only fit/he2010)
+    --params <(camdl fit summary --params-only @he2010)
 ```
 
 Emits only the winner θ̂ as a flat parameter TOML — no headers beyond a single
@@ -1208,7 +1178,7 @@ format: params.toml.
 [experiment]
 model = "models/he2010_london.camdl"
 params = [
-  "<fit_dir>/real/fit_<seed>/validate/mle_params.toml",
+  "<run folder>/mle_params.toml",
 ] # ← from inference
 
 [config]
@@ -1226,9 +1196,9 @@ back to the fit.
 ```
 model.camdl + data.tsv + fit.toml
     │
-    ├── camdl fit run scout.toml     → results/fits/scout-<h8>/if2-<h8>/seed_<N>-<h8>/fit_state.toml
-    ├── camdl fit run refine.toml    → results/fits/refine-<h8>/if2-<h8>/seed_<N>-<h8>/mle_params.toml
-    └── camdl fit run validate.toml  → results/fits/validate-<h8>/if2-<h8>/seed_<N>-<h8>/mle_params.toml
+    ├── camdl fit run scout.toml     → <build>/fit/<model>-<h12>/runs/if2-<h12>/seed_<N>-<h12>/fit_state.toml
+    ├── camdl fit run refine.toml    → <build>/fit/<model>-<h12>/runs/if2-<h12>/seed_<N>-<h12>/mle_params.toml
+    └── camdl fit run validate.toml  → <build>/fit/<model>-<h12>/runs/if2-<h12>/seed_<N>-<h12>/mle_params.toml
                                       │
                     ┌─────────────────┤
                     ▼                  ▼

@@ -21,7 +21,7 @@ use indexmap::{IndexMap, IndexSet};
 use sim::compiled_model::CompiledModel;
 use sim::inference::types::EstimatedParam;
 
-use crate::fit::handle::FitProblem;
+use crate::fit_store::FitArg as FitProblem;
 
 /// A Latin-hypercube design: `points[i][d]` is the natural-scale value of
 /// parameter `params[d]` at point `i`. A point's id is its index.
@@ -206,7 +206,8 @@ pub fn cmd_design_lhs(a: &crate::args::DesignLhsArgs, compile: crate::util::Comp
     if let Err(e) = refuse_fewer_than_two_points(*n) {
         out.fail(format!("error: {e}"));
     }
-    let fit_problem = crate::fit::handle::resolve_fit_problem(&fit.to_string_lossy())
+    let fit_store = crate::camdl_store::open_existing(&crate::camdl_store::read_root());
+    let fit_problem = FitProblem::read(&fit.to_string_lossy(), fit_store.as_ref())
         .unwrap_or_else(|e| out.fail(format!("error: --fit {}: {e}", fit.display())));
     let design = resolve_estimated(&out, &model.to_string_lossy(), &fit_problem, compile, *seed)
         .and_then(|estimated| lhs_design(&estimated, *n, *seed))

@@ -36,6 +36,7 @@ fn run(dir: &Path, args: &[&str]) -> std::process::Output {
         .args(args)
         .current_dir(dir)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("CAMDL_STORE", dir.join("results"))
         .output()
         .expect("spawn camdl")
 }
@@ -65,7 +66,7 @@ fn fit(dir: &Path, data: &str, tail: &str) {
 /// [`fit`], of the model source `model`.
 fn fit_model(dir: &Path, model: &str, data: &str, tail: &str) {
     std::fs::write(dir.join("model.camdl"), model).unwrap();
-    std::fs::write(dir.join("fit.toml"), format!(r#"output_dir = "results"
+    std::fs::write(dir.join("fit.toml"), format!(r#"store = "results"
 
 [model]
 camdl = "model.camdl"
@@ -95,7 +96,7 @@ iterations = 60
 burn_in = 20
 thin = 1
 "#)).unwrap();
-    let out = run(dir, &["fit", "run", "fit.toml", "--seed", "1"]);
+    let out = run(dir, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(out.status.success(), "fit run: {}", said(&out));
 }
 
@@ -117,7 +118,7 @@ fn predict(dir: &Path, extra: &[&str]) -> (String, PathBuf) {
     for p in walk(&dir.join("results")).into_iter().filter(|p| p.file_name().is_some_and(|n| n == "predictive.json")) {
         std::fs::remove_dir_all(p.parent().unwrap()).unwrap();
     }
-    let mut args = vec!["fit", "predict", "--fit", "fit.toml", "--n-draws", "3"];
+    let mut args = vec!["fit", "predict", "--fit", "@fit", "--n-draws", "3"];
     // `--particles` is refused when no filter runs.
     if !extra.contains(&"free_forward") {
         args.extend_from_slice(&["--particles", "40"]);
@@ -175,9 +176,12 @@ fn rows_past_the_training_prefix_are_held_out_and_the_manifest_names_both_sets()
     fit(dir, "holdout_after = 24.0\n", "");
     let (text, out) = predict(dir, &[]);
 
-    // The one-step rows: every data row, the held-out ones marked.
-    assert_eq!(roles(&out, "weekly_cases", "one_step"), split_at((1..=9).map(|w| 7 * w), 24));
-    assert_eq!(roles(&out, "daily_cases", "one_step"), split_at(1..=63, 24));
+    // The one-step rows: the training rows. Filtering through a held-out row
+    // needs its value, which a stored fit does not keep, so the band stops
+    // at the training prefix.
+    let trained_only = |rows: Vec<(f64, String)>| -> Vec<(f64, String)> { rows.into_iter().filter(|(_, r)| r == "trained").collect() };
+    assert_eq!(roles(&out, "weekly_cases", "one_step"), trained_only(split_at((1..=9).map(|w| 7 * w), 24)));
+    assert_eq!(roles(&out, "daily_cases", "one_step"), trained_only(split_at(1..=63, 24)));
     // The free-forward rows sit at the same data rows and take the same roles.
     assert_eq!(roles(&out, "weekly_cases", "free_forward"), split_at((1..=9).map(|w| 7 * w), 24));
     assert_eq!(roles(&out, "daily_cases", "free_forward"), split_at(1..=63, 24));
@@ -206,29 +210,25 @@ fn rows_past_the_training_prefix_are_held_out_and_the_manifest_names_both_sets()
     let filtered: Vec<(&str, u64, u64)> = os["streams"].as_array().unwrap().iter()
         .map(|s| (s["stream"].as_str().unwrap(), s["rows"].as_u64().unwrap(), s["held_out_rows"].as_u64().unwrap()))
         .collect();
-    assert_eq!(filtered, [("daily_cases", 63, 39), ("weekly_cases", 9, 6)]);
+    // The filter walks the stored training rows; the held-out ones are not
+    // stored with their values.
+    assert_eq!(filtered, [("daily_cases", 24, 0), ("weekly_cases", 3, 0)]);
     assert!(os.get("through").is_none(), "the counts say what was filtered through: {os}");
     assert_eq!(m["state_sets"]["free_forward"], json!({"conditioning": "none", "streams": []}));
     // Written, as `null`, without a `[data.holdout]`: the key is not missing.
     assert_eq!(m.as_object().unwrap().get("holdout_files"), Some(&serde_json::Value::Null));
 
-    // Said once, in one sentence.
-    let line = "fit predict: the one_step rows include held-out rows (39 of 63 rows in 'daily_cases', \
-                6 of 9 rows in 'weekly_cases')";
-    assert_eq!(text.matches(line).count(), 1, "{text}");
-    assert!(text.contains("parameters fitted without them and a state filtered through every earlier \
-                           row of 'daily_cases', 'weekly_cases', held-out rows included"), "{text}");
+    // The one-step band holds no held-out row, so nothing is said of one.
+    assert!(!text.contains("the one_step rows include held-out rows"), "{text}");
 
-    // Under `--stream`, the sentence and the state set name what was filtered.
+    // Under `--stream`, the state set names what was filtered.
     let (text, out) = predict(dir, &["--mode", "one_step", "--stream", "weekly_cases"]);
-    assert!(text.contains("(6 of 9 rows in 'weekly_cases'): their bands use parameters fitted without \
-                           them and a state filtered through every earlier row of 'weekly_cases', held-out"),
-        "{text}");
+    assert!(!text.contains("held-out rows"), "{text}");
     let m = read_json(&out.join("predictive.json"));
     let filtered: Vec<&str> = m["state_sets"]["one_step"]["streams"].as_array().unwrap().iter()
         .map(|s| s["stream"].as_str().unwrap()).collect();
     assert_eq!(filtered, ["weekly_cases"]);
-    assert_eq!(roles(&out, "weekly_cases", "one_step"), split_at((1..=9).map(|w| 7 * w), 24));
+    assert_eq!(roles(&out, "weekly_cases", "one_step"), trained_only(split_at((1..=9).map(|w| 7 * w), 24)));
 }
 
 /// The control, and the rows past the data. No holdout, data through day 42
@@ -341,17 +341,19 @@ fn a_row_whose_label_precedes_the_cutoff_and_whose_period_ends_after_it_is_held_
     let expect_ff = [(0.0, t), (7.0, t), (14.0, t), (21.0, h), (28.0, h), (35.0, h), (42.0, h), (49.0, h), (56.0, h)]
         .map(|(time, role)| (time, role.to_string()));
     assert_eq!(&ff[..9], &expect_ff[..], "the week labelled 21 ends on day 28, after the cutoff");
-    // One-step rows carry the period's end (gh#1152), so the same nine rows
-    // are timed 7, …, 63; the week labelled 21 is the row timed 28.
-    let expect_os = [(7.0, t), (14.0, t), (21.0, t), (28.0, h), (35.0, h), (42.0, h), (49.0, h), (56.0, h), (63.0, h)]
-        .map(|(time, role)| (time, role.to_string()));
+    // One-step rows carry the period's end (gh#1152), so the training rows
+    // are timed 7, 14, 21; the week labelled 21, timed 28, is held out, and
+    // the band stops before it (its value is not stored).
+    let expect_os = [(7.0, t), (14.0, t), (21.0, t)].map(|(time, role)| (time, role.to_string()));
     assert_eq!(roles(&out, "weekly_cases", "one_step"), expect_os);
 }
 
-/// A fit that records no training partition is refused in both modes, with
-/// the sentence the forecast mode uses: the roles are not guessed.
+/// A stored run whose training partition has been removed from its
+/// `fit.meta.json` is refused in both modes: the file no longer matches the
+/// checksum its run recorded, so the roles are not guessed from it, and
+/// nothing is written.
 #[test]
-fn a_fit_with_no_recorded_partition_is_refused_in_both_modes() {
+fn a_run_whose_recorded_partition_was_removed_is_refused_in_both_modes() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     copy_rows(dir, "daily_cases.tsv", "daily_cases.tsv", &|_| true);
@@ -365,10 +367,9 @@ fn a_fit_with_no_recorded_partition_is_refused_in_both_modes() {
     std::fs::write(&meta, serde_json::to_string_pretty(&sidecar).unwrap()).unwrap();
 
     for mode in ["free_forward", "one_step"] {
-        let out = run(dir, &["fit", "predict", "--fit", "fit.toml", "--mode", mode, "--n-draws", "3"]);
+        let out = run(dir, &["fit", "predict", "--fit", "@fit", "--mode", mode, "--n-draws", "3"]);
         assert_eq!(out.status.code(), Some(1), "--mode {mode}: {}", said(&out));
-        assert!(said(&out).contains("records no training partition, so which rows its parameters were fitted to cannot be read"),
-            "--mode {mode}: {}", said(&out));
+        assert!(said(&out).contains("@fit"), "--mode {mode}: the refusal names the run: {}", said(&out));
         assert!(!walk(&dir.join("results")).iter().any(|p| p.file_name().is_some_and(|n| n == "predictive.json")),
             "--mode {mode}: nothing is written");
     }

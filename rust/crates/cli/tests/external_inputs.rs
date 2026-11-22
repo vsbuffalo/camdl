@@ -20,6 +20,8 @@
 //!   records each bound file's digest and stores its bytes; `fit predict` and
 //!   `simulate --fit` replay those stored bytes after the source is edited.
 
+mod fit_store_support;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -342,13 +344,16 @@ impl Fixture {
     }
 
     /// Any `camdl` subcommand in the cleared environment, in the fixture
-    /// directory (so a fit stores under `results/` there).
+    /// directory, with the run store `camdl-store/` there and the profile
+    /// store `results/` there.
     fn camdl(&self, args: &[&str]) -> Output {
         Command::new(&self.camdl)
             .current_dir(&self.dir)
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("HOME", self.dir.join("home"))
+            .env("CAMDL_STORE", self.dir.join("camdl-store"))
+            .env("CAMDL_OUTPUT_DIR", self.dir.join("results"))
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .env("CAMDLC", &self.camdlc)
             .env("CAMDL_IR_CACHE_DIR", self.dir.join("ir-cache"))
@@ -359,21 +364,24 @@ impl Fixture {
     }
 }
 
-/// The leaf `fit run` stored (`stored <method> · <leaf>`) or reused (`cache
-/// hit — reusing <leaf under results/>`), relative to the fixture directory.
+/// The run `fit run` stored (`stored <method> · <run>`) or reused (`cache
+/// hit — reusing <run>`), both relative to the store, as a path relative to
+/// the fixture directory.
 fn stored_leaf(stderr: &str) -> String {
     stderr
         .lines()
         .find_map(|l| {
             let l = l.trim();
-            l.strip_prefix("stored ").and_then(|r| r.split(" · ").nth(1)).map(str::to_string)
-                .or_else(|| l.strip_prefix("cache hit — reusing ").map(|r| format!("results/{r}")))
+            l.strip_prefix("stored ").and_then(|r| r.split(" · ").nth(1))
+                .or_else(|| l.strip_prefix("cache hit — reusing "))
+                .map(|r| format!("camdl-store/{r}"))
         })
-        .unwrap_or_else(|| panic!("no `stored … · <leaf>` or `cache hit — reusing <leaf>` line in:\n{stderr}"))
+        .unwrap_or_else(|| panic!("no `stored … · <run>` or `cache hit — reusing <run>` line in:\n{stderr}"))
 }
 
+/// A stored run's `identity.json`, which holds its run id.
 fn run_json(fx: &Fixture, leaf: &str) -> serde_json::Value {
-    serde_json::from_str(&std::fs::read_to_string(fx.dir.join(leaf).join("run.json")).unwrap()).unwrap()
+    serde_json::from_str(&std::fs::read_to_string(fx.dir.join(leaf).join("identity.json")).unwrap()).unwrap()
 }
 
 /// The single log-likelihood a `pfilter` leaf recorded.
@@ -406,14 +414,15 @@ fn fit_under_two_tables_gives_two_fits_and_two_logliks() {
     let (la, lb) = (leaf_loglik(&fx, &a), leaf_loglik(&fx, &b));
     assert!(la.is_finite() && lb.is_finite() && la != lb, "two calendars must score differently: {la} vs {lb}");
 
-    // The fit folder records the bound file's digest and stores its bytes.
+    // The run records the bound file's digest, and its problem stores the
+    // file's bytes.
     for (leaf, cal) in [(&a, "cal/a.tsv"), (&b, "cal/b.tsv")] {
-        let folder = fx.dir.join(leaf).ancestors().nth(2).unwrap().to_path_buf();
+        let folder = fit_store_support::problem_of(&fx.dir.join(leaf));
         let meta: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(folder.join("fit.meta.json")).unwrap()).unwrap();
+            serde_json::from_str(&std::fs::read_to_string(fx.dir.join(leaf).join("fit.meta.json")).unwrap()).unwrap();
         assert_eq!(meta["table_hashes"]["school"], sha256_hex(&fx.dir.join(cal)), "{leaf}: recorded digest");
         assert_eq!(
-            std::fs::read(folder.join("inputs/school.tsv")).unwrap(),
+            std::fs::read(folder.join("inputs/tables/school.tsv")).unwrap(),
             std::fs::read(fx.dir.join(cal)).unwrap(),
             "{leaf}: the stored copy holds the bound bytes"
         );
@@ -442,32 +451,33 @@ fn replays_of_a_stored_fit_read_its_stored_table() {
     let fx = Fixture::with_fit_files();
     fx.write("school.tsv", CALENDAR_A);
     fx.write("pm.toml", &fit_config("school = \"school.tsv\"", PMMH_METHOD));
-    let leaf = stored_leaf(&ok(&fx.camdl(&["fit", "run", "pm.toml"])));
-    let folder = fx.dir.join(&leaf).ancestors().nth(2).unwrap().to_path_buf();
+    let leaf = stored_leaf(&ok(&fx.camdl(&["fit", "run", "pm.toml", "--label", "pm"])));
+    let run = fx.dir.join(&leaf);
 
     let predict = || -> std::collections::BTreeMap<String, Vec<u8>> {
-        let _ = std::fs::remove_dir_all(folder.join("predict"));
-        ok(&fx.camdl(&["fit", "predict", "pm.toml", "--n-draws", "8"]));
-        files_under(&folder.join("predict"))
+        ok(&fx.camdl(&["fit", "predict", "@pm", "--n-draws", "8"]));
+        files_under(&run.join("predict")).into_iter()
+            .filter(|(k, _)| k.ends_with(".tsv"))
+            .collect()
     };
-    let replay = |store: &str, extra: &[&str]| -> Vec<u8> {
-        let mut args = vec!["simulate", "fit.camdl", "--fit", "pm.toml", "--draws", "posterior", "-n", "3",
-                            "--seed", "1", "--store", store];
+    let replay = |out: &str, extra: &[&str]| -> Vec<u8> {
+        let mut args = vec!["simulate", "fit.camdl", "--fit", "@pm", "--draws", "posterior", "-n", "3",
+                            "--seed", "1", "-o", out];
         args.extend(extra);
         ok(&fx.camdl(&args));
-        files_under(&fx.dir.join(store)).into_iter().filter(|(k, _)| k.ends_with("traj.tsv")).flat_map(|(_, v)| v).collect()
+        std::fs::read(fx.dir.join(out)).unwrap()
     };
     let predicted = predict();
-    let replayed = replay("sim1", &[]);
+    let replayed = replay("sim1.tsv", &[]);
     assert!(!predicted.is_empty() && !replayed.is_empty());
 
     // Edit the source file the fit was bound to: the fit's replays do not move.
     fx.write("school.tsv", "t\tin_term\n0\t0.2\n20\t0.2\n");
     assert_eq!(predicted, predict(), "fit predict must replay the table bytes the fit stored");
-    assert_eq!(replayed, replay("sim2", &[]), "simulate --fit must replay the table bytes the fit stored");
+    assert_eq!(replayed, replay("sim2.tsv", &[]), "simulate --fit must replay the table bytes the fit stored");
 
     // `--table` replaces the fit's file on a replay, as on every command.
-    assert_ne!(replayed, replay("sim3", &["--table", "school=cal/b.tsv"]), "--table must win over the fit's table");
+    assert_ne!(replayed, replay("sim3.tsv", &["--table", "school=cal/b.tsv"]), "--table must win over the fit's table");
 }
 
 /// Every file under `dir`, by path relative to it, with its bytes.
@@ -538,20 +548,20 @@ fn pfilter_and_profile_bind_the_config_table_under_table_flag() {
 }
 
 /// A stored fit read back by a reader of its config binds the table bytes
-/// the fit ran under. `fit.resolved.toml` keeps `[data.tables]`, and a reader
-/// of a run handle (`pfilter --fit <leaf>`) binds the copy stored in the fit
-/// folder, so editing the source file after the fit does not move the
-/// result; a stored copy whose bytes are not the ones the fit recorded is
-/// refused rather than read.
+/// the fit ran under. The stored problem's `problem.toml` keeps
+/// `[data.tables]`, naming the copy stored in the problem, and a reader of a
+/// run handle (`pfilter --fit <run>`) binds that copy, so editing the source
+/// file after the fit does not move the result; a stored copy edited by hand
+/// makes the problem damaged, and it is refused rather than read.
 #[test]
 fn a_stored_fits_reader_binds_the_tables_it_ran_under() {
     let fx = Fixture::with_fit_files();
     fx.write("school.tsv", CALENDAR_A);
     fx.write("a.toml", &fit_config("school = \"school.tsv\"", PFILTER_METHOD));
     let leaf = stored_leaf(&ok(&fx.camdl(&["fit", "run", "a.toml"])));
-    let folder = fx.dir.join(&leaf).ancestors().nth(2).unwrap().to_path_buf();
-    let resolved = std::fs::read_to_string(folder.join("fit.resolved.toml")).unwrap();
-    assert!(resolved.contains("[data.tables]\nschool = \"school.tsv\"\n"), "{resolved}");
+    let folder = fit_store_support::problem_of(&fx.dir.join(&leaf));
+    let resolved = std::fs::read_to_string(folder.join("problem.toml")).unwrap();
+    assert!(resolved.contains("[data.tables]\nschool = \"inputs/tables/school.tsv\"\n"), "{resolved}");
 
     let pf = |fit: &str| -> Result<f64, String> {
         let out = fx.camdl(&["pfilter", "fit.camdl", "--fit", fit, "--param", "beta=0.4", "--param", "gamma=0.2",
@@ -568,10 +578,9 @@ fn a_stored_fits_reader_binds_the_tables_it_ran_under() {
     assert_ne!(pf("a.toml").unwrap(), as_ran, "the table matters to the log-likelihood");
     assert_eq!(pf(&leaf_dir).unwrap(), as_ran, "a stored fit binds the bytes it ran under");
 
-    // The stored copy itself changes: refused, naming the input and the
-    // digest the fit recorded.
-    std::fs::write(folder.join("inputs/school.tsv"), CALENDAR_B).unwrap();
+    // The stored copy itself changes: the problem is damaged, and a reader
+    // of the run refuses it, saying it is damaged and naming the edited file.
+    std::fs::write(folder.join("inputs/tables/school.tsv"), CALENDAR_B).unwrap();
     let err = pf(&leaf_dir).expect_err("a stored copy whose bytes are not the fit's");
-    let recorded = sha256_hex(&fx.dir.join("cal/a.tsv"));
-    assert!(err.contains("external input 'school'") && err.contains(&recorded), "{err}");
+    assert!(err.contains("is damaged") && err.contains("school.tsv"), "{err}");
 }

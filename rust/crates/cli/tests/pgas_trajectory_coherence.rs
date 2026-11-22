@@ -120,7 +120,7 @@ simulate { from = 0 'days  to = 12 'days }
 
     let fit = tmp.join("fit.toml");
     std::fs::write(&fit, format!(r#"
-output_dir = "{out}"
+store = "{out}"
 [model]
 camdl = "{ir}"
 [data.observations]

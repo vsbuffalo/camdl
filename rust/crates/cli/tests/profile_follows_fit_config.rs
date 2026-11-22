@@ -82,7 +82,7 @@ const DATA: &str = "time\tweekly_cases\n7\t47\n14\t111\n21\t474\n28\t1066\n\
 /// A fit config estimating `beta` and `gamma`; `extra_data` goes into `[data]`.
 fn fit_toml(extra_data: &str) -> String {
     format!(
-        r#"output_dir = "results"
+        r#"store = "results"
 
 [model]
 camdl = "sir.camdl"

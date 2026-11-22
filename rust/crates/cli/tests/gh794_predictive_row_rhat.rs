@@ -39,18 +39,18 @@
 //!     on `quantities/<name>.tsv`, where the case is stronger still: those are
 //!     the numbers that get published.
 
+mod fit_store_support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Where the latest `fit predict` of a run in `seg` wrote:
-/// `<seg>/predict/<run id>-<address key>/` (gh#896), the directory whose
-/// `report*.json` (one written by every predict) is newest. A path that does not
-/// exist while nothing has been predicted.
-fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
-    std::fs::read_dir(seg.join("predict"))
-        .into_iter().flatten().flatten().map(|e| e.path())
+/// The stored predictions under `root`, newest first by their `report*.json`
+/// (one written by every predict). Each chain selection is its own
+/// prediction, with its own artifact names.
+fn predictions_newest_first(root: &Path) -> Vec<PathBuf> {
+    let mut v: Vec<(std::time::SystemTime, PathBuf)> = fit_store_support::predictions(root)
+        .into_iter()
         .filter_map(|d| {
-            // Newest `report*.json` (keyed by chain selection) in the directory.
             let t = std::fs::read_dir(&d).ok()?.flatten()
                 .filter(|e| {
                     let n = e.file_name().to_string_lossy().into_owned();
@@ -60,11 +60,10 @@ fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
                 .max()?;
             Some((t, d))
         })
-        .max_by_key(|(t, _)| *t)
-        .map(|(_, d)| d)
-        .unwrap_or_else(|| seg.join("predict").join("none"))
+        .collect();
+    v.sort_by(|a, b| b.0.cmp(&a.0));
+    v.into_iter().map(|(_, d)| d).collect()
 }
-
 
 fn binary() -> PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
@@ -85,31 +84,21 @@ fn run(bin: &Path, dir: &Path, args: &[&str]) -> std::process::Output {
     Command::new(bin).env_remove("CLICOLOR_FORCE")
         .args(args)
         .current_dir(dir)
+        .env("CAMDL_STORE", dir.join("results"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output()
         .expect("spawn camdl")
 }
 
+/// `<sub>/<stream>.tsv` in the newest stored prediction under `root` that
+/// holds it.
 fn find_artifact(root: &Path, sub: &str, stream: &str) -> Option<PathBuf> {
-    for e in std::fs::read_dir(root.join("fits")).ok()?.flatten() {
-        // gh#896: the latest `fit predict` of the run writes under
-        // `<segment>/predict/<run id>-<address key>/`.
-        let p = predict_out(&e.path()).join(sub).join(format!("{stream}.tsv"));
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    None
+    find_file(root, &format!("{sub}/{stream}.tsv"))
 }
 
+/// `name` in the newest stored prediction under `root` that holds it.
 fn find_file(root: &Path, name: &str) -> Option<PathBuf> {
-    for e in std::fs::read_dir(root.join("fits")).ok()?.flatten() {
-        let p = predict_out(&e.path()).join(name);
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    None
+    predictions_newest_first(root).into_iter().map(|d| d.join(name)).find(|p| p.is_file())
 }
 
 /// Header index of `name`, panicking with the whole header when absent.
@@ -188,7 +177,7 @@ simulate {
 const DATA: &str =
     "time\tweekly_cases\n7\t16\n14\t166\n21\t626\n28\t1303\n35\t1260\n42\t1023\n49\t327\n56\t91\n";
 
-const FIT_TOML: &str = r#"output_dir = "results"
+const FIT_TOML: &str = r#"store = "results"
 
 [model]
 camdl = "model.camdl"
@@ -236,7 +225,7 @@ fn fit_then_predict(bin: &Path, tmp: &Path) {
 }
 
 fn fit_then_predict_with(bin: &Path, tmp: &Path, extra: &[&str]) {
-    let out = run(bin, tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    let out = run(bin, tmp, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(
         out.status.success(),
         "fit run failed:\nstdout={}\nstderr={}",
@@ -247,7 +236,7 @@ fn fit_then_predict_with(bin: &Path, tmp: &Path, extra: &[&str]) {
 }
 
 fn predict_with(bin: &Path, tmp: &Path, extra: &[&str]) {
-    let mut args = vec!["fit", "predict", "--fit", "fit.toml"];
+    let mut args = vec!["fit", "predict", "--fit", "@fit"];
     args.extend_from_slice(extra);
     let out = run(bin, tmp, &args);
     assert!(
@@ -630,7 +619,7 @@ fn reported_quantities_carry_their_own_rhat_and_ess() {
     fit_then_predict(&bin, &tmp);
 
     // A series quantity: one row per snapshot, each with its own reduction.
-    let series = find_artifact(&tmp.join("results"), "quantities", "prevalence")
+    let series = find_artifact(&tmp.join("results"), "quantities-model", "prevalence")
         .expect("quantities/prevalence.tsv must be written");
     let txt = std::fs::read_to_string(&series).unwrap();
     let header: Vec<&str> = txt.lines().next().unwrap().split('\t').collect();
@@ -664,7 +653,7 @@ fn reported_quantities_carry_their_own_rhat_and_ess() {
     );
 
     // A scalar quantity: one row, still carrying its own reduction.
-    let scalar = find_artifact(&tmp.join("results"), "quantities", "peak_burden")
+    let scalar = find_artifact(&tmp.join("results"), "quantities-model", "peak_burden")
         .expect("quantities/peak_burden.tsv must be written");
     let txt = std::fs::read_to_string(&scalar).unwrap();
     let header: Vec<&str> = txt.lines().next().unwrap().split('\t').collect();

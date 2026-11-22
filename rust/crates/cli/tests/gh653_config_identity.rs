@@ -1,16 +1,19 @@
-//! gh#653 — a completed fit is found by what its `fit.toml` MEANS, not by the
-//! bytes it was written in.
+//! gh#653 — a fit run's identity is what its `fit.toml` means, not the bytes
+//! it was written in.
 //!
-//! Reflowing a comment across a set of configs left every completed fit
-//! unreachable: the run store held hours of sampling, and every verb handed the
-//! config reported "no completed fit found". The parsed TOML was identical.
+//! Reflowing a comment across a set of configs must not orphan the completed
+//! runs the store holds: the parsed TOML is identical, so `fit run` on the
+//! edited config is a cache hit on the same run.
 //!
 //! The two halves of this test are equally load-bearing. A meaning-preserving
-//! edit (comment reflow, table reorder, `10.0` written `10.00`) must still
-//! resolve — and resolve to the SAME run, checked by comparing the θ̂ the fit
-//! reports. A meaning-CHANGING edit (a different particle count, a different
-//! data file) must NOT resolve: canonicalising too aggressively would hand back
-//! the posterior of a different fit, which is worse than the bug being fixed.
+//! edit (comment reflow, table reorder, `10.0` written `10.00`) must reuse the
+//! stored run. A meaning-changing edit (a different particle count, different
+//! data) must compute a new run: canonicalising too aggressively would hand
+//! back the posterior of a different fit, which is worse than the bug being
+//! fixed. Data files are identified by their content, so the same lines at a
+//! different path are the same problem, and changed lines are a new one.
+
+mod fit_store_support;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -67,7 +70,7 @@ const DATA: &str = "time\tweekly_cases\n7\t16\n14\t166\n21\t626\n28\t1303\n35\t1
 /// The config as first written and run.
 const ORIGINAL: &str = r#"# Scout fit for the closed SIR. Reporting rate is fixed at 0.5 because the
 # surveillance review has not landed yet.
-output_dir = "results"
+store = "results"
 
 [model]
 camdl = "model.camdl"
@@ -100,7 +103,7 @@ cooling = 0.7
 const REFLOWED: &str = r#"# Scout fit for the closed SIR.
 # Reporting rate is fixed at 0.5 because the surveillance review has not
 # landed yet.
-output_dir = "results"
+store = "results"
 
 [estimate]
 beta  = { bounds = [0.05, 1.0], start = 0.4 }
@@ -131,24 +134,35 @@ fn run(bin: &Path, dir: &Path, args: &[&str]) -> std::process::Output {
     Command::new(bin).env_remove("CLICOLOR_FORCE")
         .args(args)
         .current_dir(dir)
+        .env("CAMDL_STORE", dir.join("results"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output()
         .expect("spawn camdl")
 }
 
-/// `camdl fit summary a.toml --params-only` — succeeds only if the config
-/// resolves to a completed fit, and its stdout is that fit's θ̂.
-fn resolve_theta(bin: &Path, dir: &Path) -> Result<String, String> {
-    let out = run(bin, dir, &["fit", "summary", "a.toml", "--params-only"]);
-    if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).into_owned())
-    }
+/// `camdl fit summary <handle> --params-only`: the stored run's θ̂.
+fn theta(bin: &Path, dir: &Path, handle: &str) -> String {
+    let out = run(bin, dir, &["fit", "summary", handle, "--params-only"]);
+    assert!(out.status.success(), "fit summary {handle}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// `camdl fit run a.toml --seed 1`, which must succeed; its stderr.
+fn fit_run(bin: &Path, dir: &Path, extra: &[&str]) -> String {
+    let mut args = vec!["fit", "run", "a.toml", "--seed", "1"];
+    args.extend_from_slice(extra);
+    let out = run(bin, dir, &args);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        out.status.success(),
+        "fit run failed:\nstdout={}\nstderr={stderr}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    stderr
 }
 
 #[test]
-fn a_reflowed_config_still_finds_its_completed_fit() {
+fn a_reflowed_config_reuses_its_completed_run() {
     let bin = binary();
     assert!(
         bin.exists(),
@@ -161,57 +175,70 @@ fn a_reflowed_config_still_finds_its_completed_fit() {
     std::fs::create_dir_all(&tmp).unwrap();
     std::fs::write(tmp.join("model.camdl"), MODEL).unwrap();
     std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
-    // A second copy of the same data, for the changed-data-path control: the
-    // file exists, so a failure to resolve is about identity, not a missing file.
+    // A second copy of the same data at another path, and a copy with one
+    // count changed, for the data controls.
     std::fs::write(tmp.join("weekly_cases_v2.tsv"), DATA).unwrap();
+    std::fs::write(tmp.join("weekly_cases_v3.tsv"), DATA.replace("\t1303\n", "\t1304\n")).unwrap();
     std::fs::write(tmp.join("a.toml"), ORIGINAL).unwrap();
+    let store = tmp.join("results");
 
-    let out = run(&bin, &tmp, &["fit", "run", "a.toml", "--label", "a", "--seed", "1"]);
-    assert!(
-        out.status.success(),
-        "fit run failed:\nstdout={}\nstderr={}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
+    fit_run(&bin, &tmp, &["--label", "a"]);
+    let first = fit_store_support::the_run(&store);
+    let theta_a = theta(&bin, &tmp, "@a");
+    assert!(theta_a.contains("beta"), "θ̂ carries the estimated parameters:\n{theta_a}");
 
-    let theta = resolve_theta(&bin, &tmp).expect("the config it was run from resolves");
-    assert!(
-        theta.contains("beta"),
-        "θ̂ carries the estimated parameters:\n{theta}"
-    );
-
-    // ── The fix: meaning-preserving edits keep the fit reachable ──
+    // ── The fix: a meaning-preserving edit reuses the stored run ──
     std::fs::write(tmp.join("a.toml"), REFLOWED).unwrap();
-    let after = resolve_theta(&bin, &tmp).unwrap_or_else(|e| {
-        panic!("a reflowed comment must not orphan a completed fit (gh#653): {e}")
-    });
+    let stderr = fit_run(&bin, &tmp, &[]);
+    assert!(
+        stderr.contains("cache hit"),
+        "a reflowed comment must not orphan a completed fit (gh#653):\n{stderr}"
+    );
     assert_eq!(
-        after, theta,
-        "the reflowed config resolves to the SAME run, so θ̂ is unchanged"
+        fit_store_support::runs(&store),
+        vec![first.clone()],
+        "the reflowed config names the same run"
+    );
+    // Named by its folder relative to the working directory, so the summary's
+    // `# source:` line spells the path as `@a` resolves it.
+    assert_eq!(
+        theta(&bin, &tmp, &first.strip_prefix(&tmp).unwrap().to_string_lossy()),
+        theta_a,
+        "and that run's θ̂ is unchanged"
     );
 
-    // ── The control: meaning-changing edits must NOT resolve ──
-    // A different particle count is a different fit; resolving to the old run
+    // ── The control: meaning-changing edits compute a new run ──
+    // A different particle count is a different fit; reusing the old run
     // would hand back a posterior nobody asked for.
     let more_particles = REFLOWED.replace("particles  = 150", "particles  = 151");
     assert_ne!(more_particles, REFLOWED);
     std::fs::write(tmp.join("a.toml"), &more_particles).unwrap();
-    let err = resolve_theta(&bin, &tmp)
-        .expect_err("a changed particle count must not resolve to the old fit");
-    assert!(
-        err.contains("no completed fit run of"),
-        "the miss is reported plainly; got: {err}"
-    );
+    let stderr = fit_run(&bin, &tmp, &[]);
+    assert!(!stderr.contains("cache hit"), "a changed particle count must not reuse the old run:\n{stderr}");
+    assert_eq!(fit_store_support::runs(&store).len(), 2, "a second run for the changed particle count");
 
-    // A different data file is a different fit, even with identical contents.
-    let other_data = REFLOWED.replace("weekly_cases.tsv", "weekly_cases_v2.tsv");
-    assert_ne!(other_data, REFLOWED);
-    std::fs::write(tmp.join("a.toml"), &other_data).unwrap();
-    let err = resolve_theta(&bin, &tmp)
-        .expect_err("a changed data path must not resolve to the old fit");
+    // The same lines at another path are the same problem and the same run.
+    let same_lines = REFLOWED.replace("weekly_cases.tsv", "weekly_cases_v2.tsv");
+    assert_ne!(same_lines, REFLOWED);
+    std::fs::write(tmp.join("a.toml"), &same_lines).unwrap();
+    let stderr = fit_run(&bin, &tmp, &[]);
+    assert!(stderr.contains("cache hit"), "identical data at another path is the same fit:\n{stderr}");
+    assert_eq!(fit_store_support::runs(&store).len(), 2);
+
+    // Changed data is a different problem, and a new run.
+    let other_lines = REFLOWED.replace("weekly_cases.tsv", "weekly_cases_v3.tsv");
+    std::fs::write(tmp.join("a.toml"), &other_lines).unwrap();
+    let stderr = fit_run(&bin, &tmp, &[]);
+    assert!(!stderr.contains("cache hit"), "changed data must not reuse the old run:\n{stderr}");
+    assert_eq!(fit_store_support::runs(&store).len(), 3, "a third run for the changed data");
+    assert_eq!(fit_store_support::problems(&store).len(), 2, "on a second problem");
+
+    // A configuration is not a handle for a stored run.
+    let out = run(&bin, &tmp, &["fit", "summary", "a.toml", "--params-only"]);
+    let err = String::from_utf8_lossy(&out.stderr);
     assert!(
-        err.contains("no completed fit run of"),
-        "the miss is reported plainly; got: {err}"
+        !out.status.success() && err.contains("a configuration never names a run"),
+        "a fit file is refused as a run handle; got: {err}"
     );
 
     let _ = std::fs::remove_dir_all(&tmp);
@@ -219,7 +246,7 @@ fn a_reflowed_config_still_finds_its_completed_fit() {
 
 /// `ORIGINAL`'s fit, with a `[provenance]` note.
 fn with_note(reason: &str) -> String {
-    format!(r#"output_dir = "results"
+    format!(r#"store = "results"
 
 [model]
 camdl = "model.camdl"
@@ -251,29 +278,10 @@ reason = "{reason}"
 "#)
 }
 
-/// Every committed fit-method leaf (a `run.json`) under `<dir>/results/fits`.
-fn fit_leaves(dir: &Path) -> Vec<PathBuf> {
-    let mut leaves = Vec::new();
-    let mut stack = vec![dir.join("results").join("fits")];
-    while let Some(d) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&d) else { continue };
-        for e in rd.flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                if p.join("run.json").exists() { leaves.push(p) } else { stack.push(p) }
-            }
-        }
-    }
-    leaves
-}
-
 /// gh#583 item F. `[provenance]` is a note to the reader — where a config came
 /// from and why — and nothing reads it but the reader: no runner, no
-/// likelihood, no stored artifact is a function of it. It was hashed into the
-/// fit level, so rewording `reason` gave the fit a new address and re-ran it
-/// (three reasons, three fits). It is now normalized out of the fit identity
-/// and of the config lookup alike, so a reworded note is a cache hit and the
-/// reworded config still finds the fit.
+/// likelihood, no stored artifact is a function of it. So it is not part of a
+/// fit run's identity, and a reworded note is a cache hit on the same run.
 #[test]
 fn a_provenance_note_is_not_fit_identity() {
     let bin = binary();
@@ -285,19 +293,20 @@ fn a_provenance_note_is_not_fit_identity() {
     std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
 
     std::fs::write(tmp.join("a.toml"), with_note("first scout")).unwrap();
-    let out = run(&bin, &tmp, &["fit", "run", "a.toml", "--seed", "1"]);
-    assert!(out.status.success(), "fit run: {}", String::from_utf8_lossy(&out.stderr));
-    let theta = resolve_theta(&bin, &tmp).expect("the config it was run from resolves");
+    fit_run(&bin, &tmp, &[]);
+    let store = tmp.join("results");
+    let first = fit_store_support::the_run(&store);
+    let theta_first = theta(&bin, &tmp, &first.to_string_lossy());
 
     std::fs::write(tmp.join("a.toml"), with_note("reworded: rho pinned pending review"))
         .unwrap();
-    let out = run(&bin, &tmp, &["fit", "run", "a.toml", "--seed", "1"]);
-    assert!(out.status.success(), "fit run: {}", String::from_utf8_lossy(&out.stderr));
-    let leaves = fit_leaves(&tmp);
-    assert_eq!(leaves.len(), 1,
-        "a reworded provenance note must be a cache hit, not a second fit: {leaves:?}");
-    assert_eq!(resolve_theta(&bin, &tmp).expect("the reworded config resolves"), theta,
-        "and it resolves to the same fit");
+    let stderr = fit_run(&bin, &tmp, &[]);
+    let leaves = fit_store_support::runs(&store);
+    assert_eq!(leaves, vec![first.clone()],
+        "a reworded provenance note must be a cache hit, not a second fit: {leaves:?}\n{stderr}");
+    assert!(stderr.contains("cache hit"), "the rerun reuses the stored run:\n{stderr}");
+    assert_eq!(theta(&bin, &tmp, &first.to_string_lossy()), theta_first,
+        "and it is the same fit");
 
     let _ = std::fs::remove_dir_all(&tmp);
 }

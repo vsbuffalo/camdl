@@ -26,9 +26,10 @@
 //! scenario that enables it, two observed streams and a parameter-only rate
 //! factor that loop-invariant code motion hoists; `patch.camdl`, a two-patch
 //! model with an `external` table and a coupling matrix whose structural zeros
-//! the constant fold drops; two stored fits of the fit config, a one-chain
-//! IF2 (a `from_mle` source with no verdict) and a two-chain PMMH (a
-//! `from_posterior` source).
+//! the constant fold drops; two fit runs of the fit config in a run store of
+//! their own, a one-chain IF2 (a `from_mle` source with no verdict) and a
+//! two-chain PMMH (a `from_posterior` source). An invocation that names a
+//! stored fit sets `CAMDL_STORE` to the store that holds it.
 
 mod input_class_runner;
 
@@ -162,10 +163,27 @@ fn files(d: &std::path::Path) -> Vec<(&'static str, String)> {
 /// The fixture and the two stored fits the `--starts` cases read.
 struct Fx {
     fx: Arc<Fixture>,
-    /// A completed one-chain IF2 leaf: a `from_mle` source with no verdict.
+    /// The run store holding the two fits.
+    sources: PathBuf,
+    /// A completed one-chain IF2 run's folder: a `from_mle` source with no
+    /// verdict.
     mle_source: String,
-    /// A completed two-chain PMMH leaf: a `from_posterior` source.
+    /// A completed two-chain PMMH run's folder: a `from_posterior` source.
     posterior_source: String,
+}
+
+/// `inv` reading its stored fits from the run store at `store`.
+fn in_store(inv: Invocation, store: &std::path::Path) -> Invocation {
+    inv.env("CAMDL_STORE", &store.to_string_lossy())
+}
+
+/// `fit run <config>` in the working directory `cwd`, storing into the run
+/// store at `store`; returns the folder of each fit run the store holds.
+fn fit_into(fx: &Fx, cwd: &std::path::Path, store: &std::path::Path, args: &[&str]) -> Vec<PathBuf> {
+    let mut all = vec!["fit", "run"];
+    all.extend(args);
+    run_into(cwd, &in_store(Invocation::new(&fx.fx, &all), store));
+    fit_runs(store)
 }
 
 fn fx() -> Arc<Fx> {
@@ -175,18 +193,18 @@ fn fx() -> Arc<Fx> {
         return fx;
     }
     let fx = Arc::new(Fixture::create("profile_input_classes", files, &["sir.camdl", "sir_other.camdl", "patch.camdl"]));
-    let sources = fx.dir.join("sources");
-    std::fs::create_dir_all(&sources).unwrap();
+    let cwd = fx.dir.join("sources");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let sources = cwd.join("camdl-store");
     let source = |config: &str| -> String {
-        let stored = run_into(&sources, &Invocation::new(&fx, &["fit", "run", &fx.path(config)]));
-        let leaf = stored.of("fit_method").into_values().find(|l| {
-            l.record["inputs"]["method"].as_str() == Some(if config.contains("pmmh") { "pmmh" } else { "if2" })
-        });
-        leaf.expect("the source fit's leaf").dir.to_string_lossy().into_owned()
+        run_into(&cwd, &in_store(Invocation::new(&fx, &["fit", "run", &fx.path(config)]), &sources));
+        let method = if config.contains("pmmh") { "pmmh" } else { "if2" };
+        let run = fit_runs(&sources).into_iter().find(|r| run_inputs(r)["method"].as_str() == Some(method));
+        run.expect("the source fit's run").to_string_lossy().into_owned()
     };
     let mle_source = source("fit_plain.toml");
     let posterior_source = source("fit_pmmh.toml");
-    let fx = Arc::new(Fx { fx, mle_source, posterior_source });
+    let fx = Arc::new(Fx { fx, sources, mle_source, posterior_source });
     *live = Arc::downgrade(&fx);
     fx
 }
@@ -311,7 +329,7 @@ fn keyed_starts_chains() {
     let source = format!("from_posterior={}", fx.posterior_source);
     // A subset is judged by its own R̂, which a fixture this short need not
     // pass: the verdict is lifted on both sides.
-    let base = prof(&fx, &["--starts", &source, "--allow-nonconverged-source"]);
+    let base = in_store(prof(&fx, &["--starts", &source, "--allow-nonconverged-source"]), &fx.sources);
     assert_rekeys("starts_chains", &base, &base.with(&["--starts-chains", "0"]));
 }
 
@@ -520,6 +538,7 @@ fn execution_allow_nonconverged_source() {
     let fx = fx();
     let source = format!("from_mle={}", fx.mle_source);
     for b in bases(&fx) {
+        let b = in_store(b, &fx.sources);
         assert_same(&b.with(&["--starts", &source]), &b.with(&["--starts", &source, "--allow-nonconverged-source"]));
     }
 }
@@ -738,31 +757,38 @@ fn removed_param() {
 
 // ─── the --fit handle ────────────────────────────────────────────────────────
 
-/// `--fit` takes the handle forms `fit predict` takes. The stored IF2 fit of
-/// `fit_plain.toml`, named by its leaf directory, its problem folder or its
-/// run-id prefix, names the problem its archived config states, the file's
-/// (no command-line option changed it), as the `fit.toml` does: every form
-/// profiles the one computation, so after the first no form adds a point to
-/// the store that holds the fits (where the run-id prefix resolves).
+/// `--fit` takes a fit file or a stored fit. The stored IF2 fit of
+/// `fit_plain.toml`, named by its run folder, its problem folder or its
+/// run-id prefix, names the problem the file states (no command-line option
+/// changed it), as the `fit.toml` does: every form computes the same points.
+/// A profile point is keyed by the text that names the fit: the fit file's
+/// own text, the stored problem's `problem.toml`, or that followed by the
+/// run's `method.toml`. So the file, the problem and the run each key their
+/// own points, and the run's folder and its run-id prefix, which name the
+/// same run, key the same ones.
 #[test]
 fn every_fit_handle_names_the_fits_problem() {
     let fx = fx();
-    let leaf = PathBuf::from(&fx.mle_source);
-    let segment = leaf.parent().unwrap().parent().unwrap().to_path_buf();
-    let record: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(leaf.join("run.json")).unwrap()).unwrap();
-    let run_id = record["run_id"].as_str().unwrap()[..12].to_string();
-    // The store that holds the source fits, where the run-id prefix
-    // resolves; no other case stores a profile point in it.
-    let store = fx.fx.dir.join("sources");
-    let handles = [fx.fx.path("fit_plain.toml"), fx.mle_source.clone(), segment.to_string_lossy().into_owned(), run_id];
-    let mut counts = Vec::new();
+    let run = PathBuf::from(&fx.mle_source);
+    let problem = problem_of(&run);
+    let run_id = run_inputs(&run)["run_id"].as_str().unwrap()[..12].to_string();
+    let handles = [fx.fx.path("fit_plain.toml"), fx.mle_source.clone(), problem.to_string_lossy().into_owned(), run_id];
+    let mut ids = Vec::new();
+    let mut bytes = Vec::new();
     for h in &handles {
-        let s = run_into(&store, &prof(&fx, &[]).set("--fit", h));
+        // A profile store of its own for each form.
+        let store = tempfile::tempdir().unwrap();
+        let s = run_into(store.path(), &in_store(prof(&fx, &[]).set("--fit", h), &fx.sources));
         assert!(!s.stderr.contains("Is a directory"), "--fit {h}:\n{}", s.stderr);
-        counts.push(s.ids(KIND));
+        ids.push(s.ids(KIND));
+        bytes.push(s.bytes(KIND));
     }
-    assert!(!counts[0].is_empty(), "the profile stored its points");
-    assert!(counts.iter().all(|c| *c == counts[0]), "every handle names one problem: {counts:?}");
+    let [file, run_folder, problem, prefix] = [&ids[0], &ids[1], &ids[2], &ids[3]];
+    assert!(!file.is_empty(), "the profile stored its points");
+    assert!(bytes.iter().all(|b| *b == bytes[0]), "every form computes the same points: {bytes:?}");
+    assert_eq!(run_folder, prefix, "the run's folder and its id prefix name one run");
+    assert!(file.is_disjoint(run_folder) && file.is_disjoint(problem) && problem.is_disjoint(run_folder),
+        "the file, the problem and the run key their own points: {ids:?}");
 }
 
 /// The folders under `root` that hold a `fit.meta.json` and lie beneath a
@@ -785,28 +811,28 @@ fn sidecar_folders(root: &std::path::Path, kind_dir: &str) -> Vec<PathBuf> {
     out
 }
 
-/// A profile's folder stores the config as a fit folder does: the user's
-/// text, byte for byte, as `fit.toml.original` and the resolved
-/// configuration as `fit.resolved.toml`. Named by a sweep point's leaf, the
-/// pair is the fit folder's own pair (the file's text, and the point's
-/// resolved config); named by the file, the file's text and its resolution.
+/// A profile's folder stores the config it read as `fit.toml.original` and
+/// the resolved configuration as `fit.resolved.toml`. Named by a sweep
+/// point's run, the pair is the point's stored problem: its `problem.toml`
+/// followed by the run's `method.toml`, and its `problem.toml`; named by the
+/// file, the file's text, byte for byte, and its resolution.
 #[test]
 fn a_profile_stores_the_original_and_the_resolved_config() {
     let fx = fx();
     let store = tempfile::tempdir().unwrap();
-    let fitted = run_into(store.path(), &Invocation::new(&fx.fx, &["fit", "run", &fx.fx.path("fit_plain.toml"), "--sweep", "rho=0.5,0.6"]));
-    let (_, other) = sweep_points(&fitted, "rho", 0.5);
-    let fit_folder = other.dir.parent().unwrap().parent().unwrap().to_path_buf();
+    let runs = store.path().join("camdl-store");
+    fit_into(&fx, store.path(), &runs, &[&fx.fx.path("fit_plain.toml"), "--sweep", "rho=0.5,0.6"]);
+    let (_, other) = sweep_points(&runs, "rho", 0.5);
+    let problem = problem_of(&other);
     let profiled = tempfile::tempdir().unwrap();
-    run_into(profiled.path(), &prof(&fx, &[]).set("--fit", &other.dir.to_string_lossy()));
+    run_into(profiled.path(), &in_store(prof(&fx, &[]).set("--fit", &other.to_string_lossy()), &runs));
     let folders = sidecar_folders(profiled.path(), "profiles");
     assert_eq!(folders.len(), 1, "one profile folder: {folders:?}");
     let read = |d: &std::path::Path, f: &str| std::fs::read_to_string(d.join(f)).unwrap_or_else(|e| panic!("{}: {e}", d.join(f).display()));
-    assert_eq!(read(&folders[0], "fit.toml.original"), std::fs::read_to_string(fx.fx.path("fit_plain.toml")).unwrap(),
-        "the profile's original is the user's file, byte for byte");
-    assert_eq!(read(&folders[0], "fit.toml.original"), read(&fit_folder, "fit.toml.original"));
-    assert_eq!(read(&folders[0], "fit.resolved.toml"), read(&fit_folder, "fit.resolved.toml"),
-        "the profile's resolved config is the sweep point's");
+    assert_eq!(read(&folders[0], "fit.toml.original"), read(&problem, "problem.toml") + &read(&other, "method.toml"),
+        "the profile's original is the point's stored problem and method");
+    assert_eq!(read(&folders[0], "fit.resolved.toml"), read(&problem, "problem.toml"),
+        "the profile's resolved config is the sweep point's problem");
     let by_file = tempfile::tempdir().unwrap();
     run_into(by_file.path(), &prof(&fx, &[]));
     let folders = sidecar_folders(by_file.path(), "profiles");
@@ -816,9 +842,11 @@ fn a_profile_stores_the_original_and_the_resolved_config() {
     assert!(resolved.starts_with("# fit.resolved.toml:"), "{resolved}");
 }
 
-/// A fit whose `[fixed]` is a `from_scenario` profiled by its leaf and by its
-/// file stores the same `fit.resolved.toml` in the profile's folder: the
-/// scenario's values, expanded, either way.
+/// A fit whose `[fixed]` is a `from_scenario` profiled by its run and by its
+/// file stores a `fit.resolved.toml` in the profile's folder whose `[fixed]`
+/// holds the scenario's values, expanded, either way. Named by its run, the
+/// file is the stored problem's `problem.toml`; named by the fit file, it is
+/// that file's resolution.
 #[test]
 fn a_from_scenario_fit_stores_one_resolved_config_whichever_form_names_it() {
     let fx = fx();
@@ -835,26 +863,32 @@ fn a_from_scenario_fit_stores_one_resolved_config_whichever_form_names_it() {
     assert!(text.contains("from_scenario") && text.contains("sir_sc.camdl"), "{text}");
     let fit_path = store.path().join("fit_sc.toml");
     std::fs::write(&fit_path, text).unwrap();
-    let fitted = run_into(store.path(), &Invocation::new(&fx.fx, &["fit", "run", &fit_path.to_string_lossy()]));
-    let leaf = fitted.of("fit_method").into_values().next().expect("the fit's leaf").clone();
+    let runs = store.path().join("camdl-store");
+    let leaf = fit_into(&fx, store.path(), &runs, &[&fit_path.to_string_lossy()]).remove(0);
     let resolved_of = |handle: &str| {
         let out = tempfile::tempdir().unwrap();
         let m = model.to_string_lossy();
-        run_into(out.path(), &Invocation::new(&fx.fx, &["profile", &m, "--fit", handle]).with(CELLS).with(IF2_CELL));
+        let inv = Invocation::new(&fx.fx, &["profile", &m, "--fit", handle]).with(CELLS).with(IF2_CELL);
+        run_into(out.path(), &in_store(inv, &runs));
         let folders = sidecar_folders(out.path(), "profiles");
         assert_eq!(folders.len(), 1, "one profile folder: {folders:?}");
         std::fs::read_to_string(folders[0].join("fit.resolved.toml")).unwrap()
     };
-    let by_leaf = resolved_of(&leaf.dir.to_string_lossy());
+    let by_leaf = resolved_of(&leaf.to_string_lossy());
     let by_file = resolved_of(&fit_path.to_string_lossy());
-    let fixed_table: toml::Table = by_leaf.parse::<toml::Table>().unwrap()["fixed"].as_table().unwrap().clone();
+    assert_eq!(by_leaf, std::fs::read_to_string(problem_of(&leaf).join("problem.toml")).unwrap(),
+        "named by its run, the resolved config is the stored problem");
+    let fixed = |text: &str| -> toml::Table {
+        text.parse::<toml::Table>().unwrap()["fixed"].as_table().unwrap().clone()
+    };
+    let fixed_table = fixed(&by_leaf);
     assert!(!fixed_table.contains_key("from_scenario"), "the scenario is expanded:\n{by_leaf}");
     assert_eq!(fixed_table["rho"].as_float(), Some(0.5), "{by_leaf}");
-    assert_eq!(by_leaf, by_file, "one resolved config whichever form names the fit");
+    assert_eq!(fixed_table, fixed(&by_file), "one [fixed] whichever form names the fit:\n{by_leaf}\n{by_file}");
 }
 
 /// A fit whose `[fixed]` is read `from_file` stores the values it read: its
-/// `fit.resolved.toml` names no file, and a profile of its leaf, from another
+/// `problem.toml` names no file, and a profile of its run, from another
 /// working directory after the file is edited, is the profile of the values
 /// the fit ran at (`fit_plain.toml`'s), not the edited file's (`fit_rho.toml`'s).
 #[test]
@@ -866,44 +900,49 @@ fn a_from_file_fit_is_profiled_at_the_values_it_read() {
     let fit_path = store.path().join("fit_from_file.toml");
     std::fs::write(&fit_path, plain.replace("[fixed]\nbeta_b = 0.2\nrho = 0.5\n", "[fixed]\nfrom_file = \"fixed.toml\"\n")).unwrap();
     std::fs::write(store.path().join("fixed.toml"), "beta_b = 0.2\nrho = 0.5\n").unwrap();
-    let fitted = run_into(store.path(), &Invocation::new(&fx.fx, &["fit", "run", &fit_path.to_string_lossy()]));
-    let leaf = fitted.of("fit_method").into_values().next().expect("the fit's leaf").clone();
-    let folder = leaf.dir.parent().unwrap().parent().unwrap();
-    let resolved = std::fs::read_to_string(folder.join("fit.resolved.toml")).unwrap();
+    let runs = store.path().join("camdl-store");
+    let leaf = fit_into(&fx, store.path(), &runs, &[&fit_path.to_string_lossy()]).remove(0);
+    let resolved = std::fs::read_to_string(problem_of(&leaf).join("problem.toml")).unwrap();
     let fixed_table: toml::Table = resolved.parse::<toml::Table>().unwrap()["fixed"].as_table().unwrap().clone();
     assert!(!fixed_table.contains_key("from_file"), "the stored config names no fixed-values file:\n{resolved}");
     assert_eq!(fixed_table["rho"].as_float(), Some(0.5), "it holds the values read:\n{resolved}");
     std::fs::write(store.path().join("fixed.toml"), "beta_b = 0.2\nrho = 0.6\n").unwrap();
     let elsewhere = tempfile::tempdir().unwrap();
-    let by_leaf = run_into(elsewhere.path(), &prof(&fx, &[]).set("--fit", &leaf.dir.to_string_lossy())).bytes(KIND);
+    let by_leaf = run_into(elsewhere.path(), &in_store(prof(&fx, &[]).set("--fit", &leaf.to_string_lossy()), &runs)).bytes(KIND);
     let ran = run(&prof(&fx, &[])).bytes(KIND);
     let edited = run(&prof(&fx, &[]).set("--fit", &fx.fx.path("fit_rho.toml"))).bytes(KIND);
     assert_ne!(ran, edited, "the edit changes what a profile stores");
     assert_eq!(by_leaf, ran, "the leaf is profiled at the values the fit read");
 }
 
-/// A point of `fit run --sweep` named by its leaf directory, its problem
-/// folder or its run-id prefix is profiled at the point's own value, which
-/// its fit folder's `fit.resolved.toml` holds: every form stores the bytes a
+/// A point of `fit run --sweep` named by its run folder, its problem folder
+/// or its run-id prefix is profiled at the point's own value, which its
+/// problem's `problem.toml` holds: every form stores the bytes a
 /// profile of `fit_rho.toml`, whose file writes the point's value, stores, and
-/// not those of the file's own value. The forms name one computation.
+/// not those of the file's own value. The run's folder and its run-id prefix
+/// name one run and key the same points; the problem keys its own.
 #[test]
 fn a_sweep_point_handle_profiles_at_the_points_value() {
     let fx = fx();
     let store = tempfile::tempdir().unwrap();
-    let fitted = run_into(store.path(), &Invocation::new(&fx.fx, &["fit", "run", &fx.fx.path("fit_plain.toml"), "--sweep", "rho=0.5,0.6"]));
-    let (_, other) = sweep_points(&fitted, "rho", 0.5);
-    assert_eq!(segment_fixed(&other.dir, "rho"), Some(0.6));
+    let runs = store.path().join("camdl-store");
+    fit_into(&fx, store.path(), &runs, &[&fx.fx.path("fit_plain.toml"), "--sweep", "rho=0.5,0.6"]);
+    let (_, other) = sweep_points(&runs, "rho", 0.5);
+    assert_eq!(point_fixed(&other, "rho"), Some(0.6));
     let written = run(&prof(&fx, &[]).set("--fit", &fx.fx.path("fit_rho.toml"))).bytes(KIND);
     let unswept = run(&prof(&fx, &[]).set("--fit", &fx.fx.path("fit_plain.toml"))).bytes(KIND);
     assert!(!written.is_empty());
     assert_ne!(written, unswept, "the swept value changes what a profile stores");
-    let segment = other.dir.parent().unwrap().parent().unwrap().to_string_lossy().into_owned();
+    let problem = problem_of(&other).to_string_lossy().into_owned();
+    let run_id = run_inputs(&other)["run_id"].as_str().unwrap()[..12].to_string();
     let mut ids = Vec::new();
-    for h in [other.dir.to_string_lossy().into_owned(), segment, other.run_id[..12].to_string()] {
-        let s = run_into(store.path(), &prof(&fx, &[]).set("--fit", &h));
+    for h in [other.to_string_lossy().into_owned(), problem, run_id] {
+        // A profile store of its own for each form.
+        let profiled = tempfile::tempdir().unwrap();
+        let s = run_into(profiled.path(), &in_store(prof(&fx, &[]).set("--fit", &h), &runs));
         assert_eq!(s.bytes(KIND), written, "--fit {h}: the profile of the point's value");
         ids.push(s.ids(KIND));
     }
-    assert!(ids.iter().all(|i| *i == ids[0]), "every handle names one computation: {ids:?}");
+    assert_eq!(ids[0], ids[2], "the run's folder and its id prefix name one run: {ids:?}");
+    assert!(ids[1].is_disjoint(&ids[0]), "the problem keys its own points: {ids:?}");
 }

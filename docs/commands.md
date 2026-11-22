@@ -7,9 +7,9 @@ read and compare the results. This document is the map: what each command makes,
 which commands chain into which, and where the boundaries are.
 
 The organizing distinction is **artifact-producing** vs **read/display**. The
-first group runs a computation and stores a content-addressed run: `simulate`
-and `pfilter` in the run store (`./camdl-store` unless `--store` or
-`CAMDL_STORE` names another root), the fit and profile commands under
+first group runs a computation and stores a content-addressed run: `simulate`,
+`pfilter` and `fit run` in the run store (`./camdl-store` unless `--store`,
+`CAMDL_STORE` or a fit file's `store` key names another root), `profile` under
 `results/`. The second group reads those runs back or performs a pure utility
 transform. A few commands delegate to the compiler.
 
@@ -39,47 +39,30 @@ transform. A few commands delegate to the compiler.
 
 | Command                                            | Does                                                                                                                                                                                  |
 | -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `list`                                             | Browse cached runs as a table; fits one row per run, grouped by problem folder (`--history`, `--runs`).                                                                               |
-| `show`                                             | Full metadata for one cached run; `--format json` writes it as JSON (`fit_show` for a fit run or a problem folder).                                                                   |
+| `list`                                             | Browse cached runs as a table; fits one row per fit run.                                                                                                                              |
+| `show`                                             | Full metadata for one cached run; `--format json` writes it as JSON.                                                                                                                  |
 | `cat`                                              | Emit a cached run's trajectory or observations as TSV; `--stream draws.tsv --chains IDS` (or `--exclude-chains IDS`) prints only the selected chains' rows.                           |
 | `compare`                                          | Paired prequential comparison (elpd, CRPS, PIT) across fits. Scores are plug-in + in-sample-optimistic (the caveat is printed with the table); not a leave-future-out forecast score. |
 | `diff`                                             | What differs between two model files, declaration by declaration, with whether the two compile to the same model. Exit 0 identical, 1 different, 2 no report.                         |
-| `label`                                            | Set a label on any run; a fit run labelled `L` becomes `@L`, and the run that held `L` before is `@L~1`.                                                                              |
+| `label`                                            | Set a label on a `results/` run. A fit run is refused: it is named when it runs, with `fit run --label`.                                                                              |
 | `fit {run,summary,predict,diff,table,new,methods}` | Run a fit; inspect, summarize, predict-vs-observe, and aggregate fits; scaffold new `fit.toml`s.                                                                                      |
 | `dev eval`                                         | Evaluate model expressions (parameters, forcings) on a time grid — pure inspection, no simulation.                                                                                    |
 | `lineage {realize,tree,sojourn,cohort}`            | Offline projections over an event log — transmission tree, dwell times, cohort incidence.                                                                                             |
 
-**Listing fit runs.** `camdl list` prints fits one row per run, grouped under a
-`problem` line per problem folder (its fit id, model, config and path). Each row
-gives the run's label, run id, method, seed, how its chains started (`STARTS`:
-the recorded source run id, with the handle as typed beside it, since the handle
-may since have moved), its live status (`completed`, `running`, `interrupted`,
-`failed`) and its stored verdict, the line `fit summary` leads with (`—` when
-there is nothing to judge; `unreadable: <reason>` when the stored summary cannot
-be read, which never fails the listing). Unlabelled runs of one method that
-differ only in seed share a row with the seed range and a combined verdict;
-`--runs` lists each. `--history` adds each label's earlier holders, as `m0~1`,
-`m0~2`. `--limit` counts runs. `--format json` writes one `fit_list_row`
-(schema 3) object per run:
-`{schema, kind, problem {fit_id, model, config}, label, label_set_at, history_index, run_id, method, seed, starts {rule, handle, run_id, chains}, status, verdict, path}`.
+**Listing fit runs.** `camdl list` prints fits in a `fits` table, one row per
+fit run: when it was created, its run id, its problem's id (`FIT_ID`), the label
+of an invocation that holds it, the model, method, seed, best log-likelihood and
+its folder. `--format json` writes one object per run:
+`{best_loglik, kind, label, method, model, path, problem_id, run_id, seed}`.
 
-**Run handles and folder handles.** `show` and `cat` resolve a fit handle the
-way every fit verb does. `@label`, a leaf directory and a `run_id` prefix name
-one run: `camdl show @m0` describes that run (its id, problem, method, how its
-chains started, its stored verdict, path and recorded outputs, including its
-predictions), and `camdl cat @m0 --stream draws.tsv` reads a file from the run's
-leaf, then from its default-options predictions under the problem folder's
-`predict/<run id>-<key>/`, then from the problem folder. A fit-id prefix, a
-problem folder's path and a `fit.toml` name the folder: `show` lists its runs
-and the handle that selects each, and `cat` on a folder holding several runs is
-refused with them listed, unless the stream is a file of the folder itself
-(`fit.meta.json`, or a `predict/<run id>-<key>/…` path). Without `--stream`,
-`cat` on a run prints its `fit_state.toml` and on a folder its `fit.meta.json`.
-Both views end with a `forecasts` block when `fit predict --mode forecast` has
-written one: each forecast's `predict/<run id>-<key>/` directory with its
-origin, horizon, the chains its draws came from and the particle count per draw,
-read from its `forecast.json`; a `forecast.json` that cannot be read is listed
-with the reason.
+**Run handles and problem handles.** A stored fit is named by `@label` (the
+invocation `fit run --label` named), a run-id or problem-id prefix, or its
+folder. `camdl show @m0` describes that run (its path, kind, run id, problem,
+method, seed, length and files), and `camdl cat @m0 --stream draws.tsv` reads
+one of the run's files; without `--stream`, `cat` on a run prints its
+`fit_state.toml`. A command that reads one run refuses a problem handle and
+refuses a `fit.toml`, which never names a run, listing the runs the file made. A
+`fit predict` output is stored inside its run, at `predict/<mode>-<12 hex>/`.
 
 **Selecting chains.** Every reader of a posterior cloud takes `--chains IDS`
 (keep only those chains) or `--exclude-chains IDS` (drop those), never both:
@@ -225,8 +208,8 @@ starts = { from_posterior = "@coarse" } # one draw of @coarse's posterior per ch
 camdl fit run fit.toml                              # the file's one [method]
 camdl fit run fit.toml --starts from_prior          # override where the chains begin
 camdl fit run fit.toml --resume <base-run-id>       # extend a completed run
-camdl fit summary results/fits/<dir>/               # Â or R̂ / verdict / MLE table
-camdl fit predict --fit fit.toml --stream onset     # predicted-vs-observed artifact
+camdl fit summary @label                            # Â or R̂ / verdict / MLE table
+camdl fit predict --fit @label --stream onset       # predicted-vs-observed artifact
 ```
 
 `fit predict` resolves the fit's posterior draws and writes
@@ -243,9 +226,9 @@ it covers are `future` too, gh#1309). For a stream labelled by each period's
 start, `one_step` rows carry the period's end in `time` while `free_forward`
 rows and `observed/` carry the label (gh#1152), and the `free_forward` rows past
 the data are mis-timed (gh#1151); `role` is read by row position and is right on
-both. A `one_step` band at a `held_out` row uses parameters fitted without that
-row and a state filtered through every earlier row, held-out rows included, so
-it is not a forecast from the end of the training rows; `--horizon` is. Omit
+both. The `one_step` band covers the training rows only: a stored fit keeps its
+held-out rows' dates and not their values, and filtering through a row needs its
+value. A forecast from the end of the training rows is `--horizon`. Omit
 `--mode` for all applicable horizons (chain-binomial → `free_forward` +
 `one_step`; ODE → `free_forward` only); an optimizer fit (IF2 / NLopt) is
 refused since it has no posterior cloud.
@@ -259,11 +242,11 @@ status 1, and the streams that could be produced are still written. The manifest
 (`predictive.json`, or `forecast.json` for a forecast) lists the streams
 `produced`, `skipped` (each with its reason) and `failed`, so a reader can tell
 what the artifact covers without the exit status. Every mode draws with the
-binomial sampler the fit ran (`btpe` or `btrs`, read from the fit leaf) and
-records it as `binomial` in the manifest.
+binomial sampler the fit ran (`btpe` or `btrs`, read from the fit run's
+`run_inputs.json`) and records it as `binomial` in the manifest.
 
-`fit predict --fit fit.toml --horizon "4 weeks"` (or `--mode forecast`) writes
-the fixed-origin forecast instead: from the end of the fit's training rows (the
+`fit predict --fit @label --horizon "4 weeks"` (or `--mode forecast`) writes the
+fixed-origin forecast instead: from the end of the fit's training rows (the
 _forecast origin_), the state is filtered through the training rows only and
 each stream's periods ending within the reach are predicted, the period under
 way at the origin included. A target's `horizon` counts its stream's own periods
@@ -367,7 +350,8 @@ gives each chain its own start — `from_prior`, `uniform_unconstrained`, `lhs`,
 whether the chains found the same posterior. A _point_ rule puts every chain at
 one point — `single`, `{ from_mle = "<handle>" }`, `{ from_params = "<toml>" }`
 — and R̂ is then reported as not assessed rather than as a pass. A handle is
-`@label`, a fit-id or leaf `run_id` prefix, a leaf directory, or a `fit.toml`.
+`@label`, a run-id prefix, or the run's folder; a `fit.toml` names no run and is
+refused.
 
 A source that did not converge is refused where it is consumed: starting from an
 unconverged fit launders its multi-modality into this one, and
@@ -429,7 +413,7 @@ ranges. To estimate parameters from data, use `fit`.
 ### Model comparison
 
 ```bash
-camdl compare results/fits/a/posterior results/fits/b/posterior --baseline a
+camdl compare a/prequential.json b/prequential.json --baseline a
 camdl compare @baseline @candidate
 camdl compare @baseline @candidate --pointwise pointwise.tsv
 ```
@@ -440,15 +424,15 @@ single-stream comparison, in a per-stream block below it otherwise; no figure
 combines streams). Each argument is either an explicit prequential artifact — a
 `prequential.json` (or a method directory holding one), written by a `pfilter`
 method or by `camdl pfilter --save-prequential`, and read **as-is** — **or** a
-fit handle (`@label`, a hash prefix, a run directory, or a `fit.toml`), whose
-prequential is **auto-derived** by re-filtering at the fit's sealed θ̂.
-`--particles` and `--seed` set the filter used for any auto-derived handle and
-are applied **uniformly** across all derived fits, so `T_score` and the scores
-stay commensurable; they are ignored for an explicit `prequential.json` (read
-as-is). An explicit trace below schema 7, written by an older build before held
-forcings were recorded, is refused: it cannot say whether a forcing was held
-outside its range while it was scored. Re-run the fit or the
-`pfilter --save-prequential` that wrote it. The scores are **plug-in and
+fit handle (`@label`, a run-id prefix or a run's folder; a `fit.toml` is
+refused), whose prequential is **auto-derived** by re-filtering at the fit's
+sealed θ̂. `--particles` and `--seed` set the filter used for any auto-derived
+handle and are applied **uniformly** across all derived fits, so `T_score` and
+the scores stay commensurable; they are ignored for an explicit
+`prequential.json` (read as-is). An explicit trace below schema 7, written by an
+older build before held forcings were recorded, is refused: it cannot say
+whether a forcing was held outside its range while it was scored. Re-run the fit
+or the `pfilter --save-prequential` that wrote it. The scores are **plug-in and
 in-sample-optimistic** — computed at a single θ fit to the whole series — so
 they are not a leave-future-out forecast score. The optimism does not cancel
 when two models are differenced, either: it grows with the effective number of
@@ -469,6 +453,13 @@ caveat, any miscalibration flag, and the numbers the noise gates read — the
 filter-noise MC SE per row and the lag-1 autocorrelation of the per-step Δelpd.
 What those quantities are, and their citations and caveats, is
 `camdl compare --explain` (the same guide as `camdl docs model-comparison`).
+
+A stored fit run that held rows out of training (`holdout_after`, or a
+`[data.holdout]` table, whole or partial) is refused before anything is
+computed: its problem keeps the held-out rows' dates and not their values, so
+`compare` cannot score them. The refusal names the run store's scores, which
+this camdl does not write, and `--in-sample`, which compares the fits on their
+training rows.
 
 `compare` refuses, rather than renders, these unlike-for-unlike comparisons: a
 differing `T_score` (override: `--allow-mismatched-horizon`, which suppresses
@@ -522,7 +513,7 @@ never reaches them: the preflight refuses that comparison before the table is
 rendered or either file is written, naming the streams that differ (gh#570).
 
 ```bash
-camdl compare full/fit.toml cases_only/fit.toml --streams cases
+camdl compare @full @cases_only --streams cases
 ```
 
 `--streams NAME[,NAME...]` (also `streams = [...]` in `compare.toml`) compares

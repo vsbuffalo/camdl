@@ -286,11 +286,6 @@ impl Partition {
             .map(|(n, _)| n.as_str())
     }
 
-    /// Every parameter's name, in declaration order.
-    pub fn all_names(&self) -> impl Iterator<Item = &str> {
-        self.entries.keys().map(String::as_str)
-    }
-
     /// One info line per special case that applied and per unused file entry.
     pub fn notices(&self) -> Vec<String> {
         let mut out = Vec::new();
@@ -1411,7 +1406,7 @@ mod tests {
         assert_eq!(kind(&p, "gamma"), RoleKind::Fixed);
         assert_eq!(p.entries["gamma"].declared_by, Declaration::Default);
         assert_eq!(p.names_with(RoleKind::Estimated).collect::<Vec<_>>(), vec!["beta"]);
-        assert_eq!(p.all_names().count(), 10, "every parameter");
+        assert_eq!(p.entries.len(), 10, "every parameter");
     }
 
     #[test]

@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 
 use crate::args::types::{DataSpec, ParamOverride, TableSpec};
-use crate::args::{PfilterCore, PfilterInvocation, SimulateArgs, SimulateInvocation};
+use crate::args::{FitRunArgs, FitRunInvocation, PfilterCore, PfilterInvocation, SimulateArgs, SimulateInvocation};
 
 /// The pfilter every check starts from:
 /// `pfilter sir.ir.json --params p.toml --data cases=cases.tsv --particles 20 --seed 1`.
@@ -211,4 +211,75 @@ pub(crate) fn sim_no_ir_cache() -> (SimulateInvocation, SimulateInvocation) {
     let mut base = sim_base();
     base.args.model = "sir.camdl".into();
     (SimulateInvocation { no_ir_cache: false, ..base.clone() }, SimulateInvocation { no_ir_cache: true, ..base })
+}
+
+// ── fit run ──────────────────────────────────────────────────────────────────
+
+/// The fit every check starts from: a short IF2 fit of the SIR model to
+/// `cases.tsv`. `fit run fit.toml`.
+pub(crate) fn fit_base() -> FitRunInvocation {
+    fit_from(&["fit.toml"])
+}
+
+/// A fit run from its command line, without the program and subcommand
+/// names, and with the global options at their defaults.
+pub(crate) fn fit_from(args: &[&str]) -> FitRunInvocation {
+    #[derive(clap::Parser)]
+    struct Line {
+        #[command(flatten)]
+        args: FitRunArgs,
+    }
+    let line = <Line as clap::Parser>::try_parse_from(std::iter::once("run").chain(args.iter().copied()))
+        .unwrap_or_else(|e| panic!("a fixture's fit run command line does not parse: {e}"));
+    FitRunInvocation {
+        args: line.args,
+        no_licm: false,
+        no_ir_cache: false,
+        verbosity: None,
+        progress: crate::args::types::ProgressMode::None,
+        no_progress: false,
+    }
+}
+
+/// A fit file whose problem differs from the base's: another `[fixed]`
+/// value.
+pub(crate) fn fit_other_config() -> PathBuf {
+    "fit_other.toml".into()
+}
+
+/// A cadence the `[synthetic]` generator emits its prevalence stream at.
+pub(crate) fn fit_emit_every() -> Vec<String> {
+    vec!["prevalent=2".into()]
+}
+
+pub(crate) fn fit_starts() -> Option<crate::fit::starts::ChainStarts> {
+    Some("lhs".parse().expect("`lhs` is a starts rule"))
+}
+
+pub(crate) fn fit_starts_chains() -> Option<crate::chain_selection::ChainSelection> {
+    Some(crate::fit::starts::parse_starts_chains("0").expect("`0` is a chain selection"))
+}
+
+/// The run the fixture's harness stores under `@base` before a resume.
+pub(crate) fn fit_resume() -> Option<String> {
+    Some("@base".into())
+}
+
+/// Without and with `--allow-nonconverged-source`, starting from a draws
+/// file named directly, which carries no verdict to lift.
+pub(crate) fn fit_allow_nonconverged_source() -> (FitRunArgs, FitRunArgs) {
+    let base = fit_from(&["fit_pmmh.toml", "--starts", "from_posterior=draws.tsv"]).args;
+    (FitRunArgs { allow_nonconverged_source: false, ..base.clone() }, FitRunArgs { allow_nonconverged_source: true, ..base })
+}
+
+/// `--parallel 1` and `--parallel 4`.
+pub(crate) fn fit_parallel() -> (FitRunArgs, FitRunArgs) {
+    let base = fit_base().args;
+    (FitRunArgs { parallel: 1, ..base.clone() }, FitRunArgs { parallel: 4, ..base })
+}
+
+/// The model from source, compiled with and without the IR cache.
+pub(crate) fn fit_no_ir_cache() -> (FitRunInvocation, FitRunInvocation) {
+    let base = fit_from(&["fit_source.toml"]);
+    (FitRunInvocation { no_ir_cache: false, ..base.clone() }, FitRunInvocation { no_ir_cache: true, ..base })
 }

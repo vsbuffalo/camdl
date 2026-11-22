@@ -72,11 +72,12 @@ repository's
 
 ## camdl 'scope, the fit viewer (strongly recommended)
 
-[camdl 'scope](https://github.com/vsbuffalo/camdl-scope) reads the fits camdl
-writes under `results/fits/` and draws them: per-chain traces, marginal
-posteriors, pair plots, posterior predictive bands against the data, and camdl's
-convergence diagnostics. It refreshes while a fit is still running, so you can
-watch chains mix rather than wait for the end.
+[camdl 'scope](https://github.com/vsbuffalo/camdl-scope) reads fits from a
+`results/fits/` tree and draws them: per-chain traces, marginal posteriors, pair
+plots, posterior predictive bands against the data, and camdl's convergence
+diagnostics. It refreshes while a fit is still running, so you can watch chains
+mix rather than wait for the end. `camdl fit run` stores fits in the run store,
+`camdl-store/`, which is not a `results/fits/` tree.
 
 It is a Python package installed with [uv](https://docs.astral.sh/uv/). Its
 install builds the browser interface from source, so Node.js (which provides

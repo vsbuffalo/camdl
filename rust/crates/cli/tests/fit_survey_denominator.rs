@@ -157,7 +157,7 @@ fn write_zero_denom_positive_count(dir: &Path) -> PathBuf {
 fn write_if2_toml(dir: &Path, ir: &Path, data: &Path) -> PathBuf {
     let out_root = dir.join("results_if2");
     let toml = format!(r#"
-output_dir = "{out}"
+store = "{out}"
 [model]
 camdl = "{ir}"
 [data.observations]
@@ -433,7 +433,7 @@ fn a_zero_denominator_is_a_hole_under_pgas() {
         std::fs::create_dir_all(&dir).unwrap();
         let toml = dir.join("fit_pgas.toml");
         std::fs::write(&toml, format!(r#"
-output_dir = "{out}"
+store = "{out}"
 [model]
 camdl = "{ir}"
 [data.observations]

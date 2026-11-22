@@ -16,6 +16,8 @@
 //! `CAMDL_SKIP_VERSION_CHECK=1` avoids a stale globally installed
 //! `camdlc` making the test flaky.
 
+mod fit_store_support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -94,11 +96,11 @@ fn write_dated_data(dir: &Path) -> PathBuf {
 /// not at ≥200 (it is particle starvation, not a structural impossibility).
 /// 300 keeps a comfortable margin while still running sub-second. Do not
 /// lower it to "speed up the test": that reintroduces the degeneracy.
-fn write_fit_toml(dir: &Path, ir: &Path, data: &Path, output_dir: &Path) -> PathBuf {
+fn write_fit_toml(dir: &Path, ir: &Path, data: &Path, store: &Path) -> PathBuf {
     let fit_toml = dir.join("fit.toml");
     let body = format!(
         r#"
-output_dir = "{out}"
+store = "{out}"
 
 [model]
 camdl = "{ir}"
@@ -126,7 +128,7 @@ particles  = 300
 iterations = 4
 cooling    = 0.7
 "#,
-        out = output_dir.display(),
+        out = store.display(),
         ir = ir.display(),
         data = data.display(),
     );
@@ -134,7 +136,8 @@ cooling    = 0.7
     fit_toml
 }
 
-fn exec_fit_run(camdl: &Path, fit_toml: &Path, output_dir: &Path) -> PathBuf {
+/// Runs `fit_toml` and returns the folder of the one run stored under `store`.
+fn exec_fit_run(camdl: &Path, fit_toml: &Path, store: &Path) -> PathBuf {
     let out = Command::new(camdl).env_remove("CLICOLOR_FORCE")
         .arg("fit")
         .arg("run")
@@ -147,14 +150,15 @@ fn exec_fit_run(camdl: &Path, fit_toml: &Path, output_dir: &Path) -> PathBuf {
         "camdl fit run failed: stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let fits = output_dir.join("fits");
-    let entries: Vec<PathBuf> = std::fs::read_dir(&fits)
-        .unwrap_or_else(|_| panic!("no fits/ dir under {}", output_dir.display()))
-        .flatten()
-        .map(|e| e.path())
-        .collect();
-    assert_eq!(entries.len(), 1, "expected one fit dir, got {:?}", entries);
-    entries.into_iter().next().unwrap()
+    fit_store_support::the_run(store)
+}
+
+/// The store a run folder sits in: the nearest ancestor holding a
+/// `store.json`.
+fn store_of(run: &Path) -> PathBuf {
+    run.ancestors().find(|a| a.join("store.json").is_file())
+        .unwrap_or_else(|| panic!("{} is in no store", run.display()))
+        .to_path_buf()
 }
 
 fn exec_summary(camdl: &Path, fit_dir: &Path, format: &str) -> String {
@@ -165,6 +169,7 @@ fn exec_summary(camdl: &Path, fit_dir: &Path, format: &str) -> String {
         .arg("--format")
         .arg(format)
         .arg("--no-color")
+        .env("CAMDL_STORE", store_of(fit_dir))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output()
         .expect("camdl fit summary must invoke");
@@ -192,9 +197,9 @@ fn instant_estimand_renders_as_calendar_date() {
 
     let tmp = tempdir("dated");
     let data = write_dated_data(tmp.path());
-    let output_dir = tmp.path().join("out");
-    let fit_toml = write_fit_toml(tmp.path(), &ir, &data, &output_dir);
-    let fit_dir = exec_fit_run(&camdl, &fit_toml, &output_dir);
+    let store = tmp.path().join("out");
+    let fit_toml = write_fit_toml(tmp.path(), &ir, &data, &store);
+    let fit_dir = exec_fit_run(&camdl, &fit_toml, &store);
 
     // ── JSON: tau parameter carries an `estimate_date` sibling field ──
     let json: serde_json::Value =

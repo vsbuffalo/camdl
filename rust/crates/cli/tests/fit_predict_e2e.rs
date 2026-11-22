@@ -9,15 +9,16 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Where the latest `fit predict` of a run in `seg` wrote:
-/// `<seg>/predict/<run id>-<address key>/` (gh#896), the directory whose
-/// `report*.json` (one written by every predict) is newest. A path that does not
-/// exist while nothing has been predicted.
-fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
-    std::fs::read_dir(seg.join("predict"))
-        .into_iter().flatten().flatten().map(|e| e.path())
+mod fit_store_support;
+
+/// The prediction folder the latest `fit predict` in the store `root` wrote:
+/// of every `predict/<mode>-<id12>/` folder in it, the one whose
+/// `report*.json` (one written by every predict) is newest. A path that does
+/// not exist while nothing has been predicted.
+fn predict_out(root: &Path) -> PathBuf {
+    fit_store_support::predictions(root).into_iter()
         .filter_map(|d| {
-            // Newest `report*.json` (keyed by chain selection) in the directory.
+            // Newest `report*.json` (keyed by chain selection) in the folder.
             let t = std::fs::read_dir(&d).ok()?.flatten()
                 .filter(|e| {
                     let n = e.file_name().to_string_lossy().into_owned();
@@ -29,9 +30,8 @@ fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
         })
         .max_by_key(|(t, _)| *t)
         .map(|(_, d)| d)
-        .unwrap_or_else(|| seg.join("predict").join("none"))
+        .unwrap_or_else(|| root.join("no-prediction"))
 }
-
 
 fn binary() -> PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
@@ -103,9 +103,9 @@ simulate {
 /// A short observed weekly series (rise-and-fall), times on the weekly grid.
 const DATA: &str = "time\tweekly_cases\n7\t16\n14\t166\n21\t626\n28\t1303\n35\t1260\n42\t1023\n49\t327\n56\t91\n";
 
-fn fit_toml(algorithm_block: &str, output_dir: &str) -> String {
+fn fit_toml(algorithm_block: &str, store: &str) -> String {
     format!(
-        r#"output_dir = "{output_dir}"
+        r#"store = "{store}"
 
 [model]
 camdl = "model.camdl"
@@ -135,38 +135,26 @@ fn run(bin: &Path, dir: &Path, args: &[&str]) -> std::process::Output {
         // Ad-hoc run: skip the camdlc git-hash handshake (the binary under test
         // is self-consistent). Mirrors the runbook's ad-hoc guidance.
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        // The store every fit file here names, for the commands that read it.
+        .env("CAMDL_STORE", dir.join("results"))
         .output()
         .expect("spawn camdl")
 }
 
+/// `<sub>/<stream>.tsv` of the latest prediction in the store `root`.
 fn find_artifact(root: &Path, sub: &str, stream: &str) -> Option<PathBuf> {
-    // results/fits/<stem>-<hash>/predict/<run id>-<address key>/<sub>/<stream>.tsv
-    let fits = root.join("fits");
-    let entries = std::fs::read_dir(&fits).ok()?;
-    for e in entries.flatten() {
-        // gh#896: the latest `fit predict` of the run writes under
-        // `<segment>/predict/<run id>-<address key>/`.
-        let p = predict_out(&e.path()).join(sub).join(format!("{stream}.tsv"));
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    None
+    let p = predict_out(root).join(sub).join(format!("{stream}.tsv"));
+    p.is_file().then_some(p)
 }
 
-/// Find a file written directly into the fit segment (e.g. `quantities.json`).
-fn find_segment_file(root: &Path, file: &str) -> Option<PathBuf> {
-    let fits = root.join("fits");
-    for e in std::fs::read_dir(&fits).ok()?.flatten() {
-        // A segment-level file (`model.ir.json`), or a predict output under
-        // the run's `predict/<run id>-<address key>/` (gh#896).
-        for p in [e.path().join(file), predict_out(&e.path()).join(file)] {
-            if p.is_file() {
-                return Some(p);
-            }
-        }
-    }
-    None
+/// `file` of the latest prediction in the store `root` (`quantities.json`),
+/// else of the one fit problem or compiled model stored there
+/// (`model.ir.json`).
+fn find_stored_file(root: &Path, file: &str) -> Option<PathBuf> {
+    let mut places = vec![predict_out(root)];
+    places.extend(fit_store_support::problems(root));
+    places.extend(fit_store_support::folders_of(root, "compiled_model"));
+    places.into_iter().map(|d| d.join(file)).find(|p| p.is_file())
 }
 
 #[test]
@@ -190,7 +178,7 @@ thin = 1
     std::fs::write(tmp.join("fit.toml"), fit_toml(pgas, "results")).unwrap();
 
     // Run the fit.
-    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(
         out.status.success(),
         "fit run failed:\nstdout={}\nstderr={}",
@@ -199,7 +187,7 @@ thin = 1
     );
 
     // Predict.
-    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml"]);
+    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "@fit"]);
     assert!(
         out.status.success(),
         "fit predict failed:\nstdout={}\nstderr={}",
@@ -304,7 +292,7 @@ thin = 1
     assert_eq!(peak, Some("28\t1303"), "observed series is the recorded data");
 
     // ── quantities/prevalence.tsv: a series (time + banded columns, no dims) ──
-    let prev = find_artifact(&results, "quantities", "prevalence")
+    let prev = find_artifact(&results, "quantities-model", "prevalence")
         .expect("quantities/prevalence.tsv must be written");
     let prev_txt = std::fs::read_to_string(&prev).unwrap();
     let mut plines = prev_txt.lines();
@@ -322,7 +310,7 @@ thin = 1
     }
 
     // ── quantities/peak.tsv: a value scalar (banded, NO censoring trio) ──
-    let peakf = find_artifact(&results, "quantities", "peak")
+    let peakf = find_artifact(&results, "quantities-model", "peak")
         .expect("quantities/peak.tsv must be written");
     let peak_txt = std::fs::read_to_string(&peakf).unwrap();
     let mut klines = peak_txt.lines();
@@ -339,7 +327,7 @@ thin = 1
     // `max(observations.weekly_cases)` reduces the per-draw y_sim — same banded
     // value-scalar shape as a state reduction (a Value reduction never censors),
     // and the band must be finite (the obs series was materialized, not empty).
-    let peakobsf = find_artifact(&results, "quantities", "peak_obs")
+    let peakobsf = find_artifact(&results, "quantities-model", "peak_obs")
         .expect("quantities/peak_obs.tsv must be written");
     let po_txt = std::fs::read_to_string(&peakobsf).unwrap();
     let mut polines = po_txt.lines();
@@ -357,7 +345,7 @@ thin = 1
     );
 
     // ── quantities/onset.tsv: a time scalar (censorable → the censoring trio) ──
-    let onsetf = find_artifact(&results, "quantities", "onset")
+    let onsetf = find_artifact(&results, "quantities-model", "onset")
         .expect("quantities/onset.tsv must be written");
     let onset_txt = std::fs::read_to_string(&onsetf).unwrap();
     let mut olines2 = onset_txt.lines();
@@ -372,7 +360,7 @@ thin = 1
     // ── quantities/spread.tsv: a Derived over Time scalars inherits censoring ──
     // `spread = onset2 - onset` propagates a censored endpoint, so it must carry
     // the censoring trio (not silently drop censored draws under a plain header).
-    let spreadf = find_artifact(&results, "quantities", "spread")
+    let spreadf = find_artifact(&results, "quantities-model", "spread")
         .expect("quantities/spread.tsv must be written");
     let spread_txt = std::fs::read_to_string(&spreadf).unwrap();
     assert_eq!(
@@ -382,7 +370,7 @@ thin = 1
     );
 
     // ── quantities.json: lists all three logical quantities, typed ──
-    let manifest = find_segment_file(&results, "quantities.json")
+    let manifest = find_stored_file(&results, "quantities.json")
         .expect("quantities.json manifest must be written");
     let mtxt = std::fs::read_to_string(&manifest).unwrap();
     let mjson: serde_json::Value = serde_json::from_str(&mtxt).unwrap();
@@ -407,7 +395,7 @@ thin = 1
     );
 
     // ── predictive.json: the per-stream join contract (coordinates vs band) ──
-    let pmf = find_segment_file(&results, "predictive.json")
+    let pmf = find_stored_file(&results, "predictive.json")
         .expect("predictive.json manifest must be written");
     let pjson: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&pmf).unwrap()).unwrap();
@@ -517,13 +505,13 @@ thin = 1
 "#;
     std::fs::write(tmp.join("fit.toml"), fit_toml(pgas, "results")).unwrap();
 
-    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(out.status.success(), "fit run failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
 
     // Two scenarios + free_forward only (keeps the test fast and the assertion
     // about scenario stacking unambiguous).
     let out = run(&bin, &tmp, &[
-        "fit", "predict", "--fit", "fit.toml",
+        "fit", "predict", "--fit", "@fit",
         "--mode", "free_forward",
         "--scenario", "low_rho",
         "--scenario", "high_rho",
@@ -565,7 +553,7 @@ thin = 1
     );
 
     // ── ONE quantities/peak.tsv carries BOTH scenarios' rows, tagged ──
-    let peakf = find_artifact(&results, "quantities", "peak")
+    let peakf = find_artifact(&results, "quantities-model", "peak")
         .expect("quantities/peak.tsv must be written");
     let peak_txt = std::fs::read_to_string(&peakf).unwrap();
     let mut klines = peak_txt.lines();
@@ -584,7 +572,7 @@ thin = 1
     );
 
     // ── quantities.json: a `scenario` field per entry (one entry per scenario) ──
-    let manifest = find_segment_file(&results, "quantities.json")
+    let manifest = find_stored_file(&results, "quantities.json")
         .expect("quantities.json manifest");
     let mtxt = std::fs::read_to_string(&manifest).unwrap();
     let mjson: serde_json::Value = serde_json::from_str(&mtxt).unwrap();
@@ -657,9 +645,9 @@ simulate {
 }
 "#;
 
-fn fit_toml_rho_fixed(algorithm_block: &str, output_dir: &str, rho: f64) -> String {
+fn fit_toml_rho_fixed(algorithm_block: &str, store: &str, rho: f64) -> String {
     format!(
-        r#"output_dir = "{output_dir}"
+        r#"store = "{store}"
 
 [model]
 camdl = "model.camdl"
@@ -733,12 +721,12 @@ thin = 1
     // rho fixed at 0.2: ×2.0 = 0.4 (in bounds); a double-apply would be 0.8.
     std::fs::write(tmp.join("fit.toml"), fit_toml_rho_fixed(pgas, "results", 0.2)).unwrap();
 
-    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(out.status.success(), "fit run failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
 
     // BOTH the scale scenario and the no-overlay baseline (fitted) in one run.
     let out = run(&bin, &tmp, &[
-        "fit", "predict", "--fit", "fit.toml",
+        "fit", "predict", "--fit", "@fit",
         "--mode", "free_forward",
         "--scenario", "double_rho",
         "--seed", "1",
@@ -757,7 +745,7 @@ thin = 1
     // Run a SECOND predict with NO scenario to get the fitted baseline (the
     // explicit --scenario above suppresses the no-overlay row).
     let out2 = run(&bin, &tmp, &[
-        "fit", "predict", "--fit", "fit.toml",
+        "fit", "predict", "--fit", "@fit",
         "--mode", "free_forward",
         "--seed", "1",
     ]);
@@ -831,12 +819,10 @@ fn fit_predict_scenario_named_fitted_in_model_is_rejected() {
 
 #[test]
 fn fit_predict_is_self_contained_after_loose_camdl_removed() {
-    // gh#322 / Phase 1a: `fit run` archives the compiled IR in the fit leaf, so
-    // `fit predict` resolves the model from that archive — not from the loose
-    // `.camdl`, which may have moved. We DELETE the source `.camdl` after the
-    // fit; predict must still succeed. (Pre-archival this failed: predict
-    // recompiled `config.model.camdl`, now absent — so this is the red→green
-    // for the portability fix.)
+    // gh#322: `fit run` stores the compiled IR in the run store, so
+    // `fit predict` resolves the model from that copy — not from the loose
+    // `.camdl`, which may have moved. We delete the source `.camdl` after the
+    // fit; predict must still succeed.
     let bin = skip_if_missing_binary();
     let tmp = std::env::temp_dir().join(format!("camdl_predict_portable_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
@@ -855,16 +841,16 @@ thin = 1
 "#;
     std::fs::write(tmp.join("fit.toml"), fit_toml(pgas, "results")).unwrap();
 
-    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(
         out.status.success(),
         "fit run failed:\nstderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // The compiled IR is archived in the fit segment, non-empty.
-    let archive = find_segment_file(&tmp.join("results"), "model.ir.json")
-        .expect("fit run must archive model.ir.json in the fit segment");
+    // The compiled IR is stored, non-empty.
+    let archive = find_stored_file(&tmp.join("results"), "model.ir.json")
+        .expect("fit run must store model.ir.json");
     assert!(
         std::fs::metadata(&archive).unwrap().len() > 0,
         "archived model.ir.json is non-empty"
@@ -876,7 +862,7 @@ thin = 1
     let out = run(
         &bin,
         &tmp,
-        &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward"],
+        &["fit", "predict", "--fit", "@fit", "--mode", "free_forward"],
     );
     assert!(
         out.status.success(),
@@ -893,21 +879,10 @@ thin = 1
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-/// The single fit segment under `results/fits/`.
-fn fit_segment_dir(results: &Path) -> PathBuf {
-    let fits = results.join("fits");
-    std::fs::read_dir(&fits)
-        .unwrap()
-        .flatten()
-        .map(|e| e.path())
-        .find(|p| p.is_dir())
-        .expect("a fit segment")
-}
-
 #[test]
 fn fit_predict_resolves_at_label_and_hash_prefix() {
-    // Phase 1b: a fit referenced by `@label` and by its fit-level hash prefix,
-    // not just a run dir / fit.toml. Both resolve to the same sealed fit.
+    // A fit run named by `@label` and by a prefix of its run id, not just its
+    // folder path. Both resolve to the same stored run.
     let bin = skip_if_missing_binary();
     let tmp = std::env::temp_dir().join(format!("camdl_predict_handle_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
@@ -933,11 +908,8 @@ thin = 1
     );
     assert!(out.status.success(), "fit run failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
 
-    // The fit-level hash prefix is the suffix of the segment dir name (`stem-<h8>`).
-    let seg = fit_segment_dir(&tmp.join("results"));
-    let name = seg.file_name().unwrap().to_string_lossy().into_owned();
-    let hash8 = name.rsplit('-').next().unwrap().to_string();
-    assert!(hash8.len() >= 8, "segment hash suffix looks like a hash: {name}");
+    let the_run = fit_store_support::the_run(&tmp.join("results"));
+    let hash8: String = fit_store_support::run_id(&the_run).chars().take(8).collect();
 
     // (1) Resolve by @label.
     let out = run(&bin, &tmp, &["fit", "predict", "@jigawa-baseline", "--mode", "free_forward"]);
@@ -952,7 +924,7 @@ thin = 1
         "@label resolved to the fit and predicted"
     );
 
-    // (2) Resolve by hash prefix (positional handle).
+    // (2) Resolve by run id prefix (positional handle).
     let out = run(&bin, &tmp, &["fit", "predict", &hash8, "--mode", "free_forward"]);
     assert!(
         out.status.success(),
@@ -965,7 +937,7 @@ thin = 1
     let out = run(&bin, &tmp, &["fit", "predict", "@nope", "--mode", "free_forward"]);
     assert!(!out.status.success(), "unknown @label must error");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("no completed fit run labelled @nope"), "actionable not-found, got: {stderr}");
+    assert!(stderr.contains("no stored result matches `@nope`"), "actionable not-found, got: {stderr}");
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
@@ -982,8 +954,8 @@ fn a_second_fit_under_a_held_label_takes_it() {
     std::fs::write(tmp.join("model.camdl"), MODEL).unwrap();
     std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
 
-    // Two fits that differ in config (→ distinct fit-level hashes → two
-    // segments) asking for the SAME label.
+    // Two fits that differ in their method (→ two runs of one problem)
+    // asking for the same label.
     let if2_a = r#"[method]
 algorithm = "if2"
 backend = "chain_binomial"
@@ -1010,14 +982,21 @@ cooling = 0.7
     assert!(out.status.success(), "a held label moves to the new run:\n{stderr}");
     assert!(stderr.contains("note: @dup now names run"), "the move is said: {stderr}");
 
+    // The run folder of each fit file, by the config its run records.
+    let run_of = |config: &str| -> String {
+        let run = fit_store_support::runs(&tmp.join("results")).into_iter()
+            .find(|r| fit_store_support::run_inputs(r)["header"]["config"] == config)
+            .unwrap_or_else(|| panic!("no run of {config}"));
+        run.file_name().unwrap().to_string_lossy().into_owned()
+    };
     let out = run(&bin, &tmp, &["fit", "summary", "@dup"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{stderr}");
-    assert!(stderr.contains("results/fits/b-") && stderr.contains("(1 earlier holder)"),
+    assert!(stderr.contains(&run_of("b.toml")) && stderr.contains("(1 earlier holder)"),
         "@dup names b.toml's run, and the resolution line says so: {stderr}");
     let out = run(&bin, &tmp, &["fit", "summary", "@dup~1"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success() && stderr.contains("results/fits/a-"),
+    assert!(out.status.success() && stderr.contains(&run_of("a.toml")),
         "@dup~1 names a.toml's run: {stderr}");
 
     let _ = std::fs::remove_dir_all(&tmp);
@@ -1063,13 +1042,13 @@ thin = 1
 "#;
     std::fs::write(tmp.join("fit.toml"), fit_toml(pgas, "results")).unwrap();
 
-    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(out.status.success(), "fit run failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
 
     // (1) No cap → the default (200) ≥ the cloud, so free-forward replays the
     // whole cloud and reports its full size ( > 10 ). Establishes the baseline
     // and confirms the cloud is bigger than the cap we test with.
-    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward"]);
+    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "@fit", "--mode", "free_forward"]);
     assert!(out.status.success(), "uncapped predict failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
     let pred = find_artifact(&tmp.join("results"), "predictive", "weekly_cases")
         .expect("predictive/weekly_cases.tsv (uncapped) must be written");
@@ -1080,7 +1059,7 @@ thin = 1
 
     // (2) --n-draws 10 → free-forward replays exactly 10 draws and reports 10.
     let out = run(&bin, &tmp, &[
-        "fit", "predict", "--fit", "fit.toml", "--mode", "free_forward", "--n-draws", "10",
+        "fit", "predict", "--fit", "@fit", "--mode", "free_forward", "--n-draws", "10",
     ]);
     assert!(
         out.status.success(),
@@ -1124,10 +1103,10 @@ cooling = 0.7
 "#;
     std::fs::write(tmp.join("fit.toml"), fit_toml(if2, "results")).unwrap();
 
-    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(out.status.success(), "if2 fit run failed");
 
-    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "fit.toml"]);
+    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "@fit"]);
     assert!(
         !out.status.success(),
         "predict must refuse an optimizer fit (no posterior cloud), not exit 0"
@@ -1172,21 +1151,15 @@ burn_in = 10
 thin = 1
 "#;
     std::fs::write(tmp.join("fit.toml"), fit_toml(pgas, "results")).unwrap();
-    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(out.status.success(), "fit run failed:\n{}", String::from_utf8_lossy(&out.stderr));
 
-    // The run's leaf, named directly: `--fit fit.toml` resolves only to runs
-    // this engine made, and the switched predict reads the default run.
-    let segment = fit_segment_dir(&tmp.join("results"));
-    let leaf = std::fs::read_dir(&segment).unwrap().flatten()
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .flat_map(|m| std::fs::read_dir(m).into_iter().flatten().flatten().map(|e| e.path()))
-        .find(|p| p.join("run.json").is_file())
-        .expect("the fit's leaf");
-    let leaf = leaf.to_string_lossy().into_owned();
+    // The run's folder, named directly, so the switched predict reads the
+    // run the default engine made.
+    let run_dir = fit_store_support::the_run(&tmp.join("results"));
+    let leaf = run_dir.to_string_lossy().into_owned();
     let addresses = || -> std::collections::BTreeSet<String> {
-        std::fs::read_dir(segment.join("predict")).into_iter().flatten().flatten()
+        std::fs::read_dir(run_dir.join("predict")).into_iter().flatten().flatten()
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect()
     };
@@ -1200,6 +1173,7 @@ thin = 1
         .args(["fit", "predict", "--fit", &leaf])
         .current_dir(&tmp)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("CAMDL_STORE", tmp.join("results"))
         .env("CAMDL_EVAL_UNRESOLVED", "1")
         .output()
         .expect("spawn camdl");
@@ -1208,16 +1182,16 @@ thin = 1
     assert_eq!(both.len(), 2, "the switched prediction must not share the default one's address: {both:?}");
     assert!(both.is_superset(&first), "and the default one's address is where it was");
 
-    // Each manifest of a prediction names the engine that made it, as
-    // `run.json` spells it: the switched prediction's name its switch, the
-    // default one's name none, and both name this build.
-    let leaf_run: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(Path::new(&leaf).join("run.json")).unwrap()).unwrap();
+    // Each manifest of a prediction names the engine that made it, as the
+    // run's `identity.json` spells the build: the switched prediction's name
+    // its switch, the default one's name none, and both name this build.
+    let build = fit_store_support::json(&run_dir.join("identity.json"))["ambient"]["build"].clone();
+    assert!(build.is_string(), "the run records its build");
     let switched_dir = both.difference(&first).next().expect("the switched address");
     let default_dir = first.iter().next().unwrap();
     for file in ["predictive.json", "observed.json", "quantities.json", "report.json"] {
         let read = |dir: &str| -> serde_json::Value {
-            let p = segment.join("predict").join(dir).join(file);
+            let p = run_dir.join("predict").join(dir).join(file);
             serde_json::from_str(&std::fs::read_to_string(&p)
                 .unwrap_or_else(|e| panic!("reading {}: {e}", p.display()))).unwrap()
         };
@@ -1225,8 +1199,8 @@ thin = 1
         assert_eq!(on["engine_switches"], serde_json::json!([{ "name": "CAMDL_EVAL_UNRESOLVED" }]),
             "{file} of the switched prediction names its switch: {on}");
         assert!(off.get("engine_switches").is_none(), "{file} of the default prediction names none: {off}");
-        assert_eq!(on["engine_version"], leaf_run["engine_version"], "{file}: the build, as run.json spells it");
-        assert_eq!(off["engine_version"], leaf_run["engine_version"], "{file}");
+        assert_eq!(on["engine_version"], build, "{file}: the build, as the run's identity spells it");
+        assert_eq!(off["engine_version"], build, "{file}");
     }
 
     let _ = std::fs::remove_dir_all(&tmp);

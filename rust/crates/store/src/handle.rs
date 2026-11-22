@@ -122,14 +122,13 @@ impl Store {
                 distinct.dedup();
                 match distinct.len() {
                     1 => Ok((distinct[0], kind.to_string())),
+                    // The invocation holds no result of this kind: whatever it
+                    // holds is of other kinds, named in the refusal.
                     0 => {
-                        let any: Vec<&crate::record::ResultEntry> = inv.file.results.iter().collect();
-                        match any.first() {
-                            Some(r) if any.iter().all(|x| x.run_id == r.run_id) => {
-                                Err(Error::WrongKind { handle: text, expected: kind, found: r.kind.clone() })
-                            }
-                            _ => Err(Error::NotOneResult { handle: text, members: inv.file.results.iter().map(|r| r.run_id).collect() }),
-                        }
+                        let mut kinds: Vec<&str> = inv.file.results.iter().map(|r| r.kind.as_str()).collect();
+                        kinds.sort();
+                        kinds.dedup();
+                        Err(Error::WrongKind { handle: text, expected: kind, found: kinds.join(", ") })
                     }
                     _ => Err(Error::NotOneResult { handle: text, members: distinct }),
                 }
@@ -155,6 +154,13 @@ impl Store {
             return Err(Error::WrongKind { handle: handle.handle.to_string(), expected: A::KIND, found: kind });
         }
         self.inspect(&Id::<A>::from_key(key))?.ok_or_else(|| Error::NotFound { handle: handle.handle.to_string() })
+    }
+
+    /// The invocations that hold or held `label`, newest first: `@L` is the
+    /// first, `@L~n` the one `n` places after it. An invocation whose results
+    /// did not all complete holds no label.
+    pub fn label_holders(&self, label: &str) -> Vec<Invocation> {
+        label_holders(&self.inner.root, label).into_iter().map(|file| Invocation { file, took_label_from: None }).collect()
     }
 
     /// The invocation a handle names: for `@L` and `@L~n`, that invocation;

@@ -57,13 +57,7 @@ pub(crate) const FORECAST_SCHEMA: &str = "camdl.forecast/v4";
 /// The file [`write_manifest`] writes in a forecast's directory.
 pub(crate) const FORECAST_MANIFEST: &str = "forecast.json";
 
-/// The joint samples file `write_tables` writes beside it.
-pub(crate) const FORECAST_SAMPLES_FILE: &str = "forecast-samples.tsv";
-
-/// The directory of the per-stream forecast tables, `forecast/<stream>.tsv`.
-pub(crate) const FORECAST_TABLES_DIR: &str = "forecast";
-
-/// What `camdl show` states of one forecast (gh#1233), read back from its
+/// What `camdl show` states of one forecast, read back from its
 /// `forecast.json`: where it starts, how far it reaches, which chains its
 /// draws came from and how many particles each draw's filter ran.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
@@ -94,7 +88,7 @@ pub(crate) struct SummaryHorizon {
     pub duration: f64,
 }
 
-/// `forecast.json`'s `chain_selection` (D86).
+/// `forecast.json`'s `chain_selection`.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 pub(crate) struct SummaryChains {
     pub excluded: Vec<usize>,
@@ -103,21 +97,10 @@ pub(crate) struct SummaryChains {
 }
 
 impl ForecastSummary {
-    /// The forecast in `dir`: `None` when `dir` holds no `forecast.json`,
-    /// an error when it cannot be read (any I/O error but not-found,
-    /// non-UTF-8 bytes) or carries a schema other than [`FORECAST_SCHEMA`].
-    /// The error names only the file; its reader shows the directory.
-    pub(crate) fn read(dir: &std::path::Path) -> Option<Result<Self, String>> {
-        let text = match std::fs::read_to_string(dir.join(FORECAST_MANIFEST)) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
-            Err(e) => return Some(Err(format!("{FORECAST_MANIFEST}: cannot read: {e}"))),
-        };
-        Some(Self::parse(&text).map_err(|e| format!("{FORECAST_MANIFEST}: {e}")))
-    }
-
-    fn parse(text: &str) -> Result<Self, String> {
-        let doc: serde_json::Value = serde_json::from_str(text).map_err(|e| format!("not JSON: {e}"))?;
+    /// The forecast `bytes` (a `forecast.json`) describe; an error for bytes
+    /// that are not one, or carry a schema other than [`FORECAST_SCHEMA`].
+    pub(crate) fn parse(bytes: &[u8]) -> Result<Self, String> {
+        let doc: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| format!("not JSON: {e}"))?;
         match doc.get("schema").and_then(|s| s.as_str()) {
             Some(FORECAST_SCHEMA) => {}
             other => return Err(format!(
@@ -146,6 +129,13 @@ impl ForecastSummary {
     }
 }
 
+/// The joint samples file `write_tables` writes beside it.
+pub(crate) const FORECAST_SAMPLES_FILE: &str = "forecast-samples.tsv";
+
+/// The directory of the per-stream forecast tables, `forecast/<stream>.tsv`.
+pub(crate) const FORECAST_TABLES_DIR: &str = "forecast";
+
+
 /// Refuse what forecast mode does not support, before any work: the backends
 /// and options of the Stage 5 capability matrix that have no forecast yet.
 pub(crate) fn refuse_unsupported(
@@ -165,6 +155,15 @@ pub(crate) fn refuse_unsupported(
             "the '{leaf}' method leaf ran on the Gillespie backend, which is not a fitting \
              backend, so there is nothing to forecast.")),
     }
+    // A stored fit holds its held-out rows' dates and never their values,
+    // which enter only a score; `--realised-design` reads the held-out rows'
+    // design values.
+    if args.realised_design {
+        return Err("--realised-design reads the design values of the fit's held-out rows, and a stored \
+                    fit holds only their dates: held-out values enter only a score, which the run store \
+                    computes as its own result (step 7 of the run-store proposal, scores). Supply the \
+                    design with --design SOURCE=FILE.".to_string());
+    }
     let mut asked: Vec<&str> = Vec::new();
     if !args.enable.is_empty() { asked.push("--enable"); }
     if !args.disable.is_empty() { asked.push("--disable"); }
@@ -181,44 +180,23 @@ pub(crate) fn refuse_unsupported(
     Ok(())
 }
 
-/// The binomial sampler the fit run in `leaf` drew with (gh#747), so the
-/// forecast continues the fit's filter on the same sampler. Read from the
-/// leaf's `run.json` (`inputs.binomial`, written by `fit run`). A leaf written
-/// before that record has none: its sampler is `fit run --binomial`'s value
-/// when its recorded command line carries one, else `configured`, the method
-/// as `fit.toml` wrote it.
+/// The binomial sampler the fit run whose files `leaf` holds drew with
+/// (gh#747), so the forecast continues the fit's filter on the same sampler:
+/// the run's recorded `binomial` (`run_inputs.json`), else `configured`, the
+/// method's own, for a method that records none.
 pub(crate) fn fit_binomial(
     leaf: &std::path::Path,
     configured: Option<sim::rng::BinomialAlgorithm>,
 ) -> Result<sim::rng::BinomialAlgorithm, String> {
     use sim::rng::BinomialAlgorithm;
-    let path = leaf.join("run.json");
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    let record: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|e| format!("{} is not JSON: {e}", path.display()))?;
-    let parse = |v: &serde_json::Value| -> Result<BinomialAlgorithm, String> {
-        serde_json::from_value(v.clone()).map_err(|e| format!(
-            "{}: the recorded binomial sampler {v} is not one camdl knows: {e}", path.display()))
-    };
-    match record.pointer("/inputs/binomial") {
-        Some(v) if !v.is_null() => return parse(v),
-        _ => {}
-    }
-    let argv: Vec<&str> = record.pointer("/provenance/argv")
-        .and_then(|a| a.as_array())
-        .map(|a| a.iter().filter_map(|s| s.as_str()).collect())
-        .unwrap_or_default();
-    let from_argv = argv.iter().enumerate().find_map(|(i, a)| match a.strip_prefix("--binomial") {
-        Some("") => argv.get(i + 1).copied(),
-        Some(rest) => rest.strip_prefix('='),
-        None => None,
-    });
-    match (from_argv, configured) {
-        (Some(v), _) => parse(&serde_json::Value::String(v.to_string())),
+    let path = leaf.join(crate::fit_store::RUN_INPUTS_FILE);
+    let inputs = crate::fit_store::read_run_inputs(leaf)?;
+    match (inputs.get("binomial").filter(|v| !v.is_null()), configured) {
+        (Some(v), _) => serde_json::from_value::<BinomialAlgorithm>(v.clone()).map_err(|e| format!(
+            "{}: the recorded binomial sampler {v} is not one camdl knows: {e}", path.display())),
         (None, Some(c)) => Ok(c),
         (None, None) => Err(format!(
-            "{} records no binomial sampler and its fit.toml names no method; re-run the fit \
+            "{} records no binomial sampler and the fit names no method; re-run the fit \
              so the forecast can continue its filter on the same sampler.", path.display())),
     }
 }
@@ -235,6 +213,12 @@ pub(crate) struct ForecastJob<'a> {
     pub fit_base: &'a crate::util::FitBase,
     pub posterior: &'a PosteriorDraws,
     pub segment: &'a std::path::Path,
+    /// The directory the forecast's files are written into.
+    pub out_dir: &'a std::path::Path,
+    /// Each stream's held-out rows without their values, as the stored
+    /// problem holds them (`held_out/<stream>.tsv`): the rows a target is
+    /// matched to.
+    pub held_out: &'a BTreeMap<String, Vec<u8>>,
     pub run_id: &'a str,
     /// The options as resolved before the plan: the forecast adds its design
     /// inputs (D81) and addresses its directory from the result.
@@ -253,6 +237,44 @@ pub(crate) struct ForecastJob<'a> {
     pub sweep_points: &'a [Vec<(String, f64)>],
     /// The filters' particle count per draw and where it came from (D85).
     pub particles: crate::fit::predict::PredictParticles,
+}
+
+/// The held-out rows of one stream, from the stored problem's
+/// `held_out/<stream>.tsv`: each row's file, position, label and what it
+/// measures, and no value.
+pub(crate) fn held_out_rows(bytes: &[u8]) -> Result<Vec<HeldOut>, String> {
+    let text = std::str::from_utf8(bytes).map_err(|e| e.to_string())?;
+    let mut rows = Vec::new();
+    for line in text.lines().skip(1).filter(|l| !l.is_empty()) {
+        let cols: Vec<&str> = line.split('\t').collect();
+        let [file, position, label, measures, start, end] = cols[..] else {
+            return Err(format!("expected six columns, found {}: {line}", cols.len()));
+        };
+        let num = |x: &str| x.parse::<f64>().map_err(|e| format!("{x}: {e}"));
+        let measures = match measures {
+            "instant" => Measures::Instant(num(start)?),
+            "period" => Measures::Period(sim::inference::multi_stream_obs::Period::new(num(start)?, num(end)?)?),
+            other => return Err(format!("unknown measure `{other}`")),
+        };
+        let file = match file {
+            "training" => RowFile::Training,
+            "holdout" => RowFile::Holdout,
+            other => return Err(format!("unknown file `{other}`")),
+        };
+        rows.push(HeldOut {
+            file,
+            row: ObservedRow {
+                position: position.parse().map_err(|e| format!("{position}: {e}"))?,
+                label: num(label)?,
+                measures,
+                temporal: Vec::new(),
+                cell: None,
+                aux: Vec::new(),
+                design: Vec::new(),
+            },
+        });
+    }
+    Ok(rows)
 }
 
 /// One `--design` file as `forecast.json` records it: the stream it was
@@ -318,7 +340,7 @@ pub(crate) fn forecast_options(
 pub(crate) fn run_forecast(
     out: &crate::out::Out,
     job: ForecastJob,
-) -> Result<(PathBuf, Vec<PathBuf>, Vec<DeterministicFailure>, Vec<SkippedStream>), String> {
+) -> Result<(PathBuf, Vec<PathBuf>, Vec<DeterministicFailure>, Vec<SkippedStream>, crate::fit::predict::PredictOptions), String> {
     let model = job.model;
     let raw = job.args.horizon.as_deref().expect("forecast mode carries --horizon");
     let reach = parse_reach(raw, &model.time_unit, model.origin.as_deref())?;
@@ -341,21 +363,21 @@ pub(crate) fn run_forecast(
         streams.iter().map(|s| (s.name.clone(), s.rows.clone())).collect();
     let (record, partition) = TrainingPartition::read_recorded(job.segment, &rows)?;
 
-    // Rows after each stream's prefix, in its own file or a holdout file:
-    // they only name a target's held-out row, and are never filtered.
+    // Each stream's held-out rows, from the stored problem's dates: they only
+    // name a target's held-out row, and are never filtered. A stored fit
+    // holds no held-out value, so no target is scored.
     let mut held_out: BTreeMap<String, Vec<HeldOut>> = BTreeMap::new();
     for s in &streams {
-        let mut tail: Vec<HeldOut> = s.rows[partition.rows(&s.name)..].iter()
-            .map(|r| HeldOut { file: RowFile::Training, row: r.clone() })
-            .collect();
-        if let Some(path) = bindings.holdout_by_source().get(&s.obs_model_ir.source) {
-            let siblings: Vec<&ir::observation::ObservationModel> =
-                model.observations.iter().filter(|o| o.source == s.obs_model_ir.source).collect();
-            tail.extend(crate::fit::runner::load_observations(path, &s.obs_model_ir, &siblings, &time_opts)?
-                .into_iter()
-                .map(|row| HeldOut { file: RowFile::Holdout, row }));
-        }
-        held_out.insert(s.name.clone(), tail);
+        let rows = match job.held_out.get(&s.name) {
+            Some(bytes) => held_out_rows(bytes).map_err(|e| format!("held_out/{}.tsv: {e}", s.name))?,
+            None => Vec::new(),
+        };
+        held_out.insert(s.name.clone(), rows);
+    }
+    if held_out.values().any(|r| !r.is_empty()) {
+        out.say("fit predict: a forecast from a stored fit computes no held-out score: the fit holds its \
+                 held-out rows' dates and not their values, which enter only a score (step 7 of the \
+                 run-store proposal)");
     }
     for s in &mut streams {
         s.truncate_rows(partition.rows(&s.name));
@@ -401,9 +423,7 @@ pub(crate) fn run_forecast(
     // determine the predictions. The held-out outcomes are not among them.
     let options = forecast_options(job.options, &plan);
     let address_key = options.address_key(job.run_id);
-    let out_dir = crate::fit::fit_view::predictions_dir(job.segment, job.run_id, &address_key);
-    std::fs::create_dir_all(&out_dir)
-        .map_err(|e| format!("cannot create {}: {e}", out_dir.display()))?;
+    let out_dir = job.out_dir.to_path_buf();
     if let Some(mode) = plan.design_mode() {
         out.say(format_args!("fit predict: forecast design values: {}", mode.label()));
     }
@@ -527,7 +547,7 @@ pub(crate) fn run_forecast(
          target(s) on {} stream(s), {} draws × {} particles, {} arm(s)",
         fc.plan.origin(), fc.plan.origin() + fc.plan.horizon(), fc.plan.targets().len(),
         fc.plan.sources().len(), fc.n_draws, fc.n_particles, forecasts.len()));
-    Ok((out_dir, written, failures, skipped))
+    Ok((out_dir, written, failures, skipped, options))
 }
 
 /// One arm's forecast.
@@ -952,67 +972,20 @@ mod tests {
         assert_eq!(unkeyed.describe(), "posterior draw at row 12 of draws.tsv");
     }
 
-    /// gh#1233: `show` reads a forecast's summary back from `forecast.json`,
-    /// with the origin's date when the model has a calendar, and refuses a
-    /// manifest of another schema rather than guessing at its fields.
-    #[test]
-    fn a_forecast_summary_is_read_back_and_another_schema_is_refused() {
-        let doc = |schema: &str| serde_json::json!({
-            "schema": schema,
-            "origin": { "t": 24.0, "date": "2024-01-25" },
-            "horizon": { "as_written": "4 weeks", "duration": 28.0 },
-            "calendar": { "days_per_unit": 1.0, "origin": "2024-01-01", "time_unit": "days" },
-            "n_draws": 40,
-            "particles": { "n": 500, "source": "default" },
-            "chain_selection": { "excluded": [0, 2], "kept": [1], "n_total": 3, "summary": "…" },
-        }).to_string();
-        let s = ForecastSummary::parse(&doc(FORECAST_SCHEMA)).unwrap();
-        assert_eq!(s.lines(), vec![
-            ("origin", "t = 24 (2024-01-25)".to_string()),
-            ("horizon", "4 weeks (28 days)".to_string()),
-            ("chains", "kept 1, left out 0,2, of 3 (40 posterior draws)".to_string()),
-            ("particles", "500 per draw (the default)".to_string()),
-        ]);
-        let e = ForecastSummary::parse(&doc("camdl.forecast/v2")).unwrap_err();
-        assert!(e.contains("'camdl.forecast/v2'") && e.contains(FORECAST_SCHEMA), "{e}");
-    }
-
-    /// Only a missing `forecast.json` reads as "no forecast here"; one that
-    /// cannot be read is an error, named by its file alone.
-    #[test]
-    fn an_unreadable_forecast_manifest_is_an_error_and_a_missing_one_is_none() {
-        let dir = crate::test_support::unique_temp_dir("forecast_summary_read");
-        std::fs::create_dir_all(&dir).unwrap();
-        assert!(ForecastSummary::read(&dir).is_none(), "no forecast.json: no forecast");
-        std::fs::write(dir.join(FORECAST_MANIFEST), b"\xff\xfe{not utf8").unwrap();
-        let e = ForecastSummary::read(&dir).expect("an unreadable manifest is reported").unwrap_err();
-        assert!(e.starts_with("forecast.json: cannot read"), "{e}");
-        assert!(!e.contains(&dir.display().to_string()), "the error names the file, not its path: {e}");
-        std::fs::write(dir.join(FORECAST_MANIFEST), r#"{"schema": "camdl.forecast/v2"}"#).unwrap();
-        let e = ForecastSummary::read(&dir).unwrap().unwrap_err();
-        assert!(e.starts_with("forecast.json: schema 'camdl.forecast/v2'"), "{e}");
-    }
-
-    /// The fit's sampler is the leaf's record; a leaf written before the
-    /// record takes `fit run --binomial` from its command line, else the
-    /// method as fit.toml wrote it.
+    /// The fit's sampler is the run's record, else the method's own.
     #[test]
     fn the_fits_sampler_is_read_from_the_leaf() {
         use sim::rng::BinomialAlgorithm::{Btpe, Btrs};
         let leaf = |json: &str| {
             let dir = crate::test_support::unique_temp_dir("fit_binomial");
             std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(dir.join("run.json"), json).unwrap();
+            crate::fit_store::write_test_inputs(&dir, &serde_json::from_str::<serde_json::Value>(json).unwrap());
             dir
         };
-        let recorded = leaf(r#"{"inputs": {"binomial": "btrs"}, "provenance": {"argv": ["camdl"]}}"#);
+        let recorded = leaf(r#"{"inputs": {"binomial": "btrs"}}"#);
         assert_eq!(fit_binomial(&recorded, Some(Btpe)).unwrap(), Btrs, "the record wins over fit.toml");
-        let flag = leaf(r#"{"inputs": {}, "provenance": {"argv": ["camdl", "fit", "run", "f.toml", "--binomial", "btrs"]}}"#);
-        assert_eq!(fit_binomial(&flag, Some(Btpe)).unwrap(), Btrs);
-        let eq = leaf(r#"{"inputs": {}, "provenance": {"argv": ["camdl", "fit", "run", "--binomial=btrs"]}}"#);
-        assert_eq!(fit_binomial(&eq, Some(Btpe)).unwrap(), Btrs);
-        let plain = leaf(r#"{"inputs": {}, "provenance": {"argv": ["camdl", "fit", "run"]}}"#);
-        assert_eq!(fit_binomial(&plain, Some(Btrs)).unwrap(), Btrs, "fit.toml's method");
+        let plain = leaf(r#"{"inputs": {}}"#);
+        assert_eq!(fit_binomial(&plain, Some(Btrs)).unwrap(), Btrs, "the method's own");
         assert!(fit_binomial(&plain, None).is_err());
         let bad = leaf(r#"{"inputs": {"binomial": "fast"}}"#);
         assert!(fit_binomial(&bad, Some(Btpe)).is_err());

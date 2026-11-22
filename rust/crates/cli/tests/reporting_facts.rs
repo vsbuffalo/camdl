@@ -16,6 +16,8 @@
 //! The runs are small (about ten seconds in all) and fixed-seed, so every
 //! recorded value is deterministic.
 
+mod fit_store_support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -42,23 +44,22 @@ impl Drop for Tmp {
     }
 }
 
-/// The single directory under `dir` whose name starts with `prefix`.
-fn only_child(dir: &Path, prefix: &str) -> PathBuf {
-    let hits: Vec<PathBuf> = std::fs::read_dir(dir)
-        .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with(prefix))
-        .collect();
-    assert_eq!(hits.len(), 1, "expected one `{prefix}*` under {}: {hits:?}", dir.display());
-    hits.into_iter().next().unwrap()
+/// The run store every command here writes to: `camdl-store` in the work
+/// directory.
+fn store(work: &Path) -> PathBuf {
+    work.join("camdl-store")
 }
 
-/// The leaf `results/fits/<fit>-*/<method>-*/seed_*`.
-fn leaf(work: &Path, fit: &str, method: &str) -> PathBuf {
-    let fit_dir = only_child(&work.join("results/fits"), &format!("{fit}-"));
-    let method_dir = only_child(&fit_dir, &format!("{method}-"));
-    only_child(&method_dir, "seed_")
+/// The one stored fit run of the fit file `toml`: the run whose `fit.toml`
+/// (the file as given) is that file's bytes.
+fn leaf(work: &Path, toml: &str) -> PathBuf {
+    let text = std::fs::read(work.join(toml)).unwrap();
+    let hits: Vec<PathBuf> = fit_store_support::runs(&store(work))
+        .into_iter()
+        .filter(|r| std::fs::read(r.join("fit.toml")).ok().as_deref() == Some(&text[..]))
+        .collect();
+    assert_eq!(hits.len(), 1, "expected one fit run of {toml}: {hits:?}");
+    hits.into_iter().next().unwrap()
 }
 
 struct Output {
@@ -146,6 +147,9 @@ fn every_recorded_fact_is_shown() {
             .env("CAMDL_IR_CACHE_DIR", work.join(".ir-cache"))
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .env("CAMDLC", &camdlc)
+            // The work directory's store, named relative to it, so output
+            // names it as `camdl-store`.
+            .env("CAMDL_STORE", "camdl-store")
             .current_dir(&work)
             .args(args)
             .output()
@@ -174,7 +178,7 @@ fn every_recorded_fact_is_shown() {
     // follows its run.
     let mut runs: Vec<(&str, Output)> = Vec::new();
     let stuck = run(&fit("pmmh_stuck.toml", "8", &[]));
-    let stuck_leaf = leaf(&work, "pmmh_stuck", "pmmh");
+    let stuck_leaf = leaf(&work, "pmmh_stuck.toml");
     runs.push(("stuck", with_events(stuck, &stuck_leaf)));
     // The same run again is a cache hit: no method runs, and the stored
     // leaf's event log is the one the run that computed it wrote.
@@ -182,32 +186,31 @@ fn every_recorded_fact_is_shown() {
     runs.push(("stuck.cached", run(&fit("pmmh_stuck.toml", "8", &[]))));
     assert_eq!(std::fs::read(stuck_leaf.join("events.jsonl")).unwrap(), log_before,
         "a cache hit rewrote the stored leaf's events.jsonl");
-    let stuck_fit = only_child(&work.join("results/fits"), "pmmh_stuck-");
+    let stuck_fit = stuck_leaf.clone();
     runs.push(("stuck.summary", run(&a(&["fit", "summary", stuck_fit.to_str().unwrap()]))));
     runs.push(("converged", run(&fit("pmmh_converged.toml", "1", &["--label", "converged"]))));
-    let converged_fit = only_child(&work.join("results/fits"), "pmmh_converged-");
-    runs.push(("converged.summary", run(&a(&["fit", "summary", converged_fit.to_str().unwrap()]))));
-    let base = leaf(&work, "pmmh_converged", "pmmh");
+    let base = leaf(&work, "pmmh_converged.toml");
+    runs.push(("converged.summary", run(&a(&["fit", "summary", base.to_str().unwrap()]))));
     runs.push(("resumed", run(&fit("pmmh_resumed.toml", "1", &["--resume", base.to_str().unwrap()]))));
     runs.push(("stuck.excluded", run(&a(&["fit", "summary", stuck_fit.to_str().unwrap(), "--exclude-chains", "2"]))));
     runs.push(("pgas", run(&fit("pgas.toml", "1", &[]))));
-    let pgas_fit = only_child(&work.join("results/fits"), "pgas-");
+    let pgas_fit = leaf(&work, "pgas.toml");
     runs.push(("pgas.summary", run(&a(&["fit", "summary", pgas_fit.to_str().unwrap()]))));
     runs.push(("pgas.explain", run(&a(&["fit", "summary", pgas_fit.to_str().unwrap(), "--explain", "--parameters"]))));
     runs.push(("if2", run(&fit("if2.toml", "1", &["--label", "if2"]))));
     runs.push(("if2.summary", run(&a(&["fit", "summary", "@if2"]))));
     runs.push(("nlopt", run(&fit("nlopt.toml", "1", &[]))));
-    let nlopt_fit = only_child(&work.join("results/fits"), "nlopt-");
+    let nlopt_fit = leaf(&work, "nlopt.toml");
     runs.push(("nlopt.summary", run(&a(&["fit", "summary", nlopt_fit.to_str().unwrap()]))));
     let failed = run(&fit("fail.toml", "1", &[]));
-    runs.push(("fail", with_events(failed, &leaf(&work, "fail", "pmmh"))));
-    let fail_fit = only_child(&work.join("results/fits"), "fail-");
+    let fail_fit = leaf(&work, "fail.toml");
+    runs.push(("fail", with_events(failed, &fail_fit)));
     runs.push(("fail.summary", run(&a(&["fit", "summary", fail_fit.to_str().unwrap()]))));
     runs.push(("pfilter_fit", run(&fit("pfilter.toml", "1", &[]))));
-    let pfilter_fit = only_child(&work.join("results/fits"), "pfilter-");
+    let pfilter_fit = leaf(&work, "pfilter.toml");
     runs.push(("pfilter_fit.summary", run(&a(&["fit", "summary", pfilter_fit.to_str().unwrap()]))));
     runs.push(("compare", run(&a(&["compare", "@if2", "@converged", "--draws", "1"]))));
-    let mle = leaf(&work, "if2", "if2").join("mle_params.toml");
+    let mle = leaf(&work, "if2.toml").join("mle_params.toml");
     runs.push(("pfilter", run(&a(&[
         "pfilter", "sir.camdl", "--fit", "if2.toml", "--params", mle.to_str().unwrap(),
         "--particles", "200", "--seed", "1",
@@ -265,16 +268,14 @@ fn every_recorded_fact_is_shown() {
     runs.push(("lineage.cohort", run(&a(&["lineage", "cohort", "ll.tsv", "--event", "infection", "--window", "7", "--output", "coh.tsv"]))));
     runs.push(("lineage.refused", run(&a(&["lineage", "tree", "nope.tsv", "--scheme", "flat:1.0"]))));
     runs.push(("list", run(&a(&["list"]))));
-    let if2_leaf = leaf(&work, "if2", "if2");
+    let if2_leaf = leaf(&work, "if2.toml");
     runs.push(("show", run(&a(&["show", if2_leaf.to_str().unwrap()]))));
     runs.push(("cat", run(&a(&["cat", &sim_id]))));
     runs.push(("show.refused", run(&a(&["show", "zzzzzzzz"]))));
     runs.push(("fit.diff", run(&a(&["fit", "diff", "if2.toml", "pmmh_converged.toml"]))));
     runs.push(("fit.diff.refused", run(&a(&["fit", "diff", "if2.toml", "nope.toml"]))));
-    runs.push(("fit.table", run(&a(&["fit", "table", "results/fits"]))));
-    runs.push(("fit.table.md", run(&a(&["fit", "table", "results/fits", "--format", "md"]))));
-
-    run_equals_loader(&work, |args| run(&a(args)));
+    runs.push(("fit.table", run(&a(&["fit", "table", "camdl-store"]))));
+    runs.push(("fit.table.md", run(&a(&["fit", "table", "camdl-store", "--format", "md"]))));
 
     let facts = read_facts();
     assert!(facts.len() > 100, "facts.tsv holds {} facts; the reader is broken", facts.len());
@@ -307,6 +308,8 @@ fn every_recorded_fact_is_shown() {
             .collect();
         panic!("{} recorded fact(s) not shown:\n{}\n\n{}", missing.len(), missing.join("\n"), shown.join("\n"));
     }
+
+    run_equals_loader(&work, |args| run(&a(args)));
 }
 
 /// The report `fit run` built from memory equals the one `fit summary` builds
@@ -321,25 +324,18 @@ fn every_recorded_fact_is_shown() {
 fn run_equals_loader(work: &Path, run: impl Fn(&[&str]) -> Output) {
     let mut from_runs: Vec<(PathBuf, serde_json::Value)> = Vec::new();
     let mut failed = 0;
-    let fits = work.join("results/fits");
-    for fit in std::fs::read_dir(&fits).unwrap().flatten().map(|e| e.path()).filter(|p| p.is_dir()) {
-        for method in std::fs::read_dir(&fit).unwrap().flatten().map(|e| e.path()).filter(|p| p.is_dir()) {
-            // A method leaf is `seed_*`; `predict/` and other derived
-            // outputs under a fit are not method runs.
-            let leaves = std::fs::read_dir(&method).unwrap().flatten().map(|e| e.path())
-                .filter(|p| p.is_dir() && p.file_name().unwrap().to_string_lossy().starts_with("seed_"));
-            for leaf in leaves {
-                let log = leaf.join("events.jsonl");
-                let text = std::fs::read_to_string(&log).unwrap_or_else(|e| panic!("{}: {e}", log.display()));
-                let last: serde_json::Value = serde_json::from_str(text.lines().last().expect("a non-empty log"))
-                    .expect("one JSON event per line");
-                assert_eq!(last["event"], "method_report", "{} ends with its report", log.display());
-                match last["outcome"].as_str() {
-                    Some("completed") => from_runs.push((leaf, last["report"].clone())),
-                    Some("failed") => failed += 1,
-                    other => panic!("{}: outcome {other:?}", log.display()),
-                }
-            }
+    for leaf in fit_store_support::runs(&store(work)) {
+        let log = leaf.join("events.jsonl");
+        let text = std::fs::read_to_string(&log).unwrap_or_else(|e| panic!("{}: {e}", log.display()));
+        // Each stored line is `{at, event, format, n}`, the event itself in `event`.
+        let line: serde_json::Value = serde_json::from_str(text.lines().last().expect("a non-empty log"))
+            .expect("one JSON event per line");
+        let last = &line["event"];
+        assert_eq!(last["event"], "method_report", "{} ends with its report", log.display());
+        match last["outcome"].as_str() {
+            Some("completed") => from_runs.push((leaf, last["report"].clone())),
+            Some("failed") => failed += 1,
+            other => panic!("{}: outcome {other:?}", log.display()),
         }
     }
     let mut methods: Vec<String> = from_runs.iter()

@@ -140,7 +140,7 @@ fn setup(tag: &str, model_src: &str) -> Option<(TempDir, PathBuf, PathBuf)> {
 
 fn fit_toml(out_dir: &Path, ir: &Path, data: &Path, algorithm: &str) -> String {
     format!(r#"
-output_dir = "{out}"
+store = "{out}"
 [model]
 camdl = "{ir}"
 [data.observations]

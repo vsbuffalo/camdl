@@ -104,7 +104,7 @@ dt = 1.0
      method_body = method_body)).unwrap();
 
     let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .env("CAMDL_OUTPUT_DIR", dir.join("results"))
+        .env("CAMDL_STORE", dir.join("results"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDLC", &camdlc)
         .args(["fit", "run", &fit_toml.to_string_lossy(), "--seed", "1"])
@@ -256,7 +256,7 @@ dt = 1.0
 "#, ir = golden_ir().display(), data = data.display())).unwrap();
 
     let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .env("CAMDL_OUTPUT_DIR", dir.join("results"))
+        .env("CAMDL_STORE", dir.join("results"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDLC", &camdlc)
         .args(["fit", "run", &problem.to_string_lossy(), "--seed", "1"])

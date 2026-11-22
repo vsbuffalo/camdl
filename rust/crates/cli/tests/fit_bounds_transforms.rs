@@ -115,7 +115,7 @@ const IF2: &str = "algorithm = \"if2\"\nbackend = \"chain_binomial\"\nchains = 2
 fn run_fit(dir: &Path, ir: &Path, estimate: &str, method: &str, tag: &str) -> (Output, PathBuf) {
     let results = dir.join(format!("results_{tag}"));
     let toml = format!(
-        "output_dir = \"{out}\"\n[model]\ncamdl = \"{ir}\"\n[data.observations]\ncases = \"{data}\"\n\
+        "store = \"{out}\"\n[model]\ncamdl = \"{ir}\"\n[data.observations]\ncases = \"{data}\"\n\
          [estimate]\n{estimate}\n[fixed]\nbeta = 0.3\ngamma = 0.25\n[method]\n{method}\n",
         out = results.file_name().unwrap().to_string_lossy(),
         ir = ir.file_name().unwrap().to_string_lossy(),

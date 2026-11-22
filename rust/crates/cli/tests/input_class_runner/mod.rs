@@ -144,7 +144,10 @@ pub fn command(fx: &Fixture, cwd: &Path, set: &[(String, String)], drop: &[Strin
         .env("CAMDLC", &fx.camdlc)
         // A private compiled-IR cache: never the user's, never shared with
         // another test process.
-        .env("CAMDL_IR_CACHE_DIR", fx.dir.join("ir-cache"));
+        .env("CAMDL_IR_CACHE_DIR", fx.dir.join("ir-cache"))
+        // The run store of the working directory, named, so no command falls
+        // back to a store it was not given; an invocation may set another.
+        .env("CAMDL_STORE", cwd.join("camdl-store"));
     for k in drop {
         cmd.env_remove(k);
     }
@@ -155,7 +158,9 @@ pub fn command(fx: &Fixture, cwd: &Path, set: &[(String, String)], drop: &[Strin
 }
 
 /// Run `inv` in the store `store` (its working directory, under which
-/// `results/` is the default store root) and return the output.
+/// `results/` is the default root of the store a profile writes) and return
+/// the output. A fit run, or a reader of a stored fit, finds the run store
+/// through the `CAMDL_STORE` the invocation sets.
 pub fn run_in(store: &Path, inv: &Invocation) -> Output {
     let mut cmd = command(&inv.fx, store, &inv.set, &inv.drop);
     cmd.args(&inv.args);
@@ -232,8 +237,9 @@ impl Stored {
     }
 }
 
-/// Every leaf under `root`: a directory holding a `run.json`, outside a
-/// quarantined or earlier attempt.
+/// Every leaf under `root`: a directory holding a `run.json` that records its
+/// levels, outside a quarantined or earlier attempt. A fit run's `run.json`
+/// in the run store records none, so it is not one.
 pub fn leaves(root: &Path) -> Vec<Leaf> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -360,21 +366,56 @@ pub fn assert_removed(spelling: &str, with: &Invocation) {
     assert!(leaves(store.path()).is_empty(), "a refused run stores nothing");
 }
 
-/// The value the fit folder holding the fit leaf `leaf` records for the fixed
-/// parameter `name` (`fit.meta.json` `fixed`): a sweep point's value.
-pub fn segment_fixed(leaf: &Path, name: &str) -> Option<f64> {
-    let segment = leaf.parent()?.parent()?;
-    let meta: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(segment.join("fit.meta.json")).ok()?).ok()?;
-    meta["fixed"][name].as_f64()
+/// Every fit run in the run store at `root`: each folder whose
+/// `identity.json` names the kind `fit_run`, in path order.
+pub fn fit_runs(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if !p.is_dir() || e.file_name().to_string_lossy().starts_with('.') {
+                continue;
+            }
+            if let Ok(text) = std::fs::read_to_string(p.join("identity.json")) {
+                let id: serde_json::Value = serde_json::from_str(&text).unwrap();
+                if id["kind"] == "fit_run" {
+                    out.push(p.clone());
+                }
+            }
+            stack.push(p);
+        }
+    }
+    out.sort();
+    out
 }
 
-/// The fit leaves of a `fit run --sweep NAME=a,b` in `stored`, as the leaf at
-/// the file's own value `archived` and the leaf at the other point.
-pub fn sweep_points(stored: &Stored, name: &str, archived: f64) -> (Leaf, Leaf) {
-    let fits: Vec<Leaf> = stored.of("fit_method").into_values().cloned().collect();
-    assert_eq!(fits.len(), 2, "one fit leaf per sweep point");
-    let (same, other): (Vec<Leaf>, Vec<Leaf>) =
-        fits.into_iter().partition(|l| segment_fixed(&l.dir, name) == Some(archived));
+/// A fit run's `run_inputs.json`: its method, seed and run id among others.
+pub fn run_inputs(run: &Path) -> serde_json::Value {
+    serde_json::from_str(&std::fs::read_to_string(run.join("run_inputs.json")).unwrap()).unwrap()
+}
+
+/// The problem folder a fit run sits in (`<problem>/runs/<method>-…/seed_…`).
+pub fn problem_of(run: &Path) -> PathBuf {
+    run.ancestors().nth(3).unwrap().to_path_buf()
+}
+
+/// The value the problem of the fit run `run` fixes the parameter `name` at
+/// (its `problem.toml` `[fixed]`): a sweep point's value.
+pub fn point_fixed(run: &Path, name: &str) -> Option<f64> {
+    let text = std::fs::read_to_string(problem_of(run).join("problem.toml")).ok()?;
+    let doc: toml::Table = text.parse().ok()?;
+    doc.get("fixed")?.get(name)?.as_float()
+}
+
+/// The fit runs of a `fit run --sweep NAME=a,b` in the run store at `root`,
+/// as the run at the file's own value `archived` and the run at the other
+/// point.
+pub fn sweep_points(root: &Path, name: &str, archived: f64) -> (PathBuf, PathBuf) {
+    let fits = fit_runs(root);
+    assert_eq!(fits.len(), 2, "one fit run per sweep point: {fits:?}");
+    let (same, other): (Vec<PathBuf>, Vec<PathBuf>) =
+        fits.into_iter().partition(|r| point_fixed(r, name) == Some(archived));
     assert_eq!((same.len(), other.len()), (1, 1), "one point at the archived value, one elsewhere");
     (same.into_iter().next().unwrap(), other.into_iter().next().unwrap())
 }

@@ -16,7 +16,7 @@
 //! label (provenance). The removed spellings are refused here, before any
 //! file is read. The algorithm and backend are parsed, the IF2 defaults
 //! applied (`--iterations`, `--cooling`, `--cooling-target-iters`), the
-//! `--fit` handle resolved once ([`crate::fit::handle::resolve_fit_problem`]),
+//! `--fit` argument resolved once ([`crate::fit_store::FitArg::read`]),
 //! its `[config] allow_degenerate_rates` and `allow_forcing_extrapolation`
 //! folded with the flags, its nl-* method's budget and `[method] starts` read,
 //! the starts rule in force decided (`--starts`, else the fit's, qualified by
@@ -34,7 +34,7 @@
 
 use crate::args::types::{DataSpec, RwSd, SweepSpec};
 use crate::fit::fitted_model::FittedSettings;
-use crate::fit::handle::FitProblem;
+use crate::fit_store::FitArg as FitProblem;
 use crate::pfilter_config::ScenarioFlags;
 use crate::profile::ProfileAlgo;
 
@@ -301,7 +301,10 @@ pub(crate) fn resolve(
 
     // The fit `--fit` names: read once, here.
     let fit: Option<FitProblem> = fit.as_ref().map(|handle| {
-        let f = crate::fit::handle::resolve_fit_problem(&handle.to_string_lossy()).unwrap_or_else(|e| {
+        // A stored fit is read in the run store, where `fit run` stores fits;
+        // the profile itself stays on the old store.
+        let fit_store = crate::camdl_store::open_existing(&crate::camdl_store::read_root());
+        let f = FitProblem::read(&handle.to_string_lossy(), fit_store.as_ref()).unwrap_or_else(|e| {
             out.fail(format!("error: --fit {}: {e}", handle.display()));
         });
         out.say(format_args!("profile: using --fit '{}' for priors / bounds / [fixed]", f.handle));

@@ -133,7 +133,7 @@ fn every_value_flag_that_names_a_constant_is_refused_with_its_hint() {
         "simulate --sweep omega",
     );
     // Even at its declared value (D9).
-    std::fs::write(dir.join("fit.toml"), "output_dir = \"res\"\n\
+    std::fs::write(dir.join("fit.toml"), "store = \"res\"\n\
         [model]\ncamdl = \"model.camdl\"\n\
         [data.observations]\nweekly_cases = \"weekly_cases.tsv\"\n\
         [estimate]\nbeta = { start = 0.4 }\n\

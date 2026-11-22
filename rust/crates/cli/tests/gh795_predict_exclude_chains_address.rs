@@ -3,12 +3,12 @@
 //!
 //! `--exclude-chains` reports a DIFFERENT posterior (its own warning says so:
 //! "Post-hoc chain exclusion BIASES the posterior toward the retained mode").
-//! Before this fix the excluded set reached `predictive.json` as a
-//! `chain_selection` stamp but never reached the artifact's location, so
-//! `fit predict --exclude-chains 3` replaced the run's canonical predictive
-//! with a three-chain one, and a second exclusion replaced that. A reader —
-//! `camdl-scope`, or a person — then rendered a cherry-picked subset as the
-//! posterior predictive of the fit, with nothing in the run directory saying so.
+//! If the excluded set reached `predictive.json` as a `chain_selection` stamp
+//! but not the artifact's location, `fit predict --exclude-chains 3` would
+//! replace the run's canonical predictive with a three-chain one, and a reader
+//! — `camdl-scope`, or a person — would render a cherry-picked subset as the
+//! posterior predictive of the fit, with nothing in the run directory saying
+//! so.
 //!
 //! What is pinned here:
 //!
@@ -17,27 +17,27 @@
 //! - the address is keyed on the normalised SET, so `4,2` and `2,4` are one
 //!   address and a repeat collapses;
 //! - the three addresses hold genuinely different clouds (120 / 90 / 60 draws);
-//! - with no `--exclude-chains`, the artifact names are exactly the historical
-//!   ones — a `camdl-scope` reader of an unexcluded run is unaffected.
+//! - with no `--exclude-chains`, the artifact names are exactly the
+//!   unsuffixed ones — a `camdl-scope` reader of an unexcluded run is
+//!   unaffected.
 //!
-//! Fixture: one tiny real PGAS fit for a valid self-contained segment, then its
-//! `draws.tsv` is replaced by a controlled 4-chain cloud (three tight chains
-//! plus one deliberate outlier), mirroring `exclude_chains_e2e.rs` — a KNOWN
-//! chain structure a converging sampler would not reliably produce.
+//! Fixture: one small real four-chain PGAS fit, 30 post-burn-in draws per
+//! chain. Which draws a selection keeps is checked against the chain column
+//! of the run's own `draws.tsv`.
+
+mod fit_store_support;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Where the latest `fit predict` of a run in `seg` wrote:
-/// `<seg>/predict/<run id>-<address key>/` (gh#896), the directory whose
-/// `report*.json` (one written by every predict) is newest. A path that does not
-/// exist while nothing has been predicted.
+/// The stored prediction under `seg` (a run folder, or any folder above
+/// runs) whose `report*.json` is newest: the latest `fit predict`'s output. A
+/// path that does not exist while nothing has been predicted.
 fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
-    std::fs::read_dir(seg.join("predict"))
-        .into_iter().flatten().flatten().map(|e| e.path())
+    fit_store_support::predictions(seg)
+        .into_iter()
         .filter_map(|d| {
-            // Newest `report*.json` (keyed by chain selection) in the directory.
             let t = std::fs::read_dir(&d).ok()?.flatten()
                 .filter(|e| {
                     let n = e.file_name().to_string_lossy().into_owned();
@@ -120,7 +120,7 @@ simulate {
 const DATA: &str =
     "time\tweekly_cases\n7\t16\n14\t166\n21\t626\n28\t1303\n35\t1260\n42\t1023\n49\t327\n56\t91\n";
 
-const FIT_TOML: &str = r#"output_dir = "results"
+const FIT_TOML: &str = r#"store = "results"
 
 [model]
 camdl = "model.camdl"
@@ -141,69 +141,57 @@ k   = 10.0
 [method]
 algorithm = "pgas"
 backend = "chain_binomial"
-chains = 2
+chains = 4
 particles = 100
 sweeps = 40
 burn_in = 10
 thin = 1
 "#;
 
-/// Draws per chain in the controlled cloud.
+/// Post-burn-in draws per chain: `sweeps - burn_in` at `thin = 1`.
 const DRAWS_PER_CHAIN: usize = 30;
 
-/// A controlled 4-chain cloud: chains 0,1,2 tight around a slow epidemic,
-/// chain 3 a stuck outlier at a fast one. The
-/// per-chain phase shift gives non-identical sequences with the same mean.
-fn build_cloud() -> String {
-    let mut s = String::from("chain\tdraw\tbeta\tgamma\tN0\tI0\trho\tk\n");
-    let n = DRAWS_PER_CHAIN;
-    for chain in 0..4 {
-        for draw in 0..n {
-            let i = (draw + chain) % n;
-            let jitter = ((i % 11) as f64 - 5.0) * 0.002;
-            let (beta, gamma) = if chain == 3 {
-                (0.85 + jitter, 0.05)
-            } else {
-                (0.35 + jitter, 0.14 + jitter * 0.1)
-            };
-            s.push_str(&format!(
-                "{chain}\t{draw}\t{beta:.4}\t{gamma:.4}\t10000\t10\t0.6\t10\n"
-            ));
-        }
+/// The `draws.tsv` lines of chain `chain`, with the header first.
+fn chain_rows(draws_tsv: &str, chain: &str) -> String {
+    let mut lines = draws_tsv.lines().filter(|l| !l.starts_with('#'));
+    let header = lines.next().expect("a draws.tsv header");
+    let ci = header.split('\t').position(|c| c == "chain").expect("a chain column");
+    let mut out = format!("{header}\n");
+    for l in lines.filter(|l| l.split('\t').nth(ci) == Some(chain)) {
+        out.push_str(l);
+        out.push('\n');
     }
-    s
+    out
+}
+
+/// The `beta` values of chain `chain`'s draws.
+fn chain_betas(draws_tsv: &str, chain: &str) -> Vec<f64> {
+    let rows = chain_rows(draws_tsv, chain);
+    let mut lines = rows.lines();
+    let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
+    let bi = header.iter().position(|c| *c == "beta").expect("a beta column");
+    lines.map(|l| l.split('\t').nth(bi).unwrap().parse().unwrap()).collect()
 }
 
 fn run(bin: &Path, dir: &Path, args: &[&str]) -> std::process::Output {
     Command::new(bin).env_remove("CLICOLOR_FORCE")
         .args(args)
         .current_dir(dir)
+        .env("CAMDL_STORE", dir.join("results"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output()
         .expect("spawn camdl")
 }
 
+/// The one stored fit run under the store at `results`.
 fn segment_dir(results: &Path) -> PathBuf {
-    std::fs::read_dir(results.join("fits"))
-        .expect("results/fits exists")
-        .flatten()
-        .map(|e| e.path())
-        .find(|p| p.is_dir())
-        .expect("one fit segment")
+    fit_store_support::the_run(results)
 }
 
-fn find_draws_tsv(dir: &Path) -> Option<PathBuf> {
-    for e in std::fs::read_dir(dir).ok()?.flatten() {
-        let p = e.path();
-        if p.is_dir() {
-            if let Some(found) = find_draws_tsv(&p) {
-                return Some(found);
-            }
-        } else if p.file_name().and_then(|n| n.to_str()) == Some("draws.tsv") {
-            return Some(p);
-        }
-    }
-    None
+/// The run's `draws.tsv`.
+fn find_draws_tsv(run: &Path) -> Option<PathBuf> {
+    let p = run.join("draws.tsv");
+    p.is_file().then_some(p)
 }
 
 struct Fixture {
@@ -224,9 +212,8 @@ impl Fixture {
         run(bin, &self.tmp, &args)
     }
 
-    /// The predictive/quantities artifact names directly under the run's
-    /// predictions directory (`<segment>/predict/<run id>-<address key>/`, gh#896),
-    /// sorted. This IS the run directory as a reader (`ls`, `camdl-scope`) sees
+    /// The predictive/quantities artifact names directly under the latest
+    /// prediction's folder (`<run>/predict/<mode>-<id12>/`), sorted. This IS the run directory as a reader (`ls`, `camdl-scope`) sees
     /// it, which is the surface the bug corrupts.
     fn artifact_names(&self) -> Vec<String> {
         let mut names: Vec<String> = std::fs::read_dir(predict_out(&self.seg))
@@ -258,7 +245,7 @@ fn assert_ok(out: &std::process::Output, what: &str) {
     );
 }
 
-/// Set up a fit segment whose `draws.tsv` is the controlled 4-chain cloud.
+/// Fit the four-chain fixture into a store of its own.
 fn setup(bin: &Path, label: &str) -> Fixture {
     let tmp = std::env::temp_dir().join(format!(
         "camdl_gh795_{}_{label}",
@@ -270,12 +257,14 @@ fn setup(bin: &Path, label: &str) -> Fixture {
     std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
     std::fs::write(tmp.join("fit.toml"), FIT_TOML).unwrap();
 
-    let out = run(bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    let out = run(bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert_ok(&out, "fit run");
 
     let seg = segment_dir(&tmp.join("results"));
-    let draws = find_draws_tsv(&seg).expect("draws.tsv written by the fit");
-    std::fs::write(&draws, build_cloud()).unwrap();
+    let draws = std::fs::read_to_string(find_draws_tsv(&seg).expect("draws.tsv written by the fit")).unwrap();
+    for chain in ["0", "1", "2", "3"] {
+        assert_eq!(chain_betas(&draws, chain).len(), DRAWS_PER_CHAIN, "chain {chain}'s draws");
+    }
     Fixture { tmp, seg }
 }
 
@@ -367,7 +356,7 @@ fn two_exclusions_are_two_addresses_and_neither_is_the_pooled_one() {
          exclusions and each overwrote the last"
     );
     assert_eq!(
-        free_forward_n_draws(&read(&excl13_dir, "predictive-excl1,3/weekly_cases.tsv")),
+        free_forward_n_draws(&read(&excl13_dir, "predictive-excl1_3/weekly_cases.tsv")),
         BTreeSet::from([60]),
         "two chains remain"
     );
@@ -380,7 +369,7 @@ fn two_exclusions_are_two_addresses_and_neither_is_the_pooled_one() {
     );
     for (dir, name, excluded, kept) in [
         (&excl3_dir, "predictive-excl3.json", vec![3], vec![0, 1, 2]),
-        (&excl13_dir, "predictive-excl1,3.json", vec![1, 3], vec![0, 2]),
+        (&excl13_dir, "predictive-excl1_3.json", vec![1, 3], vec![0, 2]),
     ] {
         let j: serde_json::Value = serde_json::from_str(&read(dir, name)).unwrap();
         let cs = j
@@ -403,46 +392,36 @@ fn two_exclusions_are_two_addresses_and_neither_is_the_pooled_one() {
     // 5. The quantities sidecar is posterior-derived too. The pooled table must
     //    survive a chain-subset run.
     assert!(
-        pooled_dir.join("quantities/peak.tsv").exists(),
+        pooled_dir.join("quantities-model/peak.tsv").exists(),
         "the pooled quantities table survives the exclusions"
     );
     assert!(
-        excl3_dir.join("quantities-excl3/peak.tsv").exists()
-            && excl13_dir.join("quantities-excl1,3/peak.tsv").exists(),
+        excl3_dir.join("quantities-model-excl3/peak.tsv").exists()
+            && excl13_dir.join("quantities-model-excl1_3/peak.tsv").exists(),
         "each exclusion writes its own quantities table"
     );
 
-    // 6. Discovery: `camdl show <fit>` enumerates every address the fit holds,
-    //    so a user finds the subsets without knowing the naming rule. A
-    //    fixed-name envelope would list only the pooled artifact and read as
-    //    "the subset was never generated".
-    let seg = f.seg.to_string_lossy().into_owned();
-    let out = run(&bin, &f.tmp, &["show", &seg]);
-    assert_ok(&out, "camdl show <segment>");
-    let shown = String::from_utf8_lossy(&out.stdout);
-    for expected in [
-        "predictive/weekly_cases.tsv",
-        "predictive-excl3/weekly_cases.tsv",
-        "predictive-excl1,3/weekly_cases.tsv",
-        "predictive.json",
-        "predictive-excl3.json",
-        "predictive-excl1,3.json",
-        "quantities-excl3/peak.tsv",
+    // 6. Discovery: each address is a stored prediction, and `camdl show` of
+    //    it lists its keyed files, so a user finds a subset without knowing
+    //    the naming rule.
+    for (dir, expected) in [
+        (&pooled_dir, ["predictive/weekly_cases.tsv", "predictive.json"]),
+        (&excl3_dir, ["predictive-excl3/weekly_cases.tsv", "predictive-excl3.json"]),
+        (&excl13_dir, ["predictive-excl1_3/weekly_cases.tsv", "predictive-excl1_3.json"]),
     ] {
-        assert!(
-            shown.contains(expected),
-            "the fit envelope must list {expected}; got:\n{shown}"
-        );
+        let d = dir.to_string_lossy().into_owned();
+        let out = run(&bin, &f.tmp, &["show", &d]);
+        assert_ok(&out, "camdl show <prediction>");
+        let shown = String::from_utf8_lossy(&out.stdout);
+        for e in expected {
+            assert!(shown.contains(e), "the prediction lists {e}; got:\n{shown}");
+        }
     }
 
     // …and the name `show` prints is a name `cat --stream` takes, so the
     // discovery loop closes: no keyed artifact is listed but unreachable.
-    // `--mode free_forward` keys the predict's address (gh#896), so its
-    // files are listed and read under `predict/<dir>/`.
-    let prefix = format!("predict/{}/", excl3_dir.file_name().unwrap().to_string_lossy());
-    let stream = format!("{prefix}predictive-excl3/weekly_cases.tsv");
-    assert!(shown.contains(&stream), "show lists {stream}; got:\n{shown}");
-    let out = run(&bin, &f.tmp, &["cat", &seg, "--stream", &stream]);
+    let excl3 = excl3_dir.to_string_lossy().into_owned();
+    let out = run(&bin, &f.tmp, &["cat", &excl3, "--stream", "predictive-excl3/weekly_cases.tsv"]);
     assert_ok(&out, "camdl cat --stream predictive-excl3/weekly_cases.tsv");
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
@@ -463,7 +442,7 @@ fn the_address_is_the_normalised_set_not_the_string() {
 
     assert_ok(&f.predict(&bin, Some("1,3")), "predict --exclude-chains 1,3");
     let after_first = f.artifact_names();
-    let canonical = f.read("predictive-excl1,3/weekly_cases.tsv");
+    let canonical = f.read("predictive-excl1_3/weekly_cases.tsv");
 
     let repeated = f.predict(&bin, Some("1,3,1"));
     assert!(!repeated.status.success(), "a repeated chain id is refused");
@@ -483,7 +462,7 @@ fn the_address_is_the_normalised_set_not_the_string() {
              same address, not a second one"
         );
         assert_eq!(
-            f.read("predictive-excl1,3/weekly_cases.tsv"),
+            f.read("predictive-excl1_3/weekly_cases.tsv"),
             canonical,
             "`{spelling}` rewrites the same artifact (a correct collision)"
         );
@@ -505,14 +484,14 @@ fn without_the_flag_the_artifact_names_are_the_historical_ones() {
         vec![
             "predictive",
             "predictive.json",
-            "quantities",
+            "quantities-model",
             "quantities.json"
         ],
         "an unexcluded run must land exactly where it always has — camdl-scope \
          reads `predictive/`"
     );
     assert!(f.exists("predictive/weekly_cases.tsv"));
-    assert!(f.exists("quantities/peak.tsv"));
+    assert!(f.exists("quantities-model/peak.tsv"));
 
     // `observed/` is the fit's DATA, identical under any selection, so it never
     // moves — a keyed copy would be a pointless duplicate of the same bytes.
@@ -580,7 +559,7 @@ fn chains_and_its_complementary_exclusion_are_one_prediction() {
 }
 
 /// `cat --chains` on `draws.tsv` prints the kept chains' rows verbatim, and is
-/// refused for a stream whose recorded schema has no `chain` column.
+/// refused for any other stream.
 #[test]
 fn cat_selects_the_rows_of_draws_tsv_by_chain() {
     let bin = require_binary();
@@ -591,13 +570,7 @@ fn cat_selects_the_rows_of_draws_tsv_by_chain() {
     let out = run(&bin, &f.tmp, &["cat", &leaf, "--stream", "draws.tsv", "--chains", "3"]);
     assert_ok(&out, "cat --chains 3");
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
-    let mut want = String::new();
-    for (i, line) in build_cloud().lines().enumerate() {
-        if i == 0 || line.starts_with("3\t") {
-            want.push_str(line);
-            want.push('\n');
-        }
-    }
+    let want = chain_rows(&std::fs::read_to_string(&draws).unwrap(), "3");
     assert_eq!(text, want, "the header and chain 3's rows, byte for byte");
     assert!(String::from_utf8_lossy(&out.stderr).contains("--chains: keeping only chain(s) 3"));
 
@@ -609,19 +582,22 @@ fn cat_selects_the_rows_of_draws_tsv_by_chain() {
     let out = run(&bin, &f.tmp, &["cat", &leaf, "--stream", "fit_state.toml", "--chains", "0"]);
     assert!(!out.status.success(), "a stream without a chain column is refused");
     let e = String::from_utf8_lossy(&out.stderr);
-    assert!(e.contains("`fit_state.toml` has no `chain` column"), "{e}");
+    assert!(e.contains("--chains selects rows by chain") && e.contains("draws.tsv"),
+        "the refusal names the one stream the flag applies to: {e}");
 
     let _ = std::fs::remove_dir_all(&f.tmp);
 }
 
 /// `simulate --draws posterior --chains 3` replays only chain 3's draws: every
-/// replayed `beta` is the outlier chain's.
+/// replayed `beta` is one of chain 3's, and under `--exclude-chains 3` none is.
 #[test]
 fn simulate_replays_only_the_selected_chains() {
     let bin = require_binary();
     let f = setup(&bin, "simulate");
     let draws = find_draws_tsv(&f.seg).unwrap();
     let leaf = draws.parent().unwrap().to_string_lossy().into_owned();
+    let chain3 = chain_betas(&std::fs::read_to_string(&draws).unwrap(), "3");
+    let in_chain3 = |b: &f64| chain3.iter().any(|c| (c - b).abs() <= 1e-12 * c.abs().max(1.0));
     let read_betas = |path: &Path| -> Vec<f64> {
         let text = std::fs::read_to_string(path).unwrap();
         let mut lines = text.lines();
@@ -636,12 +612,14 @@ fn simulate_replays_only_the_selected_chains() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("--chains: keeping only chain(s) 3"));
     let betas = read_betas(&f.tmp.join("kept.tsv"));
     assert_eq!(betas.len(), 5);
-    assert!(betas.iter().all(|b| *b > 0.8), "every draw is chain 3's: {betas:?}");
+    assert!(betas.iter().all(in_chain3), "every draw is chain 3's: {betas:?} vs {chain3:?}");
 
     let out = run(&bin, &f.tmp, &["simulate", "model.camdl", "--draws", "posterior",
         "--fit", &leaf, "--exclude-chains", "3", "-n", "5", "--draws-out", "dropped.tsv"]);
     assert_ok(&out, "simulate --exclude-chains 3");
-    assert!(read_betas(&f.tmp.join("dropped.tsv")).iter().all(|b| *b < 0.5));
+    let dropped = read_betas(&f.tmp.join("dropped.tsv"));
+    assert_eq!(dropped.len(), 5);
+    assert!(!dropped.iter().any(in_chain3), "no draw is chain 3's: {dropped:?}");
 
     let out = run(&bin, &f.tmp, &["simulate", "model.camdl", "--chains", "3"]);
     assert!(!out.status.success(), "--chains needs --draws posterior");

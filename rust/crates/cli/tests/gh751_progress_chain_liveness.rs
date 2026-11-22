@@ -1,19 +1,20 @@
 //! gh#751: `progress.json` says how many chains are actually sampling.
 //!
-//! While a PGAS method runs, `progress.json` is the only thing written at the
-//! seed level, and it carried a global sweep counter and nothing about chains:
+//! While a PGAS method runs, `progress.json` is the only thing written in the
+//! run's folder, and a snapshot carrying only a global sweep counter says
+//! nothing about chains:
 //!
 //! ```json
 //! {"updated_at": 1787670244, "pid": 2882,
 //!  "state": {"running": {"phase": "burn_in", "step": 276, "total": 2000}}}
 //! ```
 //!
-//! A fit that refused 23 of its 24 chains at their starts wrote exactly that,
-//! byte-for-byte what a healthy 24-chain fit writes, for hours. Refusal is not
+//! A fit that refused 23 of its 24 chains at their starts would write exactly
+//! that, byte-for-byte what a healthy 24-chain fit writes, for hours. Refusal is not
 //! rare in the downstream national models — eight consecutive arms got between
 //! 1 and 16 of the 24 chains they paid for — and a chain is refused at its
-//! START, so the count is knowable in the first minutes. It was reported only
-//! afterwards, in `fit_state.toml` and `diagnostics.json`.
+//! START, so the count is knowable in the first minutes, not only afterwards
+//! in `fit_state.toml` and `diagnostics.json`.
 //!
 //! The fixture: `iota = 1e-4` at `S = 1000` gives an expected importation count
 //! of 0.6 over the window, so the unconditional reference draw is all-zero
@@ -21,6 +22,8 @@
 //! cannot rescue it. `starts = "single"` puts every chain at that same point,
 //! and a point rule permits no redraw (gh#887), so the chains that draw badly
 //! are refused outright — a real fit in which some chains run and some do not.
+
+mod fit_store_support;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -67,7 +70,7 @@ simulate { from = 0 'days  to = 6 'days }
 
 const DATA: &str = "time\tcases\n1\t150\n2\t300\n3\t450\n4\t550\n5\t600\n6\t620\n";
 
-const FIT_TOML: &str = r#"output_dir = "results"
+const FIT_TOML: &str = r#"store = "results"
 [model]
 camdl = "sir.camdl"
 [data.observations]
@@ -91,22 +94,11 @@ thin           = 1
 starts         = "single"
 "#;
 
-/// The seed leaf: the directory holding `progress.json` and `diagnostics.json`.
+/// The run folder, which holds `progress.json` and `diagnostics.json`.
 fn seed_leaf(root: &Path) -> PathBuf {
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        if d.join("progress.json").is_file() {
-            return d;
-        }
-        if let Ok(entries) = std::fs::read_dir(&d) {
-            for e in entries.flatten() {
-                if e.path().is_dir() {
-                    stack.push(e.path());
-                }
-            }
-        }
-    }
-    panic!("no progress.json under {}", root.display());
+    let run = fit_store_support::the_run(root);
+    assert!(run.join("progress.json").is_file(), "no progress.json in {}", run.display());
+    run
 }
 
 fn read_json(p: &Path) -> serde_json::Value {
@@ -129,6 +121,7 @@ fn progress_json_names_the_refused_chains_and_counts_them() {
     let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["fit", "run", "fit.toml", "--seed", "1", "--progress", "none"])
         .current_dir(&tmp)
+        .env("CAMDL_STORE", tmp.join("results"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output()
         .expect("spawn camdl");
@@ -139,9 +132,13 @@ fn progress_json_names_the_refused_chains_and_counts_them() {
     );
 
     let leaf = seed_leaf(&tmp.join("results"));
-    let progress = read_json(&leaf.join("progress.json"));
+    // A stored run's `progress.json` holds the method's last snapshot under
+    // `snapshot`, beside the time and format the run store stamps on it.
+    let stored = read_json(&leaf.join("progress.json"));
+    let progress = &stored["snapshot"];
+    assert!(progress.is_object(), "progress.json holds the method's snapshot:\n{stored:#}");
 
-    // The three fields every existing reader has are untouched.
+    // The three fields every snapshot reader has are untouched.
     assert!(progress["updated_at"].is_u64(), "{progress:#}");
     assert!(progress["pid"].is_u64(), "{progress:#}");
     assert_eq!(progress["state"], "done", "{progress:#}");

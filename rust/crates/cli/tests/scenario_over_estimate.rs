@@ -103,7 +103,7 @@ fn setup(dir: &Path) -> PathBuf {
 fn fit_toml(dir: &Path, name: &str, top: &str, estimate: &str, fixed: &str) -> PathBuf {
     let p = dir.join(format!("{name}.toml"));
     std::fs::write(&p, format!(
-        "output_dir = \"res_{name}\"\n{top}\n[model]\ncamdl = \"m.ir.json\"\n\
+        "store = \"res_{name}\"\n{top}\n[model]\ncamdl = \"m.ir.json\"\n\
          [data.observations]\ncases = \"cases.tsv\"\n[estimate]\n{estimate}\n[fixed]\n{fixed}\n{METHOD}"
     )).unwrap();
     p

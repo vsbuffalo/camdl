@@ -444,7 +444,7 @@ fn fit_records_method_backend_in_mle() {
     // recorded backend tracks the method.)
     let fit_toml = tmp.path().join("fit.toml");
     let body = format!(
-        r#"output_dir = "{out}"
+        r#"store = "{out}"
 
 [model]
 camdl = "{ir}"
@@ -485,7 +485,7 @@ cooling = 0.7
 
     let mle = walkdir(&out).into_iter()
         .find(|p| p.file_name().map(|s| s == "mle_params.toml").unwrap_or(false))
-        .expect("fit must write an mle_params.toml");
+        .expect("fit must store an mle_params.toml");
     let contents = std::fs::read_to_string(&mle).unwrap();
     // The only `backend =` line in mle_params.toml is the [provenance] one.
     let line = contents.lines()

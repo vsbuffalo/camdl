@@ -5408,7 +5408,8 @@ prior-predictive draws (`--draws`), and by `fit predict` over a fitted
 posterior. Without `--quantities-out`, `simulate` prints a note and computes
 none. The tables are `quantities/<name>.tsv`, a bare `value` for a single run
 and quantiles for an ensemble, with a `quantities.json` manifest giving each
-quantity's shape, reduction and censoring. The files a `fit predict` writes are
+quantity's shape, reduction and censoring; a prediction `fit predict` stores
+names the directory `quantities-model/`. The files a `fit predict` writes are
 specified in the run spec (§2.2.2, §2.2.3).
 
 **Run identity.** Quantities are reports computed from a run, so adding or
@@ -5980,8 +5981,9 @@ Every `simulate` cell, one realisation at one parameter point, scenario and
 seed, is stored in the run store: the directory `--store` names, else
 `$CAMDL_STORE`, else `./camdl-store`. A cell's folder is derived from its
 identity, so the same inputs reach the same folder and different inputs never
-share one. The store's layout and its other result kinds are specified in the
-run spec (§2.4, §4.4); this section states what a cell's identity holds.
+share one. The store's layout and its other result kinds, among them the fits
+`camdl fit run` stores there, are specified in the run spec (§2.2, §2.4, §4.4);
+this section states what a cell's identity holds.
 
 ```
 camdl-store/
@@ -6374,8 +6376,8 @@ equivalent is the `[fixed]` table.
 
 ```bash
 camdl fit run     fit.toml [--starts SPEC] [--seed N] [--force] [--sweep "PARAM=V1,V2,..."]
-camdl fit summary results/fits/<dir>/
-camdl fit table   results/fits/
+camdl fit summary @label
+camdl fit table   camdl-store
 ```
 
 `fit run` runs the one `[method]` of a `fit.toml`. A sequence of fits, by
@@ -6386,8 +6388,8 @@ run. A source fit whose convergence verdict failed is refused unless
 `--allow-nonconverged-source` is passed. `--sweep` repeats the fit over a
 Cartesian grid of fixed parameters (run spec §7.3). `fit summary` reports one
 fit's convergence verdict, estimates and diagnostics; `fit table` writes one row
-per fit under a results root. The method ladder is described in the inference
-spec (§6).
+per fit run in a run store (§19). The method ladder is described in the
+inference spec (§6).
 
 **Particle-filter replicates:**
 

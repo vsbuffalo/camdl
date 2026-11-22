@@ -17,21 +17,17 @@
 //!
 //! A class belongs to a (command, input) pair, not to a flag: a group that
 //! several commands flatten (`ForcingExtrapolationArg`, the global options) is
-//! classified in each command's table: [`FIT_RUN`], [`PROFILE`].
-//! `camdl pfilter` and `camdl simulate` declare their inputs' classes in their
+//! classified in each command's table: [`PROFILE`]. `camdl pfilter`,
+//! `camdl simulate` and `camdl fit run` declare their inputs' classes in their
 //! argument types instead (`#[derive(store::Inputs)]`,
-//! `crate::args::PfilterInvocation`, `crate::args::SimulateInvocation`).
+//! `crate::args::PfilterInvocation`, `crate::args::SimulateInvocation`,
+//! `crate::args::FitRunInvocation`).
 //! `every_<command>_flag_is_classified` (below) checks each against every
 //! argument clap accepts, both ways, and `every_<command>_input_has_a_case`
 //! that every input has a case in `rust/crates/cli/tests/<command>_input_classes.rs`.
 
 /// The identity level a keyed input enters at. `Model` is the compiled model,
-/// which the environment table keys. `Fit` and `Method` are the levels of a
-/// fit method leaf ([`runid::inputs::FitDigest`],
-/// [`runid::inputs::MethodLevel`]), whose third is `Seed`: the fit level holds
-/// the model, the data, the problem half of the configuration and the engine,
-/// so an environment variable keyed at `Model` enters a fit at its `Fit`
-/// level. A profile point's are `profile`, `point`,
+/// which the environment table keys. A profile point's are `profile`, `point`,
 /// `method`, `seed` and `start` ([`crate::profile_cas::resolve_profile_point`]);
 /// its inputs key `Profile`, `Method` or `Seed`. The profile level (the base)
 /// holds the model, the data, the problem, the sweep grid and the
@@ -42,7 +38,6 @@
 pub enum Level {
     Model,
     Seed,
-    Fit,
     Method,
     Profile,
 }
@@ -68,73 +63,7 @@ pub enum InputClass {
 #[cfg(test)]
 use InputClass::{Execution, Expands, Keyed, Presentation, Provenance, Removed};
 #[cfg(test)]
-use Level::{Fit, Method, Profile, Seed};
-
-/// `camdl fit run`'s inputs, by clap argument id (the field name), with their
-/// classes: `FitRunArgs`, the group it flattens and the global options.
-///
-/// The fit configuration file is `keyed(fit)`: its problem half is the fit
-/// level, though its `[method]` table keys the method level. Every flag that
-/// writes into `[method]` (`--starts`, the sampler and dt-check flags,
-/// `--binomial`, the pfilter record flags) is `keyed(method)`;
-/// `--allow-forcing-extrapolation`, which writes into `[config]`, and the
-/// global `--no-licm`, which changes the IR, are `keyed(fit)`. `--resume` keys
-/// the method level through its target length and its dep on the base.
-/// `--emit-every` keys a synthetic fit through the data it generates, in the
-/// fit level. `--allow-nonconverged-source` lifts a refusal and changes
-/// nothing a run that starts computes, so it is `execution`.
-#[cfg(test)]
-pub const FIT_RUN: &[(&str, InputClass)] = &[
-    // FitRunArgs
-    ("config", Keyed(Fit)),
-    ("starts", Keyed(Method)),
-    ("starts_chains", Keyed(Method)),
-    ("allow_nonconverged_source", Execution),
-    ("parallel", Execution),
-    ("seed", Keyed(Seed)),
-    ("force", Execution),
-    ("resume", Keyed(Method)),
-    ("sweep", Expands),
-    ("emit_every", Keyed(Fit)),
-    ("decibans_thresh", Keyed(Method)),
-    ("_removed_stage", Removed),
-    ("_removed_init", Removed),
-    ("_removed_posterior", Removed),
-    ("_removed_mle", Removed),
-    ("_removed_params", Removed),
-    ("_removed_survey_path", Removed),
-    ("_removed_survey_top_k", Removed),
-    ("_removed_allow_nonconverged_scout", Removed),
-    ("_removed_init_method", Removed),
-    ("_removed_starts_from", Removed),
-    ("_removed_tempering", Removed),
-    ("_removed_rho", Removed),
-    ("label", Provenance),
-    ("no_dt_check", Keyed(Method)),
-    ("dt_check_strict", Keyed(Method)),
-    ("binomial", Keyed(Method)),
-    ("dt_check_halvings", Keyed(Method)),
-    ("cooling_target_iters", Keyed(Method)),
-    ("max_tree_depth", Keyed(Method)),
-    ("trajectory_warmup", Keyed(Method)),
-    ("csmc_sweeps_per_nuts", Keyed(Method)),
-    ("n_trajectories", Keyed(Method)),
-    ("diagonal_mass", Keyed(Method)),
-    ("no_nuts", Keyed(Method)),
-    ("no_ancestor_sampling", Keyed(Method)),
-    ("no_adapt", Keyed(Method)),
-    ("adapt_start", Keyed(Method)),
-    ("record_ancestry", Keyed(Method)),
-    ("record_prequential", Keyed(Method)),
-    // ForcingExtrapolationArg
-    ("allow_forcing_extrapolation", Keyed(Fit)),
-    // GlobalArgs
-    ("verbosity", Presentation),
-    ("progress", Presentation),
-    ("no_progress", Presentation),
-    ("no_ir_cache", Execution),
-    ("no_licm", Keyed(Fit)),
-];
+use Level::{Method, Profile, Seed};
 
 /// `camdl profile`'s inputs, by clap argument id (the field name), with their
 /// classes: `ProfileArgs`, the groups it flattens and the global options.
@@ -251,11 +180,6 @@ mod tests {
     }
 
     #[test]
-    fn every_fit_run_flag_is_classified() {
-        assert_covers("camdl fit run", clap_args(&["fit", "run"]), FIT_RUN);
-    }
-
-    #[test]
     fn every_profile_flag_is_classified() {
         assert_covers("camdl profile", clap_args(&["profile"]), PROFILE);
     }
@@ -277,15 +201,6 @@ mod tests {
         let accepted: BTreeSet<String> = accepted.difference(&globals).cloned().collect();
         assert_eq!(accepted, simulate, "`mre simulate` takes simulate's arguments");
     }
-
-    /// Environment inputs with no `fit run` case, each with the reason.
-    const FIT_RUN_NO_CASE: &[(&str, &str)] = &[
-        ("skip_version_check", "every test run sets it: without it the handshake refuses a test build's camdlc"),
-        ("path", "the harness needs PATH to start camdl; `execution_env_camdlc` varies the camdlc found on it"),
-        ("unlabeled_threshold", "not read by fit run: `fit table` and `camdl list` read it"),
-        ("ci", "not read by fit run: `fit summary` reads it"),
-        ("store", "not read by fit run: the commands on the run store read it"),
-    ];
 
     /// Environment inputs with no `profile` case, each with the reason.
     const PROFILE_NO_CASE: &[(&str, &str)] = &[
@@ -350,16 +265,9 @@ mod tests {
         );
     }
 
-    /// Every input of `fit run`, on its command line or in its environment,
-    /// has a case in `tests/fit_run_input_classes.rs`, where a
-    /// `removed` case checks that the old spelling is refused with its
-    /// message.
-    #[test]
-    fn every_fit_run_input_has_a_case() {
-        assert_every_input_has_a_case("fit run", "fit_run_input_classes.rs", FIT_RUN, FIT_RUN_NO_CASE);
-    }
-
-    /// The same for `profile`, in `tests/profile_input_classes.rs`.
+    /// Every input of `profile`, on its command line or in its environment,
+    /// has a case in `tests/profile_input_classes.rs`, where a `removed` case
+    /// checks that the old spelling is refused with its message.
     #[test]
     fn every_profile_input_has_a_case() {
         assert_every_input_has_a_case("profile", "profile_input_classes.rs", PROFILE, PROFILE_NO_CASE);

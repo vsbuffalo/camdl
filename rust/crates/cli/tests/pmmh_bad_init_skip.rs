@@ -26,6 +26,8 @@
 //!
 //! Skipped when the release binary or camdlc isn't present.
 
+mod fit_store_support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -137,7 +139,7 @@ fn write_fit_toml(
     draws: &Path,
 ) -> PathBuf {
     let toml = format!(r#"
-output_dir = "{out}"
+store = "{out}"
 [model]
 camdl = "{ir}"
 [data.observations]
@@ -169,28 +171,10 @@ starts         = {{ from_posterior = "{draws}" }}
     p
 }
 
-/// The CAS method leaf for `method_substr` under `fits_root` —
-/// `<fit>/<method>-<h8>/seed_<N>-<h8>/` holding a `fit_method` run.json.
-fn cas_method_leaf(fits_root: &Path, method_substr: &str) -> PathBuf {
-    let mut stack = vec![fits_root.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        if d.join("run.json").is_file() {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(
-                &std::fs::read_to_string(d.join("run.json")).unwrap_or_default(),
-            ) {
-                if v.get("kind").and_then(|k| k.as_str()) == Some("fit_method") {
-                    let method = v["levels"].as_array().into_iter().flatten()
-                        .find(|l| l["name"].as_str() == Some("method"))
-                        .and_then(|l| l["label"].as_str()).unwrap_or("");
-                    if method.contains(method_substr) { return d; }
-                }
-            }
-        }
-        if let Ok(es) = std::fs::read_dir(&d) {
-            for e in es.flatten() { if e.path().is_dir() { stack.push(e.path()); } }
-        }
-    }
-    panic!("no CAS '{}' method leaf under {}", method_substr, fits_root.display());
+/// The one fit run of method `method` in the store at `root`.
+fn cas_method_leaf(root: &Path, method: &str) -> PathBuf {
+    fit_store_support::runs_of_method(root, method).into_iter().next()
+        .unwrap_or_else(|| panic!("no '{method}' fit run under {}", root.display()))
 }
 
 /// One row of the leaf's `chain_starts.tsv`: `(chain_id, attempt, status,
@@ -257,8 +241,7 @@ fn pmmh_redraws_a_pathological_drawn_start_and_runs_every_chain() {
     // Acceptance 2: the record. The chain that drew β=4.8 has a rejected row
     // for each such draw — the EssCollapsed refusal and the ESS the filter
     // reached — and an accepted row at the sane point.
-    let fits_dir = tmp.path().join("results/fits");
-    let method_dir = cas_method_leaf(&fits_dir, "pmmh");
+    let method_dir = cas_method_leaf(&tmp.path().join("results"), "pmmh");
     assert!(method_dir.join("run.json").is_file(),
         "pmmh method leaf missing run.json: {}\nstderr:\n{}", method_dir.display(), stderr);
     let rows = start_rows(&method_dir);

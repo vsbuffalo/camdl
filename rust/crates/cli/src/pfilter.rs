@@ -214,7 +214,7 @@ pub fn cmd_pfilter(inv: crate::args::PfilterInvocation) {
         args: crate::args::PfilterExecution { model_overrides: (), scenario: (), inference, stream: () },
         no_ir_cache,
     };
-    let (config, requests, _forcing_route) = crate::pfilter_config::resolve(declared, compile, &out);
+    let (config, requests, _forcing_route) = crate::pfilter_config::resolve(declared, compile, &out, &crate::camdl_store::root_of(&request));
     let store = StoreSide { request, no_store, given, execution: execution_record };
     run_pfilter(&out, config, requests, RunExports { output }, filter_execution, store);
 }
@@ -540,7 +540,7 @@ fn run_pfilter(
         if no_store {
             out.remove_on_error(store.root().to_path_buf());
         }
-        let mut info = store::RunInfo::new(&given, &execution_record, &request)
+        let info = store::RunInfo::new(&given, &execution_record, &request)
             .unwrap_or_else(|e| out.fail(format!("error: {e}")));
         // Each bound stream's table, read once, by content. The model was
         // rewritten from these rows (its anchored times), so its record names
@@ -717,8 +717,9 @@ fn run_pfilter(
         // `--save-final-state` run binds only the training rows, cut by the rule
         // the fit's partition uses, and saves the state at their end. Without
         // `--save-final-state` the filter scores every bound row, held-out ones
-        // included: its log-likelihood and prequential outputs are what `compare`
-        // scores a holdout with.
+        // included. The fit is a fit file here: a stored fit that held rows out
+        // keeps no held-out values and is refused before this
+        // (`pfilter_config::resolve`).
         //
         // The cutoff resolves as `fit run` resolved it. A bare time or date needs
         // no rows. An anchored one (`holdout_after = "last_obs - 4 weeks"`)
@@ -1188,6 +1189,7 @@ fn run_pfilter(
                 .unwrap_or_else(|e| out.fail(format!("error: the scored point: {e}"))),
             scenario: crate::camdl_store::ActiveInterventions::of(&model),
             seed: crate::camdl_store::ProcessSeed { seed },
+            fit: fit.as_ref().and_then(crate::fit_store::FitArg::problem_dep),
         };
         let point = match role {
             PointRole::Single => None,

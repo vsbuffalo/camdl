@@ -15,6 +15,8 @@
 //! be the same model (or must not), not a printed message — except the
 //! refusal and the skipped-contrast note, whose wording is the contract.
 
+mod fit_store_support;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -116,12 +118,13 @@ fn compile(dir: &Path, name: &str, src: &str) -> PathBuf {
     ir
 }
 
-/// A fit config `<name>.toml` over `ir`, with `top` spliced above `[model]`.
+/// A fit config `<name>.toml` over `ir`, with `top` spliced above `[model]`,
+/// storing into the run store every command here reads ([`store_of`]).
 fn fit_config(dir: &Path, name: &str, ir: &Path, top: &str, method: &str) -> PathBuf {
     let data = dir.join("cases.tsv");
     std::fs::write(&data, CASES_TSV).unwrap();
     let fit = dir.join(format!("{name}.toml"));
-    std::fs::write(&fit, format!(r#"output_dir = "{out}"
+    std::fs::write(&fit, format!(r#"store = "{out}"
 {top}
 [model]
 camdl = "{ir}"
@@ -133,7 +136,7 @@ beta = {{ bounds = [0.01, 1.0], start = 0.5, prior = {{ uniform = {{}} }} }}
 gamma = 0.1
 N0 = 1000
 {method}
-"#, out = dir.join(format!("res_{name}")).display(), ir = ir.display(),
+"#, out = store_of(dir).display(), ir = ir.display(),
         data = data.display())).unwrap();
     fit
 }
@@ -147,16 +150,17 @@ iterations = 60
 burn_in = 20
 "#;
 
-fn run(dir: &Path, args: &[&str]) -> Output {
-    run_in(dir, &dir.join("store"), args)
+/// The run store of the work directory `dir`: every fit stores into it, and
+/// every other command reads and stores there.
+fn store_of(dir: &Path) -> PathBuf {
+    dir.join("store")
 }
 
-/// [`run`] with the store root a handle (`@label`) resolves under.
-fn run_in(dir: &Path, store: &Path, args: &[&str]) -> Output {
+fn run(dir: &Path, args: &[&str]) -> Output {
     Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
         .current_dir(dir)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
-        .env("CAMDL_OUTPUT_DIR", store).env("CAMDL_STORE", std::path::Path::new(&store).join("camdl-store"))
+        .env("CAMDL_STORE", store_of(dir))
         .args(args)
         .output()
         .expect("spawn camdl")
@@ -168,28 +172,30 @@ fn ok(out: Output, what: &str) -> Output {
     out
 }
 
-/// The one completed fit leaf (the method leaf holding `draws.tsv`) under `root`.
-fn draws_leaf(root: &Path) -> PathBuf {
-    let mut found = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        if d.join("draws.tsv").is_file() && d.join("run.json").is_file() {
-            found.push(d.clone());
-        }
-        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
-            if e.path().is_dir() { stack.push(e.path()); }
-        }
-    }
-    assert_eq!(found.len(), 1, "expected one fit leaf under {}: {found:?}", root.display());
+/// The one fit run of the fit config `<name>.toml` in `dir`'s store, found
+/// by the config its `run_inputs.json` records.
+fn run_of(dir: &Path, name: &str) -> PathBuf {
+    let config = format!("{name}.toml");
+    let mut found: Vec<PathBuf> = fit_store_support::runs(&store_of(dir)).into_iter()
+        .filter(|r| fit_store_support::run_inputs(r)["header"]["config"].as_str()
+            .is_some_and(|c| Path::new(c).file_name().is_some_and(|f| f == config.as_str())))
+        .collect();
+    assert_eq!(found.len(), 1, "expected one fit run of {config}: {found:?}");
     found.remove(0)
+}
+
+/// [`run_of`], for a fit that holds a posterior cloud (`draws.tsv`).
+fn draws_leaf(dir: &Path, name: &str) -> PathBuf {
+    let run = run_of(dir, name);
+    assert!(run.join("draws.tsv").is_file(), "{} holds no draws.tsv", run.display());
+    run
 }
 
 /// The rows of a `fit predict` stream file for one `scenario` and `horizon`,
 /// scenario column dropped, so two arms' bands compare directly.
 fn predict_rows(leaf: &Path, scenario: &str, horizon: &str) -> Vec<String> {
-    let seg = leaf.parent().unwrap().parent().unwrap();
-    let mut files: Vec<PathBuf> = std::fs::read_dir(seg.join("predict")).unwrap()
-        .flatten().map(|e| e.path().join("predictive/cases.tsv"))
+    let mut files: Vec<PathBuf> = fit_store_support::predictions(leaf).into_iter()
+        .map(|d| d.join("predictive/cases.tsv"))
         .filter(|p| p.is_file()).collect();
     assert_eq!(files.len(), 1, "expected one predictive/cases.tsv: {files:?}");
     let text = std::fs::read_to_string(files.remove(0)).unwrap();
@@ -211,7 +217,7 @@ fn predict_fitted_arm_and_scenario_arms_carry_the_fits_selection() {
     let ir = compile(tmp.path(), "m", &format!("{HEAD}{TAIL_BOTH}"));
     let fit = fit_config(tmp.path(), "f", &ir, r#"enable = ["vax"]"#, PMMH);
     ok(run(tmp.path(), &["fit", "run", &fit.to_string_lossy()]), "fit run");
-    let leaf = draws_leaf(&tmp.path().join("res_f"));
+    let leaf = draws_leaf(tmp.path(), "f");
     ok(run(tmp.path(), &["fit", "predict", &leaf.to_string_lossy(),
         "--mode", "free_forward", "--scenario", "vax,same,novax"]), "fit predict");
 
@@ -242,8 +248,8 @@ fn predict_one_step_filters_through_the_fitted_model() {
     let f_one = fit_config(tmp.path(), "fo", &ir_one, r#"enable = ["vax"]"#, PMMH);
     ok(run(tmp.path(), &["fit", "run", &f_both.to_string_lossy()]), "fit run fb");
     ok(run(tmp.path(), &["fit", "run", &f_one.to_string_lossy()]), "fit run fo");
-    let (l_both, l_one) = (draws_leaf(&tmp.path().join("res_fb")),
-                           draws_leaf(&tmp.path().join("res_fo")));
+    let (l_both, l_one) = (draws_leaf(tmp.path(), "fb"),
+                           draws_leaf(tmp.path(), "fo"));
     assert_eq!(std::fs::read_to_string(l_both.join("draws.tsv")).unwrap(),
                std::fs::read_to_string(l_one.join("draws.tsv")).unwrap(),
         "precondition: the two fits are one fitted model and must share a posterior");
@@ -263,7 +269,7 @@ fn simulate_posterior_replays_the_fits_selection() {
     let ir = compile(tmp.path(), "m", &format!("{HEAD}{TAIL_BOTH}"));
     let fit = fit_config(tmp.path(), "f", &ir, r#"enable = ["vax"]"#, PMMH);
     ok(run(tmp.path(), &["fit", "run", &fit.to_string_lossy()]), "fit run");
-    let leaf = draws_leaf(&tmp.path().join("res_f"));
+    let leaf = draws_leaf(tmp.path(), "f");
     // The same draws outside any fit: no fit selection to apply, so the model
     // runs as written. Run FIRST, into the same store: its cells have the
     // parameters and seeds of the fit's implicit arm, and differ only in the
@@ -296,29 +302,26 @@ fn simulate_posterior_replays_the_fits_selection() {
         "`--disable vax` switches off the fitted vax and must differ");
 }
 
-/// A fit leaf whose folder's stored config cannot be read (`fit.resolved.toml`
+/// A fit run whose problem's stored config cannot be read (`problem.toml`
 /// gone) is refused by `simulate --draws posterior --fit`, naming the file,
 /// never replayed without the fit's selection and simulator as a bare
-/// directory of draws is. With the file back, the same command runs.
+/// directory of draws is.
 #[test]
 fn simulate_posterior_refuses_a_fit_whose_stored_config_is_unreadable() {
     let tmp = tempdir("simulate_unreadable");
     let ir = compile(tmp.path(), "m", &format!("{HEAD}{TAIL_BOTH}"));
     let fit = fit_config(tmp.path(), "f", &ir, r#"enable = ["vax"]"#, PMMH);
     ok(run(tmp.path(), &["fit", "run", &fit.to_string_lossy()]), "fit run");
-    let leaf = draws_leaf(&tmp.path().join("res_f"));
-    let resolved = leaf.parent().unwrap().parent().unwrap().join("fit.resolved.toml");
-    let kept = std::fs::read(&resolved).unwrap();
+    let leaf = draws_leaf(tmp.path(), "f");
+    let resolved = fit_store_support::problem_of(&leaf).join("problem.toml");
     std::fs::remove_file(&resolved).unwrap();
     let args = ["simulate", ir.to_str().unwrap(), "--draws", "posterior", "--fit", leaf.to_str().unwrap(),
         "--n-draws", "5", "--seed", "3", "-o", "out.tsv"];
     let out = run(tmp.path(), &args);
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "a fit folder without its stored config is refused:\n{err}");
-    assert!(err.contains("has no fit.resolved.toml"), "{err}");
+    assert!(err.contains("problem.toml"), "the refusal names the missing file: {err}");
     assert!(!err.contains("is not a stored fit run"), "not passed over as a bare directory:\n{err}");
-    std::fs::write(&resolved, kept).unwrap();
-    ok(run(tmp.path(), &args), "simulate with the stored config back");
 }
 
 #[test]
@@ -333,7 +336,7 @@ fn simulate_prior_and_file_draws_replay_the_fits_selection() {
     let fit = fit_config(tmp.path(), "f", &ir, r#"enable = ["vax"]"#, PMMH);
     let f0 = fit_config(tmp.path(), "f0", &ir, "", PMMH);
     ok(run(tmp.path(), &["fit", "run", &fit.to_string_lossy()]), "fit run");
-    let leaf = draws_leaf(&tmp.path().join("res_f"));
+    let leaf = draws_leaf(tmp.path(), "f");
     std::fs::copy(leaf.join("draws.tsv"), tmp.path().join("d.tsv")).unwrap();
     let sim = |out: &str, mode: &[&str], fit: &Path, extra: &[&str]| {
         let mut args = vec!["simulate", ir.to_str().unwrap()];
@@ -416,24 +419,16 @@ fn compare_derives_the_prequential_under_the_fits_selection() {
                particles = 50\niterations = 3\ncooling = 0.7\n";
     let fa = fit_config(tmp.path(), "a", &ir, r#"enable = ["vax"]"#, if2);
     let fb = fit_config(tmp.path(), "b", &ir, "", if2);
-    // Both fits in one store, so `@a` / `@b` resolve under it.
-    let store = tmp.path().join("res_ab");
-    for f in [&fa, &fb] {
-        let text = std::fs::read_to_string(f).unwrap();
-        let text = text.lines().map(|l| if l.starts_with("output_dir") {
-            format!("output_dir = \"{}\"", store.display())
-        } else { l.to_string() }).collect::<Vec<_>>().join("\n");
-        std::fs::write(f, text).unwrap();
-    }
-    let run = |dir: &Path, args: &[&str]| run_in(dir, &store, args);
+    // Both fits are in the one store, so `@a` / `@b` resolve under it.
     ok(run(tmp.path(), &["fit", "run", &fa.to_string_lossy(), "--label", "a"]), "fit run a");
     ok(run(tmp.path(), &["fit", "run", &fb.to_string_lossy(), "--label", "b"]), "fit run b");
     let theta = ok(run(tmp.path(), &["fit", "summary", "@a", "--params-only"]),
         "fit summary --params-only");
     std::fs::write(tmp.path().join("theta.toml"), &theta.stdout).unwrap();
-    let archived = std::fs::read_dir(store.join("fits")).unwrap().flatten()
-        .map(|e| e.path().join("model.ir.json")).find(|p| p.is_file())
-        .expect("fit a's archived model.ir.json");
+    let archived = std::fs::read_dir(fit_store_support::problem_of(&run_of(tmp.path(), "a")))
+        .unwrap().flatten().map(|e| e.path())
+        .find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("model.")))
+        .expect("fit a's stored model");
     let data = format!("cases={}", tmp.path().join("cases.tsv").display());
     ok(run(tmp.path(), &["pfilter", archived.to_str().unwrap(), "--data", &data,
         "--params", "theta.toml", "--enable", "vax", "--save-prequential", "manual",
@@ -477,12 +472,11 @@ fn contrast_arms_carry_the_fits_selection() {
     let ir = compile(tmp.path(), "m", &src);
     let fit = fit_config(tmp.path(), "f", &ir, r#"enable = ["vax"]"#, PGAS);
     ok(run(tmp.path(), &["fit", "run", &fit.to_string_lossy()]), "fit run");
-    let leaf = draws_leaf(&tmp.path().join("res_f"));
+    let leaf = draws_leaf(tmp.path(), "f");
     let out = ok(run(tmp.path(), &["fit", "predict", &leaf.to_string_lossy(),
         "--mode", "free_forward"]), "fit predict");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    let seg = leaf.parent().unwrap().parent().unwrap();
-    let pdir = std::fs::read_dir(seg.join("predict")).unwrap().flatten().next().unwrap().path();
+    let pdir = fit_store_support::predictions(&leaf).into_iter().next().expect("the prediction");
     assert!(!pdir.join("contrasts/restated.tsv").exists(),
         "`fitted` and `vax` are one model under the fit's selection, so `restated` \
          has no toggled intervention and must not be banded:\n{stderr}");

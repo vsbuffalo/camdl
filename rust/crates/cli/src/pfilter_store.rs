@@ -112,6 +112,10 @@ pub(crate) struct PfilterIdentity {
     /// The interventions the scenario selection keeps.
     pub scenario: ActiveInterventions,
     pub seed: ProcessSeed,
+    /// The stored fit problem `--fit` named, whose training rows, `[fixed]`
+    /// values and settings the run read; `None` without `--fit`, and for a
+    /// fit file, which is read in process.
+    pub fit: Option<Dep<crate::fit_store::FitProblem>>,
 }
 
 /// The model file's stem, the seed the user typed, and for a point of a

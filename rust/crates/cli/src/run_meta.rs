@@ -854,7 +854,7 @@ pub enum OriginalError {
     Unreadable { path: std::path::PathBuf, error: std::io::Error },
     /// `fit.meta.json` records no `fit_toml_hash`, so there is nothing to
     /// check the file against. `bytes` are the file as read.
-    NoRecordedHash { bytes: Vec<u8> },
+    NoRecordedHash,
     /// The file's SHA-256, `found`, is not the `fit_toml_hash` recorded.
     /// `bytes` are the file as read.
     Mismatch { found: String, recorded: String, bytes: Vec<u8> },
@@ -867,7 +867,7 @@ pub fn read_verified_original(segment: &std::path::Path, recorded: &str) -> Resu
     let path = segment.join(ARCHIVED_CONFIG);
     let bytes = std::fs::read(&path).map_err(|error| OriginalError::Unreadable { path, error })?;
     if recorded.is_empty() {
-        return Err(OriginalError::NoRecordedHash { bytes });
+        return Err(OriginalError::NoRecordedHash);
     }
     let found = crate::hashing::sha256_hex(&bytes);
     if found != recorded {
@@ -881,31 +881,6 @@ pub fn read_verified_original(segment: &std::path::Path, recorded: &str) -> Resu
 /// the command line's problem-half values and the folder's own `[fixed]`
 /// written in. What every reader of a stored fit's config reads.
 pub const RESOLVED_CONFIG: &str = "fit.resolved.toml";
-
-/// The path of the fit folder `segment`'s [`RESOLVED_CONFIG`], the
-/// configuration its fits ran under, for a reader of that configuration; `Err`
-/// when the folder is not at the current store layout ([`runid::STORE_LAYOUT`],
-/// recorded in its `fit.meta.json`), naming the migration that brings an older
-/// one up to date or the newer camdl that wrote it
-/// ([`crate::store_migrate::check_layout`]), and when a folder at the current
-/// layout lacks the file. A reader never takes the configuration from
-/// [`ARCHIVED_CONFIG`] in its place, which may not be what the fit ran under.
-pub fn require_resolved_config(segment: &std::path::Path) -> Result<std::path::PathBuf, String> {
-    let side = read_fit_sidecar(segment)?
-        .ok_or_else(|| format!("{} is not a complete fit directory: no fit.meta.json", segment.display()))?;
-    crate::store_migrate::check_layout(segment, side.store_layout)?;
-    let path = segment.join(RESOLVED_CONFIG);
-    if path.is_file() {
-        return Ok(path);
-    }
-    Err(format!(
-        "{} is at store layout {} but has no {RESOLVED_CONFIG}, the configuration its fits \
-         ran under: the folder is incomplete, or was changed after it was written. Re-run \
-         the fit.",
-        segment.display(),
-        side.store_layout
-    ))
-}
 
 /// Write the fit-level sidecar of a folder that keeps no config: a CLI-only
 /// `profile`'s. A folder that holds a config (a fit's, or a profile's of one)
@@ -931,38 +906,6 @@ pub fn write_fit_sidecar(
     sidecar: &FitSidecar,
 ) -> std::io::Result<()> {
     write_fit_sidecar_archiving(fit_segment, None, model_path, sidecar)
-}
-
-/// The directory of a fit folder that holds the bytes of each file bound to
-/// the model's external inputs, one `<name>.<ext>` per input: the copy a
-/// replay of the fit binds, so an edit to the source file after the fit
-/// cannot change what the fit's replays read.
-pub const STORED_INPUTS_DIR: &str = "inputs";
-
-/// The stored copy of external input `name`, read from `source`, in the fit
-/// folder `segment`. The extension is the source's: it selects the format the
-/// file is read as.
-pub fn stored_input_path(segment: &std::path::Path, name: &str, source: &std::path::Path) -> std::path::PathBuf {
-    let file = match source.extension().and_then(|e| e.to_str()) {
-        Some(ext) => format!("{name}.{ext}"),
-        None => name.to_string(),
-    };
-    segment.join(STORED_INPUTS_DIR).join(file)
-}
-
-/// Write each bound file's bytes into `segment`'s [`STORED_INPUTS_DIR`].
-pub fn store_bound_inputs(
-    segment: &std::path::Path,
-    bound: &crate::external_inputs::BoundFiles,
-) -> std::io::Result<()> {
-    for (name, file) in bound.iter() {
-        let dest = stored_input_path(segment, name, &file.path);
-        if let Some(dir) = dest.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(dest, &file.bytes)?;
-    }
-    Ok(())
 }
 
 /// [`write_fit_sidecar`] for a config already read, and resolved: `config_text`,
@@ -1084,41 +1027,6 @@ pub(crate) fn relative_path(from: &std::path::Path, to: &std::path::Path) -> std
         rel.push(c.as_os_str());
     }
     Ok(rel.to_string_lossy().into_owned())
-}
-
-/// Record the training partition into an existing fit sidecar. Called after
-/// `FitRunConfig::build` decided it at load — the per-segment sidecar write
-/// happens before the data load, so the record lands as this update. No-op
-/// when the sidecar already carries the same value; a missing sidecar or
-/// failed write is surfaced as a warning (the fit itself must not die for it
-/// — `compare` will simply refuse the `HoldOutTail` label without the
-/// record).
-pub fn record_training_partition(
-    fit_segment: &std::path::Path,
-    partition: TrainingPartitionRecord,
-) {
-    let mut sidecar = match read_fit_sidecar(fit_segment) {
-        Ok(Some(s)) => s,
-        Ok(None) => {
-            crate::out::detached().say(format_args!(
-                "warning: cannot record the training partition: no fit.meta.json under {}",
-                fit_segment.display()));
-            return;
-        }
-        Err(e) => {
-            crate::out::detached().say(format_args!(
-                "warning: cannot record the training partition: {e}"));
-            return;
-        }
-    };
-    if sidecar.training_partition.as_ref() == Some(&partition) {
-        return;
-    }
-    sidecar.training_partition = Some(partition);
-    if let Err(e) = store_fit_sidecar(fit_segment, &sidecar) {
-        crate::out::detached().say(format_args!(
-            "warning: cannot record the training partition: {e}"));
-    }
 }
 
 /// Read the fit-level sidecar; `Ok(None)` when absent (an incomplete segment —
@@ -1293,46 +1201,6 @@ mod tests {
             .collect();
         assert_eq!(names, vec!["fit.meta.json".to_string()], "the sidecar and nothing else");
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// The recorded training partition is the §3.7.3(b) proof, and a rerun
-    /// that skips the data load (all-cache-hit) rewrites the sidecar with
-    /// `training_partition: None` — the sticky merge must preserve the
-    /// recorded value, exactly as `label` is preserved (gh#29).
-    #[test]
-    fn training_partition_is_sticky_across_sidecar_rewrites() {
-        let dir = std::env::temp_dir().join(format!(
-            "camdl_trainpart_{}_{}", std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let record = TrainingPartitionRecord {
-            rule_version: 1,
-            rule: PartitionRuleRecord::Cutoff { at: TimePoint { t: 24.0, date: None } },
-            extent: TimePoint { t: 21.0, date: None },
-            streams: vec![RowPrefixRecord { stream: "cases".into(), rows: 3, digest: "ab".into() }],
-        };
-
-        let bare = FitSidecar::default();
-        write_fit_sidecar(&dir, std::path::Path::new(""), &bare)
-            .unwrap();
-        assert_eq!(read_fit_sidecar(&dir).unwrap().unwrap().training_partition, None);
-
-        record_training_partition(&dir, record.clone());
-        assert_eq!(read_fit_sidecar(&dir).unwrap().unwrap().training_partition,
-            Some(record.clone()));
-
-        // A cache-hit rerun's sidecar write carries no partition — the
-        // recorded proof must survive.
-        write_fit_sidecar(&dir, std::path::Path::new(""), &bare)
-            .unwrap();
-        assert_eq!(read_fit_sidecar(&dir).unwrap().unwrap().training_partition,
-            Some(record.clone()),
-            "a rewrite without a partition must not erase the recorded one");
-
-        let json = serde_json::to_value(&record).unwrap();
-        assert_eq!(json["rule"], serde_json::json!({"kind": "cutoff", "at": {"t": 24.0}}));
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -1652,61 +1520,6 @@ mod tests {
         let parsed: InitProvenance = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.chains[0]["beta"].source, "prior_draw");
         assert_eq!(parsed.chains[3]["beta"].source, "params_point");
-    }
-
-    /// gh#147 (M3.2) regression guard for the dropped-provenance bug: the gh#75
-    /// per-parameter prior sources must survive the fit-level sidecar
-    /// write → `FitView::read` read round trip. Before the sidecar carried
-    /// `resolved_priors`, the reader defaulted it empty and this class of bug
-    /// shipped silently. Write a Bayesian (`pgas`) method leaf + a sidecar with
-    /// mixed sources, read the fit back, and assert each `.source` matches.
-    #[test]
-    fn fit_sidecar_resolved_priors_survive_fit_view_round_trip() {
-        use crate::fit::fit_view::FitView;
-        let tmp = crate::test_support::unique_temp_dir("sidecar_priors");
-        let seg = tmp.join("fits").join("demo-abc12345");
-        let leaf = seg.join("pgas-1fb03eee").join("seed_1-06cbd6b3");
-        std::fs::create_dir_all(&leaf).unwrap();
-        // A Bayesian (pgas) method leaf — `FitView::read` requires its
-        // sidecar to carry resolved_priors.
-        std::fs::write(
-            leaf.join("run.json"),
-            r#"{"format_version":1,"kind":"fit_method","run_id":"abc1234500000000000000000000000000000000000000000000000000000000","hash_version":1,"calendar":{"days_per_unit":1.0,"origin":null,"time_unit":"days"},"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{"name":"fit","label":"demo","hash":"abc123450000000000000000000000000000000000000000000000000000000a","schema_version":1},{"name":"method","label":"pgas","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1},{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}],"status":"completed","artifacts":{},"inputs":{"method":"pgas","backend":"chain_binomial","seed":1,"n_chains":2},"provenance":{"created_at":"2026-04-19T12:00:00Z","argv":["camdl","fit","run"]}}"#,
-        )
-        .unwrap();
-
-        let sidecar = FitSidecar {
-            estimated: vec!["beta".into(), "gamma".into()],
-            resolved_priors: vec![
-                ResolvedPriorEntry { param: "beta".into(), source: "model_ir".into(),
-                    overridden_model_prior: None },
-                ResolvedPriorEntry { param: "gamma".into(), source: "fit_toml".into(),
-                    overridden_model_prior: Some("gamma(shape=2, rate=5)".into()) },
-            ],
-            ..Default::default()
-        };
-        // No fit.toml on disk → archive step is skipped; the sidecar still writes.
-        write_fit_sidecar(&seg, std::path::Path::new(""), &sidecar).unwrap();
-
-        assert!(FitView::read(&seg).is_some(), "FitView::read must derive a fit entry");
-        let view = read_fit_sidecar(&seg).unwrap().expect("the sidecar reads back");
-        let source = |p: &str| -> Option<&str> {
-            view.resolved_priors
-                .iter()
-                .find(|e| e.param == p)
-                .map(|e| e.source.as_str())
-        };
-        assert_eq!(source("beta"), Some("model_ir"),
-            "beta prior source must survive the sidecar round trip");
-        assert_eq!(source("gamma"), Some("fit_toml"),
-            "gamma prior source must survive the sidecar round trip");
-        let overridden = |p: &str| view.resolved_priors.iter()
-            .find(|e| e.param == p).and_then(|e| e.overridden_model_prior.as_deref());
-        assert_eq!(overridden("gamma"), Some("gamma(shape=2, rate=5)"),
-            "gh#369: the displaced model prior must survive the round trip");
-        assert_eq!(overridden("beta"), None);
-
-        std::fs::remove_dir_all(&tmp).ok();
     }
 
     /// gh#29: the fit-level sidecar `label` is sticky across repeated

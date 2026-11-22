@@ -48,15 +48,17 @@ keeps an input that belongs to it from being left out.
 
 ## The store
 
-camdl has two stores. `camdl simulate` and `camdl pfilter` store their results
-in the run store, written by the `store` crate (`rust/crates/store`) under
-`./camdl-store` or the root `--store` or `CAMDL_STORE` names; its design is
+camdl has two stores. `camdl simulate`, `camdl pfilter` and `camdl fit run`
+store their results in the run store, written by the `store` crate
+(`rust/crates/store`) under `./camdl-store` or the root `--store` or
+`CAMDL_STORE` names; its design is
 `docs/dev/proposals/2026-11-20-run-store-api.md`, and
-[Simulate on the run store](#simulate-on-the-run-store) below describes how a
-simulation's inputs reach its identity there. Fits and profiles store theirs
-under `results/`, written by the `runid` crate. The sections from here to that
-one describe the `results/` store; what they say about input addressing holds
-for both.
+[Simulate on the run store](#simulate-on-the-run-store) and
+[A fit on the run store](#a-fit-on-the-run-store) below describe how a
+simulation's and a fit's inputs reach their identities there. Profiles store
+theirs under `results/`, written by the `runid` crate. The sections from here to
+that one describe the `results/` store; what they say about input addressing
+holds for both.
 
 The store is **input-addressed**: a run's address is a hash of the inputs that
 determine it, computed before the run, not a hash of the bytes the run produces.
@@ -82,8 +84,8 @@ the thread count leave the stored bytes unchanged. The engine is identified by a
 build fingerprint, `ENGINE_ID`, which covers uncommitted changes to the source,
 so a rebuilt worktree does not share an identity with its clean commit; a build
 whose fingerprint cannot be determined never reuses a stored leaf. A fit's
-wall-clock timings are kept in per-attempt execution records outside the leaf's
-checksummed files. One limit remains: the platform (the operating system's
+wall-clock timings are kept in per-attempt execution records outside the run's
+result files. One limit remains: the platform (the operating system's
 mathematics library) is not part of the identity, so the guarantee is stated for
 one machine image. How a command-line flag or an environment variable reaches
 the hash is described [below](#from-a-command-line-flag-to-the-hash).
@@ -98,10 +100,9 @@ how the inputs were spelled, so that two spellings of one computation miss each
 other, or one spelling of two computations (an edited table under an unchanged
 path) collides.
 
-The inputs are not hashed as one blob. For a fit they are split into three
-levels, each a disjoint slice: the fit problem, the method and the seed
-([`resolve_fit_method`](rust:cli::fit::cas::resolve_fit_method) hashes them).
-Each level is hashed on its own, and the leaf's address is
+The inputs are not hashed as one blob. For a profile point they are split into
+levels, each a disjoint slice: the profile, the point, the method, the seed and
+the start. Each level is hashed on its own, and the leaf's address is
 [`run_id`](rust:runid::kind::run_id) over the artifact kind and the level hashes
 in order:
 
@@ -116,11 +117,11 @@ shorter sequence whose bytes happen to concatenate to a longer one.
 
 The path on disk factors the same tuple:
 [`store_path`](rust:runid::layout::store_path) writes one directory per level,
-named `{label}-{hash8}`, under the kind's partition (`fits/`, `profiles/`). The
-label is provenance, the eight hex characters are the first four bytes of the
-level's hash, and the full hashes are in `run.json`. Grouping falls out of the
-tree without any index: the seeds of one method are sibling directories under
-one method directory. A lookup finds a leaf by its hashes alone
+named `{label}-{hash8}`, under the kind's partition (`profiles/`). The label is
+provenance, the eight hex characters are the first four bytes of the level's
+hash, and the full hashes are in `run.json`. Grouping falls out of the tree
+without any index: the seeds of one method are sibling directories under one
+method directory. A lookup finds a leaf by its hashes alone
 ([`find_leaf`](rust:runid::store::find_leaf)), so a renamed file, whose label
 changes, still finds the result its hashes name.
 
@@ -289,8 +290,8 @@ A command that replays a stored fit runs under the fit's own settings. The
 simulator a fit ran on,
 [`FittedSimulator`](rust:cli::fit::fitted_model::FittedSimulator), carries its
 `[config] allow_degenerate_rates` and `allow_forcing_extrapolation`, read from
-the stored resolved config; `simulate --draws … --fit` folds its own flags into
-them
+the stored problem's `problem.toml`; `simulate --draws … --fit` folds its own
+flags into them
 ([`FittedSettings::with_flags`](rust:cli::fit::fitted_model::FittedSettings::with_flags):
 a flag can only turn a setting on) and puts the result in its resolved
 configuration, and `compare` scores each fit under them, passing them to its
@@ -336,14 +337,14 @@ default run's identity is unchanged. `run.json` keeps the build in
 `engine_version` and lists the switches in `engine_switches`, so a run this
 build made with a switch is this build's run. The commands that store a result
 under an address key the switches: `simulate` (in the ambient key of the run
-store, which names the build directory every cell is under), `fit run` (at the
-`fit` level), `fit predict` (its output directory, whose manifests also record
-`engine_version` and `engine_switches`), `pfilter` (at the `model` level) and
-`profile` (a point's base). `compare` scores a chain-binomial fit through a
-`camdl pfilter` child, which keys them; its in-process ODE scoring and
-`dev eval` store nothing under an address. The switches themselves are fields of
-the evaluator settings each compiled model carries
-([`EvalSettings`](rust:sim::compiled_model::EvalSettings)), set by
+store, which names the build directory every cell is under), `fit run` and
+`fit predict` (in the ambient key of the run store, as `simulate`; a
+prediction's manifests also record `engine_version` and `engine_switches`),
+`pfilter` (at the `model` level) and `profile` (a point's base). `compare`
+scores a chain-binomial fit through a `camdl pfilter` child, which keys them;
+its in-process ODE scoring and `dev eval` store nothing under an address. The
+switches themselves are fields of the evaluator settings each compiled model
+carries ([`EvalSettings`](rust:sim::compiled_model::EvalSettings)), set by
 [`eval_settings`](rust:cli::env::eval_settings). `CAMDL_NO_CONSTANT_FOLD` and
 `CAMDL_NO_LICM` change the compiled IR. An experimental input is also listed in
 the `provenance.experimental` field of `run.json`.
@@ -351,34 +352,13 @@ the `provenance.experimental` field of `run.json`.
 `fit run` resolves its configuration once, before anything runs, into
 [`ResolvedFitConfig`](rust:cli::fit::run_config::ResolvedFitConfig): the file
 with every flag applied, the compiled model, the engine identity, the seeds, the
-sweep and the chain-starts rule. Its identity and its runners are built from
-that value, and `run_fit` destructures it with every field named; the command
-line itself is read only before it, so no argument reaches a runner except
-through the resolved value, the execution settings (`--parallel`, `--force`) or
-the label. The fit file is read once, and every fit folder the run writes keeps
-two configs: `fit.toml.original`, that text byte for byte (its `fit_toml_hash`
-and the run's config identity are taken from it), and `fit.resolved.toml`, the
-configuration the folder's fits ran under
-([`resolved_config_text`](rust:cli::fit::run_config::resolved_config_text)): the
-text with every problem-half value the command line set
-(`--allow-forcing-extrapolation`) and the folder's own `[fixed]` values (a sweep
-point's, a `from_scenario`'s and a `from_file`'s) written in, keys sorted except
-those of the tables camdl reads in order (`[estimate]`, `[data.observations]`,
-`[data.holdout]`), marked as generated. Neither enters an identity. A reader
-checks the resolved `[fixed]` against the values `fit.meta.json` records the fit
-running at, and a fit folder whose stored config cannot be read is
-[`ResolveError::StoredConfig`](rust:cli::fit::handle::ResolveError), which no
-reader passes over as "no fit". Every reader of a stored fit's config reads the
-resolved file: a run-directory, label or run-id handle (`fit predict <leaf>`,
-`compare <leaf>`) so runs under the override and at the sweep point's values,
-and `fit table` diffs it. A folder an older build wrote has none: it is at store
-layout 0, and every such reader refuses it naming `camdl dev migrate`
-([`check_layout`](rust:cli::store_migrate::check_layout), the run spec's §2.7),
-which derives the file from what the folder records; no reader falls back to
-`fit.toml.original`. A `fit.toml` handle names only the run the file alone
-makes, so it refuses a flag-made fit and names its leaf. Every `fit run` input
-is classified in `input_class::FIT_RUN` and has a case in
-`rust/crates/cli/tests/fit_run_input_classes.rs`.
+sweep and the chain-starts rule. The problem and run identities are built from
+that value ([A fit on the run store](#a-fit-on-the-run-store)); the command line
+itself is read only before it, so no argument reaches a runner except through
+the resolved value, the execution settings (`--parallel`) or the request to the
+store (`--force`, `--label`). The fit file is read once; each run keeps that
+text byte for byte as its `fit.toml`, and its `fit_toml_hash` is taken from it.
+Neither enters an identity.
 
 `pfilter` and `profile` resolve their configurations the same way:
 [`ResolvedPfilterConfig`](rust:cli::pfilter_config::ResolvedPfilterConfig) and
@@ -387,29 +367,21 @@ built by a `resolve` that destructures the command's arguments field by field
 (so an argument added to the command does not compile until it is placed), with
 the outputs written outside the store, the execution settings and the label
 apart. The run is a function of those values, and the arguments are not in its
-scope. Each takes the handle forms `fit predict` takes for `--fit`
-([`resolve_fit_problem`](rust:cli::fit::handle::resolve_fit_problem)): a leaf
-directory, problem folder, run-id or fit-id prefix or label names a stored fit,
-whose `fit.resolved.toml` is read, so a fit made with
-`--allow-forcing-extrapolation` on its command line is read under that override
-and a `fit run --sweep` point at its own `[fixed]` values; a `fit.toml` names
-the file's problem as it reads, with or without a stored fit, and so not a
-flag-made fit's; any other existing file is a config too. The resolved config's
-`[method]` is the file's, which `profile` (reading a fit's nl-* budget and
-`starts`) reads for any leaf of the folder. A profile's folder stores the same
-pair a fit folder does: the user's text as `fit.toml.original` and the resolved
-config as `fit.resolved.toml`. The fit is read once, and its
+scope. Each `--fit` takes a fit file, resolved in process, or a stored fit:
+`@label`, a run-id or problem-id prefix, or a stored folder, read through
+`fit_store::read_fit`, which gives the stored compile, the configuration that
+`problem.toml` (and, for a run, `method.toml`) parses to, and the checked bytes
+of each stored input. A fit made with `--allow-forcing-extrapolation` on its
+command line is so read under that override, and a `fit run --sweep` point at
+its own `[fixed]` values. The fit is read once, and its
 `[config] allow_degenerate_rates` and `allow_forcing_extrapolation` are folded
-with the flags in resolution. Every input of each is classified
-(`input_class::PFILTER`, `PROFILE`) and has a case in
-`rust/crates/cli/tests/<command>_input_classes.rs`, which share one runner
-(`tests/input_class_runner/mod.rs`). A profile keys the user's config text
-(`fit.toml.original`, or the file) in its base, as `fit run`'s `fit_toml_hash`
-hashes it; what the resolved config adds, a flag's `[config]` value and the
-folder's `[fixed]`, is keyed there as values. A sweep point named by a handle
-and a file that writes the point's value store the same bytes under two keys
-(their texts differ): one computation under two keys, never two computations
-under one.
+with the flags in resolution. A `pfilter` run's identity holds a dependency on
+the stored problem when `--fit` names one. A profile of a stored fit keys the
+text of `problem.toml`, followed by the run's `method.toml` when a run is named;
+a profile of a fit file keys the file's text. Every input of each is classified
+(`input_class::PFILTER`, `PROFILE`); `pfilter`'s are checked by
+`every_pfilter_input_keeps_its_class` and `profile`'s by
+`rust/crates/cli/tests/profile_input_classes.rs`.
 
 `fit run` routes its method flags through one struct,
 [`CliMethodOverrides`](rust:cli::fit::config_v2::CliMethodOverrides), which
@@ -419,9 +391,9 @@ destructures the struct without `..`, so a field added to it does not compile
 until it names an [`OverrideFlag`](rust:cli::fit::config_v2::OverrideFlag), and
 `every_cli_sampler_flag_changes_the_method_identity` in `config_v2.rs` runs each
 flag through the identity. The copy from the clap struct into
-`CliMethodOverrides`, in [`cmd_fit_run_v2`](rust:cli::fit::cmd_fit_run_v2), is
-by hand, as is each flag that writes into the fit configuration instead
-(`--allow-forcing-extrapolation` sets `[config] allow_forcing_extrapolation`).
+`CliMethodOverrides`, in `fit::run_config::resolve`, is by hand, as is each flag
+that writes into the fit configuration instead (`--allow-forcing-extrapolation`
+sets `[config] allow_forcing_extrapolation`).
 
 So when you add a `fit run` or `profile` flag that changes what a run computes
 or stores, carry it through each step above, add a case to the differential
@@ -520,64 +492,60 @@ completed result holding `failure.toml`; a failure a rerun could change leaves
 no folder. No combined table is stored: `-o`, `--stdout` and `camdl cat @L`
 render it from the cells the invocation's record lists, in order.
 
-## How a fit is hashed
+## A fit on the run store
 
-A fit's identity has a second path. The fit configuration is a serde type, not a
-`RunInput` type, and enters the `fit` level as the digest of its JSON:
-[`fit_level_digest`](rust:cli::fit::cas::fit_level_digest) puts it in the
-`fit_toml` field of [`FitDigest`](rust:runid::inputs::FitDigest), beside the
-model digest and the digests of the training and holdout files.
-[`canonical_config_hash`](rust:cli::fit::cas::canonical_config_hash) does the
-work in four steps: it rejects any non-finite float anywhere in the value
-(serde_json writes `NaN` and `±Inf` as `null`, so without the check two configs
-differing only in them would hash alike), serializes the whole
-[`Problem`](rust:cli::fit::config_v2::Problem), removes the top-level keys that
-are provenance (`output_dir` and the `[provenance]` note), and hashes the JSON
-with its object keys sorted. The `method` level hashes the method's identity
-payload as canonical JSON in the same way (`method_config_hash`, inside a
-`MethodConfig`), and the seed has its own level.
+`camdl fit run` stores two kinds of result. A `FitProblem` (kind `fit`) holds
+what a fit is fitted to and is written once; a `FitRun` (kind `fit_run`) is one
+run of one method at one seed, stored inside its problem at `runs/` and written
+in place while it works. The layout and the files each holds are the run spec's
+§2.2. The inputs of `fit run` are declared with `#[derive(store::Inputs)]` on
+`FitRunInvocation` and the groups it flattens (`FitProblemFlags`, `FitRunFlags`,
+`FitMethodFlags`), in the classes of
+[Simulate on the run store](#simulate-on-the-run-store).
+`every_fit_run_input_keeps_its_class`, in
+`rust/crates/cli/src/fit_command/tests.rs`, runs the release binary into fresh
+stores once per input and checks what its class predicts;
+`every_fit_run_argument_is_declared` checks the declarations against every
+argument clap accepts.
 
-A level hash can only be minted by `canonical_config_hash` or by
-[`structural_level_hash`](rust:cli::fit::cas::structural_level_hash), the derive
-path: [`LevelHash`](rust:cli::fit::cas::LevelHash) has no public constructor, so
-a hash of a hand-listed `json!` literal, which would contain only the fields its
-author remembered, cannot become a level.
+A problem's identity is `FitProblemIdentity`
+(`rust/crates/cli/src/fit_store.rs`): a dependency on the stored compiled model,
+each data file's training lines, each stream's held-out dates without their
+values, the partition rule with its version, the `[data.tables]` files, the
+estimated set with its bounds and priors, the resolved `[fixed]` values,
+`simplex_groups`, the settings (`dt` and the two evaluator flags), the scenario
+request, `ic_free`, and for a `[synthetic]` problem what generated its data
+(`SyntheticOrigin`: the true parameters file's bytes, the dataset's seed and the
+block's other settings), so each generated dataset is a problem of its own.
+`fit_store::resolve_problem` builds it from a `config_v2::Problem` it
+destructures with every field named, so a key added to the fit file does not
+compile until it is placed. A run's identity is `FitRunIdentity`: a
+`ChainIdentity` (the problem, the method's settings without its length, the
+per-parameter `rw_sd`, `perturb_only_at_t0` and `start`, the compile with the
+state Jacobian when `nl-lbfgs` runs on the ODE backend, the process seed and the
+chain starts), the length, and for a resume a dependency on the base run's
+carried chain files. A resumed run's `chain.key()` must equal its base's, and
+each chain's `resume_state.bin` records it. The run id hashes the kind, the
+ambient key (the build and the engine switches) and the identity's key, so a
+rebuilt camdl never reuses a fit another build stored.
 
-Serializing the whole struct includes every field, as the derive does, but serde
-has a way to leave a field out that the derive deliberately lacks:
-`#[serde(skip_serializing_if = …)]`. A field so marked is absent from the JSON
-whenever the predicate holds, and an absent key contributes no bytes. The fit
-configuration uses it for flags whose default is `false`:
-
-<!-- decl: rust:cli::fit::config_v2::FitBackendConfig -->
-
-Both booleans are skipped when `false`, so a config that writes
-`allow_degenerate_rates = false` hashes as one that omits the key, and a stored
-fit made from a config without the key keeps its address; `true` adds the key
-and re-keys. The derive makes the opposite choice: a new `SimConfig` field
-contributes bytes at its default, and re-keys every leaf. On the JSON path,
-then, whether a field's default re-keys is decided per field by its serde
-attributes, and a field without `skip_serializing_if` behaves as it would under
-the derive. The tests `allow_degenerate_rates_changes_the_fit_identity` and
-`allow_forcing_extrapolation_false_is_the_absent_key`, in
-`rust/crates/cli/src/fit/cas.rs`, pin both halves for those two fields.
-
-[`config_identity_hash`](rust:cli::fit::cas::config_identity_hash) is a third
-hash of the same file and is not run identity: it is how a `fit.toml` handle is
-matched to the stored fit it produced, and includes the `[method]` table.
+A prediction (kind `prediction`) is stored inside the run whose draws it uses,
+at `predict/`. Its identity is the run and its problem, the stored data the
+filter conditions on, and the predict options as canonical JSON, a new option
+included unless it is named as left out.
 
 ## Versions
 
 A change that alters the bytes being hashed re-keys some set of stored leaves.
 Which set is chosen by which version moves, and each move is deliberate:
 
-| Version                                                                               | Folded into                                         | A bump re-keys                                                           |
-| ------------------------------------------------------------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------ |
-| a struct's `#[run_input(schema_version = N)]`                                         | that type's hash, after its type tag                | every leaf whose input embeds the type                                   |
-| [`HASH_VERSION`](rust:runid::hash::HASH_VERSION)                                      | every root hash and every `run_id`                  | every leaf of every kind                                                 |
-| `ir/VERSION`                                                                          | the `ir_version` field of `ModelDigest`             | every leaf with a model level: every kind at present                     |
-| the engine identity (`ENGINE_ID`, the build fingerprint, and the engine switches)     | the `engine` field of `ModelDigest` and `FitDigest` | every leaf with a model level, whenever camdl is built from other source |
-| [`PARTITION_RULE_VERSION`](rust:cli::fit::training_partition::PARTITION_RULE_VERSION) | `FitDigest`                                         | every fit                                                                |
+| Version                                                                               | Folded into                                                           | A bump re-keys                                                                                              |
+| ------------------------------------------------------------------------------------- | --------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| a struct's `#[run_input(schema_version = N)]`                                         | that type's hash, after its type tag                                  | every leaf whose input embeds the type                                                                      |
+| [`HASH_VERSION`](rust:runid::hash::HASH_VERSION)                                      | every root hash and every `run_id`                                    | every leaf of every kind                                                                                    |
+| `ir/VERSION`                                                                          | the `ir_version` field of `ModelDigest`                               | every leaf with a model level: every kind at present                                                        |
+| the engine identity (`ENGINE_ID`, the build fingerprint, and the engine switches)     | the `engine` field of `ModelDigest`; the ambient key of the run store | every leaf with a model level, and every result in the run store, whenever camdl is built from other source |
+| [`PARTITION_RULE_VERSION`](rust:cli::fit::training_partition::PARTITION_RULE_VERSION) | the problem's `partition`                                             | every fit                                                                                                   |
 
 A leaf written under an older `HASH_VERSION` stays readable, so `camdl show`,
 `fit summary` and the browsers still read it, but a lookup reports it as
@@ -592,8 +560,8 @@ the field set or to the bytes a leaf holds.
 | The change                                               | Edit                                                                                                                        | Version                                             | Pinned by                                                                                                                             |
 | -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
 | A `simulate` flag that changes the stored trajectory     | an `#[input(identity)]` field of `SimulateArgs`, carried into a field of `sim_store::SimConfig` (or lowered into the model) | the `version` of `SimConfig`'s `#[identity(..)]`    | `every_simulate_input_keeps_its_class`, with a `vary` fixture for the field                                                           |
-| A key in the fit configuration                           | a field on the serde struct, with `skip_serializing_if` at its default if existing fits should keep their keys              | none when skipped at its default                    | a `fit/cas.rs` test that the default hashes as the absent key and another value re-keys                                               |
-| A `fit run` flag that changes a method's output          | `CliMethodOverrides`, an `OverrideFlag` row, the method's arm of `write_cli_overrides`, and the copy in `cmd_fit_run_v2`    | none: the method level hashes the method as written | `every_cli_sampler_flag_changes_the_method_identity`                                                                                  |
+| A key in the fit configuration                           | a field of `config_v2::Problem`, placed by `fit_store::resolve_problem` in a field of the problem's or the run's identity   | the `version` of that struct's `#[identity(..)]`    | `every_fit_run_input_keeps_its_class`, with a `vary` fixture for the field                                                            |
+| A `fit run` flag that changes a method's output          | a field of `FitMethodFlags`, `CliMethodOverrides`, an `OverrideFlag` row, and the copy in `fit::run_config::resolve`        | none: the method level hashes the method as written | `every_cli_sampler_flag_changes_the_method_identity`                                                                                  |
 | A field that is displayed but does not change the output | `#[run_input(provenance)]` on the field, or record it only in `run.json` (`Provenance`, `RecordMeta`)                       | none                                                | a case in `differential_presentation_inputs_are_inert`                                                                                |
 | A float policy, or any other rule of the encoding        | `runid::hash` or `runid::float`, and the hand impls in `runid::ir_hash`                                                     | `HASH_VERSION`, with an entry in its doc            | the property tests in `rust/crates/runid/src/tests.rs`; `macro_eq.rs`; both golden tables                                             |
 | The IR schema                                            | the atomic OCaml, Rust and golden update (`.claude/skills/golden-update`)                                                   | `ir/VERSION`                                        | `rust/crates/runid/tests/golden_model_hashes.rs`, regenerated by `make update-golden-model-hashes` only when the re-key is the change |

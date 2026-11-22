@@ -182,7 +182,7 @@ fn fit_toml(dir: &Path, model: &Path) -> PathBuf {
         &toml,
         format!(
             r#"
-output_dir = "{out}"
+store = "{out}"
 [model]
 camdl = "{model}"
 [data.observations]
@@ -375,7 +375,7 @@ fn pgas_fit(tmp: &Path, tag: &str, model: &Path, estimate: &str, fixed: &str) ->
     std::fs::write(&data, body).unwrap();
     let toml = tmp.join(format!("fit_{tag}.toml"));
     std::fs::write(&toml, format!(
-        "output_dir = \"{out}\"\n[model]\ncamdl = \"{model}\"\n[data.observations]\ncases = \"{data}\"\n\
+        "store = \"{out}\"\n[model]\ncamdl = \"{model}\"\n[data.observations]\ncases = \"{data}\"\n\
          [config]\ndt = 1.0\n[estimate]\n{estimate}[fixed]\n{fixed}\
          [method]\nalgorithm = \"pgas\"\nbackend = \"chain_binomial\"\nchains = 1\nparticles = 8\nsweeps = 4\nburn_in = 2\n",
         out = tmp.join(format!("results_{tag}")).display(),

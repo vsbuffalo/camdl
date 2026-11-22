@@ -6,6 +6,8 @@
 //! records — and every method has an entry: an NLopt or pfilter fit used to
 //! fall through `build_summary_doc`'s match and be omitted.
 
+mod fit_store_support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -32,10 +34,11 @@ impl Drop for Tmp {
     }
 }
 
+/// The run of the fit file `<fit>.toml`, from the config its `run_inputs.json`
+/// records.
 fn fit_dir(work: &Path, fit: &str) -> PathBuf {
-    let hits: Vec<PathBuf> = std::fs::read_dir(work.join("results/fits")).unwrap().flatten()
-        .map(|e| e.path())
-        .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with(&format!("{fit}-")))
+    let hits: Vec<PathBuf> = fit_store_support::runs(&work.join("store")).into_iter()
+        .filter(|r| fit_store_support::run_inputs(r)["header"]["config"] == format!("{fit}.toml"))
         .collect();
     assert_eq!(hits.len(), 1, "{hits:?}");
     hits.into_iter().next().unwrap()
@@ -55,6 +58,7 @@ fn every_method_has_a_report_with_its_verdict_checks_warmup_and_findings() {
             .env_remove("CLICOLOR_FORCE")
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .env("CAMDLC", camdlc())
+            .env("CAMDL_STORE", work.join("store"))
             .current_dir(&work)
             .args(args)
             .output()

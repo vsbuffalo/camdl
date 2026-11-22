@@ -907,8 +907,8 @@ fn camdl_bare(cwd: &Path, store: Option<&Path>, args: &[&str]) -> Output {
 
 /// A reading command pointed at a run store, by `--store` or by
 /// `CAMDL_STORE`, reads that store and nothing beside it: not a
-/// `./camdl-store` in the working directory, and not a `./results` it was not
-/// named. Naming the results root (`--root`) still lists its fits.
+/// `./camdl-store` in the working directory, here holding a second filter run
+/// and a fit. With nothing named, `./camdl-store` is read.
 #[test]
 fn a_named_store_is_read_alone() {
     let cwd = workdir();
@@ -925,7 +925,7 @@ fn a_named_store_is_read_alone() {
     run("camdl-store", "2");
     let fit = camdl_bare(cwd.path(), None, &["fit", "run", "fit_plain.toml", "--progress", "none"]);
     assert!(fit.status.success(), "{}", String::from_utf8_lossy(&fit.stderr));
-    assert!(cwd.path().join("results").is_dir() && cwd.path().join("camdl-store").is_dir(), "the strays are there");
+    assert!(cwd.path().join("camdl-store").is_dir(), "the stray store is there");
 
     let kinds = |out: Output| -> Vec<String> {
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
@@ -941,12 +941,9 @@ fn a_named_store_is_read_alone() {
     let by_env = kinds(camdl_bare(cwd.path(), Some(&named), &list));
     assert_eq!(by_flag, ["pfilter"], "--store lists the one run in that store");
     assert_eq!(by_env, ["pfilter"], "CAMDL_STORE lists the one run in that store");
-    let with_root = kinds(camdl_bare(cwd.path(), None, &[&list[..], &["--store", "named", "--root", "results"]].concat()));
-    assert!(with_root.iter().any(|k| k != "pfilter") && with_root.iter().filter(|k| *k == "pfilter").count() == 1,
-        "a named results root is listed beside the store: {with_root:?}");
     let default = kinds(camdl_bare(cwd.path(), None, &list));
     assert!(default.iter().any(|k| k != "pfilter") && default.iter().filter(|k| *k == "pfilter").count() == 1,
-        "with nothing named, ./camdl-store and ./results are read: {default:?}");
+        "with nothing named, ./camdl-store is read, its filter run and its fit: {default:?}");
 }
 
 /// `--no-licm` and `CAMDL_NO_LICM` change the compiled model a run stores,

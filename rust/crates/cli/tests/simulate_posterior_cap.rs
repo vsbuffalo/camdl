@@ -5,6 +5,8 @@
 //! --draws-out). Pinned here: `--n-draws N` caps the posterior replay to a
 //! strided N (observable via --draws-out row count and the stderr line).
 
+mod fit_store_support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -58,6 +60,7 @@ fn run(bin: &Path, dir: &Path, args: &[&str]) -> std::process::Output {
     Command::new(bin).env_remove("CLICOLOR_FORCE")
         .args(args)
         .current_dir(dir)
+        .env("CAMDL_STORE", dir.join("store"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output()
         .expect("spawn camdl")
@@ -73,7 +76,7 @@ fn n_draws_caps_posterior_replay_strided() {
     std::fs::write(tmp.join("model.camdl"), MODEL).unwrap();
     std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
     // 30 sweeps − 10 burn-in = a 20-draw cloud: small fit, real posterior.
-    std::fs::write(tmp.join("fit.toml"), r#"output_dir = "results"
+    std::fs::write(tmp.join("fit.toml"), r#"store = "store"
 [model]
 camdl = "model.camdl"
 [data.observations]
@@ -100,11 +103,7 @@ thin = 1
     assert!(out.status.success(), "fit run failed:\nstderr={}",
         String::from_utf8_lossy(&out.stderr));
 
-    // Find the fit segment dir (results/fits/<segment>).
-    let fits = tmp.join("results").join("fits");
-    let segment = std::fs::read_dir(&fits).unwrap().flatten()
-        .map(|e| e.path()).find(|p| p.is_dir())
-        .expect("fit segment dir");
+    let segment = fit_store_support::the_run(&tmp.join("store"));
 
     // Replay with --n-draws 5: exactly 5 strided draws, said on stderr.
     let out = run(&bin, &tmp, &[

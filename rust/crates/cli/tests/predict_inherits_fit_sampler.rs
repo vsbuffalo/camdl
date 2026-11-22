@@ -1,5 +1,5 @@
 //! D78: every `fit predict` mode draws with the binomial sampler its fit ran
-//! (BTPE or BTRS, read from the fit leaf's `run.json`), and records it.
+//! (BTPE or BTRS, read from the fit run's `run_inputs.json`), and records it.
 //!
 //! The guarantee is the same sampler and recorded configuration, not the fit's
 //! realised random numbers: nothing here compares a predict's draws with the
@@ -7,6 +7,8 @@
 //!
 //! The fixture is `tests/fixtures/forecast/two_cadence_sir.camdl`, a
 //! chain-binomial SIR reported daily and weekly, fitted by PMMH.
+
+mod fit_store_support;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -25,6 +27,7 @@ fn run(dir: &Path, args: &[&str]) -> std::process::Output {
     Command::new(binary()).env_remove("CLICOLOR_FORCE")
         .args(args)
         .current_dir(dir)
+        .env("CAMDL_STORE", dir.join("store"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output()
         .expect("spawn camdl")
@@ -35,12 +38,12 @@ fn stderr(o: &std::process::Output) -> String {
 }
 
 /// A PMMH fit of the fixture in `dir`, with `extra` appended to `fit run`.
-/// Returns the fit leaf (the directory holding its `run.json`).
+/// Returns the stored fit run's folder.
 fn fit(dir: &Path, extra: &[&str]) -> PathBuf {
     for f in ["two_cadence_sir.camdl", "daily_cases.tsv", "weekly_cases.tsv"] {
         std::fs::copy(fixture(f), dir.join(f)).unwrap();
     }
-    std::fs::write(dir.join("fit.toml"), r#"output_dir = "results"
+    std::fs::write(dir.join("fit.toml"), r#"store = "store"
 
 [model]
 camdl = "two_cadence_sir.camdl"
@@ -75,12 +78,7 @@ thin = 1
     args.extend_from_slice(extra);
     let out = run(dir, &args);
     assert!(out.status.success(), "fit run: {}", stderr(&out));
-    let leaves: Vec<PathBuf> = walk(&dir.join("results")).into_iter()
-        .filter(|p| p.file_name().is_some_and(|n| n == "run.json"))
-        .map(|p| p.parent().unwrap().to_path_buf())
-        .collect();
-    assert_eq!(leaves.len(), 1, "{leaves:?}");
-    leaves[0].clone()
+    fit_store_support::the_run(&dir.join("store"))
 }
 
 fn walk(root: &Path) -> Vec<PathBuf> {
@@ -101,7 +99,7 @@ fn walk(root: &Path) -> Vec<PathBuf> {
 fn predict(dir: &Path, leaf: &Path, mode: &str) -> (serde_json::Value, String) {
     let out = run(dir, &["fit", "predict", leaf.to_str().unwrap(), "--mode", mode, "--n-draws", "4"]);
     assert!(out.status.success(), "fit predict --mode {mode}: {}", stderr(&out));
-    let manifests: Vec<PathBuf> = walk(&dir.join("results")).into_iter()
+    let manifests: Vec<PathBuf> = walk(&dir.join("store")).into_iter()
         .filter(|p| p.file_name().is_some_and(|n| n == "predictive.json"))
         .filter(|p| {
             let m: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap();
@@ -114,45 +112,38 @@ fn predict(dir: &Path, leaf: &Path, mode: &str) -> (serde_json::Value, String) {
     (m, tsv)
 }
 
-/// A fit run with `--binomial btrs` records `btrs` in its leaf; the one-step
-/// band and the free-forward replay of that leaf record `btrs` too.
+/// A fit run with `--binomial btrs` records `btrs` in its `run_inputs.json`;
+/// the one-step band and the free-forward replay of that run record `btrs` too.
 #[test]
 fn d78_a_btrs_fits_one_step_and_free_forward_record_btrs() {
     let tmp = tempfile::tempdir().unwrap();
     let leaf = fit(tmp.path(), &["--binomial", "btrs"]);
-    let record: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(leaf.join("run.json")).unwrap()).unwrap();
-    assert_eq!(record["inputs"]["binomial"], "btrs");
+    assert_eq!(fit_store_support::run_inputs(&leaf)["binomial"], "btrs");
     for mode in ["one_step", "free_forward"] {
         let (m, _) = predict(tmp.path(), &leaf, mode);
         assert_eq!(m["binomial"], "btrs", "--mode {mode}");
     }
 }
 
-/// The same posterior predicted twice, with the leaf's recorded sampler set to
-/// BTPE and then to BTRS: each mode records the leaf's sampler, and its draws
-/// change with it, so the record is the sampler the mode drew with. Only the
-/// record differs between the two runs (same draws, same seed), which is what
-/// makes a difference in the tables attributable to the sampler.
+/// A fit run on the default sampler records `btpe`, and each mode records
+/// `btpe`. The record is the one the run stored: a `run_inputs.json` rewritten
+/// to name another sampler fails the store's digest check, and `fit predict`
+/// refuses the run rather than drawing with the rewritten sampler.
 #[test]
 fn d78_one_step_and_free_forward_draw_with_the_fits_recorded_sampler() {
     let tmp = tempfile::tempdir().unwrap();
     let leaf = fit(tmp.path(), &[]);
-    let run_json = leaf.join("run.json");
+    let run_json = leaf.join("run_inputs.json");
     let mut record: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&run_json).unwrap()).unwrap();
-    assert_eq!(record["inputs"]["binomial"], "btpe");
-    let btpe: Vec<(serde_json::Value, String)> =
-        ["one_step", "free_forward"].iter().map(|m| predict(tmp.path(), &leaf, m)).collect();
-
-    record["inputs"]["binomial"] = serde_json::json!("btrs");
-    std::fs::write(&run_json, serde_json::to_string_pretty(&record).unwrap()).unwrap();
-    let btrs: Vec<(serde_json::Value, String)> =
-        ["one_step", "free_forward"].iter().map(|m| predict(tmp.path(), &leaf, m)).collect();
-
-    for (mode, (a, b)) in ["one_step", "free_forward"].iter().zip(btpe.iter().zip(&btrs)) {
-        assert_eq!((a.0["binomial"].as_str(), b.0["binomial"].as_str()), (Some("btpe"), Some("btrs")),
-            "--mode {mode} records the leaf's sampler");
-        assert!(a.1 != b.1, "--mode {mode}: the predictive draws with the recorded sampler");
+    assert_eq!(record["binomial"], "btpe");
+    for mode in ["one_step", "free_forward"] {
+        let (m, _) = predict(tmp.path(), &leaf, mode);
+        assert_eq!(m["binomial"], "btpe", "--mode {mode} records the run's sampler");
     }
+
+    record["binomial"] = serde_json::json!("btrs");
+    std::fs::write(&run_json, serde_json::to_string_pretty(&record).unwrap()).unwrap();
+    let out = run(tmp.path(), &["fit", "predict", leaf.to_str().unwrap(), "--mode", "one_step", "--n-draws", "4"]);
+    assert!(!out.status.success(), "a rewritten run_inputs.json must not be read: {}", stderr(&out));
 }

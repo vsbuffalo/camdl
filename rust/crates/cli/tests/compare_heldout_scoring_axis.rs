@@ -1,5 +1,6 @@
-//! gh#1062, D38: a held-out `compare` scores exactly the rows the fit did not
-//! train on, whatever the stream's `covers` form.
+//! gh#1062, D38: a fit holding rows out trains on exactly the rows that end
+//! at or before the cutoff, whatever the stream's `covers` form, and
+//! `compare` scores a stored fit on exactly those rows.
 //!
 //! A row trains if the END of what it measures is at or before the cutoff
 //! (`holdout_after = τ`); under `[data.holdout]` every row of the training
@@ -7,20 +8,26 @@
 //! period's close, which for a period-start label (`day(time)`,
 //! `starting_on`, `ending_on`) is after the label: the row labelled 10 under
 //! `day(time)` covers [10, 11), ends at 11 and so does not train under
-//! `holdout_after = 10`. A held-out score scores every row that did not
-//! train and ends after the training extent.
+//! `holdout_after = 10`.
 //!
 //! Each test fits a one- or two-stream closed SIR to daily rows labelled 1 to
 //! 16 with distinct observed values, cut at 10 (the rows labelled 11 to 16
 //! held out where the label is the period's end, 10 to 16 where the period
-//! opens at the label), and reads which rows `compare` scored: the scored
-//! times come from
+//! opens at the label). It reads the partition the stored problem holds: the
+//! training rows in `inputs/<stream>.tsv`, the held-out rows' periods in
+//! `held_out/<stream>.tsv` and the training extent in `partition.json`. A
+//! stored fit keeps its held-out rows' periods and not their values, so
+//! `compare` refuses to score them and names the held-out rows per stream;
+//! the test checks that refusal. It then reads which rows
+//! `compare --in-sample` scored: the scored times come from
 //! `compare --pointwise`, and the observed value at each scored time from a
 //! full-series `camdl pfilter --save-prequential` of the same data (the
 //! observed value at a step is the data, independent of θ). Most fits run
 //! IF2 on the chain-binomial backend, so `compare` derives their trace with
 //! `camdl pfilter`; the `ode_` tests run MH on the `ode` backend, whose trace
-//! `compare` scores in-process (gh#312).
+//! `compare` scores in-process.
+
+mod fit_store_support;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -69,7 +76,7 @@ enum Form {
 
 /// How a fit is run: the particle-filter path (`compare` derives its trace
 /// with `camdl pfilter`) or the ODE path (`compare` scores it in-process by
-/// the fit's own ODE likelihood, gh#312).
+/// the fit's own ODE likelihood).
 #[derive(Clone, Copy, PartialEq)]
 enum Backend {
     /// IF2 on the chain-binomial backend.
@@ -149,7 +156,7 @@ fn rows_tsv(stream: &Stream, labels: std::ops::RangeInclusive<u64>) -> String {
     s
 }
 
-fn fit_toml(streams: &[Stream], form: Form, backend: Backend, rho: f64, output_dir: &str)
+fn fit_toml(streams: &[Stream], form: Form, backend: Backend, rho: f64)
     -> String {
     let mut data = String::new();
     if form == Form::HoldoutAfter {
@@ -174,7 +181,7 @@ fn fit_toml(streams: &[Stream], form: Form, backend: Backend, rho: f64, output_d
         Backend::Ode => "algorithm = \"mh\"\nbackend = \"ode\"\nchains = 1\n\
                          iterations = 200\nburn_in = 50\nstarts = \"single\"\n",
     };
-    format!(r#"output_dir = "{output_dir}"
+    format!(r#"store = "results"
 
 [model]
 camdl = "model.camdl"
@@ -194,24 +201,41 @@ k   = 10.0
 {method}"#)
 }
 
-fn camdl(bin: &Path, dir: &Path, args: &[&str]) -> std::process::Output {
-    let out = Command::new(bin).env_remove("CLICOLOR_FORCE")
+fn run_camdl(bin: &Path, dir: &Path, args: &[&str]) -> std::process::Output {
+    Command::new(bin).env_remove("CLICOLOR_FORCE")
         .args(args)
         .current_dir(dir)
+        // `@label` handles resolve in the store the fit files name.
+        .env("CAMDL_STORE", dir.join("results"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output()
-        .expect("spawn camdl");
+        .expect("spawn camdl")
+}
+
+fn camdl(bin: &Path, dir: &Path, args: &[&str]) -> std::process::Output {
+    let out = run_camdl(bin, dir, args);
     assert!(out.status.success(), "camdl {args:?} failed:\nstdout={}\nstderr={}",
         String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     out
 }
 
-/// What `compare` scored for the first fit: its `t_score`, the training
-/// extent its `hold_out_tail` stamp records, and per stream the observed
-/// values it scored, in time order.
+/// What the first fit stored and what `compare` did with it: the training
+/// rows and held-out rows its stored problem holds, the training extent its
+/// `partition.json` records, `compare`'s refusal to score it held out, and
+/// what `compare --in-sample` scored.
 struct Scored {
+    /// Per stream, the observed values of the rows in `inputs/<stream>.tsv`.
+    training: BTreeMap<String, Vec<u64>>,
+    /// Per stream, the labels of the rows in `held_out/<stream>.tsv`.
+    held_out: BTreeMap<String, Vec<u64>>,
+    /// `partition.json`'s `extent.t`.
+    extent: f64,
+    /// `compare`'s stderr when asked for a held-out score.
+    refusal: String,
+    /// The `--in-sample` row's `t_score`.
     t_score: u64,
-    train_end: f64,
+    /// Per stream, the observed values `compare --in-sample` scored, in time
+    /// order.
     values: BTreeMap<String, Vec<u64>>,
 }
 
@@ -242,8 +266,22 @@ fn extent(covers: &str, form: Form) -> f64 {
     }
 }
 
-/// Fit two configs (differing only in a fixed `rho`) under `form`, compare
-/// them held-out, and read back what the first one scored.
+/// The values of column `col` of a stored TSV, parsed as whole numbers.
+fn column(path: &Path, col: &str) -> Vec<u64> {
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    let mut lines = text.lines();
+    let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
+    let c = header.iter().position(|h| *h == col)
+        .unwrap_or_else(|| panic!("{} has no column {col}: {header:?}", path.display()));
+    lines.filter(|l| !l.is_empty())
+        .map(|l| l.split('\t').nth(c).unwrap().parse::<f64>().unwrap() as u64)
+        .collect()
+}
+
+/// Fit two configs (differing only in a fixed `rho`) under `form`, read the
+/// partition the first one stored, ask `compare` for a held-out score, and
+/// read back what `compare --in-sample` scored for the first one.
 fn heldout_scored(slug: &str, streams: &[Stream], form: Form, backend: Backend) -> Scored {
     let bin = skip_if_missing_binary();
     let tmp = tempfile::Builder::new().prefix(&format!("camdl_gh1062_{slug}_")).tempdir().unwrap();
@@ -256,24 +294,48 @@ fn heldout_scored(slug: &str, streams: &[Stream], form: Form, backend: Backend) 
         std::fs::write(dir.join(format!("{}_holdout.tsv", s.name)),
             rows_tsv(s, TAU + 1..=16)).unwrap();
     }
-    std::fs::write(dir.join("a.toml"), fit_toml(streams, form, backend, 0.5, "results_a"))
+    std::fs::write(dir.join("a.toml"), fit_toml(streams, form, backend, 0.5))
         .unwrap();
-    std::fs::write(dir.join("b.toml"), fit_toml(streams, form, backend, 0.6, "results_b"))
+    std::fs::write(dir.join("b.toml"), fit_toml(streams, form, backend, 0.6))
         .unwrap();
-    for cfg in ["a.toml", "b.toml"] {
-        camdl(&bin, dir, &["fit", "run", cfg, "--seed", "1"]);
+    for (cfg, label) in [("a.toml", "a"), ("b.toml", "b")] {
+        camdl(&bin, dir, &["fit", "run", cfg, "--seed", "1", "--label", label]);
     }
 
-    let out = camdl(&bin, dir, &["compare", "a.toml", "b.toml", "--baseline", "b.toml",
+    // The problem `a.toml` stored: the run whose fit file fixes rho at 0.5.
+    let run_a = fit_store_support::runs(&dir.join("results")).into_iter()
+        .find(|r| std::fs::read_to_string(r.join("fit.toml")).unwrap().contains("rho = 0.5"))
+        .expect("the run of a.toml");
+    let problem = fit_store_support::problem_of(&run_a);
+    let mut training = BTreeMap::new();
+    let mut held_out = BTreeMap::new();
+    for s in streams {
+        training.insert(s.name.to_string(),
+            column(&problem.join("inputs").join(format!("{}.tsv", s.name)), s.name));
+        held_out.insert(s.name.to_string(),
+            column(&problem.join("held_out").join(format!("{}.tsv", s.name)), "label"));
+    }
+    let extent = fit_store_support::json(&problem.join("partition.json"))["extent"]["t"]
+        .as_f64().expect("partition.json extent.t");
+
+    let compare = ["compare", "@a", "@b", "--baseline", "@b",
         "--format", "json", "--particles", "100", "--draws", "1", "--replicates", "1",
-        "--seed", "1", "--pointwise", "pw.tsv"]);
+        "--seed", "1", "--pointwise", "pw.tsv"];
+    let out = run_camdl(&bin, dir, &compare);
+    assert!(!out.status.success(), "a held-out score of a stored fit is refused:\n{}",
+        String::from_utf8_lossy(&out.stderr));
+    assert!(out.stdout.is_empty(), "no table is written");
+    let refusal = String::from_utf8_lossy(&out.stderr).into_owned();
+
+    let mut in_sample = compare.to_vec();
+    in_sample.push("--in-sample");
+    let out = camdl(&bin, dir, &in_sample);
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("compare json");
     let row = v["rows"].as_array().unwrap().iter()
-        .find(|r| r["name"] == "a.toml")
-        .unwrap_or_else(|| panic!("no a.toml row:\n{v}"))
+        .find(|r| r["name"] == "@a")
+        .unwrap_or_else(|| panic!("no @a row:\n{v}"))
         .clone();
-    let train_end = row["conditioning"]["hold_out_tail"]["train_end"].as_f64()
-        .unwrap_or_else(|| panic!("the row is stamped held-out: {row}"));
+    assert_eq!(row["conditioning"], "in_sample", "{row}");
     let t_score = row["t_score"].as_u64().expect("t_score");
 
     // Observed value at each (stream, scoring time), from a full-series
@@ -307,7 +369,7 @@ fn heldout_scored(slug: &str, streams: &[Stream], form: Form, backend: Backend) 
     let mut values: BTreeMap<String, Vec<u64>> = BTreeMap::new();
     for line in lines {
         let f: Vec<&str> = line.split('\t').collect();
-        if f[c_model] != "a.toml" || f[c_score].is_empty() {
+        if f[c_model] != "@a" || f[c_score].is_empty() {
             continue;
         }
         let t: f64 = f[c_t].parse().unwrap();
@@ -316,11 +378,23 @@ fn heldout_scored(slug: &str, streams: &[Stream], form: Form, backend: Backend) 
             .unwrap_or_else(|| panic!("no observed value for {key:?} in the full trace"));
         values.entry(f[c_stream].to_string()).or_default().push(y);
     }
-    Scored { t_score, train_end, values }
+    Scored { training, held_out, extent, refusal, t_score, values }
 }
 
-/// The one-stream assertions: exactly the withheld rows are scored, starting
-/// at the first one, and the last training row is not among them.
+/// The refusal names the stored fit's held-out rows per stream and the way
+/// to score its training rows instead.
+fn assert_refused(refusal: &str, held: &[(&str, usize)]) {
+    let counts: Vec<String> = held.iter().map(|(s, n)| format!("{s}: {n}")).collect();
+    assert!(refusal.contains("held rows out of its training data")
+            && refusal.contains(&format!("({})", counts.join(", ")))
+            && refusal.contains("step 7") && refusal.contains("--in-sample"),
+        "the refusal names the held-out rows {counts:?}:\n{refusal}");
+}
+
+/// The one-stream assertions: the stored problem trains on exactly the rows
+/// before the first withheld one and holds out the rest; `compare` refuses
+/// to score the held-out rows; `compare --in-sample` scores exactly the
+/// training rows.
 fn assert_scores_only_the_withheld_rows(covers: &'static str, form: Form, slug: &str) {
     assert_backend_scores_only_the_withheld_rows(covers, form, Backend::Filter, slug);
 }
@@ -331,21 +405,23 @@ fn assert_backend_scores_only_the_withheld_rows(
 ) {
     let streams = [Stream { name: "cases", covers, flow: "infection", values: &CASES }];
     let got = heldout_scored(slug, &streams, form, backend);
-    let scored = &got.values["cases"];
     let first = first_withheld(covers, form);
-    let withheld: Vec<u64> = CASES[first..].to_vec();
-    assert_eq!(got.train_end, extent(covers, form),
-        "covers = {covers}: the stamp records the training extent");
-    assert_eq!(got.t_score, withheld.len() as u64,
-        "covers = {covers}: one scored step per withheld row; scored values {scored:?}");
-    assert_eq!(scored.first(), withheld.first(),
-        "covers = {covers}: the first scored value is the first withheld row's; \
-         scored values {scored:?}");
-    let last_training = CASES[first - 1];
-    assert!(!scored.contains(&last_training),
-        "covers = {covers}: the last training row (value {last_training}) is scored \
-         as held out; scored values {scored:?}");
-    assert_eq!(scored, &withheld, "covers = {covers}");
+    let trained: Vec<u64> = CASES[..first].to_vec();
+    let withheld_labels: Vec<u64> = (first as u64 + 1..=16).collect();
+    assert_eq!(got.extent, extent(covers, form),
+        "covers = {covers}: partition.json records the training extent");
+    assert_eq!(got.training["cases"], trained,
+        "covers = {covers}: the stored training rows end at the last training row");
+    assert_eq!(got.held_out["cases"], withheld_labels,
+        "covers = {covers}: the stored held-out rows start at the first withheld row");
+    assert_refused(&got.refusal, &[("cases", withheld_labels.len())]);
+    let scored = &got.values["cases"];
+    assert_eq!(got.t_score, trained.len() as u64,
+        "covers = {covers}: one in-sample step per training row; scored values {scored:?}");
+    assert!(!scored.contains(&CASES[first]),
+        "covers = {covers}: the first withheld row (value {}) is scored in sample; \
+         scored values {scored:?}", CASES[first]);
+    assert_eq!(scored, &trained, "covers = {covers}");
 }
 
 #[test]
@@ -369,15 +445,14 @@ fn day_holdout_files_scores_only_withheld_rows() {
 }
 
 /// Control: a `closing_at` row is scored at its label, so the label cut and
-/// the scoring cut coincide; its scored rows are the withheld ones, before
-/// and after gh#1062.
+/// the scoring cut coincide.
 #[test]
 fn closing_at_holdout_after_scores_only_withheld_rows() {
     assert_scores_only_the_withheld_rows("closing_at(time, 1 'days)", Form::HoldoutAfter, "closing");
 }
 
 /// Control: a per-row window stream is labelled by its stop, which is its
-/// scoring time, so its scored rows are the withheld ones.
+/// scoring time, so the label cut and the scoring cut coincide.
 #[test]
 fn window_columns_holdout_after_scores_only_withheld_rows() {
     assert_scores_only_the_withheld_rows(WINDOW_COLUMNS, Form::HoldoutAfter, "window");
@@ -386,9 +461,10 @@ fn window_columns_holdout_after_scores_only_withheld_rows() {
 /// Two streams under one `holdout_after = 10`: `cases` by `day(time)` (row
 /// labelled D ends at D + 1) and `deaths` by `closing_at` (row labelled D
 /// ends at D). `cases` trains rows 1–9 and `deaths` rows 1–10; both end by
-/// t = 10, the training extent. Every row that did not train ends after it,
-/// so each stream scores all of its held-out rows: `cases` labels 10–16,
-/// `deaths` labels 11–16. No training row of either stream is scored.
+/// t = 10, the training extent. The refusal counts each stream's own
+/// held-out rows (`cases` labels 10–16, `deaths` labels 11–16), and
+/// `compare --in-sample` scores each stream's training rows and no held-out
+/// row of either.
 #[test]
 fn two_streams_score_no_training_row_of_either() {
     let streams = [
@@ -397,21 +473,25 @@ fn two_streams_score_no_training_row_of_either() {
                  values: &DEATHS },
     ];
     let got = heldout_scored("two", &streams, Form::HoldoutAfter, Backend::Filter);
-    assert_eq!(got.train_end, TAU as f64, "the stamp records the training extent");
+    assert_eq!(got.extent, TAU as f64, "partition.json records the training extent");
+    assert_refused(&got.refusal, &[("cases", 7), ("deaths", 6)]);
     for (name, values, first) in [("cases", &CASES, TAU as usize - 1), ("deaths", &DEATHS, TAU as usize)] {
+        assert_eq!(got.training[name], values[..first].to_vec(),
+            "{name}: the stored training rows");
+        assert_eq!(got.held_out[name], (first as u64 + 1..=16).collect::<Vec<_>>(),
+            "{name}: the stored held-out rows");
         let scored = &got.values[name];
-        for training in &values[..first] {
-            assert!(!scored.contains(training),
-                "{name}: training value {training} scored as held out; scored {scored:?}");
+        for withheld in &values[first..] {
+            assert!(!scored.contains(withheld),
+                "{name}: held-out value {withheld} scored in sample; scored {scored:?}");
         }
-        assert_eq!(scored, &values[first..].to_vec(), "{name} scores every held-out row");
+        assert_eq!(scored, &values[..first].to_vec(), "{name} scores every training row");
     }
 }
 
-/// The ODE path (gh#312) cuts on the same boundary: two ODE+MH fits of a
-/// `day(time)` stream are compared on the rows labelled 10 to 16, which end
-/// after the cutoff, and not on the training row labelled 9, which ends at
-/// t = 10.
+/// The ODE path cuts on the same boundary: two ODE+MH fits of a `day(time)`
+/// stream hold out the rows labelled 10 to 16, which end after the cutoff,
+/// and train on the row labelled 9, which ends at t = 10.
 #[test]
 fn ode_day_holdout_after_scores_only_withheld_rows() {
     assert_backend_scores_only_the_withheld_rows("day(time)", Form::HoldoutAfter, Backend::Ode,
@@ -419,8 +499,7 @@ fn ode_day_holdout_after_scores_only_withheld_rows() {
 }
 
 /// Control for the ODE path: a `closing_at` row is scored at its label, so
-/// the boundary is the last training label and the scored rows are the
-/// withheld ones, before and after gh#1062.
+/// the boundary is the last training label.
 #[test]
 fn ode_closing_at_holdout_after_scores_only_withheld_rows() {
     assert_backend_scores_only_the_withheld_rows("closing_at(time, 1 'days)",

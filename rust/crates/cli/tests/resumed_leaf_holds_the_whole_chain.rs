@@ -1,16 +1,18 @@
 //! A resumed PMMH or PGAS leaf holds the whole chain.
 //!
-//! `fit run --resume <base>` writes a leaf of its own; that leaf is the
+//! `fit run --resume <base>` writes a run of its own; that run is the
 //! complete artifact for the longer chain. Each chain's `trace.tsv` (and, for
 //! PGAS, `trajectories.tsv`) starts as the base's file byte for byte and the
 //! new segment is appended, the index continuing from the base's without a
 //! repeated or restarted row; `draws.tsv` and the summary's R̂ / ESS are over
-//! every retained draw of the chain; and `run.json` `inputs.resume` names the
+//! every retained draw of the chain; and `run_inputs.json` `resume` names the
 //! base and the index each segment begins at.
 //!
 //! A resumed chain's random stream differs from an uninterrupted one's (the
 //! sampler reseeds at the boundary), so the uninterrupted run of the same total
 //! length is compared on its counts, not its values.
+
+mod fit_store_support;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -49,6 +51,7 @@ fn camdl(work: &Path, args: &[&str]) {
     let out = Command::new(&bin)
         .env_remove("CLICOLOR_FORCE")
         .current_dir(work)
+        .env("CAMDL_STORE", work.join("camdl-store"))
         .args(args)
         .args(["--progress", "none"])
         .output()
@@ -56,22 +59,24 @@ fn camdl(work: &Path, args: &[&str]) {
     assert!(out.status.success(), "camdl {args:?}:\n{}", String::from_utf8_lossy(&out.stderr));
 }
 
-/// The single method leaf under `results/fits/<stem>-*/`.
-fn leaf(work: &Path, stem: &str) -> PathBuf {
-    let only = |dir: &Path, prefix: &str| -> PathBuf {
-        let hits: Vec<PathBuf> = std::fs::read_dir(dir).unwrap().flatten().map(|e| e.path())
-            .filter(|p| p.is_dir() && p.file_name().unwrap().to_string_lossy().starts_with(prefix))
-            .collect();
-        assert_eq!(hits.len(), 1, "one `{prefix}*` under {}: {hits:?}", dir.display());
-        hits.into_iter().next().unwrap()
-    };
-    let fit = only(&work.join("results/fits"), &format!("{stem}-"));
-    let method = only(&fit, "");
-    only(&method, "seed_")
+/// The one fit run of `<stem>.toml` in the store at `work/camdl-store`: the
+/// run whose `fit.toml`, the file as given, is that file's bytes, and which
+/// was resumed from a base or not as `resumed` says. (`longer.toml` and
+/// `fresh.toml` are one text, run once resumed and once fresh.)
+fn leaf(work: &Path, stem: &str, resumed: bool) -> PathBuf {
+    let text = std::fs::read(work.join(format!("{stem}.toml"))).unwrap();
+    let hits: Vec<PathBuf> = fit_store_support::runs(&work.join("camdl-store"))
+        .into_iter()
+        .filter(|r| std::fs::read(r.join("fit.toml")).ok().as_deref() == Some(&text[..]))
+        .filter(|r| fit_store_support::run_inputs(r)["resume"].is_null() != resumed)
+        .collect();
+    assert_eq!(hits.len(), 1, "one fit run of {stem}.toml (resumed: {resumed}): {hits:?}");
+    hits.into_iter().next().unwrap()
 }
 
-fn run_json(leaf: &Path) -> serde_json::Value {
-    serde_json::from_slice(&std::fs::read(leaf.join("run.json")).unwrap()).unwrap()
+/// A run's `run_inputs.json`.
+fn run_inputs(leaf: &Path) -> serde_json::Value {
+    fit_store_support::run_inputs(leaf)
 }
 
 /// The `index` column of a trace, in row order.
@@ -163,9 +168,9 @@ fn assert_whole_chain(base: &Path, resumed: &Path, fresh: &Path, index: &str, ch
     assert!(distinguished > 0, "no ESS distinguishes the whole chain from the new segment");
 
     // The lineage: the base, and where each segment begins.
-    let base_id = run_json(base)["run_id"].as_str().unwrap().to_string();
-    let rec = run_json(resumed);
-    let lineage = &rec["inputs"]["resume"];
+    let base_id = run_inputs(base)["run_id"].as_str().unwrap().to_string();
+    let rec = run_inputs(resumed);
+    let lineage = &rec["resume"];
     assert_eq!(lineage["parent_run_id"].as_str(), Some(base_id.as_str()), "{lineage}");
     assert_eq!(lineage["index_column"].as_str(), Some(index), "{lineage}");
     let segments = lineage["segments"].as_array().unwrap();
@@ -175,7 +180,7 @@ fn assert_whole_chain(base: &Path, resumed: &Path, fresh: &Path, index: &str, ch
     assert_eq!(segments[1]["run_id"], rec["run_id"], "{lineage}");
     assert_eq!(segments[1]["first_index"], serde_json::json!(vec![n1; chains]),
         "the boundary is the base's length, per chain: {lineage}");
-    assert!(run_json(fresh)["inputs"].get("resume").is_none(), "a fresh run records no lineage");
+    assert!(run_inputs(fresh)["resume"].is_null(), "a fresh run records no lineage");
 }
 
 /// A `fit_state.toml` number (`best_chain`, `acceptance_rate`, `best_loglik`).
@@ -215,11 +220,11 @@ thin       = 1
 ")).unwrap();
     }
     camdl(&work, &["fit", "run", "base.toml", "--seed", "1"]);
-    let base = leaf(&work, "base");
+    let base = leaf(&work, "base", false);
     camdl(&work, &["fit", "run", "longer.toml", "--seed", "1", "--resume", base.to_str().unwrap()]);
     camdl(&work, &["fit", "run", "fresh.toml", "--seed", "1"]);
-    let resumed = leaf(&work, "longer");
-    assert_whole_chain(&base, &resumed, &leaf(&work, "fresh"), "step", 2, n1, n2);
+    let resumed = leaf(&work, "longer", true);
+    assert_whole_chain(&base, &resumed, &leaf(&work, "fresh", false), "step", 2, n1, n2);
 
     // `fit_state.toml`'s acceptance rate is the best chain's over every
     // post-burn-in step of the whole chain — at `thin = 1` the `accepted`
@@ -264,11 +269,11 @@ n_trajectories = 4
 ")).unwrap();
     }
     camdl(&work, &["fit", "run", "base.toml", "--seed", "1"]);
-    let base = leaf(&work, "base");
+    let base = leaf(&work, "base", false);
     camdl(&work, &["fit", "run", "longer.toml", "--seed", "1", "--resume", base.to_str().unwrap()]);
-    let resumed = leaf(&work, "longer");
+    let resumed = leaf(&work, "longer", true);
     camdl(&work, &["fit", "run", "fresh.toml", "--seed", "1"]);
-    assert_whole_chain(&base, &resumed, &leaf(&work, "fresh"), "sweep", 2, n1, n2);
+    assert_whole_chain(&base, &resumed, &leaf(&work, "fresh", false), "sweep", 2, n1, n2);
 
     // The saved latent paths: the base's file, then the new segment's, and
     // the manifest and the summary count both.

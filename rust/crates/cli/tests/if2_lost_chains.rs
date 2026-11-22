@@ -71,10 +71,12 @@ fn setup(dir: &Path) {
 }
 
 /// `<name>.toml`: an IF2 fit of beta and gamma, `chains` chains of
-/// `particles` particles, with `starts` as written.
+/// `particles` particles, with `starts` as written, stored in `dir/store`.
+/// Every fit of a test shares that store, since a warm start reads its source
+/// from the store the command writes to.
 fn fit_toml(dir: &Path, name: &str, chains: usize, particles: usize, starts: &str) {
     std::fs::write(dir.join(format!("{name}.toml")), format!(
-        "output_dir = \"res_{name}\"\n[model]\ncamdl = \"m.ir.json\"\n\
+        "store = \"store\"\n[model]\ncamdl = \"m.ir.json\"\n\
          [data.observations]\ncases = \"cases.tsv\"\n\
          [estimate]\nbeta = {{ bounds = [0.01, 3.0] }}\ngamma = {{ bounds = [0.01, 1.0] }}\n\
          [fixed]\nN0 = 1000\n\
@@ -86,6 +88,7 @@ fn fit_toml(dir: &Path, name: &str, chains: usize, particles: usize, starts: &st
 fn camdl(dir: &Path, args: &[&str]) -> Output {
     Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("CAMDL_STORE", dir.join("store"))
         .current_dir(dir)
         .args(args)
         .output()
@@ -148,7 +151,7 @@ fn an_if2_fit_that_lost_chains_is_incomplete_and_refused_as_a_warm_start() {
         "fixture precondition: seed 6 must lose some but not all of the 6 chains \
          (lost {lost}); pick another seed\n{err}");
 
-    let leaf = leaf(&dir.join("res_lossy"));
+    let leaf = leaf(&dir.join("store"));
     assert_eq!(state_int(&leaf, "n_chains"), Some(6));
     assert_eq!(state_int(&leaf, "n_good_chains"), Some(6 - lost),
         "fit_state.toml must record how many chains finished");
@@ -175,7 +178,7 @@ fn an_if2_fit_that_lost_chains_is_incomplete_and_refused_as_a_warm_start() {
     assert!(err.contains("error: starts source") && err.contains(&line),
         "the refusal names how many chains were lost ({line:?}):\n{err}");
     assert!(err.contains("--allow-nonconverged-source"), "the refusal names the override:\n{err}");
-    assert_eq!(leaf_count(&dir.join("res_warm")), 0, "a refused warm start writes no leaf");
+    assert_eq!(leaf_count(&dir.join("store")), 1, "a refused warm start writes no leaf");
 
     let out = camdl(dir, &["fit", "run", "warm.toml", "--seed", "1", "--progress", "none",
         "--allow-nonconverged-source"]);
@@ -194,7 +197,7 @@ fn a_deliberate_one_chain_if2_fit_is_not_assessed_and_accepted() {
     fit_toml(dir, "one", 1, 50, "\"single\"");
     let out = camdl(dir, &["fit", "run", "one.toml", "--seed", "1", "--progress", "none"]);
     assert!(out.status.success(), "{}", stderr(&out));
-    let leaf = leaf(&dir.join("res_one"));
+    let leaf = leaf(&dir.join("store"));
     assert_eq!(state_int(&leaf, "n_good_chains"), Some(1));
     assert_eq!(final_statuses(&leaf), vec![(0, "accepted".to_string())]);
     let summary = camdl(dir, &["fit", "summary", &leaf.to_string_lossy()]);

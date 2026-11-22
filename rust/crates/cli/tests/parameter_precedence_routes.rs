@@ -21,14 +21,16 @@
 //! The tier matrix itself (every pair, severity, the record) is unit-tested in
 //! `params_resolver.rs`; these tests prove the verbs reach it.
 
+mod fit_store_support;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-/// Where the latest `fit predict` of a run in `seg` wrote:
-/// `<seg>/predict/<run id>-<address key>/` (gh#896), the directory whose
-/// `report*.json` (one written by every predict) is newest. A path that does not
-/// exist while nothing has been predicted.
+/// Where the latest `fit predict` of the run `seg` stored its prediction: the
+/// folder under `<seg>/predict/` whose `report*.json` (one written by every
+/// predict) is newest. A path that does not exist while nothing has been
+/// predicted.
 fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
     std::fs::read_dir(seg.join("predict"))
         .into_iter().flatten().flatten().map(|e| e.path())
@@ -62,6 +64,13 @@ fn binary() -> PathBuf {
 
 fn camdl(dir: &Path, args: &[&str]) -> Output {
     Command::new(binary()).env_remove("CLICOLOR_FORCE").args(args).current_dir(dir).output().expect("spawn camdl")
+}
+
+/// [`camdl`] for a command that stores or reads a fit: its run store is
+/// `dir/results`, the `store` the fit files below name.
+fn camdl_fit(dir: &Path, args: &[&str]) -> Output {
+    Command::new(binary()).env_remove("CLICOLOR_FORCE").args(args).current_dir(dir)
+        .env("CAMDL_STORE", dir.join("results")).output().expect("spawn camdl")
 }
 
 fn ok(out: &Output, what: &str) -> String {
@@ -639,27 +648,48 @@ fn profile_scenario_over_a_starts_file_is_reported_and_recorded() {
 
 #[test]
 fn profile_replacing_a_from_mle_start_is_a_warning() {
-    // A stored fit's point estimate, planted as a method leaf: `from_mle`
-    // reads its `fit_state.toml` `start_values`.
+    // A stored one-chain IF2 fit of the profile fixture, in the store the
+    // profile reads: `from_mle` starts from its point estimate.
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     profile_fixture(dir);
-    let leaf = dir.join("fitleaf");
-    std::fs::create_dir_all(&leaf).unwrap();
-    std::fs::write(leaf.join("fit_state.toml"),
-        "method = \"if2\"\nseed = 1\ntimestamp = \"2026-01-01T00:00:00Z\"\n\
-         best_loglik = -20.0\ninitial_loglik = -30.0\nbest_chain = 0\nn_chains = 1\n\n\
-         [start_values]\nbeta = 0.3\ngamma = 0.2\nN0 = 1000\n\n[rw_sd]\n").unwrap();
-    let handle = leaf.to_string_lossy().into_owned();
+    std::fs::write(dir.join("src.toml"), "\
+store = \"out/camdl-store\"
+[model]
+camdl = \"sir.camdl\"
+[data.observations]
+cases = \"cases.tsv\"
+[estimate]
+beta = { bounds = [0.001, 5.0], start = 0.3 }
+gamma = { bounds = [0.01, 1.0], start = 0.2 }
+N0 = { bounds = [100, 10000], start = 1000 }
+[fixed]
+[method]
+algorithm = \"if2\"
+backend = \"chain_binomial\"
+chains = 1
+particles = 30
+iterations = 2
+cooling = 0.7
+starts = \"single\"
+").unwrap();
+    ok(&camdl(dir, &["fit", "run", "src.toml", "--seed", "1", "--label", "src", "--no-dt-check"]),
+        "the source fit");
+    // `from_mle` reads the fit's point estimate, `fit_state.toml`'s
+    // `start_values`, at full precision.
+    let state: toml::Value = toml::from_str(&read(
+        &fit_store_support::the_run(&dir.join("out/camdl-store")).join("fit_state.toml"))).unwrap();
+    let gamma_mle = state["start_values"]["gamma"].as_float().expect("the source fit's gamma");
+    let handle = "@src";
     let starts = format!("from_mle={handle}");
     let (stderr, provs) = profile_run(dir, "out",
         &["--starts", &starts, "--fixed", "gamma=0.15"]);
     assert_eq!(override_lines(&stderr), vec![format!(
-        "warning: --param/--fixed replaced gamma = 0.2 (from --starts from_mle={handle}, \
+        "warning: --param/--fixed replaced gamma = {gamma_mle} (from --starts from_mle={handle}, \
          a fit's estimate) with 0.15")]);
     for prov in provs {
         assert_eq!(prov["gamma"]["overrides"], serde_json::json!([
-            { "replaced": { "source": "starts_from_mle", "value": 0.2, "fit": handle },
+            { "replaced": { "source": "starts_from_mle", "value": gamma_mle, "fit": handle },
               "by": { "source": "fixed_cli", "value": 0.15 } },
         ]));
         assert_eq!(prov["N0"]["source"], "starts_from_mle");
@@ -702,7 +732,7 @@ scenarios {
 simulate { from = 0 'days  to = 56 'days }
 "#;
 
-const POSTERIOR_FIT: &str = r#"output_dir = "results"
+const POSTERIOR_FIT: &str = r#"store = "results"
 [model]
 camdl = "model.camdl"
 [data.observations]
@@ -725,21 +755,15 @@ burn_in = 10
 thin = 1
 "#;
 
-/// Fit the posterior fixture in `dir`; returns the PGAS method leaf.
+/// Fit the posterior fixture in `dir`, labelled `post`; returns the PGAS run.
 fn posterior_fit(dir: &Path) -> PathBuf {
     std::fs::write(dir.join("model.camdl"), POSTERIOR_MODEL).unwrap();
     std::fs::write(dir.join("weekly_cases.tsv"),
         "time\tweekly_cases\n7\t16\n14\t166\n21\t626\n28\t1303\n35\t1260\n42\t1023\n49\t327\n56\t91\n")
         .unwrap();
     std::fs::write(dir.join("fit.toml"), POSTERIOR_FIT).unwrap();
-    ok(&camdl(dir, &["fit", "run", "fit.toml", "--seed", "1"]), "fit run");
-    let fits = dir.join("results/fits");
-    let fit = std::fs::read_dir(&fits).unwrap().flatten().next().expect("fit dir").path();
-    let method = std::fs::read_dir(&fit).unwrap().flatten().map(|e| e.path())
-        .find(|p| p.file_name().unwrap().to_string_lossy().starts_with("pgas-"))
-        .expect("pgas leaf");
-    std::fs::read_dir(&method).unwrap().flatten().map(|e| e.path())
-        .find(|p| p.is_dir()).expect("seed leaf")
+    ok(&camdl_fit(dir, &["fit", "run", "fit.toml", "--seed", "1", "--label", "post"]), "fit run");
+    fit_store_support::the_run(&dir.join("results"))
 }
 
 /// `table` with its `scenario` column removed; `#` lines are kept.
@@ -771,11 +795,12 @@ fn simulate_from_a_posterior_param_and_scenario_set_give_one_output() {
     let leaf = leaf.to_string_lossy();
     let run = |name: &str, extra: &[&str]| -> (String, String, Vec<String>) {
         let (traj, obs) = (format!("traj_{name}.tsv"), format!("obs_{name}.tsv"));
-        let store = format!("st_{name}");
+        // The simulation is stored in the store that holds the fit, which is
+        // the store it reads the fit from.
         let mut argv = vec!["simulate", "model.camdl", "--draws", "posterior", "--fit", &leaf,
-            "-n", "5", "--seed", "4", "--store", &store, "-o", &traj, "--obs", &obs];
+            "-n", "5", "--seed", "4", "-o", &traj, "--obs", &obs];
         argv.extend_from_slice(extra);
-        let stderr = ok(&camdl(dir, &argv), &format!("simulate {name}"));
+        let stderr = ok(&camdl_fit(dir, &argv), &format!("simulate {name}"));
         // The `scenario` coordinate column names the arm, which differs by
         // route by construction; every other column is compared.
         (without_scenario_column(&read(&dir.join(&traj))),
@@ -820,14 +845,12 @@ fn predictive_rows(table: &str, arm: &str, k: Option<&str>) -> Vec<String> {
 fn fit_predict_scenario_set_and_one_point_sweep_give_one_band() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
-    posterior_fit(dir);
+    let fit = posterior_fit(dir);
     let predict = |extra: &[&str]| -> (String, Vec<String>) {
-        let mut argv = vec!["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward",
+        let mut argv = vec!["fit", "predict", "--fit", "@post", "--mode", "free_forward",
             "--seed", "3"];
         argv.extend_from_slice(extra);
-        let stderr = ok(&camdl(dir, &argv), &format!("fit predict {extra:?}"));
-        let fit = std::fs::read_dir(dir.join("results/fits")).unwrap().flatten().next()
-            .unwrap().path();
+        let stderr = ok(&camdl_fit(dir, &argv), &format!("fit predict {extra:?}"));
         (read(&predict_out(&fit).join("predictive/weekly_cases.tsv")), override_lines(&stderr))
     };
     let (by_scenario, n_scenario) = predict(&["--scenario", "k_alt"]);
@@ -855,7 +878,7 @@ fn fit_predict_sweep_reports_the_replaced_draws_once_as_a_range() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     posterior_fit(dir);
-    let out = camdl(dir, &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward",
+    let out = camdl_fit(dir, &["fit", "predict", "--fit", "@post", "--mode", "free_forward",
         "--seed", "3", "--sweep", "beta=0.3,0.4"]);
     let lines = override_lines(&ok(&out, "fit predict --sweep"));
     assert_eq!(lines.len(), 1, "{lines:?}");
@@ -881,14 +904,14 @@ fn fit_run_records_the_resolver_decision_once_per_segment() {
     // is refused, `fit_run_scenario_over_fixed.rs`). fit.meta.json records the
     // resolver's value and source for every parameter, and an equal value is
     // not an override, so nothing is reported, for either of the two fit
-    // seeds (two cells, one fit segment).
+    // seeds (two runs of one fit problem).
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     std::fs::write(dir.join("model.camdl"), POSTERIOR_MODEL).unwrap();
     std::fs::write(dir.join("weekly_cases.tsv"),
         "time\tweekly_cases\n7\t16\n14\t166\n21\t626\n28\t1303\n35\t1260\n42\t1023\n49\t327\n56\t91\n")
         .unwrap();
-    std::fs::write(dir.join("fit.toml"), r#"output_dir = "results"
+    std::fs::write(dir.join("fit.toml"), r#"store = "results"
 scenario = "k_alt"
 fit_seeds = [1, 2]
 [model]
@@ -908,18 +931,20 @@ algorithm = "pfilter"
 backend = "chain_binomial"
 particles = 50
 "#).unwrap();
-    let stderr = ok(&camdl(dir, &["fit", "run", "fit.toml"]), "fit run");
+    let stderr = ok(&camdl_fit(dir, &["fit", "run", "fit.toml"]), "fit run");
     assert_eq!(override_lines(&stderr), Vec::<String>::new());
-    let fit = std::fs::read_dir(dir.join("results/fits")).unwrap().flatten().next()
-        .expect("fit segment").path();
-    let meta: serde_json::Value = serde_json::from_str(&read(&fit.join("fit.meta.json"))).unwrap();
-    let k = &meta["parameters_provenance"]["k"];
-    assert_eq!(k["value"], 12.0);
-    assert_eq!(k["source"], "scenario");
-    assert!(k.get("overrides").is_none(), "an equal value is not an override: {k}");
-    assert_eq!(meta["parameters_provenance"]["rho"]["value"], 0.6);
-    assert_eq!(meta["parameters_provenance"]["rho"]["source"], "fit_toml_fixed");
-    assert_eq!(meta["parameters_provenance"]["beta"]["role"], "estimated");
+    let runs = fit_store_support::runs(&dir.join("results"));
+    assert_eq!(runs.len(), 2, "one run per fit seed: {runs:?}");
+    for run in &runs {
+        let meta: serde_json::Value = serde_json::from_str(&read(&run.join("fit.meta.json"))).unwrap();
+        let k = &meta["parameters_provenance"]["k"];
+        assert_eq!(k["value"], 12.0);
+        assert_eq!(k["source"], "scenario");
+        assert!(k.get("overrides").is_none(), "an equal value is not an override: {k}");
+        assert_eq!(meta["parameters_provenance"]["rho"]["value"], 0.6);
+        assert_eq!(meta["parameters_provenance"]["rho"]["source"], "fit_toml_fixed");
+        assert_eq!(meta["parameters_provenance"]["beta"]["role"], "estimated");
+    }
 }
 
 // ─── contrasts: an arm's scenario over the draws is reported once ───────────
@@ -981,7 +1006,7 @@ fn fit_predict_reports_a_contrast_arms_scenario_over_the_draws_once() {
     std::fs::write(dir.join("weekly_cases.tsv"),
         "time\tweekly_cases\n7\t16\n14\t166\n21\t626\n28\t1303\n35\t1260\n42\t1023\n49\t327\n56\t91\n")
         .unwrap();
-    std::fs::write(dir.join("fit.toml"), r#"output_dir = "results"
+    std::fs::write(dir.join("fit.toml"), r#"store = "results"
 [model]
 camdl = "model.camdl"
 [data.observations]
@@ -1004,8 +1029,8 @@ sweeps = 30
 burn_in = 10
 thin = 1
 "#).unwrap();
-    ok(&camdl(dir, &["fit", "run", "fit.toml", "--seed", "1"]), "fit run");
-    let stderr = ok(&camdl(dir, &["fit", "predict", "--fit", "fit.toml",
+    ok(&camdl_fit(dir, &["fit", "run", "fit.toml", "--seed", "1", "--label", "contrast"]), "fit run");
+    let stderr = ok(&camdl_fit(dir, &["fit", "predict", "--fit", "@contrast",
         "--mode", "free_forward", "--seed", "3"]), "fit predict");
     assert!(stderr.contains("contrast 'averted' — fork at"), "the contrast ran: {stderr}");
     assert_eq!(override_lines(&stderr),

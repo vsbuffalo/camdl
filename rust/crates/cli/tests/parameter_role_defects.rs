@@ -5,6 +5,8 @@
 //! plausible output, and estimated, sampled or recorded a parameter other than
 //! the one the invocation named.
 
+mod fit_store_support;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -398,7 +400,8 @@ fn fit_run_records_estimate_start_as_its_own_source() {
     let ir = compile(tmp.path(), "m", MODEL);
     let data = tmp.path().join("cases.tsv");
     let fit = tmp.path().join("fit.toml");
-    std::fs::write(&fit, format!(r#"[model]
+    std::fs::write(&fit, format!(r#"store = "store"
+[model]
 camdl = "{ir}"
 [data.observations]
 cases = "{data}"
@@ -420,9 +423,8 @@ cooling = 0.9
 "#, ir = ir.display(), data = data.display())).unwrap();
     let cwd = tmp.path().join("run");
     ok(camdl(&cwd, &["fit", "run", fit.to_str().unwrap()]));
-    let metas = find(&cwd.join("results"), "fit.meta.json");
-    assert_eq!(metas.len(), 1);
-    let prov = &json(&metas[0])["parameters_provenance"];
+    let run = fit_store_support::the_run(&tmp.path().join("store"));
+    let prov = &json(&run.join("fit.meta.json"))["parameters_provenance"];
     assert_eq!((prov["beta"]["source"].as_str(), prov["beta"]["value"].as_f64()),
         (Some("estimate_start"), Some(0.3)), "{prov}");
     assert_eq!(prov["gamma"]["source"].as_str(), Some("estimate_start_drawn"), "{prov}");

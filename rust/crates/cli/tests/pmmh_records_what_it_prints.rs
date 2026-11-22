@@ -4,11 +4,13 @@
 //! (proposal `docs/dev/proposals/2026-11-08-cli-reporting.md`, "Every fact the
 //! run-end view prints is recorded"). This runs the stuck-chain fixture and
 //! its resumed continuation and checks each new record against the line the
-//! same run printed: the opening block (`run.json` `inputs.header`), the
+//! same run printed: the opening block (`run_inputs.json` `header`), the
 //! noise check's mean (`fit_state.toml` `pf_noise.ll_mean`), the per-chain
 //! warm-up, the sampling plan and the cost (`pmmh_summary.json`).
 
-use std::path::{Path, PathBuf};
+mod fit_store_support;
+
+use std::path::PathBuf;
 use std::process::Command;
 
 fn manifest() -> PathBuf {
@@ -34,22 +36,7 @@ impl Drop for Tmp {
     }
 }
 
-fn only_child(dir: &Path, prefix: &str) -> PathBuf {
-    let hits: Vec<PathBuf> = std::fs::read_dir(dir).unwrap().flatten().map(|e| e.path())
-        .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with(prefix))
-        .collect();
-    assert_eq!(hits.len(), 1, "expected one `{prefix}*` under {}: {hits:?}", dir.display());
-    hits.into_iter().next().unwrap()
-}
-
-fn leaf(work: &Path, fit: &str) -> PathBuf {
-    let fit_dir = only_child(&work.join("results/fits"), &format!("{fit}-"));
-    only_child(&only_child(&fit_dir, "pmmh-"), "seed_")
-}
-
-fn json(path: &Path) -> serde_json::Value {
-    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
-}
+use fit_store_support::json;
 
 /// The text after `label` on the first line of `stderr` that contains it.
 fn after<'a>(stderr: &'a str, label: &str) -> &'a str {
@@ -72,6 +59,7 @@ fn every_new_pmmh_record_matches_the_line_the_run_printed() {
             .env_remove("CLICOLOR_FORCE")
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .env("CAMDLC", camdlc())
+            .env("CAMDL_STORE", "camdl-store")
             .current_dir(&work)
             .args(args)
             .output()
@@ -82,10 +70,11 @@ fn every_new_pmmh_record_matches_the_line_the_run_printed() {
     };
 
     let stderr = run(&["fit", "run", "pmmh_stuck.toml", "--seed", "8", "--progress", "none"]);
-    let dir = leaf(&work, "pmmh_stuck");
+    let store = work.join("camdl-store");
+    let dir = fit_store_support::the_run(&store);
 
     // The opening block.
-    let header = &json(&dir.join("run.json"))["inputs"]["header"];
+    let header = &fit_store_support::run_inputs(&dir)["header"];
     assert_eq!(header["config"], "pmmh_stuck.toml");
     assert_eq!(header["model"], after(&stderr, "model:"));
     let names = |v: &serde_json::Value| v.as_array().unwrap().iter()
@@ -93,9 +82,11 @@ fn every_new_pmmh_record_matches_the_line_the_run_printed() {
     assert_eq!(names(&header["estimate"]), after(&stderr, "estimate:"));
     assert_eq!(names(&header["fixed"]), after(&stderr, "fixed:"));
     assert_eq!(header["starts"], after(&stderr, "starts:"));
+    // The opening block prints the store as given; the record holds the run
+    // folder inside it, relative to the store's root.
     let output = header["output"].as_str().unwrap();
-    assert!(output.starts_with("results/fits/pmmh_stuck-") && after(&stderr, "output:").ends_with(output),
-        "relative output {output} is the printed path's tail");
+    assert_eq!(after(&stderr, "output:"), "camdl-store");
+    assert_eq!(store.join(output), dir, "the recorded output {output} is the run's folder in the store");
 
     // The noise check's mean.
     let state: toml::Value = toml::from_str(&std::fs::read_to_string(dir.join("fit_state.toml")).unwrap()).unwrap();
@@ -150,13 +141,15 @@ fn every_new_pmmh_record_matches_the_line_the_run_printed() {
 
     // A resumed run continues its base's warm-up rather than recording the
     // empty warm-up its own call saw.
-    let base = leaf(&work, "pmmh_stuck");
+    let base = dir.clone();
     std::fs::copy(work.join("pmmh_stuck.toml"), work.join("pmmh_stuck_more.toml")).unwrap();
     let more = std::fs::read_to_string(work.join("pmmh_stuck_more.toml")).unwrap()
         .replace("iterations = 1500", "iterations = 1600");
     std::fs::write(work.join("pmmh_stuck_more.toml"), more).unwrap();
     run(&["fit", "run", "pmmh_stuck_more.toml", "--seed", "8", "--progress", "none",
           "--resume", base.to_str().unwrap()]);
-    let resumed = json(&leaf(&work, "pmmh_stuck_more").join("pmmh_summary.json"));
+    let resumed_run: Vec<PathBuf> = fit_store_support::runs(&store).into_iter().filter(|r| *r != base).collect();
+    assert_eq!(resumed_run.len(), 1, "the resume writes one run beside its base: {resumed_run:?}");
+    let resumed = json(&resumed_run[0].join("pmmh_summary.json"));
     assert_eq!(resumed["warmup"], summary["warmup"]);
 }

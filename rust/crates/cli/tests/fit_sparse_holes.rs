@@ -122,7 +122,7 @@ fn write_dense_data(dir: &Path) -> PathBuf {
 fn write_if2_toml(dir: &Path, ir: &Path, data: &Path) -> (PathBuf, PathBuf) {
     let out_root = dir.join("results_if2");
     let toml = format!(r#"
-output_dir = "{out}"
+store = "{out}"
 [model]
 camdl = "{ir}"
 [data.observations]
@@ -155,7 +155,7 @@ cooling = 0.9
 fn write_pfilter_toml(dir: &Path, ir: &Path, data: &Path, tag: &str) -> (PathBuf, PathBuf) {
     let out_root = dir.join(format!("results_pf_{tag}"));
     let toml = format!(r#"
-output_dir = "{out}"
+store = "{out}"
 [model]
 camdl = "{ir}"
 [data.observations]

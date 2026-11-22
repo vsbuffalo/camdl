@@ -20,18 +20,18 @@
 //! window and says so. It is deterministic, cheap, and needs no pathological
 //! model.
 
+mod fit_store_support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Where the latest `fit predict` of a run in `seg` wrote:
-/// `<seg>/predict/<run id>-<address key>/` (gh#896), the directory whose
-/// `report*.json` (one written by every predict) is newest. A path that does not
-/// exist while nothing has been predicted.
-fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
-    std::fs::read_dir(seg.join("predict"))
-        .into_iter().flatten().flatten().map(|e| e.path())
+/// The prediction folder under the store at `store` that the latest
+/// `fit predict` wrote: the one whose `report*.json` (one written by every
+/// predict) is newest.
+fn latest_prediction(store: &Path) -> PathBuf {
+    fit_store_support::predictions(store)
+        .into_iter()
         .filter_map(|d| {
-            // Newest `report*.json` (keyed by chain selection) in the directory.
             let t = std::fs::read_dir(&d).ok()?.flatten()
                 .filter(|e| {
                     let n = e.file_name().to_string_lossy().into_owned();
@@ -43,9 +43,8 @@ fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
         })
         .max_by_key(|(t, _)| *t)
         .map(|(_, d)| d)
-        .unwrap_or_else(|| seg.join("predict").join("none"))
+        .unwrap_or_else(|| panic!("no prediction with a report under {}", store.display()))
 }
-
 
 fn binary() -> PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
@@ -114,7 +113,7 @@ simulate {
 const DATA: &str =
     "time\tweekly_cases\n7\t16\n14\t166\n21\t626\n28\t1303\n35\t1260\n42\t1023\n49\t327\n56\t91\n";
 
-const FIT_TOML: &str = r#"output_dir = "results"
+const FIT_TOML: &str = r#"store = "store"
 
 [model]
 camdl = "model.camdl"
@@ -146,21 +145,10 @@ fn run(bin: &Path, dir: &Path, args: &[&str]) -> std::process::Output {
     Command::new(bin).env_remove("CLICOLOR_FORCE")
         .args(args)
         .current_dir(dir)
+        .env("CAMDL_STORE", dir.join("store"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output()
         .expect("spawn camdl")
-}
-
-/// The fit segment: the directory under `results/fits/` holding the artifacts.
-fn segment(results: &Path) -> PathBuf {
-    let fits = results.join("fits");
-    for e in std::fs::read_dir(&fits).expect("results/fits exists").flatten() {
-        let p = e.path();
-        if predict_out(&p).join("predictive.json").is_file() || predict_out(&p).join("report.json").is_file() {
-            return p;
-        }
-    }
-    panic!("no fit segment carrying a predictive artifact under {}", fits.display());
 }
 
 #[test]
@@ -174,7 +162,7 @@ fn a_refused_tail_still_writes_the_one_step_artifact_and_records_the_failure() {
     std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
     std::fs::write(tmp.join("fit.toml"), FIT_TOML).unwrap();
 
-    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(
         out.status.success(),
         "fit run failed:\nstdout={}\nstderr={}",
@@ -187,7 +175,7 @@ fn a_refused_tail_still_writes_the_one_step_artifact_and_records_the_failure() {
     let out = run(
         &bin,
         &tmp,
-        &["fit", "predict", "--fit", "fit.toml", "--scenario", "longer"],
+        &["fit", "predict", "@fit", "--scenario", "longer"],
     );
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
@@ -199,16 +187,15 @@ fn a_refused_tail_still_writes_the_one_step_artifact_and_records_the_failure() {
         "a deterministic failure exits 1:\nstdout={stdout}\nstderr={stderr}"
     );
 
-    let results = tmp.join("results");
-    let seg = segment(&results);
+    let seg = latest_prediction(&tmp.join("store"));
 
     // 2. The one-step half — complete, data-conditioned, never reaching the
     //    horizon — is on disk. This is the object the old behaviour discarded.
-    let pred = predict_out(&seg).join("predictive").join("weekly_cases.tsv");
+    let pred = seg.join("predictive").join("weekly_cases.tsv");
     assert!(
         pred.is_file(),
         "the one-step predictive must be written even though the tail refused; \
-         segment holds {:?}\nstdout={stdout}\nstderr={stderr}",
+         the prediction holds {:?}\nstdout={stdout}\nstderr={stderr}",
         std::fs::read_dir(&seg)
             .map(|d| d.flatten().map(|e| e.file_name()).collect::<Vec<_>>())
             .unwrap_or_default()
@@ -231,7 +218,7 @@ fn a_refused_tail_still_writes_the_one_step_artifact_and_records_the_failure() {
 
     // 3. The failure is recorded, naming the site and carrying the reason.
     let report: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(predict_out(&seg).join("report.json")).expect("report.json is written"),
+        &std::fs::read_to_string(seg.join("report.json")).expect("report.json is written"),
     )
     .expect("report.json parses");
     let failures = report["failures"].as_array().expect("failures is a list");
@@ -274,14 +261,14 @@ fn an_unhonourable_scenario_is_still_a_usage_error_when_no_tail_was_asked_for() 
     std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
     std::fs::write(tmp.join("fit.toml"), FIT_TOML).unwrap();
 
-    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(out.status.success(), "fit run failed: {}", String::from_utf8_lossy(&out.stderr));
 
     let out = run(
         &bin,
         &tmp,
         &[
-            "fit", "predict", "--fit", "fit.toml", "--scenario", "longer",
+            "fit", "predict", "@fit", "--scenario", "longer",
             "--mode", "one_step",
         ],
     );

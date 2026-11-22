@@ -40,6 +40,7 @@ fn camdl(dir: &Path, args: &[&str]) -> std::process::Output {
     Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
         .current_dir(dir)
         .args(args)
+        .env("CAMDL_STORE", dir.join("store"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output()
         .expect("camdl must invoke")
@@ -180,8 +181,8 @@ fn fit_predict_evaluates_each_row_where_it_is_scored() {
          [fixed]\nbeta = 0.6\ngamma = 0.2\n\
          [method]\nalgorithm = \"mh\"\nbackend = \"ode\"\nchains = 2\niterations = 40\nburn_in = 10\n")
         .unwrap();
-    ok(camdl(dir, &["fit", "run", "fit.toml"]), "fit run");
-    ok(camdl(dir, &["fit", "predict", "--fit", "fit.toml", "--mode", "free_forward",
+    ok(camdl(dir, &["fit", "run", "fit.toml", "--label", "fit"]), "fit run");
+    ok(camdl(dir, &["fit", "predict", "@fit", "--mode", "free_forward",
         "--n-draws", "4"]), "fit predict");
 
     let find = |root: &Path, tail: &str| -> PathBuf {
@@ -194,7 +195,7 @@ fn fit_predict_evaluates_each_row_where_it_is_scored() {
         }
         panic!("no {tail} under {}", root.display())
     };
-    let text = std::fs::read_to_string(find(&dir.join("results"), "predictive/cases.tsv")).unwrap();
+    let text = std::fs::read_to_string(find(&dir.join("store"), "predictive/cases.tsv")).unwrap();
     let mut lines = text.lines();
     let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
     let col = |name: &str| header.iter().position(|c| *c == name).unwrap();
@@ -217,7 +218,7 @@ fn fit_predict_evaluates_each_row_where_it_is_scored() {
     }
     // The `observations.cases` series names each draw by its row's label, as
     // the table does: `value_at(…, 7)` is the row labelled 7, drawn at 14.
-    let q = std::fs::read_to_string(find(&dir.join("results"), "quantities/at7.tsv")).unwrap();
+    let q = std::fs::read_to_string(find(&dir.join("store"), "quantities-model/at7.tsv")).unwrap();
     let mut ql = q.lines();
     let qh: Vec<&str> = ql.next().unwrap().split('\t').collect();
     let q50: f64 = ql.next().unwrap().split('\t')

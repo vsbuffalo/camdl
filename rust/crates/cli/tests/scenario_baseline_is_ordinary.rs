@@ -14,32 +14,10 @@
 //!
 //! Shells out to the release `camdl` binary.
 
+mod fit_store_support;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-
-/// Where the latest `fit predict` of a run in `seg` wrote:
-/// `<seg>/predict/<run id>-<address key>/` (gh#896), the directory whose
-/// `report*.json` (one written by every predict) is newest. A path that does not
-/// exist while nothing has been predicted.
-fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
-    std::fs::read_dir(seg.join("predict"))
-        .into_iter().flatten().flatten().map(|e| e.path())
-        .filter_map(|d| {
-            // Newest `report*.json` (keyed by chain selection) in the directory.
-            let t = std::fs::read_dir(&d).ok()?.flatten()
-                .filter(|e| {
-                    let n = e.file_name().to_string_lossy().into_owned();
-                    n.starts_with("report") && n.ends_with(".json")
-                })
-                .filter_map(|e| e.metadata().and_then(|m| m.modified()).ok())
-                .max()?;
-            Some((t, d))
-        })
-        .max_by_key(|(t, _)| *t)
-        .map(|(_, d)| d)
-        .unwrap_or_else(|| seg.join("predict").join("none"))
-}
-
 
 fn binary() -> PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
@@ -116,7 +94,7 @@ const DATA: &str =
 
 const PARAMS: &str = "beta = 0.4\ngamma = 0.15\nN0 = 10000\nI0 = 5\nrho = 0.6\nk = 10\n";
 
-const FIT_TOML: &str = r#"output_dir = "results"
+const FIT_TOML: &str = r#"store = "store"
 
 [model]
 camdl = "model.camdl"
@@ -157,6 +135,7 @@ fn run(bin: &Path, dir: &Path, args: &[&str]) -> Output {
     Command::new(bin).env_remove("CLICOLOR_FORCE")
         .args(args)
         .current_dir(dir)
+        .env("CAMDL_STORE", dir.join("store"))
         // Ad-hoc run: skip the camdlc git-hash handshake (the binary under test
         // is self-consistent).
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
@@ -174,17 +153,15 @@ fn ok(out: &Output, what: &str) {
 }
 
 fn fit(bin: &Path, dir: &Path) {
-    ok(&run(bin, dir, &["fit", "run", "fit.toml", "--seed", "1"]), "fit run");
+    ok(&run(bin, dir, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]), "fit run");
 }
 
-/// The single `quantities/I_start.tsv` under the fit's results, as
+/// The single `quantities/I_start.tsv` in a prediction of the fit, as
 /// scenario → q50.
 fn i_start_by_scenario(dir: &Path) -> std::collections::BTreeMap<String, String> {
-    let fits = dir.join("results").join("fits");
-    let path = std::fs::read_dir(&fits)
-        .unwrap()
-        .flatten()
-        .map(|e| predict_out(&e.path()).join("quantities").join("I_start.tsv"))
+    let path = fit_store_support::predictions(&dir.join("store"))
+        .into_iter()
+        .map(|p| p.join("quantities-model").join("I_start.tsv"))
         .find(|p| p.is_file())
         .expect("quantities/I_start.tsv must be written");
     let txt = std::fs::read_to_string(path).unwrap();
@@ -207,7 +184,7 @@ fn fit_predict_applies_a_declared_baseline_scenario() {
     let dir = tmp.path();
     fit(&bin, dir);
     let out = run(&bin, dir, &[
-        "fit", "predict", "--fit", "fit.toml", "--mode", "free_forward",
+        "fit", "predict", "@fit", "--mode", "free_forward",
         "--scenario", "baseline", "--seed", "1",
     ]);
     ok(&out, "fit predict --scenario baseline");
@@ -275,7 +252,7 @@ fn an_undeclared_baseline_is_refused_by_every_verb() {
     // written — not partway through, with partial output on disk.
     fit(&bin, dir);
     let stderr = refused(&run(&bin, dir, &[
-        "fit", "predict", "--fit", "fit.toml", "--mode", "free_forward",
+        "fit", "predict", "@fit", "--mode", "free_forward",
         "--scenario", "baseline", "--seed", "1",
     ]), "fit predict");
     assert!(stderr.contains("is not declared in the model"),

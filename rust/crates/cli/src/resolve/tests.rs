@@ -177,13 +177,12 @@ fn all_kind_identities(model: &Model) -> Vec<(&'static str, ContentHash, Content
     // digest alongside the data/config digests).
     let cfg = fit_config();
     let method = cfg.inference.method.clone().expect("fixture method");
-    let fit = crate::fit::cas::resolve_fit_method(&crate::fit::cas::FitMethodCtx {
+    let fit = super::legacy_fit::resolve_fit_method(&super::legacy_fit::FitMethodCtx {
         model,
         fit_stem: "sir",
         ir_version: IRV,
         engine: &runid::inputs::EngineIdentity::of_build(ENGV),
         problem: &cfg.problem,
-        data: &Default::default(),
         method: &method,
         seed: 7,
         deps: vec![],
@@ -203,9 +202,9 @@ fn all_kind_identities(model: &Model) -> Vec<(&'static str, ContentHash, Content
     // yields that same `Value`, so these digests are identical to the
     // pre-helper `digest_value` ones — which is exactly why the pinned
     // run_ids below must not move.
-    let base_config = crate::fit::cas::canonical_config_hash(
+    let base_config = crate::profile_cas::canonical_config_hash(
         &serde_json::json!({ "fixed": { "N0": 1000.0 } }), &[]).unwrap();
-    let method_config = crate::fit::cas::canonical_config_hash(
+    let method_config = crate::profile_cas::canonical_config_hash(
         &serde_json::json!({ "algorithm": "if2" }), &[]).unwrap();
     let pr = resolve_profile_point(&ProfilePointCtx {
         model,
@@ -444,9 +443,9 @@ fn cas_identity_pins() {
 #[test]
 fn a_profile_points_method_level_is_named_method_and_naming_it_rekeys_nothing() {
     let model = tiny_model();
-    let base_config = crate::fit::cas::canonical_config_hash(
+    let base_config = crate::profile_cas::canonical_config_hash(
         &serde_json::json!({ "fixed": { "N0": 1000.0 } }), &[]).unwrap();
-    let method_config = crate::fit::cas::canonical_config_hash(
+    let method_config = crate::profile_cas::canonical_config_hash(
         &serde_json::json!({ "algorithm": "if2" }), &[]).unwrap();
     let focal = [("beta".to_string(), 0.3_f64)];
     let grid = [("beta".to_string(), vec![0.1_f64, 0.3, 0.5])];
@@ -490,9 +489,9 @@ fn a_profile_points_method_level_is_named_method_and_naming_it_rekeys_nothing() 
 #[test]
 fn profile_point_identity_and_seed_ignore_sweep_order() {
     let model = tiny_model();
-    let base_config = crate::fit::cas::canonical_config_hash(
+    let base_config = crate::profile_cas::canonical_config_hash(
         &serde_json::json!({ "fixed": { "N0": 1000.0 } }), &[]).unwrap();
-    let method_config = crate::fit::cas::canonical_config_hash(
+    let method_config = crate::profile_cas::canonical_config_hash(
         &serde_json::json!({ "algorithm": "if2" }), &[]).unwrap();
     let engine = runid::inputs::EngineIdentity::of_build(ENGV);
     let resolve = |focal: &[(String, f64)], grid: &[(String, Vec<f64>)], start: u32| {
@@ -615,9 +614,9 @@ fn golden_run_ids_match_the_reference_table() {
 fn a_build_with_an_incomplete_engine_identity_never_reads_a_stored_leaf() {
     use crate::version::EngineReuse;
     let levels = vec![
-        crate::fit::cas::level("fit", "sir", crate::fit::cas::structural_level_hash(&"fit".to_string())),
-        crate::fit::cas::level("method", "if2", crate::fit::cas::structural_level_hash(&"method".to_string())),
-        crate::fit::cas::level("seed", "seed_1", crate::fit::cas::structural_level_hash(&"seed".to_string())),
+        crate::profile_cas::level("fit", "sir", crate::profile_cas::structural_level_hash(&"fit".to_string())),
+        crate::profile_cas::level("method", "if2", crate::profile_cas::structural_level_hash(&"method".to_string())),
+        crate::profile_cas::level("seed", "seed_1", crate::profile_cas::structural_level_hash(&"seed".to_string())),
     ];
     let artifact = ResolvedArtifact {
         kind: ArtifactKind::FitMethod,
@@ -634,13 +633,13 @@ fn a_build_with_an_incomplete_engine_identity_never_reads_a_stored_leaf() {
     claim.write("fit_state.toml", b"loglik = 0.0\n").unwrap();
     claim.finalize(serde_json::Value::Null).unwrap();
 
-    let reusable = check_reuse_with(&store, &root, &artifact, WritePolicy::Reuse, EngineReuse::Reusable).unwrap();
-    assert!(matches!(reusable, ReuseVerdict::CacheHit { .. }), "a determined build reuses the stored leaf");
+    let reusable = super::legacy_fit::check_reuse_with(&store, &root, &artifact, WritePolicy::Reuse, EngineReuse::Reusable).unwrap();
+    assert!(matches!(reusable, super::legacy_fit::ReuseVerdict::CacheHit), "a determined build reuses the stored leaf");
 
     let unreusable = EngineReuse::Unreusable { missing: "rustc" };
     assert_eq!(engine_write_policy(WritePolicy::Reuse, unreusable), WritePolicy::Force);
-    let verdict = check_reuse_with(&store, &root, &artifact, WritePolicy::Reuse, unreusable).unwrap();
-    assert!(matches!(verdict, ReuseVerdict::MustRun), "an undetermined build computes");
+    let verdict = super::legacy_fit::check_reuse_with(&store, &root, &artifact, WritePolicy::Reuse, unreusable).unwrap();
+    assert!(matches!(verdict, super::legacy_fit::ReuseVerdict::MustRun), "an undetermined build computes");
     assert!(
         runid::find_leaf(&root, ArtifactKind::FitMethod, &artifact.levels).is_none(),
         "the stored leaf is no longer servable"
@@ -683,14 +682,13 @@ fn gradient_maps_re_key_the_fits_that_read_them_and_no_other() {
     let run_id = |model: &Model, method_toml: &str| {
         let method: crate::fit::config_v2::Method =
             toml::from_str(&format!("{method_toml}\nstarts = \"uniform_unconstrained\"\n")).expect("method toml");
-        crate::fit::cas::resolve_fit_method(&crate::fit::cas::FitMethodCtx {
+        super::legacy_fit::resolve_fit_method(&super::legacy_fit::FitMethodCtx {
             model,
             fit_stem: "sir",
             ir_version: IRV,
             engine: &runid::inputs::EngineIdentity::of_build(ENGV),
             problem: &cfg.problem,
-            data: &Default::default(),
-            method: &method,
+                method: &method,
             seed: 7,
             deps: vec![],
         })

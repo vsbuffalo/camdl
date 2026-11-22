@@ -1,24 +1,26 @@
-//! gh#905 — `camdl fit summary` exited 0 when the only method leaf it was
-//! asked about could not be read back.
+//! gh#905 — `camdl fit summary` must fail when the only run it was asked
+//! about cannot be read back.
 //!
-//! The text formatter printed `warning: cannot load <leaf>: …`, skipped the
-//! leaf, rendered a summary with no method in it, and returned success. A
-//! script that asks "summarise this fit" and checks the status code was told
-//! the fit had been summarised. `--format json` was worse: the load error was
-//! swallowed entirely (`.ok()`), so the reader got `"methods": []` with nothing
-//! on stderr saying why.
+//! A formatter that warned `cannot load <leaf>: …`, skipped the run and
+//! rendered a summary with no method in it would tell a script that checks
+//! the status code that the fit had been summarised. A stored file that no
+//! longer matches the bytes the store recorded makes its run damaged, and the
+//! run is refused by its folder and the file, as text and under
+//! `--format json` alike.
 //!
 //! End to end because the defect is the process exit code and the emitted
 //! document, neither of which a unit test over the formatter observes. The
-//! mixed case — a segment holding several leaves of which only some fail,
-//! which still exits 0 — is pinned as a unit test beside the rule it
-//! exercises (`fit::fit_summary::tests`), because a second readable leaf in
-//! one segment is not something a single `fit run` produces.
+//! mixed case — several leaves of which only some fail, which still exits 0
+//! — is pinned as a unit test beside the rule it exercises
+//! (`fit::fit_summary::tests`), because a single `fit run` does not produce
+//! it.
 //!
 //! Deliberately cheap: the SEIR golden IR, one estimated parameter, 2 chains,
 //! 6 sweeps, 40 particles, 5 observations. Nothing here depends on the fit
 //! converging or being a good fit — only on the leaf existing and then being
 //! unreadable.
+
+mod fit_store_support;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -38,11 +40,12 @@ fn golden_ir() -> PathBuf {
     Path::new(&manifest).join("../../../ocaml/golden/seir_observations.ir.json")
 }
 
-/// A store with exactly one PGAS leaf, plus the paths a caller needs: the
-/// segment directory (`results/fits/<stem>-<h8>`, what the handle names) and
-/// the leaf's `pgas_summary.json` (what the test corrupts).
+/// A store with exactly one PGAS run, plus the paths a caller needs: the run's
+/// folder (what the handle names) and its `pgas_summary.json` (what the test
+/// corrupts).
 struct Store {
     _tmp: tempfile::TempDir,
+    results: PathBuf,
     segment: PathBuf,
     summary_json: PathBuf,
 }
@@ -112,7 +115,7 @@ dt = 1.0
 
     let results = dir.join("results");
     let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .env("CAMDL_OUTPUT_DIR", &results)
+        .env("CAMDL_STORE", &results)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDLC", &camdlc)
         .args(["fit", "run", &fit_toml.to_string_lossy(), "--seed", "1"])
@@ -124,17 +127,11 @@ dt = 1.0
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // `results/fits/<stem>-<h8>/<algorithm>-<h8>/seed_N-<h8>/pgas_summary.json`
-    let summary_json = find_one(&results.join("fits"), "pgas_summary.json");
-    // The segment is three levels up: leaf → algorithm → segment.
-    let segment = summary_json
-        .parent()
-        .and_then(Path::parent)
-        .and_then(Path::parent)
-        .expect("leaf sits three levels under the segment")
-        .to_path_buf();
+    let segment = fit_store_support::the_run(&results);
+    let summary_json = find_one(&segment, "pgas_summary.json");
+    assert_eq!(summary_json.parent(), Some(segment.as_path()), "the summary sits in the run's folder");
 
-    Store { _tmp: tmp, segment, summary_json }
+    Store { _tmp: tmp, results, segment, summary_json }
 }
 
 /// The single file named `name` anywhere under `root`. Asserts uniqueness, so
@@ -157,17 +154,19 @@ fn find_one(root: &Path, name: &str) -> PathBuf {
 }
 
 /// Truncate the leaf's typed payload mid-value. The file still exists and is
-/// still JSON-shaped, so the failure is a parse error inside the loader rather
-/// than a missing-file branch somewhere earlier.
+/// still JSON-shaped; its bytes no longer match the digest the store recorded
+/// for it.
 fn corrupt(summary_json: &Path) {
     std::fs::write(summary_json, "{ \"truncated\": ").unwrap();
 }
 
-fn summary(segment: &Path, extra: &[&str]) -> std::process::Output {
+fn summary(store: &Store, extra: &[&str]) -> std::process::Output {
+    let segment = &store.segment;
     let mut args: Vec<String> =
         vec!["fit".into(), "summary".into(), segment.to_string_lossy().into_owned()];
     args.extend(extra.iter().map(|s| s.to_string()));
     Command::new(binary()).env_remove("CLICOLOR_FORCE")
+        .env("CAMDL_STORE", &store.results)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDLC", camdlc_bin())
         .args(&args)
@@ -182,7 +181,7 @@ fn an_unreadable_only_leaf_fails_the_summary() {
     let store = build_store();
 
     // Premise: the store summarises cleanly before it is damaged.
-    let before = summary(&store.segment, &[]);
+    let before = summary(&store, &[]);
     assert!(
         before.status.success(),
         "fixture premise: an intact store must summarise.\nstderr:\n{}",
@@ -191,56 +190,47 @@ fn an_unreadable_only_leaf_fails_the_summary() {
 
     corrupt(&store.summary_json);
 
-    let after = summary(&store.segment, &[]);
+    let after = summary(&store, &[]);
     let stderr = String::from_utf8_lossy(&after.stderr).into_owned();
     assert!(
         !after.status.success(),
         "the only leaf could not be read, so the summary is empty — \
          `fit summary` must not report success.\nstderr:\n{stderr}"
     );
-    assert!(
-        stderr.contains(&store.summary_json.parent().unwrap().to_string_lossy().into_owned()),
-        "the failure must name the leaf that could not be read:\n{stderr}"
-    );
-    assert!(
-        stderr.contains("pgas_summary.json"),
-        "the failure must carry the loader's reason:\n{stderr}"
-    );
+    assert_damaged_refusal(&store, &stderr);
 }
 
-/// `--format json` has the same duty, and one more: a reader parsing the
-/// document must find the cause in it, not only on a stderr stream it may not
-/// have captured.
+/// `--format json` fails the same way: the damaged run is refused before a
+/// document is written, so no document reports a summary with no method in
+/// it.
 #[test]
-fn the_json_document_carries_the_failure_it_exits_on() {
+fn the_json_form_fails_on_a_damaged_run_and_writes_no_document() {
     let store = build_store();
     corrupt(&store.summary_json);
 
-    let out = summary(&store.segment, &["--format", "json"]);
+    let out = summary(&store, &["--format", "json"]);
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
         !out.status.success(),
-        "`--format json` must fail on an unreadable only leaf too.\nstdout:\n{stdout}"
+        "`--format json` must fail on an unreadable only leaf too.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
+    assert!(stdout.trim().is_empty(), "no document for a refused run:\n{stdout}");
+    assert_damaged_refusal(&store, &stderr);
+}
 
-    let doc: serde_json::Value =
-        serde_json::from_str(&stdout).expect("the document must still be valid JSON");
-    assert_eq!(
-        doc["methods"].as_array().map(Vec::len),
-        Some(0),
-        "premise: the unreadable leaf contributes no method"
-    );
-    let failures = doc["failures"].as_array().expect("the document must carry a `failures` list");
-    assert_eq!(failures.len(), 1, "one leaf failed, so one entry: {failures:?}");
-    let leaf = failures[0]["leaf"].as_str().expect("each failure names its leaf");
-    assert_eq!(
-        Path::new(leaf),
-        store.summary_json.parent().unwrap(),
-        "the `leaf` field is the method-leaf directory"
-    );
-    let reason = failures[0]["reason"].as_str().expect("each failure carries a reason");
+/// The refusal of the one run, damaged because its `pgas_summary.json` no
+/// longer matches the bytes the store recorded: it names the run's folder and
+/// the file.
+fn assert_damaged_refusal(store: &Store, stderr: &str) {
     assert!(
-        reason.contains("pgas_summary.json"),
-        "the reason must name the file that could not be read: {reason}"
+        stderr.contains("names a fit run that did not complete and is not read")
+            && stderr.contains("is damaged"),
+        "the run is refused as damaged:\n{stderr}"
     );
+    assert!(
+        stderr.contains(&store.segment.to_string_lossy().into_owned()),
+        "the refusal names the run's folder:\n{stderr}"
+    );
+    assert!(stderr.contains("pgas_summary.json"), "and the file that changed:\n{stderr}");
 }

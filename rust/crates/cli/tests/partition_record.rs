@@ -55,7 +55,7 @@ const DATA: &str =
 
 /// A fit config: `estimate` and `fixed` are the bodies of the two blocks.
 fn fit_toml(estimate: &str, fixed: &str) -> String {
-    format!(r#"output_dir = "res"
+    format!(r#"store = "res"
 [model]
 camdl = "model.camdl"
 [data.observations]

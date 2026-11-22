@@ -14,7 +14,7 @@
 
 use std::path::Path;
 
-use score::convergence::ChainIndex;
+
 
 /// The per-chain files a resumed leaf copies from its parent before the new
 /// segment runs. `resume_state.bin` is the chain state the sampler continues
@@ -41,63 +41,6 @@ pub(crate) fn write_resume_state<T: serde::Serialize>(
 
 /// The per-chain file holding the state a resume continues from.
 pub(crate) const RESUME_STATE_FILE: &str = "resume_state.bin";
-
-/// The longest chain a `--resume` base's checkpoints hold: the most steps
-/// (PMMH) or sweeps (PGAS) any `chain_N/resume_state.bin` under `base`
-/// records as completed, with the unit's name. `Ok(None)` when the base holds
-/// no checkpoint, or the method cannot be resumed; the resume itself then
-/// refuses with the reason. A checkpoint that cannot be decoded is the
-/// runner's to report, and is skipped here.
-pub(crate) fn checkpoint_length(
-    base: &Path,
-    algorithm: &crate::fit::config_v2::Algorithm,
-) -> Option<(usize, &'static str)> {
-    use crate::fit::config_v2::Algorithm;
-    let decode: fn(&[u8]) -> Option<usize> = match algorithm {
-        Algorithm::PGAS { .. } => |b| {
-            bincode::deserialize::<sim::inference::pgas::ChainResumeState>(b).ok().map(|s| s.completed_sweeps)
-        },
-        Algorithm::PMMH { .. } => |b| {
-            bincode::deserialize::<sim::inference::pmmh::PMMHResumeState>(b).ok().map(|s| s.completed_steps)
-        },
-        _ => return None,
-    };
-    let unit = if matches!(algorithm, Algorithm::PGAS { .. }) { "sweeps" } else { "steps" };
-    std::fs::read_dir(base).ok()?
-        .flatten()
-        .filter(|e| ChainIndex::parse_dir_name(&e.file_name().to_string_lossy()).is_some())
-        .filter_map(|e| std::fs::read(e.path().join(RESUME_STATE_FILE)).ok())
-        .filter_map(|b| decode(&b))
-        .max()
-        .map(|n| (n, unit))
-}
-
-/// Copy the parent leaf's [`CARRIED_CHAIN_FILES`] into the resumed leaf, chain
-/// by chain. The parent is read only.
-///
-/// `std::fs::copy` clones the file on APFS (`fclonefileat`, copy-on-write: the
-/// copy shares the parent's blocks until the append writes new ones), and on
-/// Linux goes through `copy_file_range`, which reflinks on filesystems that
-/// support it; elsewhere it is a plain copy.
-pub(crate) fn copy_parent_chains(parent: &Path, leaf: &Path) -> std::io::Result<()> {
-    for entry in std::fs::read_dir(parent)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if ChainIndex::parse_dir_name(&name).is_none() || !entry.path().is_dir() {
-            continue;
-        }
-        let dst = leaf.join(name.as_ref());
-        std::fs::create_dir_all(&dst)?;
-        for f in CARRIED_CHAIN_FILES {
-            let src = entry.path().join(f);
-            if src.is_file() {
-                std::fs::copy(&src, dst.join(f))?;
-            }
-        }
-    }
-    Ok(())
-}
 
 /// One chain's retained posterior draws that came from the parent: the rows of
 /// the chain's `trace.tsv` below the resume boundary that the burn-in and
@@ -244,16 +187,14 @@ impl ResumeLineage {
     /// `boundary[c]`: the parent's own segments when it was resumed, else the
     /// parent as one segment from index 0, then this run.
     pub fn extend(
-        parent: &Path,
+        parent_run_id: &str,
+        parent_inputs: &serde_json::Value,
         index_column: &str,
         run_id: &str,
         boundary: Vec<usize>,
     ) -> Result<Self, String> {
-        let rec = crate::leaf_use::read(parent)?
-            .ok_or_else(|| format!("{} holds no run.json", parent.display()))?
-            .record;
-        let parent_run_id = rec.run_id.to_hex();
-        let mut segments = match Self::read(&rec.inputs)? {
+        let parent_run_id = parent_run_id.to_string();
+        let mut segments = match Self::read(parent_inputs)? {
             Some(l) => l.segments,
             None => vec![Segment {
                 run_id: parent_run_id.clone(),
@@ -267,19 +208,20 @@ impl ResumeLineage {
         Ok(ResumeLineage { parent_run_id, index_column: index_column.to_string(), segments })
     }
 
-    /// The lineage a run.json `inputs` records, `None` for a run that did not
-    /// resume.
+    /// The lineage a run's inputs record (`run_inputs.json`), `None` for a
+    /// run that did not resume.
     pub fn read(inputs: &serde_json::Value) -> Result<Option<Self>, String> {
         match inputs.get(RESUME_KEY) {
             None | Some(serde_json::Value::Null) => Ok(None),
             Some(v) => serde_json::from_value(v.clone())
                 .map(Some)
-                .map_err(|e| format!("run.json inputs.{RESUME_KEY}: {e}")),
+                .map_err(|e| format!("run_inputs.json {RESUME_KEY}: {e}")),
         }
     }
 }
 
-/// The run.json `inputs` key [`ResumeLineage`] is recorded under.
+/// The key of a run's inputs (`run_inputs.json`) [`ResumeLineage`] is
+/// recorded under.
 pub(crate) const RESUME_KEY: &str = "resume";
 
 #[cfg(test)]

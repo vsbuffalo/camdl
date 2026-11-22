@@ -4909,11 +4909,111 @@ How each reader holds what it reads:
 Three readers change behaviour as well as source. A reader that applied
 `holdout_after` itself (`pfilter --save-final-state`, `pfilter.rs:700`;
 `profile`, `profile.rs:563-566`) takes `StoredFit::partition` instead, since the
-stored rows are already the training rows. `profile`'s held-out files are gone
-with `data.holdout`. A forecast from a stored fit reads its targets from
-`held_out/`, and from step 5b until scores arrive in step 7 it computes no
-held-out score and refuses `--realised-design`, whose design values are held-out
-values; the refusal names step 7's scores.
+stored rows are already the training rows. `pfilter --fit` on a stored fit that
+held rows out is refused before it runs, except under `--save-final-state`: the
+stored problem keeps no held-out values, so filtering it would score fewer rows
+than the same problem named by its fit file, which scores every row. Under
+`--save-final-state` both forms bind the training rows alone and give the same
+log-likelihood and final state. Held-out scoring of stored fits returns with
+step 7. `profile`'s held-out files are gone with `data.holdout`. A forecast from
+a stored fit reads its targets from `held_out/`, and from step 5b until scores
+arrive in step 7 it computes no held-out score and refuses `--realised-design`,
+whose design values are held-out values; the refusal names step 7's scores.
+
+### 8. Where the implementation differs from this sketch
+
+`fit run` on the store (`cli/src/fit_command.rs`, `cli/src/fit_store.rs`)
+follows the sections above, with these differences.
+
+- **The problem keeps the model file under the name it was given.** A fit whose
+  `[model] camdl` names compiled IR stores `model.ir.json` where the tree in
+  section 6 shows `model.camdl`.
+- **`held_out/` exists only when rows are held out.**
+- **A run's folder holds four more files.** `run_inputs.json` is what the run
+  was asked to do and what it found: its method, backend, seed, chain count,
+  starts rule and source, sampler, best log-likelihood and resume lineage. Every
+  reader of a run reads its method and backend there. It, `fit.meta.json` (the
+  problem's provenance as the run resolved it, the old fit folder's sidecar) and
+  `execution.json` are provenance files; `method.toml` is a result file.
+- **A starts file named directly is stored in the run** as
+  `inputs/starts.<ext>`. `StartInput::File` holds the file's bytes, and the
+  store refuses an identity whose content no result file holds.
+- **`profile --fit` on a stored fit keys the text of `problem.toml`, followed by
+  the run's `method.toml` when a run is named,** in the field that held the hash
+  of `fit.toml.original`, not as an `ArtifactRef`. The contents key the profile
+  either way; step 6 replaces both with `Dep<FitProblem>`.
+- **Readers open a scratch copy of the run.** `fit_store::open_fit` copies the
+  run's result and provenance files out through `Stored::open`, writes the
+  stored compile beside them as `model.ir.json`, and hands the reader that
+  directory; messages name the stored folder, not the copy.
+- **`camdl label` refuses a fit run,** as it refuses a filter run: a completed
+  record is sealed, and `fit run ... --label` names the invocation.
+- **`--seed` is `identity`, not `expands`.** It takes one value, so a second
+  value names another run and no set of runs is enlarged; the class check of
+  `expands` (the smaller set's runs keep their ids in the larger) cannot hold
+  for it. The file's `fit_seeds` is what makes several runs.
+- **`config` is a `PathBuf` read as `SourceBytes`,** which the invocation
+  records with `Given::with_file`, and the resolution parses those bytes.
+- **A fit file's `output_dir` key is refused,** naming `store`. Nothing reads
+  it, and accepting it would store the fit somewhere other than the file asks.
+- **The removed spellings are refused before the inputs are split,** since the
+  split does not carry the skipped fields.
+- **`compare` refuses to score the held-out rows of a stored fit,** before
+  computing, as forecasts do: the problem keeps held-out rows' dates and not
+  their values. A `holdout_after` fit and a `[data.holdout]` fit, whole or
+  partial, are refused with a message naming step 7's scores; `--in-sample`
+  compares the training rows.
+- **The compile's quantities and contrasts are the `Quantities` part,** which
+  `fit run` stores and names as lineage, not identity, since they do not change
+  the fit. Each invocation records the part it compiled in its run's labels
+  (`RunLabels.quantities`), so an invocation that reuses a run after only the
+  quantities block was edited records the edited part. A prediction evaluates
+  the quantities the command that names the run compiled: `@label` takes its
+  invocation's; an id or folder takes the one every invocation that named the
+  run recorded, and is refused, listing them, when they recorded different ones.
+  `open_fit` restores the chosen part into the model a reader runs, and
+  `PredictIdentity` holds `quantities: Option<Dep<Quantities>>`. Contrasts are
+  in the same part.
+- **A prediction stores the model's own quantities in `quantities-model/`.** The
+  store keeps every kind's name, `quantities` among them, out of a result's
+  top-level directories; a vocabulary's `quantities-<key8>/` and the
+  `quantities.json` manifest keep their names, and `simulate` is unchanged.
+- **A handle that names a run in another state than completed is refused with
+  its folder, its state and the reason the store recorded**
+  (`Store::resolve_entry`). `Entry::folder` and `Run::folder` (an in-place run's
+  folder, so the method report is written before the run is sealed) are the two
+  accessors added to the library, with `Stored::lineage`.
+- **A result's folder names its store.** A folder handle is read from the
+  nearest directory above it holding `store.json`, whatever `CAMDL_STORE` is.
+- **A synthetic problem keeps what generated its data,** as identity:
+  `SyntheticOrigin` holds the true parameters file's bytes, the dataset's seed
+  and the table's other settings, and `problem.toml` writes `[synthetic]` with
+  `true_params = "synthetic/truth.toml"` and that one seed. Each dataset is its
+  own problem. A fit of real data whose file also declares `[synthetic]` (the
+  truth `fit recovery` compares estimates with) keeps the table and the truth as
+  provenance files of the problem (`synthetic.toml`, `synthetic/truth.toml`),
+  outside its identity, with any number of seeds.
+- **A failed run keeps what its method wrote:** its files, the rest of its event
+  log and its `failed` progress snapshot, before the record is marked failed.
+- **Chain ids in a prediction's file names are joined by `_`**
+  (`predictive-excl1_3/`): a stored file's name holds no comma.
+- **`PredictOptions` holds `design: BTreeMap<String, Dep<DataTable>>`,** the
+  `--design SOURCE=FILE` files a forecast reads its targets' design values from,
+  stored as data tables: a design file with other bytes is another prediction
+  even when every target's design values agree.
+- **A prediction labels a row at a stored held-out date `held_out`.** The
+  problem's data holds its training rows only, so a free-forward row past them
+  at the label of a training file's held-out row is held out; a row in a
+  `[data.holdout]` period stays `future`, as those files are not read. The
+  one-step band stops at the training rows, since filtering through held-out
+  rows needs their values, which arrive with step 7.
+- **A replay compares the stored compile with its anchors resolved** against the
+  stored data, as it resolves the given model's: the model part keeps anchored
+  horizons unresolved.
+- **Checks that refuse a fit run before it starts** (a sweep over an estimated
+  parameter, a scenario that sets a parameter `[estimate]`, `[fixed]` or the
+  sweep sets) run before the store is opened, so a refused run leaves no store
+  behind.
 
 ## Features that build on the store
 

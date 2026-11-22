@@ -19,18 +19,18 @@
 //! `[config] dt` instead (its default 1.0 in the first arm) filters the first
 //! band on 1.0 and the bands differ. No fitted value enters the comparison.
 
+mod fit_store_support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Where the latest `fit predict` of a run in `seg` wrote:
-/// `<seg>/predict/<run id>-<address key>/` (gh#896), the directory whose
-/// `report*.json` (one written by every predict) is newest. A path that does not
-/// exist while nothing has been predicted.
+/// The stored prediction under `seg` (a run folder, or any folder above
+/// runs) whose `report*.json` is newest: the latest `fit predict`'s output. A
+/// path that does not exist while nothing has been predicted.
 fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
-    std::fs::read_dir(seg.join("predict"))
-        .into_iter().flatten().flatten().map(|e| e.path())
+    fit_store_support::predictions(seg)
+        .into_iter()
         .filter_map(|d| {
-            // Newest `report*.json` (keyed by chain selection) in the directory.
             let t = std::fs::read_dir(&d).ok()?.flatten()
                 .filter(|e| {
                     let n = e.file_name().to_string_lossy().into_owned();
@@ -87,7 +87,7 @@ const DATA: &str = "time\tcases\n1\t20\n2\t35\n3\t60\n4\t90\n5\t120\n6\t150\n";
 fn fit_toml(model_file: &str, config_dt: Option<&str>) -> String {
     let config = config_dt.map(|d| format!("[config]\ndt = {d}\n")).unwrap_or_default();
     format!(
-        r#"output_dir = "results"
+        r#"store = "results"
 [model]
 camdl = "{model_file}"
 [data.observations]
@@ -108,25 +108,6 @@ thin      = 1
 starts    = "uniform_unconstrained"
 "#
     )
-}
-
-/// The one file named `name` anywhere under `root`.
-fn find(root: &Path, name: &str) -> PathBuf {
-    let mut hits = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&d) else { continue };
-        for e in entries.flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                stack.push(p);
-            } else if p.file_name().is_some_and(|f| f == name) {
-                hits.push(p);
-            }
-        }
-    }
-    assert_eq!(hits.len(), 1, "expected one {name} under {}, found {hits:?}", root.display());
-    hits.pop().unwrap()
 }
 
 /// The `one_step` rows of a predictive TSV, as text.
@@ -170,29 +151,28 @@ fn the_one_step_band_is_filtered_on_the_dt_the_fit_used() {
             Command::new(&bin).env_remove("CLICOLOR_FORCE")
                 .args(args)
                 .current_dir(&dir)
+                .env("CAMDL_STORE", dir.join("results"))
                 .env("CAMDL_SKIP_VERSION_CHECK", "1")
                 .output()
                 .expect("spawn camdl")
         };
-        let out = run(&["fit", "run", "fit.toml", "--seed", "1", "--no-progress"]);
+        let out = run(&["fit", "run", "fit.toml", "--seed", "1", "--no-progress", "--label", "fit"]);
         assert!(
             out.status.success(),
             "[{arm}] fit run failed:\n{}",
             String::from_utf8_lossy(&out.stderr)
         );
-        let out = run(&["fit", "predict", "--fit", "fit.toml", "--mode", "one_step"]);
+        let out = run(&["fit", "predict", "--fit", "@fit", "--mode", "one_step"]);
         assert!(
             out.status.success(),
             "[{arm}] fit predict failed:\n{}",
             String::from_utf8_lossy(&out.stderr)
         );
 
-        // `<segment>/<method>-<h8>/seed_<n>-<h8>/draws.tsv`, so the segment —
-        // where the predictive artifacts land — is three levels up.
-        let draws_path = find(&dir.join("results"), "draws.tsv");
-        let segment = draws_path.parent().unwrap().parent().unwrap().parent().unwrap();
-        draws.push(std::fs::read_to_string(&draws_path).unwrap());
-        predictive.push(predict_out(segment).join("predictive").join("cases.tsv"));
+        // The run folder holds `draws.tsv`, and its predictions sit inside it.
+        let fit_run = fit_store_support::the_run(&dir.join("results"));
+        draws.push(std::fs::read_to_string(fit_run.join("draws.tsv")).unwrap());
+        predictive.push(predict_out(&fit_run).join("predictive").join("cases.tsv"));
     }
 
     // Premise: both fits walk 0.2 — one from the model's declaration, one

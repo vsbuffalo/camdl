@@ -1,6 +1,5 @@
-# Paths are relative to this file; output_dir too (gh#507) — the harness cds into this directory, so the resolved location is unchanged
-# (the Makefile runs from this case dir, so both resolve here).
-output_dir = "results"
+# Paths are relative to this file, the store root among them.
+store = "results"
 
 [model]
 camdl = "model.camdl"

@@ -28,9 +28,18 @@ impl ExitCode {
 
     /// End the process with this status.
     pub fn exit(self) -> ! {
+        // Waits for an error being reported on another thread to finish
+        // failing the run it holds, so the process does not end mid-record.
+        let _reporting = ERROR_REPORT.lock().unwrap_or_else(|e| e.into_inner());
         std::process::exit(self.0)
     }
 }
+
+/// Held while [`Out::error`] reports an error and fails the run the command
+/// holds, and taken by [`ExitCode::exit`]: two threads that stop the command
+/// at once (two chains refused together) end it only after the first has
+/// stored its failure.
+static ERROR_REPORT: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// An error a command reports and exits on.
 ///
@@ -72,12 +81,13 @@ pub struct Out {
     /// the end-of-run report, its last line, is built after the method's
     /// record is handed back.
     events: Option<events::EventLog>,
-    /// The store claim on the running method's leaf, from
-    /// [`hold_claim`](Self::hold_claim) to [`take_claim`](Self::take_claim).
-    /// An error reported while it is held fails it, so the leaf's
-    /// `run.json` reaches `failed`, recording the error, on every error
-    /// path, `process::exit` (which runs no destructor) included. Behind a
-    /// lock because the chain workers report errors through a shared `&Out`.
+    /// The run the running method runs in, from
+    /// [`hold_failure`](Self::hold_failure) to
+    /// [`release_failure`](Self::release_failure). An error reported while it
+    /// is held fails it, so the run is recorded failed, with the error, on
+    /// every error path, `process::exit` (which runs no destructor) included.
+    /// Behind a lock because the chain workers report errors through a shared
+    /// `&Out`.
     claim: std::sync::Mutex<Option<HeldClaim>>,
     /// A heartbeat the command itself runs, outside any method — `camdl
     /// profile`'s invocation record (`profiles/<base>/invocations/<id>/`).
@@ -88,8 +98,9 @@ pub struct Out {
     /// temporary store), removed when an error ends the command, since
     /// `process::exit` runs no destructor.
     temporary: std::sync::Mutex<Option<std::path::PathBuf>>,
-    /// The forcing-extrapolation policy of the held claim's command, from
-    /// [`hold_claim`](Self::hold_claim) to [`take_claim`](Self::take_claim).
+    /// The forcing-extrapolation policy of the held run's command, from
+    /// [`hold_failure`](Self::hold_failure) to
+    /// [`release_failure`](Self::release_failure).
     /// Kept apart from the claim, which the first error takes: every chain
     /// still polling after that must still see the refusal and stop.
     forcing: Option<crate::forcing_extrapolation::ForcingPolicy>,
@@ -98,7 +109,7 @@ pub struct Out {
 /// What [`Out::forcing_refusal`] finds.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ForcingRefusal {
-    /// No claim is held, from [`Out::hold_claim`] to [`Out::take_claim`]:
+    /// No run is held, from [`Out::hold_failure`] to [`Out::release_failure`]:
     /// no refusal is being kept for one, so a refusal has ended the command
     /// where it was met.
     NoClaim,
@@ -109,12 +120,12 @@ pub enum ForcingRefusal {
     Refused(String),
 }
 
-/// The operation context of a streamed run: the store claim on its leaf, and
-/// what is running in it, which a failure records (`runid::Failure`). Owned
-/// by the command's `Out` for the run's span — one per `fit run` cell — and
-/// never by anything process-wide.
+/// The run a streamed method runs in, and what is running in it, which a
+/// failure records. Owned by the command's `Out` for the run's span — one per
+/// `fit run` run — and never by anything process-wide.
 pub struct HeldClaim {
-    claim: crate::resolve::ResolvedClaim,
+    /// Fails the run on the run store with the operation and the reason.
+    fail: Box<dyn FnOnce(&str, &str) -> Result<(), String> + Send>,
     /// The fit method (`pmmh`, `if2`, …).
     operation: String,
 }
@@ -244,13 +255,27 @@ impl Out {
         Ok(collector)
     }
 
-    /// Hold the store claim on the method's leaf until the run finalizes it
-    /// ([`take_claim`](Self::take_claim)). Until then, an error reported
-    /// through this handle marks the leaf `failed` and releases its lock.
-    pub fn hold_claim(&mut self, claim: crate::resolve::ResolvedClaim, operation: impl Into<String>) {
-        self.forcing = Some(claim.forcing().clone());
+    /// Hold a run on the run store until the method ends
+    /// ([`release_failure`](Self::release_failure)): an error reported
+    /// through this handle until then calls `fail` with the operation and the
+    /// error's message, which ends the run as failed before the process
+    /// exits. `forcing` is the policy of the run's command.
+    pub fn hold_failure(
+        &mut self,
+        fail: Box<dyn FnOnce(&str, &str) -> Result<(), String> + Send>,
+        forcing: crate::forcing_extrapolation::ForcingPolicy,
+        operation: impl Into<String>,
+    ) {
+        self.forcing = Some(forcing);
         *self.claim.get_mut().unwrap_or_else(|e| e.into_inner()) =
-            Some(HeldClaim { claim, operation: operation.into() });
+            Some(HeldClaim { fail, operation: operation.into() });
+    }
+
+    /// Stop holding the run [`hold_failure`](Self::hold_failure) took: the
+    /// caller ends it.
+    pub fn release_failure(&mut self) {
+        self.forcing = None;
+        let _ = self.claim.get_mut().unwrap_or_else(|e| e.into_inner()).take();
     }
 
     /// The refusal the held claim's command kept for it
@@ -263,13 +288,6 @@ impl Out {
             None => ForcingRefusal::NoClaim,
             Some(policy) => policy.refused().map_or(ForcingRefusal::Clear, ForcingRefusal::Refused),
         }
-    }
-
-    /// Hand back the claim [`hold_claim`](Self::hold_claim) took, for the
-    /// run to finalize.
-    pub fn take_claim(&mut self) -> Option<crate::resolve::ResolvedClaim> {
-        self.forcing = None;
-        self.claim.get_mut().unwrap_or_else(|e| e.into_inner()).take().map(|h| h.claim)
     }
 
     /// The running method's event log, for the chain tasks that record their
@@ -427,13 +445,12 @@ impl Out {
     /// status its event log and `progress.json` are about to record. A
     /// record that could not be written is added to the message.
     pub fn error(&self, mut e: CommandError) -> ExitCode {
+        let _reporting = ERROR_REPORT.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(dir) = self.temporary.lock().unwrap_or_else(|p| p.into_inner()).take() {
             let _ = std::fs::remove_dir_all(dir);
         }
-        let held = self.claim.lock().unwrap_or_else(|p| p.into_inner()).take();
-        if let Some(held) = held {
-            fail_claim(held.claim, &held.operation, &mut e.message);
-        }
+        // The heartbeats first: the held run's failure stores what its
+        // method wrote, the last progress snapshot among it.
         if let Some(m) = &self.method {
             // The same sentence a reader of stderr gets, for a reader holding
             // only `progress.json`.
@@ -443,6 +460,12 @@ impl Out {
             self.command_heartbeat.lock().unwrap_or_else(|p| p.into_inner()).take();
         if let Some(hb) = command_hb {
             hb.failed(e.message.as_str());
+        }
+        let held = self.claim.lock().unwrap_or_else(|p| p.into_inner()).take();
+        if let Some(held) = held {
+            if let Err(err) = (held.fail)(&held.operation, &e.message) {
+                e.message.push_str(&format!("\n  and the run could not be marked failed: {err}"));
+            }
         }
         self.say(one_head(&e.message));
         if let Some(hint) = &e.hint {
@@ -636,60 +659,6 @@ mod tests {
         assert_eq!(e.hint, None);
         let out = Out::new(true);
         assert_eq!(out.error(CommandError { code: ExitCode(2), ..e }), ExitCode(2));
-    }
-
-    /// A claim `Out` holds is failed by the error it reports: the leaf's
-    /// `run.json` is `failed`, recording the error, and its lock released
-    /// before the command exits, since `process::exit` runs no destructor. A
-    /// claim taken back is the caller's again, and an error no longer
-    /// touches it.
-    #[test]
-    fn an_error_reported_while_a_claim_is_held_marks_its_leaf_failed() {
-        let root = tempfile::tempdir().unwrap();
-        let store = runid::FsCasStore::new(root.path());
-        let h = |b: u8| runid::ContentHash::from_bytes([b; 32]);
-        let level = |name: &str, label: &str, b: u8| runid::LevelId {
-            name: name.into(), label: label.into(), hash: h(b), schema_version: 1,
-        };
-        let claim = |run: u8| {
-            let artifact = crate::resolve::ResolvedArtifact {
-                kind: runid::ArtifactKind::FitMethod,
-                levels: vec![level("fit", "f", 1), level("method", "pmmh", 2),
-                    level("seed", &format!("seed_{run}"), run)],
-                run_id: h(run),
-                display_inputs: serde_json::Value::Null,
-            };
-            let meta = crate::resolve::RecordMeta::new("0.0", "m.camdl", None,
-                ir::caltime::CalendarAxis::parse("days", None).unwrap(),
-                &crate::forcing_extrapolation::ForcingPolicy::new(false));
-            crate::resolve::begin_resolved_write(&store, root.path(), &artifact, &meta).unwrap()
-        };
-        let status = |dir: &std::path::Path| -> String {
-            let rec: serde_json::Value =
-                serde_json::from_slice(&std::fs::read(dir.join("run.json")).unwrap()).unwrap();
-            rec["status"].as_str().unwrap().to_string()
-        };
-
-        let mut out = Out::new(true);
-        let held = claim(3);
-        let dir = held.dir().to_path_buf();
-        out.hold_claim(held, "pmmh");
-        assert_eq!(status(&dir), "running");
-        assert_eq!(out.error(CommandError::new("error: the run failed")), ExitCode::FAILURE);
-        assert_eq!(status(&dir), "failed");
-        let rec: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(dir.join("run.json")).unwrap()).unwrap();
-        assert_eq!(rec["failure"], serde_json::json!({"message": "error: the run failed", "operation": "pmmh"}),
-            "run.json records why, and what was running");
-        assert!(!dir.join(".lock").exists(), "the lock is released");
-
-        let taken = claim(4);
-        let dir = taken.dir().to_path_buf();
-        out.hold_claim(taken, "pmmh");
-        let taken = out.take_claim().expect("the held claim is handed back");
-        out.error(CommandError::new("error: after the claim was taken back"));
-        assert_eq!(status(&dir), "running", "a taken-back claim is the caller's");
-        drop(taken);
     }
 
     /// `progress.json` says `done` before the leaf is finalized (the heartbeat

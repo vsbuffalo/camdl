@@ -1,7 +1,6 @@
 //! gh#147 (M3.3). The profile-point CAS identity: map a resolved profile grid
 //! point into the `runid` factored levels (`profile` / `point` / `method` /
-//! `seed` / `start`) and its leaf `run_id`. Mirrors
-//! [`crate::fit::cas::resolve_fit_method`].
+//! `seed` / `start`) and its leaf `run_id`.
 //!
 //! Factoring (design locked in `7493cc0` — not re-litigated here):
 //!   - **profile (base)** — the inference *problem*: model + data + the
@@ -56,9 +55,9 @@ pub struct ProfilePointCtx<'a> {
     pub data: &'a [(String, String)],
     /// Canonical base config blob: base params + fixed + obs + priors +
     /// fit.toml. The focal GRID and method config are EXCLUDED here.
-    pub base_config: crate::fit::cas::LevelHash,
+    pub base_config: LevelHash,
     /// The sub-fit method + hyperparams (algorithm + if2/pmmh).
-    pub method_config: crate::fit::cas::LevelHash,
+    pub method_config: LevelHash,
     /// The pinned focal `(param, value)` for this grid point.
     pub focal: &'a [(String, f64)],
     /// The full resolved sweep grid — each focal axis name and its values,
@@ -74,7 +73,78 @@ pub struct ProfilePointCtx<'a> {
     pub deps: Vec<ArtifactRef>,
 }
 
-use crate::fit::cas::{data_digests, level, structural_level_hash};
+/// Schema version stamped into every [`LevelId`] a profile point's identity
+/// holds. Identity-bearing: it folds into every profile `run_id`.
+pub(crate) const LEVEL_SCHEMA_VERSION: u16 = 1;
+
+/// A [`LevelId`] with the canonical schema version.
+pub(crate) fn level(name: &str, label: &str, hash: LevelHash) -> LevelId {
+    LevelId { name: name.into(), label: label.into(), hash: hash.0, schema_version: LEVEL_SCHEMA_VERSION }
+}
+
+/// A hash that may become an identity level. Only two functions make one:
+/// [`canonical_config_hash`] (a `Serialize` value, gated for finiteness and
+/// serialized whole) and [`structural_level_hash`] (a `ContentAddressed`
+/// value). A digest of a hand-built JSON literal cannot reach [`level`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LevelHash(ContentHash);
+
+impl LevelHash {
+    /// The hash, for embedding inside another structurally hashed input.
+    pub(crate) fn into_inner(self) -> ContentHash {
+        self.0
+    }
+}
+
+/// A [`LevelHash`] of a structurally hashed value.
+pub(crate) fn structural_level_hash<T: runid::ContentAddressed>(v: &T) -> LevelHash {
+    LevelHash(v.content_hash())
+}
+
+/// A [`LevelHash`] of a `Serialize` value: finiteness gated on the value,
+/// serialized whole, the named top-level keys removed, canonicalized and
+/// digested.
+pub(crate) fn canonical_config_hash<T: serde::Serialize>(value: &T, exclude: &[&str]) -> Result<LevelHash, String> {
+    crate::canonical_json::ensure_finite(value)?;
+    let v = crate::canonical_json::serialize_minus(value, exclude)?;
+    let bytes = serde_json::to_vec(&crate::canonical_json::canonical(&v))
+        .expect("canonical JSON of a finiteness-gated value serializes");
+    Ok(LevelHash(ContentHash::digest_bytes(&bytes)))
+}
+
+/// Per-stream data digests from SHA-256 hex hashes the caller holds, sorted
+/// by name. A hash that is not 64 hex digits is refused.
+pub(crate) fn data_digests(data: &[(String, String)]) -> Result<Vec<runid::inputs::DataDigest>, String> {
+    let mut entries: Vec<&(String, String)> = data.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries
+        .iter()
+        .map(|(name, sha)| {
+            ContentHash::from_hex(sha)
+                .map(runid::inputs::DataDigest)
+                .map_err(|e| format!("data hash for '{name}' is not a 64-hex SHA-256: {e:?}"))
+        })
+        .collect()
+}
+
+/// The dependency a profile's base holds on the source of its chain starts:
+/// the content the starts read, keyed by that content alone. A `from_mle`
+/// source is keyed by its `start_values`, any other by the file's bytes.
+pub(crate) fn start_source_dep(
+    rule: &crate::fit::starts::ChainStarts,
+    source: &crate::fit::chain_starts::ResolvedSource,
+) -> Result<ArtifactRef, String> {
+    use crate::fit::starts::{ChainStarts, Point};
+    let bytes = std::fs::read(&source.file).map_err(|e| format!("cannot read {}: {e}", source.file.display()))?;
+    let (artifact, digest) = match rule {
+        ChainStarts::Point(Point::FromMle { .. }) => (
+            "fit_state.toml:start_values",
+            ContentHash::digest_bytes(&crate::fit::chain_starts::start_values_part(&bytes)?),
+        ),
+        _ => ("starts source", ContentHash::digest_bytes(&bytes)),
+    };
+    Ok(ArtifactRef { run_id: digest, kind: ArtifactKind::FitMethod, artifact: artifact.to_string(), digest })
+}
 
 /// Resolve a profile-point leaf's identity: the five factored levels and the
 /// `run_id` derived from their hashes.

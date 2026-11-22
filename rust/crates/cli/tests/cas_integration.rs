@@ -10,6 +10,8 @@ use std::process::Command;
 mod sim_store_cells;
 use sim_store_cells::SimCell;
 
+mod fit_store_support;
+
 /// Path to the release-built binary. Tests assume a prior
 /// `cargo build --release -p cli`, which happens automatically before
 /// `cargo test` in CI. Skips the test if the binary is absent.
@@ -38,6 +40,64 @@ fn skip_if_missing_binary() -> PathBuf {
 }
 
 // ── Run-store helpers ──────────────────────────────────────────────────────
+
+/// The seed-timing SIR fixture's IR, which `fit_toml` fits.
+fn seed_timing_ir() -> PathBuf {
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    Path::new(&manifest).join("../sim/tests/fixtures/seed_timing_dated.ir.json")
+}
+
+/// A fit file for the seed-timing fixture, stored in `store`: a cheap IF2
+/// with `iterations` iterations, its data written beside it as `cases.tsv`.
+fn fit_toml(dir: &Path, name: &str, store: &Path, iterations: u32) -> PathBuf {
+    std::fs::write(dir.join("cases.tsv"), "time\tcases\n\
+        2020-03-15\t3\n2020-03-16\t6\n2020-03-17\t11\n2020-03-18\t18\n\
+        2020-03-19\t27\n2020-03-20\t31\n2020-03-21\t28\n2020-03-22\t20\n\
+        2020-03-23\t13\n2020-03-24\t8\n").unwrap();
+    let p = dir.join(name);
+    std::fs::write(&p, format!(r#"store = "{store}"
+[model]
+camdl = "{ir}"
+[data.observations]
+cases = "cases.tsv"
+[estimate]
+beta = {{ bounds = [0.1, 2.0], start = 0.6 }}
+tau  = {{ bounds = [0.0, 60.0], start = 20.0 }}
+[fixed]
+gamma = 0.2
+lambda = 2.0
+w = 3.0
+N0 = 1000
+rho = 0.6
+k = 10.0
+[method]
+algorithm = "if2"
+backend = "chain_binomial"
+chains = 2
+particles = 300
+iterations = {iterations}
+cooling = 0.7
+"#, store = store.display(), ir = seed_timing_ir().display())).unwrap();
+    p
+}
+
+/// Run `fit run <fit> --label <label>` in `dir` and return the folder of the
+/// run it stored in `store`: the one run whose `fit.toml` is `fit`'s bytes.
+fn real_fit(bin: &Path, dir: &Path, fit: &Path, label: &str, store: &Path) -> PathBuf {
+    let out = Command::new(bin).env_remove("CLICOLOR_FORCE")
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .current_dir(dir)
+        .args(["fit", "run", &fit.to_string_lossy(), "--label", label, "--progress", "none"])
+        .output().expect("spawn");
+    assert!(out.status.success(), "fit run failed: {}", String::from_utf8_lossy(&out.stderr));
+    let given = std::fs::read(fit).unwrap();
+    let runs: Vec<PathBuf> = fit_store_support::runs(store).into_iter()
+        .filter(|r| std::fs::read(r.join("fit.toml")).ok().as_deref() == Some(&given[..]))
+        .collect();
+    assert_eq!(runs.len(), 1, "one run of {}: {runs:?}", fit.display());
+    runs.into_iter().next().unwrap()
+}
+
 
 /// The stored simulation cells under the run store `store`, leaving out any
 /// cell a repair moved to `.quarantine/`.
@@ -538,60 +598,15 @@ fn starts_from_resolves_short_hash() {
     let bin = skip_if_missing_binary();
     let tmp = tempfile::tempdir().unwrap();
     let results = tmp.path().join("results");
-    // Fake a method dir with a known-hash run.json. The resolver
-    // walks results/fits/**, so we need to place the run.json
-    // under that structure.
-    let method = results.join("fits").join("demo-abc12345")
-        .join("if2-1fb03eee").join("seed_1-06cbd6b3");
-    std::fs::create_dir_all(&method).unwrap();
-    // gh#147: the resolver matches a `FitMethod` `runid::RunRecord` leaf on its
-    // `run_id` hex prefix. Plant a leaf whose `run_id` starts `deadbeef`.
-    let target_hash = "deadbeefc0ffee00000000000000000000000000000000000000000000000000";
-    let run_json = format!(r#"{{
-        "format_version":1,"kind":"fit_method","run_id":"{}","hash_version":1,"calendar":{{"days_per_unit":1.0,"origin":null,"time_unit":"days"}},
-        "ir_version":"0.7","engine_version":"0.1.0+test",
-        "levels":[
-            {{"name":"fit","label":"demo","hash":"abc1234500000000000000000000000000000000000000000000000000000000","schema_version":1}},
-            {{"name":"method","label":"if2","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},
-            {{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}
-        ],
-        "status":"completed","artifacts":{{}},
-        "inputs":{{"method":"if2","backend":"chain_binomial","seed":1,"n_chains":2}},
-        "provenance":{{"created_at":"2026-04-19T12:00:00Z","argv":[]}}
-    }}"#, target_hash);
-    std::fs::write(method.join("run.json"), run_json).unwrap();
+    // A stored run, named below by a prefix of its run id.
+    let source = fit_toml(tmp.path(), "source.toml", &results, 3);
+    let run = real_fit(&bin, tmp.path(), &source, "source", &results);
+    let run_id = fit_store_support::run_id(&run);
+    let prefix = &run_id[..8];
 
-    // Exercise the short-hash leaf resolver through `fit run`: the removed
-    // flags must error with the actionable replacement message, and the
-    // `--starts from_mle=<hash>` spelling resolves the same planted leaf. Run
-    // from `tmp` so the default `./results` resolver finds the leaf planted
-    // above.
-    std::env::set_current_dir(tmp.path()).unwrap();
-
-    // Bad hash: should error with our message.
-    let ir = tmp.path().join("dummy.ir.json");
-    std::fs::write(&ir, r#"{"compartments":[],"parameters":[]}"#).unwrap();
+    let ir = seed_timing_ir();
     let data = tmp.path().join("cases.tsv");
-    std::fs::write(&data, "time\tcases\n1\t5\n").unwrap();
-    let fit_toml = tmp.path().join("f.toml");
-    std::fs::write(&fit_toml, format!(r#"
-output_dir = "results"
-[model]
-camdl = "{}"
-[data.observations]
-cases = "{}"
-[estimate]
-beta = {{ bounds = [0.01, 2.0] }}
-[fixed]
-N0 = 1000
-[method]
-algorithm = "if2"
-backend = "chain_binomial"
-chains = 2
-particles = 50
-iterations = 3
-cooling = 0.7
-"#, ir.display(), data.display())).unwrap();
+    let fit_toml = fit_toml(tmp.path(), "f.toml", &results, 4);
 
     // Removed flags, every one named with its replacement in one message
     // (the ebola agents' habitual `--stage posterior --init from_prior`).
@@ -618,6 +633,8 @@ cooling = 0.7
     // ran with a start rule the flag was meant to select.
     let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .current_dir(tmp.path())
+        .env("CAMDL_STORE", &results)
+        .env("CAMDL_OUTPUT_DIR", &results)
         .args(["profile", &ir.to_string_lossy(),
                "--data", &format!("cases={}", data.display()),
                "--sweep", "beta=lin(0.1,0.5,2)", "--rw-sd", "auto",
@@ -636,7 +653,7 @@ cooling = 0.7
     assert!(!stderr.contains("compiling"),
         "the refusal must land before any work, got: {stderr}");
 
-    // Bad hash with the new spelling: the resolver finds no leaf and no fit.
+    // Bad hash with the new spelling: the resolver finds no run.
     let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .current_dir(tmp.path())
         .args(["fit", "run", &fit_toml.to_string_lossy(),
@@ -645,24 +662,26 @@ cooling = 0.7
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "bad hash must fail");
     assert!(stderr.contains("starts = from_mle zzzznonexistent")
-            && stderr.contains("no fit found for zzzznonexistent"),
-        "expected the handle named and 'no fit found' — a bad handle is refused before \
-         the model is loaded, got: {}", stderr);
+            && stderr.contains("zzzznonexistent holds no result record"),
+        "expected the handle named and that it names no stored result, got: {}", stderr);
 
-    // Good hash: resolves to the leaf we planted. Resolution happens before
-    // the fit does anything expensive, so the success path is that the
-    // failure comes AFTER the lookup — the planted leaf holds no
-    // `fit_state.toml`, and the error says so about that leaf.
+    // Good hash: resolves to the stored run, and the new run depends on its
+    // point estimate.
     let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .current_dir(tmp.path())
         .args(["fit", "run", &fit_toml.to_string_lossy(),
-               "--starts", "from_mle=deadbeef"])
+               "--starts", &format!("from_mle={prefix}"), "--allow-nonconverged-source"])
         .output().expect("spawn");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!stderr.contains("no fit found for"),
-        "short-hash 'deadbeef' should resolve to the planted leaf, got: {}", stderr);
-    assert!(stderr.contains("seed_1-06cbd6b3") && stderr.contains("fit_state.toml"),
-        "the planted leaf must be the one read next, got: {}", stderr);
+    assert!(out.status.success(),
+        "short-hash '{prefix}' should resolve to the stored run, got: {}", stderr);
+    let started = fit_store_support::runs(&results).into_iter()
+        .find(|r| *r != run).expect("the new run");
+    let rec = fit_store_support::json(&started.join("run.json"));
+    assert!(rec["deps"].as_array().unwrap().iter()
+            .any(|d| d["run_id"] == run_id.as_str()
+                && d["file"].as_str().is_some_and(|f| f.starts_with("fit_state.toml"))),
+        "the new run reads the named run's fit_state.toml: {rec}");
 }
 
 /// `camdl list --kind fit` should hide sim rows entirely; `--kind sim`
@@ -671,7 +690,6 @@ cooling = 0.7
 fn list_kind_filter_isolates_sections() {
     let bin = skip_if_missing_binary();
     let tmp = tempfile::tempdir().unwrap();
-    let output = tmp.path().join("output");
     let store = tmp.path().join("store");
 
     // Cache one sim, in the run store.
@@ -681,63 +699,59 @@ fn list_kind_filter_isolates_sections() {
                "--store", &store.to_string_lossy(),
                "-o", &tmp.path().join("t.tsv").to_string_lossy()])
         .status().expect("spawn");
-    // Synthesise a CAS fit (single `mle` method leaf + sidecar), in the
-    // output root fits are stored under.
-    write_cas_fit(&output, "demo", "abc12345", &["if2"], "m");
+    // Store one fit, labelled `demo`, in the same store.
+    let fit = fit_toml(tmp.path(), "demo.toml", &store, 3);
+    real_fit(&bin, tmp.path(), &fit, "demo", &store);
 
     let fit_only = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .args(["list", "--kind", "fit", &output.to_string_lossy(),
-               "--store", &store.to_string_lossy()])
+        .args(["list", "--kind", "fit", "--store", &store.to_string_lossy()])
         .output().expect("spawn");
     let s = String::from_utf8_lossy(&fit_only.stdout);
     assert!(s.contains("demo"), "--kind fit should show fits: {}", s);
     assert!(!s.contains("seed_7"), "--kind fit must hide sims: {}", s);
 
     let sim_only = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .args(["list", "--kind", "sim", &output.to_string_lossy(),
-               "--store", &store.to_string_lossy()])
+        .args(["list", "--kind", "sim", "--store", &store.to_string_lossy()])
         .output().expect("spawn");
     let s = String::from_utf8_lossy(&sim_only.stdout);
     assert!(s.contains("seed_7"), "--kind sim should show sims: {}", s);
-    assert!(!s.contains("demo-abc12345"), "--kind sim must hide fits: {}", s);
+    assert!(!s.contains("demo"), "--kind sim must hide fits: {}", s);
 }
 
-/// Regression guard for the unified output tree: `camdl list` must
-/// render a fits section when `output/fits/<...>/run.json` exists,
-/// independent of whether any sim runs are cached. We synthesize a
-/// handcrafted `run.json` rather than running a full `camdl fit run`
-/// — that keeps the test fast and orthogonal to fit-runner behaviour.
+/// `camdl list` renders a fits section for the fit runs a store holds: one
+/// row per run, two runs of one problem under the problem's one id.
 #[test]
 fn list_shows_fit_entries() {
     let bin = skip_if_missing_binary();
     let tmp = tempfile::tempdir().unwrap();
-    let output = tmp.path().join("output");
-    // gh#147 (M3.2): a CAS fit segment with two method leaves + the fit-level
-    // sidecar. `read_fit_segment` derives one fit entry whose `methods_declared`
-    // comes from the leaves (`if2`, `pgas`).
-    write_cas_fit(&output, "demo", "abc12345", &["if2", "pgas"], "m000");
+    let store = tmp.path().join("store");
+    let a = fit_toml(tmp.path(), "a.toml", &store, 3);
+    let b = fit_toml(tmp.path(), "b.toml", &store, 4);
+    let ra = real_fit(&bin, tmp.path(), &a, "demo", &store);
+    let rb = real_fit(&bin, tmp.path(), &b, "demo2", &store);
+    assert_eq!(fit_store_support::problem_of(&ra), fit_store_support::problem_of(&rb),
+        "the two runs share one problem");
 
     let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .args(["list", &output.to_string_lossy()])
+        .args(["list", "--store", &store.to_string_lossy()])
         .output().expect("spawn");
     assert!(out.status.success(), "list should succeed: stderr={:?}",
         String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
+    // Section headings are human chatter, written to stderr; the rows are on
+    // stdout.
     let stderr = String::from_utf8_lossy(&out.stderr);
-    let all = format!("{}{}", stdout, stderr);
-    assert!(all.contains("fits"), "list output must include a 'fits' section: {}", all);
-    assert!(stdout.contains("demo"),
-        "fit stem should appear in table: {}", stdout);
-    // One row per run, under the problem folder's line.
-    assert!(stdout.lines().any(|l| l.starts_with("problem ") && l.contains("demo.camdl")),
-        "a problem line heads the folder's runs: {}", stdout);
-    for m in ["if2", "pgas"] {
-        assert!(stdout.lines().any(|l| l.split_whitespace().any(|w| w == m)),
-            "a row for the {m} run: {}", stdout);
+    assert!(stderr.lines().any(|l| l.trim() == "fits"),
+        "list output must include a 'fits' section heading: {stderr}");
+    let inputs = fit_store_support::run_inputs(&ra);
+    let problem_id = &inputs["problem_id"].as_str().unwrap()[..8];
+    for (label, run) in [("demo", &ra), ("demo2", &rb)] {
+        let id = &fit_store_support::run_id(run)[..8];
+        assert!(stdout.lines().any(|l| {
+            let w: Vec<&str> = l.split_whitespace().collect();
+            w.contains(&id) && w.contains(&label) && w.contains(&"if2") && w.contains(&problem_id)
+        }), "a row for the run {id} labelled {label}, method if2, problem {problem_id}: {stdout}");
     }
-    // These synthetic leaves hold no stored summary: the verdict says so,
-    // and the listing still succeeds.
-    assert!(stdout.contains("unreadable:"), "an unreadable verdict renders: {}", stdout);
 }
 
 /// Tamper-with-artifact regression: a corrupted `traj.tsv` whose bytes no
@@ -784,19 +798,17 @@ fn cas_tampered_leaf_is_repaired_on_rerun() {
 fn show_resolves_fit_by_hash_prefix() {
     let bin = skip_if_missing_binary();
     let tmp = tempfile::tempdir().unwrap();
-    let output = tmp.path().join("output");
-    // gh#147 (M3.2): a CAS fit is addressed by its method-leaf `run_id` prefix;
-    // there is no legacy fit-wide record. `run_id` starts `deadbeef` so the
-    // short prefix matches.
-    let run_id = "deadbeefc0ffee00000000000000000000000000000000000000000000000000";
-    write_cas_fit_method(&output, run_id, "demo");
+    let store = tmp.path().join("store");
+    let fit = fit_toml(tmp.path(), "demo.toml", &store, 3);
+    let run = real_fit(&bin, tmp.path(), &fit, "demo", &store);
+    let prefix = fit_store_support::run_id(&run)[..7].to_string();
     let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .args(["show", "deadbee", "--root", &output.to_string_lossy()])
+        .args(["show", &prefix, "--store", &store.to_string_lossy()])
         .output().expect("spawn");
     assert!(out.status.success(), "show by run_id prefix should resolve: stderr={}",
         String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("fit_method"), "should render a fit-method: {stdout}");
+    assert!(stdout.contains("fit_run"), "should render a fit run: {stdout}");
     assert!(stdout.contains("if2"), "method label missing: {stdout}");
 }
 
@@ -946,6 +958,7 @@ fn simulate_batch_flag_rejected_cleanly() {
     std::fs::write(&batch_path, "").unwrap();
 
     let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
+        .env("CAMDL_STORE", tmp.path().join("store"))
         .args(["simulate",
                &golden_sir_basic().to_string_lossy(),
                "--batch", &batch_path.to_string_lossy()])
@@ -984,237 +997,78 @@ fn show_prints_metadata() {
     assert!(stdout.contains("chain_binomial"), "should show backend (config level)");
 }
 
-/// Test (4a from review): `camdl show <fit-method-hash>` resolves and
-/// renders the FitMethod payload. Pre-show-coverage-collapse, this
-/// returned "unrecognised kind".
-/// A content-addressed fit-method leaf (`runid::RunRecord`, M3.2) at
-/// `fits/{fit}/{method}/{seed}/run.json`, addressable by `run_id` prefix.
-fn write_cas_fit_method(output: &Path, run_id: &str, fit_label: &str) -> PathBuf {
-    let leaf = output.join("fits")
-        .join(format!("{fit_label}-5ca1ab1e"))
-        .join("if2-1fb03eee")
-        .join("seed_42-06cbd6b3");
-    std::fs::create_dir_all(&leaf).unwrap();
-    let rec = format!(r#"{{
-        "format_version": 1,
-        "kind": "fit_method",
-        "run_id": "{run_id}",
-        "hash_version": 1,"calendar":{{"days_per_unit":1.0,"origin":null,"time_unit":"days"}},
-        "ir_version": "0.7",
-        "engine_version": "0.1.0+test",
-        "levels": [
-            {{"name":"fit","label":"{fit_label}","hash":"5ca1ab1e00000000000000000000000000000000000000000000000000000000","schema_version":1}},
-            {{"name":"method","label":"if2","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},
-            {{"name":"seed","label":"seed_42","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}
-        ],
-        "status": "completed",
-        "artifacts": {{}},
-        "inputs": {{"method":"if2","backend":"chain_binomial","seed":42,"n_chains":4,"best_loglik":-123.45,"best_chain":1}},
-        "provenance": {{"created_at":"2026-04-30T12:00:00Z","argv":["camdl","fit","run"]}}
-    }}"#);
-    std::fs::write(leaf.join("run.json"), rec).unwrap();
-    leaf
-}
-
-/// A store written before the run.json kind `fit_stage` became `fit_method`
-/// is not read, and the readers say so. Before, `list` printed "(no cached
-/// runs)" and `show` "could not read run.json", so a user holding an old store
-/// could not tell it from an empty one.
-#[test]
-fn a_leaf_under_the_old_fit_kind_is_named_by_list_and_show() {
-    let bin = skip_if_missing_binary();
-    let tmp = tempfile::tempdir().unwrap();
-    let output = tmp.path().join("output");
-    let leaf = write_cas_fit_method(&output, &"ab".repeat(32), "old");
-    let rj = leaf.join("run.json");
-    let text = std::fs::read_to_string(&rj).unwrap();
-    std::fs::write(&rj, text.replace(r#""kind": "fit_method""#, r#""kind": "fit_stage""#)).unwrap();
-
-    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE").args(["list", &output.to_string_lossy()]).output().expect("spawn");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("fit_stage") && stderr.contains("fit_method")
-            && stderr.contains("run the fit again"),
-        "list must name the renamed kind and the remedy: stderr={stderr}");
-    assert!(!String::from_utf8_lossy(&out.stdout).contains("old-5ca1ab1e"),
-        "the old leaf is not listed as a run");
-
-    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE").args(["show", &leaf.to_string_lossy()]).output().expect("spawn");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success(), "show must refuse the old record");
-    assert!(stderr.contains("fit_stage") && stderr.contains("fit_method"),
-        "show must name the renamed kind: stderr={stderr}");
-}
-
-/// Write a content-addressed fit segment `fits/<label>-<fit_h8>/` with one
-/// `FitMethod` leaf per method (`<method>-<h8>/seed_1-<h8>/run.json`) plus the
-/// fit-level sidecar (`fit.meta.json` — the label + model-identity home). This is
-/// the shape `read_fit_segment` derives a single fit-level entry from, so
-/// `list` / `fit table` see one fit with `methods_declared` taken from the
-/// leaves. Returns the segment dir.
-fn write_cas_fit(output: &Path, label: &str, fit_h8: &str, methods: &[&str], model_identity: &str) -> PathBuf {
-    let seg = output.join("fits").join(format!("{label}-{fit_h8}"));
-    std::fs::create_dir_all(&seg).unwrap();
-    let fit_hash = format!("{fit_h8}{}", "0".repeat(64 - fit_h8.len()));
-    for (i, method) in methods.iter().enumerate() {
-        let nn = i + 1;
-        let leaf = seg
-            .join(format!("{method}-1fb03eee"))
-            .join("seed_1-06cbd6b3");
-        std::fs::create_dir_all(&leaf).unwrap();
-        // Any distinct 64-hex run_id per leaf; `read_fit_segment` reads the
-        // `fit`-level hash (shared) for the fit-level entry's `run.hash`.
-        let run_id = format!("{:0<64}", format!("abc{nn}"));
-        let rec = format!(r#"{{
-            "format_version": 1,
-            "kind": "fit_method",
-            "run_id": "{run_id}",
-            "hash_version": 1,"calendar":{{"days_per_unit":1.0,"origin":null,"time_unit":"days"}},
-            "ir_version": "0.7",
-            "engine_version": "0.1.0+test",
-            "levels": [
-                {{"name":"fit","label":"{label}","hash":"{fit_hash}","schema_version":1}},
-                {{"name":"method","label":"{method}","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},
-                {{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}
-            ],
-            "status": "completed",
-            "artifacts": {{}},
-            "inputs": {{"method":"{method}","backend":"chain_binomial","seed":1,"n_chains":2}},
-            "provenance": {{"created_at":"2026-04-19T12:00:00Z","argv":["camdl","fit","run"]}}
-        }}"#);
-        std::fs::write(leaf.join("run.json"), rec).unwrap();
-    }
-    std::fs::write(
-        seg.join("fit.meta.json"),
-        format!(r#"{{"model_identity":"{model_identity}","source_model":"demo.camdl","schema_version":3,"calendar":{{"days_per_unit":1.0,"origin":null,"time_unit":"days"}},"source_config":"demo.toml"}}"#),
-    )
-    .unwrap();
-    seg
-}
-
-/// Write a fit segment holding two leaves of the SAME algorithm that differ
-/// only in their `method`-level hash — the shape a store takes when one fit is
-/// run twice at different hyperparameters (two PGAS leaves, 12 sweeps vs 16).
-/// Returns the segment dir and the two method hashes, in on-disk order.
-fn write_two_leaves_of_one_method(output: &Path, method: &str) -> (PathBuf, [String; 2]) {
-    let seg = output.join("fits").join("twin-abc12345");
-    std::fs::create_dir_all(&seg).unwrap();
-    let fit_hash = format!("abc12345{}", "0".repeat(56));
-    let hashes = [
-        format!("34f379b8{}", "0".repeat(56)),
-        format!("d5c282ce{}", "0".repeat(56)),
-    ];
-    for (i, method_hash) in hashes.iter().enumerate() {
-        let leaf = seg
-            .join(format!("{method}-{}", &method_hash[..8]))
-            .join("seed_1-06cbd6b3");
-        std::fs::create_dir_all(&leaf).unwrap();
-        let run_id = format!("{:0<64}", format!("beef{}", i + 1));
-        let rec = format!(r#"{{
-            "format_version": 1,
-            "kind": "fit_method",
-            "run_id": "{run_id}",
-            "hash_version": 1,"calendar":{{"days_per_unit":1.0,"origin":null,"time_unit":"days"}},
-            "ir_version": "0.7",
-            "engine_version": "0.1.0+test",
-            "levels": [
-                {{"name":"fit","label":"twin","hash":"{fit_hash}","schema_version":1}},
-                {{"name":"method","label":"{method}","hash":"{method_hash}","schema_version":1}},
-                {{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}
-            ],
-            "status": "completed",
-            "artifacts": {{}},
-            "inputs": {{"method":"{method}","backend":"chain_binomial","seed":1,"n_chains":2}},
-            "provenance": {{"created_at":"2026-04-19T12:00:00Z","argv":["camdl","fit","run"]}}
-        }}"#);
-        std::fs::write(leaf.join("run.json"), rec).unwrap();
-    }
-    std::fs::write(
-        seg.join("fit.meta.json"),
-        r#"{"model_identity":"m000","source_model":"demo.camdl","schema_version":3,"calendar":{"days_per_unit":1.0,"origin":null,"time_unit":"days"},"source_config":"demo.toml"}"#,
-    )
-    .unwrap();
-    (seg, hashes)
-}
-
-/// gh#895 + gh#901: `camdl list --kind fit --format json` speaks *method*, and
-/// its per-leaf entries are distinguishable from one another.
-///
-/// Two things were wrong with the row. The keys were `methods`,
-/// `stages_declared` and per-entry `method` — a vocabulary the store levels, the
-/// fit config and the CLI had all left. And two leaves of one algorithm in one
-/// segment were indistinguishable: each carries its own `method`-level hash and
-/// its own `run_id`, and the row carried neither, so a reader could not say
-/// which entry was which leaf or address either one.
+/// gh#895 + gh#901: `camdl list --kind fit --format json` speaks *method*,
+/// and two runs of one algorithm in one problem are told apart: each row
+/// carries its own run id and path, beside the problem id they share.
 #[test]
 fn fit_list_json_names_methods_and_can_tell_two_leaves_apart() {
     let bin = skip_if_missing_binary();
     let tmp = tempfile::tempdir().unwrap();
-    let output = tmp.path().join("output");
-    let (_seg, hashes) = write_two_leaves_of_one_method(&output, "pgas");
+    let store = tmp.path().join("store");
+    let a = fit_toml(tmp.path(), "a.toml", &store, 3);
+    let b = fit_toml(tmp.path(), "b.toml", &store, 4);
+    let ra = real_fit(&bin, tmp.path(), &a, "twin_a", &store);
+    let rb = real_fit(&bin, tmp.path(), &b, "twin_b", &store);
 
     let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .args(["list", "--kind", "fit", "--format", "json", &output.to_string_lossy()])
+        .current_dir(tmp.path())
+        .args(["list", "--kind", "fit", "--format", "json", "--store", &store.to_string_lossy()])
         .output()
         .expect("spawn");
     assert!(out.status.success(), "list failed: {}", String::from_utf8_lossy(&out.stderr));
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
     let rows: Vec<serde_json::Value> = text.lines()
-        .filter(|l| l.contains("\"kind\":\"fit\""))
         .map(|l| serde_json::from_str(l).expect("each row is JSON"))
+        .filter(|r: &serde_json::Value| r["kind"] == "fit_run")
         .collect();
 
-    // v3: one row per run, each tagged, each naming its own run and path.
-    assert_eq!(rows.len(), 2, "both leaves are listed, one row each: {text}");
+    assert_eq!(rows.len(), 2, "both runs are listed, one row each: {text}");
+    let problem_id = fit_store_support::run_inputs(&ra)["problem_id"].clone();
     for row in &rows {
-        assert_eq!(row["schema"]["name"], "fit_list_row", "{row}");
-        assert_eq!(row["schema"]["version"], 3, "{row}");
-        assert_eq!(row["method"], "pgas", "{row}");
-        assert_eq!(row["problem"]["config"], "demo.toml", "{row}");
-        assert_eq!(row["problem"]["model"], "demo.camdl", "{row}");
-        assert!(row["problem"]["fit_id"].as_str().unwrap().starts_with("abc12345"), "{row}");
+        assert_eq!(row["method"], "if2", "{row}");
+        assert_eq!(row["model"], "seed_timing_dated", "{row}");
+        assert_eq!(row["problem_id"], problem_id, "{row}");
         assert_eq!(row["seed"], 1, "{row}");
-        assert_eq!(row["status"], "completed", "{row}");
-        assert_eq!(row["verdict"]["kind"], "unreadable", "{row}");
         assert!(row.get("methods").is_none(), "no v2 `methods` array: {row}");
-        let p = row["path"].as_str().expect("each row carries a path");
-        assert!(Path::new(p).join("run.json").is_file(), "the path names the leaf: {p}");
+        assert!(row.get("stage").is_none() && row.get("stages_declared").is_none(), "{row}");
+        let p = Path::new(row["path"].as_str().expect("each row carries a path"));
+        let p = if p.is_absolute() { p.to_path_buf() } else { tmp.path().join(p) };
+        assert!(p.join("identity.json").is_file(), "the path names the run: {}", p.display());
     }
     let ids: std::collections::BTreeSet<&str> = rows.iter()
         .map(|r| r["run_id"].as_str().expect("run_id is a string"))
         .collect();
-    assert_eq!(ids.len(), 2, "two distinct run_ids: {text}");
-    let paths: Vec<&str> = rows.iter().map(|r| r["path"].as_str().unwrap()).collect();
-    for h in &hashes {
-        assert!(paths.iter().any(|p| p.contains(&format!("pgas-{}", &h[..8]))),
-            "a row for the leaf of method hash {h}: {paths:?}");
-    }
+    let want: std::collections::BTreeSet<String> =
+        [&ra, &rb].iter().map(|r| fit_store_support::run_id(r)).collect();
+    assert_eq!(ids, want.iter().map(String::as_str).collect(), "the two runs' ids: {text}");
 }
 
-/// gh#147 (M3.2): `camdl show <fit-method path | run_id prefix>` renders the
-/// CAS fit-method `RunRecord` — factored levels + the recorded method metadata.
+/// `camdl show <run folder | run_id prefix>` renders a stored fit run: its
+/// kind, its method, and its problem.
 #[test]
 fn show_renders_fit_method_metadata() {
     let bin = skip_if_missing_binary();
     let tmp = tempfile::tempdir().unwrap();
-    let output = tmp.path().join("output");
-    let run_id = "5ca1ab1e00000000000000000000000000000000000000000000000000000000";
-    let leaf = write_cas_fit_method(&output, run_id, "parent");
+    let store = tmp.path().join("store");
+    let fit = fit_toml(tmp.path(), "parent.toml", &store, 3);
+    let run = real_fit(&bin, tmp.path(), &fit, "parent", &store);
+    let problem_id = fit_store_support::run_inputs(&run)["problem_id"].as_str().unwrap().to_string();
 
     // Resolve by full path.
     let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .args(["show", &leaf.to_string_lossy()])
+        .args(["show", &run.to_string_lossy(), "--store", &store.to_string_lossy()])
         .output().expect("spawn");
-    assert!(out.status.success(), "show fit-method failed: stderr={}",
+    assert!(out.status.success(), "show fit run by path failed: stderr={}",
         String::from_utf8_lossy(&out.stderr));
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains("fit_method"), "kind label missing: {}", s);
-    assert!(s.contains("if2"),       "method name missing: {}", s);
-    assert!(s.contains("if2"),       "method missing: {}", s);
-    assert!(s.contains("-123.45"),   "best_loglik missing: {}", s);
+    assert!(s.contains("fit_run"), "kind label missing: {}", s);
+    assert!(s.contains("if2"), "method missing: {}", s);
+    assert!(s.contains(&problem_id), "problem id missing: {}", s);
 
     // Resolve by run_id prefix.
+    let prefix = &fit_store_support::run_id(&run)[..8];
     let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .args(["show", "5ca1ab1e", "--root", &output.to_string_lossy()])
+        .args(["show", prefix, "--store", &store.to_string_lossy()])
         .output().expect("spawn");
     assert!(out.status.success(), "show by run_id prefix failed: stderr={}",
         String::from_utf8_lossy(&out.stderr));

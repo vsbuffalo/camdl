@@ -333,6 +333,13 @@ pub struct SourceBytes {
 }
 
 impl SourceBytes {
+    /// Reads a configuration file whose keys a project's own parser
+    /// classifies, for [`Given::with_file`] and for a run that keeps the file
+    /// it was given. The path is recorded as typed.
+    pub fn read(path: impl Into<PathBuf>) -> Result<SourceBytes> {
+        InputFile::<()>::new(path).source()
+    }
+
     pub fn digest(&self) -> Key {
         self.digest
     }

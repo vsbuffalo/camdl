@@ -905,13 +905,10 @@ fn nlopt_source_verdict(state: &FitState) -> Option<String> {
 fn sampler_source_verdict(leaf: &Path) -> Result<Option<String>, String> {
     use super::method_result::MethodResult;
     use score::convergence::{MaxRhat, RHAT_CONVERGED_THRESHOLD};
-    let rec = match runid::read_leaf(leaf) {
-        Ok(Some(l)) => l.record,
-        Ok(None) => return Err("it holds no run.json, so its convergence cannot be checked".into()),
-        Err(u) => return Err(format!("{}, so its convergence cannot be checked", u.reason)),
-    };
-    let method = rec.inputs.get("method").and_then(|m| m.as_str())
-        .ok_or("its run.json names no method, so its convergence cannot be checked")?
+    let inputs = crate::fit_store::read_run_inputs(leaf)
+        .map_err(|e| format!("{e}, so its convergence cannot be checked"))?;
+    let method = inputs.get("method").and_then(|m| m.as_str())
+        .ok_or("its run_inputs.json names no method, so its convergence cannot be checked")?
         .to_string();
     let typed = MethodResult::load_from(leaf, &method)
         .map_err(|e| format!("cannot load its {method} result, so its convergence cannot be checked: {e}"))?;

@@ -247,8 +247,9 @@ would sit tens or hundreds of log-likelihood units away.
 These numbers summarize the chains; the chains themselves are worth a look.
 camdl ’scope is a viewer for fits that runs in your browser. Started with
 `camdl-scope --port 8800` in the directory you are working in, it lists every
-fit under `results/fits/` and refreshes them while they run. Its Traces tab
-plots each parameter at every step of every chain:
+fit under a `results/fits/` tree and refreshes them while they run; it does not
+read the run store, `camdl-store/`, where `camdl fit run` stores this fit. Its
+Traces tab plots each parameter at every step of every chain:
 
 ![Traces tab of the `r0` fit in camdl ’scope: the value of each parameter, and the log posterior and log-likelihood, at every step after burn-in, one color per chain.](first-fit/img/scope-r0-traces.png)
 
@@ -297,11 +298,12 @@ given the counts up to the day before.
 
 ```{.camdl-run figure="ppc-r0.svg" caption="Posterior predictive check of the Poisson model: median (line), 50% and 90% bands, and the observed counts (black)." show-match="subsampling|predictive/in_bed.tsv"}
 camdl fit predict @r0
-uv run plot_predictive.py ppc-r0.svg Poisson=results/fits/fit_r0-*/predict/*/
+uv run plot_predictive.py ppc-r0.svg Poisson=camdl-store/*/fit/sir_r0-*/runs/pmmh-*/seed_4-*/predict/*/
 ```
 
-`fit predict` writes its quantiles under the fit's directory, in `predictive/`,
-next to the observed counts in `observed/`;
+`fit predict` stores its quantiles as a prediction inside the fit run's folder,
+at `predict/<mode>-<hash>/`: the bands in `predictive/`, next to the observed
+counts in `observed/`;
 [`plot_predictive.py`](https://github.com/vsbuffalo/camdl/tree/main/docs/guide/first-fit/plot_predictive.py)
 draws them.
 

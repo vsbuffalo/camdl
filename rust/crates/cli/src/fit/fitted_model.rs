@@ -157,6 +157,29 @@ fn same_bytes(a: &Path, b: &Path) -> Option<bool> {
 /// unresolved; it goes through the fit's anchor substitution ([`as_fitted`])
 /// before the comparison. Returns the notice to print when only the reporting
 /// layer differs, `None` when the models are the same.
+/// The model file the stored problem a run's files belong to keeps, given
+/// the copy of the run's files: `<problem>/model.<ext>` in the store.
+fn stored_model_file(run_copy: &std::path::Path) -> Option<std::path::PathBuf> {
+    let run_folder = crate::fit_store::shown(run_copy);
+    let problem = run_folder.ancestors().nth(3)?;
+    std::fs::read_dir(problem).ok()?.flatten().map(|e| e.path())
+        .find(|p| p.is_file() && p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("model.")))
+}
+
+/// The model path a stored run's fit file named, resolved against where that
+/// file was: the run's `run.json` records the fit file as typed, and the run
+/// keeps that file, whose `[model] camdl` is relative to it.
+fn recorded_model_source(run_copy: &std::path::Path) -> Option<String> {
+    let folder = crate::fit_store::shown(run_copy);
+    let record: serde_json::Value = serde_json::from_slice(&std::fs::read(folder.join("run.json")).ok()?).ok()?;
+    let config = std::path::PathBuf::from(record.pointer("/given/config/path")?.as_str()?);
+    let text = std::fs::read_to_string(run_copy.join(crate::fit_store::FIT_TOML_FILE)).ok()?;
+    let doc: toml::Table = text.parse().ok()?;
+    let camdl = doc.get("model")?.get("camdl")?.as_str()?;
+    let path = config.parent().map(|d| d.join(camdl)).unwrap_or_else(|| camdl.into());
+    Some(path.to_string_lossy().into_owned())
+}
+
 pub fn check_stored_fit(
     fit: &str,
     segment: &Path,
@@ -173,7 +196,11 @@ pub fn check_stored_fit(
             archive.display()
         ));
     }
-    let (fitted, _) = crate::util::load_ir(&archive.to_string_lossy())?;
+    let (stored, _) = crate::util::load_ir(&archive.to_string_lossy())?;
+    // The stored compile keeps its anchored horizons unresolved; they are
+    // resolved against the fit's data, as the given model's are below.
+    let (fitted, _) = as_fitted(&stored, problem)
+        .map_err(|e| format!("--fit {fit}: resolving the stored model's anchors against the fit's [data] failed: {e}"))?;
     let (given_resolved, resolved) = as_fitted(given, problem).map_err(|e| {
         format!(
             "--fit {fit}: {given_path} is anchored to observed data, and resolving its \
@@ -185,8 +212,14 @@ pub fn check_stored_fit(
         ModelAgreement::Same => Ok(None),
         ModelAgreement::ReportingDiffers => Ok(Some(reporting_notice(fit, "ran on", given_path))),
         ModelAgreement::Differs { fitted: fitted_h, given: given_h } => {
-            let source_copy = segment.join("model.camdl.original");
-            let recorded_source = problem.model.camdl.as_str();
+            // The model file the stored problem keeps, in the store: the
+            // source (or IR) the fit was posed on.
+            let source_copy = stored_model_file(segment).unwrap_or_else(|| segment.join("model.camdl"));
+            // The model path the fit was given, as typed (the run records its
+            // fit file and keeps that file); else the stored copy.
+            let recorded_source_shown = recorded_model_source(segment)
+                .unwrap_or_else(|| crate::fit::report::display_path(&source_copy));
+            let recorded_source = recorded_source_shown.as_str();
             let stem = format!(
                 "--fit {fit}: {given_path} is not the model this fit ran on (fitted model {}, \
                  {given_path} {})",
@@ -194,9 +227,9 @@ pub fn check_stored_fit(
                 short(&given_h),
             );
             let fix = format!(
-                "Fix: run with the fitted model, {} (the fit's archived IR), or refit \
+                "Fix: run with the fitted model, {} (the model file the fit stored), or refit \
                  {given_path}.",
-                archive.display()
+                crate::fit::report::display_path(&archive)
             );
             // Whether the user changed the source is a question about its bytes,
             // so it is answered by them, not by which path was named.
@@ -215,7 +248,7 @@ pub fn check_stored_fit(
                          {now}, so {moved}: the fit's observation data has changed since the \
                          fit ran, and the replay would run a different horizon from the one \
                          the parameters were fitted on.\n  {fix}",
-                        source_copy.display(),
+                        crate::fit::report::display_path(&source_copy),
                     )
                 } else {
                     let anchors = if resolved.is_empty() {
@@ -234,7 +267,7 @@ pub fn check_stored_fit(
                          camdl upgrade since the fit that changes what this source compiles \
                          to would do this; otherwise it is an internal inconsistency in \
                          camdl and worth reporting.{anchors}\n  {fix}",
-                        source_copy.display()
+                        crate::fit::report::display_path(&source_copy)
                     )
                 });
             }
@@ -248,7 +281,7 @@ pub fn check_stored_fit(
                 format!(
                     " {given_path} is the source the fit was run from, edited since; the \
                      source as fitted is archived at {}.",
-                    source_copy.display()
+                    crate::fit::report::display_path(&source_copy)
                 )
             } else {
                 format!(
@@ -414,7 +447,7 @@ impl FittedSimulator {
 /// `dt_rule::resolved_dt` and the run's recorded backend. `model` is the
 /// model the fit ran on, as the caller loaded it ([`stored_fit_model`]).
 pub(crate) fn stored_fit_simulator(
-    resolved: &crate::fit::handle::ResolvedFit,
+    resolved: &crate::fit_store::OpenedFit,
     model: &ir::Model,
 ) -> Result<FittedSimulator, String> {
     let sidecar = crate::run_meta::read_fit_sidecar(&resolved.segment)?;
@@ -440,15 +473,10 @@ pub(crate) fn stored_fit_simulator(
 /// none) the source its config names, compiled under `compile`, as `compare`
 /// reads it.
 pub(crate) fn stored_fit_model(
-    resolved: &crate::fit::handle::ResolvedFit,
+    resolved: &crate::fit_store::OpenedFit,
     compile: crate::util::CompileSettings,
 ) -> Result<ir::Model, String> {
-    let archive = resolved.segment.join("model.ir.json");
-    let model_src = if archive.is_file() {
-        archive.to_string_lossy().into_owned()
-    } else {
-        resolved.config.problem.model.camdl.clone()
-    };
+    let model_src = resolved.model_ir.to_string_lossy().into_owned();
     crate::util::load_model(&model_src, compile)
         .map(|(m, _)| m)
         .map_err(|e| format!("reading the model the fit ran on, {model_src}: {e}"))

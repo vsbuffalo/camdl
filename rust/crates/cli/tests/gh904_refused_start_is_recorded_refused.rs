@@ -137,7 +137,7 @@ dt = 1.0
 
     let results = dir.join("results");
     let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .env("CAMDL_OUTPUT_DIR", &results)
+        .env("CAMDL_STORE", &results)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDLC", &camdlc)
         .args(["fit", "run", &fit_toml.to_string_lossy(), "--seed", "1"])
@@ -149,7 +149,7 @@ dt = 1.0
         "fixture premise: the only chain must be refused at its start.\nstderr:\n{stderr}"
     );
 
-    let tsv = find_one(&results.join("fits"), "chain_starts.tsv");
+    let tsv = find_one(&results, "chain_starts.tsv");
     let leaf = tsv.parent().unwrap().to_path_buf();
     let text = std::fs::read_to_string(&tsv).unwrap();
     let rows: Vec<StartRow> = text

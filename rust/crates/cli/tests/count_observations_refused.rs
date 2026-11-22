@@ -210,7 +210,7 @@ fn fit_run_refuses_a_negative_poisson_count() {
     write(&tmp.0, name, "time\tcases\n1\t3\n2\t-4\n3\t6\n4\t5\n5\t4\n6\t3\n");
     // Paths relative to the fit.toml, which sits beside the model and data.
     let toml = write(&tmp.0, "fit.toml", r#"
-output_dir = "results"
+store = "results"
 [model]
 camdl = "m.ir.json"
 [data.observations]

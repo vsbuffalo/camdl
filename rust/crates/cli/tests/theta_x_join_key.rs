@@ -59,7 +59,7 @@ const DATA: &str = "time\tweekly_cases\n7\t16\n14\t166\n21\t626\n28\t1303\n35\t1
 fn fit_toml() -> String {
     // n_trajectories defaults to 200, so for this small fit every retained draw
     // also gets a saved trajectory → the join is full (draws ⊇ traj, equal here).
-    r#"output_dir = "results"
+    r#"store = "store"
 [model]
 camdl = "model.camdl"
 [data.observations]
@@ -88,6 +88,7 @@ fn run(bin: &Path, dir: &Path, args: &[&str]) -> std::process::Output {
     Command::new(bin).env_remove("CLICOLOR_FORCE")
         .args(args)
         .current_dir(dir)
+        .env("CAMDL_STORE", dir.join("store"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output()
         .expect("spawn camdl")
@@ -135,7 +136,7 @@ fn draws_tsv_key_joins_to_trajectories() {
     );
 
     // Locate the method dir's draws.tsv + every chain_N/trajectories.tsv under it.
-    let fits = tmp.join("results").join("fits");
+    let fits = tmp.join("store");
     let mut draws_tsv: Option<PathBuf> = None;
     let mut traj_tsvs: Vec<PathBuf> = Vec::new();
     for f in walk(&fits) {
@@ -190,10 +191,10 @@ fn fit_summary_reports_forkable_draws() {
     std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
     std::fs::write(tmp.join("fit.toml"), fit_toml()).unwrap();
 
-    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(out.status.success(), "fit run failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
 
-    let sum = run(&bin, &tmp, &["fit", "summary", "fit.toml"]);
+    let sum = run(&bin, &tmp, &["fit", "summary", "@fit"]);
     assert!(sum.status.success(), "fit summary failed:\nstderr={}", String::from_utf8_lossy(&sum.stderr));
     let text = String::from_utf8_lossy(&sum.stdout);
 

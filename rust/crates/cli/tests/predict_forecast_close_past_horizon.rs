@@ -26,32 +26,22 @@
 //! neighbours; a row that had lost a day of its window, or opened at the model
 //! origin, would not. No fitted parameter enters the comparison.
 
+mod fit_store_support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Where the latest `fit predict` of a run in `seg` wrote:
-/// `<seg>/predict/<run id>-<address key>/` (gh#896), the directory whose
-/// `report*.json` (one written by every predict) is newest. A path that does not
-/// exist while nothing has been predicted.
-fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
-    std::fs::read_dir(seg.join("predict"))
-        .into_iter().flatten().flatten().map(|e| e.path())
-        .filter_map(|d| {
-            // Newest `report*.json` (keyed by chain selection) in the directory.
-            let t = std::fs::read_dir(&d).ok()?.flatten()
-                .filter(|e| {
-                    let n = e.file_name().to_string_lossy().into_owned();
-                    n.starts_with("report") && n.ends_with(".json")
-                })
-                .filter_map(|e| e.metadata().and_then(|m| m.modified()).ok())
-                .max()?;
-            Some((t, d))
+/// The newest `report*.json` (one written by every predict) in a prediction
+/// folder.
+fn newest_report(d: &Path) -> Option<std::time::SystemTime> {
+    std::fs::read_dir(d).ok()?.flatten()
+        .filter(|e| {
+            let n = e.file_name().to_string_lossy().into_owned();
+            n.starts_with("report") && n.ends_with(".json")
         })
-        .max_by_key(|(t, _)| *t)
-        .map(|(_, d)| d)
-        .unwrap_or_else(|| seg.join("predict").join("none"))
+        .filter_map(|e| e.metadata().and_then(|m| m.modified()).ok())
+        .max()
 }
-
 
 fn binary() -> PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
@@ -72,6 +62,7 @@ fn run(bin: &Path, dir: &Path, args: &[&str]) -> std::process::Output {
     Command::new(bin).env_remove("CLICOLOR_FORCE")
         .args(args)
         .current_dir(dir)
+        .env("CAMDL_STORE", dir.join("store"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output()
         .expect("spawn camdl")
@@ -89,17 +80,16 @@ fn tempdir(tag: &str) -> PathBuf {
     p
 }
 
-/// `results/fits/<stem>-<hash>/predict/<run id>-<address key>/<sub>/<name>.tsv`.
+/// `<sub>/<name>.tsv` in the prediction under the store at `root` that the
+/// latest `fit predict` wrote (the one whose `report*.json` is newest).
 fn find_artifact(root: &Path, sub: &str, name: &str) -> Option<PathBuf> {
-    for e in std::fs::read_dir(root.join("fits")).ok()?.flatten() {
-        // gh#896: the latest `fit predict` of the run writes under
-        // `<segment>/predict/<run id>-<address key>/`.
-        let p = predict_out(&e.path()).join(sub).join(format!("{name}.tsv"));
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    None
+    let latest = fit_store_support::predictions(root)
+        .into_iter()
+        .filter_map(|d| Some((newest_report(&d)?, d)))
+        .max_by_key(|(t, _)| *t)?
+        .1;
+    let p = latest.join(sub).join(format!("{name}.tsv"));
+    p.is_file().then_some(p)
 }
 
 /// `(time, q50)` for every row of a banded TSV on the given horizon. `horizon`
@@ -242,7 +232,7 @@ const CASES_WINDOWED: &str = "win_start\twin_stop\tcases\n1\t8\t70\n8\t15\t69\n1
 
 /// A chain-binomial fit — the backend the case was reported on, and the one
 /// whose output times must land on the `dt` grid.
-const FIT_TOML: &str = r#"output_dir = "results"
+const FIT_TOML: &str = r#"store = "store"
 
 [model]
 camdl = "model.camdl"
@@ -275,7 +265,7 @@ fn setup(tag: &str, model: &str, cases: &str) -> PathBuf {
 }
 
 fn fit_then_predict(bin: &Path, tmp: &Path, extra: &[&str]) -> std::process::Output {
-    let out = run(bin, tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    let out = run(bin, tmp, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(
         out.status.success(),
         "fit run failed:\nstdout={}\nstderr={}",
@@ -283,7 +273,7 @@ fn fit_then_predict(bin: &Path, tmp: &Path, extra: &[&str]) -> std::process::Out
         String::from_utf8_lossy(&out.stderr)
     );
     let mut args =
-        vec!["fit", "predict", "--fit", "fit.toml", "--seed", "1", "--n-draws", "40"];
+        vec!["fit", "predict", "@fit", "--seed", "1", "--n-draws", "40"];
     args.extend_from_slice(extra);
     run(bin, tmp, &args)
 }
@@ -319,7 +309,7 @@ fn a_row_closing_past_the_horizon_is_forecast_not_refused() {
     );
 
     let cases_txt = std::fs::read_to_string(
-        find_artifact(&tmp.join("results"), "predictive", "cases").expect("predictive/cases.tsv"),
+        find_artifact(&tmp.join("store"), "predictive", "cases").expect("predictive/cases.tsv"),
     )
     .unwrap();
     let ff = q50_by_time(&cases_txt, Some("free_forward"));
@@ -371,7 +361,7 @@ fn a_windowed_tail_closes_at_its_label_and_widens_nothing() {
     );
 
     let cases_txt = std::fs::read_to_string(
-        find_artifact(&tmp.join("results"), "predictive", "cases").expect("predictive/cases.tsv"),
+        find_artifact(&tmp.join("store"), "predictive", "cases").expect("predictive/cases.tsv"),
     )
     .unwrap();
     let ff = q50_by_time(&cases_txt, Some("free_forward"));
@@ -405,7 +395,7 @@ fn day_of(date: &str) -> f64 {
 
 /// A short posterior on the fixture's two bulletin streams: enough draws to
 /// band, few enough to run in a second.
-const REAL_SHAPED_FIT_TOML: &str = r#"output_dir = "results"
+const REAL_SHAPED_FIT_TOML: &str = r#"store = "store"
 
 [model]
 camdl = "surveillance.camdl"
@@ -472,7 +462,7 @@ fn fit_predict_on_the_real_shaped_record_emits_through_the_horizon() {
 
     for stream in ["cases", "in_care"] {
         let tsv = std::fs::read_to_string(
-            find_artifact(&tmp.join("results"), "predictive", stream)
+            find_artifact(&tmp.join("store"), "predictive", stream)
                 .unwrap_or_else(|| panic!("predictive/{stream}.tsv")),
         )
         .unwrap();
@@ -516,7 +506,7 @@ fn the_quantities_sidecar_stops_at_the_declared_horizon() {
     );
 
     let series = std::fs::read_to_string(
-        find_artifact(&tmp.join("results"), "quantities", "cum_b").expect("quantities/cum_b.tsv"),
+        find_artifact(&tmp.join("store"), "quantities-model", "cum_b").expect("quantities/cum_b.tsv"),
     )
     .unwrap();
     let rows = q50_by_time(&series, None);
@@ -531,7 +521,7 @@ fn the_quantities_sidecar_stops_at_the_declared_horizon() {
     // value, so a reduction over the widened grid would disagree with the row
     // above it.
     let scalar = std::fs::read_to_string(
-        find_artifact(&tmp.join("results"), "quantities", "final_b")
+        find_artifact(&tmp.join("store"), "quantities-model", "final_b")
             .expect("quantities/final_b.tsv"),
     )
     .unwrap();

@@ -21,5 +21,5 @@ cp -R "$root/docs/guide/first-fit/." "$work/"
 cd "$work"
 camdl fit run fit-r0.toml --label r0 --seed 4 >/dev/null
 camdl fit predict @r0 >/dev/null
-PLOT_OPAQUE=1 uv run --quiet plot_predictive.py "$out" SIR=results/fits/fit_r0-*/predict/*/
+PLOT_OPAQUE=1 uv run --quiet plot_predictive.py "$out" SIR=camdl-store/*/fit/*/runs/*/*/predict/*/
 echo "wrote ${out#"$root"/}"

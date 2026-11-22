@@ -86,9 +86,6 @@ pub(crate) struct ResolvedFitConfig {
     /// enter the fit level (`FitDigest.tables`) and their bytes are stored in
     /// each fit folder. Empty for a model with no external input.
     pub tables: crate::external_inputs::BoundFiles,
-    /// The engine the identity folds: this build and the engine switches set
-    /// ([`super::fit_engine`]).
-    pub engine: runid::inputs::EngineIdentity,
     /// `[config] allow_forcing_extrapolation`, as the policy every model the
     /// fit evaluates runs under and every record it writes names; built once,
     /// from `config`.
@@ -102,30 +99,31 @@ pub(crate) struct ResolvedFitConfig {
     /// `--emit-every`: the cadence the `[synthetic]` generator emits at.
     pub emit_every: Option<crate::emit_every::EmitEvery>,
     /// `--resume`: the base a PGAS or PMMH chain continues, as named. Keyed
-    /// at the method level, through the target length and the dep on the
-    /// base it resolves to.
+    /// through the run's length and its dependency on the base's carried
+    /// chain files.
     pub resume: Option<String>,
+    /// The run store's root the file names (its `store` key); `CAMDL_STORE`
+    /// and the default `./camdl-store` come after it.
+    pub store_root: Option<std::path::PathBuf>,
+    /// The compile without the state Jacobian, rewritten from the data, when
+    /// `config.problem.compiled_ir` is the compile with it (`nl-lbfgs` on the
+    /// ODE backend): the compile the problem is posed on. `None` when the
+    /// two are one compile.
+    pub problem_ir: Option<String>,
     /// The NUTS tuning flags given on the command line (`--max-tree-depth`,
     /// `--diagonal-mass`), by spelling, for the note a PGAS fit gives when the
     /// model cannot run NUTS. Their values are in `config`'s method.
     pub nuts_tuning_flags: Vec<&'static str>,
-    /// What the command line set in the problem half of `config`, for the
-    /// resolved config each fit folder stores.
-    pub problem_flags: ProblemFlags,
     /// How each `[fixed]` name reached the config, read before the
     /// `from_scenario` expansion, for the fit's partition.
     pub fixed_via: Result<Vec<(String, crate::roles::FitFixedVia)>, String>,
     /// The chain-starts rule as resolved.
     pub starts: StartsPlan,
-    /// What the file alone, with no option, resolves to (gh#896).
-    pub file_only: FileOnly,
 }
 
-/// The chain-starts rule, resolved.
+/// The chain-starts rule, resolved. A sourced rule's handle is resolved in
+/// the run store, once it is open.
 pub(crate) struct StartsPlan {
-    /// A sourced rule's resolution (its handle read, its source's verdict
-    /// checked), taken before the model was compiled; `None` for a bare rule.
-    pub early: Option<chain_starts::ResolvedStarts>,
     /// Where the rule came from and what it is, as the run header says it.
     pub resolution: config_v2::StartsResolution,
     /// `--allow-nonconverged-source`: a source fit whose verdict is not
@@ -135,13 +133,6 @@ pub(crate) struct StartsPlan {
     /// Where the rule came from, for the prefix of an error about it:
     /// `--starts <spec>` or the fit file.
     pub origin: String,
-}
-
-/// The method and seeds the file alone resolves to, so the run `fit run
-/// <file>` with no option would make can be told from this one (gh#896).
-pub(crate) struct FileOnly {
-    pub method: config_v2::Method,
-    pub seeds: Vec<u64>,
 }
 
 /// What the command line set in the problem half of the configuration: the
@@ -155,19 +146,6 @@ pub(crate) struct ProblemFlags {
 }
 
 impl ProblemFlags {
-    /// `problem` without what the command line set in it: the problem the fit
-    /// file alone resolves to, for the run `fit run <file>` with no option
-    /// would make (gh#896). Each field is the inverse of the fold in
-    /// [`resolve`].
-    pub fn unfold(&self, problem: &config_v2::Problem) -> config_v2::Problem {
-        let ProblemFlags { allow_forcing_extrapolation } = *self;
-        let mut file = problem.clone();
-        if allow_forcing_extrapolation {
-            file.config.allow_forcing_extrapolation = false;
-        }
-        file
-    }
-
     /// Write every value the command line set in the problem half into `doc`,
     /// the fit file's tables. Each field is the fold [`resolve`] applied to the
     /// typed config.
@@ -344,70 +322,56 @@ fn sorted(doc: toml::Table) -> toml::Table {
 /// installation, held for the command.
 pub(crate) fn resolve(
     a: &crate::args::FitRunArgs,
+    config_text: String,
     compile: crate::util::CompileSettings,
     out: &crate::out::Out,
 ) -> (ResolvedFitConfig, crate::forcing_extrapolation::Installed) {
-    // Removed flags fail loudly before any work, each naming its replacement
-    // (alpha posture: a redirect, not a shim). Every one present is reported,
-    // so `--stage posterior --init from_prior` is answered in one message.
-    if let Some(msg) = super::removed_flag_message(a) {
-        out.fail(format!("error: {}", msg));
-    }
-    // PGAS parallel tempering was removed (gh#789); the flag is trapped so a
-    // stale script is answered with the fix rather than clap's "unexpected
-    // argument".
-    if let Some(raw) = a._removed_tempering.as_deref() {
-        out.fail(format!(
-            "error: --tempering is no longer accepted on `camdl fit run`: PGAS parallel \
-             tempering was removed (gh#789), and every PGAS chain samples the posterior \
-             directly, as the ladder's cold rung did. Drop `--tempering {raw}`; a \
-             `tempering = [...]` line under [method] must be deleted too. Fits stored \
-             before the removal are not reused and cannot be resumed; they run again."
-        ));
-    }
-    // Correlated pseudo-marginal PMMH was removed; `--rho` is trapped the same
-    // way.
-    if let Some(raw) = a._removed_rho.as_deref() {
-        out.fail(format!(
-            "error: --rho is no longer accepted on `camdl fit run`: correlated \
-             pseudo-marginal PMMH was removed, and `pmmh` runs the bootstrap particle \
-             filter with independent likelihood evaluations. Drop `--rho {raw}`; a \
-             `rho = ...` line under [method] must be deleted too. PMMH fits stored \
-             before the removal are not reused and cannot be resumed; they run again."
-        ));
-    }
     let fit_path              = a.config.to_string_lossy().into_owned();
-    let base_seed             = a.seed.unwrap_or(1);
-    // The file is read here, once; everything below parses, checks and stores
-    // this text.
-    let config_text = std::fs::read_to_string(&fit_path).unwrap_or_else(|e| {
-        out.fail(format!("error: cannot read {fit_path}: {e}"));
-    });
+    let base_seed             = a.run.seed.unwrap_or(1);
 
     // gh#540: every CLI flag that changes what the method computes or stores,
     // collected once so the method identity can see all of them. Applied to
     // the in-memory method below, before the CAS claim — the dispatch sites
     // no longer override anything, so there is no route around the key.
+    let crate::args::FitMethodFlags {
+        decibans_thresh,
+        no_dt_check,
+        dt_check_strict,
+        binomial,
+        dt_check_halvings,
+        cooling_target_iters,
+        max_tree_depth,
+        trajectory_warmup,
+        csmc_sweeps_per_nuts,
+        n_trajectories,
+        diagonal_mass,
+        no_nuts,
+        no_ancestor_sampling,
+        no_adapt,
+        adapt_start,
+        record_ancestry,
+        record_prequential,
+    } = a.method.clone();
     let cli_overrides = crate::fit::config_v2::CliMethodOverrides {
-        max_tree_depth:       a.max_tree_depth,
-        trajectory_warmup:    a.trajectory_warmup,
-        csmc_sweeps_per_nuts: a.csmc_sweeps_per_nuts,
-        n_trajectories:       a.n_trajectories,
-        diagonal_mass:        a.diagonal_mass,
-        no_nuts:              a.no_nuts,
-        no_ancestor_sampling: a.no_ancestor_sampling,
-        no_adapt:             a.no_adapt,
-        adapt_start:          a.adapt_start,
-        cooling_target_iters: a.cooling_target_iters,
-        decibans_thresh:      a.decibans_thresh,
-        no_dt_check:          a.no_dt_check,
-        dt_check_halvings:    a.dt_check_halvings,
-        dt_check_strict:      a.dt_check_strict,
-        binomial:             a.binomial,
-        record_ancestry:      a.record_ancestry,
-        record_prequential:   a.record_prequential,
+        max_tree_depth,
+        trajectory_warmup,
+        csmc_sweeps_per_nuts,
+        n_trajectories,
+        diagonal_mass,
+        no_nuts,
+        no_ancestor_sampling,
+        no_adapt,
+        adapt_start,
+        cooling_target_iters,
+        decibans_thresh,
+        no_dt_check,
+        dt_check_halvings,
+        dt_check_strict,
+        binomial,
+        record_ancestry,
+        record_prequential,
     };
-    let sweep_specs: Vec<(String, Vec<f64>)> = a.sweep.iter()
+    let sweep_specs: Vec<(String, Vec<f64>)> = a.problem.sweep.iter()
         .map(|s| (s.name.clone(), s.grid.expand()))
         .collect();
 
@@ -438,11 +402,7 @@ pub(crate) fn resolve(
     // so the override reaches the fit identity either way.
     // What the flag folds into the problem is recorded, so the fit folder
     // stores the config the fit ran under (gh#1268).
-    let problem_flags = ProblemFlags {
-        allow_forcing_extrapolation: a.forcing_extrapolation.allow_forcing_extrapolation
-            && !config.problem.config.allow_forcing_extrapolation,
-    };
-    if a.forcing_extrapolation.allow_forcing_extrapolation {
+    if a.problem.forcing_extrapolation.allow_forcing_extrapolation {
         config.problem.config.allow_forcing_extrapolation = true;
     }
     // The policy every model this fit evaluates runs under, and every record
@@ -463,7 +423,7 @@ pub(crate) fn resolve(
     // knob that fit cannot see. The override travels as an argument to
     // generation, and keys the fit the honest way — through the generated
     // data's bytes, which `FitDigest.data` already hashes.
-    let emit_every = crate::emit_every::EmitEvery::from_cli_specs(&a.emit_every)
+    let emit_every = crate::emit_every::EmitEvery::from_cli_specs(&a.problem.emit_every)
         .unwrap_or_else(|e| {
             out.fail(format!("error: {}", e));
         });
@@ -484,10 +444,6 @@ pub(crate) fn resolve(
         ));
     }
 
-    // gh#896: the method as the file alone spells it, before any CLI override,
-    // so a run can be told apart from the run `fit run <file>` would make.
-    let mut file_method: config_v2::Method =
-        config.inference.method.clone().expect("checked above");
     // gh#514 / gh#540: the CLI overrides — `--starts` and the sampler knobs —
     // all change where the chains begin or what the method computes, and
     // therefore the stored output. They are written INTO the method here,
@@ -503,35 +459,17 @@ pub(crate) fn resolve(
                 out.fail(format!("error: {e}"));
             }
         }
-        if let Some(starts) = &a.starts {
+        if let Some(starts) = &a.run.starts {
             method.starts = Some(starts.clone());
         }
         // gh#1056: `--starts-chains` qualifies the rule in force, from the
         // flag or the file; only `from_posterior` takes it.
-        if let Some(subset) = &a.starts_chains {
+        if let Some(subset) = &a.run.starts_chains {
             method.starts = Some(
                 crate::fit::starts::apply_starts_chains(method.starts.clone(), subset, "fit")
                     .unwrap_or_else(|e| out.fail(format!("error: {e}"))));
         }
     }
-
-    // A sourced `starts` rule reads a stored fit or a file: resolve the handle
-    // now, before the model is compiled, so a bad handle is refused at once
-    // and the dep folded into every leaf is one resolution. The source's
-    // convergence verdict is checked here (`--allow-nonconverged-source`
-    // lifts the refusal) — the one seam an upstream fit is consumed. A bare
-    // rule has nothing to resolve until the default is known, below.
-    let early_resolved_starts: Option<chain_starts::ResolvedStarts> = {
-        let method = config.inference.method.as_ref().expect("checked above");
-        match &method.starts {
-            Some(rule) if rule.source().is_some() => Some(
-                chain_starts::resolve_starts(rule, a.allow_nonconverged_source).unwrap_or_else(|e| {
-                    out.fail(format!("error: {}", e));
-                }),
-            ),
-            _ => None,
-        }
-    };
 
     // Compile `model.camdl` → IR EXACTLY ONCE for the whole fit. Every
     // per-(cell × sweep point) `FitRunConfig::build` then loads this
@@ -572,7 +510,7 @@ pub(crate) fn resolve(
     // on the model loaded from the re-emitted IR, so the resolved start and
     // horizon are in it: two windows are two fits, and one start spelled two
     // ways is one.
-    let compiled_ir = super::resolve_anchors_into_temp_ir(out, &compiled_ir, &config.problem)
+    let compiled_ir = super::resolve_anchors_into_temp_ir(Some(out), &compiled_ir, &config.problem)
         .unwrap_or_else(|e| {
             out.fail(format!("error: {}", e));
         });
@@ -587,6 +525,22 @@ pub(crate) fn resolve(
             out.fail(format!("error: {fit_path}: {e}"));
         });
     config.problem.compiled_ir = Some(compiled_ir.clone());
+
+    // The problem is posed on the ordinary compile, which every method
+    // shares; only `nl-lbfgs` on the ODE backend runs on the compile with the
+    // state Jacobian, which is then the run's own content. The ordinary
+    // compile is made here too, rewritten from the data the same way.
+    let problem_ir: Option<String> = if needs_state_grad {
+        let (lean, _lean_tmp) = crate::util::resolve_ir_path(&config.problem.model.camdl, false, None, compile)
+            .unwrap_or_else(|e| out.fail(format!("error: {}", e)));
+        let lean = super::resolve_anchors_into_temp_ir(None, &lean, &config.problem)
+            .unwrap_or_else(|e| out.fail(format!("error: {}", e)));
+        let (lean, _) = super::bind_tables_into_temp_ir(&lean, &config.problem)
+            .unwrap_or_else(|e| out.fail(format!("error: {fit_path}: {e}")));
+        Some(lean)
+    } else {
+        None
+    };
 
     // Load model and validate completeness (from the pre-compiled IR).
     let (model, _) = crate::util::load_ir(&compiled_ir).unwrap_or_else(|e| {
@@ -687,11 +641,6 @@ pub(crate) fn resolve(
     // From here the method is read-only: the identity below sees exactly what
     // the runners consume.
     let method: &config_v2::Method = config.inference.method.as_ref().expect("checked above");
-    // gh#896: the method the file alone resolves to, for the identity of the
-    // run `fit run <file>` with no CLI options would key (below, per cell).
-    let _ = file_method.resolve_starts(&config.problem, &model);
-    // The seeds the file alone runs: its `fit_seeds`, else the default seed.
-    let file_seeds: Vec<u64> = config.inference.fit_seeds.clone().unwrap_or_else(|| vec![1]);
     let allow_nonconverged_source = a.allow_nonconverged_source;
     // Only a fit source carries a convergence verdict to lift.
     if allow_nonconverged_source {
@@ -710,13 +659,13 @@ pub(crate) fn resolve(
     // extension dimension (IF2's cooling depends on total iterations, the
     // particle filter is one pass), so resuming would be statistically
     // incoherent.
-    if a.resume.is_some()
+    if a.run.resume.is_some()
         && !matches!(method.algorithm, config_v2::Algorithm::PGAS { .. } | config_v2::Algorithm::PMMH { .. })
     {
         out.fail(format!("error: --resume is only supported for PGAS and PMMH methods; \
                    this fit's method is '{}'.", method.algorithm.method_name()));
     }
-    if a.seed.is_some() && config.inference.fit_seeds.is_some() {
+    if a.run.seed.is_some() && config.inference.fit_seeds.is_some() {
         out.fail(format!("error: --seed sets the single seed of a fit, and {fit_path} declares \
                    `fit_seeds`, which replaces it, so the flag would change nothing. Drop \
                    --seed, or delete `fit_seeds` from the file."));
@@ -726,8 +675,11 @@ pub(crate) fn resolve(
         None       => vec![base_seed],
     };
 
+    // The run store's root the file names, anchored at the file; the
+    // environment and the default come after it.
+    let store_root = config.problem.store.as_ref().map(std::path::PathBuf::from);
     let nuts_tuning_flags: Vec<&'static str> =
-        [(a.max_tree_depth.is_some(), "--max-tree-depth"), (a.diagonal_mass, "--diagonal-mass")]
+        [(a.method.max_tree_depth.is_some(), "--max-tree-depth"), (a.method.diagonal_mass, "--diagonal-mass")]
             .into_iter()
             .filter_map(|(on, name)| on.then_some(name))
             .collect();
@@ -736,24 +688,61 @@ pub(crate) fn resolve(
         config,
         model,
         tables,
-        engine: super::fit_engine(),
         forcing,
         seeds: fit_seeds,
         sweep: sweep_specs,
         emit_every,
-        resume: a.resume.clone(),
+        resume: a.run.resume.clone(),
+        store_root,
+        problem_ir,
         nuts_tuning_flags,
-        problem_flags,
         fixed_via,
         starts: StartsPlan {
-            early: early_resolved_starts,
             resolution: starts_resolution,
             allow_nonconverged_source,
             origin: starts_origin,
         },
-        file_only: FileOnly { method: file_method, seeds: file_seeds },
     };
     (resolved, _forcing_route)
+}
+
+/// Refuses every removed spelling `a` carries, each with its replacement.
+/// Run on the arguments as clap parsed them: the split that follows does not
+/// carry the removed fields.
+pub(crate) fn refuse_removed_flags(a: &crate::args::FitRunArgs, out: &crate::out::Out) {
+    if let Some(msg) = super::removed_flag_message(a) {
+        out.fail(format!("error: {}", msg));
+    }
+    // PGAS parallel tempering was removed (gh#789); the flag is trapped so a
+    // stale script is answered with the fix rather than clap's "unexpected
+    // argument".
+    if let Some(raw) = a._removed_tempering.as_deref() {
+        out.fail(format!(
+            "error: --tempering is no longer accepted on `camdl fit run`: PGAS parallel \
+             tempering was removed (gh#789), and every PGAS chain samples the posterior \
+             directly, as the ladder's cold rung did. Drop `--tempering {raw}`; a \
+             `tempering = [...]` line under [method] must be deleted too. Fits stored \
+             before the removal are not reused and cannot be resumed; they run again."
+        ));
+    }
+    if let Some(raw) = a._removed_output_dir.as_deref() {
+        out.fail(format!(
+            "error: --output-dir is no longer accepted on `camdl fit run`: a fit is stored in \
+             the run store, whose root is the fit file's `store` key, else $CAMDL_STORE, \
+             else ./camdl-store. Drop `--output-dir {raw}`."
+        ));
+    }
+    // Correlated pseudo-marginal PMMH was removed; `--rho` is trapped the same
+    // way.
+    if let Some(raw) = a._removed_rho.as_deref() {
+        out.fail(format!(
+            "error: --rho is no longer accepted on `camdl fit run`: correlated \
+             pseudo-marginal PMMH was removed, and `pmmh` runs the bootstrap particle \
+             filter with independent likelihood evaluations. Drop `--rho {raw}`; a \
+             `rho = ...` line under [method] must be deleted too. PMMH fits stored \
+             before the removal are not reused and cannot be resumed; they run again."
+        ));
+    }
 }
 
 #[cfg(test)]

@@ -1,16 +1,17 @@
 //! Integration test for `camdl fit run --resume` against PGAS.
 //!
-//! Verifies the wiring landed in 2026-04-30 (`Method::identity_payload`
-//! split + `--resume` flag plumbed through the dispatcher):
+//! Verifies:
 //!
 //! 1. A first PGAS run writes `chain_<n>/resume_state.bin` containing
 //!    completed_sweeps == n_sweeps and the method's identity hash.
 //! 2. A second invocation with `--resume --sweeps N>n_sweeps`
 //!    succeeds and continues the chain (does not re-run burn-in).
 //! 3. Changing an *identity* field (e.g. `chains`) between the two
-//!    invocations causes resume to reject with a hash-mismatch error.
+//!    invocations causes resume to be refused.
 //!
 //! Skipped when the release binary or camdlc isn't present.
+
+mod fit_store_support;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -96,7 +97,7 @@ fn write_fit_toml_dt(
     dir: &Path, ir: &Path, data: &Path, sweeps: usize, chains: usize, dt: &str,
 ) -> PathBuf {
     let toml = format!(r#"
-output_dir = "{out}"
+store = "{out}"
 [model]
 camdl = "{ir}"
 [data.observations]
@@ -127,32 +128,17 @@ burn_in = 2
     p
 }
 
-/// The `(run_id, dir, run_json)` of a `pgas` method leaf under `<out>/fits/`,
-/// skipping any run_id in `exclude` (to pick the resumed leaf after a resume).
+/// The `(run_id, dir, run_json)` of a `pgas` fit run in the store at `out`,
+/// skipping any run_id in `exclude` (to pick the resumed run after a resume).
 fn post_leaf(out: &Path, exclude: &[String]) -> (String, PathBuf, serde_json::Value) {
-    let mut stack = vec![out.join("fits")];
-    while let Some(d) = stack.pop() {
-        let rj = d.join("run.json");
-        if rj.is_file() {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(
-                &std::fs::read_to_string(&rj).unwrap_or_default(),
-            ) {
-                if v.get("kind").and_then(|k| k.as_str()) == Some("fit_method") {
-                    let method = v["levels"].as_array().into_iter().flatten()
-                        .find(|l| l["name"].as_str() == Some("method"))
-                        .and_then(|l| l["label"].as_str()).unwrap_or("");
-                    let rid = v["run_id"].as_str().unwrap_or("").to_string();
-                    if method.contains("pgas") && !exclude.contains(&rid) {
-                        return (rid, d, v);
-                    }
-                }
-            }
-        }
-        if let Ok(es) = std::fs::read_dir(&d) {
-            for e in es.flatten() { if e.path().is_dir() { stack.push(e.path()); } }
+    for d in fit_store_support::runs_of_method(out, "pgas") {
+        let rid = fit_store_support::run_id(&d);
+        if !exclude.contains(&rid) {
+            let v = fit_store_support::json(&d.join("run.json"));
+            return (rid, d, v);
         }
     }
-    panic!("no pgas method leaf under {} (excluding {:?})", out.join("fits").display(), exclude);
+    panic!("no pgas fit run under {} (excluding {:?})", out.display(), exclude);
 }
 
 /// Recursive `{relpath -> bytes}` snapshot of a leaf, for the base-untouched check.
@@ -331,9 +317,9 @@ fn pgas_trace_emits_nuts_diagnostics() {
     assert!(!energy.is_nan(), "energy must not be NaN; got {energy}");
 }
 
-/// (3): changing an identity field (chains) between base and resume must reject
-/// with a config-hash mismatch — the copied resume_state's identity hash
-/// (chains=1) won't match the new run (chains=2).
+/// (3): changing an identity field (chains) between base and resume is refused
+/// by the resume guard: the base was fitted with other method settings
+/// (chains = 1) than the new run (chains = 2).
 #[test]
 fn pgas_resume_rejects_when_identity_field_changes() {
     let bin = camdl_bin();
@@ -360,18 +346,14 @@ fn pgas_resume_rejects_when_identity_field_changes() {
         .output().expect("spawn");
     let stderr = String::from_utf8_lossy(&r2.stderr);
     assert!(!r2.status.success(), "resume with changed chains must reject");
-    assert!(stderr.contains("config hash mismatch") || stderr.contains("no resume state"),
-        "expected config-hash-mismatch error: got {}", stderr);
+    assert!(stderr.contains("is not this run continued: it was fitted with other method settings"),
+        "expected the resume guard's refusal: got {}", stderr);
 }
 
-/// gh#583 item G. The resume guard was a second, hand-listed hash of "the
-/// same statistical problem" (`fit_stage_hash`) that covered the model, the
-/// data bytes, `[estimate]`, `[fixed]` and the method — and nothing in
-/// `[config]`. A chain fitted at `dt = 1` therefore resumed at `dt = 0.5`: a
-/// different likelihood, continued as if it were the same chain, into a leaf
-/// whose address (correctly) said `dt = 0.5`. The guard is now the CAS method
-/// identity less its extension dimension, so every input the leaf is keyed on
-/// but the sweep count must match.
+/// gh#583 item G. A chain fitted at `dt = 1` resumed at `dt = 0.5` would be a
+/// different likelihood continued as if it were the same chain. `dt` is part
+/// of the fit problem, so the resume guard, which requires every input of the
+/// run but its length to match, refuses it.
 #[test]
 fn pgas_resume_rejects_a_changed_dt() {
     let bin = camdl_bin();
@@ -395,7 +377,7 @@ fn pgas_resume_rejects_a_changed_dt() {
     let stderr = String::from_utf8_lossy(&r2.stderr);
     assert!(!r2.status.success(),
         "resuming a dt = 1 chain at dt = 0.5 must be refused: {stderr}");
-    assert!(stderr.contains("config hash mismatch"),
+    assert!(stderr.contains("is not this run continued: it was fitted with another problem"),
         "refused by the resume guard: {stderr}");
 }
 

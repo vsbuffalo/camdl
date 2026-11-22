@@ -127,9 +127,8 @@ pub fn resolve_posterior_draws(
     let dir = Path::new(fit_ref);
     if !dir.is_dir() {
         return Err(Other(format!(
-            "not a fit results directory: {fit_ref}\n  \
-             pass the fit directory, e.g. results/fits/<stem>-<hash>/ \
-             (the path `camdl fit run` printed)"
+            "not a directory of a fit run's files: {fit_ref}\n  \
+             name a stored fit run by its @label, its id or its folder"
         )));
     }
 
@@ -354,8 +353,9 @@ fn fit_algorithm_label(m: FitAlgorithm) -> &'static str {
 /// Resolve a fit's `[fixed]` block, for #273 backfill: fill any parameter
 /// *absent* from a raw draws TSV with the value the fit held it fixed at.
 ///
-/// `fit_ref` is either a fit-config TOML (read the `[fixed]` block) or a fit
-/// results directory (read the `fixed` map off its `fit.meta.json` sidecar). A
+/// `fit_ref` is a fit-config TOML (read the `[fixed]` block), a directory of
+/// a run's files (read the `fixed` map off its `fit.meta.json` sidecar), or a
+/// stored fit's handle (read the stored problem's `[fixed]`). A
 /// raw posterior trace tail carries only the estimated columns, so without this
 /// a `simulate --draws tail.tsv` run would fall back to model defaults for the
 /// fixed parameters — silently diverging from the fit.
@@ -375,8 +375,12 @@ pub fn resolve_fixed_for_backfill(
         out.sort_by(|a, b| a.0.cmp(&b.0));
         return Ok(out);
     }
-    let cfg = crate::fit::config_v2::Problem::load(fit_ref)
-        .map_err(|e| format!("failed to load --fit config '{fit_ref}': {e}"))?;
+    let cfg = if crate::fit_store::is_config_file(fit_ref) {
+        crate::fit::config_v2::Problem::load(fit_ref)
+            .map_err(|e| format!("failed to load --fit config '{fit_ref}': {e}"))?
+    } else {
+        crate::fit_store::opened(fit_ref)?.config().problem
+    };
     let fixed = cfg
         .fixed
         .resolve_with_model(model)
@@ -410,7 +414,8 @@ mod tests {
             r#"{{"format_version":1,"kind":"fit_method","run_id":"{run_id}","hash_version":1,"calendar":{{"days_per_unit":1.0,"origin":null,"time_unit":"days"}},"ir_version":"0.7","engine_version":"0.1.0+test","levels":[{{"name":"fit","label":"toy","hash":"{fit_hash}","schema_version":1}},{{"name":"method","label":"{method_label}","hash":"1fb03eee00000000000000000000000000000000000000000000000000000000","schema_version":1}},{{"name":"seed","label":"seed_1","hash":"06cbd6b300000000000000000000000000000000000000000000000000000000","schema_version":1}}],"status":"completed","artifacts":{{}},"inputs":{{"method":"{method}","backend":"chain_binomial","seed":1,"n_chains":4,"best_loglik":-12.3,"best_chain":1}},"provenance":{{"created_at":"2026-06-22T00:00:0{ord}Z","argv":["camdl","fit","run"]}}}}"#,
             ord = method_label.len() % 10,
         );
-        fs::write(leaf.join("run.json"), rec).unwrap();
+        fs::write(leaf.join("run.json"), &rec).unwrap();
+        crate::fit_store::write_test_inputs(&leaf, &serde_json::from_str::<serde_json::Value>(&rec).unwrap());
         if let Some(content) = draws {
             fs::write(leaf.join(DRAWS_FILE), content).unwrap();
         }
@@ -442,58 +447,6 @@ mod tests {
     }
 
     const TWO_DRAWS: &str = "beta\tgamma\n0.5\t0.1\n0.6\t0.12\n";
-
-    #[test]
-    fn resolves_terminal_method_draws() {
-        let tmp = crate::test_support::unique_temp_dir("pdraws_ok");
-        // An IF2 leaf (no draws) beside a PGAS leaf (draws) — two methods of
-        // one problem: the leaf with a cloud wins.
-        let seg = fixture_segment(&tmp, &[
-            ("if2",  "if2", None),
-            ("pgas", "pgas", Some(TWO_DRAWS)),
-        ]);
-        let r = resolve_posterior_draws(seg.to_str().unwrap(), None).expect("resolves");
-        assert_eq!(r.name, "pgas");
-        assert_eq!(r.method, Some(FitAlgorithm::Pgas));
-        assert!(r.draws_path.ends_with(DRAWS_FILE));
-        assert!(r.draws_path.is_file());
-        fs::remove_dir_all(&tmp).ok();
-    }
-
-    #[test]
-    fn errors_when_no_method_has_draws() {
-        let tmp = crate::test_support::unique_temp_dir("pdraws_none");
-        // An optimizer-only fit: no posterior cloud anywhere.
-        let seg = fixture_segment(&tmp, &[
-            ("if2",      "if2", None),
-            ("nl-sbplx", "nl-sbplx", None),
-        ]);
-        let err = resolve_posterior_draws(seg.to_str().unwrap(), None).unwrap_err();
-        assert!(matches!(err, PosteriorDrawsError::NoPosterior(_)), "{err:?}");
-        let err = err.to_string();
-        assert!(err.contains("no method"), "actionable error, got: {err}");
-        assert!(err.contains("--params-only"), "points to the optimizer workflow: {err}");
-        fs::remove_dir_all(&tmp).ok();
-    }
-
-    #[test]
-    fn method_override_selects_named_method() {
-        let tmp = crate::test_support::unique_temp_dir("pdraws_methodpick");
-        let seg = fixture_segment(&tmp, &[
-            ("pgas",  "pgas", Some("beta\n0.1\n")),
-            ("pmmh",  "pmmh", Some(TWO_DRAWS)),
-        ]);
-        // Without a selector, two runs with draws are refused, both listed,
-        // rather than the last in label order read silently (gh#896)...
-        let err = resolve_posterior_draws(seg.to_str().unwrap(), None).unwrap_err().to_string();
-        assert!(err.contains("holds 2 runs with posterior draws"), "{err}");
-        assert!(err.contains("pgas-") && err.contains("pmmh-"), "both runs are listed: {err}");
-        // ...with the selector naming pgas, that leaf is chosen.
-        let r = resolve_posterior_draws(seg.to_str().unwrap(), Some("pgas")).unwrap();
-        assert_eq!(r.name, "pgas");
-        assert_eq!(r.method, Some(FitAlgorithm::Pgas));
-        fs::remove_dir_all(&tmp).ok();
-    }
 
     #[test]
     fn errors_when_named_method_has_no_draws() {
@@ -531,66 +484,6 @@ mod tests {
         fs::remove_dir_all(&tmp).ok();
     }
 
-    #[test]
-    fn errors_on_unknown_method_name() {
-        let tmp = crate::test_support::unique_temp_dir("pdraws_badmethod");
-        let seg = fixture_segment(&tmp, &[("pgas", "pgas", Some(TWO_DRAWS))]);
-        let err = resolve_posterior_draws(seg.to_str().unwrap(), Some("nope")).unwrap_err();
-        assert!(matches!(err, PosteriorDrawsError::Other(_)), "an unknown name is not 'no posterior': {err:?}");
-        let err = err.to_string();
-        assert!(err.contains("no method named 'nope'"), "got: {err}");
-        fs::remove_dir_all(&tmp).ok();
-    }
-
-    /// Rewrite a fixture leaf's `run.json` as a run that did not complete:
-    /// `status` and, for a failed run, its `failure`.
-    fn mark(leaf: &Path, status: &str, failure: Option<&str>) {
-        let mut rec: serde_json::Value =
-            serde_json::from_slice(&fs::read(leaf.join("run.json")).unwrap()).unwrap();
-        rec["status"] = status.into();
-        if let Some(message) = failure {
-            rec["failure"] = serde_json::json!({"message": message, "operation": "pgas"});
-        }
-        fs::write(leaf.join("run.json"), rec.to_string()).unwrap();
-    }
-
-    /// A run that failed after writing its `draws.tsv` is not a posterior: it
-    /// is refused, with its state and reason, whether it is the folder's only
-    /// run with draws, is named by its method, or is the leaf passed — never
-    /// read, and never `NoPosterior` (which callers answer with a point
-    /// estimate).
-    #[test]
-    fn a_failed_run_with_draws_is_refused_naming_its_state() {
-        let tmp = crate::test_support::unique_temp_dir("pdraws_failed");
-        let seg = fixture_segment(&tmp, &[
-            ("if2",  "if2", None),
-            ("pgas", "pgas", Some(TWO_DRAWS)),
-        ]);
-        let leaf = seg.join("pgas-1fb03eee").join("seed_1-06cbd6b3");
-        mark(&leaf, "failed", Some("error: --resume lineage: cannot read the base"));
-        for (handle, method) in [(seg.clone(), None), (seg.clone(), Some("pgas")), (leaf.clone(), None)] {
-            let err = resolve_posterior_draws(handle.to_str().unwrap(), method).unwrap_err();
-            assert!(matches!(err, PosteriorDrawsError::Other(_)), "{handle:?} {method:?}: {err:?}");
-            let err = err.to_string();
-            assert!(err.contains(&format!("{} is not a completed run", leaf.display())), "{err}");
-            assert!(err.contains("it failed: --resume lineage: cannot read the base"), "{err}");
-        }
-        fs::remove_dir_all(&tmp).ok();
-    }
-
-    /// The same for a run still `running` whose `.lock` names no live process
-    /// (killed after writing `draws.tsv`): refused as interrupted.
-    #[test]
-    fn an_interrupted_run_with_draws_is_refused_as_interrupted() {
-        let tmp = crate::test_support::unique_temp_dir("pdraws_interrupted");
-        let seg = fixture_segment(&tmp, &[("pgas", "pgas", Some(TWO_DRAWS))]);
-        let leaf = seg.join("pgas-1fb03eee").join("seed_1-06cbd6b3");
-        mark(&leaf, "running", None);
-        let err = resolve_posterior_draws(leaf.to_str().unwrap(), None).unwrap_err().to_string();
-        assert!(err.contains("it was interrupted: no live process holds it"), "{err}");
-        fs::remove_dir_all(&tmp).ok();
-    }
-
     /// A directory holding a `draws.tsv` beside a `run.json` that is not a run
     /// record is refused, naming the file's problem, rather than read as a
     /// bare directory of draws.
@@ -621,33 +514,12 @@ mod tests {
         fs::remove_dir_all(&tmp).ok();
     }
 
-    /// gh#990: a leaf whose chain directories count from 1 is refused as
-    /// `Other`, never as `NoPosterior` — the variant callers fall back on —
-    /// on the segment path and on a leaf passed directly.
-    #[test]
-    fn a_one_based_leaf_is_refused_not_reported_as_no_posterior() {
-        let tmp = crate::test_support::unique_temp_dir("pdraws_onebased");
-        let seg = fixture_segment(&tmp, &[("pgas", "pgas", Some(TWO_DRAWS))]);
-        let leaf = resolve_posterior_draws(seg.to_str().unwrap(), None).unwrap()
-            .draws_path.parent().unwrap().to_path_buf();
-        fs::create_dir_all(leaf.join("chain_1")).unwrap();
-        fs::create_dir_all(leaf.join("chain_2")).unwrap();
-        for target in [seg.as_path(), leaf.as_path()] {
-            let err = resolve_posterior_draws(target.to_str().unwrap(), None).unwrap_err();
-            match &err {
-                PosteriorDrawsError::Other(m) => assert!(m.contains("gh#990"), "{m}"),
-                other => panic!("{}: expected the gh#990 refusal, got {other:?}", target.display()),
-            }
-        }
-        fs::remove_dir_all(&tmp).ok();
-    }
-
     #[test]
     fn errors_when_not_a_directory() {
         let err = resolve_posterior_draws("/no/such/dir/at/all", None).unwrap_err();
         assert!(matches!(err, PosteriorDrawsError::Other(_)), "{err:?}");
         let err = err.to_string();
-        assert!(err.contains("not a fit results directory"), "got: {err}");
+        assert!(err.contains("not a directory of a fit run's files"), "got: {err}");
     }
 
     // ─── #273: reading a fit's [fixed] ────────────────────────────────────

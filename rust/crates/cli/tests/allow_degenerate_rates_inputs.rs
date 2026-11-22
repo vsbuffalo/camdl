@@ -16,6 +16,8 @@
 //! The fixture's infection rate is `beta * S * S / (S + I)`: once the epidemic
 //! has run its course `S + I` is 0, and the rate divides by zero.
 
+mod fit_store_support;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -294,14 +296,12 @@ fn pfilter_applies_the_fit_configs_allow_degenerate_rates() {
 
 /// A PGAS fit under `[config] allow_degenerate_rates = true` of the model with
 /// `beta, gamma ∈ [2, 5]`, where every trajectory reaches `S + I = 0` within
-/// the 40 observed days. Returns the work dir and the fit's leaf.
+/// the 40 observed days. Returns the work dir and the fit run's folder.
 fn degenerate_fit(tag: &str) -> (Tmp, String) {
     let tmp = tempdir(tag);
     std::fs::write(tmp.0.join("model.camdl"), model(40, 2.0)).unwrap();
     std::fs::write(tmp.0.join("cases.tsv"), cases(40)).unwrap();
-    std::fs::write(tmp.0.join("fit.toml"), r#"output_dir = "results"
-
-[model]
+    std::fs::write(tmp.0.join("fit.toml"), r#"[model]
 camdl = "model.camdl"
 
 [data.observations]
@@ -327,13 +327,8 @@ thin = 1
 "#).unwrap();
     let o = camdl(&tmp.0, &["fit", "run", "fit.toml", "--seed", "1", "--progress", "none"]);
     assert!(o.status.success(), "fit run: {}", text(&o));
-    let fits = tmp.0.join("results/fits");
-    let seg = std::fs::read_dir(&fits).unwrap().flatten().map(|e| e.path())
-        .find(|p| p.is_dir()).expect("a fit segment");
-    let method = std::fs::read_dir(&seg).unwrap().flatten().map(|e| e.path())
-        .find(|p| p.file_name().unwrap().to_string_lossy().starts_with("pgas-")).expect("a pgas dir");
-    let leaf = std::fs::read_dir(&method).unwrap().flatten().map(|e| e.path())
-        .find(|p| p.join("run.json").is_file()).expect("a leaf");
+    let leaf = fit_store_support::the_run(&tmp.0.join("out/camdl-store"));
+    assert_eq!(fit_store_support::run_inputs(&leaf)["method"], "pgas");
     (tmp, leaf.to_string_lossy().into_owned())
 }
 

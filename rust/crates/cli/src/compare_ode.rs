@@ -25,7 +25,7 @@ use std::path::Path;
 
 use score::trace::{Derivation, PredictiveBasis, PrequentialTrace, ThetaSource};
 
-use crate::fit::handle::ResolvedFit;
+use crate::fit_store::OpenedFit as ResolvedFit;
 use crate::fit::runner::FitRunConfig;
 
 /// The fit's own ODE likelihood, bound to the full series, ready to score one

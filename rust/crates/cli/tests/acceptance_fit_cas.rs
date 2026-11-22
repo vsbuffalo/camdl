@@ -1,20 +1,18 @@
-//! gh#147 (M3.2) — content-addressed fit-method acceptance gates.
+//! Content-addressed fit-run acceptance gates, exercised end-to-end against
+//! the release `camdl` binary:
 //!
-//! Two properties the fit-method CAS migration must guarantee, exercised
-//! end-to-end against the release `camdl` binary:
-//!
-//! 1. **Chained-method reuse** — a second file that warm-starts from the
-//!    first (`starts = { from_mle = <leaf> }`) shares the first's fit-level
-//!    hash, because that level hashes the problem alone (the two segments
-//!    are siblings named by their stems, `scout-<h8>` and `posterior-<h8>`);
-//!    editing the second file's `[method]` re-keys only its own leaf, and
-//!    re-running the first file is a cache hit that keeps its `run_id`. This
-//!    is the `FitDigest`-excludes-`[method]` factoring working: the expensive
-//!    upstream fit is cached across downstream-config iteration.
-//! 2. **`--parallel` determinism** — the same fit at 1 vs 8 rayon threads
-//!    must produce a bit-identical θ̂. CAS fits run watchdog-None
+//! 1. **Chained-method reuse**: a second file that warm-starts from the
+//!    first (`starts = { from_mle = <run> }`) is stored under the same fit
+//!    problem, because the problem's id hashes the problem alone and not
+//!    `[method]`; editing the second file's `[method]` adds only a new run,
+//!    and re-running the first file is a cache hit that keeps its run id. The
+//!    expensive upstream fit is cached across downstream-config iteration.
+//! 2. **`--parallel` determinism**: the same fit at 1 vs 8 rayon threads
+//!    produces a bit-identical θ̂. Stored fits run without a watchdog
 //!    (machine-speed-independent) and the engine is parallel-invariant, so
 //!    the fit is a pure function of its inputs.
+
+mod fit_store_support;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -50,7 +48,7 @@ fn write_data(dir: &Path) -> PathBuf {
 /// The problem half both files share.
 fn problem_half(out: &Path, data: &Path) -> String {
     format!(
-        r#"output_dir = "{out}"
+        r#"store = "{out}"
 
 [model]
 camdl = "{ir}"
@@ -133,37 +131,23 @@ fn run_fit_parallel(bin: &Path, fit_toml: &Path, parallel: usize) -> std::proces
         .expect("camdl fit run must spawn")
 }
 
-/// Every CAS fit-method leaf under `out/fits/`: (leaf dir, run_id), read from
-/// each `run.json` (kind = `fit_method`).
+/// Every fit run stored under the store `out`: (run folder, run id).
 fn method_leaves(out: &Path) -> Vec<(PathBuf, String)> {
-    let mut found = Vec::new();
-    let mut stack = vec![out.join("fits")];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-        for e in entries.flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                stack.push(p);
-            } else if p.file_name().is_some_and(|n| n == "run.json") {
-                let Ok(txt) = std::fs::read_to_string(&p) else { continue };
-                let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) else { continue };
-                if v.get("kind").and_then(|k| k.as_str()) != Some("fit_method") {
-                    continue;
-                }
-                let run_id = v["run_id"].as_str().unwrap_or("").to_string();
-                let leaf = p.parent().map(Path::to_path_buf).unwrap_or_default();
-                found.push((leaf, run_id));
-            }
-        }
-    }
+    let mut found: Vec<(PathBuf, String)> = fit_store_support::runs(out)
+        .into_iter()
+        .map(|r| {
+            let id = fit_store_support::run_id(&r);
+            (r, id)
+        })
+        .collect();
     found.sort();
     found
 }
 
-/// The one leaf a single-file run wrote.
+/// The one run a single-file fit stored.
 fn only_leaf(out: &Path) -> (PathBuf, String) {
     let leaves = method_leaves(out);
-    assert_eq!(leaves.len(), 1, "expected one method leaf, got {leaves:?}");
+    assert_eq!(leaves.len(), 1, "expected one fit run, got {leaves:?}");
     leaves.into_iter().next().unwrap()
 }
 
@@ -177,9 +161,9 @@ fn read_scout_mle(out: &Path) -> String {
     full.split("[provenance]").next().unwrap_or(&full).trim().to_string()
 }
 
-/// Property 1: the downstream file shares the upstream's fit-level hash;
-/// editing its `[method]` re-keys only its own leaf; re-running the upstream
-/// file is a cache hit that keeps its `run_id`.
+/// Property 1: the downstream file's run shares the upstream's fit problem;
+/// editing its `[method]` adds only a run of its own; re-running the upstream
+/// file is a cache hit that keeps its run id.
 #[test]
 fn chained_method_reuse_only_rekeys_the_downstream() {
     let bin = bin();
@@ -198,21 +182,21 @@ fn chained_method_reuse_only_rekeys_the_downstream() {
     let r2 = run_fit(&bin, &post4, 1);
     assert!(r2.status.success(), "posterior run failed: {}", String::from_utf8_lossy(&r2.stderr));
     let leaves2 = method_leaves(&out);
-    assert_eq!(leaves2.len(), 2, "one problem, two methods, two leaves: {leaves2:?}");
+    assert_eq!(leaves2.len(), 2, "one problem, two methods, two runs: {leaves2:?}");
     let post4_id = leaves2.iter().find(|(_, id)| *id != scout_id)
-        .map(|(_, id)| id.clone()).expect("the downstream leaf");
-    // The two segments share the fit-level hash (the `-<h8>` suffix): that
-    // level hashes the problem, and the file stem only labels the directory.
-    let segment_h8 = |leaf: &Path| -> String {
-        let seg = leaf.parent().and_then(|p| p.parent()).unwrap();
-        let name = seg.file_name().unwrap().to_string_lossy().into_owned();
-        name.rsplit('-').next().unwrap().to_string()
-    };
-    let h8s: std::collections::BTreeSet<String> =
-        leaves2.iter().map(|(leaf, _)| segment_h8(leaf)).collect();
-    assert_eq!(h8s.len(), 1,
-        "the two method leaves must share the fit-level hash; segments: {:?}",
-        leaves2.iter().map(|(l, _)| l.parent().and_then(|p| p.parent()).unwrap().to_path_buf()).collect::<Vec<_>>());
+        .map(|(_, id)| id.clone()).expect("the downstream run");
+    // The two runs share one stored problem: its id hashes the problem, not
+    // `[method]`, and the file stem plays no part in it.
+    let problems: std::collections::BTreeSet<PathBuf> =
+        leaves2.iter().map(|(run, _)| fit_store_support::problem_of(run)).collect();
+    assert_eq!(problems.len(), 1,
+        "the two runs must sit in one fit problem; problems: {problems:?}");
+    assert_eq!(fit_store_support::problems(&out).len(), 1,
+        "the store must hold exactly one fit problem: {:?}", fit_store_support::problems(&out));
+    let problem_ids: std::collections::BTreeSet<String> = leaves2.iter()
+        .map(|(run, _)| fit_store_support::run_inputs(run)["problem_id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(problem_ids.len(), 1, "both runs must name one problem id: {problem_ids:?}");
 
     // Run 3: the upstream again, unchanged → served from cache, same run_id.
     let r3 = run_fit(&bin, &scout, 1);
@@ -228,36 +212,32 @@ fn chained_method_reuse_only_rekeys_the_downstream() {
     let leaves4 = method_leaves(&out);
     let ids: std::collections::BTreeSet<&str> = leaves4.iter().map(|(_, id)| id.as_str()).collect();
 
-    // The upstream is untouched (still exactly its one leaf), the first
-    // downstream leaf survives, and the edit added a distinct third.
+    // The upstream is untouched (still exactly its one run), the first
+    // downstream run survives, and the edit added a distinct third.
     assert!(ids.contains(scout_id.as_str()),
         "editing the downstream must not re-key the upstream; scout={scout_id} ids={ids:?}");
     assert!(ids.contains(post4_id.as_str()),
-        "the iter=4 downstream leaf must survive; post4={post4_id} ids={ids:?}");
+        "the iter=4 downstream run must survive; post4={post4_id} ids={ids:?}");
     assert_eq!(ids.len(), 3,
-        "editing the downstream (iters 4→8) must produce a distinct third leaf; got {ids:?}");
-    // And every downstream leaf carries a dep on the upstream's point estimate,
-    // so a re-run upstream re-keys them (gh#541).
+        "editing the downstream (iters 4→8) must produce a distinct third run; got {ids:?}");
+    // And every downstream run carries a dep on the upstream run's point
+    // estimate, so a re-run upstream re-keys them (gh#541).
     for (leaf, id) in &leaves4 {
         if *id == scout_id { continue; }
-        let rec = std::fs::read_to_string(leaf.join("run.json")).unwrap();
-        assert!(rec.contains("fit_state.toml"),
-            "downstream leaf {} must dep on the upstream's fit_state.toml: {rec}", leaf.display());
+        let rec = fit_store_support::json(&leaf.join("run.json"));
+        let deps_upstream = rec["deps"].as_array().expect("run.json carries deps").iter().any(|d| {
+            d["run_id"].as_str() == Some(scout_id.as_str())
+                && d["file"].as_str().is_some_and(|f| f.starts_with("fit_state.toml"))
+        });
+        assert!(deps_upstream,
+            "downstream run {} must dep on the upstream's fit_state.toml: {rec}", leaf.display());
     }
 }
 
-/// gh#901: a method leaf's `run.json` names its algorithm once, under
-/// `method`.
-///
-/// It used to carry the same string twice — `inputs.method` beside
-/// `inputs.method`, both set from `Algorithm::method_name()` — so the leaf
-/// published one fact under two vocabularies and a consumer could key on
-/// either. Two-sided: `method` is the algorithm the fit declared, and `method`
-/// is gone from `inputs` rather than kept beside it.
-///
-/// The `kind` string stays `fit_method`: it is read back from every store on
-/// disk, and renaming it would orphan them for a word that no consumer
-/// interprets as a workflow method.
+/// gh#901: a fit run's `run_inputs.json` names its algorithm once, under
+/// `method`, and not also under `stage`, so a consumer has one key to read.
+/// The run's folder sits in a `runs/<method>-<id>/` group named by the same
+/// word, and its `identity.json` gives the kind `fit_run`.
 #[test]
 fn a_method_leaf_names_its_algorithm_once() {
     let bin = bin();
@@ -269,23 +249,20 @@ fn a_method_leaf_names_its_algorithm_once() {
     assert!(r.status.success(), "scout run failed: {}", String::from_utf8_lossy(&r.stderr));
 
     let (leaf, _) = only_leaf(&out);
-    let text = std::fs::read_to_string(leaf.join("run.json")).unwrap();
-    let rec: serde_json::Value = serde_json::from_str(&text).unwrap();
-    let inputs = rec["inputs"].as_object().expect("run.json carries an inputs object");
+    let inputs = fit_store_support::run_inputs(&leaf);
+    let text = inputs.to_string();
+    let inputs = inputs.as_object().expect("run_inputs.json is an object");
     assert_eq!(inputs.get("method").and_then(|v| v.as_str()), Some("if2"),
-        "inputs must name the algorithm under `method`:\n{text}");
+        "run_inputs.json must name the algorithm under `method`:\n{text}");
     assert!(inputs.get("stage").is_none(),
         "and must not also carry it under `stage` (gh#901):\n{text}");
 
-    // The middle store level is `method` too — same word, same leaf.
-    let levels = rec["levels"].as_array().expect("run.json carries levels");
-    let names: Vec<&str> = levels.iter().filter_map(|l| l["name"].as_str()).collect();
-    assert_eq!(names, vec!["fit", "method", "seed"], "level names:\n{text}");
+    // The run's method group is named by the same word.
+    assert_eq!(fit_store_support::runs_of_method(&out, "if2"), vec![leaf.clone()],
+        "the run must sit in a `runs/if2-<id>/` group");
 
-    // Deliberately kept: the artifact-kind string.
-    assert_eq!(rec["kind"].as_str(), Some("fit_method"),
-        "the kind string is read back from every existing store and is not \
-         renamed by gh#901:\n{text}");
+    let ident = fit_store_support::json(&leaf.join("identity.json"));
+    assert_eq!(ident["kind"].as_str(), Some("fit_run"), "identity.json:\n{ident}");
 }
 
 /// Property 2: the same fit at 1 vs 8 rayon threads yields bit-identical θ̂
@@ -350,15 +327,9 @@ fn fit_theta_hat_identical_across_parallel_flag() {
          thread budget, not a numerical knob)");
 }
 
-/// Property 3 (Q2): `fit run` must announce the directory its method leaves
-/// actually land in. The leaves are written by `resolve_fit_method` under the
-/// `FitDigest` fit-level segment (`fits/{stem}-{h8}/`); the announced
-/// `output:` line must be exactly that segment — i.e. the announced path
-/// EXISTS and is the parent of the `{method}-{h8}` leaf dirs.
-///
-/// The announced path and the leaves now share one basis: the `FitDigest`
-/// fit-level hash via `fit_segment_dir` (real and synthetic alike), so the
-/// announced path always exists and parents the method leaves.
+/// Property 3: `fit run` announces the store its run lands in. The announced
+/// `output:` path exists, is the store root the fit file names, and holds the
+/// run's problem folder, which holds an `if2-<id>` method group.
 #[test]
 fn fit_run_announces_the_real_leaf_directory() {
     let bin = bin();
@@ -378,64 +349,32 @@ fn fit_run_announces_the_real_leaf_directory() {
         .map(|s| PathBuf::from(s.trim()))
         .unwrap_or_else(|| panic!("no `output:` line in fit run stderr:\n{stderr}"));
 
-    // The announced dir must exist on disk (it is the fit segment the leaves
-    // land under, not a divergent directory).
+    // The announced dir must exist on disk.
     assert!(
         announced.is_dir(),
         "announced output dir must exist on disk: {}\nstderr:\n{stderr}",
         announced.display(),
     );
 
-    // Locate the actual method leaf (the dir holding a fit_method run.json) and
-    // confirm the announced dir is its grandparent — the fit segment that
-    // `store_path` factors as fits/{fit}/{method}/{seed}/.
-    let leaf_dir = {
-        let mut stack = vec![out.join("fits")];
-        let mut hit = None;
-        while let Some(d) = stack.pop() {
-            if d.join("run.json").exists() {
-                let txt = std::fs::read_to_string(d.join("run.json")).unwrap_or_default();
-                if txt.contains("\"fit_method\"") {
-                    hit = Some(d.clone());
-                    break;
-                }
-            }
-            if let Ok(es) = std::fs::read_dir(&d) {
-                for e in es.flatten() {
-                    if e.path().is_dir() {
-                        stack.push(e.path());
-                    }
-                }
-            }
-        }
-        hit.unwrap_or_else(|| panic!("no fit_method leaf under {}", out.join("fits").display()))
-    };
-
-    // Leaf factoring: fits/{fit}/{method}/{seed}/run.json — so the fit
-    // segment is the seed dir's grandparent (= leaf_dir.parent().parent()).
-    let fit_segment = leaf_dir
-        .parent()
-        .and_then(|p| p.parent())
-        .unwrap_or_else(|| panic!("leaf {} has no fit-segment grandparent", leaf_dir.display()));
-
     assert_eq!(
         announced.canonicalize().unwrap(),
-        fit_segment.canonicalize().unwrap(),
-        "the announced `output:` dir ({}) must equal the actual fit segment \
-         that holds the method leaf dirs ({})",
+        out.canonicalize().unwrap(),
+        "the announced `output:` dir ({}) must be the store the fit file names ({})",
         announced.display(),
-        fit_segment.display(),
+        out.display(),
     );
 
-    // And the segment really contains the method tree (an `if2-<h8>` child,
-    // labelled by the algorithm).
-    let has_method_child = std::fs::read_dir(fit_segment)
+    // The store holds the run, inside its problem, inside an `if2-<id>` group.
+    let (run, _) = only_leaf(&announced);
+    let problem = fit_store_support::problem_of(&run);
+    assert!(problem.starts_with(&announced), "run {} is not under {}", run.display(), announced.display());
+    let has_method_child = std::fs::read_dir(problem.join("runs"))
         .unwrap()
         .flatten()
         .any(|e| e.path().is_dir() && e.file_name().to_string_lossy().starts_with("if2-"));
     assert!(
         has_method_child,
-        "announced fit segment {} must contain the `if2-<h8>` method leaf dir",
-        fit_segment.display(),
+        "problem {} must contain the `if2-<id>` method group",
+        problem.display(),
     );
 }

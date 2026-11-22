@@ -539,7 +539,7 @@ fn a_pgas_run_with_a_grouped_transfer_is_reproducible() {
         std::fs::write(
             &fit,
             format!(
-                r#"output_dir = "{out}"
+                r#"store = "{out}"
 
 [model]
 camdl = "{model}"

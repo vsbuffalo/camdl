@@ -31,7 +31,7 @@
 //!
 //! ## Acceptance (per method: pmmh / if2 / pgas)
 //!   1. `camdl fit run` exits NON-ZERO.
-//!   2. a `diagnostics.json` under the output tree carries an
+//!   2. a `diagnostics.json` under the run store carries an
 //!      `initial_loglik_infinite` entry (the snake_case serde tag of
 //!      `DiagnosticKind::InitialLoglikInfinite`).
 //!
@@ -152,7 +152,7 @@ starts      = "single"
 fn write_fit_toml(dir: &Path, ir: &Path, data: &Path, method: &str) -> (PathBuf, PathBuf) {
     let out_root = dir.join("results");
     let toml = format!(r#"
-output_dir = "{out}"
+store = "{out}"
 [model]
 camdl = "{ir}"
 [data.observations]
@@ -175,9 +175,9 @@ N0 = 1000
 }
 
 /// Recursively collect every file named `diagnostics.json` under `root`.
-/// The failing method errors out BEFORE CAS finalize, so its diagnostics land
-/// in the streaming-claim leaf under the output tree — not at a predictable
-/// committed leaf. Walking the whole tree finds it wherever it is.
+/// The failing method errors out before its run commits, so its diagnostics
+/// land in the run folder it claimed, whose name is not known in advance.
+/// Walking the whole store finds it wherever it is.
 fn find_diagnostics(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];

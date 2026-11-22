@@ -1,10 +1,10 @@
-//! gh#585 (Stage 3.1 of the 2026-08-29 honest-predictive-evaluation
-//! proposal): a fit that declares `holdout_after` actually trains on the
-//! truncated series, and writes the applied training window into
-//! `fit.meta.json` — the §3.7.3(b) positive proof `camdl compare`'s
-//! non-leakage gate reads. A rerun that hits the cache end-to-end must not
-//! erase the recorded window (the sidecar is rewritten before the
-//! short-circuit, without re-loading data).
+//! gh#585: a fit that declares `holdout_after` trains on the truncated
+//! series, and writes the applied training window into its run's
+//! `fit.meta.json`. A rerun that hits the cache keeps the recorded window.
+//! `camdl compare` refuses to score the held-out rows of a stored fit, and
+//! scores its training rows under `--in-sample`.
+
+mod fit_store_support;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -45,13 +45,12 @@ fn find_fit_meta(root: &Path) -> Option<PathBuf> {
     None
 }
 
-/// gh#585 (Stages 3.4/3.5): `camdl compare` scores holdout-declaring fits
-/// out-of-sample — derives with `--score-from` at the sealed boundary,
-/// verifies non-leakage, stamps `hold_out_tail` — refuses a mixed
-/// comparison and a fit without the applied-window proof, and `--in-sample`
-/// forces the old mode.
+/// `camdl compare` refuses to score the held-out rows of a stored
+/// `holdout_after` fit, alone or beside a fit that held nothing out;
+/// `--in-sample` scores the training rows; and a fit whose stored
+/// `fit.meta.json` was edited is refused as damaged.
 #[test]
-fn compare_scores_holdout_fits_out_of_sample() {
+fn compare_refuses_the_held_out_rows_of_a_stored_fit() {
     let bin = skip_if_missing_binary();
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
@@ -62,7 +61,7 @@ fn compare_scores_holdout_fits_out_of_sample() {
         std::fs::write(sub.join("obs.tsv"),
             "time\tweekly_cases\n7\t1\n14\t2\n21\t3\n28\t4\n35\t5\n").unwrap();
         std::fs::write(sub.join("fit.toml"), format!(r#"
-output_dir = "results"
+store = "../results"
 
 [model]
 camdl = "{ir}"
@@ -103,15 +102,23 @@ dt = 1.0
     let fit_b = write_fit("b", 0.15, "holdout_after = 21.0");
     let fit_c = write_fit("c", 0.10, "");
 
-    for sub in [&fit_a, &fit_b, &fit_c] {
+    // The three fits share the store `dir/results`, which `compare` reads.
+    let store = dir.join("results");
+    let mut run_a = None;
+    for (sub, label) in [(&fit_a, "a"), (&fit_b, "b"), (&fit_c, "c")] {
+        let before = fit_store_support::runs(&store);
         let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-            .args(["fit", "run", "fit.toml", "--seed", "1"])
+            .args(["fit", "run", "fit.toml", "--seed", "1", "--label", label])
             .current_dir(sub)
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .output().expect("spawn camdl");
         assert!(out.status.success(), "fit run in {} failed:\nstderr={}",
             sub.display(), String::from_utf8_lossy(&out.stderr));
+        if label == "a" {
+            run_a = fit_store_support::runs(&store).into_iter().find(|r| !before.contains(r));
+        }
     }
+    let run_a = run_a.expect("fit a stored a run");
 
     let compare = |paths: &[&str], extra: &[&str]| {
         let mut args = vec!["compare"];
@@ -121,61 +128,52 @@ dt = 1.0
         Command::new(&bin).env_remove("CLICOLOR_FORCE")
             .args(&args)
             .current_dir(dir)
+            .env("CAMDL_STORE", &store)
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .output().expect("spawn camdl")
     };
 
-    // Both fits sealed at t = 21 → held-out derivation, stamped and scored
-    // only past the boundary.
-    let out = compare(&["a/fit.toml", "b/fit.toml"], &[]);
-    assert!(out.status.success(), "holdout compare failed:\nstderr={}",
-        String::from_utf8_lossy(&out.stderr));
-    let v: serde_json::Value =
-        serde_json::from_slice(&out.stdout).expect("json output");
-    for row in v["rows"].as_array().unwrap() {
-        assert_eq!(row["conditioning"]["hold_out_tail"]["train_end"],
-            serde_json::json!(21.0),
-            "row must be stamped hold_out_tail: {row}");
-        assert!(row["derivation"].get("overrides").is_none(),
-            "a held-out derive waives nothing: {row}");
-        assert_eq!(row["t_score"], serde_json::json!(2),
-            "only t = 28, 35 lie past the sealed boundary: {row}");
+    // A stored fit keeps the dates of its held-out rows, not their values,
+    // so compare refuses to score them before computing, and says how to
+    // compare on the training rows instead.
+    for pair in [["@a", "@b"], ["@a", "@c"]] {
+        let out = compare(&pair, &[]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{pair:?}: held-out rows must not be scored:\n{stderr}");
+        assert_held_out_refusal(&stderr);
     }
 
-    // Mixed conditioning is refused — no override.
-    let out = compare(&["a/fit.toml", "c/fit.toml"], &[]);
-    assert!(!out.status.success(), "mixed conditioning must be refused");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("mix conditioning modes"),
-        "must name the mixed modes:\n{stderr}");
-
-    // --in-sample forces the old mode: full series, in_sample stamp.
-    let out = compare(&["a/fit.toml", "b/fit.toml"], &["--in-sample"]);
+    // --in-sample scores each fit on its training rows, t = 7, 14 and 21.
+    let out = compare(&["@a", "@b"], &["--in-sample"]);
     assert!(out.status.success(), "--in-sample compare failed:\nstderr={}",
         String::from_utf8_lossy(&out.stderr));
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     for row in v["rows"].as_array().unwrap() {
         assert_eq!(row["conditioning"], serde_json::json!("in_sample"));
-        assert_eq!(row["t_score"], serde_json::json!(5));
-        // The trace itself says the fit's sealed holdout was waived.
-        assert_eq!(row["derivation"]["overrides"], serde_json::json!(["in_sample_forced"]),
-            "{row}");
+        assert_eq!(row["t_score"], serde_json::json!(3), "the three training rows: {row}");
     }
 
-    // The §3.7.3(b) gate: strip the applied-window record from fit A's
-    // sidecar (what a pre-gh#585 fit looks like — it declares a holdout it
-    // never applied) and the hold_out_tail derivation must refuse.
-    let meta_path = find_fit_meta(&fit_a.join("results")).unwrap();
+    // A fit whose `fit.meta.json` was edited after it ran is damaged, and
+    // compare refuses it by its folder and the file that changed.
+    let meta_path = run_a.join("fit.meta.json");
     let mut meta: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&meta_path).unwrap()).unwrap();
     meta.as_object_mut().unwrap().remove("training_partition");
     std::fs::write(&meta_path, serde_json::to_string_pretty(&meta).unwrap()).unwrap();
-    let out = compare(&["a/fit.toml", "b/fit.toml"], &[]);
-    assert!(!out.status.success(),
-        "a fit without the applied-window proof must be refused");
+    let out = compare(&["@a", "@b"], &["--in-sample"]);
+    assert!(!out.status.success(), "an edited fit must be refused");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("no training partition"),
-        "must name the missing proof and the fix:\n{stderr}");
+    assert!(stderr.contains("names a fit run that did not complete and is not read")
+        && stderr.contains("is damaged") && stderr.contains("fit.meta.json"),
+        "must name the damaged run and the edited file:\n{stderr}");
+}
+
+/// The refusal `compare` gives a stored fit that held rows out.
+fn assert_held_out_refusal(stderr: &str) {
+    assert!(stderr.contains("held rows out of its training data") && stderr.contains("step 7")
+        && stderr.contains("--in-sample"),
+        "the refusal says rows were held out, when held-out scores arrive, and the \
+         in-sample alternative:\n{stderr}");
 }
 
 /// gh#585 (Stage 3.2): `pfilter --score-from TIME` assimilates the full
@@ -209,6 +207,7 @@ fn pfilter_score_from_windows_the_trace_not_the_likelihood() {
         Command::new(&bin).env_remove("CLICOLOR_FORCE")
             .args(&args)
             .current_dir(dir)
+            .env("CAMDL_STORE", dir.join("store"))
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .output()
             .expect("spawn camdl")
@@ -271,7 +270,7 @@ fn fit_run_applies_holdout_and_records_the_training_window() {
     std::fs::write(dir.join("obs.tsv"),
         "time\tweekly_cases\n7\t1\n14\t2\n21\t3\n28\t4\n35\t5\n").unwrap();
     let toml_src = format!(r#"
-output_dir = "results"
+store = "results"
 
 [model]
 camdl = "{ir}"
@@ -350,7 +349,7 @@ dt = 1.0
 /// a `[data.holdout]` file for `weekly_cases` only: training t = 7, 14, 21
 /// and held-out rows t = 28, 35. `detection`'s training file is the caller's,
 /// so a test can make it end before or after the held-out rows.
-fn write_partial_holdout_fit(sub: &Path, beta: f64, detection_tsv: &str) {
+fn write_partial_holdout_fit(sub: &Path, store: &str, beta: f64, detection_tsv: &str) {
     std::fs::create_dir_all(sub).unwrap();
     std::fs::write(sub.join("cases.tsv"),
         "time\tweekly_cases\n7\t1\n14\t2\n21\t3\n").unwrap();
@@ -358,7 +357,7 @@ fn write_partial_holdout_fit(sub: &Path, beta: f64, detection_tsv: &str) {
         "time\tweekly_cases\n28\t4\n35\t5\n").unwrap();
     std::fs::write(sub.join("detection.tsv"), detection_tsv).unwrap();
     std::fs::write(sub.join("fit.toml"), format!(r#"
-output_dir = "results"
+store = "{store}"
 
 [model]
 camdl = "{ir}"
@@ -396,9 +395,9 @@ dt = 1.0
 "#, ir = golden_ir().canonicalize().unwrap().display())).unwrap();
 }
 
-fn fit_run(bin: &Path, sub: &Path) -> std::process::Output {
+fn fit_run(bin: &Path, sub: &Path, label: &str) -> std::process::Output {
     Command::new(bin).env_remove("CLICOLOR_FORCE")
-        .args(["fit", "run", "fit.toml", "--seed", "1"])
+        .args(["fit", "run", "fit.toml", "--seed", "1", "--label", label])
         .current_dir(sub)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output()
@@ -418,8 +417,8 @@ fn partial_holdout_refuses_training_data_inside_the_held_out_window() {
     // `detection` trains at t = 14, 28, 42: past the first held-out row of
     // `weekly_cases` (t = 28).
     let leaky = tmp.path().join("leaky");
-    write_partial_holdout_fit(&leaky, 0.10, "time\tdetection\n14\t1\n28\t0\n42\t1\n");
-    let out = fit_run(&bin, &leaky);
+    write_partial_holdout_fit(&leaky, "results", 0.10, "time\tdetection\n14\t1\n28\t0\n42\t1\n");
+    let out = fit_run(&bin, &leaky, "leaky");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(),
         "a stream training past the held-out rows must be refused:\n{stderr}");
@@ -431,8 +430,8 @@ fn partial_holdout_refuses_training_data_inside_the_held_out_window() {
     // row lies after the latest: `detection` ends at t = 14, `weekly_cases`
     // at t = 21, so the recorded window ends at t = 21.
     let ok = tmp.path().join("ok");
-    write_partial_holdout_fit(&ok, 0.10, "time\tdetection\n14\t1\n");
-    let out = fit_run(&bin, &ok);
+    write_partial_holdout_fit(&ok, "results", 0.10, "time\tdetection\n14\t1\n");
+    let out = fit_run(&bin, &ok, "ok");
     assert!(out.status.success(), "a valid partial holdout must fit:\nstderr={}",
         String::from_utf8_lossy(&out.stderr));
     let meta_path = find_fit_meta(&ok.join("results")).unwrap();
@@ -442,13 +441,12 @@ fn partial_holdout_refuses_training_data_inside_the_held_out_window() {
         "train_end is the latest training time over all streams: {meta}");
 }
 
-/// A stored `[data.holdout]` fit whose training data runs past its recorded
-/// `train_end` — what a fit run before `train_end` covered every bound
-/// stream looks like — is refused the `hold_out_tail` stamp by `compare`
-/// rather than scored: the rows past `train_end` in a training file are
-/// data θ was fitted to.
+/// Two stored `[data.holdout]` fits whose training data ends before the
+/// recorded `train_end`: `compare` refuses to score their held-out rows, and
+/// under `--in-sample` scores their training rows, each scored file checked
+/// against the hash the fit recorded for it.
 #[test]
-fn compare_refuses_holdout_stamp_when_training_runs_past_train_end() {
+fn compare_refuses_a_partial_holdout_and_scores_its_training_rows_in_sample() {
     let bin = skip_if_missing_binary();
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
@@ -456,53 +454,38 @@ fn compare_refuses_holdout_stamp_when_training_runs_past_train_end() {
     // Two valid partial-holdout fits: `detection` ends training at t = 14,
     // before the recorded train_end = 21.
     let fits = [dir.join("a"), dir.join("b")];
-    for (sub, beta) in fits.iter().zip([0.10, 0.15]) {
-        write_partial_holdout_fit(sub, beta, "time\tdetection\n14\t1\n");
-        let out = fit_run(&bin, sub);
+    for ((sub, beta), label) in fits.iter().zip([0.10, 0.15]).zip(["a", "b"]) {
+        write_partial_holdout_fit(sub, "../results", beta, "time\tdetection\n14\t1\n");
+        let out = fit_run(&bin, sub, label);
         assert!(out.status.success(), "fit run in {} failed:\nstderr={}",
             sub.display(), String::from_utf8_lossy(&out.stderr));
     }
-    let compare = || {
+    let compare = |extra: &[&str]| {
         Command::new(&bin).env_remove("CLICOLOR_FORCE")
-            .args(["compare", "a/fit.toml", "b/fit.toml",
+            .args(["compare", "@a", "@b",
                    "--format", "json", "--particles", "100", "--replicates", "1"])
+            .args(extra)
             .current_dir(dir)
+            .env("CAMDL_STORE", dir.join("results"))
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .output().expect("spawn camdl")
     };
 
-    // A valid partial holdout is scored held-out: only weekly_cases' t = 28
-    // and 35 lie past train_end = 21.
-    let out = compare();
-    assert!(out.status.success(), "valid partial-holdout compare failed:\nstderr={}",
+    let out = compare(&[]);
+    assert!(!out.status.success(), "the held-out rows must not be scored");
+    assert_held_out_refusal(&String::from_utf8_lossy(&out.stderr));
+
+    // In sample, the training rows are scored: t = 7, 14 and 21.
+    let out = compare(&["--in-sample"]);
+    assert!(out.status.success(), "in-sample partial-holdout compare failed:\nstderr={}",
         String::from_utf8_lossy(&out.stderr));
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json output");
     for row in v["rows"].as_array().unwrap() {
-        assert_eq!(row["conditioning"]["hold_out_tail"]["train_end"],
-            serde_json::json!(21.0), "row must be stamped hold_out_tail: {row}");
-        assert_eq!(row["t_score"], serde_json::json!(2), "{row}");
+        assert_eq!(row["conditioning"], serde_json::json!("in_sample"), "{row}");
+        assert_eq!(row["t_score"], serde_json::json!(3), "{row}");
     }
-    // The held-out file is scored, and checked against the hash the fit
-    // recorded for it (`holdout_hashes`), like every training file.
-    assert!(v["data_change_unchecked"].is_null(),
-        "every scored file, the holdout file included, was checked:\n{v}");
+    assert!(v["data_change_unchecked"].is_null(), "every scored file was checked:\n{v}");
     assert!(v["data_changed"].is_null(), "nothing changed:\n{v}");
-
-    // The defective shape: `detection`'s training file now runs to t = 42,
-    // past the recorded train_end = 21. Its rows at t = 28 and 42 would be
-    // scored as held out although they are training data.
-    for sub in &fits {
-        let mut f = std::fs::OpenOptions::new()
-            .append(true).open(sub.join("detection.tsv")).unwrap();
-        std::io::Write::write_all(&mut f, b"28\t0\n42\t1\n").unwrap();
-    }
-    let out = compare();
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success(),
-        "training data past train_end must refuse the hold_out_tail stamp:\n{stderr}");
-    assert!(stderr.contains("'detection'") && stderr.contains("Re-run")
-            && stderr.contains("--in-sample"),
-        "the refusal must name the stream and both fixes:\n{stderr}");
 }
 
 /// gh#585: every method records the applied training window, not only IF2 and
@@ -529,7 +512,7 @@ fn every_method_records_the_training_window() {
         std::fs::write(dir.join("obs.tsv"),
             "time\tweekly_cases\n7\t1\n14\t2\n21\t3\n28\t4\n35\t5\n").unwrap();
         std::fs::write(dir.join("fit.toml"), format!(r#"
-output_dir = "results"
+store = "results"
 
 [model]
 camdl = "{ir}"
@@ -574,77 +557,4 @@ dt = 1.0
         assert_eq!(meta["training_partition"]["extent"]["t"], serde_json::json!(21.0),
             "{name}: fit.meta.json must record the applied training window: {meta}");
     }
-}
-
-/// gh#585: a stored fit that carries no training-window record gets one when
-/// it is re-run, even though the rerun is a cache hit (same problem, same
-/// engine version) and trains nothing: the window is a function of the problem
-/// the stored run's identity seals. This is what makes "re-run the fit", the
-/// remedy `compare` names when the record is missing, work.
-#[test]
-fn a_cache_hit_rerun_records_a_missing_training_window() {
-    let bin = skip_if_missing_binary();
-    let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path();
-    std::fs::write(dir.join("obs.tsv"),
-        "time\tweekly_cases\n7\t1\n14\t2\n21\t3\n28\t4\n35\t5\n").unwrap();
-    std::fs::write(dir.join("fit.toml"), format!(r#"
-output_dir = "results"
-
-[model]
-camdl = "{ir}"
-
-[data]
-holdout_after = 21.0
-
-[data.observations]
-weekly_cases = "obs.tsv"
-
-[estimate.beta]
-bounds = [0.01, 0.5]
-start  = 0.1
-prior  = {{ uniform = {{}} }}
-
-[fixed]
-sigma    = 0.25
-gamma    = 0.3
-rho      = 0.5
-k        = 10.0
-p_detect = 0.5
-N0       = 1000
-I0       = 5
-
-[method]
-algorithm = "mh"
-backend = "ode"
-chains = 1
-iterations = 20
-burn_in = 5
-
-[config]
-dt = 1.0
-"#, ir = golden_path())).unwrap();
-    let run = || Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .args(["fit", "run", "fit.toml", "--seed", "1"])
-        .current_dir(dir)
-        .env("CAMDL_SKIP_VERSION_CHECK", "1")
-        .output()
-        .expect("spawn camdl");
-    let out = run();
-    assert!(out.status.success(), "fit run failed:\n{}", String::from_utf8_lossy(&out.stderr));
-    let meta_path = find_fit_meta(&dir.join("results")).expect("a fit.meta.json");
-    let read = || -> serde_json::Value {
-        serde_json::from_str(&std::fs::read_to_string(&meta_path).unwrap()).unwrap()
-    };
-    // What a fit stored before its method recorded the window looks like.
-    let mut meta = read();
-    meta.as_object_mut().unwrap().remove("training_partition");
-    std::fs::write(&meta_path, serde_json::to_string_pretty(&meta).unwrap()).unwrap();
-
-    let out = run();
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "rerun failed:\n{stderr}");
-    assert!(stderr.contains("cache hit"), "the rerun reuses the stored run:\n{stderr}");
-    assert_eq!(read()["training_partition"]["extent"]["t"], serde_json::json!(21.0),
-        "the cache-hit rerun must record the missing training window");
 }

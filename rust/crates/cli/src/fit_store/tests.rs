@@ -106,7 +106,7 @@ fn open() -> Opened {
         &root.path().join("camdl-store"),
         crate::camdl_store::ambient(),
         crate::camdl_store::camdl_top_level(),
-        register(crate::camdl_store::camdl_kinds()),
+        crate::camdl_store::camdl_kinds(),
     )
     .unwrap();
     let info = RunInfo::new(&Given::default(), &(), &StoreRequest::default()).unwrap();
@@ -125,13 +125,22 @@ fn model_dep(o: &Opened, model: &ir::Model) -> Dep<CompiledModel> {
 }
 
 fn try_resolved(fx: &Fixture, o: &Opened, config: &FitConfig) -> Result<ResolvedProblem, String> {
+    try_resolved_as(fx, o, config, DataOrigin::Files)
+}
+
+fn try_resolved_as(fx: &Fixture, o: &Opened, config: &FitConfig, origin: DataOrigin) -> Result<ResolvedProblem, String> {
     resolve_problem(
         &config.problem,
         &fx.model,
         model_dep(o, &fx.model),
         ModelSourceFile { bytes: MODEL.as_bytes().to_vec(), camdl: true },
-        ProblemLabels { model: "model".into(), sweep_point: None },
+        origin,
     )
+}
+
+/// A problem posed on the data files `config` names.
+fn real_data(fx: &Fixture, o: &Opened, config: &FitConfig) -> ResolvedProblem {
+    try_resolved(fx, o, config).unwrap()
 }
 
 fn resolved(fx: &Fixture, o: &Opened, config: &FitConfig) -> ResolvedProblem {
@@ -139,7 +148,8 @@ fn resolved(fx: &Fixture, o: &Opened, config: &FitConfig) -> ResolvedProblem {
 }
 
 fn store_problem(o: &Opened, problem: &ResolvedProblem) -> Stored<FitProblem> {
-    match o.store.begin::<FitProblem>(&problem.identity, &problem.labels, &o.info, Reuse::IfCompleted).unwrap() {
+    let labels = ProblemLabels { model: "model".into(), sweep_point: None };
+    match o.store.begin::<FitProblem>(&problem.identity, &labels, &o.info, Reuse::IfCompleted).unwrap() {
         Begin::Claimed(mut run) => {
             write_problem(&mut run, problem).unwrap();
             run.finish().unwrap()
@@ -153,7 +163,7 @@ fn run_identity(problem: &Stored<FitProblem>, config: &FitConfig) -> (FitRunIden
     let method = config.inference.method.as_ref().unwrap();
     let (settings, length) = MethodSettings::of(method).unwrap();
     let (_, perturbation) = split_estimate(&config.problem.estimate).unwrap();
-    let labels = RunLabels { method: settings.algorithm.clone(), seed: 1 };
+    let labels = RunLabels { method: settings.algorithm.clone(), seed: 1, quantities: None };
     let chain = ChainIdentity {
         problem: problem.dep_all(),
         method: settings,
@@ -338,19 +348,8 @@ fn the_tree_is_the_layout() {
     let id = PredictIdentity {
         source: ParameterSource::Posterior { draws: run.dep_all(), problem: problem.dep_all() },
         data: BTreeMap::new(),
-        options: PredictOptions {
-            mode: PredictMode::Forecast,
-            reach: Some(Finite::new(7.0).unwrap()),
-            draws: 100,
-            seed: ProcessSeed { seed: 1 },
-            streams: Vec::new(),
-            scenarios: Vec::new(),
-            sweep: Vec::new(),
-            by_chain: false,
-            excluded_chains: Vec::new(),
-            particles: None,
-            allow_forcing_extrapolation: false,
-        },
+        quantities: None,
+        options: PredictOptions { mode: PredictMode::Forecast, settings: "{\"reach\":\"7 days\"}".into(), design: BTreeMap::new() },
     };
     let labels = PredictionLabels { mode: PredictMode::Forecast.label().into(), scenarios: Vec::new(), model: "model".into() };
     let prediction = match o.store.begin::<Prediction>(&id, &labels, &o.info, Reuse::IfCompleted).unwrap() {
@@ -466,4 +465,105 @@ fn a_stored_fit_gives_its_compile_and_its_inputs() {
     assert_eq!(fit.config.problem.data.as_ref().unwrap().observations["cases"], "inputs/cases.tsv",
         "the config names the stored file; it is not a path into the folder");
     assert_eq!(fit.held_out.keys().collect::<Vec<_>>(), ["cases", "recoveries"]);
+}
+
+/// A problem whose data a `[synthetic]` table generated keeps what generated
+/// it: the true parameters file, stored and checked, the dataset's one seed
+/// and the table's settings, so the problem read back is the one posed. The
+/// truth is part of the problem: another truth is another problem.
+#[test]
+fn a_synthetic_problem_reads_back_with_its_truth() {
+    use store::ContentAddressed;
+    let fx = fixture();
+    let o = open();
+    let truth = "beta = 0.4\ngamma = 0.2\n";
+    std::fs::write(fx.dir.path().join("truth.toml"), truth).unwrap();
+    let with = |seed: u64| {
+        fit_toml("file = \"wide.tsv\"", 0.02).replace(
+            "[estimate]",
+            &format!("[synthetic]\ntrue_params = \"{}\"\nsim_seeds = [{seed}]\n[estimate]",
+                fx.dir.path().join("truth.toml").display()),
+        )
+    };
+    let config = fx.config(&with(7));
+    let generated = |c: &FitConfig| try_resolved_as(&fx, &o, c, DataOrigin::Generated).unwrap();
+    let problem = generated(&config);
+    let stored = store_problem(&o, &problem);
+    let fit = read_fit(&o.store, &Handle::IdPrefix(stored.id().key().to_hex())).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let bound = fit.bind_in(scratch.path()).unwrap();
+    let spec = bound.synthetic.as_ref().expect("the [synthetic] table is part of the stored problem");
+    assert_eq!(std::fs::read_to_string(&spec.true_params).unwrap(), truth, "the truth is the file's bytes");
+    assert_eq!(spec.sim_seeds.to_vec().unwrap(), [7]);
+    assert_eq!(spec.backend, config.problem.synthetic.as_ref().unwrap().backend);
+    assert!(bound.data.is_some(), "the generated data is the problem's data");
+
+    let other_seed = generated(&fx.config(&with(8)));
+    assert_ne!(other_seed.identity.content_hash(), problem.identity.content_hash(), "the seed is the problem's");
+    std::fs::write(fx.dir.path().join("truth.toml"), "beta = 0.5\ngamma = 0.2\n").unwrap();
+    let other_truth = generated(&fx.config(&with(7)));
+    assert_ne!(other_truth.identity.content_hash(), problem.identity.content_hash(), "the truth is the problem's");
+}
+
+/// A fit of real data whose file also declares `[synthetic]` (the truth `fit
+/// recovery` compares an estimate with) stores the truth with the problem,
+/// outside its identity: the problem is the data's, so another truth is the
+/// same problem. Any number of `sim_seeds` is accepted, and the problem read
+/// back carries the table and the truth.
+#[test]
+fn a_real_data_fit_keeps_its_recovery_truth_outside_its_identity() {
+    use store::ContentAddressed;
+    let fx = fixture();
+    let o = open();
+    let truth = fx.dir.path().join("truth.toml");
+    std::fs::write(&truth, "beta = 0.4\ngamma = 0.2\n").unwrap();
+    let text = fit_toml("file = \"wide.tsv\"", 0.02).replace(
+        "[estimate]",
+        &format!("[synthetic]\ntrue_params = \"{}\"\nsim_seeds = [1, 2, 3]\n[estimate]", truth.display()),
+    );
+    let config = fx.config(&text);
+    let problem = real_data(&fx, &o, &config);
+    let stored = store_problem(&o, &problem);
+    let fit = read_fit(&o.store, &Handle::IdPrefix(stored.id().key().to_hex())).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let bound = fit.bind_in(scratch.path()).unwrap();
+    let spec = bound.synthetic.as_ref().expect("the recovery truth is read back with the problem");
+    assert_eq!(std::fs::read_to_string(&spec.true_params).unwrap(), "beta = 0.4\ngamma = 0.2\n");
+    assert_eq!(spec.sim_seeds.to_vec().unwrap(), [1, 2, 3]);
+
+    std::fs::write(&truth, "beta = 0.5\ngamma = 0.2\n").unwrap();
+    let other = real_data(&fx, &o, &fx.config(&text));
+    assert_eq!(other.identity.content_hash(), problem.identity.content_hash(), "the truth does not key a real-data fit");
+}
+
+/// A compile whose derivative tables differ (what a camdlc with an edited
+/// autodiff emits) is another compiled model, and so poses another fit
+/// problem: every run of it re-keys. A method that reads no gradient re-keys
+/// too, since the problem names the whole compile; that over-keying costs a
+/// recompute and is accepted, where reusing a run fitted under other
+/// gradients would not be.
+#[test]
+fn a_change_to_the_derivative_tables_re_keys_the_fit() {
+    use ir::deriv::DerivEntry;
+    use ir::expr::Expr;
+    use store::ContentAddressed;
+    let fx = fixture();
+    let o = open();
+    let config = fx.config(&fit_toml("file = \"wide.tsv\"", 0.02));
+    let mut edited = fx.model.clone();
+    let t = edited.transitions.first_mut().expect("the fixture has a transition");
+    t.rate_grad.insert("beta".to_string(), DerivEntry::Grad(Expr::const_(2.0)));
+    let as_problem = |model: &ir::Model| {
+        resolve_problem(
+            &config.problem,
+            model,
+            model_dep(&o, model),
+            ModelSourceFile { bytes: MODEL.as_bytes().to_vec(), camdl: true },
+            DataOrigin::Files,
+        )
+        .unwrap()
+    };
+    assert_ne!(model_dep(&o, &edited).id(), model_dep(&o, &fx.model).id(), "another compiled model");
+    assert_ne!(as_problem(&edited).identity.content_hash(), as_problem(&fx.model).identity.content_hash(),
+        "and so another fit problem");
 }

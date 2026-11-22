@@ -1,12 +1,11 @@
-//! End-to-end acceptance for the fit OUTPUT ENVELOPE projection in
-//! `camdl show` / `camdl cat`: a completed fit (a CAS segment with no fit-wide
-//! `run.json`) is discoverable by a fit handle. After `fit run` + `fit predict`,
-//! `camdl show @label` lists the discoverable output files, and `camdl cat
-//! @label --stream <rel>` streams an individual output (with the `.tsv`
-//! convenience for an extensionless stream).
-//!
-//! Phase 1c of
-//! docs/dev/proposals/2026-06-27-sealed-fit-packets-handles-and-override-algebra.md
+//! `camdl show` and `camdl cat` on a stored fit run named by its label and on
+//! the prediction stored inside it. After `fit run --label foo` and
+//! `fit predict --fit @foo`, `camdl show @foo` lists the run's result files,
+//! `camdl show <prediction folder>` lists the prediction's, and
+//! `camdl cat <handle> --stream <rel>` streams one of them (an extensionless
+//! stream resolves its `.tsv`).
+
+mod fit_store_support;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -76,9 +75,9 @@ simulate {
 /// A short observed weekly series (rise-and-fall), times on the weekly grid.
 const DATA: &str = "time\tweekly_cases\n7\t16\n14\t166\n21\t626\n28\t1303\n35\t1260\n42\t1023\n49\t327\n56\t91\n";
 
-fn fit_toml(algorithm_block: &str, output_dir: &str) -> String {
+fn fit_toml(algorithm_block: &str, store: &str) -> String {
     format!(
-        r#"output_dir = "{output_dir}"
+        r#"store = "{store}"
 
 [model]
 camdl = "model.camdl"
@@ -108,6 +107,8 @@ fn run(bin: &Path, dir: &Path, args: &[&str]) -> std::process::Output {
         // Ad-hoc run: skip the camdlc git-hash handshake (the binary under test
         // is self-consistent). Mirrors the runbook's ad-hoc guidance.
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        // The store `fit.toml` names, for the commands that read it.
+        .env("CAMDL_STORE", dir.join("results"))
         .output()
         .expect("spawn camdl")
 }
@@ -146,7 +147,7 @@ thin = 1
         &tmp,
         // Default options: their outputs are the bare paths `show`/`cat`
         // name (gh#896).
-        &["fit", "predict", "--fit", "fit.toml"],
+        &["fit", "predict", "--fit", "@foo"],
     );
     assert!(
         out.status.success(),
@@ -155,8 +156,13 @@ thin = 1
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // ── (1) `camdl show @foo` lists predictive/ and quantities/ outputs ──
-    let out = run(&bin, &tmp, &["show", "@foo", "--root", "results"]);
+    // The prediction `fit predict` stored, a result of its own inside the run.
+    let predictions = fit_store_support::predictions(&tmp.join("results"));
+    assert_eq!(predictions.len(), 1, "one stored prediction: {predictions:?}");
+    let prediction = predictions[0].to_string_lossy().into_owned();
+
+    // ── (1) `camdl show @foo` lists the run's result files ──
+    let out = run(&bin, &tmp, &["show", "@foo", "--store", "results"]);
     assert!(
         out.status.success(),
         "show @foo failed:\nstdout={}\nstderr={}",
@@ -164,37 +170,52 @@ thin = 1
         String::from_utf8_lossy(&out.stderr)
     );
     let show = String::from_utf8_lossy(&out.stdout);
+    let fields = show_fields(&show);
+    assert_eq!(fields.get("kind").map(String::as_str), Some("fit_run"), "kind header; got:\n{show}");
+    assert_eq!(fields.get("method").map(String::as_str), Some("pgas"), "method header; got:\n{show}");
+    for f in ["draws.tsv", "fit_state.toml", "chain_0/trace.tsv"] {
+        assert!(show.lines().any(|l| l.trim() == f), "show @foo lists {f}; got:\n{show}");
+    }
+
+    // ── (2) `camdl show <prediction>` lists its predictive and quantities
+    // outputs ──
+    let out = run(&bin, &tmp, &["show", &prediction, "--store", "results"]);
     assert!(
-        show.contains("predictive/weekly_cases.tsv"),
-        "show envelope must list a predictive/ output path; got:\n{show}"
+        out.status.success(),
+        "show <prediction> failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let show_pred = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(show_fields(&show_pred).get("kind").map(String::as_str), Some("prediction"),
+        "kind header; got:\n{show_pred}");
+    assert!(
+        show_pred.contains("predictive/weekly_cases.tsv"),
+        "show must list a predictive/ output path; got:\n{show_pred}"
     );
     assert!(
-        show.contains("quantities/peak.tsv"),
-        "show envelope must list a quantities/ output path; got:\n{show}"
+        show_pred.contains("quantities-model/peak.tsv"),
+        "show must list a quantities-model/ output path; got:\n{show_pred}"
     );
     // gh#892: and the file that says whether that predictive is complete.
     // `fit predict` writes `report.json` on every run — the deterministic
     // failures, empty when nothing refused — so a listing that omits it sends
     // a reader to the band without the record of what did not make it.
     assert!(
-        show.contains("report.json"),
-        "show envelope must list the predictive's report.json beside it; \
-         got:\n{show}"
+        show_pred.contains("report.json"),
+        "show must list the predictive's report.json beside it; got:\n{show_pred}"
     );
-    // The header fields the proposal specifies are present.
-    assert!(show.contains("kind") && show.contains("fit"), "kind=fit header; got:\n{show}");
-    assert!(show.contains("foo"), "label is surfaced; got:\n{show}");
 
-    // ── (2) `camdl cat @foo --stream predictive/weekly_cases` → TSV w/ q50 ──
-    // Extensionless stream resolves the `.tsv` sibling.
+    // ── (3) `camdl cat <prediction> --stream predictive/weekly_cases` → TSV
+    // with q50; an extensionless stream resolves the `.tsv` sibling ──
     let out = run(
         &bin,
         &tmp,
-        &["cat", "@foo", "--stream", "predictive/weekly_cases", "--root", "results"],
+        &["cat", &prediction, "--stream", "predictive/weekly_cases", "--store", "results"],
     );
     assert!(
         out.status.success(),
-        "cat @foo predictive stream failed:\nstdout={}\nstderr={}",
+        "cat predictive stream failed:\nstdout={}\nstderr={}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
@@ -205,27 +226,23 @@ thin = 1
         "predictive TSV header carries the q50 band column; got header: {header:?}"
     );
 
-    // ── (3) `camdl cat @foo --stream quantities/peak.tsv` → non-empty ──
+    // ── (4) `camdl cat <prediction> --stream quantities-model/peak.tsv` →
+    // non-empty ──
     let out = run(
         &bin,
         &tmp,
-        &["cat", "@foo", "--stream", "quantities/peak.tsv", "--root", "results"],
+        &["cat", &prediction, "--stream", "quantities-model/peak.tsv", "--store", "results"],
     );
     assert!(
         out.status.success(),
-        "cat @foo quantities/peak.tsv failed:\nstdout={}\nstderr={}",
+        "cat quantities-model/peak.tsv failed:\nstdout={}\nstderr={}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(
-        !out.stdout.is_empty(),
-        "quantities/peak.tsv must be non-empty"
-    );
+    assert!(!out.stdout.is_empty(), "quantities-model/peak.tsv must be non-empty");
 
-    // ── (4) `@foo` names a run: no `--stream` defaults to the run's
-    // `fit_state.toml`, as for its leaf directory, and the folder's
-    // `fit.meta.json` is still one `--stream` away ──
-    let out = run(&bin, &tmp, &["cat", "@foo", "--root", "results"]);
+    // ── (5) `@foo` names a run: no `--stream` gives its `fit_state.toml` ──
+    let out = run(&bin, &tmp, &["cat", "@foo", "--store", "results"]);
     assert!(
         out.status.success(),
         "cat @foo (default) failed:\nstderr={}",
@@ -233,26 +250,32 @@ thin = 1
     );
     let state = String::from_utf8_lossy(&out.stdout);
     assert!(state.contains("method"), "default cat emits the run's fit_state.toml; got:\n{state}");
-    let out = run(&bin, &tmp, &["cat", "@foo", "--stream", "fit.meta.json", "--root", "results"]);
-    assert!(out.status.success(), "cat @foo --stream fit.meta.json failed");
-    let meta = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        meta.contains("\"source_model\"") && meta.contains("\"estimated\""),
-        "the folder's fit.meta.json sidecar; got:\n{meta}"
-    );
 
-    // ── (5) a missing stream errors actionably (suggests `camdl show`) ──
+    // ── (6) a missing stream is refused, listing the files the run holds ──
     let out = run(
         &bin,
         &tmp,
-        &["cat", "@foo", "--stream", "predictive/nope", "--root", "results"],
+        &["cat", "@foo", "--stream", "predictive/nope", "--store", "results"],
     );
     assert!(!out.status.success(), "a missing stream must error, not exit 0");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("camdl show"),
-        "miss points the user at `camdl show`; got: {stderr}"
+        stderr.contains("holds no file `predictive/nope`") && stderr.contains("fit_state.toml"),
+        "the refusal lists the files there are; got: {stderr}"
     );
 
+    // ── (7) the label the run was named by is surfaced ──
+    assert!(show.contains("foo"), "label is surfaced; got:\n{show}");
+
     let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// The `name → value` pairs of `camdl show`'s text output: each field's name
+/// on one line and its value, indented, on the next.
+fn show_fields(show: &str) -> std::collections::BTreeMap<String, String> {
+    let lines: Vec<&str> = show.lines().collect();
+    lines.windows(2)
+        .filter(|w| !w[0].starts_with(' ') && w[1].starts_with("  "))
+        .map(|w| (w[0].trim().to_string(), w[1].trim().to_string()))
+        .collect()
 }

@@ -26,7 +26,7 @@ camdl fit predict @r0
 ## Where the Poisson model misses
 
 ```{.camdl-run figure="ppc-r0.svg" caption="Posterior predictive check of the Poisson model: median (line), 50% and 90% bands, and the observed counts (black)."}
-uv run plot_predictive.py ppc-r0.svg Poisson=results/fits/fit_r0-*/predict/*/
+uv run plot_predictive.py ppc-r0.svg Poisson=camdl-store/*/fit/sir_r0-*/runs/pmmh-*/seed_4-*/predict/*/
 ```
 
 The two panels answer different questions. The free-forward band (left)
@@ -106,8 +106,8 @@ check shows the consequence:
 
 ```{.camdl-run figure="ppc-both.svg" caption="Posterior predictive checks of both models: median (line), 50% and 90% bands, and the observed counts (black)." show-match="subsampling"}
 camdl fit predict @negbin
-uv run plot_predictive.py ppc-both.svg Poisson=results/fits/fit_r0-*/predict/*/ \
-  "Negative binomial"=results/fits/fit_negbin-*/predict/*/
+uv run plot_predictive.py ppc-both.svg Poisson=camdl-store/*/fit/sir_r0-*/runs/pmmh-*/seed_4-*/predict/*/ \
+  "Negative binomial"=camdl-store/*/fit/sir_negbin-*/runs/pmmh-*/seed_4-*/predict/*/
 ```
 
 The negative binomial's one-day-ahead band is wider and holds 13 of the 14
@@ -194,7 +194,7 @@ fraction of the school ever infected. `fit predict` wrote its posterior
 quantiles for both fits:
 
 ```{.camdl-run}
-head results/fits/fit_*/predict/*/quantities/attack_rate.tsv
+head camdl-store/*/fit/sir_*/runs/pmmh-*/seed_4-*/predict/*/quantities-model/attack_rate.tsv
 ```
 
 Both models infer that nearly the whole school was infected: the posterior

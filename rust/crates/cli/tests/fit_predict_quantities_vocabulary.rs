@@ -3,7 +3,7 @@
 //!
 //! Proposal `docs/dev/proposals/2026-08-19-quantities-as-a-separable-layer.md`,
 //! answering gh#618. The obstacle it removes is specific: `fit predict` reads
-//! the model IR ARCHIVED in the fit leaf, so editing a `quantities {}` formula
+//! the model IR stored with the fit, so editing a `quantities {}` formula
 //! in the source has no effect on a fit that has already run. It does not
 //! orphan the fit — it simply does nothing, which is the worse failure, because
 //! the wrong number keeps being reported at exit 0.
@@ -15,24 +15,27 @@
 //! - two vocabularies on one fit land at two content addresses; the same
 //!   vocabulary twice lands at one;
 //! - an in-place edit of the vocabulary re-keys the table;
-//! - the FIT's identity does not move — same `run_id`, same segment, byte-for-
-//!   byte, with and without `--quantities`;
+//! - the FIT's identity does not move — same `run_id`, same run folder,
+//!   byte-for-byte, with and without `--quantities`;
 //! - a name the model does not declare is a hard error naming the name AND the
 //!   file;
-//! - a model source that has drifted from the fit is refused rather than used.
+//! - the vocabulary is compiled against the model source the fit's problem
+//!   stores: an edit to the working copy is not used, and an edit to the
+//!   stored copy is refused.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Where the latest `fit predict` of a run in `seg` wrote:
-/// `<seg>/predict/<run id>-<address key>/` (gh#896), the directory whose
-/// `report*.json` (one written by every predict) is newest. A path that does not
-/// exist while nothing has been predicted.
-fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
-    std::fs::read_dir(seg.join("predict"))
-        .into_iter().flatten().flatten().map(|e| e.path())
+mod fit_store_support;
+
+/// The prediction folder the latest `fit predict` of the run `run` wrote: of
+/// its `predict/<mode>-<id12>/` folders, the one whose `report*.json` (one
+/// written by every predict) is newest. A path that does not exist while
+/// nothing has been predicted.
+fn predict_out(run: &Path) -> PathBuf {
+    fit_store_support::predictions(run).into_iter()
         .filter_map(|d| {
-            // Newest `report*.json` (keyed by chain selection) in the directory.
+            // Newest `report*.json` (keyed by chain selection) in the folder.
             let t = std::fs::read_dir(&d).ok()?.flatten()
                 .filter(|e| {
                     let n = e.file_name().to_string_lossy().into_owned();
@@ -44,9 +47,8 @@ fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
         })
         .max_by_key(|(t, _)| *t)
         .map(|(_, d)| d)
-        .unwrap_or_else(|| seg.join("predict").join("none"))
+        .unwrap_or_else(|| run.join("predict").join("none"))
 }
-
 
 fn binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_camdl"))
@@ -105,7 +107,7 @@ simulate {
 
 const DATA: &str = "time\tweekly_cases\n7\t16\n14\t166\n21\t626\n28\t1303\n35\t1260\n42\t1023\n49\t327\n56\t91\n";
 
-const FIT_TOML: &str = r#"output_dir = "results"
+const FIT_TOML: &str = r#"store = "results"
 
 [model]
 camdl = "model.camdl"
@@ -143,6 +145,7 @@ fn run(dir: &Path, args: &[&str]) -> std::process::Output {
         .args(args)
         .current_dir(dir)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("CAMDL_STORE", dir.join("results"))
         .output()
         .expect("spawn camdl")
 }
@@ -159,10 +162,10 @@ fn assert_ok(out: &std::process::Output, what: &str) {
 struct Fit {
     _tmp: tempfile::TempDir,
     root: PathBuf,
-    segment: PathBuf,
+    run: PathBuf,
 }
 
-/// Run one small `mh` fit and return its project root + fit segment.
+/// Run one small `mh` fit and return its project root and run folder.
 fn fitted(tag: &str) -> Fit {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().to_path_buf();
@@ -172,14 +175,8 @@ fn fitted(tag: &str) -> Fit {
     let out = run(&root, &["fit", "run", "fit.toml", "--seed", "1"]);
     assert_ok(&out, &format!("fit run ({tag})"));
 
-    let fits = root.join("results").join("fits");
-    let segment = std::fs::read_dir(&fits)
-        .unwrap()
-        .flatten()
-        .map(|e| e.path())
-        .find(|p| p.is_dir())
-        .expect("a fit segment");
-    Fit { _tmp: tmp, root, segment }
+    let run = fit_store_support::the_run(&root.join("results"));
+    Fit { _tmp: tmp, root, run }
 }
 
 impl Fit {
@@ -193,7 +190,7 @@ impl Fit {
         let mut args: Vec<&str> = vec![
             "fit",
             "predict",
-            self.segment.to_str().unwrap(),
+            self.run.to_str().unwrap(),
             "--mode",
             "free_forward",
         ];
@@ -204,10 +201,10 @@ impl Fit {
         run(&self.root, &args)
     }
 
-    /// The `quantities*` addresses the fit segment currently holds, sorted.
+    /// The `quantities*` addresses the run's predictions currently hold, sorted.
     fn addresses(&self) -> Vec<String> {
-        // Across every predict directory of the fit: each vocabulary is also
-        // its own `predict/<run>-<key>/` (the key covers the file's digest).
+        // Across every prediction of the run: each vocabulary is also its own
+        // `predict/<mode>-<id12>/` (the id covers the file's digest).
         let mut names: Vec<String> = self.predict_dirs().iter()
             .flat_map(|d| std::fs::read_dir(d).unwrap().flatten()
                 .map(|e| e.file_name().to_string_lossy().into_owned()))
@@ -219,8 +216,7 @@ impl Fit {
     }
 
     fn predict_dirs(&self) -> Vec<PathBuf> {
-        std::fs::read_dir(self.segment.join("predict")).into_iter().flatten().flatten()
-            .map(|e| e.path()).filter(|p| p.is_dir()).collect()
+        fit_store_support::predictions(&self.run)
     }
 
     /// The predict directory holding `name`.
@@ -229,28 +225,18 @@ impl Fit {
             .unwrap_or_else(|| panic!("no predict directory holds {name}"))
     }
 
-    /// Every `run.json` under this fit — one per method leaf — as
-    /// (segment-relative path, bytes), sorted. This IS the fit's identity on
-    /// disk: the leaf addresses plus the records they hold.
+    /// The records that make the fit's identity on disk — `identity.json`
+    /// and `run.json` of the run and of the problem it belongs to — as
+    /// (store-relative path, bytes), sorted. A prediction's own folder, inside
+    /// the run's `predict/`, is not part of it.
     fn identity_snapshot(&self) -> Vec<(String, String)> {
-        let mut out: Vec<(String, String)> = Vec::new();
-        let mut stack = vec![self.segment.clone()];
-        while let Some(d) = stack.pop() {
-            for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
-                let p = e.path();
-                if p.is_dir() {
-                    stack.push(p);
-                } else if p.file_name().is_some_and(|n| n == "run.json") {
-                    let rel = p
-                        .strip_prefix(&self.segment)
-                        .unwrap()
-                        .to_string_lossy()
-                        .into_owned();
-                    out.push((rel, std::fs::read_to_string(&p).unwrap()));
-                }
-            }
-        }
-        assert!(!out.is_empty(), "a fit must have at least one leaf run record");
+        let store = self.root.join("results");
+        let problem = fit_store_support::problem_of(&self.run);
+        let mut out: Vec<(String, String)> = [&problem, &self.run].iter()
+            .flat_map(|d| ["identity.json", "run.json"].map(|f| d.join(f)))
+            .map(|p| (p.strip_prefix(&store).unwrap().to_string_lossy().into_owned(),
+                      std::fs::read_to_string(&p).unwrap()))
+            .collect();
         out.sort();
         out
     }
@@ -276,19 +262,19 @@ fn a_vocabulary_applied_to_a_fit_produces_its_table_and_not_the_models() {
         dir.starts_with("quantities-"),
         "a supplied vocabulary writes a keyed address, got {dir}"
     );
-    let qdir = predict_out(&f.segment).join(dir);
+    let qdir = predict_out(&f.run).join(dir);
     assert!(qdir.join("attack_rate.tsv").exists(), "the vocabulary's quantity is emitted");
     assert!(
         qdir.join("r_zero.tsv").exists(),
         "a param-bearing `let` (R0) resolves — the vocabulary is compiled against \
-         the model SOURCE, where it still exists; it is inlined away in the archived IR"
+         the model SOURCE, where it still exists; it is inlined away in the stored IR"
     );
     assert!(
         !qdir.join("model_peak.tsv").exists(),
         "the model's own quantities block must NOT be consulted"
     );
     assert!(
-        !predict_out(&f.segment).join("quantities").join("model_peak.tsv").exists(),
+        !predict_out(&f.run).join("quantities-model").join("model_peak.tsv").exists(),
         "…and this predict must not have written the model's block anywhere"
     );
 }
@@ -299,8 +285,8 @@ fn a_vocabulary_applied_to_a_fit_produces_its_table_and_not_the_models() {
 fn without_a_vocabulary_the_models_own_block_is_reported() {
     let f = fitted("control");
     assert_ok(&f.predict(None), "fit predict");
-    assert_eq!(f.addresses(), vec!["quantities", "quantities.json"]);
-    assert!(predict_out(&f.segment).join("quantities").join("model_peak.tsv").exists());
+    assert_eq!(f.addresses(), vec!["quantities-model", "quantities.json"]);
+    assert!(predict_out(&f.run).join("quantities-model").join("model_peak.tsv").exists());
 }
 
 // ── The vocabulary keys the artifact ────────────────────────────────────────
@@ -371,7 +357,7 @@ fn camdl_show_lists_the_keyed_table() {
     let dir = addrs.iter().find(|n| !n.ends_with(".json")).unwrap().clone();
     let manifest = addrs.iter().find(|n| n.ends_with(".json")).unwrap().clone();
 
-    let out = run(&f.root, &["show", f.segment.to_str().unwrap()]);
+    let out = run(&f.root, &["show", f.run.to_str().unwrap()]);
     assert_ok(&out, "camdl show");
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(
@@ -395,7 +381,7 @@ fn the_manifest_records_the_vocabulary() {
         .find(|n| n.ends_with(".json"))
         .expect("a manifest");
     let m: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(predict_out(&f.segment).join(&name)).unwrap()).unwrap();
+        serde_json::from_str(&std::fs::read_to_string(predict_out(&f.run).join(&name)).unwrap()).unwrap();
     assert!(m["vocabulary"]["file"].as_str().unwrap().ends_with("va.camdl"), "{m}");
     assert_eq!(m["vocabulary"]["sha256"].as_str().unwrap().len(), 64);
 }
@@ -406,7 +392,7 @@ fn the_manifest_records_the_vocabulary() {
 fn the_fit_run_id_is_byte_identical_with_and_without_a_vocabulary() {
     let f = fitted("identity");
     let before = f.identity_snapshot();
-    let segment_before = f.segment.clone();
+    let run_before = f.run.clone();
 
     let va = f.vocab("va.camdl", VOCAB_A);
     assert_ok(&f.predict(Some(va.to_str().unwrap())), "predict with A");
@@ -414,11 +400,12 @@ fn the_fit_run_id_is_byte_identical_with_and_without_a_vocabulary() {
     assert_ok(&f.predict(Some(vb.to_str().unwrap())), "predict with B");
     assert_ok(&f.predict(None), "predict with the model's own block");
 
-    assert_eq!(f.segment, segment_before, "the fit's segment must not move");
+    assert_eq!(fit_store_support::the_run(&f.root.join("results")), run_before,
+        "the fit's run folder must not move");
     assert_eq!(
         f.identity_snapshot(),
         before,
-        "a reporting vocabulary must leave every leaf address and run record \
+        "a reporting vocabulary must leave the run's and its problem's records \
          byte-identical — quantities are excluded from model identity, and \
          predict must not re-key the fit it reads"
     );
@@ -437,35 +424,43 @@ fn a_missing_symbol_names_the_symbol_and_the_file() {
     assert!(err.contains("bad.camdl"), "the error names the vocabulary file: {err}");
 }
 
-/// The vocabulary is compiled against the model SOURCE, but the fit ran on the
-/// ARCHIVED IR. If the source has drifted the two are different models, and
-/// reporting the fit through formulas resolved against the wrong one is a
-/// plausible-looking wrong answer. `model_ir_hash` excludes quantities, so the
-/// check asks exactly "same model apart from its reporting layer?".
+/// The vocabulary is compiled against the model source the fit's problem
+/// stores, the file the fit ran on, so an edit to the working copy of the
+/// model after the fit changes nothing the predict reads. Reporting the fit
+/// through formulas resolved against an edited model would be a
+/// plausible-looking wrong answer.
 #[test]
-fn a_drifted_model_source_is_refused_not_used() {
+fn an_edit_to_the_working_model_after_the_fit_is_not_used() {
     let f = fitted("drift");
     let va = f.vocab("va.camdl", VOCAB_A);
-    // A structural edit to the source AFTER the fit: a new compartment.
+    // A structural edit to the working source after the fit: a new compartment.
     let drifted = MODEL.replace("compartments { S, I, R }", "compartments { S, I, R, D }");
     assert_ne!(drifted, MODEL);
     std::fs::write(f.root.join("model.camdl"), &drifted).unwrap();
 
-    let out = f.predict(Some(va.to_str().unwrap()));
-    assert!(!out.status.success(), "a drifted source must be refused");
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        err.contains("no longer the model the fit ran on"),
-        "the refusal says the source drifted: {err}"
-    );
+    assert_ok(&f.predict(Some(va.to_str().unwrap())), "predict after the working model was edited");
+    let dir = f.addresses().into_iter().find(|n| n.starts_with("quantities-") && !n.ends_with(".json"))
+        .expect("the vocabulary's table");
+    assert!(predict_out(&f.run).join(dir).join("attack_rate.tsv").exists(),
+        "the vocabulary is reported against the stored model");
+}
 
-    // And the control: editing ONLY the model's quantities block is NOT drift —
-    // that is the whole point of keying the check on a quantities-free hash.
-    let reporting_only = MODEL.replace("model_peak = max(I / N)", "model_peak = max(I)");
-    assert_ne!(reporting_only, MODEL);
-    std::fs::write(f.root.join("model.camdl"), &reporting_only).unwrap();
-    assert_ok(
-        &f.predict(Some(va.to_str().unwrap())),
-        "a quantities-only source edit must NOT count as drift",
-    );
+/// An edit to the model source the problem stores leaves the problem damaged:
+/// the predict is refused, the refusal names the file that changed, and
+/// nothing is written.
+#[test]
+fn an_edit_to_the_stored_model_is_refused() {
+    let f = fitted("stored_drift");
+    let va = f.vocab("va.camdl", VOCAB_A);
+    let stored = fit_store_support::problem_of(&f.run).join("model.camdl");
+    let drifted = std::fs::read_to_string(&stored).unwrap()
+        .replace("compartments { S, I, R }", "compartments { S, I, R, D }");
+    std::fs::write(&stored, drifted).unwrap();
+
+    let out = f.predict(Some(va.to_str().unwrap()));
+    assert!(!out.status.success(), "a damaged problem must be refused");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("damaged") && err.contains("model.camdl"),
+        "the refusal names the changed file: {err}");
+    assert!(f.predict_dirs().is_empty(), "nothing is written");
 }

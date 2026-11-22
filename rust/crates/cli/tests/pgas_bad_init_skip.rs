@@ -64,6 +64,8 @@
 //! Skipped when the release binary or camdlc isn't present, mirroring
 //! `pmmh_bad_init_skip.rs`.
 
+mod fit_store_support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -160,7 +162,7 @@ fn write_fit_toml(dir: &Path, ir: &Path, data: &Path, draws: &Path) -> (PathBuf,
     // INSIDE the prior's support: the refusal below must come from the
     // observation term, not from a start the prior already excludes.
     let toml = format!(r#"
-output_dir = "{out}"
+store = "{out}"
 [model]
 camdl = "{ir}"
 [data.observations]
@@ -193,33 +195,13 @@ starts         = {{ from_posterior = "{draws}" }}
     (p, out_root)
 }
 
-/// The CAS method leaf for `method_substr` under `fits_root`.
-fn cas_method_leaf(fits_root: &Path, method_substr: &str) -> Option<PathBuf> {
-    let mut stack = vec![fits_root.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        if d.join("run.json").is_file() {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(
-                &std::fs::read_to_string(d.join("run.json")).unwrap_or_default(),
-            ) {
-                if v.get("kind").and_then(|k| k.as_str()) == Some("fit_method") {
-                    let method = v["levels"].as_array().into_iter().flatten()
-                        .find(|l| l["name"].as_str() == Some("method"))
-                        .and_then(|l| l["label"].as_str()).unwrap_or("");
-                    if method.contains(method_substr) { return Some(d); }
-                }
-            }
-        }
-        if let Ok(es) = std::fs::read_dir(&d) {
-            for e in es.flatten() { if e.path().is_dir() { stack.push(e.path()); } }
-        }
-    }
-    None
+/// The fit run of method `method` in the store at `root`.
+fn cas_method_leaf(root: &Path, method: &str) -> Option<PathBuf> {
+    fit_store_support::runs_of_method(root, method).into_iter().next()
 }
 
-/// Every `bad_init` diagnostic found in any `diagnostics.json` under `root`.
-/// The all-refused run errors BEFORE CAS finalize, so its diagnostics land in
-/// the streaming-claim leaf rather than at a predictable committed path —
-/// walking the tree finds them wherever they are.
+/// Every `bad_init` diagnostic found in any `diagnostics.json` in the store at
+/// `root`, completed or failed run alike.
 fn bad_init_entries(root: &Path) -> Vec<serde_json::Value> {
     let mut out = Vec::new();
     for path in diagnostics_files(root) {
@@ -368,7 +350,7 @@ fn a_refused_start_is_redrawn_and_the_chain_runs() {
         "the fit must succeed: a refused draw is redrawn.\n\
          stdout:\n{}\nstderr:\n{}", run.stdout, run.stderr);
 
-    let method_dir = cas_method_leaf(&run.out_root.join("fits"), "pgas")
+    let method_dir = cas_method_leaf(&run.out_root, "pgas")
         .expect("committed `pgas` method leaf");
     let rows = start_rows(&method_dir);
     let rejected: Vec<&StartRow> = rows.iter().filter(|r| r.status == "rejected").collect();
@@ -441,7 +423,7 @@ fn all_chains_refused_is_an_error() {
     // The record: ten attempts per chain, nine rejected and the last refused.
     let leaf = {
         let mut hit = None;
-        let mut stack = vec![run.out_root.join("fits")];
+        let mut stack = vec![run.out_root.clone()];
         while let Some(d) = stack.pop() {
             if d.join("chain_starts.tsv").is_file() { hit = Some(d); break; }
             if let Ok(es) = std::fs::read_dir(&d) {
@@ -490,7 +472,8 @@ fn all_chains_refused_is_an_error() {
         &std::fs::read_to_string(leaf.join("progress.json"))
             .expect("a method that ran at all writes progress.json"),
     ).expect("progress.json parses");
-    let failed = progress["state"]["failed"].as_object()
+    // The store keeps the method's snapshot under `snapshot`.
+    let failed = progress["snapshot"]["state"]["failed"].as_object()
         .unwrap_or_else(|| panic!(
             "the run's last self-report must be `failed`, not a stale \
              `running`:\n{progress:#}"));
@@ -499,7 +482,7 @@ fn all_chains_refused_is_an_error() {
         "the reason is the one the command printed, not a bare tag: {why}");
     // And the per-chain block beside it names every chain, all refused, so a
     // reader needs nothing else to know what happened.
-    let chains = &progress["chains"];
+    let chains = &progress["snapshot"]["chains"];
     assert_eq!(chains["total"], 2, "{progress:#}");
     assert_eq!(chains["refused"], 2, "every chain refused:\n{progress:#}");
     assert_eq!(chains["running"], 0, "and none left claiming to run:\n{progress:#}");
@@ -539,7 +522,7 @@ fn a_start_the_trajectory_move_can_rescue_is_not_refused() {
         "the fixture must actually START at -inf and recover, or this test is \
          vacuous.\nstderr:\n{}", run.stderr);
 
-    let method_dir = cas_method_leaf(&run.out_root.join("fits"), "pgas")
+    let method_dir = cas_method_leaf(&run.out_root, "pgas")
         .expect("committed `pgas` method leaf");
     let mut chains = draws_chain_ids(&method_dir.join("draws.tsv"));
     chains.sort_unstable();
@@ -564,7 +547,7 @@ fn healthy_fit_keeps_every_chain() {
     assert!(!run.stderr.contains("skipped via BadInit"),
         "a healthy fit must not report a skip.\nstderr:\n{}", run.stderr);
 
-    let method_dir = cas_method_leaf(&run.out_root.join("fits"), "pgas")
+    let method_dir = cas_method_leaf(&run.out_root, "pgas")
         .expect("committed `pgas` method leaf");
     let rows = start_rows(&method_dir);
     assert!(rows.iter().all(|r| r.status == "accepted" && r.attempt == 0),
@@ -617,12 +600,12 @@ fn fit_summary_reports_a_chain_refused_at_its_start() {
          stderr:\n{}", run.stderr);
     let refused = bad[0]["chain_id"].as_u64().unwrap();
 
-    let method_dir = cas_method_leaf(&run.out_root.join("fits"), "pgas")
+    let method_dir = cas_method_leaf(&run.out_root, "pgas")
         .expect("committed `pgas` method leaf");
     let out = Command::new(camdl_bin().unwrap()).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
-        // The fit directory: `fits/<fit>/<method>/<seed>` is the leaf.
-        .args(["fit", "summary"]).arg(method_dir.parent().unwrap().parent().unwrap())
+        .env("CAMDL_STORE", &run.out_root)
+        .args(["fit", "summary"]).arg(&method_dir)
         .arg("--no-color")
         .output().expect("spawn camdl fit summary");
     let summary = String::from_utf8_lossy(&out.stdout);

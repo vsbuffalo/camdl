@@ -79,7 +79,7 @@ fn max_time(tsv: &str) -> f64 {
 fn write_fit_toml(tmp: &Path, data: &Path) -> PathBuf {
     let toml = tmp.join("fit.toml");
     write(&toml, &format!(r#"
-output_dir = "{out}"
+store = "{out}"
 [model]
 camdl = "{ir}"
 [data.observations]

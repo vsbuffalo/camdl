@@ -19,15 +19,16 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Where the latest `fit predict` of a run in `seg` wrote:
-/// `<seg>/predict/<run id>-<address key>/` (gh#896), the directory whose
-/// `report*.json` (one written by every predict) is newest. A path that does not
-/// exist while nothing has been predicted.
-fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
-    std::fs::read_dir(seg.join("predict"))
-        .into_iter().flatten().flatten().map(|e| e.path())
+mod fit_store_support;
+
+/// The prediction folder the latest `fit predict` in the store `root` wrote:
+/// of every `predict/<mode>-<id12>/` folder in it, the one whose
+/// `report*.json` (one written by every predict) is newest. A path that does
+/// not exist while nothing has been predicted.
+fn predict_out(root: &Path) -> PathBuf {
+    fit_store_support::predictions(root).into_iter()
         .filter_map(|d| {
-            // Newest `report*.json` (keyed by chain selection) in the directory.
+            // Newest `report*.json` (keyed by chain selection) in the folder.
             let t = std::fs::read_dir(&d).ok()?.flatten()
                 .filter(|e| {
                     let n = e.file_name().to_string_lossy().into_owned();
@@ -39,9 +40,8 @@ fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
         })
         .max_by_key(|(t, _)| *t)
         .map(|(_, d)| d)
-        .unwrap_or_else(|| seg.join("predict").join("none"))
+        .unwrap_or_else(|| root.join("no-prediction"))
 }
-
 
 fn binary() -> PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
@@ -117,9 +117,9 @@ const DATA: &str = "time\tweekly_cases\n7\t16\n14\t166\n21\t626\n28\t1303\n35\t1
 
 /// `k` is fixed in the fit (the swept parameter must carry a value per draw, and
 /// fixed parameters appear in every draw row exactly like estimated ones).
-fn fit_toml(output_dir: &str) -> String {
+fn fit_toml(store: &str) -> String {
     format!(
-        r#"output_dir = "{output_dir}"
+        r#"store = "{store}"
 
 [model]
 camdl = "model.camdl"
@@ -154,22 +154,15 @@ fn run(bin: &Path, dir: &Path, args: &[&str]) -> std::process::Output {
         .args(args)
         .current_dir(dir)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("CAMDL_STORE", dir.join("results"))
         .output()
         .expect("spawn camdl")
 }
 
+/// `<sub>/<stream>.tsv` of the latest prediction in the store `root`.
 fn find_artifact(root: &Path, sub: &str, stream: &str) -> Option<PathBuf> {
-    let fits = root.join("fits");
-    let entries = std::fs::read_dir(&fits).ok()?;
-    for e in entries.flatten() {
-        // gh#896: the latest `fit predict` of the run writes under
-        // `<segment>/predict/<run id>-<address key>/`.
-        let p = predict_out(&e.path()).join(sub).join(format!("{stream}.tsv"));
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    None
+    let p = predict_out(root).join(sub).join(format!("{stream}.tsv"));
+    p.is_file().then_some(p)
 }
 
 /// Run the shared PGAS fit once into `tmp/results` and return `results`.
@@ -180,7 +173,7 @@ fn setup_fit(bin: &Path, tmp: &Path) -> PathBuf {
     std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
     std::fs::write(tmp.join("fit.toml"), fit_toml("results")).unwrap();
 
-    let out = run(bin, tmp, &["fit", "run", "fit.toml", "--seed", "1"]);
+    let out = run(bin, tmp, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(
         out.status.success(),
         "fit run failed:\nstdout={}\nstderr={}",
@@ -201,7 +194,7 @@ fn fit_predict_sweep_composes_with_scenario_on_distinct_params() {
     let results = setup_fit(&bin, &tmp);
 
     let out = run(&bin, &tmp, &[
-        "fit", "predict", "--fit", "fit.toml",
+        "fit", "predict", "--fit", "@fit",
         "--mode", "free_forward",
         "--scenario", "low_rho",
         "--sweep", "k=8,12",
@@ -257,7 +250,7 @@ fn fit_predict_sweep_composes_with_scenario_on_distinct_params() {
     );
 
     // ── quantities/peak.tsv: the sweep:k column is carried on the quantity too ──
-    let peakf = find_artifact(&results, "quantities", "peak")
+    let peakf = find_artifact(&results, "quantities-model", "peak")
         .expect("quantities/peak.tsv must be written");
     let peak_txt = std::fs::read_to_string(&peakf).unwrap();
     let qheader = peak_txt.lines().next().unwrap();
@@ -300,11 +293,8 @@ fn fit_predict_sweep_composes_with_scenario_on_distinct_params() {
     );
 
     // ── predictive.json: the sweep:k coordinate is named in the join contract ──
-    let pmf = std::fs::read_dir(results.join("fits"))
-        .unwrap()
-        .flatten()
-        .map(|e| predict_out(&e.path()).join("predictive.json"))
-        .find(|p| p.is_file())
+    let pmf = Some(predict_out(&results).join("predictive.json"))
+        .filter(|p| p.is_file())
         .expect("predictive.json must be written");
     let pjson: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&pmf).unwrap()).unwrap();
@@ -347,7 +337,7 @@ fn fit_predict_sweep_same_param_as_scenario_is_a_hard_error() {
     let _results = setup_fit(&bin, &tmp);
 
     let out = run(&bin, &tmp, &[
-        "fit", "predict", "--fit", "fit.toml",
+        "fit", "predict", "--fit", "@fit",
         "--mode", "free_forward",
         "--scenario", "low_rho",
         "--sweep", "rho=0.2,0.4",
@@ -389,7 +379,7 @@ fn fit_predict_no_sweep_header_is_byte_identical() {
     let results = setup_fit(&bin, &tmp);
 
     let out = run(&bin, &tmp, &[
-        "fit", "predict", "--fit", "fit.toml",
+        "fit", "predict", "--fit", "@fit",
         "--mode", "free_forward",
     ]);
     assert!(

@@ -9,25 +9,20 @@
 //! One base means there is nothing to convert, so the class of off-by-one that
 //! gh#781, gh#823, gh#910 and gh#972 each fixed at one site cannot recur.
 //!
-//! Pinned here on real two-chain leaves, one IF2 and one PGAS, from the
+//! Pinned here on real two-chain stored runs, one IF2 and one PGAS, from the
 //! committed SEIR golden IR. Cheap on purpose: nothing depends on convergence,
 //! only on what the leaf says about its own chains.
-//!
-//! The third test is the migration guard: a leaf written by a camdl that
-//! numbered its directories from 1 (`chain_1/`, `chain_2/`, no `chain_0/`)
-//! is refused by every reader that addresses a chain by name or reads its
-//! posterior cloud — `fit summary` (text, json, md), `fit predict`,
-//! `fit table --quantity`, `compare`, `fit run --resume` — rather than read
-//! with every chain shifted by one.
+
+mod fit_store_support;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Where the latest `fit predict` of a run in `seg` wrote:
-/// `<seg>/predict/<run id>-<address key>/` (gh#896), the directory whose
-/// `report*.json` (one written by every predict) is newest. A path that does not
-/// exist while nothing has been predicted.
+/// Where the latest `fit predict` of the run `seg` stored its prediction: the
+/// folder under `<seg>/predict/` whose `report*.json` (one written by every
+/// predict) is newest. A path that does not exist while nothing has been
+/// predicted.
 fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
     std::fs::read_dir(seg.join("predict"))
         .into_iter().flatten().flatten().map(|e| e.path())
@@ -141,7 +136,7 @@ starts    = "uniform_unconstrained"
 fn camdl(dir: &Path, args: &[&str]) -> std::process::Output {
     Command::new(binary()).env_remove("CLICOLOR_FORCE")
         .current_dir(dir)
-        .env("CAMDL_OUTPUT_DIR", dir.join("results")).env("CAMDL_STORE", std::path::Path::new(&dir.join("results")).join("camdl-store"))
+        .env("CAMDL_OUTPUT_DIR", dir.join("results")).env("CAMDL_STORE", store(dir))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDLC", camdlc_bin())
         .args(args)
@@ -155,35 +150,21 @@ fn ok(out: &std::process::Output, what: &str) -> String {
     stderr
 }
 
-/// The single fit segment directory under `<dir>/results/fits/`.
-fn segment(dir: &Path) -> PathBuf {
-    let fits = dir.join("results").join("fits");
-    let mut segs: Vec<PathBuf> = std::fs::read_dir(&fits)
-        .unwrap_or_else(|e| panic!("{}: {e}", fits.display()))
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .collect();
-    assert_eq!(segs.len(), 1, "one fit segment under {}: {segs:?}", fits.display());
-    segs.pop().unwrap()
+/// The run store every command of a test uses (`CAMDL_STORE`, set by
+/// [`camdl`]).
+fn store(dir: &Path) -> PathBuf {
+    dir.join("results").join("camdl-store")
 }
 
-/// The leaf holding `fit_state.toml` under a segment.
+/// The one fit run in the test's store, which every reader below names.
+fn segment(dir: &Path) -> PathBuf {
+    fit_store_support::the_run(&store(dir))
+}
+
+/// The folder holding the run's files: the run folder itself.
 fn leaf(segment: &Path) -> PathBuf {
-    let mut stack = vec![segment.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        if d.join("fit_state.toml").is_file() {
-            return d;
-        }
-        if let Ok(es) = std::fs::read_dir(&d) {
-            for e in es.flatten() {
-                if e.path().is_dir() {
-                    stack.push(e.path());
-                }
-            }
-        }
-    }
-    panic!("no fit_state.toml under {}", segment.display());
+    assert!(segment.join("fit_state.toml").is_file(), "no fit_state.toml in {}", segment.display());
+    segment.to_path_buf()
 }
 
 /// The trailing integer of every `chain_<N>/` directory on the leaf.
@@ -352,80 +333,4 @@ fn a_pgas_leaf_numbers_its_chains_from_zero_on_every_surface() {
     ok(&sub, "summary --exclude-chains 1");
     let sub_err = String::from_utf8_lossy(&sub.stderr);
     assert!(sub_err.contains("dropped chain(s) 1"), "the warning names chain 1:\n{sub_err}");
-}
-
-/// A leaf written by a camdl that numbered directories from 1 is refused by
-/// name, not read with every chain shifted. Built by renaming the directories
-/// of a fresh leaf: `chain_1/` → `chain_2/`, `chain_0/` → `chain_1/`, so the
-/// leaf has the old shape exactly (its `draws.tsv` still keys chains 0 and 1).
-#[test]
-fn a_leaf_with_one_based_chain_directories_is_refused_not_misread() {
-    require_tools();
-    let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path();
-    std::fs::write(dir.join("posterior.toml"), format!("{}{}", problem(dir), pgas_method(8)))
-        .unwrap();
-    ok(&camdl(dir, &["fit", "run", "posterior.toml", "--seed", "1", "--no-progress"]), "pgas run");
-    let seg = segment(dir);
-    let leaf = leaf(&seg);
-    let seg_s = seg.to_string_lossy().into_owned();
-
-    std::fs::rename(leaf.join("chain_1"), leaf.join("chain_2")).unwrap();
-    std::fs::rename(leaf.join("chain_0"), leaf.join("chain_1")).unwrap();
-    assert_eq!(chain_dirs(&leaf), [1usize, 2].into_iter().collect::<BTreeSet<_>>());
-
-    let refused = |out: std::process::Output, what: &str| {
-        let e = String::from_utf8_lossy(&out.stderr).to_string();
-        assert!(!out.status.success(), "{what} must refuse the old layout, but succeeded:\n{e}");
-        assert!(e.contains("counted chains from 1") && e.contains("gh#990"),
-            "{what} must say why the leaf is refused and cite the change:\n{e}");
-    };
-    refused(camdl(dir, &["fit", "summary", &seg_s]), "fit summary");
-    // The json/md/latex document is built by a second loop; it refuses too,
-    // including under `--exclude-chains`, whose advisory would otherwise label
-    // chains by directory number.
-    refused(camdl(dir, &["fit", "summary", &seg_s, "--format", "json"]), "fit summary --format json");
-    refused(camdl(dir, &["fit", "summary", &seg_s, "--format", "md"]), "fit summary --format md");
-    refused(camdl(dir, &["fit", "summary", &seg_s, "--format", "json", "--exclude-chains", "1"]),
-        "fit summary --format json --exclude-chains 1");
-    refused(camdl(dir, &["fit", "predict", &seg_s, "--mode", "free_forward"]), "fit predict");
-    // `fit table --quantity` and `compare` fall back to a point estimate when a
-    // fit has no posterior cloud; the refusal must not be taken for that.
-    let fits = dir.join("results").join("fits").to_string_lossy().into_owned();
-    refused(camdl(dir, &["fit", "table", &fits, "--quantity", "anything"]),
-        "fit table --quantity");
-    refused(camdl(dir, &["compare", &seg_s, &seg_s]), "compare");
-    // `--draws 1` scores the plug-in point, the path with the winner fallback.
-    refused(camdl(dir, &["compare", &seg_s, &seg_s, "--draws", "1"]), "compare --draws 1");
-
-    // `--resume` addresses `chain_N/resume_state.bin` by name: refused too.
-    let run_json: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(leaf.join("run.json")).unwrap()).unwrap();
-    let run_id = run_json["run_id"].as_str().expect("run_id").to_string();
-    std::fs::write(dir.join("longer.toml"), format!("{}{}", problem(dir), pgas_method(12)))
-        .unwrap();
-    let out = camdl(dir, &["fit", "run", "longer.toml", "--seed", "1", "--no-progress",
-        "--resume", &run_id]);
-    let e = String::from_utf8_lossy(&out.stderr).to_string();
-    refused(out, "fit run --resume");
-    // The message names the leaf the user resumed from, and the refusal comes
-    // before any chain state is copied: no `resume_state.bin` exists outside
-    // the base leaf.
-    assert!(e.contains(&leaf.display().to_string()),
-        "the refusal names the base leaf {}:\n{e}", leaf.display());
-    let mut stray = Vec::new();
-    let mut stack = vec![dir.join("results")];
-    while let Some(d) = stack.pop() {
-        for ent in std::fs::read_dir(&d).unwrap().flatten() {
-            let p = ent.path();
-            if p.is_dir() {
-                stack.push(p);
-            } else if p.file_name().is_some_and(|n| n == "resume_state.bin")
-                && !p.starts_with(&leaf)
-            {
-                stray.push(p);
-            }
-        }
-    }
-    assert!(stray.is_empty(), "the refused resume copied chain state into a new leaf: {stray:?}");
 }
