@@ -2613,8 +2613,8 @@ camdl reindex                # rebuild the index from the records
   claimed it, is alive, and `interrupted` once that process has stopped; a
   failed result is printed with the reason it recorded. Completed results are
   not printed. An interrupted result's folder stays until a run that asks for
-  the same result takes it over. An interrupted invocation's record is kept, as
-  every invocation record is, so `status` lists it on every call.
+  the same result takes it over. An interrupted invocation is listed, with
+  `(clean closes its record)`, until `clean` closes it.
 - **`verify [HANDLE]`** checks every completed result, or the results the handle
   names: an id prefix or a folder names one, and `@L` names every result of the
   invocation labelled `L`. For each it computes the run id again from
@@ -2631,11 +2631,14 @@ camdl reindex                # rebuild the index from the records
   another start time counts as stopped), everything in `.quarantine/`, every
   `.attempts/` folder, and each group and build directory that is empty, and
   prints how many of each it removed. Staging whose owner is a process on
-  another host is left, and printed as `left <folder>`. It never touches a
-  completed result, a running or interrupted run, a run recorded as failed, an
-  invocation record or the index. A completed result leaves the store only after
-  `--force` has moved it to `.quarantine/`, so the copy `--force` replaced can
-  be recovered from there until `clean` runs.
+  another host is left, and printed as `left <folder>`. It closes the record of
+  each invocation still running whose process on this host has stopped: the
+  record says `interrupted`, a result the command had not finished is recorded
+  as failed, and the report counts the invocations closed. It deletes no result
+  in doing so, and never touches a completed result, a running or interrupted
+  run, a run recorded as failed, or the index. A completed result leaves the
+  store only after `--force` has moved it to `.quarantine/`, so the copy
+  `--force` replaced can be recovered from there until `clean` runs.
 - **`reindex`** reads every `identity.json`, `run.json` and invocation record,
   writes the index of completed results and ended invocations under `.index/` as
   one log, removes the index logs of owners known to have stopped, and prints

@@ -111,7 +111,8 @@ impl StoreCommand {
                 for i in all_invocations(&inner.root).iter().filter(|i| i.status == InvocationStatus::Running) {
                     let l = inner.liveness(&i.owner, std::time::Duration::ZERO);
                     let state = if l == Liveness::Dead { "interrupted" } else { "running" };
-                    writeln!(out, "invocation {}  {state}  {} results  {}", i.seq, i.results.len(), i.owner).map_err(io)?;
+                    let closes = if l == Liveness::Dead && i.owner.is_this_host() { "  (clean closes its record)" } else { "" };
+                    writeln!(out, "invocation {}  {state}  {} results  {}{closes}", i.seq, i.results.len(), i.owner).map_err(io)?;
                 }
                 for (dir, f) in walk(inner) {
                     match folder_state(&dir, &f.run_id, &inner.kinds) {
@@ -178,11 +179,13 @@ impl StoreCommand {
                 let c = store.clean()?;
                 writeln!(
                     out,
-                    "removed {} staging folders, {} quarantined folders, {} earlier attempts, {} empty directories",
+                    "removed {} staging folders, {} quarantined folders, {} earlier attempts, {} empty directories; \
+                     closed {} interrupted invocations",
                     c.staging.len(),
                     c.quarantine.len(),
                     c.attempts.len(),
-                    c.directories.len()
+                    c.directories.len(),
+                    c.invocations.len()
                 )
                 .map_err(io)?;
                 for p in &c.other_hosts {

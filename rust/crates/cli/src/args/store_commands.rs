@@ -22,6 +22,7 @@ Lists every invocation still recorded as running, and every result whose folder
 is recorded as running or failed. A run is `running` while its owner, the
 process that claimed it, is alive, and `interrupted` once that process has
 stopped without finishing; a failed run is listed with the reason it recorded.
+An interrupted invocation is listed until `camdl clean` closes its record.
 Completed results are not listed: `camdl list` shows them. Writes nothing.
 
 Examples:
@@ -74,9 +75,11 @@ Deletes:
     before it was run again
   - each group and build directory that is empty
 
-Staging whose owner is on another host is left and listed. It never touches a
-completed result, a running or interrupted run, a run recorded as failed, an
-invocation record or the index. A completed result
+It closes the record of each invocation still running whose process on this
+host has stopped, as interrupted, so `status` no longer lists it. Staging whose
+owner is on another host is left and listed. It deletes no result other than
+those in `.quarantine/`, and never touches a completed result, a running or
+interrupted run, a run recorded as failed, or the index. A completed result
 leaves the store only when `--force` has moved it to `.quarantine/`.
 
 Examples:

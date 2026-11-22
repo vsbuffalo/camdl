@@ -5,14 +5,14 @@ use std::time::Duration;
 
 use crate::artifact::run_id;
 use crate::error::Result;
-use crate::fsutil::{draft_owner, fsync_dir, remove_all, write_file_atomic};
+use crate::fsutil::{draft_owner, fsync_dir, remove_all, write_file_atomic, write_json_atomic};
 use crate::hash::Key;
 use crate::index::{index_dir, own_log, Index};
-use crate::invocation::all_invocations;
-use crate::owner::{local_liveness, local_liveness_of_stem, Liveness, Owner};
+use crate::invocation::{all_invocations, invocation_path};
+use crate::owner::{local_liveness, local_liveness_of_stem, Liveness, Owner, Timestamp};
 use crate::record::{
-    read_record, IdentityFile, IndexLine, InvocationStatus, Read, Role, RunFile, Status, ATTEMPTS_DIR, RECORD_FORMAT,
-    RUN_FILE, STAGING_DIR,
+    read_record, Failure, IdentityFile, IndexLine, InvocationStatus, Outcome, Read, Role, RunFile, Status, ATTEMPTS_DIR,
+    RECORD_FORMAT, RUN_FILE, STAGING_DIR,
 };
 use crate::storage::{folder_state, identity_of, visible_dirs, Inner, State, Store};
 
@@ -131,6 +131,9 @@ pub struct Cleaned {
     /// Claims, and folders a claim was being built in, whose owner is a
     /// process on another host: this host cannot tell whether it has stopped.
     pub other_hosts: Vec<PathBuf>,
+    /// The sequence numbers of the invocations whose records it closed as
+    /// interrupted.
+    pub invocations: Vec<u64>,
 }
 
 impl Store {
@@ -187,9 +190,11 @@ impl Store {
     /// Deletes staging folders whose owner is dead on this host (claims, and
     /// the folders claims were being built in), everything in
     /// `.quarantine/`, every `.attempts/` folder, and every empty group, kind
-    /// and build directory. Touches no completed result, running claim,
-    /// invocation record or index, and leaves staging whose owner is on
-    /// another host, listing it in [`Cleaned::other_hosts`].
+    /// and build directory, and closes the record of each running invocation
+    /// whose owner is dead on this host as interrupted. Deletes no result and
+    /// touches no completed result, running claim or index, and leaves
+    /// staging whose owner is on another host, listing it in
+    /// [`Cleaned::other_hosts`].
     pub fn clean(&self) -> Result<Cleaned> {
         let inner = &self.inner;
         let mut out = Cleaned::default();
@@ -228,6 +233,24 @@ impl Store {
                     out.staging.push(path);
                 }
             }
+        }
+        for mut inv in all_invocations(&inner.root).into_iter().filter(|i| i.status == InvocationStatus::Running) {
+            if !inv.owner.is_this_host() || inner.liveness(&inv.owner, Duration::ZERO) != Liveness::Dead {
+                continue;
+            }
+            for r in inv.results.iter_mut().filter(|r| r.outcome == Outcome::Planned) {
+                r.outcome = Outcome::Failed;
+                r.failure = Some(Failure {
+                    operation: None,
+                    reason: Some("the command was interrupted before this result ended".into()),
+                });
+                inv.counts.failed += 1;
+            }
+            inv.status = InvocationStatus::Interrupted;
+            inv.ended = Some(Timestamp::now());
+            write_json_atomic(&invocation_path(&inner.root, inv.seq), &inv)?;
+            let _ = std::fs::remove_file(inner.root.join(".invocations").join(format!("{}.progress.json", inv.seq)));
+            out.invocations.push(inv.seq);
         }
         let q = inner.root.join(".quarantine");
         for entry in std::fs::read_dir(&q).into_iter().flatten().flatten() {

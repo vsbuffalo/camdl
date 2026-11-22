@@ -346,8 +346,18 @@ fn clean_removes_only_quarantine_attempts_and_dead_staging() {
     assert!(failed.dir.join(".attempts").is_dir());
     assert_eq!(entries(&store.join(".quarantine")).len(), 1);
 
+    // The two killed commands' invocations are interrupted until clean closes them.
+    let status = p.ok(&["status"]);
+    let open: Vec<&str> = status.lines().filter(|l| l.starts_with("invocation ")).collect();
+    assert_eq!(open.len(), 2, "{status}");
+    assert!(open.iter().all(|l| l.contains("  interrupted  ") && l.ends_with("(clean closes its record)")), "{status}");
+
     let report = p.ok(&["clean"]);
-    assert_eq!(report, "removed 1 staging folders, 1 quarantined folders, 1 earlier attempts, 0 empty directories\n");
+    assert_eq!(
+        report,
+        "removed 1 staging folders, 1 quarantined folders, 1 earlier attempts, 0 empty directories; \
+         closed 2 interrupted invocations\n"
+    );
     assert!(staged(&store).is_empty(), "the dead cell's staging folder is gone");
     assert!(entries(&store.join(".quarantine")).is_empty(), "the quarantine is empty");
     assert!(!failed.dir.join(".attempts").exists(), "the earlier attempts are gone");
@@ -362,4 +372,5 @@ fn clean_removes_only_quarantine_attempts_and_dead_staging() {
     let status = p.ok(&["status"]);
     assert!(status.contains(&format!("pfilter {}  interrupted", &live.run_id[..12])), "{status}");
     assert!(status.contains(&format!("pfilter {}  failed", &failed.run_id[..12])), "{status}");
+    assert!(!status.contains("invocation "), "clean closed the interrupted invocations: {status}");
 }

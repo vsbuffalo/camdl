@@ -121,6 +121,62 @@ fn clean_removes_the_claim_drafts_of_stopped_owners_only() {
     live_child.wait().unwrap();
 }
 
+/// `clean` closes the record of an invocation whose owner stopped on this
+/// host: status interrupted, an unfinished result failed. It deletes no
+/// result, and leaves an invocation whose owner is alive or on another host.
+/// `status` lists the interrupted invocation, saying `clean` closes it, until
+/// it is closed.
+#[test]
+fn clean_closes_the_record_of_an_interrupted_invocation() {
+    let root = TempRoot::new("clean-invocations");
+    let store = open(root.path());
+    let record = |seq: u64| root.path().join(".invocations").join(format!("{seq}.json"));
+    let read = |seq: u64| -> serde_json::Value { serde_json::from_slice(&std::fs::read(record(seq)).unwrap()).unwrap() };
+    let (live, mut live_child) = live_owner();
+    let mut held = Vec::new();
+    for (label, seed) in [("cut", 1), ("live", 2), ("remote", 3)] {
+        let i = labelled(label);
+        run_sim(&store, &i, seed);
+        held.push(i);
+    }
+    let seqs: Vec<u64> = (1..=3).collect();
+    for &seq in &seqs {
+        assert_eq!(read(seq)["status"], "running");
+    }
+    // The first invocation's owner stopped before its result ended.
+    let mut v = read(1);
+    v["owner"] = serde_json::to_value(dead_owner()).unwrap();
+    v["results"][0]["outcome"] = "planned".into();
+    std::fs::write(record(1), serde_json::to_vec_pretty(&v).unwrap()).unwrap();
+    set_owner(&record(2), &live);
+    set_owner(&record(3), &remote_owner());
+    let status = |store: &crate::Store| {
+        let mut out = Vec::new();
+        StoreCommand::Status.run(store, &mut out).unwrap();
+        String::from_utf8(out).unwrap()
+    };
+    let before = status(&store);
+    assert!(before.lines().any(|l| l.starts_with("invocation 1  interrupted") && l.ends_with("(clean closes its record)")), "{before}");
+    assert!(before.lines().any(|l| l.starts_with("invocation 2  running") && !l.contains("clean")), "{before}");
+
+    let c = store.clean().unwrap();
+    assert_eq!(c.invocations, vec![1]);
+    let closed = read(1);
+    assert_eq!(closed["status"], "interrupted");
+    assert!(closed["ended"].is_string());
+    assert_eq!(closed["results"][0]["outcome"], "failed");
+    assert_eq!(closed["counts"]["failed"], 1);
+    assert_eq!(read(2)["status"], "running", "a live owner's invocation is left");
+    assert_eq!(read(3)["status"], "running", "another host's invocation is left");
+    let after = status(&store);
+    assert!(!after.contains("invocation 1 "), "{after}");
+    assert_eq!(crate::tests::result_folders(root.path()).len(), 3, "clean deletes no result");
+    assert!(store.clean().unwrap().invocations.is_empty(), "a closed record is not closed again");
+    live_child.kill().unwrap();
+    live_child.wait().unwrap();
+    drop(held);
+}
+
 #[test]
 fn the_index_is_a_cache_rebuilt_from_the_records() {
     let root = TempRoot::new("index");

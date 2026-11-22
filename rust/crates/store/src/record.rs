@@ -195,6 +195,9 @@ pub(crate) struct ConfigFile {
 pub(crate) enum InvocationStatus {
     Running,
     Ended,
+    /// Its owner stopped while it was running, and `clean` closed its record:
+    /// a result it had not finished is recorded as failed.
+    Interrupted,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

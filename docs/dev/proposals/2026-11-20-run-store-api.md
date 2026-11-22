@@ -1530,13 +1530,19 @@ computed or were already stored.
   (`begin`, `begin_with`, `begin_many` or `put`), whether or not anything is
   claimed, with status running and the results planned so far; and when the
   command ends, replacing the first atomically. It is not written again after
-  that. A batch's progress while it runs goes to a separate snapshot file beside
-  it ("On disk").
+  that, except by `clean` when the command never ended (below). A batch's
+  progress while it runs goes to a separate snapshot file beside it ("On disk").
 - **It is durable.** It is not a cache: the index is rebuilt from the records
   and the invocation records together.
 - **It is where a second request for a stored result is recorded.** The result's
   own record is sealed and is not touched.
-- **`clean` does not remove invocation records.**
+- **`clean` does not remove invocation records.** It closes one: a record still
+  running whose owner is dead on this host is written again with status
+  `interrupted`, the time `clean` closed it as `ended`, and each result still
+  planned recorded as failed with the reason "the command was interrupted before
+  this result ended". Until then `status` lists the invocation as interrupted
+  and says that `clean` closes it. An interrupted invocation holds no label and
+  deletes no result. A record whose owner is on another host is left running.
 
 ![Figure 5: two invocations with different labels and file names resolve to one identity and share one result folder; each invocation record names the same run id, and the names live in those records, never in the hash.](../figures/run-store-invocations.svg)
 
@@ -1911,9 +1917,10 @@ An invocation record:
 }
 ```
 
-`status` is `running` in the first version and `ended` in the last. `outcome` is
-one of `planned` (first version only), `computed`, `reused`, `failed` (with
-`failure`) or `busy`.
+`status` is `running` in the first version and `ended` in the last, or
+`interrupted` when `clean` closed the record of a command whose process stopped
+("Invocation records"). `outcome` is one of `planned` (first version only),
+`computed`, `reused`, `failed` (with `failure`) or `busy`.
 
 `results` lists every result the command passed to the store, in the order of
 its calls: each `put` (a compiled model, a data table), each member of a
@@ -2159,8 +2166,10 @@ None exists today except `dev reindex`, which rebuilds `index.json`
   staging below it. An owner on this host is dead when its process is gone or
   its process id names a process with another start time. Staging whose owner is
   on another host is left and listed, since this host cannot tell whether that
-  owner has stopped. It does not touch a completed result, a running claim, an
-  invocation record or the index. It is the only command that removes a group or
+  owner has stopped. It closes the record of each running invocation whose owner
+  is dead on this host as `interrupted` ("Invocation records"), and otherwise
+  does not touch an invocation record; it does not touch a completed result, a
+  running claim or the index. It is the only command that removes a group or
   build directory. A `finish` that finds a directory of its chain gone when it
   renames, because `clean` removed it a moment before, makes the chain again and
   renames once more; nothing is lost, since the result is still whole in
