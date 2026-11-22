@@ -89,3 +89,25 @@ pub fn json(path: &Path) -> serde_json::Value {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
     serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
+
+/// Copy the directory `from`, which may hold a run store, to `to`,
+/// recursively, keeping each file's bytes and modification time.
+///
+/// A reader of the store refuses a completed result whose files' sizes or
+/// modification times differ from its record, so a copy of a store must keep
+/// both. `std::fs::copy` keeps the modification time on macOS, where it
+/// clones the file, and not on Linux, where it copies the bytes into a new
+/// file; this copies the bytes and sets the time on every platform.
+pub fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(from).unwrap().flatten() {
+        let (src, dst) = (e.path(), to.join(e.file_name()));
+        if src.is_dir() {
+            copy_tree(&src, &dst);
+        } else {
+            std::fs::write(&dst, std::fs::read(&src).unwrap()).unwrap();
+            let mtime = std::fs::metadata(&src).unwrap().modified().unwrap();
+            std::fs::File::options().write(true).open(&dst).unwrap().set_modified(mtime).unwrap();
+        }
+    }
+}

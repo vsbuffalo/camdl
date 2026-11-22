@@ -148,18 +148,6 @@ fn fit_leaf(root: &Path) -> (PathBuf, PathBuf) {
     (run, problem)
 }
 
-fn copy_dir(from: &Path, to: &Path) {
-    std::fs::create_dir_all(to).unwrap();
-    for e in std::fs::read_dir(from).unwrap().flatten() {
-        let (src, dst) = (e.path(), to.join(e.file_name()));
-        if src.is_dir() {
-            copy_dir(&src, &dst);
-        } else {
-            std::fs::copy(&src, &dst).unwrap();
-        }
-    }
-}
-
 /// A copy of the project with a logging shim; returns the work dir.
 struct Case {
     _tmp: tempfile::TempDir,
@@ -174,7 +162,7 @@ fn case() -> Case {
     // A copied fit keeps relative paths only within the project; the stored
     // config names the model by an absolute path into the original project,
     // which is unchanged, so the copy is read as the original is.
-    copy_dir(&project().root, &dir);
+    fit_store_support::copy_tree(&project().root, &dir);
     let shim_dir = tmp.path().join("shim");
     std::fs::create_dir_all(&shim_dir).unwrap();
     let log = tmp.path().join("compiles.log");

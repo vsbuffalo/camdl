@@ -110,19 +110,6 @@ struct Fixture {
     handle: String,
 }
 
-/// Copy the directory `from` to `to`, recursively.
-fn copy_dir(from: &Path, to: &Path) {
-    std::fs::create_dir_all(to).unwrap();
-    for e in std::fs::read_dir(from).unwrap().flatten() {
-        let (src, dst) = (e.path(), to.join(e.file_name()));
-        if src.is_dir() {
-            copy_dir(&src, &dst);
-        } else {
-            std::fs::copy(&src, &dst).unwrap();
-        }
-    }
-}
-
 fn fixture(tag: &str, method: &str) -> Fixture {
     let bin = binary();
     assert!(bin.exists(), "release camdl binary missing: {} — run `make build-rust`", bin.display());
@@ -147,7 +134,7 @@ fn simulate(f: &Fixture, rest: &[&str]) -> (bool, String, Option<String>) {
     static CALL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = CALL.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let store = f.dir.join(format!("store-{n}"));
-    copy_dir(&f.dir.join("store"), &store);
+    fit_store_support::copy_tree(&f.dir.join("store"), &store);
     let store_arg = store.to_string_lossy().into_owned();
     let mut args = vec!["simulate", "model.camdl"];
     args.extend_from_slice(rest);
