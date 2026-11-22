@@ -4235,10 +4235,15 @@ stored at the same address. Without the flag the same command reports a cache
 hit and exits 0. A leaf another live process is still writing is not displaced;
 the run stops with an in-progress error naming the pid. `simulate` takes
 `--force` with the same meaning (`WritePolicy::Force`, `resolve::check_reuse`).
-`pfilter --force` computes the run and its by-products again, moving the stored
-folder to the quarantine; it also takes over a run whose record names a process
-on another host that is not known to be running, which a rerun without the flag
-refuses, naming the host and `--force`. `profile` has no `--force`.
+`pfilter --force` computes the run and its by-products again. The completed
+result is moved to `<root>/.quarantine/` before the recompute starts, so a
+recompute that fails leaves nothing at the result's address; the old result is
+recovered from `.quarantine/`. A run held by an owner not known to be stopped is
+refused without the flag, naming the owner's host and `--force`. With it, the
+run is taken unless its owner is on this host and running, or on another host
+with a beat that changes; an owner on another host whose beat is stale or cannot
+be read is taken, so pass `--force` there only once that process is known to
+have stopped. `profile` has no `--force`.
 
 `--resume <BASE_REF>` extends a completed PGAS or PMMH run: the base leaf is
 read read-only and the longer chain is written to a new content-addressed leaf
