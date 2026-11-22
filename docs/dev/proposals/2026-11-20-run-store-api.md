@@ -1461,6 +1461,46 @@ impl Invocation {
 }
 ```
 
+A rendering that also reads one by-product of each member, such as a combined
+table of the observations drawn beside each simulated trajectory, implements a
+second trait. It is given, beside each member, the by-product of kind `By` that
+the invocation asked for of that member: the entry registered with the member's
+own in the invocation record. The store reads it; the rendering is given no
+store.
+
+```rust
+/// A rendering over an invocation's members and one by-product kind of each.
+pub trait ByProductRendering {
+    type Of: Primary;
+    type By: ByProduct<Of = Self::Of>;
+    type Options;
+    /// `None` for a member the invocation asked no `By` of.
+    fn render(
+        members: &[(Member<Self::Of>, Option<Stored<Self::By>>)],
+        options: &Self::Options,
+        out: &mut dyn ExportSink,
+    ) -> Result<()>;
+}
+
+/// Where a rendering writes: one file, or files named under a directory.
+pub trait ExportSink {
+    /// The writer of `name`, relative to the export path. A single-file sink
+    /// accepts one name and writes it to the path itself.
+    fn file(&mut self, name: &str) -> Result<&mut dyn Write>;
+}
+
+impl Invocation {
+    /// Render to a file, or under a directory when the rendering names several.
+    /// A member, or an asked-for by-product, that is not completed is refused with
+    /// Error::MemberNotCompleted, naming each.
+    pub fn render_by_products<R: ByProductRendering>(&self, store: &Store, options: &R::Options, to: &ExportPath) -> Result<()>;
+    pub fn render_by_products_to<R: ByProductRendering>(&self, store: &Store, options: &R::Options, out: &mut dyn ExportSink) -> Result<()>;
+}
+```
+
+`Rendering` and `Member<A>` are unchanged, so the renderings that read no
+by-product keep their signatures.
+
 - **A copy** reproduces a stored file exactly.
 - **A rendering** combines or reshapes stored files and adds labels from the
   invocation record: a combined table across cells, date columns, a rounded
@@ -3109,6 +3149,7 @@ consistent with one another, and every tree starts in camdl's build directory,
 | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `Sim`             | `sims/`: model (the file's stem), config (`<backend>-dt<dt>`), params (`base`, or the point's `name=value` pairs), scenario (its name, or `(none)`), seed (`seed_<process seed>`) (`cli/src/resolve.rs:156-160`, `:168-172`; `cas_sink.rs:307-319`, `:354`) | model, settings, parameters, scenario; `seed_<seed typed>`                              | The seed level becomes the result folder, and its label is the seed typed, not the seed the cell derived                                               |
 | `Obs`, `EventLog` | `<leaf>/obs/<8 hex>-<obs seed>/` and `<leaf>/event_log/event_log.tsv`, children declared in the leaf's record (`cas_sink.rs:1103-1109`, `:1343-1357`)                                                                                                       | inside the cell, under `obs/` or `event_log/`; the streams' names, or `event_log`       | Each is a result folder with its own records; the cell's record is not touched                                                                         |
+| `SimQuantities`   | Not stored: `--quantities-out` writes a sidecar from the in-memory cells (`main.rs:2647`)                                                                                                                                                                   | inside the cell, under `sim_quantities/`; `quantities`                                  | New; the banded tables are a rendering of the stored cells                                                                                             |
 | `Pfilter`         | `pfilters/`: model, config (`pf-N<particles>-r<replicates>-dt<dt>`), params (always labelled `params`), seed (`seed_<seed>`) (`pfilter_cas.rs:165-171`)                                                                                                     | model, settings, parameters; `seed_<seed typed>`                                        | Saved files are by-products inside the run, under `saved_paths/` and the like; today they are not stored                                               |
 | `Survey`          | `surveys/`: model, config (`<eval>-P<particles>-r<replicates>`), box (`box-n<points>`), seed (`seed_<seed>`) (`survey_cas.rs:153-161`); `landscape_html/` as a child                                                                                        | model, settings, the box; `seed_<seed typed>`                                           | The HTML page is a rendering, not a child                                                                                                              |
 | `ProfilePoint`    | `profiles/`: profile (the model's stem; its key includes the grid), point (`name=value` to 4 decimals, joined by `__`), method, seed (`seed_<seed>`), start (`start_<index>`) (`profile_cas.rs:99-110`, `:122-138`)                                         | the problem, the focal values, the method; `seed_<n>-start_<i>`                         | The first group is the problem, without the grid; seed and start become one result folder; the base folder's sidecar and `invocations/` leave the tree |
@@ -3234,11 +3275,12 @@ seed (`engine.rs:182-193`), but both cells of a row show the seed typed, 1.
 ### Observations and the event log
 
 ```bash
-camdl simulate sir.camdl --obs --event-log
+camdl simulate sir.camdl --obs obs.tsv --event-log --quantities-out q/
 ```
 
-Both are by-products: the library places each inside the cell, under its `KIND`,
-with the label `ByProduct::label` gives (section 4).
+All three are by-products: the library places each inside the cell, under its
+`KIND`, with the label `ByProduct::label` gives (section 4). `obs.tsv` and `q/`
+are exports rendered from them; the bare `--event-log` exports nothing.
 
 ```text
 <build>/sim/.../_none_-0c4d21e9b7a3/seed_1-e81f5a0c3d29/
@@ -3249,6 +3291,21 @@ with the label `ByProduct::label` gives (section 4).
   event_log/
     event_log-7a2c0e4f91b3/
       identity.json  run.json  event_log.tsv
+  sim_quantities/
+    quantities-2b90e4c7a1d6/
+      identity.json  run.json  quantities.json
+```
+
+A cell whose engine stopped with an error holds `failure.toml` in place of
+`traj.tsv`, and each by-product asked of it holds the same `failure.toml` in
+place of its own files (section 4):
+
+```text
+<build>/sim/.../_none_-0c4d21e9b7a3/seed_2-a41be07c9d02/
+  identity.json  run.json  failure.toml
+  obs/
+    cases-91f3d0a2c7e8/
+      identity.json  run.json  failure.toml
 ```
 
 ### A filter run and its saved files
@@ -3485,26 +3542,60 @@ pub struct SimulateArgs {
     #[command(flatten)] #[input(group)]       pub numerics: NumericsArgs,     // backend, dt, flags
     #[arg(long)] #[input(expands)]            pub scenario: Vec<String>,
     #[arg(long)] #[input(expands)]            pub seeds: Vec<u64>,
-    #[arg(long)] #[input(adds)]               pub obs: bool,
-    #[arg(long)] #[input(adds)]               pub event_log: bool,
+    #[arg(long)] #[input(adds)]               pub obs: Option<ExportPath>,        // one table, every stream
+    #[arg(long)] #[input(adds)]               pub obs_dir: Option<ExportPath>,    // one table per stream
+    #[arg(long)] #[input(adds)]               pub event_log: Option<ExportPath>,  // bare: store only
+    #[arg(long)] #[input(adds)]               pub quantities_out: Option<ExportPath>,
     #[arg(short = 'o')] #[input(export)]      pub output: Option<ExportPath>,
+    #[arg(long)] #[input(export)]             pub stdout: bool,
     #[arg(long)] #[input(render)]             pub dates: bool,
     #[arg(long)] #[input(execution, exercised_by = fixtures::two_cell_grid)]
                                               pub parallel: usize,
     #[arg(long)] #[input(store)]              pub force: bool,
     #[arg(long)] #[input(store)]              pub label: Option<String>,
     #[arg(long)] #[input(store)]              pub store: Option<PathBuf>,
+    #[arg(long)] #[input(skip)]               pub dry_run: bool,
     #[arg(long)] #[input(skip)]               pub quiet: bool,
 }
 ```
 
 `--scenario` and `--seeds` decide which cells exist; one scenario's effects and
-one derived seed enter each cell's identity. `--obs` and `--event-log` ask for
-by-products. `-o` is a rendering made afterwards, and `--dates` adds date
-columns to it.
+one derived seed enter each cell's identity. `--obs`, `--obs-dir`, `--event-log`
+and `--quantities-out` each ask for a by-product of every cell and name the path
+its export is written to. `-o` and `--stdout` export the combined table, a
+rendering made afterwards, and `--dates` adds date columns to it.
 
 The real command has more axes than this sketch: sweep points, parameter draws
-and replicates each add cells the same way, as `expands` inputs.
+and replicates each add cells the same way, as `expands` inputs. Every flag of
+the real command, and its class:
+
+| Flag                                                                                                                                                                                                                                                                                                 | Class       | What it does on the store                                                                                                                                                 |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| the model, `--params`, `--param`, `--param-vec`, `--table`, `--enable`, `--disable`, `--fit`, `--to`, `--from`, `--init-state`, `--backend`, `--dt`, `--integrator`, `--output-every`, `--no-flows`, `--columns`, `--allow-degenerate-rates`, `--allow-forcing-extrapolation`, `--seed`, `--no-licm` | `identity`  | Enters each cell's identity, through the compiled model, the settings, the parameters, the scenario or the seed                                                           |
+| `--emit-every`                                                                                                                                                                                                                                                                                       | `identity`  | Enters the `Obs` and quantities by-products' identities, never the cell's                                                                                                 |
+| `--quantities FILE`                                                                                                                                                                                                                                                                                  | `identity`  | The vocabulary, compiled against the model and stored as a `Quantities` content artifact, enters the quantities by-product's identity                                     |
+| `--scenario`, `--seeds`, `--replicates`, `--draws`, `-n`, `--chains`, `--exclude-chains`, `--sweep`, `--sweep-file`                                                                                                                                                                                  | `expands`   | Decides which cells the batch has                                                                                                                                         |
+| `--obs`, `--obs-dir`, `--obs-only`, `--obs-only-dir`                                                                                                                                                                                                                                                 | `adds`      | Asks for each cell's `Obs` by-product and exports the combined observation table; the `-only` forms also leave the trajectory unexported                                  |
+| `--event-log [PATH]`                                                                                                                                                                                                                                                                                 | `adds`      | Asks for the `EventLog` by-product; a path exports it                                                                                                                     |
+| `--quantities-out DIR`                                                                                                                                                                                                                                                                               | `adds`      | Asks for each cell's `SimQuantities` by-product and exports the quantity tables                                                                                           |
+| `-o`, `--stdout`, `--reactive-log`, `--design-from`, `--projected-out`, `--draws-out`                                                                                                                                                                                                                | `export`    | `-o` and `--stdout` render the combined table; `--reactive-log` copies a cell's `reactive_log.tsv`; the last three write files from the resolved inputs and store nothing |
+| `--dates`, `--format`, `--tsv`                                                                                                                                                                                                                                                                       | `render`    | Shape an export: date columns, the event log's file format                                                                                                                |
+| `--parallel`, `--no-ir-cache`                                                                                                                                                                                                                                                                        | `execution` | How the cells are computed                                                                                                                                                |
+| `--force`, `--label`, `--store`                                                                                                                                                                                                                                                                      | `store`     | Requests to the store                                                                                                                                                     |
+| `--dry-run`, `--verbosity`, `--progress`, `--no-progress`                                                                                                                                                                                                                                            | `skip`      | What is printed. `--dry-run` resolves every cell, asks the store which it holds (`Store::plan`), prints the plan and stops                                                |
+
+`--design-from`, `--projected-out` and `--draws-out` are the one kind of export
+not made from stored files. A dataset simulated on a fit's design, the projected
+value on that design and the sampled parameter draws are written from the
+resolved inputs, and nothing is stored; the class check for an export (the same
+bytes twice) holds because each is deterministic in its inputs.
+
+`--stdout` writes the combined table to standard output from the stored cells,
+with the columns `-o` writes. Today it writes one cell's table with no
+coordinate columns and stores nothing; the release note says:
+"`simulate
+--stdout` now stores its cell and prints the combined table, with the
+`replicate`, `scenario` and `seed` columns `-o` writes."
 
 ### 2. Resolution
 
@@ -3536,6 +3627,16 @@ pub struct CellLabels {
     pub seed: u64,                    // the seed the user typed
     pub seed_replicate: u32,          // which replicate of that seed this cell is, from 0: the
                                       // number its process seed is derived from
+    pub point: PointLabel,            // the cell's place on the parameter-point axis
+}
+
+/// Where a cell sits on the parameter-point axis, as the combined tables show it.
+#[derive(Clone, Serialize, Deserialize)]
+pub enum PointLabel {
+    None,                                                     // one parameter point
+    Draw { index: usize },                                    // `--draws`: the `draw` column
+    Sweep { point_id: usize, values: Vec<(String, f64)> },    // `--sweep`, `--sweep-file`: `point_id`
+                                                              // and one `sweep:<param>` column each
 }
 
 #[deny(unused_variables)]
@@ -3557,8 +3658,9 @@ pub fn resolve(declared: SimulateDeclared, store: &Store, info: &RunInfo)
 ```
 
 `CompiledModel` holds everything the engine runs, derivative tables included.
-Quantities and contrasts are other content, which `simulate` does not use; the
-model's name is a label.
+Quantities and contrasts are other content, which no cell's identity holds: a
+`simulate` run with `--quantities-out` stores them with `put::<Quantities>` and
+names them in its quantities by-products only. The model's name is a label.
 
 ### 3. The identities
 
@@ -3599,11 +3701,25 @@ pub struct EventLogIdentity {
     pub sim: <SimIdentity as Identity>::Record,
 }
 
-/// What `--obs` and `--event-log` ask for.
-pub struct ByProductRequest { /* the two flags and the model's observation streams */ }
+/// One cell's generated quantities, evaluated from the in-memory trajectory and
+/// the cell's observation draws, at full precision.
+#[derive(Identity, Clone)]
+#[identity(tag = "sim_quantities", version = 1)]
+pub struct SimQuantitiesIdentity {
+    pub sim: <SimIdentity as Identity>::Record,
+    pub quantities: Dep<Quantities>,  // the model's own block, or the `--quantities FILE` vocabulary
+                                      // compiled against the model
+    pub emit_every: Option<EmitEvery>,// an `observations.<stream>` quantity reduces the draws `--obs`
+                                      // would emit under the same cadence
+    pub seed: ObsSeed,
+}
+
+/// What `--obs*`, `--event-log` and `--quantities-out` ask for.
+pub struct ByProductRequest { /* the three requests, `--emit-every`, the quantities dep and the streams */ }
 
 impl ByProductRequest {
-    pub fn new(obs: bool, event_log: bool, model: &Hashed<CompiledModelContent>) -> Self;
+    pub fn new(obs: bool, event_log: bool, quantities: Option<Dep<Quantities>>,
+               emit_every: Option<EmitEvery>, model: &Hashed<CompiledModelContent>) -> Self;
     /// The by-products wanted of one cell, each with its identity; their labels are ().
     pub fn for_cell(&self, sim: &SimIdentity) -> Wanted<Sim>;
 }
@@ -3742,7 +3858,22 @@ impl ByProduct for EventLog {
     fn label(_id: &EventLogIdentity, _labels: &()) -> String { "event_log".into() }
 }
 
-/// The combined table across a simulate invocation's cells.
+pub struct SimQuantities;
+
+impl Artifact for SimQuantities {
+    const KIND: &'static str = "sim_quantities";
+    const WRITE: WriteMode = WriteMode::Atomic;
+    type Identity = SimQuantitiesIdentity;
+    type Labels = ();
+}
+
+impl ByProduct for SimQuantities {
+    type Of = Sim;
+    fn upstream(id: &SimQuantitiesIdentity) -> &<SimIdentity as Identity>::Record { &id.sim }
+    fn label(_id: &SimQuantitiesIdentity, _labels: &()) -> String { "quantities".into() }
+}
+
+/// The combined table across a simulate invocation's cells: `-o` and `--stdout`.
 pub struct CombinedTable;
 
 pub struct CombinedTableOptions { pub dates: bool }
@@ -3754,9 +3885,61 @@ impl Rendering for CombinedTable {
         members: &[(Stored<Sim>, CellLabels)], options: &CombinedTableOptions, out: &mut dyn Write,
     ) -> store::Result<()> { /* each member's traj.tsv, with its labels as columns */ }
 }
+
+/// The combined observation tables: `--obs FILE` (every stream in one table)
+/// and `--obs-dir DIR` (one table per observation source).
+pub struct ObsTable;
+
+pub struct ObsTableOptions { pub dates: bool, pub layout: ObsLayout }
+pub enum ObsLayout { OneFile, PerSource }
+
+impl ByProductRendering for ObsTable {
+    type Of = Sim;
+    type By = Obs;
+    type Options = ObsTableOptions;
+    fn render(
+        members: &[(Member<Sim>, Option<Stored<Obs>>)], options: &ObsTableOptions, out: &mut dyn ExportSink,
+    ) -> store::Result<()> { /* each member's stream files, with the member's labels as columns */ }
+}
+
+/// The quantity tables `--quantities-out` writes: a value per cell for a single
+/// parameter point with one replicate, else the band over each (point,
+/// scenario) group's replicates, never across groups.
+pub struct QuantityTable;
+
+impl ByProductRendering for QuantityTable {
+    type Of = Sim;
+    type By = SimQuantities;
+    type Options = QuantityTableOptions;   // point or banded, and the calendar axis
+    fn render(
+        members: &[(Member<Sim>, Option<Stored<SimQuantities>>)], options: &QuantityTableOptions,
+        out: &mut dyn ExportSink,
+    ) -> store::Result<()> { /* groups by the labels' scenario and point; bands within a group */ }
+}
 ```
 
-The library places `Obs` and `EventLog` inside their upstream's folder.
+The library places `Obs`, `EventLog` and `SimQuantities` inside their upstream's
+folder. A rendering that writes a directory (`--obs-dir`, `--quantities-out`)
+writes through an `ExportSink`, which names each file relative to the export
+path; one that writes a single file is given the sink of that file.
+
+**A stored failure.** A cell whose engine stops with an error is completed, not
+failed: the error is a function of the cell's identity, which holds its seed.
+The cell stores `failure.toml` and no `traj.tsv`. A by-product whose computation
+is refused for this cell (an observation draw refused at the cell's restart, a
+quantity that is not finite) is likewise completed with its own `failure.toml`,
+and its upstream keeps its trajectory: the cell's files depend only on the
+cell's identity, so whether observations were asked for cannot change them.
+
+```toml
+# failure.toml
+stage  = "engine"          # or "observations", "quantities" in a by-product
+reason = "negative propensity -3.2e-4 for transition 'recovery' at t=41.5"
+```
+
+A rerun reuses both. A failure a rerun could change (an interruption, an I/O or
+store error, running out of memory) is a failed result under the batch rule and
+leaves no folder.
 
 ### 5. The command and the engine
 
@@ -3792,7 +3975,10 @@ pub fn simulate(args: SimulateArgs, ambient: Build<Engine>, env: StoreRequest) -
             Begin::Reused(_)        => {}
             Begin::Busy(owner)      => failures.push(store::Error::InProgress(owner).into()),  // held from another host
             Begin::Claimed(mut run) => match engine::simulate(&mut run, &execution) {
-                Ok(())   => if let Err(err) = run.finish() { failures.push(err.into()) },  // commits the cell, then its by-products
+                // Completed, with failure.toml in place of traj.tsv when the engine stopped
+                // with an error at this cell; finish commits the cell, then its by-products.
+                Ok(()) => if let Err(err) = run.finish() { failures.push(err.into()) },
+                // An error a rerun could change: an I/O or store error.
                 Err(err) => {
                     if let Err(e) = run.fail("simulating", &err.to_string()) { failures.push(e.into()) }
                     failures.push(err);
@@ -3802,13 +3988,22 @@ pub fn simulate(args: SimulateArgs, ambient: Build<Engine>, env: StoreRequest) -
     }
     drop(batch);
     let invocation = info.finish(&store)?;
+    // Stored failures, read from the cells and by-products the invocation lists.
+    failures.extend(stored_failures(&store, &invocation)?);
     if !failures.is_empty() {
-        return Err(Error::Members(failures));                    // the command exits non-zero
+        return Err(Error::Members(failures));                    // listed, and the command exits non-zero
     }
 
-    // -o: the combined table, rendered from the stored cells and the invocation's labels.
+    // -o and --stdout: the combined table, rendered from the stored cells and the
+    // invocation's labels; the observation and quantity tables from their by-products.
     if let Some(to) = output {
         invocation.render::<CombinedTable>(&store, &CombinedTableOptions { dates }, &to)?;
+    }
+    if stdout {
+        invocation.render_to::<CombinedTable>(&store, &CombinedTableOptions { dates }, &mut std::io::stdout())?;
+    }
+    if let Some(to) = obs {
+        invocation.render_by_products::<ObsTable>(&store, &ObsTableOptions { dates, layout: ObsLayout::OneFile }, &to)?;
     }
     Ok(())
 }
@@ -3822,13 +4017,33 @@ pub fn simulate(run: &mut Run<Sim>, execution: &SimulateExecution) -> Result<()>
     let mut event_log = run.also::<EventLog>()?;                  // likewise
 
     for step in Stepper::new(&model, &identity, execution) {     // the backend's step iterator
+        let step = match step {
+            Ok(step) => step,
+            Err(engine_error) => {                                // fixed by the identity: stored
+                run.result_file("failure.toml")?.write_all(&Failure::engine(&engine_error).to_bytes())?;
+                write_failure_to_each_by_product(run, &engine_error)?;   // each wanted by-product
+                                                                          // is completed with it too
+                return Ok(());
+            }
+        };
         step.write_row(&traj)?;
-        if let Some(obs) = &mut obs { draw_observations(obs, &step)?; }      // from the in-memory state
+        if let Some(obs) = &mut obs { draw_observations(obs, &step)?; }      // from the in-memory state;
+                                                                             // a refused draw writes the
+                                                                             // by-product's failure.toml
         if let Some(log) = &mut event_log { record_events(log, &step)?; }   // the actions that fired
     }
-    Ok(())                                                        // the upstream's finish commits both
+    if let Some(q) = &mut quantities { evaluate_quantities(q, &trajectory, &obs_draws)?; }
+    Ok(())                                                        // the upstream's finish commits all
 }
 ```
+
+`traj` is opened after the first step succeeds, so a cell whose engine stops
+holds `failure.toml` alone; the sketch above elides that ordering. `quantities`
+is `run.also::<SimQuantities>()`, and `trajectory` and `obs_draws` the in-memory
+values the rows were written from. Each by-product wanted of a cell whose engine
+stopped is completed with the same `failure.toml`, since its identity holds the
+cell's: a rerun that asks for it again reuses it rather than reproducing the
+cell to fail at the same step.
 
 `SimulateExecution` is the generated execution struct, `{ pub parallel: usize }`
 in this sketch, and derives `Serialize`. `SimulateExports::into_parts` returns
@@ -3944,20 +4159,23 @@ are found through their own records.
 
 ### 7. What changes what
 
-| Change                                                        | Effect                                                                                                                                                                                                                                                                     |
-| ------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--parallel 16`                                               | Every cell is reused                                                                                                                                                                                                                                                       |
-| The same command again with `--label v2`                      | Every cell is reused; the new invocation is named `v2`, and `camdl cat @v2` renders its table                                                                                                                                                                              |
-| The model file is reformatted, or the project directory moves | Every cell is reused; the compiled content is the same                                                                                                                                                                                                                     |
-| The same values come from a file instead of `--param`         | Every cell is reused                                                                                                                                                                                                                                                       |
-| `--scenario fast,slow` in the other order                     | Every cell is reused; the rendered table lists `fast` first, as asked                                                                                                                                                                                                      |
-| A scenario is renamed without changing its effects            | Every cell is reused; the table shows the new name                                                                                                                                                                                                                         |
-| `--dt 0.5`                                                    | Every cell is new                                                                                                                                                                                                                                                          |
-| A third scenario is added                                     | The four stored cells are reused; two are computed                                                                                                                                                                                                                         |
-| `--obs` is added later                                        | Each cell is simulated again to draw its observations. The trajectory ids do not change, and each recomputed trajectory is checked against the stored one.                                                                                                                 |
-| `-o out.tsv` is added later, with or without `--dates`        | Nothing is computed; the table is rendered from the stored cells                                                                                                                                                                                                           |
-| camdl is rebuilt from changed source                          | Every id is new; the old results stay and are listed                                                                                                                                                                                                                       |
-| One cell fails                                                | Nothing is left for that cell; the other cells are computed; the invocation record counts one failure, with its reason; the command reports it and exits non-zero; `@baseline` keeps naming the last invocation whose cells all completed; a rerun computes only that cell |
+| Change                                                                                    | Effect                                                                                                                                                                                                                                                                     |
+| ----------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--parallel 16`                                                                           | Every cell is reused                                                                                                                                                                                                                                                       |
+| The same command again with `--label v2`                                                  | Every cell is reused; the new invocation is named `v2`, and `camdl cat @v2` renders its table                                                                                                                                                                              |
+| The model file is reformatted, or the project directory moves                             | Every cell is reused; the compiled content is the same                                                                                                                                                                                                                     |
+| The same values come from a file instead of `--param`                                     | Every cell is reused                                                                                                                                                                                                                                                       |
+| `--scenario fast,slow` in the other order                                                 | Every cell is reused; the rendered table lists `fast` first, as asked                                                                                                                                                                                                      |
+| A scenario is renamed without changing its effects                                        | Every cell is reused; the table shows the new name                                                                                                                                                                                                                         |
+| `--dt 0.5`                                                                                | Every cell is new                                                                                                                                                                                                                                                          |
+| A third scenario is added                                                                 | The four stored cells are reused; two are computed                                                                                                                                                                                                                         |
+| `--obs` is added later                                                                    | Each cell is simulated again to draw its observations. The trajectory ids do not change, and each recomputed trajectory is checked against the stored one.                                                                                                                 |
+| `-o out.tsv` is added later, or `--obs-dir` after `--obs FILE`, with or without `--dates` | Nothing is computed; each table is rendered from the stored cells and their stored observations                                                                                                                                                                            |
+| camdl is rebuilt from changed source                                                      | Every id is new; the old results stay and are listed                                                                                                                                                                                                                       |
+| The engine stops with an error at one cell                                                | The cell is completed with `failure.toml` and no trajectory, as is each by-product asked of it; the other cells are computed; the command lists every stored failure at the end and exits non-zero; a rerun reuses the stored failure and computes nothing                 |
+| One cell's computation is interrupted, or an I/O or store error stops it                  | Nothing is left for that cell; the other cells are computed; the invocation record counts one failure, with its reason; the command reports it and exits non-zero; `@baseline` keeps naming the last invocation whose cells all completed; a rerun computes only that cell |
+| `--quantities-out` is added later                                                         | Each cell is simulated again to evaluate its quantities, as for `--obs`; the banded tables are rendered from the stored per-cell quantities                                                                                                                                |
+| `--stdout` instead of `-o`                                                                | Nothing new is computed; the same rendering is written to standard output                                                                                                                                                                                                  |
 
 ## Worked example: `camdl fit run`
 
@@ -5365,6 +5583,17 @@ Settled:
   without a claim;
 - naming a stored result after the fact and upgrading a store's format in place
   are future features.
+- a simulation cell whose engine stops with an error is a completed result
+  holding `failure.toml`, as is each by-product asked of it; a refused
+  observation draw or a non-finite quantity is a completed by-product holding
+  its own, and the cell keeps its trajectory; `simulate` lists every stored
+  failure and exits non-zero;
+- a cell's generated quantities are a by-product of the cell, and the banded
+  quantity tables, the combined observation tables, `-o` and `--stdout` are
+  renderings; a rendering reads members' by-products through
+  `ByProductRendering`;
+- `--design-from`, `--projected-out` and `--draws-out` are exports that store
+  nothing, and `--dry-run` is `skip`.
 
 - every primary kind states its whole placement, groups and result label, in
   `Primary::layout`, which has no default; a by-product supplies only its
