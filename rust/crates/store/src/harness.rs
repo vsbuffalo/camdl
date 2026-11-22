@@ -45,6 +45,13 @@ pub struct Observed {
     /// Each export that is a copy of a stored file, with the file it copies.
     /// An export not named here is a rendering.
     pub copies: BTreeMap<PathBuf, StoredFile>,
+    /// What the harness read of the run besides its stored files and
+    /// exports, by a name it chooses: for an execution input, the value the
+    /// run recorded and the effect that shows it was used, such as the
+    /// number of threads the computation ran on. Read only by
+    /// [`InputHarness::shows_use`]; no check compares it across runs, since
+    /// two values of an execution input are expected to differ here.
+    pub effects: BTreeMap<String, String>,
 }
 
 /// One file of a stored result: the result's run id and the file's name in

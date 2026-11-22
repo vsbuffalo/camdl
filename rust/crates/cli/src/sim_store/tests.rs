@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::OnceLock;
 
-use store::{Class, ClassFailure, FieldInfo, InputHarness, Inputs, Key, Observed, ObservedResult};
+use store::{Artifact, Class, ClassFailure, FieldInfo, InputHarness, Inputs, Key, Observed, ObservedResult};
 
 use crate::args::SimulateInvocation;
 use crate::input_fixtures::{sim_base, sim_from};
@@ -467,7 +467,7 @@ fn run(inv: &SimulateInvocation, store: Option<&Path>) -> store::Result<Observed
     let cwd = workdir();
     let fresh = tempfile::tempdir().unwrap();
     let root = store.map(Path::to_path_buf).unwrap_or_else(|| fresh.path().join("camdl-store"));
-    let out = camdl(cwd.path(), &root, &argv(inv), &[]);
+    let out = camdl(cwd.path(), &root, &argv(inv), &[("RUST_LOG", "camdl::sim_command=debug")]);
     if !out.status.success() {
         return Err(store::Error::Parse { what: format!("camdl {:?}", argv(inv)), why: String::from_utf8_lossy(&out.stderr).into_owned() });
     }
@@ -485,7 +485,28 @@ fn run(inv: &SimulateInvocation, store: Option<&Path>) -> store::Result<Observed
     if a.stdout {
         exports.insert(PathBuf::from("<stdout>"), Key::digest_bytes(&out.stdout));
     }
-    Ok(Observed { results: observe(&root), exports, ..Observed::default() })
+    let mut effects = crate::test_support::recorded_execution(&root, crate::sim_store::Sim::KIND);
+    effects.extend(used(&String::from_utf8_lossy(&out.stderr), &cwd.path().join("ir-cache")));
+    Ok(Observed { results: observe(&root), exports, effects, ..Observed::default() })
+}
+
+/// What a run's execution inputs did, each under `used.<field>`: from its
+/// debug log, the threads its cells were computed on; and from the IR cache
+/// directory, whether the compile bypassed the cache (`--no-ir-cache`). An
+/// effect the log reports twice with different values is recorded as both,
+/// so it matches no single value.
+fn used(stderr: &str, ir_cache: &Path) -> BTreeMap<String, String> {
+    let threads: std::collections::BTreeSet<&str> = stderr
+        .lines()
+        .filter_map(|l| l.split_once("simulate: computing cells on ").and_then(|(_, r)| r.split_whitespace().next()))
+        .collect();
+    let mut out = BTreeMap::new();
+    if !threads.is_empty() {
+        out.insert("used.args.parallel".to_string(), threads.into_iter().collect::<Vec<_>>().join(","));
+    }
+    let bypassed = !crate::test_support::ir_cache_filled(ir_cache);
+    out.insert("used.no_ir_cache".to_string(), bypassed.to_string());
+    out
 }
 
 /// The harness of `simulate`'s class checks, from one base invocation.
@@ -601,10 +622,20 @@ impl InputHarness for Harness {
         }
     }
 
-    /// Every execution fixture uses its field: two cells run on a pool of
-    /// four threads, and `--no-ir-cache` is read on a model given as source.
-    fn shows_use(&self, _field: &FieldInfo, _seen: &Observed) -> bool {
-        true
+    /// A run shows an execution input was used when the effect it reports
+    /// ([`used`]) matches the value it recorded
+    /// ([`crate::test_support::recorded_execution`]): the cells are computed on
+    /// `--parallel N` threads, or on one when it is unset, and `--no-ir-cache`
+    /// leaves the IR cache empty while its absence fills it. An input with no
+    /// effect named here does not show use.
+    fn shows_use(&self, field: &FieldInfo, seen: &Observed) -> bool {
+        let effect = |prefix: &str| seen.effects.get(&format!("{prefix}.{}", field.name)).cloned();
+        let (Some(recorded), Some(used)) = (effect("recorded"), effect("used")) else { return false };
+        let expected = match (field.name, recorded.as_str()) {
+            ("args.parallel", "null") => "1".to_string(),
+            (_, r) => r.to_string(),
+        };
+        used == expected
     }
 
     fn run(&self, invocation: &SimulateInvocation, store: Option<&Path>) -> store::Result<Observed> {

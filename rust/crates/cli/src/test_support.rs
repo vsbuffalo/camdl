@@ -67,3 +67,55 @@ pub(crate) fn tiny_model() -> ir::Model {
         contrasts: vec![],
     }
 }
+
+/// The execution inputs the first result of `kind` under the store `root`
+/// recorded in its `run.json`, each under `recorded.<field>`, with `<field>`
+/// the input's dotted name in the command's `fields()`. For a harness's
+/// `InputHarness::shows_use`.
+pub(crate) fn recorded_execution(root: &std::path::Path, kind: &str) -> std::collections::BTreeMap<String, String> {
+    use std::collections::BTreeMap;
+    fn flatten(prefix: &str, v: &serde_json::Value, out: &mut BTreeMap<String, String>) {
+        match v {
+            serde_json::Value::Object(m) => {
+                for (k, x) in m {
+                    flatten(&if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") }, x, out);
+                }
+            }
+            serde_json::Value::String(x) => {
+                out.insert(format!("recorded.{prefix}"), x.clone());
+            }
+            other => {
+                out.insert(format!("recorded.{prefix}"), other.to_string());
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else { continue };
+        for e in entries.flatten() {
+            let p = e.path();
+            if !p.is_dir() || e.file_name().to_string_lossy().starts_with('.') {
+                continue;
+            }
+            if p.join("identity.json").is_file() {
+                let id: serde_json::Value = serde_json::from_slice(&std::fs::read(p.join("identity.json")).unwrap()).unwrap();
+                if id["kind"] == kind {
+                    let run: serde_json::Value = serde_json::from_slice(&std::fs::read(p.join("run.json")).unwrap()).unwrap();
+                    flatten("", &run["execution"], &mut out);
+                    return out;
+                }
+            }
+            stack.push(p);
+        }
+    }
+    out
+}
+
+/// Whether the IR cache directory `dir` holds a compiled model, which a
+/// compile through the cache writes and `--no-ir-cache` does not.
+pub(crate) fn ir_cache_filled(dir: &std::path::Path) -> bool {
+    std::fs::read_dir(dir)
+        .map(|d| d.flatten().any(|e| e.file_name().to_string_lossy().ends_with(".ir.json")))
+        .unwrap_or(false)
+}

@@ -915,6 +915,7 @@ fn run_pfilter(
             // gh#747: `--binomial`; the run's stored address records it.
             binomial,
         };
+        log::debug!("pfilter: a budget of {} particle-substeps", smc_config.max_substeps);
 
         // --save-filtering caveat log. Fires unconditionally (not quietable)
         // because the failure mode — plotting filtering marginals as if
@@ -1429,6 +1430,10 @@ fn busy_message(owner: store::Owner) -> String {
 /// (process, observation model, all `Sync`) keep the closure `Send` for
 /// `ThreadPool::install`.
 fn run_pooled<R: Send>(pool: &Option<rayon::ThreadPool>, f: impl FnOnce() -> R + Send) -> R {
+    let f = || {
+        log::debug!("pfilter: filtering on {} threads", rayon::current_num_threads());
+        f()
+    };
     match pool {
         Some(p) => p.install(f),
         None => f(),

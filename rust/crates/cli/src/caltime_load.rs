@@ -244,6 +244,7 @@ pub fn convert_time_column(
         TimeFormat::Date => ColKind::Date,
         TimeFormat::Auto => detect_kind(cells, row_offset)?,
     };
+    log::debug!("time column read under --time-format {:?} as {kind:?}", opts.format);
 
     // W326 (proposal §3.6, Rule 6): warn when an Auto-detected
     // numeric time column is loaded under an anchored model. The

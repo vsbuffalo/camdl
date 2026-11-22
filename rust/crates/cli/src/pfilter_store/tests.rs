@@ -410,7 +410,7 @@ fn run(inv: &PfilterInvocation, store: Option<&Path>) -> store::Result<Observed>
     let cwd = workdir();
     let fresh = tempfile::tempdir().unwrap();
     let root = store.map(Path::to_path_buf).unwrap_or_else(|| fresh.path().join("camdl-store"));
-    let out = camdl(cwd.path(), &root, &argv(inv), &[]);
+    let out = camdl(cwd.path(), &root, &argv(inv), &[("RUST_LOG", USE_LOG)]);
     if !out.status.success() {
         return Err(store::Error::Parse {
             what: format!("camdl {:?}", argv(inv)),
@@ -425,7 +425,41 @@ fn run(inv: &PfilterInvocation, store: Option<&Path>) -> store::Result<Observed>
         let bytes = std::fs::read(cwd.path().join(&path)).unwrap_or_default();
         exports.insert(PathBuf::from(path), Key::digest_bytes(&bytes));
     }
-    Ok(Observed { results: observe(&root), exports, ..Observed::default() })
+    let mut effects = crate::test_support::recorded_execution(&root, crate::pfilter_store::Pfilter::KIND);
+    effects.extend(used(&String::from_utf8_lossy(&out.stderr), &cwd.path().join("ir-cache")));
+    Ok(Observed { results: observe(&root), exports, effects, ..Observed::default() })
+}
+
+/// The log filter under which a run reports what its execution inputs did:
+/// the threads it filtered on, the budget it handed the engine, and the
+/// `--time-format` the data loader read.
+const USE_LOG: &str = "camdl::pfilter=debug,camdl::caltime_load=debug";
+
+/// What a run's execution inputs did, each under `used.<field>`: from its
+/// debug log (`USE_LOG`), the threads it filtered on, the budget it handed the
+/// engine and the `--time-format` its data loader read; and from the IR cache
+/// directory, whether the compile bypassed the cache (`--no-ir-cache`). An
+/// effect the log reports twice with different values is recorded as both,
+/// so it matches no single value.
+fn used(stderr: &str, ir_cache: &Path) -> BTreeMap<String, String> {
+    let mut seen: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
+    let mut note = |field: &str, value: &str| {
+        seen.entry(format!("used.{field}")).or_default().insert(value.to_string());
+    };
+    for line in stderr.lines() {
+        let after = |marker: &str| line.split_once(marker).and_then(|(_, rest)| rest.split_whitespace().next());
+        if let Some(n) = after("pfilter: filtering on ") {
+            note("args.inference.parallel", n);
+        }
+        if let Some(n) = after("pfilter: a budget of ") {
+            note("args.inference.pf_max_substeps", n);
+        }
+        if let Some(f) = after("time column read under --time-format ") {
+            note("args.inference.time_format", &f.to_lowercase());
+        }
+    }
+    note("no_ir_cache", if crate::test_support::ir_cache_filled(ir_cache) { "false" } else { "true" });
+    seen.into_iter().map(|(k, v)| (k, v.into_iter().collect::<Vec<_>>().join(","))).collect()
 }
 
 /// The harness of `pfilter`'s class checks, from one base invocation.
@@ -511,13 +545,21 @@ impl InputHarness for Harness {
         }
     }
 
-    /// Every execution fixture uses its field: the pool is built when
-    /// `--parallel` is not 0, the time column is parsed under the format
-    /// given, the budget is checked on every substep (a lower one is refused,
-    /// [`a_budget_below_one_pass_is_refused_and_stores_nothing`]), and
-    /// `--no-ir-cache` is read on a model given as source.
-    fn shows_use(&self, _field: &FieldInfo, _seen: &Observed) -> bool {
-        true
+    /// A run shows an execution input was used when the effect it reports
+    /// ([`used`]) matches the value it recorded ([`crate::test_support::recorded_execution`]):
+    /// `--parallel N` filters on N threads, the budget handed to the engine is
+    /// `--pf-max-substeps` or, unset, the engine's default, the data loader
+    /// reads the `--time-format` given, and `--no-ir-cache` leaves the IR
+    /// cache empty while its absence fills it. An input with no effect named
+    /// here does not show use.
+    fn shows_use(&self, field: &FieldInfo, seen: &Observed) -> bool {
+        let effect = |prefix: &str| seen.effects.get(&format!("{prefix}.{}", field.name)).cloned();
+        let (Some(recorded), Some(used)) = (effect("recorded"), effect("used")) else { return false };
+        let expected = match (field.name, recorded.as_str()) {
+            ("args.inference.pf_max_substeps", "null") => sim::inference::degeneracy::ITER_BUDGET.to_string(),
+            (_, r) => r.to_string(),
+        };
+        used == expected
     }
 
     fn run(&self, invocation: &PfilterInvocation, store: Option<&Path>) -> store::Result<Observed> {

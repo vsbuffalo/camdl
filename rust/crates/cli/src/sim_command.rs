@@ -226,8 +226,10 @@ pub(crate) fn run(ctx: StoreRun<'_>) {
     let computed = claimed.len();
     let errors: Vec<String> = if ctx.job.parallel > 1 {
         use rayon::prelude::*;
+        log::debug!("simulate: computing cells on {} threads", rayon::current_num_threads());
         claimed.into_par_iter().filter_map(compute).collect()
     } else {
+        log::debug!("simulate: computing cells on 1 threads");
         claimed.into_iter().filter_map(compute).collect()
     };
     if let Some(t) = bar.into_inner().unwrap_or_else(|e| e.into_inner()) {
