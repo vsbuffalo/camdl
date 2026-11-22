@@ -331,3 +331,46 @@ fn label_refuses_a_sealed_pfilter_run() {
     assert!(!out.status.success(), "{stderr}");
     assert!(stderr.contains("sealed") && stderr.contains("--label"), "{stderr}");
 }
+
+/// `camdl cat <run> --stream NAME` reads a file of the filter run or of one of
+/// its by-products, as it does for a simulation cell; the stream's name alone
+/// stands for `<name>.tsv`, and a name none of them holds is refused with
+/// every file the run and its by-products hold.
+#[test]
+fn cat_reads_a_filter_runs_by_products() {
+    let bin = camdl_bin();
+    if camdlc_bin().is_none() { return }
+    let tmp = tempdir("cat_by_products");
+    let (ir, data) = write_fixture(tmp.path());
+    let out_root = tmp.path().join("out");
+    let trace = tmp.path().join("trace-export.tsv");
+    let health = tmp.path().join("health-export.tsv");
+    let out = run_pfilter_with(&bin, &out_root, &ir, &data, 0.3, 1, &[
+        "--trace", &trace.to_string_lossy(), "--pf-health", &health.to_string_lossy()]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let (leaf, rid) = find_pfilter_leaf(&out_root);
+    let stored = |kind: &str, file: &str| -> Vec<u8> {
+        let dir = std::fs::read_dir(leaf.join(kind)).unwrap().flatten().next().expect("the by-product's folder").path();
+        std::fs::read(dir.join(file)).unwrap()
+    };
+    let cat = |stream: &str| {
+        Command::new(&bin).env_remove("CLICOLOR_FORCE")
+            .env("CAMDL_STORE", &out_root)
+            .env("CAMDL_SKIP_VERSION_CHECK", "1")
+            .current_dir(tmp.path())
+            .args(["cat", &rid[..12], "--stream", stream])
+            .output().expect("spawn camdl cat")
+    };
+    for (stream, kind, file) in [("trace.tsv", "trace", "trace.tsv"), ("trace", "trace", "trace.tsv"),
+                                 ("pf_health.tsv", "pf_health", "pf_health.tsv")] {
+        let out = cat(stream);
+        assert!(out.status.success(), "cat --stream {stream}: {}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(out.stdout, stored(kind, file), "cat --stream {stream} prints the stored {file}");
+    }
+    let out = cat("paths.tsv");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{stderr}");
+    for name in ["loglik.toml", "trace.tsv", "pf_health.tsv"] {
+        assert!(stderr.contains(name), "the refusal lists {name}: {stderr}");
+    }
+}

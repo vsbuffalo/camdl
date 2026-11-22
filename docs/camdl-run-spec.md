@@ -2512,10 +2512,16 @@ creation time. `camdl cat` on a cell prints its `traj.tsv`; `--stream NAME`
 prints a named file of the cell or of one of its by-products, by its file name:
 an observation stream (`cases.tsv`), `event_log.tsv`, `quantities.json` or
 `reactive_log.tsv`. A name the cell does not hold is refused with the list of
-the files it does hold. `camdl cat @L` renders the combined table of the
-invocation labelled `L` (§4.4). `--limit` defaults to 50; `--all` removes the
-cap. `--kind ensemble` lists `SimEnsemble` leaves under `results/ensembles/`, a
-kind no command of this camdl writes.
+the files it does hold. `camdl cat` on a filter run prints its `loglik.toml`;
+`--stream NAME` prints a file of the run or of one of the by-products its
+`--trace`, `--pf-health` and `--save-*` flags stored: `trace.tsv`,
+`pf_health.tsv`, `filtering.tsv`, `filtered_streams.tsv`, `final_state.tsv`,
+`paths.tsv`, `prequential.tsv`, `prequential.streams.tsv` or `prequential.json`.
+For a cell and a filter run alike, a name without an extension stands for
+`<name>.tsv`. `camdl cat @L` renders the combined table of the invocation
+labelled `L` (§4.4). `--limit` defaults to 50; `--all` removes the cap.
+`--kind ensemble` lists `SimEnsemble` leaves under `results/ensembles/`, a kind
+no command of this camdl writes.
 
 Fits are listed one row per run, grouped under a `problem` line per problem
 folder (its fit id, model, config and path):

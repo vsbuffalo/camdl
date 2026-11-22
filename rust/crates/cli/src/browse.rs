@@ -160,6 +160,71 @@ fn stored_design_table(root: &Path, target: &str) -> Option<Result<Vec<u8>, Stri
     )
 }
 
+/// A file of a stored filter run, or of one of its by-products: the trace,
+/// the health table, the filtering and filtered-stream tables, the final
+/// state, the saved paths or the prequential scores. A name without an
+/// extension also stands for `<name>.tsv`. A by-product is found through the
+/// invocation records, by the filter run its identity holds.
+fn stored_pfilter_file(root: &Path, row: &PfilterRow, name: &str) -> Result<Vec<u8>, String> {
+    match stored_pfilter_file_named(root, row, name) {
+        Err(_) if !name.contains('.') => stored_pfilter_file_named(root, row, &format!("{name}.tsv")),
+        r => r,
+    }
+}
+
+fn stored_pfilter_file_named(root: &Path, row: &PfilterRow, name: &str) -> Result<Vec<u8>, String> {
+    use store::ContentAddressed;
+    use crate::pfilter_store as pf;
+    if row.stored.result_files().contains(&name) {
+        return crate::camdl_store::read_stored(&row.stored, name);
+    }
+    let store = crate::camdl_store::open_existing(root).ok_or("no run store")?;
+    let run = row.stored.identity().content_hash();
+    let mut names: Vec<String> = row.stored.result_files().iter().map(|s| s.to_string()).collect();
+    for inv in store.invocations().iter().rev() {
+        macro_rules! look {
+            ($t:ty, $flag:literal) => {
+                for (id, ()) in inv.members::<$t>().unwrap_or_default() {
+                    let Ok(Some(s)) = store.get(&id) else {
+                        // A by-product of this run that is stored but fails its
+                        // manifest check is not served; say which, and how to
+                        // make it again.
+                        if let Ok(Some(e)) = store.inspect(&id) {
+                            if e.identity().filter.content_hash() == run {
+                                if let store::EntryState::Damaged { what } = e.state() {
+                                    return Err(format!(
+                                        "the filter run's {} is damaged ({what}), so it is not read; run the \
+                                         pfilter again with {} and --force to store it again",
+                                        <$t as store::Artifact>::KIND, $flag
+                                    ));
+                                }
+                            }
+                        }
+                        continue;
+                    };
+                    if s.identity().filter.content_hash() != run {
+                        continue;
+                    }
+                    if s.result_files().contains(&name) {
+                        return crate::camdl_store::read_stored(&s, name);
+                    }
+                    names.extend(s.result_files().iter().map(|f| f.to_string()));
+                }
+            };
+        }
+        look!(pf::Trace, "--trace");
+        look!(pf::PfHealth, "--pf-health");
+        look!(pf::Filtering, "--save-filtering");
+        look!(pf::FilteredStreams, "--save-filtered-streams");
+        look!(pf::FinalState, "--save-final-state");
+        look!(pf::SavedPaths, "--save-paths");
+        look!(pf::Prequential, "--save-prequential");
+    }
+    names.sort();
+    names.dedup();
+    Err(format!("the filter run holds no file `{name}`; its files and its by-products' files: {}", names.join(", ")))
+}
+
 /// `camdl show` of a filter run on the run store.
 fn show_stored_pfilter(out: &crate::out::Out, row: &PfilterRow) {
     let field = |name: &str, value: &dyn std::fmt::Display| {
@@ -1216,9 +1281,8 @@ pub fn cmd_cat(a: &crate::args::CatArgs) {
                 sel.flag(), a.target));
         }
         let name = a.stream.as_deref().unwrap_or(crate::pfilter_store::LOGLIK_FILE);
-        let bytes = crate::camdl_store::read_stored(&row.stored, name).unwrap_or_else(|e| {
-            out.fail(format!("error: {e}\n  the filter run's files: {}", row.stored.result_files().join(", ")));
-        });
+        let bytes = stored_pfilter_file(&store_root(a.store.as_deref()), &row, name)
+            .unwrap_or_else(|e| out.fail(format!("error: {e}")));
         let _ = out.data().write_all(&bytes);
         return;
     }

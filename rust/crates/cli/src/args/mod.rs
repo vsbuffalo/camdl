@@ -2829,8 +2829,9 @@ pub struct CatArgs {
 
     /// Print a named stream instead of the run's default output: for a
     /// simulation, an observation stream (`cases`) or the event log
-    /// (`event_log.tsv`); for a fit or another run, a file it wrote
-    /// (`draws.tsv`)
+    /// (`event_log.tsv`); for a filter run, a file it or one of its saved
+    /// files holds (`trace.tsv`, `paths.tsv`); for a fit or another run, a
+    /// file it wrote (`draws.tsv`)
     #[arg(long)]
     pub stream: Option<String>,
 
