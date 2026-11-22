@@ -43,6 +43,31 @@ fn the_model_part_reads_back_to_its_own_bytes() {
     assert_eq!(back.model().simulation.t_end, 100.0);
 }
 
+/// The initial conditions read back in the order they were declared, which
+/// the runtime evaluates them by and draws initial laws in: a model whose
+/// compartments are declared out of alphabetical order is the same model
+/// after it is stored, by its order and by its structural hash.
+#[test]
+fn the_model_part_keeps_the_initial_conditions_order() {
+    let mut m = crate::test_support::tiny_model();
+    m.initial_conditions = ir::model::InitialConditions::constants([
+        ("S".to_string(), 990.0),
+        ("I".to_string(), 10.0),
+        ("R".to_string(), 0.0),
+    ]);
+    let p = parts(m.clone());
+    let back = CompiledModelContent::from_bytes(&p.model.get().to_bytes()).expect("the stored bytes read");
+    let names: Vec<&str> = back.model().initial_conditions.0.keys().map(String::as_str).collect();
+    assert_eq!(names, ["S", "I", "R"]);
+    let mut stored = back.model().clone();
+    stored.name = m.name.clone();
+    stored.description = m.description.clone();
+    assert_eq!(runid::inputs::model_ir_hash(&stored), runid::inputs::model_ir_hash(&m));
+    let mut swapped = m.clone();
+    swapped.initial_conditions.0.swap_indices(0, 1);
+    assert_ne!(model_digest(swapped), p.model.digest(), "the order is part of the model");
+}
+
 /// The name, the description, the quantities and the documentation are not
 /// the model part: none of them moves its digest. A change to what the
 /// engine runs does.

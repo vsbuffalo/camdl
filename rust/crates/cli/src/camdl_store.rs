@@ -236,7 +236,11 @@ pub(crate) struct ProcessSeed {
 /// `ir::Model` except its name, its description, its quantities and its
 /// contrasts, derivative tables included. Its bytes are canonical JSON (object
 /// keys sorted at every depth) of those fields, so the digest does not depend
-/// on the order a map was filled in.
+/// on the order a map was filled in, with one exception: the initial
+/// conditions are written as an array of `[compartment, spec]` pairs in the
+/// model's declaration order, which the runtime evaluates by (it breaks ties
+/// between independent entries, and so decides the order initial laws are
+/// drawn in). Read back, the model is the one that was stored.
 pub(crate) struct CompiledModelContent {
     /// The model, with the four fields that are not this part at their empty
     /// values. Nothing reads them from here.
@@ -249,6 +253,10 @@ impl CompiledModelContent {
         &self.model
     }
 }
+
+/// The field of `ir::Model` whose order the runtime reads, written as an
+/// ordered list.
+const INITIAL_CONDITIONS: &str = "initial_conditions";
 
 /// The fields of `ir::Model` that belong to other parts, left out of the
 /// model part's bytes.
@@ -267,6 +275,13 @@ impl CompiledModelContent {
             for k in NOT_THE_MODEL_PART {
                 o.remove(k);
             }
+            let ordered: Vec<serde_json::Value> = model
+                .initial_conditions
+                .0
+                .iter()
+                .map(|(name, spec)| serde_json::json!([name, spec]))
+                .collect();
+            o.insert(INITIAL_CONDITIONS.into(), serde_json::Value::Array(ordered));
         }
         let bytes = serde_json::to_vec(&crate::fit::cas::canonical(&v)).expect("a JSON value encodes");
         CompiledModelContent { model, bytes }
@@ -284,7 +299,17 @@ impl store::Content for CompiledModelContent {
         let o = v.as_object_mut().ok_or_else(|| parse("not a JSON object".into()))?;
         o.insert("name".into(), serde_json::Value::String(String::new()));
         o.insert("description".into(), serde_json::Value::Null);
+        // The initial conditions, in the order they were stored.
+        let ordered = match o.insert(INITIAL_CONDITIONS.into(), serde_json::Value::Object(Default::default())) {
+            Some(serde_json::Value::Array(a)) => a,
+            _ => return Err(parse("its initial conditions are not an ordered list".into())),
+        };
         let mut model: ir::Model = serde_json::from_value(v).map_err(|e| parse(e.to_string()))?;
+        for entry in ordered {
+            let (name, spec): (String, ir::model::InitSpec) =
+                serde_json::from_value(entry).map_err(|e| parse(format!("an initial condition: {e}")))?;
+            model.initial_conditions.0.insert(name, spec);
+        }
         model.restore_unresolved_horizons();
         Ok(CompiledModelContent { model, bytes: bytes.to_vec() })
     }
