@@ -262,6 +262,7 @@ fn argv(inv: &PfilterInvocation) -> Vec<String> {
         score_from,
         no_save_samples,
         no_store,
+        force,
         label,
         store,
     } = args;
@@ -327,6 +328,7 @@ fn argv(inv: &PfilterInvocation) -> Vec<String> {
     flag(*allow_forcing_extrapolation, "--allow-forcing-extrapolation");
     flag(*no_save_samples, "--no-save-samples");
     flag(*no_store, "--no-store");
+    flag(*force, "--force");
     flag(*no_licm, "--no-licm");
     flag(*no_ir_cache, "--no-ir-cache");
     v.extend(["--progress".to_string(), "none".to_string()]);
@@ -723,6 +725,64 @@ fn a_budget_below_one_pass_is_refused_and_stores_nothing() {
     }
     let failed = walk_records(&store).into_iter().filter(|(kind, _)| kind == "pfilter").map(|(_, status)| status).collect::<Vec<_>>();
     assert_eq!(failed, ["failed"], "the refused run is recorded as failed");
+}
+
+/// A run whose record names an owner on another host that is no longer
+/// running (here one with no beat file) is refused, with `--force` named, and
+/// `--force` moves the folder to the quarantine and computes the run again.
+#[test]
+fn a_run_held_from_another_host_is_refused_and_force_computes_it_again() {
+    let cwd = workdir();
+    let store = cwd.path().join("camdl-store");
+    let line = |extra: &[&str]| -> Vec<String> {
+        let mut v: Vec<String> = ["pfilter", "sir.ir.json", "--params", "p.toml", "--data", "cases=cases.tsv",
+            "--particles", "20", "--seed", "1", "--progress", "none"].iter().map(|s| s.to_string()).collect();
+        v.extend(extra.iter().map(|s| s.to_string()));
+        v
+    };
+    let first = camdl(cwd.path(), &store, &line(&[]), &[]);
+    assert!(first.status.success(), "{}", String::from_utf8_lossy(&first.stderr));
+    let stored = observe(&store).into_iter().find(|r| r.kind == "pfilter").expect("the stored run");
+
+    // The run's record, rewritten as a claim held by a process on another
+    // host: running, and owned there.
+    let mut dirs = vec![store.clone()];
+    let mut run_dir = None;
+    while let Some(d) = dirs.pop() {
+        for e in std::fs::read_dir(&d).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() && !e.file_name().to_string_lossy().starts_with('.') {
+                let id = p.join("identity.json");
+                if id.is_file() && std::fs::read_to_string(&id).unwrap().contains(&stored.run_id.to_hex()) {
+                    run_dir = Some(p.clone());
+                }
+                dirs.push(p);
+            }
+        }
+    }
+    let run_dir = run_dir.expect("the run's folder");
+    let remote = serde_json::json!({ "host": "another-host.invalid", "pid": 4242, "started": "2026-01-01T00:00:00.000Z" });
+    let mut record: serde_json::Value = serde_json::from_slice(&std::fs::read(run_dir.join("run.json")).unwrap()).unwrap();
+    record["status"] = "running".into();
+    record["owner"] = remote.clone();
+    std::fs::write(run_dir.join("run.json"), serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+    std::fs::write(run_dir.join(".lock"), serde_json::to_vec_pretty(&serde_json::json!({ "owner": remote })).unwrap()).unwrap();
+
+    let refused = camdl(cwd.path(), &store, &line(&[]), &[]);
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(!refused.status.success(), "a run held from another host is not reclaimed without --force: {stderr}");
+    assert!(stderr.contains("another-host.invalid") && stderr.contains("--force"), "the refusal names the host and --force: {stderr}");
+
+    let forced = camdl(cwd.path(), &store, &line(&["--force"]), &[]);
+    let stderr = String::from_utf8_lossy(&forced.stderr);
+    assert!(forced.status.success(), "--force computes the run again: {stderr}");
+    assert_eq!(forced.stdout, first.stdout, "the same log-likelihood");
+    let again = observe(&store).into_iter().find(|r| r.kind == "pfilter").expect("the run, stored again");
+    assert_eq!((again.run_id, again.files), (stored.run_id, stored.files), "the same run id and files");
+    assert_eq!(walk_records(&store).into_iter().filter(|(k, _)| k == "pfilter").map(|(_, s)| s).collect::<Vec<_>>(),
+        ["completed"], "the run is recorded as completed");
+    assert_eq!(std::fs::read_dir(store.join(".quarantine")).map(|d| d.count()).unwrap_or(0), 1,
+        "the held folder is in the quarantine");
 }
 
 /// `--no-licm` and `CAMDL_NO_LICM` change the compiled model a run stores,

@@ -208,8 +208,8 @@ pub fn cmd_pfilter(inv: crate::args::PfilterInvocation) {
     let (exports,) = exports.into_parts();
     let ((), (), _inference_exports, (), output) = exports.into_parts();
     let (request,) = request.into_parts();
-    let ((), (), _inference_request, (), no_store, label, root) = request.into_parts();
-    let request = crate::camdl_store::store_request(label, root);
+    let ((), (), _inference_request, (), no_store, force, label, root) = request.into_parts();
+    let request = crate::camdl_store::store_request(label, force, root);
     let execution_record = crate::args::PfilterInvocationExecution {
         args: crate::args::PfilterExecution { model_overrides: (), scenario: (), inference, stream: () },
         no_ir_cache,
@@ -1224,7 +1224,7 @@ fn run_pfilter(
         };
         let result = match begun {
             store::Begin::Reused(stored) => PointResult::Stored { stored, kept: false, by_products_failed: false },
-            store::Begin::Busy(owner) => not_completed(format!("error: {}", store::Error::InProgress(owner))),
+            store::Begin::Busy(owner) => not_completed(busy_message(owner)),
             store::Begin::Claimed(mut run) => 'claimed: {
                 // A claim on a stored run exists only for by-products: the run
                 // is computed again and compared, and keeps nothing of its own.
@@ -1401,6 +1401,20 @@ fn failure_text(e: &sim::SimError) -> String {
             format!("particle filter degeneracy ({kind:?}) at obs_window {obs_window}"),
         other => crate::util::sim_error_text(other),
     }
+}
+
+/// The refusal of a run another process holds. An owner on another host may
+/// have stopped without this host being able to tell, so the refusal names
+/// `--force`, which takes such a claim over.
+fn busy_message(owner: store::Owner) -> String {
+    let elsewhere = owner.host != store::this_host();
+    let host = owner.host.clone();
+    let mut message = format!("error: {}", store::Error::InProgress(owner));
+    if elsewhere {
+        message.push_str(&format!("; it may still be running on {host}. If that process has stopped, \
+            run again with --force"));
+    }
+    message
 }
 
 /// Run a closure on the scoped pool if one was built, else on the global pool

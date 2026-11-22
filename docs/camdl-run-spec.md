@@ -4234,8 +4234,11 @@ leaf is moved to `<root>/.quarantine/` (never deleted) and the fresh result is
 stored at the same address. Without the flag the same command reports a cache
 hit and exits 0. A leaf another live process is still writing is not displaced;
 the run stops with an in-progress error naming the pid. `simulate` takes
-`--force` with the same meaning (`WritePolicy::Force`, `resolve::check_reuse`);
-`pfilter` and `profile` have no `--force`.
+`--force` with the same meaning (`WritePolicy::Force`, `resolve::check_reuse`).
+`pfilter --force` computes the run and its by-products again, moving the stored
+folder to the quarantine; it also takes over a run whose record names a process
+on another host that is not known to be running, which a rerun without the flag
+refuses, naming the host and `--force`. `profile` has no `--force`.
 
 `--resume <BASE_REF>` extends a completed PGAS or PMMH run: the base leaf is
 read read-only and the longer chain is written to a new content-addressed leaf

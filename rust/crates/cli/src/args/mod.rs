@@ -2076,6 +2076,14 @@ pub struct PfilterArgs {
     #[input(store)]
     pub no_store: bool,
 
+    /// Compute the run and its by-products again, even when they are stored:
+    /// the stored folder moves to the store's `.quarantine/`. This is also how
+    /// to take over a run whose record names a process on another host that
+    /// has stopped; a run whose owner is still running is never taken.
+    #[arg(long)]
+    #[input(store)]
+    pub force: bool,
+
     /// A name for this invocation, found again as `@LABEL`. It names the
     /// invocation, never the result: rerunning with another label reuses the
     /// stored result.

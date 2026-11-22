@@ -838,8 +838,7 @@ fn run_simulate(inv: args::SimulateInvocation) {
     let ((), (), (), (), store_root, force, label) = request.into_parts();
     let args::SimulateInvocationExecution { args: args::SimulateExecution { parallel, .. }, no_ir_cache } = execution;
     let compile = util::CompileSettings::resolve(no_licm, no_ir_cache);
-    let request = crate::camdl_store::store_request(label.clone(), store_root.clone());
-    let request = if force { store::StoreRequest::new(None, true, None).merge(request) } else { request };
+    let request = crate::camdl_store::store_request(label.clone(), force, store_root.clone());
     let execution_record = args::SimulateInvocationExecution {
         args: args::SimulateExecution { forcing_extrapolation: (), model_overrides: (), backend: (), output_view: (), parallel },
         no_ir_cache,

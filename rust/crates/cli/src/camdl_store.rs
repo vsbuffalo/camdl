@@ -83,12 +83,18 @@ pub(crate) fn camdl_kinds() -> Kinds {
 
 // ── The store root and the request ───────────────────────────────────────────
 
-/// The store-class inputs of a command: its `--label`, and its `--store`
-/// root, over `CAMDL_STORE`, over the default `./camdl-store`. The old root
-/// (`--output-dir`, `CAMDL_OUTPUT_DIR`, `results/`) is never read here.
-pub(crate) fn store_request(label: Option<String>, root: Option<PathBuf>) -> StoreRequest {
+/// The store-class inputs of a command: its `--label`, its `--force`, and its
+/// `--store` root, over `CAMDL_STORE`, over the default `./camdl-store`. The
+/// old root (`--output-dir`, `CAMDL_OUTPUT_DIR`, `results/`) is never read
+/// here.
+///
+/// `force` asks the store to compute each result again (`Reuse::Force`): a
+/// completed result, and a claim whose owner is on another host and is not
+/// known to be running, move to the quarantine and are claimed anew. A claim
+/// whose owner is running is never taken.
+pub(crate) fn store_request(label: Option<String>, force: bool, root: Option<PathBuf>) -> StoreRequest {
     let env = StoreRequest::new(None, false, crate::env::get().vars.store.clone());
-    StoreRequest::new(label, false, root).merge(env)
+    StoreRequest::new(label, force, root).merge(env)
 }
 
 /// camdl's run store root when no input names one.
@@ -115,7 +121,7 @@ pub(crate) fn scratch() -> store::Result<Store> {
 /// The root a reader uses when it is given no store: `CAMDL_STORE`, else the
 /// default.
 pub(crate) fn read_root() -> PathBuf {
-    root_of(&store_request(None, None))
+    root_of(&store_request(None, false, None))
 }
 
 /// Opens the store at `root` for reading, or `None` when no store is there.
