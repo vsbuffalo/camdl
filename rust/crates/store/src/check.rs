@@ -1,5 +1,7 @@
 //! The check that a completed folder is whole: every listed file present with
-//! its recorded size and modification time, and nothing unlisted.
+//! its recorded size and content, and nothing unlisted. A file whose size and
+//! modification time match its record is taken as unchanged; one whose time
+//! differs is compared by its full digest, and a size that differs is damage.
 //!
 //! The check passes over the store's own entries (`.staging/`, `.attempts/`,
 //! the lock files, `identity.json`, `run.json` and their temporaries), over
@@ -8,12 +10,15 @@
 //! holds nested results when every file below it lies inside a result folder
 //! whose `identity.json` is of a registered kind and names this result as its
 //! parent, or inside a folder
-//! holding only the `.lock` an in-place claim writes first. Full digests are
-//! not computed here; `verify` and every read through the store compute them.
+//! holding only the `.lock` an in-place claim writes first. A file whose size
+//! and time both match is not hashed here; `verify` and every read through the
+//! store compute its digest. The record is not rewritten with a new time.
 
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
+
+use sha2::{Digest, Sha256};
 
 use crate::artifact::Kinds;
 use crate::fsutil::{fmt_mtime, is_lock_entry, is_temporary_of, rel_key};
@@ -22,6 +27,13 @@ use crate::record::{
     read_record, IdentityFile, Read, RunFile, ATTEMPTS_DIR, IDENTITY_FILE, LOCK_FILE, PROGRESS_FILE, RUN_FILE, RUN_TMP,
     STAGING_DIR,
 };
+
+/// The SHA-256 of the file at `path`, read in pieces.
+fn file_digest(path: &Path) -> std::io::Result<Key> {
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut fs::File::open(path)?, &mut hasher)?;
+    Ok(Key::from_bytes(hasher.finalize().into()))
+}
 
 /// What is wrong with a completed folder, or `None` when it is whole.
 pub(crate) fn damage(dir: &Path, run: &RunFile, run_id: &Key, kinds: &Kinds) -> Option<String> {
@@ -34,9 +46,16 @@ pub(crate) fn damage(dir: &Path, run: &RunFile, run_id: &Key, kinds: &Kinds) -> 
         if Some(meta.len()) != entry.bytes {
             return Some(format!("the file `{name}` has changed size"));
         }
-        match meta.modified() {
-            Ok(t) if Some(fmt_mtime(t)) == entry.mtime => {}
-            _ => return Some(format!("the file `{name}` has changed since it was stored")),
+        // A matching size and time is taken as an unchanged file, so a read
+        // of a whole store does not hash every file. A copy that does not keep
+        // modification times (`cp -r`, `rsync` without `-t`) changes only the
+        // time, so a time mismatch is settled by the file's digest.
+        if meta.modified().ok().map(fmt_mtime) != entry.mtime {
+            match file_digest(&path) {
+                Ok(d) if Some(d) == entry.sha256 => {}
+                Ok(_) => return Some(format!("the file `{name}` does not have its recorded digest")),
+                Err(e) => return Some(format!("the file `{name}` cannot be read: {e}")),
+            }
         }
     }
     let listed: BTreeSet<&str> = run.files.keys().map(String::as_str).collect();

@@ -304,6 +304,96 @@ fn a_damaged_result_is_not_served_and_the_next_begin_quarantines_it() {
     }
 }
 
+/// Copies `from` to `to`, recursively, writing each file's bytes into a new
+/// file whose modification time is set to one far in the past, as a copy
+/// that does not keep times leaves it different from the record.
+fn copy_without_times(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(from).unwrap().flatten() {
+        let (src, dst) = (e.path(), to.join(e.file_name()));
+        if src.is_dir() {
+            copy_without_times(&src, &dst);
+        } else {
+            std::fs::write(&dst, std::fs::read(&src).unwrap()).unwrap();
+            set_time(&dst, std::time::UNIX_EPOCH + Duration::from_secs(1_000_000_000));
+        }
+    }
+}
+
+fn set_time(path: &Path, t: std::time::SystemTime) {
+    std::fs::File::options().write(true).open(path).unwrap().set_modified(t).unwrap();
+}
+
+#[test]
+fn a_store_copied_without_modification_times_reuses_every_result() {
+    use crate::StoreCommand;
+    let root = TempRoot::new("copied");
+    let store = open(root.path());
+    let stored: Vec<_> = (1..=3).map(|seed| run_sim(&store, &info(), seed)).collect();
+    let copy = TempRoot::new("copied-to");
+    copy_without_times(root.path(), copy.path());
+    let store = open(copy.path());
+    for (seed, s) in (1..=3).zip(&stored) {
+        let entry = store.inspect(s.id()).unwrap().unwrap();
+        assert!(matches!(entry.state(), EntryState::Completed), "{:?}", entry.state());
+        let (id, labels) = sim(seed);
+        match store.begin::<Sim>(&id, &labels, &info(), Reuse::IfCompleted).unwrap() {
+            Begin::Reused(again) => assert!(again.open("traj.tsv").is_ok(), "a read checks the digest"),
+            _ => panic!("a copied result is reused"),
+        }
+    }
+    assert!(!copy.path().join(".quarantine").exists(), "nothing is moved to quarantine");
+    assert!(store.verify(None).unwrap().is_empty(), "verify agrees with the reader");
+    let mut listed = Vec::new();
+    StoreCommand::List { kind: "sim".into() }.run(&store, &mut listed).unwrap();
+    let listed = String::from_utf8(listed).unwrap();
+    assert_eq!(listed.matches("completed").count(), 3, "{listed}");
+    let mut status = Vec::new();
+    StoreCommand::Status.run(&store, &mut status).unwrap();
+    let status = String::from_utf8(status).unwrap();
+    assert!(!status.contains("sim "), "status lists no copied result: {status}");
+    let run = read_run(stored[0].folder());
+    let copied = read_run(&copy.path().join(stored[0].folder().strip_prefix(root.path()).unwrap()));
+    assert_eq!(copied.files, run.files, "the record keeps the times it was committed with");
+}
+
+#[test]
+fn a_file_whose_bytes_changed_at_the_same_size_is_damaged_by_its_digest() {
+    let root = TempRoot::new("same-size");
+    let store = open(root.path());
+    let s = run_sim(&store, &info(), 4);
+    let path = s.folder().join("traj.tsv");
+    let before = std::fs::read(&path).unwrap();
+    let mut after = before.clone();
+    *after.last_mut().unwrap() ^= 1;
+    std::fs::write(&path, &after).unwrap();
+    set_time(&path, std::time::UNIX_EPOCH + Duration::from_secs(1_000_000_000));
+    let entry = store.inspect(s.id()).unwrap().unwrap();
+    match entry.state() {
+        EntryState::Damaged { what } => assert!(what.contains("traj.tsv") && what.contains("digest"), "{what}"),
+        other => panic!("the digest finds the change: {other:?}"),
+    }
+    assert!(store.get(s.id()).unwrap().is_none());
+    assert_eq!(store.verify(None).unwrap().len(), 1, "verify agrees with the reader");
+}
+
+#[test]
+fn a_file_whose_size_changed_is_damaged_without_its_digest() {
+    let root = TempRoot::new("size");
+    let store = open(root.path());
+    let s = run_sim(&store, &info(), 5);
+    let path = s.folder().join("traj.tsv");
+    let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+    std::fs::write(&path, b"t\tI\n0\t55\n").unwrap();
+    set_time(&path, mtime);
+    let entry = store.inspect(s.id()).unwrap().unwrap();
+    match entry.state() {
+        EntryState::Damaged { what } => assert!(what.contains("changed size"), "{what}"),
+        other => panic!("a size change is damage: {other:?}"),
+    }
+    assert_eq!(store.verify(None).unwrap().len(), 1, "verify agrees with the reader");
+}
+
 #[test]
 fn force_quarantines_a_completed_result_and_recomputes() {
     let root = TempRoot::new("force");

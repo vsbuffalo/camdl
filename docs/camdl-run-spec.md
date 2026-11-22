@@ -2472,8 +2472,11 @@ camdl reindex                # rebuild the index from the records
   digest. Each result that fails is printed as `damaged:` with its folder and
   what differs, and the command exits 1; otherwise it prints
   `every result verified` and exits 0. It writes nothing. The next run that asks
-  for a damaged result moves it to `.quarantine/` and computes it again. A
-  handle that names no result is refused.
+  for a damaged result moves it to `.quarantine/` and computes it again. That
+  run compares each listed file's size with the record, and compares the SHA-256
+  of a file whose modification time differs from the recorded one with the
+  recorded digest, so a store copied without its files' modification times is
+  read as whole. A handle that names no result is refused.
 - **`clean`** deletes each staging folder (`.staging/`) of an unfinished result
   whose owner was a process on this host that has stopped (a claim, or the
   folder a claim was being built in; a process id that now names a process with
