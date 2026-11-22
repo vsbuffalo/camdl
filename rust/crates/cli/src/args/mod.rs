@@ -2077,9 +2077,11 @@ pub struct PfilterArgs {
     pub no_store: bool,
 
     /// Compute the run and its by-products again, even when they are stored:
-    /// the stored folder moves to the store's `.quarantine/`. This is also how
-    /// to take over a run whose record names a process on another host that
-    /// has stopped; a run whose owner is still running is never taken.
+    /// the stored folder moves to the store's `.quarantine/` first. A run held
+    /// by an owner not known to be stopped is refused; --force takes it unless
+    /// its owner is on this host and running, or on another host with a fresh
+    /// beat. Use it on a run held from another host only once that process is
+    /// known to have stopped.
     #[arg(long)]
     #[input(store)]
     pub force: bool,

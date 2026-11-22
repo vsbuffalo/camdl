@@ -771,26 +771,27 @@ fn a_budget_below_one_pass_is_refused_and_stores_nothing() {
     assert_eq!(failed, ["failed"], "the refused run is recorded as failed");
 }
 
-/// A run whose record names an owner on another host that is no longer
-/// running (here one with no beat file) is refused, with `--force` named, and
-/// `--force` moves the folder to the quarantine and computes the run again.
-#[test]
-fn a_run_held_from_another_host_is_refused_and_force_computes_it_again() {
-    let cwd = workdir();
-    let store = cwd.path().join("camdl-store");
-    let line = |extra: &[&str]| -> Vec<String> {
-        let mut v: Vec<String> = ["pfilter", "sir.ir.json", "--params", "p.toml", "--data", "cases=cases.tsv",
-            "--particles", "20", "--seed", "1", "--progress", "none"].iter().map(|s| s.to_string()).collect();
-        v.extend(extra.iter().map(|s| s.to_string()));
-        v
-    };
-    let first = camdl(cwd.path(), &store, &line(&[]), &[]);
-    assert!(first.status.success(), "{}", String::from_utf8_lossy(&first.stderr));
-    let stored = observe(&store).into_iter().find(|r| r.kind == "pfilter").expect("the stored run");
+/// The base fixture's command line with `extra`.
+fn held_line(extra: &[&str]) -> Vec<String> {
+    let mut v: Vec<String> = ["pfilter", "sir.ir.json", "--params", "p.toml", "--data", "cases=cases.tsv",
+        "--particles", "20", "--seed", "1", "--progress", "none"].iter().map(|s| s.to_string()).collect();
+    v.extend(extra.iter().map(|s| s.to_string()));
+    v
+}
 
-    // The run's record, rewritten as a claim held by a process on another
-    // host: running, and owned there.
-    let mut dirs = vec![store.clone()];
+/// An owner on another host, as the store's records name one.
+const REMOTE_HOST: &str = "another-host.invalid";
+const REMOTE_PID: u32 = 4242;
+const REMOTE_STARTED: &str = "2026-01-01T00:00:00.000Z";
+
+/// Stores the base fixture's run in `store`, then rewrites its record as a
+/// claim held by a process on another host: running, and owned there.
+/// Returns the first run's output, the stored run, and its folder.
+fn hold_from_another_host(cwd: &Path, store: &Path) -> (Output, ObservedResult, PathBuf) {
+    let first = camdl(cwd, store, &held_line(&[]), &[]);
+    assert!(first.status.success(), "{}", String::from_utf8_lossy(&first.stderr));
+    let stored = observe(store).into_iter().find(|r| r.kind == "pfilter").expect("the stored run");
+    let mut dirs = vec![store.to_path_buf()];
     let mut run_dir = None;
     while let Some(d) = dirs.pop() {
         for e in std::fs::read_dir(&d).unwrap().flatten() {
@@ -805,19 +806,30 @@ fn a_run_held_from_another_host_is_refused_and_force_computes_it_again() {
         }
     }
     let run_dir = run_dir.expect("the run's folder");
-    let remote = serde_json::json!({ "host": "another-host.invalid", "pid": 4242, "started": "2026-01-01T00:00:00.000Z" });
+    let remote = serde_json::json!({ "host": REMOTE_HOST, "pid": REMOTE_PID, "started": REMOTE_STARTED });
     let mut record: serde_json::Value = serde_json::from_slice(&std::fs::read(run_dir.join("run.json")).unwrap()).unwrap();
     record["status"] = "running".into();
     record["owner"] = remote.clone();
     std::fs::write(run_dir.join("run.json"), serde_json::to_vec_pretty(&record).unwrap()).unwrap();
     std::fs::write(run_dir.join(".lock"), serde_json::to_vec_pretty(&serde_json::json!({ "owner": remote })).unwrap()).unwrap();
+    (first, stored, run_dir)
+}
 
-    let refused = camdl(cwd.path(), &store, &line(&[]), &[]);
+/// A run whose record names an owner on another host that is no longer
+/// running (here one with no beat file) is refused, with `--force` named, and
+/// `--force` moves the folder to the quarantine and computes the run again.
+#[test]
+fn a_run_held_from_another_host_is_refused_and_force_computes_it_again() {
+    let cwd = workdir();
+    let store = cwd.path().join("camdl-store");
+    let (first, stored, _) = hold_from_another_host(cwd.path(), &store);
+
+    let refused = camdl(cwd.path(), &store, &held_line(&[]), &[]);
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(!refused.status.success(), "a run held from another host is not reclaimed without --force: {stderr}");
-    assert!(stderr.contains("another-host.invalid") && stderr.contains("--force"), "the refusal names the host and --force: {stderr}");
+    assert!(stderr.contains(REMOTE_HOST) && stderr.contains("--force"), "the refusal names the host and --force: {stderr}");
 
-    let forced = camdl(cwd.path(), &store, &line(&["--force"]), &[]);
+    let forced = camdl(cwd.path(), &store, &held_line(&["--force"]), &[]);
     let stderr = String::from_utf8_lossy(&forced.stderr);
     assert!(forced.status.success(), "--force computes the run again: {stderr}");
     assert_eq!(forced.stdout, first.stdout, "the same log-likelihood");
@@ -827,6 +839,49 @@ fn a_run_held_from_another_host_is_refused_and_force_computes_it_again() {
         ["completed"], "the run is recorded as completed");
     assert_eq!(std::fs::read_dir(store.join(".quarantine")).map(|d| d.count()).unwrap_or(0), 1,
         "the held folder is in the quarantine");
+}
+
+/// A run held by an owner on another host whose beat counter is still
+/// rising is refused even under `--force`, and its folder is left in place.
+#[test]
+fn a_run_held_from_another_host_with_a_live_beat_is_refused_under_force() {
+    let cwd = workdir();
+    let store = cwd.path().join("camdl-store");
+    let (_, _, run_dir) = hold_from_another_host(cwd.path(), &store);
+    let before = std::fs::read(run_dir.join("run.json")).unwrap();
+
+    // The owner's beat file, raised every half second while the command runs.
+    let beat = store.join(".owners").join(format!("{}.json",
+        store::path_label(&format!("{REMOTE_HOST}-{REMOTE_PID}-{REMOTE_STARTED}"))));
+    std::fs::create_dir_all(beat.parent().unwrap()).unwrap();
+    let write_beat = |n: u64| {
+        let body = serde_json::json!({ "format": 1, "host": REMOTE_HOST, "pid": REMOTE_PID,
+            "started": REMOTE_STARTED, "beat": n, "invocation": null });
+        let tmp = beat.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec(&body).unwrap()).unwrap();
+        std::fs::rename(&tmp, &beat).unwrap();
+    };
+    write_beat(0);
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let refused = std::thread::scope(|s| {
+        s.spawn(|| {
+            let mut n = 1;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                write_beat(n);
+                n += 1;
+            }
+        });
+        let out = camdl(cwd.path(), &store, &held_line(&["--force"]), &[]);
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        out
+    });
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(!refused.status.success(), "--force does not take a run whose owner's beat is rising: {stderr}");
+    assert!(stderr.contains(REMOTE_HOST), "the refusal names the owner: {stderr}");
+    assert_eq!(std::fs::read(run_dir.join("run.json")).unwrap(), before, "the held run is left as it was");
+    assert!(!store.join(".quarantine").exists() || std::fs::read_dir(store.join(".quarantine")).unwrap().count() == 0,
+        "nothing is moved to the quarantine");
 }
 
 /// `--no-licm` and `CAMDL_NO_LICM` change the compiled model a run stores,

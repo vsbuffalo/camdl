@@ -89,9 +89,12 @@ pub(crate) fn camdl_kinds() -> Kinds {
 /// here.
 ///
 /// `force` asks the store to compute each result again (`Reuse::Force`): a
-/// completed result, and a claim whose owner is on another host and is not
-/// known to be running, move to the quarantine and are claimed anew. A claim
-/// whose owner is running is never taken.
+/// completed result moves to the quarantine and is claimed anew. A claim held
+/// by an owner not known to be stopped is refused without `force`; with it,
+/// the claim is taken unless its owner is on this host and running, or on
+/// another host with a beat that changes. An owner on another host whose beat
+/// file is stale or cannot be read is taken, though it may still be running:
+/// `force` asserts that it has stopped.
 pub(crate) fn store_request(label: Option<String>, force: bool, root: Option<PathBuf>) -> StoreRequest {
     let env = StoreRequest::new(None, false, crate::env::get().vars.store.clone());
     StoreRequest::new(label, force, root).merge(env)
