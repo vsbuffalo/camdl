@@ -5,12 +5,12 @@ camdl-run-scratch: first-fit
 ---
 
 Every simulation and fit camdl runs is kept in a store, a directory tree under
-`results/` in your project. Before camdl runs anything, it works out exactly
-what the result will depend on: the compiled model, the backend and time step,
-the parameter values, the scenario, the seed. It then looks in the store for a
-result computed from those same inputs. If one is there, camdl reads it back
-instead of computing it again; if not, it computes the result and stores it
-where the next identical request will find it.
+`camdl-store/` in your project. Before camdl runs anything, it works out
+exactly what the result will depend on: the compiled model, the backend and
+time step, the parameter values, the scenario, the seed. It then looks in the
+store for a result computed from those same inputs. If one is there, camdl
+reads it back instead of computing it again; if not, it computes the result and
+stores it where the next identical request will find it.
 
 This page shows that from the command line: where a run goes, why the second
 request is answered from the store, which changes make a new run, and how to
@@ -30,26 +30,28 @@ We simulate three stochastic epidemics, one per seed:
 camdl simulate sir-r0.camdl --params truth.toml --seeds 1:3
 ```
 
-camdl ran three cells, one per seed, and stored each as a **leaf** of the store:
-a directory holding the trajectory (`traj.tsv`) and a record of the run
-(`run.json`), under `results/sims/`. Because the run had several cells, it also
-stored the three trajectories side by side as one table, an **ensemble**, under
-`results/ensembles/`.
+camdl ran three cells, one per seed, and stored each as a result of kind `sim`:
+a directory holding the trajectory (`traj.tsv`), the run's identity
+(`identity.json`) and a record of how it was made (`run.json`). The three
+trajectories are not stored a second time as one table; `-o`, `--stdout` and
+`camdl cat` render a combined table from the stored cells.
 
-The leaf's directory is named after the run's inputs. Let us look at one:
+The cell's directory is named after the run's inputs. Let us look at one:
 
 ```{.camdl-run}
-ls -d results/sims/*/*/*/*/seed_2-*
+ls -d camdl-store/*/sim/*/*/*/*/seed_2-*
 ```
 
-The path has five levels below `sims/`: the model, the configuration (backend
-and time step), the parameter values, the scenario, and the seed. Each level is
-written `{label}-{hash}`. The label (`sir_r0`, `chain_binomial-dt0.1`, `base`,
-`_none_` for no scenario, `seed_2`) is there for you to read. The eight hex
-characters after it are the start of a hash of that level's inputs, and they are
-what camdl actually matches on. Two runs whose inputs agree at every level have
-the same path and the same **run id**, a 64-character hash computed from all
-five levels.
+The first level below `camdl-store/` is the camdl build: its version and
+commit, and the start of a hash of the build and of the environment switches
+that change results. Below `sim/` there are five levels: the model, the
+configuration (backend and time step), the parameter values, the scenario, and
+the seed. Each level is written `{label}-{hash}`. The label (`sir_r0`,
+`chain_binomial-dt0.1`, `base`, `_none_` for no scenario, `seed_2`) is there for
+you to read. The twelve hex characters after it are the start of a hash of that
+level's inputs, and they are what camdl actually matches on. Two runs whose
+inputs agree at every level have the same path and the same **run id**, a
+64-character hash of all of them.
 
 ## Running the same thing again
 
@@ -74,21 +76,6 @@ every cell as a hit (read back) or a miss (would be simulated):
 camdl simulate sir-r0.camdl --params truth.toml --seeds 1:5 --dry-run
 ```
 
-::: {.internals title="Why a single-cell run is simulated again"}
-
-A `simulate` with one cell, such as `--seed 7`, does not skip the computation:
-it runs the simulation, then finds the stored leaf with the same run id and
-keeps it. Before keeping it, camdl compares the trajectory it just computed with
-the stored one. They must be byte for byte the same, because a run with a fixed
-seed is deterministic. If they ever differ, camdl stops with a `divergent
-recompute` error and keeps the new bytes under `results/.quarantine/`: two
-different results under one run id mean that something which changes the output
-is missing from the inputs camdl hashes, and that is a bug in camdl worth
-reporting. A multi-cell run, as above, reads its stored cells back without
-recomputing them.
-
-:::
-
 ## Changes that keep the same run
 
 Some options change how a run is carried out or where a copy of it is written,
@@ -99,12 +86,12 @@ and also write the combined trajectory to a file of our own:
 camdl simulate sir-r0.camdl --params truth.toml --seeds 1:3 --parallel 4 -o seeds.tsv
 ```
 
-The cells were still read from the store; `seeds.tsv` is a copy of the stored
-ensemble. The same is true of a `--label`, a display name recorded on the run,
-of the progress and verbosity options, and of the name of the model file: a
-model renamed or moved, with its contents unchanged, compiles to the same model,
-and its earlier runs are still found (camdl prints a warning naming the file
-they were first run from, whose name their directories keep).
+The cells were still read from the store; `seeds.tsv` is rendered from them.
+The same is true of a `--label`, a display name recorded on the run, of the
+progress and verbosity options, and of the name of the model file: a model
+renamed or moved, with its contents unchanged, compiles to the same model, and
+its earlier runs are still found (camdl prints a warning naming the file they
+were first run from, whose name their directories keep).
 
 ## Changes that make a new run
 
@@ -115,7 +102,7 @@ stored, is a different run. A new seed draws a new epidemic:
 camdl simulate sir-r0.camdl --params truth.toml --seed 7
 ```
 
-Dropping the flow columns from the output changes what the leaf holds, even
+Dropping the flow columns from the output changes what the cell holds, even
 though the epidemics are the same ones, so it is a new run too. A dry run shows
 that none of the three cells is in the store:
 
@@ -123,7 +110,7 @@ that none of the three cells is in the store:
 camdl simulate sir-r0.camdl --params truth.toml --seeds 1:3 --no-flows --dry-run
 ```
 
-Running it stores three new leaves:
+Running it stores three new cells:
 
 ```{.camdl-run show-match="stored"}
 camdl simulate sir-r0.camdl --params truth.toml --seeds 1:3 --no-flows
@@ -133,17 +120,17 @@ The two column views now sit side by side as two configuration directories
 under the one model:
 
 ```{.camdl-run}
-ls results/sims/sir_r0-*/
+ls camdl-store/*/sim/sir_r0-*/
 ```
 
 The same applies to an edit to the model file that changes the compiled model
 (a comment does not), to the backend, `--dt`, the horizon, any parameter value
 however it is set, the scenario, and the contents of any table or data file a
-run reads. camdl's own version is an input as well: the model level includes
-the version of the camdl that ran it, so after camdl is upgraded or rebuilt
-from another commit, every run is computed again the first time it is asked
-for. A result you need to keep across an upgrade should be kept by its files,
-which stay readable, not by expecting the store to find it.
+run reads. camdl's own build is an input as well: results are grouped under the
+build that computed them, so after camdl is upgraded or rebuilt from another
+commit, every run is computed again the first time it is asked for. A result you
+need to keep across an upgrade should be kept by its files, which stay
+readable, not by expecting the store to find it.
 
 ## What a run records
 
@@ -158,22 +145,30 @@ camdl list --kind sim
 characters of its run id. For the seed-7 run:
 
 ```{.camdl-run}
-camdl show results/sims/*/*/*/*/seed_7-*
+camdl show camdl-store/*/sim/*/*/*/*/seed_7-*
 ```
 
-`run_id` and `levels` are the run's identity, the hashes the store matches on.
-`params`, `seed` and `scenario` are the resolved inputs those hashes were
-computed from. `argv`, `created` and `engine` record how and when the run was
-made, and by which camdl. The record itself is `run.json` in the leaf's
-directory:
+`run_id` is the run's identity, the hash the store matches on. `parameters`,
+`seed` and `scenario` are the resolved inputs it was computed from. In the
+cell's directory, `identity.json` holds every input the run id was computed
+from:
 
-```{.camdl-run show-match="run_id|engine_version|label|created_at|camdl_version"}
-cat results/sims/*/*/*/*/seed_7-*/run.json
+```{.camdl-run show-match="run_id|hash_version|t_end"}
+cat camdl-store/*/sim/*/*/*/*/seed_7-*/identity.json
 ```
 
-`run.json` is what any program reading the store should rely on. The directory
-names exist for people to navigate by; a program that wants a run's model,
-parameters or seed reads them from the record rather than parsing the path.
+and `run.json` records how and when the run was made: the arguments it was
+given, when it started and finished, and the size and digest of each file it
+wrote:
+
+```{.camdl-run show-match="status|started|finished"}
+cat camdl-store/*/sim/*/*/*/*/seed_7-*/run.json
+```
+
+These two files are what any program reading the store should rely on. The
+directory names exist for people to navigate by; a program that wants a run's
+model, parameters or seed reads them from the record rather than parsing the
+path.
 
 ## Forcing a run to be computed again
 
@@ -183,15 +178,16 @@ parameters or seed reads them from the record rather than parsing the path.
 camdl simulate sir-r0.camdl --params truth.toml --seeds 1:3 --force
 ```
 
-The leaves it replaces are not deleted. They are moved to
-`results/.quarantine/`, so a forced run never destroys the result it replaces:
+The cells it replaces are not deleted. They are moved to
+`camdl-store/.quarantine/`, so a forced run never destroys the result it
+replaces:
 
 ```{.camdl-run}
-ls results/.quarantine/
+ls camdl-store/.quarantine/
 ```
 
 `camdl fit run --force` likewise computes a stored fit run again and moves the
-old one to the run store's quarantine, `camdl-store/.quarantine/`.
+old one to the same quarantine.
 
 ## Fits
 
@@ -239,7 +235,7 @@ hashed unless it is known to affect only how a result is displayed.
 The details are in two places.
 [Run identity](../internals/engineering/run-identity.qmd), in the internals
 section, explains for developers how the hash is computed and what a change to
-it touches. The run system specification gives the layout of
-[the content-addressed store](../camdl-run-spec.md#21-the-content-addressed-store)
+it touches. The run system specification gives
+[the layout of a simulation's results](../camdl-run-spec.md#24-simulation-result-layout)
 and the steps
 [from a job to a path](../camdl-run-spec.md#37-from-a-job-to-a-path-run-identity).

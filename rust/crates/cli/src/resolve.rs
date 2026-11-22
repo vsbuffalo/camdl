@@ -147,9 +147,8 @@ pub enum WritePolicy {
 /// fingerprint is incomplete ([`crate::version::EngineReuse::Unreusable`]).
 /// Such a build's `ENGINE_ID` may stand for another build's code, so it never
 /// serves a stored leaf: it computes and records every run, and the stored
-/// leaf it would have read is quarantined, never deleted. The one
-/// fail-closed rule; every reuse decision ([`check_reuse`],
-/// [`crate::cas_sink::CasSink`]'s cell check, `profile`'s point scan) asks it.
+/// leaf it would have read is quarantined, never deleted. `profile`'s scan of
+/// its stored points asks it before reusing any of them.
 pub(crate) fn engine_write_policy(policy: WritePolicy, engine: crate::version::EngineReuse) -> WritePolicy {
     match engine {
         crate::version::EngineReuse::Reusable => policy,

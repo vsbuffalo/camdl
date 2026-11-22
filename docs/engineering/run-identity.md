@@ -130,8 +130,12 @@ A leaf found at the expected path is reused only after
 recorded `run_id` must equal the expected one (a different one is a short-hash
 [`Collision`](rust:runid::store::Lookup), resolved by suffixing the directory,
 never by overwriting), the record's hash and format versions must be current,
-its status `completed`, and its files exactly the ones the record lists. The
-reuse decision itself is [`check_reuse`](rust:cli::resolve::check_reuse).
+its status `completed`, and its files exactly the ones the record lists. A
+profile's scan of its points makes the reuse decision: a point is reused only
+when `lookup` returns a hit, and only by a build that
+[`engine_write_policy`](rust:cli::resolve::engine_write_policy) allows to reuse.
+A build whose engine identity is incomplete reuses nothing; it quarantines each
+stored point and computes it again.
 
 ## The hash function
 

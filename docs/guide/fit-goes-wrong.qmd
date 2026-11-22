@@ -146,19 +146,20 @@ Both use four times the fit's 1000 particles. Near the posterior, twenty
 estimates agree to within a fraction of a log unit. At the second point, where
 almost every simulated epidemic is improbable under the counts and a few carry
 all the weight, they scatter by about 16 units around −290. With the fit's own
-1000 particles, the filter at that point cannot even finish twenty runs: one
-of them puts all its weight on a single simulated epidemic (`EssCollapsed`),
-where the estimate is undefined, and `pfilter` stops.
+1000 particles, some of the twenty runs at that point put all their weight on a
+single simulated epidemic (`EssCollapsed`), where the estimate is undefined.
+`pfilter` counts each such run as failed, reports the mean as $-\infty$, and
+names the first failure in a warning:
 
-```{.camdl-run expect="fail" show-match="EssCollapsed"}
+```{.camdl-run show-match="loglik =|EssCollapsed"}
 camdl pfilter sir-beta.camdl --fit fit-beta.toml --particles 1000 --replicates 20 \
   --param beta=0.64 --param gamma=0.33 --param N0=763 --param I0=3
 ```
 
-At the point where chain 0 sits, read off the traces, the filter fails even
-with 4000 particles:
+At the point where chain 0 sits, read off the traces, most of the runs fail
+even with 4000 particles:
 
-```{.camdl-run expect="fail" show-match="EssCollapsed"}
+```{.camdl-run show-match="loglik =|EssCollapsed"}
 camdl pfilter sir-beta.camdl --fit fit-beta.toml --particles 4000 --replicates 20 \
   --param beta=0.38 --param gamma=0.46 --param N0=763 --param I0=3
 ```
@@ -169,9 +170,9 @@ first week. Chain 0 holds an estimate of −742, made with 1000 particles in one
 of the runs that happened to survive. Its proposals, which are close to where
 it is, get fresh runs of the same filter. Some of those collapse, and a run
 that collapses gives the sampler a log-likelihood of $-\infty$, so the
-proposal is rejected. The rest come from a filter too noisy to finish twenty
-runs even with 4000 particles, and almost none come out above the estimate
-the chain is holding.
+proposal is rejected. The rest come from a filter so noisy at that point that
+most of its runs collapse even with 4000 particles, and almost none come out
+above the estimate the chain is holding.
 
 The rest follows. A chain whose proposals are all rejected looks to the
 sampler like a chain whose steps are too big, so during burn-in it shrinks the
