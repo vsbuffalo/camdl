@@ -3931,6 +3931,12 @@ quantity that is not finite) is likewise completed with its own `failure.toml`,
 and its upstream keeps its trajectory: the cell's files depend only on the
 cell's identity, so whether observations were asked for cannot change them.
 
+A combined table (`-o`, `--stdout`, `--obs`, `--obs-dir`, `--quantities-out`)
+over members of which one or more stored a failure is refused, and the error
+names each such cell and its `failure.toml`. Leaving the cell's rows out would
+write a table that looks complete and is not. The cells themselves stay stored,
+and `camdl cat` still reads each completed one.
+
 ```toml
 # failure.toml
 stage  = "engine"          # or "observations", "quantities" in a by-product
