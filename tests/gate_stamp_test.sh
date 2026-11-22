@@ -9,12 +9,17 @@
 #   - an untracked file outside the gated directories (a gate log) does not;
 #   - a checkout that changed during the gate gets no stamp;
 #   - a commit with a different tree is not covered, one with the same tree is;
-#   - a stamp written in one worktree is found from another.
+#   - a stamp written in one worktree is found from another;
+#   - a passed camdl-cloud run of the whole gate covers its commit's tree, and
+#     a run of part of the gate, a failed run, a run of an unknown commit or
+#     an unreadable listing does not.
 #
 # Every case runs in a private scratch repository.
 # Run: bash tests/gate_stamp_test.sh
 
 set -uo pipefail
+# Only the cases that put a stand-in camdl-cloud on PATH consult the cloud.
+export CAMDL_GATE_CLOUD=0
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK="$(mktemp -d)"
@@ -77,6 +82,35 @@ echo "worktrees share stamps"
 git worktree add -q "$WORK/wt" HEAD~1
 check "a stamp from the main checkout is found from a worktree" \
   bash -c "cd '$WORK/wt' && bash scripts/gate-stamp.sh check HEAD"
+
+echo "a passed camdl-cloud run counts as a stamp"
+rm -rf .git/camdl-gate-passed
+git -c user.name=t -c user.email=t@t commit -q --allow-empty -m cloud
+cloud_head="$(git rev-parse HEAD)"
+fake="$WORK/bin"; mkdir -p "$fake"
+# A stand-in for `camdl-cloud runs --json`: prints the file CLOUD_RUNS names.
+printf '#!/usr/bin/env bash\n[ "$1 $2" = "runs --json" ] && cat "$CLOUD_RUNS"\n' > "$fake/camdl-cloud"
+chmod +x "$fake/camdl-cloud"
+run_json() { # target outcome commit
+  printf '[{"spec":{"name":"r1"},"test":{"target":"%s","outcome":"%s","commit":"%s"}}]\n' "$1" "$2" "$3"
+}
+fails() { ! "$@"; }
+cloud() { CAMDL_GATE_CLOUD=1 PATH="$fake:$PATH" CLOUD_RUNS="$WORK/runs.json" bash scripts/gate-stamp.sh check "$@" 2> /dev/null; }
+run_json test passed "$cloud_head" > "$WORK/runs.json"
+check "a passed full-gate run covers its commit" cloud HEAD
+check "and a commit with the same tree" cloud HEAD~1
+check "but not a commit with another tree" fails cloud HEAD~2
+run_json test-rust passed "$cloud_head" > "$WORK/runs.json"
+check "a run of part of the gate does not count" fails cloud HEAD
+run_json test failed "$cloud_head" > "$WORK/runs.json"
+check "a failed run does not count" fails cloud HEAD
+run_json test passed 0123456789abcdef0123456789abcdef01234567 > "$WORK/runs.json"
+check "a run of a commit this repository lacks does not count" fails cloud HEAD
+echo 'not json' > "$WORK/runs.json"
+check "an unreadable listing does not count" fails cloud HEAD
+run_json test passed "$cloud_head" > "$WORK/runs.json"
+check "CAMDL_GATE_CLOUD=0 ignores the cloud" bash -c \
+  "! CAMDL_GATE_CLOUD=0 PATH='$fake:$PATH' CLOUD_RUNS='$WORK/runs.json' bash scripts/gate-stamp.sh check HEAD"
 
 echo
 echo "gate_stamp_test: $PASS passed, $FAIL failed"

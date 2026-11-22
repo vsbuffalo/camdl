@@ -10,7 +10,8 @@
 
 set -e
 
-# A commit whose source tree already passed `make test` has nothing left for
+# A commit whose source tree already passed `make test`, in a checkout of this
+# repository or in a camdl-cloud test run, has nothing left for
 # this hook to find, because the hook runs a subset of that gate. git passes
 # one line per pushed ref on stdin, "<local ref> <local sha> <remote ref>
 # <remote sha>"; a deleted ref has a local sha of all zeros and needs no
