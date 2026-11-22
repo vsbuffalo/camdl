@@ -87,9 +87,11 @@ jobs:
 
       - name: Refuse doc-test preambles in the site
         # A ```camdl-doctest-preamble fence is for `make test-docs`, not the
-        # reader; docs/_web/doctest-preamble.lua drops it (gh#1324).
+        # reader; docs/_web/doctest-preamble.lua drops it (gh#1324). The
+        # internals pages are generated from the source of the doc-test
+        # harness, which names the fence, so they are not searched.
         run: |
-          leaked=$(grep -rl 'camdl-doctest-preamble' docs/_site --include='*.html' || true)
+          leaked=$(grep -rl --exclude-dir=internals 'camdl-doctest-preamble' docs/_site --include='*.html' || true)
           if [ -n "$leaked" ]; then
             echo "doc-test preambles rendered into:"; echo "$leaked"; exit 1
           fi
