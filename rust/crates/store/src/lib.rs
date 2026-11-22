@@ -38,7 +38,7 @@ mod stored;
 mod tests;
 
 pub use artifact::{Artifact, Build, ByProduct, ContentArtifact, Id, Kinds, Primary, TopLevel, WriteMode};
-pub use commands::StoreCommand;
+pub use commands::{StoreCommand, Verdict};
 pub use error::{Error, Result, RunError};
 pub use handle::{Handle, RunRef};
 pub use harness::{check_input_classes, ClassFailure, InputHarness, Observed, ObservedResult, StoredFile};

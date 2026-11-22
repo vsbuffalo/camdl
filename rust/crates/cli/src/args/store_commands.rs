@@ -40,7 +40,8 @@ and compares it with the folder's, and computes the SHA-256 of every file its
 manifest lists and compares it with the recorded digest. Each result that fails
 is reported as damaged, with the file or the id that differs; the next run that
 asks for a damaged result moves it to `.quarantine/` and computes it again.
-Writes nothing.
+Writes nothing. Exits 0 when every result checked is whole and 1 when any is
+damaged.
 
 Examples:
   # Every completed result in the store

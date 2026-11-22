@@ -256,14 +256,19 @@ fn verify_reports_the_damaged_result_and_only_that_one() {
     let damaged = &cells[1];
     std::fs::write(damaged.dir.join("traj.tsv"), "t\tS\n0\t1\n").unwrap();
 
-    let all = p.ok(&["verify"]);
+    let damage = |args: &[&str]| {
+        let out = p.camdl(args);
+        assert_eq!(out.status.code(), Some(1), "{args:?} found damage: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let all = damage(&["verify"]);
     assert_eq!(all.lines().count(), 1, "one result is damaged: {all}");
     assert!(all.starts_with("damaged: ") && all.contains(&damaged.run_id[..12]) && all.contains("traj.tsv"), "{all}");
-    let named = p.ok(&["verify", &damaged.run_id[..12]]);
+    let named = damage(&["verify", &damaged.run_id[..12]]);
     assert!(named.contains(&damaged.run_id[..12]), "{named}");
     assert_eq!(p.ok(&["verify", &cells[0].run_id[..12]]), "every result verified\n", "the other cell is whole");
     assert_eq!(p.ok(&["verify", &filter.run_id[..12]]), "every result verified\n");
-    assert!(p.ok(&["verify", "@sm"]).contains(&damaged.run_id[..12]), "a label checks every cell of its invocation");
+    assert!(damage(&["verify", "@sm"]).contains(&damaged.run_id[..12]), "a label checks every cell of its invocation");
 
     let group = damaged.dir.parent().unwrap().to_string_lossy().into_owned();
     let out = p.camdl(&["verify", &group]);

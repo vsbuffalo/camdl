@@ -34,12 +34,22 @@ pub enum StoreCommand {
     Reindex,
 }
 
+/// What a command found wrong in the store. Only `verify` finds anything;
+/// every other command returns [`Verdict::Sound`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    Sound,
+    /// `verify` found this many results damaged.
+    Damaged { results: usize },
+}
+
 fn io(e: std::io::Error) -> Error {
     Error::Io { op: "write the output of", path: PathBuf::from("a store command"), source: e }
 }
 
 impl StoreCommand {
-    pub fn run(&self, store: &Store, out: &mut dyn Write) -> Result<()> {
+    /// Runs the command against `store`, writing its report to `out`.
+    pub fn run(&self, store: &Store, out: &mut dyn Write) -> Result<Verdict> {
         let inner = &store.inner;
         match self {
             StoreCommand::List { kind } => {
@@ -157,6 +167,11 @@ impl StoreCommand {
                 }
                 if failures.is_empty() {
                     writeln!(out, "every result verified").map_err(io)?;
+                } else {
+                    let mut damaged: Vec<_> = failures.iter().map(|f| f.run_id).collect();
+                    damaged.sort();
+                    damaged.dedup();
+                    return Ok(Verdict::Damaged { results: damaged.len() });
                 }
             }
             StoreCommand::Clean => {
@@ -176,6 +191,6 @@ impl StoreCommand {
                 writeln!(out, "indexed {n} results").map_err(io)?;
             }
         }
-        Ok(())
+        Ok(Verdict::Sound)
     }
 }

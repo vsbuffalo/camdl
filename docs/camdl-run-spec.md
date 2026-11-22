@@ -2621,9 +2621,10 @@ camdl reindex                # rebuild the index from the records
   `identity.json` and compares it with the folder's, and computes the SHA-256 of
   every file the manifest in `run.json` lists and compares it with the recorded
   digest. Each result that fails is printed as `damaged:` with its folder and
-  what differs; otherwise it prints `every result verified`. It writes nothing.
-  The next run that asks for a damaged result moves it to `.quarantine/` and
-  computes it again. A handle that names no result is refused.
+  what differs, and the command exits 1; otherwise it prints
+  `every result verified` and exits 0. It writes nothing. The next run that asks
+  for a damaged result moves it to `.quarantine/` and computes it again. A
+  handle that names no result is refused.
 - **`clean`** deletes each staging folder (`.staging/`) of an unfinished result
   whose owner was a process on this host that has stopped, everything in
   `.quarantine/`, every `.attempts/` folder, and each group and build directory

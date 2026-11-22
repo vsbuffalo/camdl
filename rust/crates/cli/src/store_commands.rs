@@ -11,6 +11,7 @@ use std::path::PathBuf;
 
 /// Runs `command` against the run store `root` names, printing its report to
 /// stdout. A root with no `store.json` is refused rather than made a store.
+/// A `verify` that finds a damaged result exits 1 after its report.
 pub(crate) fn cmd_store(command: store::StoreCommand, root: Option<PathBuf>) {
     let out = crate::out::Out::new(false);
     let request = crate::camdl_store::store_request(None, false, root);
@@ -20,6 +21,9 @@ pub(crate) fn cmd_store(command: store::StoreCommand, root: Option<PathBuf>) {
     }
     let store = crate::camdl_store::open(&request).unwrap_or_else(|e| out.fail(format!("error: {e}")));
     let mut report = Vec::new();
-    command.run(&store, &mut report).unwrap_or_else(|e| out.fail(format!("error: {e}")));
+    let verdict = command.run(&store, &mut report).unwrap_or_else(|e| out.fail(format!("error: {e}")));
     let _ = out.data().write_all(&report);
+    if let store::Verdict::Damaged { results } = verdict {
+        out.fail(format!("error: {results} damaged result(s)"));
+    }
 }

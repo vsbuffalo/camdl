@@ -136,6 +136,9 @@ fn verify_checks_the_results_its_handle_names() {
     assert_eq!(other, "every result verified\n", "the first result is whole");
     let labelled = verify("@both".into());
     assert!(labelled.contains(&second.id().key().short12()), "a label checks every result of its invocation: {labelled}");
+    let verdict = |handle: Option<String>| StoreCommand::Verify { handle }.run(&store, &mut Vec::new()).unwrap();
+    assert_eq!(verdict(None), crate::Verdict::Damaged { results: 1 });
+    assert_eq!(verdict(Some(first.id().key().to_hex())), crate::Verdict::Sound);
 }
 
 /// A path that names no result is refused, rather than reported verified

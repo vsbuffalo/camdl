@@ -2165,7 +2165,8 @@ None exists today except `dev reindex`, which rebuilds `index.json`
   computes the run id again from `identity.json` and compares it with the
   folder's, and computes each manifest file's SHA-256 and compares it with the
   recorded digest. It reports each result that fails as damaged and writes
-  nothing; the next `begin` moves a damaged result to quarantine.
+  nothing; the next `begin` moves a damaged result to quarantine. It exits 1
+  when it finds a damaged result and 0 otherwise.
 - **`reindex`** reads every `identity.json`, `run.json` and invocation record,
   writes one compacted log through a temporary file and a rename, and removes
   the logs it covered of owners known to be dead. Any other owner's log is kept.
