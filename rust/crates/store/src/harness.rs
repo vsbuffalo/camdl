@@ -6,8 +6,8 @@
 //! - **Adds.** The upstream's run id is unchanged and a by-product exists.
 //! - **Execution.** Two values on a fixture that exercises the field give
 //!   identical outputs, and the fixture shows the field was used.
-//! - **Export.** The export, made twice from the same stored files, has the
-//!   same bytes.
+//! - **Export.** A copy has the digest of the stored file it copies. A
+//!   rendering, made twice from the same stored files, has the same bytes.
 //! - **Render.** No stored file differs across two values.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -42,6 +42,17 @@ pub struct Observed {
     pub results: Vec<ObservedResult>,
     /// Each export file's digest.
     pub exports: BTreeMap<PathBuf, Key>,
+    /// Each export that is a copy of a stored file, with the file it copies.
+    /// An export not named here is a rendering.
+    pub copies: BTreeMap<PathBuf, StoredFile>,
+}
+
+/// One file of a stored result: the result's run id and the file's name in
+/// its folder.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct StoredFile {
+    pub run_id: Key,
+    pub file: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,6 +87,11 @@ fn ids(o: &Observed) -> BTreeSet<Key> {
 
 fn files(o: &Observed) -> BTreeSet<(Key, String, Key)> {
     o.results.iter().flat_map(|r| r.files.iter().map(move |(n, d)| (r.run_id, n.clone(), *d))).collect()
+}
+
+/// The digest of the stored file `of` names, among a run's results.
+fn stored_digest<'a>(o: &'a Observed, of: &StoredFile) -> Option<&'a Key> {
+    o.results.iter().find(|r| r.run_id == of.run_id).and_then(|r| r.files.get(&of.file))
 }
 
 fn fresh_root(tag: &str) -> PathBuf {
@@ -142,8 +158,29 @@ pub fn check_input_classes<H: InputHarness>(fields: &[FieldInfo], harness: &H) -
                 let _ = std::fs::remove_dir_all(&root);
                 if a.exports.is_empty() {
                     found.push(fail("setting it wrote no export".into()));
-                } else if a.exports != b.exports {
-                    found.push(fail("the export made again from the stored files has other bytes".into()));
+                }
+                for (path, digest) in &a.exports {
+                    let shown = path.display();
+                    match a.copies.get(path) {
+                        Some(of) => match stored_digest(&a, of) {
+                            None => found.push(fail(format!(
+                                "the export {shown} copies `{}` of {}, which the run did not store",
+                                of.file, of.run_id
+                            ))),
+                            Some(d) if d != digest => found.push(fail(format!(
+                                "the export {shown} differs from the stored `{}` it copies",
+                                of.file
+                            ))),
+                            Some(_) => {}
+                        },
+                        None if files(&a) != files(&b) => found.push(fail(format!(
+                            "the stored files changed between the two renderings of {shown}"
+                        ))),
+                        None if b.exports.get(path) != Some(digest) => found.push(fail(format!(
+                            "the export {shown} rendered again from the same stored files has other bytes"
+                        ))),
+                        None => {}
+                    }
                 }
             }
             Class::Render => {

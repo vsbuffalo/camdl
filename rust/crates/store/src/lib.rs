@@ -41,7 +41,7 @@ pub use artifact::{Artifact, Build, ByProduct, ContentArtifact, Id, Kinds, Prima
 pub use commands::StoreCommand;
 pub use error::{Error, Result, RunError};
 pub use handle::{Handle, RunRef};
-pub use harness::{check_input_classes, ClassFailure, InputHarness, Observed, ObservedResult};
+pub use harness::{check_input_classes, ClassFailure, InputHarness, Observed, ObservedResult, StoredFile};
 pub use hash::{CanonicalHasher, ContentAddressed, Key, KeyParseError, HASH_VERSION};
 pub use identity::{Content, DepInfo, Finite, Hashed, Identity, NotFinite};
 pub use inputs::{

@@ -485,7 +485,7 @@ fn run(inv: &SimulateInvocation, store: Option<&Path>) -> store::Result<Observed
     if a.stdout {
         exports.insert(PathBuf::from("<stdout>"), Key::digest_bytes(&out.stdout));
     }
-    Ok(Observed { results: observe(&root), exports })
+    Ok(Observed { results: observe(&root), exports, ..Observed::default() })
 }
 
 /// The harness of `simulate`'s class checks, from one base invocation.

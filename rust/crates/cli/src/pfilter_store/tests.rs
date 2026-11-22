@@ -417,13 +417,15 @@ fn run(inv: &PfilterInvocation, store: Option<&Path>) -> store::Result<Observed>
             why: String::from_utf8_lossy(&out.stderr).into_owned(),
         });
     }
+    // `-o` is rendered from the stored result, not copied from a stored
+    // file, so no export is named in `copies`.
     let mut exports = BTreeMap::new();
     let a = &inv.args;
     if let Some(path) = a.output.as_ref().map(|p| p.to_string_lossy().into_owned()) {
         let bytes = std::fs::read(cwd.path().join(&path)).unwrap_or_default();
         exports.insert(PathBuf::from(path), Key::digest_bytes(&bytes));
     }
-    Ok(Observed { results: observe(&root), exports })
+    Ok(Observed { results: observe(&root), exports, ..Observed::default() })
 }
 
 /// The harness of `pfilter`'s class checks, from one base invocation.
