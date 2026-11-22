@@ -6,6 +6,8 @@
 // referenced by main.rs's tree.
 
 pub mod types;
+mod store_commands;
+pub use store_commands::{CleanArgs, StatusArgs, StoreReindexArgs, VerifyArgs};
 
 use std::path::PathBuf;
 use clap::{Args, ArgGroup};

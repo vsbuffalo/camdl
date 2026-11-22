@@ -43,6 +43,7 @@ mod pfilter_store;  // camdl pfilter on the run store: its identity, result and 
 // command stores a fit here yet, so only its tests use it.
 #[allow(dead_code)]
 mod fit_store;
+mod store_commands; // `camdl status`, `verify`, `clean`, `reindex`: the run store's maintenance commands
 mod camdl_store;    // camdl on the run store: ambient identity, kinds, root, content artifacts
 mod input_fixtures; // the second values and fixtures of the input-class checks
 mod pfilter_config; // ResolvedPfilterConfig: pfilter's one resolved configuration; identity and filter derive from it
@@ -212,6 +213,18 @@ pub(crate) enum Command {
 
     /// Set or update the user-display label on any run (sim, fit, profile, …)
     Label(args::LabelArgs),
+
+    /// Which runs on the run store are running, failed or interrupted
+    Status(args::StatusArgs),
+
+    /// Check that each completed result on the run store matches its record
+    Verify(args::VerifyArgs),
+
+    /// Delete the run store's quarantine, earlier attempts, dead staging and empty directories
+    Clean(args::CleanArgs),
+
+    /// Rebuild the run store's index from its records
+    Reindex(args::StoreReindexArgs),
 
     /// Parse and type-check a .camdl model (delegates to camdlc)
     #[command(after_help = colored_help!("\
@@ -595,6 +608,10 @@ fn main() {
         Command::Mre(MreCmd::Fit(a))      => mre::cmd_mre_fit(&a, compile),
         Command::Mre(MreCmd::Simulate(a)) => mre::cmd_mre_simulate(&a, compile),
         Command::CheckUpdate            => check_update::cmd_check_update(),
+        Command::Status(a)  => store_commands::cmd_store(store::StoreCommand::Status, a.store.store),
+        Command::Verify(a)  => store_commands::cmd_store(store::StoreCommand::Verify { handle: a.handle }, a.store.store),
+        Command::Clean(a)   => store_commands::cmd_store(store::StoreCommand::Clean, a.store.store),
+        Command::Reindex(a) => store_commands::cmd_store(store::StoreCommand::Reindex, a.store.store),
         Command::Dev(DevCmd::Reindex(a)) => cmd_reindex(&a),
         Command::Dev(DevCmd::Migrate(a)) => store_migrate::cmd_migrate(&a),
         Command::Dev(DevCmd::Eval(a))    => eval::cmd_eval(&a, compile),
