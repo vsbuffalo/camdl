@@ -4503,6 +4503,91 @@ camdl-store/
 - **A fit made by an earlier build can still be predicted from.** The
   prediction's dependency records the fit's build.
 
+### 7. Reading a stored problem
+
+Nine readers take a stored fit today, each through the old fit folder's
+`fit.meta.json`, `fit.toml.original` and `fit.resolved.toml`
+(`cli/src/fit/handle.rs:771-898`). Each needs a `config_v2::Problem`, and some
+need the run's method as well. A stored fit therefore holds two files that parse
+back into those types, and one function reads them.
+
+**`problem.toml`**, a result file of the `FitProblem`, is the resolved problem
+half in `fit.toml` syntax. It is written by `write_problem` and parses with
+`FitConfig`'s own parser. Every field of `config_v2::Problem`
+(`fit/config_v2.rs:78-171`) is assigned:
+
+| Field of `Problem`               | In `problem.toml`                                                                                                                          |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `model`                          | `camdl = "model.camdl.original"`, the stored source; readers that run the model load the `Dep<CompiledModel>` from the identity record     |
+| `data.file`, `data.observations` | `observations.<stream> = "inputs/<stream>.tsv"`, one per stream, never a wide `file`                                                       |
+| `data.holdout_after`             | Absent. The resolved partition is the `[partition]` table: the cutoff in model time and, per stream, the training row count and its digest |
+| `data.holdout`                   | Absent; held-out tables enter only a score                                                                                                 |
+| `data.tables`                    | `tables.<name> = "inputs/tables/<name>.<ext>"`, the bytes as read                                                                          |
+| `synthetic`                      | Absent: the generated rows are the problem's `inputs/<stream>.tsv`. The generator's settings are a provenance value                        |
+| `estimate`                       | Bounds and prior per parameter; `rw_sd`, `perturb_only_at_t0` and `start` are the run's, in `method.toml`                                  |
+| `fixed`                          | `values`, every fixed parameter resolved; `from_file` and `from_scenario` are expanded, so neither appears                                 |
+| `simplex_groups`, `ic_free`      | As resolved                                                                                                                                |
+| `config`                         | `dt`, `allow_degenerate_rates` and `allow_forcing_extrapolation`, defaults filled in and the flag applied                                  |
+| `simulate`                       | `from`, resolved to model time                                                                                                             |
+| `scenario`, `enable`, `disable`  | As given, since each reader resolves them against its own compile; the resolved set is in the identity                                     |
+| `output_dir`, `provenance`       | Absent; the first is an old-store input and the second a provenance value                                                                  |
+| `compiled_ir`                    | Never serialised                                                                                                                           |
+
+`inputs/<stream>.tsv` holds the stream's training rows in file order, with the
+header, the time cells and that stream's columns, copied cell for cell from the
+source. From a wide table the stream's columns are projected out, so the stored
+file holds no other stream's values and no held-out row. The reader's test binds
+every fixture both ways, from the original `fit.toml` and from the rebuilt
+problem, and requires identical `ObservedRow`s and partition.
+
+**`method.toml`**, a result file of the `FitRun`, is the run's `[method]` table
+after `Method::merge` applies the flags, followed by an `[estimate.<parameter>]`
+table per parameter that sets `rw_sd`, `perturb_only_at_t0` or `start`. Together
+with `problem.toml` it parses to the `FitConfig` the run computed. It is not
+`fit.toml`, the provenance file that records what the run was given.
+
+```rust
+/// What a fit handle names: a problem, or one run and its problem.
+pub struct StoredFit {
+    pub problem: Stored<FitProblem>,
+    pub run: Option<Stored<FitRun>>,
+    /// problem.toml, with method.toml when `run` is Some, parsed; every relative
+    /// path is anchored at the stored folder.
+    pub config: FitConfig,
+    /// The training cutoff and per-stream row counts, from [partition].
+    pub partition: TrainingPartition,
+}
+
+/// Reads the fit `handle` names: `@label`, an id prefix or a result folder.
+/// A FitRun handle gives its run and problem; a FitProblem handle gives the
+/// problem alone. A handle naming several runs is refused with them listed.
+pub fn read_fit(store: &Store, handle: &Handle) -> Result<StoredFit>;
+```
+
+A `fit.toml` path is not a handle. A reader that needs only the problem resolves
+the file in process, through `resolve`, and stores nothing; a reader that needs
+a run refuses the file and lists the runs its invocations produced.
+
+How each reader holds what it reads:
+
+| Reader                                                                       | What it reads                                                | In its identity                                                                                                                                                                                                                                  |
+| ---------------------------------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pfilter --fit`                                                              | The problem                                                  | `fit: Option<Dep<FitProblem>>` in `PfilterIdentity`. The struct gains a field, so every `pfilter` run id re-keys, with or without `--fit`. Pre-1.0 this is accepted                                                                              |
+| `simulate --fit`                                                             | A run's draws or parameters, and the problem's settings      | Lineage, as in "Dependency edges the index must hold": the values and settings are hashed where they land in `SimIdentity`                                                                                                                       |
+| `design lhs`                                                                 | The problem                                                  | None; it stores nothing                                                                                                                                                                                                                          |
+| `compare`, `fit summary`, `fit table`                                        | A run and its problem                                        | None; they store nothing. `fit table`'s child predictions hold their own dependencies                                                                                                                                                            |
+| `camdl predict @fit`                                                         | A run and its problem                                        | `ParameterSource::Posterior { draws: Dep<FitRun>, problem: Dep<FitProblem> }`                                                                                                                                                                    |
+| `profile --fit`, until `profile` moves                                       | The problem, and the run's `method.toml` when a run is named | On the old store, an `ArtifactRef` over the digests of `problem.toml` and `method.toml`, in place of the hash of `fit.toml.original`. Profiles of stored fits re-key; profiles of a `fit.toml` do not. Step 6 replaces it with `Dep<FitProblem>` |
+| Stored-fit starts in `fit run` (`from_mle`, `from_posterior`, `from_params`) | The source run's file                                        | `StartSource` holds a `dep_part` on that file                                                                                                                                                                                                    |
+| Stored-fit starts in `profile`, until `profile` moves                        | The source run's file                                        | On the old store, an `ArtifactRef` over the file's content, as today                                                                                                                                                                             |
+
+Three readers change behaviour as well as source. A reader that applied
+`holdout_after` itself (`pfilter --save-final-state`, `pfilter.rs:700`;
+`profile`, `profile.rs:563-566`) takes `StoredFit::partition` instead, since the
+stored rows are already the training rows. `profile`'s held-out files are gone
+with `data.holdout`. A forecast's held-out rows are not in the problem; where
+they come from is decided before step 5b ("Order").
+
 ## Features that build on the store
 
 These camdl features each add an artifact, a by-product or a link, and none
@@ -5056,7 +5141,23 @@ are deleted with `runid` in the last step, and the new root does not move again.
    use the store crates, and builds the parts every later command shares.
 4. `simulate`, with observations and the combined table.
 5. `fit run` with the problem artifact. Posterior predictions arrive with it,
-   and `camdl predict @fit` replaces `fit predict`.
+   and `camdl predict @fit` replaces `fit predict`. Once `fit run` writes to the
+   new store, no fit is in the old one, so every reader of a stored fit moves in
+   the same change. The step lands in three parts, each green on main.
+   1. **5a: the types and the reader.** `FitProblem`, `FitRun`, their identities
+      and layouts, `problem.toml` and `method.toml`, `write_problem`, `read_fit`
+      and the `Prediction` artifact, tested on fits written into a scratch
+      store. No command changes, and every fit stays on the old store.
+   2. **5b: the move.** `fit run` on the store, with resume and stored-fit
+      starts; `fit summary`, `fit table`, `compare`, `list`, `show`, `cat` and
+      `label` on fit kinds; `pfilter`, `simulate`, `design` and `profile` given
+      a stored fit, through `read_fit` ("Reading a stored problem"); and
+      `fit predict`, under its old name, reading the run and writing its
+      predictions inside it at `predict/`. `cas.rs` and the old fit folder's
+      readers are deleted. Where a forecast's held-out rows come from is decided
+      before this part starts.
+   3. **5c: the command.** `camdl predict @fit` replaces `fit predict`, which is
+      deleted; the tests and documentation change their command lines.
 6. `profile`. Its identity changes the most.
 7. `camdl predict` from fixed points, born on the new store, then scores. A
    fixed-point prediction needs no fit artifact. Its command surface gets a
@@ -5067,9 +5168,11 @@ are deleted with `runid` in the last step, and the new root does not move again.
    most of today's 323 direct file and environment reads are old-store code this
    step deletes.
 
-Steps 4 and 5 are independent of each other, as are steps 6 and 7. The
-`camdl survey` command is removed in a separate change and is not moved to the
-new store.
+Step 5 follows step 4: `simulate --fit` reads stored fits (`cli/src/main.rs`,
+`--draws posterior`), so the change that moves `fit run` also moves that read,
+and it is made once `simulate` is on the store. Steps 6 and 7 are independent of
+each other. The `camdl survey` command is removed in a separate change and is
+not moved to the new store.
 
 camdl-viewer and camdl-scope are not part of this work. Once `fit run` has
 landed on main, the agent that maintains them is told what changed: the paths,
@@ -5271,7 +5374,8 @@ Settled:
 - the library offers the choice of grouping results by build at the top level
   with no default, recorded in `store.json`; camdl groups by build.
 
-No decision is open.
+One decision is open: where a forecast's held-out rows come from, since the
+problem holds only training rows. It is settled before step 5b.
 
 ## Future features
 
