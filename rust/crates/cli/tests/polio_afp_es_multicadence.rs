@@ -154,8 +154,11 @@ fn run_pfilter(bin: &Path, ir: &Path, data_args: &[String]) -> (bool, String, St
         "1".to_string(),
     ];
     args.extend_from_slice(data_args);
+    // Each test's own store, beside its model: tests of this file run at once.
+    let store = ir.parent().expect("the model sits in the test's directory").join("camdl-store");
     let out = Command::new(bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("CAMDL_STORE", store)
         .args(&args)
         .output()
         .expect("spawn pfilter");
