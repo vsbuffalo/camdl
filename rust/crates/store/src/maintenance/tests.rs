@@ -108,6 +108,36 @@ fn the_commands_report_from_the_records() {
     }
 }
 
+/// `verify <handle>` checks the result an id prefix names, not another result
+/// of the invocation that asked for it, and every result of an invocation a
+/// label names.
+#[test]
+fn verify_checks_the_results_its_handle_names() {
+    let root = TempRoot::new("verify-handle");
+    let store = open(root.path());
+    let i = labelled("both");
+    let first = run_sim(&store, &i, 1);
+    let second = run_sim(&store, &i, 2);
+    i.finish(&store).unwrap();
+    for s in [&first, &second] {
+        let mut out = Vec::new();
+        StoreCommand::Verify { handle: Some(s.id().key().to_hex()[..12].to_string()) }.run(&store, &mut out).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "every result verified\n");
+    }
+    std::fs::write(second.folder().join("traj.tsv"), b"t\tI\n0\t9\n").unwrap();
+    let verify = |handle: String| {
+        let mut out = Vec::new();
+        StoreCommand::Verify { handle: Some(handle) }.run(&store, &mut out).unwrap();
+        String::from_utf8(out).unwrap()
+    };
+    let named = verify(second.id().key().to_hex()[..12].to_string());
+    assert!(named.contains("damaged") && named.contains(&second.id().key().short12()), "{named}");
+    let other = verify(first.id().key().to_hex()[..12].to_string());
+    assert_eq!(other, "every result verified\n", "the first result is whole");
+    let labelled = verify("@both".into());
+    assert!(labelled.contains(&second.id().key().short12()), "a label checks every result of its invocation: {labelled}");
+}
+
 #[test]
 fn a_dead_lock_is_taken_over_by_exactly_one_of_many_takers() {
     let root = TempRoot::new("lock");

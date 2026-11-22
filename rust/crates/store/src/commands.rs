@@ -23,7 +23,9 @@ pub enum StoreCommand {
     Show { handle: String },
     /// Which runs and batches are running, failed or interrupted.
     Status,
-    /// Whether each folder's id matches its identity.json and each file its digest.
+    /// Whether each folder's id matches its identity.json and each file its
+    /// digest: every completed result, the one an id prefix or a path names,
+    /// or every result of the invocation a label names.
     Verify { handle: Option<String> },
     /// Deletes dead owners' staging, everything in quarantine, every earlier
     /// attempt, and empty group and build directories.
@@ -119,17 +121,28 @@ impl StoreCommand {
             StoreCommand::Verify { handle } => {
                 let only = match handle {
                     None => None,
-                    Some(h) => {
-                        let h: Handle = h.parse()?;
-                        let dir = match h {
-                            Handle::Path(p) => p,
-                            other => {
-                                let inv = store.invocation(&other)?;
+                    Some(text) => {
+                        let h: Handle = text.parse()?;
+                        let dirs = match h {
+                            Handle::Path(p) => vec![p],
+                            Handle::IdPrefix(prefix) => {
+                                let mut found: Vec<_> =
+                                    walk(inner).into_iter().filter(|(_, f)| f.run_id.to_hex().starts_with(prefix.as_str())).collect();
+                                found.sort_by_key(|(_, f)| f.run_id);
+                                found.dedup_by_key(|(_, f)| f.run_id);
+                                match found.len() {
+                                    0 => return Err(Error::NotFound { handle: text.clone() }),
+                                    1 => found.into_iter().map(|(d, _)| d).collect(),
+                                    _ => return Err(Error::Ambiguous { handle: text.clone(), matches: found.into_iter().map(|(_, f)| f.run_id).collect() }),
+                                }
+                            }
+                            label @ Handle::Label { .. } => {
+                                let inv = store.invocation(&label)?;
                                 let keys: Vec<_> = inv.file.results.iter().map(|r| r.run_id).collect();
-                                walk(inner).into_iter().find(|(_, f)| keys.contains(&f.run_id)).map(|(d, _)| d).ok_or(Error::NotFound { handle: other.to_string() })?
+                                walk(inner).into_iter().filter(|(_, f)| keys.contains(&f.run_id)).map(|(d, _)| d).collect()
                             }
                         };
-                        Some(vec![dir])
+                        Some(dirs)
                     }
                 };
                 let failures = store.verify(only.as_deref())?;
