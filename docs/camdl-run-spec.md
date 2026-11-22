@@ -2585,6 +2585,56 @@ verdict), `none`, `not_completed` or `unreadable` (with `reason`). `run_id` and
 `<root>/index.json` is a derived run_id → leaf index, rebuilt lazily on a
 prefix-resolution miss and by `camdl dev reindex <root>`. Deleting it is safe.
 
+#### Maintaining the run store: `status`, `verify`, `clean`, `reindex`
+
+Four commands read and tidy the run store, the store of `simulate` and
+`pfilter`. Each takes `--store DIR`, else `CAMDL_STORE`, else `./camdl-store`,
+and refuses a root that has no `store.json`, exiting 1, rather than create a
+store there. None of them reads `results/`.
+
+```bash
+camdl status                 # runs that are running, interrupted or failed
+camdl verify                 # every completed result against its records
+camdl verify 318a6e1b        # one result, by run-id prefix or folder
+camdl verify @baseline       # every result of the invocation labelled baseline
+camdl clean                  # delete the quarantine, earlier attempts, dead staging
+camdl reindex                # rebuild the index from the records
+```
+
+- **`status`** prints one line per invocation still recorded as running, and one
+  per result folder recorded as running or failed, with its kind and 12-hex id.
+  A running invocation or result is `running` while its owner, the process that
+  claimed it, is alive, and `interrupted` once that process has stopped; a
+  failed result is printed with the reason it recorded. Completed results are
+  not printed. An interrupted result's folder stays until a run that asks for
+  the same result takes it over. An interrupted invocation's record is kept, as
+  every invocation record is, so `status` lists it on every call.
+- **`verify [HANDLE]`** checks every completed result, or the results the handle
+  names: an id prefix or a folder names one, and `@L` names every result of the
+  invocation labelled `L`. For each it computes the run id again from
+  `identity.json` and compares it with the folder's, and computes the SHA-256 of
+  every file the manifest in `run.json` lists and compares it with the recorded
+  digest. Each result that fails is printed as `damaged:` with its folder and
+  what differs; otherwise it prints `every result verified`. It writes nothing.
+  The next run that asks for a damaged result moves it to `.quarantine/` and
+  computes it again. A handle that names no result is refused.
+- **`clean`** deletes each staging folder (`.staging/`) of an unfinished result
+  whose owner was a process on this host that has stopped, everything in
+  `.quarantine/`, every `.attempts/` folder, and each group and build directory
+  that is empty, and prints how many of each it removed. It never touches a
+  completed result, a running or interrupted run, a run recorded as failed, an
+  invocation record or the index. A completed result leaves the store only after
+  `--force` has moved it to `.quarantine/`, so the copy `--force` replaced can
+  be recovered from there until `clean` runs.
+- **`reindex`** reads every `identity.json`, `run.json` and invocation record,
+  writes the index of completed results and ended invocations under `.index/` as
+  one log, removes the index logs of owners known to have stopped, and prints
+  how many result folders it read. The index is a cache: a result is found
+  without it.
+
+`camdl dev reindex` rebuilds `results/index.json`, the index of the store of
+fits and profiles, and is a different command.
+
 ### 4.6 Synthetic Observations
 
 ```bash
