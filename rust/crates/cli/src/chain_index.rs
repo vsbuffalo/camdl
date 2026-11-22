@@ -5,7 +5,7 @@
 //! directories, the progress and error lines, `chain_starts.tsv`,
 //! `fit_state.toml`'s `best_chain` and `chain_eval_ids`, the per-chain tables
 //! of `fit summary`, `--exclude-chains`, the `chain` column of `draws.tsv` and
-//! of a `fit predict --by-chain` table. They all carry the same number: the
+//! of a `camdl predict --by-chain` table. They all carry the same number: the
 //! runner's own 0-based index, printed as it is. There is no second base and
 //! therefore no conversion — the class of off-by-one that gh#781, gh#823,
 //! gh#910 and gh#972 each fixed at one site had two bases as its cause, not a
@@ -28,7 +28,7 @@ use score::convergence::ChainIndex;
 /// Before gh#990 the directories were `chain_1/ … chain_N/` while
 /// `draws.tsv`'s `chain` key ran `0 … N-1`; now both count from 0. A reader
 /// that addressed such a leaf by name under the new rule — `--resume` opening
-/// `chain_N/resume_state.bin`, `fit predict` following a draw's `chain` key
+/// `chain_N/resume_state.bin`, `camdl predict` following a draw's `chain` key
 /// into `chain_<key>/trajectories.tsv`, `fit summary` labelling
 /// `chain_N/trace.tsv` — would read chain `k` where it wanted chain `k - 1`
 /// and miss the last chain, with nothing erroring. So the old shape is

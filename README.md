@@ -257,7 +257,7 @@ More, in one table:
 | **Simulation**       | Gillespie SSA, chain-binomial (Euler-multinomial), ODE (RK4 / adaptive RK4(5)). Extra-demographic noise via `overdispersed()`; deterministic flows via `deterministic()`                                     |
 | **Inference**        | IF2 (MLE), PGAS + NUTS (Bayesian posterior), PMMH, bootstrap particle filter, 1D/2D profile likelihood. Compiler-emitted analytic gradients                                                                  |
 | **Fitting workflow** | Declarative `fit.toml` (one problem, one method → `camdl fit run`); warm starts by handle; convergence verdicts; dt-convergence audit; calendar-dated data; sparse / irregular / missing (`NA`) observations |
-| **Diagnostics**      | Particle-filter health (ESS, τ²), prequential scoring (elpd, CRPS, PIT), paired model comparison via `camdl compare`, posterior-predictive checks via `camdl fit predict`                                    |
+| **Diagnostics**      | Particle-filter health (ESS, τ²), prequential scoring (elpd, CRPS, PIT), paired model comparison via `camdl compare`, posterior-predictive checks via `camdl predict`                                        |
 | **Reproducibility**  | Content-addressed runs with caching; common-random-number scenario coupling; version-locked offline docs (`camdl docs <topic>`)                                                                              |
 
 ## Install

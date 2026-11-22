@@ -1,6 +1,6 @@
 //! Method C of counterfactual contrasts (proposal 2026-06-25): the two-arm replay
 //! reducer that CONSUMES the IR [`ir::contrast::Contrast`] node. Auto-emitted by
-//! `fit predict` when the model declares any `contrasts {}`.
+//! `camdl predict` when the model declares any `contrasts {}`.
 //!
 //! **The fork is derived, not declared.** A contrast has no `over [..]` window.
 //! From the runs a contrast references, the reducer diffs the arms' live
@@ -33,7 +33,7 @@
 //! parametric / reactive fire time (no single derivable fork).
 //!
 //! An operand that reads `value_at(..., last_obs)` resolves against the FIT'S
-//! observation window, threaded in from `fit predict` (gh#694) — the same window
+//! observation window, threaded in from `camdl predict` (gh#694) — the same window
 //! the ordinary `quantities/` sidecar uses, so the two cannot disagree about what
 //! `last_obs` meant. The window is a property of the data, not of an arm; whether
 //! the resolved instant lies inside an arm's `[fork, run_end]` replay window is
@@ -131,12 +131,12 @@ struct ArmDrawResult {
 
 /// Compute and write every `contrasts/<name>.tsv` under `out_dir`, the run's
 /// predictions directory ([`crate::fit::fit_view::predictions_dir`]). Called by
-/// `fit predict` only when `model.contrasts` is non-empty, so a model without a
+/// `camdl predict` only when `model.contrasts` is non-empty, so a model without a
 /// `contrasts {}` block is byte-identical to before.
 ///
 /// Returns the written file paths. A non-forkable fit (no saved paths) or an ODE
 /// fit emits NO file and a located stderr note (not a crash). A shape or dimension
-/// mismatch in a contrast body is a hard error (it fails `fit predict`).
+/// mismatch in a contrast body is a hard error (it fails `camdl predict`).
 ///
 /// `obs_anchors` is the run's resolved observation window — the same pair the
 /// ordinary `quantities/` sidecar anchors `value_at(..., last_obs)` to (gh#694).
@@ -173,7 +173,7 @@ pub fn emit_contrasts(
         .with_selection(selection.cloned());
 
     // The forkable subset, classified by LatentPath. A point-estimate fit is
-    // already refused upstream by `fit predict` (PlugIn treatment), so here we
+    // already refused upstream by `camdl predict` (PlugIn treatment), so here we
     // only see a posterior cloud. With a selection active every count below is
     // over the RETAINED chains.
     let joint = resolve_joint(&pref)?;
@@ -199,7 +199,7 @@ pub fn emit_contrasts(
             ));
         }
         out.say(format_args!(
-            "fit predict: skipping {} contrast(s) — this fit has no forkable posterior \
+            "predict: skipping {} contrast(s) — this fit has no forkable posterior \
              draws (0/{} have a usable latent state X(T*)). A conditioned contrast needs \
              a stochastic fit that saved smoothed latent paths (PGAS), or a deterministic \
              (ODE) fit. PMMH/PF fits do not yet save paths.",
@@ -214,7 +214,7 @@ pub fn emit_contrasts(
     // re-integration seam is not wired here — surface it loudly, never silently.
     if backend != ForwardBackend::ChainBinomial {
         out.say(format_args!(
-            "fit predict: skipping {} contrast(s) — counterfactual contrasts fork only \
+            "predict: skipping {} contrast(s) — counterfactual contrasts fork only \
              chain_binomial posterior fits in this build; this fit ran on {}. (ODE \
              deterministic forking is a named gh#325 follow-up.)",
             model.contrasts.len(),
@@ -238,7 +238,7 @@ pub fn emit_contrasts(
     // only when draws were also skipped for want of a path.
     if let Some(info) = &joint.selection {
         out.say(format_args!(
-            "fit predict: contrasts band over the RETAINED chains — chain(s) {} excluded, \
+            "predict: contrasts band over the RETAINED chains — chain(s) {} excluded, \
              {} of {} chains kept; {} of the {} retained draws carry a saved latent path \
              X(T*).",
             info.excluded_csv(),
@@ -252,7 +252,7 @@ pub fn emit_contrasts(
     // Honest denominator, part 2: a contrast bands over the forkable subset only.
     if joint.n_forkable < joint.n_total {
         out.say(format_args!(
-            "fit predict: contrasts band over the forkable subset — {}/{} draws have a \
+            "predict: contrasts band over the forkable subset — {}/{} draws have a \
              saved latent path X(T*); the remaining {} are skipped.",
             joint.n_forkable,
             joint.n_total,
@@ -311,7 +311,7 @@ pub fn emit_contrasts(
     for c in &model.contrasts {
         match validate_contrast(c, model) {
             Ok(()) => to_emit.push(c),
-            Err(reason) => out.say(format_args!("fit predict: skipping contrast '{}' — {reason}", c.name)),
+            Err(reason) => out.say(format_args!("predict: skipping contrast '{}' — {reason}", c.name)),
         }
     }
     if to_emit.is_empty() {
@@ -352,7 +352,7 @@ pub fn emit_contrasts(
     // Each arm resolves every forkable draw's θ under its scenario (`replay`),
     // so a scenario `set`/`scale` replaces the draws' values. Report those
     // replacements once, over every arm and draw, before any arm replays —
-    // the same lines `fit predict --scenario` prints for its own arms.
+    // the same lines `camdl predict --scenario` prints for its own arms.
     {
         let mut parts: Vec<crate::params_resolver::NoticeParts> =
             Vec::with_capacity(runs_union.len() * forkable.len());
@@ -370,14 +370,14 @@ pub fn emit_contrasts(
     // `model.quantities`), so a model with an anchored quantity and no window to
     // resolve it against cannot be replayed at all — `eval_draw` treats a missing
     // window as a missing gate and panics (gh#616). That is unreachable from
-    // `fit predict`, which refuses upstream when no leaf carries an observation
+    // `camdl predict`, which refuses upstream when no leaf carries an observation
     // time; keep the arm side a loud skip rather than a panic, so the rest of the
     // command's output still lands.
     if obs_anchors.is_none() {
         if let Some(arm) = runs_union.first().and_then(|r| arms.get(r)) {
             if arm.quant_eval.references_obs_anchor() {
                 out.say(format_args!(
-                    "fit predict: skipping {} contrast(s) — quantity `{}` reads \
+                    "predict: skipping {} contrast(s) — quantity `{}` reads \
                      `value_at` at an observation anchor, and this fit binds no \
                      observation times to resolve it against.",
                     model.contrasts.len(),
@@ -422,12 +422,12 @@ pub fn emit_contrasts(
         let plan = match derive_fork(model, &arms, &runs_c, &snapshot_times, (model.simulation.t_start, dt, run_end)) {
             Ok(p) => p,
             Err(reason) => {
-                out.say(format_args!("fit predict: skipping contrast '{}' — {reason}", c.name));
+                out.say(format_args!("predict: skipping contrast '{}' — {reason}", c.name));
                 continue;
             }
         };
         out.say(format_args!(
-            "fit predict: contrast '{}' — fork at t={} (last saved snapshot before '{}' \
+            "predict: contrast '{}' — fork at t={} (last saved snapshot before '{}' \
              fires at t={}, declared at t={}); arms run [{}, {}].{}",
             c.name,
             plan.fork_t,
@@ -461,7 +461,7 @@ pub fn emit_contrasts(
                     let t = w.at(a);
                     if t < plan.fork_t - SNAPSHOT_TIME_TOL || t > run_end + SNAPSHOT_TIME_TOL {
                         out.say(format_args!(
-                            "fit predict: contrast '{}' — quantity `{qname}` reads at \
+                            "predict: contrast '{}' — quantity `{qname}` reads at \
                              `{a}` = t {t}, outside the arms' replay window [{}, {run_end}]; \
                              it is right-censored in every draw, so the band is empty \
                              (n_used = 0). An anchor is read off the FIT's data, which \
@@ -494,7 +494,7 @@ pub fn emit_contrasts(
         let undefined = shaped.iter().filter(|sv| sv.div0).count();
         if undefined > 0 {
             out.say(format_args!(
-                "fit predict: contrast '{}': {undefined} of {} draws undefined \
+                "predict: contrast '{}': {undefined} of {} draws undefined \
                  (denominator 0); excluded from the band, see n_used",
                 c.name,
                 shaped.len(),

@@ -572,7 +572,7 @@ pub struct SimulateArgs {
 
     /// Number of parameter draws. For --draws uniform/prior: how many to
     /// generate. For --draws posterior: a strided subsample cap across the
-    /// whole cloud (default 200, matching `fit predict` — never silently
+    /// whole cloud (default 200, matching `camdl predict` — never silently
     /// replay a full 60k-draw posterior; gh#630).
     #[arg(short = 'n', long)]
     #[input(expands)]
@@ -1352,18 +1352,18 @@ pub struct FitSummaryArgs {
     pub explain: bool,
 }
 
-#[derive(Args)]
+#[derive(Args, Clone, store::Inputs)]
 #[command(after_help = colored_help!("\
 Examples:
   # Write the free-forward posterior predictive for a stored fit run
-  camdl fit predict @post
+  camdl predict @post
 
   # Just one stream (logical name or an expanded leaf name)
-  camdl fit predict @post --stream onset
+  camdl predict @post --stream onset
 
   # Look at a disagreement rhat_mean flagged: one band per chain, beside
   # the pooled one, under a leading `chain` column
-  camdl fit predict @post --by-chain
+  camdl predict @post --by-chain
 
 Outputs, stored inside the run at predict/<mode>-<id>/:
   predictive/<stream>.tsv   scenario | time | <dims...> | horizon | treatment
@@ -1456,21 +1456,37 @@ the file is a superset of the pooled one — and composes with
 --exclude-chains, which does: --by-chain
 --exclude-chains 3,5 writes predictive-excl3_5/ with a `chain` column, and the
 ids there are the fit's own numbering with 3 and 5 simply absent."))]
-pub struct FitPredictArgs {
+pub struct PredictArgs {
+    /// The stored fit run whose posterior draws the prediction uses, by
+    /// handle: its `@label`, a run-id prefix or its folder. A `fit.toml`
+    /// names no run and is refused, with the runs it made listed.
+    #[arg(value_name = "RUN", required_unless_present = "_removed_fit")]
+    #[input(identity, vary = crate::input_fixtures::predict_other_run)]
+    pub source: Option<String>,
+
+    #[command(flatten)]
+    #[input(group)]
+    pub flags: PredictFlags,
+
+    #[command(flatten)]
+    #[input(group)]
+    pub posterior: PosteriorFlags,
+
+    // `--fit` named the run before the run became the positional argument;
+    // the dispatch answers it with the command line that replaces it.
+    #[arg(long = "fit", value_name = "FIT", hide = true)]
+    #[input(skip)]
+    pub _removed_fit: Option<String>,
+}
+
+/// The flags of `camdl predict` that mean the same thing whatever the
+/// prediction's parameters come from.
+#[derive(Args, Clone, Default, store::Inputs)]
+pub struct PredictFlags {
     // Also on when the fit's own config set it.
     #[command(flatten)]
+    #[input(group)]
     pub forcing_extrapolation: ForcingExtrapolationArg,
-
-    /// The stored fit run, by handle: its `@label`, a run-id prefix or its
-    /// folder. A `fit.toml` names no run and is refused, with the runs it made
-    /// listed.
-    #[arg(long = "fit", value_name = "FIT")]
-    pub fit_flag: Option<String>,
-
-    /// Positional form of the fit handle, so `camdl fit predict @jigawa-baseline`
-    /// works like `fit summary`.
-    #[arg(value_name = "FIT", conflicts_with = "fit_flag")]
-    pub fit_pos: Option<String>,
 
     /// Restrict to the named streams (repeatable). Each is a logical name
     /// (`onset`, every one of its leaves) or an expanded leaf name (`onset_Bo`).
@@ -1479,6 +1495,7 @@ pub struct FitPredictArgs {
     /// produced (no bound data, or refused) makes the exit status 1, with the
     /// other streams still written.
     #[arg(long, value_name = "STREAM")]
+    #[input(identity, vary = crate::input_fixtures::predict_stream)]
     pub stream: Vec<String>,
 
     /// Prospective scenario overlay (repeatable; conflicts with --enable/--disable).
@@ -1490,16 +1507,19 @@ pub struct FitPredictArgs {
     /// scenario's bands only — never a between-scenario difference ("cases averted"
     /// lives in the conditioned counterfactual fork).
     #[arg(long = "scenario", conflicts_with_all = ["enable", "disable"])]
+    #[input(identity, vary = crate::input_fixtures::predict_scenario)]
     pub scenarios: Vec<String>,
 
     /// Enable an intervention in an ad-hoc scenario overlay (repeatable; conflicts
     /// with --scenario). Mirrors `simulate --enable`.
     #[arg(long, conflicts_with = "scenarios")]
+    #[input(identity, vary = crate::input_fixtures::predict_intervention)]
     pub enable: Vec<String>,
 
     /// Disable an intervention in an ad-hoc scenario overlay (repeatable; conflicts
     /// with --scenario). Mirrors `simulate --disable`.
     #[arg(long, conflicts_with = "scenarios")]
+    #[input(identity, vary = crate::input_fixtures::predict_intervention)]
     pub disable: Vec<String>,
 
     /// Vary a parameter across a grid over the posterior (repeatable →
@@ -1511,6 +1531,7 @@ pub struct FitPredictArgs {
     /// scenario and a sweep on the SAME parameter is a hard error (pin OR vary,
     /// not both). Free-forward only — the one-step horizon is sweep-agnostic.
     #[arg(long = "sweep", value_name = "PARAM=GRID")]
+    #[input(identity, vary = crate::input_fixtures::predict_sweep)]
     pub sweep: Vec<crate::args::types::SweepSpec>,
 
     /// Which predictive to emit. Omitted = all applicable for the fit's
@@ -1520,6 +1541,7 @@ pub struct FitPredictArgs {
     /// fixed-origin forecast from the end of the fit's training rows, out to
     /// `--horizon`.
     #[arg(long, value_name = "MODE")]
+    #[input(identity, vary = crate::input_fixtures::predict_mode)]
     pub mode: Option<crate::args::types::PredictModeArg>,
 
     /// The forecast's reach, a duration from the end of the fit's training
@@ -1528,6 +1550,7 @@ pub struct FitPredictArgs {
     /// horizon counts that stream's own periods from the one under way.
     /// Implies `--mode forecast`.
     #[arg(long, value_name = "DURATION")]
+    #[input(identity, vary = crate::input_fixtures::predict_horizon)]
     pub horizon: Option<String>,
 
     /// Forecast mode: the design values (a column the likelihood reads, such
@@ -1537,14 +1560,8 @@ pub struct FitPredictArgs {
     /// forecast (repeatable, one per stream). Every target needs a value of
     /// every design column; a missing one is refused.
     #[arg(long, value_name = "SOURCE=FILE", conflicts_with = "realised_design")]
+    #[input(identity, vary = crate::input_fixtures::predict_design)]
     pub design: Vec<String>,
-
-    /// Forecast mode: read each target's design values from its held-out row,
-    /// realised after the forecast origin. The result is labelled a
-    /// conditional score using realised future design, not an unconditional
-    /// forecast. Every target needs a held-out row with every design value.
-    #[arg(long)]
-    pub realised_design: bool,
 
     /// Report this fit with the `quantities {}` block in FILE instead of the
     /// model's own. FILE is an ordinary `.camdl` file containing ONLY a
@@ -1556,6 +1573,7 @@ pub struct FitPredictArgs {
     /// one fit produce two tables rather than overwriting each other. The fit's
     /// own identity is untouched (proposal 2026-08-19).
     #[arg(long, value_name = "FILE")]
+    #[input(identity, vary = crate::input_fixtures::predict_quantities)]
     pub quantities: Option<PathBuf>,
 
     /// Cap the posterior cloud subsample for BOTH horizons (default 200). Each
@@ -1565,6 +1583,7 @@ pub struct FitPredictArgs {
     /// never silently run at full size (a full free-forward replay of a
     /// long-burn-in ODE fit is hours of solves).
     #[arg(long, value_name = "N")]
+    #[input(identity, vary = crate::input_fixtures::predict_n_draws)]
     pub n_draws: Option<usize>,
 
     /// Particles per posterior draw in the filters this command runs (the
@@ -1572,12 +1591,19 @@ pub struct FitPredictArgs {
     /// count for a PMMH fit, else 500. The resolved count is part of the
     /// output directory's key and is recorded in the manifest.
     #[arg(long, value_name = "N")]
+    #[input(identity, vary = crate::input_fixtures::predict_particles)]
     pub particles: Option<usize>,
 
     /// RNG seed for the y_rep observation sampling (default 1).
     #[arg(long)]
+    #[input(identity)]
     pub seed: Option<u64>,
+}
 
+/// The flags of `camdl predict` that read a fit's posterior: its chains and
+/// its held-out rows.
+#[derive(Args, Clone, Default, store::Inputs)]
+pub struct PosteriorFlags {
     /// Also band each MCMC chain on its own, tagged by a leading `chain` column
     /// (`all` on the pooled rows, the chain id on the per-chain ones, counted
     /// from 0 as in the `chain` column of `draws.tsv`) —
@@ -1607,6 +1633,7 @@ pub struct FitPredictArgs {
     /// so an excluded chain is simply absent and the ids that remain line up row
     /// for row with the pooled artifact's.
     #[arg(long = "by-chain")]
+    #[input(identity)]
     pub by_chain: bool,
 
     /// Drop the named MCMC chains from the posterior cloud before banding —
@@ -1621,6 +1648,7 @@ pub struct FitPredictArgs {
     /// SET (`3,5` and `5,3` are one address), so a subset never overwrites the
     /// pooled artifact and two subsets never overwrite each other.
     #[arg(long, value_name = "IDS")]
+    #[input(identity, vary = crate::input_fixtures::predict_chain_ids)]
     pub exclude_chains: Option<String>,
 
     /// Band over ONLY the named chains (comma-separated chain ids counted
@@ -1630,7 +1658,54 @@ pub struct FitPredictArgs {
     /// `predictive-excl0_1_2_4/` as `--exclude-chains 0,1,2,4`. Always warns;
     /// a chain id not in the fit, or naming every chain, is a hard error.
     #[arg(long, value_name = "IDS", conflicts_with = "exclude_chains")]
+    #[input(identity, vary = crate::input_fixtures::predict_chain_ids)]
     pub chains: Option<String>,
+
+    /// Forecast mode: read each target's design values from its held-out row,
+    /// realised after the forecast origin. The result is labelled a
+    /// conditional score using realised future design, not an unconditional
+    /// forecast. Every target needs a held-out row with every design value.
+    /// A stored fit keeps its held-out rows' dates and not their values, so
+    /// a forecast from one refuses this flag.
+    #[arg(long)]
+    #[input(identity)]
+    pub realised_design: bool,
+}
+
+/// One `camdl predict` as its inputs reach the store: the command's
+/// arguments and the global options, each with its class. Built by the
+/// dispatch in `main.rs`; the global options are not `PredictArgs`' own.
+#[derive(Clone, store::Inputs)]
+pub struct PredictInvocation {
+    #[input(group)]
+    pub args: PredictArgs,
+    /// `--no-licm`: compile a `--quantities` vocabulary against the fit's
+    /// model source without loop-invariant code motion. A prediction runs
+    /// the fit's stored compile. The vocabulary's compile is checked against
+    /// it with every hoisted subexpression written back in place, so it
+    /// agrees with a fit compiled under either setting, and it contributes
+    /// only its quantities, which hoisting does not touch.
+    #[input(execution, exercised_by = crate::input_fixtures::predict_no_licm)]
+    pub no_licm: bool,
+    /// `--no-ir-cache`: compile a `--quantities` vocabulary rather than reuse
+    /// a cached IR, which is the IR a compile emits.
+    #[input(execution, exercised_by = crate::input_fixtures::predict_no_ir_cache)]
+    pub no_ir_cache: bool,
+    #[input(skip)]
+    pub verbosity: Option<log::LevelFilter>,
+    #[input(skip)]
+    pub progress: types::ProgressMode,
+    #[input(skip)]
+    pub no_progress: bool,
+}
+
+/// `camdl fit predict` is removed: a prediction is `camdl predict RUN`. This
+/// catch-all accepts any arguments so an old command line is answered with
+/// the one that replaces it rather than a clap parse error.
+#[derive(Args)]
+pub struct FitPredictRemovedArgs {
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+    pub _ignored: Vec<String>,
 }
 
 /// The reserved scenario name for the no-overlay row — the fitted model as
@@ -1647,7 +1722,7 @@ pub const FITTED: &str = "fitted";
 /// One shared check because both verbs mis-handle a repeat, differently and
 /// both badly: `simulate` would accumulate two cells into one scenario bucket
 /// and fail with "point-mode quantities require exactly one realization" AFTER
-/// the whole grid had simulated and committed leaves, while `fit predict` bands
+/// the whole grid had simulated and committed leaves, while `camdl predict` bands
 /// each posterior draw twice and reports `n_draws = 2N` — a band that looks
 /// right with a sample count that is not (gh#579). A repeat is never what the
 /// user meant, so it is rejected at parse where the diagnostic can name it.
@@ -1675,19 +1750,7 @@ pub fn split_scenario_names(raw: &[String]) -> Result<Vec<String>, String> {
     Ok(names)
 }
 
-impl FitPredictArgs {
-    /// The raw fit handle (`--fit` or the positional form), unparsed.
-    pub fn fit(&self) -> Result<&str, String> {
-        self.fit_flag
-            .as_deref()
-            .or(self.fit_pos.as_deref())
-            .ok_or_else(|| {
-                "a fit handle is required: `@label`, a hash prefix, a run directory, \
-                 or `--fit fit.toml`"
-                    .into()
-            })
-    }
-
+impl PredictFlags {
     /// Parse the repeatable `--scenario`/`--enable`/`--disable` surface into the
     /// shared `Vec<ScenarioRef>`, exactly the way `simulate` does (`main.rs`'s
     /// `from_cli`): `--scenario a,b` comma-splits into `[Named("a"), Named("b")]`
@@ -1875,7 +1938,7 @@ pub struct FitTableArgs {
     /// q50 of the no-overlay `fitted` row). Repeatable for several
     /// quantities. Unlike the default read-only table, `--quantity`
     /// may DERIVE the value on demand: for a fit that has not been
-    /// predicted yet it runs `fit predict --mode free_forward`,
+    /// predicted yet it runs `camdl predict --mode free_forward`,
     /// populating that run's `quantities-model/` outputs. Optimizer fits
     /// (IF2 / NLopt) have no posterior cloud, so their cell renders `—`.
     #[arg(long = "quantity", value_name = "NAME")]
@@ -3208,7 +3271,7 @@ pub struct CompareArgs {
     pub seed: u64,
 
     /// Drop MCMC chains from a fit's posterior cloud before deriving its plug-in
-    /// θ̂, so a comparison scores the SAME subset `fit predict`/`fit summary`
+    /// θ̂, so a comparison scores the SAME subset `camdl predict`/`fit summary`
     /// would band. PER-FIT (repeat the flag): `--exclude-chains @a:4` drops
     /// chain 4 from the fit named `@a` only, leaving the others whole. The fit
     /// name is matched VERBATIM against the name shown in the table (and matched
@@ -3695,24 +3758,24 @@ mod tests {
             "no results root beside a named store");
     }
 
-    // ── fit predict: scenario overlay parsing (Layer 1) ──────────────────────
+    // ── predict: scenario overlay parsing (Layer 1) ──────────────────────────
 
-    fn parse_fit_predict(args: &[&str]) -> FitPredictArgs {
-        let mut full: Vec<&str> = vec!["camdl", "fit", "predict"];
+    fn parse_predict(args: &[&str]) -> PredictFlags {
+        let mut full: Vec<&str> = vec!["camdl", "predict", "@fit"];
         full.extend(args);
-        let cli = Cli::try_parse_from(full).expect("fit predict parse");
+        let cli = Cli::try_parse_from(full).expect("predict parse");
         match cli.command {
-            Command::Fit(FitCmd::Predict(a)) => a,
-            _ => unreachable!("expected fit predict"),
+            Command::Predict(a) => a.flags,
+            _ => unreachable!("expected predict"),
         }
     }
 
     #[test]
-    fn fit_predict_no_scenario_yields_single_fitted() {
+    fn predict_no_scenario_yields_single_fitted() {
         // No `--scenario` → a single inline `fitted` overlay carrying no
         // enable/disable (the no-overlay row, byte-identical to today's
         // hardcoded baseline replay).
-        let a = parse_fit_predict(&["--fit", "fit.toml"]);
+        let a = parse_predict(&[]);
         let refs = a.scenario_refs().expect("no-scenario parses");
         assert_eq!(refs.len(), 1, "exactly one scenario when none requested");
         assert_eq!(refs[0].name(), FITTED, "the no-overlay row is named fitted, not baseline");
@@ -3726,11 +3789,10 @@ mod tests {
     }
 
     #[test]
-    fn fit_predict_repeated_scenario_parses_to_named_vec() {
+    fn predict_repeated_scenario_parses_to_named_vec() {
         // Repeated `--scenario` → one `Named` ref each, in order (mirrors the
         // simulate parser). This is the proposal's `no_sia` / `with_sia` form.
-        let a = parse_fit_predict(&[
-            "--fit", "fit.toml",
+        let a = parse_predict(&[
             "--scenario", "no_sia",
             "--scenario", "with_sia",
         ]);
@@ -3747,9 +3809,9 @@ mod tests {
     }
 
     #[test]
-    fn fit_predict_comma_list_scenario_splits() {
+    fn predict_comma_list_scenario_splits() {
         // `--scenario a,b` comma-splits, exactly like simulate.
-        let a = parse_fit_predict(&["--fit", "fit.toml", "--scenario", "no_sia,with_sia"]);
+        let a = parse_predict(&["--scenario", "no_sia,with_sia"]);
         let refs = a.scenario_refs().unwrap();
         let names: Vec<String> = refs.iter().map(|r| r.name().to_string()).collect();
         // gh#625: fitted leads (see the repeated-`--scenario` test).
@@ -3758,10 +3820,10 @@ mod tests {
     }
 
     #[test]
-    fn fit_predict_enable_disable_form_overlay() {
+    fn predict_enable_disable_form_overlay() {
         // `--enable`/`--disable` (no `--scenario`) → a single ad-hoc `fitted`
         // overlay carrying the toggles, mirroring `simulate --enable`.
-        let a = parse_fit_predict(&["--fit", "fit.toml", "--enable", "sia", "--disable", "ri"]);
+        let a = parse_predict(&["--enable", "sia", "--disable", "ri"]);
         let refs = a.scenario_refs().unwrap();
         assert_eq!(refs.len(), 1);
         match &refs[0] {
@@ -3775,20 +3837,20 @@ mod tests {
     }
 
     #[test]
-    fn fit_predict_scenario_fitted_is_reserved() {
+    fn predict_scenario_fitted_is_reserved() {
         // An explicit `--scenario fitted` is rejected: it collides with the
         // reserved no-overlay value. The diagnostic names the reservation + fix.
-        let a = parse_fit_predict(&["--fit", "fit.toml", "--scenario", "fitted"]);
+        let a = parse_predict(&["--scenario", "fitted"]);
         let err = a.scenario_refs().expect_err("fitted must be rejected");
         assert!(err.contains("reserved"), "names the reservation: {err}");
         assert!(err.contains("fitted"), "names the offending value: {err}");
     }
 
     #[test]
-    fn fit_predict_scenario_conflicts_with_enable() {
+    fn predict_scenario_conflicts_with_enable() {
         // clap-level: --scenario and --enable are mutually exclusive (mirrors
         // simulate's σ-flag rule).
-        let full = ["camdl", "fit", "predict", "--fit", "fit.toml",
+        let full = ["camdl", "predict", "@fit",
                     "--scenario", "no_sia", "--enable", "sia"];
         assert!(Cli::try_parse_from(full).is_err(),
             "--scenario + --enable must be a clap conflict");

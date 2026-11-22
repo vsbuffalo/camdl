@@ -400,7 +400,7 @@ This is how you emit a _derived channel_ the model computes but doesn't carry as
 a compartment: force of infection `λ(t)`, effective reproduction number,
 cumulative incidence, EIR, prevalence `I / N`. Declaring it here — rather than
 reconstructing it in a downstream script from `traj.tsv` — keeps it in step with
-the model's own arithmetic and bands it over the posterior in `fit predict`. A
+the model's own arithmetic and bands it over the posterior in `camdl predict`. A
 reduction (`final`, `max`, `mean`, `time_of_max`, `first_above`, `integral`,
 `count_above`, …) instead collapses the series to a **scalar**. A reduction can
 also fold a **simulated observation** —
@@ -408,7 +408,7 @@ also fold a **simulated observation** —
 for the declared `cases` stream (never a fresh draw); an observation source must
 be reduced (a bare `observations.cases` series is rejected). They run wherever a
 simulation does — over prior-predictive draws (`simulate --draws`), over a
-fitted posterior (`fit predict`), banded into `quantities/<name>.tsv` with a
+fitted posterior (`camdl predict`), banded into `quantities/<name>.tsv` with a
 `quantities.json` manifest. A timing question that never resolves (an outbreak
 that never takes off in a given draw) is reported as **right-censored**, not as
 a fabricated time. Because they are derived reports, adding or changing a

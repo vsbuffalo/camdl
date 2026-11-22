@@ -5,7 +5,7 @@
 //! `--scenario baseline` has to mean that scenario, and on a model that does
 //! not declare one it has to be refused like any other undeclared name, with
 //! the declared scenarios listed. The no-scenario arm is the parenthesised
-//! `(none)` (`simulate`) or the compiler-reserved `fitted` (`fit predict`),
+//! `(none)` (`simulate`) or the compiler-reserved `fitted` (`camdl predict`),
 //! neither of which a declared scenario can be called.
 //!
 //! The observable is the initial infected count: the params set `I0 = 5`, the
@@ -184,10 +184,10 @@ fn fit_predict_applies_a_declared_baseline_scenario() {
     let dir = tmp.path();
     fit(&bin, dir);
     let out = run(&bin, dir, &[
-        "fit", "predict", "@fit", "--mode", "free_forward",
+        "predict", "@fit", "--mode", "free_forward",
         "--scenario", "baseline", "--seed", "1",
     ]);
-    ok(&out, "fit predict --scenario baseline");
+    ok(&out, "predict --scenario baseline");
     let by = i_start_by_scenario(dir);
     assert_eq!(by.get("baseline").map(String::as_str), Some("3"),
         "the declared `baseline` scenario sets I0 = 3: {by:?}");
@@ -248,14 +248,14 @@ fn an_undeclared_baseline_is_refused_by_every_verb() {
         "--sweep", "beta=lin(0.3,0.4,2)", "--scenario", "baseline", "--seed", "1",
     ]), "profile");
 
-    // fit predict refuses up front, before any replay runs or any file is
+    // predict refuses up front, before any replay runs or any file is
     // written — not partway through, with partial output on disk.
     fit(&bin, dir);
     let stderr = refused(&run(&bin, dir, &[
-        "fit", "predict", "@fit", "--mode", "free_forward",
+        "predict", "@fit", "--mode", "free_forward",
         "--scenario", "baseline", "--seed", "1",
-    ]), "fit predict");
+    ]), "predict");
     assert!(stderr.contains("is not declared in the model"),
-        "fit predict: the up-front scenario check refuses it:\n{stderr}");
-    assert!(!stderr.contains("wrote "), "fit predict wrote nothing:\n{stderr}");
+        "predict: the up-front scenario check refuses it:\n{stderr}");
+    assert!(!stderr.contains("wrote "), "predict wrote nothing:\n{stderr}");
 }

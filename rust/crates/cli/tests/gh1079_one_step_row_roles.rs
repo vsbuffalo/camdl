@@ -1,4 +1,4 @@
-//! gh#1079: `camdl fit predict` marks each predictive row with the part it
+//! gh#1079: `camdl predict` marks each predictive row with the part it
 //! played in the fit, and `predictive.json` names both information sets
 //! (`docs/dev/temporal-architecture.md` §2.4, §5.3).
 //!
@@ -111,21 +111,21 @@ fn walk(root: &Path) -> Vec<PathBuf> {
     found
 }
 
-/// Run `fit predict` (both modes unless `extra` says otherwise) and return
+/// Run `camdl predict` (both modes unless `extra` says otherwise) and return
 /// what it said and the directory it wrote `predictive.json` to.
 fn predict(dir: &Path, extra: &[&str]) -> (String, PathBuf) {
     // Each call's options key their own directory; keep only this call's.
     for p in walk(&dir.join("results")).into_iter().filter(|p| p.file_name().is_some_and(|n| n == "predictive.json")) {
         std::fs::remove_dir_all(p.parent().unwrap()).unwrap();
     }
-    let mut args = vec!["fit", "predict", "--fit", "@fit", "--n-draws", "3"];
+    let mut args = vec!["predict", "@fit", "--n-draws", "3"];
     // `--particles` is refused when no filter runs.
     if !extra.contains(&"free_forward") {
         args.extend_from_slice(&["--particles", "40"]);
     }
     args.extend_from_slice(extra);
     let out = run(dir, &args);
-    assert!(out.status.success(), "fit predict: {}", said(&out));
+    assert!(out.status.success(), "predict: {}", said(&out));
     let manifests: Vec<PathBuf> = walk(&dir.join("results")).into_iter()
         .filter(|p| p.file_name().is_some_and(|n| n == "predictive.json"))
         .collect();
@@ -367,7 +367,7 @@ fn a_run_whose_recorded_partition_was_removed_is_refused_in_both_modes() {
     std::fs::write(&meta, serde_json::to_string_pretty(&sidecar).unwrap()).unwrap();
 
     for mode in ["free_forward", "one_step"] {
-        let out = run(dir, &["fit", "predict", "--fit", "@fit", "--mode", mode, "--n-draws", "3"]);
+        let out = run(dir, &["predict", "@fit", "--mode", mode, "--n-draws", "3"]);
         assert_eq!(out.status.code(), Some(1), "--mode {mode}: {}", said(&out));
         assert!(said(&out).contains("@fit"), "--mode {mode}: the refusal names the run: {}", said(&out));
         assert!(!walk(&dir.join("results")).iter().any(|p| p.file_name().is_some_and(|n| n == "predictive.json")),

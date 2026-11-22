@@ -8,7 +8,7 @@
 //! dynamics at exit 0 (peak I 10–258 per draw against 1296–3673 through the
 //! fitted model).
 //!
-//! The comparison is the one `fit predict --quantities` uses
+//! The comparison is the one `camdl predict --quantities` uses
 //! (`fit::fitted_model::compare_to_fitted`): quantities and contrasts are
 //! excluded, so a reporting-only edit runs and says so.
 
@@ -234,12 +234,12 @@ fn an_anchored_fit_replays_through_its_own_source() {
         assert!(!err.contains("is not the model this fit ran on"), "{rest:?}:\n{err}");
     }
 
-    // `fit predict --quantities` compiles a vocabulary against the same
+    // `camdl predict --quantities` compiles a vocabulary against the same
     // source and compares it with the archived model the same way.
     std::fs::write(f.dir.join("vocab.camdl"), "quantities {\n  peak_I = max(I)\n}\n").unwrap();
-    let out = run(&f.dir, &["fit", "predict", seg, "--mode", "free_forward", "--quantities", "vocab.camdl"]);
+    let out = run(&f.dir, &["predict", seg, "--mode", "free_forward", "--quantities", "vocab.camdl"]);
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "fit predict --quantities on an anchored fit:\n{err}");
+    assert!(out.status.success(), "predict --quantities on an anchored fit:\n{err}");
 
     // A different anchored model is still refused, and is not called an
     // edit of the fit's source.

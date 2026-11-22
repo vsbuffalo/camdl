@@ -1,6 +1,6 @@
 //! `run_job` — the single simulation engine over [`SimulateJob`].
 //!
-//! `camdl simulate` (`main::run_simulate`) and `fit predict`'s free-forward
+//! `camdl simulate` (`main::run_simulate`) and `camdl predict`'s free-forward
 //! replay build a [`SimulateJob`] and hand it here. This
 //! is the run-spec §3.1 convergence: the multi-run logic — cell
 //! expansion, the determinism-critical seed arithmetic, per-cell

@@ -187,7 +187,7 @@ pub(crate) struct DriverConfig {
     pub binomial: sim::rng::BinomialAlgorithm,
 }
 
-/// The seed of draw `d`, for every filter `fit predict` runs per posterior
+/// The seed of draw `d`, for every filter `camdl predict` runs per posterior
 /// draw (the one-step band and the forecast): reproducible from the base seed
 /// and the draw's index alone, and keyed on the index so a skipped draw does
 /// not shift the seeds after it.

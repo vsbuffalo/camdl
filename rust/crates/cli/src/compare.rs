@@ -3517,7 +3517,7 @@ fn dropped_chains(run_dir: &Path, sel: &ChainSelection) -> Result<Vec<usize>, St
 ///
 /// A `--exclude-chains` selection (gh#417) is attached to the resolved draws
 /// ref, so the posterior mean is taken over the RETAINED cloud — the same
-/// filter `fit predict`/`fit summary` apply. An optimizer fit has no cloud, so
+/// filter `camdl predict`/`fit summary` apply. An optimizer fit has no cloud, so
 /// the selection has nothing to filter there.
 fn point_estimate_params_toml(
     segment: &Path,
@@ -3549,7 +3549,7 @@ fn point_estimate_params_toml(
 ///
 /// Reads through the shared draws authority ([`PosteriorDrawsRef`]) so an
 /// attached `--exclude-chains` selection is applied ONCE, here, before the mean
-/// — the same seam `fit predict`/`fit summary` use, rather than a second raw
+/// — the same seam `camdl predict`/`fit summary` use, rather than a second raw
 /// draws reader. The `(chain, draw)` key columns are dropped by the keyed
 /// loader, never emitted as parameters (gh#322).
 fn posterior_mean_params_toml(pref: &PosteriorDrawsRef) -> Result<(ScoredTheta, usize), String> {

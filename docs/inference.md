@@ -238,35 +238,34 @@ troughs) indicates model misspecification.
 
 The mechanics above are the internal filter view. The user-facing way to get the
 one-step-ahead band that carries full posterior parameter uncertainty is
-`camdl fit predict --fit fit.toml --mode one_step`: it re-runs the bootstrap
-filter once per posterior draw, samples `ỹ` from the propagated (pre-reweight)
-particles at each observation time, and pools over (particles × draws) into the
-`q05…q95` columns of `predictive/<stream>.tsv` —
-`horizon=one_step,
-treatment=posterior`. This is chain-binomial only (an ODE
-fit's one-step reduces to its free-forward band). Under `[data] holdout_after`
-the band covers the training rows only, since a stored fit keeps its held-out
-rows' dates and not their values; the `free_forward` rows at those dates carry
-`role` `held_out`. See [`camdl docs workflow`](workflow.md) §7.
+`camdl predict @fit --mode one_step`: it re-runs the bootstrap filter once per
+posterior draw, samples `ỹ` from the propagated (pre-reweight) particles at each
+observation time, and pools over (particles × draws) into the `q05…q95` columns
+of `predictive/<stream>.tsv` — `horizon=one_step,
+treatment=posterior`. This is
+chain-binomial only (an ODE fit's one-step reduces to its free-forward band).
+Under `[data] holdout_after` the band covers the training rows only, since a
+stored fit keeps its held-out rows' dates and not their values; the
+`free_forward` rows at those dates carry `role` `held_out`. See
+[`camdl docs workflow`](workflow.md) §7.
 
 ### Forecasts from the end of the training rows
 
-`camdl fit predict --fit fit.toml --horizon "4 weeks"` is the fixed-origin
-forecast. For each posterior draw the same bootstrap filter runs over the rows
-the parameters were fitted to, then on to the end of each stream's next periods
-with no data, and draws each period's reported count from the observation model
-at its end. The forecast origin is the end of the training rows; nothing after
-it is assimilated, so after the origin every particle keeps its weight and
-particle $i$'s draws across the periods are one joint sample of the future. A
-period that began before the origin, such as the week under way when daily data
-run to mid-week, is predicted whole: the particle carries the flow it inferred
-before the origin and adds what it simulates after it. Because a stream's
-running total starts only where a declared period starts, the periods come from
-the stream's declaration (its `covers` width, or its `emit_schedule`), never
-from the spacing of past rows. The draws are pooled with equal weights, and a
-draw whose filter fails, or any particle that dies after the origin, fails the
-whole forecast rather than being dropped. Chain-binomial posteriors only for
-now.
+`camdl predict @fit --horizon "4 weeks"` is the fixed-origin forecast. For each
+posterior draw the same bootstrap filter runs over the rows the parameters were
+fitted to, then on to the end of each stream's next periods with no data, and
+draws each period's reported count from the observation model at its end. The
+forecast origin is the end of the training rows; nothing after it is
+assimilated, so after the origin every particle keeps its weight and particle
+$i$'s draws across the periods are one joint sample of the future. A period that
+began before the origin, such as the week under way when daily data run to
+mid-week, is predicted whole: the particle carries the flow it inferred before
+the origin and adds what it simulates after it. Because a stream's running total
+starts only where a declared period starts, the periods come from the stream's
+declaration (its `covers` width, or its `emit_schedule`), never from the spacing
+of past rows. The draws are pooled with equal weights, and a draw whose filter
+fails, or any particle that dies after the origin, fails the whole forecast
+rather than being dropped. Chain-binomial posteriors only for now.
 
 ### What happens at each observation time
 
@@ -561,14 +560,14 @@ A fitted stochastic compartmental model gives you three distinct views of the
 data:
 
 1. **Unconditional posterior predictive.**
-   `camdl fit predict --fit fit.toml --mode free_forward`. "What does the fitted
-   model predict a priori?" — sampled `y_rep` per posterior draw, pooled into
-   the `predictive/<stream>.tsv` ribbon (averaged over the cloud, not run at a
+   `camdl predict @fit --mode free_forward`. "What does the fitted model predict
+   a priori?" — sampled `y_rep` per posterior draw, pooled into the
+   `predictive/<stream>.tsv` ribbon (averaged over the cloud, not run at a
    single plug-in point).
 2. **Smoothing over latent.** `camdl pfilter --save-paths N` at the MLE. "What
    does the model think the latent trajectory was, given the data?"
-3. **Raw observations.** `camdl fit predict` writes these to
-   `observed/<stream>.tsv` in the same tidy keys, ready to overlay on (1).
+3. **Raw observations.** `camdl predict` writes these to `observed/<stream>.tsv`
+   in the same tidy keys, ready to overlay on (1).
 
 Plot (1) and (2) as ribbons, (3) as points, side by side:
 
@@ -1972,8 +1971,8 @@ The last row is about where the origin falls. A weekly stream declared
 other observation outputs are refused, naming the stream and the period
 `[21, 28)`. A restart at day 21 or day 28 is not. Trajectory output (`-o`) is
 unaffected. To predict a week that is under way, use
-`camdl fit predict --mode forecast`, which reads it from the filter's own
-running count.
+`camdl predict --mode forecast`, which reads it from the filter's own running
+count.
 
 The origin must coincide with an output-emit time — a time between snapshots is
 an error, never snapped to a neighbour.

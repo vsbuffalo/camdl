@@ -307,7 +307,7 @@ impl TrainingPartition {
     /// with the record as written, checked against `rows`
     /// ([`Self::from_record`]). `rows` must hold every stream the fit bound:
     /// the recorded extent is checked against them. A fit that recorded none
-    /// is refused, so no command guesses which rows trained; `fit predict`
+    /// is refused, so no command guesses which rows trained; `camdl predict`
     /// reads its parameter set through this in every mode.
     pub(crate) fn read_recorded(
         segment: &std::path::Path,

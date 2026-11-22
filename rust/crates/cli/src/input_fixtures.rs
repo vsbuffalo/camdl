@@ -4,13 +4,17 @@
 //!
 //! Every path a function here returns is relative, and names a file of the
 //! fixture directory the command's class check runs in
-//! (`crate::pfilter_store::tests`, `crate::sim_store::tests`), which is the
+//! (`crate::pfilter_store::tests`, `crate::sim_store::tests`,
+//! `crate::fit_command::tests`, `crate::predict_command::tests`), which is the
 //! working directory of each run. The values are meaningful only there.
 
 use std::path::PathBuf;
 
 use crate::args::types::{DataSpec, ParamOverride, TableSpec};
-use crate::args::{FitRunArgs, FitRunInvocation, PfilterCore, PfilterInvocation, SimulateArgs, SimulateInvocation};
+use crate::args::{
+    FitRunArgs, FitRunInvocation, PfilterCore, PfilterInvocation, PredictArgs, PredictInvocation, SimulateArgs,
+    SimulateInvocation,
+};
 
 /// The pfilter every check starts from:
 /// `pfilter sir.ir.json --params p.toml --data cases=cases.tsv --particles 20 --seed 1`.
@@ -282,4 +286,104 @@ pub(crate) fn fit_parallel() -> (FitRunArgs, FitRunArgs) {
 pub(crate) fn fit_no_ir_cache() -> (FitRunInvocation, FitRunInvocation) {
     let base = fit_from(&["fit_source.toml"]);
     (FitRunInvocation { no_ir_cache: false, ..base.clone() }, FitRunInvocation { no_ir_cache: true, ..base })
+}
+
+// ── predict ──────────────────────────────────────────────────────────────────
+
+/// The prediction every check starts from: the free-forward band of a few
+/// draws of the PMMH run the harness stores as `@fit`.
+/// `predict @fit --mode free_forward --n-draws 4`.
+#[cfg(test)]
+pub(crate) fn predict_base() -> PredictInvocation {
+    predict_from(&["@fit", "--mode", "free_forward", "--n-draws", "4"])
+}
+
+/// A prediction from its command line, without the program and subcommand
+/// names, and with the global options at their defaults.
+pub(crate) fn predict_from(args: &[&str]) -> PredictInvocation {
+    #[derive(clap::Parser)]
+    struct Line {
+        #[command(flatten)]
+        args: PredictArgs,
+    }
+    let line = <Line as clap::Parser>::try_parse_from(std::iter::once("predict").chain(args.iter().copied()))
+        .unwrap_or_else(|e| panic!("a fixture's predict command line does not parse: {e}"));
+    PredictInvocation {
+        args: line.args,
+        no_licm: false,
+        no_ir_cache: false,
+        verbosity: None,
+        progress: crate::args::types::ProgressMode::None,
+        no_progress: false,
+    }
+}
+
+/// The second run the harness stores, `@other`: the same problem at another
+/// seed.
+pub(crate) fn predict_other_run() -> Option<String> {
+    Some("@other".into())
+}
+
+pub(crate) fn predict_stream() -> Vec<String> {
+    vec!["weekly_cases".into()]
+}
+
+/// A scenario of the fixture model, `vax`.
+pub(crate) fn predict_scenario() -> Vec<String> {
+    vec!["vax".into()]
+}
+
+/// The fixture model's intervention, `vax`.
+pub(crate) fn predict_intervention() -> Vec<String> {
+    vec!["vax".into()]
+}
+
+pub(crate) fn predict_sweep() -> Vec<crate::args::types::SweepSpec> {
+    vec!["gamma=0.2,0.3".parse().expect("a sweep")]
+}
+
+pub(crate) fn predict_mode() -> Option<crate::args::types::PredictModeArg> {
+    Some(crate::args::types::PredictModeArg::OneStep)
+}
+
+pub(crate) fn predict_horizon() -> Option<String> {
+    Some("3 weeks".into())
+}
+
+/// A design file of the survey stream whose first target's number tested
+/// differs from the base's `design.tsv`.
+pub(crate) fn predict_design() -> Vec<String> {
+    vec!["survey=design2.tsv".into()]
+}
+
+/// A reporting vocabulary in place of the model's own quantities.
+pub(crate) fn predict_quantities() -> Option<PathBuf> {
+    Some("vocab.camdl".into())
+}
+
+pub(crate) fn predict_n_draws() -> Option<usize> {
+    Some(6)
+}
+
+pub(crate) fn predict_particles() -> Option<usize> {
+    Some(30)
+}
+
+/// One of the fixture run's two chains.
+pub(crate) fn predict_chain_ids() -> Option<String> {
+    Some("1".into())
+}
+
+/// A vocabulary compiled with and without loop-invariant code motion against
+/// the source of `@hoisted`, a fit whose infection rate has a factor the
+/// motion hoists.
+pub(crate) fn predict_no_licm() -> (PredictInvocation, PredictInvocation) {
+    let base = predict_from(&["@hoisted", "--mode", "free_forward", "--n-draws", "4", "--quantities", "vocab.camdl"]);
+    (PredictInvocation { no_licm: false, ..base.clone() }, PredictInvocation { no_licm: true, ..base })
+}
+
+/// A vocabulary compiled with and without the IR cache.
+pub(crate) fn predict_no_ir_cache() -> (PredictInvocation, PredictInvocation) {
+    let base = predict_from(&["@fit", "--mode", "free_forward", "--n-draws", "4", "--quantities", "vocab.camdl"]);
+    (PredictInvocation { no_ir_cache: false, ..base.clone() }, PredictInvocation { no_ir_cache: true, ..base })
 }

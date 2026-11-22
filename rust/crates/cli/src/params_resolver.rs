@@ -838,7 +838,7 @@ pub fn effective_horizon(
 ///
 /// Single source of truth for "which parameters does scenario X pin/scale",
 /// read by [`scenario_coordinate_collision`] — behind both the engine's
-/// sweep / draws-file guard and `fit predict`'s `--sweep` guard — so no two
+/// sweep / draws-file guard and `camdl predict`'s `--sweep` guard — so no two
 /// commands can disagree about a scenario's footprint. A `Named`
 /// reference that is not a model preset (e.g. the implicit `baseline`) touches
 /// nothing → an empty set (no collision possible).
@@ -984,7 +984,7 @@ pub fn coordinate_values<'a>(
 /// vary it), and a `scale` would rescale every one; both are refused
 /// (proposal 2026-06-27 §4, gh#572). The one formatter behind the engine's
 /// guard ([`crate::engine::check_scenario_coordinate_collision`]) and
-/// `fit predict`'s `--sweep` guard, so every command words it the same way.
+/// `camdl predict`'s `--sweep` guard, so every command words it the same way.
 pub fn scenario_coordinate_collision(
     model: &ir::Model,
     scenario: &crate::sim_job::ScenarioRef,
@@ -2610,7 +2610,7 @@ fn emit_notices_of(out: &crate::out::Out, resolved: &[PartsRef<'_>]) {
     }
 }
 
-/// The `param-override` notice for `fit predict --sweep`: a swept value
+/// The `param-override` notice for `camdl predict --sweep`: a swept value
 /// replaces each posterior draw's value for that parameter, inside one draw
 /// row, so the resolver sees one draw/sweep-tier value and records no
 /// override. One info line per swept parameter, naming the replaced draw

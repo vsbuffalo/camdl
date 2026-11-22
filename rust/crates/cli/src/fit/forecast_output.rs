@@ -1,4 +1,4 @@
-//! `camdl fit predict --mode forecast`: the fixed-origin forecast of a fit,
+//! `camdl predict --mode forecast`: the fixed-origin forecast of a fit,
 //! from the end of its training rows out to `--horizon`
 //! (`docs/dev/temporal-architecture.md` §2.5, §4.4; migration plan, Stage 5).
 //!
@@ -139,7 +139,7 @@ pub(crate) const FORECAST_TABLES_DIR: &str = "forecast";
 /// Refuse what forecast mode does not support, before any work: the backends
 /// and options of the Stage 5 capability matrix that have no forecast yet.
 pub(crate) fn refuse_unsupported(
-    args: &crate::args::FitPredictArgs,
+    args: &crate::args::PredictArgs,
     posterior: &PosteriorDraws,
 ) -> Result<(), String> {
     use crate::args::types::ForwardBackend;
@@ -158,17 +158,17 @@ pub(crate) fn refuse_unsupported(
     // A stored fit holds its held-out rows' dates and never their values,
     // which enter only a score; `--realised-design` reads the held-out rows'
     // design values.
-    if args.realised_design {
+    if args.posterior.realised_design {
         return Err("--realised-design reads the design values of the fit's held-out rows, and a stored \
                     fit holds only their dates: held-out values enter only a score, which the run store \
                     computes as its own result (step 7 of the run-store proposal, scores). Supply the \
                     design with --design SOURCE=FILE.".to_string());
     }
     let mut asked: Vec<&str> = Vec::new();
-    if !args.enable.is_empty() { asked.push("--enable"); }
-    if !args.disable.is_empty() { asked.push("--disable"); }
-    if args.by_chain { asked.push("--by-chain"); }
-    if args.quantities.is_some() { asked.push("--quantities"); }
+    if !args.flags.enable.is_empty() { asked.push("--enable"); }
+    if !args.flags.disable.is_empty() { asked.push("--disable"); }
+    if args.posterior.by_chain { asked.push("--by-chain"); }
+    if args.flags.quantities.is_some() { asked.push("--quantities"); }
     if !asked.is_empty() {
         return Err(format!(
             "{} cannot be combined with --mode forecast yet: a forecast writes no quantities \
@@ -203,7 +203,7 @@ pub(crate) fn fit_binomial(
 
 /// What the forecast needs from `run_predict`.
 pub(crate) struct ForecastJob<'a> {
-    pub args: &'a crate::args::FitPredictArgs,
+    pub args: &'a crate::args::PredictArgs,
     /// The fitted model, observation anchors resolved.
     pub model: &'a ir::Model,
     /// The same model with every parameter seeded from a draw, so it compiles.
@@ -231,7 +231,7 @@ pub(crate) struct ForecastJob<'a> {
     pub binomial: sim::rng::BinomialAlgorithm,
     /// The streams this forecast covers, skips and fails before any work (D76).
     pub selection: &'a StreamSelection,
-    /// `fit predict`'s scenario list, the fitted model first (D50).
+    /// `camdl predict`'s scenario list, the fitted model first (D50).
     pub scenarios: &'a [crate::sim_job::ScenarioRef],
     /// The `--sweep` grid, one entry per point; empty without `--sweep`.
     pub sweep_points: &'a [Vec<(String, f64)>],
@@ -342,7 +342,7 @@ pub(crate) fn run_forecast(
     job: ForecastJob,
 ) -> Result<(PathBuf, Vec<PathBuf>, Vec<DeterministicFailure>, Vec<SkippedStream>, crate::fit::predict::PredictOptions), String> {
     let model = job.model;
-    let raw = job.args.horizon.as_deref().expect("forecast mode carries --horizon");
+    let raw = job.args.flags.horizon.as_deref().expect("forecast mode carries --horizon");
     let reach = parse_reach(raw, &model.time_unit, model.origin.as_deref())?;
     let data = job.config.data_spec()
         .map_err(|e| format!("this fit has no [data] block to read its training rows from: {e}"))?;
@@ -375,7 +375,7 @@ pub(crate) fn run_forecast(
         held_out.insert(s.name.clone(), rows);
     }
     if held_out.values().any(|r| !r.is_empty()) {
-        out.say("fit predict: a forecast from a stored fit computes no held-out score: the fit holds its \
+        out.say("predict: a forecast from a stored fit computes no held-out score: the fit holds its \
                  held-out rows' dates and not their values, which enter only a score (step 7 of the \
                  run-store proposal)");
     }
@@ -390,8 +390,8 @@ pub(crate) fn run_forecast(
     // skipped it or, when `--stream` asked for it, failed it.
     let selection = job.selection;
     // D81: where a design-reading stream's target design values come from.
-    let (design_files, design_digests) = prospective_design(model, &job.args.design, &time_opts)?;
-    let design_of = |name: &str| match (job.args.realised_design, design_files.get(name)) {
+    let (design_files, design_digests) = prospective_design(model, &job.args.flags.design, &time_opts)?;
+    let design_of = |name: &str| match (job.args.posterior.realised_design, design_files.get(name)) {
         (true, _) => DesignInput::ExPost,
         (false, Some(rows)) => DesignInput::Prospective(rows),
         (false, None) => DesignInput::NotSupplied,
@@ -425,7 +425,7 @@ pub(crate) fn run_forecast(
     let address_key = options.address_key(job.run_id);
     let out_dir = job.out_dir.to_path_buf();
     if let Some(mode) = plan.design_mode() {
-        out.say(format_args!("fit predict: forecast design values: {}", mode.label()));
+        out.say(format_args!("predict: forecast design values: {}", mode.label()));
     }
     // An eligible stream the plan refused is a failure; one with no target
     // within the reach is skipped, unless `--stream` asked for it.
@@ -460,7 +460,7 @@ pub(crate) fn run_forecast(
     extend_run(&mut fitted, &plan);
     if plan.run_end() > model.simulation.t_end {
         out.say(format_args!(
-            "fit predict: the forecast runs to t = {}, past the model's `simulate {{ to }}` \
+            "predict: the forecast runs to t = {}, past the model's `simulate {{ to }}` \
              (t = {}), with interventions planned to that end; nothing else is extended.",
             plan.run_end(), model.simulation.t_end));
     }
@@ -469,11 +469,11 @@ pub(crate) fn run_forecast(
         .with_eval_settings(job.compiled.eval));
 
     // The posterior draws, subsampled as the other modes do.
-    let cap = job.args.n_draws.unwrap_or(crate::fit::predict::DEFAULT_PREDICT_DRAWS);
+    let cap = job.args.flags.n_draws.unwrap_or(crate::fit::predict::DEFAULT_PREDICT_DRAWS);
     let idx = crate::fit::predict::subsample_indices(job.posterior.n_draws(), cap);
     if idx.len() < job.posterior.n_draws() {
         out.say(format_args!(
-            "fit predict: forecast — subsampling {} of {} posterior draws (raise with --n-draws)",
+            "predict: forecast — subsampling {} of {} posterior draws (raise with --n-draws)",
             idx.len(), job.posterior.n_draws()));
     }
     // Each draw is named by its row of draws.tsv, which under a chain
@@ -543,7 +543,7 @@ pub(crate) fn run_forecast(
     })?);
     let fc = &forecasts[0].fc;
     out.say(format_args!(
-        "fit predict: forecast from t = {} (the end of the training rows) to t = {}: {} \
+        "predict: forecast from t = {} (the end of the training rows) to t = {}: {} \
          target(s) on {} stream(s), {} draws × {} particles, {} arm(s)",
         fc.plan.origin(), fc.plan.origin() + fc.plan.horizon(), fc.plan.targets().len(),
         fc.plan.sources().len(), fc.n_draws, fc.n_particles, forecasts.len()));

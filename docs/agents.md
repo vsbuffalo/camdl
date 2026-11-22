@@ -57,12 +57,12 @@ for the full sequence, the diagnostics table, and the guardrails. In one line:
 ```
 check -> simulate (sanity) -> synthetic recovery -> choose a method
       -> write fit.toml -> fit run -> fit summary -> read diagnostics
-      -> refine priors -> fit predict (predicted-vs-observed) -> validate
+      -> refine priors -> camdl predict (predicted-vs-observed) -> validate
 ```
 
 The predicted-vs-observed step is **one verb, not a hand-rolled pipeline**:
-`camdl fit predict --fit fit.toml --stream <name>` resolves the fit's posterior
-draws and writes a tidy `predictive/<stream>.tsv` (`q05…q95` ribbon + typed
+`camdl predict @fit --stream <name>` resolves the fit's posterior draws and
+writes a tidy `predictive/<stream>.tsv` (`q05…q95` ribbon + typed
 `horizon`/`treatment` columns, a `role` column saying whether the fit `trained`
 on each row or `held_out` it, the fit's `fit_rhat_max`/`fit_ess_min` stamp, and
 the per-row `rhat_mean`/`rhat_pred` convergence channels — act on `rhat_mean`,
@@ -139,7 +139,7 @@ than guessing: `camdl mre fit fit.toml` bundles the model, its compile-time
 - Run `camdl check`, `camdl simulate`, `camdl design lhs`, `camdl pfilter`,
   `camdl fit run` (a single method, not committing the fit dir),
   `camdl fit
-  summary`, `camdl fit predict`, `camdl list`, `camdl show`,
+  summary`, `camdl predict`, `camdl list`, `camdl show`,
   `camdl fit diff`.
 - Edit a `.camdl` model file in response to a compile error from the error table
   (typo fix, missing declaration, dim-correction).
@@ -560,7 +560,7 @@ compartment — force of infection `λ(t)`, effective reproduction number `Rₑ(
 cumulative incidence, EIR, prevalence `I/N` — declare it in a `quantities {}`
 block as an **unreduced** expression. camdl evaluates it at every output time,
 writes `quantities/<name>.tsv` (`quantities-model/<name>.tsv` in a stored
-prediction), and `fit predict` bands it over the posterior alongside the
+prediction), and `camdl predict` bands it over the posterior alongside the
 observed streams. Do **not** reconstruct it in a pandas/matplotlib script from
 `traj.tsv`: a hand-rolled recomputation drifts from the model's own arithmetic
 (a subtly different `N`, a dropped `cond` guard), is not banded over the
@@ -576,7 +576,7 @@ use:
 
 ```
 camdl simulate model.camdl --quantities reporting/national.camdl --quantities-out out/
-camdl fit predict @jigawa-baseline --quantities reporting/national.camdl
+camdl predict @jigawa-baseline --quantities reporting/national.camdl
 ```
 
 The file REPLACES the model's own block; it never merges. It is compiled against
@@ -592,8 +592,8 @@ stored cell that lacks the quantities asked for is simulated again to evaluate
 them, and its trajectory is checked against the stored one.
 
 This is also the answer to "I corrected a `quantities {}` formula and
-`fit predict` still reports the old number": `fit predict` reads the model IR
-archived inside the fit, so editing the source does nothing to a fit that
+`camdl predict` still reports the old number": `camdl predict` reads the model
+IR archived inside the fit, so editing the source does nothing to a fit that
 already ran. Pass the corrected block with `--quantities` instead. It is refused
 if the model source has drifted from the one the fit ran on.
 
@@ -671,7 +671,7 @@ session with `camdl show @m0 --format json`, read its `run_id` and `path`, and
 use the run id from then on.
 
 A `fit.toml` path never names a run: one file makes a new run whenever its data,
-its seeds, a sweep or the camdl build changes. `fit summary`, `fit predict`,
+its seeds, a sweep or the camdl build changes. `fit summary`, `camdl predict`,
 `compare`, `simulate --draws posterior --fit`, `--starts from_mle=…` and
 `--resume` refuse one and list the runs it made; `pfilter --fit`, `design` and
 `profile --fit`, which need only the problem, accept it.
@@ -769,7 +769,7 @@ cannot disagree with the file it describes. Consume the _role_, never the name �
 the iteration column is spelled `sweep`, `step`, `draw` or `iteration` depending
 on the method, and `time` (physical) and `iteration` (a sampler index) are
 deliberately distinct roles. Not every producer declares one: `profile`, the
-`fit predict` outputs, and every result in the run store (fit runs, the cells
+`camdl predict` outputs, and every result in the run store (fit runs, the cells
 `simulate` stores and the runs `pfilter` stores) do not. A simulated cell's
 `traj.tsv` has the fixed layout of `docs/camdl-run-spec.md` §10.1.
 
@@ -815,7 +815,7 @@ furniture. Two reasons specific to camdl, beyond ordinary hygiene:
 - **Target the thing you actually want to look at.** Asking the workflow for the
   fit alone stops at the end of sampling with no posterior predictive written,
   so the viewer has no ribbons; targeting the predictive runs
-  `fit run → fit predict` as one chain.
+  `fit run → camdl predict` as one chain.
 
 `make` for light pipelines and for the networked/offline seam — a networked
 target refreshes a **committed** reference copy of the data, every other target

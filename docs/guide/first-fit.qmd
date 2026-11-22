@@ -291,17 +291,17 @@ Convergence says the sampler found the posterior. Whether the model describes
 the school is a separate question. A *posterior predictive check* asks it
 directly: simulate the epidemic from posterior draws, add the observation
 noise, and see whether the observed counts look like a typical simulation.
-`fit predict` does this two ways. The `free_forward` horizon simulates each
+`camdl predict` does this two ways. The `free_forward` horizon simulates each
 epidemic from day 0 without looking at the data. The `one_step` horizon
 predicts each day's count from the particle filter's picture of the epidemic
 given the counts up to the day before.
 
 ```{.camdl-run figure="ppc-r0.svg" caption="Posterior predictive check of the Poisson model: median (line), 50% and 90% bands, and the observed counts (black)." show-match="subsampling|predictive/in_bed.tsv"}
-camdl fit predict @r0
+camdl predict @r0
 uv run plot_predictive.py ppc-r0.svg Poisson=camdl-store/*/fit/sir_r0-*/runs/pmmh-*/seed_4-*/predict/*/
 ```
 
-`fit predict` stores its quantiles as a prediction inside the fit run's folder,
+`camdl predict` stores its quantiles as a prediction inside the fit run's folder,
 at `predict/<mode>-<hash>/`: the bands in `predictive/`, next to the observed
 counts in `observed/`;
 [`plot_predictive.py`](https://github.com/vsbuffalo/camdl/tree/main/docs/guide/first-fit/plot_predictive.py)

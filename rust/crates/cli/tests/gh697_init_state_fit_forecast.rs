@@ -961,7 +961,7 @@ fn a_fit_sourced_restart_inside_a_reporting_period_is_refused() {
     assert!(!out.status.success(), "a restart at day 56 inside days 42-62 must be refused: {err}");
     assert!(err.contains("[42, 63)"), "the refusal names the period: {err}");
     assert!(err.contains("t = 56"), "the refusal names the restart time: {err}");
-    assert!(err.contains("fit predict"), "the refusal points at the forecast: {err}");
+    assert!(err.contains("predict"), "the refusal points at the forecast: {err}");
 
     // On the declared weekly cadence day 56 is a boundary, and the same
     // restart writes its observations.

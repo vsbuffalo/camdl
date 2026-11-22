@@ -120,7 +120,7 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
     // `--quantity <NAME>`: fill each surviving row's posterior-median
     // cell for each requested scalar quantity. Read-or-derive (mirrors
     // Phase 2a's prequential derivation): read an existing
-    // `quantities/<NAME>.tsv`, else derive it by spawning `fit predict`
+    // `quantities/<NAME>.tsv`, else derive it by spawning `camdl predict`
     // for fits that carry a posterior cloud. The default `fit table`
     // (no `--quantity`) skips this entirely and stays read-only. We key
     // the surviving rows back to their segment dirs by `fit_hash` —
@@ -128,7 +128,7 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
     if !args.quantities.is_empty() {
         // `--exclude-chains` (clap-gated to require `--quantity`): parse ONCE at
         // the boundary to validate the format, then forward it to every derived
-        // `fit predict`. The same drop set is applied to each fit — a cohort
+        // `camdl predict`. The same drop set is applied to each fit — a cohort
         // caveat we warned about above. A chain id absent from a given fit makes
         // that fit's predict refuse, so its cell renders `—` (like any other
         // derivation failure), rather than aborting the whole table.
@@ -145,7 +145,7 @@ pub fn cmd_fit_table(args: &FitTableArgs) {
                 out.fail(format!("error: {e}"));
             }
         };
-        // gh#896: a row reports one run, and `fit predict` writes that run's
+        // gh#896: a row reports one run, and `camdl predict` writes that run's
         // quantities under `<segment>/predict/<run id>-<key>/`; so each cell is read
         // from, and derived by predicting, the row's own run.
         let run_by_id: std::collections::HashMap<&str, (&crate::fit_store::OpenedFit, &std::path::Path)> =
@@ -418,7 +418,7 @@ fn parse_iso_to_unix(s: &str) -> Option<i64> {
 ///   1. **Read existing**: if the sidecar `selection` addresses is present,
 ///      return the `fitted` row's `q50`.
 ///   2. **Derive on demand**: else, if the fit carries a posterior
-///      cloud (`has_cloud`, from `resolve_posterior_draws`), spawn `camdl fit predict
+///      cloud (`has_cloud`, from `resolve_posterior_draws`), spawn `camdl predict
 ///      <the row's leaf> --mode free_forward` (the single source of truth
 ///      for the simulate-per-draw + quantity-evaluation loop) and
 ///      re-read the file.
@@ -484,7 +484,7 @@ fn resolve_quantity_median(
     // `draws.tsv`?), NOT a per-method allowlist. A method-name check
     // (`pgas|pmmh`) silently dropped `mh` — an ODE/chain-binomial Bayesian
     // sampler that also writes `draws.tsv` — rendering `—` for a quantity that
-    // exists. An optimizer fit (IF2/NLopt) has no cloud, so `fit predict` would
+    // exists. An optimizer fit (IF2/NLopt) has no cloud, so `camdl predict` would
     // refuse it anyway; skip the spawn.
     if !has_cloud {
         return None;
@@ -492,8 +492,7 @@ fn resolve_quantity_median(
 
     let exe = std::env::current_exe().ok()?;
     let mut cmd = std::process::Command::new(&exe);
-    cmd.arg("fit")
-        .arg("predict")
+    cmd.arg("predict")
         .arg(run_id)
         .arg("--mode")
         .arg("free_forward")
@@ -501,7 +500,7 @@ fn resolve_quantity_median(
         .env("CAMDL_SKIP_VERSION_CHECK", "1");
     // Forward the chain selection so the derived quantity is banded over the
     // same subset, in its canonical spelling — the one that resolves to `sub`
-    // above. `fit predict` re-parses + validates it against THIS fit's chains;
+    // above. `camdl predict` re-parses + validates it against THIS fit's chains;
     // an id absent here makes predict refuse → this cell renders `—`.
     if let Some(info) = &info {
         cmd.arg("--exclude-chains").arg(info.excluded_csv());

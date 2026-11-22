@@ -538,6 +538,7 @@ pub(crate) fn camdlc_emit_deps(
 /// so the command-line flag reaches the subprocess: the environment variable
 /// would be inherited on its own, the flag would not.
 fn pass_compile_settings(cmd: &mut std::process::Command, compile: CompileSettings) {
+    log::debug!("camdlc runs with loop-invariant code motion {}", if compile.licm_enabled() { "on" } else { "off" });
     if !compile.licm_enabled() {
         cmd.env("CAMDL_NO_LICM", "1");
     }
@@ -1461,7 +1462,7 @@ pub(crate) fn delegate_to_camdlc(args: &[&str], compile: CompileSettings) -> Res
 /// extension parse), so the two cannot disagree about what a model path is.
 ///
 /// Lives beside `resolve_ir_path` so the two cannot drift apart; the render
-/// archives of `fit run` and `fit predict` (gh#496, gh#536) are the callers.
+/// archives of `fit run` and `camdl predict` (gh#496, gh#536) are the callers.
 pub fn model_is_camdl_source(model_path: &str) -> bool {
     model_path.ends_with(".camdl")
 }
@@ -1802,7 +1803,7 @@ pub fn check_obs_before_origin(
 }
 
 /// Most-common value in `xs` under a relative tolerance (~1%). Used for the
-/// modal observation gap by `fit predict`'s forecast grid (gh#696), which
+/// modal observation gap by `camdl predict`'s forecast grid (gh#696), which
 /// continues a stream's own reporting cadence past the data — the one notion
 /// of "this series' typical spacing".
 ///
@@ -2803,7 +2804,7 @@ pub struct SimRun {
     /// whatever `output { trajectories { … } }` enumerates
     /// (2026-09-08-workflow-first-fit-config §1.5, §3.5).
     ///
-    /// `fit predict` puts its forecast rows' closing boundaries here. A row's
+    /// `camdl predict` puts its forecast rows' closing boundaries here. A row's
     /// value is the difference of the recorded cumulative flow at its two
     /// boundaries, and a closing `covers` form — `ending_on(time, 7 'days)`
     /// closes the row labelled `t` at `t + 1 'days` — puts the last forecast
@@ -2837,7 +2838,7 @@ pub struct SimRun {
     pub scenario_inline_set: Vec<(String, f64)>,
     pub scenario_inline_scale: Vec<(String, f64)>,
     /// The intervention selection of the fit this cell replays, when the run
-    /// replays one (`fit predict`, `simulate --draws posterior --fit`): the
+    /// replays one (`camdl predict`, `simulate --draws posterior --fit`): the
     /// base the cell's own scenario is overlaid on ([`FitBase::overlay`]).
     /// Empty everywhere else, and then a no-op.
     pub fit_base: FitBase,
@@ -2849,7 +2850,7 @@ pub struct SimRun {
     /// model's declared integrator.
     pub integrator: Option<crate::args::types::IntegratorArg>,
     /// The chain-binomial backend's binomial sampler (gh#747). BTPE everywhere
-    /// except a replay of a fit (`fit predict`), which draws with the sampler
+    /// except a replay of a fit (`camdl predict`), which draws with the sampler
     /// the fit ran (D78).
     pub binomial: sim::rng::BinomialAlgorithm,
     /// How the evaluators treat a collapsed expression
@@ -3026,7 +3027,7 @@ pub fn apply_scenario_horizon(
 /// past the resolved horizon when one lies beyond it
 /// (2026-09-08-workflow-first-fit-config §1.5, §3.5).
 ///
-/// A no-op on the empty slice, which is every caller but `fit predict`.
+/// A no-op on the empty slice, which is every caller but `camdl predict`.
 ///
 /// **What it changes.** Two things, both on the emission grid: the run's
 /// integration end, raised to the furthest required time when that is past
@@ -3082,7 +3083,7 @@ pub fn apply_required_output_times(model: &mut ir::Model, required: &[f64]) {
 
 #[cfg(test)]
 mod required_output_times_tests {
-    //! `apply_required_output_times` — the emission-grid widening `fit predict`
+    //! `apply_required_output_times` — the emission-grid widening `camdl predict`
     //! asks for when a forecast row's declared period closes past the horizon.
 
     use super::apply_required_output_times;
@@ -3105,7 +3106,7 @@ mod required_output_times_tests {
         ir::model::OutputSchedule::Regular(ir::model::RegularOutputSchedule { start, step })
     }
 
-    /// Every caller but `fit predict` passes an empty slice, and a `fit predict`
+    /// Every caller but `camdl predict` passes an empty slice, and a `camdl predict`
     /// whose rows all close on the grid passes one too. A request for nothing
     /// must leave the model exactly as declared — not the horizon, and not even
     /// the schedule's representation, so the run is the one the model states.
@@ -3365,7 +3366,7 @@ pub fn combine_fit_scenario(
 
 /// The intervention selection a fit ran under — the fit config's top-level
 /// `scenario` or `enable`/`disable` — as the base every replay of "the fitted
-/// model" starts from: `fit predict`'s arms and its one-step filter, the
+/// model" starts from: `camdl predict`'s arms and its one-step filter, the
 /// contrast arms, `simulate --draws posterior --fit`, and `pfilter --fit`.
 ///
 /// Only the intervention lists are carried. A fit's named scenario can also
@@ -3507,7 +3508,7 @@ impl FitBase {
 /// honour (gh#561).
 ///
 /// The commands whose window comes from the DATA — `pfilter`, `profile`,
-/// `fit predict` — score or emit at the observation times, so
+/// `camdl predict` — score or emit at the observation times, so
 /// `scenarios { x { simulate { to = … } } }` moves nothing for them. Ignoring it
 /// is exactly the silent drop gh#561 exists to remove, so each refuses instead,
 /// naming `why` and pointing at the command that does run the scenario's own
@@ -4614,24 +4615,24 @@ mod anchored_horizon_guard_tests {
         // Both anchored (model +4 'weeks, scenario +8 'weeks): both NaN.
         let m = sir_with_scenario_horizon(f64::NAN, Some(f64::NAN));
         assert!(
-            refuse_scenario_horizon(&m, Some(&name), "fit predict", "why").is_err(),
+            refuse_scenario_horizon(&m, Some(&name), "predict", "why").is_err(),
             "two DIFFERENT anchored horizons must not compare equal and be dropped"
         );
 
         // Model anchored, scenario literal.
         let m = sir_with_scenario_horizon(f64::NAN, Some(200.0));
-        assert!(refuse_scenario_horizon(&m, Some(&name), "fit predict", "why").is_err());
+        assert!(refuse_scenario_horizon(&m, Some(&name), "predict", "why").is_err());
 
         // Model literal, scenario anchored.
         let m = sir_with_scenario_horizon(80.0, Some(f64::NAN));
-        assert!(refuse_scenario_horizon(&m, Some(&name), "fit predict", "why").is_err());
+        assert!(refuse_scenario_horizon(&m, Some(&name), "predict", "why").is_err());
 
         // Negative control: the same guard still ACCEPTS a scenario that
         // restates the model horizon, so the tests above are not passing merely
         // because the guard refuses everything.
         let m = sir_with_scenario_horizon(80.0, Some(80.0));
         assert!(
-            refuse_scenario_horizon(&m, Some(&name), "fit predict", "why").is_ok(),
+            refuse_scenario_horizon(&m, Some(&name), "predict", "why").is_ok(),
             "a scenario restating the model horizon is a no-op and must be allowed"
         );
     }

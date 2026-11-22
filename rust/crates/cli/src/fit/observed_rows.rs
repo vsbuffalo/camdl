@@ -54,7 +54,7 @@ pub(crate) struct ObservedRow {
     /// The row's time cell (`window_stop` for a stream with per-row windows)
     /// in model time: what the file labels the row with, not what it
     /// measures. Read where the file's own time is the answer: writing the
-    /// time column back (`obs_emit`), the time column of `fit predict`'s
+    /// time column back (`obs_emit`), the time column of `camdl predict`'s
     /// tables, the refusal of a row labelled before the run starts
     /// (`check_obs_before_origin`), and the row a refusal names.
     pub label: f64,

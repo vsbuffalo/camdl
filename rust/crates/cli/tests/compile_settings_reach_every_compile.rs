@@ -267,13 +267,13 @@ fn fit_diff() {
     assert_every_compile_follows_the_flag("fit diff", &["fit", "diff", "fit.toml", "other.toml"]);
 }
 
-/// `fit predict` replays the archived model; a reporting vocabulary is
+/// `camdl predict` replays the archived model; a reporting vocabulary is
 /// compiled against the model source, under the flag.
 #[test]
 fn fit_predict_with_a_vocabulary() {
     assert_every_compile_follows_the_flag(
-        "fit predict --quantities",
-        &["fit", "predict", &leaf_arg(), "--mode", "free_forward", "--quantities", "vocab.camdl", "--n-draws", "2"],
+        "predict --quantities",
+        &["predict", &leaf_arg(), "--mode", "free_forward", "--quantities", "vocab.camdl", "--n-draws", "2"],
     );
 }
 

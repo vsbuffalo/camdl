@@ -1,4 +1,4 @@
-//! Which of the model's observation streams a `fit predict` covers (D76).
+//! Which of the model's observation streams a `camdl predict` covers (D76).
 //!
 //! Every mode follows one contract. A stream the fit bound data to is
 //! _eligible_; a stream with no bound data that nobody asked for is _skipped_,
@@ -20,7 +20,7 @@
 use super::failures::{DeterministicFailure, SkipReason, SkippedStream, Site};
 use ir::observation::ObservationModel;
 
-/// The streams one `fit predict` covers, and the ones it leaves out.
+/// The streams one `camdl predict` covers, and the ones it leaves out.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct StreamSelection {
     /// The eligible leaves, by name, in the model's order.

@@ -21,6 +21,7 @@ use std::sync::OnceLock;
 use store::{Artifact, Class, ClassFailure, FieldInfo, InputHarness, Inputs, Key, Observed, ObservedResult};
 
 use crate::args::FitRunInvocation;
+use crate::test_support::Pins;
 use crate::input_fixtures::{fit_base, fit_from};
 
 const SIR: &str = r#"
@@ -722,20 +723,8 @@ fn each_method_computes_what_it_computed_before_the_move() {
         let dir = run_folders(&store).into_iter().next().unwrap();
         got.insert(m.to_string(), digests(&dir));
     }
-    let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
-    let Some(want) = pinned_digests(os, arch) else {
-        let name = format!("{}_{}", os, arch).to_uppercase();
-        panic!(
-            "no digests are pinned for {os}/{arch}; this platform computed the table below. \
-             Add it, and the row ((\"{os}\", \"{arch}\"), {name}) to PINS:\n\n{}",
-            render_pins(&name, &got)
-        );
-    };
-    assert_eq!(got, want, "the files each method computes moved");
+    crate::test_support::assert_pinned(PINS, &got, "the files each method computes moved");
 }
-
-/// A method's pinned files: `(file, digest)`, per method.
-type Pins = &'static [(&'static str, &'static [(&'static str, &'static str)])];
 
 /// The pins of [`each_method_computes_what_it_computed_before_the_move`], per
 /// `(target_os, target_arch)`.
@@ -744,24 +733,6 @@ const PINS: &[((&str, &str), Pins)] = &[
     (("linux", "aarch64"), LINUX),
     (("linux", "x86_64"), LINUX),
 ];
-
-fn pinned_digests(os: &str, arch: &str) -> Option<BTreeMap<String, BTreeMap<String, String>>> {
-    let (_, pinned) = PINS.iter().find(|((o, a), _)| *o == os && *a == arch)?;
-    Some(pinned.iter().map(|(m, fs)| (m.to_string(), fs.iter().map(|(f, d)| (f.to_string(), d.to_string())).collect())).collect())
-}
-
-/// `got` as the Rust source of a pin table named `name`.
-fn render_pins(name: &str, got: &BTreeMap<String, BTreeMap<String, String>>) -> String {
-    let mut s = format!("const {name}: Pins = &[\n");
-    for (m, fs) in got {
-        s += &format!("    (\"{m}\", &[\n");
-        for (f, d) in fs {
-            s += &format!("        (\"{f}\", \"{d}\"),\n");
-        }
-        s += "    ]),\n";
-    }
-    s + "];\n"
-}
 
 /// macOS arm64: taken from the old store's runs of the same fixtures.
 const MACOS_AARCH64: Pins = &[
@@ -957,7 +928,7 @@ fn compare_refuses_to_score_held_out_rows_of_a_stored_fit() {
 /// compiled. A user fits a model, edits only its quantities block and runs
 /// `fit run` again: the problem and the run are reused, since the
 /// quantities do not change the fit, and that invocation records the edited
-/// quantities. `fit predict @second` evaluates the edited block and `@first`
+/// quantities. `camdl predict @second` evaluates the edited block and `@first`
 /// the original; the run's id, which both invocations named with different
 /// quantities, is refused with them listed.
 #[test]
@@ -979,7 +950,7 @@ fn a_prediction_evaluates_the_quantities_of_the_invocation_it_names() {
     assert_eq!(run_folders(&store).len(), 1, "one run");
 
     let quantities_of = |handle: &str| -> Vec<String> {
-        ok(run(&["fit", "predict", handle, "--mode", "free_forward", "--n-draws", "2"]));
+        ok(run(&["predict", handle, "--mode", "free_forward", "--n-draws", "2"]));
         let mut names: Vec<String> = folders(&store)
             .into_iter()
             .filter(|(_, id, _)| id["kind"] == "prediction")
@@ -994,7 +965,7 @@ fn a_prediction_evaluates_the_quantities_of_the_invocation_it_names() {
     assert_eq!(quantities_of("@first"), ["peak_I.tsv", "peak_R.tsv"], "the original block, beside it");
 
     let id = run_folders(&store)[0].file_name().unwrap().to_string_lossy().rsplit_once('-').unwrap().1.to_string();
-    let refused = run(&["fit", "predict", &id, "--mode", "free_forward", "--n-draws", "2"]);
+    let refused = run(&["predict", &id, "--mode", "free_forward", "--n-draws", "2"]);
     let err = String::from_utf8_lossy(&refused.stderr);
     assert!(!refused.status.success(), "an id two invocations compiled differently is refused:\n{err}");
     assert!(err.contains("different quantities blocks") && err.contains("invocation 1") && err.contains("invocation 2")

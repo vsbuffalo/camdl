@@ -121,13 +121,14 @@ impl ForwardBackend {
     }
 }
 
-/// Which predictive `camdl fit predict` emits (`--mode`). ABSENT on the
+/// Which predictive `camdl predict` emits (`--mode`). ABSENT on the
 /// command line = "all applicable" (the default): a chain-binomial fit emits
 /// both `free_forward` and `one_step`; an ODE fit emits `free_forward` only
 /// (its one-step is identical, so it is simply not applicable — no error). An
 /// explicit `--mode one_step` on an ODE fit is a hard error with a redirect.
 /// `forecast` is the fixed-origin forecast and needs `--horizon`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PredictModeArg {
     #[value(name = "free_forward", alias = "free-forward")]
     FreeForward,

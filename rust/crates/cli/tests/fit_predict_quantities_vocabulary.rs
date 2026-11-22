@@ -1,8 +1,8 @@
-//! `camdl fit predict <fit> --quantities FILE`: report a fit that already exists
+//! `camdl predict <fit> --quantities FILE`: report a fit that already exists
 //! with a corrected reporting vocabulary.
 //!
 //! Proposal `docs/dev/proposals/2026-08-19-quantities-as-a-separable-layer.md`,
-//! answering gh#618. The obstacle it removes is specific: `fit predict` reads
+//! answering gh#618. The obstacle it removes is specific: `camdl predict` reads
 //! the model IR stored with the fit, so editing a `quantities {}` formula
 //! in the source has no effect on a fit that has already run. It does not
 //! orphan the fit — it simply does nothing, which is the worse failure, because
@@ -28,7 +28,7 @@ use std::process::Command;
 
 mod fit_store_support;
 
-/// The prediction folder the latest `fit predict` of the run `run` wrote: of
+/// The prediction folder the latest `camdl predict` of the run `run` wrote: of
 /// its `predict/<mode>-<id12>/` folders, the one whose `report*.json` (one
 /// written by every predict) is newest. A path that does not exist while
 /// nothing has been predicted.
@@ -188,7 +188,6 @@ impl Fit {
 
     fn predict(&self, vocab: Option<&str>) -> std::process::Output {
         let mut args: Vec<&str> = vec![
-            "fit",
             "predict",
             self.run.to_str().unwrap(),
             "--mode",
@@ -250,7 +249,7 @@ fn a_vocabulary_applied_to_a_fit_produces_its_table_and_not_the_models() {
     let va = f.vocab("va.camdl", VOCAB_A);
     assert_ok(
         &f.predict(Some(va.to_str().unwrap())),
-        "fit predict --quantities",
+        "predict --quantities",
     );
 
     let addrs = f.addresses();
@@ -284,7 +283,7 @@ fn a_vocabulary_applied_to_a_fit_produces_its_table_and_not_the_models() {
 #[test]
 fn without_a_vocabulary_the_models_own_block_is_reported() {
     let f = fitted("control");
-    assert_ok(&f.predict(None), "fit predict");
+    assert_ok(&f.predict(None), "predict");
     assert_eq!(f.addresses(), vec!["quantities-model", "quantities.json"]);
     assert!(predict_out(&f.run).join("quantities-model").join("model_peak.tsv").exists());
 }

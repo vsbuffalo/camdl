@@ -165,7 +165,7 @@ fn design_from_draws_each_row_from_the_state_where_it_is_scored() {
     }
 }
 
-/// `fit predict`'s free-forward band draws each row from the state, and with
+/// `camdl predict`'s free-forward band draws each row from the state, and with
 /// the time, where the row is scored: its period's stop. The rows themselves,
 /// and the table's time column, are unchanged.
 #[test]
@@ -182,8 +182,8 @@ fn fit_predict_evaluates_each_row_where_it_is_scored() {
          [method]\nalgorithm = \"mh\"\nbackend = \"ode\"\nchains = 2\niterations = 40\nburn_in = 10\n")
         .unwrap();
     ok(camdl(dir, &["fit", "run", "fit.toml", "--label", "fit"]), "fit run");
-    ok(camdl(dir, &["fit", "predict", "@fit", "--mode", "free_forward",
-        "--n-draws", "4"]), "fit predict");
+    ok(camdl(dir, &["predict", "@fit", "--mode", "free_forward",
+        "--n-draws", "4"]), "predict");
 
     let find = |root: &Path, tail: &str| -> PathBuf {
         let mut stack = vec![root.to_path_buf()];

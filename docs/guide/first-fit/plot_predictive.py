@@ -2,7 +2,7 @@
 # requires-python = ">=3.11"
 # dependencies = ["polars>=1.0", "matplotlib>=3.8"]
 # ///
-"""Plot posterior predictive checks from `camdl fit predict` output.
+"""Plot posterior predictive checks from `camdl predict` output.
 
 One row per fit, one column per horizon: `free_forward` (simulated from day 0
 without the data) and `one_step` (each day predicted from the counts up to the

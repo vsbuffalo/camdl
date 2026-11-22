@@ -1,5 +1,5 @@
 //! Generated-quantities output: banding + tidy-TSV rendering, shared by
-//! `fit predict` (banded posterior/draws) and `simulate` (banded for `--draws`,
+//! `camdl predict` (banded posterior/draws) and `simulate` (banded for `--draws`,
 //! point for a single fixed-params run). The pure evaluator lives in
 //! `sim::quantity`; this module turns its per-draw [`sim::quantity::QuantityResult`]s
 //! into `quantities/<name>.tsv` sidecars + a `quantities.json` manifest.
@@ -27,7 +27,7 @@ pub(crate) enum Mode {
     Point,
 }
 
-/// The `fit predict` design-overlay coordinates a quantity output is tagged
+/// The `camdl predict` design-overlay coordinates a quantity output is tagged
 /// with: the scenario overlay axis ([`DesignCoords::scenario`]) and the sweep
 /// grid coordinate ([`DesignCoords::sweep`], one `(param, value)` per swept
 /// parameter, in sorted-name order). A leading `scenario` column precedes the
@@ -50,7 +50,7 @@ pub(crate) struct DesignCoords<'a> {
 /// Which object a design cell's quantities were folded over, per leaf, plus how
 /// many of its draws had a conditioned path to fold (gh#722).
 ///
-/// `fit predict` always supplies one so EVERY manifest entry says which object
+/// `camdl predict` always supplies one so EVERY manifest entry says which object
 /// its numbers came from — the fitted arm's `value_at(N0 - S, last_obs)` is a
 /// conditioned read and a scenario arm's is a free-forward replay, and the two
 /// sit in one file under a `scenario` column. `simulate` supplies `None` (it
@@ -103,7 +103,7 @@ impl NonFiniteQuantity {
     /// The sentence this failure carries into `report.json` and onto stderr.
     ///
     /// The FACT only, with no claim about what was kept: what happens next
-    /// differs by caller — `fit predict` writes everything else and says so,
+    /// differs by caller — `camdl predict` writes everything else and says so,
     /// `simulate` writes nothing — and a shared sentence asserting either one
     /// would be false in the other's output.
     pub fn reason(&self) -> String {
@@ -249,7 +249,7 @@ fn push_design_row_cells(cells: &mut Vec<String>, coords: DesignCoords) {
 /// quantile columns; a series prepends `time`; a stratified leaf inserts its
 /// `<dims…>`; a censorable scalar inserts the censoring trio; a caller that
 /// supplied a chain partition gets `rhat`/`ess` after `n_draws` (gh#794). The
-/// `fit predict` design overlay (`scenario`, then `sweep:<param>`) leads
+/// `camdl predict` design overlay (`scenario`, then `sweep:<param>`) leads
 /// everything else.
 fn quantity_header(
     shape: QShape,
@@ -321,7 +321,7 @@ fn collect_qrefs(se: &ir::quantity::ScalarExpr, out: &mut Vec<String>) {
 /// `mode` selects banded (one column per draw → a quantile band) or point (one
 /// realization → a bare `value`).
 ///
-/// `coords` is the `fit predict` design overlay: a `Some` scenario prepends a
+/// `coords` is the `camdl predict` design overlay: a `Some` scenario prepends a
 /// leading `scenario` column to every TSV header + row and a `scenario` field to
 /// every manifest entry; a non-empty sweep prepends one `sweep:<param>` column
 /// per swept parameter (after the scenario column) and a `sweep` object to the
@@ -473,7 +473,7 @@ pub(crate) fn render_quantities(
             "unit": serde_json::Value::Null,
             "censoring": censoring,
         });
-        // The `fit predict` design overlay: one manifest entry per (quantity,
+        // The `camdl predict` design overlay: one manifest entry per (quantity,
         // scenario, sweep-cell), tagged so a consumer can group/join by scenario
         // and sweep coordinate. Omitted for the simulate path (`DesignCoords::none`),
         // keeping its manifest byte-identical.
@@ -537,7 +537,7 @@ pub(crate) struct RenderedQuantities {
 ///
 /// A quantity artifact holds one header per quantity and the rows of every
 /// design cell stacked beneath it. Both verbs need that stacking — `simulate`
-/// over its scenarios, `fit predict` over (sweep point × scenario) — and it is
+/// over its scenarios, `camdl predict` over (sweep point × scenario) — and it is
 /// the bug-prone part: drop the wrong line and a header lands mid-file; merge
 /// the manifests wrongly and a consumer cannot tell the cells apart.
 ///
@@ -618,7 +618,7 @@ impl StackedQuantities {
 
     /// The stacked files plus one merged manifest.
     ///
-    /// The manifest carries the calendar block. `fit predict` previously built
+    /// The manifest carries the calendar block. `camdl predict` previously built
     /// its own merged document with `schema` + `quantities` only, so a consumer
     /// of a predict quantities manifest could not map the numeric `time` column
     /// to dates without re-parsing the model — the one thing the block exists to
@@ -669,7 +669,7 @@ impl StackedQuantities {
 /// and the parameters, so its R-hat is the undiluted kind; a quantity whose
 /// manifest `source` is `observations` reduces sampled `y_rep` and therefore
 /// carries observation noise, which makes its R-hat the diluted kind (the
-/// `rhat_pred` flavour, see `fit predict --help`).
+/// `rhat_pred` flavour, see `camdl predict --help`).
 fn push_row_convergence(
     cells: &mut Vec<String>,
     chains: Option<&crate::fit::row_convergence::ChainOfDraw>,
@@ -1095,7 +1095,7 @@ mod tests {
     }
 
     /// gh#715: `growth` divides by an empty compartment on two of five draws.
-    /// Before, the whole render refused and `fit predict` wrote nothing at all
+    /// Before, the whole render refused and `camdl predict` wrote nothing at all
     /// — no bands for any stream, no other quantity. Now the refusal is
     /// attributed to `growth`, with the FIRST offending draw named, and `peak`
     /// is rendered as if nothing had happened.
@@ -1294,7 +1294,7 @@ mod tests {
 
     #[test]
     fn banded_render_with_scenario_tags_header_rows_and_manifest() {
-        // The `fit predict` overlay axis: a leading `scenario` column on the TSV
+        // The `camdl predict` overlay axis: a leading `scenario` column on the TSV
         // header + every row, and a `scenario` field on the manifest entry. `None`
         // (simulate) must omit both — guarded by the byte-identical tests above.
         use ir::observation::StratumKey;

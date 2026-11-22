@@ -321,7 +321,7 @@ fn fit_aware_commands_read_the_configs_override() {
 /// its config, stores the config it ran under: the run folder keeps the file
 /// byte for byte as `fit.toml`, comments included, and its problem's
 /// `problem.toml` records `[config] allow_forcing_extrapolation = true`, so
-/// every reader of it — `fit predict` here — runs under the override without
+/// every reader of it — `camdl predict` here — runs under the override without
 /// being given the flag again (gh#1268).
 #[test]
 fn a_fit_made_under_the_flag_stores_the_override_in_its_config() {
@@ -343,7 +343,7 @@ fn a_fit_made_under_the_flag_stores_the_override_in_its_config() {
         leaf.parent().unwrap().parent().unwrap().parent().unwrap().join("problem.toml")).unwrap();
     assert!(resolved.starts_with("# problem.toml:"), "the resolved config says what it is:\n{resolved}");
     let parsed: toml::Table = resolved.parse().unwrap_or_else(|e| panic!("the resolved config parses: {e}\n{resolved}"));
-    let o = camdl(tmp.path(), &["fit", "predict", leaf.to_str().unwrap(), "--mode", "free_forward"]);
+    let o = camdl(tmp.path(), &["predict", leaf.to_str().unwrap(), "--mode", "free_forward"]);
     let err = stderr(&o);
     assert!(!err.contains("forcing `mult` was evaluated"), "predict reads the stored override:\n{err}");
     assert!(o.status.success(), "{err}");
@@ -356,7 +356,7 @@ fn a_fit_made_under_the_flag_stores_the_override_in_its_config() {
 
 /// The same fit, named by its `fit.toml`: a configuration names no run (one
 /// file makes a run per data, seed, sweep and build, and here the flag-made
-/// run is not even the run the file alone makes). `fit predict` and
+/// run is not even the run the file alone makes). `camdl predict` and
 /// `compare` refuse it rather than replay the flag-made fit under a config
 /// without the override, and the refusal lists the stored run's folder so
 /// the reader can name it instead (gh#1268).
@@ -375,7 +375,7 @@ fn a_fit_toml_handle_does_not_stand_for_a_flag_made_fit() {
         .expect("the fit run");
     let leaf_name = leaf.file_name().unwrap().to_string_lossy().into_owned();
     for args in [
-        vec!["fit", "predict", toml, "--mode", "free_forward"],
+        vec!["predict", toml, "--mode", "free_forward"],
         vec!["compare", toml, leaf.to_str().unwrap()],
     ] {
         let o = camdl(tmp.path(), &args);

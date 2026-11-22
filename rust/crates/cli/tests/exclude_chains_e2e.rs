@@ -1,12 +1,12 @@
 //! End-to-end acceptance for read-side chain selection (`--exclude-chains`) on
-//! `fit predict` and `fit summary`.
+//! `camdl predict` and `fit summary`.
 //!
 //! Proposal: docs/dev/proposals/2026-07-09-chain-selection-read-side.md
 //!
 //! Each test runs one tiny real four-chain PGAS fit, stored in its work
 //! dir's store, and reads its posterior through the read-side commands.
 //! Draws a stored run holds cannot be replaced, so the tests here check what
-//! a selection is recorded as, what it refuses, and that `fit predict` and
+//! a selection is recorded as, what it refuses, and that `camdl predict` and
 //! `fit summary` recompute their convergence numbers over the same subset.
 
 mod fit_store_support;
@@ -14,7 +14,7 @@ mod fit_store_support;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The latest `fit predict` of the run `run` stored: the prediction under
+/// The latest `camdl predict` of the run `run` stored: the prediction under
 /// `run/predict/` whose `run.json` finished last. A path that does not exist
 /// while nothing has been predicted.
 fn predict_out(run: &Path) -> PathBuf {
@@ -218,7 +218,7 @@ fn nonexistent_chain_id_hard_errors() {
     let out = run(
         &bin,
         &tmp,
-        &["fit", "predict", &seg_str, "--mode", "free_forward", "--exclude-chains", "9"],
+        &["predict", &seg_str, "--mode", "free_forward", "--exclude-chains", "9"],
     );
     assert!(!out.status.success(), "a chain id not in the fit must be a hard error");
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -238,7 +238,7 @@ fn excluding_every_chain_hard_errors() {
     let out = run(
         &bin,
         &tmp,
-        &["fit", "predict", &seg_str, "--mode", "free_forward", "--exclude-chains", "0,1,2,3"],
+        &["predict", &seg_str, "--mode", "free_forward", "--exclude-chains", "0,1,2,3"],
     );
     assert!(!out.status.success(), "excluding every chain must be a hard error");
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -329,7 +329,7 @@ fn predict_subset_recomputes_convergence_agreeing_with_summary() {
     // dropped chains). The buggy path copied the stored value into every row of
     // `predictive/*.tsv` — labelling a band drawn from the clean chains with the
     // polluted full-cloud R̂ (a "did not converge" verdict about a subset that
-    // did). `fit summary` already recomputes over the subset; `fit predict` must
+    // did). `fit summary` already recomputes over the subset; `camdl predict` must
     // AGREE — that divergence IS the bug.
     let bin = skip_if_missing_binary();
     let (tmp, seg) = setup(&bin, "predict_subset_rhat");
@@ -344,7 +344,7 @@ fn predict_subset_recomputes_convergence_agreeing_with_summary() {
 
     // Full cloud (no selection): the band carries the stored full-cloud summary.
     // That is CORRECT for the full cloud and must stay put — the regression guard.
-    let out = run(&bin, &tmp, &["fit", "predict", &seg_str, "--mode", "free_forward"]);
+    let out = run(&bin, &tmp, &["predict", &seg_str, "--mode", "free_forward"]);
     assert!(out.status.success(), "full predict failed:\n{}", String::from_utf8_lossy(&out.stderr));
     let (full_rhat_s, full_ess_s) = free_forward_convergence_cells(
         &std::fs::read_to_string(predict_out(&seg).join("predictive").join("weekly_cases.tsv")).unwrap(),
@@ -365,7 +365,7 @@ fn predict_subset_recomputes_convergence_agreeing_with_summary() {
     let out = run(
         &bin,
         &tmp,
-        &["fit", "predict", &seg_str, "--mode", "free_forward", "--exclude-chains", "3"],
+        &["predict", &seg_str, "--mode", "free_forward", "--exclude-chains", "3"],
     );
     assert!(out.status.success(), "excluded predict failed:\n{}", String::from_utf8_lossy(&out.stderr));
     let (excl_rhat_s, excl_ess_s) = free_forward_convergence_cells(

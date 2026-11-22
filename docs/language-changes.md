@@ -893,7 +893,7 @@ the `chain_N/` directories, the progress and refusal lines, `chain_starts.tsv`'s
 `chain_id`, `fit_state.toml`'s `best_chain` and `chain_eval_ids`, `run.json`'s
 `inputs.best_chain`, `mle_params.toml`'s `[provenance] chain`, every
 `fit summary` table (text, json, md, latex), `--exclude-chains`, the `chain`
-column `fit predict --by-chain` adds, `progress.json`'s per-chain rows and
+column `camdl predict --by-chain` adds, `progress.json`'s per-chain rows and
 `cross_chain_compat.json`'s `chains`. They were numbered from 1, while the
 `chain` column of `draws.tsv` and `trajectories.tsv` — the join key — was
 numbered from 0, and the conversion between the two bases was written by hand at
@@ -918,7 +918,7 @@ directory, because both moved together; a script that opened `chain_<c+1>/` for
 a `draws.tsv` row with `chain = c` now opens `chain_<c>/`. A stored fit written
 before this change — `chain_1/ … chain_N/` with no `chain_0/` — is refused with
 a message naming this change, rather than read with every chain shifted, by
-`fit summary` (every `--format`), `fit predict`, `fit table --quantity`,
+`fit summary` (every `--format`), `camdl predict`, `fit table --quantity`,
 `compare` when it derives the fit's prequential (an explicit `prequential.json`
 is read as given), `simulate --draws posterior`, and `fit run --resume`, which
 refuses the base leaf before any chain state is copied; re-run the fit. A plain
@@ -1922,10 +1922,10 @@ the value carried in the leading `scenario` column — is renamed from `as_fitte
 to `fitted`. The name is reserved: a `scenarios { }` preset may not use it,
 because it would shadow the no-overlay value and make output rows ambiguous.
 
-**Migration.** If you parse `camdl fit predict` output, the no-overlay
-`scenario` column value is now `fitted` (was `as_fitted`). The reservation moves
-with the name: a `scenarios { }` preset may no longer be named `fitted` (rename
-it); a preset named `as_fitted` is no longer reserved.
+**Migration.** If you parse `camdl predict` output, the no-overlay `scenario`
+column value is now `fitted` (was `as_fitted`). The reservation moves with the
+name: a `scenarios { }` preset may no longer be named `fitted` (rename it); a
+preset named `as_fitted` is no longer reserved.
 
 **Diagnostic.** A `scenarios { }` preset named `fitted` → **E291** ("scenario
 name 'fitted' is reserved"), with a hint to rename the scenario.

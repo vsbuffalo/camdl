@@ -580,7 +580,7 @@ fn refuse_unresolved_anchors(model: &Model) -> Result<(), SimError> {
                        streams, so the command must have data: pass `--fit <fit.toml | fit \
                        run dir>` on `simulate`, `--data`/`--fit` on `pfilter` or `profile`, \
                        or run it through a command that binds data by construction \
-                       (`fit run`, `fit predict`).";
+                       (`fit run`, `camdl predict`).";
 
     if let Some(a) = &model.simulation.t_start_anchor {
         return Err(SimError::Validation(format!(

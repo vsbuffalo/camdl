@@ -417,7 +417,7 @@ pub(crate) struct PredictOptions {
     /// seed, the streams, the scenario and sweep arms, the chain selection,
     /// the particle count, a `--quantities` vocabulary's digest, a
     /// forecast's targets and design mode — as canonical JSON of the options
-    /// `fit predict` resolved. A new option is in it unless it is named as
+    /// `camdl predict` resolved. A new option is in it unless it is named as
     /// left out there.
     pub settings: String,
     /// The design files a forecast reads its targets' design values from

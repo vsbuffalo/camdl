@@ -97,7 +97,7 @@ pub(crate) struct ArmInputs<'a> {
     /// fit's intervention selection is applied.
     pub model: &'a ir::Model,
     pub fit_base: &'a crate::util::FitBase,
-    /// `fit predict`'s scenario list: the fitted model first, then each
+    /// `camdl predict`'s scenario list: the fitted model first, then each
     /// `--scenario`.
     pub scenarios: &'a [ScenarioRef],
     /// The `--sweep` grid, one entry per point; empty without `--sweep`.
@@ -154,7 +154,7 @@ fn refusal(label: &ArmLabel, origin: f64, why: &str) -> String {
 
 /// The arm's compiled model and its parameter vector per draw: the draw at
 /// the draw tier, the swept values over it, the scenario on top, resolved as
-/// every other `fit predict` arm is ([`crate::fit::contrasts::resolve_arm`]).
+/// every other `camdl predict` arm is ([`crate::fit::contrasts::resolve_arm`]).
 fn resolve(
     i: &ArmInputs,
     sref: &ScenarioRef,

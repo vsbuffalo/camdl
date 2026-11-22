@@ -35,7 +35,7 @@ use score::convergence::GateVerdict;
 /// the CLI no longer use, and it is machine-read.
 pub const SCHEMA_NAME: &str = "table_row";
 ///
-/// v3 (gh#896): `run_id`, the run the row reports. `fit predict` writes each
+/// v3 (gh#896): `run_id`, the run the row reports. `camdl predict` writes each
 /// run's quantities under `<segment>/predict/<run id>-<key>/`, so a row's
 /// `quantities` are read from its run's directory, not the folder's.
 ///
@@ -151,7 +151,7 @@ pub struct TableRow {
     /// of a scalar quantity from the model's `quantities {}` block,
     /// read from the run's free-forward predict,
     /// `<fit_dir>/predict/<run id>-<free-forward address key>/quantities/<NAME>.tsv`
-    /// (derived there on demand by `fit predict --mode free_forward` when
+    /// (derived there on demand by `camdl predict --mode free_forward` when
     /// absent; gh#896). An uncomputable quantity for a
     /// row is simply absent from the map. A field addition is
     /// non-breaking under schema v1 (proposal §3); the

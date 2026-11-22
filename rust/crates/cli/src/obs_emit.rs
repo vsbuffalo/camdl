@@ -350,7 +350,7 @@ pub(crate) fn refuse_period_under_way(
          state holds compartment counts only, not what '{name}' had counted since \
          t = {start}, so this period's row cannot be written from it; it would be missing, \
          or a partial count.\n  \
-         Fix: forecast from the fit with `camdl fit predict <fit> --mode forecast \
+         Fix: forecast from the fit with `camdl predict <fit> --mode forecast \
          --horizon <duration>`, which predicts the period under way from the filter's own \
          running count; or restart from a state saved where no emitted stream is \
          inside a period (for '{name}', t = {start} or t = {stop}); or run without \

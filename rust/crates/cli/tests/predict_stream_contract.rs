@@ -1,4 +1,4 @@
-//! D76: which of the model's observation streams `fit predict` covers, and
+//! D76: which of the model's observation streams `camdl predict` covers, and
 //! what its exit status says about them, in every mode.
 //!
 //! | situation                                                    | exit |
@@ -115,13 +115,13 @@ fn names(v: &serde_json::Value) -> Vec<String> {
 }
 
 fn forecast(dir: &Path, extra: &[&str]) -> std::process::Output {
-    let mut args = vec!["fit", "predict", "@fit", "--horizon", "1 weeks", "--n-draws", "2"];
+    let mut args = vec!["predict", "@fit", "--horizon", "1 weeks", "--n-draws", "2"];
     args.extend_from_slice(extra);
     run(dir, &args)
 }
 
 fn free_forward(dir: &Path, extra: &[&str]) -> std::process::Output {
-    let mut args = vec!["fit", "predict", "@fit", "--mode", "free_forward", "--n-draws", "2"];
+    let mut args = vec!["predict", "@fit", "--mode", "free_forward", "--n-draws", "2"];
     args.extend_from_slice(extra);
     run(dir, &args)
 }
@@ -224,7 +224,7 @@ fn d76_row6_an_eligible_stream_that_fails_makes_the_exit_status_1() {
 fn d76_row1_the_default_mode_produces_every_eligible_stream_and_exits_0() {
     let tmp = tempfile::tempdir().unwrap();
     fit(tmp.path(), BOTH);
-    let out = run(tmp.path(), &["fit", "predict", "@fit", "--n-draws", "2"]);
+    let out = run(tmp.path(), &["predict", "@fit", "--n-draws", "2"]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     let m = json(&predict_dir(tmp.path(), "predictive.json").join("predictive.json"));
     assert_eq!(names(&m["produced"]), ["daily_cases", "weekly_cases"]);

@@ -1,7 +1,7 @@
 //! gh#708: the one-step band is filtered on the step the FIT walked.
 //!
 //! Under the one dt rule (`dt_rule`) a fit walks the model's declared
-//! `simulate { dt }` when there is one, else its `[config] dt`. `fit predict`
+//! `simulate { dt }` when there is one, else its `[config] dt`. `camdl predict`
 //! re-filters the observed series for the one-step band, so it must walk the
 //! same step: under `chain_binomial` the step sets the transition probability
 //! `1 - exp(-rate·dt)`, and a band on another step is a replay of a different
@@ -14,7 +14,7 @@
 //! writes no `[config] dt`; the other model declares no step and its fit
 //! writes `[config] dt = 0.2`. Both fits walk 0.2, so their posterior clouds
 //! are byte-identical — asserted first, as the premise. The two
-//! `fit predict --mode one_step` runs then draw from identical clouds at
+//! `camdl predict --mode one_step` runs then draw from identical clouds at
 //! the same seed, so their bands must be identical too. Reading the archived
 //! `[config] dt` instead (its default 1.0 in the first arm) filters the first
 //! band on 1.0 and the bands differ. No fitted value enters the comparison.
@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The stored prediction under `seg` (a run folder, or any folder above
-/// runs) whose `report*.json` is newest: the latest `fit predict`'s output. A
+/// runs) whose `report*.json` is newest: the latest `camdl predict`'s output. A
 /// path that does not exist while nothing has been predicted.
 fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
     fit_store_support::predictions(seg)
@@ -162,10 +162,10 @@ fn the_one_step_band_is_filtered_on_the_dt_the_fit_used() {
             "[{arm}] fit run failed:\n{}",
             String::from_utf8_lossy(&out.stderr)
         );
-        let out = run(&["fit", "predict", "--fit", "@fit", "--mode", "one_step"]);
+        let out = run(&["predict", "@fit", "--mode", "one_step"]);
         assert!(
             out.status.success(),
-            "[{arm}] fit predict failed:\n{}",
+            "[{arm}] predict failed:\n{}",
             String::from_utf8_lossy(&out.stderr)
         );
 

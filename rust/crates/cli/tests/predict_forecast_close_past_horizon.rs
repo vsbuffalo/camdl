@@ -1,4 +1,4 @@
-//! `fit predict` forecasts through the declared horizon even when the last
+//! `camdl predict` forecasts through the declared horizon even when the last
 //! forecast row's period closes past it.
 //!
 //! A row's predictive value is the difference of the recorded cumulative flow
@@ -7,7 +7,7 @@
 //! forecast row's *close* sits past the label: `ending_on(time, 7 'days)` says
 //! the row labelled `D` covers `[D−6, D+1)`, and the forecast tail runs out to
 //! the horizon, so the final row closes one day beyond it — a day nothing was
-//! integrated to. `fit predict` used to refuse the whole free-forward artifact
+//! integrated to. `camdl predict` used to refuse the whole free-forward artifact
 //! there ("the period boundary t = … is not a recorded output time"), after the
 //! fit had already run; the only fix available was to move `simulate { to }` by
 //! a day, which re-keys the model and orphans the fit.
@@ -81,7 +81,7 @@ fn tempdir(tag: &str) -> PathBuf {
 }
 
 /// `<sub>/<name>.tsv` in the prediction under the store at `root` that the
-/// latest `fit predict` wrote (the one whose `report*.json` is newest).
+/// latest `camdl predict` wrote (the one whose `report*.json` is newest).
 fn find_artifact(root: &Path, sub: &str, name: &str) -> Option<PathBuf> {
     let latest = fit_store_support::predictions(root)
         .into_iter()
@@ -273,7 +273,7 @@ fn fit_then_predict(bin: &Path, tmp: &Path, extra: &[&str]) -> std::process::Out
         String::from_utf8_lossy(&out.stderr)
     );
     let mut args =
-        vec!["fit", "predict", "@fit", "--seed", "1", "--n-draws", "40"];
+        vec!["predict", "@fit", "--seed", "1", "--n-draws", "40"];
     args.extend_from_slice(extra);
     run(bin, tmp, &args)
 }
@@ -351,7 +351,7 @@ fn a_windowed_tail_closes_at_its_label_and_widens_nothing() {
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
         out.status.success(),
-        "fit predict failed:\nstdout={}\nstderr={stderr}",
+        "predict failed:\nstdout={}\nstderr={stderr}",
         String::from_utf8_lossy(&out.stdout)
     );
     assert!(
@@ -423,7 +423,7 @@ burn_in = 40
 thin = 1
 "#;
 
-/// `fit predict` on a short fit of the real-shaped bulletin emits a forecast
+/// `camdl predict` on a short fit of the real-shaped bulletin emits a forecast
 /// row for every day from the end of the record through the declared horizon.
 ///
 /// The record is dated, irregular and holed, and it ends fourteen days before
@@ -455,7 +455,7 @@ fn fit_predict_on_the_real_shaped_record_emits_through_the_horizon() {
     let out = fit_then_predict(&bin, &tmp, &["--mode", "free_forward"]);
     assert!(
         out.status.success(),
-        "fit predict must run on the real-shaped record:\nstdout={}\nstderr={}",
+        "predict must run on the real-shaped record:\nstdout={}\nstderr={}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
@@ -500,7 +500,7 @@ fn the_quantities_sidecar_stops_at_the_declared_horizon() {
     let out = fit_then_predict(&bin, &tmp, &["--mode", "free_forward"]);
     assert!(
         out.status.success(),
-        "fit predict failed:\nstdout={}\nstderr={}",
+        "predict failed:\nstdout={}\nstderr={}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );

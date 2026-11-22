@@ -37,7 +37,7 @@
 //! `CAMDL_NO_LICM` change the IR the compiler emits and are keyed through the
 //! model level. The commands that store a result under an address key the
 //! switches into it: `simulate` (its trajectories, their observation subtrees
-//! and its ensembles), `fit run` (at the `fit` level), `fit predict` (its
+//! and its ensembles), `fit run` (at the `fit` level), `camdl predict` (its
 //! output directory), `pfilter` and `profile` (a point's base).
 //! `compare` scores a chain-binomial fit through a `camdl pfilter` child,
 //! which keys them; its in-process ODE scoring and `dev eval` store nothing

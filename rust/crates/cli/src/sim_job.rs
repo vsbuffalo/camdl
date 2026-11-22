@@ -2,7 +2,7 @@
 //! (`SimulateJob`, `ParamSource`, `Seeds`, `ScenarioRef`) — and
 //! scenario-reference resolution.
 //!
-//! `simulate` lowers its flags into one `SimulateJob`, and `fit predict`
+//! `simulate` lowers its flags into one `SimulateJob`, and `camdl predict`
 //! builds one for its free-forward replay; a single `crate::engine::run_job`
 //! drives the `param-point × scenario × seed-slot` cell loop for both. The
 //! per-cell seed arithmetic, iteration order and `SimRun` construction are the
@@ -20,7 +20,7 @@ use crate::args::types::ForwardBackend;
 // ─── SimulateJob (run-spec §3.1) ──────────────────────────────────────────────
 
 /// Everything needed to run one or more simulations — run-spec §3.1.
-/// `camdl simulate` builds one from CLI args (`main.rs`) and `fit predict`
+/// `camdl simulate` builds one from CLI args (`main.rs`) and `camdl predict`
 /// builds one for its free-forward replay; both hand it to
 /// [`crate::engine::run_job`].
 ///
@@ -36,12 +36,12 @@ pub struct SimulateJob {
     pub backend: ForwardBackend,
     pub dt: f64,
     /// The chain-binomial binomial sampler, copied to every cell's
-    /// `SimRun::binomial`: BTPE, except for `fit predict`, which replays a fit
+    /// `SimRun::binomial`: BTPE, except for `camdl predict`, which replays a fit
     /// on the sampler the fit ran (D78).
     pub binomial: sim::rng::BinomialAlgorithm,
     /// How the evaluators treat a collapsed expression, copied to every cell's
     /// `SimRun::eval`: `simulate`'s resolved `--allow-degenerate-rates`, or
-    /// the replayed fit's `[config] allow_degenerate_rates` for `fit predict`.
+    /// the replayed fit's `[config] allow_degenerate_rates` for `camdl predict`.
     pub eval: sim::EvalSettings,
     /// gh#166: optional CLI `--integrator` override (method only); `None` → the
     /// model's declared integrator.
@@ -64,7 +64,7 @@ pub struct SimulateJob {
     /// model's own `output { trajectories { … } }` schedule — copied verbatim
     /// onto each cell's [`crate::util::SimRun`], where
     /// `apply_required_output_times` folds them into the schedule and raises
-    /// the integration end to reach them. `fit predict` supplies its forecast
+    /// the integration end to reach them. `camdl predict` supplies its forecast
     /// rows' closing boundaries here; empty everywhere else.
     pub required_output_times: Vec<f64>,
     /// gh#641: the loaded `--init-state` file. Shared by every cell (it is one
@@ -84,7 +84,7 @@ pub struct SimulateJob {
     /// every cell's `SimRun::fit_fixed` and resolved at the `fit.toml [fixed]`
     /// tier (gh#949). Empty for every other source.
     pub fit_fixed: IndexMap<String, f64>,
-    /// The intervention selection of the fit this job replays (`fit predict`,
+    /// The intervention selection of the fit this job replays (`camdl predict`,
     /// `simulate --draws posterior --fit`), copied to every cell's
     /// `SimRun::fit_base`: each scenario arm is overlaid on it. Empty for a
     /// job that replays no fit.
@@ -377,7 +377,7 @@ pub enum ResolvedScenario {
 ///    declared scenarios. No name is special: a model may declare a scenario
 ///    called `baseline`, and `--scenario baseline` then means that scenario.
 /// 3. `Inline` (an arm built from flags — the implicit `(none)` arm of
-///    `simulate`, or `fit predict`'s `fitted` arm) → the ad-hoc patch it
+///    `simulate`, or `camdl predict`'s `fitted` arm) → the ad-hoc patch it
 ///    carries, empty for the model as written.
 /// 4. `Inline` whose name is a declared scenario → hard error: the engine
 ///    would run the inline patch, not the scenario of that name, so the row
@@ -530,7 +530,7 @@ mod tests {
         // `baseline` is an ordinary scenario name: a model that does not
         // declare it gets the same refusal, listing the declared scenarios,
         // as any other undeclared name. It used to resolve to the unmodified
-        // model, so `fit predict --scenario baseline` passed its up-front
+        // model, so `camdl predict --scenario baseline` passed its up-front
         // check and then failed late, after writing partial output.
         let err = resolve_scenario_ref(&ScenarioRef::Named("baseline".into()), &names(&["other"]))
             .unwrap_err();
@@ -545,7 +545,7 @@ mod tests {
     #[test]
     fn resolve_implicit_arm_is_the_empty_adhoc_patch() {
         // The implicit arms are `Inline` refs built by the CLI — `(none)` for
-        // `simulate`, `fitted` for `fit predict` — and resolve to the patch
+        // `simulate`, `fitted` for `camdl predict` — and resolve to the patch
         // they carry, on a model with or without a `scenarios {}` block.
         for (label, presets) in [
             (IMPLICIT_ARM_LABEL, names(&[])),

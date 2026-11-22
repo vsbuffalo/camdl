@@ -2,7 +2,7 @@
 //! the predictive-ergonomics work. A `fit table` column surfaces the posterior
 //! median (q50) of a scalar generated quantity per fit, read from
 //! `quantities/<NAME>.tsv` of the run's prediction or DERIVED on demand by spawning
-//! `fit predict --mode free_forward` for fits that carry a posterior cloud.
+//! `camdl predict --mode free_forward` for fits that carry a posterior cloud.
 //!
 //! Properties under test:
 //!   (a) derive-on-demand: a PGAS fit that was NOT predicted gets its `peak`
@@ -21,7 +21,7 @@ use std::process::Command;
 
 mod fit_store_support;
 
-/// The prediction folder the latest `fit predict` of the run `run` wrote: of
+/// The prediction folder the latest `camdl predict` of the run `run` wrote: of
 /// its `predict/<mode>-<id12>/` folders, the one whose `report*.json` (one
 /// written by every predict) is newest. A path that does not exist while
 /// nothing has been predicted.
@@ -294,7 +294,7 @@ fn quantity_derives_on_demand_then_reads_existing() {
     let peak_tsv = predict_out(&run_dir).join("quantities-model").join("peak.tsv");
     assert!(
         peak_tsv.exists(),
-        "--quantity must have DERIVED quantities/peak.tsv via fit predict"
+        "--quantity must have DERIVED quantities/peak.tsv via predict"
     );
 
     // ── (b) read-existing: a second table read returns the q50 the derive wrote.

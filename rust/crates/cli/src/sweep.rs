@@ -1,10 +1,10 @@
 //! The design axis of `camdl simulate`: `--sweep PARAM=GRID` and
 //! `--sweep-file FILE` expanded into design points, the resolved design that
 //! is recorded with the run, and the checks the flags share with
-//! `fit predict --sweep` (proposal 2026-10-24-batch-to-simulate §3).
+//! `camdl predict --sweep` (proposal 2026-10-24-batch-to-simulate §3).
 //!
 //! One expansion serves both verbs, so `simulate --sweep` and
-//! `fit predict --sweep` produce the same `point_id` for the same flags: the
+//! `camdl predict --sweep` produce the same `point_id` for the same flags: the
 //! Cartesian product of the swept parameters **sorted by name**, the first
 //! name varying slowest, `point_id` being a point's 0-based position in it.
 //! A design coordinate is a *user-authored* parameter value (the

@@ -732,7 +732,7 @@ pub fn read_trajectory(
 ///
 /// [`read_trajectory`] reads one key and scans the whole file to do it, so a
 /// caller that wants many keys out of one file pays `n_keys × file_size`. That
-/// is the reporting configuration for `fit predict`: a `value_at(…, last_obs)`
+/// is the reporting configuration for `camdl predict`: a `value_at(…, last_obs)`
 /// quantity is read on every posterior draw's smoothing path (gh#722), and at
 /// national scale that is hundreds of draws against a substep-resolution
 /// `trajectories.tsv`. One pass instead of hundreds is the whole of the
@@ -1137,7 +1137,7 @@ mod tests {
     /// rows, in the same order.
     ///
     /// This is the standing drift check between the two row-selection loops
-    /// (`fit predict` reads the whole posterior's smoothing paths through the
+    /// (`camdl predict` reads the whole posterior's smoothing paths through the
     /// multi-key one; the number it prints is a published estimand). Both are
     /// also checked against the WRITTEN draws, because the two share their row
     /// decode — a differential alone would agree happily on a wrong value.

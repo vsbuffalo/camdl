@@ -2406,7 +2406,7 @@ mod tests {
     /// than by a filter.
     ///
     /// This test used to assert the opposite shape: that constant columns
-    /// swept in by `fit predict`'s all-columns subset recompute carried a
+    /// swept in by `camdl predict`'s all-columns subset recompute carried a
     /// non-finite R̂ and had to be skipped. That recompute is gone. The subset
     /// path iterates the ESTIMATED set read from the fit's own sidecar, so the
     /// only way a NaN reaches this map is an estimated parameter that failed —

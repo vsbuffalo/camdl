@@ -1,6 +1,6 @@
 //! A **quantities vocabulary file**: an ordinary `.camdl` file containing only
 //! a `quantities { }` block, supplied at the point of use (`simulate
-//! --quantities`, `fit predict --quantities`) and compiled against the model it
+//! --quantities`, `camdl predict --quantities`) and compiled against the model it
 //! is applied to. It REPLACES the model's own block wholesale — a merge rule
 //! would be a silent-precedence surface.
 //!
@@ -74,7 +74,7 @@ impl QuantitiesOverride {
 /// The output subdirectory for a run's quantity TSVs: `quantities` for the
 /// model's own block, `quantities-<key8>` for a supplied vocabulary.
 ///
-/// One function, shared by `simulate --quantities-out` and `fit predict`, so
+/// One function, shared by `simulate --quantities-out` and `camdl predict`, so
 /// the two cannot key their artifacts differently — the failure mode of a
 /// second copy is that one command collides while the other does not, which is
 /// invisible until two tables disagree.

@@ -9,7 +9,7 @@
 //! - `pfilter` applies the flag and must put it in its run identity, or a run
 //!   with it and a run without it share one stored leaf; with `--fit` it must
 //!   also apply the fit config's field (gh#1235);
-//! - commands that replay a stored fit (`fit predict`, `compare`) must replay
+//! - commands that replay a stored fit (`camdl predict`, `compare`) must replay
 //!   it under the fit's own setting, as they already do for forcing
 //!   extrapolation.
 //!
@@ -332,14 +332,14 @@ thin = 1
     (tmp, leaf.to_string_lossy().into_owned())
 }
 
-/// `fit predict` replays the fit's model forward from each draw. The fit was
+/// `camdl predict` replays the fit's model forward from each draw. The fit was
 /// made under `allow_degenerate_rates`, so the replay must be too; before the
 /// fix it ran without it and the free-forward horizon failed with
 /// `NumericalCollapse`.
 #[test]
 fn fit_predict_replays_the_fits_allow_degenerate_rates() {
     let (tmp, leaf) = degenerate_fit("predict");
-    let o = camdl(&tmp.0, &["fit", "predict", &leaf, "--mode", "free_forward"]);
+    let o = camdl(&tmp.0, &["predict", &leaf, "--mode", "free_forward"]);
     let all = text(&o);
     assert!(!all.contains("NumericalCollapse"), "the replay must not collapse:\n{all}");
     assert!(o.status.success(), "{all}");

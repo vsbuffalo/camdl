@@ -1,5 +1,5 @@
 //! The one integration-step rule, for every backend and every command that
-//! scores data against a model (`fit run`, `fit predict`, `camdl profile`,
+//! scores data against a model (`fit run`, `camdl predict`, `camdl profile`,
 //! `camdl pfilter`).
 //!
 //! The model's declared step (`simulate { dt = … }`) is the integration step.

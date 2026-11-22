@@ -792,7 +792,7 @@ mod real_state_projection_tests {
             .expect("an integer-only likelihood argument must still build");
     }
 
-    /// gh#681: the emission builders (`simulate --obs`, `fit predict`) must
+    /// gh#681: the emission builders (`simulate --obs`, `camdl predict`) must
     /// return the refusal as an error the CLI can report, not panic with it.
     #[test]
     fn obs_samplers_return_the_real_state_refusal_as_an_error() {

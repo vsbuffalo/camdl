@@ -282,7 +282,7 @@ set-once flag is on the compiled forcing, shared by the model's clones, so a
 model that already reported a forcing under one policy does not report it under
 the next. Every command installs its policy before compiling, and `compare`
 compiles each in-process fit's model after installing that fit's policy. Most
-commands install one policy. `fit predict` alone nests a second, an allowing
+commands install one policy. `camdl predict` alone nests a second, an allowing
 one, once it has read the stored fit's config; a refusal under the first has
 already ended the command, and the inner guard's drop puts the first back. A
 claim-holding `fit run` keeps a refusal for its claim, and each chain polls the
@@ -342,7 +342,7 @@ default run's identity is unchanged. `run.json` keeps the build in
 build made with a switch is this build's run. The commands that store a result
 under an address key the switches: `simulate` (in the ambient key of the run
 store, which names the build directory every cell is under), `fit run` and
-`fit predict` (in the ambient key of the run store, as `simulate`; a
+`camdl predict` (in the ambient key of the run store, as `simulate`; a
 prediction's manifests also record `engine_version` and `engine_switches`),
 `pfilter` (at the `model` level) and `profile` (a point's base). `compare`
 scores a chain-binomial fit through a `camdl pfilter` child, which keys them;

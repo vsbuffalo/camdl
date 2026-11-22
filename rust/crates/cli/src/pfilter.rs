@@ -441,7 +441,7 @@ fn run_pfilter(
     // built from `obs_model.obs_time(i)`. So a scenario's own `simulate { to }`
     // cannot move anything here, including the `--save-paths` grid. Refuse
     // rather than ignore it: silently discarding a declared horizon is the bug
-    // gh#561 exists to remove, and the same guard sits on `fit predict`.
+    // gh#561 exists to remove, and the same guard sits on `camdl predict`.
     //
     // It runs AFTER the substitution above so it compares two RESOLVED numbers:
     // an anchored model and an anchored scenario that resolve to the same time

@@ -1,10 +1,10 @@
-//! gh#795 — a chain-subset `fit predict` must not be written at the pooled
+//! gh#795 — a chain-subset `camdl predict` must not be written at the pooled
 //! run's address.
 //!
 //! `--exclude-chains` reports a DIFFERENT posterior (its own warning says so:
 //! "Post-hoc chain exclusion BIASES the posterior toward the retained mode").
 //! If the excluded set reached `predictive.json` as a `chain_selection` stamp
-//! but not the artifact's location, `fit predict --exclude-chains 3` would
+//! but not the artifact's location, `camdl predict --exclude-chains 3` would
 //! replace the run's canonical predictive with a three-chain one, and a reader
 //! — `camdl-scope`, or a person — would render a cherry-picked subset as the
 //! posterior predictive of the fit, with nothing in the run directory saying
@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The stored prediction under `seg` (a run folder, or any folder above
-/// runs) whose `report*.json` is newest: the latest `fit predict`'s output. A
+/// runs) whose `report*.json` is newest: the latest `camdl predict`'s output. A
 /// path that does not exist while nothing has been predicted.
 fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
     fit_store_support::predictions(seg)
@@ -200,11 +200,11 @@ struct Fixture {
 }
 
 impl Fixture {
-    /// Run `fit predict`, optionally under an exclusion. Free-forward only —
+    /// Run `camdl predict`, optionally under an exclusion. Free-forward only —
     /// the one-step horizon is not what this test is about and it is slower.
     fn predict(&self, bin: &Path, exclude: Option<&str>) -> std::process::Output {
         let seg = self.seg.to_string_lossy().into_owned();
-        let mut args: Vec<&str> = vec!["fit", "predict", &seg, "--mode", "free_forward"];
+        let mut args: Vec<&str> = vec!["predict", &seg, "--mode", "free_forward"];
         if let Some(ids) = exclude {
             args.push("--exclude-chains");
             args.push(ids);
@@ -298,7 +298,7 @@ fn two_exclusions_are_two_addresses_and_neither_is_the_pooled_one() {
     let bin = require_binary();
     let f = setup(&bin, "addresses");
 
-    // Each selection is its own `fit predict` address (`predict/<run>-<key>/`,
+    // Each selection is its own `camdl predict` address (`predict/<run>-<key>/`,
     // the key covering the chain selection), so each directory is read as the
     // one its predict wrote.
     let read = |dir: &Path, rel: &str| -> String {
@@ -521,7 +521,7 @@ fn chains_and_its_complementary_exclusion_are_one_prediction() {
     let f = setup(&bin, "keep");
     let seg = f.seg.to_string_lossy().into_owned();
     let predict = |flag: &str, ids: &str| {
-        run(&bin, &f.tmp, &["fit", "predict", &seg, "--mode", "free_forward", flag, ids])
+        run(&bin, &f.tmp, &["predict", &seg, "--mode", "free_forward", flag, ids])
     };
 
     let kept = predict("--chains", "0,1,2");
@@ -542,7 +542,7 @@ fn chains_and_its_complementary_exclusion_are_one_prediction() {
     assert_eq!(f.read("predictive-excl3/weekly_cases.tsv"), via_keep,
         "the two spellings band the same cloud");
 
-    let both = run(&bin, &f.tmp, &["fit", "predict", &seg, "--mode", "free_forward",
+    let both = run(&bin, &f.tmp, &["predict", &seg, "--mode", "free_forward",
         "--chains", "0", "--exclude-chains", "3"]);
     assert!(!both.status.success(), "both flags together are refused");
 

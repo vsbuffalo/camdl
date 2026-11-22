@@ -20,7 +20,7 @@ repeating the first page's fit and its predictive check:
 
 ```{.camdl-run show-match="converged|max R̂|subsampling"}
 camdl fit run fit-r0.toml --label r0 --seed 4
-camdl fit predict @r0
+camdl predict @r0
 ```
 
 ## Where the Poisson model misses
@@ -105,7 +105,7 @@ one, a modest amount of extra scatter. What differs is how much a day's count ma
 check shows the consequence:
 
 ```{.camdl-run figure="ppc-both.svg" caption="Posterior predictive checks of both models: median (line), 50% and 90% bands, and the observed counts (black)." show-match="subsampling"}
-camdl fit predict @negbin
+camdl predict @negbin
 uv run plot_predictive.py ppc-both.svg Poisson=camdl-store/*/fit/sir_r0-*/runs/pmmh-*/seed_4-*/predict/*/ \
   "Negative binomial"=camdl-store/*/fit/sir_negbin-*/runs/pmmh-*/seed_4-*/predict/*/
 ```
@@ -190,7 +190,7 @@ scores days the fit did not see.
 ## What the fit cannot see
 
 The `quantities` block reports, for each posterior draw, `attack_rate`, the
-fraction of the school ever infected. `fit predict` wrote its posterior
+fraction of the school ever infected. `camdl predict` wrote its posterior
 quantiles for both fits:
 
 ```{.camdl-run}

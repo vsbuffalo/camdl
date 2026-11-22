@@ -78,7 +78,7 @@ fn recompute_over_subset(
     // Recompute R̂ / ESS over the retained chains for the estimated params — the
     // keys of `posterior_mean`, the exact set the renderer iterates, so the table
     // shape is unchanged. Routed through the one shared recompute
-    // (`chain_selection::recompute_subset_diagnostics`) that `fit predict` also
+    // (`chain_selection::recompute_subset_diagnostics`) that `camdl predict` also
     // calls, so summary and predict cannot disagree on the same fit + selection.
     let param_names: Vec<String> = posterior_mean.keys().cloned().collect();
     let sub = crate::chain_selection::recompute_subset_diagnostics(

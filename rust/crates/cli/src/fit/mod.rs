@@ -2,7 +2,7 @@
 //!
 //! `camdl fit run FIT.toml [--seed N] [--starts SPEC] [--label "..."]
 //! [--force]` runs the file's one `[method]` on its problem and stores the
-//! result as a content-addressed leaf; `fit summary`, `fit predict`, `fit
+//! result as a content-addressed leaf; `fit summary`, `camdl predict`, `fit
 //! table`, `fit diff` and `fit new` read and derive from those. See
 //! `docs/dev/proposals/2026-09-08-workflow-first-fit-config.md`.
 
@@ -103,7 +103,7 @@ pub(crate) mod forecast_plan; // what a fixed-origin forecast predicts: its orig
 pub(crate) mod forecast_driver; // the fixed-origin forecast: one bootstrap filter per posterior draw
 pub(crate) mod forecast_arms; // the scenario and sweep arms of a forecast, each differing only after the origin
 pub(crate) mod forecast_contrast; // the difference of two arms' predictive means and its Monte Carlo error (D83)
-pub(crate) mod forecast_output; // `fit predict --mode forecast`: the plan, the driver, the artifact
+pub(crate) mod forecast_output; // `camdl predict --mode forecast`: the plan, the driver, the artifact
 pub(crate) mod forecast_score; // the marginal and joint log scores of a forecast against held-out values (D79)
 pub mod runner;
 pub mod priors_precedence;  // gh#75: shared prior-resolution chain for fit run + profile
@@ -147,7 +147,7 @@ pub(crate) mod opt_trace; // opt_trace.tsv: each NLopt search's running best, wr
 pub mod fitted_model; // is the given model the one a fit ran on (the replay check)
 pub mod joint;    // gh#322: keyed-joint (θ, X) read — LatentPath classifier + join
 pub mod failures; // the deterministic-failure record a predictive run writes as report.json
-pub mod predict;  // `camdl fit predict`: free-forward posterior predictive verb + types
+pub mod predict;  // `camdl predict`: free-forward posterior predictive verb + types
 pub(crate) mod predict_streams; // which declared streams a predictive covers, skips or fails (D76)
 pub mod contrasts; // gh#322: counterfactual `contrasts {}` two-arm replay reducer (stage C)
 

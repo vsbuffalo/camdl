@@ -1,4 +1,4 @@
-//! D78: every `fit predict` mode draws with the binomial sampler its fit ran
+//! D78: every `camdl predict` mode draws with the binomial sampler its fit ran
 //! (BTPE or BTRS, read from the fit run's `run_inputs.json`), and records it.
 //!
 //! The guarantee is the same sampler and recorded configuration, not the fit's
@@ -94,11 +94,11 @@ fn walk(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// `fit predict <leaf> --mode <mode>`; returns `predictive.json` and the
+/// `camdl predict <leaf> --mode <mode>`; returns `predictive.json` and the
 /// daily stream's predictive table.
 fn predict(dir: &Path, leaf: &Path, mode: &str) -> (serde_json::Value, String) {
-    let out = run(dir, &["fit", "predict", leaf.to_str().unwrap(), "--mode", mode, "--n-draws", "4"]);
-    assert!(out.status.success(), "fit predict --mode {mode}: {}", stderr(&out));
+    let out = run(dir, &["predict", leaf.to_str().unwrap(), "--mode", mode, "--n-draws", "4"]);
+    assert!(out.status.success(), "predict --mode {mode}: {}", stderr(&out));
     let manifests: Vec<PathBuf> = walk(&dir.join("store")).into_iter()
         .filter(|p| p.file_name().is_some_and(|n| n == "predictive.json"))
         .filter(|p| {
@@ -127,7 +127,7 @@ fn d78_a_btrs_fits_one_step_and_free_forward_record_btrs() {
 
 /// A fit run on the default sampler records `btpe`, and each mode records
 /// `btpe`. The record is the one the run stored: a `run_inputs.json` rewritten
-/// to name another sampler fails the store's digest check, and `fit predict`
+/// to name another sampler fails the store's digest check, and `camdl predict`
 /// refuses the run rather than drawing with the rewritten sampler.
 #[test]
 fn d78_one_step_and_free_forward_draw_with_the_fits_recorded_sampler() {
@@ -144,6 +144,6 @@ fn d78_one_step_and_free_forward_draw_with_the_fits_recorded_sampler() {
 
     record["binomial"] = serde_json::json!("btrs");
     std::fs::write(&run_json, serde_json::to_string_pretty(&record).unwrap()).unwrap();
-    let out = run(tmp.path(), &["fit", "predict", leaf.to_str().unwrap(), "--mode", "one_step", "--n-draws", "4"]);
+    let out = run(tmp.path(), &["predict", leaf.to_str().unwrap(), "--mode", "one_step", "--n-draws", "4"]);
     assert!(!out.status.success(), "a rewritten run_inputs.json must not be read: {}", stderr(&out));
 }

@@ -1,6 +1,6 @@
 //! gh#322 stage C — end-to-end counterfactual `contrasts {}`: a PGAS chain_binomial
 //! fit of a model with an SIA intervention + two scenarios + a contrast →
-//! `fit predict` auto-emits `contrasts/<name>.tsv` (the two-arm CRN replay reducer).
+//! `camdl predict` auto-emits `contrasts/<name>.tsv` (the two-arm CRN replay reducer).
 //! There is no `over [..]` window: the fork is DERIVED (the last saved snapshot
 //! before the toggled intervention fires).
 //!
@@ -42,7 +42,7 @@ fn run(bin: &Path, dir: &Path, args: &[&str]) -> std::process::Output {
         .expect("spawn camdl")
 }
 
-/// `<prediction>/<sub>/<stream>.tsv` of the latest `fit predict` stored
+/// `<prediction>/<sub>/<stream>.tsv` of the latest `camdl predict` stored
 /// under the store `root` (the prediction whose `run.json` finished last),
 /// if present.
 fn find_artifact(root: &Path, sub: &str, stream: &str) -> Option<PathBuf> {
@@ -228,10 +228,10 @@ fn fit_predict_emits_deaths_averted_contrast_with_positive_median() {
     // `--mode free_forward`: the contrast is a forward counterfactual object;
     // this also sidesteps the one-step exact-filter's unrelated limitation with the
     // parametric `at [origin + 4 'weeks]` schedule. Contrasts are horizon-independent.
-    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "@fit", "--mode", "free_forward"]);
+    let out = run(&bin, &tmp, &["predict", "@fit", "--mode", "free_forward"]);
     assert!(
         out.status.success(),
-        "fit predict failed:\nstdout={}\nstderr={}",
+        "predict failed:\nstdout={}\nstderr={}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
@@ -242,7 +242,7 @@ fn fit_predict_emits_deaths_averted_contrast_with_positive_median() {
     // (1) deaths averted: the SIA removes 60% of susceptibles at week 4, so the
     // counterfactual `with_sia` arm has FEWER deaths → `no_sia − with_sia > 0`.
     let averted = find_artifact(&results, "contrasts", "averted")
-        .expect("contrasts/averted.tsv must be auto-emitted by fit predict");
+        .expect("contrasts/averted.tsv must be auto-emitted by predict");
     let (q50, mean, n_used) = scalar_band(&averted);
     assert!(n_used > 0, "the band is over a positive used-draw count, got {n_used}");
     assert!(
@@ -256,7 +256,7 @@ fn fit_predict_emits_deaths_averted_contrast_with_positive_median() {
     // last saved snapshot before the SIA fires at day 28. (Were it forking from
     // init at t=0, there would be no derived-fork note / the fork would be 0.)
     let fork = reported_fork_time(&stderr, "averted")
-        .unwrap_or_else(|| panic!("fit predict must report the derived fork; stderr:\n{stderr}"));
+        .unwrap_or_else(|| panic!("predict must report the derived fork; stderr:\n{stderr}"));
     assert!(
         fork > 0.0 && fork < 28.0,
         "fork must be derived strictly between t=0 and the SIA fire (t=28), got {fork}"
@@ -302,10 +302,10 @@ fn point_estimate_fit_emits_no_contrast_file() {
     let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(out.status.success(), "if2 fit run failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
 
-    // An IF2 fit is a point estimate (no posterior cloud) → `fit predict` refuses
+    // An IF2 fit is a point estimate (no posterior cloud) → `camdl predict` refuses
     // before any output. No contrast file is written, and the error names the gate.
-    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "@fit"]);
-    assert!(!out.status.success(), "fit predict must refuse a point-estimate fit");
+    let out = run(&bin, &tmp, &["predict", "@fit"]);
+    assert!(!out.status.success(), "predict must refuse a point-estimate fit");
     let stderr = String::from_utf8_lossy(&out.stderr).to_lowercase();
     assert!(
         stderr.contains("optimizer") || stderr.contains("point") || stderr.contains("posterior"),
@@ -381,9 +381,9 @@ fn series_minus_scalar_contrast_is_a_located_shape_error() {
     assert!(out.status.success(), "fit run failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
 
     // The shape mismatch is a Rust reducer check (the OCaml dim check passes: both
-    // operands are counts). `fit predict` fails with a located message.
-    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "@fit", "--mode", "free_forward"]);
-    assert!(!out.status.success(), "a series−scalar contrast must fail fit predict");
+    // operands are counts). `camdl predict` fails with a located message.
+    let out = run(&bin, &tmp, &["predict", "@fit", "--mode", "free_forward"]);
+    assert!(!out.status.success(), "a series−scalar contrast must fail predict");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("shape mismatch") && stderr.contains("'bad'"),
@@ -452,11 +452,11 @@ fn parameter_only_contrast_skips_with_a_located_note_and_no_file() {
     assert!(out.status.success(), "fit run failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
 
     // A param-only contrast has no toggled intervention → the reducer skips it with
-    // a note (gh#327) and `fit predict` still succeeds. No contrast file is written.
-    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "@fit", "--mode", "free_forward"]);
+    // a note (gh#327) and `camdl predict` still succeeds. No contrast file is written.
+    let out = run(&bin, &tmp, &["predict", "@fit", "--mode", "free_forward"]);
     assert!(
         out.status.success(),
-        "fit predict must succeed (the contrast is skipped, not a hard error):\nstderr={}",
+        "predict must succeed (the contrast is skipped, not a hard error):\nstderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -566,10 +566,10 @@ I0 = 10
     // ODE is forkable (Deterministic), so the reducer passes the latent gate but
     // hits the ODE-backend deferral: skip-with-note (gh#325), predict succeeds,
     // no file is written.
-    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "@fit", "--mode", "free_forward"]);
+    let out = run(&bin, &tmp, &["predict", "@fit", "--mode", "free_forward"]);
     assert!(
         out.status.success(),
-        "fit predict must succeed (the contrast is skipped, not a hard error):\nstderr={}",
+        "predict must succeed (the contrast is skipped, not a hard error):\nstderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -650,10 +650,10 @@ fn obs_sourced_contrast_skips_with_gh326_state_sourced_emits() {
     let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(out.status.success(), "fit run failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
 
-    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "@fit", "--mode", "free_forward"]);
+    let out = run(&bin, &tmp, &["predict", "@fit", "--mode", "free_forward"]);
     assert!(
         out.status.success(),
-        "fit predict must succeed (the obs-sourced contrast is skipped, not fatal):\nstderr={}",
+        "predict must succeed (the obs-sourced contrast is skipped, not fatal):\nstderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -764,10 +764,10 @@ k   = 10.0
     let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(out.status.success(), "fit run failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
 
-    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "@fit", "--mode", "free_forward"]);
+    let out = run(&bin, &tmp, &["predict", "@fit", "--mode", "free_forward"]);
     assert!(
         out.status.success(),
-        "fit predict failed:\nstderr={}",
+        "predict failed:\nstderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
 
@@ -801,7 +801,7 @@ k   = 10.0
 // A per-scenario `simulate { to }` is honoured on the `simulate` path — a MENU
 // of runs, each answering its own question (see `tests/scenario_horizon.rs`).
 // A contrast DIFFERENCES its operands, so unequal windows compare the windows
-// rather than the counterfactual, and `fit predict` emits at the OBSERVED times
+// rather than the counterfactual, and `camdl predict` emits at the OBSERVED times
 // so it cannot move its window at all. Both refuse rather than silently ignore.
 
 /// `MODEL` reduced to one contrast, with a horizon declared on ONE of its two
@@ -928,7 +928,7 @@ fn contrast_arms_agreeing_on_a_non_model_horizon_are_refused() {
     );
 
     let out =
-        run(&bin, &tmp, &["fit", "predict", "--fit", "@fit", "--mode", "free_forward"]);
+        run(&bin, &tmp, &["predict", "@fit", "--mode", "free_forward"]);
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
         !out.status.success(),
@@ -967,7 +967,7 @@ fn contrast_arms_with_different_horizons_are_refused() {
     );
 
     let out =
-        run(&bin, &tmp, &["fit", "predict", "--fit", "@fit", "--mode", "free_forward"]);
+        run(&bin, &tmp, &["predict", "@fit", "--mode", "free_forward"]);
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
         !out.status.success(),
@@ -997,7 +997,7 @@ fn contrast_arms_with_different_horizons_are_refused() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-/// The same shape with NO `contrasts {}` block, so the `fit predict` guard is
+/// The same shape with NO `contrasts {}` block, so the `camdl predict` guard is
 /// exercised in isolation — with a contrast present the (correct) contrast-arm
 /// refusal fires first and would mask it.
 const MODEL_SCENARIO_HORIZON_NO_CONTRAST: &str = r#"
@@ -1050,7 +1050,7 @@ fn fit_predict_scenario_with_its_own_horizon_is_refused() {
     std::fs::create_dir_all(&tmp).unwrap();
     std::fs::write(tmp.join("model.camdl"), MODEL_SCENARIO_HORIZON_NO_CONTRAST).unwrap();
     std::fs::write(tmp.join("weekly_cases.tsv"), DATA).unwrap();
-    // PGAS, not IF2: `fit predict` gates on a posterior cloud BEFORE it reaches
+    // PGAS, not IF2: `camdl predict` gates on a posterior cloud BEFORE it reaches
     // the scenario overlay, so an optimizer fit would fail on that gate instead
     // and never exercise this guard.
     std::fs::write(tmp.join("fit.toml"), fit_toml(PGAS)).unwrap();
@@ -1068,14 +1068,14 @@ fn fit_predict_scenario_with_its_own_horizon_is_refused() {
         &bin,
         &tmp,
         &[
-            "fit", "predict", "--fit", "@fit", "--mode", "free_forward", "--scenario",
+            "predict", "@fit", "--mode", "free_forward", "--scenario",
             "with_sia",
         ],
     );
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
         !out.status.success(),
-        "fit predict must refuse a scenario whose horizon it cannot honour; it \
+        "predict must refuse a scenario whose horizon it cannot honour; it \
          succeeded.\nstderr:\n{stderr}"
     );
     assert!(
@@ -1095,7 +1095,7 @@ fn fit_predict_scenario_with_its_own_horizon_is_refused() {
         &bin,
         &tmp,
         &[
-            "fit", "predict", "--fit", "@fit", "--mode", "free_forward", "--scenario",
+            "predict", "@fit", "--mode", "free_forward", "--scenario",
             "no_sia",
         ],
     );
@@ -1110,9 +1110,9 @@ fn fit_predict_scenario_with_its_own_horizon_is_refused() {
 
 // ── gh#694: an observation-anchored `value_at` quantity + a `contrasts {}` block
 
-/// One banded row of a `fit predict` quantity sidecar, by column name. A
+/// One banded row of a `camdl predict` quantity sidecar, by column name. A
 /// censorable scalar's header is
-/// `scenario n_draws n_value n_censored p_censored q05 … q95`; `fit predict`
+/// `scenario n_draws n_value n_censored p_censored q05 … q95`; `camdl predict`
 /// writes one row per scenario and these fixtures predict a single (`fitted`)
 /// scenario, so the first data row is the row.
 fn quantity_row(path: &Path) -> std::collections::HashMap<String, String> {
@@ -1178,7 +1178,7 @@ simulate { from = 0 'days  to = 80 'days }
 "#;
 
 /// gh#694: declaring `contrasts {}` must not cost the model its observation
-/// anchors. `fit predict` holds the fit's data and resolves `last_obs` for the
+/// anchors. `camdl predict` holds the fit's data and resolves `last_obs` for the
 /// ordinary `quantities/` sidecar; the contrast arms evaluate the same quantity
 /// list, so an anchored quantity NO contrast references must not fail the
 /// command — and the resolved value must be the one the data implies, not
@@ -1196,11 +1196,11 @@ fn anchored_quantity_no_contrast_references_still_predicts() {
     let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(out.status.success(), "fit run failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
 
-    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "@fit", "--mode", "free_forward"]);
+    let out = run(&bin, &tmp, &["predict", "@fit", "--mode", "free_forward"]);
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
         out.status.success(),
-        "an anchored quantity beside a contrasts block must not fail fit predict \
+        "an anchored quantity beside a contrasts block must not fail predict \
          (gh#694); stderr:\n{stderr}"
     );
 
@@ -1327,7 +1327,7 @@ fn contrast_over_an_anchored_quantity_resolves_in_both_arms() {
     let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(out.status.success(), "fit run failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
 
-    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "@fit", "--mode", "free_forward"]);
+    let out = run(&bin, &tmp, &["predict", "@fit", "--mode", "free_forward"]);
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
         out.status.success(),
@@ -1440,7 +1440,7 @@ fn an_anchor_before_the_fork_censors_with_a_located_note() {
     let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(out.status.success(), "fit run failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
 
-    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "@fit", "--mode", "free_forward"]);
+    let out = run(&bin, &tmp, &["predict", "@fit", "--mode", "free_forward"]);
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
         out.status.success(),
@@ -1497,7 +1497,7 @@ fn ratio_contrast_with_a_zero_denominator_censors_those_draws() {
     let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(out.status.success(), "fit run failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
 
-    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "@fit", "--mode", "free_forward"]);
+    let out = run(&bin, &tmp, &["predict", "@fit", "--mode", "free_forward"]);
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
         out.status.success(),

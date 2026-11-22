@@ -1,7 +1,7 @@
 //! gh#538 / proposal 2026-08-17 — `value_at` end-to-end through the real
 //! binary, on the two surfaces that resolve (or refuse) the `last_obs` anchor:
 //!
-//!   1. `fit predict` resolves `last_obs` from the fit's bound data and bands
+//!   1. `camdl predict` resolves `last_obs` from the fit's bound data and bands
 //!      the quantity (n_censored = 0);
 //!   2. a `value_at` anchored past the horizon censors EVERY draw (the
 //!      censor-not-clamp contract, end-to-end — clamping would silently report
@@ -23,7 +23,7 @@ mod fit_store_support;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The prediction folder in the fit run `run` that the latest `fit predict`
+/// The prediction folder in the fit run `run` that the latest `camdl predict`
 /// wrote: the one whose `report*.json` (one written by every predict) is
 /// newest. A path that does not exist while nothing has been predicted.
 fn predict_out(run: &Path) -> PathBuf {
@@ -183,16 +183,16 @@ fn predict_resolves_last_obs_and_censors_past_horizon() {
 
     let segment = fit_segment(&tmp.path().join("out"));
     let predict = Command::new(bin()).env_remove("CLICOLOR_FORCE")
-        .args(["fit", "predict"])
+        .args(["predict"])
         .arg(&segment)
         .arg("--no-progress")
         .env("CAMDL_STORE", tmp.path().join("out"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output()
-        .expect("fit predict");
+        .expect("predict");
     assert!(
         predict.status.success(),
-        "fit predict failed:\n{}",
+        "predict failed:\n{}",
         String::from_utf8_lossy(&predict.stderr)
     );
 
@@ -335,7 +335,7 @@ fn simulate_refuses_last_obs_naming_the_quantity() {
         );
     }
     assert!(
-        stderr.contains("fit predict"),
+        stderr.contains("predict"),
         "the error must point at the surface that CAN resolve it: {stderr}"
     );
 }

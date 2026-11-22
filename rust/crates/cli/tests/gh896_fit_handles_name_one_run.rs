@@ -235,7 +235,7 @@ fn pgas(sweeps: u32) -> String {
     )
 }
 
-/// `fit predict <run folder>` replays that run's draws. Two PGAS runs of one
+/// `camdl predict <run folder>` replays that run's draws. Two PGAS runs of one
 /// file differ in `sweeps`, so their draw counts tell which was read.
 #[test]
 fn predict_of_a_leaf_reads_that_run() {
@@ -250,7 +250,7 @@ fn predict_of_a_leaf_reads_that_run() {
 
     // 2 chains × (sweeps − burn_in) retained draws.
     for (leaf, draws) in [(&short[0], 6), (&long[0], 12)] {
-        let all = p.ok(&["fit", "predict", &leaf.to_string_lossy(), "--mode", "free_forward"]);
+        let all = p.ok(&["predict", &leaf.to_string_lossy(), "--mode", "free_forward"]);
         assert!(all.contains(&format!("{draws} draws from")),
             "{} holds {draws} draws:\n{all}", leaf.display());
     }
@@ -384,7 +384,7 @@ fn every_resolving_verb_prints_the_resolution_line() {
     let want = format!("@post → run {}", &id[..6]);
     for args in [
         vec!["fit", "summary", "@post"],
-        vec!["fit", "predict", "@post", "--mode", "free_forward", "--n-draws", "2"],
+        vec!["predict", "@post", "--mode", "free_forward", "--n-draws", "2"],
         vec!["show", "@post", "--root", &root],
         vec!["cat", "@post", "--stream", "draws.tsv", "--root", &root],
     ] {
@@ -475,12 +475,12 @@ fn two_pgas_runs(p: &Project) -> (PathBuf, PathBuf, PathBuf) {
     (segment_of(&short[0]), short[0].clone(), long[0].clone())
 }
 
-/// `fit predict <problem folder>` holding two runs is refused, listing them.
+/// `camdl predict <problem folder>` holding two runs is refused, listing them.
 #[test]
 fn predict_of_a_folder_with_two_runs_lists_them() {
     let p = Project::new();
     let (segment, short, long) = two_pgas_runs(&p);
-    let out = p.run(&["fit", "predict", &segment.to_string_lossy(), "--mode", "free_forward"]);
+    let out = p.run(&["predict", &segment.to_string_lossy(), "--mode", "free_forward"]);
     let all = text(&out);
     assert!(!out.status.success(), "a choice between two runs is the user's:\n{all}");
     assert!(all.contains("names a fit problem"), "{all}");
@@ -489,7 +489,7 @@ fn predict_of_a_folder_with_two_runs_lists_them() {
     }
 }
 
-/// `fit predict` writes inside the run it read (`<run>/predict/<mode>-<id12>/`),
+/// `camdl predict` writes inside the run it read (`<run>/predict/<mode>-<id12>/`),
 /// and its manifests record that run's id; nothing is written into the
 /// problem folder the two runs share.
 #[test]
@@ -497,7 +497,7 @@ fn predict_writes_under_the_run_it_read() {
     let p = Project::new();
     let (segment, short, long) = two_pgas_runs(&p);
     for leaf in [&short, &long] {
-        p.ok(&["fit", "predict", &leaf.to_string_lossy(), "--mode", "free_forward"]);
+        p.ok(&["predict", &leaf.to_string_lossy(), "--mode", "free_forward"]);
     }
     assert!(!segment.join("predictive").exists() && !segment.join("predictive.json").exists()
         && !segment.join("predict").exists(),
@@ -698,8 +698,8 @@ fn predict_options_key_their_own_output() {
     p.ok(&["fit", "run", "post.toml", "--seed", "1"]);
     let leaf = p.leaves().remove(0);
     let l = leaf.to_string_lossy().into_owned();
-    p.ok(&["fit", "predict", &l, "--mode", "free_forward"]);
-    p.ok(&["fit", "predict", &l, "--mode", "free_forward", "--n-draws", "3"]);
+    p.ok(&["predict", &l, "--mode", "free_forward"]);
+    p.ok(&["predict", &l, "--mode", "free_forward", "--n-draws", "3"]);
     let dirs = fit_store_support::predictions(&leaf);
     assert_eq!(dirs.len(), 2, "two option sets, two addresses: {dirs:?}");
     let mut n_draws: Vec<u64> = dirs.iter().map(|d| {
@@ -744,7 +744,7 @@ fn a_prediction_is_read_through_its_own_folder() {
     let p = Project::new();
     p.config("post.toml", &pgas(7));
     p.ok(&["fit", "run", "post.toml", "--seed", "1", "--label", "post"]);
-    p.ok(&["fit", "predict", "@post", "--mode", "free_forward", "--n-draws", "3"]);
+    p.ok(&["predict", "@post", "--mode", "free_forward", "--n-draws", "3"]);
     let root = p.store().to_string_lossy().into_owned();
 
     let out = p.run(&["cat", "@post", "--stream", "predictive/weekly_cases.tsv", "--root", &root]);

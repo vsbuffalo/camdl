@@ -62,11 +62,11 @@ method, seed, length and files), and `camdl cat @m0 --stream draws.tsv` reads
 one of the run's files; without `--stream`, `cat` on a run prints its
 `fit_state.toml`. A command that reads one run refuses a problem handle and
 refuses a `fit.toml`, which never names a run, listing the runs the file made. A
-`fit predict` output is stored inside its run, at `predict/<mode>-<12 hex>/`.
+`camdl predict` output is stored inside its run, at `predict/<mode>-<12 hex>/`.
 
 **Selecting chains.** Every reader of a posterior cloud takes `--chains IDS`
 (keep only those chains) or `--exclude-chains IDS` (drop those), never both:
-`fit summary`, `fit predict`, `fit table --quantity`,
+`fit summary`, `camdl predict`, `fit table --quantity`,
 `simulate --draws posterior` and `cat --stream draws.tsv`. `compare` takes
 either per fit (`--chains @a:0,1`, `--exclude-chains @b:4`) or cohort-wide (bare
 ids); one fit named in both flags, or a cohort-wide value beside a per-fit one,
@@ -209,10 +209,10 @@ camdl fit run fit.toml                              # the file's one [method]
 camdl fit run fit.toml --starts from_prior          # override where the chains begin
 camdl fit run fit.toml --resume <base-run-id>       # extend a completed run
 camdl fit summary @label                            # Â or R̂ / verdict / MLE table
-camdl fit predict --fit @label --stream onset       # predicted-vs-observed artifact
+camdl predict @label --stream onset       # predicted-vs-observed artifact
 ```
 
-`fit predict` resolves the fit's posterior draws and writes
+`camdl predict` resolves the fit's posterior draws and writes
 `predictive/<stream>.tsv` (the `q05…q95` ribbon, with typed
 `horizon`/`treatment` columns, a `role` column, the fit's
 `fit_rhat_max`/`fit_ess_min` stamp, and the per-row `rhat_mean`/`rhat_pred`
@@ -245,7 +245,7 @@ what the artifact covers without the exit status. Every mode draws with the
 binomial sampler the fit ran (`btpe` or `btrs`, read from the fit run's
 `run_inputs.json`) and records it as `binomial` in the manifest.
 
-`fit predict --fit @label --horizon "4 weeks"` (or `--mode forecast`) writes the
+`camdl predict @label --horizon "4 weeks"` (or `--mode forecast`) writes the
 fixed-origin forecast instead: from the end of the fit's training rows (the
 _forecast origin_), the state is filtered through the training rows only and
 each stream's periods ending within the reach are predicted, the period under
@@ -539,14 +539,15 @@ in §7 of `camdl docs model-comparison`.
 - **A forcing is not extended past its range silently.** A run that evaluates an
   `interpolated` forcing before its first or after its last data point, or a
   `bspline` outside its window, is refused by every command that runs a model
-  (`simulate`, `fit run`, `fit predict`, `pfilter`, `profile`, `compare` when it
-  derives a prequential, `dev eval`). The error names the forcing, its range and
-  the side it was evaluated on. `--allow-forcing-extrapolation` on any of them
-  (in a fit config, `[config] allow_forcing_extrapolation = true`) holds the
-  forcing's end value instead, prints one warning per forcing naming its range
-  and the span held, and records the override in each `run.json` the command
-  writes. The override is part of the run's identity, so a run under it and the
-  same run without it are two runs: neither is served the other's stored result.
+  (`simulate`, `fit run`, `camdl predict`, `pfilter`, `profile`, `compare` when
+  it derives a prequential, `dev eval`). The error names the forcing, its range
+  and the side it was evaluated on. `--allow-forcing-extrapolation` on any of
+  them (in a fit config, `[config] allow_forcing_extrapolation = true`) holds
+  the forcing's end value instead, prints one warning per forcing naming its
+  range and the span held, and records the override in each `run.json` the
+  command writes. The override is part of the run's identity, so a run under it
+  and the same run without it are two runs: neither is served the other's stored
+  result.
 
 - **`simulate` goes forward; `fit` goes backward.** Simulation maps parameters →
   data; fitting maps data → parameters. A sweep is many forward runs, never an

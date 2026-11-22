@@ -139,7 +139,7 @@ fn write_data(path: &Path, n_rows: usize) {
 
 /// A minimal fit toml. Only `[data.observations]` is consulted when resolving
 /// anchors; the rest is the schema-required minimum. A POSTERIOR method (pmmh),
-/// deliberately tiny, because `fit predict` draws bands and refuses an
+/// deliberately tiny, because `camdl predict` draws bands and refuses an
 /// optimizer-only fit.
 fn write_fit_toml(dir: &Path, model: &Path, data: &Path) -> PathBuf {
     let toml = dir.join("fit.toml");
@@ -401,7 +401,7 @@ fn an_anchored_horizon_resolves_and_sets_the_grid() {
 /// The proposal's red test for the sentinel decision, end to end.
 ///
 /// Model horizon `last_obs + 4 'weeks`, scenario horizon `last_obs + 8 'weeks`.
-/// `fit predict` emits at the OBSERVED times, so it cannot honour a scenario's
+/// `camdl predict` emits at the OBSERVED times, so it cannot honour a scenario's
 /// own window — and must SAY so rather than silently drop it. That refusal is
 /// `refuse_scenario_horizon`, which works by comparing the two horizons for
 /// equality. With the first draft's placeholder `t_end` both sides would have
@@ -433,14 +433,14 @@ fn predict_refuses_a_scenario_horizon_that_differs_after_resolution() {
         String::from_utf8_lossy(&fit.stderr)
     );
 
-    // The stored fit run, which is what `fit predict` takes, read from the
+    // The stored fit run, which is what `camdl predict` takes, read from the
     // store the fit file names.
     let store = tmp.path().join("results");
     let segment = fit_store_support::the_run(&store);
 
     let predict = || -> (bool, String) {
         let o = Command::new(&bin).env_remove("CLICOLOR_FORCE").env("CAMDL_STORE", isolated_store())
-            .args(["fit", "predict"])
+            .args(["predict"])
             .arg(&segment)
             .args(["--scenario", "forecast"])
             .args(["--n-draws", "5"])
@@ -448,7 +448,7 @@ fn predict_refuses_a_scenario_horizon_that_differs_after_resolution() {
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
             .output()
-            .expect("spawn fit predict");
+            .expect("spawn predict");
         (o.status.success(), String::from_utf8_lossy(&o.stderr).into_owned())
     };
 
@@ -973,25 +973,25 @@ fn anchors_resolve_at_the_step_the_fit_runs_at() {
         "data at multiples of the fit's dt = 0.5 must anchor:\n{stderr}"
     );
 
-    // `fit predict` reads the stored fit; it must not refuse the anchors.
+    // `camdl predict` reads the stored fit; it must not refuse the anchors.
     let store = tmp.path().join("results");
     let segment = fit_store_support::the_run(&store);
     let o = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .args(["fit", "predict"])
+        .args(["predict"])
         .arg(&segment)
         .args(["--n-draws", "5"])
         .env("CAMDL_STORE", &store)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
         .output()
-        .expect("spawn fit predict");
+        .expect("spawn predict");
     let stderr = String::from_utf8_lossy(&o.stderr);
     // Half-day observation times need a finer output grid than this model has,
     // so predict can refuse later for that reason; it must not refuse the
     // anchors themselves.
     assert!(
         !stderr.contains("resolving this model's observation anchors"),
-        "fit predict must anchor at the fit's dt:\n{stderr}"
+        "predict must anchor at the fit's dt:\n{stderr}"
     );
 }
 

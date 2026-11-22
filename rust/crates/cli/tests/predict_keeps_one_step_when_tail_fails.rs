@@ -1,4 +1,4 @@
-//! `fit predict` keeps what it computed when the free-forward tail refuses.
+//! `camdl predict` keeps what it computed when the free-forward tail refuses.
 //!
 //! The one-step-ahead band and the free-forward tail are two different objects.
 //! The first is data-conditioned — a bootstrap filter over the observed rows,
@@ -15,7 +15,7 @@
 //! complete object.
 //!
 //! The tail failure used here is a scenario whose declared `simulate { to }`
-//! differs from the model's (`refuse_scenario_horizon`, gh#561): `fit predict`
+//! differs from the model's (`refuse_scenario_horizon`, gh#561): `camdl predict`
 //! replays every scenario at the model's own horizon, so it cannot honour that
 //! window and says so. It is deterministic, cheap, and needs no pathological
 //! model.
@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The prediction folder under the store at `store` that the latest
-/// `fit predict` wrote: the one whose `report*.json` (one written by every
+/// `camdl predict` wrote: the one whose `report*.json` (one written by every
 /// predict) is newest.
 fn latest_prediction(store: &Path) -> PathBuf {
     fit_store_support::predictions(store)
@@ -175,7 +175,7 @@ fn a_refused_tail_still_writes_the_one_step_artifact_and_records_the_failure() {
     let out = run(
         &bin,
         &tmp,
-        &["fit", "predict", "@fit", "--scenario", "longer"],
+        &["predict", "@fit", "--scenario", "longer"],
     );
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
@@ -235,7 +235,7 @@ fn a_refused_tail_still_writes_the_one_step_artifact_and_records_the_failure() {
         stderr.contains("the free-forward tail"),
         "stderr names what failed:\n{stderr}"
     );
-    // The written files are listed on stderr: `fit predict` is not a report
+    // The written files are listed on stderr: `camdl predict` is not a report
     // command, so its stdout carries nothing (the CLI reporting rule).
     assert!(
         stderr.lines().any(|l| l.starts_with("wrote ")),
@@ -268,7 +268,7 @@ fn an_unhonourable_scenario_is_still_a_usage_error_when_no_tail_was_asked_for() 
         &bin,
         &tmp,
         &[
-            "fit", "predict", "@fit", "--scenario", "longer",
+            "predict", "@fit", "--scenario", "longer",
             "--mode", "one_step",
         ],
     );

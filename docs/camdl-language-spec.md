@@ -5375,7 +5375,7 @@ at_the_start   = value_at(N0 - S, first_obs)
 ```
 
 An anchor's value depends on the data and is resolved by the command that
-binds it (`fit predict`). The offset is folded to model time when the model is
+binds it (`camdl predict`). The offset is folded to model time when the model is
 compiled, so the compiled model does not depend on the data. A forward
 `camdl simulate` of a model with an anchored `value_at` is refused with an
 error naming the quantity, because a simulation binds no observed data.
@@ -5404,12 +5404,12 @@ from its quantiles.
 
 **Where quantities are computed.** Quantities are computed by
 `camdl simulate --quantities-out DIR`, for a single run, replicates, or
-prior-predictive draws (`--draws`), and by `fit predict` over a fitted
+prior-predictive draws (`--draws`), and by `camdl predict` over a fitted
 posterior. Without `--quantities-out`, `simulate` prints a note and computes
 none. The tables are `quantities/<name>.tsv`, a bare `value` for a single run
 and quantiles for an ensemble, with a `quantities.json` manifest giving each
-quantity's shape, reduction and censoring; a prediction `fit predict` stores
-names the directory `quantities-model/`. The files a `fit predict` writes are
+quantity's shape, reduction and censoring; a prediction `camdl predict` stores
+names the directory `quantities-model/`. The files a `camdl predict` writes are
 specified in the run spec (§2.2.2, §2.2.3).
 
 **Run identity.** Quantities are reports computed from a run, so adding or
@@ -5431,7 +5431,7 @@ models share one reporting vocabulary:
 
 ```
 camdl simulate model.camdl --quantities reporting/national.camdl --quantities-out out/
-camdl fit predict @jigawa-baseline --quantities reporting/national.camdl
+camdl predict @jigawa-baseline --quantities reporting/national.camdl
 ```
 
 The file is compiled with the model, so its body is resolved against the
@@ -5448,9 +5448,9 @@ file's path and SHA-256 digest. Two vocabularies applied to one run therefore
 write two tables, and a formula corrected in place writes a new table. Run
 identity is unchanged.
 
-A fit stores the model IR it ran on, and `fit predict` reads that stored IR, so
+A fit stores the model IR it ran on, and `camdl predict` reads that stored IR, so
 editing a formula in the model source does not change what an existing fit
-reports; `fit predict --quantities` does. The vocabulary is compiled against the
+reports; `camdl predict --quantities` does. The vocabulary is compiled against the
 fit's model source and refused unless that source is still the model the fit
 ran on. The comparison excludes quantities and contrasts, so a source edited
 only in its reporting blocks is accepted.
@@ -5504,7 +5504,7 @@ contrasts {
 
 **Meaning.** Differencing two independently simulated arms by hand mixes the
 intervention's effect with the Monte Carlo noise of two unrelated random draws.
-`fit predict` instead runs both arms from one shared state. It compares the
+`camdl predict` instead runs both arms from one shared state. It compares the
 intervention sets of the two runs to find the toggled intervention, and forks
 at the last saved trajectory snapshot strictly before the time that
 intervention fires on the run's grid (§13.2: an intervention declared at 2.4
@@ -5520,10 +5520,10 @@ interventions are toggled, the fork precedes the earliest. The results are
 banded over the draws that can be forked into `contrasts/<name>.tsv`. An
 operand of series shape gives a series contrast; a scalar gives a scalar one.
 
-Contrasts are computed only by `fit predict`, only on a chain-binomial fit
+Contrasts are computed only by `camdl predict`, only on a chain-binomial fit
 whose posterior draws carry a saved latent path, and only over those draws;
-`fit predict` says how many draws that is when it is fewer than all. On any
-other fit, `fit predict` skips the contrasts with a note. It also skips, with a
+`camdl predict` says how many draws that is when it is fewer than all. On any
+other fit, `camdl predict` skips the contrasts with a note. It also skips, with a
 note naming the contrast:
 
 - a contrast whose arms toggle no intervention, so that they differ only in
@@ -5541,11 +5541,11 @@ as a `first_above` that never crosses. A scalar contrast drops the draw from its
 band; a series contrast drops only the affected time cells, so the draw's other
 snapshots still count. The band's `n_used` column gives, per cell, the number of
 draws it was computed over, and a result computed from a censored operand is
-censored. For each contrast with at least one such draw, `fit predict` prints
+censored. For each contrast with at least one such draw, `camdl predict` prints
 one line on stderr:
 
 ```text
-fit predict: contrast 'rel': 3 of 200 draws undefined (denominator 0); excluded from the band, see n_used
+predict: contrast 'rel': 3 of 200 draws undefined (denominator 0); excluded from the band, see n_used
 ```
 
 The count is of draws with at least one undefined cell. If every draw is
@@ -5898,7 +5898,7 @@ A run resolves the horizon once, from the observation times it binds, prints
 the resolved value on stderr, and substitutes it into the model its identity is
 computed from, so a run under one data release is never served from the store
 for another. Every command that binds observation data resolves anchors this
-way: `camdl simulate --fit <fit.toml | fit run dir>`, `fit run`, `fit predict`,
+way: `camdl simulate --fit <fit.toml | fit run dir>`, `fit run`, `camdl predict`,
 and `pfilter` and `profile`, which take the observation window from what they
 bind through `--data` or `--fit`. A command that binds no data
 refuses an anchored model, naming the anchored construct.
@@ -5960,7 +5960,7 @@ serves several data windows. In order of precedence:
 `origin`, or an anchor with a bare-word offset (`"first_obs - 1 week"`). The
 override is applied as an anchored start is, so it enters the run's identity
 through the model and moves the same derived starts. A stored fit records the
-start it was fitted from, and `fit predict` and `simulate --fit <run dir>`
+start it was fitted from, and `camdl predict` and `simulate --fit <run dir>`
 replay that start. `--from` is refused together with `--init-state`, which sets
 the start itself.
 

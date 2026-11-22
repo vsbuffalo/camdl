@@ -14,12 +14,12 @@ mod canonical_json; // canonical JSON text and the finiteness gate for values an
 mod resolve;        // Resolve bridge: CLI inputs → runid identity (CAS run-identity refactor, gh#147)
 mod store_migrate;  // `camdl dev migrate`: raise store folders to the current layout, in place
 mod run_meta;       // cross-cutting run-metadata value types (FitAlgorithm, Backend, provenance records, FitSidecar)
-mod posterior_draws; // resolve a fit run's canonical posterior draws (--draws posterior, fit predict)
+mod posterior_draws; // resolve a fit run's canonical posterior draws (--draws posterior, predict)
 mod chain_index;    // the chain number, counted from 0: the one index base every fit surface names (gh#990)
 mod chain_selection; // read-side --exclude-chains: the one chain filter over a posterior cloud
 mod quantile; // shared quantile reduction + numeric formatting (proposal 2026-08-11 §3.6)
 mod quantities_file; // `--quantities FILE`: a separable reporting vocabulary + its artifact key
-mod quantity_output; // generated-quantities banding + tidy-TSV rendering (shared by fit predict + simulate)
+mod quantity_output; // generated-quantities banding + tidy-TSV rendering (shared by predict + simulate)
 mod obs_anchor;     // gh#616: runtime resolution of a model's observation anchors
 mod forcing_extrapolation; // a forcing evaluated outside its range: refuse, or hold under the override
 mod obs_emit;       // gh#833: what `simulate --obs` writes per stream, and over which period
@@ -41,6 +41,7 @@ mod prequential_out; // the one prequential.tsv/.json writer (gh#650)
 mod pfilter_store;  // camdl pfilter on the run store: its identity, result and by-products
 mod fit_store;      // a fit on the run store: the problem, its runs and their predictions
 mod fit_command;    // camdl fit run on the run store: the problems, the runs on each, the method under each claim
+mod predict_command; // camdl predict on the run store: a prediction from a stored fit run's posterior
 mod store_commands; // `camdl status`, `verify`, `clean`, `reindex`: the run store's maintenance commands
 mod camdl_store;    // camdl on the run store: ambient identity, kinds, root, content artifacts
 mod input_fixtures; // the second values and fixtures of the input-class checks
@@ -176,6 +177,10 @@ pub(crate) enum Command {
     /// Inference pipeline (MLE, posterior sampling, evaluation)
     #[command(subcommand)]
     Fit(FitCmd),
+
+    /// Predict from a stored fit run's posterior: the free-forward and
+    /// one-step bands, or a forecast
+    Predict(args::PredictArgs),
 
     /// Standalone bootstrap particle filter at fixed parameters
     Pfilter(args::PfilterArgs),
@@ -403,8 +408,9 @@ pub(crate) enum FitCmd {
     Table(args::FitTableArgs),
     /// Derive a new fit.toml from an existing one
     New(args::FitNewArgs),
-    /// Write the free-forward posterior predictive (predicted-vs-observed) artifact
-    Predict(args::FitPredictArgs),
+    /// (removed) A prediction is `camdl predict RUN`
+    #[command(hide = true)]
+    Predict(args::FitPredictRemovedArgs),
     /// List supported (algorithm, backend) pairs and their descriptions
     Methods,
 }
@@ -584,7 +590,15 @@ fn main() {
         Command::Fit(FitCmd::Diff(a))   => fit::cmd_fit_diff(&a, compile),
         Command::Fit(FitCmd::Table(a))  => fit::cmd_fit_table(&a),
         Command::Fit(FitCmd::New(a))    => fit::cmd_fit_new(&a, compile),
-        Command::Fit(FitCmd::Predict(a)) => fit::predict::cmd_fit_predict(&a, compile),
+        Command::Fit(FitCmd::Predict(_)) => predict_command::refuse_fit_predict(),
+        Command::Predict(a)             => predict_command::cmd_predict(args::PredictInvocation {
+            args: a,
+            no_licm: cli.global.no_licm,
+            no_ir_cache: cli.global.no_ir_cache,
+            verbosity: cli.global.verbosity,
+            progress: cli.global.progress,
+            no_progress: cli.global.no_progress,
+        }),
         Command::Fit(FitCmd::Methods)   => fit::cmd_fit_methods(),
         Command::Label(a)               => fit::cmd_label(&a),
         Command::Pfilter(a)             => pfilter::cmd_pfilter(args::PfilterInvocation {
@@ -1617,7 +1631,7 @@ fn run_simulate(inv: args::SimulateInvocation) {
         scenario_name: None, // set per-scenario in the loop
         t_end_override, // gh#626: keys the CAS identity below; cells get it via the job
         t_start_override, // `--from` / `[simulate] from`, moved into each cell's model
-        // `simulate` records the model's own output schedule; only `fit predict`
+        // `simulate` records the model's own output schedule; only `camdl predict`
         // has forecast-row boundaries to add.
         required_output_times: Vec::new(),
         // gh#641: assigned PER CELL by `engine::build_cell_sim_run` (replicate i
@@ -2040,7 +2054,7 @@ fn run_simulate(inv: args::SimulateInvocation) {
                 .unwrap_or("posterior");
             // gh#630 (ebola F35): never silently replay the full cloud — a
             // 60k-draw posterior is hours of forward solves and a 21 MB
-            // --draws-out. Same strided default cap as `fit predict`
+            // --draws-out. Same strided default cap as `camdl predict`
             // (never front-biased), raised or lowered with --n-draws.
             let cap = a.n_draws.unwrap_or(crate::fit::predict::DEFAULT_PREDICT_DRAWS);
             let total = loaded.len();
@@ -2577,7 +2591,7 @@ fn resolve_sim_config(
     // keyed off the model as loaded here, not off the schedule
     // `resolve_run_model` hands the backend, so a content-addressed run
     // carrying one would store two different trajectories under one address.
-    // No such caller exists — only `fit predict` sets them, and its replay
+    // No such caller exists — only `camdl predict` sets them, and its replay
     // writes no leaf — so this refuses rather than lets a future one discover
     // it as a stale cache hit.
     if !run.required_output_times.is_empty() {
@@ -2590,7 +2604,7 @@ fn resolve_sim_config(
         );
     }
     // The binomial sampler changes every chain-binomial draw and is not in the
-    // run identity, for the same reason: only `fit predict` sets one other
+    // run identity, for the same reason: only `camdl predict` sets one other
     // than BTPE (D78), and its replay writes no leaf.
     if run.binomial != sim::rng::BinomialAlgorithm::Btpe {
         return Err(format!(
@@ -2863,7 +2877,7 @@ fn simulate_fit_problem(
     })
 }
 
-/// The fold over a config already in hand. Split out so `fit predict` — which
+/// The fold over a config already in hand. Split out so `camdl predict` — which
 /// has resolved its config long before it could look up a `--fit` ref —
 /// resolves anchors through the SAME reader as `simulate`, rather than growing a
 /// second one that could disagree about which rows count as observation times.
@@ -3132,8 +3146,8 @@ fn check_obs_times_on_snapshot_grid(
     // The guidance deliberately states the INVARIANT rather than naming one fix.
     // Observation times reach this check from two unrelated places — a model's
     // `emit_schedule` (simulate/synthetic) and a loaded data file's time
-    // column (`fit predict`) — and advice that fits one is wrong for the other.
-    // Telling a `fit predict` user to "change the emit schedule" is nonsense:
+    // column (`camdl predict`) — and advice that fits one is wrong for the other.
+    // Telling a `camdl predict` user to "change the emit schedule" is nonsense:
     // there isn't one, and they cannot rewrite their data's dates.
     Err(format!(
         "observation stream '{}' needs a value at t = {bad}, which is not a \
@@ -3149,7 +3163,7 @@ fn check_obs_times_on_snapshot_grid(
          `output {{ trajectories {{ every = ... }} }}`.\n  \
          If these times come from an `emit_schedule`, make it a multiple of \
          the output cadence (or widen the output schedule to match). If they \
-         come from a data file — `fit predict` projects at the observed times, \
+         come from a data file — `camdl predict` projects at the observed times, \
          not an `emit_schedule` — the output schedule must be fine enough to \
          include them. If the run's horizon comes from a scenario's \
          `simulate {{ to }}` or a `--to` override extending past an \
@@ -3174,7 +3188,7 @@ pub(crate) fn run_start_of(traj: &sim::Trajectory, model: &ir::Model) -> f64 {
 /// Project a stream's observed quantity for each row — the state at an
 /// instant, or the flow over `[start, stop)` — off the recorded trajectory.
 /// One walk serves every caller: the synthetic emitters (rows planned from the
-/// stream's declaration), `fit predict` (rows from the bound data) and the
+/// stream's declaration), `camdl predict` (rows from the bound data) and the
 /// obs-sourced quantities (gh#833).
 ///
 /// Both endpoints of an interval row must be recorded snapshots. Between

@@ -3,7 +3,7 @@
 //!
 //! The reported case: `growth = value_at(I, last_obs) / value_at(I, last_obs -
 //! 2 'weeks)` divides by an empty compartment on 3 of 200 draws — an ordinary
-//! member of that posterior, not a corrupt run — and `camdl fit predict` wrote
+//! member of that posterior, not a corrupt run — and `camdl predict` wrote
 //! **nothing at all**: no `predictive/`, no `observed/`, no bands for any of
 //! four observation streams, and none of the other 21 quantities. That cost
 //! four of five arms of a model comparison their entire posterior predictive.
@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The stored prediction under `seg` (a run folder, or any folder above
-/// runs) whose `report*.json` is newest: the latest `fit predict`'s output. A
+/// runs) whose `report*.json` is newest: the latest `camdl predict`'s output. A
 /// path that does not exist while nothing has been predicted.
 fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
     fit_store_support::predictions(seg)
@@ -176,7 +176,7 @@ fn one_non_finite_quantity_drops_out_and_everything_else_is_written() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "@fit"]);
+    let out = run(&bin, &tmp, &["predict", "@fit"]);
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
 

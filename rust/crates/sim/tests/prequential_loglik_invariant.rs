@@ -1,6 +1,6 @@
 //! Byte-identical-loglik property of the prequential recorder (gh#269).
 //!
-//! The one-step-ahead posterior predictive (`camdl fit predict --mode
+//! The one-step-ahead posterior predictive (`camdl predict --mode
 //! one_step`) runs a bootstrap filter per posterior draw with
 //! `record_prequential = true`, reading the per-particle predictive samples it
 //! captures. That recording MUST NOT perturb the filter's log-likelihood — the

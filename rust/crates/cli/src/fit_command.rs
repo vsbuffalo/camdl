@@ -368,7 +368,7 @@ fn run_fit(mut out: Out, cx: FitCommand<'_>) -> Vec<String> {
         ).unwrap_or_else(|e| out.fail(format!("error: {e}")));
         let crate::camdl_store::CompiledParts { model: part, quantities, labels, provenance } = parts;
         // The quantities and contrasts do not change the fit, so the problem
-        // names them as lineage: `fit predict` evaluates them.
+        // names them as lineage: `camdl predict` evaluates them.
         let quantities = store.put::<crate::camdl_store::Quantities>(quantities, &labels, &store::Provenance::none(), info)
             .and_then(|s| s.dep(crate::camdl_store::Quantities::FILE))
             .unwrap_or_else(|e| out.fail(format!("error: storing the quantities: {e}")));

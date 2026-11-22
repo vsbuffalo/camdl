@@ -1,6 +1,6 @@
 //! gh#695 — `--exclude-chains` must reach the counterfactual contrast path.
 //!
-//! `fit predict` applies a read-side chain selection to the free-forward
+//! `camdl predict` applies a read-side chain selection to the free-forward
 //! posterior cloud, and must apply it to the `(θ, X)` joint the contrast
 //! reducer forks from too; otherwise `contrasts/<name>.tsv` bands over the very
 //! chain `predictive.json`'s `chain_selection` records as excluded — the
@@ -249,7 +249,7 @@ fn predictive_n_draws(seg: &Path, stream: &str, excl: Option<&str>) -> Vec<usize
     seen
 }
 
-/// The `chain_selection` object `fit predict` stamps into the manifest at the
+/// The `chain_selection` object `camdl predict` stamps into the manifest at the
 /// address the run wrote to.
 fn manifest_chain_selection(seg: &Path, excl: Option<&str>) -> Option<serde_json::Value> {
     let path = predict_file(seg, &format!("{}.json", addr("predictive", excl)));
@@ -261,7 +261,7 @@ fn manifest_chain_selection(seg: &Path, excl: Option<&str>) -> Option<serde_json
 }
 
 fn predict(bin: &Path, tmp: &Path, extra: &[&str]) -> std::process::Output {
-    let mut args = vec!["fit", "predict", "--fit", "@fit", "--mode", "free_forward"];
+    let mut args = vec!["predict", "@fit", "--mode", "free_forward"];
     args.extend_from_slice(extra);
     run(bin, tmp, &args)
 }
@@ -288,7 +288,7 @@ fn contrast_bands_over_the_retained_chains_only() {
     let out = predict(&bin, &tmp, &[]);
     assert!(
         out.status.success(),
-        "fit predict failed:\nstderr={}",
+        "predict failed:\nstderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
     let averted = contrast_path(&seg, "averted", None);
@@ -308,7 +308,7 @@ fn contrast_bands_over_the_retained_chains_only() {
     let out = predict(&bin, &tmp, &["--exclude-chains", "1"]);
     assert!(
         out.status.success(),
-        "fit predict --exclude-chains failed:\nstderr={}",
+        "predict --exclude-chains failed:\nstderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
@@ -372,7 +372,7 @@ fn contrast_bands_over_the_retained_chains_only() {
     let out = predict(&bin, &tmp, &[]);
     assert!(
         out.status.success(),
-        "fit predict failed:\nstderr={}",
+        "predict failed:\nstderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
     assert_eq!(

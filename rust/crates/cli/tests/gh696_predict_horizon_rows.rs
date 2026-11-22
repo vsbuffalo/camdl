@@ -1,7 +1,7 @@
-//! gh#696 — `fit predict` emits the FREE-FORWARD stream bands out to the
+//! gh#696 — `camdl predict` emits the FREE-FORWARD stream bands out to the
 //! model's own horizon, not only at the observation times.
 //!
-//! Within one `fit predict` run the trajectory is integrated to the model
+//! Within one `camdl predict` run the trajectory is integrated to the model
 //! horizon: `quantities/` carries rows out there, while `predictive/` used to
 //! stop at the last observation. Same simulation, two artifacts, two time
 //! axes — so a scenario's projected epidemic curve existed internally and was
@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The stored prediction under `seg` (a run folder, or any folder above
-/// runs) whose `report*.json` is newest: the latest `fit predict`'s output. A
+/// runs) whose `report*.json` is newest: the latest `camdl predict`'s output. A
 /// path that does not exist while nothing has been predicted.
 fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
     fit_store_support::predictions(seg)
@@ -77,7 +77,7 @@ fn run(bin: &Path, dir: &Path, args: &[&str]) -> std::process::Output {
         .expect("spawn camdl")
 }
 
-/// `<sub>/<stream>.tsv` in the latest `fit predict`'s output under the store
+/// `<sub>/<stream>.tsv` in the latest `camdl predict`'s output under the store
 /// at `root`.
 fn find_artifact(root: &Path, sub: &str, stream: &str) -> Option<PathBuf> {
     let p = predict_out(root).join(sub).join(format!("{stream}.tsv"));
@@ -276,7 +276,7 @@ fn fit_then_predict(bin: &Path, tmp: &Path, predict_extra: &[&str]) -> std::proc
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    let mut args = vec!["fit", "predict", "--fit", "@fit"];
+    let mut args = vec!["predict", "@fit"];
     args.extend_from_slice(predict_extra);
     run(bin, tmp, &args)
 }
@@ -291,7 +291,7 @@ fn free_forward_bands_run_to_the_model_horizon() {
     let out = fit_then_predict(&bin, &tmp, &[]);
     assert!(
         out.status.success(),
-        "fit predict failed:\nstdout={}\nstderr={}",
+        "predict failed:\nstdout={}\nstderr={}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
@@ -379,14 +379,14 @@ fn free_forward_bands_run_to_the_model_horizon() {
     assert_eq!(prev_max, 80.0, "the quantity series runs to the model horizon");
 
     // ── gh#561 stays intact: a scenario declaring its OWN horizon is still
-    //    refused, because `fit predict` runs the MODEL's window, not the
+    //    refused, because `camdl predict` runs the MODEL's window, not the
     //    scenario's. Extending to the model horizon must not open this door.
     let out = fit_then_predict(&bin, &tmp, &["--scenario", "longer"]);
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(
         !out.status.success(),
         "scenario `longer` declares to = 120 against a model horizon of 80; \
-         `fit predict` cannot honour it and must still refuse. stdout={}\nstderr={stderr}",
+         `camdl predict` cannot honour it and must still refuse. stdout={}\nstderr={stderr}",
         String::from_utf8_lossy(&out.stdout)
     );
     assert!(
@@ -407,7 +407,7 @@ fn horizon_equal_to_the_data_adds_no_rows() {
     let out = fit_then_predict(&bin, &tmp, &[]);
     assert!(
         out.status.success(),
-        "fit predict failed:\nstdout={}\nstderr={}",
+        "predict failed:\nstdout={}\nstderr={}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
@@ -508,7 +508,7 @@ thin = 1
     let out = fit_then_predict(&bin, &tmp, &[]);
     assert!(
         out.status.success(),
-        "fit predict failed:\nstdout={}\nstderr={}",
+        "predict failed:\nstdout={}\nstderr={}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );

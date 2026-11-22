@@ -433,7 +433,7 @@ fn simulate_without_scenario_emits_no_scenario_column() {
 /// Without this, `simulate` accumulates two cells into ONE scenario bucket and
 /// fails with "point-mode quantities require exactly one realization" only
 /// after the whole grid has simulated and committed leaves — a late, confusing
-/// failure for an input that is never what the user meant. `fit predict` has
+/// failure for an input that is never what the user meant. `camdl predict` has
 /// the same gap with a worse symptom (gh#579), so both verbs route through one
 /// check.
 #[test]

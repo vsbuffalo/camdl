@@ -45,7 +45,7 @@
 //! neither.
 //!
 //! Who reads the resolved config: a run-directory, label or run-id handle
-//! (`fit predict <leaf>`, `compare <leaf>`) recovers the problem from it, and
+//! (`camdl predict <leaf>`, `compare <leaf>`) recovers the problem from it, and
 //! so runs under the override a flag set (gh#1268) and at a sweep point's own
 //! values; `fit table`'s config diff compares it. A `fit.toml` handle names
 //! only the run the file alone makes (gh#896), so it refuses a flag-made fit,

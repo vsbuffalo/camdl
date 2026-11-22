@@ -714,7 +714,7 @@ fn evaluate_quantities(
         return Err(format!(
             "quantity `{}` reads `value_at` at an observation anchor (`last_obs` / `first_obs`, with or \
              without an offset), but a forward simulation has no observed data to anchor to. Evaluate it \
-             via `fit predict` (where the fit's data supplies the observation times), or use a literal \
+             via `camdl predict` (where the fit's data supplies the observation times), or use a literal \
              time: `value_at(expr, date(\"...\"))`.",
             eval.obs_anchor_quantity_names().join("`, `"),
         ));

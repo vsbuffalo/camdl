@@ -1,5 +1,5 @@
 //! gh#1233: `camdl show` lists the fixed-origin forecasts that
-//! `fit predict --mode forecast` stores under its run's
+//! `camdl predict --mode forecast` stores under its run's
 //! `predict/forecast-<id12>/`, and states each one's origin, horizon, chain
 //! selection and particle count.
 //!
@@ -119,8 +119,8 @@ fn show_lists_each_forecast_with_its_origin_horizon_chains_and_particles() {
     let dir = tmp.path();
     let run = fit(dir);
     let seg = run.to_string_lossy().into_owned();
-    ok(dir, &["fit", "predict", &seg, "--mode", "forecast", "--horizon", "4 weeks"]);
-    ok(dir, &["fit", "predict", &seg, "--mode", "forecast", "--horizon", "2 weeks",
+    ok(dir, &["predict", &seg, "--mode", "forecast", "--horizon", "4 weeks"]);
+    ok(dir, &["predict", &seg, "--mode", "forecast", "--horizon", "2 weeks",
               "--exclude-chains", "1", "--particles", "50"]);
     let (full, subset) = forecast_dirs(&run);
 

@@ -140,7 +140,7 @@ pub(crate) struct ResolvedCell {
     /// The evaluator settings the compiled model carries ([`ResolvedCell::compile`]).
     pub eval: sim::EvalSettings,
     /// Snapshot times the run must record beyond the model's own schedule
-    /// (`fit predict`'s forecast rows); applied to `run.model`, and refused by
+    /// (`camdl predict`'s forecast rows); applied to `run.model`, and refused by
     /// the store identity, which has no route for them.
     pub required_output_times: Vec<f64>,
 }

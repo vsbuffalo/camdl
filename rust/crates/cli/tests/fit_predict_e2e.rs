@@ -1,5 +1,5 @@
-//! End-to-end acceptance for `camdl fit predict` — the free-forward posterior
-//! predictive verb. Runs a real (tiny) PGAS fit, then `fit predict`, and checks
+//! End-to-end acceptance for `camdl predict` — the free-forward posterior
+//! predictive verb. Runs a real (tiny) PGAS fit, then `camdl predict`, and checks
 //! the two tidy artifacts have the typed-axis columns the proposal specifies.
 //! Also checks the safety property: an optimizer (IF2) fit is refused, never
 //! silently turned into a band.
@@ -11,7 +11,7 @@ use std::process::Command;
 
 mod fit_store_support;
 
-/// The prediction folder the latest `fit predict` in the store `root` wrote:
+/// The prediction folder the latest `camdl predict` in the store `root` wrote:
 /// of every `predict/<mode>-<id12>/` folder in it, the one whose
 /// `report*.json` (one written by every predict) is newest. A path that does
 /// not exist while nothing has been predicted.
@@ -187,10 +187,10 @@ thin = 1
     );
 
     // Predict.
-    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "@fit"]);
+    let out = run(&bin, &tmp, &["predict", "@fit"]);
     assert!(
         out.status.success(),
-        "fit predict failed:\nstdout={}\nstderr={}",
+        "predict failed:\nstdout={}\nstderr={}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
@@ -207,7 +207,7 @@ thin = 1
     );
     assert!(
         !predict_stderr.contains("stage"),
-        "and `fit predict` must not print the word `stage` \
+        "and `camdl predict` must not print the word `stage` \
          anywhere:\n{predict_stderr}"
     );
 
@@ -511,14 +511,14 @@ thin = 1
     // Two scenarios + free_forward only (keeps the test fast and the assertion
     // about scenario stacking unambiguous).
     let out = run(&bin, &tmp, &[
-        "fit", "predict", "--fit", "@fit",
+        "predict", "@fit",
         "--mode", "free_forward",
         "--scenario", "low_rho",
         "--scenario", "high_rho",
     ]);
     assert!(
         out.status.success(),
-        "two-scenario fit predict failed:\nstdout={}\nstderr={}",
+        "two-scenario predict failed:\nstdout={}\nstderr={}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
@@ -726,14 +726,14 @@ thin = 1
 
     // BOTH the scale scenario and the no-overlay baseline (fitted) in one run.
     let out = run(&bin, &tmp, &[
-        "fit", "predict", "--fit", "@fit",
+        "predict", "@fit",
         "--mode", "free_forward",
         "--scenario", "double_rho",
         "--seed", "1",
     ]);
     assert!(
         out.status.success(),
-        "scale-scenario fit predict failed:\nstdout={}\nstderr={}",
+        "scale-scenario predict failed:\nstdout={}\nstderr={}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
@@ -745,12 +745,12 @@ thin = 1
     // Run a SECOND predict with NO scenario to get the fitted baseline (the
     // explicit --scenario above suppresses the no-overlay row).
     let out2 = run(&bin, &tmp, &[
-        "fit", "predict", "--fit", "@fit",
+        "predict", "@fit",
         "--mode", "free_forward",
         "--seed", "1",
     ]);
     assert!(out2.status.success(),
-        "baseline fit predict failed:\nstderr={}", String::from_utf8_lossy(&out2.stderr));
+        "baseline predict failed:\nstderr={}", String::from_utf8_lossy(&out2.stderr));
     let base_pred = find_artifact(&tmp.join("results"), "predictive", "weekly_cases")
         .expect("predictive/weekly_cases.tsv (baseline) must be written");
     let base_by_scen = read_q50_by_scenario(&base_pred);
@@ -820,7 +820,7 @@ fn fit_predict_scenario_named_fitted_in_model_is_rejected() {
 #[test]
 fn fit_predict_is_self_contained_after_loose_camdl_removed() {
     // gh#322: `fit run` stores the compiled IR in the run store, so
-    // `fit predict` resolves the model from that copy — not from the loose
+    // `camdl predict` resolves the model from that copy — not from the loose
     // `.camdl`, which may have moved. We delete the source `.camdl` after the
     // fit; predict must still succeed.
     let bin = skip_if_missing_binary();
@@ -862,11 +862,11 @@ thin = 1
     let out = run(
         &bin,
         &tmp,
-        &["fit", "predict", "--fit", "@fit", "--mode", "free_forward"],
+        &["predict", "@fit", "--mode", "free_forward"],
     );
     assert!(
         out.status.success(),
-        "fit predict must resolve the model from the archived IR after the loose \
+        "predict must resolve the model from the archived IR after the loose \
          .camdl is removed:\nstdout={}\nstderr={}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
@@ -912,10 +912,10 @@ thin = 1
     let hash8: String = fit_store_support::run_id(&the_run).chars().take(8).collect();
 
     // (1) Resolve by @label.
-    let out = run(&bin, &tmp, &["fit", "predict", "@jigawa-baseline", "--mode", "free_forward"]);
+    let out = run(&bin, &tmp, &["predict", "@jigawa-baseline", "--mode", "free_forward"]);
     assert!(
         out.status.success(),
-        "fit predict @label failed:\nstdout={}\nstderr={}",
+        "predict @label failed:\nstdout={}\nstderr={}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
@@ -925,16 +925,16 @@ thin = 1
     );
 
     // (2) Resolve by run id prefix (positional handle).
-    let out = run(&bin, &tmp, &["fit", "predict", &hash8, "--mode", "free_forward"]);
+    let out = run(&bin, &tmp, &["predict", &hash8, "--mode", "free_forward"]);
     assert!(
         out.status.success(),
-        "fit predict <hash> failed for prefix {hash8}:\nstdout={}\nstderr={}",
+        "predict <hash> failed for prefix {hash8}:\nstdout={}\nstderr={}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
 
     // (3) An unknown label is a typed not-found error, not a panic.
-    let out = run(&bin, &tmp, &["fit", "predict", "@nope", "--mode", "free_forward"]);
+    let out = run(&bin, &tmp, &["predict", "@nope", "--mode", "free_forward"]);
     assert!(!out.status.success(), "unknown @label must error");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("no stored result matches `@nope`"), "actionable not-found, got: {stderr}");
@@ -1048,7 +1048,7 @@ thin = 1
     // (1) No cap → the default (200) ≥ the cloud, so free-forward replays the
     // whole cloud and reports its full size ( > 10 ). Establishes the baseline
     // and confirms the cloud is bigger than the cap we test with.
-    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "@fit", "--mode", "free_forward"]);
+    let out = run(&bin, &tmp, &["predict", "@fit", "--mode", "free_forward"]);
     assert!(out.status.success(), "uncapped predict failed:\nstderr={}", String::from_utf8_lossy(&out.stderr));
     let pred = find_artifact(&tmp.join("results"), "predictive", "weekly_cases")
         .expect("predictive/weekly_cases.tsv (uncapped) must be written");
@@ -1059,7 +1059,7 @@ thin = 1
 
     // (2) --n-draws 10 → free-forward replays exactly 10 draws and reports 10.
     let out = run(&bin, &tmp, &[
-        "fit", "predict", "--fit", "@fit", "--mode", "free_forward", "--n-draws", "10",
+        "predict", "@fit", "--mode", "free_forward", "--n-draws", "10",
     ]);
     assert!(
         out.status.success(),
@@ -1106,7 +1106,7 @@ cooling = 0.7
     let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(out.status.success(), "if2 fit run failed");
 
-    let out = run(&bin, &tmp, &["fit", "predict", "--fit", "@fit"]);
+    let out = run(&bin, &tmp, &["predict", "@fit"]);
     assert!(
         !out.status.success(),
         "predict must refuse an optimizer fit (no posterior cloud), not exit 0"
@@ -1164,20 +1164,20 @@ thin = 1
             .collect()
     };
 
-    let plain = run(&bin, &tmp, &["fit", "predict", "--fit", &leaf]);
-    assert!(plain.status.success(), "fit predict failed:\n{}", String::from_utf8_lossy(&plain.stderr));
+    let plain = run(&bin, &tmp, &["predict", &leaf]);
+    assert!(plain.status.success(), "predict failed:\n{}", String::from_utf8_lossy(&plain.stderr));
     let first = addresses();
     assert_eq!(first.len(), 1, "{first:?}");
 
     let switched = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .args(["fit", "predict", "--fit", &leaf])
+        .args(["predict", &leaf])
         .current_dir(&tmp)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDL_STORE", tmp.join("results"))
         .env("CAMDL_EVAL_UNRESOLVED", "1")
         .output()
         .expect("spawn camdl");
-    assert!(switched.status.success(), "switched fit predict failed:\n{}", String::from_utf8_lossy(&switched.stderr));
+    assert!(switched.status.success(), "switched predict failed:\n{}", String::from_utf8_lossy(&switched.stderr));
     let both = addresses();
     assert_eq!(both.len(), 2, "the switched prediction must not share the default one's address: {both:?}");
     assert!(both.is_superset(&first), "and the default one's address is where it was");

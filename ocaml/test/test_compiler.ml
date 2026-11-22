@@ -3797,7 +3797,7 @@ let test_scenario_enable_known_intervention_compiles () =
     }
   |}) in ()
 
-(* 2026-06-27 scenario-aware fit predict: `fitted` is the reserved name for
+(* 2026-06-27 scenario-aware camdl predict: `fitted` is the reserved name for
    the no-overlay row in the `scenario` column. A preset by that name would
    shadow the reserved value, so the compiler rejects it (E291) with a
    migration-style diagnostic. *)

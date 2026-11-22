@@ -13,7 +13,7 @@
 //!     (and one fit, whether the start is written in the model or the config);
 //!     different starts are different runs.
 //!  4. An anchored start with no data is refused by name.
-//!  5. `pfilter --fit` and `fit predict` use the start the config gives.
+//!  5. `pfilter --fit` and `camdl predict` use the start the config gives.
 
 use std::path::{Path, PathBuf};
 mod fit_store_support;
@@ -281,7 +281,7 @@ fn one_start_by_two_spellings_is_one_run_and_two_starts_are_two() {
 
 /// The start a config gives is the fit's, by value: `[simulate] from` over an
 /// anchored model and a model written with that start as a literal are one
-/// fit, and `fit predict` replays them identically. `pfilter --fit` scores the
+/// fit, and `camdl predict` replays them identically. `pfilter --fit` scores the
 /// same model. A different start is a different fit.
 #[test]
 fn a_config_start_is_one_fit_with_the_literal_and_replays() {
@@ -318,9 +318,9 @@ fn a_config_start_is_one_fit_with_the_literal_and_replays() {
     assert_eq!(problem["simulate"]["from"].as_float(), Some(-2.0), "the fit stores the start it ran from");
 
     let predict = |p: &Project, seg: &Path| -> String {
-        ok(&camdl_in(p, &["fit", "predict", seg.to_str().unwrap(), "--n-draws", "3", "--seed", "1",
+        ok(&camdl_in(p, &["predict", seg.to_str().unwrap(), "--n-draws", "3", "--seed", "1",
                                    "--mode", "free_forward"], None),
-           "fit predict");
+           "predict");
         let dir = fit_store_support::predictions(seg).pop().expect("the prediction");
         std::fs::read_to_string(dir.join("predictive/cases.tsv")).unwrap()
     };

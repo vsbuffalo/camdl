@@ -1,4 +1,4 @@
-//! A command that reads a run's results — its posterior draws (`fit predict`,
+//! A command that reads a run's results — its posterior draws (`camdl predict`,
 //! `simulate --draws posterior`), its point estimate (`starts = { from_mle }`)
 //! — reads only a completed run, and refuses any other with the state its
 //! `run.json` gives: failed with its reason, failed with none recorded,
@@ -273,7 +273,7 @@ fn assert_damaged_record(said: &str, leaf: &Path, what: &str) {
         "{what} names the record and why:\n{said}");
 }
 
-/// `fit predict <leaf>` refuses a sampler leaf that did not complete, in each
+/// `camdl predict <leaf>` refuses a sampler leaf that did not complete, in each
 /// state, and writes no predictive for it.
 #[test]
 fn fit_predict_refuses_a_leaf_that_did_not_complete() {
@@ -282,19 +282,19 @@ fn fit_predict_refuses_a_leaf_that_did_not_complete() {
     let completed = json(&leaf.join("run.json"));
     for state in NotCompleted::ALL {
         state.apply(&leaf);
-        let out = run(dir, &["fit", "predict", &leaf.to_string_lossy(), "--n-draws", "4"]);
-        assert_refused(&out, &leaf, state, "fit predict");
+        let out = run(dir, &["predict", &leaf.to_string_lossy(), "--n-draws", "4"]);
+        assert_refused(&out, &leaf, state, "predict");
         assert!(!leaf.join("predict").exists(),
             "nothing is written for a {state:?} leaf: the run is refused before predict starts");
     }
     // A run-id prefix names the run at any state; it is refused the same way.
     NotCompleted::Failed.apply(&leaf);
     let prefix = fit_store_support::run_id(&leaf)[..12].to_string();
-    let out = run(dir, &["fit", "predict", &prefix, "--n-draws", "4"]);
-    assert_refused_as(&out, &prefix, &leaf, NotCompleted::Failed, "fit predict <run-id prefix>");
+    let out = run(dir, &["predict", &prefix, "--n-draws", "4"]);
+    assert_refused_as(&out, &prefix, &leaf, NotCompleted::Failed, "predict <run-id prefix>");
     // Restored, the completed leaf predicts.
     std::fs::write(leaf.join("run.json"), serde_json::to_vec_pretty(&completed).unwrap()).unwrap();
-    let out = run(dir, &["fit", "predict", &leaf.to_string_lossy(), "--n-draws", "4"]);
+    let out = run(dir, &["predict", &leaf.to_string_lossy(), "--n-draws", "4"]);
     assert!(out.status.success(), "a completed leaf predicts:\n{}", stderr(&out));
 }
 
@@ -314,7 +314,7 @@ fn simulate_from_the_posterior_of_a_leaf_that_did_not_complete_is_refused() {
 }
 
 /// A leaf handle whose `run.json` is not a run record is an error naming the
-/// leaf and why, from a reader of results (`fit predict`) and from a reader
+/// leaf and why, from a reader of results (`camdl predict`) and from a reader
 /// that shows any run (`fit summary`) alike, not a problem folder that
 /// "holds no completed fit run".
 #[test]
@@ -322,7 +322,7 @@ fn a_handle_whose_run_json_is_corrupt_is_an_error_naming_it() {
     let (tmp, leaf) = completed_pmmh();
     let dir = tmp.path();
     std::fs::write(leaf.join("run.json"), "{ \"format\": 1, \"status\": ").unwrap();
-    for args in [vec!["fit", "predict"], vec!["fit", "summary"]] {
+    for args in [vec!["predict"], vec!["fit", "summary"]] {
         let mut args = args;
         let handle = leaf.to_string_lossy().into_owned();
         args.push(&handle);

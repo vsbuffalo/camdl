@@ -18,7 +18,7 @@ for, is in [`camdl docs concepts`](concepts.md). How each algorithm works is in
 
 ```
 write model → check → simulate → synthetic recovery → choose a method
-            → write fit.toml → fit run → fit summary → fit predict → validate
+            → write fit.toml → fit run → fit summary → camdl predict → validate
 
 optional, when a fit needs them:
   design lhs (a design of parameter values) · if2 (a point estimate, profiles)
@@ -256,7 +256,7 @@ unless the fit file's `store` key or `CAMDL_STORE` names another root.
 camdl fit summary @baseline      # or the run folder `fit run` printed, or a run-id prefix
 ```
 
-Every fit command (`fit summary`, `fit predict`, `compare`) takes the same
+Every fit command (`fit summary`, `camdl predict`, `compare`) takes the same
 **handle**: an `@label`, a run-id prefix, or the run folder `camdl fit run`
 prints. A `fit.toml` is refused, with the runs it made listed: one file makes a
 new run whenever its data, seeds, a sweep or the camdl build changes. Each fit
@@ -279,15 +279,15 @@ then prints these blocks:
   sampling a side mode or a weakly identified ridge, or may not have mixed.
 
 To read the posterior of some chains only, give `--chains 0,1,2,4` (keep those
-chains) or `--exclude-chains 3,5` (drop those) to `fit summary`, `fit predict`,
-`fit table --quantity`, `compare`, `simulate --draws posterior` and
-`cat --stream draws.tsv`. The two flags name one selection two ways: on a
+chains) or `--exclude-chains 3,5` (drop those) to `fit summary`,
+`camdl predict`, `fit table --quantity`, `compare`, `simulate --draws posterior`
+and `cat --stream draws.tsv`. The two flags name one selection two ways: on a
 six-chain fit `--chains 0,1,2,4` and `--exclude-chains 3,5` are the same
-selection, and `fit predict` stores both under one name (`predictive-excl3_5/`).
-A selection is a view of the stored run and never re-runs it. It always prints a
-warning, because dropping chains biases the posterior toward the chains kept. To
-start a new fit from some chains of an earlier one, use `--starts-chains`
-(`fit-toml.md`, "Where a chain starts").
+selection, and `camdl predict` stores both under one name
+(`predictive-excl3_5/`). A selection is a view of the stored run and never
+re-runs it. It always prints a warning, because dropping chains biases the
+posterior toward the chains kept. To start a new fit from some chains of an
+earlier one, use `--starts-chains` (`fit-toml.md`, "Where a chain starts").
 
 `camdl fit summary --explain` adds a short definition of every column under the
 block it belongs to.
@@ -409,19 +409,19 @@ prequential elpd, and mechanism and prior sensitivity, is in
 
 ## 7. Validate the fit
 
-### Predicted-vs-observed in one verb: `camdl fit predict`
+### Predicted-vs-observed in one verb: `camdl predict`
 
 The workhorse posterior check — overlay the observed data on the fitted model's
 predictive band — is a single verb that reads the fit and writes a tidy,
 plot-ready artifact:
 
 ```bash
-camdl fit predict @baseline --stream onset
+camdl predict @baseline --stream onset
 # wrote camdl-store/<build>/fit/sle-…/runs/pgas-…/seed_1-…/predict/all-…/predictive/onset.tsv
 # wrote camdl-store/<build>/fit/sle-…/runs/pgas-…/seed_1-…/predict/all-…/observed/onset.tsv
 ```
 
-`fit predict` resolves the fit's canonical post-warm-up posterior draws,
+`camdl predict` resolves the fit's canonical post-warm-up posterior draws,
 forward-simulates each draw through the **real** observation model (sampling
 `y_rep`, not the projected mean, so observation noise is in the band),
 integrates over the cloud by pooling and quantiling, and writes two files under
@@ -522,14 +522,14 @@ all applicable for the fit's backend:
   posterior subsample (`--n-draws`, default 200); both horizons stack in the
   same file, distinguished by the `horizon` column.
 
-`fit predict` refuses an optimizer fit (IF2 / NLopt) with an actionable message
-— such a fit returns one best-fit point, not a distribution, so there is no
-posterior band to draw; get its parameters with
+`camdl predict` refuses an optimizer fit (IF2 / NLopt) with an actionable
+message — such a fit returns one best-fit point, not a distribution, so there is
+no posterior band to draw; get its parameters with
 `camdl fit summary <run>
 --params-only` and run a plug-in
 `camdl simulate --params …` instead.
 
-If the model declares a `quantities {}` block, `fit predict` also bands each
+If the model declares a `quantities {}` block, `camdl predict` also bands each
 derived quantity over the same posterior draws into
 `quantities-model/<name>.tsv`, inside the prediction's folder, with a
 `quantities.json` manifest. These are either **series** — a channel the model

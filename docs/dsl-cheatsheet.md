@@ -362,7 +362,7 @@ or one mixed with state/arithmetic, is `E289`. (`total`/`sum`, a _stratified_
 obs source, and a disk-replay `quantities` command are not in v1.1.)
 
 Output: one `quantities/<name>.tsv` per quantity (banded `q05…q95` over draws) +
-a `quantities.json` manifest — from `fit predict` (in the fit segment) and
+a `quantities.json` manifest — from `camdl predict` (in the fit segment) and
 `simulate --quantities-out <dir>` (a point `value` for a single run). A `time`
 reduction that never crosses is **right-censored** (reported via
 `n_value`/`n_censored`, not faked). Quantities are non-identity: adding a
@@ -491,8 +491,8 @@ before assuming the language doesn't do something — it usually does.
   sub-stages, so no new IR. New reserved word: `via`. See the section above.
 - **`quantities {}`** (2026-06-25) — generated quantities: named, non-scored
   reductions of a run (peak, time-to-peak, attack rate, integral, …) reported as
-  `quantities/<name>.tsv` from `fit predict` / `simulate --quantities-out`. New
-  reserved word: `quantities`; the reduction names (`final`, `time_of_max`,
+  `quantities/<name>.tsv` from `camdl predict` / `simulate --quantities-out`.
+  New reserved word: `quantities`; the reduction names (`final`, `time_of_max`,
   `first_above`, `integral`, …) are valid only inside the block (using one in a
   rate is **E290**). See the section above.
 - **`reactive_interventions {}`** (gh#204) — state/observation-triggered

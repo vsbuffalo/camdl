@@ -1,5 +1,5 @@
 //! gh#630 (ebola F35): `simulate --draws posterior` must never silently replay
-//! the full posterior cloud. `fit predict` caps at a strided 200 and says why;
+//! the full posterior cloud. `camdl predict` caps at a strided 200 and says why;
 //! simulate's `--n-draws` used to apply only to `--draws uniform/prior`, so a
 //! 60k-draw cloud replayed in full (hours of forward solves, a 21 MB
 //! --draws-out). Pinned here: `--n-draws N` caps the posterior replay to a

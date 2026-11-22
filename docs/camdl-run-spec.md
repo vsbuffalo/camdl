@@ -171,10 +171,10 @@ rather than resolved:
   neither. A `--params` / `--fixed-file` file is tier 3, below the scenario, and
   is not checked: a scenario overriding a parameter file is the intended
   layering. `pfilter` refuses `--scenario` with `--param` at parse time
-  (gh#194); `fit predict` and `fit run` take no tier-5 flag;
+  (gh#194); `camdl predict` and `fit run` take no tier-5 flag;
 
 - a scenario that `set`s or `scale`s a parameter a `--sweep`/`--sweep-file` grid
-  or a `--draws <file>` varies (`simulate`, `fit predict`, `fit run --sweep`;
+  or a `--draws <file>` varies (`simulate`, `camdl predict`, `fit run --sweep`;
   gh#572). Generated draws (`--draws prior|uniform|posterior`) are not checked:
   a scenario over them is the counterfactual those runs exist for;
 - a scenario that moves a parameter off the value a fit.toml's `[fixed]` gives
@@ -232,11 +232,11 @@ and the resolved source per parameter is recorded in `fit.meta.json`.
 **One job type behind the verb.** `camdl simulate` builds a `SimulateJob`
 (`sim_job.rs`) and hands it to one engine (`engine::run_job`), which plans the
 `param-point × scenario × seed-slot` grid and drives it through a `RunSink`;
-`fit predict` builds the same job for its free-forward replay. `simulate` stores
-each cell in the run store and renders its exports from the stored cells (§4.4).
-`SimulateJob` deliberately has no serde derive — the CLI parses its own surface
-(clap args) and lowers to the resolved struct, so there is no second wire schema
-to drift.
+`camdl predict` builds the same job for its free-forward replay. `simulate`
+stores each cell in the run store and renders its exports from the stored cells
+(§4.4). `SimulateJob` deliberately has no serde derive — the CLI parses its own
+surface (clap args) and lowers to the resolved struct, so there is no second
+wire schema to drift.
 
 **Every parameter choice is accounted for.** In `fit.toml` the rule is
 exhaustive and enforced: every model parameter must appear in exactly one of
@@ -418,7 +418,7 @@ it works. The layout is that of `docs/dev/proposals/2026-11-20-run-store-api.md`
         execution.json  events.jsonl  progress.json
         inputs/starts.<ext>                      # a --starts file named directly
         fit_state.toml  mle_params.toml  chain_0/ …   # the method's results, below
-        predict/<mode>-<12 hex>/                 # `fit predict` output (§2.2.2)
+        predict/<mode>-<12 hex>/                 # `camdl predict` output (§2.2.2)
 ```
 
 `<build>` is the camdl version and 12 hex digits of the ambient key, as for
@@ -670,7 +670,7 @@ though the method does not read them.
 
 **A fit file never names a run.** One unchanged fit file makes several runs
 whenever something outside its text changes: the data, its seeds, a sweep, or
-the build. A command that needs one run (`fit summary`, `fit predict`,
+the build. A command that needs one run (`fit summary`, `camdl predict`,
 `compare`, `simulate --draws posterior --fit`, `--starts from_mle=…`,
 `fit run --resume`) refuses a fit file and lists the runs the file has made,
 each with its id and folder:
@@ -715,10 +715,10 @@ one entry per expanded leaf. Each descriptor gives `name`, `index_dims`,
 fold over the same observation leaves the particle filter binds, so it cannot
 disagree with what was fit.
 
-#### 2.2.2 `fit predict` predictive artifact
+#### 2.2.2 `camdl predict` predictive artifact
 
-`camdl fit predict <fit>` resolves the fit handle — `@label`, a run id prefix or
-a run's folder — to one run. A fit file is refused with the runs it made listed
+`camdl predict RUN` resolves the run handle — `@label`, a run id prefix or a
+run's folder — to one run. A fit file is refused with the runs it made listed
 (§2.2.1). It stores one `prediction` result inside that run, at
 `predict/<mode>-<12 hex>/`, holding two tidy, plot-ready families of files plus
 a JSON manifest for each that records the run's full `run_id`. Two runs of one
@@ -743,19 +743,20 @@ a prediction. A forecast from a stored fit reads its targets from the problem's
 `held_out/` files, computes no held-out score, and refuses `--realised-design`,
 whose design values are held-out values; no command scores the held-out rows of
 a stored fit (`compare` refuses them, Appendix A, `camdl compare`). A rerun of
-`fit predict` with the same inputs is served from the store. `predictive.json`,
-`observed.json` and `forecast.json` record the key under `address_key` and the
-options under `options`. Every manifest of a prediction (`predictive.json`,
-`observed.json`, the quantities manifest, `report.json`, `forecast.json`)
-records the engine that made it as `run.json` does: `engine_version`, the build
-fingerprint, and `engine_switches`, absent when no switch was on.
-`fit table --quantity` reads the address its own free-forward derivation writes.
-Inside the directory, `--exclude-chains` and `--quantities` also name the files
-(`predictive-excl3/`, `quantities-<key8>/`), so a chain-subset or
-other-vocabulary table says so in its name. A forecast's files carry no such
-suffix (D86): `forecast.json`, `forecast-samples.tsv`, `forecast/` and
-`report.json` keep their names, the directory alone is keyed by the selection,
-and `forecast.json` states `options.excluded_chains` (`[]` for the full cloud).
+`camdl predict` with the same inputs is served from the store.
+`predictive.json`, `observed.json` and `forecast.json` record the key under
+`address_key` and the options under `options`. Every manifest of a prediction
+(`predictive.json`, `observed.json`, the quantities manifest, `report.json`,
+`forecast.json`) records the engine that made it as `run.json` does:
+`engine_version`, the build fingerprint, and `engine_switches`, absent when no
+switch was on. `fit table --quantity` reads the address its own free-forward
+derivation writes. Inside the directory, `--exclude-chains` and `--quantities`
+also name the files (`predictive-excl3/`, `quantities-<key8>/`), so a
+chain-subset or other-vocabulary table says so in its name. A forecast's files
+carry no such suffix (D86): `forecast.json`, `forecast-samples.tsv`, `forecast/`
+and `report.json` keep their names, the directory alone is keyed by the
+selection, and `forecast.json` states `options.excluded_chains` (`[]` for the
+full cloud).
 
 The free-forward replay projects each row off its own recorded trajectories, so
 it records a snapshot at every time a row reads — each data time and each
@@ -827,11 +828,11 @@ are mis-timed (gh#1151); `role` is read by row position and is right on both.
 **A downstream simulation inherits its fit's stochastic configuration (D78).**
 Unless explicitly overridden, every downstream simulation inherits the
 stochastic configuration recorded by its parent fit. For the binomial sampler
-(`btpe` or `btrs`, the `binomial` key of the method), `fit predict` reads the
+(`btpe` or `btrs`, the `binomial` key of the method), `camdl predict` reads the
 sampler from the fit run's `run_inputs.json` (`binomial`), and every simulation
 it runs draws with it: the one-step filters, the free-forward replay and its
 `y_rep` draws, the forecast's filters and the contrast forks. `predictive.json`
-and `forecast.json` record it as `binomial`. `fit predict` has no flag that
+and `forecast.json` record it as `binomial`. `camdl predict` has no flag that
 overrides it. The guarantee is the same sampler and the same recorded
 configuration, not the same random numbers: a predict does not reproduce the
 draws the fit made. `simulate` does not follow this rule when it replays a fit
@@ -866,12 +867,11 @@ draws per chain, a `draws.tsv` with no chain column, a constant row), never a
 pass; the `one_step` horizon leaves both pairs empty, because its cell pools
 over filter particles as well as draws.
 
-`camdl fit predict --by-chain` adds a leading `chain` column — `all` on the
-pooled rows, the chain id on one additional band per chain, on **both**
-horizons. The pooled band is unchanged and remains the default object; without
-the flag no `chain` column is written. A per-chain band carries no
-`rhat_*`/`ess_*` cell, because those compare chains, and reports its own chain's
-`n_draws`.
+`camdl predict --by-chain` adds a leading `chain` column — `all` on the pooled
+rows, the chain id on one additional band per chain, on **both** horizons. The
+pooled band is unchanged and remains the default object; without the flag no
+`chain` column is written. A per-chain band carries no `rhat_*`/`ess_*` cell,
+because those compare chains, and reports its own chain's `n_draws`.
 
 The two horizons answer different questions per chain, and a reader must know
 which they are looking at. A **free-forward** per-chain band asks whether the
@@ -904,7 +904,7 @@ pooled one — its `all` rows are byte-identical, so re-running with the flag ad
 rows and one column rather than replacing an artifact with a different object,
 exactly as `--scenario` and `--sweep` do. A chain subset is a different
 posterior, so it keeps its own keyed directory, and the two compose:
-`camdl fit predict --by-chain --exclude-chains 3,5` writes
+`camdl predict --by-chain --exclude-chains 3,5` writes
 `predictive-excl3_5/<stream>.tsv` with a `chain` column. Chain ids are the fit's
 own numbering and are never renumbered by an exclusion, so an excluded chain is
 simply absent from the column and the ids that remain name the same chains as in
@@ -955,7 +955,7 @@ in the column name itself. `observed.json` (`camdl.observed/v1`) is its sibling
 for the observed series.
 
 **`report.json` says what the run computed and what refused.** Schema tag
-`camdl.predict-report/v2`, written on every `fit predict`, with a `failures`
+`camdl.predict-report/v2`, written on every `camdl predict`, with a `failures`
 list that is empty when nothing refused and a `skipped` list that is empty when
 every declared stream was covered:
 
@@ -1106,7 +1106,7 @@ each at the site it refused:
 a non-finite quantity is an error there, named, with nothing written.
 
 **A chain subset is a different address, not a rewrite of the pooled one.**
-`fit predict --exclude-chains 3,5` writes `predictive-excl3_5/<stream>.tsv` +
+`camdl predict --exclude-chains 3,5` writes `predictive-excl3_5/<stream>.tsv` +
 `predictive-excl3_5.json`, and likewise `contrasts-excl3_5/`,
 `quantities-model-excl3_5/` with its manifest `quantities-excl3_5.json`, and
 `report-excl3_5.json`; the full cloud keeps the bare names. The key is the
@@ -1116,7 +1116,7 @@ would silently replace the run's canonical predictive and a second subset would
 replace that, leaving only a stamp inside the file that had already been
 overwritten. `observed/` is not keyed — it is the recorded data, identical under
 any selection. A prediction is a result of its own: `camdl show <prediction>`
-(its id prefix or folder, which `fit predict` prints) lists its files, and
+(its id prefix or folder, which `camdl predict` prints) lists its files, and
 `camdl cat <prediction> --stream predictive/<stream>.tsv` reads one.
 `camdl show` and `camdl cat` on the fit run list and read only the run's own
 files. `--chains` keeps the named chains instead of dropping them, and is
@@ -1153,7 +1153,7 @@ loads back through `--data` to the time it was rendered from (`docs/dates.md`,
 
 #### 2.2.3 Which object a quantity is read on
 
-`fit predict` also writes the model's `quantities {}` block to
+`camdl predict` also writes the model's `quantities {}` block to
 `quantities-model/<name>.tsv` plus a `quantities.json` manifest (a
 `--quantities` vocabulary's tables are `quantities-<key8>/`). The run store
 keeps every result kind's name, `quantities` among them, out of a result's
@@ -1461,7 +1461,7 @@ pub struct SimulateJob {
     /// after the scenario horizon; `None` = no override.
     pub t_end_override: Option<f64>,
     /// Times every cell must record a snapshot at, beyond the model's own
-    /// output schedule (`fit predict` supplies its forecast rows' closing
+    /// output schedule (`camdl predict` supplies its forecast rows' closing
     /// boundaries; empty everywhere else).
     pub required_output_times: Vec<f64>,
     /// The loaded `--init-state` ensemble, shared by every cell; `None` = the
@@ -1495,7 +1495,7 @@ It carries no output directory, no `--force`, no label, and no GeoJSON path:
 those are write-side concerns owned by the sink, not by the job.
 `camdl
 simulate` builds one in `main.rs` with `parallel` from `--parallel` /
-`CAMDL_PARALLEL` (absent: sequential; 0: every core); `fit predict` builds one
+`CAMDL_PARALLEL` (absent: sequential; 0: every core); `camdl predict` builds one
 for its free-forward replay and passes its own thread count.
 
 The engine that consumes it is `rust/crates/cli/src/engine.rs`:
@@ -1627,7 +1627,7 @@ colliding parameter, both sources, and the fix (the diagnostic is shown in
 prior, uniform, or posterior draws is the counterfactual those runs exist for.
 The check is `engine::check_scenario_coordinate_collision`, reached from
 `engine::run_job` and from `simulate --dry-run` (so a dry run refuses what the
-run would); `fit predict --sweep` words its own check with the same formatter.
+run would); `camdl predict --sweep` words its own check with the same formatter.
 
 This is collision policy, not precedence. The resolution order of §1.3 still
 places a scenario above a draw row or sweep point, and that order is what
@@ -1639,8 +1639,8 @@ values the user listed.
 One sweep grammar serves every verb that takes a grid.
 
 **`--sweep NAME=SPEC`** — `rust/crates/cli/src/args/types.rs`, used by
-`camdl simulate`, `camdl profile`, `camdl fit run` and `camdl fit predict`.
-`simulate` and `fit predict` share one expansion
+`camdl simulate`, `camdl profile`, `camdl fit run` and `camdl predict`.
+`simulate` and `camdl predict` share one expansion
 (`rust/crates/cli/src/sweep.rs`): several `--sweep` flags form the Cartesian
 product **sorted by parameter name**, the first name varying slowest, and
 `point_id` is a point's 0-based position in it, so the two verbs give the same
@@ -1731,7 +1731,7 @@ estimated for. So before anything runs, `simulate` compares the two:
 - a **fit config** (`--draws prior|<file> --fit fit.toml`) is compared with the
   model its `[model]` names, compiled now.
 
-The comparison is the one `fit predict --quantities` uses
+The comparison is the one `camdl predict --quantities` uses
 (`rust/crates/cli/src/fit/fitted_model.rs`, `compare_to_fitted`): the
 presentation-normalized model identity, which excludes `quantities {}` and
 `contrasts {}`, the model's file name, and `--output-every` (a property of this
@@ -1885,7 +1885,7 @@ through the preset path, an `Inline` arm through the ad-hoc path:
    `--scenario baseline` then means that scenario; on a model that declares
    none, it is refused like any other undeclared name.
 3. `Inline` → `Adhoc`, carrying its patch. The CLI builds these for the arm a
-   run has without `--scenario`: `simulate`'s `(none)` and `fit predict`'s
+   run has without `--scenario`: `simulate`'s `(none)` and `camdl predict`'s
    `fitted`, each the empty patch unless `--enable`/`--disable` were given.
 4. `Inline` whose name is a declared scenario → **error**. A scenario reference
    is either a model preset or an ad-hoc patch, never both; the model scenario
@@ -2767,7 +2767,7 @@ the same value of it, and the replacement is reported on stderr (§1.3, §5.4).
 ### 5.2 CLI ↔ Type Mapping
 
 `camdl simulate` parses into `args::SimulateArgs` (clap) and lowers to
-`sim_job::SimulateJob`; `fit predict` builds the same job for its free-forward
+`sim_job::SimulateJob`; `camdl predict` builds the same job for its free-forward
 replay. From there neither the engine nor the store knows which verb produced
 the job.
 
@@ -2782,7 +2782,7 @@ pub struct SimulateJob {
     pub source: ParamSource,           // where parameter vectors come from
     pub scenarios: Vec<ScenarioRef>,   // σ layer; empty ⇒ the implicit `(none)` arm
     pub t_end_override: Option<f64>,   // --to, resolved to model time
-    pub required_output_times: Vec<f64>, // extra snapshot times (fit predict)
+    pub required_output_times: Vec<f64>, // extra snapshot times (camdl predict)
     pub init_state: Option<Arc<InitStateSource>>, // --init-state ensemble
     pub obs_anchors: Option<ObsAnchorTimes>, // resolved first_obs/last_obs, once per job
     pub seeds: Seeds,                  // S layer
@@ -2907,9 +2907,9 @@ axis and keep every point distinct. The two are refused together.
 underscore-joined (`beta_north`), and its column is `sweep:beta_north`. Several
 `--sweep` flags form the Cartesian product **sorted by parameter name**, the
 first name varying slowest; `point_id` is a point's 0-based position in that
-product, and `fit predict --sweep` gives the same `point_id` for the same flags.
-A parameter named twice, or one the model does not declare, is refused before
-anything runs.
+product, and `camdl predict --sweep` gives the same `point_id` for the same
+flags. A parameter named twice, or one the model does not declare, is refused
+before anything runs.
 
 **`--sweep-file FILE`**: a TSV whose header names model parameters and whose
 rows are design points, `point_id` the 0-based row. A `point_id` column of
@@ -3267,8 +3267,8 @@ that each training file's leading rows still digest to the recorded prefix; a
 fit without a holdout is scored in-sample.
 
 A model anchor (`simulate { to = last_obs + … }`, a `piecewise` breakpoint) and
-`fit predict`'s `value_at(…, last_obs)` resolve over the training rows only, so
-appending held-out rows to a `holdout_after` file moves no anchor.
+`camdl predict`'s `value_at(…, last_obs)` resolve over the training rows only,
+so appending held-out rows to a `holdout_after` file moves no anchor.
 
 `[synthetic]` (`SyntheticSpec`, `config_v2.rs`):
 
@@ -3291,8 +3291,8 @@ boundary is removed; `detect_removed_condition_from` (`config_v2.rs`) refuses it
 ahead of the strict `deny_unknown_fields` parse — at the top level or anywhere
 under `[data]` — with a message naming the replacement, so a stale config fails
 with a migration rather than a bare unknown-field error. `camdl pfilter`,
-`camdl profile` and `camdl fit predict` bind the same declared periods, so a
-fixed-θ loglik and a predictive row cover the window the fit scored.
+`camdl profile` and `camdl predict` bind the same declared periods, so a fixed-θ
+loglik and a predictive row cover the window the fit scored.
 
 ### 6.3 `[estimate]` — free parameters
 
@@ -3446,7 +3446,7 @@ restarting mid-schedule is statistically incoherent.
 | `thin`                 | `5`     | Retain every k-th post-burn-in sweep.                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `max_tree_depth`       | `10`    | NUTS tree-depth ceiling for the θ\|X update.                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `trajectory_warmup`    | `0`     | CSMC-only sweeps before parameter updates begin.                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `binomial`             | `btpe`  | Binomial sampler for propagation draws: `btpe`, or `btrs` (faster, exact, not bit-compatible). `fit predict` draws with the sampler the fit ran (D78).                                                                                                                                                                                                                                                                                                                 |
+| `binomial`             | `btpe`  | Binomial sampler for propagation draws: `btpe`, or `btrs` (faster, exact, not bit-compatible). `camdl predict` draws with the sampler the fit ran (D78).                                                                                                                                                                                                                                                                                                               |
 | `csmc_sweeps_per_nuts` | `1`     | CSMC trajectory updates per parameter update.                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `n_trajectories`       | `200`   | Posterior trajectories written to disk. Output-shaping, but keyed.                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `dense_mass`           | `true`  | Full-covariance NUTS metric; `false` for diagonal.                                                                                                                                                                                                                                                                                                                                                                                                                     |
@@ -3665,8 +3665,8 @@ A multi-chain sampler leaf whose kind is `point` is read with its R̂ withheld:
 `fit summary` reports
 `R̂ — not assessed: all 2 chains started at one point
 (starts = from_mle @scout)`
-in place of a verdict, `fit predict` stamps its bands the same way, and the ESS
-— a within-chain quantity — is kept. Writing the point rule is the
+in place of a verdict, `camdl predict` stamps its bands the same way, and the
+ESS — a within-chain quantity — is kept. Writing the point rule is the
 acknowledgement; `fit run` says so once at startup for a sampler with
 `chains > 1`. An IF2 run keeps its Â band under the same header, since IF2's
 perturbation re-spreads the swarm after the start.
@@ -3713,7 +3713,7 @@ progress and refusal lines, `chain_starts.tsv`'s `chain_id`, `fit_state.toml`'s
 `best_chain` and `chain_eval_ids`, `run_inputs.json`'s `best_chain`,
 `mle_params.toml`'s `[provenance] chain`, every `fit summary` table,
 `--exclude-chains`, the `chain` column of `draws.tsv` and `trajectories.tsv`,
-the `chain` column `fit predict --by-chain` adds, `progress.json`'s per-chain
+the `chain` column `camdl predict --by-chain` adds, `progress.json`'s per-chain
 rows and `cross_chain_compat.json`'s `chains`. `simulate`'s `replicate`, `draw`
 and `point_id` count from 0 too. Joining any two of these takes no arithmetic,
 and no artifact carries a second base to convert from.
@@ -3772,7 +3772,7 @@ the reason the store recorded:
 error: camdl-store/0.1.0_f531753ac.dirty-a20ab6cb-4bff11f93f55/fit/sir-797c0b53281a/runs/pmmh-85f985a8c2a2/seed_1-37ee86900a72 names a fit run that did not complete and is not read: camdl-store/0.1.0_f531753ac.dirty-a20ab6cb-4bff11f93f55/fit/sir-797c0b53281a/runs/pmmh-85f985a8c2a2/seed_1-37ee86900a72 was interrupted: its process ended before it completed
 ```
 
-A command that needs a run (`fit summary`, `fit predict`, `compare`,
+A command that needs a run (`fit summary`, `camdl predict`, `compare`,
 `simulate --draws posterior --fit`, a sourced `starts`, `--resume`) refuses a
 problem handle, listing the problem's runs
 (`error: 8bcb names a fit problem, and this reads one run of it. Its runs:`),
@@ -3935,8 +3935,9 @@ A file with no `[method]` passes every check above for the readers that take
 
 ## 7. The Fit CLI
 
-`camdl fit` is a group of seven subcommands. One runs inference; three read what
-a run left behind; two work on configs; one is a static capability listing.
+`camdl fit` is a group of six subcommands. One runs inference; two read what a
+run left behind; two work on configs; one is a static capability listing. A
+prediction from a stored run is the top-level `camdl predict RUN` (§2.2.2).
 
 | subcommand    | what it does                                                                                                                                           |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -3945,7 +3946,6 @@ a run left behind; two work on configs; one is a static capability listing.
 | `fit table`   | walk a run store and render one row per fit run                                                                                                        |
 | `fit diff`    | compare two `fit.toml` configs                                                                                                                         |
 | `fit new`     | scaffold a new `fit.toml` derived from an existing one                                                                                                 |
-| `fit predict` | write the posterior-predictive (predicted-vs-observed) artifact                                                                                        |
 | `fit methods` | list the supported (algorithm, backend) pairs                                                                                                          |
 
 There is no `camdl fit list` and no `camdl fit where`. Browsing every cached run
@@ -3988,14 +3988,14 @@ camdl fit table camdl-store
 camdl fit table camdl-store --with-method pgas --format md
 camdl fit diff fits/01_mle.toml fits/02_posterior.toml
 camdl fit new --from fits/01_mle.toml fits/04_derived.toml
-camdl fit predict @posterior --n-draws 20
+camdl predict @posterior --n-draws 20
 camdl fit methods
 camdl list
 ```
 
-**Fit handles.** `fit summary` and `fit predict` take a _handle_ naming one run:
-`@<label>`, a run id prefix, or the run's folder (§6.8). A `fit.toml` is
-refused, with the runs it made listed:
+**Fit handles.** `fit summary` and `camdl predict` take a _handle_ (the
+positional argument RUN) naming one run: `@<label>`, a run id prefix, or the
+run's folder (§6.8). A `fit.toml` is refused, with the runs it made listed:
 
 ```
 $ camdl fit summary fit_pmmh_all.toml
@@ -4102,7 +4102,7 @@ Note the shapes. `--resume` carries a **base reference**, not a boolean;
 **no `--store`** (the run store's root is the `fit.toml`'s `store` key, or
 `CAMDL_STORE`, or `./camdl-store`) and **no `--skip-chains`** (chain exclusion
 is a read-side view: `fit summary --exclude-chains`,
-`fit predict --exclude-chains`, `fit table --exclude-chains`).
+`camdl predict --exclude-chains`, `fit table --exclude-chains`).
 
 `--force` on `fit run` recomputes a run that already exists: the stored run, its
 predictions included, is moved to `<root>/.quarantine/` (never deleted) and the
@@ -4670,14 +4670,14 @@ observation dominates. A row carrying a tenth of the elpd by itself, with `pit`
 at 0 or 1 and `ess` in the single digits, is one observation the filter could
 not explain — check the data row at that `t` before anything else.
 
-Once a sampler run exists, `fit predict` replays the posterior forward and
+Once a sampler run exists, `camdl predict` replays the posterior forward and
 writes the predicted-vs-observed pair:
 
 ```
-$ camdl fit predict @posterior --n-draws 20
-fit predict: free_forward horizon — subsampling 20 of 60 posterior draws (raise with --n-draws)
-fit predict: one_step horizon — subsampling 20 of 60 posterior draws (raise with --n-draws)
-fit predict: mode=free_forward+one_step(20 draws) treatment=posterior, 1 scenario(s) [fitted], 1 stream(s), 60 draws from pgas method 'pgas'
+$ camdl predict @posterior --n-draws 20
+predict: free_forward horizon — subsampling 20 of 60 posterior draws (raise with --n-draws)
+predict: one_step horizon — subsampling 20 of 60 posterior draws (raise with --n-draws)
+predict: mode=free_forward+one_step(20 draws) treatment=posterior, 1 scenario(s) [fitted], 1 stream(s), 60 draws from pgas method 'pgas'
 wrote camdl-store/<build>/fit/sir-…/runs/pgas-…/seed_1-…/predict/all-…/predictive/weekly_cases.tsv
 wrote camdl-store/<build>/fit/sir-…/runs/pgas-…/seed_1-…/predict/all-…/predictive.json
 wrote camdl-store/<build>/fit/sir-…/runs/pgas-…/seed_1-…/predict/all-…/observed/weekly_cases.tsv
@@ -4840,9 +4840,9 @@ to score them (scores of held-out rows arrive with the run store's scores);
 `camdl fit summary FIT --params-only` and run `camdl pfilter` over the full file
 with `--score-from` (`docs/inference.md`, "Out-of-sample validation").
 
-`camdl fit predict` plus `camdl compare` answers a different question, replaying
-the fitted trajectory forward into the held-out window rather than re-filtering
-it; reach for that when you want a predictive score rather than a filter
+`camdl predict` plus `camdl compare` answers a different question, replaying the
+fitted trajectory forward into the held-out window rather than re-filtering it;
+reach for that when you want a predictive score rather than a filter
 log-likelihood.
 
 A held-out file that already exists on its own, with rows that all end after the
@@ -6026,7 +6026,7 @@ the first chain directory with a readable file, so an early crashed chain does
 not drop the entry. It is best-effort: an unreadable file is omitted rather than
 failing the run.
 
-`profile` and the `fit predict` outputs declare no schema, and neither do the
+`profile` and the `camdl predict` outputs declare no schema, and neither do the
 results `simulate` and `pfilter` store in the run store. Of the vocabulary
 above, the column roles `dimension`, `observable`, and `quantile` and the table
 roles `observation`, `predictive`, and `landscape` are defined but unreachable —
@@ -6491,12 +6491,12 @@ camdl simulate models/sir.camdl --draws draws.tsv --fit fit.toml \
     --replicates 10 --obs ppc.tsv
 ```
 
-**The purpose-built alternative.** `camdl fit predict` writes the
+**The purpose-built alternative.** `camdl predict` writes the
 predicted-vs-observed artifact directly from a completed fit, banded over the
 posterior, with no re-plumbing of draws:
 
 ```bash
-camdl fit predict @posterior
+camdl predict @posterior
 ```
 
 It emits, under the run's `predict/<mode>-<12 hex>/` (§2.2.2):
@@ -6532,7 +6532,7 @@ that propagate posterior uncertainty.
 **Every arm starts from the model that was fitted.** A fit config's top-level
 `scenario` or `enable`/`disable` (§6.2) is part of the problem the posterior
 describes: `fit run` estimated under it. Every command that replays a fit
-applies it — `simulate --draws posterior --fit`, `fit predict` (the `fitted`
+applies it — `simulate --draws posterior --fit`, `camdl predict` (the `fitted`
 arm, every `--scenario` arm, the one-step filter), the contrast arms,
 `pfilter
 --fit` and the prequential `compare` derives. For a stored fit the
@@ -6549,7 +6549,7 @@ is the fitted model. The command says so on stderr when the fit selected
 anything:
 
 ```
-fit predict: the fitted model runs the fit's own enable ["lockdown"] / disable []; every scenario arm applies its changes on top of it
+predict: the fitted model runs the fit's own enable ["lockdown"] / disable []; every scenario arm applies its changes on top of it
 ```
 
 Only the fit's intervention lists form the base. A fit scenario's `set`/`scale`
@@ -6569,7 +6569,7 @@ also breaks the coupling.
 
 **Do not hand-difference the two arms for a headline number.** The model-level
 `contrasts { }` block does this correctly and is auto-emitted by
-`camdl fit predict`:
+`camdl predict`:
 
 ```camdl
 quantities {
@@ -6593,7 +6593,7 @@ are banded over the forkable draws into `contrasts/<name>.tsv`. A contrast with
 no toggled intervention (a parameter-only scenario) or one toggled by a
 parametric or reactive fire time is skipped with a note, never silently.
 
-**A chain selection reaches the contrast.** `fit predict --exclude-chains`
+**A chain selection reaches the contrast.** `camdl predict --exclude-chains`
 narrows the forkable set to the retained chains before the fork, so a contrast
 bands over exactly the cloud `predictive.json`'s `chain_selection` block
 describes — the contrast's `n_used` and the free-forward rows' `n_draws` are one
@@ -6707,8 +6707,8 @@ with a **different tier-3**. The difference is deliberate and load-bearing.
 
 There is **no implicit flat fallback on the fit path.** A `fit run` chain is
 treated as the canonical posterior downstream (`fit_summary.json`,
-`fit predict`, `compare`), so silently targeting the unconditioned likelihood is
-not allowed. The refusal names every parameter and all three remedies:
+`camdl predict`, `compare`), so silently targeting the unconditioned likelihood
+is not allowed. The refusal names every parameter and all three remedies:
 
 ```
 $ camdl fit run fit_noprior.toml --seed 1
@@ -6850,7 +6850,7 @@ fit_id     run          label                  stem           method   methods c
 
 Read-only by default: every cell is recovered from the stored run's files. **One
 flag breaks that rule** — `--quantity <NAME>` may _derive_ a value on demand,
-running `fit predict --mode free_forward` for any fit run that has not been
+running `camdl predict --mode free_forward` for any fit run that has not been
 predicted yet, and storing that prediction, with its `quantities-model/` tables,
 inside the run. Optimizer fits have no posterior cloud, so their cell renders
 `—`.
@@ -7224,10 +7224,10 @@ error: observation stream 'inc' needs a value at t = 1, which is not a recorded 
 `--output-every N` is subject to the same check, so a flag that reads as
 presentational still constrains the observation cadence. **Set the trajectory
 output cadence at least as fine as the finest `emit_schedule`** (or, when the
-times come from a data file, fine enough to include them; `fit predict` records
-snapshots at the data times, §2.2.2). The output schedule defaults to every 1.0
-days, independent of `dt`, so sub-unit observation times need an explicit
-`output { trajectories { every = … } }`.
+times come from a data file, fine enough to include them; `camdl predict`
+records snapshots at the data times, §2.2.2). The output schedule defaults to
+every 1.0 days, independent of `dt`, so sub-unit observation times need an
+explicit `output { trajectories { every = … } }`.
 
 ### 14.3 Interaction with scheduled interventions
 
@@ -7602,8 +7602,7 @@ camdl fit diff A B            (see §13.2)
 camdl fit new --from A DEST   (see §13.3)
 camdl fit methods             list (algorithm, backend) pairs with stability tiers
 
-camdl fit predict [FIT]
-  --fit FIT                   same handle grammar as `fit summary`
+camdl predict RUN            RUN: the positional run handle, same grammar as `fit summary`
   --stream NAME               one logical stream, or an expanded leaf name
   --scenario NAMES            prospective scenario overlay (repeatable), applied on
                               top of the fit's own scenario/enable/disable (§11.3).

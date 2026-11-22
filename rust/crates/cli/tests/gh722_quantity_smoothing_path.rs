@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The stored prediction under `seg` (a run folder, or any folder above
-/// runs) whose `report*.json` is newest: the latest `fit predict`'s output. A
+/// runs) whose `report*.json` is newest: the latest `camdl predict`'s output. A
 /// path that does not exist while nothing has been predicted.
 fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
     fit_store_support::predictions(seg)
@@ -317,10 +317,10 @@ fn in_window_value_at_reads_the_conditioned_path() {
         "fit run failed:\n{}",
         String::from_utf8_lossy(&fit.stderr)
     );
-    let pred = run(&bin, &dir, &["fit", "predict", "--fit", "@fit", "--mode", "free_forward"]);
+    let pred = run(&bin, &dir, &["predict", "@fit", "--mode", "free_forward"]);
     assert!(
         pred.status.success(),
-        "fit predict failed:\n{}",
+        "predict failed:\n{}",
         String::from_utf8_lossy(&pred.stderr)
     );
     let stderr = String::from_utf8_lossy(&pred.stderr).to_string();
@@ -431,10 +431,10 @@ fn a_fit_with_no_saved_paths_censors_instead_of_falling_back() {
     let fit = run(&bin, &dir, &["fit", "run", "fit.toml", "--label", "fit"]);
     assert!(fit.status.success(), "fit run failed:\n{}", String::from_utf8_lossy(&fit.stderr));
     let pred =
-        run(&bin, &dir, &["fit", "predict", "--fit", "@fit", "--mode", "free_forward"]);
+        run(&bin, &dir, &["predict", "@fit", "--mode", "free_forward"]);
     assert!(
         pred.status.success(),
-        "fit predict must still produce the rest of the artifact:\n{}",
+        "predict must still produce the rest of the artifact:\n{}",
         String::from_utf8_lossy(&pred.stderr)
     );
     let stderr = String::from_utf8_lossy(&pred.stderr).to_string();

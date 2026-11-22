@@ -25,7 +25,7 @@
 //!
 //! The sampled role (a measure's varying set, `simulate --draws`) is not here
 //! yet: no command that resolves roles takes a sample axis until `simulate`
-//! and `fit predict` move onto the partition.
+//! and `camdl predict` move onto the partition.
 //!
 //! Proposal: `docs/dev/proposals/2026-10-26-parameter-roles.md` §6.
 

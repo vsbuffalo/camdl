@@ -1,6 +1,6 @@
 //! `camdl show` and `camdl cat` on a stored fit run named by its label and on
 //! the prediction stored inside it. After `fit run --label foo` and
-//! `fit predict --fit @foo`, `camdl show @foo` lists the run's result files,
+//! `camdl predict @foo`, `camdl show @foo` lists the run's result files,
 //! `camdl show <prediction folder>` lists the prediction's, and
 //! `camdl cat <handle> --stream <rel>` streams one of them (an extensionless
 //! stream resolves its `.tsv`).
@@ -147,16 +147,16 @@ thin = 1
         &tmp,
         // Default options: their outputs are the bare paths `show`/`cat`
         // name (gh#896).
-        &["fit", "predict", "--fit", "@foo"],
+        &["predict", "@foo"],
     );
     assert!(
         out.status.success(),
-        "fit predict failed:\nstdout={}\nstderr={}",
+        "predict failed:\nstdout={}\nstderr={}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // The prediction `fit predict` stored, a result of its own inside the run.
+    // The prediction `camdl predict` stored, a result of its own inside the run.
     let predictions = fit_store_support::predictions(&tmp.join("results"));
     assert_eq!(predictions.len(), 1, "one stored prediction: {predictions:?}");
     let prediction = predictions[0].to_string_lossy().into_owned();
@@ -198,7 +198,7 @@ thin = 1
         "show must list a quantities-model/ output path; got:\n{show_pred}"
     );
     // gh#892: and the file that says whether that predictive is complete.
-    // `fit predict` writes `report.json` on every run — the deterministic
+    // `camdl predict` writes `report.json` on every run — the deterministic
     // failures, empty when nothing refused — so a listing that omits it sends
     // a reader to the band without the record of what did not make it.
     assert!(

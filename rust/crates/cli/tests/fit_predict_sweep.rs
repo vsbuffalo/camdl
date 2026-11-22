@@ -1,4 +1,4 @@
-//! End-to-end acceptance for `camdl fit predict --sweep` — the Phase-3 parameter
+//! End-to-end acceptance for `camdl predict --sweep` — the Phase-3 parameter
 //! sweep over the posterior, composing with `--scenario`.
 //!
 //! A sweep varies one parameter across a grid over the posterior cloud: each
@@ -21,7 +21,7 @@ use std::process::Command;
 
 mod fit_store_support;
 
-/// The prediction folder the latest `fit predict` in the store `root` wrote:
+/// The prediction folder the latest `camdl predict` in the store `root` wrote:
 /// of every `predict/<mode>-<id12>/` folder in it, the one whose
 /// `report*.json` (one written by every predict) is newest. A path that does
 /// not exist while nothing has been predicted.
@@ -194,7 +194,7 @@ fn fit_predict_sweep_composes_with_scenario_on_distinct_params() {
     let results = setup_fit(&bin, &tmp);
 
     let out = run(&bin, &tmp, &[
-        "fit", "predict", "--fit", "@fit",
+        "predict", "@fit",
         "--mode", "free_forward",
         "--scenario", "low_rho",
         "--sweep", "k=8,12",
@@ -202,7 +202,7 @@ fn fit_predict_sweep_composes_with_scenario_on_distinct_params() {
     ]);
     assert!(
         out.status.success(),
-        "compose fit predict failed:\nstdout={}\nstderr={}",
+        "compose predict failed:\nstdout={}\nstderr={}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
@@ -271,7 +271,7 @@ fn fit_predict_sweep_composes_with_scenario_on_distinct_params() {
     );
 
     // ── quantities.json carries the calendar block ──────────────────────────
-    // `fit predict` used to build its merged manifest with `schema` +
+    // `camdl predict` used to build its merged manifest with `schema` +
     // `quantities` only, so a consumer could not map the numeric `time` column
     // to dates without re-parsing the model — the one thing the block exists to
     // prevent, and it bites hardest on dated outbreak work. `simulate`'s
@@ -337,7 +337,7 @@ fn fit_predict_sweep_same_param_as_scenario_is_a_hard_error() {
     let _results = setup_fit(&bin, &tmp);
 
     let out = run(&bin, &tmp, &[
-        "fit", "predict", "--fit", "@fit",
+        "predict", "@fit",
         "--mode", "free_forward",
         "--scenario", "low_rho",
         "--sweep", "rho=0.2,0.4",
@@ -379,12 +379,12 @@ fn fit_predict_no_sweep_header_is_byte_identical() {
     let results = setup_fit(&bin, &tmp);
 
     let out = run(&bin, &tmp, &[
-        "fit", "predict", "--fit", "@fit",
+        "predict", "@fit",
         "--mode", "free_forward",
     ]);
     assert!(
         out.status.success(),
-        "no-sweep fit predict failed:\nstdout={}\nstderr={}",
+        "no-sweep predict failed:\nstdout={}\nstderr={}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );

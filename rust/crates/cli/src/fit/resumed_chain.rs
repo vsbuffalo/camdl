@@ -4,7 +4,7 @@
 //! own. That leaf is the complete artifact for the longer chain: each
 //! `chain_N/` starts as a copy of the parent's per-chain files
 //! ([`CARRIED_CHAIN_FILES`]) and the new segment is appended to them, so every
-//! reader of the leaf — `fit summary`, R̂/ESS, `draws.tsv`, `fit predict`,
+//! reader of the leaf — `fit summary`, R̂/ESS, `draws.tsv`, `camdl predict`,
 //! `fit compare` — sees the whole chain without following the lineage back.
 //!
 //! The lineage itself is recorded, not inferred: run.json `inputs.resume`

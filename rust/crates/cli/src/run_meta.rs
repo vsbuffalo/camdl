@@ -113,7 +113,7 @@ impl FitAlgorithm {
     /// A Bayesian posterior sampler: it explores the full posterior and writes a
     /// `draws.tsv` cloud, so a completed run has a posterior band to draw. PGAS
     /// (the default Bayesian path), PMMH, and MH are samplers. This is the
-    /// authoritative sampler/optimizer partition used to frame `fit predict`'s
+    /// authoritative sampler/optimizer partition used to frame `camdl predict`'s
     /// refusals — a sampler with no resolvable draws is *incomplete*, never an
     /// "optimizer fit" (gh#343).
     pub fn is_posterior_sampler(self) -> bool {

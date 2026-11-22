@@ -5,7 +5,7 @@
 //! with gh#990 the fit side does too: the `chain_N/` directories, the
 //! per-chain tables of `fit summary` (text and json), `chain_starts.tsv`'s
 //! `chain_id`, `fit_state.toml`'s `best_chain` and `chain_eval_ids`,
-//! `--exclude-chains`, and the `chain` column `fit predict --by-chain` adds.
+//! `--exclude-chains`, and the `chain` column `camdl predict --by-chain` adds.
 //! One base means there is nothing to convert, so the class of off-by-one that
 //! gh#781, gh#823, gh#910 and gh#972 each fixed at one site cannot recur.
 //!
@@ -19,7 +19,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Where the latest `fit predict` of the run `seg` stored its prediction: the
+/// Where the latest `camdl predict` of the run `seg` stored its prediction: the
 /// folder under `<seg>/predict/` whose `report*.json` (one written by every
 /// predict) is newest. A path that does not exist while nothing has been
 /// predicted.
@@ -270,7 +270,7 @@ fn an_if2_leaf_numbers_its_chains_from_zero_on_every_surface() {
 
 /// PGAS: directories, the summary's per-chain table, `--exclude-chains`
 /// (its parse, its validation message and its provenance record) and the
-/// `chain` column `fit predict --by-chain` writes all use the numbers of
+/// `chain` column `camdl predict --by-chain` writes all use the numbers of
 /// `draws.tsv`'s `chain` column, with no arithmetic between any two of them.
 #[test]
 fn a_pgas_leaf_numbers_its_chains_from_zero_on_every_surface() {
@@ -300,7 +300,7 @@ fn a_pgas_leaf_numbers_its_chains_from_zero_on_every_surface() {
 
     // `--exclude-chains 1` drops the second chain: the one whose draws carry
     // `chain = 1` in draws.tsv, and whose trace is chain_1/.
-    ok(&camdl(dir, &["fit", "predict", &seg_s, "--mode", "free_forward",
+    ok(&camdl(dir, &["predict", &seg_s, "--mode", "free_forward",
         "--exclude-chains", "1"]), "predict --exclude-chains 1");
     let prov: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(predict_out(&seg).join("predictive-excl1.json")).unwrap()).unwrap();
@@ -310,7 +310,7 @@ fn a_pgas_leaf_numbers_its_chains_from_zero_on_every_surface() {
 
     // A chain this fit does not have is refused, and the message states the
     // range in the same base.
-    let bad = camdl(dir, &["fit", "predict", &seg_s, "--mode", "free_forward",
+    let bad = camdl(dir, &["predict", &seg_s, "--mode", "free_forward",
         "--exclude-chains", "2"]);
     assert!(!bad.status.success(), "chain 2 is not a chain of a two-chain fit");
     let e = String::from_utf8_lossy(&bad.stderr);
@@ -318,7 +318,7 @@ fn a_pgas_leaf_numbers_its_chains_from_zero_on_every_surface() {
         "the refusal names the valid range 0..1:\n{e}");
 
     // `--by-chain`: the `chain` column carries 0, 1 and `all`.
-    ok(&camdl(dir, &["fit", "predict", &seg_s, "--mode", "free_forward", "--by-chain"]),
+    ok(&camdl(dir, &["predict", &seg_s, "--mode", "free_forward", "--by-chain"]),
         "predict --by-chain");
     let pred = std::fs::read_to_string(predict_out(&seg).join("predictive").join("weekly_cases.tsv")).unwrap();
     let mut lines = pred.lines();

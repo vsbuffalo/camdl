@@ -780,7 +780,7 @@ pub fn compile_obs_sample_pf(
             "compile_obs_sample_pf: counts length {} != expected {}", counts.len(), n_int);
         let int_s = IntState::from_vec(counts.to_vec());
         // Per-observation aux (e.g. a binomial denominator `n = tested`) is the
-        // CALLER's to supply. `fit predict` forwards the OBSERVED aux at each obs
+        // CALLER's to supply. `camdl predict` forwards the OBSERVED aux at each obs
         // time, so the posterior-predictive draws `y_rep ~ binomial(n_observed,
         // p̂)` — the exogenous survey sample size carried forward. Data-free
         // emitters (`simulate --obs`, the store's `obs/` subtree, synthetic

@@ -1,4 +1,4 @@
-//! `camdl fit predict` — the free-forward posterior predictive verb, plus the
+//! `camdl predict` — the free-forward posterior predictive verb, plus the
 //! type system that makes a misread predictive object unrepresentable.
 //!
 //! A predictive varies on two independent axes the dangerous bugs leave
@@ -95,7 +95,7 @@ impl RowRole {
     }
 }
 
-/// The fit's parameter set as `fit predict` reads it: the training partition
+/// The fit's parameter set as `camdl predict` reads it: the training partition
 /// the fit recorded, verified against the bound files as they are now.
 struct ParameterSet {
     /// The record as the fit wrote it; `predictive.json` carries it as
@@ -393,7 +393,7 @@ pub struct SavedPaths {
 impl DrawKeys {
     /// Intersect the cloud's keys with the keys that actually have a saved
     /// path. One `read_to_string` pass per `chain_*/trajectories.tsv`, so this
-    /// runs only when a quantity needs a conditioned read — a `fit predict`
+    /// runs only when a quantity needs a conditioned read — a `camdl predict`
     /// with no in-window `value_at` pays nothing.
     pub fn resolve_saved(&self) -> SavedPaths {
         let on_disk = crate::fit::joint::trajectory_keys(&self.method_dir);
@@ -634,7 +634,7 @@ pub struct ObservedRow {
 /// One (scenario, horizon) contribution to a `predictive/<stream>.tsv`: its rows,
 /// plus the labels they carry (the scenario overlay axis, the horizon axis, the
 /// treatment, the convergence, the draw count). Stacking several of these under
-/// one header is how `fit predict` writes every scenario's `free_forward` rows
+/// one header is how `camdl predict` writes every scenario's `free_forward` rows
 /// plus the `one_step` rows into the same file — the `scenario` and `horizon`
 /// columns distinguish them.
 pub struct PredictiveSection<'a> {
@@ -1542,7 +1542,7 @@ fn declared_grid_replay(
 
 // ── The verb ───────────────────────────────────────────────────────────────
 
-/// What one `fit predict` produced: the files it wrote, and what refused while
+/// What one `camdl predict` produced: the files it wrote, and what refused while
 /// it did.
 ///
 /// The two are independent. A run can write a complete one-step artifact and
@@ -1559,7 +1559,7 @@ struct PredictOutcome {
     stored: ToStore,
 }
 
-/// What `fit predict` stores its files as: a prediction inside the run whose
+/// What `camdl predict` stores its files as: a prediction inside the run whose
 /// draws it used.
 struct ToStore {
     fit: std::sync::Arc<crate::fit_store::OpenedFit>,
@@ -1571,19 +1571,23 @@ struct ToStore {
     design: Vec<String>,
 }
 
-/// `camdl fit predict` — write the free-forward posterior predictive artifact.
-pub(crate) fn cmd_fit_predict(args: &crate::args::FitPredictArgs, compile: crate::util::CompileSettings) {
+/// `camdl predict RUN`: the prediction of the stored fit run `args` names,
+/// stored inside that run, with `info` recording the invocation. Each file
+/// written is named on stderr; a skipped stream is named and does not fail
+/// the command; a deterministic failure fails it after every object that
+/// computed is stored.
+pub(crate) fn predict(args: &crate::args::PredictArgs, compile: crate::util::CompileSettings, info: store::RunInfo) {
     // The forcing-extrapolation policy this command's evaluations run under,
     // installed for the rest of the command.
     let forcing =
-        crate::forcing_extrapolation::ForcingPolicy::new(args.forcing_extrapolation.allow_forcing_extrapolation);
+        crate::forcing_extrapolation::ForcingPolicy::new(args.flags.forcing_extrapolation.allow_forcing_extrapolation);
     let _forcing_route = forcing.install();
-    // fit predict has no `--no-color`: its painters follow the environment
+    // predict has no `--no-color`: its painters follow the environment
     // and whether each stream is a terminal.
     let out = crate::out::Out::new(false);
     match run_predict(&out, args, compile) {
         Ok(outcome) => {
-            let folder = store_prediction(&outcome.stored).unwrap_or_else(|e| out.fail(format!("error: {e}")));
+            let folder = store_prediction(&outcome.stored, info).unwrap_or_else(|e| out.fail(format!("error: {e}")));
             // What it wrote is the command's account of itself, not data:
             // stderr, like every other command's `wrote` lines.
             for p in &outcome.written {
@@ -1593,21 +1597,21 @@ pub(crate) fn cmd_fit_predict(args: &crate::args::FitPredictArgs, compile: crate
             // A skipped stream was never eligible: it is named so the reader
             // knows the artifact leaves it out, and it does not fail the run.
             for s in &outcome.skipped {
-                out.say(format_args!("fit predict: {}", s.describe()));
+                out.say(format_args!("predict: {}", s.describe()));
             }
             if !outcome.failures.is_empty() {
                 // What failed, then what was written — in that order, because
                 // the first is why the exit status is 1 and the second is what
                 // the reader still has.
                 out.say(format_args!(
-                    "fit predict: {} deterministic failure(s); this predictive is incomplete:",
+                    "predict: {} deterministic failure(s); this predictive is incomplete:",
                     outcome.failures.len()
                 ));
                 for f in &outcome.failures {
                     out.say(format_args!("  ✗ {}", f.describe()));
                 }
                 out.fail(format!(
-                    "fit predict: wrote {} file(s) anyway — every object that computed is on \
+                    "predict: wrote {} file(s) anyway — every object that computed is on \
                      disk, and `report.json` lists what did not. Exit status 1.",
                     outcome.written.len()
                 ));
@@ -1624,13 +1628,13 @@ pub(crate) fn cmd_fit_predict(args: &crate::args::FitPredictArgs, compile: crate
 /// its problem and the options. A prediction already stored is reused, and
 /// the files just written are dropped. Returns the prediction's folder.
 #[allow(clippy::result_large_err)] // the store's error carries the paths a person acts on, returned once
-fn store_prediction(p: &ToStore) -> Result<PathBuf, String> {
+fn store_prediction(p: &ToStore, info: store::RunInfo) -> Result<PathBuf, String> {
     use crate::fit_store::Prediction;
-    let root = crate::fit_store::reader_root();
+    // The prediction sits inside its run, so it is stored in the store that
+    // holds the run, which a folder handle names whatever `CAMDL_STORE` is.
+    let root = crate::fit_store::store_holding(p.fit.fit.problem.folder()).unwrap_or_else(crate::fit_store::reader_root);
     let store = crate::camdl_store::open_existing(&root)
         .ok_or_else(|| format!("no run store at {}", root.display()))?;
-    let info = store::RunInfo::new(&store::Given::default(), &(), &store::StoreRequest::default())
-        .map_err(|e| e.to_string())?;
     // Each design file, stored as a data table the prediction depends on.
     let mut design = std::collections::BTreeMap::new();
     for spec in &p.design {
@@ -1748,13 +1752,13 @@ struct LeafObs {
 /// The predictive `--mode` and `--horizon` ask for: `None` is every
 /// applicable one. `--horizon` alone means the forecast; the forecast needs a
 /// reach; and a reach means nothing to another mode.
-fn predict_mode(args: &crate::args::FitPredictArgs)
+fn predict_mode(args: &crate::args::PredictArgs)
     -> Result<Option<crate::args::types::PredictModeArg>, String>
 {
     use crate::args::types::PredictModeArg;
     // `--horizon` once named the mode; answer that spelling with the flag
     // that does it now, rather than with a malformed-duration error.
-    if let Some(h) = args.horizon.as_deref() {
+    if let Some(h) = args.flags.horizon.as_deref() {
         let mode = h.trim().replace('-', "_");
         if matches!(mode.as_str(), "free_forward" | "one_step" | "forecast") {
             return Err(format!(
@@ -1762,7 +1766,7 @@ fn predict_mode(args: &crate::args::FitPredictArgs)
                  predictive mode is chosen with --mode {mode}."));
         }
     }
-    match (args.mode, args.horizon.as_deref()) {
+    match (args.flags.mode, args.flags.horizon.as_deref()) {
         (None, Some(_)) => Ok(Some(PredictModeArg::Forecast)),
         (Some(PredictModeArg::Forecast), None) => Err(
             "--mode forecast needs --horizon DURATION, the reach of the forecast from the \
@@ -1777,13 +1781,13 @@ fn predict_mode(args: &crate::args::FitPredictArgs)
 
 fn run_predict(
     out: &crate::out::Out,
-    args: &crate::args::FitPredictArgs,
+    args: &crate::args::PredictArgs,
     compile: crate::util::CompileSettings,
 ) -> Result<PredictOutcome, String> {
     predict_mode(args)?;
     // 1. The run the handle names (`@label`, a run-id prefix, its folder),
     //    read through the store into a copy of its files.
-    let fit = crate::fit_store::opened_run(args.fit()?)?;
+    let fit = crate::fit_store::opened_run(args.source.as_deref().ok_or("a stored fit run is required: its @label, a run-id prefix or its folder")?)?;
     let run_dir = fit.run_dir().expect("a run handle has its files").to_path_buf();
     let segment = fit.segment.clone();
     let config = fit.config.clone();
@@ -1806,7 +1810,7 @@ fn run_predict(
         .map_err(|e| format!("cannot make a scratch directory: {e}"))?;
     // D85: the filters' particle count, the PMMH fit's own by default.
     let fit_pmmh_particles = fit_pmmh_particles(&run_dir)?;
-    let particles = PredictParticles::resolve(args.particles, fit_pmmh_particles)?;
+    let particles = PredictParticles::resolve(args.flags.particles, fit_pmmh_particles)?;
     // The problem half is all a replay reads: model, data, fixed, estimate.
     let config = config.problem;
 
@@ -1814,7 +1818,7 @@ fn run_predict(
     //    `--exclude-chains` is parsed at the boundary into a typed selection and
     //    applied to the cloud through the draws authority (one filter, once).
     let selection =
-        ChainSelection::from_flags(args.chains.as_deref(), args.exclude_chains.as_deref())?;
+        ChainSelection::from_flags(args.posterior.chains.as_deref(), args.posterior.exclude_chains.as_deref())?;
     let fit_result = FitResult::resolve(out, &segment, &run_dir, selection.clone())?;
     let treatment = fit_result.into_treatment();
     // The label the artifact carries, derived from the treatment before we
@@ -1823,7 +1827,9 @@ fn run_predict(
     let treatment_kind = treatment.kind();
     let posterior = match treatment {
         ParamTreatment::Posterior(pd) => pd,
-        ParamTreatment::PlugIn { method, name } => return Err(plugin_refusal(method, &name)),
+        ParamTreatment::PlugIn { method, name } => {
+            return Err(plugin_refusal(method, &name, args.source.as_deref().unwrap_or("<run>")))
+        }
     };
 
     // A chain selection actually dropped chains — warn loudly (non-quietable),
@@ -1862,7 +1868,7 @@ fn run_predict(
     // address whenever one runs; where none runs, `--particles` would be
     // silently ignored, so it is refused.
     let runs_filter = one_step_fit.is_some() || mode == Some(PredictModeArg::Forecast);
-    if args.particles.is_some() && !runs_filter {
+    if args.flags.particles.is_some() && !runs_filter {
         return Err(format!(
             "--particles sets the particle count of the one-step band's and the forecast's \
              filters, and this predict runs neither ({}).",
@@ -1882,7 +1888,7 @@ fn run_predict(
     let (compiled_ir, _ir_tmp): (String, Option<std::path::PathBuf>) = if archived_ir.is_file() {
         (archived_ir.to_string_lossy().into_owned(), None)
     } else {
-        // `fit predict` replays forward trajectories from stored draws — it never
+        // `camdl predict` replays forward trajectories from stored draws — it never
         // recomputes an ODE gradient, so compile lean (`needs_state_grad = false`,
         // gh#439 A2).
         crate::util::resolve_ir_path(&config.model.camdl, false, None, compile)?
@@ -1910,20 +1916,27 @@ fn run_predict(
     //     they differ the source has drifted and we refuse — the alternative is
     //     reporting a fit through formulas written for a different model.
     let vocabulary: Option<crate::quantities_file::QuantitiesOverride> =
-        args.quantities.as_deref().map(crate::quantities_file::QuantitiesOverride::load).transpose()?;
+        args.flags.quantities.as_deref().map(crate::quantities_file::QuantitiesOverride::load).transpose()?;
     // The options that key the output directory. A forecast's gain its design
     // inputs (D81) once its plan is built, so the forecast addresses its own
     // directory (`run_forecast`); every other mode's is addressed below,
     // after the forecast branch.
-    let options = PredictOptions {
+    let mut options = PredictOptions {
         particles: runs_filter.then_some(particles.n),
         ..PredictOptions::of(args, posterior.selection(), vocabulary.as_ref())
     };
-    if (!args.design.is_empty() || args.realised_design) && mode != Some(PredictModeArg::Forecast) {
+    // With no --mode, the modes that apply to the fit's backend, resolved
+    // before the options are keyed: where the one-step band does not apply,
+    // the default computes the free-forward band alone, and is keyed as
+    // `--mode free_forward` is.
+    if mode.is_none() && one_step_fit.is_none() {
+        options.mode = "free_forward";
+    }
+    if (!args.flags.design.is_empty() || args.posterior.realised_design) && mode != Some(PredictModeArg::Forecast) {
         return Err(format!(
             "{} supplies the design values of a forecast's targets, and this predict is not a \
              forecast; pass --horizon DURATION (--mode forecast).",
-            if args.realised_design { "--realised-design" } else { "--design" }));
+            if args.posterior.realised_design { "--realised-design" } else { "--design" }));
     }
     if let Some(v) = &vocabulary {
         // The vocabulary compiles against the model file the problem keeps.
@@ -1932,7 +1945,7 @@ fn run_predict(
         model.quantities = quantities_from_vocabulary(&model, &posed, v, compile)?;
     }
 
-    // gh#616: `fit predict` HAS the fit's data, so it resolves the model's
+    // gh#616: `camdl predict` HAS the fit's data, so it resolves the model's
     // observation anchors rather than refusing them — and it must do so HERE,
     // before the horizon guard below and before any compile. Inheriting an
     // unresolved horizon would emit a single-snapshot "forecast" that reads as a
@@ -1974,7 +1987,7 @@ fn run_predict(
     // already ended the command, so only what is evaluated from here on
     // differs.
     let _fit_forcing_route = (config.config.allow_forcing_extrapolation
-        && !args.forcing_extrapolation.allow_forcing_extrapolation)
+        && !args.flags.forcing_extrapolation.allow_forcing_extrapolation)
         .then(|| crate::forcing_extrapolation::ForcingPolicy::new(true).install());
     // …and under its `allow_degenerate_rates`: a rate that collapsed to 0 in
     // the fit collapses to 0 in every replay of it (the one-step filters, the
@@ -2001,7 +2014,7 @@ fn run_predict(
     // overlay). Validate each ref against the model's presets up front so an
     // unknown `--scenario NAME` errors with the available presets, BEFORE any
     // simulation runs (the resolver's actionable message).
-    let scenario_refs = args.scenario_refs()?;
+    let scenario_refs = args.flags.scenario_refs()?;
     let preset_names: Vec<String> =
         model.presets.iter().map(|p| p.name.clone()).collect();
     for sref in &scenario_refs {
@@ -2030,7 +2043,7 @@ fn run_predict(
     // to salvage.
     let scenario_horizon_refusal: Option<String> = scenario_refs.iter().find_map(|sref| {
         crate::util::refuse_scenario_horizon(
-            &model, Some(sref.name()), "fit predict",
+            &model, Some(sref.name()), "predict",
             "the predictive replays every scenario at the model's own horizon, \
              which is one window for the whole run",
         )
@@ -2050,7 +2063,7 @@ fn run_predict(
     let fit_base = crate::util::FitBase::of(&config)?;
     if !fit_base.is_empty() {
         out.say(format_args!(
-            "fit predict: the fitted model runs the fit's own {}; every scenario \
+            "predict: the fitted model runs the fit's own {}; every scenario \
              arm applies its changes on top of it",
             fit_base.describe()
         ));
@@ -2073,14 +2086,14 @@ fn run_predict(
     // parameter in each draw row), so the resolver applies it below the
     // scenario tier. A scenario touching a swept parameter is refused (3d); on
     // the parameters it does touch, the scenario's tier applies.
-    let sweep_points: Vec<Vec<(String, f64)>> = crate::sweep::expand_sweep_specs(&args.sweep);
+    let sweep_points: Vec<Vec<(String, f64)>> = crate::sweep::expand_sweep_specs(&args.flags.sweep);
     let swept_params: std::collections::BTreeSet<String> =
-        args.sweep.iter().map(|s| s.name.clone()).collect();
+        args.flags.sweep.iter().map(|s| s.name.clone()).collect();
 
     // Each swept parameter must be a real model parameter, named at most once —
     // a sweep over an undeclared (or duplicated) name would vary a `sweep:<param>`
     // column while the dynamics never move (a silent no-op).
-    crate::sweep::check_swept_names(&args.sweep, &model)?;
+    crate::sweep::check_swept_names(&args.flags.sweep, &model)?;
 
     // 3d. A scenario and a sweep on the SAME parameter is a hard error: the
     // scenario's `set` would override (its `scale` rescale) every sweep value,
@@ -2175,7 +2188,7 @@ fn run_predict(
             Some(PredictModeArg::Forecast) => Site::ForecastStream,
             _ => Site::Stream,
         };
-        select_streams(&model.observations, |o| bound.contains_key(&o.source), &args.stream, site)?
+        select_streams(&model.observations, |o| bound.contains_key(&o.source), &args.flags.stream, site)?
     };
 
     // The forecast mode: the fixed-origin forecast and nothing else.
@@ -2199,11 +2212,11 @@ fn run_predict(
                 calendar: &calendar,
                 schema: schema.as_ref(),
                 dt: one_step_dt,
-                seed: args.seed.unwrap_or(1),
+                seed: args.flags.seed.unwrap_or(1),
                 binomial,
                 selection: &streams_in,
                 scenarios: &scenario_refs,
-                sweep_points: if args.sweep.is_empty() { &[] } else { &sweep_points },
+                sweep_points: if args.flags.sweep.is_empty() { &[] } else { &sweep_points },
                 particles,
             },
         )?;
@@ -2217,7 +2230,7 @@ fn run_predict(
         )?);
         return Ok(PredictOutcome {
             written, failures, skipped,
-            stored: ToStore { fit: fit.clone(), dir: scratch, options: forecast_options, design: args.design.clone() },
+            stored: ToStore { fit: fit.clone(), dir: scratch, options: forecast_options, design: args.flags.design.clone() },
         });
     }
 
@@ -2239,7 +2252,7 @@ fn run_predict(
     let parameter_set = ParameterSet::read(&model, &compiled, &config, dt, &segment, &fit.fit.held_out)?;
 
     let schema = crate::run_meta::read_fit_sidecar(&segment)?.and_then(|s| s.schema);
-    let seed = args.seed.unwrap_or(1);
+    let seed = args.flags.seed.unwrap_or(1);
 
     // Build the generated-quantities evaluator once (the IR is fixed across draws);
     // `None` when the model declares no `quantities {}` block. The evaluator drives
@@ -2424,7 +2437,7 @@ fn run_predict(
                 if !aux_cols.is_empty() {
                     if noted.insert(obs_ir.source.clone()) {
                         out.say(format_args!(
-                            "fit predict: stream '{}' stops at its last observation \
+                            "predict: stream '{}' stops at its last observation \
                              (t = {last_obs}) even though the model horizon is {}: its \
                              likelihood reads the observed data column(s) [{}], which \
                              have no value past the data. Projecting it would draw \
@@ -2444,7 +2457,7 @@ fn run_predict(
                 if extension.is_empty() {
                     if noted.insert(obs_ir.source.clone()) {
                         out.say(format_args!(
-                            "fit predict: stream '{}' stops at its last observation \
+                            "predict: stream '{}' stops at its last observation \
                              (t = {last_obs}) even though the model horizon is {}: no \
                              trajectory output time past the data continues this \
                              stream's observed cadence, so there is no grid to project \
@@ -2541,7 +2554,7 @@ fn run_predict(
                 // One note per logical stream, not per stratum leaf.
                 if extended.insert(obs_ir.source.clone()) {
                     out.say(format_args!(
-                        "fit predict: stream '{}': the last forecast row (t = {label}) \
+                        "predict: stream '{}': the last forecast row (t = {label}) \
                          covers [{start}, {stop}) under its `covers` declaration, \
                          which closes past the declared horizon t = {}. Integrating \
                          to t = {stop} and recording a snapshot there, so the row's \
@@ -2582,7 +2595,7 @@ fn run_predict(
                 }
             }
             if n_between_grid > 0 {
-                out.say("fit predict: recording extra trajectory snapshots at the \
+                out.say("predict: recording extra trajectory snapshots at the \
                      observation and row-boundary times that fall between the \
                      model's output times, so each row can be projected off the \
                      trajectory the fit scored from integrator state. They are \
@@ -2612,7 +2625,7 @@ fn run_predict(
             // written. Same knob + default + strided pick the one-step horizon uses,
             // so both horizons subsample identically. Computed ONCE — the subsample
             // is scenario/sweep-independent.
-            let ff_cap = args.n_draws.unwrap_or(DEFAULT_PREDICT_DRAWS);
+            let ff_cap = args.flags.n_draws.unwrap_or(DEFAULT_PREDICT_DRAWS);
             let ff_idx = subsample_indices(posterior.n_draws(), ff_cap);
             let ff_draws: Vec<&IndexMap<String, f64>> =
                 ff_idx.iter().map(|&i| &posterior.draws()[i]).collect();
@@ -2629,19 +2642,19 @@ fn run_predict(
                 *ff_draws_per_chain.entry(*c).or_insert(0) += 1;
             }
             if ff_chain_of_point.iter().all(Option::is_none) {
-                out.say("fit predict: this fit's draws.tsv carries no chain column, so the \
+                out.say("predict: this fit's draws.tsv carries no chain column, so the \
                      per-row convergence columns (rhat_mean / ess_mean / rhat_pred / \
                      ess_pred) are left empty — a between-chain statistic needs to know \
                      which chain each draw came from.");
-                if args.by_chain {
-                    out.say("fit predict: --by-chain has nothing to split on for the same \
+                if args.posterior.by_chain {
+                    out.say("predict: --by-chain has nothing to split on for the same \
                          reason, so no `chain` column is written and the file carries \
                          the pooled band only.");
                 }
             }
             if ff_n_draws < posterior.n_draws() {
                 out.say(format_args!(
-                    "fit predict: free_forward horizon — subsampling {ff_n_draws} of {} \
+                    "predict: free_forward horizon — subsampling {ff_n_draws} of {} \
                      posterior draws (raise with --n-draws)",
                     posterior.n_draws()
                 ));
@@ -2670,7 +2683,7 @@ fn run_predict(
                 );
                 if !unconditioned.is_empty() {
                     out.say(format_args!(
-                        "fit predict: quantity `{}` reduces `observations.<stream>` at an \
+                        "predict: quantity `{}` reduces `observations.<stream>` at an \
                          anchor inside the observed record, and is reported on the \
                          free-forward replay. The saved smoothing path carries the \
                          conditioned projection (`inc_<stream>`, a mean), not a draw from \
@@ -2702,7 +2715,7 @@ fn run_predict(
             // arm only, and only when no `--enable`/`--disable` rides on it (that
             // makes it a counterfactual too).
             let conditioned_scenario: Option<String> =
-                if args.enable.is_empty() && args.disable.is_empty() {
+                if args.flags.enable.is_empty() && args.flags.disable.is_empty() {
                     Some(crate::args::FITTED.to_string())
                 } else {
                     None
@@ -2721,7 +2734,7 @@ fn run_predict(
                 match (&ff_saved, &conditioned_scenario) {
                     (Some(s), Some(_)) if s.n_saved > 0 => {
                         out.say(format_args!(
-                            "fit predict: quantity `{names}` is anchored at or before \
+                            "predict: quantity `{names}` is anchored at or before \
                              last_obs — reported on the conditioned smoothing path \
                              p(x|y), not on the free-forward replay (gh#722). \
                              {}/{} replayed draws have a saved path; the other {} are \
@@ -2734,7 +2747,7 @@ fn run_predict(
                     }
                     (_, None) => {
                         out.say(format_args!(
-                            "fit predict: quantity `{names}` is anchored at or before \
+                            "predict: quantity `{names}` is anchored at or before \
                              last_obs, but `--enable`/`--disable` makes every arm of this \
                              run a counterfactual, for which no conditioned path exists. \
                              They are reported on the free-forward replay, which ignores \
@@ -2743,7 +2756,7 @@ fn run_predict(
                     }
                     _ => {
                         out.say(format_args!(
-                            "fit predict: quantity `{names}` is anchored at or before \
+                            "predict: quantity `{names}` is anchored at or before \
                              last_obs, but this fit saved no latent path for any replayed \
                              draw — there is nothing conditioned to read them on. They are \
                              reported as fully censored rather than taken from the \
@@ -2752,7 +2765,7 @@ fn run_predict(
                              Fix: re-fit with a PGAS method and `n_trajectories` > 0 \
                              (only PGAS saves the smoothing paths; PMMH and \
                              particle-filter methods write none), then re-run \
-                             `fit predict`."
+                             `camdl predict`."
                         ));
                     }
                 }
@@ -2761,7 +2774,7 @@ fn run_predict(
             // in the same file as the fitted arm's, under a `scenario` column, so a
             // reader comparing them must know they are two different objects.
             if any_smoothed && scenario_refs.iter().any(|s| s.name() != crate::args::FITTED) {
-                out.say("fit predict: the scenario arms report their anchored quantities on \
+                out.say("predict: the scenario arms report their anchored quantities on \
                      their OWN free-forward replay — the smoothing path was inferred under \
                      the fitted model, and the data a counterfactual would have generated \
                      do not exist. `quantities.json` tags each entry with `evaluated_on`.");
@@ -2770,7 +2783,7 @@ fn run_predict(
             // each cell by its planned `point_idx`/`rep` (`process_seed_for`),
             // independent of execution order, so parallelism never perturbs a
             // trajectory (engine.rs) — the bands are byte-identical to a sequential
-            // replay of the same subsample. `fit predict` has no thread-budget flag,
+            // replay of the same subsample. `camdl predict` has no thread-budget flag,
             // so default to the machine width; `RAYON_NUM_THREADS` still caps the
             // global pool.
             let ff_parallel = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
@@ -2873,7 +2886,7 @@ fn run_predict(
                         required_output_times: required_output_times.clone(),
                         // gh#641: the predictive replays from the model's init {} at
                         // each posterior draw; a filtered-state restart is a
-                        // `simulate --init-state` surface, not a `fit predict` one.
+                        // `simulate --init-state` surface, not a `camdl predict` one.
                         init_state: None,
                         // gh#616: the engine re-loads the model from the ARCHIVED IR
                         // path per cell, which still carries the unresolved anchors —
@@ -2948,7 +2961,7 @@ fn run_predict(
                         scenario: scenario_name.clone(),
                         bands: assemble_predictive(
                             &model, accum, &ff_emit_times, &leaves, &parameter_set,
-                            schema.as_ref(), args.by_chain,
+                            schema.as_ref(), args.posterior.by_chain,
                         )?,
                     });
                 }
@@ -2964,7 +2977,7 @@ fn run_predict(
                     // The fact here; the reason travels with the failure and is
                     // printed once, at the end, beside the exit status.
                     out.say(format_args!(
-                        "fit predict: quantity `{}` refused and is dropped from the \
+                        "predict: quantity `{}` refused and is dropped from the \
                          table — the reason is below and in report.json.",
                         f.name
                     ));
@@ -2983,7 +2996,7 @@ fn run_predict(
         if let Err(reason) = outcome {
             // Only the fact, here: the reason travels with the failure and is
             // printed once, at the end, beside the exit status it explains.
-            out.say("fit predict: the free-forward tail refused — continuing with what is \
+            out.say("predict: the free-forward tail refused — continuing with what is \
                  computable; the reason is below and in report.json.");
             failures.push(DeterministicFailure::EvaluationFailed {
                 at: Site::FreeForward,
@@ -3004,7 +3017,7 @@ fn run_predict(
 
     // ── One-step horizon: per-draw bootstrap filter over the data, pooled. Runs
     // only when the witness was built (a filterable fit and the horizon wanted).
-    let n_draws_cap = args.n_draws.unwrap_or(DEFAULT_PREDICT_DRAWS);
+    let n_draws_cap = args.flags.n_draws.unwrap_or(DEFAULT_PREDICT_DRAWS);
     let one_step: Option<OneStepBands> = match &one_step_fit {
         Some(fit) => Some(one_step_bands(
             out,
@@ -3027,7 +3040,7 @@ fn run_predict(
             particles.n,
             seed,
             schema.as_ref(),
-            args.by_chain,
+            args.posterior.by_chain,
             &parameter_set,
         )?),
         None => None,
@@ -3073,7 +3086,7 @@ fn run_predict(
     // predictive header uses (empty without `--sweep`). Computed once — uniform
     // across streams.
     let sweep_col_names: Vec<String> = {
-        let mut names: Vec<String> = args.sweep.iter().map(|s| s.name.clone()).collect();
+        let mut names: Vec<String> = args.flags.sweep.iter().map(|s| s.name.clone()).collect();
         names.sort();
         names
     };
@@ -3456,7 +3469,7 @@ fn run_predict(
             // stream the fit bound.
             let walked: Vec<String> = o.filtered.iter().map(|f| format!("'{}'", f.stream)).collect();
             out.say(format_args!(
-                "fit predict: the one_step rows include held-out rows ({}): their bands use \
+                "predict: the one_step rows include held-out rows ({}): their bands use \
                  parameters fitted without them and a state filtered through every earlier \
                  row of {}, held-out rows included (the `role` column marks them).",
                 held.join(", "), walked.join(", ")));
@@ -3473,7 +3486,7 @@ fn run_predict(
     }
     let scenario_labels: Vec<&str> = scenario_refs.iter().map(|s| s.name()).collect();
     out.say(format_args!(
-        "fit predict: mode={} treatment=posterior, {} scenario(s) [{}], {} stream(s), \
+        "predict: mode={} treatment=posterior, {} scenario(s) [{}], {} stream(s), \
          {} draws from {} method '{}'",
         horizons.join("+"),
         scenario_labels.len(),
@@ -3485,7 +3498,7 @@ fn run_predict(
     ));
     Ok(PredictOutcome {
         written, failures, skipped: streams_in.skipped,
-        stored: ToStore { fit: fit.clone(), dir: scratch, options, design: args.design.clone() },
+        stored: ToStore { fit: fit.clone(), dir: scratch, options, design: args.flags.design.clone() },
     })
 }
 
@@ -3508,35 +3521,40 @@ fn quantities_from_vocabulary(
     compile: crate::util::CompileSettings,
 ) -> Result<Vec<ir::quantity::Quantity>, String> {
     let model_source: &str = &config.model.camdl;
+    // Messages name the model file in the stored problem, not its scratch copy.
+    let shown = crate::fit_store::shown(std::path::Path::new(model_source));
     if !crate::util::model_is_camdl_source(model_source) {
         return Err(format!(
-            "--quantities needs this fit's model SOURCE, but the fit records `{model_source}`, \
+            "--quantities needs this fit's model SOURCE, but the fit records `{}`, \
              which is compiled IR. A reporting vocabulary is resolved against the model's \
              symbols at compile time, and a `let` that mentions a parameter is inlined away \
-             in the IR, so it cannot be applied to a compiled model."
+             in the IR, so it cannot be applied to a compiled model.",
+            shown.display()
         ));
     }
     if !std::path::Path::new(model_source).is_file() {
         return Err(format!(
-            "--quantities needs this fit's model source `{model_source}`, which is not \
+            "--quantities needs this fit's model source `{}`, which is not \
              readable from here. The fit itself is self-contained (it archived its compiled \
-             IR), but a reporting vocabulary has to be compiled against the model's symbols."
+             IR), but a reporting vocabulary has to be compiled against the model's symbols.",
+            shown.display()
         ));
     }
-    // Lean compile: `fit predict` replays forward trajectories and never
+    // Lean compile: `camdl predict` replays forward trajectories and never
     // recomputes an ODE gradient (gh#439 A2). Identity is gradient-independent,
     // so this does not disturb the hash comparison below.
     let (ir_path, _tmp) = crate::util::resolve_ir_path(model_source, false, Some(vocabulary), compile)?;
     let (recompiled, _) = crate::util::load_ir(&ir_path)?;
-    use crate::fit::fitted_model::{as_fitted, compare_to_fitted, short, ModelAgreement};
+    use crate::fit::fitted_model::{as_fitted, compare_to_fitted, short, without_hoisting, ModelAgreement};
     // The archived IR is the model AFTER `fit run` resolved its observation
     // anchors; the recompiled source still carries them. Both go through the
     // fit's own resolution before the comparison — a no-op on the archived IR,
     // and on the pre-archive fallback (`archived` recompiled from source) it
-    // resolves both sides alike. The quantities transplanted are the
-    // recompiled model's, which the substitution does not touch.
+    // resolves both sides alike. Both are compared with their hoisted
+    // subexpressions written back in place, so the fit's compile and this
+    // one agree whether loop-invariant code motion ran in either.
     let resolve = |m: &ir::Model| {
-        as_fitted(m, config).map(|(m, _)| m).map_err(|e| {
+        as_fitted(m, config).map(|(m, _)| m).and_then(|m| without_hoisting(&m)).map_err(|e| {
             format!(
                 "--quantities: resolving the observation anchors of this fit's model \
                  against its [data], to compare the source with the model the fit ran on, \
@@ -3544,19 +3562,23 @@ fn quantities_from_vocabulary(
             )
         })
     };
+    let recompiled = resolve(&recompiled)?;
     if let ModelAgreement::Differs { fitted: archived_h, given: recompiled_h } =
-        compare_to_fitted(&resolve(archived)?, &resolve(&recompiled)?)
+        compare_to_fitted(&resolve(archived)?, &recompiled)
     {
         return Err(format!(
-            "this fit's model source `{model_source}` is no longer the model the fit ran on, \
+            "this fit's model source `{}` is no longer the model the fit ran on, \
              so a reporting vocabulary cannot be checked against it (archived {}, source {}). \
              Quantities are excluded from that hash, so this difference is a real change to \
              the dynamics, observations, or parameters — not the vocabulary. Re-run the fit \
              against the current source, or check out the source the fit used.",
+            shown.display(),
             short(&archived_h),
             short(&recompiled_h),
         ));
     }
+    // The quantities transplanted refer to no hoisted binding, so they read
+    // the same in the archived model whatever it hoisted.
     Ok(recompiled.quantities)
 }
 
@@ -3715,7 +3737,7 @@ const CADENCE_MATCH_REL_TOL: f64 = 1e-6;
 /// entirely (spec §16.4: the data file's `time` column drives the fit) — and
 /// where it is present it is the SIMULATE-side cadence, which is free to
 /// disagree with the data the fit actually holds. The observed times are always
-/// present here and are what the rest of `fit predict` is keyed to, so they are
+/// present here and are what the rest of `camdl predict` is keyed to, so they are
 /// the single authority; `output_times` (the trajectory's own snapshot grid, the
 /// grid `quantities/` is written on) supplies the candidates, which is what
 /// makes the forecast band and the quantity sidecars agree by construction.
@@ -3922,7 +3944,7 @@ fn band_row(
 
 // ── Posterior-cloud subsampling (shared by both horizons) ───────────────────
 
-/// Default posterior-cloud subsample cap for `fit predict`, shared by both
+/// Default posterior-cloud subsample cap for `camdl predict`, shared by both
 /// horizons. Neither needs the full fit-grade cloud: the one-step band pools
 /// `draws × n_particles` per cell and the free-forward band pools one forward
 /// replay per draw, so a few hundred draws saturate q05…q95. The full cloud is
@@ -3930,15 +3952,15 @@ fn band_row(
 /// fit is thousands of ~seconds-each solves (gh#387).
 pub(crate) const DEFAULT_PREDICT_DRAWS: usize = 200;
 
-/// Every input that changes what `fit predict` writes, beyond the run it
+/// Every input that changes what `camdl predict` writes, beyond the run it
 /// reads, resolved to the values the predict used. Together with the run and
 /// the engine they key the output directory ([`Self::address_key`]), and they
 /// are recorded in its manifests, so two predictions computed from different
 /// inputs never share a directory and a reader can tell which one it holds.
 ///
-/// The `FitPredictArgs` flags, and where each one goes:
+/// The `PredictArgs` flags, and where each one goes:
 ///
-/// - `--fit` / the positional handle: the run it resolves to, keyed by its
+/// - the run handle (`RUN`): the run it resolves to, keyed by its
 ///   full run id in [`Self::address_key`] (the spelling of the handle is not).
 /// - `--mode`, `--horizon` (as `reach`), `--n-draws`, `--seed`, `--stream`,
 ///   `--scenario`, `--enable`, `--disable`, `--sweep`, `--by-chain`: fields.
@@ -4014,7 +4036,7 @@ struct PredictAddress<'a> {
 pub(crate) const PREDICT_KEY_HEX: usize = 32;
 
 impl PredictOptions {
-    /// What `fit predict <run>` with no options uses.
+    /// What `camdl predict <run>` with no options uses.
     pub(crate) fn defaults() -> Self {
         PredictOptions {
             mode: "all",
@@ -4048,7 +4070,7 @@ impl PredictOptions {
     /// The options of `args`, with the chain selection as resolved against the
     /// fit (`excluded`) and the `--quantities` vocabulary as loaded.
     pub(crate) fn of(
-        args: &crate::args::FitPredictArgs,
+        args: &crate::args::PredictArgs,
         excluded: Option<&crate::chain_selection::SubsetInfo>,
         vocabulary: Option<&crate::quantities_file::QuantitiesOverride>,
     ) -> Self {
@@ -4056,24 +4078,24 @@ impl PredictOptions {
         PredictOptions {
             // An invalid combination is refused by [`predict_mode`] before
             // any output is addressed; this reads the same flags.
-            mode: match (args.mode, args.horizon.is_some()) {
+            mode: match (args.flags.mode, args.flags.horizon.is_some()) {
                 (None, false) => "all",
                 (Some(PredictModeArg::FreeForward), _) => "free_forward",
                 (Some(PredictModeArg::OneStep), _) => "one_step",
                 (Some(PredictModeArg::Forecast), _) | (None, true) => "forecast",
             },
-            reach: args.horizon.clone(),
-            n_draws: args.n_draws.unwrap_or(DEFAULT_PREDICT_DRAWS),
-            seed: args.seed.unwrap_or(1),
-            stream: args.stream.clone(),
-            scenarios: args.scenarios.clone(),
-            enable: args.enable.clone(),
-            disable: args.disable.clone(),
-            sweep: args.sweep.iter().map(|s| (s.name.clone(), s.grid.expand())).collect(),
-            by_chain: args.by_chain,
+            reach: args.flags.horizon.clone(),
+            n_draws: args.flags.n_draws.unwrap_or(DEFAULT_PREDICT_DRAWS),
+            seed: args.flags.seed.unwrap_or(1),
+            stream: args.flags.stream.clone(),
+            scenarios: args.flags.scenarios.clone(),
+            enable: args.flags.enable.clone(),
+            disable: args.flags.disable.clone(),
+            sweep: args.flags.sweep.iter().map(|s| (s.name.clone(), s.grid.expand())).collect(),
+            by_chain: args.posterior.by_chain,
             excluded_chains: excluded_chain_ids(excluded),
             quantities: vocabulary.map(|v| v.digest.clone()),
-            allow_forcing_extrapolation: args.forcing_extrapolation.allow_forcing_extrapolation,
+            allow_forcing_extrapolation: args.flags.forcing_extrapolation.allow_forcing_extrapolation,
             particles: None,
             forecast: None,
         }
@@ -4183,12 +4205,12 @@ static EMPTY_CHAIN_COUNTS: BTreeMap<usize, usize> = BTreeMap::new();
 
 // ── The one-step-ahead posterior predictive producer ───────────────────────
 
-/// The particle count of `fit predict`'s filters when neither `--particles`
+/// The particle count of `camdl predict`'s filters when neither `--particles`
 /// nor the fit gives one (D85): the fit is not PMMH (PGAS's conditional SMC
 /// count is not a bootstrap-filter count).
 pub(crate) const DEFAULT_PREDICT_PARTICLES: usize = 500;
 
-/// Where the particle count of `fit predict`'s filters came from (D85).
+/// Where the particle count of `camdl predict`'s filters came from (D85).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ParticlesSource {
@@ -4228,7 +4250,7 @@ pub(crate) fn fit_pmmh_particles(leaf: &Path) -> Result<Option<usize>, String> {
              --particles", path.display()))
 }
 
-/// The particle count every filter `fit predict` runs per posterior draw
+/// The particle count every filter `camdl predict` runs per posterior draw
 /// uses (the one-step band's and the forecast's), as resolved (D85).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct PredictParticles {
@@ -4438,7 +4460,7 @@ fn pool_one_step_draws(
     if !skipped.is_empty() {
         let (first_idx, first_err) = &skipped[0];
         out.say(format_args!(
-            "fit predict: one_step horizon — skipped {}/{} posterior draws whose one-step \
+            "predict: one_step horizon — skipped {}/{} posterior draws whose one-step \
              filter degenerated (a small tail of degenerate draws is expected in a \
              converging posterior; first: draw {first_idx}: {first_err}); bands pool the \
              remaining {} draws",
@@ -4467,14 +4489,14 @@ fn pool_one_step_draws(
         }
         if n_pooled == 0 {
             out.say(format_args!(
-                "fit predict: one_step horizon -- chain {} contributed no band: all \
+                "predict: one_step horizon -- chain {} contributed no band: all \
                  {n_offered} of its replayed draws degenerated. It is omitted from the \
                  per-chain rows rather than banded over nothing.",
                 ChainIndex(*id)
             ));
         } else {
             out.say(format_args!(
-                "fit predict: one_step horizon -- chain {} bands over {n_pooled} of the \
+                "predict: one_step horizon -- chain {} bands over {n_pooled} of the \
                  {n_offered} draws it was given ({} degenerated); its rows report \
                  n_draws = {n_pooled}, so a narrower band there may be a thinner \
                  sample rather than a more certain chain.",
@@ -4514,7 +4536,7 @@ fn pool_one_step_draws(
 /// rows carry no convergence cells for the same reason the free-forward ones do
 /// not -- a between-chain statistic has nothing to compare one chain against.)
 #[allow(clippy::too_many_arguments)]
-/// `fit predict`'s step grids, `(free_forward, one_step)`: both the step
+/// `camdl predict`'s step grids, `(free_forward, one_step)`: both the step
 /// the fit ran at (`dt_rule::resolved_dt`), so neither horizon replays a
 /// different process than the fit. Kept as a pair so the two call sites
 /// still name which grid they walk.
@@ -4677,7 +4699,7 @@ fn one_step_bands(
     let n_used = chosen.len();
     if n_used < total {
         out.say(format_args!(
-            "fit predict: one_step horizon — subsampling {n_used} of {total} posterior \
+            "predict: one_step horizon — subsampling {n_used} of {total} posterior \
              draws (raise with --n-draws)"
         ));
     }
@@ -4730,7 +4752,7 @@ fn one_step_bands(
     // report. Empty without `--by-chain`, and empty on an unkeyed cloud.
     let chain_ids: Vec<usize> = if by_chain { pool.bandable_chains() } else { Vec::new() };
     if by_chain && chain_ids.is_empty() {
-        out.say("fit predict: one_step horizon — --by-chain wrote no per-chain rows: this \
+        out.say("predict: one_step horizon — --by-chain wrote no per-chain rows: this \
              fit's draws.tsv carries no chain column, so no chain can be named.");
     }
     let n_pooled_by_chain: BTreeMap<usize, usize> = chain_ids
@@ -4904,7 +4926,7 @@ fn one_step_refusal(why: NotFilterable, method: Option<FitAlgorithm>, leaf: &str
              reduces to the observation model at the deterministic state, identical to \
              the free-forward band. There is no separate one-step object to emit.\n  \
              Use the free-forward horizon instead:\n    \
-             camdl fit predict --fit <run> --mode free_forward"
+             camdl predict <run> --mode free_forward"
         ),
         NotFilterable::NotAnInferenceBackend => format!(
             "the '{leaf}' method leaf ran on the Gillespie backend, which is not an \
@@ -4922,7 +4944,7 @@ fn one_step_refusal(why: NotFilterable, method: Option<FitAlgorithm>, leaf: &str
 /// (IF2 / NLopt) that returns a single point and never has a band. Framing a
 /// sampler as an "optimizer fit" misdirected the user of the *default* Bayesian
 /// method to the plug-in workflow, discarding the posterior it does have.
-fn plugin_refusal(method: Option<FitAlgorithm>, leaf: &str) -> String {
+fn plugin_refusal(method: Option<FitAlgorithm>, leaf: &str, handle: &str) -> String {
     let leaf = leaf_name(leaf, method);
     if let Some(m) = method.filter(|m| m.is_posterior_sampler()) {
         return format!(
@@ -4930,7 +4952,7 @@ fn plugin_refusal(method: Option<FitAlgorithm>, leaf: &str) -> String {
              written its posterior draws (draws.tsv) — that file is written when the \
              method finishes, so the fit is likely incomplete or still running.\n  \
              Let the fit finish (or re-run it); a completed {m} leaf has a full \
-             posterior cloud, and `camdl fit predict` will draw the band with no \
+             posterior cloud, and `camdl predict` will draw the band with no \
              extra flags."
         );
     }
@@ -4939,10 +4961,10 @@ fn plugin_refusal(method: Option<FitAlgorithm>, leaf: &str) -> String {
             "the '{leaf}' method leaf is an optimizer fit ({m}) — it returns a single \
              best-fit parameter set, not a distribution, so there is no posterior band \
              to draw.\n  \
-             Get those parameters and run a plug-in forward simulation instead:\n    \
-             camdl fit summary <run> --params-only > params.toml\n    \
-             camdl simulate <model> --params params.toml --obs-only-dir out/\n  \
-             (A labelled plug-in predictive is a future cell; v1 emits posterior bands only.)"
+             Write its estimate as a parameters file, and give that file to a command \
+             that takes --params:\n    \
+             camdl fit summary {handle} --params-only > params.toml\n    \
+             camdl simulate <model> --params params.toml --obs-only-dir out/"
         );
     }
     // Neither a posterior sampler nor an optimizer (a likelihood-eval method
@@ -5045,7 +5067,7 @@ mod tests {
 
     use super::*;
 
-    /// `fit predict` reads the observed series of every leaf a fit binds. Under
+    /// `camdl predict` reads the observed series of every leaf a fit binds. Under
     /// the one-file shorthand on a model whose `cases[p in patch]` block
     /// expands to `cases_urban`/`cases_rural` (both of source `cases`), it
     /// looked each leaf's file up by source in a map keyed by leaf, found
@@ -5653,7 +5675,7 @@ mod tests {
         // unusable for it. The refusal must name the missing draws, never the
         // plug-in-simulate optimizer workflow (which discards the posterior).
         for m in [FitAlgorithm::Pgas, FitAlgorithm::Pmmh, FitAlgorithm::Mh] {
-            let msg = plugin_refusal(Some(m), "posterior");
+            let msg = plugin_refusal(Some(m), "posterior", "@post");
             assert!(
                 !msg.contains("optimizer"),
                 "a {m} leaf must not be described as an optimizer fit; got: {msg}"
@@ -5674,10 +5696,10 @@ mod tests {
         // The optimizer refusal is preserved: IF2 / NLopt genuinely have no band,
         // so the plug-in-simulate workflow is the right redirect (no over-correction).
         for m in [FitAlgorithm::If2, FitAlgorithm::NlSbplx, FitAlgorithm::NlBobyqa] {
-            let msg = plugin_refusal(Some(m), "scout");
+            let msg = plugin_refusal(Some(m), "scout", "@scout");
             assert!(msg.contains("optimizer fit"), "a {m} leaf is an optimizer fit; got: {msg}");
             assert!(
-                msg.contains("--params-only"),
+                msg.contains("camdl fit summary @scout --params-only") && msg.contains("--params params.toml"),
                 "the optimizer refusal points at the plug-in workflow; got: {msg}"
             );
         }

@@ -27,7 +27,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-/// Where the latest `fit predict` of the run `seg` stored its prediction: the
+/// Where the latest `camdl predict` of the run `seg` stored its prediction: the
 /// folder under `<seg>/predict/` whose `report*.json` (one written by every
 /// predict) is newest. A path that does not exist while nothing has been
 /// predicted.
@@ -696,7 +696,7 @@ starts = \"single\"
     }
 }
 
-// ─── From a posterior: simulate --draws posterior and fit predict ───────────
+// ─── From a posterior: simulate --draws posterior and predict ───────────
 
 /// A closed SIR with a weekly negative-binomial observation; `k` (the
 /// dispersion) is fixed in the fit, and `k_alt` sets it to 12.
@@ -822,7 +822,7 @@ fn simulate_from_a_posterior_param_and_scenario_set_give_one_output() {
         vec!["info: scenario `k_alt` replaced k = 10 (from the draw or sweep point) with 12"]);
 }
 
-/// The `free_forward` rows of a `fit predict` predictive table, with the
+/// The `free_forward` rows of a `camdl predict` predictive table, with the
 /// `scenario` and `sweep:k` columns removed, for the rows whose scenario is
 /// `arm` and whose `sweep:k` (when present) is `k`.
 fn predictive_rows(table: &str, arm: &str, k: Option<&str>) -> Vec<String> {
@@ -847,10 +847,10 @@ fn fit_predict_scenario_set_and_one_point_sweep_give_one_band() {
     let dir = tmp.path();
     let fit = posterior_fit(dir);
     let predict = |extra: &[&str]| -> (String, Vec<String>) {
-        let mut argv = vec!["fit", "predict", "--fit", "@post", "--mode", "free_forward",
+        let mut argv = vec!["predict", "@post", "--mode", "free_forward",
             "--seed", "3"];
         argv.extend_from_slice(extra);
-        let stderr = ok(&camdl_fit(dir, &argv), &format!("fit predict {extra:?}"));
+        let stderr = ok(&camdl_fit(dir, &argv), &format!("predict {extra:?}"));
         (read(&predict_out(&fit).join("predictive/weekly_cases.tsv")), override_lines(&stderr))
     };
     let (by_scenario, n_scenario) = predict(&["--scenario", "k_alt"]);
@@ -864,7 +864,7 @@ fn fit_predict_scenario_set_and_one_point_sweep_give_one_band() {
 
     // The scenario replaces the posterior row's k, and says so. A `--sweep`
     // value is written into the draw row itself (`fit/predict.rs`, the same
-    // draw/sweep tier), so `fit predict` reports that replacement of the
+    // draw/sweep tier), so `camdl predict` reports that replacement of the
     // draws' values itself, once per swept parameter.
     assert_eq!(n_scenario,
         vec!["info: scenario `k_alt` replaced k = 10 (from the draw or sweep point) with 12"]);
@@ -878,9 +878,9 @@ fn fit_predict_sweep_reports_the_replaced_draws_once_as_a_range() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     posterior_fit(dir);
-    let out = camdl_fit(dir, &["fit", "predict", "--fit", "@post", "--mode", "free_forward",
+    let out = camdl_fit(dir, &["predict", "@post", "--mode", "free_forward",
         "--seed", "3", "--sweep", "beta=0.3,0.4"]);
-    let lines = override_lines(&ok(&out, "fit predict --sweep"));
+    let lines = override_lines(&ok(&out, "predict --sweep"));
     assert_eq!(lines.len(), 1, "{lines:?}");
     let line = &lines[0];
     let prefix = "info: --sweep replaced beta = ";
@@ -1030,8 +1030,8 @@ burn_in = 10
 thin = 1
 "#).unwrap();
     ok(&camdl_fit(dir, &["fit", "run", "fit.toml", "--seed", "1", "--label", "contrast"]), "fit run");
-    let stderr = ok(&camdl_fit(dir, &["fit", "predict", "--fit", "@contrast",
-        "--mode", "free_forward", "--seed", "3"]), "fit predict");
+    let stderr = ok(&camdl_fit(dir, &["predict", "@contrast",
+        "--mode", "free_forward", "--seed", "3"]), "predict");
     assert!(stderr.contains("contrast 'averted' — fork at"), "the contrast ran: {stderr}");
     assert_eq!(override_lines(&stderr),
         vec!["info: scenario `with_sia` replaced k = 10 (from the draw or sweep point) with 12"]);

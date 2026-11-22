@@ -1,7 +1,7 @@
 //! Regression: the posterior-predictive observation sampler must carry a
 //! DATA-column binomial denominator forward.
 //!
-//! `fit predict`'s free-forward predictive drew `y_rep` from
+//! `camdl predict`'s free-forward predictive drew `y_rep` from
 //! `binomial(n = n_examined, p = projected)` where `n_examined` is a data
 //! column. Before the fix `compile_obs_sample_pf` sampled with NO aux, so `n`
 //! resolved to 0 and every draw was `binomial(0, p) = 0` — an all-zero

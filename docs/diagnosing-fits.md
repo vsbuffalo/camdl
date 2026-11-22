@@ -625,15 +625,15 @@ Three different predictions answer three different questions; using the wrong
 one hides the very misfit you're hunting.
 
 - **Free-forward (unconditional posterior-predictive)** —
-  `camdl fit predict --fit fit.toml --mode free_forward`. Replays the fitted
-  model from the start, never re-anchored to data, sampling `y_rep` per
-  posterior draw. Exposes _generative_ misspecification: can the model, run
-  forward on its own, produce data like the observations? A drifting transition
-  model produces a band that blows up over time.
-- **One-step-ahead** — `camdl fit predict --fit fit.toml --mode one_step`. The
-  honest short-horizon forecast `p(y_t | y_{1:t-1})`: re-conditions on the data
-  at every step, so it stays tight **iff** the filter can track the data. The
-  right tool for _timing_ questions (does the model anticipate each next
+  `camdl predict @fit --mode free_forward`. Replays the fitted model from the
+  start, never re-anchored to data, sampling `y_rep` per posterior draw. Exposes
+  _generative_ misspecification: can the model, run forward on its own, produce
+  data like the observations? A drifting transition model produces a band that
+  blows up over time.
+- **One-step-ahead** — `camdl predict @fit --mode one_step`. The honest
+  short-horizon forecast `p(y_t | y_{1:t-1})`: re-conditions on the data at
+  every step, so it stays tight **iff** the filter can track the data. The right
+  tool for _timing_ questions (does the model anticipate each next
   observation?). Chain-binomial only. Under `[data] holdout_after` the band
   covers the training rows only, since a stored fit keeps its held-out rows'
   dates and not their values; the `free_forward` rows at those dates are marked
@@ -646,7 +646,7 @@ one hides the very misfit you're hunting.
   model. It **cheats** for the purpose of model-checking: a smoothed ribbon that
   hugs the data is not evidence the model is right.
 
-`fit predict` writes both predictive horizons (stacked in
+`camdl predict` writes both predictive horizons (stacked in
 `predictive/<stream>.tsv`, keyed by the `horizon` column) and the observed
 series (`observed/<stream>.tsv`) under the run directory, ready to join on
 `(time, <dims>)` and plot — one facet per stratum. Read the predictive band as a

@@ -113,7 +113,7 @@ contact = "../data/build/contact.tsv"
 ```
 
 Every command that reads a fit config binds these files: `fit run`,
-`pfilter --fit`, `profile --fit`, and through a stored fit `fit predict` and
+`pfilter --fit`, `profile --fit`, and through a stored fit `camdl predict` and
 `simulate --draws posterior --fit`. A `--table NAME=FILE` on the command line
 replaces the config's file for that name, as `--data` replaces a
 `[data.observations]` entry. A run is refused, naming the input, when the model
@@ -127,7 +127,7 @@ A bound file enters the fit's identity by its bytes, not its path: the same
 bytes under another path are the same fit (and are reused), and one changed byte
 is another fit. The fit folder records each file's SHA-256 in `fit.meta.json`
 (`table_hashes`) and keeps a copy of its bytes in `inputs/NAME.EXT`. What a fit
-replays (`fit predict`, `simulate --fit`) is the model as it was bound, so
+replays (`camdl predict`, `simulate --fit`) is the model as it was bound, so
 editing the source file after the fit cannot change a past fit's predictions;
 `--table` on a replay is how to run it under another file on purpose. A config
 with `[synthetic]` and no `[data]` has nowhere to write `[data.tables]`, so its
@@ -159,7 +159,7 @@ The start enters the fit's identity through the model, not through this key:
 camdl writes the resolved start into the model before keying the fit, so
 `from = "first_obs"`, `from = -2` and a model written with `from = -2 'days` are
 one fit when they resolve to the same day, and two windows are two fits. The
-stored fit records the model with its start, so `fit predict` and
+stored fit records the model with its start, so `camdl predict` and
 `simulate --fit <run dir>` replay it.
 
 **`[estimate]`** — the parameters to infer. Each value is an inline table:
@@ -209,7 +209,7 @@ and the span held, and the fit's `run.json` records the override. The setting is
 part of the fit's identity (a fit made under it and one refused without it are
 different computations), and `fit run
 --allow-forcing-extrapolation` sets it.
-`fit predict` of such a fit runs under it too.
+`camdl predict` of such a fit runs under it too.
 
 Observation times need not lie on the grid `t_start + k·dt`. `if2`, `pfilter`
 and `pmmh` step exactly to every observed period's start and end; `pgas` steps
@@ -521,7 +521,7 @@ declared first period opens where it says, so the warm-up before the first row
 is discarded without a separate setting. Delete the key.
 ```
 
-`camdl pfilter`, `camdl profile` and `camdl fit predict` bind the same declared
+`camdl pfilter`, `camdl profile` and `camdl predict` bind the same declared
 periods, so a fixed-θ log-likelihood or a predictive row covers exactly the
 window the fit scored. The history is in `camdl docs language-changes`.
 

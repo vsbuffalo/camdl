@@ -815,7 +815,7 @@ fn run_profile(
     // gh#561: every profile point runs the filter, whose window is the
     // observation times — the model horizon is never read here. A scenario's
     // own `simulate { to }` therefore moves nothing, so refuse it rather than
-    // discard it silently (the same guard as `pfilter` and `fit predict`).
+    // discard it silently (the same guard as `pfilter` and `camdl predict`).
     //
     // It runs AFTER the substitution above so it compares two RESOLVED numbers:
     // an anchored model and an anchored scenario that resolve to the same time

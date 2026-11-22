@@ -9,7 +9,7 @@
 //! forecaster's first week went missing; a `window_start`/`window_stop` stream
 //! wrote a short first window instead. Both are refused by name here
 //! (`docs/dev/temporal-architecture.md` §4.4, "Restarts"; §5.2), and the
-//! message points at `fit predict --mode forecast`, which carries the period
+//! message points at `camdl predict --mode forecast`, which carries the period
 //! under way.
 //!
 //! These tests shell out to the release binary.
@@ -251,7 +251,7 @@ fn assert_refused_at(r: &Restart, period: &str, at: &str) {
         "a refused restart stores no run, so no leaf declares observations it never wrote"
     );
     assert!(
-        err.contains("fit predict") && err.contains("--mode forecast"),
+        err.contains("predict") && err.contains("--mode forecast"),
         "the refusal points at the forecast that carries the period: {err}"
     );
     assert!(

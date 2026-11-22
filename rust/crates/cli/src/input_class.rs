@@ -18,10 +18,10 @@
 //! A class belongs to a (command, input) pair, not to a flag: a group that
 //! several commands flatten (`ForcingExtrapolationArg`, the global options) is
 //! classified in each command's table: [`PROFILE`]. `camdl pfilter`,
-//! `camdl simulate` and `camdl fit run` declare their inputs' classes in their
-//! argument types instead (`#[derive(store::Inputs)]`,
+//! `camdl simulate`, `camdl fit run` and `camdl predict` declare their inputs'
+//! classes in their argument types instead (`#[derive(store::Inputs)]`,
 //! `crate::args::PfilterInvocation`, `crate::args::SimulateInvocation`,
-//! `crate::args::FitRunInvocation`).
+//! `crate::args::FitRunInvocation`, `crate::args::PredictInvocation`).
 //! `every_<command>_flag_is_classified` (below) checks each against every
 //! argument clap accepts, both ways, and `every_<command>_input_has_a_case`
 //! that every input has a case in `rust/crates/cli/tests/<command>_input_classes.rs`.

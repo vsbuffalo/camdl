@@ -1,4 +1,4 @@
-//! gh#702, restated under gh#833 — `fit predict` opens the first incidence bin
+//! gh#702, restated under gh#833 — `camdl predict` opens the first incidence bin
 //! where the stream's declaration opens it, not at the model origin.
 //!
 //! A stream declaring `covers = closing_at(time, 50 'days)` whose first row is
@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The stored prediction under `seg` (a run folder, or any folder above
-/// runs) whose `report*.json` is newest: the latest `fit predict`'s output. A
+/// runs) whose `report*.json` is newest: the latest `camdl predict`'s output. A
 /// path that does not exist while nothing has been predicted.
 fn predict_out(seg: &std::path::Path) -> std::path::PathBuf {
     fit_store_support::predictions(seg)
@@ -93,7 +93,7 @@ fn tempdir(tag: &str) -> PathBuf {
     p
 }
 
-/// `<sub>/<stream>.tsv` in the latest `fit predict`'s output under the store
+/// `<sub>/<stream>.tsv` in the latest `camdl predict`'s output under the store
 /// at `root`.
 fn find_artifact(root: &Path, sub: &str, stream: &str) -> Option<PathBuf> {
     let p = predict_out(root).join(sub).join(format!("{stream}.tsv"));
@@ -283,7 +283,7 @@ fn fit_then_predict(bin: &Path, tmp: &Path, extra: &[&str]) -> std::process::Out
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    let mut args = vec!["fit", "predict", "--fit", "@fit", "--seed", "1", "--n-draws", "60"];
+    let mut args = vec!["predict", "@fit", "--seed", "1", "--n-draws", "60"];
     args.extend_from_slice(extra);
     run(bin, tmp, &args)
 }
@@ -298,7 +298,7 @@ fn free_forward_first_bin_opens_where_the_declaration_opens_it() {
     let out = fit_then_predict(&bin, &tmp, &["--mode", "free_forward"]);
     assert!(
         out.status.success(),
-        "fit predict failed:\nstdout={}\nstderr={}",
+        "predict failed:\nstdout={}\nstderr={}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
@@ -369,7 +369,7 @@ fn free_forward_first_bin_is_backend_independent() {
     let out = fit_then_predict(&bin, &tmp, &["--mode", "free_forward"]);
     assert!(
         out.status.success(),
-        "fit predict failed:\nstdout={}\nstderr={}",
+        "predict failed:\nstdout={}\nstderr={}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
@@ -436,7 +436,7 @@ fn one_step_first_bin_opens_where_the_declaration_opens_it() {
     let out = fit_then_predict(&bin, &tmp, &["--mode", "one_step"]);
     assert!(
         out.status.success(),
-        "fit predict failed:\nstdout={}\nstderr={}",
+        "predict failed:\nstdout={}\nstderr={}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );

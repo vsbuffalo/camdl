@@ -119,3 +119,44 @@ pub(crate) fn ir_cache_filled(dir: &std::path::Path) -> bool {
         .map(|d| d.flatten().any(|e| e.file_name().to_string_lossy().ends_with(".ir.json")))
         .unwrap_or(false)
 }
+
+/// A pin table: `(file, digest)` per case, for one platform.
+pub(crate) type Pins = &'static [(&'static str, &'static [(&'static str, &'static str)])];
+
+/// Asserts that `got`, the digests a platform computed per case, are the
+/// pins `pins` holds for this `(target_os, target_arch)`. Digests that
+/// depend on the platform's libm are pinned per platform. On a platform with
+/// no pins it fails, printing the table it computed and the row to add.
+pub(crate) fn assert_pinned(
+    pins: &[((&str, &str), Pins)],
+    got: &std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+    what: &str,
+) {
+    let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
+    let Some((_, pinned)) = pins.iter().find(|((o, a), _)| *o == os && *a == arch) else {
+        let name = format!("{os}_{arch}").to_uppercase();
+        panic!(
+            "no digests are pinned for {os}/{arch}; this platform computed the table below. \
+             Add it, and the row ((\"{os}\", \"{arch}\"), {name}) to PINS:\n\n{}",
+            render_pins(&name, got)
+        );
+    };
+    let want: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>> = pinned
+        .iter()
+        .map(|(m, fs)| (m.to_string(), fs.iter().map(|(f, d)| (f.to_string(), d.to_string())).collect()))
+        .collect();
+    assert_eq!(got, &want, "{what}");
+}
+
+/// `got` as the Rust source of a pin table named `name`.
+fn render_pins(name: &str, got: &std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>) -> String {
+    let mut s = format!("const {name}: Pins = &[\n");
+    for (m, fs) in got {
+        s += &format!("    (\"{m}\", &[\n");
+        for (f, d) in fs {
+            s += &format!("        (\"{f}\", \"{d}\"),\n");
+        }
+        s += "    ]),\n";
+    }
+    s + "];\n"
+}

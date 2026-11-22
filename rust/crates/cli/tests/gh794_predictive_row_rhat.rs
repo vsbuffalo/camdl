@@ -236,12 +236,12 @@ fn fit_then_predict_with(bin: &Path, tmp: &Path, extra: &[&str]) {
 }
 
 fn predict_with(bin: &Path, tmp: &Path, extra: &[&str]) {
-    let mut args = vec!["fit", "predict", "--fit", "@fit"];
+    let mut args = vec!["predict", "@fit"];
     args.extend_from_slice(extra);
     let out = run(bin, tmp, &args);
     assert!(
         out.status.success(),
-        "fit predict {extra:?} failed:\nstdout={}\nstderr={}",
+        "predict {extra:?} failed:\nstdout={}\nstderr={}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );

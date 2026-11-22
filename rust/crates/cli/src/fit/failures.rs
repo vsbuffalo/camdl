@@ -7,7 +7,7 @@
 //! run names the site — and the draw, where there is one — and exits 1.
 //!
 //! The rule this module exists to enforce is that failing closed on the exit
-//! status is not the same as discarding a complete object. `fit predict`
+//! status is not the same as discarding a complete object. `camdl predict`
 //! computes many things that fail independently — the data-conditioned
 //! one-step-ahead band, which never reaches the forecast horizon; the
 //! free-forward tail; one `quantities {}` entry among twenty — and refusing to

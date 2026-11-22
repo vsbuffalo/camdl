@@ -17,7 +17,7 @@
 //! - **Fit configs.** `[data.tables]` binds the same inputs for `fit run`,
 //!   `pfilter --fit` and `profile --fit`, with `--table` laid
 //!   over it; two calendars are two fits with two log-likelihoods; a fit
-//!   records each bound file's digest and stores its bytes; `fit predict` and
+//!   records each bound file's digest and stores its bytes; `camdl predict` and
 //!   `simulate --fit` replay those stored bytes after the source is edited.
 
 mod fit_store_support;
@@ -455,7 +455,7 @@ fn replays_of_a_stored_fit_read_its_stored_table() {
     let run = fx.dir.join(&leaf);
 
     let predict = || -> std::collections::BTreeMap<String, Vec<u8>> {
-        ok(&fx.camdl(&["fit", "predict", "@pm", "--n-draws", "8"]));
+        ok(&fx.camdl(&["predict", "@pm", "--n-draws", "8"]));
         files_under(&run.join("predict")).into_iter()
             .filter(|(k, _)| k.ends_with(".tsv"))
             .collect()
@@ -473,7 +473,7 @@ fn replays_of_a_stored_fit_read_its_stored_table() {
 
     // Edit the source file the fit was bound to: the fit's replays do not move.
     fx.write("school.tsv", "t\tin_term\n0\t0.2\n20\t0.2\n");
-    assert_eq!(predicted, predict(), "fit predict must replay the table bytes the fit stored");
+    assert_eq!(predicted, predict(), "predict must replay the table bytes the fit stored");
     assert_eq!(replayed, replay("sim2.tsv", &[]), "simulate --fit must replay the table bytes the fit stored");
 
     // `--table` replaces the fit's file on a replay, as on every command.

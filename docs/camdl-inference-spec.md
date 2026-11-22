@@ -1114,8 +1114,8 @@ Schema-stability rules:
   PMMH's result shape) is `"mh"`, and the three NLopt algorithms are
   `"nl-sbplx"`, `"nl-bobyqa"` and `"nl-lbfgs"`.
 - **A reader that needs one run refuses a problem handle and a `fit.toml`**:
-  `fit summary`, `--params-only`, `fit predict`, `compare` and `simulate --fit`.
-  Pass the run's folder, `@label` or run-id prefix.
+  `fit summary`, `--params-only`, `camdl predict`, `compare` and
+  `simulate --fit`. Pass the run's folder, `@label` or run-id prefix.
 - **`failures` is always present**, one entry per method leaf the walker found
   and could not read back. Each entry carries `leaf` (the method-leaf directory)
   and `reason` (which file, and what was wrong with it), and is also warned

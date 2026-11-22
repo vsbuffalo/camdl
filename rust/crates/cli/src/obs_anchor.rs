@@ -121,7 +121,7 @@ pub fn resolve_from_config(
 ///
 /// `fit run` resolves the model it fits — and archives — through this, and
 /// every later command that has to reproduce that resolution for a stored fit
-/// (`fit predict`, the replay model check) calls it with the fit's config, so
+/// (`camdl predict`, the replay model check) calls it with the fit's config, so
 /// the window is computed one way rather than re-derived at each site. It reads
 /// the data as it is NOW: a stored fit records the substituted model, not the
 /// window, so data changed since the fit yields a different window.
@@ -720,7 +720,7 @@ pub fn set_start(model: &mut ir::Model, s: f64, site: &str) -> Result<(), String
 /// Resolve `model` as a fit of `problem` runs it: the config's
 /// `[simulate] from`, then every observation anchor, against the fit's
 /// observed window ([`fit_window`]). The one resolution every fit-config path
-/// takes (`fit run`, its per-cell loads, `fit predict`, the replay check), so
+/// takes (`fit run`, its per-cell loads, `camdl predict`, the replay check), so
 /// they cannot disagree on where a fit starts. A model with neither returns
 /// unchanged with an empty list.
 pub fn resolve_for_fit(

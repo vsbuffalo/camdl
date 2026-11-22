@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 304" role="img" aria-labelledby="t d">
   <title id="t">The fit workflow</title>
-  <desc id="d">Ten steps in order. Before any fit: write the model, check it, simulate from it, recover known parameters from synthetic data, and choose an inference method. The fit: write fit.toml, fit run, fit summary, fit predict, and validate. Two further steps are optional and used only when a fit needs them: design lhs, which writes a design of parameter values to simulate or score, and if2, which gives a point estimate and profiles.</desc>
+  <desc id="d">Ten steps in order. Before any fit: write the model, check it, simulate from it, recover known parameters from synthetic data, and choose an inference method. The fit: write fit.toml, fit run, fit summary, predict, and validate. Two further steps are optional and used only when a fit needs them: design lhs, which writes a design of parameter values to simulate or score, and if2, which gives a point estimate and profiles.</desc>
   <defs>
     <marker id="wf-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
       <path d="M0,0 L10,5 L0,10 z" class="fig-arrow"/>
@@ -34,7 +34,7 @@
     <rect x="266" y="164" width="108" height="56" rx="4" class="fig-card s-line"/>
     <text x="320" y="197">fit summary</text>
     <rect x="398" y="164" width="108" height="56" rx="4" class="fig-card s-line"/>
-    <text x="452" y="197">fit predict</text>
+    <text x="452" y="197">predict</text>
     <rect x="530" y="164" width="108" height="56" rx="4" class="fig-card s-line"/>
     <text x="584" y="197">validate</text>
   </g>

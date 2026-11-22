@@ -7,7 +7,7 @@
 # docs/guide/first-fit/, serves the result with camdl-scope, and saves the
 # tabs the page shows to docs/guide/first-fit/img/. The posterior predictive
 # plots are drawn at render time instead (plot_predictive.py): camdl-scope
-# reads `fit predict` output from its pre-0.2 location (camdl-scope#9).
+# reads `camdl predict` output from its pre-0.2 location (camdl-scope#9).
 #
 # Needs: this checkout's camdl first on PATH (`make docs-first-fit-screenshots`
 # arranges it), camdl-scope (docs/agents.md, "camdl 'scope"), uv, and Google

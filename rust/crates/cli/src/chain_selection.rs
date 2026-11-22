@@ -7,7 +7,7 @@
 //! name them. A [`ChainSelection`] names the chains to use, on two sides:
 //!
 //! - the **read side**, `--chains` (keep) or `--exclude-chains` (drop) at
-//!   `fit predict` / `fit summary` / `fit table` / `compare` /
+//!   `camdl predict` / `fit summary` / `fit table` / `compare` /
 //!   `simulate --draws posterior` / `cat` time, which never re-runs the fit
 //!   and never re-keys its CAS identity;
 //! - the **start side**, `starts = { from_posterior = "@base", chains = [..] }`
@@ -474,7 +474,7 @@ impl SubsetInfo {
 /// chains.
 ///
 /// `fit summary` consumes the whole struct (it also derives posterior means from
-/// [`kept`](Self::kept)); `fit predict` reduces it to a band label (max R̂ / min
+/// [`kept`](Self::kept)); `camdl predict` reduces it to a band label (max R̂ / min
 /// ESS). Both routing through [`recompute_subset_diagnostics`] is what keeps the
 /// two from ever disagreeing on the same fit + selection — the divergence that
 /// let a chain-subset predictive band carry the polluted full-cloud R̂.
@@ -505,7 +505,7 @@ pub struct SubsetDiagnostics {
 /// completion and the SAME [`apply_keyed`](ChainSelection::apply_keyed) filter.
 ///
 /// This is the one recompute both `fit summary --exclude-chains` and
-/// `fit predict --exclude-chains` call — so the diagnostics a chain-subset band
+/// `camdl predict --exclude-chains` call — so the diagnostics a chain-subset band
 /// carries are the diagnostics the summary reports for the same subset, never
 /// the stored full-cloud value that includes the dropped chains.
 ///

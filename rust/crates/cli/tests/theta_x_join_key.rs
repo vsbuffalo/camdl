@@ -4,7 +4,7 @@
 //! the foundation the keyed-joint `(θ, X)` join (step 2) is built on.
 //!
 //! Also pins the no-break property: the shared draws loader strips the key, so
-//! `fit predict` (whose schema validator rejects a non-parameter draws column)
+//! `camdl predict` (whose schema validator rejects a non-parameter draws column)
 //! still runs — covered by the existing `fit_predict_e2e` suite, which now runs
 //! against a keyed `draws.tsv`.
 //!

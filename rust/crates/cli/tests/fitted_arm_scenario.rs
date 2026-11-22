@@ -4,7 +4,7 @@
 //! `fit run` scores the model with the fit's selection applied — toggleable
 //! interventions are off unless enabled (spec §14.4) — so a fit config with
 //! `enable = ["vax"]` estimates under `vax`. The commands that replay that fit
-//! must replay the same model: `fit predict`'s `fitted` arm and one-step
+//! must replay the same model: `camdl predict`'s `fitted` arm and one-step
 //! filter, the contrast arms, `simulate --draws posterior --fit`, `pfilter
 //! --fit`, and the prequential `compare` derives. Each once rebuilt the model
 //! from the archived IR with no selection, so `vax` was silently off (or, in
@@ -191,7 +191,7 @@ fn draws_leaf(dir: &Path, name: &str) -> PathBuf {
     run
 }
 
-/// The rows of a `fit predict` stream file for one `scenario` and `horizon`,
+/// The rows of a `camdl predict` stream file for one `scenario` and `horizon`,
 /// scenario column dropped, so two arms' bands compare directly.
 fn predict_rows(leaf: &Path, scenario: &str, horizon: &str) -> Vec<String> {
     let mut files: Vec<PathBuf> = fit_store_support::predictions(leaf).into_iter()
@@ -218,8 +218,8 @@ fn predict_fitted_arm_and_scenario_arms_carry_the_fits_selection() {
     let fit = fit_config(tmp.path(), "f", &ir, r#"enable = ["vax"]"#, PMMH);
     ok(run(tmp.path(), &["fit", "run", &fit.to_string_lossy()]), "fit run");
     let leaf = draws_leaf(tmp.path(), "f");
-    ok(run(tmp.path(), &["fit", "predict", &leaf.to_string_lossy(),
-        "--mode", "free_forward", "--scenario", "vax,same,novax"]), "fit predict");
+    ok(run(tmp.path(), &["predict", &leaf.to_string_lossy(),
+        "--mode", "free_forward", "--scenario", "vax,same,novax"]), "predict");
 
     let fitted = predict_rows(&leaf, "fitted", "free_forward");
     // `vax` restates the fit's own selection, and the paired seeds are shared
@@ -254,8 +254,8 @@ fn predict_one_step_filters_through_the_fitted_model() {
                std::fs::read_to_string(l_one.join("draws.tsv")).unwrap(),
         "precondition: the two fits are one fitted model and must share a posterior");
     for l in [&l_both, &l_one] {
-        ok(run(tmp.path(), &["fit", "predict", &l.to_string_lossy(),
-            "--mode", "one_step"]), "fit predict one_step");
+        ok(run(tmp.path(), &["predict", &l.to_string_lossy(),
+            "--mode", "one_step"]), "predict one_step");
     }
     assert_eq!(predict_rows(&l_both, "fitted", "one_step"),
                predict_rows(&l_one, "fitted", "one_step"),
@@ -448,7 +448,7 @@ fn compare_derives_the_prequential_under_the_fits_selection() {
          a pfilter at θ̂ with --enable vax ({})", manual.elpd());
 }
 
-/// A PGAS fit that saves its smoothed paths, so `fit predict` emits contrasts.
+/// A PGAS fit that saves its smoothed paths, so `camdl predict` emits contrasts.
 const PGAS: &str = r#"[method]
 algorithm = "pgas"
 backend = "chain_binomial"
@@ -473,8 +473,8 @@ fn contrast_arms_carry_the_fits_selection() {
     let fit = fit_config(tmp.path(), "f", &ir, r#"enable = ["vax"]"#, PGAS);
     ok(run(tmp.path(), &["fit", "run", &fit.to_string_lossy()]), "fit run");
     let leaf = draws_leaf(tmp.path(), "f");
-    let out = ok(run(tmp.path(), &["fit", "predict", &leaf.to_string_lossy(),
-        "--mode", "free_forward"]), "fit predict");
+    let out = ok(run(tmp.path(), &["predict", &leaf.to_string_lossy(),
+        "--mode", "free_forward"]), "predict");
     let stderr = String::from_utf8_lossy(&out.stderr);
     let pdir = fit_store_support::predictions(&leaf).into_iter().next().expect("the prediction");
     assert!(!pdir.join("contrasts/restated.tsv").exists(),

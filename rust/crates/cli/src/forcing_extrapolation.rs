@@ -133,7 +133,7 @@ impl ForcingPolicy {
     /// guard drops. Install it before compiling the models that run under it,
     /// and hold it for the rest of the command: a model reports a forcing
     /// once, so one compiled earlier and already past a forcing's range does
-    /// not tell this policy (see the module doc). An install nests: `fit predict`
+    /// not tell this policy (see the module doc). An install nests: `camdl predict`
     /// installs the stored fit's policy inside its own, and the inner guard's
     /// drop puts back the policy it replaced.
     pub fn install(&self) -> Installed {
@@ -428,7 +428,7 @@ mod tests {
         assert_eq!(held(&record), vec!["routed"]);
     }
 
-    /// A nested install (`fit predict` installs the stored fit's policy
+    /// A nested install (`camdl predict` installs the stored fit's policy
     /// inside the command's own) routes into the inner policy while its
     /// guard lives; dropping that guard puts the outer one back, and
     /// dropping the outer one empties the slot.

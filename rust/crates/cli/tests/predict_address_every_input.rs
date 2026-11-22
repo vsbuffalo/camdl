@@ -1,4 +1,4 @@
-//! `fit predict` stores each prediction as a result of its own, under the fit
+//! `camdl predict` stores each prediction as a result of its own, under the fit
 //! run's `predict/<mode>-<id>/`, and readers find a prediction by that address. The key must therefore cover every input
 //! that changes what predict writes: two predictions computed from different
 //! inputs never share a directory (proposal 2026-11-17, phase 1e).
@@ -103,7 +103,7 @@ fn two_chain_selections_are_two_forecast_addresses() {
     let dir = tmp.path();
     fit(dir);
 
-    let base = ["fit", "predict", "--fit", "@fc", "--horizon", "2 weeks", "--n-draws", "8"];
+    let base = ["predict", "@fc", "--horizon", "2 weeks", "--n-draws", "8"];
     assert_ok(&run(dir, &base), "pooled forecast");
     let pooled = forecast_dirs(dir);
     assert_eq!(pooled.len(), 1, "{pooled:?}");
