@@ -5089,6 +5089,223 @@ impl Primary for Prediction {
 - **`fit table` is an orchestrator whose child is a producer.** It stores
   nothing itself, but the predictions it asks for are stored results.
 
+### `camdl predict` from a fixed point
+
+`camdl predict` takes its parameters from one of two sources, named by its
+positional argument. A handle (`@label`, an id prefix or a result folder) names
+a stored fit run, and the prediction is `ParameterSource::Posterior`. A model
+file (`.camdl` or `.ir.json`, as `simulate` and `pfilter` accept) names a model,
+and the parameters are one point given on the command line; the prediction is
+`ParameterSource::FixedPoint`. A `fit.toml` is refused, since a configuration
+file never names a run. This section specifies the second form, which step 7
+adds. It is used to predict from a point estimated elsewhere, from an optimizer
+fit's estimate (`camdl fit summary <run> --params-only`), or from literature
+values.
+
+A fixed-point prediction is made as a posterior prediction is made over a cloud
+of identical draws: the point is repeated `--n-draws` times, each copy with its
+own seed derived from `--seed`, and every mode pools over the copies as it pools
+over posterior draws. Free-forward runs one replay per copy, and one-step and
+forecast run one filter per copy, pooled over particles and copies. The bands
+therefore carry process and observation noise and no parameter uncertainty.
+
+```bash
+camdl predict seir.camdl --params mle.toml --data cases=cases.tsv \
+  --holdout-after 2026-03-01 --horizon '4 weeks' --scenario school_closure
+```
+
+#### Flags
+
+Flags that mean the same thing for both sources are one flag, declared once in a
+group both forms flatten, `PredictFlags`. The fixed-point flags are a second
+group, `FixedPointFlags`; the posterior flags a third, `PosteriorFlags`. A flag
+of one source's group given with the other source is refused, naming the source
+it belongs to.
+
+| Flag                                                                          | Source      | Class       | Meaning                                                                                                                                   |
+| ----------------------------------------------------------------------------- | ----------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| the model                                                                     | fixed point | `identity`  | Compiled with `compile_from_data`, so the `--table` files and the data's anchored times are written in before the model is keyed          |
+| `--params FILE` (repeatable), `--param NAME=VALUE`                            | fixed point | `identity`  | The point, resolved by `resolve_params` as in `simulate`: the files in order, then each `--param`                                         |
+| `--table NAME=FILE`                                                           | fixed point | `identity`  | An external table, through the compiled model                                                                                             |
+| `--data [NAME=]PATH`, `--obs NAME`                                            | fixed point | `identity`  | Required. The observations, bound as `pfilter` binds them; each stream's conditioned lines are stored as a `DataTable`                    |
+| `--holdout-after TIME`                                                        | fixed point | `identity`  | The rows the point was fitted to end here; the grammar and the cut are `fit.toml`'s `[data] holdout_after`. Recorded as `trained_through` |
+| `--backend`, `--dt`, `--integrator`, `--binomial`, `--allow-degenerate-rates` | fixed point | `identity`  | The numerics, resolved as `simulate` resolves them (`Numerics::check`)                                                                    |
+| `--time-format`                                                               | fixed point | `execution` | How `--data`'s time column is parsed, as in `pfilter`; a format the column does not hold is refused                                       |
+| `--mode MODE`                                                                 | both        | `identity`  | `free_forward`, `one_step` or `forecast`; the default is below                                                                            |
+| `--horizon DURATION`                                                          | both        | `identity`  | A forecast's reach past its origin; implies `--mode forecast`                                                                             |
+| `--design SOURCE=FILE`                                                        | both        | `identity`  | A forecast's design values for stream SOURCE's targets, stored as a `DataTable`                                                           |
+| `--stream NAME`                                                               | both        | `identity`  | Restricts the streams predicted                                                                                                           |
+| `--scenario NAME`, `--enable`, `--disable`                                    | both        | `identity`  | The arms, each a scenario selection, in the order given                                                                                   |
+| `--sweep PARAM=GRID`                                                          | both        | `identity`  | Sweep arms over one parameter; free-forward only                                                                                          |
+| `--n-draws N`                                                                 | both        | `identity`  | The draws pooled: a cap on the posterior subsample, or the number of copies of the point. Default 200 for both                            |
+| `--particles N`                                                               | both        | `identity`  | Particles per draw in each filter. Default 500 for a fixed point                                                                          |
+| `--seed N`                                                                    | both        | `identity`  | The seed every draw's process seed is derived from. Default 1                                                                             |
+| `--quantities FILE`                                                           | both        | `identity`  | A `quantities {}` block compiled against the model and stored as a `Quantities` content artifact                                          |
+| `--allow-forcing-extrapolation`                                               | both        | `identity`  | As for every command that runs a model                                                                                                    |
+| `--by-chain`, `--exclude-chains`, `--chains`, `--realised-design`             | posterior   | `identity`  | Refused with a model file (below)                                                                                                         |
+| `-o DIR`                                                                      | both        | `export`    | A copy of the prediction's result files                                                                                                   |
+| `--force`, `--label`, `--store`                                               | both        | `store`     | Requests to the store                                                                                                                     |
+| `--verbosity`, `--progress`, `--no-progress`                                  | both        | `skip`      | What is printed                                                                                                                           |
+
+The global `--no-licm` changes the compiled model, so it reaches identity
+through the model's key, as in every command.
+
+The design calls, each with its reason:
+
+- **The point is given with `--params` and `--param`, not `--fixed`.** No
+  parameter is estimated, so the flags are `simulate`'s and `pfilter`'s
+  (`ModelOverrides`), where `--params` is unambiguous; `--fixed` names a value
+  removed from an `[estimate]` set, which this command does not have.
+- **There is no `--fit fit.toml`.** In `pfilter`, `--fit` takes a configuration
+  for its data binding and `[fixed]` values. Here the positional argument
+  already distinguishes a stored fit from a model, and a second meaning of "fit"
+  in one command would let `--fit fit.toml` be read as a parameter source. The
+  data and the point are given directly.
+- **The cut is `--holdout-after`, the name `fit.toml` uses.** It has the same
+  grammar (a model-time number, a date, or `last_obs` with an offset) and the
+  same effect as the fit's key: rows after it are held out. A user predicting
+  from a point fitted under a `fit.toml` with `holdout_after` types the same
+  value, and the prediction's rows have the roles the fit gave them.
+- **`--data` is required in every mode.** The streams a prediction covers, and
+  the rows its bands are drawn at, are the bound streams' rows, as for a fit,
+  where a stream with no bound data is skipped. A free-forward prediction with
+  no data would be `simulate --obs`, which already exists.
+- **One origin per prediction.** The forecast origin is the end of the rows the
+  filter conditions on, which are the rows the point was fitted to, as for a fit
+  (temporal architecture, D57). Without `--holdout-after` every bound row is
+  conditioned on and is a `trained` row, as in a fit with no `holdout_after`.
+  Forecasts from several origins are several invocations, one per
+  `--holdout-after`. Conditioning the state on rows after the parameters' cutoff
+  is deferred for both sources (temporal architecture, Part 7).
+- **Held-out rows are not read and not stored.** The stored `DataTable` of each
+  stream holds the conditioned lines only, cut by the rule a fit problem's
+  `inputs/` uses ("Reading a stored problem"), so a held-out value never reaches
+  a prediction's identity; held-out outcomes enter only a score. A window-column
+  stream with no emit schedule takes its forecast targets from held-out rows'
+  dates, which a fixed-point prediction does not keep, so such a stream is
+  refused for a forecast with the reason a fit with no held-out rows gives
+  (`StreamRefusal::NoRhythm`).
+- **`--n-draws` keeps its name and default.** For both sources it is the number
+  of draws the bands pool over; for a posterior it caps the subsample, and for a
+  point it is the number of copies. One default keeps the two sources' bands
+  equally resolved.
+- **The default mode is resolved before the identity is built.** With no
+  `--mode` and no `--horizon`, the mode is every mode that applies: free-forward
+  and one-step (`PredictMode::All`) on chain-binomial, free-forward on ODE and
+  Gillespie. So `--mode free_forward` and the default give one run id where they
+  mean the same computation.
+- **A flag that cannot change the result is refused, not ignored.**
+  `--particles` on a free-forward-only prediction and `--design` outside a
+  forecast would otherwise give a second run id for the same bytes.
+
+#### The identity
+
+`PredictIdentity` is the one in "Predictions". The fixed-point variant of
+`ParameterSource` gains one field, `numerics`: a posterior prediction takes its
+backend and step from the fit problem's settings, and a fixed point has no
+problem to take them from.
+
+```rust
+pub enum ParameterSource {
+    Posterior  { draws: Dep<FitRun>, problem: Dep<FitProblem> },
+    FixedPoint {
+        model: Dep<CompiledModel>,                // compile_from_data: tables and anchored times written in
+        params: ResolvedParams,                   // --params, then each --param
+        numerics: Numerics,                       // backend, dt, integrator, binomial, allow_degenerate_rates
+        trained_through: Option<TrainingCutoff>,  // --holdout-after, in model time
+    },
+}
+```
+
+`PredictIdentity.data` holds one `Dep<DataTable>` per bound stream.
+`PredictOptions` is shared: for a fixed point its `by_chain` is `false` and its
+`excluded_chains` empty, and `particles` is `None` for a free-forward
+prediction. `--design` tables enter `PredictOptions` as
+`design: BTreeMap<String, Dep<DataTable>>`, a field both sources need, since a
+forecast's design values determine it. `PredictionLabels` holds the mode's
+label, the scenario names as typed and the model file's stem.
+
+#### Labelling
+
+A fixed-point prediction is the `FixedPoint` variant of its identity, which its
+identity record shows. Every rendering of it writes `plug_in` in the `treatment`
+column, which a posterior prediction fills with `posterior`, and leaves the
+columns that compare chains or count effective draws (`fit_rhat_max`,
+`fit_ess_min`, `rhat_*`, `ess_*`) empty. `camdl show` prints, for a fixed-point
+prediction, that its bands carry no parameter uncertainty. The arm with no
+scenario overlay is named `(none)`, as in `simulate`, since `fitted` would say
+the point was fitted.
+
+#### What is refused
+
+- **A posterior flag with a model file:** `--by-chain`, `--exclude-chains` and
+  `--chains` name a fit's chains, and `--realised-design` reads held-out rows'
+  design values, which a fixed-point prediction does not keep; an ex-post
+  evaluation belongs to a score.
+- **A fixed-point flag with a handle:** the fit problem holds the model, the
+  data, the tables and the numerics, so a second source of any of them is
+  refused.
+- **No `--data`.**
+- **A mode the backend cannot run,** with the messages `camdl predict @fit`
+  gives: one-step on ODE or Gillespie, forecast on Gillespie.
+- **`--sweep` with one-step or forecast,** and a scenario and a sweep on the
+  same parameter, as for a posterior.
+- **A parameter with no value after every source,** or a `--param` the model
+  does not declare, by `resolve_params`.
+- **`--particles` without a filtering mode, `--design` without a forecast.**
+
+#### Where it lands
+
+The layout is the one `Prediction::layout` gives: under `prediction/`, grouped
+by the model, named by the mode.
+
+```bash
+camdl fit summary @scout-if2 --params-only > mle.toml
+camdl predict seir.camdl --params mle.toml --data cases=cases.tsv \
+  --holdout-after 2026-03-01 --horizon '4 weeks' --scenario school_closure \
+  --seed 7 --label seir-forecast
+```
+
+The identity record of the prediction, in outline:
+
+```text
+prediction
+  source: FixedPoint
+    model:           Dep<CompiledModel> 5d27e0b9a3c1…   # seir.camdl, cases.tsv's anchored times
+    params:          every parameter of seir.camdl, from mle.toml
+    numerics:        chain_binomial, dt 1, btpe
+    trained_through: 2026-03-01 in model time
+  data:              { cases: Dep<DataTable> 8a1f03c2d9e4… }   # the rows through 2026-03-01
+  quantities:        none
+  options:
+    mode: forecast  reach: 28  draws: 200  seed: <derived from 7>
+    streams: []  scenarios: [school_closure]  sweep: []
+    by_chain: false  excluded_chains: []  particles: 500
+    allow_forcing_extrapolation: false  design: {}
+```
+
+```text
+camdl-store/
+  0.1.0_ce78a5e-4b1f07d2a9e3/
+    compiled_model/
+      seir-5d27e0b9a3c1/model.ir.json
+    data_table/
+      cases-8a1f03c2d9e4/table.tsv            # conditioned lines only
+    prediction/
+      seir-5d27e0b9a3c1/                      # group: the model
+        forecast-4e8b21c07d93/                # the prediction
+          identity.json  run.json
+          <the forecast tables, as camdl predict @fit writes them>
+  .invocations/
+    124.json                                  # the label seir-forecast, the model's stem, the scenario as typed
+```
+
+The model group's suffix is the key of the `Dep<CompiledModel>`, so every
+fixed-point prediction from one compile shares the group, whatever its
+parameters. A second run with another `--params` file adds a sibling
+`forecast-…` folder; the identity record, not the path, says which point each
+holds.
+
 ### Scores
 
 Held-out outcomes enter only a score (D81). They never change a prediction's run
@@ -5620,8 +5837,8 @@ are deleted with `runid` in the last step, and the new root does not move again.
       deleted; the tests and documentation change their command lines.
 6. `profile`. Its identity changes the most.
 7. `camdl predict` from fixed points, born on the new store, then scores. A
-   fixed-point prediction needs no fit artifact. Its command surface gets a
-   short specification of its own when this step begins.
+   fixed-point prediction needs no fit artifact. Its command surface is
+   "`camdl predict` from a fixed point".
 8. `runid` and `runid-derive` are deleted when the last command has moved. The
    clippy `disallowed-methods` guard against undeclared reads ("Guarding against
    undeclared reads") is added in this step, on the crates that remain, because
