@@ -145,50 +145,16 @@ fn gradient_maps_are_inert() {
 //   2. `cas_identity_pins`: the absolute run_id hexes, so any re-key of any
 //      kind is deliberate and reviewed.
 
-use crate::fit::config_v2::FitConfig;
 use crate::profile_cas::{resolve_profile_point, ProfilePointCtx};
 
 const IRV: &str = "0.7";
 const ENGV: &str = "0.3.0+test";
-
-/// A minimal fit config with no `[data]` streams, so `fit_level_digest` needs
-/// no files on disk and the model is its only model-bearing input. `starts`
-/// is spelled so the method identity is takeable without a model to resolve
-/// the default against.
-fn fit_config() -> FitConfig {
-    FitConfig::from_toml_str(
-        "[model]\ncamdl = \"models/sir.camdl\"\n\
-         [estimate]\nbeta = { bounds = [0.01, 2.0] }\n\
-         [fixed]\nN0 = 1000000\n\
-         [method]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\n\
-         chains = 4\nparticles = 1000\niterations = 50\ncooling = 0.70\n\
-         starts = \"uniform_unconstrained\"\n",
-    )
-    .expect("fixture fit config must parse")
-}
 
 /// Resolve `model` through EVERY model-bearing CAS identity path. Returns
 /// `(kind, model-bearing level hash, leaf run_id)` in a fixed order. Every
 /// non-model input is held constant, so any hash motion is the model's.
 fn all_kind_identities(model: &Model) -> Vec<(&'static str, ContentHash, ContentHash)> {
     let mut out = Vec::new();
-
-    // fit — `resolve_fit_method`; levels[0] is the `fit` level (folds the model
-    // digest alongside the data/config digests).
-    let cfg = fit_config();
-    let method = cfg.inference.method.clone().expect("fixture method");
-    let fit = super::legacy_fit::resolve_fit_method(&super::legacy_fit::FitMethodCtx {
-        model,
-        fit_stem: "sir",
-        ir_version: IRV,
-        engine: &runid::inputs::EngineIdentity::of_build(ENGV),
-        problem: &cfg.problem,
-        method: &method,
-        seed: 7,
-        deps: vec![],
-    })
-    .expect("fit");
-    out.push(("fit", fit.levels[0].hash, fit.run_id));
 
     let data: Vec<(String, String)> =
         vec![("cases".to_string(), ContentHash::digest_bytes(b"cases").to_hex())];
@@ -412,9 +378,8 @@ fn cas_identity_pins() {
         // writes the two empty strings it hashed for them, so every model
         // level's bytes changed.
         //
-        // `sim` and `sim_ensemble` leave the list: `simulate` stores its
-        // cells on the run store, whose ids are not runid's.
-        ("fit", "937d67de229bc67c23bf862cdc345332dd145f1b66283d4e2635f6022851979f"),
+        // `sim`, `sim_ensemble` and `fit` leave the list: `simulate` and
+        // `fit run` store on the run store, whose ids are not runid's.
         ("profile", "a3182ce7cbb9eae3f2f5f9bc2a782d2d6d4a5a19ca3921624f1f73ecdff5857b"),
     ];
     // Compared as whole lists so a failure reports EVERY kind that moved, not
@@ -609,18 +574,17 @@ fn golden_run_ids_match_the_reference_table() {
 /// Fail closed (proposal 2026-11-17 §1a): a build whose engine fingerprint is
 /// incomplete may share its `ENGINE_ID` with another build's code, so it never
 /// serves a stored leaf. It computes, and the leaf it would have read is set
-/// aside in `.quarantine/`, never deleted.
+/// aside in `.quarantine/`, never deleted, as `profile`'s point scan does.
 #[test]
 fn a_build_with_an_incomplete_engine_identity_never_reads_a_stored_leaf() {
     use crate::version::EngineReuse;
-    let levels = vec![
-        crate::profile_cas::level("fit", "sir", crate::profile_cas::structural_level_hash(&"fit".to_string())),
-        crate::profile_cas::level("method", "if2", crate::profile_cas::structural_level_hash(&"method".to_string())),
-        crate::profile_cas::level("seed", "seed_1", crate::profile_cas::structural_level_hash(&"seed".to_string())),
-    ];
+    let levels: Vec<_> = ["profile", "point", "method", "seed", "start"]
+        .iter()
+        .map(|n| crate::profile_cas::level(n, n, crate::profile_cas::structural_level_hash(&n.to_string())))
+        .collect();
     let artifact = ResolvedArtifact {
-        kind: ArtifactKind::FitMethod,
-        run_id: runid::run_id(ArtifactKind::FitMethod, &levels.iter().map(|l| l.hash).collect::<Vec<_>>()),
+        kind: ArtifactKind::ProfilePoint,
+        run_id: runid::run_id(ArtifactKind::ProfilePoint, &levels.iter().map(|l| l.hash).collect::<Vec<_>>()),
         levels,
         display_inputs: serde_json::Value::Null,
     };
@@ -630,87 +594,20 @@ fn a_build_with_an_incomplete_engine_identity_never_reads_a_stored_leaf() {
     let meta = RecordMeta::new("0.7", "sir.camdl", None, calendar,
         &crate::forcing_extrapolation::ForcingPolicy::new(false));
     let claim = begin_resolved_write(&store, &root, &artifact, &meta).unwrap();
-    claim.write("fit_state.toml", b"loglik = 0.0\n").unwrap();
+    claim.write("point.toml", b"loglik = 0.0\n").unwrap();
     claim.finalize(serde_json::Value::Null).unwrap();
+    let leaf = runid::store_path(&root, artifact.kind, &artifact.levels);
+    let id = runid::LeafIdentity::new(artifact.run_id);
 
-    let reusable = super::legacy_fit::check_reuse_with(&store, &root, &artifact, WritePolicy::Reuse, EngineReuse::Reusable).unwrap();
-    assert!(matches!(reusable, super::legacy_fit::ReuseVerdict::CacheHit), "a determined build reuses the stored leaf");
+    assert_eq!(engine_write_policy(WritePolicy::Reuse, EngineReuse::Reusable), WritePolicy::Reuse,
+        "a determined build reuses the stored leaf");
+    assert!(matches!(store.lookup(&leaf, &id), runid::Lookup::Hit(_)));
 
     let unreusable = EngineReuse::Unreusable { missing: "rustc" };
-    assert_eq!(engine_write_policy(WritePolicy::Reuse, unreusable), WritePolicy::Force);
-    let verdict = super::legacy_fit::check_reuse_with(&store, &root, &artifact, WritePolicy::Reuse, unreusable).unwrap();
-    assert!(matches!(verdict, super::legacy_fit::ReuseVerdict::MustRun), "an undetermined build computes");
-    assert!(
-        runid::find_leaf(&root, ArtifactKind::FitMethod, &artifact.levels).is_none(),
-        "the stored leaf is no longer servable"
-    );
+    assert_eq!(engine_write_policy(WritePolicy::Reuse, unreusable), WritePolicy::Force, "an undetermined build computes");
+    store.displace(&leaf, &id).unwrap();
+    assert!(!matches!(store.lookup(&leaf, &id), runid::Lookup::Hit(_)), "the stored leaf is no longer servable");
     assert!(root.join(".quarantine").read_dir().unwrap().next().is_some(), "it was quarantined, not deleted");
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// Proposal 2026-11-17 §1b: two compiles of one forward model whose gradient
-/// maps differ — what a camdlc with an edited autodiff emits — are one model,
-/// and so one run for a method that never reads a gradient, and two runs for
-/// a method that does. Asserted on the whole fit `run_id`, through
-/// `resolve_fit_method`, for every method on each side.
-#[test]
-fn gradient_maps_re_key_the_fits_that_read_them_and_no_other() {
-    use ir::deriv::{CompGradMap, DerivEntry};
-    use ir::expr::{BinOp, Expr};
-    use ir::transition::{DrawMethod, StoichiometryEntry, Transition};
-
-    let compiled_with = |d_rate_d_beta: Expr| -> Model {
-        let mut m = tiny_model();
-        m.transitions = vec![Transition {
-            name: "infection".into(),
-            stoichiometry: vec![StoichiometryEntry("S".into(), -1), StoichiometryEntry("I".into(), 1)],
-            rate: Expr::bin_op(BinOp::Mul, Expr::param("beta"), Expr::pop("I")),
-            metadata: None,
-            draw_method: DrawMethod::Poisson,
-            rate_grad: std::collections::HashMap::from([("beta".to_string(), DerivEntry::Grad(d_rate_d_beta))]),
-            rate_state_grad: CompGradMap(Default::default()),
-            lineage: None,
-        }];
-        m
-    };
-    // The right derivative of beta·I, and a wrong one.
-    let right = compiled_with(Expr::pop("I"));
-    let wrong = compiled_with(Expr::bin_op(BinOp::Mul, Expr::const_(2.0), Expr::pop("I")));
-    assert_eq!(model_digest_hash(&right), model_digest_hash(&wrong), "one forward model");
-
-    let cfg = fit_config();
-    let run_id = |model: &Model, method_toml: &str| {
-        let method: crate::fit::config_v2::Method =
-            toml::from_str(&format!("{method_toml}\nstarts = \"uniform_unconstrained\"\n")).expect("method toml");
-        super::legacy_fit::resolve_fit_method(&super::legacy_fit::FitMethodCtx {
-            model,
-            fit_stem: "sir",
-            ir_version: IRV,
-            engine: &runid::inputs::EngineIdentity::of_build(ENGV),
-            problem: &cfg.problem,
-                method: &method,
-            seed: 7,
-            deps: vec![],
-        })
-        .expect("fit identity")
-        .run_id
-    };
-    let pgas = "algorithm = \"pgas\"\nbackend = \"chain_binomial\"\nchains = 2\nparticles = 100\nsweeps = 10";
-    let reads = [
-        ("pgas with nuts", format!("{pgas}\nuse_nuts = true")),
-        ("nl-lbfgs", "algorithm = \"nl-lbfgs\"\nbackend = \"ode\"\nchains = 1".to_string()),
-    ];
-    let never_reads = [
-        ("pgas --no-nuts", format!("{pgas}\nuse_nuts = false")),
-        ("if2", "algorithm = \"if2\"\nbackend = \"chain_binomial\"\nchains = 2\nparticles = 100\n\
-                 iterations = 10\ncooling = 0.7".to_string()),
-        ("nl-sbplx", "algorithm = \"nl-sbplx\"\nbackend = \"ode\"\nchains = 1".to_string()),
-        ("nl-bobyqa", "algorithm = \"nl-bobyqa\"\nbackend = \"ode\"\nchains = 1".to_string()),
-    ];
-    for (what, toml) in &reads {
-        assert_ne!(run_id(&right, toml), run_id(&wrong, toml), "{what} reads the gradient maps: it must re-key");
-    }
-    for (what, toml) in &never_reads {
-        assert_eq!(run_id(&right, toml), run_id(&wrong, toml), "{what} reads no gradient: it must not re-key");
-    }
-}

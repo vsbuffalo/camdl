@@ -270,8 +270,6 @@ pub fn begin_resolved_write(
 }
 
 #[cfg(test)]
-mod legacy_fit;
-#[cfg(test)]
 mod tests;
 #[cfg(test)]
 pub(crate) use tests::tiny_model;
