@@ -177,6 +177,7 @@ fn recover_beta_integ(
     std::fs::write(&truth, format!("beta = {TRUE_BETA}\ngamma = 0.3\nN0 = 10000\n")).unwrap();
     let data = tmp.path().join("cases.tsv");
     let sim = Command::new(&bin).env_remove("CLICOLOR_FORCE")
+        .env("CAMDL_STORE", tmp.path().join("camdl-store"))
         .args(["simulate"]).arg(&ir)
         .args(["--params"]).arg(&truth)
         .args(["--backend", "ode", "--dt", "1", "--seed", "1", "--obs-only"]).arg(&data)

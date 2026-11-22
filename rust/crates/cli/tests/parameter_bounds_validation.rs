@@ -86,6 +86,7 @@ fn run_simulate(
     let out_path = tmp.path().join("traj.tsv");
     let mut cmd = Command::new(bin);
     cmd.env_remove("CLICOLOR_FORCE");
+    cmd.env("CAMDL_STORE", tmp.path().join("camdl-store"));
     cmd.args([
         "simulate", &model.to_string_lossy(),
         "--params", &params.to_string_lossy(),

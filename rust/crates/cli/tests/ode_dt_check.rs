@@ -81,6 +81,7 @@ fn gen_data(bin: &Path, ir: &Path, dir: &Path) -> PathBuf {
     std::fs::write(&truth, "beta = 0.8\ngamma = 0.3\nN0 = 10000\n").unwrap();
     let data = dir.join("cases.tsv");
     let sim = Command::new(bin).env_remove("CLICOLOR_FORCE")
+        .env("CAMDL_STORE", dir.join("camdl-store"))
         .args(["simulate"]).arg(ir)
         .args(["--params"]).arg(&truth)
         .args(["--backend", "ode", "--dt", "1", "--seed", "1", "--obs-only"]).arg(&data)

@@ -69,7 +69,9 @@ fn line_list(camdl: &Path, dir: &Path, model: &str, params: &[&str], seed: &str)
         "--backend", "chain_binomial", "--dt", "1", "--seed", seed,
     ];
     sim.extend_from_slice(params);
+    let store = dir.join("camdl-store");
     sim.extend(["--event-log", ev.to_str().unwrap(), "--tsv", "--output", traj.to_str().unwrap()]);
+    sim.extend(["--store", store.to_str().unwrap()]);
     run(camdl, &sim);
     run(camdl, &["lineage", "realize", ev.to_str().unwrap(), "--identity-seed", seed, "-o", ll.to_str().unwrap()]);
     read_tsv(&ll).expect("parse line list")

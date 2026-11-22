@@ -315,6 +315,7 @@ fn simulate_refuses_last_obs_naming_the_quantity() {
     .unwrap();
 
     let out = Command::new(bin()).env_remove("CLICOLOR_FORCE")
+        .env("CAMDL_STORE", tmp.path().join("camdl-store"))
         .arg("simulate")
         .arg(&model)
         .args(["--backend", "chain_binomial", "--seed", "1", "--dt", "1"])

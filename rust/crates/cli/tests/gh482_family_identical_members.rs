@@ -46,6 +46,7 @@ simulate {{ from = 0 'days to = 20 'days }}
 
 fn simulate(bin: &Path, model_path: &Path) -> std::process::Output {
     Command::new(bin).env_remove("CLICOLOR_FORCE")
+        .env("CAMDL_STORE", model_path.parent().expect("the model's folder").join("camdl-store"))
         .args([
             "simulate",
             &model_path.to_string_lossy(),
@@ -137,6 +138,7 @@ simulate {{ from = 0 'days to = 20 'days }}
 
 fn simulate_ode(bin: &Path, model_path: &Path) -> std::process::Output {
     Command::new(bin).env_remove("CLICOLOR_FORCE")
+        .env("CAMDL_STORE", model_path.parent().expect("the model's folder").join("camdl-store"))
         .args([
             "simulate",
             &model_path.to_string_lossy(),

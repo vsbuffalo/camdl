@@ -219,6 +219,7 @@ fn nl_lbfgs_recovers_the_truth_and_matches_the_derivative_free_optimum() {
         .unwrap();
     let data = tmp.path().join("cases.tsv");
     let sim = Command::new(&bin).env_remove("CLICOLOR_FORCE")
+        .env("CAMDL_STORE", tmp.path().join("camdl-store"))
         .args(["simulate"]).arg(&ir)
         .args(["--params"]).arg(&truth)
         .args(["--backend", "ode", "--dt", "1", "--seed", "1", "--obs-only"]).arg(&data)

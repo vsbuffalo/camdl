@@ -206,6 +206,7 @@ fn every_method_leaves_a_terminal_progress_record() {
     std::fs::write(&truth, "beta = 0.8\ngamma = 0.3\nN0 = 1000\n").unwrap();
     let data = dir.join("cases.tsv");
     let sim = Command::new(binary()).env_remove("CLICOLOR_FORCE")
+        .env("CAMDL_STORE", dir.join("camdl-store"))
         .arg("simulate")
         .arg(&ir)
         .args(["--params"])

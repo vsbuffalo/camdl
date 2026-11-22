@@ -128,6 +128,7 @@ fn setup(tag: &str, model_src: &str) -> Option<(TempDir, PathBuf, PathBuf)> {
     std::fs::write(&truth, "beta = 0.02\nsigma = 0.2\ngamma = 0.1\nseed = 40\nfrac_age = 0.2\n").unwrap();
     let data = tmp.path().join("cases.tsv");
     let sim = Command::new(&bin).env_remove("CLICOLOR_FORCE")
+        .env("CAMDL_STORE", tmp.path().join("camdl-store"))
         .args(["simulate"]).arg(&ir)
         .args(["--params"]).arg(&truth)
         .args(["--backend", "ode", "--dt", "1", "--seed", "7", "--obs-only"]).arg(&data)

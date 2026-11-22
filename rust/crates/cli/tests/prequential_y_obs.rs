@@ -54,6 +54,7 @@ fn synth_obs(bin: &Path, model: &Path, tmp: &Path, extra_args: &[&str]) -> PathB
     let obs_path = tmp.join("obs.tsv");
     let mut cmd = Command::new(bin);
     cmd.env_remove("CLICOLOR_FORCE");
+    cmd.env("CAMDL_STORE", tmp.join("camdl-store"));
     cmd.env("CAMDL_SKIP_VERSION_CHECK", "1").args([
         "simulate",
         &model.to_string_lossy(),
@@ -119,6 +120,7 @@ fn prequential_y_obs_single_stream_equals_data() {
 
     let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("CAMDL_STORE", tmp.path().join("camdl-store"))
         .args([
             "pfilter",
             &single_block_model().to_string_lossy(),
@@ -175,6 +177,7 @@ fn prequential_y_obs_multi_stream_is_each_streams_own_value() {
     // Bind two streams (their own distinct columns of the same wide obs file).
     let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("CAMDL_STORE", tmp.path().join("camdl-store"))
         .args([
             "pfilter",
             &multi_block_model().to_string_lossy(),

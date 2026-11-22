@@ -130,6 +130,8 @@ fn observation_reductions_reduce_the_same_y_sim_as_obs() {
         obs_path.to_str().unwrap(),
         "--quantities-out",
         qdir.to_str().unwrap(),
+        "--store",
+        tmp.path().join("camdl-store").to_str().unwrap(),
     ]);
     assert!(
         out.status.success(),

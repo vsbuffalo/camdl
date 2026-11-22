@@ -64,6 +64,7 @@ init {{ S = 9990  I = 10 }}
 fn simulate_stdout(bin: &Path, ir: &Path, params: &Path, integrator: Option<&str>) -> String {
     let mut cmd = Command::new(bin);
     cmd.env_remove("CLICOLOR_FORCE");
+    cmd.env("CAMDL_STORE", ir.parent().expect("the model's folder").join("camdl-store"));
     cmd.args(["simulate"]).arg(ir)
         .args(["--params"]).arg(params)
         .args(["--backend", "ode", "--dt", "1", "--seed", "1", "--stdout"])

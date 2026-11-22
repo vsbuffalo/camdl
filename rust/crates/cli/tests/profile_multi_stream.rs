@@ -56,6 +56,7 @@ fn synth_obs_tsv(bin: &Path, tmp: &Path) -> PathBuf {
     let obs_path = tmp.join("seir_obs.tsv");
     let status = Command::new(bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("CAMDL_STORE", tmp.join("camdl-store"))
         .args([
             "simulate", &seir_spatial_5_inference().to_string_lossy(),
             "--backend", "chain_binomial", "--dt", "1", "--seed", "42",

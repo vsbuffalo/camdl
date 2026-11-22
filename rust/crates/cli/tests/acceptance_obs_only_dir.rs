@@ -100,6 +100,7 @@ fn obs_only_dir_writes_one_file_per_stream() {
     write_params(&params);
 
     let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
+        .env("CAMDL_STORE", tmp.path().join("camdl-store"))
         .args(["simulate", &model.to_string_lossy(),
                "--params", &params.to_string_lossy(),
                "--backend", "chain_binomial",
@@ -142,6 +143,7 @@ fn multi_cadence_single_file_error_names_both_dir_flags() {
     write_params(&params);
 
     let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
+        .env("CAMDL_STORE", tmp.path().join("camdl-store"))
         .args(["simulate", &model.to_string_lossy(),
                "--params", &params.to_string_lossy(),
                "--backend", "chain_binomial",
