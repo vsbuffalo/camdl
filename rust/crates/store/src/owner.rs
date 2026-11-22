@@ -230,6 +230,25 @@ pub(crate) fn local_liveness(owner: &Owner) -> Liveness {
     }
 }
 
+/// The liveness of the owner whose file stem ([`Owner::file_stem`]) is
+/// `stem`, when that owner is on this host: dead when its process is gone or
+/// its process id now names a process with another start time. `None` when
+/// the stem names another host, or cannot be read as an owner of this one.
+pub(crate) fn local_liveness_of_stem(stem: &str) -> Option<Liveness> {
+    let rest = stem.strip_prefix(&format!("{}-", crate::layout::path_label(this_host())))?;
+    let pid: u32 = rest.split('-').next()?.parse().ok()?;
+    if !pid_exists(pid) {
+        return Some(Liveness::Dead);
+    }
+    match process_start(pid) {
+        Some(started) => {
+            let now = Owner { host: this_host().to_string(), pid, started };
+            Some(if now.file_stem() == stem { Liveness::Alive } else { Liveness::Dead })
+        }
+        None => Some(Liveness::Unknown),
+    }
+}
+
 /// An owner's beat file, as written.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct BeatFile {

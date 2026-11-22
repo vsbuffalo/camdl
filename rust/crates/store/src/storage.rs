@@ -19,7 +19,7 @@ use crate::artifact::{record_key, Artifact, Build, ByProduct, ContentArtifact, I
 use crate::check::damage;
 use crate::error::{json_err, At, Error, Result, RunError};
 use crate::fsutil::{
-    create_dirs_durable, fsync_dir, is_lock_entry, lock_owner, quarantine, remove_all, try_lock, unique_name,
+    claim_draft_name, create_dirs_durable, fsync_dir, is_lock_entry, lock_owner, quarantine, remove_all, try_lock, unique_name,
     write_file_synced, write_json_synced, LockAttempt, LockGuard,
 };
 use crate::hash::{ContentAddressed, Key, HASH_VERSION};
@@ -976,7 +976,7 @@ impl Inner {
             WriteMode::Atomic => {
                 let staging_root = self.root.join(STAGING_DIR);
                 std::fs::create_dir_all(&staging_root).at("create directory", &staging_root)?;
-                let tmp = staging_root.join(unique_name(&run_id.to_hex()));
+                let tmp = staging_root.join(claim_draft_name(this_owner(), &run_id.to_hex()));
                 std::fs::create_dir(&tmp).at("create directory", &tmp)?;
                 write_claim_records(&tmp, &ident, &run_file)?;
                 let mut rel_dirs = Vec::new();
@@ -1292,7 +1292,7 @@ impl Inner {
         for &i in &missing {
             let w = &wanted.items[i];
             let bp_id = crate::artifact::run_id(w.kind, &self.ambient_key, &w.identity_key);
-            let tmp = staging_root.join(unique_name(&bp_id.to_hex()));
+            let tmp = staging_root.join(claim_draft_name(this_owner(), &bp_id.to_hex()));
             let slot = self.by_product_slot(w, tmp.clone(), run_id, A::KIND, info, entries.by_products[i].clone())?;
             let dest = staging_root.join(bp_id.to_hex());
             let claimed = self.under_claim_lock(&staging_root, &bp_id.to_hex(), || {
@@ -1434,7 +1434,7 @@ impl Inner {
             }
             let staging_root = self.root.join(STAGING_DIR);
             std::fs::create_dir_all(&staging_root).at("create directory", &staging_root)?;
-            let tmp = staging_root.join(unique_name(&run_id.to_hex()));
+            let tmp = staging_root.join(claim_draft_name(this_owner(), &run_id.to_hex()));
             std::fs::create_dir(&tmp).at("create directory", &tmp)?;
             let ident = self.identity_file::<C>(content, Self::parent_of(&placed))?;
             let mut run = running_record(info, info.seq(), Vec::new());

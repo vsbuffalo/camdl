@@ -41,6 +41,27 @@ pub(crate) fn unique_name(prefix: &str) -> String {
     format!("{prefix}.{}.{n}.{nanos}", std::process::id())
 }
 
+/// The name of the temporary folder a claim of the run id `hex` is built in
+/// under `.staging/` before it is renamed to `hex`:
+/// `<hex>.<host>-<pid>-<start>.<n>`, naming the owner that builds it, so that
+/// `clean` can tell whether that owner has stopped ([`draft_owner`]).
+pub(crate) fn claim_draft_name(owner: &Owner, hex: &str) -> String {
+    static N: AtomicU64 = AtomicU64::new(0);
+    format!("{hex}.{}.{}", owner.file_stem(), N.fetch_add(1, Ordering::Relaxed))
+}
+
+/// The owner-name part of a `.staging/` entry named by [`claim_draft_name`],
+/// or `None` for any other name.
+pub(crate) fn draft_owner(name: &str) -> Option<&str> {
+    let (hex, rest) = name.split_at_checked(64)?;
+    if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let (stem, n) = rest.strip_prefix('.')?.rsplit_once('.')?;
+    n.parse::<u64>().ok()?;
+    Some(stem)
+}
+
 /// Writes `bytes` to `path` so a reader sees the old file or the whole new
 /// one: through a temporary file of this writer's own in the same directory,
 /// renamed over `path`, and the directory synced.

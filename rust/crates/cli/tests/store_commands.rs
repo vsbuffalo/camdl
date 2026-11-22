@@ -1,6 +1,7 @@
 //! `camdl status`, `verify`, `clean` and `reindex` against run stores built by
 //! real `pfilter` and `simulate` runs: completed results, a run that failed, a
-//! run killed while it filtered, a cell killed while it was staged, and a
+//! run killed while it filtered, a cell killed while it was staged or while
+//! its claim was being built, and a
 //! result `--force` moved to quarantine.
 //!
 //! Drives the release binary; each test has a store of its own under a
@@ -211,15 +212,12 @@ fn entries(dir: &Path) -> Vec<String> {
     v
 }
 
-/// The claims under the store's root `.staging/`: folders named by a run id
-/// that hold a `run.json`. A claim is built under a temporary name and
-/// renamed, so a folder under any other name is a claim not yet made.
+/// The folders under the store's root `.staging/`: claims, named by their
+/// run id, and the folders claims are built in before their rename, named by
+/// the run id and the process building them. Locks, and the temporary files
+/// a lock is written to before it is linked into place, are left out.
 fn staged(store: &Path) -> Vec<String> {
-    entries(&store.join(".staging"))
-        .into_iter()
-        .filter(|n| n.len() == 64 && n.chars().all(|c| c.is_ascii_hexdigit()))
-        .filter(|n| store.join(".staging").join(n).join("run.json").exists())
-        .collect()
+    entries(&store.join(".staging")).into_iter().filter(|n| !n.ends_with(".lock") && !n.starts_with('.')).collect()
 }
 
 /// A completed filter run and a labelled two-cell simulation.
@@ -335,9 +333,10 @@ fn clean_removes_only_quarantine_attempts_and_dead_staging() {
     let slow_cell = Project::simulate_args("9", &["--dt", "0.00000001"]);
     let child = p.start_until(&slow_cell, |s| !staged(s).is_empty());
     child.kill();
+    // The kill lands either while the claim is built or after its rename;
+    // `clean` removes the folder in both cases.
     let staging = staged(&store);
     assert_eq!(staging.len(), 1, "{staging:?}");
-    assert_eq!(entries(&store.join(".staging")).iter().filter(|n| !n.ends_with(".lock")).count(), 1, "only the claim is staged");
 
     // The earlier `clean` ran while the quarantine and the attempt existed and
     // removed them; make both again, then clean once more with every state

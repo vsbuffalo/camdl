@@ -1753,8 +1753,8 @@ Staging lives on the same filesystem as the results, so the rename is atomic:
   `<root>/.staging/<64 hex of the run id>/`, whether its layout starts at the
   kind's directory or `Layout::inside` a parent, and with or without groups.
 - **A content artifact written by `put`** stages in a temporary folder of its
-  own, `<root>/.staging/<64 hex of the run id>.<host>-<pid>-<start>.<n>/`, as
-  today's atomic commit names one per attempt (`store.rs:493-503`).
+  own, `<root>/.staging/<64 hex of the run id>.<host>-<pid>-<start>.<n>/`, named
+  as a claim's temporary folder is ("Details of the library").
 - **A by-product produced with an `Atomic` upstream** stages inside the
   upstream's staging folder, at `<KIND>/<label>-<12 hex>/`, so the upstream's
   rename places both.
@@ -2153,14 +2153,18 @@ None exists today except `dev reindex`, which rebuilds `index.json`
 (`cli/src/cas_index.rs:115-130`, `cli/src/args/mod.rs:2816-2820`).
 
 - **`clean`** deletes the staging folders whose owner is dead on this host,
-  everything in `.quarantine/`, and every `.attempts/` folder, and removes each
-  group directory, and each build directory, that is empty and has no live
-  owner's staging below it. It does not touch a completed result, a running
-  claim, an invocation record or the index. It is the only command that removes
-  a group or build directory. A `finish` that finds a directory of its chain
-  gone when it renames, because `clean` removed it a moment before, makes the
-  chain again and renames once more; nothing is lost, since the result is still
-  whole in staging.
+  claims and the temporary folders claims are built in alike, everything in
+  `.quarantine/`, and every `.attempts/` folder, and removes each group
+  directory, and each build directory, that is empty and has no live owner's
+  staging below it. An owner on this host is dead when its process is gone or
+  its process id names a process with another start time. Staging whose owner is
+  on another host is left and listed, since this host cannot tell whether that
+  owner has stopped. It does not touch a completed result, a running claim, an
+  invocation record or the index. It is the only command that removes a group or
+  build directory. A `finish` that finds a directory of its chain gone when it
+  renames, because `clean` removed it a moment before, makes the chain again and
+  renames once more; nothing is lost, since the result is still whole in
+  staging.
 - **`verify [<handle>]`** checks every completed result, or the one named. It
   computes the run id again from `identity.json` and compares it with the
   folder's, and computes each manifest file's SHA-256 and compares it with the
@@ -2200,10 +2204,13 @@ These rules complete the sections above for an implementer.
   (`cli/src/fit/config_v2.rs:3677`), and is recorded as typed.
 - **A claim is created whole.** An atomic claim, and a by-product's claim under
   `<upstream folder>/.staging/`, is built in a temporary folder beside its final
-  name, holding `identity.json` and `run.json`, and renamed to
-  `<64 hex of the run id>/`. The rename fails when another claimant's folder is
-  there. A staging folder whose `run.json` does not read is debris and is moved
-  to quarantine.
+  name, `<64 hex of the run id>.<host>-<pid>-<start>.<n>/`, where
+  `<host>-<pid>-<start>` names its builder as a beat file does and `<n>` counts
+  the builder's folders, holding `identity.json` and `run.json`, and renamed to
+  `<64 hex of the run id>/`. Only the builder touches the folder before the
+  rename, and `clean` tells from the name whether the builder has stopped. The
+  rename fails when another claimant's folder is there. A staging folder whose
+  `run.json` does not read is debris and is moved to quarantine.
 - **Claim folders are made and removed under one lock.** Creating
   `.staging/<64 hex>/` (by its rename), removing one whose owner is dead, and
   moving one to quarantine under `Force` each take `.staging/<64 hex>.lock`

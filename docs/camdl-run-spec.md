@@ -2626,9 +2626,12 @@ camdl reindex                # rebuild the index from the records
   for a damaged result moves it to `.quarantine/` and computes it again. A
   handle that names no result is refused.
 - **`clean`** deletes each staging folder (`.staging/`) of an unfinished result
-  whose owner was a process on this host that has stopped, everything in
-  `.quarantine/`, every `.attempts/` folder, and each group and build directory
-  that is empty, and prints how many of each it removed. It never touches a
+  whose owner was a process on this host that has stopped (a claim, or the
+  folder a claim was being built in; a process id that now names a process with
+  another start time counts as stopped), everything in `.quarantine/`, every
+  `.attempts/` folder, and each group and build directory that is empty, and
+  prints how many of each it removed. Staging whose owner is a process on
+  another host is left, and printed as `left <folder>`. It never touches a
   completed result, a running or interrupted run, a run recorded as failed, an
   invocation record or the index. A completed result leaves the store only after
   `--force` has moved it to `.quarantine/`, so the copy `--force` replaced can

@@ -185,6 +185,9 @@ impl StoreCommand {
                     c.directories.len()
                 )
                 .map_err(io)?;
+                for p in &c.other_hosts {
+                    writeln!(out, "left {}: staged by a process on another host", p.display()).map_err(io)?;
+                }
             }
             StoreCommand::Reindex => {
                 let n = store.reindex()?;

@@ -65,16 +65,18 @@ pub struct VerifyArgs {
 #[derive(Args, Debug, Clone)]
 #[command(after_help = colored_help!("\
 Deletes:
-  - each staging folder (`.staging/`) of an unfinished atomic result whose
-    owner was a process on this host that has stopped
+  - each staging folder (`.staging/`) of an unfinished atomic result, or
+    folder a claim was being built in, whose owner was a process on this host
+    that has stopped
   - everything in `.quarantine/`, where the store moves the results `--force`
     replaces, damaged results, and folders it cannot read
   - every `.attempts/` folder: the records an interrupted or failed run left
     before it was run again
   - each group and build directory that is empty
 
-It never touches a completed result, a running or interrupted run, a run
-recorded as failed, an invocation record or the index. A completed result
+Staging whose owner is on another host is left and listed. It never touches a
+completed result, a running or interrupted run, a run recorded as failed, an
+invocation record or the index. A completed result
 leaves the store only when `--force` has moved it to `.quarantine/`.
 
 Examples:

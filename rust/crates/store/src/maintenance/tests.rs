@@ -68,6 +68,59 @@ fn clean_removes_quarantine_attempts_dead_staging_and_empty_directories_only() {
     assert!(store.get(fit.id()).unwrap().is_some());
 }
 
+/// A folder a claim was being built in names its builder, so `clean` removes
+/// the one whose builder was killed, and the one whose process id now names a
+/// process with another start time, and leaves a live builder's and lists one
+/// from another host.
+#[test]
+fn clean_removes_the_claim_drafts_of_stopped_owners_only() {
+    use crate::fsutil::{claim_draft_name, draft_owner};
+    let root = TempRoot::new("clean-drafts");
+    let store = open(root.path());
+    let kept = run_sim(&store, &info(), 1);
+    let staging = root.path().join(".staging");
+    let hex = kept.id().key().to_hex();
+    let draft = |owner: &crate::Owner| {
+        let d = staging.join(claim_draft_name(owner, &hex));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("identity.json"), b"{").unwrap();
+        d
+    };
+    // A builder killed while it built its claim.
+    let (killed, mut child) = live_owner();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let killed = draft(&killed);
+    // A live builder.
+    let (live, mut live_child) = live_owner();
+    let live = draft(&live);
+    // A process id since given to another process: this test's own, with
+    // another start time.
+    let reused = crate::Owner {
+        host: crate::this_host().into(),
+        pid: std::process::id(),
+        started: crate::Timestamp("2000-01-01T00:00:00.000Z".into()),
+    };
+    let reused = draft(&reused);
+    let remote = draft(&remote_owner());
+    let mine = claim_draft_name(crate::owner::this_owner(), &hex);
+    assert_eq!(crate::owner::local_liveness_of_stem(draft_owner(&mine).unwrap()), Some(crate::Liveness::Alive));
+
+    let c = store.clean().unwrap();
+    let mut removed = c.staging.clone();
+    removed.sort();
+    let mut expected = vec![killed.clone(), reused.clone()];
+    expected.sort();
+    assert_eq!(removed, expected);
+    assert!(!killed.exists() && !reused.exists());
+    assert!(live.exists(), "a live builder's folder is kept");
+    assert_eq!(c.other_hosts, vec![remote.clone()]);
+    assert!(remote.exists(), "another host's folder is kept");
+    assert!(store.get(kept.id()).unwrap().is_some());
+    live_child.kill().unwrap();
+    live_child.wait().unwrap();
+}
+
 #[test]
 fn the_index_is_a_cache_rebuilt_from_the_records() {
     let root = TempRoot::new("index");

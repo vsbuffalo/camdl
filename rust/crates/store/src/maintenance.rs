@@ -5,11 +5,11 @@ use std::time::Duration;
 
 use crate::artifact::run_id;
 use crate::error::Result;
-use crate::fsutil::{fsync_dir, remove_all, write_file_atomic};
+use crate::fsutil::{draft_owner, fsync_dir, remove_all, write_file_atomic};
 use crate::hash::Key;
 use crate::index::{index_dir, own_log, Index};
 use crate::invocation::all_invocations;
-use crate::owner::{local_liveness, Liveness, Owner};
+use crate::owner::{local_liveness, local_liveness_of_stem, Liveness, Owner};
 use crate::record::{
     read_record, IdentityFile, IndexLine, InvocationStatus, Read, Role, RunFile, Status, ATTEMPTS_DIR, RECORD_FORMAT,
     RUN_FILE, STAGING_DIR,
@@ -120,13 +120,17 @@ pub struct VerifyFailure {
     pub what: String,
 }
 
-/// What `clean` removed.
+/// What `clean` removed, and the staging it left because its owner is on
+/// another host.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Cleaned {
     pub staging: Vec<PathBuf>,
     pub quarantine: Vec<PathBuf>,
     pub attempts: Vec<PathBuf>,
     pub directories: Vec<PathBuf>,
+    /// Claims, and folders a claim was being built in, whose owner is a
+    /// process on another host: this host cannot tell whether it has stopped.
+    pub other_hosts: Vec<PathBuf>,
 }
 
 impl Store {
@@ -180,10 +184,12 @@ impl Store {
         Ok(out)
     }
 
-    /// Deletes staging folders whose owner is dead on this host, everything
-    /// in `.quarantine/`, every `.attempts/` folder, and every empty group,
-    /// kind and build directory. Touches no completed result, running claim,
-    /// invocation record or index.
+    /// Deletes staging folders whose owner is dead on this host (claims, and
+    /// the folders claims were being built in), everything in
+    /// `.quarantine/`, every `.attempts/` folder, and every empty group, kind
+    /// and build directory. Touches no completed result, running claim,
+    /// invocation record or index, and leaves staging whose owner is on
+    /// another host, listing it in [`Cleaned::other_hosts`].
     pub fn clean(&self) -> Result<Cleaned> {
         let inner = &self.inner;
         let mut out = Cleaned::default();
@@ -195,14 +201,30 @@ impl Store {
         for s in staging_dirs {
             for entry in std::fs::read_dir(&s).into_iter().flatten().flatten() {
                 let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                // A folder a claim was being built in, before its rename: its
+                // name says whose it is, and only its builder ever touches it.
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if let Some(stem) = draft_owner(&name) {
+                    match local_liveness_of_stem(stem) {
+                        Some(Liveness::Dead) => {
+                            remove_all(&path)?;
+                            out.staging.push(path);
+                        }
+                        Some(_) => {}
+                        None => out.other_hosts.push(path),
+                    }
+                    continue;
+                }
                 let owner = match read_record::<RunFile>(&path.join(RUN_FILE)) {
                     Read::Ok(r) => r.owner,
                     _ => continue,
                 };
-                if owner.is_this_host()
-                    && inner.liveness(&owner, Duration::ZERO) == Liveness::Dead
-                    && inner.clear_claim(&path, &owner, false)?
-                {
+                if !owner.is_this_host() {
+                    out.other_hosts.push(path);
+                } else if inner.liveness(&owner, Duration::ZERO) == Liveness::Dead && inner.clear_claim(&path, &owner, false)? {
                     out.staging.push(path);
                 }
             }
