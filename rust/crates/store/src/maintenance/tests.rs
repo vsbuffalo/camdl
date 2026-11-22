@@ -138,6 +138,29 @@ fn verify_checks_the_results_its_handle_names() {
     assert!(labelled.contains(&second.id().key().short12()), "a label checks every result of its invocation: {labelled}");
 }
 
+/// A path that names no result is refused, rather than reported verified
+/// because nothing was checked.
+#[test]
+fn verify_refuses_a_path_that_names_no_result() {
+    let root = TempRoot::new("verify-path");
+    let store = open(root.path());
+    let s = run_sim(&store, &info(), 1);
+    let group = s.folder().parent().unwrap().to_string_lossy().into_owned();
+    for handle in [group, root.path().join("no-such-folder").to_string_lossy().into_owned()] {
+        let r = StoreCommand::Verify { handle: Some(handle.clone()) }.run(&store, &mut Vec::new());
+        assert!(matches!(r, Err(crate::Error::NoRecord { .. })), "{handle}: {r:?}");
+    }
+    let mut out = Vec::new();
+    StoreCommand::Verify { handle: Some(s.folder().to_string_lossy().into_owned()) }.run(&store, &mut out).unwrap();
+    assert_eq!(String::from_utf8(out).unwrap(), "every result verified\n");
+    let i = labelled("gone");
+    let gone = run_sim(&store, &i, 2);
+    i.finish(&store).unwrap();
+    std::fs::remove_dir_all(gone.folder()).unwrap();
+    let r = StoreCommand::Verify { handle: Some("@gone".into()) }.run(&store, &mut Vec::new());
+    assert!(matches!(r, Err(crate::Error::NotFound { .. })), "a label whose results are all gone: {r:?}");
+}
+
 #[test]
 fn a_dead_lock_is_taken_over_by_exactly_one_of_many_takers() {
     let root = TempRoot::new("lock");

@@ -124,6 +124,7 @@ impl StoreCommand {
                     Some(text) => {
                         let h: Handle = text.parse()?;
                         let dirs = match h {
+                            Handle::Path(p) if crate::storage::identity_of(&p).is_none() => return Err(Error::NoRecord { path: p }),
                             Handle::Path(p) => vec![p],
                             Handle::IdPrefix(prefix) => {
                                 let mut found: Vec<_> =
@@ -139,7 +140,12 @@ impl StoreCommand {
                             label @ Handle::Label { .. } => {
                                 let inv = store.invocation(&label)?;
                                 let keys: Vec<_> = inv.file.results.iter().map(|r| r.run_id).collect();
-                                walk(inner).into_iter().filter(|(_, f)| keys.contains(&f.run_id)).map(|(d, _)| d).collect()
+                                let dirs: Vec<_> =
+                                    walk(inner).into_iter().filter(|(_, f)| keys.contains(&f.run_id)).map(|(d, _)| d).collect();
+                                if dirs.is_empty() {
+                                    return Err(Error::NotFound { handle: text.clone() });
+                                }
+                                dirs
                             }
                         };
                         Some(dirs)
