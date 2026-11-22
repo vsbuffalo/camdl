@@ -1,6 +1,5 @@
 //! Typed inference diagnostics — machine-readable, severity-classified,
-//! serializable to JSON for downstream tooling (camdl-book, camdl-vignettes,
-//! CI pipelines) to consume programmatically.
+//! serializable to JSON for other programs, such as CI pipelines, to read.
 //!
 //! Call sites push `DiagnosticKind` variants; the collector handles
 //! rendering, severity, hints, and serialization.

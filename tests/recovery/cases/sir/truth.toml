@@ -1,5 +1,4 @@
-# Planted ground-truth for the SIR recovery case — the book's getting-started
-# canonical values (camdl-book/guide/getting-started/params.toml). R0 = 2.67.
+# Planted ground-truth for the SIR recovery case. R0 = 2.67.
 # `make synth` simulates weekly reported cases at these values (seed 1,
 # chain_binomial); the IF2 fit recovers beta and gamma with N0, I0, rho, k fixed.
 beta  = 0.4

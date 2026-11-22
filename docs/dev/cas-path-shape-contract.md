@@ -1,8 +1,8 @@
 # CAS path-shape contract (for downstream consumers)
 
 Status: current as of the content-addressed run-identity refactor (gh#147).
-Audience: tools that read camdl's `results/` tree — notably camdl-book
-(`scenarios.qmd`) and camdl-viewer (`cas.py`).
+Audience: tools that read camdl's `results/` tree, such as camdl-viewer
+(`cas.py`).
 
 ## The one rule
 

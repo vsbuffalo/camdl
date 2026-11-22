@@ -11,7 +11,7 @@
 //! trajectory gate would not notice (it scores nothing).
 //!
 //! The reference is the validated `sir` recovery case
-//! (`tests/recovery/cases/sir`, see its README): the book getting-started SIR
+//! (`tests/recovery/cases/sir`, see its README): a closed SIR
 //! scored at the planted truth against the committed seed-1 synthetic weekly-case
 //! series. The model is rebuilt in-memory here (rather than loaded from a
 //! generated IR fixture that would go stale on a schema bump) — the same style as

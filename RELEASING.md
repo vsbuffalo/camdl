@@ -103,7 +103,6 @@ above.
 - [ ] `make test` passes locally (unit + golden + integration).
 - [ ] Goldens clean:
       `make update-golden && git diff --exit-code ir/golden/ ocaml/golden/`.
-- [ ] The book (camdl-book) renders against this commit.
 - [ ] No `#[ignore]` / dead-code / `--no-verify` shortcuts introduced.
 - [ ] Every breaking change since the last tag has an `old → new` entry in
       [`docs/language-changes.md`](docs/language-changes.md) and a migration

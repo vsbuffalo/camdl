@@ -12,9 +12,8 @@
 //!
 //! Plain mode emits one line per significant event without carriage returns
 //! or ANSI escapes, throttled per (chain, event-type) pair. Designed to be
-//! safe under `tee`, `&> log`, `ssh host 'camdl ...'`, and CI pipelines —
-//! the motivating use cases from the camdl-book CLAUDE.md guidance about
-//! `script(1)` wrapping, which this replaces.
+//! safe under `tee`, `&> log`, `ssh host 'camdl ...'`, and CI pipelines,
+//! where a terminal-only progress display would write escapes into a log.
 
 use std::io::IsTerminal;
 use std::sync::OnceLock;

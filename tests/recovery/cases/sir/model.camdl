@@ -1,6 +1,5 @@
-# Closed SIR — the book's canonical getting-started model
-# (camdl-book/guide/getting-started/sir_priors.camdl), used here as the clean,
-# well-identified parameter-recovery reference that anchors the inference oracle.
+# Closed SIR, the clean, well-identified parameter-recovery reference that
+# anchors the inference oracle.
 # Weekly reported cases via a NegBinomial observation model (reporting rho,
 # dispersion k); R0 = beta/gamma = 2.67, a single-peak epidemic in N = 10000.
 # Plant theta (truth.toml), simulate, fit, recover beta and gamma (N0, I0, rho,

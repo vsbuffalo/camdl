@@ -7,10 +7,7 @@ Tree-sitter grammar for the [camdl](../) compartmental modelling DSL.
 Last refreshed against the language spec on **2026-07-02**. The grammar parses
 every model in `ocaml/golden/`, every test fixture under
 `rust/crates/sim/tests/fixtures/` and `tests/fixtures/`, and every worked
-example in `docs/dev/proposals/fixtures/`. Sibling tooling for static document
-rendering (the KDE/Pandoc syntax XML at
-`camdl-book/_extensions/camdl/camdl.xml`) covers the same surface; the two are
-maintained in parallel.
+example in `docs/dev/proposals/fixtures/`.
 
 Surface covered:
 

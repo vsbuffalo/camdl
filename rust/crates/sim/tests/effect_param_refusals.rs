@@ -15,7 +15,7 @@
 //!   the `run_pgas` boundary for an effect amount, an effect schedule and a
 //!   plain `init` assignment.
 //!
-//! The model is the book's seeding idiom on `sir_basic`:
+//! The model is a common seeding idiom on `sir_basic`:
 //! `events { founders_arrive : add(I, n_seed) at [tau] }`. A periodic-spline
 //! variant reaches the amount through a forcing coefficient instead.
 

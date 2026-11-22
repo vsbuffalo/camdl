@@ -1,7 +1,7 @@
 //! `baseline` is an ordinary scenario name on every verb that takes
 //! `--scenario`.
 //!
-//! The book's models declare `scenarios { baseline { set = { ... } } }`, so
+//! Models may declare `scenarios { baseline { set = { ... } } }`, so
 //! `--scenario baseline` has to mean that scenario, and on a model that does
 //! not declare one it has to be refused like any other undeclared name, with
 //! the declared scenarios listed. The no-scenario arm is the parenthesised
