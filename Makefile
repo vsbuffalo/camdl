@@ -116,12 +116,15 @@ dev-camdlc: build-ocaml
 
 # ── Test ──────────────────────────────────────────────────────────────────────
 
-# Machine-wide queue for the heavy targets (docs/dev/testing.md, "Tiered gate").
-# Many sessions and agents share one machine, and seven concurrent `make test`
-# runs once drove a 16-core machine to a load of ~145. `test`, `test-rust`,
-# `test-inference` and `test-integration` therefore each run inside one of
-# CAMDL_TEST_SLOTS slots held by scripts/test-slot.sh, waiting while all are
-# taken; test-fast and targeted cargo runs are not queued.
+# Machine-wide queue for the heavy targets (docs/engineering/test-gate.md).
+# When several checkouts share one machine, unqueued `make test` runs
+# overload it (seven at once drove a 16-core machine to a load of ~145).
+# `test`, `test-rust`, `test-inference` and `test-integration` therefore each
+# run inside one of CAMDL_TEST_SLOTS slots held by scripts/test-slot.sh,
+# waiting while all are taken; test-fast and targeted cargo runs are not
+# queued. The default, one slot, gives each gate the whole machine; a machine
+# where several gates should run at once sets CAMDL_TEST_SLOTS in its
+# environment.
 #
 # Nesting takes one slot, not one per sub-target: the queued form of a target
 # re-runs `make <target>` inside the slot, and test-slot.sh exports
@@ -131,33 +134,37 @@ dev-camdlc: build-ocaml
 # The prerequisites (builds included) run inside the slot too.
 #
 # CAMDL_TEST_SLOTS=0 disables the queue; CI sets it, one job per machine.
-# While the queue is on, two more limits apply, each overridden by an explicit
-# value in the environment:
-#   - cargo builds with at most 6 jobs (CARGO_BUILD_JOBS; cargo's default is
-#     one per core, per run). Not `build.jobs` in rust/.cargo/config.toml: that
-#     sets the job count rather than capping it, so a 6 would oversubscribe
-#     CI's 4-core runners.
+#
+# Each gate uses its share of the machine, the cores divided by the slots
+# (all of them with the queue off), at least one:
+#   - cargo builds with that many jobs (CARGO_BUILD_JOBS). Not `build.jobs` in
+#     rust/.cargo/config.toml, which would fix one number for every machine.
 #   - the test recipes (test-fast, test-rust, test-inference, test-integration)
-#     run with RAYON_NUM_THREADS=2, so each test binary and each `camdl` it
-#     spawns uses two Rayon threads, not one per core. Tests that compare
-#     thread counts build their own pools of an explicit size. Not in
-#     rust/.cargo/config.toml's [env]: cargo applies that to `cargo run` and
-#     `cargo bench` too, which would silently time parallel code on two threads.
-CAMDL_TEST_SLOTS ?= 3
+#     run each test binary on that many test threads (RUST_TEST_THREADS,
+#     overriding the 4 in rust/.cargo/config.toml, which caps plain
+#     `cargo test` runs), and with RAYON_NUM_THREADS at half of it, so each
+#     test binary and each `camdl` it spawns uses that many Rayon threads.
+#     Half, because a binary running several tests at once starts a Rayon
+#     pool per test. Tests that compare thread counts build their own pools of
+#     an explicit size. Not in rust/.cargo/config.toml's [env]: cargo applies
+#     that to `cargo run` and `cargo bench` too, which would silently time
+#     parallel code on fewer threads.
+# An explicit value in the environment wins for all three.
+CAMDL_TEST_SLOTS ?= 1
 TEST_SLOT_QUEUED := $(if $(CAMDL_TEST_SLOT_HELD),,$(filter-out 0,$(CAMDL_TEST_SLOTS)))
 QUEUED_TESTS := test test-rust test-inference test-integration
 ifneq ($(TEST_SLOT_QUEUED),)
 $(QUEUED_TESTS):
 	@bash scripts/test-slot.sh $(CAMDL_TEST_SLOTS) $(MAKE) $@
 endif
-TEST_ENV :=
-ifneq ($(filter-out 0,$(CAMDL_TEST_SLOTS)),)
+NPROC := $(shell getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+GATE_SHARE := $(shell s=$(or $(filter-out 0,$(CAMDL_TEST_SLOTS)),1); n=$$(( $(NPROC) / s )); [ $$n -lt 1 ] && n=1; echo $$n)
 ifeq ($(origin CARGO_BUILD_JOBS),undefined)
-CARGO_BUILD_JOBS := $(shell n=$$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 6); [ "$$n" -lt 6 ] && echo "$$n" || echo 6)
+CARGO_BUILD_JOBS := $(GATE_SHARE)
 endif
 export CARGO_BUILD_JOBS
-TEST_ENV := RAYON_NUM_THREADS=$(or $(RAYON_NUM_THREADS),2)
-endif
+GATE_RAYON := $(shell n=$$(( $(GATE_SHARE) / 2 )); [ $$n -lt 1 ] && n=1; echo $$n)
+TEST_ENV := RAYON_NUM_THREADS=$(or $(RAYON_NUM_THREADS),$(GATE_RAYON)) RUST_TEST_THREADS=$(or $(RUST_TEST_THREADS),$(GATE_SHARE))
 
 .PHONY: test lint test-ocaml test-rust test-inference test-integration test-docs test-cli-docs test-data-spec test-dates-doc test-install test-slot-queue test-gate-stamp
 
