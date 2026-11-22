@@ -116,7 +116,7 @@ dev-camdlc: build-ocaml
 
 # ── Test ──────────────────────────────────────────────────────────────────────
 
-# Machine-wide queue for the heavy targets (docs/engineering/test-gate.md).
+# Machine-wide queue for the heavy targets (docs/engineering/testing.md, "Sharing a machine").
 # When several checkouts share one machine, unqueued `make test` runs
 # overload it (seven at once drove a 16-core machine to a load of ~145).
 # `test`, `test-rust`, `test-inference` and `test-integration` therefore each
@@ -214,7 +214,7 @@ check-score-wasm:
 # (test-ocaml's dune runtest, check-reactive-golden, test-integration's OCaml→Rust
 # shell suite, test-docs, test-cli-docs). Use it while iterating; it is NOT the
 # authoritative gate. The full `make test` — and CI, which mirrors every phase
-# (see .github/workflows/ + docs/dev/testing.md "Tiered gate") — must pass before
+# (see .github/workflows/ + docs/engineering/testing.md, "How `make test` runs") — must pass before
 # a change lands. Anything test-fast skips is therefore still caught by CI.
 # (cargo-nextest was tried as the runner but its parallel test-list enumeration
 # spawns a burst of process launches that wedges macOS syspolicyd / code-signing,
@@ -251,7 +251,7 @@ diagnostics-invariants:
 # divergence). Skip the version handshake too: it is an end-user safeguard
 # against drifted *installed* binaries; with the fresh camdlc pinned on PATH
 # it would only false-red on a cargo-cached stale camdl binary — which, having
-# unchanged Rust, is schema-compatible by construction. See docs/dev/testing.md.
+# unchanged Rust, is schema-compatible by construction. See docs/engineering/testing.md, layer 5.
 CAMDLC_BIN := $(abspath rust/target/_camdlc_bin)
 # Optional compile cache (sccache): used only when it's on PATH; empty otherwise,
 # which cargo treats as unset — so CI and contributors without it are unaffected.

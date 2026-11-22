@@ -198,5 +198,5 @@ The property suite (`proptest`) verifies A1–A4, B1–B4, C1, D4 over generated
 schedules at two levels — spine-level (pure `Schedule`/`Cursor`) and
 matrix-level (the deterministic `mu=0` model through each filter/backend). C2 is
 pinned by `n_cursors_identical_sequence`; D3 by the capability gates; the gh#216
-firing arms (A1–A3) by `gh216_cursor_firing`. See `docs/dev/testing.md` for the
-suite layout.
+firing arms (A1–A3) by `gh216_cursor_firing`. See `docs/engineering/testing.md`
+for the suite layout.

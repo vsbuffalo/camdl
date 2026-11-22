@@ -1,7 +1,7 @@
 ---
 date: 2026-11-21
 status: implemented
-related: docs/engineering/test-gate.md
+related: docs/engineering/testing.md
 ---
 
 # Sizing each gate's threads from the machine

@@ -28,7 +28,7 @@ if [ -z "${CAMDL_TEST_SLOT_HELD:-}" ]; then
 fi
 
 # Run the whole hook in one slot of the machine-wide test queue, as `make test`
-# does (scripts/test-slot.sh; docs/dev/testing.md, "Tiered gate"): it runs the
+# does (scripts/test-slot.sh; docs/engineering/testing.md, "Sharing a machine"): it runs the
 # full workspace suite. Its own `make test-integration` then shares the slot.
 # CAMDL_TEST_SLOTS=0 runs it unqueued.
 if [ -z "${CAMDL_TEST_SLOT_HELD:-}" ] && [ "${CAMDL_TEST_SLOTS:-3}" != 0 ]; then

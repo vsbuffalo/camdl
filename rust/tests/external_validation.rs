@@ -18,8 +18,8 @@
 //! Regeneration (requires R+renv for any r-pomp cases):
 //!     CAMDL_REGEN_EXTERNAL=1 cargo test --test external_validation -- --nocapture
 //!
-//! See docs/dev/testing.md §L9 and
-//! docs/dev/proposals/2026-04-23-external-validation-harness.md.
+//! See docs/engineering/testing.md, layer 8, and
+//! docs/dev/proposals/archive/pre-alpha/2026-04-23-external-validation-harness.md.
 
 use std::path::PathBuf;
 use std::process::Command;

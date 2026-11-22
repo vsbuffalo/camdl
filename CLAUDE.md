@@ -33,9 +33,9 @@ answer is the worst outcome available; a red test is cheap by comparison.**
 ## The gate
 
 `make build` builds both toolchains; the Makefile is self-describing for the
-rest. The gate is tiered (`docs/dev/testing.md`, "Tiered gate") — run the fast
-tier while iterating; the full `make test` (or CI) is the authoritative gate
-before a change lands. CI mirrors every phase.
+rest. The gate is tiered (`docs/engineering/testing.md`, "How `make test` runs")
+— run the fast tier while iterating; the full `make test` (or CI) is the
+authoritative gate before a change lands. CI mirrors every phase.
 
 ```bash
 make test-fast        # inner loop: whole Rust workspace — NOT authoritative
@@ -48,8 +48,9 @@ cd rust && cargo test --test expr_eval    # one Rust test file
 ```
 
 `test`, `test-rust`, `test-inference` and `test-integration` queue for one of
-three machine-wide slots shared by every session; "waiting for a test slot" is
-the queue, not a hang (`docs/dev/testing.md`, "Tiered gate").
+the `CAMDL_TEST_SLOTS` machine-wide slots shared by every session (3 on the
+shared Mac, set in `~/.zshenv`); "waiting for a test slot" is the queue, not a
+hang (`docs/engineering/testing.md`, "Sharing a machine").
 
 **Never lower the bar to make something pass.** No `--no-verify`, no weakening
 an assertion, no skipping a check, no widening a tolerance to get green. If
@@ -57,10 +58,10 @@ something fails, find the cause.
 
 `cargo-nextest` is **not** used — its parallel launch burst wedges macOS
 syspolicyd/code-signing; `cargo test` runs test binaries one at a time and is
-safe. Within a binary, tests run in parallel on `RUST_TEST_THREADS` threads,
-capped at 4 in `rust/.cargo/config.toml` so parallel agents share the cores.
-`sccache` is optional (`brew install sccache`); the Makefile uses it only when
-on PATH.
+safe. Within a binary, tests run in parallel on `RUST_TEST_THREADS` threads;
+under `make` each run takes its share of the cores (cores divided by slots), and
+a plain `cargo test` is capped at 4 by `rust/.cargo/config.toml`. `sccache` is
+optional (`brew install sccache`); the Makefile uses it only when on PATH.
 
 ## "camdlc version mismatch" is environmental, not your diff
 
@@ -92,9 +93,9 @@ Do **not**, to "fix" a mismatch red:
   (`find_camdlc` priority 2 > 3) and breaks those tests; the harness uses
   PATH-prepend (priority 3) so a test's own shim still wins.
 
-Runbook: `docs/dev/testing.md` ("Gotcha: camdlc version check"). The deeper fix
-— key the guard on IR schema version, not git hash, so no skip is needed — is in
-`docs/dev/proposals/2026-09-10-camdlc-version-guard.md`.
+Runbook: `docs/engineering/testing.md` ("Layer 5: the command-line program").
+The deeper fix — key the guard on IR schema version, not git hash, so no skip is
+needed — is in `docs/dev/proposals/2026-09-10-camdlc-version-guard.md`.
 
 ## Goldens and `ir/VERSION` are a human-loop change, never collateral
 

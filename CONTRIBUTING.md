@@ -55,7 +55,8 @@ make test             # authoritative gate (every phase; mirrors CI) — green b
 
 The gate is tiered: `make test-fast` while iterating, full `make test` (or CI)
 before a change lands. CI mirrors every phase, so what the fast tier skips is
-still caught before merge — see `docs/dev/testing.md` "Tiered gate".
+still caught before merge — see `docs/engineering/testing.md`, "How `make test`
+runs".
 
 If you change the IR schema, follow the atomic-update procedure in `CLAUDE.md`
 ("Changing the IR schema") — schema + both language implementations + golden

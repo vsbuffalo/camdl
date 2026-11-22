@@ -5,7 +5,7 @@
 # and agents on one machine queue instead of all running the full suite at
 # once (seven concurrent `make test` runs reached a load of ~145 on a 16-core
 # machine). The Makefile wraps `test`, `test-rust`, `test-inference` and
-# `test-integration` in it; see docs/dev/testing.md, "Tiered gate".
+# `test-integration` in it; see docs/engineering/testing.md, "Sharing a machine".
 #
 # Slots are the files slot.0 .. slot.(N-1) in one shared directory:
 #   $CAMDL_TEST_SLOT_DIR if set; else /tmp/claude-<uid>/camdl-test-slots when
