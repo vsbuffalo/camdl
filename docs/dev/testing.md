@@ -368,12 +368,19 @@ pre-push hook (which now diff `tests/fixtures/reactive/ir` and
 cross-language integration → `ci.yml`; doc / CLI-doc gates → Doctest / CLI-docs
 workflows. Nothing the fast tier skips is un-gated.
 
-**The heavy targets queue for a machine-wide slot.** Many sessions and agents
-share one machine, and seven concurrent `make test` runs once drove a 16-core
-machine to a load of about 145. So `make test`, `make test-rust`,
-`make test-inference`, `make test-integration` and the pre-push hook each run
-inside one of `CAMDL_TEST_SLOTS` slots (default 3), held by
-`scripts/test-slot.sh`. When all are taken the run prints
+How the gate's pieces fit together, with measurements of where its time goes, is
+[the test gate](../engineering/test-gate.md) engineering page. This section is
+the reference for each piece.
+
+**The heavy targets queue for a machine-wide slot.** When several checkouts
+share one machine, unqueued gates overload it: seven concurrent `make test` runs
+once drove a 16-core machine to a load of about 145. So `make test`,
+`make test-rust`, `make test-inference`, `make test-integration` and the
+pre-push hook each run inside one of `CAMDL_TEST_SLOTS` slots, held by
+`scripts/test-slot.sh`. The default is one slot. A machine where several gates
+should run at once sets the number in the environment of every shell that runs a
+gate, including non-interactive ones (in zsh, `~/.zshenv`):
+`export CAMDL_TEST_SLOTS=3`. When all slots are taken the run prints
 `waiting for a test slot (3 in use; …)` once and polls until one frees.
 `make test-fast` and targeted `cargo test` runs are not queued.
 
@@ -391,14 +398,18 @@ inside one of `CAMDL_TEST_SLOTS` slots (default 3), held by
   `${TMPDIR:-/tmp}/camdl-test-slots/`; `CAMDL_TEST_SLOT_DIR` overrides it.
 - **`CAMDL_TEST_SLOTS=0` turns the queue off.** CI sets it in `ci.yml`,
   `inference.yml` and `release.yml`, where one job has the runner to itself.
-- **While the queue is on, each run also uses fewer threads.** cargo builds with
-  at most 6 jobs (`CARGO_BUILD_JOBS`), and the test recipes set
-  `RAYON_NUM_THREADS=2`, so a test binary, and each `camdl` it spawns, uses two
-  Rayon threads rather than one per core; `rust/.cargo/config.toml` already caps
-  each test binary at 4 test threads. An explicit value in the environment wins
-  for all three. The Rayon limit is set in the Makefile rather than in
+- **Each gate uses its share of the machine**: the cores divided by the slots,
+  or all of them with the queue off. cargo builds with that many jobs
+  (`CARGO_BUILD_JOBS`), each test binary runs that many test threads
+  (`RUST_TEST_THREADS`), and each test binary, and each `camdl` it spawns, uses
+  half that many Rayon threads (`RAYON_NUM_THREADS`), because a binary running
+  several tests at once starts a Rayon pool per test. On a 16-core machine with
+  three slots that is 5, 5 and 2; on an 8-vCPU cloud machine with one slot, 8, 8
+  and 4. An explicit value in the environment wins for all three.
+  `rust/.cargo/config.toml` caps plain `cargo test` runs, outside `make`, at 4
+  test threads. The Rayon setting is in the Makefile rather than in
   `rust/.cargo/config.toml` because cargo applies that file's `[env]` to
-  `cargo run` and `cargo bench` too, which would time parallel code on two
+  `cargo run` and `cargo bench` too, which would time parallel code on fewer
   threads without saying so.
 
 `make test-slot-queue` (part of `make test`, and of CI's `test` job on Linux)
@@ -441,10 +452,15 @@ one worktree covers the same content pushed from another.
 `scripts/gate-stamp.sh` writes a record only when the checkout had no
 uncommitted change and no untracked file under `rust/`, `ocaml/`, `tests/`,
 `ir/`, `scripts/`, `docs/` or `.githooks/` when the run started, and was in the
-same state when it ended. Records are removed after 14 days.
-`make test-gate-stamp` tests these rules. A record does not cover state outside
-the repository, such as the installed opam packages; CI runs the full gate on
-every push and pull request that changes code, whether or not a record exists.
+same state when it ended. Records are removed after 14 days. A passed
+`camdl-cloud test --rev <commit>` run of the whole gate counts as a record for
+that commit's tree: the hook asks `camdl-cloud runs --json` for runs with target
+`test` and outcome `passed`, and accepts a pushed commit with the same tree as
+one of them. Without `camdl-cloud` on `PATH`, or with `CAMDL_GATE_CLOUD=0`, only
+local records count. `make test-gate-stamp` tests these rules. A record does not
+cover state outside the repository, such as the installed opam packages; CI runs
+the full gate on every push and pull request that changes code, whether or not a
+record exists.
 
 (The book used to be built here via `mdbook`; it now lives in `../camdl-book`
 with its own CI. Remove any stale `.githooks/pre-push` entry that still invokes
