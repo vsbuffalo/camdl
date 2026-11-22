@@ -477,7 +477,7 @@ impl Rendering for DesignTable {
         }
         rows.sort_by_key(|(point, _)| point.row);
         for (point, stored) in rows {
-            let loglik = Loglik::from_bytes(&read_stored(stored, LOGLIK_FILE).map_err(parse)?).map_err(parse)?;
+            let loglik = Loglik::from_bytes(&crate::camdl_store::read_stored(stored, LOGLIK_FILE).map_err(parse)?).map_err(parse)?;
             let mut row = point.point_id.to_string();
             for (_, v) in &point.values {
                 row.push_str(&format!("\t{v}"));
@@ -499,14 +499,6 @@ pub(crate) fn one_line(message: &str) -> String {
         .chars()
         .map(|c| if matches!(c, '\t' | '\n' | '\r') { ' ' } else { c })
         .collect()
-}
-
-/// The read of a stored file into memory.
-pub(crate) fn read_stored<A: Artifact>(stored: &store::Stored<A>, name: &str) -> Result<Vec<u8>, String> {
-    let mut bytes = Vec::new();
-    std::io::Read::read_to_end(&mut stored.open(name).map_err(|e| e.to_string())?, &mut bytes)
-        .map_err(|e| format!("reading {name}: {e}"))?;
-    Ok(bytes)
 }
 
 #[cfg(test)]

@@ -1481,7 +1481,7 @@ fn report_design(
         match result {
             PointResult::Failed(e) => not_completed.push((*point_id, e.message)),
             PointResult::Stored { stored, .. } => {
-                let loglik = read_stored(&stored, LOGLIK_FILE)
+                let loglik = crate::camdl_store::read_stored(&stored, LOGLIK_FILE)
                     .and_then(|b| Loglik::from_bytes(&b))
                     .unwrap_or_else(|e| out.fail(format!("error: {e}")));
                 if loglik.every_replicate_failed() {
@@ -1561,7 +1561,7 @@ fn report_single(
         out.say(format_args!("pfilter: @{label} now names invocation {}, which held it from invocation {before}",
             invocation.seq()));
     }
-    let loglik = read_stored(&stored, LOGLIK_FILE)
+    let loglik = crate::camdl_store::read_stored(&stored, LOGLIK_FILE)
         .and_then(|b| Loglik::from_bytes(&b))
         .unwrap_or_else(|e| out.fail(format!("error: {e}")));
     let n_particles = loglik.n_particles;
@@ -1781,7 +1781,7 @@ fn by_product_bytes(store: &store::Store, invocation: &store::Invocation, kind: 
                     .ok_or_else(|| format!("the invocation lists no {kind}"))?;
                 let stored = store.get(&id).map_err(|e| e.to_string())?
                     .ok_or_else(|| format!("the {kind} {} is not stored", id.key().short12()))?;
-                return read_stored(&stored, file);
+                return crate::camdl_store::read_stored(&stored, file);
             })*
         };
     }

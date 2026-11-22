@@ -4324,14 +4324,15 @@ keeps both and moves them into the types.
 #[identity(tag = "fit_problem", version = 1)]
 pub struct FitProblemIdentity {
     pub model: Dep<CompiledModel>,                          // the ordinary compile
-    pub training: BTreeMap<String, Hashed<TrainingRows>>,   // the training rows only, per stream
-    pub partition: PartitionRule,                           // holdout_after, and the rule's version
-    pub tables: BTreeMap<String, Hashed<Table>>,            // external tables
+    pub training: Vec<(String, InputFile)>,                 // each data file's training lines, by source
+    pub held_out: BTreeMap<String, Hashed<HeldOutDates>>,   // each stream's held-out rows, dates only
+    pub partition: Partition,                               // holdout_after resolved, and the rule's version
+    pub tables: BTreeMap<String, InputFile>,                // external tables
     pub estimate: Estimate,                                 // what is estimated, bounds, priors, transforms
     pub fixed: ResolvedFixed,                               // a sweep point's values land here
     pub simplex_groups: Vec<SimplexGroup>,
     pub settings: FitSettings,                              // dt and the two allow flags, defaults filled in
-    pub scenario: ResolvedScenario,
+    pub scenario: ScenarioRequest,                          // scenario, enable and disable, as given
     pub ic_free: bool,
 }
 
@@ -4358,12 +4359,10 @@ pub struct FitRunIdentity {
 }
 ```
 
-- **Held-out rows are not in the problem.** With `holdout_after` they sit in the
-  training file, so the problem hashes the training rows, not the file. The
-  per-stream digest of the training rows exists today: `RowPrefix`
-  (`fit/training_partition.rs:135`) carries it, computed by `row_digest`
-  (`training_partition.rs:59`). It is recorded and not yet in any identity.
-  Held-out tables enter only a score.
+- **Held-out values are not in the problem.** With `holdout_after` the held-out
+  rows sit in the training file, so the problem hashes the file's training
+  lines, not the whole file, and the held-out rows' dates without their values
+  ("Reading a stored problem"). Held-out tables enter only a score.
 - **This re-keys every fit with a holdout.** Today the fit's identity covers the
   whole training file and the held-out tables. Removing them is deliberate.
 - **Method settings that sit in `[estimate]` belong to the run.** `rw_sd`,
@@ -4643,7 +4642,7 @@ is `{ pub allow_nonconverged_source: bool, pub parallel: usize }`. It derives
 `(Option<String>,)`, its `store` key. A rerun of the same command computes only
 the problems and runs that are not stored.
 
-`write_problem` writes the training rows, the tables and the resolved settings
+`write_problem` writes the training lines, the tables and the resolved settings
 as result files, and the model source as a required provenance file. A problem
 holds no `fit.toml`, because that file also carries the method, which differs
 between runs.
@@ -4692,8 +4691,10 @@ camdl-store/
     fit/
       seir-2696ab0a41c7/                      # FitProblem: written once
         identity.json  run.json
-        problem.toml  inputs/cases.tsv        # training rows only
-        model.camdl.original                  # provenance file, required
+        problem.toml  partition.json          # the problem; which rows trained
+        inputs/cases.tsv                      # training lines only
+        held_out/cases.tsv                    # held-out rows' dates, no values
+        model.camdl                           # provenance file, required
         runs/
           if2-8d4e11a0c27b/                   # group: the method's settings
             seed_1-7b21e4c09a3d/              # FitRun, completed and sealed
@@ -4736,50 +4737,79 @@ need the run's method as well. A stored fit therefore holds two files that parse
 back into those types, and one function reads them.
 
 **`problem.toml`**, a result file of the `FitProblem`, is the resolved problem
-half in `fit.toml` syntax. It is written by `write_problem` and parses with
-`FitConfig`'s own parser. Every field of `config_v2::Problem`
-(`fit/config_v2.rs:78-171`) is assigned:
+half in `fit.toml` syntax. `write_problem` writes it from the problem's identity
+alone, so it is a function of that identity, and refuses it unless `FitConfig`'s
+own parser reads it back with `[estimate]` in order. Every field of
+`config_v2::Problem` (`fit/config_v2.rs:78-171`) is assigned:
 
-| Field of `Problem`               | In `problem.toml`                                                                                                                          |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `model`                          | `camdl = "model.camdl.original"`, the stored source; readers that run the model load the `Dep<CompiledModel>` from the identity record     |
-| `data.file`, `data.observations` | `observations.<stream> = "inputs/<stream>.tsv"`, one per stream, never a wide `file`                                                       |
-| `data.holdout_after`             | Absent. The resolved partition is the `[partition]` table: the cutoff in model time and, per stream, the training row count and its digest |
-| `data.holdout`                   | Absent; held-out tables enter only a score                                                                                                 |
-| `data.tables`                    | `tables.<name> = "inputs/tables/<name>.<ext>"`, the bytes as read                                                                          |
-| `synthetic`                      | Absent: the generated rows are the problem's `inputs/<stream>.tsv`. The generator's settings are a provenance value                        |
-| `estimate`                       | Bounds and prior per parameter; `rw_sd`, `perturb_only_at_t0` and `start` are the run's, in `method.toml`                                  |
-| `fixed`                          | `values`, every fixed parameter resolved; `from_file` and `from_scenario` are expanded, so neither appears                                 |
-| `simplex_groups`, `ic_free`      | As resolved                                                                                                                                |
-| `config`                         | `dt`, `allow_degenerate_rates` and `allow_forcing_extrapolation`, defaults filled in and the flag applied                                  |
-| `simulate`                       | `from`, resolved to model time                                                                                                             |
-| `scenario`, `enable`, `disable`  | As given, since each reader resolves them against its own compile; the resolved set is in the identity                                     |
-| `output_dir`, `provenance`       | Absent; the first is an old-store input and the second a provenance value                                                                  |
-| `compiled_ir`                    | Never serialised                                                                                                                           |
+| Field of `Problem`               | In `problem.toml`                                                                                                                                                       |
+| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`                          | `camdl = "model.camdl"`, the source as a provenance file, named so the compile step reads it by its extension; readers that run the model load the `Dep<CompiledModel>` |
+| `data.file`, `data.observations` | `observations.<source> = "inputs/<source>.<ext>"`, one per bound source in binding order, never a wide `file`                                                           |
+| `data.holdout_after`             | Absent: the stored files hold only training lines. Which rows trained is the result file `partition.json`, the partition record of today's `fit.meta.json`              |
+| `data.holdout`                   | Absent; held-out outcomes enter only a score                                                                                                                            |
+| `data.tables`                    | `tables.<name> = "inputs/tables/<name>.<ext>"`, the bytes as read                                                                                                       |
+| `synthetic`                      | Absent: generated datasets are resolved as data once written                                                                                                            |
+| `estimate`                       | Bounds and prior per parameter, in the file's order; `rw_sd`, `perturb_only_at_t0` and `start` are the run's, in `method.toml`                                          |
+| `fixed`                          | Every fixed value resolved; `from_file` and `from_scenario` are expanded, so neither appears                                                                            |
+| `simplex_groups`, `ic_free`      | As resolved                                                                                                                                                             |
+| `config`                         | `dt`, `allow_degenerate_rates` and `allow_forcing_extrapolation`, the step resolved by the one dt rule                                                                  |
+| `simulate`                       | `from`, the stored compile's start in model time                                                                                                                        |
+| `scenario`, `enable`, `disable`  | As given, and in the identity as given: a named scenario also sets parameter values, which each reader applies to its own compile                                       |
+| `output_dir`, `provenance`       | Absent; the first is an old-store input and the second a provenance value                                                                                               |
+| `compiled_ir`                    | Never serialised                                                                                                                                                        |
 
-`inputs/<stream>.tsv` holds the stream's training rows in file order, with the
-header, the time cells and that stream's columns, copied cell for cell from the
-source. From a wide table the stream's columns are projected out, so the stored
-file holds no other stream's values and no held-out row. The reader's test binds
-every fixture both ways, from the original `fit.toml` and from the rebuilt
-problem, and requires identical `ObservedRow`s and partition.
+`partition.json` is a separate file because `fit.toml`'s parser refuses an
+unknown key.
+
+`inputs/<source>.<ext>` is the source's data file with only the lines that hold
+a training row of one of its streams, and the lines that give no stream a row,
+every column kept; when every stream trains on all its rows it is the source's
+bytes. A wide file bound to several sources is stored once per source. Which
+stream a line gives a row to is read by the loader itself, binding each data
+line alone, so a long-form file sorted by stratum keeps each stratum's own
+training lines. The result is checked when the problem is resolved: binding the
+stored bytes must give each stream exactly its training rows, by count and row
+digest, or the problem is refused. That refusal is reached only when streams of
+one source train on different numbers of its lines. The identity keys the stored
+bytes, so a change to any column within the training lines re-keys the problem.
+The tests bind a wide table and a long-form table sorted by stratum both ways,
+from the original `fit.toml` cut by the partition and from the rebuilt problem,
+and require identical `ObservedRow`s.
+
+**`held_out/<stream>.tsv`** holds each held-out row of each stream without its
+value: the file it is in (`training`, past the cutoff, or `holdout`), its
+position in that file, its label, and the instant or period it measures. These
+are in `FitProblemIdentity`, so a fit whose held-out dates differ is another
+problem; when observations were made is study design. A forecast from a stored
+fit names its targets from them.
 
 **`method.toml`**, a result file of the `FitRun`, is the run's `[method]` table
 after `Method::merge` applies the flags, followed by an `[estimate.<parameter>]`
 table per parameter that sets `rw_sd`, `perturb_only_at_t0` or `start`. Together
 with `problem.toml` it parses to the `FitConfig` the run computed. It is not
-`fit.toml`, the provenance file that records what the run was given.
+`fit.toml`, the provenance file that records what the run was given. A sourced
+`starts` is written as the caller's method holds it, so the caller names its
+source as the run stores it.
 
 ```rust
-/// What a fit handle names: a problem, or one run and its problem.
+/// What a fit handle names: a problem, or one run and its problem, with every
+/// input read through the store.
 pub struct StoredFit {
     pub problem: Stored<FitProblem>,
     pub run: Option<Stored<FitRun>>,
-    /// problem.toml, with method.toml when `run` is Some, parsed; every relative
-    /// path is anchored at the stored folder.
-    pub config: FitConfig,
-    /// The training cutoff and per-stream row counts, from [partition].
-    pub partition: TrainingPartition,
+    pub model: Dep<CompiledModel>,                  // a reader runs this, never model.camdl
+    pub config: FitConfig,                          // problem.toml (+ method.toml); [data] names stored files
+    pub training: Vec<(String, StoredInput)>,       // each source's training file, checked bytes
+    pub tables: BTreeMap<String, StoredInput>,
+    pub held_out: BTreeMap<String, Vec<u8>>,        // held_out/<stream>.tsv
+    pub partition: TrainingPartitionRecord,         // partition.json
+}
+
+impl StoredFit {
+    /// The problem with each input's checked bytes written to `dir`, for the
+    /// data loader, which reads a file by its path.
+    pub fn bind_in(&self, dir: &Path) -> Result<Problem>;
 }
 
 /// Reads the fit `handle` names: `@label`, an id prefix or a result folder.
@@ -4787,6 +4817,11 @@ pub struct StoredFit {
 /// problem alone. A handle naming several runs is refused with them listed.
 pub fn read_fit(store: &Store, handle: &Handle) -> Result<StoredFit>;
 ```
+
+`read_fit` hands its readers no path into the problem's folder. The one reader
+that needs a path is the data loader, `observed_rows`, which every command that
+binds data goes through; it takes the copies `bind_in` writes to a scratch
+directory.
 
 A `fit.toml` path is not a handle. A reader that needs only the problem resolves
 the file in process, through `resolve`, and stores nothing; a reader that needs
@@ -4809,8 +4844,10 @@ Three readers change behaviour as well as source. A reader that applied
 `holdout_after` itself (`pfilter --save-final-state`, `pfilter.rs:700`;
 `profile`, `profile.rs:563-566`) takes `StoredFit::partition` instead, since the
 stored rows are already the training rows. `profile`'s held-out files are gone
-with `data.holdout`. A forecast's held-out rows are not in the problem; where
-they come from is decided before step 5b ("Order").
+with `data.holdout`. A forecast from a stored fit reads its targets from
+`held_out/`, and from step 5b until scores arrive in step 7 it computes no
+held-out score and refuses `--realised-design`, whose design values are held-out
+values; the refusal names step 7's scores.
 
 ## Features that build on the store
 
@@ -5378,8 +5415,9 @@ are deleted with `runid` in the last step, and the new root does not move again.
       a stored fit, through `read_fit` ("Reading a stored problem"); and
       `fit predict`, under its old name, reading the run and writing its
       predictions inside it at `predict/`. `cas.rs` and the old fit folder's
-      readers are deleted. Where a forecast's held-out rows come from is decided
-      before this part starts.
+      readers are deleted. A forecast reads its targets from the problem's
+      held-out dates, computes no held-out score and refuses `--realised-design`
+      until step 7.
    3. **5c: the command.** `camdl predict @fit` replaces `fit predict`, which is
       deleted; the tests and documentation change their command lines.
 6. `profile`. Its identity changes the most.
@@ -5609,8 +5647,12 @@ Settled:
 - the library offers the choice of grouping results by build at the top level
   with no default, recorded in `store.json`; camdl groups by build.
 
-One decision is open: where a forecast's held-out rows come from, since the
-problem holds only training rows. It is settled before step 5b.
+- a fit problem keeps a values-free list of its held-out rows' dates per stream,
+  in its identity; a forecast from a stored fit reads its targets from it, and
+  until step 7's scores a forecast computes no held-out score and refuses
+  `--realised-design`.
+
+No decision is open.
 
 ## Future features
 

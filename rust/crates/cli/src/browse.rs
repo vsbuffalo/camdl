@@ -62,7 +62,7 @@ struct PfilterRow {
 
 impl PfilterRow {
     fn loglik(&self) -> Option<crate::pfilter_store::Loglik> {
-        crate::pfilter_store::read_stored(&self.stored, crate::pfilter_store::LOGLIK_FILE)
+        crate::camdl_store::read_stored(&self.stored, crate::pfilter_store::LOGLIK_FILE)
             .and_then(|b| crate::pfilter_store::Loglik::from_bytes(&b))
             .ok()
     }
@@ -918,7 +918,7 @@ pub fn cmd_cat(a: &crate::args::CatArgs) {
                 sel.flag(), a.target));
         }
         let name = a.stream.as_deref().unwrap_or(crate::pfilter_store::LOGLIK_FILE);
-        let bytes = crate::pfilter_store::read_stored(&row.stored, name).unwrap_or_else(|e| {
+        let bytes = crate::camdl_store::read_stored(&row.stored, name).unwrap_or_else(|e| {
             out.fail(format!("error: {e}\n  the filter run's files: {}", row.stored.result_files().join(", ")));
         });
         let _ = out.data().write_all(&bytes);

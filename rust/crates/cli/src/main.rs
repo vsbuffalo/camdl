@@ -39,6 +39,10 @@ mod dt_rule;      // the one integration-step rule: the model's declared dt, els
 mod pfilter;        // used internally by fit runner for data loading
 mod prequential_out; // the one prequential.tsv/.json writer (gh#650)
 mod pfilter_store;  // camdl pfilter on the run store: its identity, result and by-products
+// A fit on the run store: the problem, its runs and their predictions. No
+// command stores a fit here yet, so only its tests use it.
+#[allow(dead_code)]
+mod fit_store;
 mod camdl_store;    // camdl on the run store: ambient identity, kinds, root, content artifacts
 mod input_fixtures; // the second values and fixtures of the input-class checks
 mod pfilter_config; // ResolvedPfilterConfig: pfilter's one resolved configuration; identity and filter derive from it

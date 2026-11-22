@@ -1433,15 +1433,11 @@ impl Method {
         //
         // `starts` is hashed by [`ChainStarts::identity_value`]: a sourced
         // rule by its kind, its source through `deps` (gh#896).
-        let mut payload = match self.algorithm {
-            Algorithm::PGAS { .. } => self.payload_minus(&["sweeps", "n_trajectories"]),
-            Algorithm::PMMH { .. } | Algorithm::Mh { .. } => self.payload_minus(&["iterations"]),
-            Algorithm::IF2 { .. }
-            | Algorithm::PFilter { .. }
-            | Algorithm::NlSbplx(_)
-            | Algorithm::NlBobyqa(_)
-            | Algorithm::NlLbfgs(_) => self.payload_minus(&[]),
-        };
+        let mut exclude: Vec<&str> = self.algorithm.extension_key().into_iter().collect();
+        if matches!(self.algorithm, Algorithm::PGAS { .. }) {
+            exclude.push("n_trajectories");
+        }
+        let mut payload = self.payload_minus(&exclude);
         if let (Some(starts), Some(obj)) = (&self.starts, payload.as_object_mut()) {
             obj.insert("starts".to_string(), starts.identity_value());
         }
@@ -1648,6 +1644,22 @@ impl Algorithm {
             | Algorithm::PFilter { .. }
             | Algorithm::NlSbplx(_)
             | Algorithm::NlBobyqa(_) => false,
+        }
+    }
+
+    /// The `[method]` key that holds the method's length, for a method a
+    /// resume can extend: PGAS `sweeps`, PMMH and MH `iterations`. A resumed
+    /// run shares every other key with its base, so the length is left out of
+    /// the method's identity and keyed on its own.
+    pub(crate) fn extension_key(&self) -> Option<&'static str> {
+        match self {
+            Algorithm::PGAS { .. } => Some("sweeps"),
+            Algorithm::PMMH { .. } | Algorithm::Mh { .. } => Some("iterations"),
+            Algorithm::IF2 { .. }
+            | Algorithm::PFilter { .. }
+            | Algorithm::NlSbplx(_)
+            | Algorithm::NlBobyqa(_)
+            | Algorithm::NlLbfgs(_) => None,
         }
     }
 

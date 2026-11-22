@@ -125,6 +125,15 @@ pub(crate) fn open_existing(root: &Path) -> Option<Store> {
     open(&StoreRequest::new(None, false, Some(root.to_path_buf()))).ok()
 }
 
+/// A stored result file's bytes, read through the store, which checks them
+/// against the file's digest.
+pub(crate) fn read_stored<A: Artifact>(stored: &store::Stored<A>, name: &str) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut stored.open(name).map_err(|e| e.to_string())?, &mut bytes)
+        .map_err(|e| format!("reading {name}: {e}"))?;
+    Ok(bytes)
+}
+
 // ── Layout ───────────────────────────────────────────────────────────────────
 
 /// camdl's shared grouping under a kind's directory: the model, then the
