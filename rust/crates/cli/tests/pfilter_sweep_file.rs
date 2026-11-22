@@ -600,10 +600,14 @@ fn an_errored_run_stores_no_by_product() {
         assert!(err.contains("EssCollapsed"), "{err}");
         assert!(!dir.path().join("trace.tsv").exists(), "no trace is exported:\n{err}");
         assert!(err.contains("no by-product asked for was stored or exported"), "the failed trace is named:\n{err}");
+        // The run's own report, `stored <folder>` or `cached <folder>`; the
+        // compile's `cached IR for <model>` line is not one.
+        let report = |l: &str, v: &str| l.trim_start().strip_prefix(v).filter(|rest| !rest.starts_with("IR for "))
+            .map(str::to_string);
         let other = if verb == "stored " { "cached " } else { "stored " };
-        assert!(!err.lines().any(|l| l.trim_start().starts_with(other)), "{verb}call:\n{err}");
+        assert!(!err.lines().any(|l| report(l, other).is_some()), "{verb}call:\n{err}");
         folders.push(err.lines()
-            .find_map(|l| l.trim_start().strip_prefix(verb))
+            .find_map(|l| report(l, verb))
             .unwrap_or_else(|| panic!("the run is reported {verb}:\n{err}"))
             .trim().to_string());
     }

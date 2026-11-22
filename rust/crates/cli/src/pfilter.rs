@@ -321,9 +321,16 @@ fn run_pfilter(
         scenario: scenario_name, enable: mut adhoc_enable, disable: mut adhoc_disable,
     } = scenario_flags;
 
-    // Load model (supports .camdl via camdlc)
-    let (mut model_in, model_json) = crate::util::load_model(&ir_path, compile)
+    // A `.camdl` is compiled through the IR cache under the command's compile
+    // settings, to the full IR (`--no-ir-cache` compiles every time); an
+    // `.ir.json` is read as given.
+    let (resolved_ir, ir_tmp) = crate::util::resolve_ir_path(&ir_path, true, None, compile)
         .unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
+    let loaded = crate::util::load_ir(&resolved_ir);
+    if let Some(tmp) = &ir_tmp {
+        let _ = std::fs::remove_file(tmp);
+    }
+    let (mut model_in, model_json) = loaded.unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
     if let Some(base) = &scored_fit_base {
         let (enable, disable) = base.lists(&model_in).unwrap_or_else(|e| {
             out.fail(format!("error: --fit: {e}"));
