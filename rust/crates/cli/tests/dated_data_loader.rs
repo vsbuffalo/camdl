@@ -326,8 +326,23 @@ fn dates_flag_adds_calendar_column() {
     a2.extend(["--dates", "--obs-only", dated.to_str().unwrap()]);
     assert!(run(&camdl, &a2).status.success());
 
-    let plain_txt = std::fs::read_to_string(&plain).unwrap();
-    let dated_txt = std::fs::read_to_string(&dated).unwrap();
+    // Each `--obs-only` table opens with the cell's coordinate columns
+    // (`replicate`, `scenario`, `seed`); the observation columns follow.
+    const COORDS: &str = "replicate\tscenario\tseed\t";
+    let strip = |txt: String| -> String {
+        let mut out = String::new();
+        for (i, l) in txt.lines().enumerate() {
+            let fields: Vec<&str> = l.split('\t').collect();
+            if i == 0 {
+                assert!(l.starts_with(COORDS), "coordinate columns lead the header: {l}");
+            }
+            out.push_str(&fields[3..].join("\t"));
+            out.push('\n');
+        }
+        out
+    };
+    let plain_txt = strip(std::fs::read_to_string(&plain).unwrap());
+    let dated_txt = strip(std::fs::read_to_string(&dated).unwrap());
 
     // Header gains a `date` column.
     let dated_hdr = dated_txt.lines().next().unwrap();

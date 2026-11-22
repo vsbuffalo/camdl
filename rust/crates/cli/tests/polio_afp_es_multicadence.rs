@@ -81,12 +81,15 @@ fn read_times(path: &Path, level: &str) -> Vec<f64> {
         .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     let mut lines = txt.lines().filter(|l| !l.trim().is_empty());
     let header: Vec<&str> = lines.next().expect("header").split('\t').collect();
-    assert_eq!(header[1], "patch",
+    // The coordinate columns of a one-cell `simulate` table lead, then the
+    // stream's own columns.
+    assert_eq!(&header[..3], ["replicate", "scenario", "seed"], "{header:?}");
+    assert_eq!(header[4], "patch",
         "the family's file carries its `: dim` column: {header:?}");
     lines
         .filter_map(|l| {
             let f: Vec<&str> = l.split('\t').collect();
-            (f[1] == level).then(|| f[0].parse::<f64>()
+            (f[4] == level).then(|| f[3].parse::<f64>()
                 .unwrap_or_else(|_| panic!("time parse in {}: {l:?}", path.display())))
         })
         .collect()
@@ -103,7 +106,7 @@ fn generate_data(bin: &Path, ir: &Path, dir: &Path) -> (PathBuf, PathBuf) {
             "--params", &params().to_string_lossy(),
             "--backend", "chain_binomial", "--dt", "1", "--seed", "1",
             "--obs-only-dir", &obs_dir.to_string_lossy(),
-            "--output-dir", &dir.join("results").to_string_lossy(),
+            "--store", &dir.join("results").to_string_lossy(),
         ])
         .output()
         .expect("spawn simulate");

@@ -48,6 +48,16 @@ keeps an input that belongs to it from being left out.
 
 ## The store
 
+camdl has two stores. `camdl simulate` and `camdl pfilter` store their results
+in the run store, written by the `store` crate (`rust/crates/store`) under
+`./camdl-store` or the root `--store` or `CAMDL_STORE` names; its design is
+`docs/dev/proposals/2026-11-20-run-store-api.md`, and
+[Simulate on the run store](#simulate-on-the-run-store) below describes how a
+simulation's inputs reach its identity there. Fits and profiles store theirs
+under `results/`, written by the `runid` crate. The sections from here to that
+one describe the `results/` store; what they say about input addressing holds
+for both.
+
 The store is **input-addressed**: a run's address is a hash of the inputs that
 determine it, computed before the run, not a hash of the bytes the run produces.
 This is the model of the Nix package store, which Dolstra calls the
@@ -88,10 +98,9 @@ how the inputs were spelled, so that two spellings of one computation miss each
 other, or one spelling of two computations (an edited table under an unchanged
 path) collides.
 
-The inputs are not hashed as one blob. For a simulation they are split into five
-levels, each a disjoint slice: the model, the configuration, the parameters, the
-scenario and the seed
-([`resolve_trajectory`](rust:cli::resolve::resolve_trajectory) hashes them).
+The inputs are not hashed as one blob. For a fit they are split into three
+levels, each a disjoint slice: the fit problem, the method and the seed
+([`resolve_fit_method`](rust:cli::fit::cas::resolve_fit_method) hashes them).
 Each level is hashed on its own, and the leaf's address is
 [`run_id`](rust:runid::kind::run_id) over the artifact kind and the level hashes
 in order:
@@ -107,14 +116,13 @@ shorter sequence whose bytes happen to concatenate to a longer one.
 
 The path on disk factors the same tuple:
 [`store_path`](rust:runid::layout::store_path) writes one directory per level,
-named `{label}-{hash8}`, under the kind's partition (`sims/`, `fits/`, …). The
+named `{label}-{hash8}`, under the kind's partition (`fits/`, `profiles/`). The
 label is provenance, the eight hex characters are the first four bytes of the
 level's hash, and the full hashes are in `run.json`. Grouping falls out of the
-tree without any index: the seeds of one ensemble are sibling directories under
-one scenario directory, and a `--no-flows` variant of a run is a sibling
-directory at the configuration level. A lookup finds a leaf by its hashes alone
-([`find_leaf`](rust:runid::store::find_leaf)), so a renamed model file, whose
-label changes, still finds the result its hashes name.
+tree without any index: the seeds of one method are sibling directories under
+one method directory. A lookup finds a leaf by its hashes alone
+([`find_leaf`](rust:runid::store::find_leaf)), so a renamed file, whose label
+changes, still finds the result its hashes name.
 
 A leaf found at the expected path is reused only after
 [`FsCasStore::lookup`](rust:runid::store::FsCasStore::lookup) checks it: the
@@ -123,34 +131,6 @@ recorded `run_id` must equal the expected one (a different one is a short-hash
 never by overwriting), the record's hash and format versions must be current,
 its status `completed`, and its files exactly the ones the record lists. The
 reuse decision itself is [`check_reuse`](rust:cli::resolve::check_reuse).
-
-A multi-cell `simulate` asks before it computes, and skips the cells the store
-holds. A single-cell `simulate` computes its cell anyway, and its commit
-compares each file it staged with the stored one under the same `run_id`: equal
-digests keep the stored leaf, and unequal ones are refused as
-[`DivergentRecompute`](rust:runid::store::CasError), with the staged bytes kept
-in `.quarantine/`. Since runs are seeded and deterministic, that error means an
-input that changes the output is missing from the identity, or the run is not
-deterministic.
-
-What a leaf's run id holds is the same whichever invocation wrote it. An
-artifact that only some invocations ask for is therefore never one of the leaf's
-own files, which the manifest lists, but a _child_: a directory under the leaf,
-declared in `run.json`'s `children` (recorded, never hashed) and passed over by
-the manifest and the exact-set check. A sim leaf has two. The synthetic
-observations (`--obs` and its siblings) are at `obs/<hash8>-<obs_seed>/`,
-addressed by the observation blocks, the `--emit-every` cadence and the file
-format, which the trajectory's run id does not cover. The lineage event log
-(`--event-log`) is at the fixed address `event_log/`, because everything it
-depends on is in the run id: the recorder draws no randomness and reads only the
-model, the parameters, the seed and the backend's settings, and the recorder and
-its file format belong to the engine, whose fingerprint the `model` level folds
-in. A child is written after the leaf commits, declared before it is written (so
-a crash leaves a declared child with nothing in it, never an undeclared
-directory that would make the leaf stale); the event log, once complete, is
-never overwritten with other bytes. The
-[`child`](rust:cli::input_class::InputClass) class names the inputs that ask for
-one.
 
 ## The hash function
 
@@ -215,9 +195,10 @@ The seed level shows the one exclusion on the simulation path:
 cell's position: `--seed 5 --replicates 3` runs three cells with three process
 seeds, all from base seed 5. Hashing the base seed would put those three cells,
 which hold three different trajectories, under one `run_id`. `base_seed` is
-therefore provenance. On the simulation path the seed directory's label is built
-from the process seed too, so a lone `--seed 5` lives in `seed_5-…` and a mixed
-cell in a directory such as `seed_5871781006564002452-…`.
+therefore provenance. The run store's cell identity makes the same choice: it
+holds the process seed, and the cell's folder is labelled by the seed typed, so
+the three cells of `--seed 5 --replicates 3` are `seed_5-…`, `seed_5-r1-…` and
+`seed_5-r2-…`.
 
 For `Seed`, the derive generates the equivalent of the following. This is a hand
 expansion for reading, not code in the repository; it is modelled on the hand
@@ -264,79 +245,9 @@ that embeds the struct, and that is scheduled with a version bump (below).
 
 ## From a command-line flag to the hash
 
-The derive guarantees that every field of `SimConfig` reaches the hash. For
-`simulate`, four more things guarantee that every input reaches it, or is
-declared not to:
-
-1. **Every input is classified.** A class belongs to a (command, input) pair:
-   the test-only table `SIMULATE` in [`input_class`](rust:cli::input_class)
-   gives one of `keyed(level)`, `execution`, `provenance`, `presentation`,
-   `child`, `expands` or `removed` (the module's table says what each means) to
-   every field of [`SimulateArgs`](rust:cli::args::SimulateArgs), of the groups
-   it flattens ([`OutputView`](rust:cli::args::OutputView) and the rest) and of
-   the global options. `every_simulate_flag_is_classified` checks the table
-   against every argument clap accepts, both ways. Environment variables have a
-   class column in [`env::VARS`](rust:cli::env::VARS), and are read nowhere but
-   in that module
-   (`rust/crates/cli/tests/environment_is_read_in_one_module.rs`).
-2. **Identity and engine settings come from one value.** After its precedence
-   rules (an explicit flag, a fit's provenance, a replayed fit's simulator, the
-   model's own default), `run_simulate` resolves its configuration once, into
-   [`ResolvedSimConfig`](rust:cli::sim_config::ResolvedSimConfig): the base
-   model and its [`ModelDigest`](rust:runid::inputs::ModelDigest), the run-wide
-   part of the `config` level ([`RunConfig`](rust:cli::sim_config::RunConfig):
-   backend, `dt`, the output schedule, the two evaluator flags, the column view)
-   and the scenario arms. [`CasSink::cell_resolve`](rust:cli::cas_sink::CasSink)
-   builds each cell's `SimConfig` with
-   [`RunConfig::cell_config`](rust:cli::sim_config::RunConfig), which
-   destructures `RunConfig` exhaustively, so a field added to either struct does
-   not compile until it is carried across.
-   [`ResolvedSimConfig::engine_settings`](rust:cli::sim_config::ResolvedSimConfig)
-   is the one conversion to what runs: the job's backend, `dt` and evaluator
-   settings ([`EvalSettings`](rust:sim::compiled_model::EvalSettings), which
-   every cell's compiled model carries), and the forcing-extrapolation policy
-   ([`ForcingPolicy`](rust:cli::forcing_extrapolation::ForcingPolicy)). It is
-   called once per invocation, and the CAS sink keeps that instance, so every
-   leaf's record names the policy the run's forcing notes went into. The thread
-   count, the store root and `--force` travel in a separate
-   [`Execution`](rust:cli::sim_config::Execution) value.
-3. **A cell's identity and its run come from one value.**
-   [`ResolvedCell::resolve`](rust:cli::sim_config::ResolvedCell) resolves a
-   cell's `SimRun` through the engine's own resolution
-   ([`resolve_loaded_run`](rust:cli::util::resolve_loaded_run)) into the model
-   the cell executes, its table digests, seed and restored origin state, and its
-   backend, step, sampler and evaluator settings. The engine
-   ([`simulate_compiled`](rust:cli::util::simulate_compiled)) runs from it and
-   hands the same instance back with the trajectory (`engine::CellResult`);
-   `CasSink::merge_cell` keys the written leaf from it, through
-   `CasSink::cell_identity`, whose destructure binds no field to `_`, so a field
-   added to the cell does not compile there until it is named and used. The
-   window and the parameter values are read off the resolved model. What the
-   identity keys from the invocation instead is checked against the cell: a cell
-   whose backend, step, evaluator settings or sampler differ from the run's
-   `RunConfig`, whose interventions differ from its scenario arm's, or that
-   records extra snapshot times is refused rather than keyed. The cache-hit
-   check has to look a cell up before it runs, so it resolves the cell over the
-   base model; the written leaf's identity is checked against that pre-run one,
-   and a cell whose two identities differ is not written.
-4. **Every input has a case.** `rust/crates/cli/tests/simulate_input_classes.rs`
-   runs camdl into fresh stores, in a cleared environment, once per input and
-   checks what its class predicts (below); `every_simulate_input_has_a_case`
-   fails if one has no case.
-
-The configuration is not hashed as one value: a run has many cells, and each
-part reaches the level of a cell that it belongs to. The exhaustive copy of
-`RunConfig` makes the run-wide part include-by-default, and the exhaustive
-destructure of `ResolvedCell` the per-cell part (the window, the parameter
-values and table digests, the seed and the restored origin state). Two limits
-remain. The `model` level is computed once, from the sink's base model, so
-`ir_path`, `integrator` and `obs_anchors` are keyed from the job's run rather
-than each cell's own load; every cell copies them from the job, but a cell
-carrying other values would not be told apart. And a `SimRun` field that changed
-the resolved model other than through its parameter values, its window or its
-interventions would reach the engine without reaching the identity.
-`ResolvedCell::resolve` names every `SimRun` field, but a field named there as
-`field: _` compiles, so the name is a point for review, not a guarantee.
+How `simulate`'s flags reach a cell's identity is in
+[Simulate on the run store](#simulate-on-the-run-store). The settings below are
+shared by every command that runs a model.
 
 `--allow-degenerate-rates` is not a process-wide setting: it is a field of the
 compiled model
@@ -403,16 +314,14 @@ pass-throughs). Nothing reads it process-wide. A load of a model that is already
 compiled ([`load_ir`](rust:cli::util::load_ir)) takes no settings and refuses a
 `.camdl`, so no compile can run without them.
 
-Two kinds of flag reach the identity through the model and the parameters rather
-than `RunConfig`. A flag that rewrites the model before it runs
-(`--output-every`, which rematerializes the model's output schedule;
-`--integrator`; the global `--no-licm`) is hashed with the model, because
-[`load_run_model`](rust:cli::util::load_run_model) is the one load that both the
-engine and the model level read. A parameter flag (`--param`, `--params`,
-`--param-vec`, a draw or sweep point) is hashed with the parameters, because the
-`params` level is the output of
-[`resolve_run_parameters`](rust:cli::util::resolve_run_parameters), the same
-call the engine makes.
+In `simulate`, two kinds of flag reach a cell's identity through the model and
+the parameters rather than its settings. A flag that rewrites the model before
+it runs (`--output-every`, which rematerializes the model's output schedule;
+`--integrator`; the global `--no-licm`) changes the stored compiled model,
+because [`load_run_model`](rust:cli::util::load_run_model) is the one load that
+both the engine and the stored compiled model are made from. A parameter flag
+(`--param`, `--params`, `--param-vec`, a draw or sweep point) is in the cell's
+parameters, which are read off the resolved model the engine runs.
 
 An environment variable that can change a result is keyed. The alternative
 evaluation paths (`CAMDL_EVAL_UNRESOLVED`, `CAMDL_NO_BINDING_CACHE`) and every
@@ -426,9 +335,9 @@ value can pass for another switch; with no switch on it is the build alone, so a
 default run's identity is unchanged. `run.json` keeps the build in
 `engine_version` and lists the switches in `engine_switches`, so a run this
 build made with a switch is this build's run. The commands that store a result
-under an address key the switches: `simulate` (its trajectories, their
-observation subtrees and its ensembles), `fit run` (at the `fit` level),
-`fit predict` (its output directory, whose manifests also record
+under an address key the switches: `simulate` (in the ambient key of the run
+store, which names the build directory every cell is under), `fit run` (at the
+`fit` level), `fit predict` (its output directory, whose manifests also record
 `engine_version` and `engine_switches`), `pfilter` (at the `model` level) and
 `profile` (a point's base). `compare` scores a chain-binomial fit through a
 `camdl pfilter` child, which keys them; its in-process ODE scoring and
@@ -502,12 +411,6 @@ and a file that writes the point's value store the same bytes under two keys
 (their texts differ): one computation under two keys, never two computations
 under one.
 
-A derived artifact that only some invocations ask for is a child of the leaf at
-its own address, never one of the leaf's files:
-[`RecordedChild`](rust:cli::cas_sink::RecordedChild) writes one file and its
-record into `<leaf>/<name>/`, declared in the leaf's `run.json` `children`
-before it is written. `simulate --event-log` (`event_log/`) is one.
-
 `fit run` routes its method flags through one struct,
 [`CliMethodOverrides`](rust:cli::fit::config_v2::CliMethodOverrides), which
 [`Algorithm::apply_cli_overrides`](rust:cli::fit::config_v2::Algorithm::apply_cli_overrides)
@@ -520,22 +423,21 @@ flag through the identity. The copy from the clap struct into
 by hand, as is each flag that writes into the fit configuration instead
 (`--allow-forcing-extrapolation` sets `[config] allow_forcing_extrapolation`).
 
-So when you add a `simulate` flag that changes what a run computes or stores:
-classify it `keyed`, give it a field of `RunConfig` (or lower it into the model,
-or into the parameters), and add its case to `simulate_input_classes.rs`. For
-`fit run` and the other commands, carry it through each step above, add a case
-to the differential test, and write the end-to-end test that runs camdl with and
-without the flag and finds two leaves.
+So when you add a `fit run` or `profile` flag that changes what a run computes
+or stores, carry it through each step above, add a case to the differential
+test, and write the end-to-end test that runs camdl with and without the flag
+and finds two leaves. A `simulate` flag is declared with its class instead
+([below](#simulate-on-the-run-store)).
 
 ## Testing a classification
 
 Calling an input identity, presentation or provenance is a prediction about what
 happens when that input alone is changed, so each classification can be tested.
 Run camdl twice into two fresh stores, changing only that input, and compare the
-stored results (the trajectory, the ensemble, the observation table; not
-`run.json`, which records the time and the command line and always differs). The
-rule is that **the stored bytes change exactly when the `run_id` changes**, and
-it can fail two ways:
+stored results (the trajectory, the observation table; not `run.json`, which
+records the time and the command line and always differs). The rule is that
+**the stored bytes change exactly when the `run_id` changes**, and it can fail
+two ways:
 
 - **The bytes change and the `run_id` does not.** The input belongs in identity
   and is missing from the hash, so the store would serve one result in place of
@@ -545,36 +447,78 @@ it can fail two ways:
   nothing. Runs that could have been reused are computed again; no result is
   wrong.
 
-`--parallel` is tested this way.
-`parallel_runs_are_byte_identical_to_the_serial_run` in
-`rust/crates/cli/tests/simulate_sweep.rs` runs a four-cell sweep into two fresh
-stores with `--parallel 1` and `--parallel 4` and requires the combined
-trajectory file, the observation table and the stored ensemble to be equal byte
-for byte. The claim holds because a cell's seed is a function of its position in
-the grid and cells are merged in a fixed order, so the thread that finishes
-first never reaches the output.
-`a_parallel_run_splices_hits_and_misses_in_canonical_order`, in
-`simulate_store_reuse.rs`, checks the same when some cells are read back from
-the store and the rest are computed.
+`fit run`'s inputs are tested against this rule in
+`rust/crates/cli/tests/fit_run_input_classes.rs`, against the `fit`, `method`
+and `seed` levels, with a `removed` case for each old spelling it refuses, and
+`profile`'s in `rust/crates/cli/tests/profile_input_classes.rs`. `simulate`'s
+and `pfilter`'s are tested by the run store's class checks
+([below](#simulate-on-the-run-store)). The other commands' flags are not yet
+tested this way. These are regression evidence on small fixtures, not proof that
+no model behaves otherwise.
 
-Every `simulate` input is tested against the rule by its class, in
-`rust/crates/cli/tests/simulate_input_classes.rs`: a `keyed(level)` input,
-changed alone, re-keys every cell and changes the hash of the level its class
-names; an `execution` input leaves the run ids and the stored bytes unchanged;
-an `expands` input keeps the run ids of the cells common to both values; a
-presentation or provenance input, on a fixture where it does something, leaves
-the leaves unaffected, or writes none when it takes the run out of the store;
-and a `child` input, run after a run without it in the same store, leaves every
-leaf's run id and manifest unchanged byte for byte and writes its child at its
-address under the leaf. These are regression evidence on small fixtures, not
-proof that no model behaves otherwise. `fit run`'s inputs are tested the same
-way in `rust/crates/cli/tests/fit_run_input_classes.rs`, against the `fit`,
-`method` and `seed` levels, with a `removed` case for each old spelling it
-refuses, and `pfilter`'s and `profile`'s in
-`rust/crates/cli/tests/{pfilter,profile}_input_classes.rs` against each
-command's levels. The other commands' flags are not yet tested this way; the
-differential tests in `rust/crates/cli/src/resolve/tests.rs` check the hash of
-one `SimConfig` field at a time without running the simulation.
+## Simulate on the run store
+
+`camdl simulate` stores each cell as one `sim` result of the run store. Its
+inputs are declared on the argument types with `#[derive(store::Inputs)]`:
+`SimulateArgs`, the groups it flattens, and `SimulateInvocation`, which adds the
+global options. Every field carries `#[input(..)]` with one class, and the
+derive refuses a field with none:
+
+| Class       | What the input may do                         | What `store::check_input_classes` requires of it                                 |
+| ----------- | --------------------------------------------- | -------------------------------------------------------------------------------- |
+| `identity`  | change a result; hashed into the run id       | a second value changes a run id                                                  |
+| `expands`   | decide which cells a batch has (`--seeds`)    | the cells of the smaller set keep their run ids in the larger, which adds a cell |
+| `adds`      | ask for a by-product (`--obs`, `--event-log`) | the cell's run id is unchanged, and a by-product is stored                       |
+| `execution` | change how a cell is computed (`--parallel`)  | two values give the same stored files, run ids and exports                       |
+| `export`    | name a file to write (`-o`)                   | an export is written, and made again from the stored files it is the same bytes  |
+| `render`    | change how an export is written (`--dates`)   | a second value changes no stored file                                            |
+| `store`     | a request to the store (`--label`, `--force`) | nothing                                                                          |
+| `recorded`  | kept on record, read by nothing               | nothing                                                                          |
+| `skip`      | change only what is printed (`--dry-run`)     | nothing                                                                          |
+
+The derive splits the arguments by class into one generated struct per
+destination. The part that reaches identity (the `identity`, `expands` and
+`adds` fields) has private fields and one `into_parts` that returns them all, so
+a new input breaks every caller until it is handled.
+`every_simulate_input_keeps_its_class`, in
+`rust/crates/cli/src/sim_store/tests.rs`, runs the release binary into fresh
+stores once per input and checks what its class predicts;
+`every_simulate_argument_is_declared` checks the declarations against every
+argument clap accepts.
+
+A cell's identity is `SimIdentity` (`rust/crates/cli/src/sim_store.rs`): a
+dependency on the stored compiled model, the settings (`SimConfig`: backend,
+`dt`, the cell's window, a restored `--init-state` row, the two evaluator flags,
+the column view), every parameter's value after all sources, the interventions
+the cell's scenario keeps, and the process seed. `simulate` builds it per cell
+from [`ResolvedCell::resolve`](rust:cli::sim_config::ResolvedCell), the value
+the engine then runs, and refuses a cell whose backend, step, evaluator settings
+or sampler differ from the run's, or that records extra snapshot times. Before
+the engine runs, the cell checks that the model it is about to run is the stored
+compiled model with the cell's parameters, interventions and window applied, by
+digest. The run id hashes the kind, the ambient key (the build and the engine
+switches) and the identity's key, so a rebuilt camdl never reuses a cell another
+build stored. The compiled model is keyed as compiled and rewritten from data,
+before any cell's values are applied, and leaves out the `quantities` and
+`contrasts` blocks, which only the `sim_quantities` by-product reads.
+
+An artifact that only some invocations ask for is a by-product, stored inside
+the cell at an identity of its own, and never one of the cell's files: the
+observations (`obs`, whose identity adds the observation blocks, the
+`--emit-every` cadence, the file format, the streams and the observation seed),
+the event log (`event_log`, whose identity is the cell's alone, since the
+recorder draws nothing) and the generated quantities (`sim_quantities`, which
+adds the stored quantities block and the observation seed). Asking for one never
+changes the cell's id or its record. A rerun that asks for a by-product the
+store lacks simulates the cell again: the trajectory is checked against the
+stored one, and only the by-product is stored. Since cells are seeded and
+deterministic, a mismatch means an input that changes the trajectory is missing
+from the identity, or the engine is not deterministic.
+
+A failure fixed by the cell's identity, the engine stopping with an error, is a
+completed result holding `failure.toml`; a failure a rerun could change leaves
+no folder. No combined table is stored: `-o`, `--stdout` and `camdl cat @L`
+render it from the cells the invocation's record lists, in order.
 
 ## How a fit is hashed
 
@@ -645,14 +589,14 @@ the field set or to the bytes a leaf holds.
 
 ## Where a change lands
 
-| The change                                               | Edit                                                                                                                           | Version                                             | Pinned by                                                                                                                             |
-| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| A `simulate` flag that changes the stored trajectory     | a `keyed(config)` row in `input_class::SIMULATE`, a field of `RunConfig` and of `SimConfig` (or lower the flag into the model) | `SimConfig`'s `schema_version`                      | a `keyed_<flag>` case in `simulate_input_classes.rs`; the moved hexes in `cas_identity_pins` and `tests/fixtures/golden_run_ids.tsv`  |
-| A key in the fit configuration                           | a field on the serde struct, with `skip_serializing_if` at its default if existing fits should keep their keys                 | none when skipped at its default                    | a `fit/cas.rs` test that the default hashes as the absent key and another value re-keys                                               |
-| A `fit run` flag that changes a method's output          | `CliMethodOverrides`, an `OverrideFlag` row, the method's arm of `write_cli_overrides`, and the copy in `cmd_fit_run_v2`       | none: the method level hashes the method as written | `every_cli_sampler_flag_changes_the_method_identity`                                                                                  |
-| A field that is displayed but does not change the output | `#[run_input(provenance)]` on the field, or record it only in `run.json` (`Provenance`, `RecordMeta`)                          | none                                                | a case in `differential_presentation_inputs_are_inert`                                                                                |
-| A float policy, or any other rule of the encoding        | `runid::hash` or `runid::float`, and the hand impls in `runid::ir_hash`                                                        | `HASH_VERSION`, with an entry in its doc            | the property tests in `rust/crates/runid/src/tests.rs`; `macro_eq.rs`; both golden tables                                             |
-| The IR schema                                            | the atomic OCaml, Rust and golden update (`.claude/skills/golden-update`)                                                      | `ir/VERSION`                                        | `rust/crates/runid/tests/golden_model_hashes.rs`, regenerated by `make update-golden-model-hashes` only when the re-key is the change |
+| The change                                               | Edit                                                                                                                        | Version                                             | Pinned by                                                                                                                             |
+| -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| A `simulate` flag that changes the stored trajectory     | an `#[input(identity)]` field of `SimulateArgs`, carried into a field of `sim_store::SimConfig` (or lowered into the model) | the `version` of `SimConfig`'s `#[identity(..)]`    | `every_simulate_input_keeps_its_class`, with a `vary` fixture for the field                                                           |
+| A key in the fit configuration                           | a field on the serde struct, with `skip_serializing_if` at its default if existing fits should keep their keys              | none when skipped at its default                    | a `fit/cas.rs` test that the default hashes as the absent key and another value re-keys                                               |
+| A `fit run` flag that changes a method's output          | `CliMethodOverrides`, an `OverrideFlag` row, the method's arm of `write_cli_overrides`, and the copy in `cmd_fit_run_v2`    | none: the method level hashes the method as written | `every_cli_sampler_flag_changes_the_method_identity`                                                                                  |
+| A field that is displayed but does not change the output | `#[run_input(provenance)]` on the field, or record it only in `run.json` (`Provenance`, `RecordMeta`)                       | none                                                | a case in `differential_presentation_inputs_are_inert`                                                                                |
+| A float policy, or any other rule of the encoding        | `runid::hash` or `runid::float`, and the hand impls in `runid::ir_hash`                                                     | `HASH_VERSION`, with an entry in its doc            | the property tests in `rust/crates/runid/src/tests.rs`; `macro_eq.rs`; both golden tables                                             |
+| The IR schema                                            | the atomic OCaml, Rust and golden update (`.claude/skills/golden-update`)                                                   | `ir/VERSION`                                        | `rust/crates/runid/tests/golden_model_hashes.rs`, regenerated by `make update-golden-model-hashes` only when the re-key is the change |
 
 The two golden tables pin absolute values.
 `rust/crates/cli/tests/fixtures/golden_run_ids.tsv`, read by

@@ -1,13 +1,13 @@
-//! One ensemble id stands for one combined table.
+//! A combined table follows the order its cells were asked for; the cells do
+//! not.
 //!
 //! `simulate --scenario a,b` and `--scenario b,a` run the same cells: a cell's
 //! process seed does not depend on its scenario's position, so each cell has
-//! the same `Sim` leaf under both orders. Their combined tables differ: the
+//! the same stored folder under both orders. Their combined tables differ: the
 //! rows follow the order asked for, and the `replicate` column is the row's
-//! position. The same holds for `--seeds 1,2` and `--seeds 2,1`. Each run must
-//! store, under its own ensemble id, exactly the table it produced; a run that
-//! finds a different table under its id, warns and exits 0 leaves one id
-//! naming two tables.
+//! position. The same holds for `--seeds 1,2` and `--seeds 2,1`. Both orders
+//! run into one store must leave one stored cell per distinct cell, and each
+//! run's `-o` table must be the one its order asks for, the same on a repeat.
 //!
 //! Shells out to the release `camdl` binary.
 
@@ -48,23 +48,7 @@ scenarios {
 
 const PARAMS: &str = "beta = 0.4\ngamma = 0.2\n";
 
-fn run_leaves(root: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        if dir.join("run.json").is_file() {
-            out.push(dir.clone());
-        }
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for e in entries.flatten() {
-                if e.path().is_dir() {
-                    stack.push(e.path());
-                }
-            }
-        }
-    }
-    out
-}
+mod sim_store_cells;
 
 fn simulate(dir: &Path, cells: &[&str], mirror: &str) -> Output {
     let bin = binary();
@@ -75,7 +59,7 @@ fn simulate(dir: &Path, cells: &[&str], mirror: &str) -> Output {
     );
     let mut args = vec![
         "simulate", "m.camdl", "--params", "p.toml", "--backend", "chain_binomial",
-        "--dt", "1", "--output-dir", "out", "-o", mirror,
+        "--dt", "1", "--store", "out", "-o", mirror,
     ];
     args.extend_from_slice(cells);
     Command::new(bin)
@@ -87,24 +71,11 @@ fn simulate(dir: &Path, cells: &[&str], mirror: &str) -> Output {
         .expect("spawn camdl")
 }
 
-/// Every ensemble leaf in the store, by `run_id`, with its stored table.
-fn ensembles(dir: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
-    run_leaves(&dir.join("out").join("ensembles"))
-        .into_iter()
-        .map(|leaf| {
-            let rec: serde_json::Value =
-                serde_json::from_str(&std::fs::read_to_string(leaf.join("run.json")).unwrap()).unwrap();
-            let table = std::fs::read(leaf.join("ensemble.tsv")).unwrap();
-            (rec["run_id"].as_str().unwrap().to_string(), table)
-        })
-        .collect()
-}
-
 /// Run `first` then `second` (one cell set in two orders) and `first` again
-/// into one store. Each run must exit 0 without an ensemble warning and leave
-/// its own table stored under an id of its own; the repeat of `first` must
-/// find its table already stored.
-fn assert_each_order_is_its_own_ensemble(first: &[&str], second: &[&str]) {
+/// into one store. Each run must exit 0 without an ensemble warning; the two
+/// orders write different tables over the same `n_cells` stored cells, and the
+/// repeat of `first` writes its table again byte for byte.
+fn assert_each_order_is_its_own_table(first: &[&str], second: &[&str], n_cells: usize) {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     std::fs::write(dir.join("m.camdl"), MODEL).unwrap();
@@ -117,32 +88,28 @@ fn assert_each_order_is_its_own_ensemble(first: &[&str], second: &[&str]) {
         assert!(!err.contains("warning: ensemble"), "{cells:?} warned about its ensemble:\n{err}");
     }
 
-    let stored = ensembles(dir);
     let one = std::fs::read(dir.join("one.tsv")).unwrap();
     let two = std::fs::read(dir.join("two.tsv")).unwrap();
     assert_ne!(one, two, "the two orders must write different tables for this test to bite");
     assert_eq!(one, std::fs::read(dir.join("one_again.tsv")).unwrap(), "a repeated run is deterministic");
-    assert_eq!(stored.len(), 2, "two tables, two ensemble ids: {:?}", stored.keys());
-    for (mirror, table) in [("one.tsv", &one), ("two.tsv", &two)] {
-        assert!(
-            stored.values().any(|t| t == table),
-            "the table {mirror} produced is not stored under any ensemble id"
-        );
-    }
+    let cells = sim_store_cells::sim_run_ids(&dir.join("out"));
+    assert_eq!(cells.len(), n_cells, "both orders share one stored cell per distinct cell: {cells:?}");
 }
 
 #[test]
-fn scenario_order_never_gives_one_ensemble_id_two_tables() {
-    assert_each_order_is_its_own_ensemble(
+fn scenario_order_reorders_the_table_over_the_same_cells() {
+    assert_each_order_is_its_own_table(
         &["--seed", "3", "--replicates", "2", "--scenario", "a,b"],
         &["--seed", "3", "--replicates", "2", "--scenario", "b,a"],
+        4,
     );
 }
 
 #[test]
-fn seed_order_never_gives_one_ensemble_id_two_tables() {
-    assert_each_order_is_its_own_ensemble(
+fn seed_order_reorders_the_table_over_the_same_cells() {
+    assert_each_order_is_its_own_table(
         &["--seeds", "1,2", "--scenario", "a"],
         &["--seeds", "2,1", "--scenario", "a"],
+        2,
     );
 }

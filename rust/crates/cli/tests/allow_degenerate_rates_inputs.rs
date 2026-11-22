@@ -363,10 +363,11 @@ fn compare_replays_the_fits_allow_degenerate_rates() {
     assert!(o.status.success(), "{all}");
 }
 
-/// The distinct run ids of the committed `run.json`s under `root`.
+/// The distinct run ids recorded in the `identity.json`s of the run store
+/// under `root`.
 fn run_ids(root: &Path) -> std::collections::BTreeSet<String> {
     fn walk(d: &Path, out: &mut std::collections::BTreeSet<String>) {
-        if let Ok(b) = std::fs::read_to_string(d.join("run.json")) {
+        if let Ok(b) = std::fs::read_to_string(d.join("identity.json")) {
             let v: serde_json::Value = serde_json::from_str(&b).unwrap();
             if let Some(id) = v["run_id"].as_str() {
                 out.insert(id.to_string());

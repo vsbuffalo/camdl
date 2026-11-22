@@ -5,8 +5,8 @@
 
 > **Scope:** This spec describes camdl's run system: forward simulation (single
 > runs, multi-cell ensembles and `--sweep` grids), inference pipelines
-> (`fit.toml`), parameter sweeps, predictive workflows, and the
-> content-addressed store that holds every result together with its provenance.
+> (`fit.toml`), parameter sweeps, predictive workflows, and the two
+> content-addressed stores that hold every result together with its provenance.
 
 ---
 
@@ -232,10 +232,11 @@ and the resolved source per parameter is recorded in `fit.meta.json`.
 **One job type behind the verb.** `camdl simulate` builds a `SimulateJob`
 (`sim_job.rs`) and hands it to one engine (`engine::run_job`), which plans the
 `param-point × scenario × seed-slot` grid and drives it through a `RunSink`;
-`fit predict` builds the same job for its free-forward replay. `simulate`'s sink
-writes per-cell store leaves plus a combined wide-format mirror. `SimulateJob`
-deliberately has no serde derive — the CLI parses its own surface (clap args)
-and lowers to the resolved struct, so there is no second wire schema to drift.
+`fit predict` builds the same job for its free-forward replay. `simulate` stores
+each cell in the run store and renders its exports from the stored cells (§4.4).
+`SimulateJob` deliberately has no serde derive — the CLI parses its own surface
+(clap args) and lowers to the resolved struct, so there is no second wire schema
+to drift.
 
 **Every parameter choice is accounted for.** In `fit.toml` the rule is
 exhaustive and enforced: every model parameter must appear in exactly one of
@@ -300,27 +301,30 @@ project/
 ├── data/            # observation TSVs, lookup tables
 ├── params/          # parameter-point TOMLs
 ├── fits/            # fit.toml configs
-└── results/         # the content-addressed store (see below)
+├── results/         # the content-addressed store of fits and profiles (see below)
+└── camdl-store/     # the run store of simulate and pfilter (§4.4)
 ```
 
-Only `results/` has meaning to camdl. Its location resolves with the precedence
-**CLI `--output-dir` > config-file `output_dir` > `CAMDL_OUTPUT_DIR` >
-`./results`** (`run_paths::output_root`). Project-specific config sits above
-ambient shell state deliberately: setting `CAMDL_OUTPUT_DIR` to keep scratch
-runs separate must not silently redirect a fit.toml that declared
-`output_dir = "results/he2010"`.
+Only `results/` and `camdl-store/` have meaning to camdl. They are two stores.
+`camdl simulate` and `camdl pfilter` store their results in the run store, whose
+root is `--store DIR`, else `CAMDL_STORE`, else `./camdl-store`; its layout is
+in §4.4. Fits and profiles store theirs under `results/`, whose location
+resolves with the precedence **CLI `--output-dir` > config-file `output_dir` >
+`CAMDL_OUTPUT_DIR` > `./results`** (`run_paths::output_root`). Project-specific
+config sits above ambient shell state deliberately: setting `CAMDL_OUTPUT_DIR`
+to keep scratch runs separate must not silently redirect a fit.toml that
+declared `output_dir = "results/he2010"`. Neither `--output-dir` nor
+`CAMDL_OUTPUT_DIR` applies to the run store.
 
 ### 2.1 The content-addressed store
 
-Every result camdl keeps lives in one store under the output root, partitioned
-by artifact kind:
+The results of fits and profiles live in one store under the output root,
+partitioned by artifact kind:
 
 ```
 results/
 ├── index.json            # rebuildable lookup cache (§2.6)
 ├── .staging/             # atomic-commit scratch (§2.6)
-├── sims/                 # one leaf per simulated cell
-├── ensembles/            # combined wide-format TSV across a multi-cell simulate
 ├── fits/                 # fit segments, each holding its method leaves
 └── profiles/             # profile-likelihood grid points
 ```
@@ -355,12 +359,10 @@ alias and `([h1,h2], [h1])` cannot collide with a concatenation. The full 64-hex
 
 The levels per kind:
 
-| kind            | partition   | levels, in path order                     |
-| --------------- | ----------- | ----------------------------------------- |
-| `sim`           | `sims`      | model · config · params · scenario · seed |
-| `sim_ensemble`  | `ensembles` | model · config · params · grid            |
-| `fit_method`    | `fits`      | fit · method · seed                       |
-| `profile_point` | `profiles`  | profile · point · method · seed · start   |
+| kind            | partition  | levels, in path order                   |
+| --------------- | ---------- | --------------------------------------- |
+| `fit_method`    | `fits`     | fit · method · seed                     |
+| `profile_point` | `profiles` | profile · point · method · seed · start |
 
 **The one rule for consumers: resolve runs by reading `run.json`, never by
 parsing path segments.** Path segments mirror the `levels` array for human
@@ -1277,20 +1279,21 @@ segment, the layout of a swept fit is identical to that of an unswept one.
 
 The store enforces concurrency at the leaf, in two write modes.
 
-**Mode A (atomic)** — used by `sim` and `sim_ensemble`, whose whole output is
-known in memory before the commit. The leaf is written into a per-attempt
-staging directory under `<root>/.staging/`, fsynced in a fixed order (each
-artifact, then `run.json`, then the directory), then moved into place by
-`rename`. The staging name carries the process id and a process-local counter,
-so two concurrent same-identity commits never share a staging directory.
+**Mode A (atomic)** — for a leaf whose whole output is known in memory before
+the commit; no command of this camdl writes a `results/` leaf in this mode. The
+leaf is written into a per-attempt staging directory under `<root>/.staging/`,
+fsynced in a fixed order (each artifact, then `run.json`, then the directory),
+then moved into place by `rename`. The staging name carries the process id and a
+process-local counter, so two concurrent same-identity commits never share a
+staging directory.
 
-**Mode B (streaming)** — used by fit methods, `pfilter` and profile points,
-which write into the leaf as they go and whose display summary (a loglik) is
-only known at the end. The writer creates `.lock` with `O_EXCL` inside the leaf
-directory, writes a `Running` `run.json`, streams its files, and commits by
-flipping status to `Completed` and building the file manifest from what it
-actually wrote. A concurrent claimant that finds a live `.lock` gets
-`CasError::FitInProgress` naming the holding pid.
+**Mode B (streaming)** — used by fit methods and profile points, which write
+into the leaf as they go and whose display summary (a loglik) is only known at
+the end. The writer creates `.lock` with `O_EXCL` inside the leaf directory,
+writes a `Running` `run.json`, streams its files, and commits by flipping status
+to `Completed` and building the file manifest from what it actually wrote. A
+concurrent claimant that finds a live `.lock` gets `CasError::FitInProgress`
+naming the holding pid.
 
 A `.lock` holds its owner's pid and host name, one per line (a lock holding the
 pid alone, as camdl wrote before the host was recorded, is read as this host's).
@@ -1359,76 +1362,49 @@ The integrity gate is deliberately cheap — presence, size, and mtime, no
 re-digest — so listing a fit with many large chain files does not re-hash them;
 the recorded per-file SHA-256 is there for integrity tooling, and no read path
 recomputes it today. The manifest is an exact set over the leaf's whole subtree,
-except reserved files and _declared children_: a declared child subdirectory
-(`obs/`, `event_log/`) is a boundary, recognized and not recursed into.
+except reserved files and _declared children_: a subdirectory the leaf's
+`run.json` declares as a child is a boundary, recognized and not recursed into.
 
 **Which commands skip on a cache hit.** `fit run` consults `lookup` and skips
 the computation on a `Hit` (unless `--force`); `profile` skips each start whose
 leaf is a `Hit` (reported as `N of M starts already cached`) and has no
-`--force`. A multi-cell `camdl simulate` skips a cell the store already holds
-under the exact rule of §4.4 and reads its `traj.tsv` back for the combined
-mirror; a lone `simulate` runs its cell and relies on the commit being
-idempotent.
+`--force`. `camdl simulate` and `camdl pfilter` store in the run store, whose
+reuse rule is in §4.4.
 
 ### 2.4 Simulation Result Layout
 
-A single-cell `simulate` writes one `sim` leaf:
+`camdl simulate` stores each cell, one realisation at one parameter point, one
+scenario and one seed, as one `sim` result in the run store (§4.4), not under
+`results/`. The layout is that of
+`docs/dev/proposals/2026-11-20-run-store-api.md` ("Layouts, kind by kind"):
 
 ```
-results/sims/{model}-{h8}/{backend}-dt{dt}-{h8}/{params}-{h8}/{scenario}-{h8}/seed_{n}-{h8}/
-  run.json
-  traj.tsv
-  reactive_log.tsv       # when a reactive policy was active
-  obs/{obs_h8}-{obs_seed}/{stream}.tsv + obs.json    # declared child, with --obs
-  event_log/event_log.tsv + event_log.json           # declared child, with --event-log
+<root>/<version>-<12 hex of the ambient key>/          # the build, written <build>
+  compiled_model/<model stem>-<12 hex>/                 # the compiled model, stored once
+  sim/<model stem>-<12 hex>/<backend>-dt<dt>-<12 hex>/<params label>-<12 hex>/<scenario>-<12 hex>/seed_<seed>[-r<n>]-<12 hex>/
+    identity.json
+    run.json
+    traj.tsv
+    reactive_log.tsv                                    # when a reactive policy was active
 ```
 
-The five levels hash disjoint slices of the resolved input set. **model** is the
-presentation-normalized whole-IR digest plus `ir/VERSION` and the engine
-version. **config** is backend, `dt`, `t_start`, `t_end`, the output schedule,
-`allow_degenerate_rates`, `allow_forcing_extrapolation`, and the trajectory
-column view (`--no-flows`, `--columns`); `--output-every` is not here because it
-is lowered into the output schedule upstream. **params** is the resolved base
-name→value map plus the digests of any `--table` files. **scenario** is the
-scenario's effective delta — the enabled and disabled intervention sets, the
-parameter patch (`set`), and the `scale` factors, each including whatever the
-scenario inherits through `compose` — so two presets that differ only in `scale`
-or only in what they compose cannot share a `run_id`. **seed** is the resolved
-`process_seed` (the only hashed field of the level).
+A cell's identity is the compiled model it depends on, its settings (backend,
+`dt`, the cell's start and end, a restored `--init-state` row,
+`allow_degenerate_rates`, `allow_forcing_extrapolation`, `--no-flows` and the
+`--columns` allow-list), every parameter's value after all sources, the
+interventions its scenario keeps, and its process seed. Each folder name is a
+label followed by 12 hex digits of that group's key; the label is not part of
+the identity. The params label is `base`, or a sweep point's or draw row's
+`name=value` pairs joined by `_`, or `draws` when that text exceeds 96 bytes.
+The scenario label is the scenario's name, or `(none)` for the implicit arm of a
+run without `--scenario`, which a folder name writes `_none_`. The seed label is
+the seed typed: `--seed 7 --replicates 3` stores `seed_7`, `seed_7-r1` and
+`seed_7-r2`, and each value of `--seeds` is its own `seed_<n>`.
 
-Segment labels: the model label is the model file's slugged stem; the config
-label is `{backend}-dt{dt}`; the params label is `base` when no per-cell
-overrides apply, otherwise the sorted `name=value` pairs joined by `_`
-(sanitized), falling back to the literal `draws` when that would exceed 96
-characters; the scenario label is the preset name, or for the implicit arm of a
-run without `--scenario` the label derived from its flags — `(none)` when it has
-none, which the path sanitizer renders `_none_` — and the seed label is
-`seed_{N}`, unpadded, where N is the cell's `process_seed`: the `--seed` value
-itself for a lone run, for replicate 0 at point 0, and for each value of an
-explicit `--seeds` list, and otherwise the mixed value of §3.1 (for example
-`seed_5871781006564002452`). A label is provenance, never identity: a leaf
-written under another label for the same hashes (an earlier camdl wrote the
-implicit arm as `baseline`) is found by hash and reused.
-
-Because a level hash is a structural digest of typed values rather than of a
-string, the empty scenario is a **constant**: a scenario with no overrides, no
-scale factors, no enables and no disables always hashes to the same value, so
-`_none_-e93c95fd` identifies the unmodified model in every project.
-`seed_1-e6a47b86` and `base-...` are constants in the same way.
-
-A **multi-cell** `simulate` (`--replicates`, `--seeds`, several `--scenario`, or
-`--draws`) writes the N per-cell `sim` leaves _and_ one `sim_ensemble` leaf
-under `ensembles/` holding the combined wide-format `ensemble.tsv` that
-interleaves every cell with `replicate` / `scenario` / `draw` columns. The
-ensemble's `grid` level digests the cell list in table order, each cell
-contributing its row in the table, its point id, its process seed and its `sim`
-run id, plus the explicit cell count and the sweep design. So three replicates
-and four replicates are different ensembles (count-in-the-key), and so are two
-runs that lay one cell set out in different orders, such as `--scenario a,b` and
-`--scenario b,a`, or `--seeds 1,2` and `--seeds 2,1`: their tables differ in row
-order and in the `replicate` column, which numbers the rows. The scenario label
-is not digested; a cell's `sim` run id already pins its scenario. The ensemble
-`deps` on the N `sim` leaves it was built from. Its path label is `cells-n{N}`.
+Observations, the event log and generated quantities are by-products stored
+inside the cell folder, each with its own `identity.json` and `run.json`; the
+cell's own record is not changed by them (§4.4). No combined table is stored:
+`-o`, `--stdout` and `camdl cat @LABEL` render it from the stored cells.
 
 ### 2.5 Per-leaf metadata
 
@@ -1436,8 +1412,8 @@ Every leaf directory contains exactly one `run.json`, the serialized
 `RunRecord`. It records the leaf's identity levels, the exact set of files the
 leaf owns with their digests, the upstream artifacts it consumed, its completion
 status, and a free-form provenance block. It is never itself hashed — identity
-comes only from the resolved inputs, which is precisely why attaching an `obs/`
-child or a column schema cannot change the parent's `run_id`.
+comes only from the resolved inputs, which is precisely why a column schema
+cannot change the leaf's `run_id`.
 
 `run.json` also carries an `output_schema` declaring, for each tabular file the
 leaf wrote, which column is the time or iteration axis, which are grouping keys,
@@ -1445,21 +1421,10 @@ which are model quantities, and which are sampler diagnostics — so a consumer
 can render or join a TSV without reverse-engineering its header.
 
 The full field-by-field contract is §9.5; the column-role vocabulary and the
-rendering rule it implies are §10.9.
-
-**Sub-artifacts have no `run.json`.** A trajectory leaf may declare an
-observation ensemble as a child at `obs/{obs_hash8}-{obs_seed}/`, holding one
-`<stream>.tsv` per observation stream plus an `obs.json` provenance file. That
-child is keyed on the model's observation blocks alone, so changing a reporting
-parameter re-samples the observations without invalidating the cached
-trajectory. `simulate --event-log` writes the lineage event log (the record of
-every transition that `camdl lineage realize` replays, not a fit's
-`events.jsonl` of reported events) as a second child, at the fixed address
-`event_log/` (`event_log.tsv` plus an `event_log.json` record), since nothing
-the log depends on lies outside the trajectory's run id. Both are children
-rather than files of the leaf so that the leaf's own files, and its manifest,
-are the same whichever invocation wrote it first. Reach them through the
-parent's `children` map, not by walking the tree for `run.json` files.
+rendering rule it implies are §10.9. Both describe leaves under `results/`. A
+result in the run store (§4.4) has its own `identity.json` and `run.json`, whose
+format is that of `docs/dev/proposals/2026-11-20-run-store-api.md`; a `sim`
+cell's `run.json` carries no `output_schema`.
 
 ### 2.6 Store-root files
 
@@ -1737,8 +1702,8 @@ CLI mapping:
 ```
 
 These four flags are mutually exclusive at the clap level. All of them are
-_mirrors_: the observation draws are also written into the run's leaf under
-`obs/{obs_hash8}-{obs_seed}/`.
+exports: the observation draws are stored in each cell as an `obs` by-product
+(§10.5), and the file or directory is rendered from them.
 
 ### 3.2 ParamSource — where parameter vectors come from
 
@@ -2093,111 +2058,51 @@ the path from those digests. Two properties follow: the same inputs always land
 in the same directory (so a re-run is a cache hit), and different inputs never
 share a directory (so a stale result cannot be served for changed inputs).
 
-**Step 1 — resolve.** `rust/crates/cli/src/resolve.rs` maps a cell's already-
-resolved CLI inputs into `runid` identity values. Every field entering a hash is
-a concrete value: parameter and scenario maps are name→value, the seed is the
-resolved `process_seed` (never the base `--seed`), and a non-finite resolved
-float is a `ResolveError` raised before any hashing.
+**The cell's identity.** `camdl simulate` resolves each cell into a
+`SimIdentity` (`rust/crates/cli/src/sim_store.rs`), and the run store derives
+the cell's run id and folder from it. Every field is a resolved value: the
+parameters are name→value after every source, the seed is the cell's process
+seed (§3.5), and a non-finite value is refused before anything is hashed.
 
-```rust
-pub fn resolve_trajectory(ctx: &TrajectoryCtx) -> Result<ResolvedTrajectory, ResolveError>;
+| Field      | What it holds                                                                                                                                                                          |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`    | A dependency on the stored compiled model: the model as compiled and rewritten from data (anchored times, `--integrator`, bound `--table` files), before any cell's values are applied |
+| `config`   | backend, `dt`, the cell's start and end, a restored `--init-state` row, `allow_degenerate_rates`, `allow_forcing_extrapolation`, `--no-flows`, the `--columns` allow-list              |
+| `params`   | Every parameter's value after all sources: the model, `--params`, a draw or sweep point, the scenario, `--param` and `--param-vec`                                                     |
+| `scenario` | The interventions the cell's scenario selection keeps                                                                                                                                  |
+| `seed`     | The process seed                                                                                                                                                                       |
 
-pub struct ResolvedTrajectory {
-    pub levels: Vec<LevelId>,     // five levels, in path order
-    pub run_id: ContentHash,      // derived from the level hashes
-}
-```
-
-**Step 2 — the five levels.** A forward simulation's identity is factored into
-five digests, each hashing a disjoint slice of the input set
-(`rust/crates/runid/src/inputs.rs`):
-
-| Level      | Identity value     | What it folds in                                                                                                                                  |
-| ---------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `model`    | `ModelDigest`      | The whole canonical IR, plus `ir_version` and the engine version                                                                                  |
-| `config`   | `SimConfig`        | backend, `dt`, `t_start`, `t_end`, output schedule, calendar mode, `allow_degenerate_rates`, `allow_forcing_extrapolation`, `no_flows`, `columns` |
-| `params`   | `ResolvedParams`   | The resolved base parameter map, plus content digests of any `--table` files                                                                      |
-| `scenario` | `ResolvedScenario` | Sorted enabled/disabled intervention ids and the canonical parameter patch                                                                        |
-| `seed`     | `Seed`             | `process_seed` only                                                                                                                               |
-
-Two rules govern membership, and they are the whole discipline:
+Two rules govern membership:
 
 - **A field that changes the stored bytes is identity and must re-key.** This
   includes output-view flags: `--no-flows` and `--columns` change which columns
-  the leaf contains, so they ride in `SimConfig`. `--output-every` is not there
-  because it lowers into the model's output schedule and therefore rides the
-  model digest instead.
+  the cell stores, so they are in `config`. `--output-every` is not there
+  because it lowers into the model's output schedule and so changes the compiled
+  model instead.
 - **A re-encoding of the same values is presentation and enters no hash.** A
-  rendering choice, such as a file format or a date format, has no field in the
-  compiled model.
+  rendering choice, such as a file format or `--dates`, has no field in the
+  identity.
 
-Fields marked `#[run_input(provenance)]` are recorded but never hashed:
-`Seed::base_seed` and `ArtifactRef::kind` are the two on the simulate path.
-Everything else in a `#[derive(RunInput)]` type is folded, in declaration order,
-with no skip-if-default — adding a field re-keys every existing leaf of that
-kind, which is deliberate versioned turnover, scoped by bumping either that
-type's `#[run_input(schema_version = N)]`, the crate-wide `HASH_VERSION`, or
-`ir/VERSION`.
-
-**Step 3 — the leaf address.** `runid::run_id` folds the artifact kind's
-declaration index and the count-prefixed level-hash sequence
-(`rust/crates/runid/src/kind.rs`), so two kinds with a coincidentally equal
-level sequence cannot alias.
-
-```rust
-pub fn run_id(kind: ArtifactKind, levels: &[ContentHash]) -> ContentHash;
-```
-
-**Step 4 — the path.** `runid::store_path` (`rust/crates/runid/src/layout.rs`)
-renders one `{label}-{hash8}` segment per level under the kind's partition
-directory. The label is provenance — a rename yields a new directory and a
-harmless cache miss — and the 8 hex characters are identity. Navigation and
-display read `run.json`, never the segments.
-
-```rust
-pub fn store_path(root: &Path, kind: ArtifactKind, levels: &[LevelId]) -> PathBuf;
-```
-
-The output root resolves as **CLI `--output-dir` > config-file `output_dir` >
-`CAMDL_OUTPUT_DIR` > `results/`** (`rust/crates/cli/src/run_paths.rs`,
-`output_root`). Project-specific config sits above ambient shell state
-deliberately: setting the environment variable must not silently redirect a fit
-that declared its own `output_dir`.
-
-A real single-run leaf:
+The run id hashes the kind, the ambient key (the camdl build and the environment
+switches that change results) and the identity's key. The folder groups the cell
+by model, settings, parameters and scenario, each a `{label}-{12 hex}` name,
+under the build directory `<root>/<version>-<12 hex of the ambient key>/`:
 
 ```text
-results/sims/
-  sir_basic-cd37d79d/                 # model:    IR digest + ir_version + engine
-    chain_binomial-dt1-9fe90ef5/      # config:   backend, dt, schedule, output view
-      base-b912ced1/                  # params:   resolved base values (+ table digests)
-        _none_-e93c95fd/              # scenario: the (here empty) delta
-          seed_7-d0aef62a/            # seed:     the resolved process_seed
-            traj.tsv
-            run.json
+camdl-store/0.1.0_ed976bd25-5ac7c5a662df/
+  sim/
+    sir_basic-f7f8d6574383/               # the model
+      chain_binomial-dt1-e11ea3bb8bda/    # the settings
+        base-883acc24d0c8/                # the parameters
+          _none_-0982c8c677d0/            # the scenario (here none)
+            seed_42-4efed5f6564d/         # the cell: the seed typed
+              identity.json
+              run.json
+              traj.tsv
 ```
 
-The `params` label is `base` for an unswept run and a key-sorted `k=v` join for
-a sweep point or draw row, collapsing to the tag `draws` when the join would
-overflow a path component.
-
-**Step 5 — write.** Every CAS write goes through one seam,
-`resolve::begin_resolved_write`, which derives the path from the resolved
-identity, builds the `RunRecord` in exactly one place, and dispatches to either
-an atomic commit (the whole artifact set handed over at once — the simulate
-path) or a streaming claim that the caller writes into and finalizes (the fit
-path). Cache validity is `FsCasStore::lookup`, which requires an identity match,
-a current schema, `status = Completed`, and an exact-set file check; anything
-else is a `Miss`, a `Stale(reason)`, or a `Collision` on a short-hash-prefix
-clash, which is disambiguated rather than overwritten.
-
-**Derived ensembles.** A multi-cell `simulate` also writes the combined
-wide-format TSV as its own artifact kind, `SimEnsemble`, under
-`results/ensembles/` with four levels — `model` / `config` / `params` / `grid`
-(`rust/crates/cli/src/sim_ensemble_cas.rs`). The `grid` level folds the per-cell
-list in table order _and the explicit cell count_ (§2.4), so three replicates
-and four replicates are different ensembles; the ensemble's `deps` carry one
-`ArtifactRef` per cell leaf, pinned to that cell's `traj.tsv` digest.
+The labels (§2.4) are provenance: a cell is found by its identity, and a folder
+name is never parsed. Navigation and display read the records.
 
 ## 4. Single-Run Simulation
 
@@ -2207,19 +2112,19 @@ specification for running a model. No fit config is needed for exploration.
 ### 4.1 Basic CLI
 
 ```bash
-# Baseline (no scenario) — writes a leaf in the content-addressed store
+# Baseline (no scenario) — stores the cell in the run store
 # and prints where it landed on stderr (§4.4)
 camdl simulate seir_vaccine.camdl --params params.toml --seed 42
 ```
 
 ```
-stored ./results/sims/seir_vaccine-a0c10f3e/chain_binomial-dt1-e669f2d2/base-eb8ec4ef/_none_-e93c95fd/seed_42-dd2fb524
-       camdl cat 18bd7a09b098c20c22fd478abd331b5475d213c57f5505ead75088f35a523c27
+stored /home/me/project/camdl-store/0.1.0_3e2b2888-4b1f07d2a9e3/sim/seir_vaccine-6d02b7e914fa/chain_binomial-dt1-5e2a90c417bd/base-77c0d1e25f3a/_none_-0c4d21e9b7a3/seed_42-e81f5a0c3d29
+       camdl cat e81f5a0c3d29c1b04f6e7a2d9b3c58e01f4a6d27c9b8e3f05a1d6c4b2e7f9a03
 ```
 
-The four hex suffixes and the `run_id` are content hashes; they change whenever
-any identity-bearing input changes (including the runtime version), so the exact
-digests in this document will not match your run.
+The hex suffixes and the `run_id` are content hashes; they change whenever any
+identity-bearing input changes (including the camdl build), so the exact digests
+in this document will not match your run.
 
 ```bash
 # Named scenario from the model's `scenarios {}` block
@@ -2261,7 +2166,9 @@ Parameters (7):
 ```
 
 `--seed` defaults to `1` (env `CAMDL_SEED`); a run without an explicit seed is
-still deterministic and still content-addressed.
+still deterministic and still stored. A single-cell `--dry-run` prints the plan
+alone; a multi-cell one also lists which cells the store already holds (§5.5).
+Neither writes anything.
 
 ### 4.2 CLI Flag Rules
 
@@ -2295,16 +2202,16 @@ camdl simulate seir_vaccine.camdl --params params.toml --scenario with_sia --par
 
 **Other exclusions enforced at parse time:**
 
-| combination                                                                                                                               | why                                                    |
-| ----------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
-| `--seed` × `--seeds`                                                                                                                      | one base seed vs an explicit seed list                 |
-| `--seeds` × `--replicates`                                                                                                                | explicit seeds vs derived seeds                        |
-| `--stdout` × `--seeds` / `--replicates` / `--draws` / `--sweep` / `--sweep-file`                                                          | `--stdout` is single-cell only                         |
-| `--stdout` × `-o` / `--obs*`                                                                                                              | those mirror the store `--stdout` opts out of          |
-| `--event-log` × `--seeds` / `--replicates` / `--draws` / `--sweep` / `--sweep-file`                                                       | event-log recording is single-run only                 |
-| `--event-log` × `--stdout`                                                                                                                | `--stdout` writes no leaf for the log to be a child of |
-| `--draws-out` without `--draws`                                                                                                           | it writes the rows `--draws` generated                 |
-| `--obs` × `--obs-dir` / `--obs-only`; `--obs-dir` × `--obs-only`; `--obs-only` × `--obs-only-dir`; `--obs-only` / `--obs-only-dir` × `-o` | one observation output form at a time                  |
+| combination                                                                                                                               | why                                     |
+| ----------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------- |
+| `--seed` × `--seeds`                                                                                                                      | one base seed vs an explicit seed list  |
+| `--seeds` × `--replicates`                                                                                                                | explicit seeds vs derived seeds         |
+| `--stdout` × `--seeds` / `--replicates` / `--draws` / `--sweep` / `--sweep-file`                                                          | `--stdout` is single-cell only          |
+| `--stdout` × `-o` / `--obs*`                                                                                                              | `--stdout` is the one export of the run |
+| `--event-log` × `--seeds` / `--replicates` / `--draws` / `--sweep` / `--sweep-file`                                                       | event-log recording is single-run only  |
+| `--event-log` × `--stdout`                                                                                                                | `--stdout` is the one export of the run |
+| `--draws-out` without `--draws`                                                                                                           | it writes the rows `--draws` generated  |
+| `--obs` × `--obs-dir` / `--obs-only`; `--obs-dir` × `--obs-only`; `--obs-only` × `--obs-only-dir`; `--obs-only` / `--obs-only-dir` × `-o` | one observation output form at a time   |
 
 The `--obs*` combinations are clap conflicts like the rest (§3.1.1), rejected at
 parse time. Two checks need the compiled model and run after it, exiting 1 with
@@ -2368,7 +2275,7 @@ editing it produces a new leaf. `pfilter`, `profile` and `simulate --fit` take
 ```
 
 **Trajectory column view.** These change the emitted columns _and_ the run
-identity, so a filtered run is a distinct leaf:
+identity, so a filtered run is a distinct cell:
 
 ```bash
 --output-every N     # one row every N time-units, overriding the model's `output { every }`
@@ -2383,12 +2290,15 @@ camdl simulate seir_vaccine.camdl --params params.toml --seed 42 \
 ```
 
 ```
-# 0.1.0+3e2b2888 (2026-08-10)
-t	t_start	t_stop	S	I
-0	0	0	99990	10
-30	0	30	99791	64
-60	30	60	96434	1208
+# 0.1.0+3e2b2888
+replicate	scenario	seed	t	t_start	t_stop	S	I
+0	(none)	42	0	0	0	99990	10
+0	(none)	42	30	0	30	99791	64
+0	(none)	42	60	30	60	96434	1208
 ```
+
+`--dates` is presentation: it adds the date columns to the rendered table and
+does not change the stored cell.
 
 Without an `origin` in the model, `--dates` is an error:
 
@@ -2396,27 +2306,27 @@ Without an `origin` in the model, `--dates` is an error:
 error: --dates requires the model to declare an `origin` (e.g. `origin = date("2020-01-01")`).
 ```
 
-### 4.4 Output destinations — the content-addressed store by default
+### 4.4 Output destinations — the run store by default
 
-Every run writes a leaf into the content-addressed store under `--output-dir`
-(default `./results`, env `CAMDL_OUTPUT_DIR`) and reports the leaf path plus the
-`camdl cat` that reads it back. Both lines go to **stderr**, so a `--stdout`
-pipeline stays clean. Storing is not opt-in.
+`camdl simulate` stores every cell in the run store, whose root is
+`--store DIR`, else `CAMDL_STORE`, else `./camdl-store`, and reports the folder
+plus the `camdl cat` that reads it back. Both lines go to **stderr**, so a
+`--stdout` pipeline stays clean. Storing is not opt-in. `--output-dir` is not
+accepted by `simulate`, and `CAMDL_OUTPUT_DIR` is not read.
 
 ```bash
-# Default: write the leaf, print where it went.
+# Default: store the cell, print where it went.
 camdl simulate seir_vaccine.camdl --params params.toml --seed 42
-#   stored ./results/sims/…/seed_42-dd2fb524
-#          camdl cat 18bd7a09…
+#    stored …/camdl-store/0.1.0_3e2b2888-4b1f07d2a9e3/sim/…/seed_42-e81f5a0c3d29
+#           camdl cat e81f5a0c…
 
-# Opt out: stream the trajectory to stdout, write no leaf.
+# Store the cell and print the combined table to stdout.
 camdl simulate seir_vaccine.camdl --params params.toml --seed 42 --stdout > out.tsv
 camdl simulate seir_vaccine.camdl --params params.toml --seed 42 --stdout | head
 
-# Write a plain-TSV mirror AND the leaf (the file is a convenience copy).
+# Store the cell and export the combined table to a file.
 camdl simulate seir_vaccine.camdl --params params.toml --seed 42 -o out.tsv
 #   trajectory written to out.tsv
-#   stored ./results/sims/…
 
 # Browse what you have run.
 camdl list
@@ -2424,18 +2334,18 @@ camdl show <run-id-prefix>
 camdl cat  <run-id-prefix>
 ```
 
-**The three destinations.** A run always produces exactly one primary trajectory
-artifact; these say where it goes.
+**The three destinations.** Each says where the combined table goes; every one
+stores the cells.
 
-| flag                        | trajectory                | store leaf written? |
-| --------------------------- | ------------------------- | ------------------- |
-| _(default)_                 | store leaf only           | yes                 |
-| `-o FILE` / `--output FILE` | store leaf **and** `FILE` | yes                 |
-| `--stdout`                  | stdout only               | no                  |
+| flag                        | combined table                    |
+| --------------------------- | --------------------------------- |
+| _(default)_                 | not written; the cells are stored |
+| `-o FILE` / `--output FILE` | `FILE`                            |
+| `--stdout`                  | stdout                            |
 
 The trajectory is **never** written to stdout without `--stdout`, at any size.
 Commands whose primary result is a scalar do echo it: `camdl pfilter` prints the
-log-likelihood to stdout while also writing its own leaf, so the tight "vary θ,
+log-likelihood to stdout while also storing its result, so the tight "vary θ,
 re-check" loop stays a one-liner:
 
 ```bash
@@ -2448,61 +2358,99 @@ camdl pfilter seir_observations.camdl --scenario baseline \
 -190.8639
 ```
 
-**Mirror files carry a provenance header.** `--stdout` and `-o` both prefix the
-TSV with a comment line naming the binary that produced it:
+**The combined table.** `-o`, `--stdout` and `camdl cat @LABEL` all write one
+table rendered from the stored cells, in the order the command asked for them.
+It has a `# <version>` line, then the columns
+`replicate scenario [point_id sweep:<param>…] [draw] seed t t_start t_stop [date date_start date_stop]`
+and the state and flow columns. The columns are the same for one cell and for
+many, so a script does not branch on the number of cells:
 
 ```
-# 0.1.0+3e2b2888 (2026-08-10)
-t	t_start	t_stop	S	E	I	R	V	flow_infection	flow_progression	flow_recovery	flow_waning
+# 0.1.0+3e2b2888
+replicate	scenario	seed	t	t_start	t_stop	S	E	I	R	V	flow_infection	flow_progression	flow_recovery	flow_waning
+0	baseline	1	0	0	0	99990	0	10	0	0	0	0	0	0
 ```
 
-The bytes in the store leaf's `traj.tsv` are the same table without that header.
+`replicate` is the cell's 0-based position in the invocation, not its seed.
+`scenario` is the scenario's name, `(none)` for the implicit arm. `point_id` and
+one `sweep:<param>` column per swept parameter appear under `--sweep` /
+`--sweep-file` (§5.5), and `draw`, the 0-based draw index, under `--draws`.
+`seed` is the process seed the cell ran under: passed back to `--seeds`, it
+reproduces that cell. The date columns appear under `--dates`. A cell's stored
+`traj.tsv` holds the time, state and flow columns alone, without the version
+line.
 
-**Re-running.** A lone `camdl simulate` re-simulates its cell on every
-invocation and re-commits the identical leaf; the commit is idempotent, so the
-store does not grow. A multi-cell run skips the cells the store already holds
-and reads their `traj.tsv` back for the combined outputs, reporting
-`N of M cells read from the store; simulated K`. A cell is held only when every
-requested artifact is present: the leaf's own files and, when observations are
-requested, the exact `obs/<hash8>-<obs_seed>/` subtree with every stream file
-and its `obs.json` — a leaf holding another cadence's subtree is a miss. A leaf
-is found by its hashes, not its label, so a renamed model file or a relabelled
-arm is still a hit. `--force` recomputes every cell (the displaced leaves are
-quarantined, not deleted); `--quantities-out` recomputes every cell too, since
-the quantities are a sidecar over the in-memory trajectory. `--dry-run` on a
-multi-cell run prints every cell as `[hit ]` or `[miss]` with its leaf path, or
-`[fail]` with the reason for a cell whose identity does not resolve (it would
-fail when run, and is counted apart), and the counts; it writes nothing.
+**Re-running.** A cell is found by its identity (§3.7), not by its folder name,
+so a renamed model file or a relabelled arm is still found. A rerun reuses every
+stored cell, computes only the cells the store does not hold, and renders the
+exports from the stored cells; a multi-cell run reports
+`N of M cells read from the store; simulated K`. `--force` recomputes every
+cell, and moves each stored one to quarantine first. `--parallel N` (env
+`CAMDL_PARALLEL`) runs the cells on N threads (0 = every core; absent =
+sequential); the stored cells and every export are the same bytes whatever the
+value, because a cell's seed is a function of its position in the grid.
 
-**Layout.** Five factored levels under `<output-dir>/sims/`:
+**`--label L`** names the invocation, which `camdl cat @L` and the other
+commands that take a handle find again; it never names a cell. A rerun under
+another label reuses every stored cell, and `@L` then names the new invocation.
+
+**`--dry-run`** prints the resolved plan. For a multi-cell run it also lists
+each cell as `[hit ]` (the store holds it, with its 12-hex id) or `[miss]`,
+marks `[fail]` a cell whose identity does not resolve, and prints the counts. It
+writes nothing.
+
+**By-products.** Observations (`--obs`, `--obs-dir`, `--obs-only`,
+`--obs-only-dir`, §4.6), the event log (`--event-log`) and generated quantities
+(`--quantities-out`) are by-products of a cell, stored inside its folder, each
+with its own `identity.json` and `run.json`:
 
 ```
-sims/{model}-{h8}/{config}-{h8}/{params}-{h8}/{scenario}-{h8}/seed_{n}-{h8}/
-    run.json      # identity, levels, artifact digests, output schema, provenance
-    traj.tsv      # the trajectory
-    obs/          # present only when synthetic observations were requested
+seed_42-e81f5a0c3d29/
+  identity.json  run.json  traj.tsv
+  obs/<stream names joined by _>-<12 hex>/<stream>.tsv …
+  event_log/event_log-<12 hex>/event_log.tsv
+  sim_quantities/quantities-<12 hex>/quantities.json
 ```
 
-Each component is `<human label>-<first 8 hex of that level's hash>`. The label
-is display only; identity is the hash. A params level with no overrides is
-labelled `base`; a full drawn parameter vector collapses to `draws` so the path
-component stays under `NAME_MAX`.
+Asking for a by-product never changes the cell's id or its record. A rerun that
+asks for a by-product the store lacks simulates the cell again, checks that the
+trajectory reproduces the stored one, and stores the by-product. The quantities
+block a cell evaluates (the model's own, or `--quantities FILE`) is stored once
+as a content artifact under `<build>/quantities/<stem>-<12 hex>/`, as the
+compiled model is under `<build>/compiled_model/`. The observation and quantity
+exports are rendered from the stored by-products; the bare `--event-log` exports
+nothing, and `--event-log PATH` exports the stored log.
 
-**Hash composition.** The `model` level keys on the compiled IR; `config` on
-backend, `dt`, integrator, and the column view; `params` on the resolved base
-parameters, draw/sweep overrides, and the bytes of any `--table` file;
-`scenario` on the resolved enable/disable/set delta; `seed` on the process seed.
-The runtime version participates, so a code change that alters simulation
-semantics produces new leaves rather than silently reusing old ones.
+**Failures.** A cell whose engine stops with an error is a completed result: its
+folder holds `failure.toml` in place of `traj.tsv`, and each by-product asked of
+it holds the same `failure.toml`. An observation draw that is refused, or a
+quantity that is not finite, stores `failure.toml` in that by-product, and the
+cell keeps its trajectory.
 
-`--no-flows` / `--columns` re-key the `config` level only. `--output-every`
-rewrites the compiled IR's output schedule, so it re-keys the `model` level as
-well — same model source, different model hash. `--emit-every` re-keys neither:
-it touches only emitted observations, so it keys the leaf's `obs/` child instead
-(§10.5).
+```toml
+# failure.toml
+stage  = "engine"          # "observations" or "quantities" in a by-product
+reason = "negative propensity -3.2e-4 for transition 'recovery' at t=41.5"
+```
 
-**Ensembles.** `--seeds`, `--replicates`, and `--draws` write one leaf per cell
-plus a single combined `SimEnsemble` artifact under `<output-dir>/ensembles/`:
+The batch carries on past a failed cell. At the end the command lists every
+stored failure, exports nothing and exits 1; a rerun reuses the stored failures
+and computes nothing for them. A failure a rerun could change, such as an I/O or
+store error or an interruption, leaves no folder, so a rerun computes that cell.
+
+**Writes that store nothing.** `--design-from` (§4.6), `--projected-out` and
+`--draws-out` write files from the resolved inputs and store nothing.
+
+**Hash composition.** §3.7 lists what a cell's identity holds. `--no-flows` and
+`--columns` change the settings group only. `--output-every` rewrites the
+compiled model's output schedule, so it changes the model group as well: same
+model source, different compiled model. `--emit-every` changes neither: it
+touches only emitted observations, so it changes the identity of the `obs`
+by-product (§10.5). The camdl build enters the ambient key, so a camdl built
+from changed source stores new cells rather than reusing old ones.
+
+**Several cells.** `--seeds`, `--replicates`, several `--scenario`, `--draws`
+and `--sweep` store one cell per grid point; no ensemble is stored:
 
 ```bash
 camdl simulate seir_vaccine.camdl --params params.toml --scenario baseline,with_sia --seeds 1:3
@@ -2510,41 +2458,18 @@ camdl simulate seir_vaccine.camdl --params params.toml --scenario baseline,with_
 
 ```
 2 scenarios × 3 replicates = 6 runs
-  storing ensemble · 6 cells (276.2KB)
- ensemble ./results/ensembles/seir_vaccine-a0c10f3e/chain_binomial-dt1-72322740/base-2c2d41e8/cells-n6-70131f1a
-   stored 6 leaves · ./results/sims/
+   stored 6 cells · /home/me/project/camdl-store
           camdl list
 ```
-
-`camdl cat` on the ensemble emits the combined wide-format TSV, with leading
-index columns gated on the grid shape — `replicate` always, then `scenario` when
-more than one scenario ran, then `draw` under `--draws`, or `point_id`, one
-`sweep:<param>` column per swept parameter and `seed` under `--sweep` /
-`--sweep-file`:
-
-```
-# 0.1.0+3e2b2888 (2026-08-10)
-replicate	scenario	t	t_start	t_stop	S	E	I	R	V	flow_infection	flow_progression	flow_recovery	flow_waning
-0	baseline	0	0	0	99990	0	10	0	0	0	0	0	0
-```
-
-`replicate` is a 0-based cell index, not the seed. With `--seeds 10,20` the
-column reads `0` and `1`; the seed that produced a row is recorded in the
-per-cell leaf's `run.json`, not in the combined TSV — except under a sweep,
-whose `seed` column is the pairing key across design points. `draw` is the
-0-based draw index.
-
-`--parallel N` (env `CAMDL_PARALLEL`) runs the simulation phase of a multi-cell
-`simulate` on N Rayon threads (0 = every core; absent = sequential). The
-combined files, the observation tables and the stored ensemble are
-byte-identical whatever the value: a cell's seed is a function of its grid
-position, and the engine merges cells in canonical order.
 
 ### 4.5 `camdl list` / `show` / `cat` / `label` — the primary access path
 
 Because output goes to the store by default, these are **the** way you reach
-results. `list` defaults to `./results` (positional `ROOT`, `--root DIR`, or
-`CAMDL_OUTPUT_DIR`); every run's banner hands you the exact `camdl cat` to run
+results. They read two roots: the run store, for `simulate` and `pfilter`
+(`--store
+DIR`, else `CAMDL_STORE`, else `./camdl-store`), and `results/`, for
+fits and profiles (positional `ROOT` of `list`, `--root DIR`, or
+`CAMDL_OUTPUT_DIR`). Every run's banner hands you the exact `camdl cat` to run
 next.
 
 ```bash
@@ -2556,39 +2481,39 @@ camdl list --scenario baseline --all
 camdl list --kind sim              # sim | fit | profile | pfilter | ensemble | all
 camdl list --format json           # machine-readable; see the caveat below
 
-# Full metadata for one run (short-hash prefix resolves git-style)
-camdl show 18bd7a09
-camdl show ./results/sims/seir_vaccine-a0c10f3e/chain_binomial-dt1-e669f2d2/base-eb8ec4ef/_none_-e93c95fd/seed_42-dd2fb524
+# Full metadata for one cell (short-hash prefix resolves git-style)
+camdl show e81f5a0c
 
-# Emit the trajectory, or a named stream from the leaf
-camdl cat 18bd7a09
-camdl cat b1fb4eb0 --stream cases_urban
-camdl cat <id> --stream event_log.tsv
+# Emit the trajectory, or a named file of the cell or of its by-products
+camdl cat e81f5a0c
+camdl cat e81f5a0c --stream cases_urban.tsv
+camdl cat e81f5a0c --stream event_log.tsv
+camdl cat e81f5a0c --stream quantities.json
 
-# Attach a display label to any run
-camdl label 18bd7a09 "reference run"
+# The combined table of the invocation labelled `baseline`
+camdl cat @baseline
 ```
 
-`camdl list` groups by artifact kind and shows:
+`camdl list` shows the stored cells in a `sims` table, one row per cell:
 
 ```
 sims
- CREATED   RUN_ID    LABEL          MODEL         SCENARIO  SEED  PARAMS  SIZE  PATH
- just now  52f1a1ba  <unlabelled>   seir_vaccine  (none)    42    base    35K   ./results/sims/seir_vaccine-a0c10f3e/…/seed_42-dd2fb524
- 13m ago   18bd7a09  reference run  seir_vaccine  (none)    42    base    32K   ./results/sims/seir_vaccine-a0c10f3e/…/seed_42-dd2fb524
+ CREATED   RUN_ID    LABEL         MODEL      CONFIG              SCENARIO  SEED       PATH
+ just now  5f62c5cb  sw            sir_basic  chain_binomial-dt1  (none)    seed_1-r1  camdl-store/0.1.0_3e2b2888-4b1f07d2a9e3/sim/sir_basic-f7f8d6574383/…/seed_1-r1-5f62c5cb63a6
+ just now  4efed5f6  <unlabelled>  sir_basic  chain_binomial-dt1  (none)    seed_42    camdl-store/0.1.0_3e2b2888-4b1f07d2a9e3/sim/sir_basic-f7f8d6574383/…/seed_42-4efed5f6564d
 ```
 
-with a separate `ensembles` block carrying `CELLS` instead of `SCENARIO`/`SEED`.
-`--limit` defaults to 50; `--all` removes the cap.
-
-**An ensemble row stands for its member leaves.** A multi-cell `simulate` stores
-one `sim` leaf per cell and one ensemble leaf that lists them as dependencies;
-in any view that includes ensembles, the per-cell `sim` leaves the listed
-ensembles reference are not printed as rows of their own (membership is decided
-over every ensemble in the store, before `--limit`/`--since` truncate). A `sims`
-block therefore shows lone runs and cells that belong to no stored ensemble.
-`--kind sim` excludes ensembles and so lists every per-cell leaf; the cells are
-always reachable by `camdl show` on their `run_id`.
+`LABEL` is the label of an invocation that holds the cell. `SEED` is the cell's
+seed label (§2.4). `camdl show` on a cell prints its path, kind, model, config,
+scenario, seed label and process seed, full `run_id`, parameters, files and
+creation time. `camdl cat` on a cell prints its `traj.tsv`; `--stream NAME`
+prints a named file of the cell or of one of its by-products, by its file name:
+an observation stream (`cases.tsv`), `event_log.tsv`, `quantities.json` or
+`reactive_log.tsv`. A name the cell does not hold is refused with the list of
+the files it does hold. `camdl cat @L` renders the combined table of the
+invocation labelled `L` (§4.4). `--limit` defaults to 50; `--all` removes the
+cap. `--kind ensemble` lists `SimEnsemble` leaves under `results/ensembles/`, a
+kind no command of this camdl writes.
 
 Fits are listed one row per run, grouped under a `problem` line per problem
 folder (its fit id, model, config and path):
@@ -2614,22 +2539,20 @@ adds each label's earlier holders as `L~1`, `L~2`. `--limit` counts runs.
 
 Paths are printed relative to the root you asked for, so they are copy-paste
 ready into `camdl show` / `camdl cat`. Short-hash prefix resolution is
-git-style:
+git-style; in the run store a prefix that matches several results, cells and
+by-products alike, is refused with their 12-hex ids:
 
 ```bash
-camdl show 1
+camdl show 3
 ```
 
 ```
-error: '1' is ambiguous, matches 2 entries:
-  sim            ./results/sims/sir_priors-39588ff2/…/seed_5871781006564002450-1277c5c6
-  sim            ./results/sims/seir_vaccine-a0c10f3e/…/seed_42-dd2fb524
-refine by appending /<scenario> and/or /<seed_N>, or pass a longer hash prefix
+error: `3` matches 3 results: 35f6c644d453, 3766108b8da9, 3e4f1379e077
 ```
 
-`camdl show` prints the resolved path, kind, model, scenario, seed, config, the
-full `run_id`, every level with its hash, artifact sizes, creation time, engine
-version, and the `argv` that produced the run.
+A `results/` leaf shown by `camdl show` prints its path, kind, model, scenario,
+seed, config, the full `run_id`, every level with its hash, artifact sizes,
+creation time, engine version, and the `argv` that produced the run.
 
 `--format json` emits the sim, fit, profile, pfilter, and ensemble sections as
 JSON Lines (one object per line). The stream is therefore not a single JSON
@@ -2678,26 +2601,23 @@ camdl simulate seir_observations.camdl --seed 42 --emit-every cases=7 --obs-dir 
 camdl simulate sir_two_patch_long_obs.camdl --scenario baseline --seed 42 \
     --replicates 5 --obs cases_rep.tsv
 
-# Suppress the loose trajectory mirror, emit observations only (SBC workflows)
+# Export the observations only, not the combined table (SBC workflows)
 camdl simulate seir_observations.camdl --scenario baseline --seed 42 --obs-only-dir obs_only/
 ```
 
-`--obs` writes one wide table with a column per stream:
+`--obs` writes one wide table with a column per stream, after the coordinate
+columns of the combined table (§4.4): `replicate`, `scenario`, the point columns
+under `--sweep` or `--draws`, and `seed`. The columns are the same for one cell
+and for many:
 
 ```
-time	cases_urban	cases_rural
-0	0	0
-7	2	3
-14	1	0
+replicate	scenario	seed	time	cases_urban	cases_rural
+0	baseline	42	7	2	3
+0	baseline	42	14	1	0
 ```
 
-Under `--replicates`/`--seeds`/`--draws` the table gains a leading `replicate`
-column (0-based, as in §10.2):
-
-```
-replicate	time	cases_urban	cases_rural
-0	7	2	3
-```
+Each export is rendered from the observations stored in the cells (below), so
+asking for `--obs-dir` after `--obs FILE` computes nothing.
 
 `--obs` refuses a model whose streams emit on different schedules, before
 simulating:
@@ -2709,11 +2629,12 @@ Use --obs-dir (one file per stream, keeps trajectory) or
 --obs-only-dir (one file per stream, suppresses trajectory).
 ```
 
-`--obs-dir` / `--obs-only-dir` write one file per stream under the columns the
-stream **declared**, so the file re-loads under its own model (gh#833): the
-value under the scored column's name, the time under the `: time` column's name
-— or both boundaries under the `window_start`/`window_stop` names for a stream
-that declares its windows per row, each with a `date_*` twin under `--dates`:
+`--obs-dir` / `--obs-only-dir` write one file per stream, after the same
+coordinate columns, under the columns the stream **declared**, so the file
+re-loads under its own model (gh#833): the value under the scored column's name,
+the time under the `: time` column's name — or both boundaries under the
+`window_start`/`window_stop` names for a stream that declares its windows per
+row, each with a `date_*` twin under `--dates`:
 
 ```
 win_start	win_stop	cases
@@ -2812,14 +2733,16 @@ Projections are what a sensitivity or identifiability analysis differentiates,
 and what a posterior-predictive mean averages. Like `--quantities-out`, the
 output is a sidecar outside run identity.
 
-`--obs-only` / `--obs-only-dir` suppress only the _loose_ trajectory mirror; the
-store leaf still holds `traj.tsv`. In every mode the sampled observations are
-also written into the leaf under `obs/<obs-hash>-<obs-seed>/<stream>.tsv`
-alongside an `obs.json`, so they are reachable with
-`camdl cat <id> --stream
-<name>` without keeping the loose files.
+`--obs-only` / `--obs-only-dir` leave out only the combined-table export; the
+cell still stores `traj.tsv`. In every mode the sampled observations are an
+`obs` by-product of each cell, stored inside it at
+`obs/<stream names joined by _>-<12 hex>/<stream>.tsv` with its own
+`identity.json` and `run.json`, so they are reachable with
+`camdl cat <id> --stream <stream>.tsv` without keeping the exported files. A
+cell already stored without them is simulated again to draw them, and its
+trajectory is checked against the stored one.
 
-These writers — `--obs`, `--obs-dir`, the store's `obs/` subtree, and a
+These writers — `--obs`, `--obs-dir`, the stored `obs` by-product, and a
 generated quantity that reduces `observations.<stream>` — draw every stream from
 the model alone, with no data columns. So a stream whose likelihood reads a data
 column is refused by name before any cell runs, including a ratio stream's `n`
@@ -2837,11 +2760,10 @@ The observation RNG is seeded independently of the process RNG, so adding
 One engine behind every grid. `camdl simulate` covers a grid expressed entirely
 in flags: scenarios × parameter points × replicates or seeds, where the
 parameter points are a sample (`--draws`) or a design (`--sweep` /
-`--sweep-file`, §5.5). It builds a `SimulateJob`, hands it to `engine::run_job`,
-and writes one five-level `sim` leaf per cell, so `camdl list` / `show` / `cat`
-browse every cell uniformly; a multi-cell run also writes one `SimEnsemble` leaf
-holding the combined table (§4.4). A grid the store already holds is read back,
-not re-simulated.
+`--sweep-file`, §5.5). It builds a `SimulateJob` and stores one `sim` result per
+cell in the run store (§4.4), so `camdl list` / `show` / `cat` browse every cell
+uniformly. No combined table is stored; `-o` and `camdl cat @LABEL` render it
+from the cells. A grid the store already holds is read back, not re-simulated.
 
 ### 5.1 CLI Invocations
 
@@ -2994,8 +2916,8 @@ pub enum ObsOutput { None, File(PathBuf), Dir(PathBuf), OnlyFile(PathBuf), OnlyD
 `--scenario` accepts a comma-separated list or repetition; both expand to the
 same `Vec<ScenarioRef>`.
 
-Output shape is supplied by the verb as an `engine::RunSink`: `simulate`
-composes the store sink with a combined-TSV mirror sink.
+`simulate` hands each cell the store has not got to the engine, and renders its
+exports from the stored cells afterwards.
 
 ### 5.3 Total Runs Calculation
 
@@ -3078,13 +3000,12 @@ anything runs.
 **`--sweep-file FILE`**: a TSV whose header names model parameters and whose
 rows are design points, `point_id` the 0-based row. A `point_id` column of
 distinct non-negative integers gives each row the id it is written under instead
-(in the combined and observation tables and in the ensemble record's
-`design.point_ids`); the row position still drives nothing but the engine's own
-order. A column naming no model parameter is refused with the parameter list; a
-file with zero rows is refused; a duplicate row is refused naming both lines; a
-repeated or non-integer `point_id` is refused naming the row. `--sweep-file` and
-`--sweep` are mutually exclusive. The file enters the ensemble's record by
-content digest.
+(in the combined and observation tables); the row position still drives nothing
+but the engine's own order. A column naming no model parameter is refused with
+the parameter list; a file with zero rows is refused; a duplicate row is refused
+naming both lines; a repeated or non-integer `point_id` is refused naming the
+row. `--sweep-file` and `--sweep` are mutually exclusive. The file enters no
+identity: each row's values reach the cells' parameters.
 
 **`camdl design lhs MODEL --fit FIT.toml --n N [--seed S] [-o FILE]`** writes
 such a file: a Latin-hypercube design of N points over the fit config's
@@ -3118,33 +3039,32 @@ dry run alike; so is a `--param` on a swept parameter, since `--param` outranks
 every tier and the sweep would not vary it; so is `--sweep` with `--draws` or
 `--design-from`.
 
-**Labels and records.** Each cell's `params` level is labelled by the swept
-values, `beta=0.2` in `run.json` and `beta_0.2-<h8>` in the path, two swept
+**Labels and records.** Each cell's parameters group is labelled by the swept
+values, `beta=0.2` in its labels and `beta_0.2-<12 hex>` in the path, two swept
 parameters as `beta=0.3_rho=0.5`; the arm label is the preset's name, or derived
 from the flags for an ad-hoc arm (`(none)`, `(none)+vaccination` for
-`--enable vaccination`, `(none);beta=0.3` for `--param beta=0.3`). The ensemble
-leaf's `run.json` carries the resolved design — its source, the point count
-(`n_points`, in place of a sample's `n_draws`) and each swept parameter's
-values, name-sorted — so the grid declaration lives with the results.
+`--enable vaccination`, `(none);beta=0.3` for `--param beta=0.3`). The
+invocation's record lists the cells in order with their labels, which carry each
+cell's `point_id` and swept values.
 
-**Columns.** Under a sweep the combined `ensemble.tsv` (and `-o` mirror) leads
-with `replicate`, `point_id`, one `sweep:<param>` column per swept parameter
-(shortest round-trip rendering, so `0.1234567` reads back exactly) and `seed`,
-then the time columns; there is no `draw` column. Observation tables under
-`--obs-dir` / `--obs-only-dir` / `--obs` / `--obs-only` carry the same four
-leading columns before the stream's own. `quantities {}` under a sweep are
-banded per (design point, scenario), never across points; one replicate per
-point gives a point-mode row per group.
+**Columns.** Under a sweep the combined table (`-o`, `--stdout`,
+`camdl cat @LABEL`) leads with `replicate`, `scenario`, `point_id`, one
+`sweep:<param>` column per swept parameter (shortest round-trip rendering, so
+`0.1234567` reads back exactly) and `seed`, then the time columns; there is no
+`draw` column. Observation tables under `--obs-dir` / `--obs-only-dir` / `--obs`
+/ `--obs-only` carry the same leading columns before the stream's own.
+`quantities {}` under a sweep are banded per (design point, scenario), never
+across points; one replicate per point gives a point-mode row per group.
 
 **Observations as a dataset.** `--obs-dir DIR` writes one TSV per observation
 stream, stacked over every cell with the columns above; that directory is the
 dataset a modeller then hands to `pfilter --data cases=DIR/cases.tsv` or to a
-fit, and the same draws also land in each leaf's `obs/` subtree. There is no
-path-less observation flag: the destination is the product.
+fit, and it is rendered from the `obs` by-product stored in each cell. There is
+no path-less observation flag: the destination is the product.
 
 ```bash
 camdl simulate ocaml/golden/sir_basic.camdl --params ocaml/golden/sir_basic.params.toml \
-    --sweep beta=0.2,0.5 --replicates 2 --dry-run --output-dir results
+    --sweep beta=0.2,0.5 --replicates 2 --dry-run
 ```
 
 ```
@@ -3166,19 +3086,21 @@ Parameters (3):
   gamma =       0.100000  ocaml/golden/sir_basic.params.toml
 
   total: 2 design points × 2 replicates = 4 runs
+info: the draw or sweep point replaced beta = 0.3 (from ocaml/golden/sir_basic.params.toml) with 0.2 to 0.5, across 4 cells
 
-store: results
-  [miss] sims/sir_basic-389ccfd3/chain_binomial-dt1-903a4928/beta_0.2-65985320/_none_-e93c95fd/seed_1-e6a47b86
-  [miss] sims/sir_basic-389ccfd3/chain_binomial-dt1-903a4928/beta_0.2-65985320/_none_-e93c95fd/seed_5871781006564002452-f483e20c
-  [miss] sims/sir_basic-389ccfd3/chain_binomial-dt1-903a4928/beta_0.5-ee1882a0/_none_-e93c95fd/seed_1-e6a47b86
-  [miss] sims/sir_basic-389ccfd3/chain_binomial-dt1-903a4928/beta_0.5-ee1882a0/_none_-e93c95fd/seed_5871781006564002452-f483e20c
+store: camdl-store
+  [miss] scenario=(none) seed_1
+  [miss] scenario=(none) seed_1-r1
+  [miss] scenario=(none) seed_1
+  [miss] scenario=(none) seed_1-r1
   0 cache hits → read back, 4 misses → would simulate
 (dry run — no simulation, no files written.)
 ```
 
-The two seed segments are shared by both `beta` points — the common random
-numbers above — and `beta` is absent from the parameter list because the sweep
-supplies it per cell.
+Each cell is named by its scenario and seed label; once the cells are stored,
+each line reads `[hit ]` and ends with the cell's 12-hex id. Both `beta` points
+run `seed_1` and `seed_1-r1` — the common random numbers above — and `beta` is
+absent from the parameter list because the sweep supplies it per cell.
 
 #### Scoring a design: `pfilter --sweep-file`
 
@@ -3277,20 +3199,18 @@ A multi-cell `camdl simulate`:
 2. Expands the parameter axis — the draws of `--draws`, or the design points of
    `--sweep` / `--sweep-file` — and builds the `param-point × scenario × seed`
    grid. A scenario touching a user-authored coordinate is refused here.
-3. Classifies each cell against the store under the exact rule of §4.4.
-   `--dry-run` stops here and prints the plan, each cell as a hit or a miss with
-   its leaf path, and the counts.
-4. Runs the cells the store does not hold, sequentially, in canonical
-   `scenario → point → replicate` order (each cell's seed is derived from its
-   coordinates, so no ordering can perturb a trajectory), and reads the held
-   cells back.
-5. Writes `traj.tsv` + `run.json` (+ `obs/` when observations were requested)
-   per leaf, the `SimEnsemble` leaf with the combined table and the resolved
-   design, and the `-o` / `--obs*` mirrors. There is no grid-level manifest
-   file; the per-leaf `run.json` records are the index, with `<root>/index.json`
-   as a derived, rebuildable lookup cache.
-6. Reports `N of M cells read from the store; simulated K` and where the leaves
-   landed.
+3. Resolves each cell's identity (§3.7). `--dry-run` stops here and prints the
+   plan, each cell as a hit or a miss, and the counts.
+4. Stores the compiled model, then begins every cell in the store: a stored cell
+   is reused, and each other cell is simulated, in parallel under `--parallel`,
+   and stored with the by-products asked of it. Each cell's seed is derived from
+   its coordinates, so no ordering can perturb a trajectory.
+5. Records the invocation: the inputs as given, the `--label`, and the cells in
+   order with their labels.
+6. Lists every stored failure and exits 1 if there is one (§4.4); otherwise
+   reports how many cells were read from the store and where the cells landed,
+   and renders the `-o` / `--stdout` / `--obs*` / `--quantities-out` exports
+   from the stored cells.
 
 ## 6. FitConfig — the inference type
 
@@ -5130,13 +5050,13 @@ separates them.
 
 ### 9.1 The identity model
 
-Every artifact camdl writes — a forward trajectory, a fit's method leaf, a
-particle filter evaluation, a profile grid point, a multi-cell ensemble — is
-stored as a **content-addressed leaf** in one store rooted at the output
-directory (default `results/`, see `run_paths::DEFAULT_OUTPUT_ROOT`). There is
-no second scheme: fits are content-addressed exactly like simulations. The only
-thing that is "named" about a fit directory is the human-readable _label_ in
-each path segment, which is provenance and never identity.
+A fit's method leaf and a profile grid point are each stored as a
+**content-addressed leaf** in one store rooted at the output directory (default
+`results/`, see `run_paths::DEFAULT_OUTPUT_ROOT`). This section describes that
+store. A forward simulation and a particle filter evaluation are stored in the
+run store instead (§3.7, §4.4). The only thing that is "named" about a fit
+directory is the human-readable _label_ in each path segment, which is
+provenance and never identity.
 
 A leaf's identity is **not** one flat hash. It is an ordered tuple of per-level
 content hashes, and the leaf address is derived from that tuple:
@@ -5259,42 +5179,10 @@ different models (the `model` level; `config` is unchanged).
 
 #### 9.2.4 The levels, per artifact kind
 
-| kind (`store_dir`)           | levels, in path order                     | resolver                      |
-| ---------------------------- | ----------------------------------------- | ----------------------------- |
-| `Sim` (`sims/`)              | model · config · params · scenario · seed | `cli/src/resolve.rs`          |
-| `SimEnsemble` (`ensembles/`) | model · config · params · grid            | `cli/src/sim_ensemble_cas.rs` |
-| `FitMethod` (`fits/`)        | fit · method · seed                       | `cli/src/fit/cas.rs`          |
-| `ProfilePoint` (`profiles/`) | profile · point · method · seed · start   | `cli/src/profile_cas.rs`      |
-
-**`Sim` levels** (`resolve::resolve_trajectory`; the level types are in
-`runid::inputs`):
-
-- `model` — `ModelDigest` (§9.2.3). Label: the model file stem.
-- `config` — `SimConfig`, `schema_version = 6`: `backend`
-  (gillespie/chain_binomial/ode), `dt`, `t_start`, `t_end`, the resolved output
-  schedule (`Regular { start, step }` or `AtTimes([…])`), `calendar` (a
-  placeholder always `Numeric` today), `allow_degenerate_rates`,
-  `allow_forcing_extrapolation`, `no_flows`, the `columns` allow-list as a
-  sorted set, and `init_state`. The schema version is also where the leaf's
-  _file format_ enters the key: version 5 changed no field, it re-keyed every
-  sim leaf because `traj.tsv` gained `t_start`/`t_stop` (§10.1) and a key must
-  not name bytes a recompute no longer reproduces; version 6 likewise re-keyed
-  every sim leaf because its `run.json` gained the `calendar` block (§9.5).
-  Label: `{backend}-dt{dt}`.
-- `params` — `ResolvedParams`: the resolved base parameter map
-  (`BTreeMap<ParamId, FiniteF64>`, i.e. compiled-in values overlaid by
-  `--params` then `--param`, plus any sweep point) and the SHA-256 **content**
-  digests of every `--table NAME=FILE` file, sorted by table name. Files are
-  hashed by bytes, never by path. Label: `base`, a `k=v` join of the sweep
-  point, or `draws` when a full draw vector would overflow the path component.
-- `scenario` — `ResolvedScenario`: the sorted `enable` and `disable`
-  intervention-id sets and the parameter patch. Only the _delta_; renaming a
-  scenario preserves the hash. Label: the scenario name.
-- `seed` — `Seed`. Only `process_seed` is hashed; `base_seed` is
-  `#[run_input(provenance)]`. Hashing the derived per-cell seed rather than the
-  user's `--seed` is what stops a lone run and a sweep cell from aliasing.
-  Label: `seed_{n}` — note this renders the _process_ seed, so a multi-replicate
-  run shows segments like `seed_5871781006564002452`.
+| kind (`store_dir`)           | levels, in path order                   | resolver                 |
+| ---------------------------- | --------------------------------------- | ------------------------ |
+| `FitMethod` (`fits/`)        | fit · method · seed                     | `cli/src/fit/cas.rs`     |
+| `ProfilePoint` (`profiles/`) | profile · point · method · seed · start | `cli/src/profile_cas.rs` |
 
 **`FitMethod` levels** (`fit::cas::resolve_fit_method`):
 
@@ -5318,11 +5206,6 @@ different models (the `model` level; `config` is unchanged).
 `Method::identity_payload()` deliberately omits the _extension dimension_ (PGAS
 sweeps, PMMH iterations) so `--resume` can lengthen a chain without re-keying;
 the resume length is keyed separately as `target_length`.
-
-**`SimEnsemble` levels**: the `config` level is only `{backend, dt}`; every
-other config knob reaches the ensemble through the `grid` level, which digests
-`{n_cells, [(scenario_label, process_seed, draw_idx, sim_run_id)] sorted}`. The
-cell **count** is in the key explicitly.
 
 **`Pfilter` `config`** digests
 `{particles, replicates, dt, obs_block,
@@ -5355,26 +5238,6 @@ done by `FiniteF64`'s constructor.
   index.json                       # derived, rebuildable (§9.6)
   .staging/                        # in-flight commits
   .quarantine/                     # unidentifiable debris moved aside
-  sims/
-    {model_stem}-{h8}/
-      {backend}-dt{dt}-{h8}/
-        {param_label}-{h8}/
-          {scenario}-{h8}/
-            seed_{n}-{h8}/
-              run.json             # RunRecord, kind = sim
-              traj.tsv
-              reactive_log.tsv     # only when a reactive policy fired
-              obs/                 # declared child, one dir per (obs model, obs seed)
-                {obs_hash8}-{obs_seed}/
-                  <stream>.tsv
-                  obs.json         # NOT a RunRecord
-              event_log/           # declared child, only with --event-log
-                event_log.tsv
-                event_log.json     # NOT a RunRecord
-  ensembles/
-    {model_stem}-{h8}/{backend}-dt{dt}-{h8}/{param_label}-{h8}/cells-n{N}-{h8}/
-      run.json
-      ensemble.tsv
   fits/
     {fit_stem}-{h8}/               # the fit level; also holds fit-wide sidecars
       fit.meta.json
@@ -5419,72 +5282,41 @@ leaf read `Stale`, and conversely a file edited in place to the same length with
 the mtime restored passes. The strong `digest` recorded per artifact is **not**
 recomputed on any read path today.
 
-**What a cache hit actually saves.**
+**`simulate` and the run store.** A `sim` cell is stored in the run store, not
+here, and its reuse rule is §4.4: a rerun reuses every stored cell, and
+`--force` moves the stored cell to quarantine and stores the recomputed one. An
+input changes a cell's id when it changes the cell's identity (§3.7):
 
-- A multi-cell `camdl simulate` skips the simulation itself: `SimSink` defers to
-  `CasSink::should_run`, which returns `false` on a hit under the exact rule of
-  §4.4, and the cell's `traj.tsv` (and stored observations) are read back for
-  the combined outputs instead.
-- A lone `camdl simulate` recomputes its cell. What the hit saves is the write:
-  `commit_atomic` sees an `AlreadyCompleted` leaf and discards the freshly
-  staged bytes (unless `--force`, below).
+| change                                          | new cell? | where it enters                                   |
+| ----------------------------------------------- | --------- | ------------------------------------------------- |
+| model file edit that changes the compiled model | yes       | model                                             |
+| camdl build (engine version, `ir/VERSION`)      | yes       | the build directory                               |
+| `--backend`, `--dt`                             | yes       | settings                                          |
+| `--output-every`                                | yes       | model[^oe]                                        |
+| `--no-flows`, `--columns`                       | yes       | settings                                          |
+| `--allow-degenerate-rates`                      | yes       | settings                                          |
+| `--param`, `--params`                           | yes       | parameters                                        |
+| `--table` file _contents_                       | yes       | model                                             |
+| `--integrator`                                  | yes       | model                                             |
+| `--scenario`, `--enable`, `--disable`           | yes       | scenario (and parameters, for a `set` or `scale`) |
+| `--seed`, `--seeds`, `--replicates`             | yes       | seed                                              |
+| `--emit-every`                                  | no[^ee]   | the `obs` by-product                              |
+| `--obs*`, `--event-log`, `--quantities-out`     | no        | a by-product                                      |
+| `--label`                                       | no        | the invocation record                             |
+| `-o`, `--stdout`, `--dates`, `--draws-out`      | no        | exports only                                      |
+| `--parallel`                                    | no        | nothing                                           |
 
-Consequences of that second rule, which are load-bearing for anyone reasoning
-about the store:
-
-- On a hit the leaf keeps the **bytes of the first writer**. A second run whose
-  identity matches but whose bytes differ leaves no trace, unless it is forced.
-- `simulate --force` quarantines an existing same-identity leaf (moved to
-  `<root>/.quarantine/`, not deleted) and stores the recomputed bytes in its
-  place, so a forced run is the one way to replace a leaf's contents.
-- An artifact that only some invocations ask for is never one of the leaf's own
-  files. The observation subtree and the event log are declared children
-  (`obs/…`, `event_log/`): a run that asks for one writes it beside a leaf that
-  already exists and declares it in the leaf's `run.json` `children`, which is
-  recorded and not hashed, so the leaf's run id and manifest are the same
-  whichever invocation wrote it first. A recompute of the leaf — `--force`, or a
-  leaf read as stale — moves the whole directory aside, children included, so a
-  child is written again only by a run that asks for it. A reader uses the event
-  log only when its `event_log.json` record is present and names the file's size
-  and SHA-256; otherwise `camdl cat --stream event_log.tsv` refuses and names
-  `--event-log` and `--force` as the remedy.
-- `--label` is the one recorded field refreshed on a hit: the leaf's
-  `run.json.provenance.label` is rewritten in place when it differs.
-
-**What re-keys a `Sim` run** (verified by perturbing one input at a time against
-`ocaml/golden/sir_basic.camdl`):
-
-| change                                | re-keys? | level        |
-| ------------------------------------- | -------- | ------------ |
-| model file edit                       | yes      | model        |
-| camdl (engine) version                | yes      | model        |
-| `ir/VERSION`                          | yes      | model        |
-| `--backend`                           | yes      | config       |
-| `--dt`                                | yes      | config       |
-| `--output-every`                      | yes      | model[^oe]   |
-| `--no-flows`, `--columns`             | yes      | config       |
-| `--allow-degenerate-rates`            | yes      | config       |
-| `--param`, `--params`                 | yes      | params       |
-| `--table` file _contents_             | yes      | params       |
-| `--scenario`, `--enable`, `--disable` | yes      | scenario     |
-| `--seed`, `--seeds`, `--replicates`   | yes      | seed         |
-| `--emit-every`                        | no[^ee]  | obs child    |
-| `--label`                             | no       | provenance   |
-| `-o`, `--obs*`, `--draws-out`         | no       | mirrors only |
-| `--integrator`                        | yes      | model        |
-| `--dates`                             | no       | mirrors only |
-
-[^oe]: `--output-every` re-keys through the _model_ level, not `config`:
-    `util::rematerialize_with_output_every` rewrites the compiled IR to a temp
-    file that both the engine and the identity resolver then load. This is the
-    pattern a model-mutating CLI flag must follow **when the flag changes the
+[^oe]: `--output-every` enters through the _model_, not the settings:
+    `util::rematerialize_with_output_every` rewrites the compiled IR that both
+    the engine and the stored compiled model are made from. This is the pattern
+    a model-mutating CLI flag must follow **when the flag changes the
     trajectory**.
 
 [^ee]: `--emit-every` deliberately does NOT follow that pattern. It changes only
-    the emitted observations, so it keys the `obs/` child (`obs_hash`, §10.5)
-    and leaves the sim `run_id` alone — two cadences are two obs subtrees under
-    one trajectory leaf. Lowering it into the IR would move the model hash a
-    `fit` against real data shares, re-keying a fit over a change
+    the emitted observations, so it enters the identity of the `obs` by-product
+    (§10.5) and leaves the cell's id alone: two cadences are two `obs`
+    by-products inside one cell. Lowering it into the IR would move the model
+    hash a `fit` against real data shares, re-keying a fit over a change
     `emit_schedule` cannot make to a likelihood.
 
 ### 9.4 Fit identity and re-running a changed fit
@@ -5546,10 +5378,12 @@ Because the key is the run's identity, it covers every input that re-keys a fit
 (`camdl list/show/cat`, viewers, notebooks). The on-disk schema is
 `runid::record::RunRecord` (`rust/crates/runid/src/record.rs`); `FORMAT_VERSION`
 is `2`. **The record itself is never hashed** — identity comes only from the
-levels — which is why declaring an `obs/` child cannot change the trajectory's
-`run_id`.
+levels — which is why declaring a child cannot change the leaf's `run_id`. This
+contract is that of `results/` leaves; a result in the run store has its own
+records (§2.5).
 
-A real `sims/` leaf record (hashes and paths abbreviated):
+A `results/sims/` leaf record, a kind `camdl list` and `camdl show` read and no
+command of this camdl writes (hashes and paths abbreviated):
 
 ```json
 {
@@ -5761,40 +5595,40 @@ carries no step: draw `k` of chain `c` is the `k`-th retained row of
 | `failure`        | `{message, operation}`                     | on a `"failed"` record camdl stopped: its error, and what was running; omitted otherwise             |
 | `artifacts`      | map path → `{bytes, mtime, digest}`        | EXACT SET over the leaf's own files; `mtime` is `"{secs}.{nanos:09}"`                                |
 | `output_schema`  | map path → `{role, columns}`               | declared column roles (§10.9); omitted when empty                                                    |
-| `children`       | map namespace → `[hash]`                   | declared child sub-artifact dirs (`obs`, `event_log`); omitted when empty                            |
+| `children`       | map namespace → `[hash]`                   | declared child sub-artifact dirs (`obs`, `event_log` of a `sims/` leaf); omitted when empty          |
 | `inputs`         | arbitrary JSON                             | display/audit summary, **never hashed**; omitted when null                                           |
 | `provenance`     | object                                     | `argv`, `label`, `created_at`, `camdl_version`, `source_paths` — all recorded, never hashed          |
 
-`status` transitions depend on the write mode. `sim` and `sim_ensemble` commit
-**atomically**: the leaf appears only once complete, and there is no
-discoverable in-flight record. `fit_method`, `pfilter` and `profile_point`
-**stream**: they claim the directory, write a `"running"` record and an
-exclusive `.lock`, stream output in, then finalize to `"completed"` with the
-exact-set manifest and the post-run `inputs`. A run camdl stops on an error
-records `"failed"`, with its `failure`, before it exits, and releases the
-`.lock`; a `"running"` record left behind is what a killed or crashed run
-leaves, and stays `"running"` (§2.3.1, "A run's end is recorded, never
-inferred"). A stale `.lock` whose PID is dead is reclaimed, the prior attempt's
-record preserved under `.attempts/`; a live one refuses with `fit in progress`.
+`status` transitions depend on the write mode. A leaf written in Mode A (§2.3.1)
+commits **atomically**: it appears only once complete, and there is no
+discoverable in-flight record. `fit_method` and `profile_point` **stream**: they
+claim the directory, write a `"running"` record and an exclusive `.lock`, stream
+output in, then finalize to `"completed"` with the exact-set manifest and the
+post-run `inputs`. A run camdl stops on an error records `"failed"`, with its
+`failure`, before it exits, and releases the `.lock`; a `"running"` record left
+behind is what a killed or crashed run leaves, and stays `"running"` (§2.3.1, "A
+run's end is recorded, never inferred"). A stale `.lock` whose PID is dead is
+reclaimed, the prior attempt's record preserved under `.attempts/`; a live one
+refuses with `fit in progress`.
 
 Three `provenance` fields — `finished_at`, `host`, `thread_count` — exist in the
 schema and are never populated by any writer.
 
 Sub-artifacts that are _not_ `RunRecord`s:
 
-- `obs/{obs_hash8}-{obs_seed}/obs.json` —
+- `obs/{obs_hash8}-{obs_seed}/obs.json`, in a `results/sims/` leaf —
   `{obs_hash, obs_seed, process_seed, streams, version}`, where `obs_hash` is
   the SHA-256 of the model's serialized `observations` block. The parent
   declares this directory under `children.obs`, but the declared hash is
   `SHA256("{run_id}:{obs_seed}:{obs_hash}")` and appears nowhere inside the
   child.
-- `event_log/event_log.json` — `{parent_run_id, file, bytes, digest}`: the
-  parent leaf's run id and the size and SHA-256 of `event_log.tsv`, written
-  after it, so its presence marks the child complete. The parent declares the
-  directory under `children.event_log` with the hash
-  `SHA256("{run_id}:event_log")`. A second `--event-log` run of the same run id
-  leaves a complete child as it is, and refuses one whose recorded digest
-  differs from the bytes it recorded, overwriting nothing.
+- `event_log/event_log.json`, in a `results/sims/` leaf —
+  `{parent_run_id, file, bytes, digest}`: the parent leaf's run id and the size
+  and SHA-256 of `event_log.tsv`, written after it, so its presence marks the
+  child complete. The parent declares the directory under `children.event_log`
+  with the hash `SHA256("{run_id}:event_log")`. A second `--event-log` run of
+  the same run id leaves a complete child as it is, and refuses one whose
+  recorded digest differs from the bytes it recorded, overwriting nothing.
 - `fits/{fit_stem}-{h8}/fit.meta.json` — the fit-wide sidecar:
   `{schema_version, source_model, model_identity, source_config, fit_toml_hash, data_hashes,
   holdout_hashes, estimated, fixed, resolved_priors, parameters_provenance, schema}`,
@@ -5825,32 +5659,29 @@ an error. `camdl dev reindex [ROOT]` rebuilds it from a fresh walk.
 
 ### 9.7 Enumerating a grid — no manifest file
 
-There is no grid-level `manifest.json`. Each completed cell is independently a
-content-addressed `run.json` leaf under `sims/` (the system of record). To
-enumerate a grid, walk those leaves or read the derived `index.json` (§9.6).
-`camdl list` does this live; `simulate --dry-run` re-plans the grid from its
-flags and reports, per cell, whether the store already holds it.
-
-A multi-cell `simulate` additionally writes one `SimEnsemble` leaf holding the
-combined wide-format TSV, with a `deps` edge to each cell's `traj.tsv`.
+There is no grid-level `manifest.json`. Each completed cell of a `simulate` grid
+is independently a `sim` result in the run store (§4.4), and the invocation's
+record lists the cells in the order the command asked for them, with their
+labels. `camdl cat @LABEL` renders the combined table from that record and the
+stored cells; `camdl list` lists the cells; `simulate --dry-run` re-plans the
+grid from its flags and reports, per cell, whether the store already holds it.
 
 ### 9.8 Identity boundaries worth knowing
 
 Two flags are easy to misjudge, and neither is a gap.
 
-- **`--integrator rk4|rk45` (`Sim`)** changes the trajectory and re-keys the
-  `model` level: the override is part of the resolved model whose digest names
-  the leaf, and the integrator is always folded into that digest (§9.2.3). Two
-  integrators are two leaves.
-- **`--dates` (`SimEnsemble`)** changes only how the combined TSV is rendered.
-  The stored `ensemble.tsv` never carries date columns; they appear in the `-o`
-  and `--stdout` views only (§10.2). The flag is therefore not identity, and a
-  run with and without it is the same ensemble.
+- **`--integrator rk4|rk45` (`simulate`)** changes the trajectory and changes
+  the cell's compiled model: the override is part of the compiled model the cell
+  depends on (§3.7). Two integrators are two cells.
+- **`--dates` (`simulate`)** changes only how the combined table is rendered. A
+  stored `traj.tsv` never carries date columns; they appear in the `-o`,
+  `--stdout` and observation exports only (§10.2). The flag is therefore not
+  identity, and a run with and without it stores the same cells.
 
 Related but sound: `reactive_log.tsv` is written whenever the model has an
-active reactive policy, so it is a function of the run id; the event log, which
-only some invocations ask for, is the leaf's `event_log/` child, never one of
-its files.
+active reactive policy, so it is a function of the cell's identity and one of
+its files; the event log, which only some invocations ask for, is an `event_log`
+by-product inside the cell, never one of the cell's files.
 
 ---
 
@@ -5862,8 +5693,8 @@ file's own header, so a consumer never has to reverse-engineer a column name.
 
 ### 10.1 Trajectories (`traj.tsv`)
 
-The canonical per-cell trajectory artifact in a `Sim` leaf. One row per output
-time. **No comment or version line** — the first line is the header:
+The canonical per-cell trajectory file of a `sim` cell. One row per output time.
+**No comment or version line** — the first line is the header:
 
 ```
 t	t_start	t_stop	S	I	R	flow_infection	flow_recovery
@@ -5893,50 +5724,48 @@ Columns, in this order (`util::TRAJ_TIME_HEADER`, then
 `--no-flows` drops group 5; `--columns A,B,…` restricts groups 3–5 to an
 allow-list validated against the model (an unknown name is a hard error listing
 the valid ones); the three time columns are always written. Emitted order always
-follows the model, never the allow-list. Both knobs are identity (§9.2.4), so a
-filtered trajectory is its own leaf.
+follows the model, never the allow-list. Both knobs are identity (§3.7), so a
+filtered trajectory is its own cell.
 
-The leaf trajectory never carries a `date` column, regardless of `--dates`.
+The stored trajectory never carries a `date` column, regardless of `--dates`.
 
-### 10.2 Combined trajectory views (`ensemble.tsv`, `-o`, `--stdout`)
+### 10.2 Combined trajectory table (`-o`, `--stdout`, `camdl cat @LABEL`)
 
-A multi-cell `simulate` (`--replicates` / `--seeds` / multiple `--scenario` /
-`--draws`) interleaves every cell into one wide TSV. The same table is the
-`ensemble.tsv` artifact of the `SimEnsemble` leaf and the `-o PATH` mirror. The
-two are byte-identical except for the `date` columns below: `--dates` renders
-into the `-o` mirror only, and the stored `ensemble.tsv` never carries them.
+`-o PATH`, `--stdout` and `camdl cat @LABEL` write one table rendered from the
+stored cells of an invocation, in the order the command asked for them. It is
+not stored; the three write the same bytes.
 
 ```
-# 0.1.0+<git> (<build date>)
-replicate	t	t_start	t_stop	date	date_start	date_stop	S	I	R	V	flow_infection	flow_recovery
-0	0	0	0	2020-01-01	2020-01-01	2020-01-01	9990	10	0	0	0	0
-0	1	0	1	2020-01-02	2020-01-01	2020-01-02	9985	13	2	0	5	2
+# 0.1.0+<git>
+replicate	scenario	seed	t	t_start	t_stop	date	date_start	date_stop	S	I	R	V	flow_infection	flow_recovery
+0	(none)	1	0	0	0	2020-01-01	2020-01-01	2020-01-01	9990	10	0	0	0	0
+0	(none)	1	1	0	1	2020-01-02	2020-01-01	2020-01-02	9985	13	2	0	5	2
 ```
 
-- Line 1 is a `# {camdl version} ({build date})` comment — present here and
-  absent from `traj.tsv`.
-- Leading key columns appear only when the corresponding axis has more than one
-  level: `replicate` when the run has more than one cell, `scenario` when more
-  than one scenario, `draw` when more than one parameter draw.
-- `replicate` numbers the cells of the whole run, 0-based in canonical order
-  (scenario, then draw or design point, then replicate), so it runs on across
-  scenarios: with 2 draws × 2 replicates, the first scenario's rows carry
+- Line 1 is a `# {camdl version}` comment — present here and absent from
+  `traj.tsv`.
+- The coordinate columns are the same for one cell and for many: `replicate`,
+  `scenario`, then `point_id` and one `sweep:<param>` column per swept parameter
+  under `--sweep` / `--sweep-file`, or `draw` under `--draws`, then `seed`.
+- `replicate` numbers the cells of the whole invocation, 0-based in canonical
+  order (scenario, then draw or design point, then replicate), so it runs on
+  across scenarios: with 2 draws × 2 replicates, the first scenario's rows carry
   `replicate` 0–3 and the second's 4–7. It is not a key for pairing scenarios; a
   join on it matches nothing across scenarios. Cells of different scenarios at
   the same draw and the same replicate within that draw share a process seed
   (§3.1, the scenario index is absent from the mix), and those are the pairs to
-  difference: join on `draw` (or, for a sweep, `point_id` and `seed`) and `t`,
-  plus, when there is more than one replicate per draw, the replicate's position
-  within its scenario, `replicate mod (draws × replicates)`.
-- `date`, `date_start`, `date_stop` appear only under `--dates` (in the `-o`
-  mirror, never in the stored `ensemble.tsv`), which requires the model to
-  declare an `origin`; each is its numeric twin (`t`, `t_start`, `t_stop`)
-  rendered via `ir::caltime::internal_to_date_hires`.
+  difference: join on `draw` (or, for a sweep, `point_id`) and `seed` and `t`.
+- `scenario` is the scenario's name, `(none)` for the implicit arm. `seed` is
+  the process seed the cell ran under; passed back to `--seeds` it reproduces
+  the cell.
+- `date`, `date_start`, `date_stop` appear only under `--dates`, which requires
+  the model to declare an `origin`; each is its numeric twin (`t`, `t_start`,
+  `t_stop`) rendered via `ir::caltime::internal_to_date_hires`.
 - The data columns are identical to §10.1 and honour the same
   `--no-flows`/`--columns` filter.
 
-A single-cell `simulate` writes no ensemble leaf; the one `Sim` leaf is the
-whole result.
+A table over cells of which one or more stored a failure (§4.4) is refused, and
+the error names each such cell.
 
 ### 10.3 Posterior draws (`draws.tsv`)
 
@@ -6049,9 +5878,11 @@ is appended under the base's header (§9.5, "A resumed leaf").
 ### 10.5 Observation draws
 
 `simulate --obs/--obs-dir/--obs-only/--obs-only-dir` draws synthetic
-observations from the model's `observations {}` block. They live in the leaf
-under `obs/{obs_hash8}-{obs_seed}/<stream>.tsv`, one file per stream, and are
-mirrored to the requested path or directory.
+observations from the model's `observations {}` block. They are an `obs`
+by-product of each cell, stored inside the cell folder at
+`obs/<stream names joined by _>-<12 hex>/<stream>.tsv`, one file per stream,
+beside the by-product's own `identity.json` and `run.json`, and the requested
+path or directory is rendered from them.
 
 Per-stream file:
 
@@ -6062,17 +5893,23 @@ time	weekly_cases
 ```
 
 The time column is named `time` here, not `t`. Values render as an integer when
-the draw is integral and `{:.6}` otherwise. The leaf's stream files never carry
-a `date` column — `--dates` reaches only the mirrors.
+the draw is integral and `{:.6}` otherwise. The stored stream files never carry
+a `date` column or coordinate columns; `--dates` and the coordinates reach only
+the exports.
 
-The single-file wide form (`--obs PATH`) prefixes the same optional
-`replicate`/`scenario`/`draw` key columns as §10.2, then `time`, an optional
-`date` under `--dates`, then one column per stream. It requires every stream to
-share a schedule; a multi-cadence model is a hard error directing the user to
+Both exports prefix the coordinate columns of §10.2 (`replicate`, `scenario`,
+the point columns, `seed`) before the time column, for one cell as for many. The
+single-file wide form (`--obs PATH`) then has `time`, an optional `date` under
+`--dates`, then one column per stream. It requires every stream to share a
+schedule; a multi-cadence model is a hard error directing the user to
 `--obs-dir`.
 
-The `obs/` child is keyed on `(trajectory run_id, obs model hash, obs seed)`, so
-observation draws can be iterated without recomputing the trajectory.
+The `obs` by-product's identity is the cell's identity, a digest of the
+observation blocks with the `--emit-every` override and the file format, the
+streams' names, and the observation seed. A cell already stored without it is
+simulated again to draw it, and the trajectory is checked against the stored
+one. An observation draw that is refused stores `failure.toml` in the
+by-product, and the cell keeps its trajectory (§4.4).
 
 **`--emit-every` (gh#656).** A model's `emit_schedule` is the SIMULATE-only
 emission cadence — the fit path reads the data file's own time column and never
@@ -6096,23 +5933,21 @@ emit it. A stream declared with `window_start`/`window_stop` columns carries its
 own boundaries and takes any cadence.
 
 The override is applied at the CONSUMPTION sites — the `--obs*` writers, the
-`obs/` child, an obs-sourced quantity, and `[synthetic]` generation — **not** by
-rematerializing the compiled IR the way `--output-every` does. That is
-deliberate: `emit_schedule` never enters a likelihood, so moving the model hash
-for it would re-key a `fit` against real data over a change that fit cannot see,
-orphaning a completed fit. Each path therefore keys what the override actually
-determines:
+`obs` by-product, an obs-sourced quantity, and `[synthetic]` generation —
+**not** by rematerializing the compiled IR the way `--output-every` does. That
+is deliberate: `emit_schedule` never enters a likelihood, so moving the model
+hash for it would re-key a `fit` against real data over a change that fit cannot
+see, orphaning a completed fit. Each path therefore keys what the override
+actually determines:
 
-| path                         | what re-keys                                                                                       |
-| ---------------------------- | -------------------------------------------------------------------------------------------------- |
-| `simulate --obs*` / `obs/`   | the `obs_hash` naming the child, so two cadences are two subtrees under one shared trajectory leaf |
-| `fit run` with `[synthetic]` | the generated data's own bytes, which `FitDigest.data` already hashes — correct, the data changed  |
-| `fit run` on real data       | nothing; the flag is refused there, since it could only do nothing                                 |
+| path                         | what re-keys                                                                                      |
+| ---------------------------- | ------------------------------------------------------------------------------------------------- |
+| `simulate --obs*`            | the `obs` by-product's identity, so two cadences are two `obs` by-products inside one stored cell |
+| `fit run` with `[synthetic]` | the generated data's own bytes, which `FitDigest.data` already hashes — correct, the data changed |
+| `fit run` on real data       | nothing; the flag is refused there, since it could only do nothing                                |
 
-Two cadences share one trajectory leaf because the trajectory bytes do not
-depend on the emission cadence. The `obs/` child is a declared boundary in the
-leaf's exact-set (keyed by the directory NAME), so a second subtree beside the
-first is not an orphan.
+Two cadences share one cell because the trajectory bytes do not depend on the
+emission cadence.
 
 ### 10.6 Fit sidecars
 
@@ -6306,14 +6141,20 @@ rest, its `bad_init` records included.
 
 `simulate --quantities-out DIR` writes `DIR/quantities/<name>.tsv` plus a
 `DIR/quantities.json` manifest (`schema: "camdl.quantities/v1"`). A single
-fixed-parameter run emits a bare `value` per leaf (point mode); a
-`--draws`/`--replicates`/`--seeds` run emits banded quantiles.
+fixed-parameter run emits a bare `value` per cell (point mode); a
+`--draws`/`--replicates`/`--seeds` run emits quantiles over each (point,
+scenario) group's replicates.
 
-Quantities are a **regenerated sidecar**: they never enter a CAS leaf and never
-enter run identity (`quantities` and `contrasts` are the model fields excluded
-from `Model::hash_into`, §9.2.3). This is sound only because `camdl simulate`
-recomputes every cell even on a cache hit (§9.3) — the quantities are always
-evaluated from the run just performed, never read back from a stored leaf.
+Each cell's quantities are a `sim_quantities` by-product stored inside the cell
+at `sim_quantities/quantities-<12 hex>/quantities.json`, evaluated from the
+trajectory at full precision, and the tables are rendered from them. The
+quantities block (the model's own, or the `--quantities FILE` vocabulary) is
+stored once as a content artifact at `<build>/quantities/<stem>-<12 hex>/`, and
+the by-product depends on it; the cell's own identity does not (`quantities` and
+`contrasts` are model fields the compiled model's key leaves out). A cell
+already stored without its quantities is simulated again to evaluate them, and
+its trajectory is checked against the stored one. A quantity that is not finite
+stores `failure.toml` in the by-product, and the cell keeps its trajectory.
 
 Without the flag, a model that declares quantities prints a note and skips them
 rather than erroring.
@@ -6353,18 +6194,18 @@ overlays are `diagnostic`. Because the index column is spelled differently by
 method (`sweep`, `step`, `draw`, `iteration`), a consumer reads the role and
 never the name.
 
-Two producers emit a schema today. A `sim` leaf declares `traj.tsv` (table role
-`trajectory`, unrecognized columns defaulting to `state`). A completed fit leaf
-declares `draws.tsv` (role `posterior_cloud`) plus one entry per per-chain trace
-filename — `trace.tsv` for PGAS/PMMH/MH, `parameter_traces.tsv` for IF2/nlopt —
-read from the first chain directory with a readable file, so an early crashed
-chain does not drop the entry. Both are best-effort: an unreadable file is
-omitted rather than failing the run.
+One producer emits a schema today. A completed fit leaf declares `draws.tsv`
+(role `posterior_cloud`) plus one entry per per-chain trace filename —
+`trace.tsv` for PGAS/PMMH/MH, `parameter_traces.tsv` for IF2/nlopt — read from
+the first chain directory with a readable file, so an early crashed chain does
+not drop the entry. It is best-effort: an unreadable file is omitted rather than
+failing the run.
 
-`pfilter`, `profile`, `sim_ensemble`, and the `fit predict` outputs declare no
-schema. Of the vocabulary above, the column roles `dimension`, `observable`, and
-`quantile` and the table roles `observation`, `predictive`, and `landscape` are
-defined but unreachable — no producer emits them.
+`profile` and the `fit predict` outputs declare no schema, and neither do the
+results `simulate` and `pfilter` store in the run store. Of the vocabulary
+above, the column roles `dimension`, `observable`, and `quantile` and the table
+roles `observation`, `predictive`, and `landscape` are defined but unreachable —
+no producer emits them.
 
 The schema is recorded, never hashed, so attaching it cannot re-key a run. It is
 omitted from `run.json` when empty.
@@ -6715,8 +6556,8 @@ cell and writes no trace.
 Every workflow in this section is a `camdl simulate` run over a **cloud of
 parameter vectors** (`--draws`) rather than a single point. The four sources are
 `prior`, `posterior`, `uniform`, and a path to a parameter TSV. A run with
-`--draws`, `--replicates`, or `--seeds` is an _ensemble_: one content-addressed
-store leaf per cell, plus an ensemble node that names them.
+`--draws`, `--replicates`, or `--seeds` is an _ensemble_: one stored cell per
+grid point, which the invocation's record lists in order.
 
 ### 11.1 Prior Predictive Check
 
@@ -7357,7 +7198,7 @@ camdl mre fit fit.toml --no-data -b bug.tar.gz  # structure only, no data values
 camdl mre simulate sir.camdl --params p.toml --seed 42
 ```
 
-`-b/--bundle` names the output (`-o` keeps its trajectory-mirror meaning on
+`-b/--bundle` names the output (`-o` keeps its combined-table meaning on
 `mre simulate`). `--no-data` emits column schema, row counts and time range with
 no values, for sensitive data.
 
@@ -7784,11 +7625,11 @@ Ensemble
                               env CAMDL_PARALLEL; §4.4)
 
 Trajectory output
-  -o, --output FILE           plain-TSV mirror IN ADDITION to the store leaf
-                              (env CAMDL_OUTPUT)
-  --stdout                    stream to stdout, write no store leaf. Single-cell
-                              only; conflicts with --seeds/--replicates/--draws,
-                              -o and --obs*
+  -o, --output FILE           export the combined table, rendered from the stored
+                              cells (env CAMDL_OUTPUT)
+  --stdout                    store the cell and print the combined table to
+                              stdout. Single-cell only; conflicts with
+                              --seeds/--replicates/--draws/--sweep, -o and --obs*
   --output-every N            one row every N time-units, overriding output { every }
   --no-flows                  drop every flow_* column
   --columns COL,...           restrict trajectory columns to this allow-list
@@ -7797,8 +7638,8 @@ Trajectory output
 Observation output
   --obs FILE                  synthetic observations, all streams, one TSV
   --obs-dir DIR               one TSV per stream
-  --obs-only FILE             like --obs, suppress trajectory output
-  --obs-only-dir DIR          like --obs-dir, suppress trajectory output
+  --obs-only FILE             like --obs, without the combined-table export
+  --obs-only-dir DIR          like --obs-dir, without the combined-table export
   --design-from FIT_TOML      simulate on the observation design that fit config
                               binds — its observed labels, each row's own period,
                               its NA holes — instead of on `emit_schedule`.
@@ -7806,8 +7647,8 @@ Observation output
                               θ from --params or --draws (one ds_NN/ per draw)
   --projected-out DIR         with --design-from: write each stream's projected
                               value (before observation noise) as one TSV per
-                              stream, in column `projected`; a sidecar outside run
-                              identity. Usable with or without --obs-dir
+                              stream, in column `projected`; stores nothing.
+                              Usable with or without --obs-dir
   --emit-every N | NAME=N     override `emit_schedule`, in model time units, for
                               every stream or one by its observation-block label
                               (repeatable; the two forms are exclusive). Only a
@@ -7822,22 +7663,29 @@ Other artifacts
                               block in FILE (a .camdl file holding only that block)
                               instead of the model's own; tables land in
                               <dir>/quantities-<key>/, keyed by FILE's contents
-  --event-log [FILE]          record the lineage event log as a child of the run leaf;
-                              pass a PATH to also mirror it. Single-run only
-  --format parquet|tsv        event-log format (default parquet); --tsv is shorthand
-  --reactive-log PATH         mirror the reactive firing log (leaf copy always written
-                              when a reactive policy was active). Single-run only
+  --event-log [FILE]          store the lineage event log as a by-product of the cell;
+                              pass a PATH to also export it. Single-run only
+  --format parquet|tsv        event-log export format (default parquet); --tsv is
+                              shorthand
+  --reactive-log PATH         export the cell's reactive firing log (stored whenever
+                              a reactive policy was active). Single-run only
 
 Store
-  --output-dir DIR            store root (default ./results; env CAMDL_OUTPUT_DIR)
-  --force                     re-run even if cached output exists
-  --label TEXT                display label, ^[a-zA-Z0-9 ,._-]{1,64}$
-  --dry-run                   print the resolved run plan without simulating
+  --store DIR                 the run store's root (default $CAMDL_STORE, else
+                              ./camdl-store)
+  --force                     recompute every cell; the stored cell is moved to
+                              quarantine first
+  --label TEXT                name this invocation, found again as `@TEXT`; never
+                              names a cell
+  --dry-run                   print the resolved plan and, for a multi-cell run,
+                              which cells the store holds; writes nothing
 ```
 
-There is no `--resume` flag: a multi-cell run reads back the cells the store
-already holds by default, and `--force` overrides it. `camdl fit run --sweep`
-sweeps a `[fixed]` parameter of a fit (§7.3).
+`--output-dir` is not accepted, and `CAMDL_OUTPUT_DIR` is not read (§4.4).
+`--draws posterior --fit` reads the fit from `results/`. There is no `--resume`
+flag: a run reads back the cells the store already holds by default, and
+`--force` overrides it. `camdl fit run --sweep` sweeps a `[fixed]` parameter of
+a fit (§7.3).
 
 ### `camdl fit run CONFIG`
 
@@ -8291,14 +8139,16 @@ refusal names `--streams` with the streams the two rows share.
 camdl list [ROOT]
   --root DIR                  alias for the positional; wins when both are given
                               (default ./results; env CAMDL_OUTPUT_DIR)
+  --store DIR                 the run store's root, for simulate and pfilter
+                              results (default $CAMDL_STORE, else ./camdl-store)
   --model SUBSTR   --scenario NAME   --since 1h|30m|2d
   --kind sim|fit|profile|pfilter|ensemble|all             (default all)
   --parent HASH               children of a specific parent run (8+ char prefix)
   --limit N (default 50) | --all
   --format human|json
 
-camdl show TARGET             --root DIR   --format human|json
-camdl cat TARGET              --root DIR   --stream NAME
+camdl show TARGET             --root DIR   --store DIR   --format human|json
+camdl cat TARGET              --root DIR   --store DIR   --stream NAME
 camdl label HASH LABEL        --root DIR
 ```
 
@@ -8357,9 +8207,9 @@ camdl dev compile / camdl dev doctest      (see "Compiler passthroughs")
 
 Sensitivity analysis (Sobol indices and similar) is not a camdl concern, and
 camdl generates no space-filling designs. Generate the design in R or Python,
-run it with `camdl simulate --sweep-file design.tsv`, and compute the indices
-over `ensemble.tsv` (every row carries its `point_id` and `sweep:<param>`
-values) with R's `sensitivity` package or Python's `SALib`.
+run it with `camdl simulate --sweep-file design.tsv -o design_out.tsv`, and
+compute the indices over the combined table (every row carries its `point_id`
+and `sweep:<param>` values) with R's `sensitivity` package or Python's `SALib`.
 
 ---
 

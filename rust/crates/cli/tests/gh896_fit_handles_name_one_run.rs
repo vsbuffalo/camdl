@@ -717,7 +717,7 @@ fn simulate_posterior_draws_come_from_the_named_run() {
     let segment = segment_of(&short);
     let ir = golden_ir().to_string_lossy().into_owned();
     let sim = |fit: &str| p.run(&["simulate", &ir, "--draws", "posterior", "--fit", fit,
-        "--seed", "1", "--output-dir", "sims"]);
+        "--seed", "1", "--store", "sims"]);
 
     let out = sim(&segment.to_string_lossy());
     let all = text(&out);
@@ -1044,7 +1044,7 @@ fn simulate_posterior_draws_narrow_to_runs_with_draws() {
     let pgas_leaf = leaves.iter().find(|l| l.join("draws.tsv").is_file()).unwrap();
     let ir = golden_ir().to_string_lossy().into_owned();
     let all = p.ok(&["simulate", &ir, "--draws", "posterior", "--fit", &segment.to_string_lossy(),
-        "--seed", "1", "--output-dir", "sims"]);
+        "--seed", "1", "--store", "sims"]);
     assert!(all.contains(&pgas_leaf.display().to_string()), "the PGAS run is used and named:\n{all}");
 }
 

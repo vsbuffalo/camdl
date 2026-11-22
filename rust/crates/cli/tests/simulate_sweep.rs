@@ -7,6 +7,8 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+mod sim_store_cells;
+
 fn binary() -> PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     Path::new(&manifest).join("../../target/release/camdl")
@@ -92,11 +94,11 @@ impl Fixture {
         name.to_string()
     }
 
-    /// `simulate m.camdl --params p.toml --backend chain_binomial --dt 1 --output-dir out <extra…>`.
+    /// `simulate m.camdl --params p.toml --backend chain_binomial --dt 1 --store out <extra…>`.
     fn simulate(&self, extra: &[&str]) -> Output {
         let mut args = vec![
             "simulate", "m.camdl", "--params", "p.toml", "--backend", "chain_binomial",
-            "--dt", "1", "--output-dir", "out",
+            "--dt", "1", "--store", "out",
         ];
         args.extend_from_slice(extra);
         Command::new(skip_if_missing_binary()).env_remove("CLICOLOR_FORCE")
@@ -107,30 +109,10 @@ impl Fixture {
             .expect("spawn camdl")
     }
 
-    /// Every `Sim` leaf under the output root.
-    fn leaves(&self) -> Vec<PathBuf> {
-        let mut v = run_leaves(&self.path("out").join("sims"));
-        v.sort();
-        v
+    /// Every stored simulation cell in the store `out`, sorted by folder.
+    fn leaves(&self) -> Vec<sim_store_cells::SimCell> {
+        sim_store_cells::sim_cells(&self.path("out"))
     }
-}
-
-fn run_leaves(root: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        if dir.join("run.json").is_file() {
-            out.push(dir.clone());
-        }
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for e in entries.flatten() {
-                if e.path().is_dir() {
-                    stack.push(e.path());
-                }
-            }
-        }
-    }
-    out
 }
 
 fn stderr(out: &Output) -> String {
@@ -149,24 +131,10 @@ fn assert_refused(out: &Output, what: &str, needles: &[&str]) {
     }
 }
 
-/// The `<label>` of a leaf's `<level>` path segment (`<label>-<h8>`), read
-/// from `run.json`'s levels so the test does not parse directory names.
-fn level_label(leaf: &Path, level: &str) -> String {
-    let rec: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(leaf.join("run.json")).unwrap()).unwrap();
-    rec["levels"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|l| l["name"] == level)
-        .map(|l| l["label"].as_str().unwrap().to_string())
-        .unwrap_or_else(|| panic!("no `{level}` level in {}", leaf.display()))
-}
-
-fn process_seed(leaf: &Path) -> u64 {
-    let rec: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(leaf.join("run.json")).unwrap()).unwrap();
-    rec["inputs"]["process_seed"].as_u64().expect("process_seed in inputs")
+/// The label of a cell's params folder (`<label>-<h12>`): the swept values,
+/// as the store's path sanitizer renders them (`rho=0.5` → `rho_0.5`).
+fn params_label(cell: &sim_store_cells::SimCell) -> String {
+    cell.params_dir_name()
 }
 
 /// Test 1 — the D-B pin. `--sweep rho=0.5,0.9 --replicates 2` writes four
@@ -181,15 +149,15 @@ fn design_points_share_a_process_seed_per_replicate() {
     let leaves = fx.leaves();
     assert_eq!(leaves.len(), 4, "2 points × 2 replicates: {leaves:?}");
 
-    let mut labels: Vec<String> = leaves.iter().map(|l| level_label(l, "params")).collect();
+    let mut labels: Vec<String> = leaves.iter().map(params_label).collect();
     labels.sort();
     labels.dedup();
-    assert_eq!(labels, vec!["rho=0.5", "rho=0.9"], "the params level is labelled by the swept value");
+    assert_eq!(labels, vec!["rho_0.5", "rho_0.9"], "the params folder is labelled by the swept value");
 
     // Group by process seed: each seed must hold exactly the two points.
     let mut by_seed: std::collections::BTreeMap<u64, Vec<&PathBuf>> = Default::default();
     for l in &leaves {
-        by_seed.entry(process_seed(l)).or_default().push(l);
+        by_seed.entry(l.seed()).or_default().push(&l.dir);
     }
     assert_eq!(by_seed.len(), 2, "two replicates are two process seeds, shared across points: {by_seed:?}");
     let mut trajectories: Vec<Vec<u8>> = Vec::new();
@@ -210,16 +178,15 @@ fn sweep_file_rows_are_design_points() {
     let fx = Fixture::new();
     let f = fx.write("d.tsv", "rho\tbeta\n0.5\t0.3\n0.9\t0.3\n");
     assert_ok(&fx.simulate(&["--sweep-file", &f, "--seed", "3"]), "sweep-file");
-    let mut labels: Vec<String> = fx.leaves().iter().map(|l| level_label(l, "params")).collect();
+    let mut labels: Vec<String> = fx.leaves().iter().map(params_label).collect();
     labels.sort();
-    assert_eq!(labels, vec!["beta=0.3_rho=0.5", "beta=0.3_rho=0.9"]);
+    assert_eq!(labels, vec!["beta_0.3_rho_0.5", "beta_0.3_rho_0.9"]);
 }
 
 /// Decision D-C of the coordinate-kind proposal: a sweep file's own `point_id`
 /// column names the points. Its ids are the written ones — in the combined
-/// table, the observation tables and the ensemble record's design — while the
-/// rows keep their position for everything else, and the leaves stay labelled
-/// by value.
+/// table and the observation tables — while the rows keep their position for
+/// everything else, and the cells stay labelled by value.
 #[test]
 fn sweep_file_point_id_column_is_the_written_id() {
     let fx = Fixture::new();
@@ -229,7 +196,7 @@ fn sweep_file_point_id_column_is_the_written_id() {
         "sweep-file with a point_id column",
     );
     let (header, rows) = table(&fx.path("c.tsv"));
-    assert_eq!(&header[..4], ["replicate", "point_id", "sweep:rho", "seed"], "{header:?}");
+    assert_eq!(&header[..5], ["replicate", "scenario", "point_id", "sweep:rho", "seed"], "{header:?}");
     assert_eq!(distinct(&column(&header, &rows, "point_id")), vec!["12", "3", "7"], "the file's ids, not 0..2");
     // Each id carries its own row's value.
     let pid = column(&header, &rows, "point_id");
@@ -237,21 +204,11 @@ fn sweep_file_point_id_column_is_the_written_id() {
     let at = |id: &str| rho[pid.iter().position(|p| *p == id).unwrap()].to_string();
     assert_eq!((at("3"), at("7"), at("12")), ("0.5".into(), "0.9".into(), "0.7".into()));
     let (header, rows) = table(&fx.path("synth").join("cases.tsv"));
-    assert_eq!(header, ["replicate", "point_id", "sweep:rho", "seed", "time", "cases"]);
+    assert_eq!(header, ["replicate", "scenario", "point_id", "sweep:rho", "seed", "time", "cases"]);
     assert_eq!(distinct(&column(&header, &rows, "point_id")), vec!["12", "3", "7"], "the observation table carries the same ids");
-    // The ensemble record names the parameters and the written ids.
-    let ens = run_leaves(&fx.path("out").join("ensembles"));
-    assert_eq!(ens.len(), 1, "one ensemble leaf: {ens:?}");
-    let rec: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(ens[0].join("run.json")).unwrap()).unwrap();
-    let design = &rec["inputs"]["design"];
-    assert_eq!(design["source"], "file", "{design}");
-    assert_eq!(design["params"], serde_json::json!(["rho"]), "`point_id` is not a parameter: {design}");
-    assert_eq!(design["point_ids"], serde_json::json!([3, 7, 12]), "{design}");
-    assert_eq!(rec["inputs"]["n_points"], 3);
-    let mut labels: Vec<String> = fx.leaves().iter().map(|l| level_label(l, "params")).collect();
+    let mut labels: Vec<String> = fx.leaves().iter().map(params_label).collect();
     labels.sort();
-    assert_eq!(labels, vec!["rho=0.5", "rho=0.7", "rho=0.9"], "leaves are labelled by value, not id");
+    assert_eq!(labels, vec!["rho_0.5", "rho_0.7", "rho_0.9"], "cells are labelled by value, not id");
 }
 
 /// Test 5 — every conflict is refused with a message naming it.
@@ -402,34 +359,6 @@ fn sweep_file_refusals() {
     assert!(fx.leaves().is_empty(), "a refused run writes no leaf");
 }
 
-/// The resolved design lives in the ensemble's `run.json`: the swept
-/// parameters with their values and `n_points`, in place of `n_draws`.
-#[test]
-fn ensemble_record_carries_the_resolved_design() {
-    let fx = Fixture::new();
-    assert_ok(&fx.simulate(&["--sweep", "rho=0.5,0.9", "--sweep", "beta=0.3", "--replicates", "2"]), "sweep");
-    let ens = run_leaves(&fx.path("out").join("ensembles"));
-    assert_eq!(ens.len(), 1, "one ensemble leaf: {ens:?}");
-    let rec: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(ens[0].join("run.json")).unwrap()).unwrap();
-    let inputs = &rec["inputs"];
-    assert_eq!(inputs["n_cells"], 4);
-    assert_eq!(inputs["n_points"], 2);
-    assert!(inputs.get("n_draws").is_none(), "a sweep job reports n_points, not n_draws: {inputs}");
-    assert_eq!(
-        inputs["design"],
-        serde_json::json!({
-            "source": "sweep",
-            "n_points": 2,
-            "params": [
-                { "name": "beta", "values": [0.3] },
-                { "name": "rho", "values": [0.5, 0.9] },
-            ],
-        }),
-        "the design is recorded name-sorted with its values: {inputs}"
-    );
-}
-
 /// The header and data rows of a camdl TSV (version line dropped).
 fn table(path: &Path) -> (Vec<String>, Vec<Vec<String>>) {
     let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
@@ -467,8 +396,8 @@ fn combined_table_of_a_sweep_job_has_point_id_sweep_and_seed_columns() {
     );
     let (header, rows) = table(&fx.path("c.tsv"));
     assert_eq!(
-        &header[..7],
-        ["replicate", "point_id", "sweep:rho", "seed", "t", "t_start", "t_stop"],
+        &header[..8],
+        ["replicate", "scenario", "point_id", "sweep:rho", "seed", "t", "t_start", "t_stop"],
         "coordinate columns lead the time columns: {header:?}"
     );
     assert!(!header.iter().any(|h| h == "draw"), "a sweep job writes no `draw` column: {header:?}");
@@ -505,7 +434,7 @@ fn point_ids_do_not_depend_on_flag_order() {
     let a = std::fs::read(fx.path("a.tsv")).unwrap();
     assert_eq!(a, std::fs::read(fx.path("b.tsv")).unwrap(), "flag order must not change the combined file");
     let (header, rows) = table(&fx.path("a.tsv"));
-    assert_eq!(&header[..6], ["replicate", "point_id", "sweep:gamma", "sweep:rho", "seed", "t"]);
+    assert_eq!(&header[..7], ["replicate", "scenario", "point_id", "sweep:gamma", "sweep:rho", "seed", "t"]);
     // point_id 0 is (gamma=0.1, rho=0.5), 1 is (gamma=0.1, rho=0.9): gamma varies slowest.
     let pid = column(&header, &rows, "point_id");
     let g = column(&header, &rows, "sweep:gamma");
@@ -530,7 +459,7 @@ fn observation_tables_of_a_sweep_job_carry_the_design_columns() {
         "sweep with --obs-only-dir",
     );
     let (header, rows) = table(&fx.path("synth").join("cases.tsv"));
-    assert_eq!(header, ["replicate", "point_id", "sweep:rho", "seed", "time", "cases"]);
+    assert_eq!(header, ["replicate", "scenario", "point_id", "sweep:rho", "seed", "time", "cases"]);
     assert_eq!(distinct(&column(&header, &rows, "point_id")), vec!["0", "1"]);
     assert_eq!(distinct(&column(&header, &rows, "sweep:rho")), vec!["0.5", "0.9"]);
     assert_eq!(distinct(&column(&header, &rows, "replicate")), vec!["0", "1", "2", "3"]);
@@ -541,7 +470,7 @@ fn observation_tables_of_a_sweep_job_carry_the_design_columns() {
         "sweep with --obs-only",
     );
     let (header, _) = table(&fx.path("all.tsv"));
-    assert_eq!(header, ["replicate", "point_id", "sweep:rho", "seed", "time", "cases"]);
+    assert_eq!(header, ["replicate", "scenario", "point_id", "sweep:rho", "seed", "time", "cases"]);
 }
 
 /// Test 7 — quantities under a sweep are banded per (design point, scenario),
@@ -586,7 +515,7 @@ fn quantities_are_grouped_per_design_point_and_scenario() {
 /// position and the engine merges cells in canonical order. Two fresh stores
 /// (so neither run reads a cell back) with `--parallel 1` and `--parallel 4`
 /// over a four-cell sweep of a dynamics parameter give byte-identical combined
-/// files, observation tables and stored ensembles.
+/// files, observation tables and stored trajectories.
 #[test]
 fn parallel_runs_are_byte_identical_to_the_serial_run() {
     fn run(threads: &str) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
@@ -598,51 +527,38 @@ fn parallel_runs_are_byte_identical_to_the_serial_run() {
             ]),
             &format!("--parallel {threads}"),
         );
-        assert_eq!(fx.leaves().len(), 4, "four cells simulated");
-        let ens = run_leaves(&fx.path("out").join("ensembles"));
-        assert_eq!(ens.len(), 1, "one ensemble leaf: {ens:?}");
+        let cells = fx.leaves();
+        assert_eq!(cells.len(), 4, "four cells simulated");
+        let mut stored: Vec<(String, String)> = cells.iter().map(|c| (c.run_id.clone(), c.traj())).collect();
+        stored.sort();
         (
             std::fs::read(fx.path("c.tsv")).unwrap(),
             std::fs::read(fx.path("synth").join("cases.tsv")).unwrap(),
-            std::fs::read(ens[0].join("ensemble.tsv")).unwrap(),
+            format!("{stored:?}").into_bytes(),
         )
     }
     let serial = run("1");
     let parallel = run("4");
     assert_eq!(serial.0, parallel.0, "the combined trajectory file must not depend on --parallel");
     assert_eq!(serial.1, parallel.1, "the observation table must not depend on --parallel");
-    assert_eq!(serial.2, parallel.2, "the stored ensemble.tsv must not depend on --parallel");
+    assert_eq!(serial.2, parallel.2, "the stored cells must not depend on --parallel");
 }
 
-/// Test 3 (first half) — `--sweep beta=0.2,0.3` and `--sweep beta=0.3,0.2`
+/// Test 3 (first half) — `--sweep rho=0.2,0.3` and `--sweep rho=0.3,0.2`
 /// are the same cell set (under D-B every point shares the seed) but two
-/// combined files, so two ensemble identities: the design is in the key.
+/// combined files: the design's order is the table's order.
 #[test]
-fn sweep_value_order_is_in_the_ensemble_identity() {
-    fn ensemble_id(fx: &Fixture) -> String {
-        let ens = run_leaves(&fx.path("out").join("ensembles"));
-        assert_eq!(ens.len(), 1, "one ensemble leaf: {ens:?}");
-        let rec: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(ens[0].join("run.json")).unwrap()).unwrap();
-        rec["run_id"].as_str().unwrap().to_string()
-    }
+fn sweep_value_order_orders_the_combined_table_not_the_cells() {
     let a = Fixture::new();
-    assert_ok(&a.simulate(&["--sweep", "rho=0.2,0.3", "--seed", "9"]), "0.2,0.3");
+    assert_ok(&a.simulate(&["--sweep", "rho=0.2,0.3", "--seed", "9", "-o", "c.tsv"]), "0.2,0.3");
     let b = Fixture::new();
-    assert_ok(&b.simulate(&["--sweep", "rho=0.3,0.2", "--seed", "9"]), "0.3,0.2");
+    assert_ok(&b.simulate(&["--sweep", "rho=0.3,0.2", "--seed", "9", "-o", "c.tsv"]), "0.3,0.2");
     let c = Fixture::new();
-    assert_ok(&c.simulate(&["--sweep", "rho=0.2,0.3", "--seed", "9"]), "0.2,0.3 again");
-    // The same cells: both stores hold the same two Sim leaves.
-    let ids = |fx: &Fixture| -> Vec<String> {
-        let mut v: Vec<String> = fx.leaves().iter().map(|l| {
-            let rec: serde_json::Value =
-                serde_json::from_str(&std::fs::read_to_string(l.join("run.json")).unwrap()).unwrap();
-            rec["run_id"].as_str().unwrap().to_string()
-        }).collect();
-        v.sort();
-        v
-    };
+    assert_ok(&c.simulate(&["--sweep", "rho=0.2,0.3", "--seed", "9", "-o", "c.tsv"]), "0.2,0.3 again");
+    // The same cells: both stores hold the same two cells.
+    let ids = |fx: &Fixture| sim_store_cells::sim_run_ids(&fx.path("out"));
     assert_eq!(ids(&a), ids(&b), "the two orders run the same two cells");
-    assert_ne!(ensemble_id(&a), ensemble_id(&b), "but the combined files differ, so the ensembles must");
-    assert_eq!(ensemble_id(&a), ensemble_id(&c), "and the identity is deterministic");
+    let table = |fx: &Fixture| std::fs::read(fx.path("c.tsv")).unwrap();
+    assert_ne!(table(&a), table(&b), "but the combined files differ");
+    assert_eq!(table(&a), table(&c), "and the combined file is deterministic");
 }

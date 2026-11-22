@@ -4,6 +4,13 @@ Status: current as of the content-addressed run-identity refactor (gh#147).
 Audience: tools that read camdl's `results/` tree, such as camdl-viewer
 (`cas.py`).
 
+This contract covers the `results/` tree only. `camdl simulate` and
+`camdl pfilter` store their results in the run store (`./camdl-store`, or the
+root `--store` or `CAMDL_STORE` names), whose layout and records are those of
+`docs/dev/proposals/2026-11-20-run-store-api.md`. The `sim`, `sim_ensemble` and
+`pfilter` kinds below describe `results/` leaves that no command of this camdl
+writes.
+
 ## The one rule
 
 **Resolve runs by reading `run.json`, never by parsing path segments.**
@@ -71,13 +78,13 @@ share a problem half and differ in `[method]` share the hash; they sit in
 sibling segments named by their stems. Read the fit-level view by combining the
 sidecar with its method-leaf `run.json`s.
 
-A **multi-cell `simulate`** (`--replicates` / `--seeds` / multiple `--scenario`
-/ `--draws`) writes N per-cell `sim` leaves under `sims/` **plus** one
-`sim_ensemble` leaf under `ensembles/` holding the combined wide-format
-trajectory TSV across all cells. The `sim_ensemble`'s `grid` level digests the
-sorted cell set and the cell count (count-in-the-key), and it `deps` on the N
-`sim` leaves; `cat <sim_ensemble run_id>` yields that combined TSV. A
-single-cell `simulate` writes only the one `sim` leaf (no ensemble).
+In the `results/` layout, a **multi-cell `simulate`** (`--replicates` /
+`--seeds` / multiple `--scenario` / `--draws`) is N per-cell `sim` leaves under
+`sims/` **plus** one `sim_ensemble` leaf under `ensembles/` holding the combined
+wide-format trajectory TSV across all cells. The `sim_ensemble`'s `grid` level
+digests the sorted cell set and the cell count (count-in-the-key), and it `deps`
+on the N `sim` leaves; `cat <sim_ensemble run_id>` yields that combined TSV. A
+single-cell `simulate` is only the one `sim` leaf (no ensemble).
 
 **Sub-artifacts (no `run.json`).** A trajectory leaf may declare an observation
 ensemble as a child. It is **not** a `RunRecord`: it lives at

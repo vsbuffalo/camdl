@@ -11,6 +11,8 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+mod sim_store_cells;
+
 fn manifest() -> PathBuf {
     PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set under cargo test"))
 }
@@ -89,13 +91,14 @@ fn setup(dir: &Path) {
 }
 
 /// `camdl simulate m.ir.json <args>` in `dir/<cwd>`; returns the N0 every cell
-/// resolved to (one value, asserted), from each leaf's run.json.
+/// resolved to (one value, asserted), from each cell's identity record.
 fn simulate_n0(dir: &Path, cwd: &str, args: &[&str]) -> f64 {
     let work = dir.join(cwd);
     std::fs::create_dir_all(&work).unwrap();
     let out: Output = Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .current_dir(&work)
+        .env("CAMDL_STORE", work.join("camdl-store"))
         .args(["simulate", &dir.join("m.ir.json").to_string_lossy()])
         .args(args)
         .arg("--seed").arg("1")
@@ -103,26 +106,12 @@ fn simulate_n0(dir: &Path, cwd: &str, args: &[&str]) -> f64 {
         .expect("spawn camdl simulate");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "simulate {args:?} failed: {err}");
-    let mut found = Vec::new();
-    collect_n0(&work.join("results/sims"), &mut found);
-    assert!(!found.is_empty(), "no leaf run.json under {}/results/sims; stderr:\n{err}", cwd);
+    let found: Vec<f64> = sim_store_cells::sim_cells(&work.join("camdl-store")).iter()
+        .filter_map(|c| c.params()["N0"].as_f64())
+        .collect();
+    assert!(!found.is_empty(), "no sim cell with N0 under {}/camdl-store; stderr:\n{err}", cwd);
     assert!(found.iter().all(|v| *v == found[0]), "cells disagree on N0: {found:?}");
     found[0]
-}
-
-fn collect_n0(dir: &Path, out: &mut Vec<f64>) {
-    for e in std::fs::read_dir(dir).unwrap().flatten() {
-        let p = e.path();
-        if p.is_dir() {
-            collect_n0(&p, out);
-        } else if p.file_name().is_some_and(|n| n == "run.json") {
-            let v: serde_json::Value =
-                serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
-            if let Some(n0) = v["inputs"]["parameters_provenance"]["N0"]["value"].as_f64() {
-                out.push(n0);
-            }
-        }
-    }
 }
 
 /// `--params` outranks the fit config's `[fixed]` on both `--fit` draws paths.

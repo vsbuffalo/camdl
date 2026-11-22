@@ -66,19 +66,19 @@ fn ctx<'a>(
     base_seed: u64,
     process_seed: u64,
 ) -> TrajectoryCtx<'a> {
-    let run = crate::sim_config::RunConfig::new(
+    let run = super::legacy_sim::RunConfig::new(
         ForwardBackend::ChainBinomial,
         1.0,
         output,
         false,
         false,
-        crate::sim_config::view(false, &[]),
+        super::legacy_sim::view(false, &[]),
     )
     .unwrap();
     TrajectoryCtx {
         model: test_model_digest(model),
         model_stem: "sir",
-        config: run.cell_config(crate::sim_config::CellWindow::new(0.0, t_end, None).unwrap()),
+        config: run.cell_config(super::legacy_sim::CellWindow::new(0.0, t_end, None).unwrap()),
         params,
         table_digests: vec![],
         enable: &[],
@@ -95,7 +95,7 @@ fn ctx<'a>(
 /// The `model` level of a trajectory under the fixed IR-version and engine
 /// strings the pins below were recorded with.
 fn test_model_digest(m: &Model) -> ModelDigest {
-    crate::sim_config::ResolvedModel::new(m.clone(), "0.7", runid::inputs::EngineIdentity::of_build("0.3.0+test"), "sir.camdl").digest
+    super::legacy_sim::ResolvedModel::new(m.clone(), "0.7", runid::inputs::EngineIdentity::of_build("0.3.0+test"), "sir.camdl").digest
 }
 
 /// The `model`-level digest hash under fixed versions, the unit the gradient
@@ -330,7 +330,7 @@ impl SimInputs {
     }
 
     fn run_id(&self) -> ContentHash {
-        let run = crate::sim_config::RunConfig::new(
+        let run = super::legacy_sim::RunConfig::new(
             self.backend,
             self.dt,
             &self.output,
@@ -339,7 +339,7 @@ impl SimInputs {
             crate::util::OutputColumns { no_flows: self.no_flows, allow: self.columns.clone() },
         )
         .expect("run config");
-        let window = crate::sim_config::CellWindow::new(self.t_start, self.t_end, self.init_state.clone())
+        let window = super::legacy_sim::CellWindow::new(self.t_start, self.t_end, self.init_state.clone())
             .expect("window");
         resolve_trajectory(&TrajectoryCtx {
             model: test_model_digest(&self.model),
@@ -938,7 +938,7 @@ fn a_build_with_an_incomplete_engine_identity_never_reads_a_stored_leaf() {
         &crate::forcing_extrapolation::ForcingPolicy::new(false));
     let mut files = runid::Artifacts::new();
     files.insert("traj.tsv", b"time\n0\n".to_vec());
-    begin_resolved_write(&store, &root, &artifact, &meta, WriteMode::Atomic(files)).unwrap();
+    begin_resolved_write_atomic(&store, &root, &artifact, &meta, files).unwrap();
 
     let reusable = check_reuse_with(&store, &root, &artifact, WritePolicy::Reuse, EngineReuse::Reusable).unwrap();
     assert!(matches!(reusable, ReuseVerdict::CacheHit { .. }), "a determined build reuses the stored leaf");

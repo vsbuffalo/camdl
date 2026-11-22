@@ -88,10 +88,14 @@ fn s(p: &Path) -> String {
 fn restart_after(bin: &Path, dir: &Path, data: &Path, last: f64) -> (std::process::Output, PathBuf) {
     let txt = std::fs::read_to_string(data).unwrap();
     let mut lines = txt.lines();
-    let mut ctx = String::from(lines.next().unwrap());
+    let header = lines.next().unwrap();
+    // `simulate --obs-only-dir` leads with its coordinate columns; the time is
+    // found by name.
+    let ti = header.split('\t').position(|h| h == "time").expect("a `time` column");
+    let mut ctx = String::from(header);
     ctx.push('\n');
     for l in lines {
-        let t: f64 = l.split('\t').next().unwrap().parse().unwrap();
+        let t: f64 = l.split('\t').nth(ti).unwrap().parse().unwrap();
         if t <= last {
             ctx.push_str(l);
             ctx.push('\n');
@@ -117,7 +121,7 @@ fn restart_after(bin: &Path, dir: &Path, data: &Path, last: f64) -> (std::proces
         "--init-state".into(), s(&state),
         "--replicates".into(), PARTICLES.to_string(),
         "--dt".into(), "0.25".into(), "--seed".into(), "1".into(),
-        "-o".into(), s(&traj), "--output-dir".into(), s(&dir.join("cas_sim")),
+        "-o".into(), s(&traj), "--store".into(), s(&dir.join("cas_sim")),
     ], &dir.join("cas_sim"));
     (out, traj)
 }
@@ -142,7 +146,7 @@ fn init_state_restarts_on_grid_above_8192() {
     let out = run(&bin, &[
         "simulate".into(), s(&dir.join("sirs.camdl")), "--params".into(), s(&dir.join("p.toml")),
         "--seed".into(), "1".into(), "--obs-only-dir".into(), s(&obs),
-        "--output-dir".into(), s(&dir.join("cas_gen")),
+        "--store".into(), s(&dir.join("cas_gen")),
     ], &dir.join("cas_gen"));
     assert!(out.status.success(), "data gen failed: {}", String::from_utf8_lossy(&out.stderr));
     let data = obs.join("cases.tsv");

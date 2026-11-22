@@ -72,6 +72,10 @@ pub enum Error {
     /// file, an environment variable, or a content's bytes.
     #[error("cannot read {what}: {why}")]
     Parse { what: String, why: String },
+    /// A rendering refused its members, in the project's own words: what it
+    /// would not write, and why.
+    #[error("{0}")]
+    RenderingRefused(String),
     #[error("cannot {op} {}: {source}", path.display())]
     Io { op: &'static str, path: PathBuf, source: std::io::Error },
 }

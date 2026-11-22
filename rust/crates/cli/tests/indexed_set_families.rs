@@ -74,6 +74,7 @@ fn simulate(src: &str, backend: &str) -> (bool, String, String) {
             "simulate", path.to_str().unwrap(), "--backend", backend,
             "--param", "gamma=0", "--seed", "1", "--to", "2", "--output-every", "1",
             "--stdout", "--progress", "none",
+            "--store", dir.path().join("camdl-store").to_str().unwrap(),
         ])
         .env("CAMDLC", cc)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
@@ -91,8 +92,9 @@ fn simulate(src: &str, backend: &str) -> (bool, String, String) {
 fn row_at(tsv: &str, t: &str) -> Vec<f64> {
     let mut lines = tsv.lines().filter(|l| !l.starts_with('#'));
     let header: Vec<&str> = lines.next().expect("header").split('\t').collect();
+    let ti = header.iter().position(|h| *h == "t").expect("a `t` column");
     let row: Vec<&str> = lines
-        .find(|l| l.split('\t').next() == Some(t))
+        .find(|l| l.split('\t').nth(ti) == Some(t))
         .unwrap_or_else(|| panic!("no row at t = {t}"))
         .split('\t')
         .collect();

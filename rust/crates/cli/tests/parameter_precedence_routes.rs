@@ -100,7 +100,6 @@ fn run_jsons(root: &Path) -> Vec<serde_json::Value> {
     out
 }
 
-/// The single leaf `run.json` under `root`.
 /// The one filter run in the run store `root`: its `identity.json` and its
 /// `provenance.json`.
 fn one_pfilter(root: &Path) -> (serde_json::Value, serde_json::Value) {
@@ -124,25 +123,40 @@ fn one_pfilter(root: &Path) -> (serde_json::Value, serde_json::Value) {
     found.remove(0)
 }
 
-fn one_leaf(root: &Path) -> serde_json::Value {
-    let mut leaves = run_jsons(root);
-    assert_eq!(leaves.len(), 1, "expected one leaf under {}", root.display());
-    leaves.remove(0)
+/// The one simulation cell's `identity.json` under the run store `root`.
+fn one_sim_cell(root: &Path) -> serde_json::Value {
+    let mut found = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if !p.is_dir() { continue }
+            if let Ok(b) = std::fs::read_to_string(p.join("identity.json")) {
+                let id: serde_json::Value = serde_json::from_str(&b).unwrap();
+                if id["kind"] == "sim" {
+                    found.push(id);
+                }
+            }
+            stack.push(p);
+        }
+    }
+    assert_eq!(found.len(), 1, "expected one simulation cell under {}", root.display());
+    found.remove(0)
 }
 
-/// A leaf's identity: its `run_id` and each level's hash by level name.
+/// A cell's identity: its `run_id` and each part of its identity record
+/// (`model`, `config`, `params`, `scenario`, `seed`), serialised, by name.
 #[derive(Debug, Clone, PartialEq)]
 struct Identity {
     run_id: String,
     levels: BTreeMap<String, String>,
 }
 
-fn identity(leaf: &serde_json::Value) -> Identity {
+fn identity(cell: &serde_json::Value) -> Identity {
     Identity {
-        run_id: leaf["run_id"].as_str().expect("run_id").to_string(),
-        levels: leaf["levels"].as_array().expect("levels").iter()
-            .map(|l| (l["name"].as_str().unwrap().to_string(),
-                      l["hash"].as_str().unwrap().to_string()))
+        run_id: cell["run_id"].as_str().expect("run_id").to_string(),
+        levels: cell["identity"].as_object().expect("identity record").iter()
+            .map(|(name, record)| (name.clone(), record.to_string()))
             .collect(),
     }
 }
@@ -211,25 +225,44 @@ struct RouteRun {
     overrides: Vec<String>,
 }
 
-/// Strip the leading design-coordinate columns a sweep adds
-/// (`point_id`, `sweep:beta`, `seed`), after checking they say what the route
-/// asked for: point 0, beta 0.3, seed 7.
-fn strip_design_columns(table: &str) -> String {
+/// Strip the leading coordinate columns every simulate table carries
+/// (`replicate`, `scenario`, and for a sweep `point_id` and `sweep:beta`, for a
+/// draws file `draw`, then `seed`), after checking they say what the route
+/// asked for: replicate 0, the route's scenario arm (`(none)` without one),
+/// point 0, beta 0.3, draw 0, seed 7.
+fn strip_design_columns(table: &str, arm: &str) -> String {
     let mut out = String::new();
+    let mut n_coords = None;
+    let mut header: Vec<String> = Vec::new();
     for (i, line) in table.lines().enumerate() {
         if line.starts_with('#') {
             out.push_str(line);
             out.push('\n');
             continue;
         }
-        let cols: Vec<&str> = line.splitn(4, '\t').collect();
-        assert_eq!(cols.len(), 4, "short row: {line}");
-        if cols[0] == "point_id" {
-            assert_eq!(&cols[..3], ["point_id", "sweep:beta", "seed"], "header {i}");
-        } else {
-            assert_eq!(&cols[..3], ["0", "0.3", "7"], "row {i}: {line}");
-        }
-        out.push_str(cols[3]);
+        let cols: Vec<&str> = line.split('\t').collect();
+        let n = match n_coords {
+            None => {
+                let n = cols.iter().position(|c| *c == "seed").expect("a `seed` column") + 1;
+                header = cols[..n].iter().map(|c| c.to_string()).collect();
+                n_coords = Some(n);
+                n
+            }
+            Some(n) => {
+                for (name, value) in header.iter().zip(&cols[..n]) {
+                    let want = match name.as_str() {
+                        "replicate" | "point_id" | "draw" => "0",
+                        "scenario" => arm,
+                        "sweep:beta" => "0.3",
+                        "seed" => "7",
+                        other => panic!("unexpected coordinate column `{other}`"),
+                    };
+                    assert_eq!(*value, want, "row {i}, column {name}: {line}");
+                }
+                n
+            }
+        };
+        out.push_str(&cols[n..].join("\t"));
         out.push('\n');
     }
     out
@@ -240,19 +273,19 @@ fn simulate_route(dir: &Path, name: &str, args: &[&str]) -> RouteRun {
     let traj = format!("traj_{name}.tsv");
     let obs = format!("obs_{name}.tsv");
     let mut argv = vec!["simulate", "m.camdl", "--backend", "chain_binomial", "--dt", "1",
-        "--seed", "7", "--output-dir", &store, "-o", &traj, "--obs", &obs];
+        "--seed", "7", "--store", &store, "-o", &traj, "--obs", &obs];
     argv.extend_from_slice(args);
     let stderr = ok(&camdl(dir, &argv), &format!("simulate route {name} {args:?}"));
-    let design = args.iter().any(|a| a.starts_with("--sweep"));
-    let (mut t, mut o) = (read(&dir.join(&traj)), read(&dir.join(&obs)));
-    if design {
-        t = strip_design_columns(&t);
-        o = strip_design_columns(&o);
-    }
+    // The scenario coordinate names the arm: the scenario's name, or `(none)`
+    // without one, whatever `--param` the run applies over it.
+    let arm = args.iter().position(|a| *a == "--scenario")
+        .map_or("(none)".to_string(), |i| args[i + 1].to_string());
+    let t = strip_design_columns(&read(&dir.join(&traj)), &arm);
+    let o = strip_design_columns(&read(&dir.join(&obs)), &arm);
     RouteRun {
         traj: t,
         obs: o,
-        id: identity(&one_leaf(&dir.join(&store).join("sims"))),
+        id: identity(&one_sim_cell(&dir.join(&store))),
         overrides: override_lines(&stderr),
     }
 }
@@ -285,7 +318,7 @@ fn simulate_every_route_to_one_value_gives_one_trajectory() {
     let reference = &runs[0].2;
     assert!(reference.overrides.is_empty(), "{:?}", reference.overrides);
 
-    for (name, is_scenario, run) in &runs {
+    for (name, _is_scenario, run) in &runs {
         // One trajectory and one observation series, byte for byte.
         assert_eq!(run.traj, reference.traj, "route {name}: trajectory differs");
         assert_eq!(run.obs, reference.obs, "route {name}: observations differ");
@@ -306,30 +339,12 @@ fn simulate_every_route_to_one_value_gives_one_trajectory() {
                 "route {name}: {:?}", run.overrides);
         }
 
-        // The no-scenario routes are one leaf. A scenario route is its own
-        // `scenario` level — the level hashes the scenario's effective delta
-        // (`set`/`scale`/enable/disable), which a scenario that sets beta has
-        // and a `--param` does not — so its run_id differs while its output
-        // does not. That split is the identity rule, not a defect.
-        if *is_scenario {
-            assert_ne!(run.id.levels["scenario"], reference.id.levels["scenario"],
-                "route {name}");
-            assert_ne!(run.id.run_id, reference.id.run_id, "route {name}");
-        } else {
-            assert_eq!(run.id, reference.id, "route {name}: identity differs");
-        }
+        // Every route is one cell. A scenario's `set`/`scale` reaches the
+        // identity as the parameter values it resolves to, and its `scenario`
+        // record names only the interventions it activates, so a scenario that
+        // only sets beta has the identity of a `--param` that does.
+        assert_eq!(run.id, reference.id, "route {name}: identity differs");
     }
-
-    // Scenarios with the same effective delta share the scenario level:
-    // `set_b`, `child` (inherits `set = { beta = 0.3 }`) and `expr` (computes
-    // 0.3 at compile time) all reach the run as `set = { beta = 0.3 }`. A
-    // `scale` delta is a different delta even where it lands on the same
-    // value.
-    let by: BTreeMap<&str, &Identity> = runs.iter().map(|(n, _, r)| (*n, &r.id)).collect();
-    assert_eq!(by["extends_set"], by["scenario_set"]);
-    assert_eq!(by["extends_expr"], by["scenario_set"]);
-    assert_ne!(by["scenario_scale"].levels["scenario"], by["scenario_set"].levels["scenario"]);
-    assert_ne!(by["extends_scale"].levels["scenario"], by["scenario_scale"].levels["scenario"]);
 }
 
 // ─── pfilter: --params, --param and a scenario score one likelihood ─────────
@@ -727,6 +742,27 @@ fn posterior_fit(dir: &Path) -> PathBuf {
         .find(|p| p.is_dir()).expect("seed leaf")
 }
 
+/// `table` with its `scenario` column removed; `#` lines are kept.
+fn without_scenario_column(table: &str) -> String {
+    let mut out = String::new();
+    let mut at = None;
+    for line in table.lines() {
+        if line.starts_with('#') {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        let cols: Vec<&str> = line.split('\t').collect();
+        let i = *at.get_or_insert_with(|| {
+            cols.iter().position(|c| *c == "scenario").expect("a `scenario` column")
+        });
+        let kept: Vec<&str> = cols.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, c)| *c).collect();
+        out.push_str(&kept.join("\t"));
+        out.push('\n');
+    }
+    out
+}
+
 #[test]
 fn simulate_from_a_posterior_param_and_scenario_set_give_one_output() {
     let tmp = tempfile::tempdir().unwrap();
@@ -737,10 +773,14 @@ fn simulate_from_a_posterior_param_and_scenario_set_give_one_output() {
         let (traj, obs) = (format!("traj_{name}.tsv"), format!("obs_{name}.tsv"));
         let store = format!("st_{name}");
         let mut argv = vec!["simulate", "model.camdl", "--draws", "posterior", "--fit", &leaf,
-            "-n", "5", "--seed", "4", "--output-dir", &store, "-o", &traj, "--obs", &obs];
+            "-n", "5", "--seed", "4", "--store", &store, "-o", &traj, "--obs", &obs];
         argv.extend_from_slice(extra);
         let stderr = ok(&camdl(dir, &argv), &format!("simulate {name}"));
-        (read(&dir.join(&traj)), read(&dir.join(&obs)), override_lines(&stderr))
+        // The `scenario` coordinate column names the arm, which differs by
+        // route by construction; every other column is compared.
+        (without_scenario_column(&read(&dir.join(&traj))),
+         without_scenario_column(&read(&dir.join(&obs))),
+         override_lines(&stderr))
     };
     let (t_param, o_param, n_param) = run("param", &["--param", "k=12"]);
     let (t_scen, o_scen, n_scen) = run("scenario", &["--scenario", "k_alt"]);

@@ -78,7 +78,7 @@ fn misaligned_emit_schedule_is_refused_and_writes_nothing() {
         // on day 7 and the rest would read zero.
         "--output-every", "7",
         "--obs", obs.to_str().unwrap(),
-        "--output-dir", tmp.path().join("r").to_str().unwrap(),
+        "--store", tmp.path().join("r").to_str().unwrap(),
     ]);
 
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -106,7 +106,7 @@ fn aligned_and_coarser_emit_schedules_are_accepted() {
         "--params", params.to_str().unwrap(),
         "--seed", "3",
         "--obs", obs.to_str().unwrap(),
-        "--output-dir", tmp.path().join("r").to_str().unwrap(),
+        "--store", tmp.path().join("r").to_str().unwrap(),
     ]);
     assert!(
         out.status.success(),
@@ -118,11 +118,15 @@ fn aligned_and_coarser_emit_schedules_are_accepted() {
     // This is the property the guard protects; it is asserted here so the test
     // fails if a future change reinstates the quantization without tripping the
     // guard.
+    // The table opens with the cell's coordinate columns (`replicate`,
+    // `scenario`, `seed`); the observed value is the column after `time`.
     let txt = std::fs::read_to_string(&obs).unwrap();
+    let value_col = txt.lines().next().unwrap().split('\t').position(|h| h == "time")
+        .expect("a `time` column") + 1;
     let vals: Vec<f64> = txt
         .lines()
         .skip(1)
-        .filter_map(|l| l.split('\t').nth(1)?.parse().ok())
+        .filter_map(|l| l.split('\t').nth(value_col)?.parse().ok())
         .collect();
     assert!(vals.len() > 7, "expected a daily series, got {} rows", vals.len());
     let nonzero = vals.iter().filter(|v| **v > 0.0).count();
@@ -148,7 +152,7 @@ fn aligned_and_coarser_emit_schedules_are_accepted() {
         "--params", p2.to_str().unwrap(),
         "--seed", "3",
         "--obs", obs2.to_str().unwrap(),
-        "--output-dir", tmp2.path().join("r").to_str().unwrap(),
+        "--store", tmp2.path().join("r").to_str().unwrap(),
     ]);
     assert!(
         out2.status.success(),

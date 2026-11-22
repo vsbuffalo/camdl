@@ -99,7 +99,7 @@ impl PfilterConfig {
 /// `pf-N<particles>-r<replicates>-dt<dt>`, with an integral `dt` written
 /// without its decimals.
 pub(crate) fn config_label(particles: u64, replicates: u64, dt: f64) -> String {
-    format!("pf-N{particles}-r{replicates}-dt{}", crate::sim_ensemble_cas::fmt_dt(dt))
+    format!("pf-N{particles}-r{replicates}-dt{}", crate::sim_store::fmt_dt(dt))
 }
 
 /// One particle-filter evaluation.

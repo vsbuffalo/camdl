@@ -77,7 +77,8 @@ pub(crate) fn camdl_top_level() -> TopLevel {
 
 /// Every kind camdl stores on the run store.
 pub(crate) fn camdl_kinds() -> Kinds {
-    crate::pfilter_store::register(Kinds::new().register::<CompiledModel>().register::<DataTable>())
+    let kinds = Kinds::new().register::<CompiledModel>().register::<Quantities>().register::<DataTable>();
+    crate::sim_store::register(crate::pfilter_store::register(kinds))
 }
 
 // ── The store root and the request ───────────────────────────────────────────
@@ -280,11 +281,19 @@ impl store::Content for CompiledModelContent {
     }
 }
 
-/// A model's quantities and contrasts, as canonical JSON. No command on the
-/// store reads them yet; they are split out so the model part never holds
-/// them.
+/// A model's quantities and contrasts, as canonical JSON: the part of a
+/// compile `simulate --quantities-out` evaluates, split out so the model part
+/// never holds them.
 pub(crate) struct QuantitiesContent {
     bytes: Vec<u8>,
+}
+
+impl QuantitiesContent {
+    /// The quantities, as the evaluator reads them.
+    pub fn quantities(&self) -> Result<Vec<ir::quantity::Quantity>, String> {
+        let v: serde_json::Value = serde_json::from_slice(&self.bytes).map_err(|e| format!("the stored quantities: {e}"))?;
+        serde_json::from_value(v["quantities"].clone()).map_err(|e| format!("the stored quantities: {e}"))
+    }
 }
 
 impl store::Content for QuantitiesContent {
@@ -434,6 +443,28 @@ impl Primary for CompiledModel {
 impl ContentArtifact for CompiledModel {
     type Content = CompiledModelContent;
     const FILE: &'static str = "model.ir.json";
+}
+
+/// A model's quantities and contrasts, stored once per distinct content and
+/// build, and depended on by each cell's generated quantities.
+pub(crate) struct Quantities;
+
+impl Artifact for Quantities {
+    const KIND: &'static str = "quantities";
+    const WRITE: WriteMode = WriteMode::Atomic;
+    type Identity = Hashed<QuantitiesContent>;
+    type Labels = ModelLabels;
+}
+
+impl Primary for Quantities {
+    fn layout(_id: &Self::Identity, labels: &ModelLabels) -> Placed {
+        Layout::in_kind().result(&labels.name)
+    }
+}
+
+impl ContentArtifact for Quantities {
+    type Content = QuantitiesContent;
+    const FILE: &'static str = "quantities.json";
 }
 
 // ── Data tables ──────────────────────────────────────────────────────────────

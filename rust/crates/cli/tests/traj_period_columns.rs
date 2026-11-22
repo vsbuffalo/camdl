@@ -35,14 +35,20 @@ fn seed_timing_dated() -> PathBuf {
 }
 
 fn run(camdl: &Path, args: &[&str]) -> String {
+    // `--stdout` stores the cell before printing it; keep the store private.
+    let store = tempfile::tempdir().unwrap();
     let out = Command::new(camdl).env_remove("CLICOLOR_FORCE")
         .args(args)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("CAMDL_STORE", store.path().join("camdl-store"))
         .output()
         .expect("camdl must invoke");
     assert!(out.status.success(), "camdl {:?} failed:\n{}", args, String::from_utf8_lossy(&out.stderr));
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
+
+/// The coordinate columns that open every combined table `--stdout` prints.
+const COORDS: [&str; 3] = ["replicate", "scenario", "seed"];
 
 /// The trajectory table from `--stdout`: header cells and data rows, the
 /// leading `# version` comment skipped.
@@ -67,7 +73,8 @@ fn num(row: &[String], i: usize) -> f64 {
 /// The claims that hold for every backend, from the written file alone.
 fn assert_periods_tile_and_reconcile(backend: &str, stdout: &str, flow_tol: f64) {
     let (header, rows) = table(stdout);
-    assert_eq!(&header[..3], ["t", "t_start", "t_stop"], "[{backend}] the time columns lead the header");
+    assert_eq!(&header[..3], COORDS, "[{backend}] the coordinate columns lead the header");
+    assert_eq!(&header[3..6], ["t", "t_start", "t_stop"], "[{backend}] the time columns follow the coordinates");
     assert!(rows.len() > 2, "[{backend}] a run has more than two output rows");
 
     let (t, start, stop) = (col(&header, "t"), col(&header, "t_start"), col(&header, "t_stop"));
@@ -155,7 +162,8 @@ fn dates_gives_each_boundary_its_calendar_twin() {
         "--param", "beta=0.6", "--param", "gamma=0.2", "--param", "lambda=2.0", "--param", "w=3.0",
         "--param", "N0=5000", "--param", "rho=0.5", "--param", "k=20", "--param", "tau=2"]);
     let (header, rows) = table(&stdout);
-    assert_eq!(&header[..6], ["t", "t_start", "t_stop", "date", "date_start", "date_stop"]);
+    assert_eq!(&header[..3], COORDS);
+    assert_eq!(&header[3..9], ["t", "t_start", "t_stop", "date", "date_start", "date_stop"]);
     let (date, ds, de) = (col(&header, "date"), col(&header, "date_start"), col(&header, "date_stop"));
     assert_eq!(rows[0][date], "2020-02-24", "the origin");
     assert_eq!(rows[0][ds], rows[0][date], "the first row's empty period opens on its own date");

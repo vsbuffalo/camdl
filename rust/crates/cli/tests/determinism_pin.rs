@@ -79,14 +79,30 @@ fn content_lines(tsv: &str) -> Vec<&str> {
         .collect()
 }
 
-/// Map a single-run trajectory (columns `t  S  I  R  V  flow_*`) to t → full row.
+/// The index of the `t` column in a combined table's header. The columns
+/// before it are the cell's coordinates (`replicate`, `scenario`, `seed`);
+/// the trajectory row starts at `t`.
+fn t_column(header: &str) -> usize {
+    header.split('\t').position(|h| h == "t")
+        .unwrap_or_else(|| panic!("no `t` column in {header}"))
+}
+
+/// The trajectory part of a row: its columns from `t` on.
+fn trajectory_part(line: &str, t_col: usize) -> String {
+    line.split('\t').skip(t_col).collect::<Vec<_>>().join("\t")
+}
+
+/// Map a single-run trajectory (columns `t  t_start  t_stop  S  I  R  V
+/// flow_*` after the coordinate columns) to t → the row from `t` on.
 fn rows_by_t(tsv: &str) -> BTreeMap<i64, String> {
     let lines = content_lines(tsv);
+    let t_col = t_column(lines[0]);
     let mut out = BTreeMap::new();
     for l in lines.iter().skip(1) {
         // skip header
-        let t: i64 = l.split('\t').next().unwrap().parse().unwrap();
-        out.insert(t, l.to_string());
+        let row = trajectory_part(l, t_col);
+        let t: i64 = row.split('\t').next().unwrap().parse().unwrap();
+        out.insert(t, row);
     }
     out
 }
@@ -102,7 +118,9 @@ fn run_sim(bin: &Path, model: &Path, extra: &[&str], out: &Path) {
     args.extend(extra.iter().map(|s| s.to_string()));
     args.push("-o".into());
     args.push(out.to_string_lossy().into_owned());
-    let o = Command::new(bin).env_remove("CLICOLOR_FORCE").args(&args).output().expect("spawn");
+    let o = Command::new(bin).env_remove("CLICOLOR_FORCE")
+        .env("CAMDL_STORE", out.parent().unwrap().join("camdl-store"))
+        .args(&args).output().expect("spawn");
     assert!(o.status.success(),
         "simulate {:?} failed: {}", extra, String::from_utf8_lossy(&o.stderr));
 }
@@ -161,21 +179,21 @@ fn explicit_seeds_match_single_runs() {
     run_sim(&bin, &model, &["--seeds", "7,8,9"], &multi);
 
     // Multi output has a leading `replicate` column. Extract replicate 1's
-    // rows (0-based → the second seed, 8), stripping the replicate column,
+    // rows (0-based → the second seed, 8), keeping the columns from `t` on,
     // into t → row.
     let multi_txt = std::fs::read_to_string(&multi).unwrap();
     let lines = content_lines(&multi_txt);
     let header = lines[0];
     assert!(header.starts_with("replicate\t"),
         "multi-run output should lead with a `replicate` column: {header}");
+    let t_col = t_column(header);
     let mut rep2: BTreeMap<i64, String> = BTreeMap::new();
     for l in lines.iter().skip(1) {
-        let mut it = l.splitn(2, '\t');
-        let rep: u64 = it.next().unwrap().parse().unwrap();
-        let rest = it.next().unwrap();
+        let rep: u64 = l.split('\t').next().unwrap().parse().unwrap();
         if rep == 1 {
+            let rest = trajectory_part(l, t_col);
             let t: i64 = rest.split('\t').next().unwrap().parse().unwrap();
-            rep2.insert(t, rest.to_string());
+            rep2.insert(t, rest);
         }
     }
     assert!(!rep2.is_empty(), "no replicate-1 rows found in multi output");

@@ -162,25 +162,31 @@ Both paths go through the same constant deliberately — changing it anywhere
 requires changing it everywhere, or synthetic fits stop being reproducible
 against standalone simulate output.
 
-## 6. Output files and CAS layout
+## 6. Output files and store layout
 
-Under `--cas`, the canonical layout from the 2026-04-19 output-tree unification
-(`docs/dev/proposals/2026-04-19-unified-output-tree.md`):
+`camdl simulate` stores each cell in the run store (`./camdl-store`, or the root
+`--store` or `CAMDL_STORE` names), and the synthetic observations are an `obs`
+by-product inside the cell (`docs/camdl-run-spec.md` §4.4, §10.5):
 
 ```text
-<root>/sims/<sim_hash[:8]>/<scenario-slug>-<scen_hash[:8]>/seed_<N>/
-  traj.tsv                      # trajectory (always)
-  run.json                      # simulate provenance
-  obs/<obs_hash[:8]>-<obs_seed>/
-    <stream_name>.tsv           # synthetic observations (one per stream)
-    obs.json                    # obs-generation provenance
+<build>/sim/<model>-<12 hex>/<backend>-dt<dt>-<12 hex>/<params>-<12 hex>/<scenario>-<12 hex>/seed_<seed>[-r<n>]-<12 hex>/
+  identity.json  run.json  traj.tsv          # the cell
+  obs/<stream names joined by _>-<12 hex>/
+    identity.json  run.json                  # the by-product's own records
+    <stream_name>.tsv                        # synthetic observations (one per stream)
 ```
 
-The `obs_hash` captures the observation model + obs params + the streams' output
-schedule — independent of the trajectory hash, so iterating on the observation
-model doesn't invalidate the trajectory cache.
-`camdl cat <hash> --stream weekly_cases` surfaces either synthetic or data TSVs
-uniformly.
+The `obs` by-product's identity is the cell's identity, a digest of the
+observation blocks with the `--emit-every` override and the file format, the
+streams' names and the observation seed. Asking for observations never changes
+the cell's id, so iterating on the observation model does not invalidate the
+stored trajectory; a cell stored without the observations asked for is simulated
+again, and its trajectory is checked against the stored one. `--obs FILE` and
+`--obs-dir DIR` export tables rendered from the stored per-cell files, with the
+coordinate columns `replicate`, `scenario`, the point columns and `seed` before
+the time column. `camdl cat <id> --stream
+weekly_cases.tsv` prints one stored
+stream file.
 
 ## 7. Data-TSV format
 

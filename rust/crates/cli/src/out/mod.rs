@@ -662,12 +662,7 @@ mod tests {
             let meta = crate::resolve::RecordMeta::new("0.0", "m.camdl", None,
                 ir::caltime::CalendarAxis::parse("days", None).unwrap(),
                 &crate::forcing_extrapolation::ForcingPolicy::new(false));
-            match crate::resolve::begin_resolved_write(&store, root.path(), &artifact, &meta,
-                crate::resolve::WriteMode::Streaming).unwrap()
-            {
-                crate::resolve::ResolvedWrite::Streaming(c) => c,
-                crate::resolve::ResolvedWrite::Committed(_) => unreachable!(),
-            }
+            crate::resolve::begin_resolved_write(&store, root.path(), &artifact, &meta).unwrap()
         };
         let status = |dir: &std::path::Path| -> String {
             let rec: serde_json::Value =

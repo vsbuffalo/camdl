@@ -125,29 +125,6 @@ pub fn fit_output_schema(
     out
 }
 
-/// Build the `output_schema` for a simulation leaf by classifying its in-memory
-/// artifact headers (the sim commits atomically, so the files are not yet on
-/// disk). `traj.tsv`/`ensemble.tsv` are trajectories — a column matching no
-/// reserved name is a compartment `state`; other artifacts are skipped for now.
-pub fn sim_output_schema(files: &BTreeMap<String, Vec<u8>>) -> BTreeMap<String, TableSchema> {
-    let none: HashSet<&str> = HashSet::new();
-    let mut out = BTreeMap::new();
-    for (name, bytes) in files {
-        let role_default = match name.as_str() {
-            "traj.tsv" | "ensemble.tsv" => Some((TableRole::Trajectory, ColumnRole::State)),
-            _ => None,
-        };
-        if let Some((role, default)) = role_default {
-            if let Ok(text) = std::str::from_utf8(bytes) {
-                if let Some(cols) = header_cols(text) {
-                    out.insert(name.clone(), table(&cols, role, &none, &none, default));
-                }
-            }
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,25 +159,6 @@ mod tests {
         assert_eq!(classify("inc_cases", &none, &none, st), ColumnRole::Incidence);
         assert_eq!(classify("replicate", &none, &none, st), ColumnRole::Replicate);
         assert_eq!(classify("S", &none, &none, st), ColumnRole::State); // compartment → default
-    }
-
-    #[test]
-    fn sim_schema_classifies_trajectory_header() {
-        let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-        files.insert(
-            "traj.tsv".to_string(),
-            b"t\tt_start\tt_stop\tS\tI\tR\tflow_infection\n0\t0\t0\t99\t1\t0\t0\n".to_vec(),
-        );
-        files.insert("event_log.tsv".to_string(), b"anything\n".to_vec()); // not a trajectory
-        let schema = sim_output_schema(&files);
-        assert!(!schema.contains_key("event_log.tsv"), "non-trajectory artifact skipped");
-        let traj = &schema["traj.tsv"];
-        assert_eq!(traj.role, TableRole::Trajectory);
-        assert_eq!(traj.columns[0].role, ColumnRole::Time); // t — the x-axis
-        assert_eq!(traj.columns[1].role, ColumnRole::WindowStart); // t_start
-        assert_eq!(traj.columns[2].role, ColumnRole::WindowStop); // t_stop
-        assert_eq!(traj.columns[3].role, ColumnRole::State); // S (compartment)
-        assert_eq!(traj.columns[6].role, ColumnRole::Flow); // flow_infection
     }
 
     #[test]

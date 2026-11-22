@@ -17,6 +17,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod sim_store_cells;
+
 fn binary() -> PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     let b = Path::new(&manifest).join("../../target/release/camdl");
@@ -192,7 +194,7 @@ fn restart_model(model_src: &str, origin: f64, extra: &[&str], obs_dir_flag: boo
         "--param".into(), "gamma=0.15".into(),
         "--init-state".into(), s(&state),
         "--seed".into(), "3".into(),
-        "--output-dir".into(), s(&store),
+        "--store".into(), s(&store),
     ];
     if obs_dir_flag {
         args.extend(["--obs-dir".to_string(), s(&obs_dir)]);
@@ -202,23 +204,29 @@ fn restart_model(model_src: &str, origin: f64, extra: &[&str], obs_dir_flag: boo
     Restart { _tmp: tmp, out, obs_dir, store }
 }
 
-/// Whether anything was stored under `root`: a `run.json` at any depth.
+/// Whether a simulation cell was stored under the run store `root`.
 fn stored_a_run(root: &Path) -> bool {
-    let Ok(rd) = std::fs::read_dir(root) else { return false };
-    rd.flatten().any(|e| {
-        let p = e.path();
-        if p.is_dir() { stored_a_run(&p) } else { p.file_name().is_some_and(|n| n == "run.json") }
-    })
+    !sim_store_cells::sim_cells(root).is_empty()
 }
 
-/// The data rows of a written observation file.
+/// An observation file's lines without its leading coordinate columns
+/// (`replicate`, `scenario`, … `seed`), so each starts at the stream's own
+/// first column.
+fn stream_columns(txt: &str) -> Vec<String> {
+    let mut lines = txt.lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty());
+    let header = lines.next().expect("a header");
+    let first = header.split('\t').position(|h| h == "seed")
+        .unwrap_or_else(|| panic!("no `seed` coordinate column in {header}")) + 1;
+    std::iter::once(header).chain(lines)
+        .map(|l| l.split('\t').skip(first).collect::<Vec<_>>().join("\t"))
+        .collect()
+}
+
+/// The data rows of a written observation file, from the stream's first
+/// column on.
 fn data_rows(r: &Restart) -> Vec<String> {
     let txt = std::fs::read_to_string(r.obs_dir.join("weekly.tsv")).unwrap();
-    txt.lines()
-        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
-        .skip(1)
-        .map(str::to_string)
-        .collect()
+    stream_columns(&txt).into_iter().skip(1).collect()
 }
 
 fn assert_refused(r: &Restart, period: &str) {
@@ -296,7 +304,7 @@ fn an_instant_stream_restarts_anywhere() {
     let err = String::from_utf8_lossy(&r.out.stderr);
     assert!(r.out.status.success(), "a census has no period under way: {err}");
     let txt = std::fs::read_to_string(r.obs_dir.join("weekly.tsv")).unwrap();
-    assert!(txt.lines().any(|l| l.starts_with("28\t")), "the census at day 28 is written:\n{txt}");
+    assert!(stream_columns(&txt).iter().any(|l| l.starts_with("28\t")), "the census at day 28 is written:\n{txt}");
 }
 
 /// A week that begins before the model does is not a period under way: no
@@ -434,7 +442,7 @@ fn an_anchored_model_start_is_resolved_before_periods_are_placed() {
             "--init-state".into(), s(&state),
             "--seed".into(), "3".into(),
             "--quantities-out".into(), s(&dir.join(format!("q_{name}"))),
-            "--output-dir".into(), s(&dir.join(format!("cas_{name}"))),
+            "--store".into(), s(&dir.join(format!("cas_{name}"))),
         ])
     };
 

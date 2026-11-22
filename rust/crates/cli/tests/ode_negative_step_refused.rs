@@ -45,7 +45,7 @@ fn simulate(root: &Path, dt: &str) -> (std::process::Output, PathBuf) {
             dt,
             "--seed",
             "1",
-            "--output-dir",
+            "--store",
             root.join("store").to_str().unwrap(),
             "-o",
             out.to_str().unwrap(),

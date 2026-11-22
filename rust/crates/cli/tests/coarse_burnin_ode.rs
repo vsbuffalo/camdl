@@ -93,18 +93,25 @@ fn setup(tag: &str, model_src: &str) -> Option<(TempDir, PathBuf, PathBuf)> {
         .args(["--params"]).arg(&truth)
         .args(["--backend", "ode", "--dt", "1", "--seed", "1", "--obs-only"]).arg(&full)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("CAMDL_STORE", tmp.path().join("camdl-store"))
         .output().unwrap();
     assert!(sim.status.success(), "simulate failed: {}", String::from_utf8_lossy(&sim.stderr));
 
-    // Trim to time >= 50 (keep the header verbatim so the column name matches).
+    // Trim to time >= 50. The `--obs-only` table opens with the simulation's
+    // coordinate columns (`replicate`, `scenario`, `seed`); the data file keeps
+    // the columns from `time` on, with their header names verbatim so the
+    // column name matches the stream.
     let text = std::fs::read_to_string(&full).unwrap();
     let mut lines = text.lines();
     let header = lines.next().expect("data header");
-    let mut trimmed = String::from(header);
+    let time_col = header.split('\t').position(|c| c == "time")
+        .unwrap_or_else(|| panic!("no `time` column in the --obs-only header: {header}"));
+    let from_time = |l: &str| l.split('\t').skip(time_col).collect::<Vec<_>>().join("\t");
+    let mut trimmed = from_time(header);
     trimmed.push('\n');
     for l in lines {
-        if let Some(t) = l.split('\t').next().and_then(|c| c.parse::<f64>().ok()) {
-            if t >= 50.0 { trimmed.push_str(l); trimmed.push('\n'); }
+        if let Some(t) = l.split('\t').nth(time_col).and_then(|c| c.parse::<f64>().ok()) {
+            if t >= 50.0 { trimmed.push_str(&from_time(l)); trimmed.push('\n'); }
         }
     }
     let data = tmp.path().join("prev.tsv");

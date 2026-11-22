@@ -14,6 +14,8 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+mod sim_store_cells;
+
 fn binary() -> PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     Path::new(&manifest).join("../../target/release/camdl")
@@ -93,7 +95,7 @@ impl Fixture {
     fn simulate_with(&self, replicates: &str, out_dir: &str, extra: &[&str]) -> Output {
         let mut args = vec![
             "simulate", "m.camdl", "--params", "p.toml", "--backend", "chain_binomial",
-            "--dt", "1", "--seed", "4", "--replicates", replicates, "--output-dir", out_dir,
+            "--dt", "1", "--seed", "4", "--replicates", replicates, "--store", out_dir,
         ];
         args.extend_from_slice(extra);
         Command::new(skip_if_missing_binary()).env_remove("CLICOLOR_FORCE")
@@ -104,29 +106,13 @@ impl Fixture {
             .expect("spawn camdl")
     }
 
+    /// The folders of every stored simulation cell in the store `out`.
     fn sim_leaves(&self) -> Vec<PathBuf> {
-        let mut v = run_leaves(&self.path("out").join("sims"));
+        let mut v: Vec<PathBuf> =
+            sim_store_cells::sim_cells(&self.path("out")).into_iter().map(|c| c.dir).collect();
         v.sort();
         v
     }
-}
-
-fn run_leaves(root: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        if dir.join("run.json").is_file() {
-            out.push(dir.clone());
-        }
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for e in entries.flatten() {
-                if e.path().is_dir() {
-                    stack.push(e.path());
-                }
-            }
-        }
-    }
-    out
 }
 
 fn stderr(out: &Output) -> String {
@@ -306,22 +292,26 @@ fn an_observation_request_re_simulates_cells_lacking_the_exact_subtree() {
     assert_eq!(std::fs::read(fx.path("synth1c").join("cases.tsv")).unwrap(), daily);
 }
 
-/// A `--quantities-out` run simulates every cell — the quantities are a
-/// regenerated sidecar over the in-memory trajectory — and the dry run says so.
+/// Each cell's quantities are a by-product evaluated from the in-memory
+/// trajectory, so asking for them of cells stored without them simulates
+/// every cell again, and the dry run counts those cells as misses; once
+/// stored, a rerun reads every cell and its quantities from the store.
 #[test]
 fn a_quantities_run_recomputes_every_cell() {
     let fx = Fixture::new();
     assert_ok(&fx.simulate(&[]), "first run");
     let dry = fx.simulate(&["--quantities-out", "q", "--dry-run"]);
     assert_ok(&dry, "dry run with quantities");
-    assert!(
-        stderr(&dry).contains("3 cache hits, 0 misses; quantities requested: 3 cells recomputed"),
-        "{}", stderr(&dry)
-    );
+    assert!(stderr(&dry).contains("0 cache hits \u{2192} read back, 3 misses"), "{}", stderr(&dry));
     let run = fx.simulate(&["--quantities-out", "q"]);
     assert_ok(&run, "quantities run");
     assert_eq!(simulated(&run), None, "every cell ran; stderr:\n{}", stderr(&run));
     assert!(fx.path("q").join("quantities").join("peak.tsv").is_file());
+    let table = std::fs::read(fx.path("q").join("quantities").join("peak.tsv")).unwrap();
+    let again = fx.simulate(&["--quantities-out", "q2"]);
+    assert_ok(&again, "quantities rerun");
+    assert_eq!(simulated(&again), Some(0), "every cell and its quantities are read back; stderr:\n{}", stderr(&again));
+    assert_eq!(std::fs::read(fx.path("q2").join("quantities").join("peak.tsv")).unwrap(), table, "the table rendered from the store is the computed one");
 }
 
 /// The pre-existing defect commit `c42f5665` fixed, pinned on its own: a leaf
@@ -344,9 +334,5 @@ fn an_earlier_cadences_subtree_survives_a_later_one() {
     for leaf in &leaves {
         let subtrees = obs_subtrees(leaf);
         assert_eq!(subtrees.len(), 2, "both cadences under {}: {subtrees:?}", leaf.display());
-        let rec: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(leaf.join("run.json")).unwrap()).unwrap();
-        let declared = rec["children"]["obs"].as_array().map(|a| a.len()).unwrap_or(0);
-        assert_eq!(declared, 2, "run.json declares both obs children under {}: {}", leaf.display(), rec["children"]);
     }
 }

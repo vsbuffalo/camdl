@@ -13,6 +13,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod sim_store_cells;
+
 fn binary() -> PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     Path::new(&manifest).join("../../target/release/camdl")
@@ -123,7 +125,7 @@ fn simulate_on(
         backend,
         "--seed",
         "7",
-        "--output-dir",
+        "--store",
         &store.to_string_lossy(),
         "-o",
         &out.to_string_lossy(),
@@ -175,55 +177,23 @@ fn last_t(rows: &[(String, f64, f64)], scenario: &str) -> f64 {
         .fold(f64::NEG_INFINITY, f64::max)
 }
 
-/// Every `run.json` under `<store>/sims` (the trajectory leaves; the ensemble
-/// record lives under `ensembles/` and is not a cell).
-fn sim_records(store: &Path) -> Vec<serde_json::Value> {
-    fn walk(dir: &Path, out: &mut Vec<serde_json::Value>) {
-        let Ok(rd) = std::fs::read_dir(dir) else { return };
-        for e in rd.flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                walk(&p, out);
-            } else if p.file_name().is_some_and(|n| n == "run.json") {
-                let s = std::fs::read_to_string(&p).unwrap();
-                out.push(serde_json::from_str(&s).unwrap());
-            }
-        }
-    }
-    let mut out = Vec::new();
-    walk(&store.join("sims"), &mut out);
-    out
-}
-
-/// The distinct `run_id`s among the trajectory leaves. This — NOT the leaf
-/// count — is the collision check: the store PATH carries a readable label
-/// segment per level, so cells with distinct labels land in distinct
-/// directories even when their identity is byte-identical. The `run_id` is
-/// derived from the level HASHES alone, so it is the thing that actually
-/// collides.
+/// The distinct `run_id`s among the stored cells. This, not the folder
+/// count, is the collision check: the store path carries a readable label per
+/// level, so cells with distinct labels could land in distinct folders even
+/// when their identity were byte-identical. The `run_id` is derived from the
+/// identity alone, so it is the thing that actually collides.
 fn distinct_run_ids(store: &Path) -> Vec<String> {
-    let mut ids: Vec<String> = sim_records(store)
-        .iter()
-        .map(|r| r["run_id"].as_str().expect("run.json has a run_id").to_string())
-        .collect();
-    ids.sort();
+    let mut ids = sim_store_cells::sim_run_ids(store);
     ids.dedup();
     ids
 }
 
-/// The identity-bearing hash suffix of each level, in path order — the
-/// `run.json` `levels` array with the readable labels dropped.
-fn level_hashes(store: &Path) -> Vec<Vec<String>> {
-    let mut out: Vec<Vec<String>> = sim_records(store)
+/// One identity-record field (`config`, `scenario`, …) of every stored cell,
+/// sorted.
+fn identity_parts(store: &Path, field: &str) -> Vec<String> {
+    let mut out: Vec<String> = sim_store_cells::sim_cells(store)
         .iter()
-        .map(|r| {
-            r["levels"]
-                .as_array()
-                .expect("levels array")
-                .iter()
-                .map(|l| l["hash"].as_str().expect("level hash").to_string())
-                .collect()
-        })
+        .map(|c| c.identity["identity"][field].to_string())
         .collect();
     out.sort();
     out
@@ -373,27 +343,23 @@ fn absent_or_equal_horizon_does_not_rekey() {
     let a = simulate(&bin, &no_horizon, &params, &["plain"]);
     let b = simulate(&bin, &menu, &params, &["same"]);
 
-    // Levels are (model, config, params, scenario, seed) in path order. The
+    // The identity record has a model, config, params, scenario and seed. The
     // horizon lives in `config`, so that is the one to compare: the two models
     // differ in source text (three scenarios vs one), so their MODEL level
     // legitimately differs and is not part of this claim.
-    let config_of = |run: &Run| -> Vec<String> {
-        level_hashes(&run.store).iter().map(|ls| ls[1].clone()).collect()
-    };
+    let config_of = |run: &Run| -> Vec<String> { identity_parts(&run.store, "config") };
     assert_eq!(
         config_of(&a),
         config_of(&b),
         "a scenario whose `to` equals the model horizon must produce the same \
-         config-level digest as one that declares no horizon at all — the \
+         config identity as one that declares no horizon at all — the \
          identity folds the resolved VALUE, not whether it was declared"
     );
 
     // And the scenario level stays empty-delta-identical for both, so the
     // horizon has not leaked into the scenario digest (which would re-key
     // every existing scenario'd run in every store).
-    let scenario_of = |run: &Run| -> Vec<String> {
-        level_hashes(&run.store).iter().map(|ls| ls[3].clone()).collect()
-    };
+    let scenario_of = |run: &Run| -> Vec<String> { identity_parts(&run.store, "scenario") };
     assert_eq!(
         scenario_of(&a),
         scenario_of(&b),
@@ -622,7 +588,7 @@ fn a_shortened_horizon_emits_no_observations_past_its_own_trajectory() {
             "7",
             "--scenario",
             "shorter",
-            "--output-dir",
+            "--store",
             &store.to_string_lossy(),
             "--obs",
             &obs.to_string_lossy(),
@@ -644,11 +610,13 @@ fn a_shortened_horizon_emits_no_observations_past_its_own_trajectory() {
     // So must the observations. Before the fix these ran to the model's 100,
     // with t = 50..100 read off the frozen final snapshot.
     let txt = std::fs::read_to_string(&obs).unwrap();
-    let obs_times: Vec<f64> = txt
+    let mut obs_lines = txt
         .lines()
-        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
-        .skip(1)
-        .map(|l| l.split('\t').next().unwrap().parse().unwrap())
+        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'));
+    let obs_header: Vec<&str> = obs_lines.next().expect("obs header").split('\t').collect();
+    let time_i = obs_header.iter().position(|c| *c == "time").expect("time column");
+    let obs_times: Vec<f64> = obs_lines
+        .map(|l| l.split('\t').nth(time_i).unwrap().parse().unwrap())
         .collect();
     assert!(!obs_times.is_empty(), "the scenario must still emit its own observations");
     let obs_last = obs_times.iter().copied().fold(f64::NEG_INFINITY, f64::max);
@@ -842,7 +810,7 @@ fn obs_mirror_refuses_scenarios_with_different_horizons() {
                 "simulate", &model.to_string_lossy(), "--params",
                 &params.to_string_lossy(), "--backend", "ode", "--seed", "7",
                 "--scenario", order[0], "--scenario", order[1],
-                "--output-dir", &store.to_string_lossy(),
+                "--store", &store.to_string_lossy(),
                 "--obs", &obs.to_string_lossy(), "-o", &traj.to_string_lossy(),
             ])
             .output()

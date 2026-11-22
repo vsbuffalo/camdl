@@ -2237,12 +2237,8 @@ fn run_profile(
         meta.engine = engine.clone();
         let write = match crate::resolve::begin_resolved_write(
             &store, &root, &resolved_artifact, &meta,
-            crate::resolve::WriteMode::Streaming,
         ) {
-            Ok(crate::resolve::ResolvedWrite::Streaming(c)) => c,
-            Ok(crate::resolve::ResolvedWrite::Committed(_)) => {
-                unreachable!("Streaming write mode never returns a committed path")
-            }
+            Ok(c) => c,
             // The identical point is already stored — a cache report, not a
             // failure (this start recomputed it for nothing).
             Err(runid::CasError::AlreadyCompleted { .. }) => return,

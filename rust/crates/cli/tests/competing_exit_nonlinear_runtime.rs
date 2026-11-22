@@ -82,7 +82,7 @@ fn simulate(dir: &Path, tag: &str, src: &str, backend: &str, dt: &str, seed: u64
     let o = Command::new(binary())
         .env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
-        .env("CAMDL_OUTPUT_DIR", dir.join("cas"))
+        .env("CAMDL_STORE", dir.join("camdl-store"))
         .args(["simulate", path.to_str().unwrap(), "--backend", backend, "--dt", dt])
         .args(["--output-every", dt, "--seed", &seed.to_string(), "-o", out.to_str().unwrap()])
         .output()
@@ -94,9 +94,13 @@ fn simulate(dir: &Path, tag: &str, src: &str, backend: &str, dt: &str, seed: u64
     );
     let tsv = std::fs::read_to_string(out).unwrap();
     let mut lines = tsv.lines().filter(|l| !l.starts_with('#'));
-    let header: Vec<String> = lines.next().expect("header").split('\t').map(str::to_string).collect();
+    // The `-o` table opens with the cell's coordinate columns (`replicate`,
+    // `scenario`, `seed`); the trajectory starts at `t`.
+    let full_header: Vec<&str> = lines.next().expect("header").split('\t').collect();
+    let t_col = full_header.iter().position(|h| *h == "t").expect("a `t` column");
+    let header: Vec<String> = full_header[t_col..].iter().map(|h| h.to_string()).collect();
     let rows: Vec<Vec<f64>> = lines
-        .map(|l| l.split('\t').map(|f| f.parse::<f64>().expect("number")).collect())
+        .map(|l| l.split('\t').skip(t_col).map(|f| f.parse::<f64>().expect("number")).collect())
         .collect();
     for (i, row) in rows.iter().enumerate() {
         for (h, v) in header.iter().zip(row) {

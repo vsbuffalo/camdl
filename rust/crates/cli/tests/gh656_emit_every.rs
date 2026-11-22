@@ -116,25 +116,24 @@ fn skip_if_missing_binary() -> bool {
     true
 }
 
-/// The `time` column of a one-stream obs TSV (header + `time\t<stream>` rows).
+/// The `time` column of a one-stream obs TSV, found by its header name: a
+/// `simulate --obs-dir` table leads with its coordinate columns, a fit's
+/// generated dataset does not.
 fn obs_times(path: &Path) -> Vec<f64> {
-    std::fs::read_to_string(path)
-        .unwrap()
-        .lines()
-        .skip(1)
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| l.split('\t').next().unwrap().parse::<f64>().unwrap())
-        .collect()
+    let text = std::fs::read_to_string(path).unwrap();
+    let mut lines = text.lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty());
+    let header: Vec<&str> = lines.next().expect("header").split('\t').collect();
+    let ti = header.iter().position(|h| *h == "time").expect("a `time` column");
+    lines.map(|l| l.split('\t').nth(ti).unwrap().parse::<f64>().unwrap()).collect()
 }
 
-/// Every dir containing a `run.json`, at any depth — the factored CAS sim path
-/// is several levels deep, and the obs ensemble is a declared `obs/` child below
-/// it (which carries no `run.json` of its own).
+/// Every simulation cell folder under a run-store root, at any depth: the
+/// folders whose `identity.json` records `kind = "sim"`.
 fn run_leaves(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        if dir.join("run.json").is_file() {
+        if identity_of(&dir).is_some_and(|v| v["kind"] == "sim") {
             out.push(dir.clone());
         }
         if let Ok(entries) = std::fs::read_dir(&dir) {
@@ -149,8 +148,13 @@ fn run_leaves(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// The `obs/{obs_hash8}-{obs_seed}` subtree names under a sim leaf — the obs
-/// artifacts' content addresses.
+fn identity_of(dir: &Path) -> Option<serde_json::Value> {
+    let txt = std::fs::read_to_string(dir.join("identity.json")).ok()?;
+    serde_json::from_str(&txt).ok()
+}
+
+/// The `obs/<streams>-<hash>` by-product folder names under a sim cell — the
+/// obs artifacts' content addresses.
 fn obs_subtree_names(leaf: &Path) -> Vec<String> {
     let mut out: Vec<String> = std::fs::read_dir(leaf.join("obs"))
         .map(|d| {
@@ -165,9 +169,8 @@ fn obs_subtree_names(leaf: &Path) -> Vec<String> {
 }
 
 fn run_id_of(leaf: &Path) -> String {
-    let txt = std::fs::read_to_string(leaf.join("run.json")).unwrap();
-    let v: serde_json::Value = serde_json::from_str(&txt).unwrap();
-    v["run_id"].as_str().expect("run.json carries a run_id").to_string()
+    let v = identity_of(leaf).expect("a sim cell has an identity.json");
+    v["run_id"].as_str().expect("identity.json carries a run_id").to_string()
 }
 
 // ── Behaviour ────────────────────────────────────────────────────────────────
@@ -187,7 +190,7 @@ fn the_bare_form_sets_every_streams_cadence() {
         "--seed", "3",
         "--emit-every", "7",
         "--obs-dir", dir.to_str().unwrap(),
-        "--output-dir", tmp.path().join("r").to_str().unwrap(),
+        "--store", tmp.path().join("r").to_str().unwrap(),
     ]);
     assert!(
         out.status.success(),
@@ -226,7 +229,7 @@ fn the_labelled_form_sets_one_stream_and_leaves_its_sibling_alone() {
         "--seed", "3",
         "--emit-every", "cases=7",
         "--obs-dir", dir.to_str().unwrap(),
-        "--output-dir", tmp.path().join("r").to_str().unwrap(),
+        "--store", tmp.path().join("r").to_str().unwrap(),
     ]);
     assert!(
         out.status.success(),
@@ -262,7 +265,7 @@ fn mixing_the_bare_and_labelled_forms_is_refused() {
         "--emit-every", "7",
         "--emit-every", "cases=1",
         "--obs-dir", tmp.path().join("obs").to_str().unwrap(),
-        "--output-dir", tmp.path().join("r").to_str().unwrap(),
+        "--store", tmp.path().join("r").to_str().unwrap(),
     ]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "mixed forms must be refused\nstderr={stderr}");
@@ -281,7 +284,7 @@ fn an_unknown_stream_label_lists_the_valid_ones() {
         "--params", params.to_str().unwrap(),
         "--emit-every", "caes=7",
         "--obs-dir", tmp.path().join("obs").to_str().unwrap(),
-        "--output-dir", tmp.path().join("r").to_str().unwrap(),
+        "--store", tmp.path().join("r").to_str().unwrap(),
     ]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "a typo'd label must be refused\nstderr={stderr}");
@@ -306,7 +309,7 @@ fn an_at_list_stream_is_refused_by_name() {
         "--params", params.to_str().unwrap(),
         "--emit-every", "7",
         "--obs", obs.to_str().unwrap(),
-        "--output-dir", tmp.path().join("r").to_str().unwrap(),
+        "--store", tmp.path().join("r").to_str().unwrap(),
     ]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -331,7 +334,7 @@ fn a_run_that_emits_no_observations_refuses_the_flag() {
         "simulate", model.to_str().unwrap(),
         "--params", params.to_str().unwrap(),
         "--emit-every", "7",
-        "--output-dir", tmp.path().join("r").to_str().unwrap(),
+        "--store", tmp.path().join("r").to_str().unwrap(),
     ]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -353,7 +356,7 @@ fn the_dsl_tick_spelling_is_refused_with_a_plain_number_hint() {
         "--params", params.to_str().unwrap(),
         "--emit-every", "1 'weeks",
         "--obs-dir", tmp.path().join("obs").to_str().unwrap(),
-        "--output-dir", tmp.path().join("r").to_str().unwrap(),
+        "--store", tmp.path().join("r").to_str().unwrap(),
     ]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "stderr={stderr}");
@@ -367,8 +370,8 @@ fn the_dsl_tick_spelling_is_refused_with_a_plain_number_hint() {
 
 /// Two cadences are two artifacts, and one cadence twice is one artifact.
 ///
-/// The obs subtree is addressed `obs/{obs_hash8}-{obs_seed}` under the sim leaf,
-/// and `obs_hash` folds the override (`cas_sink::obs_subtree_hash`). Drop that fold
+/// The obs by-product is addressed `obs/<streams>-<hash>` under the sim cell,
+/// and its hash folds the override. Drop that fold
 /// and the two cadences collide on one directory — the second run silently
 /// overwriting the first's weekly file with daily rows under an address that
 /// still claims to be the first's.
@@ -388,7 +391,7 @@ fn distinct_cadences_are_distinct_obs_artifacts_and_the_same_cadence_collides() 
             "--seed", "3",
             "--emit-every", every,
             "--obs-dir", obs_dir,
-            "--output-dir", store.to_str().unwrap(),
+            "--store", store.to_str().unwrap(),
         ]);
         assert!(
             out.status.success(),
@@ -452,7 +455,7 @@ fn the_flag_does_not_move_the_model_identity_a_real_data_fit_keys_on() {
             "--params".into(), params.to_string_lossy().into(),
             "--seed".into(), "3".into(),
             "--obs-dir".into(), obs_dir.into(),
-            "--output-dir".into(), store.to_string_lossy().into(),
+            "--store".into(), store.to_string_lossy().into(),
         ];
         args.extend(extra.iter().map(|s| s.to_string()));
         let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();

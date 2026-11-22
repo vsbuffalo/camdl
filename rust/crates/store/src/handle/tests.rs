@@ -167,6 +167,77 @@ fn a_rendering_combines_an_invocations_results_with_their_labels() {
     assert_eq!(std::fs::read(&copy.0).unwrap(), b"t\tI\n0\t5\n");
 }
 
+struct WithObs;
+impl crate::ByProductRendering for WithObs {
+    type Of = Sim;
+    type By = Obs;
+    type Options = ();
+    fn render(
+        members: &[crate::MemberWith<Sim, Obs>],
+        _: &(),
+        out: &mut dyn crate::ExportSink,
+    ) -> crate::Result<()> {
+        for ((_, l), obs) in members {
+            let w = out.file(&format!("seed_{}.tsv", l.seed))?;
+            let mut b = Vec::new();
+            if let Some(o) = obs {
+                std::io::Read::read_to_end(&mut o.open("obs.tsv")?, &mut b).unwrap();
+            }
+            w.write_all(&b).unwrap();
+        }
+        Ok(())
+    }
+}
+
+/// A by-product rendering is given each member with the by-product the
+/// invocation asked for of that member, and a member asked for none with
+/// `None`; it writes a directory when it names files.
+#[test]
+fn a_by_product_rendering_reads_each_members_own_by_product() {
+    let root = TempRoot::new("render-by-products");
+    let store = open(root.path());
+    let i = labelled("obs");
+    for (seed, want) in [(1u64, true), (2, false), (3, true)] {
+        let (id, labels) = sim(seed);
+        let obs = ObsId { sim: id.record(), rate: Finite::new(seed as f64).unwrap() };
+        let wanted = if want { crate::Wanted::<Sim>::none().with::<Obs>(obs, ()) } else { crate::Wanted::none() };
+        let Begin::Claimed(mut run) = store.begin_with::<Sim>(&id, &labels, &wanted, &i, Reuse::IfCompleted).unwrap() else {
+            panic!("claimed")
+        };
+        run.result_file("traj.tsv").unwrap().write_all(b"t\n").unwrap();
+        if let Some(o) = run.also::<Obs>().unwrap() {
+            o.result_file("obs.tsv").unwrap().write_all(format!("o{seed}").as_bytes()).unwrap();
+        }
+        run.finish().unwrap();
+    }
+    let inv = i.finish(&store).unwrap();
+    let to = ExportPath(root.path().join("out"));
+    inv.render_by_products::<WithObs>(&store, &(), &to).unwrap();
+    for (seed, want) in [(1, "o1"), (2, ""), (3, "o3")] {
+        assert_eq!(std::fs::read_to_string(to.0.join(format!("seed_{seed}.tsv"))).unwrap(), want);
+    }
+}
+
+/// An export of several files is written under its path as a directory,
+/// subdirectories its names hold included; one file named `""` is the path
+/// itself.
+#[test]
+fn an_export_writes_one_file_or_a_directory_of_them() {
+    let root = TempRoot::new("export-files");
+    let mut files = crate::ExportFiles::default();
+    crate::ExportSink::file(&mut files, "quantities/a.tsv").unwrap().write_all(b"a").unwrap();
+    crate::ExportSink::file(&mut files, "quantities.json").unwrap().write_all(b"m").unwrap();
+    let dir = ExportPath(root.path().join("out"));
+    files.write_to(&dir).unwrap();
+    assert_eq!(std::fs::read(dir.0.join("quantities/a.tsv")).unwrap(), b"a");
+    assert_eq!(std::fs::read(dir.0.join("quantities.json")).unwrap(), b"m");
+    let mut one = crate::ExportFiles::default();
+    crate::ExportSink::file(&mut one, "").unwrap().write_all(b"t").unwrap();
+    let file = ExportPath(root.path().join("t.tsv"));
+    one.write_to(&file).unwrap();
+    assert_eq!(std::fs::read(&file.0).unwrap(), b"t");
+}
+
 #[derive(serde::Serialize, serde::Deserialize, crate::FileInputs, Clone, Debug)]
 #[serde(deny_unknown_fields)]
 struct ConfigToml {

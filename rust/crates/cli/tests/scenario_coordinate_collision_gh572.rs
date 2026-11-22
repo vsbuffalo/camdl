@@ -17,6 +17,8 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+mod sim_store_cells;
+
 fn binary() -> PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     Path::new(&manifest).join("../../target/release/camdl")
@@ -88,42 +90,22 @@ impl Fixture {
             .expect("spawn camdl")
     }
 
-    /// `simulate m.camdl --params p.toml --backend ode --output-dir out --sweep
+    /// `simulate m.camdl --params p.toml --backend ode --store out --sweep
     /// mu=0.2,0.3,0.4 --scenario <scenario> <flags…>` — a three-point `mu`
     /// sweep on `simulate`'s design axis.
     fn simulate_sweep(&self, scenario: &str, flags: &[&str]) -> Output {
         let mut args = vec![
             "simulate", "m.camdl", "--params", "p.toml", "--backend", "ode",
-            "--output-dir", "out", "--sweep", "mu=0.2,0.3,0.4", "--scenario", scenario,
+            "--store", "out", "--sweep", "mu=0.2,0.3,0.4", "--scenario", scenario,
         ];
         args.extend_from_slice(flags);
         self.camdl(&args)
     }
 
-    /// Every `Sim` leaf under the output root (`out/sims/`; a multi-cell
-    /// `simulate` also writes an ensemble leaf under `out/ensembles/`, which
-    /// is not a computation).
+    /// Every stored simulation cell's folder under the store `out`.
     fn leaves(&self) -> Vec<PathBuf> {
-        run_leaves(&self.path("out").join("sims"))
+        sim_store_cells::sim_cells(&self.path("out")).into_iter().map(|c| c.dir).collect()
     }
-}
-
-fn run_leaves(root: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        if dir.join("run.json").is_file() {
-            out.push(dir.clone());
-        }
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for e in entries.flatten() {
-                if e.path().is_dir() {
-                    stack.push(e.path());
-                }
-            }
-        }
-    }
-    out
 }
 
 fn stderr(out: &Output) -> String {
@@ -238,7 +220,7 @@ fn sweep_file_over_a_parameter_the_scenario_sets_is_refused() {
     for extra in [&["--dry-run"][..], &[][..]] {
         let mut args = vec![
             "simulate", "m.camdl", "--params", "p.toml", "--backend", "ode",
-            "--output-dir", "out", "--sweep-file", "mu.tsv", "--scenario", "pin_mu",
+            "--store", "out", "--sweep-file", "mu.tsv", "--scenario", "pin_mu",
         ];
         args.extend_from_slice(extra);
         assert_refused(
@@ -259,7 +241,7 @@ fn draws_file_column_the_scenario_sets_is_refused_with_the_shared_diagnostic() {
     std::fs::write(fx.path("mydraws.tsv"), "mu\tnu\n0.3\t0.5\n0.4\t0.5\n").unwrap();
     let out = fx.camdl(&[
         "simulate", "m.camdl", "--draws", "mydraws.tsv", "--scenario", "pin_mu",
-        "--backend", "ode", "--output-dir", "out", "-o", "traj.tsv",
+        "--backend", "ode", "--store", "out", "-o", "traj.tsv",
     ]);
     assert_refused(
         &out,
@@ -286,7 +268,7 @@ fn simulate_dry_run_refuses_a_draws_file_column_the_scenario_sets() {
     std::fs::write(fx.path("mydraws.tsv"), "mu\tnu\n0.3\t0.5\n0.4\t0.5\n").unwrap();
     let out = fx.camdl(&[
         "simulate", "m.camdl", "--draws", "mydraws.tsv", "--scenario", "pin_mu",
-        "--backend", "ode", "--output-dir", "out", "-o", "traj.tsv", "--dry-run",
+        "--backend", "ode", "--store", "out", "-o", "traj.tsv", "--dry-run",
     ]);
     assert_refused(
         &out,
@@ -311,7 +293,7 @@ fn draws_file_column_the_scenario_scales_is_refused() {
     std::fs::write(fx.path("mydraws.tsv"), "mu\tnu\n0.3\t0.5\n0.4\t0.5\n").unwrap();
     let out = fx.camdl(&[
         "simulate", "m.camdl", "--draws", "mydraws.tsv", "--scenario", "half_mu",
-        "--backend", "ode", "--output-dir", "out", "-o", "traj.tsv",
+        "--backend", "ode", "--store", "out", "-o", "traj.tsv",
     ]);
     assert_refused(
         &out,
@@ -359,7 +341,7 @@ scenarios { slow { set = { mu = 0.01 } } }
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .args([
                 "simulate", "pd.camdl", "--draws", "uniform", "-n", "3", "--seeds", "1",
-                "--backend", "ode", "--output-dir", out, "-o", &format!("{out}.tsv"),
+                "--backend", "ode", "--store", out, "-o", &format!("{out}.tsv"),
             ]);
         if let Some(s) = scenario {
             cmd.args(["--scenario", s]);
@@ -370,7 +352,7 @@ scenarios { slow { set = { mu = 0.01 } } }
             "generated draws under {scenario:?} must run; stderr:\n{}",
             stderr(&o)
         );
-        run_leaves(&p.join(out).join("sims"))
+        sim_store_cells::sim_cells(&p.join(out))
     };
 
     let shadowed = simulate("with_scenario", Some("slow"));
@@ -379,19 +361,16 @@ scenarios { slow { set = { mu = 0.01 } } }
         1,
         "three draws the scenario overrides are one computation: {shadowed:?}"
     );
-    let meta: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(shadowed[0].join("run.json")).unwrap())
-            .unwrap();
-    let params_label = meta["levels"]
-        .as_array()
-        .and_then(|ls| ls.iter().find(|l| l["name"] == "params"))
-        .and_then(|l| l["label"].as_str())
-        .map(str::to_string);
     assert_eq!(
-        params_label.as_deref(),
-        Some("mu=0.01"),
-        "the params label names the mu that ran; run.json levels: {}",
-        meta["levels"]
+        shadowed[0].params()["mu"], 0.01,
+        "the cell's identity records the mu that ran: {}",
+        shadowed[0].identity
+    );
+    assert_eq!(
+        shadowed[0].params_dir_name(),
+        "mu_0.01",
+        "the params label names the mu that ran: {}",
+        shadowed[0].dir.display()
     );
 
     let free = simulate("without_scenario", None);

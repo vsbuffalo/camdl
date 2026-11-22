@@ -619,6 +619,7 @@ fn obs_only_dir_and_synthetic_agree_byte_for_byte_at_same_seed() {
     // Path A: --obs-only-dir at seed=10
     let cli_dir = tmp.path().join("cli");
     let cli_status = Command::new(&bin).env_remove("CLICOLOR_FORCE").arg("simulate")
+        .env("CAMDL_STORE", tmp.path().join("camdl-store"))
         .arg(&ir)
         .args(["--params"]).arg(&truth)
         .args(["--seed", "10"])
@@ -647,7 +648,20 @@ sim_seeds = [10]
     let syn_tsv = datagen_segment(&out).join("synthetic").join("data")
         .join("ds_01").join("cases.tsv");
 
-    let cli_bytes = std::fs::read(&cli_tsv).unwrap();
+    // `--obs-only-dir` writes the coordinate columns (`replicate`, `scenario`,
+    // `seed`) before the stream's own; the stream's columns are compared.
+    let cli_text = std::fs::read_to_string(&cli_tsv).unwrap();
+    let mut cli_stripped = String::new();
+    for line in cli_text.lines() {
+        let cells: Vec<&str> = line.splitn(4, '\t').collect();
+        assert_eq!(cells.len(), 4, "coordinate columns then the stream's: {line:?}");
+        if cells[0] == "replicate" {
+            assert_eq!(&cells[..3], ["replicate", "scenario", "seed"], "{line:?}");
+        }
+        cli_stripped.push_str(cells[3]);
+        cli_stripped.push('\n');
+    }
+    let cli_bytes = cli_stripped.into_bytes();
     let syn_bytes = std::fs::read(&syn_tsv).unwrap();
     assert_eq!(cli_bytes, syn_bytes,
         "--obs-only-dir (seed=N) and [synthetic] (sim_seeds=[N]) must produce \

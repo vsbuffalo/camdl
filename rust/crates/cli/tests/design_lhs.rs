@@ -207,7 +207,7 @@ fn the_design_runs_under_simulate_sweep_file() {
     assert_ok(&fx.camdl(&[
         "simulate", &ir, "--params", &params.to_string_lossy(),
         "--sweep-file", &design_path, "--seed", "3",
-        "--backend", "chain_binomial", "--dt", "1", "--output-dir", &store, "-o", &combined,
+        "--backend", "chain_binomial", "--dt", "1", "--store", &store, "-o", &combined,
     ]), "simulate --sweep-file");
 
     // The combined table carries each point's id and its swept values, as

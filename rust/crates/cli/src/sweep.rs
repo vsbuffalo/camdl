@@ -17,7 +17,6 @@ use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 
 use crate::args::types::SweepSpec;
-use crate::sim_ensemble_cas::{ResolvedDesign, SweptParam};
 
 /// One design point: the swept parameters and their values at this point,
 /// sorted by parameter name.
@@ -250,6 +249,31 @@ pub fn read_sweep_file(path: &Path, model: &ir::Model) -> Result<SweepFile, Stri
     };
     Ok(SweepFile { points, design })
 }
+
+/// The resolved design axis of a `simulate` sweep job: what `--sweep` or
+/// `--sweep-file` expanded to, the design the cells' labels and the dry run show.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum ResolvedDesign {
+    /// `--sweep PARAM=GRID`, repeatable. `params` is name-sorted; the design
+    /// points are their Cartesian product with the first name varying slowest,
+    /// so `point_id` is a position in that product.
+    Sweep { params: Vec<SweptParam>, n_points: usize },
+    /// `--sweep-file FILE`: a TSV whose header names parameters and whose rows
+    /// are the design points. `point_ids` is the id each row was written
+    /// under, in row order: the file's own `point_id` column when it has one,
+    /// else `0..n_points`. The file enters by its content digest, never its
+    /// path.
+    File { params: Vec<String>, digest: String, n_points: usize, point_ids: Vec<usize> },
+}
+
+/// One swept parameter and the values it takes, in grid order.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SweptParam {
+    pub name: String,
+    pub values: Vec<f64>,
+}
+
 
 #[cfg(test)]
 mod tests {

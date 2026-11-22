@@ -115,14 +115,14 @@ fn simulate_stdout_still_writes_the_quantities_sidecar() {
         &[
             "simulate", model.to_str().unwrap(),
             "--scenario", "baseline", "--seed", "1",
-            "--output-dir", tmp.path().join("results").to_str().unwrap(),
+            "--store", tmp.path().join("camdl-store").to_str().unwrap(),
             "--stdout",
             "--quantities-out", qdir.to_str().unwrap(),
         ],
     );
     assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.lines().any(|l| l.starts_with("t\t")),
+    assert!(stdout.lines().any(|l| l.starts_with("replicate\tscenario\tseed\tt\t")),
         "the trajectory still streams to stdout:\n{stdout}");
     assert!(qdir.join("quantities.json").exists(),
         "--quantities-out must write its manifest under --stdout too");
@@ -146,8 +146,8 @@ fn simulate_point_run_writes_quantities_sidecar() {
             "baseline",
             "--seed",
             "1",
-            "--output-dir",
-            tmp.path().join("results").to_str().unwrap(),
+            "--store",
+            tmp.path().join("camdl-store").to_str().unwrap(),
             "--quantities-out",
             qdir.to_str().unwrap(),
         ],
@@ -248,8 +248,8 @@ fn simulate_draws_run_writes_banded_quantities() {
             "5",
             "--seed",
             "7",
-            "--output-dir",
-            tmp.path().join("results").to_str().unwrap(),
+            "--store",
+            tmp.path().join("camdl-store").to_str().unwrap(),
             "--quantities-out",
             qdir.to_str().unwrap(),
         ],
@@ -309,7 +309,7 @@ fn simulate_bands_each_scenario_separately() {
     let tmp = tempfile::tempdir().unwrap();
     let model = write_model(tmp.path());
     let qdir = tmp.path().join("q");
-    let results_dir = tmp.path().join("results");
+    let results_dir = tmp.path().join("camdl-store");
 
     let out = run(
         &bin,
@@ -321,7 +321,7 @@ fn simulate_bands_each_scenario_separately() {
             "--seed", "7",
             "--scenario", "baseline",
             "--scenario", "ctrl",
-            "--output-dir", results_dir.to_str().unwrap(),
+            "--store", results_dir.to_str().unwrap(),
             "--quantities-out", qdir.to_str().unwrap(),
         ],
     );
@@ -404,7 +404,7 @@ fn simulate_without_scenario_emits_no_scenario_column() {
     let tmp = tempfile::tempdir().unwrap();
     let model = write_model(tmp.path());
     let qdir = tmp.path().join("q");
-    let results_dir = tmp.path().join("results");
+    let results_dir = tmp.path().join("camdl-store");
 
     let out = run(
         &bin,
@@ -414,7 +414,7 @@ fn simulate_without_scenario_emits_no_scenario_column() {
             "--draws", "uniform",
             "-n", "3",
             "--seed", "7",
-            "--output-dir", results_dir.to_str().unwrap(),
+            "--store", results_dir.to_str().unwrap(),
             "--quantities-out", qdir.to_str().unwrap(),
         ],
     );
@@ -446,12 +446,12 @@ fn simulate_rejects_duplicate_scenario_names() {
     ] {
         let tmp = tempfile::tempdir().unwrap();
         let model = write_model(tmp.path());
-        let results_dir = tmp.path().join("results");
+        let results_dir = tmp.path().join("camdl-store");
         let mut argv = vec![
             "simulate",
             model.to_str().unwrap(),
             "--seed", "1",
-            "--output-dir", results_dir.to_str().unwrap(),
+            "--store", results_dir.to_str().unwrap(),
         ];
         argv.extend_from_slice(&args);
 
@@ -488,8 +488,8 @@ fn simulate_without_quantities_out_skips_with_a_note() {
             "baseline",
             "--seed",
             "1",
-            "--output-dir",
-            tmp.path().join("results").to_str().unwrap(),
+            "--store",
+            tmp.path().join("camdl-store").to_str().unwrap(),
         ],
     );
     // The run still succeeds — declaring quantities without emitting them is not

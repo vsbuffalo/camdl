@@ -1,9 +1,13 @@
 # camdl types reference & flow guide
 
-The run-identity and CAS-store type model now lives in the `runid` crate and is
-documented authoritatively at the source. This memo is a pointer to where each
-piece of the type model lives, so a reader can go to the code rather than a
-catalogue that drifts.
+The run-identity and CAS-store type model of the `results/` store lives in the
+`runid` crate and is documented authoritatively at the source. `camdl simulate`
+and `camdl pfilter` store in the run store instead, the `store` crate
+(`rust/crates/store`), whose design is
+`docs/dev/proposals/2026-11-20-run-store-api.md`; `simulate`'s kinds are in
+`cli/src/sim_store.rs` and `pfilter`'s in `cli/src/pfilter_store.rs`. This memo
+is a pointer to where each piece of the type model lives, so a reader can go to
+the code rather than a catalogue that drifts.
 
 ## Run identity and the content-addressed store (`runid` crate)
 
@@ -33,8 +37,6 @@ The end-to-end path shape and the consumer contract for `run.json` are in
 
 Each CAS-emitting command resolves CLI inputs into `runid` levels at one site:
 
-- `cli/src/resolve.rs` — `resolve_trajectory`: `simulate` → `ArtifactKind::Sim`
-  levels (`model` / `config` / `params` / `scenario` / `seed`).
 - `cli/src/fit/cas.rs` — `resolve_fit_method`: one method leaf of a fit →
   `ArtifactKind::FitMethod` levels (`fit` / `method` / `seed`).
 - `cli/src/profile_cas.rs` — `resolve_profile_point`:

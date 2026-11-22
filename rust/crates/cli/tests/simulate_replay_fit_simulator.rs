@@ -12,6 +12,8 @@
 //! `replay_simulator`, unit-tested beside it.
 
 use std::path::{Path, PathBuf};
+mod sim_store_cells;
+
 use std::process::{Command, Output};
 
 fn binary() -> PathBuf {
@@ -123,18 +125,22 @@ fn fixture(tag: &str, method: &str) -> Fixture {
 }
 
 /// `simulate model.camdl <rest>`: success, stderr, and the `<backend>-dt<dt>`
-/// component of the store path the run landed at.
+/// config folder its cells were stored under (each call gets its own store).
 fn simulate(f: &Fixture, rest: &[&str]) -> (bool, String, Option<String>) {
+    static CALL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = CALL.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let store = f.dir.join(format!("store-{n}"));
+    let store_arg = store.to_string_lossy().into_owned();
     let mut args = vec!["simulate", "model.camdl"];
     args.extend_from_slice(rest);
-    args.extend_from_slice(&["--seed", "3", "--output-dir", "out"]);
+    args.extend_from_slice(&["--seed", "3", "--store", &store_arg]);
     let out = run(&f.dir, &args);
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    let config = stderr
-        .split(|c: char| c.is_whitespace() || c == '/')
-        .find(|s| s.starts_with("chain_binomial-dt") || s.starts_with("ode-dt") || s.starts_with("gillespie-dt"))
-        .map(|s| s.rsplit_once('-').map(|(head, _hash)| head.to_string()).unwrap_or_default());
-    (out.status.success(), stderr, config)
+    let mut configs: Vec<String> =
+        sim_store_cells::sim_cells(&store).iter().map(|c| c.config_dir_name()).collect();
+    configs.dedup();
+    assert!(configs.len() <= 1, "one invocation runs on one simulator: {configs:?}");
+    (out.status.success(), stderr, configs.pop())
 }
 
 fn meta(f: &Fixture) -> serde_json::Value {

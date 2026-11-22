@@ -431,6 +431,134 @@ impl Invocation {
 /// One result of an invocation, completed, with its labels.
 pub type Member<A> = (Stored<A>, <A as Artifact>::Labels);
 
+impl Invocation {
+    /// Every member of kind `R::Of`, completed, with the completed by-product
+    /// of kind `R::By` the invocation asked for of it. A by-product entry
+    /// belongs to the member entry registered before it, since a member and
+    /// the by-products wanted of it are registered together.
+    fn completed_members_with<R: ByProductRendering>(&self, store: &Store) -> Result<Vec<MemberWith<R::Of, R::By>>> {
+        let label_err = |r: &crate::record::ResultEntry, e: serde_json::Error| Error::Parse {
+            what: format!("the labels of {} in invocation {}", r.run_id.short12(), self.file.seq),
+            why: e.to_string(),
+        };
+        let mut wanted: Vec<(Key, <R::Of as Artifact>::Labels, Option<Key>)> = Vec::new();
+        for r in &self.file.results {
+            if r.kind == <R::Of as Artifact>::KIND {
+                wanted.push((r.run_id, serde_json::from_value(r.labels.clone()).map_err(|e| label_err(r, e))?, None));
+            } else if r.kind == <R::By as Artifact>::KIND {
+                if let Some(last) = wanted.last_mut() {
+                    last.2 = Some(r.run_id);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        let mut missing = Vec::new();
+        for (key, labels, by) in wanted {
+            let member = store.get(&Id::<R::Of>::from_key(key))?;
+            let by_product = match by {
+                Some(b) => match store.get(&Id::<R::By>::from_key(b))? {
+                    Some(s) => Some(s),
+                    None => {
+                        missing.push(b);
+                        None
+                    }
+                },
+                None => None,
+            };
+            match member {
+                Some(s) => out.push(((s, labels), by_product)),
+                None => missing.push(key),
+            }
+        }
+        if !missing.is_empty() {
+            return Err(Error::MemberNotCompleted { invocation: self.file.seq, members: missing });
+        }
+        Ok(out)
+    }
+
+    /// Renders this invocation's members and their by-products to the export
+    /// path: a rendering that names one file `""` writes the path itself, and
+    /// any other is written under the path as a directory. A member, or an
+    /// asked-for by-product, that is not completed is refused with
+    /// [`Error::MemberNotCompleted`], naming each.
+    pub fn render_by_products<R: ByProductRendering>(&self, store: &Store, options: &R::Options, to: &ExportPath) -> Result<()> {
+        let mut files = ExportFiles::default();
+        self.render_by_products_to::<R>(store, options, &mut files)?;
+        files.write_to(to)
+    }
+
+    /// The same rendering, to any sink.
+    pub fn render_by_products_to<R: ByProductRendering>(&self, store: &Store, options: &R::Options, out: &mut dyn ExportSink) -> Result<()> {
+        let members = self.completed_members_with::<R>(store)?;
+        R::render(&members, options, out)
+    }
+}
+
+/// One member of an invocation with the by-product of kind `B` the
+/// invocation asked for of it, if it asked for one.
+pub type MemberWith<A, B> = (Member<A>, Option<Stored<B>>);
+
+/// A rendering over an invocation's members and one by-product kind of each.
+pub trait ByProductRendering {
+    type Of: crate::Primary;
+    type By: crate::ByProduct<Of = Self::Of>;
+    type Options;
+    /// Each member with the by-product the invocation asked for of it; `None`
+    /// for a member the invocation asked none of.
+    fn render(members: &[MemberWith<Self::Of, Self::By>], options: &Self::Options, out: &mut dyn ExportSink) -> Result<()>;
+}
+
+/// Where a rendering writes: one file, or files named under a directory.
+pub trait ExportSink {
+    /// The writer of `name`, relative to the export path; `""` names the
+    /// export path itself. A name is opened once.
+    fn file(&mut self, name: &str) -> Result<&mut dyn Write>;
+}
+
+/// An export held in memory, by file name, until it is written whole.
+#[derive(Default)]
+pub struct ExportFiles {
+    files: Vec<(String, Vec<u8>)>,
+}
+
+impl ExportFiles {
+    /// The files written, in the order they were named.
+    pub fn files(&self) -> &[(String, Vec<u8>)] {
+        &self.files
+    }
+
+    /// Writes the files to `to`: one file named `""` is `to` itself, any other
+    /// set is written under `to` as a directory. Each file is written
+    /// atomically.
+    pub fn write_to(&self, to: &ExportPath) -> Result<()> {
+        match self.files.as_slice() {
+            [(name, bytes)] if name.is_empty() => write_file_atomic(&to.0, bytes),
+            files => {
+                std::fs::create_dir_all(&to.0).at("create directory", &to.0)?;
+                for (name, bytes) in files {
+                    let path = to.0.join(name);
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent).at("create directory", parent)?;
+                    }
+                    write_file_atomic(&path, bytes)?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl ExportSink for ExportFiles {
+    fn file(&mut self, name: &str) -> Result<&mut dyn Write> {
+        let bad = name.contains("..") || Path::new(name).is_absolute() || (name.is_empty() && !self.files.is_empty());
+        if bad || self.files.iter().any(|(n, _)| n == name || n.is_empty()) {
+            return Err(Error::BadFileName { name: name.to_string() });
+        }
+        self.files.push((name.to_string(), Vec::new()));
+        Ok(&mut self.files.last_mut().expect("pushed above").1)
+    }
+}
+
 /// A rendering: a pure function of stored result files, an invocation's labels
 /// and options.
 pub trait Rendering {

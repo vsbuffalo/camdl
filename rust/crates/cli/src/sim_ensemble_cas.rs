@@ -44,6 +44,8 @@
 //! Mirrors [`crate::pfilter_cas`] for the level/digest
 //! conventions.
 
+#![allow(dead_code)] // kept only for the golden run-id pins of `resolve::tests`
+
 use runid::inputs::ModelDigest;
 use runid::{run_id, ArtifactKind, ContentHash, LevelId};
 

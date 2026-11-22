@@ -47,7 +47,9 @@ pub use identity::{Content, DepInfo, Finite, Hashed, Identity, NotFinite};
 pub use inputs::{
     release, Class, EnvInputs, EnvParts, FieldInfo, FileInputs, Given, InputFile, Inputs, Parsed, SourceBytes, Split, Vary,
 };
-pub use invocation::{ExportPath, Invocation, Member, Rendering, RunInfo, StoreRequest};
+pub use invocation::{
+    ByProductRendering, ExportFiles, ExportPath, ExportSink, Invocation, Member, MemberWith, Rendering, RunInfo, StoreRequest,
+};
 pub use layout::{path_label, Layout, Placed, LABEL_CAP};
 pub use maintenance::{Cleaned, VerifyFailure};
 pub use owner::{this_host, Liveness, Owner, Timestamp, BEAT_INTERVAL, STALE_AFTER};

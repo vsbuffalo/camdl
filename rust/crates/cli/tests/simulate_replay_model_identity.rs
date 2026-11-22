@@ -11,6 +11,8 @@
 //! (`fit::fitted_model::compare_to_fitted`): quantities and contrasts are
 //! excluded, so a reporting-only edit runs and says so.
 
+mod sim_store_cells;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -127,7 +129,7 @@ fn fixture_of(tag: &str, model: &str) -> Fixture {
 fn simulate(f: &Fixture, model: &str, rest: &[&str]) -> (bool, String) {
     let mut args = vec!["simulate", model];
     args.extend_from_slice(rest);
-    args.extend_from_slice(&["--seed", "3", "--output-dir", "out"]);
+    args.extend_from_slice(&["--seed", "3", "--store", "store"]);
     let out = run(&f.dir, &args);
     (out.status.success(), String::from_utf8_lossy(&out.stderr).into_owned())
 }
@@ -146,7 +148,7 @@ fn a_replay_through_another_model_is_refused_and_the_fitted_one_runs() {
     assert!(err.contains(&format!("--fit {seg}")), "names the fit:\n{err}");
     assert!(err.contains(&archive), "names the archived model as the fix:\n{err}");
     assert!(err.contains("fitted model ") && err.contains("edited.camdl "), "both identities:\n{err}");
-    assert!(!f.dir.join("out").join("sims").exists(), "nothing ran:\n{err}");
+    assert!(sim_store_cells::sim_cells(&f.dir.join("store")).is_empty(), "nothing ran:\n{err}");
 
     // The same through a fit.toml handle naming the stored run.
     let (ok, err) =

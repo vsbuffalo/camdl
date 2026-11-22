@@ -184,6 +184,229 @@ fn show_stored_pfilter(out: &crate::out::Out, row: &PfilterRow) {
     field("created", &fmt_relative_time(row.created, SystemTime::now()));
 }
 
+/// A simulation cell on the run store, prepared for `list` and `show`.
+struct StoredSimRow {
+    stored: store::Stored<crate::sim_store::Sim>,
+    labels: crate::sim_store::CellLabels,
+    /// The label of the latest invocation that asked for it, if it had one.
+    label: Option<String>,
+    rel_path: String,
+    created: SystemTime,
+}
+
+impl StoredSimRow {
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "kind": "sim",
+            "run_id": self.stored.id().key().to_hex(),
+            "label": self.label,
+            "labels": self.labels,
+            "path": self.rel_path,
+            "identity": self.stored.identity(),
+            "files": self.stored.result_files(),
+            "failure": crate::sim_store::Failure::of(&self.stored).ok().flatten(),
+        })
+    }
+}
+
+/// Every completed simulation cell the run store's invocation records list,
+/// once, with the label of the latest invocation that asked for it.
+fn discover_stored_sim_rows(root: &Path) -> Vec<StoredSimRow> {
+    let Some(store) = crate::camdl_store::open_existing(root) else { return Vec::new() };
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut rows: std::collections::BTreeMap<store::Key, StoredSimRow> = std::collections::BTreeMap::new();
+    for inv in store.invocations() {
+        let Ok(members) = inv.members::<crate::sim_store::Sim>() else { continue };
+        for (id, labels) in members {
+            if let Some(row) = rows.get_mut(&id.key()) {
+                if inv.label().is_some() {
+                    row.label = inv.label().map(str::to_string);
+                }
+                continue;
+            }
+            let Ok(Some(stored)) = store.get(&id) else { continue };
+            let created = std::fs::metadata(stored.folder()).and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
+            let rel_path = pathdiff_str(stored.folder(), &cwd);
+            rows.insert(id.key(), StoredSimRow { stored, labels, label: inv.label().map(str::to_string), rel_path, created });
+        }
+    }
+    rows.into_values().collect()
+}
+
+/// The simulation cell a handle names on the run store: `None` when the
+/// handle names no cell there.
+fn resolve_stored_sim(root: &Path, key: &str) -> Option<Result<StoredSimRow, String>> {
+    let store = crate::camdl_store::open_existing(root)?;
+    // A label names an invocation: it names a cell only when that invocation
+    // asked for exactly one, and nothing here when it asked for none.
+    if let Ok(h @ store::Handle::Label { .. }) = key.parse::<store::Handle>() {
+        let invocation = store.invocation(&h).ok()?;
+        let members = invocation.members::<crate::sim_store::Sim>().ok()?;
+        return match members.as_slice() {
+            [] => None,
+            [(id, _)] => {
+                let row = discover_stored_sim_rows(root).into_iter().find(|r| r.stored.id() == id);
+                Some(row.ok_or_else(|| format!("{key} names a cell that is not stored")))
+            }
+            many => Some(Err(format!(
+                "{key} names {} cells, where one is needed; `camdl cat {key}` renders their table",
+                many.len()
+            ))),
+        };
+    }
+    let handle: store::RunRef<crate::sim_store::Sim> = key.parse().ok()?;
+    let stored = match store.resolve(&handle) {
+        Ok(s) => s,
+        Err(store::Error::NotFound { .. } | store::Error::WrongKind { .. } | store::Error::NoRecord { .. }) => return None,
+        Err(e) => return Some(Err(e.to_string())),
+    };
+    let row = discover_stored_sim_rows(root).into_iter().find(|r| r.stored.id() == stored.id());
+    Some(row.ok_or_else(|| format!("{key} names a simulation cell no invocation record lists")))
+}
+
+/// The combined table of the `simulate` invocation a label names, rendered
+/// from its stored cells: `None` for any other handle or invocation.
+fn stored_sim_table(root: &Path, target: &str) -> Option<Result<Vec<u8>, String>> {
+    let handle: store::Handle = target.parse().ok()?;
+    if !matches!(handle, store::Handle::Label { .. }) {
+        return None;
+    }
+    let store = crate::camdl_store::open_existing(root)?;
+    let invocation = store.invocation(&handle).ok()?;
+    if invocation.members::<crate::sim_store::Sim>().ok()?.is_empty() {
+        return None;
+    }
+    let mut table = Vec::new();
+    let options = crate::sim_store::CombinedTableOptions { dates: None };
+    Some(
+        invocation
+            .render_to::<crate::sim_store::CombinedTable>(&store, &options, &mut table)
+            .map(|()| table)
+            .map_err(|e| e.to_string()),
+    )
+}
+
+/// A file of a stored cell, or of one of its by-products: the event log, an
+/// observation stream's `<stream>.tsv` (or the stream's name), the quantities. A by-product is found
+/// through the invocation records, by the record of the cell its identity
+/// holds.
+fn stored_sim_file(root: &Path, row: &StoredSimRow, name: &str) -> Result<Vec<u8>, String> {
+    match stored_sim_file_named(root, row, name) {
+        Err(_) if !name.contains('.') => stored_sim_file_named(root, row, &format!("{name}.tsv")),
+        r => r,
+    }
+}
+
+fn stored_sim_file_named(root: &Path, row: &StoredSimRow, name: &str) -> Result<Vec<u8>, String> {
+    use store::ContentAddressed;
+    if row.stored.result_files().contains(&name) {
+        return crate::camdl_store::read_stored(&row.stored, name);
+    }
+    let store = crate::camdl_store::open_existing(root).ok_or("no run store")?;
+    let cell = row.stored.identity().content_hash();
+    let mut names: Vec<String> = row.stored.result_files().iter().map(|s| s.to_string()).collect();
+    for inv in store.invocations().iter().rev() {
+        macro_rules! look {
+            ($t:ty, $flag:literal) => {
+                for (id, ()) in inv.members::<$t>().unwrap_or_default() {
+                    let Ok(Some(s)) = store.get(&id) else {
+                        // A by-product of this cell that is stored but fails
+                        // its manifest check is not served; say which, and how
+                        // to make it again.
+                        if let Ok(Some(e)) = store.inspect(&id) {
+                            if e.identity().sim.content_hash() == cell {
+                                if let store::EntryState::Damaged { what } = e.state() {
+                                    return Err(format!(
+                                        "the cell's {} is damaged ({what}), so it is not read; run the \
+                                         simulate again with {} and --force to store it again",
+                                        <$t as store::Artifact>::KIND, $flag
+                                    ));
+                                }
+                            }
+                        }
+                        continue;
+                    };
+                    if s.identity().sim.content_hash() != cell {
+                        continue;
+                    }
+                    if s.result_files().contains(&name) {
+                        return crate::camdl_store::read_stored(&s, name);
+                    }
+                    names.extend(s.result_files().iter().map(|f| f.to_string()));
+                }
+            };
+        }
+        look!(crate::sim_store::EventLog, "--event-log");
+        look!(crate::sim_store::Obs, "--obs");
+        look!(crate::sim_store::SimQuantities, "--quantities-out");
+    }
+    names.sort();
+    names.dedup();
+    Err(format!("the cell holds no file `{name}`; its files and its by-products' files: {}", names.join(", ")))
+}
+
+/// `camdl show` of a simulation cell on the run store.
+fn show_stored_sim(out: &crate::out::Out, row: &StoredSimRow) {
+    let field = |name: &str, value: &dyn std::fmt::Display| {
+        out.report_line(format_args!("{}", style::stdout().paint(name, Style::Dim)));
+        out.report_line(format_args!("  {value}"));
+    };
+    field("path", &style::stdout().paint(&row.rel_path, Style::Code));
+    field("kind", &"sim");
+    if let Some(l) = &row.label {
+        field("label", l);
+    }
+    let id = row.stored.identity();
+    field("model", &row.labels.model);
+    field("config", &crate::sim_store::config_label(&id.config));
+    field("scenario", &row.labels.scenario);
+    field("seed", &row.labels.seed_label());
+    field("process seed", &id.seed.seed);
+    field("run_id", &style::stdout().paint(&row.stored.id().key().to_hex(), Style::Dim));
+    if let Ok(Some(f)) = crate::sim_store::Failure::of(&row.stored) {
+        field("failure", &format!("{}: {}", f.stage, f.reason));
+    }
+    if !id.params.values.is_empty() {
+        out.report_line(format_args!("{}", style::stdout().paint("parameters", Style::Dim)));
+        for (name, v) in &id.params.values {
+            out.report_line(format_args!("  {:<16} {}", name, v.get()));
+        }
+    }
+    field("files", &row.stored.result_files().join(", "));
+    field("created", &fmt_relative_time(row.created, SystemTime::now()));
+}
+
+fn print_stored_sim_table(out: &crate::out::Out, rows: &[StoredSimRow], now: SystemTime) {
+    use comfy_table::{Table, Cell, ContentArrangement, presets::NOTHING};
+    let mut table = Table::new();
+    table
+        .load_preset(NOTHING)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_header(vec![
+            Cell::new("CREATED").add_attribute(comfy_table::Attribute::Bold),
+            Cell::new("RUN_ID").add_attribute(comfy_table::Attribute::Bold),
+            Cell::new("LABEL").add_attribute(comfy_table::Attribute::Bold),
+            Cell::new("MODEL").add_attribute(comfy_table::Attribute::Bold),
+            Cell::new("CONFIG").add_attribute(comfy_table::Attribute::Bold),
+            Cell::new("SCENARIO").add_attribute(comfy_table::Attribute::Bold),
+            Cell::new("SEED").add_attribute(comfy_table::Attribute::Bold),
+            Cell::new("PATH").add_attribute(comfy_table::Attribute::Bold),
+        ]);
+    for r in rows {
+        table.add_row(vec![
+            Cell::new(fmt_relative_time(r.created, now)).fg(comfy_table::Color::Yellow),
+            short_hash_cell(&r.stored.id().key().to_hex()),
+            label_cell(&r.label),
+            Cell::new(&r.labels.model),
+            Cell::new(crate::sim_store::config_label(&r.stored.identity().config)).add_attribute(comfy_table::Attribute::Dim),
+            Cell::new(&r.labels.scenario),
+            Cell::new(r.labels.seed_label()),
+            Cell::new(&r.rel_path).fg(comfy_table::Color::Cyan),
+        ]);
+    }
+    out.report_line(format_args!("{table}"));
+}
+
 /// A new-format `SimEnsemble` leaf, prepared for the `list` display. The
 /// kind-SimEnsemble filter happens in [`cas_read::walk_sim_ensemble_leaves`].
 struct EnsembleRow {
@@ -304,6 +527,11 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
     } else {
         discover_pfilter_rows(&store_root(a.store.as_deref()))
     };
+    let stored_sims = if !filter_kind.includes_sims() {
+        Vec::new()
+    } else {
+        discover_stored_sim_rows(&store_root(a.store.as_deref()))
+    };
 
     let now = SystemTime::now();
 
@@ -361,6 +589,16 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
         .collect();
     filtered_pfilters.sort_by(|x, y| y.created.cmp(&x.created));
 
+    let mut filtered_stored_sims: Vec<StoredSimRow> = stored_sims.into_iter()
+        .filter(|r| a.model.as_deref().is_none_or(|m| r.labels.model.contains(m)))
+        .filter(|r| a.scenario.as_deref().is_none_or(|s| r.labels.scenario == s))
+        .filter(|r| match filter_since {
+            Some(dur) => now.duration_since(r.created).is_ok_and(|d| d <= dur),
+            None => true,
+        })
+        .collect();
+    filtered_stored_sims.sort_by(|x, y| y.created.cmp(&x.created));
+
     let mut filtered_ensembles: Vec<EnsembleRow> = ensembles.into_iter()
         .filter(|e| a.model.as_deref().is_none_or(|m| e.leaf.level_label("model").contains(m)))
         .filter(|_| a.scenario.is_none())
@@ -376,6 +614,7 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
         fit_rows.truncate(a.limit);
         filtered_profiles.truncate(a.limit);
         filtered_pfilters.truncate(a.limit);
+        filtered_stored_sims.truncate(a.limit);
         filtered_ensembles.truncate(a.limit);
     }
 
@@ -387,11 +626,15 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
         }
         print_profiles_json(&out, &filtered_profiles);
         print_pfilter_json(&out, &filtered_pfilters);
+        for r in &filtered_stored_sims {
+            out.report_line(format_args!("{}", serde_json::to_string(&r.json()).unwrap_or_default()));
+        }
         print_ensemble_json(&out, &filtered_ensembles);
     } else {
         let any_other = !fit_rows.is_empty()
             || !filtered_profiles.is_empty()
             || !filtered_pfilters.is_empty()
+            || !filtered_stored_sims.is_empty()
             || !filtered_ensembles.is_empty();
         if !filtered_ensembles.is_empty() {
             out.say(format_args!("{}", style::stderr().paint("ensembles", Style::Bold)));
@@ -411,6 +654,11 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
         if !filtered_pfilters.is_empty() {
             out.say(format_args!("{}", style::stderr().paint("pfilters", Style::Bold)));
             print_pfilter_table(&out, &filtered_pfilters, now);
+            out.say("");
+        }
+        if !filtered_stored_sims.is_empty() {
+            out.say(format_args!("{}", style::stderr().paint("sims", Style::Bold)));
+            print_stored_sim_table(&out, &filtered_stored_sims, now);
             out.say("");
         }
         if !filtered_runs.is_empty() || !any_other {
@@ -492,6 +740,15 @@ pub fn cmd_show(a: &crate::args::ShowArgs) {
             out.report_line(format_args!("{}", serde_json::to_string_pretty(&row.json()).unwrap_or_default()));
         } else {
             show_stored_pfilter(&out, &row);
+        }
+        return;
+    }
+    if let Some(row) = resolve_stored_sim(&store_root(a.store.as_deref()), &a.target) {
+        let row = row.unwrap_or_else(|e| out.fail(format!("error: {e}")));
+        if json {
+            out.report_line(format_args!("{}", serde_json::to_string_pretty(&row.json()).unwrap_or_default()));
+        } else {
+            show_stored_sim(&out, &row);
         }
         return;
     }
@@ -910,6 +1167,30 @@ pub fn cmd_cat(a: &crate::args::CatArgs) {
         }
     }
 
+    // A `simulate` invocation on the run store, by its label: the combined
+    // table, rendered from its stored cells.
+    if a.stream.is_none() && selection.is_none() {
+        if let Some(table) = stored_sim_table(&store_root(a.store.as_deref()), &a.target) {
+            let table = table.unwrap_or_else(|e| out.fail(format!("error: {e}")));
+            let _ = out.data().write_all(&table);
+            return;
+        }
+    }
+
+    // A simulation cell on the run store: `traj.tsv`, or a named file of the
+    // cell or of one of its by-products.
+    if let Some(row) = resolve_stored_sim(&store_root(a.store.as_deref()), &a.target) {
+        let row = row.unwrap_or_else(|e| out.fail(format!("error: {e}")));
+        if let Some(sel) = &selection {
+            out.fail(format!("error: {} selects rows of a fit run's chain-keyed stream; `{}` names a simulation cell",
+                sel.flag(), a.target));
+        }
+        let name = a.stream.as_deref().unwrap_or(crate::sim_store::TRAJ_FILE);
+        let bytes = stored_sim_file(&store_root(a.store.as_deref()), &row, name).unwrap_or_else(|e| out.fail(format!("error: {e}")));
+        let _ = out.data().write_all(&bytes);
+        return;
+    }
+
     // A filter run on the run store: `loglik.toml`, or a named result file.
     if let Some(row) = resolve_stored_pfilter(&store_root(a.store.as_deref()), &a.target) {
         let row = row.unwrap_or_else(|e| out.fail(format!("error: {e}")));
@@ -945,12 +1226,10 @@ pub fn cmd_cat(a: &crate::args::CatArgs) {
     match resolved {
         Resolved::Sim { leaf, rel_path, .. } => {
             let bytes = if let Some(ref stream) = a.stream {
-                let named_event_log = stream == crate::cas_sink::EVENT_LOG_FILE
-                    || stream == crate::cas_sink::EVENT_LOG_CHILD;
+                let named_event_log = stream == "event_log.tsv" || stream == "event_log";
                 let path = match find_obs_stream(&leaf.dir, stream) {
                     Some(p) => p,
-                    None if named_event_log => crate::cas_sink::complete_event_log(&leaf.dir)
-                        .unwrap_or_else(|e| out.fail(format!("error: {e}"))),
+                    None if named_event_log => leaf.dir.join("event_log").join("event_log.tsv"),
                     None => out.fail(format!(
                         "error: no observation stream '{}' in {} (the event log is `event_log.tsv`)",
                         stream, rel_path)),

@@ -2728,7 +2728,6 @@ fn run_predict(
                         fit_base: fit_base.clone(),
                         set_vec_entries: vec![],
                         table_files: vec![],
-                        obs: crate::sim_job::ObsOutput::None,
                         parallel: ff_parallel,
                     };
                     crate::engine::run_job(&job, &mut sink)?;

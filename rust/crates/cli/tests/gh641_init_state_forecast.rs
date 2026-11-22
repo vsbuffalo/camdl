@@ -205,7 +205,7 @@ fn fixture(bin: &Path, particles: usize) -> Fixture {
     let out = run(bin, &[
         "simulate".into(), s(&model), "--params".into(), s(&params),
         "--obs".into(), s(&data), "--seed".into(), "7".into(),
-        "--output-dir".into(), s(&dir.join("cas_gen")),
+        "--store".into(), s(&dir.join("cas_gen")),
     ]);
     assert!(out.status.success(), "data gen failed: {}", String::from_utf8_lossy(&out.stderr));
 
@@ -257,9 +257,11 @@ fn col<'a>(hdr: &[String], rows: &'a [Vec<String>], name: &str) -> Vec<&'a str> 
     rows.iter().map(|r| r[i].as_str()).collect()
 }
 
-/// Every SIM leaf under a CAS root, as (run_id, config-level hash). A multi-cell
-/// `simulate` also commits one `sim_ensemble` leaf referencing the cells; that
-/// is a different artifact kind, not a per-cell trajectory.
+/// Every simulation cell under a run-store root that holds a trajectory, as
+/// (run_id, config record). A cell whose engine refused the run holds a
+/// `failure.toml` and no `traj.tsv`, and is not counted. The config record is
+/// the cell identity's `config` object serialised, which carries the restored
+/// state file and row; two cells differing only in the state differ here.
 fn leaf_ids(root: &Path) -> Vec<(String, String)> {
     fn walk(p: &Path, out: &mut Vec<PathBuf>) {
         if let Ok(rd) = std::fs::read_dir(p) {
@@ -267,7 +269,7 @@ fn leaf_ids(root: &Path) -> Vec<(String, String)> {
                 let path = e.path();
                 if path.is_dir() {
                     walk(&path, out);
-                } else if path.file_name().is_some_and(|n| n == "run.json") {
+                } else if path.file_name().is_some_and(|n| n == "identity.json") {
                     out.push(path);
                 }
             }
@@ -280,12 +282,10 @@ fn leaf_ids(root: &Path) -> Vec<(String, String)> {
         .filter_map(|f| {
             let v: serde_json::Value =
                 serde_json::from_str(&std::fs::read_to_string(f).unwrap()).unwrap();
-            if v["kind"] != "sim" {
+            if v["kind"] != "sim" || !f.with_file_name("traj.tsv").is_file() {
                 return None;
             }
-            let cfg = v["levels"].as_array().unwrap().iter()
-                .find(|l| l["name"] == "config").expect("config level")
-                ["hash"].as_str().unwrap().to_string();
+            let cfg = v["identity"]["config"].to_string();
             Some((v["run_id"].as_str().unwrap().to_string(), cfg))
         })
         .collect();
@@ -315,7 +315,7 @@ fn forecast_starts_from_the_restored_state_at_the_declared_origin() {
         "--replicates".into(), N_SMALL.to_string(),
         "--seed".into(), "3".into(),
         "-o".into(), s(&traj),
-        "--output-dir".into(), s(&f.dir.join("cas")),
+        "--store".into(), s(&f.dir.join("cas")),
     ]);
     assert!(out.status.success(), "forecast failed: {}", String::from_utf8_lossy(&out.stderr));
 
@@ -388,7 +388,7 @@ fn composes_with_an_observation_anchored_horizon() {
         "--replicates".into(), N_SMALL.to_string(),
         "--seed".into(), "3".into(),
         "-o".into(), s(&traj),
-        "--output-dir".into(), s(&f.dir.join("cas")),
+        "--store".into(), s(&f.dir.join("cas")),
     ]);
     assert!(
         out.status.success(),
@@ -426,7 +426,7 @@ fn synthetic_observations_cover_the_forecast_window_only() {
         "--replicates".into(), N_SMALL.to_string(),
         "--seed".into(), "3".into(),
         "--obs".into(), s(&obs),
-        "--output-dir".into(), s(&f.dir.join("cas")),
+        "--store".into(), s(&f.dir.join("cas")),
     ]);
     assert!(
         out.status.success(),
@@ -471,7 +471,7 @@ fn a_non_restarted_run_still_fails_closed_on_an_out_of_window_at_list() {
     let out = run(&bin, &[
         "simulate".into(), s(&model), "--params".into(), s(&params),
         "--obs".into(), s(&obs), "--seed".into(), "1".into(),
-        "--output-dir".into(), s(&dir.join("cas")),
+        "--store".into(), s(&dir.join("cas")),
     ]);
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -515,7 +515,7 @@ fn two_different_state_files_produce_distinct_run_ids() {
             "--init-state".into(), s(st),
             "--replicates".into(), N_SMALL.to_string(),
             "--seed".into(), "5".into(),
-            "--output-dir".into(), s(&store),
+            "--store".into(), s(&store),
         ]);
         assert!(out.status.success(), "run failed: {}", String::from_utf8_lossy(&out.stderr));
     }
@@ -533,7 +533,7 @@ fn two_different_state_files_produce_distinct_run_ids() {
         ids.iter().map(|(_, c)| c.as_str()).collect();
     assert_eq!(
         configs.len(), 2 * N_SMALL,
-        "each (file, row) pair must have its own config-level hash"
+        "each (file, row) pair must have its own config record"
     );
 }
 
@@ -549,7 +549,7 @@ fn the_same_state_file_still_hits_the_cache() {
         "--init-state".into(), s(&f.state),
         "--replicates".into(), N_SMALL.to_string(),
         "--seed".into(), "5".into(),
-        "--output-dir".into(), s(&store),
+        "--store".into(), s(&store),
     ];
     for _ in 0..2 {
         let out = run(&bin, &args);
@@ -573,7 +573,7 @@ fn duplicate_seeds_restoring_different_rows_do_not_collide() {
         "simulate".into(), s(&f.model_long), "--params".into(), s(&f.params),
         "--init-state".into(), s(&f.state),
         "--seeds".into(), vec!["7"; N_SMALL].join(","),
-        "--output-dir".into(), s(&store),
+        "--store".into(), s(&store),
     ]);
     assert!(out.status.success(), "run failed: {}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(
@@ -589,7 +589,7 @@ fn duplicate_seeds_restoring_different_rows_do_not_collide() {
     let out = run(&bin, &[
         "simulate".into(), s(&f.model_long), "--params".into(), s(&f.params),
         "--seeds".into(), vec!["7"; N_SMALL].join(","),
-        "--output-dir".into(), s(&store_ctl),
+        "--store".into(), s(&store_ctl),
     ]);
     assert!(out.status.success(), "control failed: {}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(
@@ -640,7 +640,7 @@ fn event_log_with_init_state_is_refused_not_silently_restarted() {
         "--event-log".into(), s(&ev),
         "--seed".into(), "3".into(),
         "-o".into(), s(&traj),
-        "--output-dir".into(), s(&dir.join("cas")),
+        "--store".into(), s(&dir.join("cas")),
     ]);
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -699,7 +699,7 @@ fn a_reactive_model_is_refused_by_policy_name() {
         "--param".into(), "N0=1000".into(), "--param".into(), "I0=10".into(),
         "--enable".into(), "sia".into(),
         "--init-state".into(), s(&state),
-        "--output-dir".into(), s(&dir.join("cas")),
+        "--store".into(), s(&dir.join("cas")),
     ]);
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "a reactive model must refuse --init-state: {err}");
@@ -730,7 +730,7 @@ fn a_real_compartment_model_is_refused_by_compartment_name() {
         "--param".into(), "xi=0.05".into(), "--param".into(), "delta=0.1".into(),
         "--param".into(), "N0=1000".into(), "--param".into(), "I0=10".into(),
         "--init-state".into(), s(&state),
-        "--output-dir".into(), s(&dir.join("cas")),
+        "--store".into(), s(&dir.join("cas")),
     ]);
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "a real-compartment model must refuse: {err}");
@@ -760,7 +760,7 @@ fn an_off_grid_origin_is_refused_never_snapped() {
     let out = run(&bin, &[
         "simulate".into(), s(&model), "--params".into(), s(&params),
         "--init-state".into(), s(&state),
-        "--output-dir".into(), s(&dir.join("cas")),
+        "--store".into(), s(&dir.join("cas")),
     ]);
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "an off-grid origin must be refused: {err}");
@@ -786,7 +786,7 @@ fn a_backend_without_the_seam_is_refused() {
             "--init-state".into(), s(&f.state),
             "--backend".into(), backend.into(),
             "--replicates".into(), N_SMALL.to_string(),
-            "--output-dir".into(), s(&f.dir.join("cas")),
+            "--store".into(), s(&f.dir.join("cas")),
         ]);
         let err = String::from_utf8_lossy(&out.stderr);
         assert!(!out.status.success(), "{backend} must refuse --init-state");
@@ -810,7 +810,7 @@ fn pairing_with_draws_is_refused() {
         "simulate".into(), s(&f.model_long), "--params".into(), s(&f.params),
         "--init-state".into(), s(&f.state),
         "--draws".into(), s(&draws),
-        "--output-dir".into(), s(&f.dir.join("cas")),
+        "--store".into(), s(&f.dir.join("cas")),
     ]);
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "--init-state + --draws must be refused");
@@ -831,7 +831,7 @@ fn a_replicate_row_count_mismatch_is_refused() {
         "simulate".into(), s(&f.model_long), "--params".into(), s(&f.params),
         "--init-state".into(), s(&f.state),
         "--replicates".into(), "3".into(),
-        "--output-dir".into(), s(&f.dir.join("cas")),
+        "--store".into(), s(&f.dir.join("cas")),
     ]);
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "a replicate/row mismatch must be refused");
@@ -852,7 +852,7 @@ fn an_origin_at_or_past_the_horizon_is_refused() {
         "simulate".into(), s(&f.model), "--params".into(), s(&f.params),
         "--init-state".into(), s(&f.state),
         "--replicates".into(), N_SMALL.to_string(),
-        "--output-dir".into(), s(&f.dir.join("cas")),
+        "--store".into(), s(&f.dir.join("cas")),
     ]);
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "origin == horizon must be refused");

@@ -1,5 +1,5 @@
 //! The resolved engine input behind `camdl simulate` — run-spec §3
-//! (`SimulateJob`, `ParamSource`, `Seeds`, `ObsOutput`, `ScenarioRef`) — and
+//! (`SimulateJob`, `ParamSource`, `Seeds`, `ScenarioRef`) — and
 //! scenario-reference resolution.
 //!
 //! `simulate` lowers its flags into one `SimulateJob`, and `fit predict`
@@ -93,8 +93,6 @@ pub struct SimulateJob {
     pub set_vec_entries: Vec<(String, String)>,
     /// `--table NAME=FILE` entries (CLI only).
     pub table_files: Vec<(String, String)>,
-    /// Synthetic-observation output mode.
-    pub obs: ObsOutput,
     /// Rayon thread count for the simulation phase (1 = sequential).
     pub parallel: usize,
 }
@@ -264,45 +262,6 @@ impl Seeds {
         match self {
             Seeds::Single(s) => *s,
             Seeds::Explicit(v) => *v.first().unwrap_or(&1),
-        }
-    }
-}
-
-/// Synthetic-observation output mode — run-spec §3.1.1. `OnlyFile`/
-/// `OnlyDir` suppress the trajectory.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub enum ObsOutput {
-    #[default]
-    None,
-    /// Single wide-format TSV (errors if streams have different schedules).
-    File(PathBuf),
-    /// One TSV per stream in a directory.
-    Dir(PathBuf),
-    /// Like `File`, trajectory suppressed.
-    OnlyFile(PathBuf),
-    /// Like `Dir`, trajectory suppressed.
-    OnlyDir(PathBuf),
-}
-
-impl ObsOutput {
-    /// True when the trajectory output is suppressed.
-    pub fn suppresses_trajectory(&self) -> bool {
-        matches!(self, ObsOutput::OnlyFile(_) | ObsOutput::OnlyDir(_))
-    }
-
-    /// `Some(path)` for the single-file modes (`File`/`OnlyFile`).
-    pub fn file_path(&self) -> Option<&PathBuf> {
-        match self {
-            ObsOutput::File(p) | ObsOutput::OnlyFile(p) => Some(p),
-            _ => None,
-        }
-    }
-
-    /// `Some(path)` for the dir modes (`Dir`/`OnlyDir`).
-    pub fn dir_path(&self) -> Option<&PathBuf> {
-        match self {
-            ObsOutput::Dir(p) | ObsOutput::OnlyDir(p) => Some(p),
-            _ => None,
         }
     }
 }

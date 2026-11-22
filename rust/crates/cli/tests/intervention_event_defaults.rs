@@ -110,7 +110,7 @@ fn s_at(traj: &str, t: f64) -> i64 {
 /// Run `camdl simulate` and return the trajectory TSV. The trajectory is the
 /// `-o PATH` mirror (the CAS leaf is the system of record; the trajectory is
 /// never written to stdout — Item C). A unique `-o` file + isolated
-/// `--output-dir` are appended so concurrent test runs never share a CAS root.
+/// `--store` are appended so concurrent test runs never share a store root.
 fn run_simulate(args: &[&str]) -> String {
     let bin = skip_if_missing_binary();
     let tmp = tempfile::tempdir().unwrap();
@@ -119,7 +119,7 @@ fn run_simulate(args: &[&str]) -> String {
     let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(args)
         .args(["-o", &traj_path.to_string_lossy(),
-               "--output-dir", &cas_dir.to_string_lossy()])
+               "--store", &cas_dir.to_string_lossy()])
         .output()
         .expect("spawn");
     if !out.status.success() {

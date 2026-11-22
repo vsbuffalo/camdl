@@ -807,7 +807,7 @@ fn a_changed_paired_ensemble_re_keys_every_cell() {
             HORIZON.into(),
             "--seed".into(),
             "11".into(),
-            "--output-dir".into(),
+            "--store".into(),
             s(root),
         ]
     };
@@ -862,7 +862,7 @@ fn a_changed_paired_ensemble_re_keys_every_cell() {
             HORIZON.into(),
             "--seed".into(),
             "11".into(),
-            "--output-dir".into(),
+            "--store".into(),
             s(&root_b),
         ],
     );
@@ -913,7 +913,8 @@ fn copy_tree(src: &Path, dst: &Path) {
     }
 }
 
-/// Every `sim`-kind leaf's `run_id` under a CAS root.
+/// Every `sim`-kind cell's `run_id` under a run-store root, read from each
+/// cell's `identity.json`.
 fn sim_leaf_ids(root: &Path) -> Vec<String> {
     fn walk(p: &Path, out: &mut Vec<PathBuf>) {
         if let Ok(rd) = std::fs::read_dir(p) {
@@ -921,7 +922,7 @@ fn sim_leaf_ids(root: &Path) -> Vec<String> {
                 let path = e.path();
                 if path.is_dir() {
                     walk(&path, out);
-                } else if path.file_name().is_some_and(|n| n == "run.json") {
+                } else if path.file_name().is_some_and(|n| n == "identity.json") {
                     out.push(path);
                 }
             }
@@ -964,7 +965,7 @@ fn a_fit_sourced_restart_inside_a_reporting_period_is_refused() {
             "--init-state".into(), "fit".into(),
             "--to".into(), HORIZON.into(),
             "--seed".into(), "5".into(),
-            "--output-dir".into(), s(&f.dir.join("cas_under_way")),
+            "--store".into(), s(&f.dir.join("cas_under_way")),
         ];
         args.extend(extra.iter().map(|a| a.to_string()));
         run_in(&bin, &f.dir, &args)

@@ -61,7 +61,7 @@ fn final_row(dir: &Path, stages: u32) -> Vec<(String, f64)> {
     let o = Command::new(binary())
         .env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
-        .env("CAMDL_OUTPUT_DIR", dir.join("cas"))
+        .env("CAMDL_STORE", dir.join("camdl-store"))
         .args([
             "simulate",
             src.to_str().unwrap(),
@@ -80,12 +80,16 @@ fn final_row(dir: &Path, stages: u32) -> Vec<(String, f64)> {
     );
     let tsv = std::fs::read_to_string(out).unwrap();
     let mut lines = tsv.lines().filter(|l| !l.starts_with('#'));
-    let header: Vec<String> =
-        lines.next().expect("header").split('\t').map(str::to_string).collect();
+    // The `-o` table opens with the cell's coordinate columns (`replicate`,
+    // `scenario`, `seed`); the trajectory starts at `t`.
+    let full_header: Vec<&str> = lines.next().expect("header").split('\t').collect();
+    let t_col = full_header.iter().position(|h| *h == "t").expect("a `t` column");
+    let header: Vec<String> = full_header[t_col..].iter().map(|h| h.to_string()).collect();
     let last: Vec<f64> = lines
         .next_back()
         .expect("a final row")
         .split('\t')
+        .skip(t_col)
         .map(|f| f.parse::<f64>().expect("number"))
         .collect();
     header.into_iter().zip(last).collect()

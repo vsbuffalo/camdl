@@ -427,6 +427,42 @@ fn finish_refuses_held_content_with_no_result_file_of_its_digest() {
     assert_eq!(s.identity().rows, id.rows.digest(), "the record holds the content's digest");
 }
 
+/// Openers racing to create a root that does not exist yet all open it, in
+/// every one of many trials: exactly one writes `store.json` and the others
+/// read it.
+#[test]
+fn concurrent_openers_of_a_root_that_does_not_exist_all_open_it() {
+    for trial in 0..40 {
+        let parent = TempRoot::new("open-race-fresh");
+        let root = parent.path().join(format!("store-{trial}"));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let root = root.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    Store::open(&root, Build::Known(Engine { build: "b".into() }), TopLevel::ByKind, kinds()).err().map(|e| e.to_string())
+                })
+            })
+            .collect();
+        let refused: Vec<String> = handles.into_iter().filter_map(|h| h.join().unwrap()).collect();
+        assert!(refused.is_empty(), "trial {trial}: {refused:?}");
+    }
+}
+
+/// A foreign non-empty directory, with no sign of another opener, is refused
+/// at once.
+#[test]
+fn a_foreign_directory_is_refused_without_waiting() {
+    let root = TempRoot::new("open-foreign");
+    std::fs::write(root.path().join("notes.txt"), b"x").unwrap();
+    let t = std::time::Instant::now();
+    let r = Store::open(root.path(), Build::Known(Engine { build: "b".into() }), TopLevel::ByKind, kinds());
+    assert!(matches!(r, Err(Error::NotAStore { .. })));
+    assert!(t.elapsed() < std::time::Duration::from_millis(200), "refused after {:?}", t.elapsed());
+}
+
 #[test]
 fn open_refuses_a_foreign_directory_the_other_top_level_and_a_kind_registered_twice() {
     let root = TempRoot::new("open");
@@ -480,6 +516,29 @@ fn the_invocation_record_is_written_at_the_first_call_and_when_the_command_ends(
     assert_eq!(read_run(stored.folder()).invocation, Some(1));
 }
 
+/// A plan with by-products: a stored result whose wanted by-product is not
+/// stored is told apart from one that holds it, and from one not stored.
+#[test]
+fn a_plan_with_by_products_names_a_result_that_lacks_one() {
+    let root = TempRoot::new("plan-with");
+    let store = open(root.path());
+    run_sim(&store, &info(), 31);
+    let (id, labels) = sim(32);
+    let wanted = Wanted::<Sim>::none().with::<Obs>(ObsId { sim: id.record(), rate: Finite::new(0.3).unwrap() }, ());
+    let i = info();
+    let Begin::Claimed(mut run) = store.begin_with(&id, &labels, &wanted, &i, Reuse::IfCompleted).unwrap() else { panic!() };
+    run.result_file("traj.tsv").unwrap().write_all(b"t\tI\n0\t32\n").unwrap();
+    run.also::<Obs>().unwrap().unwrap().result_file("obs.tsv").unwrap().write_all(b"o").unwrap();
+    run.finish().unwrap();
+    let want = |seed: u64| {
+        let (id, labels) = sim(seed);
+        let w = Wanted::<Sim>::none().with::<Obs>(ObsId { sim: id.record(), rate: Finite::new(0.3).unwrap() }, ());
+        (id, labels, w)
+    };
+    let states: Vec<crate::PlanState> = store.plan_with::<Sim>(&[want(31), want(32), want(33)]).unwrap().into_iter().map(|p| p.state).collect();
+    assert_eq!(states, vec![crate::PlanState::ByProductsMissing, crate::PlanState::Completed, crate::PlanState::Absent]);
+}
+
 #[test]
 fn a_batch_claims_a_repeated_identity_once_and_answers_in_the_order_asked() {
     let root = TempRoot::new("batch");
@@ -519,10 +578,12 @@ fn a_content_artifact_is_stored_once_and_read_through_a_dependency() {
     let store = open(root.path());
     let content = Hashed::new(ModelText("S -> I".into()));
     let prov = Provenance::none().file("source.camdl", b"model sir".to_vec()).value("whole_digest", &"abc").unwrap();
+    assert!(store.get_content::<Model>(&content).unwrap().is_none(), "a content not yet put is not found");
     let info1 = info();
     let a = store.put::<Model>(content.clone(), &ModelLabels { name: "sir".into() }, &prov, &info1).unwrap();
     let b = store.put::<Model>(content.clone(), &ModelLabels { name: "renamed".into() }, &Provenance::none(), &info()).unwrap();
     assert_eq!(a.folder(), b.folder(), "the first writer's labels name the folder");
+    assert_eq!(store.get_content::<Model>(&content).unwrap().unwrap().folder(), a.folder(), "a put content is found by its content");
     assert!(a.folder().file_name().unwrap().to_string_lossy().starts_with("sir-"));
     assert_eq!(a.recorded("whole_digest"), Some(&serde_json::json!("abc")));
     assert_eq!(*a.identity(), content.digest());

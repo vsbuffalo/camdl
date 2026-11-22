@@ -142,7 +142,8 @@ pub enum PredictModeArg {
 /// block, where the type forbids orphan tolerances), so there is no `--atol`/
 /// `--rtol` flag to orphan. Forcing rk45 preserves the model's tolerances when it
 /// declared them, else uses the runtime defaults; forcing rk4 drops them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum IntegratorArg {
     #[value(name = "rk4")]
     Rk4,
@@ -201,7 +202,8 @@ impl std::fmt::Display for ProgressMode {
 // ─── SeedSpec ─────────────────────────────────────────────────────────────────
 
 /// `--seeds 1:100`  or  `--seeds 1,2,42`
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SeedSpec {
     Range { from: u64, to: u64 },
     List(Vec<u64>),
@@ -254,13 +256,14 @@ impl FromStr for SeedSpec {
 /// (`ocaml/lib/compiler/expander.ml` and `rust/crates/sim/src/propensity.rs`
 /// both implement it as `ln`). Rebinding `log` here would make
 /// `log(0.1, 10, 5)` mean two different things in two contexts.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct SweepSpec {
     pub name: String,
     pub grid: Grid,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Grid {
     List(Vec<f64>),
     Linear { min: f64, max: f64, n: usize },
@@ -422,7 +425,7 @@ impl FromStr for RwSd {
 // ─── ParamVecSpec ─────────────────────────────────────────────────────────────
 
 /// `--param-vec PREFIX=FILE`  e.g. `--param-vec beta=params.tsv`
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct ParamVecSpec {
     pub prefix: String,
     pub file:   String,

@@ -24,7 +24,7 @@ use sim::lineage::{
 };
 
 use crate::args::{
-    LineageCohortArgs, LineageRealizeArgs, LineageSojournArgs, LineageTreeArgs, SimulateArgs,
+    LineageCohortArgs, LineageRealizeArgs, LineageSojournArgs, LineageTreeArgs,
 };
 
 /// Resolve the requested artifact format from `--format` / `--tsv`.
@@ -126,21 +126,23 @@ fn build_writer(
     }
 }
 
-/// `camdl simulate --event-log` follow-up (Layer 1 → Layer 2). The recorded
-/// event log is the system of record as the run leaf's event-log child,
-/// `<leaf>/event_log/event_log.tsv` (written by `CasSink`); this only writes
-/// the optional `--event-log PATH` mirror and prints the `lineage realize`
-/// hint.
-///
-/// `exact` is true for Gillespie (each event is a single transition) and false
-/// for batched backends (sub-dt batching introduces a bias that
-/// `lineage realize` quantifies). `leaf_event_log` is the complete child's
-/// file ([`crate::cas_sink::complete_event_log`]).
-pub fn finish_event_log(out: &crate::out::Out, a: &SimulateArgs, event_log: &EventLog, exact: bool, leaf_event_log: &str) {
-    // A real `--event-log PATH` (anything but the bare `auto` sentinel) is
-    // mirrored to disk in the format implied by --tsv / --format / extension.
-    let mirror = a.event_log.clone().filter(|p| p.as_os_str() != "auto");
-    let format = resolve_format_with_path(a.tsv, &a.format, mirror.as_deref())
+/// Report a stored event log, and export it to `mirror` when a path was given,
+/// in the format `--tsv`, `--format` or the path's extension names: a TSV
+/// export is a copy of the stored bytes, a Parquet one is written from the
+/// parsed log. `stored` is the stored log's path, which `lineage realize`
+/// reads.
+#[allow(clippy::too_many_arguments)]
+pub fn finish_event_log(
+    out: &crate::out::Out,
+    mirror: Option<&Path>,
+    tsv: bool,
+    format: &Option<String>,
+    event_log: &EventLog,
+    stored_bytes: &[u8],
+    exact: bool,
+    stored: &str,
+) {
+    let format = resolve_format_with_path(tsv, format, mirror)
         .unwrap_or_else(|e| {
             out.fail(format!("error: {}", e));
         });
@@ -155,12 +157,16 @@ pub fn finish_event_log(out: &crate::out::Out, a: &SimulateArgs, event_log: &Eve
         "batched — sub-dt bias is reported by `lineage realize`"
     };
 
-    if let Some(ref path) = mirror {
-        sim::lineage::event_log_io::write(event_log, path, format).unwrap_or_else(|e| {
-            out.fail(format!("error: writing event log mirror: {:?}", e));
+    if let Some(path) = mirror {
+        let written = match format {
+            LineListFormat::Tsv => std::fs::write(path, stored_bytes).map_err(|e| format!("{e}")),
+            LineListFormat::Parquet => sim::lineage::event_log_io::write(event_log, path, format).map_err(|e| format!("{e:?}")),
+        };
+        written.unwrap_or_else(|e| {
+            out.fail(format!("error: writing the event log export: {e}"));
         });
         out.say(format_args!(
-            "event log: {} events ({} lineage); stored as the run's event-log child, mirrored to {} ({}); {}",
+            "event log: {} events ({} lineage); stored, exported to {} ({}); {}",
             event_log.events.len(), n_lineage, path.display(), fmt_ext, exactness,
         ));
         out.say(format_args!(
@@ -169,11 +175,11 @@ pub fn finish_event_log(out: &crate::out::Out, a: &SimulateArgs, event_log: &Eve
         ));
     } else {
         out.say(format_args!(
-            "event log: {} events ({} lineage) stored as the run's event-log child; {}",
+            "event log: {} events ({} lineage) stored; {}",
             event_log.events.len(), n_lineage, exactness,
         ));
         out.say(format_args!(
-            "  next: camdl lineage realize {} --identity-seed <N> -o line_list.tsv", leaf_event_log
+            "  next: camdl lineage realize {} --identity-seed <N> -o line_list.tsv", stored
         ));
     }
 }

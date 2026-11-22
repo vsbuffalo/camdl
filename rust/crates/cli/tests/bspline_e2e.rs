@@ -245,9 +245,10 @@ fn recorded_holds(cas: &Path) -> Vec<String> {
             let p = e.path();
             if p.is_dir() {
                 stack.push(p);
-            } else if p.file_name().is_some_and(|n| n == "run.json") {
+            } else if p.file_name().is_some_and(|n| n == "provenance.json") {
+                // A cell's provenance file records each forcing it held.
                 let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
-                let held = v.pointer("/inputs/forcing_extrapolation/held").and_then(|n| n.as_array()).cloned().unwrap_or_default();
+                let held = v.pointer("/forcing_extrapolation/held").and_then(|n| n.as_array()).cloned().unwrap_or_default();
                 out.extend(held.iter().filter_map(|n| n["forcing"].as_str().map(str::to_string)));
             }
         }

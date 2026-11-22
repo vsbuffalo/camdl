@@ -585,9 +585,10 @@ models needs its own vocabulary (an Erlang-staged model's `reff` formula is not
 an exponential-dwell model's). The emitted tables land in `quantities-<key>/`,
 keyed by the file's contents, so applying two vocabularies to one run gives you
 two tables rather than overwriting one, and correcting a formula in place
-produces a new table instead of a stale cache hit. Neither the simulation nor
-the fit's identity moves — quantities are derived reports, not inputs, so
-nothing re-runs.
+produces a new table instead of a stale cache hit. Neither a simulated cell's
+identity nor the fit's moves: quantities are derived reports, not inputs. A
+stored cell that lacks the quantities asked for is simulated again to evaluate
+them, and its trajectory is checked against the stored one.
 
 This is also the answer to "I corrected a `quantities {}` formula and
 `fit predict` still reports the old number": `fit predict` reads the model IR
@@ -640,7 +641,9 @@ camdl list                        # all cached runs; fits one row per run, by pr
 camdl show <run>                  # full metadata for one run
 camdl show @label --format json   # one fit run as JSON: run_id, path, verdict, outputs
 camdl show @label~1               # the run that held the label before
-camdl cat  <run>                  # emit its trajectory or observations
+camdl cat  <run>                  # emit a simulated cell's trajectory
+camdl cat  <run> --stream cases.tsv    # one file of a cell or of its by-products
+camdl cat  @label                 # a simulate run's combined table, rendered from its cells
 camdl cat  @label --stream draws.tsv   # one file of a fit run (leaf, then its predictions)
 camdl fit summary <fit-dir>       # convergence, gate verdict, MLE table for a fit
 camdl fit summary <fit-dir> --explain      # ... plus what each column means
@@ -674,25 +677,26 @@ with the source can reproduce the result bit-for-bit.
 
 ### The layout the tools expect
 
-| Path        | What                                                                                          |
-| ----------- | --------------------------------------------------------------------------------------------- |
-| `models/`   | `.camdl` model files and their `fit.toml` configs, side by side                               |
-| `data/`     | committed input streams plus the lock/manifest pinning their provenance                       |
-| `results/`  | the content-addressed run store — `results/fits/`, `results/sims/`, …                         |
-| `scripts/`  | everything the Makefile or workflow calls; no logic inline in a rule                          |
-| `workflow/` | the fit DAG (`*.smk`), once the project has enough fan-out to need one                        |
-| `tests/`    | offline contract tests — do the data's columns match what the model's `observations` declare? |
-| `notes/`    | dated working notes                                                                           |
-| `Makefile`  | the named entry points, including the networked/offline split                                 |
+| Path           | What                                                                                          |
+| -------------- | --------------------------------------------------------------------------------------------- |
+| `models/`      | `.camdl` model files and their `fit.toml` configs, side by side                               |
+| `data/`        | committed input streams plus the lock/manifest pinning their provenance                       |
+| `results/`     | the content-addressed store of fits and profiles — `results/fits/`, `results/profiles/`, …    |
+| `camdl-store/` | the run store of `simulate` and `pfilter` (`--store DIR` or `CAMDL_STORE` to move it)         |
+| `scripts/`     | everything the Makefile or workflow calls; no logic inline in a rule                          |
+| `workflow/`    | the fit DAG (`*.smk`), once the project has enough fan-out to need one                        |
+| `tests/`       | offline contract tests — do the data's columns match what the model's `observations` declare? |
+| `notes/`       | dated working notes                                                                           |
+| `Makefile`     | the named entry points, including the networked/offline split                                 |
 
-`results/` is the one that is not a matter of taste. Every run is
-content-addressed on the tuple above, so keeping them all under one root is what
-makes a run **addressable**: `camdl list`, `camdl show <run>` and
-`camdl fit table results/fits/` work off it, an identical re-run is a cache hit
-rather than a recompute, and a refit on updated data forks a new leaf beside the
-old one instead of overwriting it. Scatter fits into per-experiment directories
-and all three are lost. A leaf belongs to camdl — never write a derived summary
-into one.
+`results/` and `camdl-store/` are the ones that are not a matter of taste. Every
+run is content-addressed on the tuple above, so keeping them all under these
+roots is what makes a run **addressable**: `camdl list`, `camdl show <run>` and
+`camdl fit table results/fits/` work off them, an identical re-run is a cache
+hit rather than a recompute, and a refit on updated data forks a new leaf beside
+the old one instead of overwriting it. Scatter fits into per-experiment
+directories and all three are lost. A leaf belongs to camdl — never write a
+derived summary into one.
 
 The reasoning behind each directory, and the house style for a model file's
 header, is `docs/camdl-style.md` in the camdl repo.
@@ -759,9 +763,10 @@ diagnostics. It is built by classifying each file's **actual** header, so it
 cannot disagree with the file it describes. Consume the _role_, never the name —
 the iteration column is spelled `sweep`, `step`, `draw` or `iteration` depending
 on the method, and `time` (physical) and `iteration` (a sampler index) are
-deliberately distinct roles. Not every producer declares one: `sim` leaves and
-completed fit leaves do; `pfilter`, `profile` and the `fit predict` outputs do
-not.
+deliberately distinct roles. Not every producer declares one: completed fit
+leaves do; `profile`, the `fit predict` outputs, and the cells `simulate` and
+the runs `pfilter` store in the run store do not. A simulated cell's `traj.tsv`
+has the fixed layout of `docs/camdl-run-spec.md` §10.1.
 
 **To ask whether a long fit is still alive, read `progress.json`, not the
 mtimes.** Every method but `pfilter` writes one into its leaf and a background

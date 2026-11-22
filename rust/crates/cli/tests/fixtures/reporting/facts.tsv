@@ -376,15 +376,15 @@ predict	stderr	line	wrote	/observed/cases.tsv
 predict	stderr	line	wrote	/report.json
 predict.refused	stderr	line	error:	no completed fit run labelled @nope under results/fits
 simulate	stderr	line	simulate · chain_binomial:	running …
-simulate	stderr	line	stored	./results/sims/sir-
+simulate	stderr	line	stored	/camdl-store/
+simulate	stderr	line	stored	/sim/sir-
 simulate	stderr	line	camdl cat	camdl cat
 simulate.stdout	stdout	line	t_start	flow_infection
 simulate.stdout	stdout	line	1076	619
 simulate.seeds	stderr	line	3 replicates	= 3 runs
 simulate.seeds	stderr	line	trajectory written to	traj.tsv
-simulate.seeds	stderr	line	storing ensemble	3 cells
-simulate.seeds	stderr	line	ensemble	./results/ensembles/sir-
-simulate.seeds	stderr	line	stored	3 leaves · ./results/sims/
+simulate.seeds	stderr	line	stored	3 cells · 
+simulate.seeds	stderr	line	stored	/camdl-store
 simulate.seeds	stderr	line	observations written to	obsd/cases.tsv
 simulate.dry	stderr	line	camdl simulate	(dry run)
 simulate.dry	stderr	line	backend:	chain_binomial
@@ -392,7 +392,7 @@ simulate.dry	stderr	line	Parameters	(4):
 simulate.dry	stderr	line	beta	0.600000  truth.toml
 simulate.refused	stderr	line	error: unknown parameter	'zzz' from --param.
 simulate.refused	stderr	line	Available parameters:	beta, gamma, rho, N0
-simulate.events	stderr	line	event log:	185 events (99 lineage); stored as the run's event-log child, mirrored to ev.tsv (tsv); exact (Gillespie)
+simulate.events	stderr	line	event log:	185 events (99 lineage); stored, exported to ev.tsv (tsv); exact (Gillespie)
 simulate.events	stderr	line	next:	camdl lineage realize ev.tsv --identity-seed <N> -o line_list.tsv
 lineage.realize	stderr	line	lineage realize:	identity-seed 7, 99 edges, log P(line list | event log) = -664.457449
 lineage.realize	stderr	line	sub-dt bias:	0.000 (exact — Gillespie event log)

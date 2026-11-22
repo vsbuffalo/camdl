@@ -7,6 +7,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod sim_store_cells;
+use sim_store_cells::SimCell;
+
 /// Path to the release-built binary. Tests assume a prior
 /// `cargo build --release -p cli`, which happens automatically before
 /// `cargo test` in CI. Skips the test if the binary is absent.
@@ -34,25 +37,33 @@ fn skip_if_missing_binary() -> PathBuf {
     bin
 }
 
-// ── New-format (runid::RunRecord) helpers ──────────────────────────────────
+// ── Run-store helpers ──────────────────────────────────────────────────────
 
-/// Read a sim leaf's `run.json` (a `RunRecord`) as JSON.
-fn read_meta(dir: &Path) -> serde_json::Value {
-    serde_json::from_str(&std::fs::read_to_string(dir.join("run.json")).unwrap()).unwrap()
+/// The stored simulation cells under the run store `store`, leaving out any
+/// cell a repair moved to `.quarantine/`.
+fn live_cells(store: &Path) -> Vec<SimCell> {
+    sim_store_cells::sim_cells(store).into_iter()
+        .filter(|c| !c.dir.components().any(|p| p.as_os_str() == ".quarantine"))
+        .collect()
 }
 
-/// A named factored level's label (`model`/`config`/`params`/`scenario`/`seed`).
-fn level_label<'a>(meta: &'a serde_json::Value, name: &str) -> &'a str {
-    meta["levels"].as_array().unwrap().iter()
-        .find(|l| l["name"] == name).unwrap_or_else(|| panic!("level {name} present"))
-        ["label"].as_str().unwrap()
+/// The one live simulation cell under `store`; panics unless exactly one.
+fn sole_cell(store: &Path) -> SimCell {
+    let cells = live_cells(store);
+    assert_eq!(cells.len(), 1, "expected exactly one cell under {}, got {:?}",
+        store.display(), cells.iter().map(|c| &c.dir).collect::<Vec<_>>());
+    cells.into_iter().next().unwrap()
 }
 
-/// A named factored level's content hash (64 hex).
-fn level_hash<'a>(meta: &'a serde_json::Value, name: &str) -> &'a str {
-    meta["levels"].as_array().unwrap().iter()
-        .find(|l| l["name"] == name).unwrap_or_else(|| panic!("level {name} present"))
-        ["hash"].as_str().unwrap()
+/// The `sim/` folder of the run store `store`: `<store>/<build>/sim`, the one
+/// a single build writes.
+fn sim_dir(store: &Path) -> PathBuf {
+    let builds: Vec<PathBuf> = std::fs::read_dir(store).unwrap().flatten()
+        .map(|e| e.path())
+        .filter(|p| p.join("sim").is_dir())
+        .collect();
+    assert_eq!(builds.len(), 1, "one build folder with a sim/ under {}: {builds:?}", store.display());
+    builds[0].join("sim")
 }
 
 #[test]
@@ -65,49 +76,41 @@ fn cas_first_run_writes_cache_and_metadata() {
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--scenario", "baseline",
                "--seed", "42",
-               "--output-dir", &output.to_string_lossy(),
+               "--store", &output.to_string_lossy(),
                "-o", &tmp.path().join("traj.tsv").to_string_lossy()])
         .status()
         .expect("spawn");
     assert!(status.success(), "first run should succeed");
 
-    // Exactly one CAS entry under runs/
-    let runs = output.join("sims");
-    assert!(runs.exists(), "sims/ directory should exist");
-    let seed_dirs: Vec<_> = walkdir(&runs).into_iter()
-        .filter(|p| p.join("run.json").exists())
-        .collect();
-    assert_eq!(seed_dirs.len(), 1, "should have exactly one run dir");
+    // Exactly one cell in the store.
+    let cell = sole_cell(&output);
+    assert!(cell.dir.join("traj.tsv").exists(), "traj.tsv should be written");
+    assert!(cell.dir.join("run.json").exists(), "run.json should be written");
 
-    let dir = &seed_dirs[0];
-    assert!(dir.join("traj.tsv").exists(), "traj.tsv should be written");
-    assert!(dir.join("run.json").exists(), "run.json should be written");
-
-    // run.json is a RunRecord: factored levels + run_id + provenance.
-    let meta = read_meta(dir);
-    assert_eq!(meta["kind"], "sim", "new-format RunRecord: kind=sim");
-    assert_eq!(meta["run_id"].as_str().unwrap().len(), 64);
+    // identity.json names the cell; run.json records the run.
+    assert_eq!(cell.identity["kind"], "sim", "identity.json: kind=sim");
+    assert_eq!(cell.run_id.len(), 64);
+    let meta = cell.run_json();
     assert_eq!(meta["status"], "completed");
-    assert_eq!(level_label(&meta, "seed"), "seed_42");
-    assert_eq!(level_label(&meta, "scenario"), "baseline");
-    assert!(meta["provenance"]["argv"].as_array().unwrap().len() >= 4);
-    // `engine_version` is the engine's build fingerprint (ENGINE_ID, 128
-    // bits of hex); the readable `<release>+<commit>` is provenance.
-    let engine = meta["engine_version"].as_str().unwrap();
+    assert_eq!(cell.seed(), 42);
+    assert_eq!(cell.scenario_dir_name(), "baseline");
+    // The invocation that wrote the cell keeps its argv.
+    let inv = meta["invocation"].as_u64().expect("run.json names its invocation");
+    let inv: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
+        output.join(".invocations").join(format!("{inv}.json"))).unwrap()).unwrap();
+    assert!(inv["argv"].as_array().unwrap().len() >= 4);
+    // `ambient.build` is the engine's build fingerprint (ENGINE_ID, 128 bits
+    // of hex).
+    let engine = cell.identity["ambient"]["build"].as_str().unwrap();
     assert!(engine.len() == 32 && engine.bytes().all(|b| b.is_ascii_hexdigit()),
-        "engine_version is the build fingerprint: {engine}");
-    assert!(meta["provenance"]["camdl_version"].as_str().unwrap().contains('+'),
-        "provenance.camdl_version is the readable version with its commit");
-    assert!(meta["provenance"]["created_at"].as_str().is_some());
+        "ambient.build is the build fingerprint: {engine}");
+    assert!(meta["started"].as_str().is_some() && meta["finished"].as_str().is_some());
 }
 
 #[test]
 fn cas_second_identical_run_does_not_rewrite_leaf() {
-    // CAS is the default. A second, byte-identical run re-simulates (the
-    // trajectory is needed for the -o mirror) but the store commit is
-    // idempotent: `commit_atomic` resolves the existing identical leaf to
-    // `AlreadyCompleted` and never re-writes its `traj.tsv`. The proof is the
-    // unchanged mtime.
+    // A second, byte-identical run finds the stored cell and does not
+    // re-write its `traj.tsv`. The proof is the unchanged mtime.
     let bin = skip_if_missing_binary();
     let tmp = tempfile::tempdir().unwrap();
     let output = tmp.path().join("output");
@@ -117,7 +120,7 @@ fn cas_second_identical_run_does_not_rewrite_leaf() {
             .args(["simulate", &golden_sir_basic().to_string_lossy(),
                    "--scenario", "baseline",
                    "--seed", "42",
-                   "--output-dir", &output.to_string_lossy(),
+                   "--store", &output.to_string_lossy(),
                    "-o", &tmp.path().join("traj.tsv").to_string_lossy()])
             .output()
             .expect("spawn")
@@ -129,9 +132,7 @@ fn cas_second_identical_run_does_not_rewrite_leaf() {
     assert!(stderr1.contains("stored"), "first run stderr should report the run was stored: {}", stderr1);
 
     // Wait long enough that the filesystem mtime would differ if rewritten.
-    let cache_path = walkdir(&output.join("sims")).into_iter()
-        .find(|p| p.join("traj.tsv").exists()).unwrap()
-        .join("traj.tsv");
+    let cache_path = sole_cell(&output).dir.join("traj.tsv");
     let mtime1 = std::fs::metadata(&cache_path).unwrap().modified().unwrap();
 
     std::thread::sleep(std::time::Duration::from_millis(10));
@@ -139,9 +140,9 @@ fn cas_second_identical_run_does_not_rewrite_leaf() {
     let second = run_once();
     assert!(second.status.success());
 
-    // mtime unchanged — the idempotent commit must not re-write the leaf.
+    // mtime unchanged — the second run must not re-write the cell.
     let mtime2 = std::fs::metadata(&cache_path).unwrap().modified().unwrap();
-    assert_eq!(mtime1, mtime2, "idempotent commit must not overwrite traj.tsv");
+    assert_eq!(mtime1, mtime2, "a stored cell must not be overwritten by an identical run");
 }
 
 #[test]
@@ -155,22 +156,19 @@ fn cas_different_seed_new_cache_entry() {
             .args(["simulate", &golden_sir_basic().to_string_lossy(),
                    "--scenario", "baseline",
                    "--seed", seed,
-                   "--output-dir", &output.to_string_lossy(),
+                   "--store", &output.to_string_lossy(),
                    "-o", &tmp.path().join("traj.tsv").to_string_lossy()])
             .status().expect("spawn");
         assert!(st.success());
     }
 
-    let dirs: Vec<_> = walkdir(&output.join("sims")).into_iter()
-        .filter(|p| p.join("run.json").exists()).collect();
-    assert_eq!(dirs.len(), 2, "should have two separate seed dirs");
+    let cells = live_cells(&output);
+    assert_eq!(cells.len(), 2, "should have two separate seed cells");
 
-    // Seed segments are `seed_{base}-{seed_h8}` (no level is label-only).
-    let seeds: Vec<String> = dirs.iter()
-        .map(|d| d.file_name().unwrap().to_string_lossy().into_owned())
-        .collect();
-    assert!(seeds.iter().any(|n| n.starts_with("seed_42-")), "got {seeds:?}");
-    assert!(seeds.iter().any(|n| n.starts_with("seed_43-")), "got {seeds:?}");
+    // Each cell's identity records its seed.
+    let mut seeds: Vec<u64> = cells.iter().map(|c| c.seed()).collect();
+    seeds.sort();
+    assert_eq!(seeds, [42, 43], "got {seeds:?}");
 }
 
 /// gh#135 regression. Two structurally different models under identical
@@ -222,7 +220,7 @@ fn cas_different_models_do_not_collide() {
             .args(["simulate", &model.to_string_lossy(),
                    "--scenario", "baseline",
                    "--seed", "1",
-                   "--output-dir", &output.to_string_lossy(),
+                   "--store", &output.to_string_lossy(),
                    "-o", &tmp.path().join("traj.tsv").to_string_lossy()])
             .status().expect("spawn");
         assert!(st.success(), "simulate should succeed");
@@ -230,30 +228,29 @@ fn cas_different_models_do_not_collide() {
     run(&path_a);
     run(&path_b);
 
-    // Two distinct cache entries — not one collision.
-    let dirs: Vec<_> = walkdir(&output.join("sims")).into_iter()
-        .filter(|p| p.join("run.json").exists()).collect();
-    assert_eq!(dirs.len(), 2,
-        "two structurally different models must produce two CAS entries, \
+    // Two distinct cells — not one collision.
+    let cells = live_cells(&output);
+    assert_eq!(cells.len(), 2,
+        "two structurally different models must produce two cells, \
          not collide to one (gh#135)");
 
-    // The model LEVEL hash (structural whole-IR digest) must be recorded,
-    // 64-hex, and distinct between the two structurally different models.
-    let mut model_hashes: Vec<String> = dirs.iter().map(|d| {
-        let meta = read_meta(d);
-        level_hash(&meta, "model").to_string()
+    // The compiled model's digest (structural whole-IR digest) must be
+    // recorded in each cell's identity, 64-hex, and distinct between the two
+    // structurally different models.
+    let mut model_hashes: Vec<String> = cells.iter().map(|c| {
+        c.identity["identity"]["model"]["digest"].as_str().unwrap().to_string()
     }).collect();
     model_hashes.sort();
     for mh in &model_hashes {
-        assert_eq!(mh.len(), 64, "model level hash is 64-hex");
+        assert_eq!(mh.len(), 64, "model digest is 64-hex");
     }
     assert_ne!(model_hashes[0], model_hashes[1],
-        "two structurally different models must record distinct model level \
-         hashes (gh#135/gh#147)");
+        "two structurally different models must record distinct model \
+         digests (gh#135/gh#147)");
 
     // And the trajectories themselves must differ — the symptom users saw.
-    let trajs: Vec<Vec<u8>> = dirs.iter()
-        .map(|d| std::fs::read(d.join("traj.tsv")).unwrap()).collect();
+    let trajs: Vec<Vec<u8>> = cells.iter()
+        .map(|c| std::fs::read(c.dir.join("traj.tsv")).unwrap()).collect();
     assert_ne!(trajs[0], trajs[1],
         "doubling the recovery rate must change the trajectory; identical \
          bytes means one model was served the other's cached result (gh#135)");
@@ -273,30 +270,25 @@ fn cas_multi_seeds_writes_one_leaf_per_seed() {
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--scenario", "baseline",
                "--seeds", "1:3",
-               "--output-dir", &output.to_string_lossy()])
+               "--store", &output.to_string_lossy()])
         .output()
         .expect("spawn");
     assert!(out.status.success(), "multi-seed simulate should succeed: {}",
         String::from_utf8_lossy(&out.stderr));
 
-    let dirs: Vec<_> = walkdir(&output.join("sims")).into_iter()
-        .filter(|p| p.join("run.json").exists()).collect();
-    assert_eq!(dirs.len(), 3, "three seeds must produce three leaves");
+    let cells = live_cells(&output);
+    assert_eq!(cells.len(), 3, "three seeds must produce three cells");
 
     // Three distinct run_ids (the seed is in the key — count-in-the-key).
-    let mut run_ids: Vec<String> = dirs.iter()
-        .map(|d| read_meta(d)["run_id"].as_str().unwrap().to_string())
-        .collect();
+    let mut run_ids: Vec<String> = cells.iter().map(|c| c.run_id.clone()).collect();
     run_ids.sort();
     run_ids.dedup();
     assert_eq!(run_ids.len(), 3, "three seeds must yield three distinct run_ids");
 
-    // The seed labels cover 1, 2, 3 (explicit --seeds are used verbatim).
-    let labels: Vec<String> = dirs.iter()
-        .map(|d| level_label(&read_meta(d), "seed").to_string()).collect();
-    for s in ["seed_1", "seed_2", "seed_3"] {
-        assert!(labels.iter().any(|l| l == s), "missing {s} in {labels:?}");
-    }
+    // The seeds are 1, 2, 3 (explicit --seeds are used verbatim).
+    let mut seeds: Vec<u64> = cells.iter().map(|c| c.seed()).collect();
+    seeds.sort();
+    assert_eq!(seeds, [1, 2, 3], "got {seeds:?}");
 }
 
 /// Count-in-the-key: `--replicates N` (no `--draws`) writes N distinct leaves,
@@ -314,15 +306,13 @@ fn cas_replicates_write_one_leaf_each_and_single_run_writes_one() {
     let st = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--scenario", "baseline", "--seed", "42", "--replicates", "3",
-               "--output-dir", &out3.to_string_lossy(),
+               "--store", &out3.to_string_lossy(),
                "-o", &tmp.path().join("c3.tsv").to_string_lossy()])
         .status().expect("spawn");
     assert!(st.success(), "3-replicate simulate should succeed");
-    let dirs3: Vec<_> = walkdir(&out3.join("sims")).into_iter()
-        .filter(|p| p.join("run.json").exists()).collect();
-    assert_eq!(dirs3.len(), 3, "3 replicates must write 3 leaves");
-    let mut ids3: Vec<String> = dirs3.iter()
-        .map(|d| read_meta(d)["run_id"].as_str().unwrap().to_string()).collect();
+    let cells3 = live_cells(&out3);
+    assert_eq!(cells3.len(), 3, "3 replicates must write 3 cells");
+    let mut ids3: Vec<String> = cells3.iter().map(|c| c.run_id.clone()).collect();
     ids3.sort(); ids3.dedup();
     assert_eq!(ids3.len(), 3, "3 replicates must have 3 distinct run_ids (seed in key)");
 
@@ -331,13 +321,11 @@ fn cas_replicates_write_one_leaf_each_and_single_run_writes_one() {
     let st = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--scenario", "baseline", "--seed", "42",
-               "--output-dir", &out1.to_string_lossy(),
+               "--store", &out1.to_string_lossy(),
                "-o", &tmp.path().join("c1.tsv").to_string_lossy()])
         .status().expect("spawn");
     assert!(st.success(), "single-run simulate should succeed");
-    let dirs1: Vec<_> = walkdir(&out1.join("sims")).into_iter()
-        .filter(|p| p.join("run.json").exists()).collect();
-    assert_eq!(dirs1.len(), 1, "a lone simulate run must write exactly one leaf");
+    assert_eq!(live_cells(&out1).len(), 1, "a lone simulate run must write exactly one cell");
 }
 
 /// The load-bearing invariant: the multi-cell path (`simulate --seeds …`,
@@ -365,7 +353,7 @@ fn multi_cell_and_single_cell_leaves_are_byte_identical() {
                "--scenario", "baseline",
                "--params", &params.to_string_lossy(),
                "--seeds", "10,11,12",
-               "--output-dir", &multi_out.to_string_lossy(),
+               "--store", &multi_out.to_string_lossy(),
                "-o", &tmp.path().join("c.tsv").to_string_lossy()])
         .status().expect("spawn");
     assert!(st.success(), "simulate --seeds should succeed");
@@ -377,30 +365,28 @@ fn multi_cell_and_single_cell_leaves_are_byte_identical() {
                    "--scenario", "baseline",
                    "--params", &params.to_string_lossy(),
                    "--seed", seed,
-                   "--output-dir", &single_out.to_string_lossy()])
+                   "--store", &single_out.to_string_lossy()])
             .status().expect("spawn");
         assert!(st.success(), "simulate --seed {seed} should succeed");
     }
 
-    // Enumerate the multi-cell leaves; for each, the same store-relative path
+    // Enumerate the multi-cell cells; for each, the same store-relative path
     // must exist in the single-run store with the same run_id and identical
     // traj bytes.
-    let multi_root = multi_out.join("sims");
-    let multi_leaves: Vec<_> = walkdir(&multi_root).into_iter()
-        .filter(|p| p.join("run.json").exists()).collect();
-    assert_eq!(multi_leaves.len(), 3, "expected 3 multi-cell leaves");
+    let multi_cells = live_cells(&multi_out);
+    assert_eq!(multi_cells.len(), 3, "expected 3 multi-cell cells");
 
-    for ml in &multi_leaves {
-        let rel = ml.strip_prefix(&multi_root).unwrap();
-        let sl = single_out.join("sims").join(rel);
-        assert!(sl.join("run.json").exists(),
-            "single-run store missing the same-path leaf: {}", rel.display());
+    for mc in &multi_cells {
+        let rel = mc.dir.strip_prefix(&multi_out).unwrap();
+        let sl = single_out.join(rel);
+        assert!(sl.join("identity.json").exists(),
+            "single-run store missing the same-path cell: {}", rel.display());
 
-        let mid = read_meta(ml)["run_id"].as_str().unwrap().to_string();
-        let sid = read_meta(&sl)["run_id"].as_str().unwrap().to_string();
-        assert_eq!(mid, sid, "run_id mismatch at {}", rel.display());
+        let sid = sim_store_cells::read_json(&sl.join("identity.json"))["run_id"]
+            .as_str().unwrap().to_string();
+        assert_eq!(mc.run_id, sid, "run_id mismatch at {}", rel.display());
 
-        let mbytes = std::fs::read(ml.join("traj.tsv")).unwrap();
+        let mbytes = std::fs::read(mc.dir.join("traj.tsv")).unwrap();
         let sbytes = std::fs::read(sl.join("traj.tsv")).unwrap();
         assert_eq!(mbytes, sbytes,
             "traj.tsv bytes differ between the multi-cell and single-cell paths at {}",
@@ -408,7 +394,7 @@ fn multi_cell_and_single_cell_leaves_are_byte_identical() {
     }
 }
 
-/// The model directories (`sims/<name>-<hash>`) directly under `sims`.
+/// The model directories (`sim/<name>-<hash>`) directly under `sims`.
 fn model_dirs(sims: &Path) -> Vec<String> {
     let mut v: Vec<String> = std::fs::read_dir(sims).unwrap().flatten()
         .filter(|e| e.path().is_dir())
@@ -440,10 +426,10 @@ fn a_camdl_source_lands_on_one_model_directory_with_the_ir_cache_on_or_off() {
                "--scenario", "baseline",
                "--params", &params.to_string_lossy(),
                "--seed", "10",
-               "--output-dir", &store.to_string_lossy()])
+               "--store", &store.to_string_lossy()])
         .output().expect("spawn");
     assert!(out.status.success(), "simulate: {}", String::from_utf8_lossy(&out.stderr));
-    let sims = store.join("sims");
+    let sims = sim_dir(&store);
     let after_first = model_dirs(&sims);
     assert_eq!(after_first.len(), 1, "one model directory: {after_first:?}");
     assert!(after_first[0].starts_with("sir_basic-"),
@@ -459,7 +445,7 @@ fn a_camdl_source_lands_on_one_model_directory_with_the_ir_cache_on_or_off() {
                   "--scenario", "baseline",
                   "--params", &params.to_string_lossy(),
                   "--seeds", "10,11",
-                  "--output-dir", &store.to_string_lossy()]);
+                  "--store", &store.to_string_lossy()]);
         if no_cache { cmd.env("CAMDL_NO_IR_CACHE", "1"); }
         let out = cmd.output().expect("spawn");
         assert!(out.status.success(), "simulate --seeds: {}", String::from_utf8_lossy(&out.stderr));
@@ -473,9 +459,8 @@ fn a_camdl_source_lands_on_one_model_directory_with_the_ir_cache_on_or_off() {
 /// multi-cell `--dry-run` over a `.camdl` source with `--output-every`. It
 /// must predict the identity the run resolves — the model compiled from
 /// source, with the output cadence lowered into it — so a completed grid
-/// reports every cell a hit, one more seed reports exactly one miss, and the
-/// missing cell's leaf path is printed once, relative to the store, under the
-/// model's own directory.
+/// reports every cell a hit, and one more seed reports exactly one miss, the
+/// new seed's cell.
 #[test]
 fn a_camdl_source_dry_run_counts_the_leaves_the_run_wrote() {
     let bin = skip_if_missing_binary();
@@ -494,7 +479,7 @@ fn a_camdl_source_dry_run_counts_the_leaves_the_run_wrote() {
                   "--params", &params.to_string_lossy(),
                   "--seeds", seeds,
                   "--output-every", "2",
-                  "--output-dir", &store.to_string_lossy()]);
+                  "--store", &store.to_string_lossy()]);
         if dry_run { cmd.arg("--dry-run"); }
         let out = cmd.output().expect("spawn");
         assert!(out.status.success(), "simulate --seeds {seeds} (dry run: {dry_run}): {}",
@@ -510,12 +495,9 @@ fn a_camdl_source_dry_run_counts_the_leaves_the_run_wrote() {
     // One more seed: that cell is the one miss, printed under the store once.
     let s = simulate("1,2,3", true);
     assert!(s.contains("2 cache hits → read back, 1 misses → would simulate"), "{s}");
-    let line = s.lines().find(|l| l.contains("[miss]")).unwrap_or_else(|| panic!("{s}"));
-    assert!(line.contains("seed_3-"), "the miss is the new seed: {line}");
-    let path = line.split("[miss] ").nth(1).unwrap_or_else(|| panic!("{line}")).trim();
-    assert!(path.starts_with("sims/sir_basic-"),
-        "relative to the store, under the model's own directory: {path}");
-    assert!(!path.contains("sims/sims"), "sims/ printed once: {path}");
+    let misses: Vec<&str> = s.lines().filter(|l| l.contains("[miss]")).collect();
+    assert_eq!(misses.len(), 1, "one miss line: {s}");
+    assert!(misses[0].trim_end().ends_with("seed_3"), "the miss is the new seed: {}", misses[0]);
 }
 
 #[test]
@@ -530,14 +512,14 @@ fn list_shows_cached_runs() {
             .args(["simulate", &golden_sir_basic().to_string_lossy(),
                    "--scenario", "baseline",
                    "--seed", seed,
-                   "--output-dir", &output.to_string_lossy(),
+                   "--store", &output.to_string_lossy(),
                    "-o", &tmp.path().join("traj.tsv").to_string_lossy()])
             .status().expect("spawn");
     }
 
     // `camdl list` should find both
     let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .args(["list", &output.to_string_lossy()])
+        .args(["list", "--store", &output.to_string_lossy()])
         .output().expect("spawn");
     assert!(out.status.success(), "list should succeed");
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -690,26 +672,30 @@ fn list_kind_filter_isolates_sections() {
     let bin = skip_if_missing_binary();
     let tmp = tempfile::tempdir().unwrap();
     let output = tmp.path().join("output");
+    let store = tmp.path().join("store");
 
-    // Cache one sim.
+    // Cache one sim, in the run store.
     Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--scenario", "baseline", "--seed", "7",
-               "--output-dir", &output.to_string_lossy(),
+               "--store", &store.to_string_lossy(),
                "-o", &tmp.path().join("t.tsv").to_string_lossy()])
         .status().expect("spawn");
-    // Synthesise a CAS fit (single `mle` method leaf + sidecar).
+    // Synthesise a CAS fit (single `mle` method leaf + sidecar), in the
+    // output root fits are stored under.
     write_cas_fit(&output, "demo", "abc12345", &["if2"], "m");
 
     let fit_only = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .args(["list", "--kind", "fit", &output.to_string_lossy()])
+        .args(["list", "--kind", "fit", &output.to_string_lossy(),
+               "--store", &store.to_string_lossy()])
         .output().expect("spawn");
     let s = String::from_utf8_lossy(&fit_only.stdout);
     assert!(s.contains("demo"), "--kind fit should show fits: {}", s);
     assert!(!s.contains("seed_7"), "--kind fit must hide sims: {}", s);
 
     let sim_only = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .args(["list", "--kind", "sim", &output.to_string_lossy()])
+        .args(["list", "--kind", "sim", &output.to_string_lossy(),
+               "--store", &store.to_string_lossy()])
         .output().expect("spawn");
     let s = String::from_utf8_lossy(&sim_only.stdout);
     assert!(s.contains("seed_7"), "--kind sim should show sims: {}", s);
@@ -755,11 +741,9 @@ fn list_shows_fit_entries() {
 }
 
 /// Tamper-with-artifact regression: a corrupted `traj.tsv` whose bytes no
-/// longer match the leaf's exact-set manifest must never be served. With CAS
-/// the default, a re-run always re-simulates and commits idempotently; the
-/// commit's claim resolution classifies the tampered leaf as `Stale` and
-/// repairs it (the staging leaf is renamed into place), so the corrupt bytes
-/// are replaced with the correct trajectory.
+/// longer match the cell's recorded `files` digests must never be served. A
+/// re-run finds the cell damaged, moves it to `.quarantine/` and simulates it
+/// again, so the corrupt bytes are replaced with the correct trajectory.
 #[test]
 fn cas_tampered_leaf_is_repaired_on_rerun() {
     let bin = skip_if_missing_binary();
@@ -771,15 +755,14 @@ fn cas_tampered_leaf_is_repaired_on_rerun() {
             .args(["simulate", &golden_sir_basic().to_string_lossy(),
                    "--scenario", "baseline",
                    "--seed", "42",
-                   "--output-dir", &output.to_string_lossy(),
+                   "--store", &output.to_string_lossy(),
                    "-o", &tmp.path().join("traj.tsv").to_string_lossy()])
             .output().expect("spawn")
     };
 
     let first = run_once();
     assert!(first.status.success());
-    let dir = walkdir(&output.join("sims")).into_iter()
-        .find(|p| p.join("run.json").exists()).expect("one run");
+    let dir = sole_cell(&output).dir;
     let good = std::fs::read(dir.join("traj.tsv")).unwrap();
 
     // Corrupt the cached trajectory.
@@ -789,8 +772,8 @@ fn cas_tampered_leaf_is_repaired_on_rerun() {
     // never left holding the corrupt content.
     let out = run_once();
     assert!(out.status.success(), "re-run should succeed");
-    let repaired = walkdir(&output.join("sims")).into_iter()
-        .find(|p| p.join("run.json").exists()).expect("one run");
+    let repaired = sole_cell(&output).dir;
+    assert_eq!(repaired, dir, "the repaired cell is at the same folder");
     let after = std::fs::read(repaired.join("traj.tsv")).unwrap();
     assert_ne!(after, b"tampered-and-shorter",
         "tampered bytes must not survive a re-run");
@@ -828,26 +811,23 @@ fn cat_emits_cached_trajectory() {
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--scenario", "baseline",
                "--seed", "42",
-               "--output-dir", &output.to_string_lossy(),
+               "--store", &output.to_string_lossy(),
                "-o", &tmp.path().join("traj.tsv").to_string_lossy()])
         .status().expect("spawn");
 
-    // Find the cached dir, derive the run_id short prefix.
-    let dir = walkdir(&output.join("sims")).into_iter()
-        .find(|p| p.join("run.json").exists()).unwrap();
-    let meta = read_meta(&dir);
-    let run_id = meta["run_id"].as_str().unwrap();
-    let short = &run_id[..8];
+    // Find the stored cell, derive the run_id short prefix.
+    let cell = sole_cell(&output);
+    let dir = cell.dir.clone();
+    let short = &cell.run_id[..8];
 
     // `camdl cat <short>` uniquely resolves and emits the TSV
     let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .args(["cat", short, "--root", &output.to_string_lossy()])
+        .args(["cat", short, "--store", &output.to_string_lossy()])
         .output().expect("spawn");
     assert!(out.status.success(), "cat short-hash should resolve uniquely");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    // The canonical leaf carries no `# camdl <version>` provenance header
-    // (that lives in run.json's `engine_version`); the trajectory TSV is the
-    // canonical form starting with the `t` column header.
+    // The stored cell's trajectory carries no `# camdl <version>` header and
+    // no coordinate columns; it starts with the `t` column header.
     assert!(stdout.starts_with("t\t"), "cat should emit the trajectory header row: {:?}",
         &stdout[..stdout.len().min(40)]);
     assert!(stdout.contains("\tS\t") || stdout.contains("\tI\t"),
@@ -858,11 +838,10 @@ fn cat_emits_cached_trajectory() {
     assert_eq!(out.stdout, cached, "cat output must match cached bytes byte-for-byte");
 }
 
-/// A `--sweep` point is recoverable from the live tree: each leaf's `params`
-/// level is labelled by the swept value (`beta=0.2`), `camdl list` shows it,
-/// and no grid-level index file is written — `sims/manifest.json` was retired
-/// (gh#147 item D); the per-leaf `run.json` and the derived `index.json` are
-/// the only index.
+/// A `--sweep` point is recoverable from the store: each cell's identity
+/// records the swept value, its params folder is labelled by it
+/// (`beta_0.2`), `camdl list` shows it, and no grid-level `manifest.json` is
+/// written.
 #[test]
 fn sweep_point_is_recorded_in_run_json_and_listed() {
     let bin = skip_if_missing_binary();
@@ -882,24 +861,24 @@ fn sweep_point_is_recorded_in_run_json_and_listed() {
                "--params", &params_path.to_string_lossy(),
                "--sweep", "beta=0.2,0.3,0.4",
                "--seed", "1",
-               "--output-dir", &output.to_string_lossy()])
+               "--store", &output.to_string_lossy()])
         .status().expect("spawn");
     assert!(st.success(), "simulate --sweep should succeed");
 
-    // One leaf per sweep point × scenario × seed = 3.
-    let run_dirs: Vec<_> = walkdir(&output.join("sims")).into_iter()
-        .filter(|p| p.join("run.json").exists()).collect();
-    assert_eq!(run_dirs.len(), 3, "expected 3 leaves for a 3-point sweep");
+    // One cell per sweep point × scenario × seed = 3.
+    let cells = live_cells(&output);
+    assert_eq!(cells.len(), 3, "expected 3 cells for a 3-point sweep");
 
-    // The sweep point is a resolved value in the PARAMS level (not the
-    // scenario delta, not the model hash). Its label encodes `beta=<v>`.
+    // The sweep point is a resolved parameter value (not the scenario delta,
+    // not the model hash); the params folder's label encodes it.
     let mut beta_values: Vec<f64> = Vec::new();
-    for dir in &run_dirs {
-        let meta = read_meta(dir);
-        let label = level_label(&meta, "params"); // e.g. "beta=0.2"
-        let beta: f64 = label.strip_prefix("beta=")
-            .unwrap_or_else(|| panic!("params label should be beta=<v>, got {label}"))
+    for cell in &cells {
+        let beta = cell.params()["beta"].as_f64().expect("beta in the identity's params");
+        let label = cell.params_dir_name(); // e.g. "beta_0.2"
+        let from_label: f64 = label.strip_prefix("beta_")
+            .unwrap_or_else(|| panic!("params label should be beta_<v>, got {label}"))
             .parse().expect("beta value parses");
+        assert_eq!(from_label, beta, "the params folder is labelled by the swept value");
         beta_values.push(beta);
     }
     beta_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -907,19 +886,19 @@ fn sweep_point_is_recorded_in_run_json_and_listed() {
     assert!((beta_values[1] - 0.3).abs() < 1e-9);
     assert!((beta_values[2] - 0.4).abs() < 1e-9);
 
-    assert!(!output.join("sims").join("manifest.json").exists(),
-        "a sweep must not write sims/manifest.json (retired)");
+    assert!(sim_store_cells::walk_files(&output).iter()
+            .all(|p| p.file_name().is_none_or(|n| n != "manifest.json")),
+        "a sweep must not write a manifest.json");
 
-    // `camdl list --kind sim` shows the beta values in the PARAMS column (the
-    // default listing folds a multi-cell run's cells into its ensemble row).
+    // `camdl list --kind sim` shows each cell's beta value.
     let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .args(["list", &output.to_string_lossy(), "--kind", "sim"])
+        .args(["list", "--store", &output.to_string_lossy(), "--kind", "sim"])
         .output().expect("spawn");
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("beta=0.2"), "list should show beta=0.2: {}", stdout);
-    assert!(stdout.contains("beta=0.3"), "list should show beta=0.3: {}", stdout);
-    assert!(stdout.contains("beta=0.4"), "list should show beta=0.4: {}", stdout);
+    assert!(stdout.contains("beta_0.2"), "list should show beta_0.2: {}", stdout);
+    assert!(stdout.contains("beta_0.3"), "list should show beta_0.3: {}", stdout);
+    assert!(stdout.contains("beta_0.4"), "list should show beta_0.4: {}", stdout);
 }
 
 /// `--dry-run` on a sweep prints the resolved grid on stderr, exits 0, and
@@ -937,7 +916,7 @@ fn sweep_dry_run_prints_the_grid_and_writes_nothing() {
                "--params", &params_path.to_string_lossy(),
                "--sweep", "beta=0.2,0.3,0.4",
                "--seed", "1",
-               "--output-dir", &output.to_string_lossy(),
+               "--store", &output.to_string_lossy(),
                "--dry-run"])
         .output().expect("spawn");
     assert!(out.status.success(), "dry-run should exit 0");
@@ -950,9 +929,8 @@ fn sweep_dry_run_prints_the_grid_and_writes_nothing() {
         "stderr should confirm no simulation ran: {}", stderr);
 
     // Must not have written any run files.
-    let runs_dir = output.join("sims");
-    assert!(!runs_dir.exists() ||
-            walkdir(&runs_dir).into_iter().find(|p| p.join("run.json").exists()).is_none(),
+    assert!(sim_store_cells::walk_files(&output).iter()
+            .all(|p| p.file_name().is_none_or(|n| n != "run.json")),
         "dry-run must not write any run.json files");
 }
 
@@ -988,17 +966,15 @@ fn show_prints_metadata() {
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--scenario", "baseline",
                "--seed", "42",
-               "--output-dir", &output.to_string_lossy(),
+               "--store", &output.to_string_lossy(),
                "-o", &tmp.path().join("traj.tsv").to_string_lossy()])
         .status().expect("spawn");
 
-    let dir = walkdir(&output.join("sims")).into_iter()
-        .find(|p| p.join("run.json").exists()).unwrap();
-    let meta = read_meta(&dir);
-    let short = &meta["run_id"].as_str().unwrap()[..8];
+    let cell = sole_cell(&output);
+    let short = &cell.run_id[..8];
 
     let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .args(["show", short, "--root", &output.to_string_lossy()])
+        .args(["show", short, "--store", &output.to_string_lossy()])
         .output().expect("spawn");
     assert!(out.status.success(), "show should succeed");
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -1247,144 +1223,40 @@ fn show_renders_fit_method_metadata() {
 }
 
 
-/// Test (5 from review): `camdl label` works on a new-format sim leaf —
-/// the label persists on the leaf's `RunRecord.provenance.label`. The
-/// profile case (label → the profile-base sidecar, NOT per-leaf) is covered
-/// by `profile_priors::label_command_relabels_profile_sidecar`, where the
-/// profile-running harness lives.
-#[test]
-fn label_works_on_sim_runs() {
-    let bin = skip_if_missing_binary();
-    let tmp = tempfile::tempdir().unwrap();
-    let output = tmp.path().join("output");
-
-    // Sim run — golden_sir_basic has no parameter defaults, so pass them.
-    Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .args(["simulate", &golden_sir_basic().to_string_lossy(),
-               "--param", "beta=2.0",
-               "--param", "gamma=0.3",
-               "--param", "N0=1000",
-               "--param", "I0=10",
-               "--seed", "1",
-               "--output-dir", &output.to_string_lossy(),
-               "-o", &tmp.path().join("traj.tsv").to_string_lossy()])
-        .status().expect("spawn");
-
-    let sim_dir = walkdir(&output.join("sims")).into_iter()
-        .find(|p| p.join("run.json").exists()).expect("one sim dir");
-    let sim_meta = read_meta(&sim_dir);
-    let sim_hash: String = sim_meta["run_id"].as_str().unwrap().chars().take(8).collect();
-
-    // Label the sim by run_id prefix.
-    let status = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .args(["label", &sim_hash, "test sim label",
-               "--root", &output.to_string_lossy()])
-        .status().expect("spawn");
-    assert!(status.success(), "label on sim must succeed");
-
-    // Re-read; the label persists in the RunRecord provenance.
-    let sim_meta2 = read_meta(&sim_dir);
-    assert_eq!(sim_meta2["provenance"]["label"].as_str(), Some("test sim label"),
-        "sim label must persist on RunRecord.provenance.label. got: {:?}",
-        sim_meta2);
-}
-
-/// `camdl reindex` rebuilds `<root>/index.json` from the live run.json files,
-/// and the index accelerates a subsequent `show` without changing its output.
-/// (gh#147 M4: the derived index.)
-#[test]
-fn reindex_builds_index_and_show_still_resolves() {
-    let bin = skip_if_missing_binary();
-    let tmp = tempfile::tempdir().unwrap();
-    let output = tmp.path().join("output");
-
-    // Cache two sims.
-    for seed in ["42", "99"] {
-        Command::new(&bin).env_remove("CLICOLOR_FORCE")
-            .args(["simulate", &golden_sir_basic().to_string_lossy(),
-                   "--scenario", "baseline", "--seed", seed,
-                   "--output-dir", &output.to_string_lossy(),
-                   "-o", &tmp.path().join("t.tsv").to_string_lossy()])
-            .status().expect("spawn");
-    }
-
-    // No index yet (the writer does not emit one in M4 piece 1).
-    assert!(!output.join("index.json").exists(), "no index before reindex");
-
-    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .args(["dev", "reindex", &output.to_string_lossy()])
-        .output().expect("spawn");
-    assert!(out.status.success(), "reindex should succeed: {}",
-        String::from_utf8_lossy(&out.stderr));
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("reindexed 2 run"), "summary should count 2 runs: {}", stdout);
-    assert!(output.join("index.json").exists(), "index.json written");
-    assert!(!output.join("index.json.tmp").exists(),
-        "no index.json.tmp left after a successful atomic write");
-
-    // The index entries point at the live leaves: show by short hash resolves.
-    let dir = walkdir(&output.join("sims")).into_iter()
-        .find(|p| p.join("run.json").exists()).unwrap();
-    let short = &read_meta(&dir)["run_id"].as_str().unwrap()[..8].to_string();
-    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .args(["show", short, "--root", &output.to_string_lossy()])
-        .output().expect("spawn");
-    assert!(out.status.success(), "show via index should resolve: {}",
-        String::from_utf8_lossy(&out.stderr));
-}
-
-/// Invariant 1 (miss → walk → repair): a leaf added out of band AFTER an index
-/// exists must still be found by `show` — never reported "no match" because the
-/// index lacks it.
+/// A cell stored by a later invocation is found by `show` by its run-id
+/// prefix, as the first one is.
 #[test]
 fn out_of_band_leaf_is_found_via_walk_fallback() {
     let bin = skip_if_missing_binary();
     let tmp = tempfile::tempdir().unwrap();
     let output = tmp.path().join("output");
 
-    // Cache one sim and build an index that knows only about it.
-    Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .args(["simulate", &golden_sir_basic().to_string_lossy(),
-               "--scenario", "baseline", "--seed", "1",
-               "--output-dir", &output.to_string_lossy(),
-               "-o", &tmp.path().join("t.tsv").to_string_lossy()])
-        .status().expect("spawn");
-    let st = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .args(["dev", "reindex", &output.to_string_lossy()])
-        .status().expect("spawn");
-    assert!(st.success());
+    // Store one sim, then a SECOND (seed 2) in a later invocation.
+    for seed in ["1", "2"] {
+        Command::new(&bin).env_remove("CLICOLOR_FORCE")
+            .args(["simulate", &golden_sir_basic().to_string_lossy(),
+                   "--scenario", "baseline", "--seed", seed,
+                   "--store", &output.to_string_lossy(),
+                   "-o", &tmp.path().join("t.tsv").to_string_lossy()])
+            .status().expect("spawn");
+    }
 
-    // Add a SECOND sim out of band (seed 2). The index from the reindex above
-    // does NOT contain it.
-    Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .args(["simulate", &golden_sir_basic().to_string_lossy(),
-               "--scenario", "baseline", "--seed", "2",
-               "--output-dir", &output.to_string_lossy(),
-               "-o", &tmp.path().join("t.tsv").to_string_lossy()])
-        .status().expect("spawn");
+    // The later cell's run_id.
+    let later = live_cells(&output).into_iter().find(|c| c.seed() == 2).expect("seed 2 cell");
+    let later_short = &later.run_id[..8];
 
-    // Find the out-of-band leaf's run_id (seed_2 segment).
-    let oob_dir = walkdir(&output.join("sims")).into_iter()
-        .find(|p| p.join("run.json").exists()
-              && p.file_name().unwrap().to_string_lossy().starts_with("seed_2-"))
-        .expect("seed_2 leaf");
-    let oob_short = &read_meta(&oob_dir)["run_id"].as_str().unwrap()[..8].to_string();
-
-    // `show` of the out-of-band hash must succeed via the walk fallback, NOT
-    // report "no match" because the (stale) index lacks the entry.
     let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .args(["show", oob_short, "--root", &output.to_string_lossy()])
+        .args(["show", later_short, "--store", &output.to_string_lossy()])
         .output().expect("spawn");
     assert!(out.status.success(),
-        "out-of-band leaf must resolve via walk fallback: stderr={}",
+        "a later cell must resolve: stderr={}",
         String::from_utf8_lossy(&out.stderr));
     assert!(!String::from_utf8_lossy(&out.stderr).contains("no run matches"),
-        "must not report 'no match' for an out-of-band leaf");
+        "must not report 'no match' for a later cell");
 }
 
-/// Invariant 2 (stale → drop): a leaf whose entry is in the index but whose
-/// directory was removed must NOT resolve to the dead path; `show` reports a
-/// clean "no match" instead of pointing at the missing leaf.
+/// A cell whose folder was removed must NOT resolve to the dead path; `show`
+/// reports a clean "no match" instead of pointing at the missing cell.
 #[test]
 fn removed_leaf_does_not_resolve_to_dead_path() {
     let bin = skip_if_missing_binary();
@@ -1394,87 +1266,35 @@ fn removed_leaf_does_not_resolve_to_dead_path() {
     Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--scenario", "baseline", "--seed", "1",
-               "--output-dir", &output.to_string_lossy(),
+               "--store", &output.to_string_lossy(),
                "-o", &tmp.path().join("t.tsv").to_string_lossy()])
         .status().expect("spawn");
-    let st = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .args(["dev", "reindex", &output.to_string_lossy()])
-        .status().expect("spawn");
-    assert!(st.success());
 
-    let dir = walkdir(&output.join("sims")).into_iter()
-        .find(|p| p.join("run.json").exists()).unwrap();
-    let short = read_meta(&dir)["run_id"].as_str().unwrap()[..8].to_string();
+    let cell = sole_cell(&output);
+    let short = cell.run_id[..8].to_string();
     // It resolves while present.
     assert!(Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .args(["show", &short, "--root", &output.to_string_lossy()])
+        .args(["show", &short, "--store", &output.to_string_lossy()])
         .status().expect("spawn").success(), "resolves while present");
 
-    // Remove the leaf out of band; the index entry is now stale.
-    std::fs::remove_dir_all(&dir).unwrap();
+    // Remove the cell out of band; the store's index still names it.
+    std::fs::remove_dir_all(&cell.dir).unwrap();
 
     let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .args(["show", &short, "--root", &output.to_string_lossy()])
+        .args(["show", &short, "--store", &output.to_string_lossy()])
         .output().expect("spawn");
     assert!(!out.status.success(),
-        "a removed leaf must not resolve (no dead path)");
+        "a removed cell must not resolve (no dead path)");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("no run matches"),
         "expected clean 'no run matches', got: {}", stderr);
 }
 
-// ─── SimEnsemble (multi-cell combined TSV) tests ─────────────────────────────
+// ─── Combined table (multi-cell) tests ──────────────────────────────────────
 
-/// The single ensemble leaf written by a multi-cell run (under
-/// `<out>/ensembles/`). Panics if not exactly one.
-fn sole_ensemble_leaf(out: &Path) -> PathBuf {
-    let leaves: Vec<_> = walkdir(&out.join("ensembles")).into_iter()
-        .filter(|p| p.join("run.json").exists()).collect();
-    assert_eq!(leaves.len(), 1, "expected exactly one ensemble leaf, got {}", leaves.len());
-    leaves.into_iter().next().unwrap()
-}
-
-/// Count-in-the-key: a 3-replicate run and a 4-replicate run produce DIFFERENT
-/// ensemble `run_id`s — the combined TSV has a different number of rows, so the
-/// cell set (and its count) is in the key (the n_trajectories collision class).
-#[test]
-fn ensemble_cell_count_is_in_the_run_id() {
-    let bin = skip_if_missing_binary();
-    let tmp = tempfile::tempdir().unwrap();
-
-    let out3 = tmp.path().join("out3");
-    let st = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .args(["simulate", &golden_sir_basic().to_string_lossy(),
-               "--scenario", "baseline", "--seed", "42", "--replicates", "3",
-               "--output-dir", &out3.to_string_lossy()])
-        .status().expect("spawn");
-    assert!(st.success(), "3-replicate simulate should succeed");
-
-    let out4 = tmp.path().join("out4");
-    let st = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .args(["simulate", &golden_sir_basic().to_string_lossy(),
-               "--scenario", "baseline", "--seed", "42", "--replicates", "4",
-               "--output-dir", &out4.to_string_lossy()])
-        .status().expect("spawn");
-    assert!(st.success(), "4-replicate simulate should succeed");
-
-    let id3 = read_meta(&sole_ensemble_leaf(&out3))["run_id"].as_str().unwrap().to_string();
-    let id4 = read_meta(&sole_ensemble_leaf(&out4))["run_id"].as_str().unwrap().to_string();
-    assert_ne!(id3, id4,
-        "3 vs 4 replicates must give DIFFERENT ensemble run_ids (cell count in the key)");
-
-    // Sanity: the leaf-side count-in-the-key still holds (3 vs 4 Sim leaves).
-    let n3 = walkdir(&out3.join("sims")).into_iter()
-        .filter(|p| p.join("run.json").exists()).count();
-    let n4 = walkdir(&out4.join("sims")).into_iter()
-        .filter(|p| p.join("run.json").exists()).count();
-    assert_eq!((n3, n4), (3, 4), "per-cell Sim leaf counts must be 3 and 4");
-}
-
-/// Round-trip: a 3-replicate run writes ONE ensemble leaf whose `deps` are
-/// exactly the 3 per-cell `Sim` leaf run_ids; `cat <ensemble>` emits the
-/// combined wide-format TSV (with a `replicate` column, 3 replicates),
-/// byte-identical to the `-o` mirror; `list --kind ensemble` surfaces it.
+/// Round-trip: a 3-replicate run under `--label` stores 3 cells; `cat @LABEL`
+/// emits the combined wide-format TSV (with a `replicate` column, 3
+/// replicates), byte-identical to the `-o` export.
 #[test]
 fn ensemble_round_trip_deps_cat_and_list() {
     let bin = skip_if_missing_binary();
@@ -1485,46 +1305,24 @@ fn ensemble_round_trip_deps_cat_and_list() {
     let st = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--scenario", "baseline", "--seed", "42", "--replicates", "3",
-               "--output-dir", &out.to_string_lossy(),
+               "--store", &out.to_string_lossy(), "--label", "three",
                "-o", &mirror.to_string_lossy()])
         .status().expect("spawn");
     assert!(st.success(), "3-replicate simulate should succeed");
 
-    // The 3 per-cell Sim leaf run_ids.
-    let sim_leaves: Vec<_> = walkdir(&out.join("sims")).into_iter()
-        .filter(|p| p.join("run.json").exists()).collect();
-    assert_eq!(sim_leaves.len(), 3, "expected 3 Sim leaves");
-    let mut sim_ids: Vec<String> = sim_leaves.iter()
-        .map(|d| read_meta(d)["run_id"].as_str().unwrap().to_string()).collect();
-    sim_ids.sort();
+    assert_eq!(live_cells(&out).len(), 3, "expected 3 cells");
 
-    // The ensemble leaf: kind = sim_ensemble, deps = the 3 Sim leaves.
-    let ens = sole_ensemble_leaf(&out);
-    let ens_meta = read_meta(&ens);
-    assert_eq!(ens_meta["kind"].as_str().unwrap(), "sim_ensemble");
-    let deps = ens_meta["deps"].as_array().expect("ensemble has deps");
-    assert_eq!(deps.len(), 3, "ensemble deps must be the 3 per-cell Sim leaves");
-    let mut dep_ids: Vec<String> = deps.iter()
-        .map(|d| d["run_id"].as_str().unwrap().to_string()).collect();
-    dep_ids.sort();
-    assert_eq!(dep_ids, sim_ids, "ensemble deps must be exactly the 3 Sim leaf run_ids");
-    for d in deps {
-        assert_eq!(d["kind"].as_str().unwrap(), "sim");
-        assert_eq!(d["artifact"].as_str().unwrap(), "traj.tsv");
-    }
-
-    // `cat <ensemble-hash>` emits the combined TSV byte-identical to the `-o`
-    // mirror, and that TSV has a `replicate` column with 3 replicates.
-    let ens_id = ens_meta["run_id"].as_str().unwrap();
+    // `cat @three` emits the combined TSV byte-identical to the `-o` export,
+    // and that TSV has a `replicate` column with 3 replicates.
     let cat = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .args(["cat", &ens_id[..16], "--root", &out.to_string_lossy()])
+        .args(["cat", "@three", "--store", &out.to_string_lossy()])
         .output().expect("spawn");
-    assert!(cat.status.success(), "cat <ensemble> failed: {}",
+    assert!(cat.status.success(), "cat @three failed: {}",
         String::from_utf8_lossy(&cat.stderr));
     let mirror_bytes = std::fs::read(&mirror).unwrap();
-    assert!(!mirror_bytes.is_empty(), "the -o mirror must be non-empty");
+    assert!(!mirror_bytes.is_empty(), "the -o export must be non-empty");
     assert_eq!(cat.stdout, mirror_bytes,
-        "cat <ensemble> must equal the -o combined TSV byte-for-byte");
+        "cat @LABEL must equal the -o combined TSV byte-for-byte");
 
     // The combined TSV header carries a `replicate` column, and the data has
     // exactly 3 distinct replicate values, counted from 0 (one index base for
@@ -1541,122 +1339,66 @@ fn ensemble_round_trip_deps_cat_and_list() {
         .collect();
     assert_eq!(reps, ["0", "1", "2"].into_iter().collect(),
         "combined TSV must contain replicates 0,1,2, got {reps:?}");
-
-    // `list --kind ensemble` surfaces the ensemble (table to stderr; json to
-    // stdout, one record per line).
-    let list = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .args(["list", &out.to_string_lossy(), "--kind", "ensemble", "--format", "json"])
-        .output().expect("spawn");
-    assert!(list.status.success(), "list --kind ensemble failed: {}",
-        String::from_utf8_lossy(&list.stderr));
-    // The json mode emits one record per line; collect the `sim_ensemble`
-    // records (other kinds' printers may emit an empty `[]` line — tolerate it).
-    let list_out = String::from_utf8(list.stdout).unwrap();
-    let ensemble_rows: Vec<serde_json::Value> = list_out.lines()
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-        .filter(|v| v.get("kind").and_then(|k| k.as_str()) == Some("sim_ensemble"))
-        .collect();
-    assert_eq!(ensemble_rows.len(), 1,
-        "list --kind ensemble must surface exactly the one ensemble, got: {list_out}");
-    assert_eq!(ensemble_rows[0]["run_id"].as_str().unwrap(), ens_id);
-}
-
-/// Single-run simulate writes NO ensemble (the one Sim leaf is the whole
-/// thing).
-#[test]
-fn single_run_writes_no_ensemble() {
-    let bin = skip_if_missing_binary();
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("out");
-    let st = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .args(["simulate", &golden_sir_basic().to_string_lossy(),
-               "--scenario", "baseline", "--seed", "42",
-               "--output-dir", &out.to_string_lossy(),
-               "-o", &tmp.path().join("c.tsv").to_string_lossy()])
-        .status().expect("spawn");
-    assert!(st.success(), "single-run simulate should succeed");
-    let ensembles: Vec<_> = walkdir(&out.join("ensembles")).into_iter()
-        .filter(|p| p.join("run.json").exists()).collect();
-    assert!(ensembles.is_empty(), "a single-run simulate must write NO ensemble");
 }
 
 /// Item C: `simulate` (single AND multi-cell) with NO `-o` writes NOTHING to
-/// stdout — the CAS leaf/ensemble are the system of record. The `-o` mirror
-/// still works, and the leaf/ensemble exist either way.
+/// stdout — the stored cells are the system of record. The `-o` export still
+/// works, and the cells exist either way.
 #[test]
 fn simulate_writes_nothing_to_stdout_without_output_flag() {
     let bin = skip_if_missing_binary();
     let tmp = tempfile::tempdir().unwrap();
 
-    // Single-run, no -o: empty stdout, one Sim leaf, no ensemble.
+    // Single-run, no -o: empty stdout, one cell.
     let out1 = tmp.path().join("out1");
     let single = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--scenario", "baseline", "--seed", "42",
-               "--output-dir", &out1.to_string_lossy()])
+               "--store", &out1.to_string_lossy()])
         .output().expect("spawn");
     assert!(single.status.success(), "single-run simulate (no -o) should succeed: {}",
         String::from_utf8_lossy(&single.stderr));
     assert!(single.stdout.is_empty(),
         "single-run simulate with no -o must write NOTHING to stdout, got {} bytes",
         single.stdout.len());
-    assert_eq!(walkdir(&out1.join("sims")).into_iter()
-        .filter(|p| p.join("run.json").exists()).count(), 1,
-        "the Sim leaf must still be written");
+    assert_eq!(live_cells(&out1).len(), 1, "the cell must still be written");
 
-    // Multi-cell, no -o: empty stdout, but the leaves AND ensemble exist.
+    // Multi-cell, no -o: empty stdout, but the cells exist.
     let out3 = tmp.path().join("out3");
     let multi = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--scenario", "baseline", "--seed", "42", "--replicates", "3",
-               "--output-dir", &out3.to_string_lossy()])
+               "--store", &out3.to_string_lossy()])
         .output().expect("spawn");
     assert!(multi.status.success(), "multi-cell simulate (no -o) should succeed: {}",
         String::from_utf8_lossy(&multi.stderr));
     assert!(multi.stdout.is_empty(),
         "multi-cell simulate with no -o must write NOTHING to stdout, got {} bytes",
         multi.stdout.len());
-    assert_eq!(walkdir(&out3.join("sims")).into_iter()
-        .filter(|p| p.join("run.json").exists()).count(), 3,
-        "the 3 Sim leaves must still be written");
-    let _ = sole_ensemble_leaf(&out3); // ensemble exists even with no -o
+    assert_eq!(live_cells(&out3).len(), 3, "the 3 cells must still be written");
 
-    // With -o, the mirror is written and matches `cat <ensemble>`.
+    // With -o, the export is written and matches `cat @LABEL`.
     let out3b = tmp.path().join("out3b");
     let mirror = tmp.path().join("m.tsv");
     let mirrored = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--scenario", "baseline", "--seed", "42", "--replicates", "3",
-               "--output-dir", &out3b.to_string_lossy(),
+               "--store", &out3b.to_string_lossy(), "--label", "m",
                "-o", &mirror.to_string_lossy()])
         .output().expect("spawn");
     assert!(mirrored.status.success(), "multi-cell simulate (-o) should succeed");
     assert!(mirrored.stdout.is_empty(),
         "even WITH -o, simulate writes the trajectory to the file, not stdout");
     let mirror_bytes = std::fs::read(&mirror).unwrap();
-    let ens = sole_ensemble_leaf(&out3b);
-    let ens_tsv = std::fs::read(ens.join("ensemble.tsv")).unwrap();
-    assert_eq!(mirror_bytes, ens_tsv,
-        "the -o mirror must be byte-identical to the stored ensemble.tsv");
+    let cat = Command::new(&bin).env_remove("CLICOLOR_FORCE")
+        .args(["cat", "@m", "--store", &out3b.to_string_lossy()])
+        .output().expect("spawn");
+    assert!(cat.status.success(), "cat @m: {}", String::from_utf8_lossy(&cat.stderr));
+    assert_eq!(mirror_bytes, cat.stdout,
+        "the -o export must be byte-identical to the table `cat @LABEL` renders");
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-
-/// Collect all directory paths under `root` (non-recursive children of
-/// each level; bounded depth is fine for our 3-level CAS layout).
-/// Every directory at any depth under `root`. Callers filter to leaves with
-/// `.filter(|p| p.join("run.json").exists())`. Depth-agnostic so it handles
-/// the factored 5-level CAS path (model/config/params/scenario/seed), not
-/// just the legacy 3-level layout.
-/// The sole leaf (a dir with a `run.json`) under `sims`, panicking if not
-/// exactly one.
-fn sole_leaf(sims: &Path) -> PathBuf {
-    let dirs: Vec<_> = walkdir(sims).into_iter()
-        .filter(|p| p.join("run.json").exists()).collect();
-    assert_eq!(dirs.len(), 1, "expected exactly one leaf under {:?}, got {}", sims, dirs.len());
-    dirs.into_iter().next().unwrap()
-}
 
 /// A model with a `#[lineage]`-annotated transition (required by
 /// `--event-log`), compiled to IR. Returns `None` if camdlc is unavailable
@@ -1694,11 +1436,11 @@ simulate { from = 0 'days  to = 60 'days }
     Some(ir)
 }
 
-/// `simulate --event-log` records the event log as the `Sim` leaf's declared
-/// child, `<leaf>/event_log/event_log.tsv`. The recorder is passive (Tier 2a),
-/// so the leaf's run_id, `traj.tsv` bytes and manifest are those of a plain
-/// `simulate` at the same seed. `--event-log PATH` also writes PATH as a
-/// byte-identical mirror (symmetric with `-o` for the trajectory).
+/// `simulate --event-log` records the event log as a by-product of the cell,
+/// `<cell>/event_log/event_log-<hash>/event_log.tsv`. The recorder is passive
+/// (Tier 2a), so the cell's run_id, `traj.tsv` bytes and own files are those of
+/// a plain `simulate` at the same seed. `--event-log PATH` also writes PATH as
+/// a byte-identical export (symmetric with `-o` for the trajectory).
 #[test]
 fn event_log_lands_in_the_sim_leafs_child() {
     let bin = skip_if_missing_binary();
@@ -1708,54 +1450,50 @@ fn event_log_lands_in_the_sim_leafs_child() {
     let common = ["--backend", "gillespie", "--seed", "7",
                   "--param", "beta=0.6", "--param", "gamma=0.2", "--param", "N0=500"];
 
-    // (1) plain simulate → leaf with traj.tsv only.
+    // (1) plain simulate → cell with traj.tsv only.
     let out_plain = tmp.path().join("plain");
     let st = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &ir_s]).args(common)
-        .args(["--output-dir", &out_plain.to_string_lossy(),
+        .args(["--store", &out_plain.to_string_lossy(),
                "-o", &tmp.path().join("traj_plain.tsv").to_string_lossy()])
         .status().expect("spawn");
     assert!(st.success(), "plain simulate should succeed");
-    let plain_leaf = sole_leaf(&out_plain.join("sims"));
-    let plain_run_id = read_meta(&plain_leaf)["run_id"].as_str().unwrap().to_string();
-    let plain_traj = std::fs::read(plain_leaf.join("traj.tsv")).unwrap();
+    let plain = sole_cell(&out_plain);
+    let plain_traj = std::fs::read(plain.dir.join("traj.tsv")).unwrap();
     let plain_files: Vec<String> =
-        read_meta(&plain_leaf)["artifacts"].as_object().unwrap().keys().cloned().collect();
-    assert!(!plain_leaf.join("event_log").exists(),
+        plain.run_json()["files"].as_object().unwrap().keys().cloned().collect();
+    assert!(!plain.dir.join("event_log").exists(),
         "plain simulate must NOT write an event log");
 
-    // (2) simulate --event-log PATH → the same leaf files, run_id and traj
-    //     bytes, plus the child; PATH is a byte-identical mirror.
+    // (2) simulate --event-log PATH → the same cell files, run_id and traj
+    //     bytes, plus the by-product; PATH is a byte-identical export.
     let out_el = tmp.path().join("el");
     let mirror = tmp.path().join("mirror.tsv");
     let st = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &ir_s]).args(common)
-        .args(["--output-dir", &out_el.to_string_lossy(),
+        .args(["--store", &out_el.to_string_lossy(),
                "--event-log", &mirror.to_string_lossy()])
         .status().expect("spawn");
     assert!(st.success(), "simulate --event-log should succeed");
-    let el_leaf = sole_leaf(&out_el.join("sims"));
-    let el_meta = read_meta(&el_leaf);
+    let el = sole_cell(&out_el);
 
-    assert_eq!(el_meta["run_id"].as_str().unwrap(), plain_run_id,
+    assert_eq!(el.run_id, plain.run_id,
         "--event-log must not change the sim run_id (passive recorder, Tier 2a)");
-    assert_eq!(std::fs::read(el_leaf.join("traj.tsv")).unwrap(), plain_traj,
+    assert_eq!(std::fs::read(el.dir.join("traj.tsv")).unwrap(), plain_traj,
         "trajectory must be byte-identical with/without --event-log");
-    let el_files: Vec<String> = el_meta["artifacts"].as_object().unwrap().keys().cloned().collect();
-    assert_eq!(el_files, plain_files, "--event-log leaves the leaf's own files as a plain run's");
-    let child = el_leaf.join("event_log").join("event_log.tsv");
-    assert!(child.is_file(), "the event log is the leaf's event_log/ child");
-    assert!(el_meta["children"]["event_log"].is_array(),
-        "the child is declared in run.json's children");
-    assert_eq!(std::fs::read(&mirror).unwrap(), std::fs::read(&child).unwrap(),
-        "--event-log PATH mirror must be byte-identical to the child's event_log.tsv");
+    let el_files: Vec<String> = el.run_json()["files"].as_object().unwrap().keys().cloned().collect();
+    assert_eq!(el_files, plain_files, "--event-log leaves the cell's own files as a plain run's");
+    let logs = el.by_products("event_log.tsv");
+    assert_eq!(logs.len(), 1, "one event log by-product: {logs:?}");
+    assert!(logs[0].starts_with(el.dir.join("event_log")),
+        "the event log is under the cell's event_log/: {}", logs[0].display());
+    assert_eq!(std::fs::read(&mirror).unwrap(), std::fs::read(&logs[0]).unwrap(),
+        "--event-log PATH export must be byte-identical to the stored event_log.tsv");
 }
 
-/// A `--label` passed to `simulate` must end up on the leaf's
-/// `provenance.label` EVEN WHEN the trajectory is a CAS cache hit — the
-/// content-addressed dedup must not silently drop the user's explicit label.
-/// (Matches `fit run`, which keeps its label current on an all-cache-hit
-/// rerun.) Conversely, a label-less rerun must NOT wipe an existing label.
+/// A `--label` passed to `simulate` names the invocation EVEN WHEN its cell is
+/// already stored: `cat @LABEL` renders the run's table. A label-less rerun
+/// does not take the label away.
 #[test]
 fn simulate_label_applies_on_cached_leaf() {
     let bin = skip_if_missing_binary();
@@ -1765,33 +1503,38 @@ fn simulate_label_applies_on_cached_leaf() {
     let run = |label: Option<&str>| {
         let mut args = vec!["simulate".to_string(), gold.to_string_lossy().into_owned(),
             "--scenario".into(), "baseline".into(), "--seed".into(), "123".into(),
-            "--output-dir".into(), out.to_string_lossy().into_owned()];
+            "--store".into(), out.to_string_lossy().into_owned()];
         if let Some(l) = label { args.push("--label".into()); args.push(l.into()); }
         assert!(Command::new(&bin).env_remove("CLICOLOR_FORCE").args(&args).status().expect("spawn").success());
     };
+    let cat_label = || Command::new(&bin).env_remove("CLICOLOR_FORCE")
+        .args(["cat", "@added later", "--store", &out.to_string_lossy()])
+        .output().expect("spawn");
 
-    // 1. fresh run, no label → null label.
+    // 1. fresh run, no label → the label names nothing.
     run(None);
-    let leaf = sole_leaf(&out.join("sims"));
-    assert!(read_meta(&leaf)["provenance"]["label"].is_null(),
-        "no --label → null label");
+    let cell = sole_cell(&out);
+    assert!(!cat_label().status.success(), "no --label → `@added later` names nothing");
 
-    // 2. re-run SAME params WITH --label: the cached leaf must adopt it.
+    // 2. re-run SAME params WITH --label: the stored cell is reused and the
+    //    label names the run.
     run(Some("added later"));
-    assert_eq!(read_meta(&leaf)["provenance"]["label"].as_str(), Some("added later"),
-        "simulate --label on a cached leaf must apply the label (dedup must not drop it)");
+    assert_eq!(sole_cell(&out).dir, cell.dir, "the labelled rerun reuses the stored cell");
+    let cat = cat_label();
+    assert!(cat.status.success(),
+        "simulate --label over a stored cell must apply the label: {}",
+        String::from_utf8_lossy(&cat.stderr));
+    let table = cat.stdout;
 
     // 3. label-less rerun must PRESERVE the existing label (absence ≠ clear).
     run(None);
-    assert_eq!(read_meta(&leaf)["provenance"]["label"].as_str(), Some("added later"),
-        "a label-less rerun must not wipe an existing label");
+    let cat = cat_label();
+    assert!(cat.status.success(), "a label-less rerun must not wipe an existing label");
+    assert_eq!(cat.stdout, table, "the label still renders the same table");
 }
 
-/// `camdl list` collapses ensemble members: a multi-replicate `simulate`
-/// writes N per-cell `Sim` leaves + one `SimEnsemble`, and the default/`all`
-/// view shows ONLY the ensemble (not one row per replicate). `--kind sim` still
-/// surfaces the individual leaves. `--root DIR` is accepted as an alias for the
-/// positional ROOT (consistency with `cat`/`show`).
+/// `camdl list --store DIR` lists each cell of a multi-replicate `simulate`
+/// on its own row, in the default view and under `--kind sim`.
 #[test]
 fn list_collapses_ensemble_members_and_accepts_root_flag() {
     let bin = skip_if_missing_binary();
@@ -1801,12 +1544,11 @@ fn list_collapses_ensemble_members_and_accepts_root_flag() {
     assert!(Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--scenario", "baseline", "--seed", "5", "--replicates", "3",
-               "--output-dir", &store_s])
+               "--store", &store_s])
         .status().expect("spawn").success());
 
-    // JSONL: one `RunRecord` per line on stdout. Parse each line and inspect
-    // the TOP-LEVEL `kind` — a substring match would be fooled by the
-    // ensemble record's embedded `deps`, each of which carries `"kind":"sim"`.
+    // JSONL: one record per line on stdout. Parse each line and inspect the
+    // TOP-LEVEL `kind`.
     let count_kind = |args: &[&str], kind: &str| -> usize {
         let out = Command::new(&bin).env_remove("CLICOLOR_FORCE").args(args).output().expect("spawn");
         String::from_utf8_lossy(&out.stdout).lines()
@@ -1815,24 +1557,15 @@ fn list_collapses_ensemble_members_and_accepts_root_flag() {
             .count()
     };
 
-    // Default view (positional ROOT): one ensemble, zero loose sim rows.
-    assert_eq!(count_kind(&["list", &store_s, "--format", "json"], "sim_ensemble"), 1,
-        "default list must show the ensemble");
-    assert_eq!(count_kind(&["list", &store_s, "--format", "json"], "sim"), 0,
-        "default list must NOT print one row per replicate (members collapse into the ensemble)");
-
-    // `--root DIR` alias behaves identically to the positional.
-    assert_eq!(count_kind(&["list", "--root", &store_s, "--format", "json"], "sim_ensemble"), 1,
-        "`list --root DIR` must work like the positional ROOT");
-
-    // `--kind sim`: the individual per-cell leaves ARE surfaced (3 replicates).
-    assert_eq!(count_kind(&["list", "--root", &store_s, "--kind", "sim", "--format", "json"], "sim"), 3,
-        "`list --kind sim` must surface all 3 replicate leaves");
+    assert_eq!(count_kind(&["list", "--store", &store_s, "--format", "json"], "sim"), 3,
+        "the default list must show the 3 replicate cells");
+    assert_eq!(count_kind(&["list", "--store", &store_s, "--kind", "sim", "--format", "json"], "sim"), 3,
+        "`list --kind sim` must surface all 3 replicate cells");
 }
 
-/// The store banner printed after a `simulate` includes the `--output-dir`
-/// prefix (a copy-paste-ready path), not just the store-relative `sims/…` tail,
-/// plus the `camdl cat <run_id>` that reads the run back.
+/// The store banner printed after a `simulate` names the stored cell's folder
+/// under the `--store` root (a copy-paste-ready path), plus the
+/// `camdl cat <run_id>` that reads the run back.
 #[test]
 fn stored_banner_includes_output_dir_prefix_and_cat_hint() {
     let bin = skip_if_missing_binary();
@@ -1841,18 +1574,19 @@ fn stored_banner_includes_output_dir_prefix_and_cat_hint() {
     let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--scenario", "baseline", "--seed", "7",
-               "--output-dir", &store.to_string_lossy()])
+               "--store", &store.to_string_lossy()])
         .output().expect("spawn");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    let prefix = format!("{}/sims", store.to_string_lossy());
-    assert!(stderr.contains(&prefix),
-        "the store banner must include the --output-dir prefix '{prefix}':\n{stderr}");
-    assert!(stderr.contains("camdl cat "),
+    let cell = sole_cell(&store);
+    let banner = format!("stored {}", cell.dir.display());
+    assert!(stderr.contains(&banner),
+        "the store banner must name the cell folder '{banner}':\n{stderr}");
+    assert!(stderr.contains(&format!("camdl cat {}", cell.run_id)),
         "the banner must tell the user how to read the run back:\n{stderr}");
 }
 
-/// `--stdout` streams the trajectory TSV to stdout and writes NO store leaf
-/// and NO banner — the escape hatch for piping.
+/// `--stdout` stores the cell and streams the combined table to stdout — the
+/// escape hatch for piping. It prints the table `-o` would write.
 #[test]
 fn stdout_streams_trajectory_and_skips_the_store() {
     let bin = skip_if_missing_binary();
@@ -1861,21 +1595,25 @@ fn stdout_streams_trajectory_and_skips_the_store() {
     let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_sir_basic().to_string_lossy(),
                "--scenario", "baseline", "--seed", "7",
-               "--output-dir", &store.to_string_lossy(), "--stdout"])
+               "--store", &store.to_string_lossy(), "--stdout"])
         .output().expect("spawn");
     assert!(out.status.success(), "simulate --stdout should succeed");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    // A wide-format trajectory TSV on stdout: a `# camdl <version>` comment,
-    // then the `t\tS\t…` column header, then rows.
-    assert!(stdout.lines().any(|l| l.starts_with("t\t")),
-        "stdout should carry the trajectory TSV header (t<TAB>…), got:\n{stdout}");
+    // A wide-format table on stdout: a `# <version>` comment, then the header
+    // (`replicate`, `scenario`, `seed`, then `t` …), then rows.
+    assert!(stdout.lines().any(|l| l.starts_with("replicate\tscenario\tseed\tt\t")),
+        "stdout should carry the combined table header, got:\n{stdout}");
     assert!(stdout.lines().count() > 3, "stdout should carry trajectory rows");
-    // No store leaf was written, and no banner pointed at one.
-    assert!(!store.join("sims").exists(),
-        "--stdout must NOT write a store leaf");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!stderr.contains("stored"),
-        "--stdout must not print the store banner:\n{stderr}");
+    // The cell was stored, and stdout is the table `-o` writes from it.
+    assert_eq!(live_cells(&store).len(), 1, "--stdout stores the cell");
+    let export = tmp.path().join("t.tsv");
+    let o = Command::new(&bin).env_remove("CLICOLOR_FORCE")
+        .args(["simulate", &golden_sir_basic().to_string_lossy(),
+               "--scenario", "baseline", "--seed", "7",
+               "--store", &store.to_string_lossy(), "-o", &export.to_string_lossy()])
+        .output().expect("spawn");
+    assert!(o.status.success());
+    assert_eq!(out.stdout, std::fs::read(&export).unwrap(), "--stdout prints the table -o writes");
 }
 
 /// Progress rendering is passive: a multi-cell `simulate` produces a
@@ -1890,7 +1628,7 @@ fn progress_mode_does_not_change_trajectories() {
         let st = Command::new(&bin).env_remove("CLICOLOR_FORCE")
             .args(["simulate", &golden_sir_basic().to_string_lossy(),
                    "--scenario", "baseline", "--seed", "7", "--replicates", "3",
-                   "--output-dir", &tmp.path().join(tag).to_string_lossy(),
+                   "--store", &tmp.path().join(tag).to_string_lossy(),
                    "-o", &o.to_string_lossy(), "--progress", mode])
             .status().expect("spawn");
         assert!(st.success(), "simulate --progress {mode} should succeed");
@@ -1900,18 +1638,3 @@ fn progress_mode_does_not_change_trajectories() {
         "progress mode must not change the trajectory (bars must be RNG-passive)");
 }
 
-fn walkdir(root: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue; };
-        for e in entries.flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                out.push(p.clone());
-                stack.push(p);
-            }
-        }
-    }
-    out
-}

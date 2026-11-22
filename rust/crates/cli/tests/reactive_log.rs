@@ -83,7 +83,7 @@ fn run(extra: &[&str]) -> Run {
         ["--seed", "1", "--backend", "chain_binomial", "--dt", "1.0",
          "-o", &traj.to_string_lossy(),
          "--reactive-log", &mirror.to_string_lossy(),
-         "--output-dir", &cas.path().to_string_lossy()]
+         "--store", &cas.path().to_string_lossy()]
             .iter()
             .map(|s| s.to_string()),
     );

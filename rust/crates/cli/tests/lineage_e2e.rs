@@ -72,19 +72,41 @@ fn count_tips(newick: &str) -> usize {
     newick.matches("ind").count()
 }
 
-/// The leaf's run id and its manifest (`run.json`'s `artifacts`, serialized).
+/// The cell's run id (from `identity.json`) and its manifest (`run.json`'s
+/// `files`, serialized).
 fn manifest_of(leaf: &Path) -> (String, String) {
     let rec: serde_json::Value =
         serde_json::from_slice(&std::fs::read(leaf.join("run.json")).unwrap()).unwrap();
-    (rec["run_id"].as_str().unwrap().to_string(), rec["artifacts"].to_string())
+    (run_id_of(leaf), rec["files"].to_string())
 }
 
-/// `simulate --event-log` writes the event log as a child of the leaf at its
-/// own address, `<leaf>/event_log/`, so what one run id holds does not depend
-/// on whether any invocation asked for the log. A plain run, then the same
-/// command with `--event-log`, then a plain run again leave the leaf's run id
-/// and manifest byte-identical; the log is at the child address, declared in
-/// `run.json`'s `children`, and is not one of the leaf's own files.
+fn identity_of(dir: &Path) -> Option<serde_json::Value> {
+    serde_json::from_slice(&std::fs::read(dir.join("identity.json")).ok()?).ok()
+}
+
+fn run_id_of(leaf: &Path) -> String {
+    identity_of(leaf).expect("identity.json")["run_id"].as_str().unwrap().to_string()
+}
+
+/// The folder of the cell's event-log by-product,
+/// `<cell>/event_log/event_log-<hash>/`, if one was written.
+fn event_log_dir(leaf: &Path) -> Option<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(leaf.join("event_log"))
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    assert!(dirs.len() <= 1, "at most one event-log by-product: {dirs:?}");
+    dirs.pop()
+}
+
+/// `simulate --event-log` writes the event log as a by-product of the cell at
+/// its own address, `<cell>/event_log/event_log-<hash>/`, so what one run id
+/// holds does not depend on whether any invocation asked for the log. A plain
+/// run, then the same command with `--event-log`, then a plain run again leave
+/// the cell's run id and manifest byte-identical; the log is at the by-product
+/// address and is not one of the cell's own files.
 #[test]
 fn the_event_log_is_a_child_and_the_leaf_manifest_never_changes() {
     let camdl = camdl_bin();
@@ -108,7 +130,7 @@ fn the_event_log_is_a_child_and_the_leaf_manifest_never_changes() {
     let base: Vec<&str> = vec![
         "simulate", model_arg, "--backend", "gillespie", "--seed", "7",
         "--param", "beta=0.6", "--param", "gamma=0.2", "--param", "N0=500",
-        "--output-dir", store_s,
+        "--store", store_s,
     ];
 
     let first = run(&camdl, &base);
@@ -118,8 +140,7 @@ fn the_event_log_is_a_child_and_the_leaf_manifest_never_changes() {
     assert_eq!(leaves.len(), 1, "expected one sim leaf, got {leaves:?}");
     let leaf = leaves[0].clone();
     let plain = manifest_of(&leaf);
-    let child = leaf.join("event_log").join("event_log.tsv");
-    assert!(!child.exists(), "a plain run writes no event log");
+    assert!(event_log_dir(&leaf).is_none(), "a plain run writes no event log");
 
     let ev = tmp.join("ev.tsv");
     let mut args = base.clone();
@@ -131,17 +152,12 @@ fn the_event_log_is_a_child_and_the_leaf_manifest_never_changes() {
     assert_eq!(manifest_of(&leaf), plain,
         "--event-log leaves the leaf's run id and manifest byte-identical");
     assert!(!leaf.join("event_log.tsv").exists(), "the log is not one of the leaf's own files");
-    assert!(child.is_file(), "the log is at the child address {}", child.display());
-    assert!(leaf.join("event_log").join("event_log.json").is_file(), "the child carries its record");
+    let child = event_log_dir(&leaf).expect("an event-log by-product").join("event_log.tsv");
+    assert!(child.is_file(), "the log is at the by-product address {}", child.display());
     assert_eq!(std::fs::read(&ev).unwrap(), std::fs::read(&child).unwrap(),
-        "the --event-log PATH mirror holds the child's bytes");
-    let rec: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(leaf.join("run.json")).unwrap()).unwrap();
-    assert!(rec["children"]["event_log"].as_array().is_some_and(|ids| ids.len() == 1),
-        "run.json declares the child: {}", rec["children"]);
+        "the --event-log PATH mirror holds the by-product's bytes");
 
-    // A later plain run reads the leaf as a valid hit (the child is declared,
-    // so it is not an orphan of the leaf's exact set), and both survive it.
+    // A later plain run reads the cell as a valid hit, and both survive it.
     let third = run(&camdl, &base);
     assert!(third.status.success(), "third run failed: {}",
         String::from_utf8_lossy(&third.stderr));
@@ -181,15 +197,16 @@ impl Lineage {
         let mut args: Vec<&str> = vec![
             "simulate", &self.ir, "--backend", "gillespie", "--seed", "7",
             "--param", "beta=0.6", "--param", "gamma=0.2", "--param", "N0=500",
-            "--output-dir", &self.store,
+            "--store", &self.store,
         ];
         args.extend(extra);
         run(&self.camdl, &args)
     }
 
-    /// `camdl cat <leaf> --stream event_log.tsv`.
+    /// `camdl cat <cell run id> --stream event_log.tsv`.
     fn cat_event_log(&self, leaf: &Path) -> std::process::Output {
-        run(&self.camdl, &["cat", leaf.to_str().unwrap(), "--root", &self.store, "--stream", "event_log.tsv"])
+        let id = run_id_of(leaf);
+        run(&self.camdl, &["cat", &id, "--store", &self.store, "--stream", "event_log.tsv"])
     }
 
     /// The store's one sim leaf.
@@ -204,28 +221,8 @@ fn ok(o: &std::process::Output, what: &str) {
     assert!(o.status.success(), "{what} failed: {}", String::from_utf8_lossy(&o.stderr));
 }
 
-fn record(leaf: &Path) -> serde_json::Value {
-    serde_json::from_slice(&std::fs::read(leaf.join("run.json")).unwrap()).unwrap()
-}
-
-/// The id a leaf declares for its event-log child is SHA-256 of
-/// `"{run_id}:event_log"`, hex: pinned, because a reader that finds the child
-/// through `children` and the writer that names it must agree.
-#[test]
-fn the_event_log_child_id_is_pinned() {
-    use sha2::{Digest, Sha256};
-    let Some(fx) = Lineage::new("evid") else { return };
-    ok(&fx.simulate(&["--event-log"]), "simulate --event-log");
-    let rec = record(&fx.leaf());
-    let run_id = rec["run_id"].as_str().unwrap();
-    let want: String = Sha256::digest(format!("{run_id}:event_log").as_bytes())
-        .iter().map(|b| format!("{b:02x}")).collect();
-    assert_eq!(rec["children"]["event_log"], serde_json::json!([want]));
-}
-
-/// `--stdout` takes the run out of the store, so there is no leaf for the
-/// event log to be a child of, and the log would be dropped with exit 0. The
-/// combination is refused.
+/// `--stdout` with `--event-log` is refused, naming both flags, so the log is
+/// never dropped with exit 0.
 #[test]
 fn stdout_and_event_log_are_refused_together() {
     let Some(fx) = Lineage::new("evstdout") else { return };
@@ -239,21 +236,22 @@ fn stdout_and_event_log_are_refused_together() {
     assert!(!ev.exists());
 }
 
-/// `camdl cat --stream event_log.tsv` reads the child only when it is
-/// complete: its record present and its file the size the record names. A
-/// child without its record, or whose file differs from it, is a clear error
-/// that names the remedy, never a partial log on stdout.
+/// `camdl cat --stream event_log.tsv` reads the by-product only when it is
+/// complete: its record (`run.json`) present and its file the one the record
+/// names. A by-product without its record, or whose file differs from it, is
+/// a clear error that names the remedy, never a partial log on stdout.
 #[test]
 fn cat_reads_only_a_complete_event_log_child() {
     let Some(fx) = Lineage::new("evcat") else { return };
     ok(&fx.simulate(&["--event-log"]), "simulate --event-log");
     let leaf = fx.leaf();
-    let file = leaf.join("event_log").join("event_log.tsv");
-    let rec = leaf.join("event_log").join("event_log.json");
+    let by_product = event_log_dir(&leaf).expect("an event-log by-product");
+    let file = by_product.join("event_log.tsv");
+    let rec = by_product.join("run.json");
     let full = std::fs::read(&file).unwrap();
     let o = fx.cat_event_log(&leaf);
     ok(&o, "cat --stream event_log.tsv");
-    assert_eq!(o.stdout, full, "cat prints the child's bytes");
+    assert_eq!(o.stdout, full, "cat prints the by-product's bytes");
 
     let refused = |what: &str| {
         let o = fx.cat_event_log(&leaf);
@@ -269,50 +267,17 @@ fn cat_reads_only_a_complete_event_log_child() {
     refused("a file without its record");
 }
 
-/// The crash state — the child declared in `run.json` but nothing written —
-/// is readable as "not there": `cat` refuses cleanly, a plain rerun reads the
-/// leaf as a hit (its record, the declaration included, is kept), and an
-/// `--event-log` rerun writes the child.
-#[test]
-fn a_declared_but_empty_event_log_child_recovers() {
-    use sha2::{Digest, Sha256};
-    let Some(fx) = Lineage::new("evcrash") else { return };
-    ok(&fx.simulate(&[]), "plain simulate");
-    let leaf = fx.leaf();
-    let mut rec = record(&leaf);
-    let run_id = rec["run_id"].as_str().unwrap().to_string();
-    let id: String = Sha256::digest(format!("{run_id}:event_log").as_bytes())
-        .iter().map(|b| format!("{b:02x}")).collect();
-    rec["children"] = serde_json::json!({ "event_log": [id] });
-    std::fs::write(leaf.join("run.json"), serde_json::to_vec_pretty(&rec).unwrap()).unwrap();
-    let declared = std::fs::read(leaf.join("run.json")).unwrap();
-
-    let o = fx.cat_event_log(&leaf);
-    assert!(!o.status.success() && o.stdout.is_empty(), "cat refuses a declared, empty child");
-    let err = String::from_utf8_lossy(&o.stderr);
-    assert!(err.contains("--event-log"), "the refusal names the remedy: {err}");
-
-    ok(&fx.simulate(&[]), "plain rerun");
-    assert_eq!(fx.leaf(), leaf);
-    assert_eq!(std::fs::read(leaf.join("run.json")).unwrap(), declared,
-        "a plain rerun is a hit: the record, its declaration included, is kept as it was");
-
-    ok(&fx.simulate(&["--event-log"]), "simulate --event-log");
-    let o = fx.cat_event_log(&leaf);
-    ok(&o, "cat after the --event-log rerun");
-    assert!(o.stdout.starts_with(b"# camdl-event-log"), "the child is written");
-}
-
-/// Committed sim leaves (dirs holding a run.json) under `<store>/sims`.
+/// Simulation cells (folders whose `identity.json` has `kind = "sim"`) under
+/// the store root.
 fn sim_leaves(store: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
-    let mut stack = vec![store.join("sims")];
+    let mut stack = vec![store.to_path_buf()];
     while let Some(d) = stack.pop() {
         let Ok(rd) = std::fs::read_dir(&d) else { continue };
         for e in rd.flatten() {
             let p = e.path();
             if p.is_dir() {
-                if p.join("run.json").exists() { out.push(p); } else { stack.push(p); }
+                if identity_of(&p).is_some_and(|v| v["kind"] == "sim") { out.push(p); } else { stack.push(p); }
             }
         }
     }
@@ -357,7 +322,7 @@ fn lineage_end_to_end_tsv_and_parquet() {
         "gamma=0.2",
         "--param",
         "N0=500",
-        "--output-dir",
+        "--store",
         store_s,
     ];
 
@@ -379,7 +344,7 @@ fn lineage_end_to_end_tsv_and_parquet() {
     // 2b. Parquet event log.
     let ev_pq = tmp.join("event_log.parquet");
     let ev_pq_s = ev_pq.to_str().unwrap();
-    // No `-o`: the trajectory goes to the CAS leaf only (the event log is the
+    // No `-o`: the trajectory goes to the store cell only (the event log is the
     // artifact of interest here). The Parquet event log is mirrored to ev_pq.
     let mut args2: Vec<&str> = common.to_vec();
     args2.extend(["--event-log", ev_pq_s]);
@@ -401,7 +366,7 @@ fn lineage_end_to_end_tsv_and_parquet() {
         &[
             "simulate", model_arg, "--backend", "gillespie", "--seed", "7",
             "--param", "beta=0.6", "--param", "gamma=0.2", "--param", "N0=500",
-            "--output-dir", store_s, "--output", traj_base_s,
+            "--store", store_s, "--output", traj_base_s,
         ],
     );
     assert!(base.status.success(), "baseline simulate failed");
@@ -627,7 +592,7 @@ fn staged_competing_exit_records_conditional_parent_weights() {
             "simulate", ir.to_str().unwrap(), "--backend", "gillespie", "--seed", "7",
             "--param", "beta=0.4", "--param", "sigma=0.2", "--param", "gamma=0.1",
             "--param", "mu=0.5", "--param", "K=5",
-            "--output-dir", store.to_str().unwrap(),
+            "--store", store.to_str().unwrap(),
             "--event-log", ev.to_str().unwrap(), "--tsv",
         ],
     );

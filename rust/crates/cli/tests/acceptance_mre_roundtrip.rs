@@ -74,6 +74,36 @@ fn run_ids(root: &Path) -> Vec<String> {
     ids
 }
 
+/// Every `run_id` recorded in an `identity.json` under a run store `root`,
+/// sorted. A `camdl simulate` cell and the compiled model it depends on each
+/// keep their id there.
+fn store_run_ids(root: &Path) -> Vec<String> {
+    let mut ids = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let ij = dir.join("identity.json");
+        if ij.is_file() {
+            if let Ok(txt) = std::fs::read_to_string(&ij) {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) {
+                    if let Some(id) = v.get("run_id").and_then(|x| x.as_str()) {
+                        ids.push(id.to_string());
+                    }
+                }
+            }
+        }
+        if let Ok(es) = std::fs::read_dir(&dir) {
+            for e in es.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                }
+            }
+        }
+    }
+    ids.sort();
+    ids
+}
+
 fn tar_list(bundle: &Path) -> Vec<String> {
     let out = Command::new("tar")
         .arg("tzf")
@@ -204,6 +234,8 @@ fn mre_simulate_bundle_reproduces_by_run_id() {
         .arg("-b")
         .arg(&bundle)
         .current_dir(&fixture)
+        // Keeps the packing run's cells out of the fixture directory.
+        .env("CAMDL_STORE", work.path().join("pack_store"))
         .output()
         .expect("spawn `mre simulate`");
     assert!(
@@ -224,7 +256,7 @@ fn mre_simulate_bundle_reproduces_by_run_id() {
     let run_a = Command::new(&camdl).env_remove("CLICOLOR_FORCE")
         .args(["simulate", "model/sir_patches.camdl", "--params", "params.toml", "--seed", "1"])
         .current_dir(&fixture)
-        .env("CAMDL_OUTPUT_DIR", &out_a)
+        .env("CAMDL_STORE", &out_a)
         .output()
         .expect("spawn in-place `simulate`");
     assert!(
@@ -232,8 +264,8 @@ fn mre_simulate_bundle_reproduces_by_run_id() {
         "in-place simulate failed:\n{}",
         String::from_utf8_lossy(&run_a.stderr)
     );
-    let ids_a = run_ids(&out_a);
-    assert!(!ids_a.is_empty(), "in-place run produced no run.json");
+    let ids_a = store_run_ids(&out_a);
+    assert!(!ids_a.is_empty(), "in-place run produced no identity.json");
 
     // 3. unpack into an ISOLATED dir (no path back to the repo)
     let iso = work.path().join("iso");
@@ -260,7 +292,7 @@ fn mre_simulate_bundle_reproduces_by_run_id() {
     let run_b = Command::new(&camdl).env_remove("CLICOLOR_FORCE")
         .args(["simulate", "model/sir_patches.camdl", "--params", "params.toml", "--seed", "1"])
         .current_dir(&bundle_root)
-        .env("CAMDL_OUTPUT_DIR", &out_b)
+        .env("CAMDL_STORE", &out_b)
         .output()
         .expect("spawn bundled `simulate`");
     assert!(
@@ -268,7 +300,7 @@ fn mre_simulate_bundle_reproduces_by_run_id() {
         "bundled simulate failed — bundle is NOT self-contained:\n{}",
         String::from_utf8_lossy(&run_b.stderr)
     );
-    let ids_b = run_ids(&out_b);
+    let ids_b = store_run_ids(&out_b);
 
     // 5. identity-faithful + complete closure (a missing read() table would
     //    fail the compile or shift the IR digest)

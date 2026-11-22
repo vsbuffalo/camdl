@@ -53,7 +53,7 @@ fn run_showcase(tmp: &Path) -> (PathBuf, PathBuf, PathBuf) {
             traj.to_str().unwrap(),
             "--obs",
             obs.to_str().unwrap(),
-            "--output-dir",
+            "--store",
             tmp.join("results").to_str().unwrap(),
             "--quantities-out",
             qdir.to_str().unwrap(),

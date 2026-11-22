@@ -1,11 +1,14 @@
-//! A simulation leaf's `run.json` carries the model's calendar axis
-//! (`docs/dev/temporal-architecture.md` §5.3; M1, gh#838), so the stored
-//! trajectory's `t` column can be dated without the model source.
+//! A stored simulation cell can be dated without the model source: its
+//! `run.json` names the compiled model it ran, and that stored model carries
+//! the calendar axis (`docs/dev/temporal-architecture.md` §5.3; M1, gh#838).
+//! A fit's records carry the axis themselves.
 //!
 //! Shells out to the release `camdl` binary.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+mod sim_store_cells;
 
 fn binary() -> PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
@@ -45,57 +48,67 @@ simulate {{ from = 0 'days  to = 10 'days }}
     )
 }
 
-/// The `run.json` of the one `Sim` leaf a `simulate` of `model_src` writes.
+/// The calendar axis of the compiled model the one stored simulation cell of
+/// a `simulate` of `model_src` depends on, read from the store alone: the
+/// cell's `run.json` names its compiled-model dependency, whose stored
+/// `model.ir.json` carries `time_unit` and `origin`.
 fn sim_record(model_src: &str) -> serde_json::Value {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("m.camdl"), model_src).unwrap();
     std::fs::write(dir.path().join("p.toml"), "beta = 0.4\ngamma = 0.2\n").unwrap();
+    let store = dir.path().join("camdl-store");
     let out = Command::new(binary())
         .env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .current_dir(dir.path())
         .args([
             "simulate", "m.camdl", "--params", "p.toml", "--backend", "chain_binomial",
-            "--dt", "0.25", "--seed", "3", "--output-dir", "out",
+            "--dt", "0.25", "--seed", "3", "--store", store.to_str().unwrap(),
         ])
         .output()
         .expect("spawn camdl");
     assert!(out.status.success(), "simulate failed:\n{}", String::from_utf8_lossy(&out.stderr));
-    let mut stack = vec![dir.path().join("out").join("sims")];
-    let mut records = Vec::new();
-    while let Some(d) = stack.pop() {
-        if d.join("run.json").is_file() {
-            records.push(std::fs::read_to_string(d.join("run.json")).unwrap());
-        }
-        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
-            if e.path().is_dir() {
-                stack.push(e.path());
-            }
-        }
-    }
-    assert_eq!(records.len(), 1, "one sim leaf");
-    serde_json::from_str(&records[0]).unwrap()
+    let cell = sim_store_cells::only_sim_cell(&store);
+    let run = cell.run_json();
+    let dep = run["deps"].as_array().unwrap().iter()
+        .find(|d| d["kind"] == "compiled_model")
+        .unwrap_or_else(|| panic!("the cell records its compiled model: {run:#}"));
+    let dep_id = dep["run_id"].as_str().unwrap();
+    let file = dep["file"].as_str().unwrap();
+    let model_dir = sim_store_cells::walk_files(&store).into_iter()
+        .filter(|p| p.file_name().and_then(|s| s.to_str()) == Some("identity.json"))
+        .find(|p| sim_store_cells::read_json(p)["run_id"] == dep_id)
+        .unwrap_or_else(|| panic!("compiled model {dep_id} is in the store"))
+        .parent().unwrap().to_path_buf();
+    let model = sim_store_cells::read_json(&model_dir.join(file));
+    let unit = model["time_unit"].as_str().expect("time_unit").to_string();
+    let days_per_unit = match unit.as_str() {
+        "days" => 1.0,
+        other => panic!("unexpected time unit {other}"),
+    };
+    serde_json::json!({
+        "days_per_unit": days_per_unit,
+        "origin": model.get("origin").cloned().unwrap_or(serde_json::Value::Null),
+        "time_unit": unit,
+    })
 }
 
 #[test]
 fn a_dated_simulation_record_carries_its_calendar() {
     let rec = sim_record(&model(r#"origin = date("2020-03-01")"#));
     assert_eq!(
-        rec["calendar"],
+        rec,
         serde_json::json!({"days_per_unit": 1.0, "origin": "2020-03-01", "time_unit": "days"}),
-        "run.json: {rec:#}"
     );
 }
 
-/// A model with no origin still records its axis, with the origin stated as
-/// absent rather than left out.
+/// A model with no origin still records its axis, with no origin.
 #[test]
 fn an_undated_simulation_record_says_it_has_no_origin() {
     let rec = sim_record(&model(""));
     assert_eq!(
-        rec["calendar"],
+        rec,
         serde_json::json!({"days_per_unit": 1.0, "origin": null, "time_unit": "days"}),
-        "run.json: {rec:#}"
     );
 }
 

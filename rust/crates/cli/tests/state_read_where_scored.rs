@@ -280,9 +280,13 @@ fn an_observation_quantity_names_each_draw_by_its_label() {
     ok(camdl(dir, &["simulate", "q.ir.json", "--params", "p.toml", "--backend", "ode",
         "--seed", "1", "--obs", "obs.tsv", "--quantities-out", "qd"]), "simulate --obs --quantities-out");
 
-    let obs: Vec<(f64, f64)> = std::fs::read_to_string(dir.join("obs.tsv")).unwrap()
-        .lines().skip(1)
-        .map(|l| { let f: Vec<&str> = l.split('\t').collect(); (f[0].parse().unwrap(), f[1].parse().unwrap()) })
+    let obs_text = std::fs::read_to_string(dir.join("obs.tsv")).unwrap();
+    let mut obs_lines = obs_text.lines();
+    let obs_header: Vec<&str> = obs_lines.next().unwrap().split('\t').collect();
+    let (tc, vc) = (obs_header.iter().position(|c| *c == "time").unwrap(),
+        obs_header.iter().position(|c| *c == "cases").unwrap());
+    let obs: Vec<(f64, f64)> = obs_lines
+        .map(|l| { let f: Vec<&str> = l.split('\t').collect(); (f[tc].parse().unwrap(), f[vc].parse().unwrap()) })
         .collect();
     let scalar = |name: &str| -> f64 {
         std::fs::read_to_string(dir.join(format!("qd/quantities/{name}.tsv"))).unwrap()

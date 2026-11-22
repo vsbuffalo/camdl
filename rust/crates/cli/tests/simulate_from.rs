@@ -16,6 +16,8 @@
 //!  5. `pfilter --fit` and `fit predict` use the start the config gives.
 
 use std::path::{Path, PathBuf};
+mod sim_store_cells;
+
 use std::process::{Command, Output};
 
 fn bin() -> PathBuf {
@@ -181,28 +183,9 @@ fn simulate(p: &Project, extra: &[&str]) -> (String, f64, f64) {
     (stderr, col("t"), col("S"))
 }
 
-/// Every `run_id` committed under the project's store.
+/// Every simulation cell's run id stored under the project's store.
 fn run_ids(p: &Project) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut stack = vec![p.dir.join("cas")];
-    while let Some(d) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&d) else { continue };
-        for e in rd.flatten() {
-            let path = e.path();
-            if path.is_dir() {
-                if let Ok(txt) = std::fs::read_to_string(path.join("run.json")) {
-                    let v: serde_json::Value = serde_json::from_str(&txt).unwrap();
-                    if let Some(id) = v.get("run_id").and_then(|x| x.as_str()) {
-                        out.push(id.to_string());
-                    }
-                }
-                stack.push(path);
-            }
-        }
-    }
-    out.sort();
-    out.dedup();
-    out
+    sim_store_cells::sim_run_ids(&p.dir.join("cas").join("camdl-store"))
 }
 
 #[test]

@@ -12,28 +12,26 @@
 //! | `execution`    | changes how the result is computed, not what (`--parallel`)  | differential: run id and stored bytes stay the same      |
 //! | `provenance`   | how the run was asked for (`--label`)                        | structural, plus the leaf is unaffected                  |
 //! | `presentation` | how output is written outside the store (`-o`)               | structural, plus the leaf is unaffected or none written  |
-//! | `child`        | asks for a derived child of the leaf (`--event-log`, `--obs`) | the leaf's run id and manifest are unchanged, the child is at its address |
 //! | `expands`      | defines the set of runs (`--seeds`, `--sweep`)               | differential: cells common to both keep their run ids    |
 //! | `removed`      | refuses an old spelling with a migration message             | the flag fails with the message                          |
 //!
 //! A class belongs to a (command, input) pair, not to a flag: a group that
 //! several commands flatten (`ForcingExtrapolationArg`, the global options) is
-//! classified in each command's table: [`SIMULATE`], [`FIT_RUN`], [`PROFILE`].
-//! `camdl pfilter` declares its inputs' classes in its argument types instead
-//! (`#[derive(store::Inputs)]`, `crate::args::PfilterInvocation`).
+//! classified in each command's table: [`FIT_RUN`], [`PROFILE`].
+//! `camdl pfilter` and `camdl simulate` declare their inputs' classes in their
+//! argument types instead (`#[derive(store::Inputs)]`,
+//! `crate::args::PfilterInvocation`, `crate::args::SimulateInvocation`).
 //! `every_<command>_flag_is_classified` (below) checks each against every
 //! argument clap accepts, both ways, and `every_<command>_input_has_a_case`
 //! that every input has a case in `rust/crates/cli/tests/<command>_input_classes.rs`.
 
-/// The identity level a keyed input enters at. The first five are the levels of
-/// a simulation leaf ([`crate::resolve::resolve_trajectory`]); `Obs` is the
-/// address of the synthetic-observation subtree under a leaf
-/// ([`crate::cas_sink::obs_subtree_hash`]), which a trajectory's own run id does
-/// not cover. `Fit` and `Method` are the levels of a fit method leaf
-/// ([`runid::inputs::FitDigest`], [`runid::inputs::MethodLevel`]), whose third
-/// is `Seed`: the fit level holds the model, the data, the problem half of the
-/// configuration and the engine, so an environment variable keyed at a
-/// simulation's `Model` level enters a fit at its `Fit` level. A profile point's are `profile`, `point`,
+/// The identity level a keyed input enters at. `Model` is the compiled model,
+/// which the environment table keys. `Fit` and `Method` are the levels of a
+/// fit method leaf ([`runid::inputs::FitDigest`],
+/// [`runid::inputs::MethodLevel`]), whose third is `Seed`: the fit level holds
+/// the model, the data, the problem half of the configuration and the engine,
+/// so an environment variable keyed at `Model` enters a fit at its `Fit`
+/// level. A profile point's are `profile`, `point`,
 /// `method`, `seed` and `start` ([`crate::profile_cas::resolve_profile_point`]);
 /// its inputs key `Profile`, `Method` or `Seed`. The profile level (the base)
 /// holds the model, the data, the problem, the sweep grid and the
@@ -43,11 +41,7 @@
 #[cfg_attr(not(test), allow(dead_code))] // the levels other than `Model` occur only in the command tables
 pub enum Level {
     Model,
-    Config,
-    Params,
-    Scenario,
     Seed,
-    Obs,
     Fit,
     Method,
     Profile,
@@ -65,13 +59,6 @@ pub enum InputClass {
     Execution,
     Provenance,
     Presentation,
-    /// Asks for a child of the leaf: an artifact derived from the leaf's
-    /// result, stored under the leaf at its own address and declared in the
-    /// leaf's `run.json` `children`, never one of the leaf's own files. So
-    /// whether an invocation asked for it never changes what the leaf's run
-    /// id holds. The observation subtree (`obs/<hash8>-<obs_seed>/`) and the
-    /// event log (`event_log/`) are the two.
-    Child,
     Expands,
     /// An old spelling, kept only so that it is refused with a message naming
     /// its replacement.
@@ -79,79 +66,9 @@ pub enum InputClass {
 }
 
 #[cfg(test)]
-use InputClass::{Child, Execution, Expands, Keyed, Presentation, Provenance, Removed};
+use InputClass::{Execution, Expands, Keyed, Presentation, Provenance, Removed};
 #[cfg(test)]
-use Level::{Config, Fit, Method, Model, Obs, Params, Profile, Scenario, Seed};
-
-/// `camdl simulate`'s inputs, by clap argument id (the field name), with their
-/// classes: `SimulateArgs`, the groups it flattens and the global options.
-#[cfg(test)]
-pub const SIMULATE: &[(&str, InputClass)] = &[
-    // SimulateArgs
-    ("model", Keyed(Model)),
-    ("to", Keyed(Config)),
-    // `--from` moves the model's start (and the starts derived from it) in the
-    // one load the run and its identity share, so it keys the model level.
-    ("from", Keyed(Model)),
-    ("init_state", Keyed(Config)),
-    ("allow_degenerate_rates", Keyed(Config)),
-    ("param_vec", Keyed(Params)),
-    ("scenarios", Expands),
-    ("enable", Keyed(Scenario)),
-    ("disable", Keyed(Scenario)),
-    ("seed", Keyed(Seed)),
-    ("seeds", Expands),
-    ("replicates", Expands),
-    ("draws", Expands),
-    ("sweep", Expands),
-    ("sweep_file", Expands),
-    ("fit", Keyed(Params)),
-    ("n_draws", Expands),
-    ("chains", Expands),
-    ("exclude_chains", Expands),
-    ("draws_out", Presentation),
-    ("output", Presentation),
-    ("stdout", Presentation),
-    ("emit_every", Keyed(Obs)),
-    ("obs", Child),
-    ("obs_dir", Child),
-    ("obs_only", Child),
-    ("obs_only_dir", Child),
-    ("design_from", Presentation),
-    ("projected_out", Presentation),
-    ("dates", Presentation),
-    ("quantities_out", Presentation),
-    ("quantities", Presentation),
-    ("dry_run", Presentation),
-    ("output_dir", Execution),
-    ("parallel", Execution),
-    ("force", Execution),
-    ("label", Provenance),
-    ("event_log", Child),
-    ("format", Presentation),
-    ("tsv", Presentation),
-    ("reactive_log", Presentation),
-    // ForcingExtrapolationArg
-    ("allow_forcing_extrapolation", Keyed(Config)),
-    // ModelOverrides
-    ("params", Keyed(Params)),
-    ("param", Keyed(Params)),
-    ("table", Keyed(Params)),
-    // SimBackend
-    ("backend", Keyed(Config)),
-    ("dt", Keyed(Config)),
-    ("integrator", Keyed(Model)),
-    // OutputView
-    ("every", Keyed(Model)),
-    ("no_flows", Keyed(Config)),
-    ("columns", Keyed(Config)),
-    // GlobalArgs
-    ("verbosity", Presentation),
-    ("progress", Presentation),
-    ("no_progress", Presentation),
-    ("no_ir_cache", Execution),
-    ("no_licm", Keyed(Model)),
-];
+use Level::{Fit, Method, Profile, Seed};
 
 /// `camdl fit run`'s inputs, by clap argument id (the field name), with their
 /// classes: `FitRunArgs`, the group it flattens and the global options.
@@ -291,7 +208,7 @@ pub const PROFILE: &[(&str, InputClass)] = &[
 
 /// `camdl mre simulate`'s own input. It flattens `SimulateArgs` and writes a
 /// bundle that reproduces that simulate run, so every other input keeps the
-/// class it has in [`SIMULATE`].
+/// class `SimulateArgs` declares.
 #[cfg(test)]
 pub const MRE_SIMULATE_OWN: &[(&str, InputClass)] = &[("bundle", Presentation)];
 
@@ -334,11 +251,6 @@ mod tests {
     }
 
     #[test]
-    fn every_simulate_flag_is_classified() {
-        assert_covers("camdl simulate", clap_args(&["simulate"]), SIMULATE);
-    }
-
-    #[test]
     fn every_fit_run_flag_is_classified() {
         assert_covers("camdl fit run", clap_args(&["fit", "run"]), FIT_RUN);
     }
@@ -348,20 +260,23 @@ mod tests {
         assert_covers("camdl profile", clap_args(&["profile"]), PROFILE);
     }
 
+    /// `mre simulate` takes every input of `simulate` (declared on
+    /// `SimulateArgs`) and its own.
     #[test]
     fn every_mre_simulate_flag_is_classified() {
-        assert_covers("camdl mre simulate", clap_args(&["mre", "simulate"]), SIMULATE.iter().chain(MRE_SIMULATE_OWN));
+        use store::Inputs;
+        let simulate: BTreeSet<String> = crate::args::SimulateArgs::fields()
+            .iter()
+            .map(|f| f.name.rsplit('.').next().unwrap().to_string())
+            .collect();
+        let mut accepted = clap_args(&["mre", "simulate"]);
+        for (own, _) in MRE_SIMULATE_OWN {
+            assert!(accepted.remove(*own), "`{own}` is not an argument of `camdl mre simulate`");
+        }
+        let globals: BTreeSet<String> = ["verbosity", "progress", "no_progress", "no_ir_cache", "no_licm"].map(String::from).into();
+        let accepted: BTreeSet<String> = accepted.difference(&globals).cloned().collect();
+        assert_eq!(accepted, simulate, "`mre simulate` takes simulate's arguments");
     }
-
-    /// Environment inputs with no `simulate` case, each with the reason.
-    const NO_CASE: &[(&str, &str)] = &[
-        ("skip_version_check", "every test run sets it: without it the handshake refuses a test build's camdlc"),
-        ("path", "the harness needs PATH to start camdl; `execution_env_camdlc` varies the camdlc found on it"),
-        ("output_dir", "not read by simulate: its store root is `--output-dir`, whose clap `env` reads CAMDL_OUTPUT_DIR"),
-        ("unlabeled_threshold", "not read by simulate: `fit table` and `camdl list` read it"),
-        ("ci", "not read by simulate: `fit summary` reads it"),
-        ("store", "not read by simulate: the commands on the run store read it"),
-    ];
 
     /// Environment inputs with no `fit run` case, each with the reason.
     const FIT_RUN_NO_CASE: &[(&str, &str)] = &[
@@ -388,7 +303,6 @@ mod tests {
             InputClass::Expands => "expands",
             InputClass::Presentation => "presentation",
             InputClass::Provenance => "provenance",
-            InputClass::Child => "child",
             InputClass::Removed => "removed",
         };
         // A removed spelling's field is `_removed_<old name>`; its case is
@@ -405,7 +319,7 @@ mod tests {
             .filter_map(|l| l.trim_start().strip_prefix("fn "))
             .filter_map(|l| l.split('(').next())
             .filter(|n| {
-                ["keyed_", "execution_", "expands_", "presentation_", "provenance_", "child_", "removed_"]
+                ["keyed_", "execution_", "expands_", "presentation_", "provenance_", "removed_"]
                     .iter()
                     .any(|p| n.starts_with(p))
             })
@@ -436,20 +350,8 @@ mod tests {
         );
     }
 
-    /// Every input of simulate — on its command line or in its environment —
-    /// has a case in `tests/simulate_input_classes.rs` named
-    /// `<class>_<input>` (or `<class>_env_<field>`), and every case there names
-    /// such an input with its class. A `keyed`, `execution` or `expands` case
-    /// runs camdl twice and compares; a `presentation` or `provenance` case
-    /// checks, on a fixture where the input is live, that the leaf is
-    /// unaffected or that none is written; a `child` case, that the leaf's
-    /// run id and manifest are unchanged and the child is at its address.
-    #[test]
-    fn every_simulate_input_has_a_case() {
-        assert_every_input_has_a_case("simulate", "simulate_input_classes.rs", SIMULATE, NO_CASE);
-    }
-
-    /// The same for `fit run`, in `tests/fit_run_input_classes.rs`, where a
+    /// Every input of `fit run`, on its command line or in its environment,
+    /// has a case in `tests/fit_run_input_classes.rs`, where a
     /// `removed` case checks that the old spelling is refused with its
     /// message.
     #[test]

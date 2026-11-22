@@ -711,7 +711,7 @@ fn plain_simulate_obs_refuses_a_covariate_stream_by_name_and_writes_nothing() {
             "simulate", ir.to_str().unwrap(),
             "--params", truth.to_str().unwrap(),
             flag, target.to_str().unwrap(),
-            "--output-dir", store.to_str().unwrap(),
+            "--store", store.to_str().unwrap(),
             "--backend", "chain_binomial", "--dt", "1", "--seed", "11",
         ]);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -746,7 +746,7 @@ fn a_quantity_over_a_covariate_stream_is_refused_by_name() {
         "simulate", ir.to_str().unwrap(),
         "--params", truth.to_str().unwrap(),
         "--quantities-out", qdir.to_str().unwrap(),
-        "--output-dir", tmp.path().join("results").to_str().unwrap(),
+        "--store", tmp.path().join("results").to_str().unwrap(),
         "--backend", "chain_binomial", "--dt", "1", "--seed", "11",
     ]);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -774,7 +774,7 @@ fn multi_cell_obs_refuses_a_covariate_stream_by_name_and_writes_nothing() {
         "--params", truth.to_str().unwrap(),
         "--seeds", "1,2",
         "--obs-dir", synth.to_str().unwrap(),
-        "--output-dir", store.to_str().unwrap(),
+        "--store", store.to_str().unwrap(),
         "--backend", "chain_binomial", "--dt", "1",
     ]);
     let stderr = String::from_utf8_lossy(&output.stderr);

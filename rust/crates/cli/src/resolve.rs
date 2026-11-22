@@ -1,77 +1,8 @@
-//! The `Resolve` bridge for `simulate`: map already-resolved CLI
-//! inputs into the `runid` identity types — the factored `LevelId`s and the
-//! leaf `run_id`.
-//!
-//! Every field that enters a hash is a *resolved value*: param/scenario maps
-//! are concrete name→value, the seed is the resolved `process_seed` (never
-//! the base `--seed`), and a non-finite resolved float is a `ResolveError`
-//! surfaced before any hashing. The model level is
-//! `runid::inputs::ModelDigest::from_model`, shared by every artifact kind;
-//! `--format` and time rendering are provenance and enter no hash.
-//!
-//! This is the identity half of the wiring; the caller supplies resolved
-//! config/params/scenario/seed (from `params_resolver`, the model, and the
-//! seed mixer) and feeds the resulting path + record to `runid`'s `Layout`
-//! and `CasStore`. The model digest is the whole-IR digest (so an obs-only
-//! edit over-invalidates the trajectory, but never under-invalidates).
-
-use std::collections::{BTreeMap, HashMap};
-
-use runid::inputs::{
-    DataDigest, InterventionId, ModelDigest, ParamId, ResolvedParams, ResolvedScenario, Seed,
-    SimConfig,
-};
-use runid::{run_id, ArtifactKind, ContentHash, FiniteF64, LevelId, ResolveError};
-
-/// A fully-resolved trajectory leaf: the factored identity levels (in path
-/// order) and the leaf `run_id` (composed from the level hashes).
-///
-/// In the factored scheme the identity is the *tuple of per-level digests*,
-/// not a single flat hash, so the leaf is described by its levels — each a
-/// disjoint slice of the input set (model / config / params / scenario /
-/// seed) — and the `run_id` derived from them.
-pub struct ResolvedTrajectory {
-    pub levels: Vec<LevelId>,
-    pub run_id: ContentHash,
-    /// The readable summary written to the leaf's `run.json.inputs` (never
-    /// hashed): the parameter values, scenario and seed the levels were
-    /// hashed from, built from the same [`TrajectoryCtx`] in the same call, so
-    /// what `camdl show` prints is what the `run_id` names (gh#583 item I).
-    pub display_inputs: serde_json::Value,
-}
-
-/// Inputs to [`resolve_trajectory`], all already resolved by the caller. The
-/// labels are provenance (readable path segments); identity rides in the
-/// hashes.
-///
-/// The model and config levels arrive whole: `model` is the invocation's
-/// [`ModelDigest`] (`sim_config::ResolvedModel::digest`) and `config` the cell's
-/// [`SimConfig`] (`sim_config::RunConfig::cell_config`), so this bridge copies no
-/// configuration field by hand.
-pub struct TrajectoryCtx<'a> {
-    pub model: ModelDigest,
-    pub model_stem: &'a str,
-    pub config: SimConfig,
-    /// The cell's resolved parameter values (name → value) — every tier
-    /// applied, as `util::resolve_run_parameters` hands them to the engine —
-    /// plus the table-file digests.
-    pub params: &'a HashMap<String, f64>,
-    pub table_digests: Vec<DataDigest>,
-    /// Resolved scenario delta — the *effective* one, compose-walked
-    /// (`params_resolver::resolve_preset_delta` for a preset).
-    pub enable: &'a [String],
-    pub disable: &'a [String],
-    pub scen_params: &'a HashMap<String, f64>,
-    /// `scale` factors in application order (gh#573).
-    pub scen_scale: &'a [(String, f64)],
-    /// Readable labels (provenance).
-    pub param_label: &'a str,
-    pub scenario_label: &'a str,
-    /// The base `--seed` (readable label) and the resolved `process_seed`
-    /// (the actual trajectory driver, and the only seed value hashed).
-    pub base_seed: u64,
-    pub process_seed: u64,
-}
+//! The writer seam of the old store (`runid`), for the commands that have
+//! not moved to the run store: a command resolves its identity into a
+//! [`ResolvedArtifact`], supplies write-time provenance in a [`RecordMeta`],
+//! and calls [`begin_resolved_write`]; and the model identity string fit
+//! sidecars record ([`model_identity_from_ir`]).
 
 /// The model's *structural* content identity, hex-encoded: the `runid` model
 /// content hash ([`ModelDigest::ir`] = `Model::content_hash`), rendered as
@@ -102,80 +33,6 @@ pub fn model_identity_from_ir(model_ir_json: &str) -> String {
     }
 }
 
-use crate::sim_config::finite;
-
-fn resolve_params(
-    values: &HashMap<String, f64>,
-    tables: Vec<DataDigest>,
-) -> Result<ResolvedParams, ResolveError> {
-    let mut m: BTreeMap<ParamId, FiniteF64> = BTreeMap::new();
-    for (k, v) in values {
-        m.insert(ParamId(k.clone()), finite(*v)?);
-    }
-    Ok(ResolvedParams { values: m, tables })
-}
-
-fn resolve_scenario(
-    enable: &[String],
-    disable: &[String],
-    patch: &HashMap<String, f64>,
-    scale: &[(String, f64)],
-) -> Result<ResolvedScenario, ResolveError> {
-    let enabled = enable.iter().cloned().map(InterventionId).collect();
-    let disabled = disable.iter().cloned().map(InterventionId).collect();
-    let mut p: BTreeMap<ParamId, FiniteF64> = BTreeMap::new();
-    for (k, v) in patch {
-        p.insert(ParamId(k.clone()), finite(*v)?);
-    }
-    // Group by parameter, keeping each parameter's factors in application
-    // order: factors on different parameters commute, factors on the same one
-    // are applied in sequence (see `ResolvedScenario::scale`).
-    let mut sc: BTreeMap<ParamId, Vec<FiniteF64>> = BTreeMap::new();
-    for (k, f) in scale {
-        sc.entry(ParamId(k.clone())).or_default().push(finite(*f)?);
-    }
-    Ok(ResolvedScenario { enabled, disabled, patch: p, scale: sc })
-}
-
-use crate::fit::cas::{level, structural_level_hash};
-
-/// Resolve a trajectory leaf's identity: the five factored levels
-/// (model/config/params/scenario/seed, in path order), and the `run_id` derived
-/// from them.
-pub fn resolve_trajectory(ctx: &TrajectoryCtx) -> Result<ResolvedTrajectory, ResolveError> {
-    let config = &ctx.config;
-    let config_label = format!(
-        "{}-dt{}",
-        crate::sim_config::forward_backend(config.backend).as_str(),
-        config.dt.get()
-    );
-    let params = resolve_params(ctx.params, ctx.table_digests.clone())?;
-    let scenario = resolve_scenario(ctx.enable, ctx.disable, ctx.scen_params, ctx.scen_scale)?;
-    let seed = Seed { process_seed: ctx.process_seed, base_seed: ctx.base_seed };
-
-    // Each level hashes a disjoint slice of the input; the union is the whole
-    // resolved input set. The label is provenance, the hash is identity.
-    let levels = vec![
-        level("model", ctx.model_stem, structural_level_hash(&ctx.model)),
-        level("config", &config_label, structural_level_hash(config)),
-        level("params", ctx.param_label, structural_level_hash(&params)),
-        level("scenario", ctx.scenario_label, structural_level_hash(&scenario)),
-        level("seed", &format!("seed_{}", ctx.base_seed), structural_level_hash(&seed)),
-    ];
-    let level_hashes: Vec<ContentHash> = levels.iter().map(|l| l.hash).collect();
-    let rid = run_id(ArtifactKind::Sim, &level_hashes);
-
-    let display_inputs = serde_json::json!({
-        "params": ctx.params.iter()
-            .map(|(k, v)| (k.clone(), *v))
-            .collect::<BTreeMap<String, f64>>(),
-        "scenario": ctx.scenario_label,
-        "process_seed": ctx.process_seed,
-    });
-
-    Ok(ResolvedTrajectory { levels, run_id: rid, display_inputs })
-}
-
 // ─── The resolved-writer seam (gh#241 PR D) ──────────────────────────────────
 //
 // One choke point for every CAS write. A command resolves its identity into a
@@ -189,11 +46,14 @@ pub fn resolve_trajectory(ctx: &TrajectoryCtx) -> Result<ResolvedTrajectory, Res
 // the record is byte-for-byte what the per-kind builders produced — this seam
 // is a structural unification, not an identity change.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+
+use runid::{ArtifactKind, ContentHash, LevelId};
 
 use runid::store::StreamClaim;
 use runid::{
-    store_path, Artifacts, CasError, FsCasStore, Provenance, RunRecord, RunStatus, FORMAT_VERSION,
+    store_path, CasError, FsCasStore, Provenance, RunRecord, RunStatus, FORMAT_VERSION,
     HASH_VERSION,
 };
 
@@ -264,18 +124,6 @@ impl RecordMeta {
         self
     }
 
-    pub fn with_children(mut self, children: BTreeMap<String, Vec<ContentHash>>) -> Self {
-        self.children = children;
-        self
-    }
-}
-
-/// Which store door to use — mirrors the store's two write modes.
-pub enum WriteMode {
-    /// Hand over a finished artifact set; committed atomically in one call.
-    Atomic(Artifacts),
-    /// Claim the leaf, stream output into it, then finalize.
-    Streaming,
 }
 
 /// What the caller wants done about an artifact that already exists.
@@ -431,13 +279,6 @@ pub(crate) fn note_leaf_from_another_model_file(leaf: &Path, model_path: &str) {
     }
 }
 
-/// The outcome of [`begin_resolved_write`].
-pub enum ResolvedWrite {
-    /// Atomic: already committed; the destination path.
-    Committed(PathBuf),
-    /// Streaming: an open claim the caller writes into, then finalizes.
-    Streaming(ResolvedClaim),
-}
 
 /// An open streaming claim plus the record to finalize with. The caller streams
 /// output files (via [`dir`](Self::dir) / [`write`](Self::write)) then calls
@@ -504,7 +345,7 @@ impl ResolvedClaim {
 
 /// Assemble the `RunRecord` for `resolved` + `meta` at `status`. The single
 /// record-construction site — every CAS write routes through here.
-fn build_record(resolved: &ResolvedArtifact, meta: &RecordMeta, status: RunStatus) -> RunRecord {
+pub(crate) fn build_record(resolved: &ResolvedArtifact, meta: &RecordMeta, status: RunStatus) -> RunRecord {
     // Display-only, never hashed: a run made under
     // `--allow-forcing-extrapolation` says so, and names what it held.
     let mut inputs = resolved.display_inputs.clone();
@@ -555,24 +396,18 @@ pub fn begin_resolved_write(
     root: &Path,
     resolved: &ResolvedArtifact,
     meta: &RecordMeta,
-    mode: WriteMode,
-) -> Result<ResolvedWrite, CasError> {
+) -> Result<ResolvedClaim, CasError> {
     let dir = runid::find_leaf(root, resolved.kind, &resolved.levels)
         .unwrap_or_else(|| store_path(root, resolved.kind, &resolved.levels));
-    match mode {
-        WriteMode::Atomic(artifacts) => {
-            let record = build_record(resolved, meta, RunStatus::Completed);
-            let dest = store.commit_atomic(&dir, record, artifacts)?;
-            Ok(ResolvedWrite::Committed(dest))
-        }
-        WriteMode::Streaming => {
-            let record = build_record(resolved, meta, RunStatus::Running);
-            let claim = store.claim_streaming(&dir, record.clone())?;
-            Ok(ResolvedWrite::Streaming(ResolvedClaim { claim, record, forcing: meta.forcing.clone() }))
-        }
-    }
+    let record = build_record(resolved, meta, RunStatus::Running);
+    let claim = store.claim_streaming(&dir, record.clone())?;
+    Ok(ResolvedClaim { claim, record, forcing: meta.forcing.clone() })
 }
 
+#[cfg(test)]
+mod legacy_sim;
+#[cfg(test)]
+pub(crate) use legacy_sim::*;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

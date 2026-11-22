@@ -16,6 +16,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod sim_store_cells;
+
 fn camdl_bin() -> PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
     Path::new(&manifest).join("../../target/release/camdl")
@@ -48,24 +50,9 @@ fn compile(dir: &Path, camdlc: &Path, src: &str, stem: &str) -> PathBuf {
     ir_path
 }
 
-/// Count committed sim leaves (dirs holding a run.json) under `<out>/sims`.
+/// The folders of every stored simulation cell under the store `out`.
 fn sim_leaves(out: &Path) -> Vec<PathBuf> {
-    let mut leaves = Vec::new();
-    let mut stack = vec![out.join("sims")];
-    while let Some(d) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&d) else { continue };
-        for e in rd.flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                if p.join("run.json").exists() {
-                    leaves.push(p);
-                } else {
-                    stack.push(p);
-                }
-            }
-        }
-    }
-    leaves
+    sim_store_cells::sim_cells(out).into_iter().map(|c| c.dir).collect()
 }
 
 const SIR_ODE: &str = r#"
@@ -107,7 +94,7 @@ fn integrator_override_splits_the_cas_leaves() {
             .args(["--params"]).arg(&params)
             .args(["--backend", "ode", "--dt", "1", "--seed", "1",
                    "--integrator", m,
-                   "--output-dir"]).arg(&out)
+                   "--store"]).arg(&out)
             .arg("-o").arg(tmp.path().join(format!("traj_{m}.tsv")))
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .output().unwrap();
@@ -147,7 +134,7 @@ fn force_replaces_the_stored_leaf() {
         cmd.args(["simulate"]).arg(&ir)
             .args(["--params"]).arg(&params)
             .args(["--backend", "ode", "--dt", "1", "--seed", "1",
-                   "--output-dir"]).arg(&out)
+                   "--store"]).arg(&out)
             .arg("-o").arg(tmp.path().join("traj.tsv"))
             .env("CAMDL_SKIP_VERSION_CHECK", "1");
         for a in extra { cmd.arg(a); }
@@ -226,7 +213,7 @@ fn param_vec_values_split_the_cas_leaves() {
             .args(["--params"]).arg(&params)
             .args(["--seed", "1",
                    "--param-vec"]).arg(format!("beta={}", vec_file.display()))
-            .args(["--output-dir"]).arg(&out)
+            .args(["--store"]).arg(&out)
             .arg("-o").arg(tmp.path().join(format!("traj_{tag}.tsv")))
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .output().unwrap();
@@ -270,7 +257,7 @@ fn param_that_shadows_a_draw_splits_the_cas_leaves() {
         cmd.env_remove("CLICOLOR_FORCE");
         cmd.args(["simulate"]).arg(&ir)
             .args(["--backend", "ode", "--dt", "1", "--seed", "1", "--draws"]).arg(&draws)
-            .args(["--output-dir"]).arg(&out)
+            .args(["--store"]).arg(&out)
             .arg("-o").arg(tmp.path().join(format!("traj_{tag}.tsv")))
             .env("CAMDL_SKIP_VERSION_CHECK", "1");
         if let Some(p) = extra { cmd.args(["--param", p]); }
@@ -292,11 +279,8 @@ fn param_that_shadows_a_draw_splits_the_cas_leaves() {
         "the shadowed leaf's params label must carry the β it ran: {labels:?}");
 }
 
-/// gh#583 item I. A `Sim` leaf's `run.json.inputs` was `null`, so `camdl show`
-/// printed no parameter values for a simulation — while the params path label
-/// collapses a long vector to `draws` on the stated grounds that "the full
-/// drawn values live in `run.json`". The leaf now records the resolved values
-/// its `params` level hashed (here: the draw's γ and N0, and the `--param` β
+/// gh#583 item I. A stored cell records the resolved parameter values it ran
+/// in its identity record (here: the draw's γ and N0, and the `--param` β
 /// that won over the draw's), and `camdl show` prints them.
 #[test]
 fn sim_leaf_records_the_parameters_it_ran() {
@@ -317,24 +301,21 @@ fn sim_leaf_records_the_parameters_it_ran() {
     let st = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate"]).arg(&ir)
         .args(["--backend", "ode", "--dt", "1", "--seed", "1", "--draws"]).arg(&draws)
-        .args(["--param", "beta=0.6", "--output-dir"]).arg(&out)
+        .args(["--param", "beta=0.6", "--store"]).arg(&out)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output().unwrap();
     assert!(st.status.success(), "simulate: {}", String::from_utf8_lossy(&st.stderr));
 
-    let leaves = sim_leaves(&out);
-    assert_eq!(leaves.len(), 1);
-    let record: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(leaves[0].join("run.json")).unwrap())
-            .unwrap();
-    let params = &record["inputs"]["params"];
+    let cell = sim_store_cells::only_sim_cell(&out);
+    let record = &cell.identity;
+    let params = cell.params();
     assert_eq!(params["beta"], 0.6, "the --param β that ran, not the draw's: {record}");
     assert_eq!(params["gamma"], 0.1, "the draw's γ: {record}");
     assert_eq!(params["N0"], 10000.0, "the draw's N0: {record}");
 
-    let run_id = record["run_id"].as_str().unwrap().to_string();
+    let run_id = cell.run_id.clone();
     let show = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .args(["show", &run_id, "--root"]).arg(&out)
+        .args(["show", &run_id, "--store"]).arg(&out)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("NO_COLOR", "1")
         .output().unwrap();
@@ -361,31 +342,12 @@ init { S = 990  I = 10 }
 simulate { from = 0 'days  to = 10 'days }
 "#;
 
-/// Every committed `SimEnsemble` leaf under `<out>/ensembles`.
-fn ensemble_leaves(out: &Path) -> Vec<PathBuf> {
-    let mut leaves = Vec::new();
-    let mut stack = vec![out.join("ensembles")];
-    while let Some(d) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&d) else { continue };
-        for e in rd.flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                if p.join("run.json").exists() { leaves.push(p) } else { stack.push(p) }
-            }
-        }
-    }
-    leaves
-}
-
-/// gh#583 item B. `--dates` adds `date` columns to the combined TSV, and the
-/// multi-cell ensemble was stored from that same buffer — but `--dates` is in
-/// none of the ensemble's identity levels. So whichever run landed first
-/// decided the stored bytes: a `--dates` run stored a dated ensemble that a
-/// plain run was then served, and the other order died in DivergentRecompute
-/// (a warning, and no ensemble). `--dates` is presentation: the ensemble is
-/// stored date-free, like the `Sim` leaves, and only the `-o` mirror is dated.
+/// gh#583 item B. `--dates` adds `date` columns to the combined TSV it
+/// exports, but `--dates` is in no cell's identity: it is presentation. The
+/// cells are stored date-free, so a plain rerun is a hit on the cells a
+/// `--dates` run stored, and only the exported table is dated.
 #[test]
-fn dates_reach_the_mirror_and_not_the_stored_ensemble() {
+fn dates_reach_the_export_and_not_the_stored_cells() {
     let bin = camdl_bin();
     let Some(cc) = camdlc() else {
         eprintln!("skip: camdlc.exe missing (run `make build`)");
@@ -403,7 +365,7 @@ fn dates_reach_the_mirror_and_not_the_stored_ensemble() {
         cmd.env_remove("CLICOLOR_FORCE");
         cmd.args(["simulate"]).arg(&ir)
             .args(["--param", "beta=0.3", "--param", "gamma=0.1", "--param", "N0=1000",
-                   "--seeds", "1,2", "--output-dir"]).arg(&out)
+                   "--seeds", "1,2", "--store"]).arg(&out)
             .arg("-o").arg(tmp.path().join(format!("{tag}.tsv")))
             .env("CAMDL_SKIP_VERSION_CHECK", "1");
         if dates { cmd.arg("--dates"); }
@@ -420,20 +382,23 @@ fn dates_reach_the_mirror_and_not_the_stored_ensemble() {
     run("dated", true);
     assert!(header(&tmp.path().join("dated.tsv")).split('\t').any(|c| c == "date"),
         "the -o mirror of a --dates run carries the date column");
-    let ens = ensemble_leaves(&out);
-    assert_eq!(ens.len(), 1, "one ensemble leaf: {ens:?}");
-    let stored = header(&ens[0].join("ensemble.tsv"));
-    assert!(!stored.split('\t').any(|c| c == "date"),
-        "the stored ensemble must be date-free — `--dates` is in no identity \
-         level, so a plain run would be served these bytes: {stored}");
+    let cells = sim_store_cells::sim_cells(&out);
+    assert_eq!(cells.len(), 2, "one cell per seed: {cells:?}");
+    for cell in &cells {
+        let stored = cell.traj().lines().find(|l| !l.starts_with('#')).unwrap_or("").to_string();
+        assert!(!stored.split('\t').any(|c| c == "date"),
+            "a stored cell must be date-free — `--dates` is in no identity, so a \
+             plain run would be served these bytes: {stored}");
+    }
 
-    // The plain run resolves the same ensemble identity and agrees with it.
+    // The plain run resolves the same cells and reads them back.
     let stderr = run("plain", false);
     assert!(!stderr.contains("divergent recompute"),
-        "a plain rerun must agree with the stored ensemble: {stderr}");
-    assert_eq!(std::fs::read(tmp.path().join("plain.tsv")).unwrap(),
-               std::fs::read(ens[0].join("ensemble.tsv")).unwrap(),
-        "without --dates, the -o mirror and the stored ensemble are the same bytes");
+        "a plain rerun must agree with the stored cells: {stderr}");
+    assert!(stderr.contains("2 of 2 cells read from the store; simulated 0"),
+        "a plain rerun is a hit on the cells the --dates run stored: {stderr}");
+    assert!(!header(&tmp.path().join("plain.tsv")).split('\t').any(|c| c == "date"),
+        "without --dates, the exported table has no date column");
 }
 
 const SIR_DEFAULTED: &str = r#"
@@ -481,7 +446,7 @@ fn single_and_multi_cell_runs_share_a_leaf_over_a_defaulted_parameter() {
     let st = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate"]).arg(&ir)
         .args(["--params"]).arg(&params)
-        .args(["--seed", "3", "--output-dir"]).arg(&out)
+        .args(["--seed", "3", "--store"]).arg(&out)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output().unwrap();
     assert!(st.status.success(), "simulate: {}", String::from_utf8_lossy(&st.stderr));
@@ -491,7 +456,7 @@ fn single_and_multi_cell_runs_share_a_leaf_over_a_defaulted_parameter() {
     let st = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate"]).arg(&ir)
         .args(["--params"]).arg(&params)
-        .args(["--seeds", "3,4", "--output-dir"]).arg(&out)
+        .args(["--seeds", "3,4", "--store"]).arg(&out)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output().unwrap();
     assert!(st.status.success(), "simulate --seeds: {}", String::from_utf8_lossy(&st.stderr));

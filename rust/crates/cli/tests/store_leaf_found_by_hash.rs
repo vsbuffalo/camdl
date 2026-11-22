@@ -24,6 +24,8 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+mod sim_store_cells;
+
 fn binary() -> PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     Path::new(&manifest).join("../../target/release/camdl")
@@ -73,11 +75,11 @@ impl Fixture {
         self.dir.path().join(name)
     }
 
-    /// `simulate <model> --params p.toml --replicates 2 --seed 7 --output-dir out <extra…>`.
+    /// `simulate <model> --params p.toml --replicates 2 --seed 7 --store out <extra…>`.
     fn simulate(&self, model: &str, extra: &[&str]) -> Output {
         let mut args = vec![
             "simulate", model, "--params", "p.toml", "--backend", "chain_binomial",
-            "--dt", "1", "--seed", "7", "--replicates", "2", "--output-dir", "out",
+            "--dt", "1", "--seed", "7", "--replicates", "2", "--store", "out",
         ];
         args.extend_from_slice(extra);
         Command::new(skip_if_missing_binary()).env_remove("CLICOLOR_FORCE")
@@ -88,40 +90,16 @@ impl Fixture {
             .expect("spawn camdl")
     }
 
-    /// Every `Sim` leaf under the output root: its directory and its `run_id`,
-    /// sorted by `run_id`.
+    /// Every stored simulation cell under the store: its folder and its
+    /// `run_id`, sorted by `run_id`.
     fn sim_leaves(&self) -> Vec<(PathBuf, String)> {
-        let mut out: Vec<(PathBuf, String)> = run_leaves(&self.path("out").join("sims"))
+        let mut out: Vec<(PathBuf, String)> = sim_store_cells::sim_cells(&self.path("out"))
             .into_iter()
-            .map(|dir| {
-                let rec: serde_json::Value = serde_json::from_str(
-                    &std::fs::read_to_string(dir.join("run.json")).unwrap(),
-                )
-                .unwrap();
-                (dir, rec["run_id"].as_str().unwrap().to_string())
-            })
+            .map(|c| (c.dir, c.run_id))
             .collect();
         out.sort_by(|a, b| a.1.cmp(&b.1));
         out
     }
-}
-
-fn run_leaves(root: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        if dir.join("run.json").is_file() {
-            out.push(dir.clone());
-        }
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for e in entries.flatten() {
-                if e.path().is_dir() {
-                    stack.push(e.path());
-                }
-            }
-        }
-    }
-    out
 }
 
 fn assert_ok(out: &Output, what: &str) {
@@ -145,7 +123,7 @@ fn renaming_the_model_file_keeps_every_leaf_a_hit() {
     let before = fx.sim_leaves();
     assert_eq!(before.len(), 2, "two replicates are two leaves");
     assert!(
-        before.iter().all(|(dir, _)| dir.to_string_lossy().contains("/sims/sir-")),
+        before.iter().all(|(dir, _)| dir.to_string_lossy().contains("/sim/sir-")),
         "the model level is labelled by the file stem: {before:?}"
     );
 
@@ -159,17 +137,17 @@ fn renaming_the_model_file_keeps_every_leaf_a_hit() {
          same directories, same run_ids — not a second copy under `sir_renamed-…`"
     );
     assert!(
-        !fx.path("out").join("sims").read_dir().unwrap().flatten().any(|e| {
-            e.file_name().to_string_lossy().starts_with("sir_renamed-")
-        }),
+        !sim_store_cells::walk_files(&fx.path("out"))
+            .iter()
+            .any(|p| p.to_string_lossy().contains("/sim/sir_renamed-")),
         "no `sir_renamed-…` model directory may appear"
     );
 }
 
 /// The scenario level's label is provenance too. A leaf whose scenario
-/// directory was relabelled on disk — the label in the segment and in
-/// `run.json` both changed, the hashes untouched — is found by the next run
-/// and not stored again under the current label.
+/// folder was relabelled on disk — the label in the segment changed, the
+/// identity untouched — is found by the next run and not stored again under
+/// the current label.
 #[test]
 fn a_relabelled_scenario_directory_is_still_a_hit() {
     let fx = Fixture::new("sir");
@@ -177,7 +155,7 @@ fn a_relabelled_scenario_directory_is_still_a_hit() {
     let before = fx.sim_leaves();
     assert_eq!(before.len(), 2);
 
-    // Relabel: the leaves' parent is the scenario directory `_none_-<h8>`
+    // Relabel: the cells' parent is the scenario folder `_none_-<h12>`
     // (the implicit arm `(none)`, as the path sanitizer renders it).
     let scenario_dir = before[0].0.parent().unwrap().to_path_buf();
     let seg = scenario_dir.file_name().unwrap().to_string_lossy().into_owned();
@@ -185,17 +163,6 @@ fn a_relabelled_scenario_directory_is_still_a_hit() {
     assert_eq!(label, "_none_");
     let relabelled = scenario_dir.with_file_name(format!("renamed_arm-{h8}"));
     std::fs::rename(&scenario_dir, &relabelled).unwrap();
-    for leaf in run_leaves(&relabelled) {
-        let path = leaf.join("run.json");
-        let mut rec: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        for level in rec["levels"].as_array_mut().unwrap() {
-            if level["name"] == "scenario" {
-                level["label"] = serde_json::Value::String("renamed_arm".into());
-            }
-        }
-        std::fs::write(&path, serde_json::to_string_pretty(&rec).unwrap()).unwrap();
-    }
     let relabelled_leaves = fx.sim_leaves();
     assert_eq!(relabelled_leaves.len(), 2);
     assert!(relabelled_leaves.iter().all(|(d, _)| d.starts_with(&relabelled)));
@@ -230,14 +197,14 @@ enum IrCache {
     Off,
 }
 
-/// `simulate <model> … --output-dir <out>` under the given IR-cache mode,
+/// `simulate <model> … --store <out>` under the given IR-cache mode,
 /// with every other input fixed.
 fn simulate_with_cache(fx: &Fixture, model: &str, out: &str, cache: IrCache) -> Output {
     let mut cmd = Command::new(skip_if_missing_binary());
     cmd.env_remove("CLICOLOR_FORCE");
     cmd.args([
         "simulate", model, "--params", "p.toml", "--backend", "chain_binomial",
-        "--dt", "1", "--seed", "7", "--replicates", "2", "--output-dir", out,
+        "--dt", "1", "--seed", "7", "--replicates", "2", "--store", out,
     ])
     .current_dir(fx.dir.path())
     .env("CAMDL_SKIP_VERSION_CHECK", "1")
@@ -249,19 +216,9 @@ fn simulate_with_cache(fx: &Fixture, model: &str, out: &str, cache: IrCache) -> 
     cmd.output().expect("spawn camdl")
 }
 
-/// The sorted `run_id`s of every `Sim` leaf under `<out>/sims`.
+/// The sorted `run_id`s of every stored simulation cell under the store `out`.
 fn run_ids_under(fx: &Fixture, out: &str) -> Vec<String> {
-    let mut ids: Vec<String> = run_leaves(&fx.path(out).join("sims"))
-        .into_iter()
-        .map(|dir| {
-            let rec: serde_json::Value =
-                serde_json::from_str(&std::fs::read_to_string(dir.join("run.json")).unwrap())
-                    .unwrap();
-            rec["run_id"].as_str().unwrap().to_string()
-        })
-        .collect();
-    ids.sort();
-    ids
+    sim_store_cells::sim_run_ids(&fx.path(out))
 }
 
 /// The model file's name is a label, not identity. Two byte-identical models

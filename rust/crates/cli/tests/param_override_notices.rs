@@ -1,5 +1,6 @@
 //! `simulate` reports every replacement of one parameter tier's value by
-//! another's — on stderr, once per run, and in each leaf's `run.json`.
+//! another's — on stderr, once per run. Each cell's `identity.json` records
+//! the value the run used.
 //!
 //! The rule (docs/camdl-run-spec.md §1.3): no tier may replace a value a lower
 //! tier supplied, with a different value, without the user being told. The
@@ -59,7 +60,7 @@ fn simulate(dir: &Path, args: &[&str]) -> Run {
         .arg(&model)
         .args(args)
         .args(["--backend", "chain_binomial", "--dt", "1", "--seed", "1"])
-        .arg("--output-dir")
+        .arg("--store")
         .arg(&store)
         .output()
         .expect("spawn");
@@ -74,14 +75,18 @@ fn write(dir: &Path, name: &str, contents: &str) -> PathBuf {
     p
 }
 
-/// Every leaf `run.json` under `root`, parsed.
-fn run_jsons(root: &Path) -> Vec<serde_json::Value> {
+/// Every simulation cell's `identity.json` under the store `root`, parsed.
+fn sim_identities(root: &Path) -> Vec<serde_json::Value> {
     let mut out = Vec::new();
-    let mut stack = vec![root.join("sims")];
+    let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let rj = dir.join("run.json");
-        if rj.is_file() {
-            out.push(serde_json::from_str(&std::fs::read_to_string(rj).unwrap()).unwrap());
+        let ij = dir.join("identity.json");
+        if ij.is_file() {
+            let v: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(ij).unwrap()).unwrap();
+            if v["kind"] == "sim" {
+                out.push(v);
+            }
         }
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for e in entries.flatten() {
@@ -108,23 +113,10 @@ fn a_scenario_over_a_params_file_is_reported_and_recorded() {
     let line = format!("info: scenario `lockdown` replaced I0 = 5 (from {}) with 3", p.display());
     assert_eq!(override_lines(&run.stderr), vec![line.as_str()], "stderr: {}", run.stderr);
 
-    let leaves = run_jsons(&run.store);
-    assert_eq!(leaves.len(), 1);
-    let inputs = &leaves[0]["inputs"];
+    let cells = sim_identities(&run.store);
+    assert_eq!(cells.len(), 1);
     // The run used the scenario's value.
-    assert_eq!(inputs["params"]["I0"], 3.0);
-    let i0 = &inputs["parameters_provenance"]["I0"];
-    assert_eq!(i0["source"], "scenario");
-    assert_eq!(
-        i0["overrides"],
-        serde_json::json!([{
-            "replaced": { "source": "fixed_file", "value": 5.0, "path": p.display().to_string() },
-            "by": { "source": "scenario", "value": 3.0, "scenario": "lockdown" },
-        }])
-    );
-    assert!(inputs["parameters_provenance"]["beta"].get("overrides").is_none());
-    assert_eq!(inputs["notices"][0]["code"], "param-override");
-    assert_eq!(inputs["notices"][0]["severity"], "info");
+    assert_eq!(cells[0]["identity"]["params"]["values"]["I0"], 3.0);
 }
 
 #[test]
@@ -212,8 +204,6 @@ fn an_equal_value_replacement_is_not_reported() {
     let p = write(tmp.path(), "p.toml", "beta = 0.3\nI0 = 3\n");
     let run = simulate(tmp.path(), &["--params", &p.to_string_lossy(), "--scenario", "lockdown"]);
     assert!(override_lines(&run.stderr).is_empty(), "stderr: {}", run.stderr);
-    let leaves = run_jsons(&run.store);
-    assert!(leaves[0]["inputs"]["parameters_provenance"]["I0"].get("overrides").is_none());
 }
 
 #[test]
@@ -239,12 +229,17 @@ fn a_multi_cell_sweep_reports_each_override_once() {
     want.sort();
     assert_eq!(lines, want, "stderr: {}", run.stderr);
 
-    // Every leaf records its own overrides.
-    let leaves = run_jsons(&run.store);
-    assert_eq!(leaves.len(), 3);
-    for leaf in &leaves {
-        let pp = &leaf["inputs"]["parameters_provenance"];
-        assert_eq!(pp["I0"]["overrides"][0]["replaced"]["value"], 5.0);
-        assert_eq!(pp["beta"]["overrides"][0]["by"]["source"], "sweep_point");
+    // Every cell ran at the scenario's I0 and its own sweep point's beta.
+    let cells = sim_identities(&run.store);
+    assert_eq!(cells.len(), 3);
+    let mut betas: Vec<f64> = Vec::new();
+    for cell in &cells {
+        let values = &cell["identity"]["params"]["values"];
+        assert_eq!(values["I0"], 3.0);
+        betas.push(values["beta"].as_f64().unwrap());
+    }
+    betas.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    for (got, want) in betas.iter().zip([0.2, 0.3, 0.4]) {
+        assert!((got - want).abs() < 1e-12, "sweep points {betas:?}");
     }
 }

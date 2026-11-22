@@ -254,8 +254,8 @@ fn run(ex: &Example, dir: &Path) -> Result<Table, String> {
         model.display().to_string(),
         "--params".into(),
         params.display().to_string(),
-        "--output-dir".into(),
-        dir.join("results").display().to_string(),
+        "--store".into(),
+        dir.join("camdl-store").display().to_string(),
     ];
     let obs_file = dir.join("obs.tsv");
     let mut reads_obs = false;

@@ -67,7 +67,9 @@ fn col_at(traj_path: &Path, col_name: &str, target_t: f64) -> Option<f64> {
         if line.starts_with('#') || line.is_empty() { continue; }
         let cols: Vec<&str> = line.split('\t').collect();
         if header.is_empty() { header = cols; continue; }
-        let t: f64 = cols[0].parse().ok()?;
+        // The `t` column follows the cell's coordinate columns.
+        let t_idx = header.iter().position(|h| *h == "t")?;
+        let t: f64 = cols[t_idx].parse().ok()?;
         if (t - target_t).abs() < 1e-6 {
             let idx = header.iter().position(|h| *h == col_name)?;
             return cols[idx].parse().ok();
@@ -88,6 +90,7 @@ fn run_simulate(camdl: &Path, model: &Path, backend: &str, traj: &Path) {
             "--param", "beta=0.0001", "--param", "gamma=0.0001", "--param", "N0=10000000",
             "-o", traj.to_str().unwrap(),
         ])
+        .env("CAMDL_STORE", traj.with_extension("store"))
         .output().expect("camdl must invoke");
     assert!(out.status.success(),
         "simulate ({backend}) failed: {}", String::from_utf8_lossy(&out.stderr));

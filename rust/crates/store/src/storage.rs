@@ -17,10 +17,10 @@ use std::time::Duration;
 
 use crate::artifact::{record_key, Artifact, Build, ByProduct, ContentArtifact, Id, Kinds, Primary, RecordCheck, TopLevel, WriteMode};
 use crate::check::damage;
-use crate::error::{At, Error, Result, RunError};
+use crate::error::{json_err, At, Error, Result, RunError};
 use crate::fsutil::{
     create_dirs_durable, fsync_dir, is_lock_entry, lock_owner, quarantine, remove_all, try_lock, unique_name,
-    write_json_atomic, write_json_synced, LockAttempt, LockGuard,
+    write_file_synced, write_json_synced, LockAttempt, LockGuard,
 };
 use crate::hash::{ContentAddressed, Key, HASH_VERSION};
 use crate::identity::{Content, Identity};
@@ -42,6 +42,10 @@ use crate::Provenance;
 /// How long a claimant waits before looking again at a claim lock another
 /// claimant holds: today's `LOCK_RETRY_INTERVAL`.
 const CLAIM_LOCK_RETRY: Duration = Duration::from_millis(20);
+
+/// The prefix of an opener's draft of `store.json`, written whole before it is
+/// linked into place.
+const STORE_JSON_DRAFT: &str = ".store.json.draft";
 
 /// Whether a completed result may be reused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -191,29 +195,55 @@ impl Store {
         kinds.validate()?;
         let store_json = root.join("store.json");
         let not_a_store = |why: String| Error::NotAStore { root: root.to_path_buf(), why };
-        match std::fs::read(&store_json) {
-            Ok(bytes) => {
-                let f: StoreFile = serde_json::from_slice(&bytes).map_err(|e| not_a_store(format!("store.json: {e}")))?;
-                if f.format != STORE_FORMAT {
-                    return Err(not_a_store(format!("store.json has format {}; this program reads format {STORE_FORMAT}", f.format)));
-                }
-                if f.top_level != top.wire() {
-                    return Err(Error::TopLevelDiffers { root: root.to_path_buf(), stored: f.top_level, asked: top.wire().into() });
-                }
+        let read_record = |bytes: &[u8]| -> Result<()> {
+            let f: StoreFile = serde_json::from_slice(bytes).map_err(|e| not_a_store(format!("store.json: {e}")))?;
+            if f.format != STORE_FORMAT {
+                return Err(not_a_store(format!("store.json has format {}; this program reads format {STORE_FORMAT}", f.format)));
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                let empty = match std::fs::read_dir(root) {
-                    Ok(mut d) => d.next().is_none(),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
-                    Err(e) => return Err(e).at("list", root),
-                };
-                if !empty {
-                    return Err(not_a_store("the directory is not empty and has no store.json".into()));
-                }
-                std::fs::create_dir_all(root).at("create directory", root)?;
-                write_json_atomic(&store_json, &StoreFile { format: STORE_FORMAT, top_level: top.wire().into() })?;
+            if f.top_level != top.wire() {
+                return Err(Error::TopLevelDiffers { root: root.to_path_buf(), stored: f.top_level, asked: top.wire().into() });
             }
-            Err(e) => return Err(not_a_store(format!("store.json cannot be read: {e}"))),
+            Ok(())
+        };
+        // A root is a store once `store.json` exists. A root without one is
+        // made a store when it holds nothing but other openers' drafts of
+        // `store.json`: each opener writes a whole draft of its own and links
+        // it to `store.json`, which succeeds for exactly one of them, and the
+        // others read what it linked. A root holding anything else is refused
+        // at once.
+        loop {
+            match std::fs::read(&store_json) {
+                Ok(bytes) => {
+                    read_record(&bytes)?;
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(not_a_store(format!("store.json cannot be read: {e}"))),
+            }
+            std::fs::create_dir_all(root).at("create directory", root)?;
+            let foreign = std::fs::read_dir(root)
+                .at("list", root)?
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .any(|n| n != "store.json" && !n.starts_with(STORE_JSON_DRAFT));
+            if foreign {
+                return Err(not_a_store("the directory is not empty and has no store.json".into()));
+            }
+            let draft = root.join(unique_name(STORE_JSON_DRAFT));
+            let bytes = serde_json::to_vec_pretty(&StoreFile { format: STORE_FORMAT, top_level: top.wire().into() })
+                .map_err(|e| json_err("encode", &store_json, e))?;
+            write_file_synced(&draft, &bytes)?;
+            let linked = std::fs::hard_link(&draft, &store_json);
+            let _ = std::fs::remove_file(&draft);
+            match linked {
+                Ok(()) => {
+                    fsync_dir(root)?;
+                    break;
+                }
+                // Another opener linked its draft first: read it.
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e).at("create", &store_json),
+            }
         }
         let (e, known) = ambient.parts();
         let ambient_json = serde_json::to_value(e.record())
@@ -318,6 +348,12 @@ impl Store {
         r.map(|(s, _)| s)
     }
 
+    /// Read-only: the content artifact holding `content`, when it is stored.
+    /// Nothing is written, so a command that only plans can name it.
+    pub fn get_content<C: ContentArtifact>(&self, content: &crate::Hashed<C::Content>) -> Result<Option<Stored<C>>> {
+        self.get(&Id::<C>::of(&self.inner.ambient_key, content))
+    }
+
     /// Read-only: what exists for each identity. Nothing is claimed.
     pub fn plan<A: Primary>(&self, members: &[(A::Identity, A::Labels)]) -> Result<Vec<Planned<A>>> {
         members
@@ -341,6 +377,28 @@ impl Store {
                 Ok(Planned { id, state })
             })
             .collect()
+    }
+
+    /// Read-only, as [`Store::plan`], with the by-products wanted of each
+    /// member: a completed member lacking a completed wanted by-product is
+    /// [`PlanState::ByProductsMissing`], since beginning it would compute it
+    /// again to produce them.
+    pub fn plan_with<A: Primary>(&self, members: &[(A::Identity, A::Labels, Wanted<A>)]) -> Result<Vec<Planned<A>>> {
+        let mut out = Vec::with_capacity(members.len());
+        for (identity, labels, wanted) in members {
+            let mut planned = self.plan::<A>(std::slice::from_ref(&(identity.clone(), labels.clone())))?.remove(0);
+            if planned.state == PlanState::Completed {
+                for w in &wanted.items {
+                    let bp = crate::artifact::run_id(w.kind, &self.inner.ambient_key, &w.identity_key);
+                    if self.inner.find_completed(w.kind, &bp)?.is_none() {
+                        planned.state = PlanState::ByProductsMissing;
+                        break;
+                    }
+                }
+            }
+            out.push(planned);
+        }
+        Ok(out)
     }
 
     /// Opens a batch and claims its members in one pass, each with its labels
@@ -449,6 +507,8 @@ pub struct Planned<A: Artifact> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlanState {
     Absent,
+    /// The result is completed and a by-product wanted of it is not.
+    ByProductsMissing,
     Running(Owner),
     Completed,
     Damaged,

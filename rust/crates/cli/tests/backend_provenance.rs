@@ -7,6 +7,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod sim_store_cells;
+
 fn binary() -> PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     Path::new(&manifest).join("../../target/release/camdl")
@@ -86,7 +88,7 @@ fn simulate_refuses_a_params_file_edited_after_its_fit() {
     let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_pure_death().to_string_lossy(),
                "--params", &mle.to_string_lossy(),
-               "--seed", "1", "--output-dir", &output.to_string_lossy(),
+               "--seed", "1", "--store", &output.to_string_lossy(),
                "-o", &tmp.path().join("t.tsv").to_string_lossy()])
         .output().expect("spawn");
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -100,7 +102,7 @@ fn simulate_refuses_a_params_file_edited_after_its_fit() {
     ] {
         assert!(stderr.contains(needle), "diagnostic lacks {needle:?}; stderr: {stderr}");
     }
-    assert!(!output.join("sims").exists(), "a refused run writes no leaf");
+    assert!(sim_store_cells::sim_cells(&output).is_empty(), "a refused run writes no cell");
     assert!(!tmp.path().join("t.tsv").exists(), "a refused run writes no mirror");
 }
 
@@ -114,7 +116,7 @@ fn simulate_runs_an_unedited_fit_params_file() {
     let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &golden_pure_death().to_string_lossy(),
                "--params", &mle.to_string_lossy(),
-               "--seed", "1", "--output-dir", &tmp.path().join("out").to_string_lossy(),
+               "--seed", "1", "--store", &tmp.path().join("out").to_string_lossy(),
                "-o", &tmp.path().join("t.tsv").to_string_lossy()])
         .output().expect("spawn");
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -134,6 +136,7 @@ fn simulate_auto_matches_fit_backend_when_backend_not_passed() {
         .args(["simulate", &golden_pure_death().to_string_lossy(),
                "--params", &mle.to_string_lossy(),
                "--replicates", "2", "--seed", "1",
+               "--store", &tmp.path().join("out").to_string_lossy(),
                "-o", &tmp.path().join("t.tsv").to_string_lossy()])
         .output().expect("spawn");
     assert!(out.status.success(), "expected success; stderr: {}",
@@ -157,6 +160,7 @@ fn simulate_warns_on_explicit_backend_mismatch() {
                "--params", &mle.to_string_lossy(),
                "--replicates", "2", "--seed", "1",
                "--backend", "gillespie",
+               "--store", &tmp.path().join("out").to_string_lossy(),
                "-o", &tmp.path().join("t.tsv").to_string_lossy()])
         .output().expect("spawn");
     assert!(out.status.success(),
@@ -183,6 +187,7 @@ fn simulate_silent_on_matching_explicit_backend() {
                "--params", &mle.to_string_lossy(),
                "--replicates", "2", "--seed", "1",
                "--backend", "chain_binomial", "--dt", "1.0",
+               "--store", &tmp.path().join("out").to_string_lossy(),
                "-o", &tmp.path().join("t.tsv").to_string_lossy()])
         .output().expect("spawn");
     assert!(out.status.success());
@@ -205,6 +210,7 @@ fn simulate_unchanged_on_standalone_params_file() {
         .args(["simulate", &golden_pure_death().to_string_lossy(),
                "--params", &standalone.to_string_lossy(),
                "--replicates", "2", "--seed", "1",
+               "--store", &tmp.path().join("out").to_string_lossy(),
                "-o", &tmp.path().join("t.tsv").to_string_lossy()])
         .output().expect("spawn");
     assert!(out.status.success());
@@ -252,25 +258,18 @@ n_particles = 500
         .args(["simulate", &golden_pure_death().to_string_lossy(),
                "--params", &mle.to_string_lossy(),
                "--seed", "1",
-               "--output-dir", &output.to_string_lossy(),
+               "--store", &output.to_string_lossy(),
                "-o", &tmp.path().join("t.tsv").to_string_lossy()])
         .status().expect("spawn");
     assert!(status.success());
 
-    // Locate the run.json under output/sims/...
-    let run_jsons: Vec<_> = walkdir(&output.join("sims")).into_iter()
-        .filter(|p| p.file_name().map(|s| s == "run.json").unwrap_or(false))
-        .collect();
-    assert_eq!(run_jsons.len(), 1, "expected one sim run, got {}",
-        run_jsons.len());
-    let v: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(&run_jsons[0]).unwrap()).unwrap();
-    assert_eq!(v["kind"], "sim", "a valid sim RunRecord");
-    assert_eq!(v["run_id"].as_str().unwrap().len(), 64);
-    // The mle's backend (chain_binomial) is auto-matched into the config level.
-    let cfg = v["levels"].as_array().unwrap().iter()
-        .find(|l| l["name"] == "config").unwrap()["label"].as_str().unwrap();
-    assert!(cfg.starts_with("chain_binomial-"), "config level: {cfg}");
+    // The one stored sim cell, found by its identity.json.
+    let cell = sim_store_cells::only_sim_cell(&output);
+    assert_eq!(cell.identity["kind"], "sim", "a valid sim cell");
+    assert_eq!(cell.run_id.len(), 64);
+    assert_eq!(cell.run_json()["status"], "completed");
+    // The mle's backend (chain_binomial) is auto-matched into the config.
+    assert_eq!(cell.config()["backend"], "ChainBinomial", "config: {}", cell.config());
 }
 
 // ── Behavior tests: read run.json and assert the *resolved* backend ──
@@ -288,26 +287,17 @@ n_particles = 500
 // bug hard-coding chain_binomial in the auto-match path is caught —
 // checking only one backend direction is insufficient.
 
-/// Find the single sim run.json under `output/sims/**` and return the
-/// resolved `(backend, dt)` recorded in its `config` level label
-/// (`"chain_binomial-dt1"` → `("chain_binomial", "1")`). In the factored
-/// CAS, backend + dt live in the config level (hashed) — there is no
-/// `kind.backend`/`kind.dt` field anymore.
-fn read_sim_config(output_root: &Path) -> (String, String) {
-    let run_jsons: Vec<_> = walkdir(&output_root.join("sims")).into_iter()
-        .filter(|p| p.file_name().map(|s| s == "run.json").unwrap_or(false))
-        .collect();
-    assert_eq!(run_jsons.len(), 1,
-        "expected exactly one run.json under {}, got {:?}",
-        output_root.display(), run_jsons);
-    let v: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(&run_jsons[0]).unwrap()).unwrap();
-    let label = v["levels"].as_array().unwrap().iter()
-        .find(|l| l["name"] == "config").expect("config level")
-        ["label"].as_str().unwrap().to_string();
-    let (backend, dt) = label.rsplit_once("-dt")
-        .unwrap_or_else(|| panic!("config label should be <backend>-dt<dt>, got {label}"));
-    (backend.to_string(), dt.to_string())
+/// Find the single sim cell under the store `output_root` and return the
+/// resolved `(backend, dt)` recorded in its identity record's `config`
+/// (`{"backend": "ChainBinomial", "dt": 1.0}` → `("ChainBinomial", 1.0)`).
+fn read_sim_config(output_root: &Path) -> (String, f64) {
+    let cell = sim_store_cells::only_sim_cell(output_root);
+    let cfg = cell.config();
+    let backend = cfg["backend"].as_str()
+        .unwrap_or_else(|| panic!("config.backend should be a string: {cfg}")).to_string();
+    let dt = cfg["dt"].as_f64()
+        .unwrap_or_else(|| panic!("config.dt should be a number: {cfg}"));
+    (backend, dt)
 }
 
 /// Run `simulate --params <mle> [extra args...]`, return the
@@ -320,7 +310,7 @@ fn run_simulate_cas(
         "simulate".into(), golden_pure_death().to_string_lossy().to_string(),
         "--params".into(), mle.to_string_lossy().to_string(),
         "--seed".into(), "1".into(),
-        "--output-dir".into(), output.to_string_lossy().to_string(),
+        "--store".into(), output.to_string_lossy().to_string(),
         "-o".into(), tmp.join("t.tsv").to_string_lossy().to_string(),
     ];
     for a in extra { args.push(a.to_string()); }
@@ -341,8 +331,8 @@ fn run_json_records_chain_binomial_when_provenance_says_chain_binomial() {
     write_fake_mle(&mle, "chain_binomial", 1.0);
     let output = run_simulate_cas(&bin, tmp.path(), &mle, &[]);
     let (backend, dt) = read_sim_config(&output);
-    assert_eq!(backend, "chain_binomial", "config level must record auto-matched backend");
-    assert_eq!(dt, "1");
+    assert_eq!(backend, "ChainBinomial", "config must record auto-matched backend");
+    assert_eq!(dt, 1.0);
 }
 
 #[test]
@@ -356,7 +346,7 @@ fn run_json_records_gillespie_when_provenance_says_gillespie() {
     write_fake_mle(&mle, "gillespie", 1.0);
     let output = run_simulate_cas(&bin, tmp.path(), &mle, &[]);
     let (backend, _dt) = read_sim_config(&output);
-    assert_eq!(backend, "gillespie", "config level must record gillespie (opposite direction)");
+    assert_eq!(backend, "Gillespie", "config must record gillespie (opposite direction)");
 }
 
 #[test]
@@ -371,8 +361,8 @@ fn run_json_records_auto_matched_dt_not_just_backend() {
     write_fake_mle(&mle, "chain_binomial", 0.5);
     let output = run_simulate_cas(&bin, tmp.path(), &mle, &[]);
     let (_backend, dt) = read_sim_config(&output);
-    assert_eq!(dt, "0.5",
-        "config level must record auto-matched dt 0.5, not the 1.0 default");
+    assert_eq!(dt, 0.5,
+        "config must record auto-matched dt 0.5, not the 1.0 default");
 }
 
 #[test]
@@ -389,7 +379,7 @@ fn explicit_backend_overrides_provenance_in_run_json() {
     let output = run_simulate_cas(&bin, tmp.path(), &mle,
         &["--backend", "gillespie"]);
     let (backend, _dt) = read_sim_config(&output);
-    assert_eq!(backend, "gillespie", "explicit --backend must override provenance");
+    assert_eq!(backend, "Gillespie", "explicit --backend must override provenance");
 }
 
 #[test]
@@ -404,7 +394,7 @@ fn standalone_params_use_chain_binomial_default_in_run_json() {
     std::fs::write(&standalone, "mu = 0.05\n").unwrap();
     let output = run_simulate_cas(&bin, tmp.path(), &standalone, &[]);
     let (backend, _dt) = read_sim_config(&output);
-    assert_eq!(backend, "chain_binomial", "standalone params must use chain_binomial default");
+    assert_eq!(backend, "ChainBinomial", "standalone params must use chain_binomial default");
 }
 
 #[test]
@@ -420,9 +410,9 @@ fn explicit_dt_overrides_provenance_in_run_json() {
     let output = run_simulate_cas(&bin, tmp.path(), &mle,
         &["--dt", "0.25"]);
     let (backend, dt) = read_sim_config(&output);
-    assert_eq!(dt, "0.25", "explicit --dt must override provenance dt");
+    assert_eq!(dt, 0.25, "explicit --dt must override provenance dt");
     // And backend still auto-matches (we didn't pass --backend).
-    assert_eq!(backend, "chain_binomial");
+    assert_eq!(backend, "ChainBinomial");
 }
 
 // ── Producer side (gh#241 C3): `camdl fit` must record the METHOD's backend
@@ -512,7 +502,7 @@ cooling = 0.7
     let sim = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args(["simulate", &seed_timing_model().to_string_lossy(),
                "--params", &mle.to_string_lossy(),
-               "--seed", "1", "--output-dir", &tmp.path().join("sim").to_string_lossy(),
+               "--seed", "1", "--store", &tmp.path().join("sim").to_string_lossy(),
                "-o", &tmp.path().join("t.tsv").to_string_lossy()])
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output().expect("spawn camdl simulate");

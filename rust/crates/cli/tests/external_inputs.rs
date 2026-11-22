@@ -135,7 +135,7 @@ impl Fixture {
             .env("CAMDL_IR_CACHE_DIR", self.dir.join("ir-cache"))
             .arg("simulate")
             .args(args)
-            .args(["--progress", "none", "--output-dir"])
+            .args(["--progress", "none", "--store"])
             .arg(self.dir.join(store))
             .output()
             .expect("spawn camdl simulate")
@@ -259,7 +259,8 @@ fn table_file_with_the_wrong_cell_count_is_refused() {
 fn bound_bytes_not_path_are_the_identity() {
     let fx = Fixture::new();
     fx.write("copy/imp.tsv", IMP);
-    fx.write("edited/imp.tsv", &format!("{IMP}# one more line\n"));
+    fx.write("commented/imp.tsv", &format!("{IMP}# one more line\n"));
+    fx.write("edited/imp.tsv", &IMP.replace("north\t10\t0.14", "north\t10\t0.15"));
     let id = |store: &str, imp: &str| {
         let imp = format!("imp={imp}");
         run_id(&ok(&fx.simulate(store, &ext_args(&["--table", &imp, "--table", "school=school.tsv"]))))
@@ -267,8 +268,13 @@ fn bound_bytes_not_path_are_the_identity() {
     let a = id("a", "imp.tsv");
     let b = id("b", &fx.path("copy/imp.tsv"));
     let c = id("c", "edited/imp.tsv");
+    let d = id("d", "commented/imp.tsv");
     assert_eq!(a, b, "the same bytes under another path are the same run");
-    assert_ne!(a, c, "one changed byte in a bound file is a different run");
+    assert_ne!(a, c, "one changed value in a bound file is a different run");
+    // A bound table reaches a cell through the compiled model it is written
+    // into, so bytes that leave the model unchanged (a comment line) leave the
+    // run unchanged ("A model rewritten from data").
+    assert_eq!(a, d, "a comment line in a bound file changes no value and so no run");
 }
 
 // ── Fits: `[data.tables]` in the fit config ─────────────────────────────────
@@ -446,7 +452,7 @@ fn replays_of_a_stored_fit_read_its_stored_table() {
     };
     let replay = |store: &str, extra: &[&str]| -> Vec<u8> {
         let mut args = vec!["simulate", "fit.camdl", "--fit", "pm.toml", "--draws", "posterior", "-n", "3",
-                            "--seed", "1", "--output-dir", store];
+                            "--seed", "1", "--store", store];
         args.extend(extra);
         ok(&fx.camdl(&args));
         files_under(&fx.dir.join(store)).into_iter().filter(|(k, _)| k.ends_with("traj.tsv")).flat_map(|(_, v)| v).collect()

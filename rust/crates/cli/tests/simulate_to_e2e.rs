@@ -15,6 +15,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod sim_store_cells;
+
 fn binary() -> PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     Path::new(&manifest).join("../../target/release/camdl")
@@ -127,7 +129,7 @@ fn absolute_to_extends_trajectory_and_rekeys() {
         }
         let o = Command::new(&bin).env_remove("CLICOLOR_FORCE")
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
-            .env("CAMDL_OUTPUT_DIR", tmp.path().join("cas"))
+            .env("CAMDL_STORE", tmp.path().join("cas"))
             .args(&args)
             .output()
             .expect("spawn simulate");
@@ -147,31 +149,11 @@ fn absolute_to_extends_trajectory_and_rekeys() {
     assert_eq!(max_time(&base), 100.0, "baked horizon");
     assert_eq!(max_time(&ext), 140.0, "--to 140 must extend the output grid");
 
-    // Distinct identities: the two runs committed different CAS leaves. The
-    // stderr run lines carry the run ids; cheapest robust check is that the
-    // leaves differ — assert the store has (at least) two sim leaves.
-    let sims = tmp.path().join("cas").join("sims");
-    let n_leaves = walk_count(&sims);
-    assert!(n_leaves >= 2,
-        "two horizons must commit two distinct CAS leaves, found {n_leaves}");
+    // Distinct identities: the two runs stored two different cells.
+    let ids = sim_store_cells::sim_run_ids(&tmp.path().join("cas"));
+    assert_eq!(ids.len(), 2,
+        "two horizons must store two distinct cells, found {ids:?}");
     let _ = stderr_base;
-}
-
-/// Count leaf run dirs (containing run.json) under the sims store.
-fn walk_count(root: &Path) -> usize {
-    let mut n = 0;
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&d) else { continue };
-        for e in rd.flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                if p.join("run.json").is_file() { n += 1; }
-                stack.push(p);
-            }
-        }
-    }
-    n
 }
 
 /// Anchored `--to` without `--fit`: the named refusal.
@@ -188,7 +170,7 @@ fn anchored_to_without_fit_is_refused() {
     args.extend(PARAMS.iter().map(|s| s.to_string()));
     let o = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
-        .env("CAMDL_OUTPUT_DIR", tmp.path().join("cas"))
+        .env("CAMDL_STORE", tmp.path().join("cas"))
         .args(&args)
         .output()
         .expect("spawn simulate");
@@ -221,7 +203,7 @@ fn anchored_to_resolves_against_fit_data() {
     args.extend(PARAMS.iter().map(|s| s.to_string()));
     let o = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
-        .env("CAMDL_OUTPUT_DIR", tmp.path().join("cas"))
+        .env("CAMDL_STORE", tmp.path().join("cas"))
         .args(&args)
         .output()
         .expect("spawn simulate");
@@ -253,7 +235,7 @@ fn inverted_horizon_is_refused() {
     args.extend(PARAMS.iter().map(|s| s.to_string()));
     let o = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
-        .env("CAMDL_OUTPUT_DIR", tmp.path().join("cas"))
+        .env("CAMDL_STORE", tmp.path().join("cas"))
         .args(&args)
         .output()
         .expect("spawn simulate");
@@ -271,7 +253,7 @@ fn scenario_horizon_conflict_is_refused() {
     let tmp = tempfile::tempdir().unwrap();
     let o = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
-        .env("CAMDL_OUTPUT_DIR", tmp.path().join("cas"))
+        .env("CAMDL_STORE", tmp.path().join("cas"))
         .args([
             "simulate",
             &golden("sir_demography.ir.json").to_string_lossy(),
@@ -293,7 +275,7 @@ fn scenario_horizon_conflict_is_refused() {
     // not be what refuses it.
     let o = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
-        .env("CAMDL_OUTPUT_DIR", tmp.path().join("cas2"))
+        .env("CAMDL_STORE", tmp.path().join("cas2"))
         .args([
             "simulate",
             &golden("sir_demography.ir.json").to_string_lossy(),
@@ -337,7 +319,7 @@ fn extending_to_with_at_list_emit_schedule_is_refused() {
     args.extend(PARAMS.iter().map(|s| s.to_string()));
     let o = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
-        .env("CAMDL_OUTPUT_DIR", tmp.path().join("cas"))
+        .env("CAMDL_STORE", tmp.path().join("cas"))
         .args(&args)
         .output()
         .expect("spawn simulate");

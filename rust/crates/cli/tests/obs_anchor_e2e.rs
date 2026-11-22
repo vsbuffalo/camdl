@@ -181,7 +181,8 @@ fn params_file(dir: &Path) -> PathBuf {
     p
 }
 
-/// Every `run_id` committed under a CAS root.
+/// Every simulation cell's `run_id` under a store root, read from each cell's
+/// `identity.json`.
 fn run_ids(cas_root: &Path) -> Vec<String> {
     let mut out = Vec::new();
     let mut stack = vec![cas_root.to_path_buf()];
@@ -190,10 +191,13 @@ fn run_ids(cas_root: &Path) -> Vec<String> {
         for e in rd.flatten() {
             let p = e.path();
             if p.is_dir() {
-                let rj = p.join("run.json");
-                if rj.is_file() {
-                    if let Ok(txt) = std::fs::read_to_string(&rj) {
+                let ij = p.join("identity.json");
+                if ij.is_file() {
+                    if let Ok(txt) = std::fs::read_to_string(&ij) {
                         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) {
+                            if v["kind"] != "sim" {
+                                continue;
+                            }
                             if let Some(id) = v.get("run_id").and_then(|x| x.as_str()) {
                                 out.push(id.to_string());
                             }
@@ -682,11 +686,11 @@ fn an_anchored_horizon_can_write_observations() {
     // The emitted axis must reach the RESOLVED horizon (last_obs 28 + 14 = 42),
     // not the pre-substitution placeholder.
     let txt = std::fs::read_to_string(&obs).expect("obs file written");
-    let max_t = txt
-        .lines()
-        .skip(1)
-        .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
-        .filter_map(|l| l.split('\t').next().and_then(|t| t.parse::<f64>().ok()))
+    let mut lines = txt.lines().filter(|l| !l.trim().is_empty() && !l.starts_with('#'));
+    let header: Vec<&str> = lines.next().expect("header").split('\t').collect();
+    let ti = header.iter().position(|h| *h == "time").expect("a `time` column");
+    let max_t = lines
+        .filter_map(|l| l.split('\t').nth(ti).and_then(|t| t.parse::<f64>().ok()))
         .fold(f64::NEG_INFINITY, f64::max);
     assert_eq!(max_t, 42.0, "obs axis reaches the resolved horizon:\n{txt}");
 }

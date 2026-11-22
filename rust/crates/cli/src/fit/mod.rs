@@ -1471,12 +1471,8 @@ fn run_fit(
         }
         let write = match crate::resolve::begin_resolved_write(
             &store, &cas_root, &resolved_artifact, &meta,
-            crate::resolve::WriteMode::Streaming,
         ) {
-            Ok(crate::resolve::ResolvedWrite::Streaming(c)) => c,
-            Ok(crate::resolve::ResolvedWrite::Committed(_)) => {
-                unreachable!("Streaming write mode never returns a committed path")
-            }
+            Ok(c) => c,
             Err(e) => {
                 drop(label_lock);
                 out.fail(format!("error: claim fit method {}: {}", cas_path.display(), e));

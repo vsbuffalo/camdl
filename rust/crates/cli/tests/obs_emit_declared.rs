@@ -86,8 +86,14 @@ fn emit(camdl: &Path, model: &Path, out_dir: &Path) -> String {
     std::fs::read_to_string(out_dir.join("cases.tsv")).expect("cases.tsv written")
 }
 
+/// The coordinate columns every `simulate --obs-dir` table leads with, for a
+/// run of one cell: its replicate, its scenario and its seed.
+const COORDS: &str = "replicate\tscenario\tseed\t";
+const N_COORDS: usize = 3;
+
+/// The first column after the coordinate columns.
 fn first_column(line: &str) -> &str {
-    line.split('\t').next().unwrap()
+    line.split('\t').nth(N_COORDS).unwrap()
 }
 
 /// The fixture's schedule is `regular { start 0, step 1 }` over a run
@@ -102,7 +108,7 @@ fn closing_at_writes_every_row_the_run_covers_and_no_leading_zero_width_row() {
 
     let c = emit(&camdl, &closing, &tmp.join("c"));
     let c_lines: Vec<&str> = c.lines().collect();
-    assert_eq!(c_lines[0], "time\tcases", "the time under the declared column's name");
+    assert_eq!(c_lines[0], format!("{COORDS}time\tcases"), "the time under the declared column's name");
     let labels: Vec<&str> = c_lines[1..].iter().map(|l| first_column(l)).collect();
     let expected: Vec<String> = (1..=120).map(|t| t.to_string()).collect();
     assert_eq!(labels, expected, "labels 1..=120: the row at t_start has no simulated period");
@@ -148,7 +154,7 @@ fn the_value_goes_under_the_scored_column_not_the_stream_name() {
     let out = run(&camdl, &args);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let text = std::fs::read_to_string(out_dir.join("reported.tsv")).expect("one file per STREAM");
-    assert_eq!(text.lines().next().unwrap(), "time\tcases",
+    assert_eq!(text.lines().next().unwrap(), format!("{COORDS}time\tcases"),
         "the header names the scored column, which is what the loader reads");
 }
 
@@ -164,10 +170,10 @@ fn a_windowed_stream_round_trips_through_its_own_emitted_file() {
     let out_dir = tmp.join("o");
     let text = emit(&camdl, &model, &out_dir);
     let lines: Vec<&str> = text.lines().collect();
-    assert_eq!(lines[0], "win_start\twin_stop\tcases", "the declared window columns, then the scored column");
+    assert_eq!(lines[0], format!("{COORDS}win_start\twin_stop\tcases"), "the declared window columns, then the scored column");
     let written: Vec<(f64, f64)> = lines[1..].iter().map(|l| {
         let f: Vec<&str> = l.split('\t').collect();
-        (f[0].parse().unwrap(), f[1].parse().unwrap())
+        (f[N_COORDS].parse().unwrap(), f[N_COORDS + 1].parse().unwrap())
     }).collect();
     assert_eq!(written[0], (0.0, 1.0), "contiguous windows from the run's start; no zero-width row");
     assert!(written.windows(2).all(|w| w[0].1 == w[1].0), "contiguous");
@@ -293,16 +299,16 @@ fn the_real_shaped_windowed_and_instant_streams_round_trip() {
 
     let cases = std::fs::read_to_string(out_dir.join("cases.tsv")).expect("cases.tsv");
     let lines: Vec<&str> = cases.lines().collect();
-    assert_eq!(lines[0], "window_start\twindow_stop\tcases",
+    assert_eq!(lines[0], format!("{COORDS}window_start\twindow_stop\tcases"),
         "the declared window columns, then the scored column");
     let written: Vec<(f64, f64)> = lines[1..].iter().map(|l| {
         let f: Vec<&str> = l.split('\t').collect();
-        (f[0].parse().unwrap(), f[1].parse().unwrap())
+        (f[N_COORDS].parse().unwrap(), f[N_COORDS + 1].parse().unwrap())
     }).collect();
     assert!(written.windows(2).all(|w| w[0].1 == w[1].0), "contiguous: {written:?}");
 
     let care = std::fs::read_to_string(out_dir.join("in_care.tsv")).expect("in_care.tsv");
-    assert_eq!(care.lines().next().unwrap(), "window_stop\tin_care",
+    assert_eq!(care.lines().next().unwrap(), format!("{COORDS}window_stop\tin_care"),
         "a stream whose `: time` column is named for a window boundary keeps that name");
 
     let out = reload(&camdl, &ir, &out_dir, &["cases", "in_care"]);
@@ -326,7 +332,7 @@ fn the_real_shaped_stratified_family_round_trips() {
 
     let text = std::fs::read_to_string(out_dir.join("province_cases.tsv"))
         .expect("one long-format file for the family's source");
-    assert_eq!(text.lines().next().unwrap(), "week_ending\tprovince\tprovince_cases",
+    assert_eq!(text.lines().next().unwrap(), format!("{COORDS}week_ending\tprovince\tprovince_cases"),
         "the declared columns, the dim column among them");
     let out = reload(&camdl, &ir, &out_dir, &["province_cases"]);
     assert!(out.status.success(),
@@ -347,7 +353,7 @@ fn the_real_shaped_covariate_stream_round_trips() {
     emit_real_shaped(&camdl, &ir, &out_dir);
 
     let text = std::fs::read_to_string(out_dir.join("survey.tsv")).expect("survey.tsv");
-    assert_eq!(text.lines().next().unwrap(), "time\tpositives\ttested",
+    assert_eq!(text.lines().next().unwrap(), format!("{COORDS}time\tpositives\ttested"),
         "the declared columns, the denominator among them");
     let out = reload(&camdl, &ir, &out_dir, &["survey"]);
     assert!(out.status.success(),

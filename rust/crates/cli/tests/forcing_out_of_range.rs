@@ -759,7 +759,7 @@ fn statuses(root: &Path) -> Vec<(PathBuf, serde_json::Value)> {
 }
 
 /// Under `--allow-forcing-extrapolation` each kind runs, says so once, and
-/// records the override in the run's `run.json`.
+/// records the override in the stored cell's identity record.
 #[test]
 fn the_override_holds_with_one_warning_per_function() {
     for kind in KINDS {
@@ -773,7 +773,7 @@ fn the_override_holds_with_one_warning_per_function() {
         assert!(err.contains("held from t = 50 to the end of the run"), "{kind}: names the span held:\n{err}");
         assert!(!err.contains("t = 51"), "{kind}: names no time outside the range:\n{err}");
         let recorded = recorded_overrides(&tmp.path().join("cas"));
-        assert_eq!(recorded, vec![true], "{kind}: the override is recorded in run.json");
+        assert_eq!(recorded, vec![true], "{kind}: the override is recorded in the cell's identity");
     }
 }
 
@@ -979,8 +979,8 @@ fn a_range_covering_the_run_is_untouched() {
     assert_eq!(warnings(&err), 0, "{err}");
 }
 
-/// The `allow_forcing_extrapolation` value of every committed `run.json`
-/// under `cas`.
+/// The `allow_forcing_extrapolation` value each stored simulation cell under
+/// `cas` records in its identity record's `config`.
 fn recorded_overrides(cas: &Path) -> Vec<bool> {
     let mut out = Vec::new();
     let mut stack = vec![cas.to_path_buf()];
@@ -990,9 +990,12 @@ fn recorded_overrides(cas: &Path) -> Vec<bool> {
             let p = e.path();
             if p.is_dir() {
                 stack.push(p);
-            } else if p.file_name().is_some_and(|n| n == "run.json") {
+            } else if p.file_name().is_some_and(|n| n == "identity.json") {
                 let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
-                if let Some(b) = v.pointer("/inputs/forcing_extrapolation/allowed").and_then(|b| b.as_bool()) {
+                if v["kind"] != "sim" {
+                    continue;
+                }
+                if let Some(b) = v.pointer("/identity/config/allow_forcing_extrapolation").and_then(|b| b.as_bool()) {
                     out.push(b);
                 }
             }

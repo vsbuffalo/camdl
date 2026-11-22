@@ -275,7 +275,7 @@ dt = 1.0
         .args(["simulate", &golden_ir().to_string_lossy(),
                "--draws", "prior", "--fit", &problem.to_string_lossy(),
                "-n", "2", "--seed", "1", "--obs-dir", &dir.join("ppc").to_string_lossy(),
-               "--output-dir", &dir.join("sims").to_string_lossy()])
+               "--store", &dir.join("sims").to_string_lossy()])
         .output()
         .expect("spawn simulate");
     let stderr = String::from_utf8_lossy(&out.stderr);

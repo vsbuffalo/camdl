@@ -856,6 +856,20 @@ pub(crate) fn write_stream_columns(
     extra: &[(String, Vec<f64>)],
     mode: RowValues,
 ) -> Result<(), String> {
+    let bytes = stream_columns_bytes(path, plan, scored, values, extra, mode)?;
+    std::fs::write(path, bytes).map_err(|e| format!("cannot write {}: {}", path.display(), e))
+}
+
+/// The bytes [`write_stream_columns`] writes, without writing them: the file
+/// a simulation cell stores for one stream. `path` names the file in errors.
+pub(crate) fn stream_columns_bytes(
+    path: &Path,
+    plan: &EmitPlan,
+    scored: &str,
+    values: &[f64],
+    extra: &[(String, Vec<f64>)],
+    mode: RowValues,
+) -> Result<Vec<u8>, String> {
     use std::io::Write;
     if values.len() != plan.rows.len() {
         return Err(format!(
@@ -871,10 +885,7 @@ pub(crate) fn write_stream_columns(
             ));
         }
     }
-    let mut out = std::io::BufWriter::new(
-        std::fs::File::create(path)
-            .map_err(|e| format!("cannot create {}: {}", path.display(), e))?,
-    );
+    let mut out: Vec<u8> = Vec::new();
     let io = |e: std::io::Error| format!("{}: {}", path.display(), e);
     match &plan.columns {
         TemporalColumns::Time(t) => write!(out, "{t}\t{scored}").map_err(io)?,
@@ -905,7 +916,7 @@ pub(crate) fn write_stream_columns(
         }
         writeln!(out).map_err(io)?;
     }
-    out.flush().map_err(io)
+    Ok(out)
 }
 
 /// A drawn observation as the file spells it: an integral value as an integer,

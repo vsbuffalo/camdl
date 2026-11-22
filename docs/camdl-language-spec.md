@@ -5192,9 +5192,9 @@ or a fixed cadence (`every = 30 'days`). The `at` entries are instant
 positions (§2.1): one calendar step is its calendar date by the one-step
 calendar rule, and any other calendar duration is **E321**.
 
-**Where the trajectory goes.** `camdl simulate` stores the trajectory in the
-run store (§19). `-o FILE` also writes a copy to `FILE`, and `--stdout` streams
-it to standard output and stores nothing. Synthetic observations are written
+**Where the trajectory goes.** `camdl simulate` stores each cell's trajectory
+in the run store (§19). `-o FILE` writes the combined table of the stored cells
+to `FILE`, and `--stdout` writes the same table to standard output. Synthetic observations are written
 only when `--obs`, `--obs-dir`, `--obs-only` or `--obs-only-dir` is passed
 (§12.4, §21).
 
@@ -5203,11 +5203,13 @@ CLI), §25 (the IR).
 
 ### 16.1 Output Files
 
-A `simulate` run stores two files in its leaf directory (§19):
+A `simulate` cell stores these files in its folder (§19):
 
 ```
-traj.tsv      # one row per output time
-run.json      # the run record: identity levels, resolved inputs, file digests (§19)
+identity.json    # the cell's identity record (§19.1)
+run.json         # the record: status, file digests, the inputs as given
+provenance.json  # where each parameter value came from
+traj.tsv         # one row per output time
 ```
 
 `traj.tsv` has a `t` column, a `t_start`/`t_stop` pair, one column per
@@ -5974,94 +5976,86 @@ until the run resolves it.
 
 ## 19. Content-Addressable Output
 
-Every run is stored in a **content-addressed store** under the output root
-(`--output-dir`, default `./results`), partitioned by artifact kind: `sims/`
-for `simulate` trajectories, `fits/` for fits, and so on. A run's directory is
-derived from its inputs, so the same inputs always reach the same directory and
-different inputs never share one. The store's layout and every artifact kind
-are specified in the run spec (§2.1, §3.7); this section states what a
-`simulate` run's address depends on.
+Every `simulate` cell, one realisation at one parameter point, scenario and
+seed, is stored in the run store: the directory `--store` names, else
+`$CAMDL_STORE`, else `./camdl-store`. A cell's folder is derived from its
+identity, so the same inputs reach the same folder and different inputs never
+share one. The store's layout and its other result kinds are specified in the
+run spec (§2.4, §4.4); this section states what a cell's identity holds.
 
 ```
-{output_dir}/
-  sims/
-    {model}/{config}/{params}/{scenario}/{seed}/
-      traj.tsv
-      run.json
+camdl-store/
+  {version}-{key12}/                       # one directory per build of camdl
+    compiled_model/{model}-{key12}/
+    sim/
+      {model}-{key12}/{backend}-dt{dt}-{key12}/{params}-{key12}/{scenario}-{key12}/
+        seed_{seed}-{key12}/
+          identity.json  run.json  provenance.json  traj.tsv
 ```
 
-A `simulate` trajectory's address has five levels, nested in the order model,
-config, params, scenario, seed. Each path segment is `{label}-{hash8}`, as in
-`sir_basic-3a7f2c1d/chain_binomial-dt1-1fb03eee/…`: the label is a readable
-tag (the model's file stem, `chain_binomial-dt1`, `seed_1`) and `hash8` is the
-first eight hex characters of that level's content hash.
-
-Commands that list and display runs read `run.json`, never the segment text, so
-a label carries no identity. A run without `--scenario` has an empty scenario
-change, which hashes to a level hash like any other input.
+Each directory name is a readable label and twelve hex characters of a key, as
+in `sir_basic-3a7f2c1d9e04/chain_binomial-dt1-1fb03eee52a1/…`. The labels are
+the model's file stem, the backend and step, `base` or a sweep point's or draw
+row's values, the scenario's name (`_none_` without one), and the seed typed,
+followed by `-r1`, `-r2`, … for each later replicate of that seed. Commands
+that list and display results read `identity.json` and `run.json`, never the
+folder name, so a label carries no identity.
 
 ### 19.1 Run identity
 
-A leaf's identity is its `run_id`, one hash over the artifact kind and the
-ordered list of the five level hashes,
+A cell's run id is one hash over the kind `sim`, the ambient identity (the
+build of camdl and the environment switches that change results) and the
+cell's identity. It is recorded in full in `identity.json`. The identity has
+five parts:
 
-```
-run_id = hash(HASH_VERSION, kind, [model, config, params, scenario, seed])
-```
-
-recorded in full (64 hex characters) in `run.json`; the eight-character path
-segments are a readable factoring of it. Together the levels cover every
-resolved input:
-
-| Level      | Covers                                                                                                                                                                                                   |
+| Part       | Covers                                                                                                                                                                                                   |
 | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `model`    | the whole compiled model (compartments, transitions, observations, ODE equations, tables, `init`, `time_unit`, scenario presets), the IR schema version and the engine build; the output `format` and the time rendering are removed first, since they do not change results, and `quantities {}`, `contrasts {}` and `#'` documentation are not part of the model (§16.4) |
-| `config`   | the backend, `dt`, `from` and `to`, the output schedule, the calendar mode, the written-column selection (`--columns`, `--no-flows`), the handling of degenerate rates and of forcing extrapolation, and the saved state a run starts from under `--init-state` |
-| `params`   | the resolved base parameter values and the content digests of any loaded table files                                                                                                                     |
-| `scenario` | the scenario's effective change only: the `enable` and `disable` lists and the `set` and `scale` parameter patch                                                                                         |
-| `seed`     | the run's process seed, derived from `--seed` or `--seeds` (run spec §3.5)                                                                                                                               |
+| `model`    | the compiled model, keyed by its bytes: everything the engine runs (compartments, transitions, observations, ODE equations, tables, `init`, `time_unit`, scenario presets), with observation anchors resolved and `--table` files written in; not the model's name, description, `quantities {}`, `contrasts {}` or `#'` documentation (§16.4) |
+| `config`   | the backend, `dt`, the cell's start and end, the saved state a cell restores under `--init-state`, the written-column selection (`--columns`, `--no-flows`), and the handling of degenerate rates and of forcing extrapolation |
+| `params`   | every parameter's resolved value, after the model, `--params`, a draw or sweep point, the scenario's `set` and `scale`, `--param` and `--param-vec` (run spec §1.3)                                     |
+| `scenario` | the interventions the cell's scenario selection keeps                                                                                                                                                   |
+| `seed`     | the cell's process seed, derived from `--seed` or `--seeds` (run spec §3.5)                                                                                                                             |
 
-The levels are not disjoint in two places. The scenarios a file declares are
-part of the compiled model, so editing or renaming any of them, selected or
-not, re-keys the `model` level, while the `scenario` level hashes only the
-selected scenario's effective change. And `--output-every` rewrites the
-compiled model's output schedule, which both `model` and `config` hash
-(§16.3). A value supplied from a `--params` file re-keys the `params` level and
-leaves the `model` level unchanged; the same value written into a scenario's
-`set` gives a different `model` level from a file without that scenario. The
-written-column selection is part of `config`, so two runs that write different
-columns are different leaves, and a leaf's file and its `run_id` always agree.
+Names are labels and enter no hash: a scenario's name, the model file's name,
+`--label` and the seed typed. Two selections with the same effect within one
+model are one cell, and a value is one value whether a params file, `--param`
+or a scenario's `set` gives it. The scenarios a file declares are part of the
+compiled model, so editing or renaming any of them, selected or not, gives a
+new `model` part. `--output-every` rewrites the compiled model's output
+schedule, so it reaches a cell through the model.
 
-**Collisions.** Eight hex characters per segment suffice because two leaves
-share a path only when every level on the path collides at once. The full
-hashes in `run.json` are the authoritative check, and when two different
-identities do share a path the store adds a suffix to the final segment.
+Observations, the event log and generated quantities are by-products stored
+inside the cell's folder (`obs/`, `event_log/`, `sim_quantities/`), each with
+an identity that holds the cell's and its own settings, so asking for one
+never changes the cell's id.
 
 ### 19.2 Cache reuse
 
-A run whose address already holds a completed leaf is a **cache hit** and is
-read back without simulating. The levels nest, so a change re-keys its own level
-and every level below it, and the subtrees of unchanged levels are reused:
+A cell whose identity is already stored and completed is read back without
+simulating. A stored cell asked for a by-product it lacks is simulated again,
+and its trajectory is checked against the stored one.
 
-| What changed                        | Re-keys              | Reuse                                                                       |
-| ----------------------------------- | -------------------- | --------------------------------------------------------------------------- |
-| model / IR                          | `model` + all below  | none                                                                        |
-| base params or table data           | `params` + below     | none                                                                        |
-| backend, `dt`, or column selection  | `config` + below     | none                                                                        |
-| a scenario in the file, edited or renamed | `model` + all below | none                                                                  |
-| the scenario selected, or `--enable`/`--disable` | that `scenario` leaf | other scenarios' leaves reused                                 |
-| add more seeds                      | new `seed` leaves    | existing seeds reused                                                       |
+| What changed                                     | New cells                           | Reused                 |
+| ------------------------------------------------ | ----------------------------------- | ---------------------- |
+| the model, or a bound table's values             | every cell                          | none                   |
+| a scenario in the file, edited or renamed        | every cell                          | none                   |
+| backend, `dt`, the window or the column selection | every cell                         | none                   |
+| a parameter value                                | the cells whose values changed      | the others             |
+| the scenario selected, or `--enable`/`--disable` | the cells whose interventions differ | the others            |
+| more seeds                                       | the new seeds' cells                | the existing cells     |
+| camdl rebuilt                                    | every cell, under the new build     | none; the old stay     |
 
 ### 19.3 Enumerating runs
 
-There is no manifest file. Each completed run is its own `run.json` leaf, and
-`camdl list` enumerates them by walking the leaves or reading the store's
-`index.json`, a lookup cache rebuilt from the leaves (run spec §2.6).
+There is no manifest file. Each command run writes an invocation record that
+lists the cells it asked for, in order, with their labels. `camdl list` lists
+the stored cells, and `camdl cat @LABEL` renders the combined table of the
+invocation labelled `LABEL` from its stored cells (run spec §4.4).
 
 ### 19.4 Caching
 
-The same inputs give the same hashes, so a run whose leaf already exists is not
-simulated again. `--force` re-runs it and overwrites the stored result.
+The same inputs give the same identity, so a stored cell is not simulated
+again. `--force` simulates it again and moves the stored copy to quarantine.
 
 ---
 
@@ -6275,10 +6269,10 @@ Options:
   --params     FILE.toml  load parameter values (repeatable, later overrides earlier)
 ```
 
-`simulate` writes the trajectory to a content-addressed store leaf under
-`./results` (`--output-dir` sets the root), and prints the `camdl cat` command
-that reads it back. `--stdout` streams the TSV to stdout and writes no leaf;
-`-o FILE` writes a TSV copy in addition to the leaf. The trajectory's columns
+`simulate` stores each cell in the run store, `./camdl-store` (`--store` sets
+the root), and prints the `camdl cat` command that reads it back. `-o FILE`
+writes the combined table of the stored cells to `FILE`, and `--stdout` writes
+it to standard output. The trajectory's columns
 are `t`, `t_start` and `t_stop` (the period each row's flows cover), one column
 per compartment, and `flow_<name>` per transition (run spec §10.1).
 Observation draws are written with `--obs`, `--obs-dir` or `--obs-only` (§12.4).
@@ -6315,7 +6309,7 @@ the run spec (§5).
 
 camdl computes no sensitivity indices and generates no space-filling designs.
 For a Sobol analysis, generate the design in R or Python, run it with
-`--sweep-file`, and compute the indices from `ensemble.tsv` with R's
+`--sweep-file`, and compute the indices from the `-o` table with R's
 `sensitivity` package (Iooss et al., [CRAN](https://CRAN.R-project.org/package=sensitivity))
 or Python's SALib (Herman and Usher 2017,
 [_Journal of Open Source Software_ 2(9):97](https://doi.org/10.21105/joss.00097)).

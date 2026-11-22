@@ -68,7 +68,7 @@ fn a_misaligned_stream_leaves_no_partial_obs_child() {
     let out = Command::new(binary()).env_remove("CLICOLOR_FORCE")
         .args([
             "simulate", "m.camdl", "--params", "p.toml", "--backend", "chain_binomial",
-            "--dt", "1", "--seeds", "1,2", "--obs-dir", "synth", "--output-dir", "out",
+            "--dt", "1", "--seeds", "1,2", "--obs-dir", "synth", "--store", "out",
         ])
         .current_dir(tmp.path())
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
@@ -83,20 +83,17 @@ fn a_misaligned_stream_leaves_no_partial_obs_child() {
 
     // The load-bearing assertion: NO stream file may survive. A
     // validate-as-you-write loop would have emitted `weekly.tsv` before
-    // failing on `daily`, leaving a child with data and no obs.json.
+    // failing on `daily`, leaving a partial obs by-product.
     let mut leftovers = Vec::new();
     for e in walk(&tmp.path().join("out")).into_iter().chain(walk(&tmp.path().join("synth"))) {
         let name = e.file_name().unwrap().to_string_lossy().to_string();
         if name.ends_with(".tsv") && (name.starts_with("weekly") || name.starts_with("daily")) {
             leftovers.push(e.display().to_string());
         }
-        if name == "obs.json" {
-            leftovers.push(e.display().to_string());
-        }
     }
     assert!(
         leftovers.is_empty(),
-        "a refused obs emission must write no stream files and no obs.json; found: {leftovers:?}"
+        "a refused obs emission must write no stream files; found: {leftovers:?}"
     );
 }
 

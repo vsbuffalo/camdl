@@ -75,14 +75,18 @@ observations {
     std::fs::write(path, src).unwrap();
 }
 
-/// Every dir containing a `run.json`, at any depth — the factored store path
-/// is 5 levels deep, and the obs ensemble is a declared `obs/` child below it.
+/// Every simulation cell under a run store root, at any depth: a folder whose
+/// `identity.json` records `kind = "sim"`. The observation by-products a cell
+/// carries in its `obs/` subfolder are not cells.
 fn run_leaves(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        if dir.join("run.json").is_file() {
-            out.push(dir.clone());
+        if let Ok(txt) = std::fs::read_to_string(dir.join("identity.json")) {
+            let v: serde_json::Value = serde_json::from_str(&txt).expect("identity.json parses");
+            if v["kind"] == "sim" {
+                out.push(dir.clone());
+            }
         }
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for e in entries.flatten() {
@@ -113,7 +117,7 @@ fn obs_stream_files(seed_leaf: &Path) -> Vec<PathBuf> {
 }
 
 /// `simulate sir.camdl --params params.toml --backend chain_binomial --dt 1
-/// --seeds <seeds> --output-dir <output> <extra…>`.
+/// --seeds <seeds> --store <output> <extra…>`.
 fn simulate(bin: &Path, model: &Path, params: &Path, output: &Path, seeds: &str, extra: &[&str]) -> Output {
     let mut cmd = Command::new(bin);
     cmd.env_remove("CLICOLOR_FORCE");
@@ -121,7 +125,7 @@ fn simulate(bin: &Path, model: &Path, params: &Path, output: &Path, seeds: &str,
               "--params", &params.to_string_lossy(),
               "--backend", "chain_binomial", "--dt", "1",
               "--seeds", seeds,
-              "--output-dir", &output.to_string_lossy()]);
+              "--store", &output.to_string_lossy()]);
     cmd.args(extra);
     cmd.output().expect("spawn")
 }
@@ -149,7 +153,7 @@ fn requesting_obs_over_an_obs_free_store_still_writes_observations() {
     let first = simulate(&bin, &model, &params, &output, "1,2", &[]);
     assert!(first.status.success(), "obs-free run failed. stderr:\n{}",
         String::from_utf8_lossy(&first.stderr));
-    let leaves = run_leaves(&output.join("sims"));
+    let leaves = run_leaves(&output);
     assert_eq!(leaves.len(), 2, "expected one leaf per seed, got {:?}", leaves);
     for leaf in &leaves {
         assert!(!leaf.join("obs").is_dir(),
@@ -164,7 +168,7 @@ fn requesting_obs_over_an_obs_free_store_still_writes_observations() {
     assert!(second.status.success(), "obs run failed. stderr:\n{}",
         String::from_utf8_lossy(&second.stderr));
 
-    let leaves = run_leaves(&output.join("sims"));
+    let leaves = run_leaves(&output);
     assert_eq!(leaves.len(), 2, "requesting obs must not fork new trajectory leaves");
     for leaf in &leaves {
         assert!(leaf.join("obs").is_dir(),
@@ -196,7 +200,7 @@ fn a_multi_seed_run_writes_the_observation_ensemble_into_the_store() {
         "a --seeds run with --obs-dir must succeed. stderr:\n{}",
         String::from_utf8_lossy(&run.stderr));
 
-    let leaves = run_leaves(&output.join("sims"));
+    let leaves = run_leaves(&output);
     assert_eq!(leaves.len(), 3,
         "expected one run leaf per seed (3), got {:?}", leaves);
 

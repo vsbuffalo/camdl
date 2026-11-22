@@ -7,8 +7,10 @@ read and compare the results. This document is the map: what each command makes,
 which commands chain into which, and where the boundaries are.
 
 The organizing distinction is **artifact-producing** vs **read/display**. The
-first group runs a computation and writes a content-addressed run under
-`results/`; the second group reads those runs back or performs a pure utility
+first group runs a computation and stores a content-addressed run: `simulate`
+and `pfilter` in the run store (`./camdl-store` unless `--store` or
+`CAMDL_STORE` names another root), the fit and profile commands under
+`results/`. The second group reads those runs back or performs a pure utility
 transform. A few commands delegate to the compiler.
 
 ## The command map
@@ -138,8 +140,11 @@ camdl inspect model.camdl --cost-report       # per-step eval cost analysis
 ```
 
 `simulate` is forward only: a model, parameters, a scenario, a seed → a
-trajectory. With `--obs` it also draws synthetic observations through the
-model's observation block.
+trajectory. Each cell is stored in the run store; `-o FILE` or `--stdout`
+exports the combined table rendered from the stored cells, and
+`camdl cat @LABEL` renders it again for a run named with `--label`. With `--obs`
+it also draws synthetic observations through the model's observation block,
+stored inside each cell.
 
 ### Evaluate the model over a parameter design
 
@@ -374,8 +379,9 @@ actually began.
 
 A grid is forward simulation only — **no inference**. `simulate` runs the
 Cartesian product of its parameter points × scenarios × replicates (or explicit
-seeds) into the store, one leaf per cell plus one combined `ensemble.tsv`. The
-parameter points are a _design_ you choose (`--sweep PARAM=GRID`, repeatable, or
+seeds) into the run store, one stored cell per grid point. No combined table is
+stored: `-o FILE` and `camdl cat @LABEL` render it from the cells. The parameter
+points are a _design_ you choose (`--sweep PARAM=GRID`, repeatable, or
 `--sweep-file FILE`) or a _sample_ (`--draws`); the two are refused together.
 
 ```bash
@@ -404,16 +410,18 @@ Every design point at a given replicate shares one random stream, so paired
 differences across points are low-variance and adding a point leaves the others
 unchanged (for independent noise per point, run one invocation per point with
 its own `--seed`). The combined table and the observation tables carry
-`point_id`, one `sweep:<param>` column per swept parameter, and `seed` — the
-pairing key across points, and across scenarios. Do not pair scenarios on
-`replicate`: it numbers the cells of the whole run, so it runs on from one
-scenario to the next and a join on it matches nothing; with `--draws`, pair on
-`draw` (run spec §10.2). A scenario that sets or scales a swept parameter, or a
-`--param` on one, is refused. A second run of the same grid reads every cell the
-store holds back instead of re-simulating it; `--force` recomputes. The arm of
-an ad-hoc run is labelled from its flags (`(none)` for no flags,
-`(none)+school_closure` for `--enable school_closure`, `(none);beta=0.3` for
-`--param beta=0.3`).
+`replicate`, `scenario`, `point_id`, one `sweep:<param>` column per swept
+parameter, and `seed` — the pairing key across points, and across scenarios. Do
+not pair scenarios on `replicate`: it numbers the cells of the whole run, so it
+runs on from one scenario to the next and a join on it matches nothing; with
+`--draws`, pair on `draw` (run spec §10.2). A scenario that sets or scales a
+swept parameter, or a `--param` on one, is refused. A second run of the same
+grid reads every cell the store holds back instead of re-simulating it, under
+any `--label`; `--force` recomputes. A cell whose engine stops with an error is
+stored with its `failure.toml` and reused by a rerun; the run lists every such
+cell and exports nothing. The arm of an ad-hoc run is labelled from its flags
+(`(none)` for no flags, `(none)+school_closure` for `--enable school_closure`,
+`(none);beta=0.3` for `--param beta=0.3`).
 
 Use a sweep to explore _forward_ behavior under interventions and parameter
 ranges. To estimate parameters from data, use `fit`.

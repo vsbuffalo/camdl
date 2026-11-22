@@ -100,7 +100,7 @@ fn run_capture_stderr(args: &[&str], trace: bool) -> String {
         .args([
             "-o",
             &traj_path.to_string_lossy(),
-            "--output-dir",
+            "--store",
             &cas_dir.to_string_lossy(),
         ]);
     if trace {

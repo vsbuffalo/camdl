@@ -28,7 +28,7 @@ mod run_paths;      // canonical output-path helpers
 mod cas;
 mod browse;
 mod check_update;   // `camdl check-update` — GitHub release-availability check
-mod sim_job;       // SimulateJob / ParamSource / Seeds / ScenarioRef / ObsOutput (run-spec §3)
+mod sim_job;       // SimulateJob / ParamSource / Seeds / ScenarioRef (run-spec §3)
 mod roles;         // parameter roles: the partition, resolved from role declarations before any value
 mod sweep;         // the design axis: --sweep / --sweep-file expansion, checks, the resolved design
 mod engine;        // run_job: the engine behind simulate's cell grid (run-spec §3.1)
@@ -61,7 +61,10 @@ mod profile_diagnostics;
 mod profile_invocation; // profiles/<base>/invocations/<id>/: the grid an invocation runs, and its heartbeat
 mod profile_table;    // gh#1059: the collected per-cell table a profile run prints
 mod out;           // the stream layer: notices, progress, milestones, colour
-mod sim_ensemble_cas; // gh#147: multi-cell simulate ensemble CAS identity (model/config/params/grid)
+#[cfg(test)]
+mod sim_ensemble_cas; // the old store's ensemble identity, kept only for the golden run-id pins
+mod sim_store;       // camdl simulate on the run store: its cells, their by-products and the combined tables
+mod sim_command;     // the store half of camdl simulate: identities, the batch, the engine under each claim, the exports
 mod lineage;        // three-layer lineage: --event-log record + realize + tree
 mod mre;            // `camdl mre` — minimal-reproducible-example bundles (gh#212)
 mod input_class;    // every input of a converted command and its class, checked against clap
@@ -551,7 +554,14 @@ fn main() {
     let compile = util::CompileSettings::resolve(cli.global.no_licm, cli.global.no_ir_cache);
 
     match cli.command {
-        Command::Simulate(a)            => run_simulate(&a, compile),
+        Command::Simulate(a)            => run_simulate(args::SimulateInvocation {
+            args: a,
+            no_licm: cli.global.no_licm,
+            no_ir_cache: cli.global.no_ir_cache,
+            verbosity: cli.global.verbosity,
+            progress: cli.global.progress,
+            no_progress: cli.global.no_progress,
+        }),
         Command::Fit(FitCmd::Run(a))    => fit::cmd_fit_run_v2(&a, compile),
         Command::Fit(FitCmd::Summary(a))=> fit::cmd_fit_summary(&a, compile),
         Command::Fit(FitCmd::Diff(a))   => fit::cmd_fit_diff(&a, compile),
@@ -802,10 +812,66 @@ fn resolve_paired_posterior(
     )
 }
 
-fn run_simulate(a: &args::SimulateArgs, compile: util::CompileSettings) {
+fn run_simulate(inv: args::SimulateInvocation) {
     // simulate has no `--no-color`: its painters follow the environment and
     // whether each stream is a terminal.
     let out = crate::out::Out::new(false);
+    // The inputs split by class. Every declared input is taken apart here and
+    // placed in the arguments the resolution below reads, so an input added to
+    // `SimulateArgs` does not compile until it is placed; `--dry-run` is
+    // `skip` and is read before the split.
+    let dry_run = inv.args.dry_run;
+    let (declared, execution, exports, request, given) = store::Inputs::split(inv).into_parts();
+    let (declared, no_licm) = declared.into_parts();
+    let (
+        model, to, from, init_state, allow_degenerate_rates, forcing_extrapolation, model_overrides, param_vec,
+        scenarios, enable, disable, backend, output_view, seed, seeds, replicates, draws, sweep, sweep_file, fit,
+        n_draws, chains, exclude_chains, emit_every, obs, obs_dir, obs_only, obs_only_dir, quantities_out,
+        quantities, event_log,
+    ) = declared.into_parts();
+    let (allow_forcing_extrapolation,) = forcing_extrapolation.into_parts();
+    let (params, param, table) = model_overrides.into_parts();
+    let (backend_flag, dt_flag, integrator_flag) = backend.into_parts();
+    let (every, no_flows, columns) = output_view.into_parts();
+    let (exports,) = exports.into_parts();
+    let ((), (), (), (), draws_out, output, stdout, design_from, projected_out, dates, format, tsv, reactive_log) =
+        exports.into_parts();
+    let (request,) = request.into_parts();
+    let ((), (), (), (), store_root, force, label) = request.into_parts();
+    let args::SimulateInvocationExecution { args: args::SimulateExecution { parallel, .. }, no_ir_cache } = execution;
+    let compile = util::CompileSettings::resolve(no_licm, no_ir_cache);
+    let request = crate::camdl_store::store_request(label.clone(), store_root.clone());
+    let request = if force { store::StoreRequest::new(None, true, None).merge(request) } else { request };
+    let execution_record = args::SimulateInvocationExecution {
+        args: args::SimulateExecution { forcing_extrapolation: (), model_overrides: (), backend: (), output_view: (), parallel },
+        no_ir_cache,
+    };
+    let a = &args::SimulateArgs {
+        model, to, from, init_state, allow_degenerate_rates,
+        forcing_extrapolation: args::ForcingExtrapolationArg { allow_forcing_extrapolation },
+        model_overrides: args::ModelOverrides { params, param, table },
+        param_vec, scenarios, enable, disable,
+        backend: args::SimBackend { backend: backend_flag, dt: dt_flag, integrator: integrator_flag },
+        output_view: args::OutputView { every, no_flows, columns },
+        seed, seeds, replicates, draws, sweep, sweep_file, fit, n_draws, chains, exclude_chains, draws_out, output,
+        stdout, emit_every, obs, obs_dir, obs_only, obs_only_dir, design_from, projected_out, dates, quantities_out,
+        quantities, dry_run, store: store_root, parallel, force, label, event_log, format, tsv, reactive_log,
+    };
+    // A file an export writes after the cells are stored must have a
+    // directory to go to; one that has none is refused before anything runs.
+    let file_exports: [(&str, Option<&std::path::Path>); 6] = [
+        ("-o", a.output.as_deref()),
+        ("--obs", a.obs.as_deref()),
+        ("--obs-only", a.obs_only.as_deref().filter(|p| !p.to_string_lossy().ends_with('/') && !p.is_dir())),
+        ("--draws-out", a.draws_out.as_deref()),
+        ("--event-log", a.event_log.as_deref().filter(|p| p.as_os_str() != "auto")),
+        ("--reactive-log", a.reactive_log.as_deref()),
+    ];
+    for (flag, path) in file_exports {
+        if let Some(path) = path {
+            util::refuse_missing_export_dir(flag, path).unwrap_or_else(|e| out.fail(format!("error: {e}")));
+        }
+    }
     let _eval_stats_guard = crate::util::EvalStatsReportGuard::start();
     // The compile settings (`--no-licm`) are passed to the one compile below
     // and to each compile of a replayed fit's config, and reach the identity
@@ -824,8 +890,6 @@ fn run_simulate(a: &args::SimulateArgs, compile: util::CompileSettings) {
             Some(0) => std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
             Some(n) => n,
         },
-        store_root: a.output_dir.to_string_lossy().into_owned(),
-        force: a.force,
     };
     // ── Extract typed args into locals that match the rest of the function ─
     let ir_path          = a.model.to_string_lossy().into_owned();
@@ -942,7 +1006,6 @@ fn run_simulate(a: &args::SimulateArgs, compile: util::CompileSettings) {
         None       => vec![a.seed],
     };
     let seeds_spec_given = a.seeds.is_some();
-    let output_path: Option<String>  = a.output.as_ref().map(|p| p.to_string_lossy().into_owned());
     let mut obs_path: Option<String> = a.obs.as_ref().map(|p| p.to_string_lossy().into_owned());
     let mut obs_dir: Option<String>  = a.obs_dir.as_ref().map(|p| p.to_string_lossy().into_owned());
     let obs_only: Option<String>     = a.obs_only.as_ref().map(|p| p.to_string_lossy().into_owned());
@@ -1129,7 +1192,7 @@ fn run_simulate(a: &args::SimulateArgs, compile: util::CompileSettings) {
     // gh#571 shape). A scenario that sets or scales a swept parameter is
     // refused by the engine's coordinate guard (gh#572), on the run and on the
     // dry run alike.
-    let design: Option<(Vec<(usize, crate::sweep::DesignPoint)>, crate::sim_ensemble_cas::ResolvedDesign)> =
+    let design: Option<(Vec<(usize, crate::sweep::DesignPoint)>, crate::sweep::ResolvedDesign)> =
         if !a.sweep.is_empty() {
             crate::sweep::check_swept_names(&a.sweep, &model_to).unwrap_or_else(|e| {
                 out.fail(format!("error: {e}"));
@@ -1270,7 +1333,6 @@ fn run_simulate(a: &args::SimulateArgs, compile: util::CompileSettings) {
                   or a config with [simulate] from).");
     }
 
-    let cas_root = execution.store_root.clone();
 
     // ── Backend-provenance guardrail ─────────────────────────────
     //
@@ -1813,50 +1875,15 @@ fn run_simulate(a: &args::SimulateArgs, compile: util::CompileSettings) {
         });
     }
 
-    // The display label rides on every leaf's `RunRecord.provenance.label`.
-    let label_arg: Option<String> = match a.label.as_deref() {
-        Some(raw) => match crate::fit::validate_label(raw) {
-            Ok(l) => Some(l),
-            Err(e) => {
-                out.fail(format!("error: invalid --label: {}", e));
-            }
-        },
-        None => None,
-    };
-    // Fit → sim lineage. When `--params` consumed a fit-MLE file carrying a
-    // `[provenance]` block, record the upstream fit on every sim leaf's
-    // `RunRecord.deps` (an `ArtifactRef`): the fit's content hash as the
-    // upstream identity, plus the consumed params file's content digest (so a
-    // regenerated fit — different θ̂ — produces a different dep). This is
-    // provenance only — a sim's identity is its factored levels
-    // (resolve_trajectory), never `deps` — so it does not change the run_id or
-    // store path. Empty when no fit-provenance params file was supplied.
-    let fit_dep: Vec<runid::inputs::ArtifactRef> = match (&from_fit_hash, &from_fit_params_file) {
-        (Some(hash), Some(pf)) => {
-            match runid::ContentHash::from_hex(hash) {
-                Ok(run_id) => {
-                    let digest = std::fs::read(pf)
-                        .map(|b| runid::ContentHash::digest_bytes(&b))
-                        .unwrap_or(run_id);
-                    let artifact = std::path::Path::new(pf)
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| pf.clone());
-                    vec![runid::inputs::ArtifactRef {
-                        run_id,
-                        kind: runid::ArtifactKind::FitMethod,
-                        artifact,
-                        digest,
-                    }]
-                }
-                // A non-hex fit_hash (legacy / malformed provenance) is not a
-                // CAS identity we can record — skip the dep rather than fold a
-                // bogus run_id. The backend-guardrail above still fired.
-                Err(_) => Vec::new(),
-            }
+    // Fit → sim lineage: a params file carrying a fit's `[provenance]` block
+    // is recorded, with its content digest, on every cell's record. It is not
+    // hashed: the parameter values it gave are.
+    let mut lineage: Vec<store::Lineage> = Vec::new();
+    if let (Some(_), Some(pf)) = (&from_fit_hash, &from_fit_params_file) {
+        if let Ok(bytes) = std::fs::read(pf) {
+            lineage.push(store::Lineage::Input { field: "params".into(), digest: store::Key::digest_bytes(&bytes) });
         }
-        _ => Vec::new(),
-    };
+    }
 
     // ── Load draws if --draws is specified ─────────────────────────────────
     let draws: Vec<HashMap<String, f64>> = if let Some(ref source) = draws_path {
@@ -2084,7 +2111,7 @@ fn run_simulate(a: &args::SimulateArgs, compile: util::CompileSettings) {
     //   - no `--scenario`   → a single ad-hoc Inline carrying the CLI
     //     --enable/--disable (or empty), so the baseline path keeps
     //     `scenario_name = None` exactly as before.
-    use crate::sim_job::{ObsOutput, ParamSource, ScenarioRef, Seeds, SimulateJob};
+    use crate::sim_job::{ParamSource, ScenarioRef, Seeds, SimulateJob};
     // The ad-hoc arm's label is derived from what the flags resolved to
     // (`sim_job::adhoc_arm_label`), at this site and at the sink's
     // `ResolvedEntry` alike, so two different ad-hoc arms are told apart in
@@ -2149,17 +2176,6 @@ fn run_simulate(a: &args::SimulateArgs, compile: util::CompileSettings) {
         Seeds::Single(seed)
     };
 
-    // ObsOutput from the resolved obs_path/obs_dir + suppression. (The
-    // --obs-only / --obs-only-dir flags were already normalised into
-    // obs_path/obs_dir + `suppress_trajectory` above.)
-    let obs_mode = if let Some(ref p) = obs_path {
-        if suppress_trajectory { ObsOutput::OnlyFile(p.into()) } else { ObsOutput::File(p.into()) }
-    } else if let Some(ref d) = obs_dir {
-        if suppress_trajectory { ObsOutput::OnlyDir(d.into()) } else { ObsOutput::Dir(d.into()) }
-    } else {
-        ObsOutput::None
-    };
-
     // ── The resolved configuration ──────────────────────────────────────────
     //
     // Every precedence rule above has been applied, so the run-wide settings
@@ -2216,7 +2232,6 @@ fn run_simulate(a: &args::SimulateArgs, compile: util::CompileSettings) {
         fit_base: base_sim_run.fit_base.clone(),
         set_vec_entries: base_sim_run.set_vec_entries.clone(),
         table_files: base_sim_run.table_files.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-        obs: obs_mode,
         // Output is byte-identical whatever the thread count: a cell's seed is
         // a function of its grid position, and the engine merges cells in
         // canonical order, so the writers see the sequence a serial run
@@ -2260,37 +2275,23 @@ fn run_simulate(a: &args::SimulateArgs, compile: util::CompileSettings) {
         out.say(format_args!("draws.tsv: wrote {} draws to {}", n_draws, draws_out));
     }
 
-    // ── Dry run ─────────────────────────────────────────────────────────────
-    if dry_run {
-        print_dry_run(&out,
-            &ir_path, &ir_path_compiled, engine_settings.backend, engine_settings.dt, seed,
-            &base_sim_run.params_files, &base_sim_run.overrides,
-            &scenario_list, &seeds, &draws_path,
-            n_draws, replicates, total_runs,
-            &obs_path, &obs_dir, &obs_only,
-            design.as_ref().map(|(_, d)| d),
-        );
-        // The store view of a multi-cell plan: which cells the store already
-        // holds, under the exact rule the run applies, and the leaf paths.
-        // Nothing is displaced or written — `--force` is reported, not applied.
-        if total_runs > 1 {
-            let cas = build_simulate_cas_sink(
-                sim_config.clone(), &engine_settings, &execution, want_obs, label_arg.clone(), fit_dep.clone(),
-                emit_every.clone(), total_runs,
-            );
-            print_store_view(&out, &cas, &job, execution.force, a.quantities_out.is_some());
-        }
-        return;
-    }
-
     // ── `--design-from`: simulate on a fit's own observation design ─────────
     //
     // gh#831. The rows come from the bound data rather than from the model's
-    // `emit_schedule`, so this leaves the store-backed trajectory pipeline
-    // below entirely: what it produces is a dataset, not a run. The flag
-    // conflicts (args/mod.rs) with every knob that pipeline owns, so nothing
-    // a user passed is silently dropped here.
+    // `emit_schedule`, so this leaves the store: what it produces is a
+    // dataset written from the resolved inputs, not a stored result.
     if let Some(ref design_toml) = a.design_from {
+        if dry_run {
+            print_dry_run(&out,
+                &ir_path, &ir_path_compiled, engine_settings.backend, engine_settings.dt, seed,
+                &base_sim_run.params_files, &base_sim_run.overrides,
+                &scenario_list, &seeds, &draws_path,
+                n_draws, replicates, total_runs,
+                &obs_path, &obs_dir, &obs_only,
+                design.as_ref().map(|(_, d)| d),
+            );
+            return;
+        }
         if obs_dir.is_none() && a.projected_out.is_none() {
             out.fail(
                 "error: --design-from writes one file per observation stream, so it \
@@ -2308,105 +2309,36 @@ fn run_simulate(a: &args::SimulateArgs, compile: util::CompileSettings) {
         return;
     }
 
-    // ── Build the per-cell CAS sink (the system of record) ──────────────────
-    //
-    // Content-addressed storage is the default. Each engine cell (scenario ×
-    // param-point × replicate) commits its own leaf through `CasSink`, keyed
-    // on the (model, config, params, scenario, process_seed) cell (resolve
-    // identity via `resolve::resolve_trajectory`, then `commit_atomic`, plus
-    // the per-cell obs child). The `--output`/`--obs`
-    // mirror is layered on top by `StreamSink` (below).
-    let cas_sink = build_simulate_cas_sink(
-        sim_config.clone(),
-        &engine_settings,
-        &execution,
-        want_obs || obs_only.is_some() || obs_only_dir.is_some()
-            || obs_path.is_some() || obs_dir.is_some(),
-        label_arg.clone(),
-        fit_dep,
-        emit_every.clone(),
-        total_runs,
-    );
-
-    // The trajectory mirror, accumulated in memory. The canonical bytes live
-    // in the store (per-cell leaves + multi-run ensemble); this buffer is the
-    // convenience view, written to `-o PATH` post-loop and (multi-run) stored
-    // verbatim as the `SimEnsemble` artifact. NEVER stdout (Item C): with no
-    // `-o` the user gets the `cached:` stderr line + `camdl cat <hash>`.
-    // `None` ⟺ trajectory suppressed (`--obs-only`, run-spec §3.1.1).
-    let traj_out: Option<Vec<u8>> = if !job.obs.suppresses_trajectory() {
-        Some(Vec::new())
-    } else {
-        None
-    };
-
-    // The combined-obs / wide-format mirror sink. Its ObsOutput is derived
-    // from `job.obs` (run-spec §3.1.1, single source of truth).
-    // gh#583 item B: under `--dates` the mirror carries date columns the
-    // ensemble must not — `--dates` is presentation, in no identity level, so
-    // the stored ensemble is rendered date-free (as the `Sim` leaves are) and
-    // the mirror alone is dated. Without `--dates` the two are one buffer.
-    let undated_out: Option<Vec<u8>> = (a.dates && traj_out.is_some()).then(Vec::new);
-    // The parameter-point axis the combined tables label: the design of a
-    // sweep job (its swept parameters, name-sorted), the draws of a draws job,
-    // or none.
-    let point_axis: PointAxis = match (&design, &draws_path) {
-        (Some((_, d)), _) => {
-            let mut params: Vec<String> = match d {
-                crate::sim_ensemble_cas::ResolvedDesign::Sweep { params, .. } =>
-                    params.iter().map(|p| p.name.clone()).collect(),
-                crate::sim_ensemble_cas::ResolvedDesign::File { params, .. } => params.clone(),
-            };
-            params.sort();
-            PointAxis::Sweep { params }
+    // ── Dry run ─────────────────────────────────────────────────────────────
+    if dry_run {
+        print_dry_run(&out,
+            &ir_path, &ir_path_compiled, engine_settings.backend, engine_settings.dt, seed,
+            &base_sim_run.params_files, &base_sim_run.overrides,
+            &scenario_list, &seeds, &draws_path,
+            n_draws, replicates, total_runs,
+            &obs_path, &obs_dir, &obs_only,
+            design.as_ref().map(|(_, d)| d),
+        );
+        if total_runs <= 1 {
+            return;
         }
-        (None, Some(_)) => PointAxis::Draws,
-        (None, None) => PointAxis::None,
-    };
-    let stream = StreamSink {
-        traj_out,
-        undated_out,
-        traj_header_written: false,
-        output_cols: sim_config.run.view.clone(),
-        dates: a.dates,
-        dates_render: None,
-        obs_path: job.obs.file_path().map(|p| p.to_string_lossy().into_owned()),
-        obs_dir: job.obs.dir_path().map(|p| p.to_string_lossy().into_owned()),
-        obs_data: Vec::new(),
-        obs_stream_names: Vec::new(),
-        obs_files: Vec::new(),
-        obs_plans: Vec::new(),
-        emit_every: emit_every.clone(),
-        // The counts are captured in `on_start`; the axis is the job's.
-        shape: TableShape { total_runs: 1, n_scenarios: 1, n_points: 1, axis: point_axis.clone() },
-    };
+    }
 
     // ── Generated quantities (proposal 2026-06-25) ──────────────────────────
-    // Build the accumulator iff the model declares a `quantities {}` block. With
-    // `--quantities-out` it emits a regenerated sidecar (never in the CAS leaf,
-    // never in the run identity); without it, a one-line note and skip. Point vs
-    // band is keyed by the param-source kind (fixed params + single cell → point;
-    // a `--draws`/multi-cell run → band), not the cell count alone.
-    let quant: Option<SimQuantities> = {
+    // With `--quantities-out` each cell evaluates the model's `quantities {}`
+    // block as a by-product, and the tables are rendered from them. Without
+    // it, a model that declares quantities prints a one-line note.
+    let quantities_want: Option<crate::sim_command::QuantitiesWant> = {
         let (q_model, _) = util::load_ir(&ir_path_compiled).unwrap_or_else(|e| {
             out.fail(format!("error: {}", e));
         });
         if q_model.quantities.is_empty() {
             None
-        } else if let Some(out_dir) = a.quantities_out.clone() {
-            // Scenario is a DESIGN coordinate, draws/replicates/seeds are
-            // SAMPLING coordinates; the accumulator keys on the former so a
-            // quantile is only ever taken over the latter (gh#562, proposal §1).
-            //
-            // `Mode` is keyed on the param-source KIND, never the cell count —
-            // the cell count includes the scenario factor, so counting it would
-            // report a two-point "posterior band" over a baseline and its
-            // counterfactual. A `--draws` file with a single row must still
-            // band.
+        } else if let Some(dir) = a.quantities_out.clone() {
             // A sweep point is a design coordinate like a scenario: one
             // replicate per point is one realization per group (point mode),
-            // more is a band over the replicates of each group — never a band
-            // across points (the gh#562 class).
+            // more is a band over the replicates of each group, never a band
+            // across points or scenarios (gh#562).
             let mode = if matches!(
                 job.source,
                 crate::sim_job::ParamSource::Point { replicates: 1 }
@@ -2416,213 +2348,60 @@ fn run_simulate(a: &args::SimulateArgs, compile: util::CompileSettings) {
             } else {
                 crate::quantity_output::Mode::Banded
             };
-            Some(SimQuantities {
-                quantities: q_model.quantities.clone(),
+            Some(crate::sim_command::QuantitiesWant {
+                dir,
                 mode,
                 scenario_axis: !scenario_names.is_empty(),
-                axis: point_axis.clone(),
-                out_dir,
                 vocabulary: quantities_override.clone(),
-                compiled: None,
-                eval: None,
-                by_group: indexmap::IndexMap::new(),
-                calendar: ir::caltime::CalendarAxis::from_model(&q_model)
-                    .unwrap_or_else(|e| out.fail(format!("error: {e}"))),
-                emit_every: emit_every.clone(),
             })
         } else {
-            let n = q_model.quantities.len();
-            out.say(format_args!(
-                "note: model declares {n} quantit{}; pass --quantities-out <dir> to emit them",
-                if n == 1 { "y" } else { "ies" }
-            ));
+            if !dry_run {
+                let n = q_model.quantities.len();
+                out.say(format_args!(
+                    "note: model declares {n} quantit{}; pass --quantities-out <dir> to emit them",
+                    if n == 1 { "y" } else { "ies" }
+                ));
+            }
             None
         }
     };
 
-    // Store re-use: a multi-cell run skips the cells the store already holds
-    // and reads them back. `--stdout` opted out of the store; a
-    // `--quantities-out` run needs every trajectory in memory (see `SimSink`);
-    // a lone run keeps its path (its commit dedups against the store).
-    let reuse = total_runs > 1 && !a.stdout && quant.is_none();
-    let mut sink = SimSink {
-        cas: cas_sink,
-        stream,
-        skip_cas: a.stdout,
-        quant,
-        reuse,
-        pending: std::collections::BTreeMap::new(),
-        n_reused: 0,
-    };
-    // The `--event-log` branch drives the sink's `RunSink` methods directly
-    // (one recorded cell), so the trait must be in scope here.
-    use engine::RunSink as _;
-
-    // ── Lineage event-log path (three-layer architecture, Layer 1) ──────────
-    // `--event-log` records the identity-free event log. It is single-run only
-    // (conflicts with --seeds / --replicates / --draws, enforced by clap), so
-    // the grid is exactly one cell. The recorder is passive — it draws no
-    // randomness — so the trajectory (and thus the leaf's run_id and
-    // `traj.tsv` bytes) is byte-identical to a plain `simulate` at the same
-    // seed (Tier 2a). The recorded log rides on the `CellResult` and `CasSink`
-    // writes it as the leaf's event-log child, `<leaf>/event_log/`.
-    // We reuse `plan_grid` (not a hand-rolled spec) so the cell — and its
-    // run_id — match the normal path exactly. `--event-log PATH` additionally
-    // mirrors the log to PATH (symmetric with `-o` for the trajectory).
-    let recorded: Option<(sim::lineage::EventLog, bool)> = if a.event_log.is_some() {
-        let (specs, grid) = engine::plan_grid(&job);
-        if specs.len() != 1 {
-            out.fail("error: --event-log is single-run only (no --seeds / \
-                       --replicates / --draws / multiple --scenario)");
-        }
-        let spec = specs.into_iter().next().expect("len checked == 1");
-        util::emit_run_notices(&out, &[&spec.sim_run]);
-        sink.on_start(&grid);
-        let (traj, resolved, event_log, exact) =
-            util::run_simulation_event_log(&spec.sim_run).unwrap_or_else(|e| {
-                out.fail(format!("error: {}", e));
-            });
-        let cell = engine::CellResult { spec, traj, cell: resolved, event_log: Some(event_log) };
-        sink.merge_cell(&cell).unwrap_or_else(|e| {
-            out.fail(format!("error: {}", e));
-        });
-        sink.on_finish(&grid).unwrap_or_else(|e| {
-            out.fail(format!("error: {}", e));
-        });
-        // Recover the log for the optional mirror + realize hint (merge_cell
-        // only borrowed the cell, so we can move it back out here).
-        cell.event_log.map(|el| (el, exact))
-    } else {
-        engine::run_job(&job, &mut sink).unwrap_or_else(|e| {
-            out.fail(format!("error: {}", e));
-        });
-        None
-    };
-
-    // The combined wide-format trajectory bytes (None ⟺ --obs-only). The CAS
-    // leaves/ensemble are the system of record; this buffer is the mirror —
-    // written to `-o PATH`, or to stdout under `--stdout` (the store opt-out).
-    let combined_traj: Option<Vec<u8>> = sink.stream.traj_out.take();
-    // The date-free rendering, present only under `--dates` (gh#583 B).
-    let undated_traj: Option<Vec<u8>> = sink.stream.undated_out.take();
-
-    // `--stdout`: stream the trajectory to stdout and stop. No leaf was
-    // committed (skip_cas), so there is no store, no ensemble, and no banner —
-    // just the TSV, ready to pipe. `--quantities-out` is a directory, not the
-    // store, so it is still written, before the stream: a quantity that fails
-    // to render then exits with nothing on stdout (gh#574).
-    if a.stdout {
-        if let Some(q) = &sink.quant {
-            write_quantities_sidecar(&out, q);
-        }
-        if let Some(ref bytes) = combined_traj {
-            use std::io::Write;
-            if let Err(e) = out.data().write_all(bytes) {
-                out.fail(format!("error writing trajectory to stdout: {}", e));
-            }
-        }
-        return;
+    if a.event_log.is_some() && total_runs != 1 {
+        out.fail("error: --event-log is single-run only (no --seeds / \
+                   --replicates / --draws / multiple --scenario)");
     }
 
-    if let (Some(ref path), Some(ref bytes)) = (&output_path, &combined_traj) {
-        if !suppress_trajectory {
-            std::fs::write(path, bytes).unwrap_or_else(|e| {
-                out.fail(format!("cannot write {}: {}", path, e));
-            });
-            out.say(format_args!("trajectory written to {}", path));
-        }
-    }
-
-    // Surface any per-cell CAS commit failures (the store is the system of
-    // record; a failed commit is fatal to the run's purpose).
-    if !sink.cas.errors.is_empty() {
-        for e in &sink.cas.errors {
-            out.say(format_args!("error: {}", e));
-        }
-        crate::out::ExitCode(1).exit();
-    }
-
-    // ── Store the combined-across-cells TSV as a `SimEnsemble` artifact ──────
-    //
-    // A multi-cell run (total_runs > 1) keeps its N per-cell `Sim` leaves AND
-    // additionally writes the combined wide-format TSV as a content-addressed
-    // ensemble that REFERENCES them (deps). The ensemble's artifact bytes are
-    // the same rows the `-o` mirror holds, so `cat <ensemble>` == the `-o`
-    // combined TSV — except under `--dates`, which is presentation and in no
-    // identity level, so its date columns stay in the mirror and out of the
-    // store (gh#583 item B). A single-run simulate writes NO ensemble (the one
-    // leaf is the whole thing).
-    if total_runs > 1 && !suppress_trajectory {
-        if let Some(bytes) = undated_traj.as_ref().or(combined_traj.as_ref()) {
-            // The post-bar pause the user sees is this: writing + fsyncing the
-            // combined wide-format TSV as the ensemble leaf. Announce it so a
-            // multi-MB ensemble doesn't look like a hang.
-            out.milestone("storing",
-                format!("ensemble \u{b7} {} cells ({})",
-                    total_runs, crate::out::status::human_bytes(bytes.len() as u64)));
-            write_sim_ensemble(&out,
-                &sink.cas, bytes, &cas_root, label_arg.clone(), design.as_ref().map(|(_, d)| d),
-            );
-        }
-    }
-
-    // Report what the store supplied and where the leaves landed.
-    if sink.n_reused > 0 {
-        out.milestone("cached", format!(
-            "{} of {} cells read from the store; simulated {}",
-            sink.n_reused, total_runs, total_runs - sink.n_reused
-        ));
-    }
-    report_cas_leaves(&out, &sink.cas.completed_runs, &cas_root);
-
-    // ── Write the combined observation mirror ───────────────────────────────
-    sink.stream.write_obs_output(&out);
-
-    // ── Write generated quantities (regenerated sidecar, NOT in the CAS leaf) ─
-    if let Some(q) = &sink.quant {
-        write_quantities_sidecar(&out, q);
-    }
-
-    // ── Event-log mirror + realize hint (Layer 1 → Layer 2) ─────────────────
-    // The canonical event log is the leaf's event-log child,
-    // `<leaf>/event_log/event_log.tsv`; `--event-log PATH` additionally
-    // mirrors it to PATH. Either way, point the user at the next step
-    // (`lineage realize`).
-    if let Some((event_log, exact)) = recorded {
-        // A real file path `lineage realize` can read directly (run_path is
-        // relative to the store root and includes the `sims/` prefix), named
-        // only once the child is complete. A failed child write has already
-        // ended the command above, so an incomplete child here is reported
-        // rather than pointed at.
-        let leaf = sink.cas.completed_runs.last()
-            .map(|e| std::path::Path::new(&cas_root).join(&e.run_path))
-            .unwrap_or_else(|| out.fail("internal error: --event-log stored no leaf"));
-        let leaf_event_log = crate::cas_sink::complete_event_log(&leaf)
-            .unwrap_or_else(|e| out.fail(format!("error: {e}")));
-        lineage::finish_event_log(&out, a, &event_log, exact, &leaf_event_log.display().to_string());
-    }
-
-    // ── Reactive-log mirror (gh#204) ─────────────────────────────────────────
-    // The canonical reactive firing log is the `reactive_log.tsv` artifact in
-    // the leaf — always present (declared) when a reactive policy was active, so
-    // on a cache hit it is still there. `--reactive-log PATH` mirrors it to PATH
-    // (symmetric with `-o` for the trajectory); the leaf stays the system of
-    // record. A non-reactive model writes no leaf log, so there is nothing to
-    // mirror — say so rather than create an empty file.
-    if let Some(ref dest) = a.reactive_log {
-        let leaf_log = sink.cas.completed_runs.last()
-            .map(|e| format!("{}/{}/reactive_log.tsv", cas_root, e.run_path))
-            .filter(|p| std::path::Path::new(p).exists());
-        match leaf_log {
-            Some(src) => {
-                if let Err(e) = std::fs::copy(&src, dest) {
-                    out.say(format_args!("warning: --reactive-log mirror to {}: {}", dest.display(), e));
-                }
-            }
-            None => out.say("warning: --reactive-log: this run has no active reactive policy \
-                 (enable one with a scenario or --enable); nothing to mirror"),
-        }
-    }
+    crate::sim_command::run(crate::sim_command::StoreRun {
+        out: &out,
+        job: &job,
+        sim: &sim_config,
+        engine: &engine_settings,
+        model_path: &ir_path,
+        ir_compiled: &ir_path_compiled,
+        table_files: &base_sim_run.table_files,
+        request,
+        given,
+        execution: execution_record,
+        lineage,
+        wants: crate::sim_command::Wants {
+            obs: want_obs,
+            event_log: a.event_log.is_some(),
+            quantities: quantities_want,
+            emit_every: emit_every.clone(),
+        },
+        exports: crate::sim_command::Exports {
+            output: if suppress_trajectory { None } else { a.output.clone() },
+            stdout: a.stdout,
+            obs_file: obs_path.as_ref().map(std::path::PathBuf::from),
+            obs_dir: obs_dir.as_ref().map(std::path::PathBuf::from),
+            dates: a.dates,
+            event_log: a.event_log.clone().filter(|p| p.as_os_str() != "auto"),
+            event_log_tsv: a.tsv,
+            event_log_format: a.format.clone(),
+            reactive_log: a.reactive_log.clone(),
+        },
+        dry_run,
+    });
 }
 
 /// The files a `--fit` handle binds to the model's external inputs, by name:
@@ -2643,194 +2422,6 @@ fn fit_table_files(fit_ref: &str) -> Result<Vec<(String, String)>, String> {
     }
     let resolved = crate::fit::handle::resolve_fit(fit_ref).map_err(|e| e.to_string())?;
     Ok(tables(&resolved.config.problem))
-}
-
-/// Write `simulate --quantities-out`'s sidecar: the rendered tables plus the
-/// `quantities.json` manifest. Regenerated, never part of the CAS leaf, so it
-/// is written whether or not the run stored one — `--stdout` included (gh#574).
-fn write_quantities_sidecar(out: &crate::out::Out, q: &SimQuantities) {
-    if !q.by_group.is_empty() {
-        // One design cell per (design point, scenario), each banded over ITS
-        // OWN replicates. The `scenario` column is emitted iff the run has a
-        // scenario axis: with no `--scenario` there is exactly one arm and no
-        // coordinate to report, and labelling it would name a world the run
-        // did not simulate (proposal §2.4, §3.3). The `sweep:<param>` columns
-        // are emitted iff the run has a design axis, from the group's point.
-        let mut stacked = crate::quantity_output::StackedQuantities::new(q.mode);
-        for ((_, scenario), acc) in &q.by_group {
-            let coords = crate::quantity_output::DesignCoords {
-                scenario: q.scenario_axis.then_some(scenario.as_str()),
-                sweep: &acc.sweep,
-            };
-            stacked
-                // `simulate` has no fit behind it, so there is no
-                // conditioned/replay distinction to tag (gh#722) and the
-                // manifest is byte-identical.
-                .push_group(&q.quantities, coords, &acc.draws, &acc.times, None, None, &q.calendar)
-                .unwrap_or_else(|e| {
-                    out.fail(format!("error rendering quantities: {}", e));
-                });
-        }
-        let rendered = stacked.finish(&q.calendar).unwrap_or_else(|e| {
-            out.fail(format!("error rendering quantities: {}", e));
-        });
-        // gh#715 partitions a non-finite quantity out of the render rather
-        // than raising it, so that `fit predict` can keep the rest of its
-        // artifact and record the failure. `simulate` has no such record to
-        // write into, so here it stays what it has always been: an error,
-        // named, with nothing written.
-        if !rendered.failures.is_empty() {
-            for f in &rendered.failures {
-                out.say(format_args!("error: quantity '{}': {}", f.name, f.reason()));
-            }
-            crate::out::ExitCode(1).exit();
-        }
-        let (outs, manifest) = (rendered.files, rendered.manifest);
-        std::fs::create_dir_all(&q.out_dir).unwrap_or_else(|e| {
-            out.fail(format!("error: cannot create quantities dir {}: {}", q.out_dir.display(), e));
-        });
-        // The vocabulary's content digest keys the artifact (proposal
-        // 2026-08-19): the model's own block keeps writing `quantities/`,
-        // a supplied one writes `quantities-<key8>/`. Two vocabularies over
-        // one run are two tables, not one overwritten twice.
-        let sub_dir = crate::quantities_file::quantities_dir_name(q.vocabulary.as_ref());
-        for (name, content) in &outs {
-            match crate::fit::predict::write_tsv(&q.out_dir, &sub_dir, name, content) {
-                Ok(p) => out.say(format_args!("quantities: wrote {}", p.display())),
-                Err(e) => {
-                    out.fail(format!("error: {}", e));
-                }
-            }
-        }
-        let manifest = match crate::quantities_file::stamp_provenance(
-            &manifest, q.vocabulary.as_ref())
-        {
-            Ok(m) => m,
-            Err(e) => {
-                out.fail(format!("error: {}", e));
-            }
-        };
-        let manifest_path = q.out_dir.join(
-            crate::quantities_file::quantities_manifest_name(q.vocabulary.as_ref()));
-        std::fs::write(&manifest_path, &manifest).unwrap_or_else(|e| {
-            out.fail(format!("error: cannot write {}: {}", manifest_path.display(), e));
-        });
-        out.say(format_args!("quantities: wrote {}", manifest_path.display()));
-    }
-}
-
-/// `RunSink` for `camdl simulate`: writes the per-cell content-addressed
-/// leaf (`cas`) AND the `--output`/`--obs` mirror
-/// (`stream`, the combined wide-format TSV). The store is the system of
-/// record; the mirror is the convenience view.
-///
-/// A multi-cell run re-uses what the store already holds (proposal
-/// 2026-10-24-batch-to-simulate §3): a cell whose leaf is a hit under
-/// [`crate::cas_sink::CasSink::stored_hit`]'s exact rule is not simulated,
-/// and its `traj.tsv` rows — and, when observations were asked for, its
-/// stored observation values — are read back into the combined outputs in
-/// canonical order. The engine classifies every cell before any runs, so
-/// skipped cells are held in `pending` and spliced in by `run_idx` as the
-/// live cells merge. A `--quantities-out` run simulates every cell: the
-/// quantities are a regenerated sidecar computed from the in-memory
-/// trajectory, and the stored `traj.tsv` writes real values at four decimals,
-/// so it cannot stand in. A lone run keeps today's path (commit dedup).
-struct SimSink {
-    cas: crate::cas_sink::CasSink,
-    stream: StreamSink,
-    /// `--stdout`: the user opted out of the store, so skip the leaf commit
-    /// entirely — only the `stream` mirror runs, and the caller writes its
-    /// buffer to stdout. The store is otherwise the system of record.
-    skip_cas: bool,
-    /// Whether cells the store already holds are skipped and read back:
-    /// a multi-cell run without `--stdout` and without `--quantities-out`.
-    reuse: bool,
-    /// Skipped cells, by `run_idx`, waiting for their place in canonical
-    /// order among the live cells' merges.
-    pending: std::collections::BTreeMap<usize, StoredCell>,
-    /// How many cells were read from the store rather than simulated.
-    n_reused: usize,
-    /// Generated quantities (proposal 2026-06-25), `Some` iff the model declares
-    /// a `quantities {}` block AND `--quantities-out <dir>` was given. The
-    /// evaluator is compiled lazily on the first cell (from that cell's
-    /// fully-resolved model) and reused; per cell the trajectory is folded into
-    /// the leaf's quantity values. Never part of the run identity — a regenerated
-    /// sidecar.
-    quant: Option<SimQuantities>,
-}
-
-/// The per-run generated-quantities accumulator carried on [`SimSink`].
-struct SimQuantities {
-    /// The model's quantity IR (cloned once), used to build the evaluator and to
-    /// render the output.
-    quantities: Vec<ir::quantity::Quantity>,
-    /// Banded (`--draws`/multi-cell) vs point (single fixed-params cell). Keyed
-    /// by the param-source kind, not the cell count alone.
-    mode: crate::quantity_output::Mode,
-    /// Whether this run HAS a scenario axis (any `--scenario` was passed). A
-    /// fact about the run, fixed at construction: with no axis there is no
-    /// design coordinate to report, and inventing one would name a world the
-    /// run did not simulate (proposal §2.4).
-    scenario_axis: bool,
-    /// The parameter-point axis: a sweep job's groups carry their point's
-    /// swept values as `sweep:<param>` coordinates.
-    axis: PointAxis,
-    /// The directory to write the quantity TSVs + manifest into.
-    out_dir: std::path::PathBuf,
-    /// The supplied reporting vocabulary, `None` when the model's own
-    /// `quantities {}` block is in force. Its content digest names the
-    /// subdirectory and manifest (`quantities-<key8>/`), so two vocabularies
-    /// over one model land at two addresses instead of overwriting each other;
-    /// its path + digest go into the manifest as provenance.
-    vocabulary: Option<crate::quantities_file::QuantitiesOverride>,
-    /// Built lazily on the first `merge_cell` from that cell's resolved model —
-    /// the compile happens once per run, never per cell.
-    compiled: Option<std::sync::Arc<sim::CompiledModel>>,
-    eval: Option<sim::quantity::QuantityEvaluator>,
-    /// Per (design point, scenario): that group's draws and its own time axis.
-    ///
-    /// A scenario and a design point are DESIGN coordinates — they say which
-    /// world was simulated — while draws/replicates/seeds are SAMPLING
-    /// coordinates within one world. A quantile summarises the second kind
-    /// only; taking one across scenarios, or across the points of a sweep,
-    /// averages a baseline and its counterfactual into a ribbon describing
-    /// neither (gh#562). Keyed here, at the point cells are assigned, because
-    /// that is where the information exists — a renderer handed already-merged
-    /// cells cannot un-merge them.
-    ///
-    /// Insertion order is the engine's canonical order (scenario outermost,
-    /// then point), and `run_job` merges strictly in that order even under
-    /// Rayon, so the rendered file lists groups deterministically.
-    by_group: indexmap::IndexMap<(usize, String), GroupQuant>,
-    /// Calendar semantics for the `time` axis, stamped into `quantities.json` so
-    /// a consumer maps `time → Date` without re-deriving `origin`/`time_unit`.
-    calendar: ir::caltime::CalendarAxis,
-    /// gh#656: the `--emit-every` override, so an `observations.<stream>`
-    /// quantity reduces the same y_sim series `--obs` emits under the same flags.
-    emit_every: Option<crate::emit_every::EmitEvery>,
-}
-
-/// One (design point, scenario) group's accumulated quantity draws and the
-/// time axis they were produced on. Per group, not per run: once a scenario
-/// can declare its own horizon (gh#561), a run-global axis would render a
-/// September scenario against an August one.
-#[derive(Default)]
-struct GroupQuant {
-    /// One inner `Vec` per cell: each quantity leaf's value, in `quantities`
-    /// order. Retains derived values, never the trajectory.
-    draws: Vec<Vec<sim::quantity::QuantityResult>>,
-    times: Vec<f64>,
-    /// The group's design point as `(param, value)` pairs in name order —
-    /// its `sweep:<param>` coordinates; empty off the sweep axis.
-    sweep: Vec<(String, f64)>,
-}
-
-/// Whether two output-time grids agree, on the output-axis coincidence
-/// tolerance [`sim::schedule::output_tol`] (relative to |t|, so a
-/// calendar-anchored model at t ~ 1e5 days is not held to exact equality).
-fn time_grids_match(a: &[f64], b: &[f64]) -> bool {
-    a.len() == b.len()
-        && a.iter().zip(b).all(|(x, y)| (x - y).abs() <= sim::schedule::output_tol(*x))
 }
 
 /// Materialize the per-draw `y_sim` for the streams an `observations.<stream>`
@@ -2923,242 +2514,6 @@ fn materialize_obs_for_quantities(
     Ok(sim::quantity::ObsSeriesSet { streams: out })
 }
 
-impl SimQuantities {
-    /// Fold one cell's trajectory into its quantity values, compiling the
-    /// evaluator on the first call. The per-cell parameter vector is read by
-    /// name from the cell's fully-resolved model (every cell shares the param
-    /// set, so this is exact for any param source: fixed params, `--params`
-    /// files, `--draws`, scenario overrides).
-    fn push_cell(&mut self, cell: &engine::CellResult) -> Result<(), String> {
-        if self.eval.is_none() {
-            let compiled = std::sync::Arc::new(
-                sim::CompiledModel::new(cell.model().clone())
-                    .map_err(|e| format!("compiling model for quantities: {e:?}"))?
-                    .with_eval_settings(cell.spec.sim_run.eval),
-            );
-            let eval = sim::quantity::QuantityEvaluator::new(&self.quantities, compiled.as_ref())
-                .map_err(|e| format!("building quantity evaluator: {e}"))?;
-            self.compiled = Some(compiled);
-            self.eval = Some(eval);
-        }
-        let compiled = self.compiled.as_ref().expect("compiled set above");
-        let eval = self.eval.as_ref().expect("eval set above");
-        let mut params = vec![f64::NAN; compiled.param_index.len()];
-        for p in &cell.model().parameters {
-            if let Some(&idx) = compiled.param_index.get(p.name.as_str()) {
-                if let Some(v) = p.value.resolved_value() {
-                    params[idx] = v;
-                }
-            }
-        }
-        // A `value_at(..., last_obs)` quantity anchors to the end of OBSERVED
-        // data; a forward simulation has none (even `--obs` output is synthetic
-        // y_sim, not observations). Hard error naming the quantities — the
-        // capability-gap convention — rather than an empty/NaN column
-        // (proposal 2026-08-17).
-        if eval.references_obs_anchor() {
-            return Err(format!(
-                "quantity `{}` reads `value_at` at an observation anchor \
-                 (`last_obs` / `first_obs`, with or without an offset), but a \
-                 forward simulation has no observed data to anchor to. Evaluate \
-                 it via `fit predict` (where the fit's data supplies the \
-                 observation times), or use a literal time: \
-                 `value_at(expr, date(\"...\"))`.",
-                eval.obs_anchor_quantity_names().join("`, `"),
-            ));
-        }
-        // `observations.<stream>` quantities reduce the per-draw y_sim — sampled
-        // here with the cell's obs_seed (the same draws `--obs` would emit). Only
-        // built when a quantity actually references an observation stream.
-        let obs_streams = eval.obs_streams();
-        let obs_set = if obs_streams.is_empty() {
-            None
-        } else {
-            Some(materialize_obs_for_quantities(
-                &obs_streams,
-                cell.model(),
-                &cell.traj,
-                compiled,
-                &params,
-                cell.spec.obs_seed,
-                cell.cell.restart,
-                self.emit_every.as_ref(),
-            )?)
-        };
-        // `simulate` has no fit behind it, so there is no conditioned path to
-        // read: every quantity folds the replay (gh#722 `ConditionedRead::Off`).
-        let results = eval.eval_draw(
-            &params,
-            &cell.traj,
-            sim::quantity::ConditionedRead::Off,
-            compiled,
-            obs_set.as_ref(),
-            None,
-        );
-        let times: Vec<f64> = cell.traj.snapshots.iter().map(|s| s.t).collect();
-        // The key is DERIVED from the cell, never supplied by a caller — that is
-        // what makes pooling unrepresentable here. An accumulator taking a key
-        // parameter would be strictly weaker, however well the key were typed,
-        // because a caller could pass one key for every cell.
-        let scenario = cell.spec.scenario.name();
-        // A design point is a group key; a draw is a sample within its
-        // scenario's group, so a draws job keeps one group per scenario.
-        let (point, sweep): (usize, Vec<(String, f64)>) = match &self.axis {
-            PointAxis::Sweep { .. } => (
-                cell.spec.point_idx,
-                cell.spec.point_overrides.iter().map(|(k, v)| (k.clone(), *v)).collect(),
-            ),
-            PointAxis::Draws | PointAxis::None => (0, Vec::new()),
-        };
-        let acc = self.by_group.entry((point, scenario.to_string())).or_default();
-        if acc.draws.is_empty() {
-            acc.times = times;
-            acc.sweep = sweep;
-        } else if !time_grids_match(&acc.times, &times) {
-            // Later cells PROVE compatibility rather than being folded into the
-            // first cell's axis. Without this, a future feature letting cells of
-            // ONE scenario differ in cadence would silently reinstate gh#562 at
-            // smaller scale — first-wins, no diagnostic.
-            return Err(format!(
-                "scenario '{scenario}', point {point}: cell {} has {} output times \
-                 but this group's earlier cells have {}. Quantity cells within a \
-                 group must share a time grid.",
-                cell.spec.run_idx,
-                times.len(),
-                acc.times.len()
-            ));
-        }
-        acc.draws.push(results);
-        Ok(())
-    }
-}
-
-/// A cell the store already held, read back for the combined outputs: its
-/// leaf's `traj.tsv` text (spliced in as rows, never re-rendered, so the bytes
-/// are the leaf's), the scenario-applied model it ran, and — when observations
-/// were asked for — each stream's stored values in plan-row order.
-struct StoredCell {
-    spec: engine::CellSpec,
-    traj_tsv: String,
-    model: ir::Model,
-    /// The cell's restart, as its resolution gave it (gh#1081): `model` has had
-    /// its start moved to the origin, so the model's own start is carried here.
-    restart: Option<crate::obs_emit::Restart>,
-    /// Per stream, the stored values as the leaf wrote them (validated as
-    /// numbers, kept as text so the mirror renders them unchanged).
-    obs: Vec<Vec<String>>,
-}
-
-impl SimSink {
-    /// Read a hit back from the store: the leaf `stored_hit` found, its
-    /// `traj.tsv`, and the observation subtree the exact rule required.
-    fn read_stored(&self, spec: &engine::CellSpec) -> Result<StoredCell, String> {
-        let (cell, rt) = self.cas.resolved_cell(spec)?;
-        let restart = cell.restart;
-        let (dir, _) = self.cas.stored_leaf(&rt);
-        let traj_path = dir.join("traj.tsv");
-        let traj_tsv = std::fs::read_to_string(&traj_path)
-            .map_err(|e| format!("reading stored {}: {}", traj_path.display(), e))?;
-        let model = cell.run.model;
-        let obs = if self.stream.obs_path.is_some() || self.stream.obs_dir.is_some() {
-            let obs_dir = crate::cas_sink::obs_subtree_dir(
-                &dir, &model.observations, self.stream.emit_every.as_ref(), spec.obs_seed,
-            )?;
-            let mut out = Vec::with_capacity(model.observations.len());
-            for o in &model.observations {
-                let path = obs_dir.join(format!("{}.tsv", o.name));
-                let text = std::fs::read_to_string(&path)
-                    .map_err(|e| format!("reading stored {}: {}", path.display(), e))?;
-                let mut vals = Vec::new();
-                for (i, line) in text.lines().enumerate().skip(1) {
-                    if line.trim().is_empty() {
-                        continue;
-                    }
-                    // The value is the last column: the writer puts the scored
-                    // column after the temporal column(s) and writes no extra
-                    // columns into the leaf.
-                    let last = line.rsplit('\t').next().unwrap_or("");
-                    last.parse::<f64>().map_err(|_| format!(
-                        "{} line {}: cannot read `{}` as the stored observation value",
-                        path.display(), i + 1, last
-                    ))?;
-                    vals.push(last.to_string());
-                }
-                out.push(vals);
-            }
-            out
-        } else {
-            Vec::new()
-        };
-        Ok(StoredCell { spec: spec.clone(), traj_tsv, model, restart, obs })
-    }
-
-    /// Splice every pending stored cell with `run_idx < before` into the
-    /// combined outputs, in canonical order.
-    fn flush_pending_before(&mut self, before: usize) -> Result<(), String> {
-        let ready: Vec<usize> = self.pending.range(..before).map(|(k, _)| *k).collect();
-        for k in ready {
-            let cell = self.pending.remove(&k).expect("key listed from the map");
-            self.stream.merge_stored(&cell)?;
-        }
-        Ok(())
-    }
-}
-
-impl engine::RunSink for SimSink {
-    fn on_start(&mut self, grid: &engine::Grid) {
-        self.stream.on_start(grid);
-    }
-
-    fn should_run(&mut self, spec: &engine::CellSpec) -> bool {
-        if !self.reuse {
-            return true;
-        }
-        self.cas.should_run(spec)
-    }
-
-    fn on_skip(&mut self, spec: &engine::CellSpec) {
-        self.cas.on_skip(spec);
-        self.n_reused += 1;
-        match self.read_stored(spec) {
-            Ok(cell) => {
-                self.pending.insert(spec.run_idx, cell);
-            }
-            // Surfaced with the commit errors after the loop: a hit the mirror
-            // cannot read back is a run that did not produce what was asked.
-            Err(e) => self.cas.errors.push(format!(
-                "scenario={} seed={}: reading the stored cell back: {}",
-                spec.scenario.name(), spec.process_seed, e
-            )),
-        }
-    }
-
-    fn merge_cell(&mut self, cell: &engine::CellResult) -> Result<(), String> {
-        // Stored cells that precede this one in canonical order go first, so
-        // the combined outputs read as if every cell had run.
-        self.flush_pending_before(cell.spec.run_idx)?;
-        // Leaf first (system of record), then the mirror. A commit error is
-        // accumulated on `cas.errors` and surfaced after the loop, never
-        // silently dropped. Under `--stdout` the leaf is suppressed.
-        if !self.skip_cas {
-            self.cas.merge_cell(cell)?;
-        }
-        self.stream.merge_cell(cell)?;
-        // Generated quantities: fold this cell's trajectory alongside the leaf +
-        // mirror, using the cell's own resolved params. Composed here (not a
-        // second RunSink) so it sees the same per-cell trajectory.
-        if let Some(q) = &mut self.quant {
-            q.push_cell(cell)?;
-        }
-        Ok(())
-    }
-
-    fn on_finish(&mut self, grid: &engine::Grid) -> Result<(), String> {
-        self.flush_pending_before(usize::MAX)?;
-        self.stream.on_finish(grid)
-    }
-}
-
 /// Resolve `simulate`'s configuration once: the base model and its `model`
 /// level, the run-wide `config` level, and the scenario arms. Both the run
 /// identity of every cell (through [`crate::cas_sink::CasSink`]) and the
@@ -3231,63 +2586,21 @@ fn resolve_sim_config(
     // anchor EXPLICITLY; no model field will do it for them.
     let base_model = util::load_run_model(run)?;
 
-    // Resolve each simulate scenario into the hash-relevant delta. A name
-    // matching a model preset reads its effective delta via
-    // `ResolvedEntry::from_preset` (preset route); the no-scenario case is the
-    // CLI ad-hoc baseline.
-    let arms: Vec<crate::cas_sink::ResolvedEntry> = if scenario_names.is_empty() {
-        vec![crate::cas_sink::ResolvedEntry {
-            name: adhoc_label.to_string(),
-            route: None,
-            enable: run.adhoc_enable.clone(),
-            disable: run.adhoc_disable.clone(),
-            params: HashMap::new(),
-            scale: Vec::new(),
-        }]
-    } else {
-        scenario_names.iter().map(|name| {
-            if !base_model.presets.iter().any(|p| &p.name == name) {
-                let available: Vec<&str> = base_model.presets.iter()
-                    .map(|p| p.name.as_str()).collect();
-                return Err(format!("scenario '{}' not found. Available: {}", name,
-                    if available.is_empty() { "(none)".into() } else { available.join(", ") }));
-            }
-            // The effective (compose-walked, scale-bearing) delta, from the
-            // authority the preset route applies (gh#573). The arm's horizon
-            // is keyed per cell, from the model the cell runs.
-            crate::cas_sink::ResolvedEntry::from_preset(&base_model, name)
-        }).collect::<Result<Vec<_>, String>>()?
-    };
-    // A replayed fit's intervention selection is part of what each arm runs
-    // (`util::FitBase::overlay`), so it is part of what each arm is keyed on:
-    // its lists lead each arm's, in the order the overlay applies them. An
-    // empty base leaves every entry, and so every `run_id`, unchanged.
-    let arms = if run.fit_base.is_empty() {
-        arms
-    } else {
-        let (base_enable, base_disable) =
-            run.fit_base.lists(&base_model).map_err(|e| e.to_string())?;
-        arms.into_iter().map(|mut e| {
-            e.enable = base_enable.iter().cloned().chain(e.enable).collect();
-            e.disable = base_disable.iter().cloned().chain(e.disable).collect();
-            e
-        }).collect()
-    };
+    // A named scenario the model does not declare is refused here, before any
+    // cell is planned.
+    for name in scenario_names {
+        if !base_model.presets.iter().any(|p| &p.name == name) {
+            let available: Vec<&str> = base_model.presets.iter().map(|p| p.name.as_str()).collect();
+            return Err(format!("scenario '{}' not found. Available: {}", name,
+                if available.is_empty() { "(none)".into() } else { available.join(", ") }));
+        }
+    }
+    let _ = adhoc_label;
 
     let SimConfigFlags { backend, dt, allow_degenerate_rates, allow_forcing_extrapolation, view } = flags;
-    let run_config = crate::sim_config::RunConfig::new(
-        backend, dt, &base_model.output.times,
-        allow_degenerate_rates, allow_forcing_extrapolation, view,
-    )
-    .map_err(|e| format!("resolve error: {e}"))?;
-    // Display prefix + provenance source path come from the ORIGINAL model
-    // path, not the compiled temp IR (`run.ir_path`), so the store layout and
-    // `run.json` provenance show the model's real name (gh#51 cross-check
-    // parity with the pre-hoist behaviour).
-    let model = crate::sim_config::ResolvedModel::new(
-        base_model, ir::IR_VERSION.trim(), crate::env::get().engine_identity(version::ENGINE_ID), display_path,
-    );
-    Ok(crate::sim_config::ResolvedSimConfig { model, run: run_config, arms })
+    let run_config = crate::sim_config::RunConfig { backend, dt, allow_degenerate_rates, allow_forcing_extrapolation, view };
+    let model = crate::sim_config::ResolvedModel::new(base_model, display_path);
+    Ok(crate::sim_config::ResolvedSimConfig { model, run: run_config })
 }
 
 /// The run-wide settings `simulate` resolved by its precedence rules (an
@@ -3299,448 +2612,6 @@ struct SimConfigFlags {
     allow_degenerate_rates: bool,
     allow_forcing_extrapolation: bool,
     view: crate::util::OutputColumns,
-}
-
-/// Build the simulate-side [`crate::cas_sink::CasSink`] over the resolved
-/// configuration, so each cell's leaf is keyed on exactly what ran, whichever
-/// path (a lone run or a multi-cell grid) writes it.
-fn build_simulate_cas_sink(
-    sim: std::sync::Arc<crate::sim_config::ResolvedSimConfig>,
-    engine: &crate::sim_config::EngineSettings,
-    execution: &crate::sim_config::Execution,
-    obs_enabled: bool,
-    label: Option<String>,
-    fit_dep: Vec<runid::inputs::ArtifactRef>,
-    // gh#656: `--emit-every`. It names the obs subtree (`obs_subtree_hash`) as
-    // well as setting the emitted times, so two cadences are two addressable
-    // artifacts under one shared trajectory leaf — the leaf itself does NOT
-    // re-key, because its bytes do not depend on the emission cadence.
-    emit_every: Option<crate::emit_every::EmitEvery>,
-    total_runs: usize,
-) -> crate::cas_sink::CasSink {
-    crate::cas_sink::CasSink {
-        engine: engine.clone(),
-        sim,
-        runs_dir: format!("{}/sims", execution.store_root),
-        obs_enabled,
-        emit_every,
-        force: execution.force,
-        total: total_runs,
-        counter: 0,
-        completed_runs: Vec::new(),
-        errors: Vec::new(),
-        label,
-        fit_dep,
-        // Progress: a LONE run (total_runs <= 1) goes through the engine's
-        // per-timestep bar (`run_one_cell_with_progress`), so the sink adds no
-        // overall bar (a redundant `1/1`). A multi-cell ensemble hits
-        // `run_one_cell` (no inner bar), so the sink owns the overall cells
-        // bar — otherwise the ensemble runs silently. The `Task` honours
-        // `--progress none`/`plain` internally.
-        progress: crate::cas_sink::cells_progress(total_runs, "simulate"),
-        pre_run: HashMap::new(),
-    }
-}
-
-/// Store the combined-across-cells wide-format TSV of a multi-cell `simulate`
-/// as a content-addressed `SimEnsemble` leaf that references (deps) the N
-/// per-cell `Sim` leaves. `combined_bytes` are the exact bytes the `-o` mirror
-/// writes, so `camdl cat <ensemble>` == the `-o` combined TSV.
-///
-/// Failure here is reported but non-fatal: the per-cell `Sim` leaves are the
-/// primary system of record and are already committed; the ensemble is a
-/// derived convenience view, so a write hiccup must not fail the whole run
-/// (mirrors the obs-child non-fatal posture).
-fn write_sim_ensemble(
-    out: &crate::out::Out,
-    cas: &crate::cas_sink::CasSink,
-    combined_bytes: &[u8],
-    cas_root: &str,
-    label: Option<String>,
-    // The resolved `--sweep` / `--sweep-file` design of a sweep job: keyed
-    // into the `grid` level and recorded in `run.json`, so the grid
-    // declaration lives with the results. `None` for every other job.
-    design: Option<&crate::sim_ensemble_cas::ResolvedDesign>,
-) {
-    // Build the cell list from the committed leaves. A cell without a resolved
-    // run_id failed identity resolution (already on `errors`, which aborted
-    // above) — defensively skip it so we never fold a bogus dep.
-    let cells: Vec<crate::sim_ensemble_cas::EnsembleCell> = cas
-        .completed_runs
-        .iter()
-        .filter_map(|r| {
-            Some(crate::sim_ensemble_cas::EnsembleCell {
-                row: r.row,
-                scenario_label: r.scenario.clone(),
-                process_seed: r.process_seed,
-                point_id: r.point_id,
-                sim_run_id: r.run_id?,
-                traj_digest: r.traj_digest?,
-                params_level: r.params_level?,
-            })
-        })
-        .collect();
-    if cells.len() != cas.completed_runs.len() {
-        out.say(format_args!("warning: ensemble: {} of {} cells lacked a resolved identity; \
-                   skipping ensemble artifact",
-            cas.completed_runs.len() - cells.len(), cas.completed_runs.len()));
-        return;
-    }
-
-    let engine = &cas.engine;
-    let ctx = crate::sim_ensemble_cas::EnsembleCtx {
-        model: &cas.sim.model.ir,
-        ir_version: ir::IR_VERSION.trim(),
-        engine: &cas.sim.model.engine,
-        stem: &cas.sim.model.stem,
-        backend: engine.backend,
-        dt: engine.dt,
-        cells: &cells,
-        design,
-    };
-    let resolved = match crate::sim_ensemble_cas::resolve_sim_ensemble(&ctx) {
-        Ok(r) => r,
-        Err(e) => {
-            out.say(format_args!("warning: ensemble identity: {}", e));
-            return;
-        }
-    };
-
-    let root = std::path::Path::new(cas_root);
-
-    // Distinct scenarios (sorted, deduped) for the display payload.
-    let mut scenarios: Vec<String> = cells.iter().map(|c| c.scenario_label.clone()).collect();
-    scenarios.sort();
-    scenarios.dedup();
-    let n_seeds = {
-        let mut s: Vec<u64> = cells.iter().map(|c| c.process_seed).collect();
-        s.sort_unstable();
-        s.dedup();
-        s.len()
-    };
-    let n_point_ids = {
-        let mut d: Vec<usize> = cells.iter().map(|c| c.point_id).collect();
-        d.sort_unstable();
-        d.dedup();
-        d.len()
-    };
-    let mut inputs = serde_json::json!({
-        "n_cells": cells.len(),
-        "scenarios": scenarios,
-        "n_scenarios": scenarios.len(),
-        "n_seeds": n_seeds,
-    });
-    // The point axis is named for what it is: the design of a sweep job, with
-    // its `n_points`, or the draw count of a draws job. After the manifest is
-    // gone the record is the only place "β = lin(0.2, 0.6, 5)" survives.
-    match design {
-        Some(d) => {
-            inputs["n_points"] = serde_json::json!(n_point_ids);
-            inputs["design"] = serde_json::to_value(d).unwrap_or(serde_json::Value::Null);
-        }
-        None => inputs["n_draws"] = serde_json::json!(n_point_ids),
-    }
-
-    let deps = crate::sim_ensemble_cas::ensemble_deps(&cells);
-    let resolved_artifact = crate::resolve::ResolvedArtifact {
-        kind: runid::ArtifactKind::SimEnsemble,
-        levels: resolved.levels.clone(),
-        run_id: resolved.run_id,
-        display_inputs: inputs,
-    };
-    let calendar = ir::caltime::CalendarAxis::from_model(&cas.sim.model.ir)
-        .unwrap_or_else(|e| out.fail(format!("error: {e}")));
-    let mut meta = crate::resolve::RecordMeta::new(
-        ir::IR_VERSION.trim(), &cas.sim.model.path, label, calendar, &cas.engine.forcing)
-        .with_deps(deps);
-    meta.engine = cas.sim.model.engine.clone();
-
-    let mut artifacts = runid::Artifacts::new();
-    artifacts.insert("ensemble.tsv", combined_bytes.to_vec());
-    let store = runid::FsCasStore::new(root);
-    match crate::resolve::begin_resolved_write(
-        &store,
-        root,
-        &resolved_artifact,
-        &meta,
-        crate::resolve::WriteMode::Atomic(artifacts),
-    ) {
-        Ok(crate::resolve::ResolvedWrite::Committed(dest)) => {
-            // Full rooted path (e.g. `./results/ensembles/…`), matching the
-            // `stored` banner — not the bare store-relative `ensembles/…`.
-            out.milestone("ensemble", dest.to_string_lossy());
-        }
-        Ok(crate::resolve::ResolvedWrite::Streaming(_)) => {
-            unreachable!("Atomic write mode never returns a streaming claim")
-        }
-        Err(e) => out.say(format_args!("warning: ensemble commit failed: {}", e)),
-    }
-}
-
-/// Report where the run(s) landed in the store and how to read them back.
-/// A lone run prints its rooted leaf path plus the `camdl cat <run_id>` that
-/// reads it; a multi-run prints a one-line summary plus `camdl list`. The path
-/// is rooted at `cas_root` (the `--output-dir`) — e.g.
-/// `./results/sims/model-…/…/seed_…` — so it is copy-paste ready, not just the
-/// store-relative `sims/…` tail. (Whether a leaf was freshly written or a
-/// cache hit is not distinguished here — `commit_atomic` is idempotent and
-/// does not report which; that is a follow-up.)
-fn report_cas_leaves(out: &crate::out::Out, runs: &[crate::cas_sink::RunEntry], cas_root: &str) {
-    let root = cas_root.trim_end_matches('/');
-    match runs.len() {
-        0 => {}
-        1 => {
-            let r = &runs[0];
-            out.milestone("stored", format!("{}/{}", root, r.run_path));
-            if let Some(id) = r.run_id {
-                out.hint(format!("camdl cat {}", id.to_hex()));
-            }
-        }
-        n => {
-            out.milestone("stored", format!("{} leaves \u{b7} {}/sims/", n, root));
-            out.hint("camdl list");
-        }
-    }
-}
-
-/// One sampled observation row in the combined-obs accumulator.
-struct ObsRow {
-    time: f64,
-    /// What the value was drawn over — an instant, or `[start, stop)`; a
-    /// windowed stream writes both boundaries (gh#833).
-    coverage: score::trace::Coverage,
-    /// The cell this row belongs to, as the table's coordinate columns say it.
-    coords: CellCoords,
-    value: ObsValue,
-}
-
-/// A row's value: drawn in this run, or read back verbatim from a stored leaf.
-/// A stored value is written exactly as the leaf wrote it, so a read-back row
-/// is byte-identical to the row a fresh run would have produced (a real value
-/// that rounds to an integer at six decimals stays `2.000000`, never `2`).
-enum ObsValue {
-    Drawn(f64),
-    Stored(String),
-}
-
-impl ObsValue {
-    fn render(&self) -> String {
-        match self {
-            ObsValue::Drawn(v) => obs_emit::format_obs_value(*v),
-            ObsValue::Stored(text) => text.clone(),
-        }
-    }
-}
-
-/// The parameter-point axis of a job, as the combined trajectory and
-/// observation tables label it (proposal 2026-10-24-batch-to-simulate §3
-/// "Combined outputs").
-#[derive(Clone, Debug)]
-enum PointAxis {
-    /// One parameter point: no point column.
-    None,
-    /// `--draws`: a `draw` column, the 0-based draw index, when the job has
-    /// more than one draw.
-    Draws,
-    /// `--sweep` / `--sweep-file`: `point_id` (a sweep file's own id for the
-    /// row, else the 0-based design index), one
-    /// `sweep:<param>` column per swept parameter in name order, written in
-    /// Rust's shortest round-trip form so a value joins exactly against the
-    /// grid that produced it, and `seed`, the cell's process seed — the pairing
-    /// key, since under decision D-B two design points at one replicate share
-    /// it. Never a `draw` column: a design point is not a draw.
-    Sweep { params: Vec<String> },
-}
-
-/// The grid shape that decides which coordinate columns the combined tables
-/// carry: `replicate` (the global run ordinal, counted from 0) when the run
-/// has more than one cell, `scenario` when more than one arm ran, then the
-/// point axis's columns. One writer for the trajectory table and both
-/// observation tables, so no table mixes conventions.
-#[derive(Clone, Debug)]
-struct TableShape {
-    total_runs: usize,
-    n_scenarios: usize,
-    n_points: usize,
-    axis: PointAxis,
-}
-
-/// One cell's coordinates in the combined tables.
-#[derive(Clone, Debug)]
-struct CellCoords {
-    run_idx: usize,
-    scenario: String,
-    /// The id the cell is written under: a sweep point's `point_id`, a draw's
-    /// index.
-    point_id: usize,
-    /// The cell's value of each swept parameter, in the axis's name order;
-    /// empty off the sweep axis.
-    point_values: Vec<f64>,
-    seed: u64,
-}
-
-impl CellCoords {    /// Errs rather than writing a placeholder when a swept parameter has no
-    /// value on the cell: a `sweep:<param>` cell is a coordinate, and a
-    /// plausible-looking `NaN` there would be a wrong answer, not a blank.
-    fn of(spec: &engine::CellSpec, axis: &PointAxis) -> Result<Self, String> {
-        let point_values = match axis {
-            PointAxis::Sweep { params } => params
-                .iter()
-                .map(|p| {
-                    spec.point_overrides.get(p).copied().ok_or_else(|| format!(
-                        "cell {} (point {}) carries no value for swept parameter `{}`",
-                        spec.run_idx, spec.point_id, p
-                    ))
-                })
-                .collect::<Result<Vec<f64>, String>>()?,
-            PointAxis::Draws | PointAxis::None => Vec::new(),
-        };
-        Ok(CellCoords {
-            run_idx: spec.run_idx,
-            scenario: spec.scenario.name().to_string(),
-            point_id: spec.point_id,
-            point_values,
-            seed: spec.process_seed,
-        })
-    }
-}
-
-impl TableShape {
-    /// The coordinate header cells, each followed by a tab, so the time
-    /// column follows directly.
-    fn write_coord_header(&self, out: &mut impl std::io::Write) -> std::io::Result<()> {
-        if self.total_runs > 1 { write!(out, "replicate\t")?; }
-        if self.n_scenarios > 1 { write!(out, "scenario\t")?; }
-        match &self.axis {
-            PointAxis::Sweep { params } => {
-                write!(out, "point_id\t")?;
-                for p in params { write!(out, "sweep:{p}\t")?; }
-                write!(out, "seed\t")?;
-            }
-            PointAxis::Draws if self.n_points > 1 => write!(out, "draw\t")?,
-            PointAxis::Draws | PointAxis::None => {}
-        }
-        Ok(())
-    }
-
-    /// One row's coordinate cells, each followed by a tab.
-    fn write_coord_cells(&self, out: &mut impl std::io::Write, c: &CellCoords) -> std::io::Result<()> {
-        if self.total_runs > 1 { write!(out, "{}\t", c.run_idx)?; }
-        if self.n_scenarios > 1 { write!(out, "{}\t", c.scenario)?; }
-        match &self.axis {
-            PointAxis::Sweep { .. } => {
-                write!(out, "{}\t", c.point_id)?;
-                for v in &c.point_values { write!(out, "{v}\t")?; }
-                write!(out, "{}\t", c.seed)?;
-            }
-            PointAxis::Draws if self.n_points > 1 => write!(out, "{}\t", c.point_id)?,
-            PointAxis::Draws | PointAxis::None => {}
-        }
-        Ok(())
-    }
-}
-
-/// Which file one stream's rows belong in under `--obs-dir`, and what those
-/// rows must say to be routed back to it (gh#884).
-///
-/// The loader binds one file per observation `source`. An unstratified stream
-/// is alone under its source and gets a file of its own, named for the stream.
-/// A stratified family's leaves share a source, so they share one long-format
-/// file named for that source, and each row carries the `: dim` cells that say
-/// which leaf it is — the cells the loader routes by.
-struct ObsFileKey {
-    source: String,
-    /// `(column header, level)` per declared `: dim` column; empty for an
-    /// unstratified stream.
-    dims: Vec<(String, String)>,
-}
-
-/// `RunSink` for `camdl simulate`: streams the combined wide-format
-/// trajectory TSV (replicate/scenario/draw columns gated on the grid
-/// shape) and accumulates synthetic observations for a post-loop combined
-/// write. Reproduces the pre-unification `run_simulate` output byte-for-byte.
-struct StreamSink {
-    /// The combined wide-format trajectory TSV, accumulated in memory across
-    /// cells. `None` ⟺ the trajectory is suppressed (`--obs-only`). Post-loop
-    /// this buffer is the single source of bytes for BOTH the `-o` mirror and
-    /// (multi-run) the content-addressed `SimEnsemble` artifact, so the two are
-    /// byte-identical by construction. Never streamed to stdout (Item C — the
-    /// CAS leaf/ensemble are the system of record).
-    traj_out: Option<Vec<u8>>,
-    /// The same rows without date columns, kept only under `--dates` (else
-    /// `None`, and `traj_out` is already date-free). The `SimEnsemble` artifact
-    /// is stored from this buffer: `--dates` is in no identity level, so bytes
-    /// it changes cannot be stored under the ensemble's `run_id` (gh#583 B).
-    undated_out: Option<Vec<u8>>,
-    traj_header_written: bool,
-    /// gh#156: the resolved `--no-flows` / `--columns` filter for this mirror's
-    /// trajectory columns — the same selection the CAS leaf renderer uses.
-    output_cols: crate::util::OutputColumns,
-    dates: bool,
-    dates_render: Option<(String, String)>,
-    obs_path: Option<String>,
-    obs_dir: Option<String>,
-    obs_data: Vec<Vec<ObsRow>>,
-    obs_stream_names: Vec<String>,
-    /// Per stream, parallel to `obs_stream_names`: which file it belongs in,
-    /// and what its rows say to get back to it (gh#884).
-    obs_files: Vec<ObsFileKey>,
-    /// Per stream, the rows `--obs` writes and the columns they go under —
-    /// planned once from the stream's declaration at `run_idx == 0` and shared
-    /// by every cell, which all share one obs axis (gh#833).
-    obs_plans: Vec<crate::obs_emit::EmitPlan>,
-    /// gh#656: the `--emit-every` override for this run's emitted observations.
-    /// `None` for every run without the flag.
-    emit_every: Option<crate::emit_every::EmitEvery>,
-    /// Which coordinate columns the combined tables carry: the point axis is
-    /// fixed at construction, the counts are captured in `on_start`.
-    shape: TableShape,
-}
-
-/// One cell's rows of the combined wide-format trajectory TSV, renderable with
-/// or without the calendar-date columns — so the dated `-o` mirror and the
-/// date-free `SimEnsemble` artifact are two renderings of the same rows, never
-/// two writers (gh#583 item B).
-struct WideTrajBlock<'a> {
-    traj: &'a sim::Trajectory,
-    cols: &'a util::TrajColumns,
-    time_unit: &'a str,
-    /// The first cell writes the version line and the column header.
-    write_header: bool,
-    shape: &'a TableShape,
-    coords: &'a CellCoords,
-}
-
-impl WideTrajBlock<'_> {
-    /// Append this cell's rows to `out`, with date columns rendered from
-    /// `date_origin` when it is `Some`.
-    fn write(&self, out: &mut Vec<u8>, date_origin: Option<&str>) -> Result<(), String> {
-        use std::io::Write;
-        let e = |e: std::io::Error| e.to_string();
-        if self.write_header {
-            writeln!(out, "# {}", version::VERSION_SHORT).map_err(e)?;
-            self.shape.write_coord_header(out).map_err(e)?;
-            // `t t_start t_stop [date date_start date_stop]`: the instant
-            // the states are read at and the period the flows cover
-            // (gh#833), the same cells the leaf's `traj.tsv` carries.
-            write!(out, "{}", util::TRAJ_TIME_HEADER).map_err(e)?;
-            if date_origin.is_some() {
-                write!(out, "{}", util::TRAJ_DATE_HEADER).map_err(e)?;
-            }
-            self.cols.write_header(out).map_err(e)?;
-            writeln!(out).map_err(e)?;
-        }
-        for (snap, period) in self.traj.snapshots.iter().zip(self.traj.flow_periods()) {
-            self.shape.write_coord_cells(out, self.coords).map_err(e)?;
-            util::write_traj_time_cells(out, snap.t, period).map_err(e)?;
-            if let Some(o) = date_origin {
-                util::write_traj_date_cells(out, o, self.time_unit, snap.t, period)?;
-            }
-            self.cols.write_row(out, snap).map_err(e)?;
-            writeln!(out).map_err(e)?;
-        }
-        Ok(())
-    }
 }
 
 /// The transitions a simulation never fired, as one warning: each by name
@@ -3767,429 +2638,18 @@ fn never_fired_notice(names: &[&str]) -> Option<out::notice::Notice> {
     })
 }
 
-impl engine::RunSink for StreamSink {
-    fn on_start(&mut self, grid: &engine::Grid) {
-        self.shape.total_runs = grid.total_runs;
-        self.shape.n_scenarios = grid.n_scenarios;
-        self.shape.n_points = grid.n_points;
-    }
-
-    fn merge_cell(&mut self, cell: &engine::CellResult) -> Result<(), String> {
-        let traj = &cell.traj;
-        let model = cell.model();        let run_idx = cell.spec.run_idx;
-        let coords = CellCoords::of(&cell.spec, &self.shape.axis)?;
-
-        // Diagnostics (first run only).
-        if run_idx == 0 && !traj.transition_diagnostics.is_empty() {
-            match write_diagnostics_tsv("diagnostics.tsv", &traj.transition_diagnostics) {
-                Ok(zero_count) => {
-                    if zero_count > 0 {
-                        if let Some(n) = never_fired_notice(&never_fired(&traj.transition_diagnostics)) {
-                            crate::out::detached().notice(&n);
-                        }
-                    }
-                }
-                Err(e) => crate::out::detached().say(format_args!("warning: could not write diagnostics.tsv: {}", e)),
-            }
-        }
-
-        // ── Trajectory output ───────────────────────────────────────────────
-        if let Some(ref mut out) = self.traj_out {
-            // One column selection drives both this mirror and the CAS leaf
-            // renderer (`util::write_traj_to`) — see `TrajColumns`, so an
-            // output-view filter can never apply to one writer and not the other.
-            let cols = self.output_cols.cols(model);
-
-            let date_origin: Option<&str> = if self.dates {
-                match model.origin.as_deref() {
-                    Some(o) => {
-                        if self.dates_render.is_none() {
-                            self.dates_render = Some((o.to_string(), model.time_unit.clone()));
-                        }
-                        Some(o)
-                    }
-                    None => return Err(
-                        "--dates requires the model to declare an `origin` \
-                         (e.g. `origin = date(\"2020-01-01\")`).".to_string()),
-                }
-            } else {
-                None
-            };
-
-            let block = WideTrajBlock {
-                traj, cols: &cols, time_unit: &model.time_unit,
-                write_header: !self.traj_header_written,
-                shape: &self.shape,
-                coords: &coords,
-            };
-            block.write(out, date_origin)?;
-            if let Some(ref mut undated) = self.undated_out {
-                block.write(undated, None)?;
-            }
-            self.traj_header_written = true;
-        }
-
-        // ── Observation sampling ────────────────────────────────────────────
-        if self.obs_path.is_some() || self.obs_dir.is_some() {
-            if self.dates && self.dates_render.is_none() {
-                match model.origin.as_deref() {
-                    Some(o) => self.dates_render = Some((o.to_string(), model.time_unit.clone())),
-                    None => return Err(
-                        "--dates requires the model to declare an `origin` \
-                         (e.g. `origin = date(\"2020-01-01\")`).".to_string()),
-                }
-            }
-            let compiled = std::sync::Arc::new(
-                sim::CompiledModel::new(model.clone())
-                    .map_err(|e| format!("error compiling model for obs: {:?}", e))?
-                    .with_eval_settings(cell.spec.sim_run.eval),
-            );
-            let params = compiled.default_params.clone();
-            let mut obs_rng = sim::rng::StatefulRng::new(cell.spec.obs_seed);
-
-            if self.obs_plans.is_empty() {
-                self.ensure_obs_streams(
-                    model,
-                    run_start_of(traj, model),
-                    cell.cell.restart,
-                )?;
-            }
-
-            for (si, obs_ir) in model.observations.iter().enumerate() {
-                let sampler = sim::inference::obs_model::compile_obs_sample_pf(
-                    obs_ir, compiled.clone(), &params,
-                ).map_err(|e| e.to_string())?;
-                let plan = &self.obs_plans[si];
-                let projected_values = project_coverages(traj, obs_ir, model, &plan.scored(), compiled.eval)?;
-                for (ti, row) in plan.rows.iter().enumerate() {
-                    // GH #6 fix: pass the actual compartment state where the row
-                    // is scored so the likelihood p/mean expressions can resolve
-                    // references like `N = S + I + R`.
-                    let snap = snap_at(traj, row.at);
-                    let draw = sampler(
-                        projected_values[ti], row.at, &snap.int_state.counts, &[], &mut obs_rng,
-                    );
-                    self.obs_data[si].push(ObsRow {
-                        time: row.label,
-                        coverage: row.coverage,
-                        coords: coords.clone(),
-                        value: ObsValue::Drawn(draw),
-                    });
+/// `diagnostics.tsv` for a simulated cell whose transitions carry
+/// diagnostics, with a warning naming the transitions that never fired.
+fn write_transition_diagnostics(traj: &sim::Trajectory) {
+    match write_diagnostics_tsv("diagnostics.tsv", &traj.transition_diagnostics) {
+        Ok(zero_count) => {
+            if zero_count > 0 {
+                if let Some(n) = never_fired_notice(&never_fired(&traj.transition_diagnostics)) {
+                    crate::out::detached().notice(&n);
                 }
             }
         }
-
-        Ok(())
-    }
-}
-
-impl StreamSink {
-    /// Plan the observation streams once, from the first cell merged (live or
-    /// stored): the stream names, the files they belong in, and the rows each
-    /// stream's declaration assigns to its emit times.
-    ///
-    /// `model` is the cell's resolved model, so this is the cell's own horizon
-    /// under a per-scenario `to` (gh#561), and its forecast origin under
-    /// `--init-state` (gh#641 — `None` for every ordinary run). The cells
-    /// share one obs axis, and the pre-flight has already refused a grid whose
-    /// cells disagree about it.
-    fn ensure_obs_streams(
-        &mut self,
-        model: &ir::Model,
-        run_start: f64,
-        restart: Option<crate::obs_emit::Restart>,
-    ) -> Result<(), String> {
-        for obs_model in &model.observations {
-            self.obs_stream_names.push(obs_model.name.clone());
-            self.obs_files.push(ObsFileKey {
-                source: obs_model.source.clone(),
-                dims: crate::obs_emit::dim_cells(obs_model)?,
-            });
-            self.obs_data.push(Vec::new());
-            let times = obs_emit_schedule_times(
-                obs_model, restart, model.simulation.t_end, self.emit_every.as_ref(),
-            )?;
-            // The rows the declaration assigns to those times, within the run
-            // (gh#833). A wide file has one `time` column and cannot carry a
-            // windowed stream's two boundaries.
-            let plan = crate::obs_emit::plan_emission(
-                obs_model, &times, run_start, model.simulation.t_end,
-                self.emit_every.as_ref().and_then(|e| e.resolve_for(&obs_model.source)),
-            )?;
-            if self.obs_path.is_some()
-                && matches!(plan.columns, crate::obs_emit::TemporalColumns::Window { .. })
-            {
-                return Err(format!(
-                    "observation stream '{}' declares `window_start`/`window_stop` \
-                     columns, which a single wide `--obs` file cannot carry.\n  \
-                     Use --obs-dir (one file per stream, keeps trajectory) or \
-                     --obs-only-dir (one file per stream, suppresses trajectory).",
-                    obs_model.name
-                ));
-            }
-            self.obs_plans.push(plan);
-        }
-        Ok(())
-    }
-
-    /// Splice a cell the store already held into the combined outputs.
-    ///
-    /// The leaf's `traj.tsv` rows are the rows this mirror would have written
-    /// — the leaf renderer and the mirror share `write_traj_time_cells` and
-    /// `TrajColumns::write_row`, and the leaf's column selection is in its
-    /// identity — so each stored row is prefixed with the cell's coordinate
-    /// cells and copied, never re-rendered. Under `--dates` the three date
-    /// cells are rendered from the row's own `t`/`t_start`/`t_stop`. Stored
-    /// observation values are pushed under the shared plan's rows.
-    fn merge_stored(&mut self, cell: &StoredCell) -> Result<(), String> {        let model = &cell.model;
-        let coords = CellCoords::of(&cell.spec, &self.shape.axis)?;
-        let mut lines = cell.traj_tsv.lines();
-        let header = lines.next().ok_or_else(|| "stored traj.tsv is empty".to_string())?;
-        let Some(rest_header) = header.strip_prefix(util::TRAJ_TIME_HEADER) else {
-            return Err(format!(
-                "stored traj.tsv header `{header}` is not the current trajectory format; \
-                 re-run with --force to recompute the cell"
-            ));
-        };
-        let rows: Vec<&str> = lines.filter(|l| !l.trim().is_empty()).collect();
-        let run_start: f64 = rows
-            .first()
-            .and_then(|r| r.split('\t').next())
-            .and_then(|t| t.parse().ok())
-            .unwrap_or(model.simulation.t_start);
-
-        if self.traj_out.is_some() {
-            let date_origin: Option<String> = if self.dates {
-                match model.origin.as_deref() {
-                    Some(o) => {
-                        if self.dates_render.is_none() {
-                            self.dates_render = Some((o.to_string(), model.time_unit.clone()));
-                        }
-                        Some(o.to_string())
-                    }
-                    None => return Err(
-                        "--dates requires the model to declare an `origin` \
-                         (e.g. `origin = date(\"2020-01-01\")`).".to_string()),
-                }
-            } else {
-                None
-            };
-            let write_header = !self.traj_header_written;
-            let shape = self.shape.clone();
-            let time_unit = model.time_unit.clone();
-            let render = |out: &mut Vec<u8>, dates: Option<&str>| -> Result<(), String> {
-                use std::io::Write;
-                let e = |e: std::io::Error| e.to_string();
-                if write_header {
-                    writeln!(out, "# {}", version::VERSION_SHORT).map_err(e)?;
-                    shape.write_coord_header(out).map_err(e)?;
-                    write!(out, "{}", util::TRAJ_TIME_HEADER).map_err(e)?;
-                    if dates.is_some() {
-                        write!(out, "{}", util::TRAJ_DATE_HEADER).map_err(e)?;
-                    }
-                    writeln!(out, "{rest_header}").map_err(e)?;
-                }
-                for row in &rows {
-                    let mut it = row.splitn(4, '\t');
-                    let (t, start, stop) = match (it.next(), it.next(), it.next()) {
-                        (Some(t), Some(a), Some(b)) => (t, a, b),
-                        _ => return Err(format!("stored traj.tsv row `{row}` lacks the three time cells")),
-                    };
-                    let rest = it.next();
-                    shape.write_coord_cells(out, &coords).map_err(e)?;
-                    write!(out, "{t}\t{start}\t{stop}").map_err(e)?;
-                    if let Some(origin) = dates {
-                        let num = |x: &str| x.parse::<f64>()
-                            .map_err(|_| format!("stored traj.tsv time cell `{x}` is not a number"));
-                        util::write_traj_date_cells(out, origin, &time_unit, num(t)?, (num(start)?, num(stop)?))?;
-                    }
-                    if let Some(rest) = rest {
-                        write!(out, "\t{rest}").map_err(e)?;
-                    }
-                    writeln!(out).map_err(e)?;
-                }
-                Ok(())
-            };
-            if let Some(out) = self.traj_out.as_mut() {
-                render(out, date_origin.as_deref())?;
-            }
-            if let Some(undated) = self.undated_out.as_mut() {
-                render(undated, None)?;
-            }
-            self.traj_header_written = true;
-        }
-
-        if self.obs_path.is_some() || self.obs_dir.is_some() {
-            if self.dates && self.dates_render.is_none() {
-                match model.origin.as_deref() {
-                    Some(o) => self.dates_render = Some((o.to_string(), model.time_unit.clone())),
-                    None => return Err(
-                        "--dates requires the model to declare an `origin` \
-                         (e.g. `origin = date(\"2020-01-01\")`).".to_string()),
-                }
-            }
-            if self.obs_plans.is_empty() {
-                self.ensure_obs_streams(model, run_start, cell.restart)?;
-            }
-            for si in 0..self.obs_plans.len() {
-                let rows: Vec<(f64, score::trace::Coverage)> = self.obs_plans[si].rows.iter()
-                    .map(|r| (r.label, r.coverage)).collect();
-                let values = cell.obs.get(si).ok_or_else(|| format!(
-                    "stored cell holds no values for stream '{}'", self.obs_stream_names[si]))?;
-                if values.len() != rows.len() {
-                    return Err(format!(
-                        "stored observations for stream '{}' have {} rows but this run emits {}; \
-                         re-run with --force to recompute the cell",
-                        self.obs_stream_names[si], values.len(), rows.len()
-                    ));
-                }
-                for (value, &(time, coverage)) in values.iter().zip(&rows) {
-                    self.obs_data[si].push(ObsRow {
-                        time, coverage, coords: coords.clone(), value: ObsValue::Stored(value.clone()),
-                    });
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Write the combined synthetic-observation output after all cells are
-    /// merged. Reproduces the pre-unification post-loop obs writers.
-    fn write_obs_output(&self, out: &crate::out::Out) {
-        use std::io::Write;
-        if (self.obs_path.is_none() && self.obs_dir.is_none()) || self.obs_data.is_empty() {
-            return;
-        }
-        let total_runs = self.shape.total_runs;
-        let date_render = self.dates_render.as_ref();
-
-        // --obs / --obs-only: single wide-format file.
-        if let Some(ref path) = self.obs_path {
-            let f = std::fs::File::create(path)
-                .unwrap_or_else(|e| { out.fail(format!("cannot create {}: {}", path, e)); });
-            let mut w = std::io::BufWriter::new(f);
-
-            self.shape.write_coord_header(&mut w).unwrap();
-            write!(w, "time").unwrap();
-            if date_render.is_some() { write!(w, "\tdate").unwrap(); }
-            for name in &self.obs_stream_names { write!(w, "\t{}", name).unwrap(); }
-            writeln!(w).unwrap();
-
-            let n_times = self.obs_plans[0].rows.len();
-            for run in 0..total_runs {
-                for ti in 0..n_times {
-                    let row_idx = run * n_times + ti;
-                    self.shape.write_coord_cells(&mut w, &self.obs_data[0][row_idx].coords).unwrap();
-                    let t_val = self.obs_data[0][row_idx].time;
-                    write!(w, "{}", t_val).unwrap();
-                    if let Some((o, tu)) = date_render {
-                        let d = ir::caltime::internal_to_date_hires(o, t_val, tu)
-                            .unwrap_or_else(|e| { out.fail(format!("error rendering date: {}", e)); });
-                        write!(w, "\t{}", d).unwrap();
-                    }
-                    for si in 0..self.obs_stream_names.len() {
-                        write!(w, "\t{}", self.obs_data[si][row_idx].value.render()).unwrap();
-                    }
-                    writeln!(w).unwrap();
-                }
-            }
-            drop(w);
-            out.say(format_args!("observations written to {}", path));
-        }
-
-        // --obs-dir / --obs-only-dir: one file per observation `source`, under
-        // the columns the stream declared, so the file re-loads under its own
-        // model (gh#833, gh#830, gh#884): the value under the `scored` column's
-        // name, the time under the `: time` column's name — or both window
-        // boundaries under their `window_start`/`window_stop` names, each dated
-        // when `--dates` is on. A stratified family's leaves share a source, so
-        // they share one long-format file, each row carrying the `: dim` cells
-        // the loader routes by; every other stream is alone under its source
-        // and keeps a file of its own, named for the stream.
-        if let Some(ref dir) = self.obs_dir {
-            for group in self.obs_dir_groups() {
-                let first = group[0];
-                let plan = &self.obs_plans[first];
-                let stem = match group.len() {
-                    1 => &self.obs_stream_names[first],
-                    _ => &self.obs_files[first].source,
-                };
-                let path = format!("{}/{}.tsv", dir, stem);
-                let f = std::fs::File::create(&path)
-                    .unwrap_or_else(|e| { out.fail(format!("cannot create {}: {}", path, e)); });
-                let mut w = std::io::BufWriter::new(f);
-                let render_date = |t: f64| -> String {
-                    let (o, tu) = date_render.expect("dated only when --dates");
-                    ir::caltime::internal_to_date_hires(o, t, tu)
-                        .unwrap_or_else(|e| { out.fail(format!("error rendering date: {}", e)); })
-                };
-
-                self.shape.write_coord_header(&mut w).unwrap();
-                match &plan.columns {
-                    crate::obs_emit::TemporalColumns::Time(t) => {
-                        write!(w, "{t}").unwrap();
-                        if date_render.is_some() { write!(w, "\tdate").unwrap(); }
-                    }
-                    crate::obs_emit::TemporalColumns::Window { start, stop } => {
-                        write!(w, "{start}\t{stop}").unwrap();
-                        if date_render.is_some() { write!(w, "\tdate_start\tdate_stop").unwrap(); }
-                    }
-                }
-                for (header, _) in &self.obs_files[first].dims {
-                    write!(w, "\t{header}").unwrap();
-                }
-                writeln!(w, "\t{}", plan.scored).unwrap();
-
-                // Row-major over the shared obs axis with the leaves
-                // interleaved: one long-format row per (row, leaf), which is
-                // the shape the loader reads a family back from.
-                for ri in 0..self.obs_data[first].len() {
-                    for &si in &group {
-                        let row = &self.obs_data[si][ri];
-                        self.shape.write_coord_cells(&mut w, &row.coords).unwrap();
-                        match (&plan.columns, row.coverage) {
-                            (crate::obs_emit::TemporalColumns::Window { .. },
-                             score::trace::Coverage::Interval { start, stop }) => {
-                                write!(w, "{start}\t{stop}").unwrap();
-                                if date_render.is_some() {
-                                    write!(w, "\t{}\t{}", render_date(start), render_date(stop)).unwrap();
-                                }
-                            }
-                            _ => {
-                                write!(w, "{}", row.time).unwrap();
-                                if date_render.is_some() {
-                                    write!(w, "\t{}", render_date(row.time)).unwrap();
-                                }
-                            }
-                        }
-                        for (_, level) in &self.obs_files[si].dims {
-                            write!(w, "\t{level}").unwrap();
-                        }
-                        writeln!(w, "\t{}", row.value.render()).unwrap();
-                    }
-                }
-                drop(w);
-                out.say(format_args!("observations written to {}", path));
-            }
-        }
-    }
-
-    /// The stream indices that share each `--obs-dir` file, in declaration
-    /// order: one group per observation `source` (gh#884). A source with one
-    /// stream is a group of one.
-    fn obs_dir_groups(&self) -> Vec<Vec<usize>> {
-        let mut groups: Vec<Vec<usize>> = Vec::new();
-        let mut seen: Vec<&str> = Vec::new();
-        for (si, key) in self.obs_files.iter().enumerate() {
-            match seen.iter().position(|s| *s == key.source) {
-                Some(g) => groups[g].push(si),
-                None => {
-                    seen.push(&key.source);
-                    groups.push(vec![si]);
-                }
-            }
-        }
-        groups
+        Err(e) => crate::out::detached().say(format_args!("warning: could not write diagnostics.tsv: {}", e)),
     }
 }
 
@@ -5704,7 +4164,7 @@ fn print_dry_run(
     obs_path: &Option<String>,
     obs_dir: &Option<String>,
     obs_only: &Option<String>,
-    design: Option<&crate::sim_ensemble_cas::ResolvedDesign>,
+    design: Option<&crate::sweep::ResolvedDesign>,
 ) {
     let d = out::paint::dim;
     let b = out::paint::bold;
@@ -5719,7 +4179,7 @@ fn print_dry_run(
 
     // The design axis: what the grid declaration resolved to.
     let swept_names: Vec<String> = match design {
-        Some(crate::sim_ensemble_cas::ResolvedDesign::Sweep { params, n_points }) => {
+        Some(crate::sweep::ResolvedDesign::Sweep { params, n_points }) => {
             for p in params {
                 let vals: Vec<String> = p.values.iter().map(|v| v.to_string()).collect();
                 out.say(format_args!("  {} {} = [{}]", d("sweep:"), p.name, vals.join(", ")));
@@ -5727,7 +4187,7 @@ fn print_dry_run(
             out.say(format_args!("  {} {} design point(s)", d("design:"), n_points));
             params.iter().map(|p| p.name.clone()).collect()
         }
-        Some(crate::sim_ensemble_cas::ResolvedDesign::File { params, digest, n_points, point_ids }) => {
+        Some(crate::sweep::ResolvedDesign::File { params, digest, n_points, point_ids }) => {
             out.say(format_args!("  {} {} design point(s) over {} (file digest {})",
                 d("sweep-file:"), n_points, params.join(", "), &digest[..8]));
             // The file's own ids are worth a line; row numbering is the default.
@@ -5879,8 +4339,8 @@ fn print_dry_run(
     if total_runs > 1 {
         out.say("");
         let n_design_points = match design {
-            Some(crate::sim_ensemble_cas::ResolvedDesign::Sweep { n_points, .. })
-            | Some(crate::sim_ensemble_cas::ResolvedDesign::File { n_points, .. }) => *n_points,
+            Some(crate::sweep::ResolvedDesign::Sweep { n_points, .. })
+            | Some(crate::sweep::ResolvedDesign::File { n_points, .. }) => *n_points,
             None => 1,
         };
         let parts: Vec<String> = [
@@ -5892,72 +4352,6 @@ fn print_dry_run(
         ].iter().flatten().cloned().collect();
         out.say(format_args!("  {} {} = {} runs", d("total:"), parts.join(" × "), total_runs));
     }
-}
-
-/// The store view of a multi-cell dry run: per cell, whether the store already
-/// holds it (the exact rule of [`crate::cas_sink::CasSink::stored_hit`]) and
-/// its leaf path, then the hit and miss counts. The sink already resolves each
-/// cell's identity, so this is the view, not new computation; nothing is
-/// displaced or written.
-fn print_store_view(
-    out: &crate::out::Out,
-    cas: &crate::cas_sink::CasSink,
-    job: &crate::sim_job::SimulateJob,
-    force: bool,
-    quantities: bool,
-) {
-    let d = out::paint::dim;
-    let (specs, _) = engine::plan_grid(job);
-    let root = cas.root();
-    let rel_of = |dir: &std::path::Path| {
-        dir.strip_prefix(&root).unwrap_or(dir).to_string_lossy().into_owned()
-    };
-    // A cell whose identity cannot be resolved is neither a hit nor a miss:
-    // it would fail when it ran, so it is counted apart.
-    let (mut hits, mut misses, mut unresolved) = (0usize, 0usize, 0usize);
-    let mut cells: Vec<(&str, String)> = Vec::with_capacity(specs.len());
-    for spec in &specs {
-        let entry = match cas.stored_hit(spec) {
-            Ok(Some(dir)) => {
-                hits += 1;
-                ("hit ", rel_of(&dir))
-            }
-            Ok(None) => match cas.cell_resolve(spec) {
-                Ok((_, _, rel)) => {
-                    misses += 1;
-                    ("miss", rel)
-                }
-                Err(e) => {
-                    unresolved += 1;
-                    ("fail", format!("(identity unresolved: {e})"))
-                }
-            },
-            Err(e) => {
-                unresolved += 1;
-                ("fail", format!("(identity unresolved: {e})"))
-            }
-        };
-        cells.push(entry);
-    }
-    out.say("");
-    out.say(format_args!("{} {}", d("store:"), root.display()));
-    for (status, rel) in &cells {
-        out.say(format_args!("  [{}] {}", status, rel));
-    }
-    if force {
-        out.say(format_args!("  {} in the store; --force recomputes every cell ({} runs)", hits, cells.len()));
-    } else if quantities {
-        out.say(format_args!(
-            "  {} cache hits, {} misses; quantities requested: {} cells recomputed",
-            hits, misses, cells.len()
-        ));
-    } else {
-        out.say(format_args!("  {} cache hits → read back, {} misses → would simulate", hits, misses));
-    }
-    if unresolved > 0 {
-        out.say(format_args!("  {} cells whose identity does not resolve → would fail", unresolved));
-    }
-    out.say("(dry run — no simulation, no files written.)");
 }
 
 fn format_param_value(v: f64) -> String {

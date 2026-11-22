@@ -122,9 +122,15 @@ fn row_at(dir: &Path, run: &Run<'_>, t: f64) -> Row {
     assert!(o.status.success(), "{}: simulate must succeed:\n{}", run.tag, stderr(&o));
     let tsv = std::fs::read_to_string(dir.join(format!("{}.tsv", run.tag))).unwrap();
     let mut lines = tsv.lines().filter(|l| !l.starts_with('#'));
+    // The combined table opens with the coordinate columns (`replicate`,
+    // `scenario`, `seed`); the trajectory's own columns start at `t`.
     let header: Vec<&str> = lines.next().expect("header").split('\t').collect();
+    let t_col = header.iter().position(|h| *h == "t").expect("a `t` column");
+    assert_eq!(&header[..t_col], ["replicate", "scenario", "seed"], "{}: coordinate columns", run.tag);
+    let header = &header[t_col..];
     for line in lines {
-        let fields: Vec<f64> = line.split('\t').map(|f| f.parse::<f64>().expect("number")).collect();
+        let fields: Vec<f64> =
+            line.split('\t').skip(t_col).map(|f| f.parse::<f64>().expect("number")).collect();
         if (fields[0] - t).abs() < 1e-9 {
             return Row(header.iter().map(|h| h.to_string()).zip(fields).collect());
         }

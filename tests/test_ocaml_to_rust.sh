@@ -12,7 +12,11 @@ FAIL=0
 
 # Single temp file reused across iterations; cleaned up on any exit.
 tmpir=$(mktemp /tmp/camdl_XXXXXX)
-trap 'rm -f "$tmpir"' EXIT
+# The run store every `simulate` below writes to unless it names its own, so
+# no run leaves a `camdl-store/` in the working directory.
+store_all=$(mktemp -d /tmp/camdl_store_all_XXXXXX)
+export CAMDL_STORE="$store_all"
+trap 'rm -f "$tmpir"; rm -rf "$store_all"' EXIT
 
 # Goldens of implemented but unreleased features: camdlc compiles them, and
 # every camdl command must refuse them with the "not yet available" message
@@ -138,22 +142,20 @@ run_store_test() {
 
     # run. gh#audit-C6: --allow-degenerate-rates for the same reason as the
     # per-backend simulate loop above (sir_five_age has empty-stratum
-    # divisors that strict mode would reject). --parallel 2 as the grid ran
-    # before this test moved onto `simulate`; `simulate` plans its cells
-    # sequentially whatever the flag says (run-spec §4.4), so the flag is
-    # carried for the day it is honoured, not exercised today.
+    # divisors that strict mode would reject). --parallel 2 computes the
+    # claimed cells on two threads; the stored bytes do not depend on it.
     if ! "$CAMDL" simulate "$model" --params "$params" "$@" \
-            --output-dir "$outdir" --parallel 2 --allow-degenerate-rates \
+            --store "$outdir" --parallel 2 --allow-degenerate-rates \
             > /dev/null 2>"$tmperr"; then
         echo "FAIL [simulate] $name"; cat "$tmperr"; FAIL=$((FAIL+1)); return
     fi
 
-    # check the cell count: one `sim` leaf per cell, counted through the browse
+    # check the cell count: one `sim` cell per grid point, counted through the browse
     # surface. `list --format json` emits one JSON object per run as NDJSON
     # (plus a trailing `[]`), so count the object lines; `--all` lifts the
     # default 50-row limit (some grids run 60).
     local completed
-    completed=$("$CAMDL" list --root "$outdir" --kind sim --all --format json 2>/dev/null \
+    completed=$("$CAMDL" list --store "$outdir" --kind sim --all --format json 2>/dev/null \
         | python3 -c "import sys, json; print(sum(1 for l in sys.stdin if l.strip() and isinstance(json.loads(l), dict)))")
     if [ "$completed" -ne "$expected_runs" ]; then
         echo "FAIL [run count] $name: expected $expected_runs runs, got $completed"
@@ -164,7 +166,7 @@ run_store_test() {
     # every cell back from the store — "N of N cells read from the store;
     # simulated 0" on stderr.
     if ! "$CAMDL" simulate "$model" --params "$params" "$@" \
-            --output-dir "$outdir" --parallel 2 --allow-degenerate-rates \
+            --store "$outdir" --parallel 2 --allow-degenerate-rates \
             > /dev/null 2>"$tmperr"; then
         echo "FAIL [resume] $name"; cat "$tmperr"; FAIL=$((FAIL+1)); return
     fi

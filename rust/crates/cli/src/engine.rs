@@ -101,12 +101,6 @@ pub struct CellResult {
     pub spec: CellSpec,
     pub traj: sim::Trajectory,
     pub cell: crate::sim_config::ResolvedCell,
-    /// The recorded identity-free event log, present only for the
-    /// `simulate --event-log` path (the recorder is passive — Tier 2a — so a
-    /// cell carrying `Some(..)` has the same `traj`/run_id as one carrying
-    /// `None`). A `CasSink` writes it as the leaf's event-log child,
-    /// `<leaf>/event_log/event_log.tsv`.
-    pub event_log: Option<sim::lineage::EventLog>,
 }
 
 impl CellResult {
@@ -119,8 +113,6 @@ impl CellResult {
 /// The grid shape, computed once up front so a sink can size headers /
 /// print a banner before any cell runs.
 pub struct Grid {
-    pub n_scenarios: usize,
-    pub n_points: usize,
     pub total_runs: usize,
     /// Rayon thread count requested by the job (1 = sequential).
     pub parallel: usize,
@@ -170,8 +162,6 @@ pub fn plan_grid(job: &SimulateJob) -> (Vec<CellSpec>, Grid) {
 
     let total_runs = scenarios.len() * param_points.len() * replicates;
     let grid = Grid {
-        n_scenarios: scenarios.len(),
-        n_points: param_points.len(),
         total_runs,
         parallel: job.parallel.max(1),
     };
@@ -284,7 +274,7 @@ pub fn run_job(job: &SimulateJob, sink: &mut dyn RunSink) -> Result<(), String> 
 /// Run a single planned cell to a [`CellResult`].
 fn run_one_cell(spec: CellSpec) -> Result<CellResult, String> {
     let (traj, cell) = util::run_cell(&spec.sim_run, None)?;
-    Ok(CellResult { spec, traj, cell, event_log: None })
+    Ok(CellResult { spec, traj, cell })
 }
 
 /// Run a lone cell with a per-timestep `t/t_end` + ETA progress bar on stderr.
@@ -350,7 +340,7 @@ fn run_one_cell_with_progress(spec: CellSpec) -> Result<CellResult, String> {
     }
 
     let result = util::simulate_compiled(&compiled, &cell, Some(&pb))
-        .map(|traj| CellResult { spec, traj, cell, event_log: None });
+        .map(|traj| CellResult { spec, traj, cell });
 
     pb.finish_and_clear();
     result

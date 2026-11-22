@@ -17,6 +17,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod sim_store_cells;
+
 fn binary() -> PathBuf {
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     Path::new(&manifest).join("../../target/release/camdl")
@@ -70,57 +72,27 @@ fn write_inputs(dir: &Path) -> (PathBuf, PathBuf) {
     (model, params)
 }
 
-/// Every directory under `root` holding a `run.json` (the CAS leaves).
-fn run_leaves(root: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        if dir.join("run.json").is_file() {
-            out.push(dir.clone());
-        }
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for e in entries.flatten() {
-                let p = e.path();
-                if p.is_dir() {
-                    stack.push(p);
-                }
-            }
-        }
-    }
-    out
-}
-
-/// One leaf's `run_id` and numeric trajectory rows.
+/// One stored cell's `run_id` and numeric trajectory rows.
 #[derive(Debug)]
 struct Leaf {
     run_id: String,
     rows: Vec<String>,
 }
 
-/// The scenario label of a leaf: the `scenario` path segment is
-/// `<label>-<h8>`, the parent of the `seed_N-<h8>` leaf directory.
-fn scenario_label(leaf: &Path) -> String {
-    let seg = leaf.parent().unwrap().file_name().unwrap().to_string_lossy().into_owned();
-    seg.rsplit_once('-').map(|(l, _)| l.to_string()).unwrap_or(seg)
-}
-
-fn read_leaf(leaf: &Path) -> Leaf {
-    let rj: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(leaf.join("run.json")).unwrap()).unwrap();
-    let run_id = rj["run_id"].as_str().expect("run.json has run_id").to_string();
-    let rows = std::fs::read_to_string(leaf.join("traj.tsv"))
-        .unwrap()
+fn read_leaf(cell: &sim_store_cells::SimCell) -> Leaf {
+    let rows = cell
+        .traj()
         .lines()
         .filter(|l| !l.starts_with('#'))
         .filter(|l| l.split('\t').next().is_some_and(|f| f.parse::<f64>().is_ok()))
         .map(str::to_string)
         .collect();
-    Leaf { run_id, rows }
+    Leaf { run_id: cell.run_id.clone(), rows }
 }
 
-/// Leaves keyed by scenario label.
-fn leaves_by_scenario(sims: &Path) -> BTreeMap<String, Leaf> {
-    run_leaves(sims).iter().map(|l| (scenario_label(l), read_leaf(l))).collect()
+/// Stored cells keyed by the label of the scenario folder they sit in.
+fn leaves_by_scenario(store: &Path) -> BTreeMap<String, Leaf> {
+    sim_store_cells::sim_cells(store).iter().map(|c| (c.scenario_dir_name(), read_leaf(c))).collect()
 }
 
 /// Run one `simulate --scenario a,b,…` over `scenarios` (seed 1,
@@ -129,7 +101,7 @@ fn simulate_arms(scenarios: &[&str]) -> BTreeMap<String, Leaf> {
     let bin = skip_if_missing_binary();
     let tmp = tempfile::tempdir().unwrap();
     let (model, params) = write_inputs(tmp.path());
-    let out = tmp.path().join("out");
+    let out = tmp.path().join("camdl-store");
     let arms = scenarios.join(",");
     let run = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args([
@@ -139,7 +111,7 @@ fn simulate_arms(scenarios: &[&str]) -> BTreeMap<String, Leaf> {
             "--backend", "chain_binomial",
             "--dt", "1",
             "--seed", "1",
-            "--output-dir", &out.to_string_lossy(),
+            "--store", &out.to_string_lossy(),
         ])
         .output()
         .expect("spawn");
@@ -148,7 +120,7 @@ fn simulate_arms(scenarios: &[&str]) -> BTreeMap<String, Leaf> {
         "simulate --scenario {arms} failed: {}",
         String::from_utf8_lossy(&run.stderr)
     );
-    leaves_by_scenario(&out.join("sims"))
+    leaves_by_scenario(&out)
 }
 
 /// Run `simulate --scenario s` once per scenario into one store. Returns the
@@ -157,7 +129,7 @@ fn simulate_each(scenarios: &[&str]) -> (BTreeMap<String, Leaf>, BTreeMap<String
     let bin = skip_if_missing_binary();
     let tmp = tempfile::tempdir().unwrap();
     let (model, params) = write_inputs(tmp.path());
-    let out = tmp.path().join("out");
+    let out = tmp.path().join("camdl-store");
     for s in scenarios {
         let run = Command::new(&bin).env_remove("CLICOLOR_FORCE")
             .args([
@@ -167,7 +139,7 @@ fn simulate_each(scenarios: &[&str]) -> (BTreeMap<String, Leaf>, BTreeMap<String
                 "--backend", "chain_binomial",
                 "--dt", "1",
                 "--seed", "1",
-                "--output-dir", &out.to_string_lossy(),
+                "--store", &out.to_string_lossy(),
                 "-o", &tmp.path().join(format!("{s}.tsv")).to_string_lossy(),
             ])
             .output()
@@ -186,12 +158,14 @@ fn simulate_each(scenarios: &[&str]) -> (BTreeMap<String, Leaf>, BTreeMap<String
                 .lines()
                 .filter(|l| !l.starts_with('#'))
                 .filter(|l| l.split('\t').next().is_some_and(|f| f.parse::<f64>().is_ok()))
-                .map(str::to_string)
+                // The trajectory after the coordinate columns (`replicate`,
+                // `scenario`, `seed`): the scenario label differs by arm.
+                .map(|l| l.splitn(4, '\t').nth(3).expect("coordinate columns then the trajectory").to_string())
                 .collect();
             (s.to_string(), rows)
         })
         .collect();
-    (leaves_by_scenario(&out.join("sims")), mirrors)
+    (leaves_by_scenario(&out), mirrors)
 }
 
 /// The premise and the claim for a pair that must NOT share an address: the
@@ -232,9 +206,8 @@ fn multi_scenario_compose_only_difference_changes_run_id() {
 /// trajectory is identical, and a content address — a function of content,
 /// not of spelling — must be identical too. One identity is one leaf: the
 /// path carries the scenario *label*, which is provenance, and the store
-/// finds a leaf by its hashes (`runid::find_leaf`), so the second arm is a
-/// hit on the first arm's leaf rather than a second copy under its own name
-/// (proposal 2026-10-24-batch-to-simulate §3 "Arm labels").
+/// finds a cell by its identity, so the second arm is a hit on the first
+/// arm's cell rather than a second copy under its own name.
 #[test]
 fn multi_scenario_same_effective_delta_via_compose_shares_run_id() {
     let leaves = simulate_arms(&["halved", "via_half"]);

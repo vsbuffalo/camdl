@@ -170,20 +170,23 @@ pub struct ScenarioArgs {
 }
 
 /// `--backend` + `--dt`
-#[derive(Args, Clone)]
+#[derive(Args, Clone, store::Inputs)]
 pub struct SimBackend {
     /// Simulation backend (default: chain_binomial)
     #[arg(long)]
+    #[input(identity, vary = crate::input_fixtures::other_backend)]
     pub backend: Option<ForwardBackend>,
 
     /// Step size for discrete-time backends (default: 1.0)
     #[arg(long)]
+    #[input(identity, vary = crate::input_fixtures::other_dt)]
     pub dt: Option<f64>,
 
     /// ODE integrator method override: rk4 (fixed) or rk45 (adaptive). gh#166.
     /// Tolerances are a model property — set them in
     /// `simulate { integrator = rk45 { atol = .., rtol = .. } }`.
     #[arg(long)]
+    #[input(identity, vary = crate::input_fixtures::other_integrator)]
     pub integrator: Option<crate::args::types::IntegratorArg>,
 }
 
@@ -197,23 +200,26 @@ pub struct SimBackend {
 /// change which columns are written to the content-addressed leaf, so they ride
 /// the `config`-level identity (`runid::inputs::SimConfig`): a non-default view
 /// is a distinct, reproducible artifact.
-#[derive(Args, Clone, Debug, Default)]
+#[derive(Args, Clone, Debug, Default, store::Inputs)]
 pub struct OutputView {
     /// Emit one trajectory row every N time-units, overriding the model's
     /// `output { every }`. A plain number in the model's `time_unit` (like
     /// `--dt`); e.g. `--output-every 7` on a daily model writes weekly rows.
     #[arg(long = "output-every", value_name = "N")]
+    #[input(identity, vary = crate::input_fixtures::other_every)]
     pub every: Option<f64>,
 
     /// Drop every `flow_*` column from the trajectory output — most useful for
     /// stratified/spatial models where inter-stratum flow columns dominate.
     #[arg(long = "no-flows", default_value_t = false)]
+    #[input(identity)]
     pub no_flows: bool,
 
     /// Restrict trajectory columns to this comma-separated allow-list of output
     /// column names (compartments and/or `flow_<name>`). Empty = all columns;
     /// emitted order follows the model, not this list.
     #[arg(long = "columns", value_delimiter = ',', value_name = "COL,...")]
+    #[input(identity, vary = crate::input_fixtures::other_columns)]
     pub columns: Vec<String>,
 }
 
@@ -362,19 +368,19 @@ pub struct PfilterCore {
 
 // ─── simulate ─────────────────────────────────────────────────────────────────
 
-#[derive(Args)]
+#[derive(Args, Clone, store::Inputs)]
 #[command(after_help = colored_help!("\
 Examples:
-  # Basic simulation. The run is written to the content-addressed store
-  # under ./results (reruns with identical inputs are instant); read it
-  # back with `camdl cat <id>` / browse with `camdl list`.
-  camdl simulate sir.camdl --params p.toml --seed 42
-  camdl list        # browse cached runs
+  # Basic simulation. Each cell is stored in the run store, ./camdl-store
+  # (reruns with identical inputs are instant); read it back with
+  # `camdl cat <id>` or `camdl cat @LABEL`, and browse with `camdl list`.
+  camdl simulate sir.camdl --params p.toml --seed 42 --label base
+  camdl list        # browse stored cells
 
-  # Also write a plain TSV mirror to a file
+  # Also export the combined table to a file
   camdl simulate sir.camdl --params p.toml --seed 42 -o traj.tsv
 
-  # Stream the trajectory to stdout (no store write) for piping
+  # Write the combined table to stdout for piping
   camdl simulate sir.camdl --params p.toml --seed 42 --stdout | head
 
   # Named scenario
@@ -391,6 +397,7 @@ Examples:
 "))]
 pub struct SimulateArgs {
     /// IR JSON or .camdl model file
+    #[input(identity, vary = crate::input_fixtures::sim_other_model)]
     pub model: PathBuf,
 
     /// Override the run's horizon (`simulation.t_end`), gh#626. SPEC is a
@@ -406,6 +413,7 @@ pub struct SimulateArgs {
     /// calendar rule): write the offset in days. A scenario
     /// that declares its own different horizon is a hard error.
     #[arg(long, value_name = "SPEC")]
+    #[input(identity, vary = crate::input_fixtures::sim_other_to)]
     pub to: Option<String>,
 
     /// Override the run's start (the model's `simulate { from }`), so one
@@ -419,6 +427,7 @@ pub struct SimulateArgs {
     /// schedule with no `from`), and enters the run's identity through the
     /// model. Refused with --init-state, which sets the start itself.
     #[arg(long, value_name = "SPEC", allow_hyphen_values = true)]
+    #[input(identity, vary = crate::input_fixtures::sim_other_from)]
     pub from: Option<String>,
 
     /// Start the run from an inferred state at the last observation time
@@ -436,6 +445,7 @@ pub struct SimulateArgs {
     ///     Requires `--draws posterior`; forecasts over the subset of draws
     ///     that have a saved latent path, and reports that count.
     #[arg(long, value_name = "FILE|fit")]
+    #[input(identity, vary = crate::input_fixtures::sim_init_state)]
     pub init_state: Option<String>,
 
     /// gh#audit-C6 / S1. See InferenceCore.allow_degenerate_rates.
@@ -443,48 +453,60 @@ pub struct SimulateArgs {
     /// has a known empty-stratum-divisor and the user wants to keep
     /// the legacy zero-rate behaviour rather than fix the model.
     #[arg(long, default_value_t = false)]
+    #[input(identity)]
     pub allow_degenerate_rates: bool,
 
     #[command(flatten)]
+    #[input(group)]
     pub forcing_extrapolation: ForcingExtrapolationArg,
 
     #[command(flatten)]
+    #[input(group)]
     pub model_overrides: ModelOverrides,
 
     /// Parameter vector file (may be repeated), e.g. --param-vec beta=FILE
     #[arg(long, value_name = "PREFIX=FILE")]
+    #[input(identity, vary = crate::input_fixtures::sim_param_vec)]
     pub param_vec: Vec<ParamVecSpec>,
 
     /// Named scenarios (may be repeated; conflicts with --enable/--disable)
     #[arg(long = "scenario", conflicts_with_all = ["enable", "disable"])]
+    #[input(expands)]
     pub scenarios: Vec<String>,
 
     /// Enable an intervention (may be repeated; conflicts with --scenario)
     #[arg(long, conflicts_with = "scenarios")]
+    #[input(identity, vary = crate::input_fixtures::an_intervention)]
     pub enable: Vec<String>,
 
     /// Disable an intervention (may be repeated; conflicts with --scenario)
     #[arg(long, conflicts_with = "scenarios")]
+    #[input(identity, vary = crate::input_fixtures::an_intervention)]
     pub disable: Vec<String>,
 
     #[command(flatten)]
+    #[input(group)]
     pub backend: SimBackend,
 
     /// Trajectory output view: --output-every / --no-flows / --columns.
     #[command(flatten)]
+    #[input(group)]
     pub output_view: OutputView,
 
     /// RNG seed for a single run (conflicts with --seeds)
     #[arg(long, default_value_t = 1, conflicts_with = "seeds",
           env = "CAMDL_SEED")]
+    #[input(identity)]
     pub seed: u64,
 
     /// Multiple seeds: range (1:100) or list (1,2,42); conflicts with --replicates
     #[arg(long, conflicts_with_all = ["replicates"])]
+    #[input(expands)]
     pub seeds: Option<SeedSpec>,
 
     /// Stochastic replicates per parameter point (conflicts with --seeds)
     #[arg(long, conflicts_with = "seeds")]
+    #[input(expands)]
     pub replicates: Option<usize>,
 
     /// Parameter draw source: path to a params TSV, "uniform", "prior", or
@@ -495,6 +517,7 @@ pub struct SimulateArgs {
     /// scenario or `--param`. A draw is a SAMPLE from a measure; a value you
     /// choose is a design point — use --sweep / --sweep-file for those.
     #[arg(long)]
+    #[input(expands)]
     pub draws: Option<String>,
 
     /// Deterministic grid over a parameter (repeatable): the DESIGN axis.
@@ -513,6 +536,7 @@ pub struct SimulateArgs {
     /// re-simulated (--force recomputes; --dry-run shows hits and misses).
     #[arg(long, value_name = "PARAM=GRID",
           conflicts_with_all = ["draws", "design_from", "sweep_file"])]
+    #[input(expands)]
     pub sweep: Vec<SweepSpec>,
 
     /// Design points from a TSV: the header names model parameters, each row
@@ -525,6 +549,7 @@ pub struct SimulateArgs {
     /// ensemble's record by content digest.
     #[arg(long, value_name = "FILE",
           conflicts_with_all = ["draws", "design_from", "sweep"])]
+    #[input(expands)]
     pub sweep_file: Option<PathBuf>,
 
     /// Companion for `--draws`. With `--draws prior`, a fit.toml supplying
@@ -540,6 +565,7 @@ pub struct SimulateArgs {
     /// against — a manual check requires --fit to come with --draws and/or
     /// an anchored --to (gh#626).
     #[arg(long)]
+    #[input(identity, vary = crate::input_fixtures::sim_fit)]
     pub fit: Option<PathBuf>,
 
     /// Number of parameter draws. For --draws uniform/prior: how many to
@@ -547,6 +573,7 @@ pub struct SimulateArgs {
     /// whole cloud (default 200, matching `fit predict` — never silently
     /// replay a full 60k-draw posterior; gh#630).
     #[arg(short = 'n', long)]
+    #[input(expands)]
     pub n_draws: Option<usize>,
 
     /// With `--draws posterior`: replay ONLY the named chains of the fit's
@@ -554,6 +581,7 @@ pub struct SimulateArgs {
     /// `--chains 3,5`). Cannot be given with `--exclude-chains`. Always warns;
     /// a chain id not in the fit, or naming every chain, is a hard error.
     #[arg(long, value_name = "IDS", conflicts_with = "exclude_chains")]
+    #[input(expands)]
     pub chains: Option<String>,
 
     /// With `--draws posterior`: drop the named chains of the fit's posterior
@@ -561,33 +589,36 @@ pub struct SimulateArgs {
     /// Post-hoc exclusion biases the posterior toward the retained mode and
     /// always prints a warning.
     #[arg(long, value_name = "IDS")]
+    #[input(expands)]
     pub exclude_chains: Option<String>,
 
     /// Write the sampled per-draw parameter vectors to this TSV (gh#157).
     /// One row per draw, one column per parameter the draw source carries —
     /// for `--draws prior|uniform`, only the sampled parameters (gh#949) —
     /// in the column-per-param format `--draws PATH` reads back.
-    /// Only written when given; the content-addressed store leaves are
-    /// unaffected.
+    /// Only written when given; written from the resolved draws, it stores
+    /// nothing.
     #[arg(long, value_name = "PATH", requires = "draws")]
+    #[input(export)]
     pub draws_out: Option<PathBuf>,
 
-    /// Write a plain-TSV trajectory mirror to this file, IN ADDITION to the
-    /// content-addressed store leaf (the default system of record). Without
-    /// `-o` the trajectory is not written to a loose file — read it back with
-    /// `camdl cat <id>`. Use `--stdout` to stream instead of storing.
+    /// Export the combined table to this file: every cell's stored
+    /// trajectory, with the `replicate`, `scenario`, point and `seed`
+    /// columns, for one cell as for many. Rendered from the store after the
+    /// cells are stored; `camdl cat @LABEL` renders the same table.
     #[arg(short, long, env = "CAMDL_OUTPUT")]
+    #[input(export)]
     pub output: Option<PathBuf>,
 
-    /// Stream the trajectory TSV to stdout and DO NOT write the store leaf or
-    /// the `cached:` banner — the escape hatch for piping into another tool
-    /// (`camdl simulate … --stdout | …`). Single-cell only: it conflicts with
-    /// the store-backed ensemble knobs (--seeds / --replicates / --draws) and
-    /// with `-o`/`--obs*`, which mirror the store this flag opts out of.
+    /// Write the combined table `-o` writes to stdout, for piping into
+    /// another tool (`camdl simulate … --stdout | …`). The cell is stored as
+    /// for any run. Single-cell only: it conflicts with --seeds /
+    /// --replicates / --draws / --sweep and with `-o`/`--obs*`.
     #[arg(long, conflicts_with_all = [
         "output", "obs", "obs_dir", "obs_only", "obs_only_dir",
         "seeds", "replicates", "draws", "sweep", "sweep_file",
     ])]
+    #[input(export)]
     pub stdout: bool,
 
     /// Override the cadence at which synthetic observations are EMITTED
@@ -601,24 +632,29 @@ pub struct SimulateArgs {
     /// `emit_schedule = at [...]` is refused by name. This changes emitted
     /// output only; it never enters a likelihood.
     #[arg(long = "emit-every", value_name = "N | NAME=N")]
+    #[input(identity, vary = crate::input_fixtures::sim_emit_every)]
     pub emit_every: Vec<String>,
 
     /// Write synthetic observations to a single TSV (all streams)
     #[arg(long, conflicts_with_all = ["obs_dir", "obs_only"])]
+    #[input(adds)]
     pub obs: Option<PathBuf>,
 
     /// Write one TSV per observation stream to a directory
     #[arg(long, conflicts_with_all = ["obs", "obs_only"])]
+    #[input(adds)]
     pub obs_dir: Option<PathBuf>,
 
     /// Like --obs but suppress trajectory output
     #[arg(long, conflicts_with_all = ["obs", "obs_dir", "output", "obs_only_dir"])]
+    #[input(adds)]
     pub obs_only: Option<PathBuf>,
 
     /// Like --obs-dir (one TSV per stream) but suppress trajectory output.
     /// The multi-cadence-safe sibling of --obs-only (run-spec §3.1.1,
     /// ObsOutput::OnlyDir).
     #[arg(long, conflicts_with_all = ["obs", "obs_dir", "obs_only", "output"])]
+    #[input(adds)]
     pub obs_only_dir: Option<PathBuf>,
 
     /// Simulate on the observation design a fit config binds, instead of on
@@ -645,6 +681,7 @@ pub struct SimulateArgs {
         "emit_every", "dates", "init_state", "quantities_out", "event_log",
         "scenarios",
     ])]
+    #[input(export)]
     pub design_from: Option<PathBuf>,
 
     /// Write each observation stream's projected value on the design that
@@ -661,6 +698,7 @@ pub struct SimulateArgs {
     /// --quantities-out, a sidecar outside run identity. Usable with or
     /// without --obs-dir / --obs-only-dir.
     #[arg(long, value_name = "DIR", requires = "design_from")]
+    #[input(export)]
     pub projected_out: Option<PathBuf>,
 
     /// Add a calendar `date` column (rendered from the model `origin` +
@@ -669,16 +707,20 @@ pub struct SimulateArgs {
     /// default; `--dates` is purely additive (2026-05-22 calendar-time §6.7).
     /// No-op with a clear error if the model declares no `origin`.
     #[arg(long)]
+    #[input(render)]
     pub dates: bool,
 
     /// Emit the model's `quantities {}` block to this directory as
-    /// `<dir>/quantities/<name>.tsv` + `<dir>/quantities.json`. A single
-    /// fixed-params run writes a bare `value` per leaf (point mode); a
-    /// `--draws`/`--replicates`/`--seeds` run writes banded quantiles. Quantities
-    /// are a regenerated sidecar — never part of the content-addressed run
-    /// identity. Without this flag, a model that declares quantities prints a
-    /// note and skips them (not a hard error).
+    /// `<dir>/quantities/<name>.tsv` + `<dir>/quantities.json`. Each cell's
+    /// quantities are stored beside it as a by-product, evaluated from the
+    /// trajectory at full precision, and the tables are rendered from them: a
+    /// single fixed-params run writes a bare `value` per quantity (point
+    /// mode); a `--draws`/`--replicates`/`--seeds` run writes quantiles over
+    /// each group's replicates. A cell's own id does not depend on it.
+    /// Without this flag, a model that declares quantities prints a note and
+    /// skips them (not a hard error).
     #[arg(long, value_name = "DIR")]
+    #[input(adds)]
     pub quantities_out: Option<PathBuf>,
 
     /// Report with the `quantities {}` block in FILE instead of the model's own.
@@ -691,67 +733,96 @@ pub struct SimulateArgs {
     /// The trajectory and the run's identity are unaffected (proposal
     /// 2026-08-19).
     #[arg(long, value_name = "FILE", requires = "quantities_out")]
+    #[input(identity, vary = crate::input_fixtures::sim_vocabulary)]
     pub quantities: Option<PathBuf>,
 
     /// Print resolved run plan without simulating
     #[arg(long)]
+    #[input(skip)]
     pub dry_run: bool,
 
-    /// Root directory of the run store
-    #[arg(long, default_value = "./results", env = "CAMDL_OUTPUT_DIR")]
-    pub output_dir: PathBuf,
+    /// The run store's root (default `$CAMDL_STORE`, else `./camdl-store`).
+    #[arg(long, value_name = "DIR")]
+    #[input(store)]
+    pub store: Option<PathBuf>,
 
     /// Rayon threads for the simulation phase of a multi-cell run (absent:
     /// sequential; 0 = all cores). Output is byte-identical whatever the
     /// value: cells are seeded by grid position and merged in canonical order.
     #[arg(long, env = "CAMDL_PARALLEL")]
+    #[input(execution, exercised_by = crate::input_fixtures::sim_parallel)]
     pub parallel: Option<usize>,
 
-    /// Re-run even if cached output already exists
+    /// Recompute every cell even when it is stored; the stored cell is moved
+    /// to quarantine first.
     #[arg(long)]
+    #[input(store)]
     pub force: bool,
 
-    /// User-supplied display label for this simulate run. Validated
-    /// against `^[a-zA-Z0-9 ,._-]{1,64}$` after trim. Surfaced in
-    /// `camdl list` and `camdl show`. With `--seeds`, the label
-    /// applies to each per-seed run.
+    /// A name for this invocation, found again as `@LABEL`. It names the
+    /// invocation, never a cell: rerunning under another label reuses every
+    /// stored cell, and `camdl cat @LABEL` renders the invocation's table.
     #[arg(long, value_name = "TEXT")]
+    #[input(store)]
     pub label: Option<String>,
 
     /// Record the Layer-1 lineage **event log** (2026-05-20 three-layer
     /// architecture). Requires a model with `#[lineage]` annotations and a
     /// backend that declares the LINEAGES capability (Gillespie /
-    /// chain-binomial). The event log is stored as a child of the run's
-    /// leaf, `<leaf>/event_log/event_log.tsv`, which leaves the leaf itself
-    /// unchanged (read it with `camdl cat <id> --stream event_log.tsv`); it is
-    /// identity-free — realize it into a line list with `camdl lineage
-    /// realize`. Pass a PATH to also mirror the log to that file (format from
-    /// --tsv/--format/extension); bare `--event-log` (or `auto`) records only
-    /// into the leaf. Single-run only — conflicts with --seeds / --replicates
-    /// / --draws / --sweep / --sweep-file — and conflicts with --stdout,
-    /// which writes no leaf for the log to be a child of.
+    /// chain-binomial). The event log is a by-product of the cell, stored
+    /// inside it, so asking for it never changes the cell's id (read it with
+    /// `camdl cat <id> --stream event_log.tsv`); realize it into a line list
+    /// with `camdl lineage realize`. Pass a PATH to also export the log to
+    /// that file (format from --tsv/--format/extension); bare `--event-log`
+    /// (or `auto`) only stores it. Single-run only: conflicts with --seeds /
+    /// --replicates / --draws / --sweep / --sweep-file / --stdout.
     #[arg(long, value_name = "FILE", num_args = 0..=1, default_missing_value = "auto",
           conflicts_with_all = ["seeds", "replicates", "draws", "sweep", "sweep_file", "stdout"])]
+    #[input(adds)]
     pub event_log: Option<PathBuf>,
 
     /// Event-log format: `parquet` (default, production) or `tsv`
     /// (dependency-free, debug). With --event-log.
     #[arg(long, value_name = "FMT", requires = "event_log", conflicts_with = "tsv")]
+    #[input(render)]
     pub format: Option<String>,
 
     /// Shorthand for `--format tsv` (with --event-log).
     #[arg(long, requires = "event_log")]
+    #[input(render)]
     pub tsv: bool,
 
-    /// Mirror the reactive firing log to this file, IN ADDITION to the
-    /// canonical `reactive_log.tsv` artifact in the run's CAS leaf. The leaf
-    /// log is always present when a reactive policy was active (read it with
-    /// `camdl cat <id> --stream reactive_log.tsv`); this flag is a convenience
-    /// mirror, symmetric with `-o` for the trajectory — the leaf stays the
-    /// system of record. Single-run only.
+    /// Export the reactive firing log to this file: a copy of the cell's
+    /// stored `reactive_log.tsv`, which a cell holds whenever a reactive
+    /// policy was active (read it with `camdl cat <id> --stream
+    /// reactive_log.tsv`). Single-run only.
     #[arg(long, value_name = "PATH",
           conflicts_with_all = ["seeds", "replicates", "draws", "sweep", "sweep_file"])]
+    #[input(export)]
     pub reactive_log: Option<PathBuf>,
+}
+
+/// One `camdl simulate` as its inputs reach the store: the command's
+/// arguments and the global options, each with its class. Built by the
+/// dispatch in `main.rs`; the global options are not `SimulateArgs`' own.
+#[derive(Clone, store::Inputs)]
+pub struct SimulateInvocation {
+    #[input(group)]
+    pub args: SimulateArgs,
+    /// `--no-licm`: compile without loop-invariant code motion. It changes
+    /// the compiled model, whose bytes every cell's identity holds.
+    #[input(identity)]
+    pub no_licm: bool,
+    /// `--no-ir-cache`: compile rather than reuse a cached IR, which is the
+    /// IR a compile emits.
+    #[input(execution, exercised_by = crate::input_fixtures::sim_no_ir_cache)]
+    pub no_ir_cache: bool,
+    #[input(skip)]
+    pub verbosity: Option<log::LevelFilter>,
+    #[input(skip)]
+    pub progress: types::ProgressMode,
+    #[input(skip)]
+    pub no_progress: bool,
 }
 
 // ─── fit ──────────────────────────────────────────────────────────────────────
@@ -2635,7 +2706,7 @@ pub struct ListArgs {
     #[arg(long = "root", value_name = "DIR")]
     pub root_flag: Option<PathBuf>,
 
-    /// The run store's root, where the commands on it (`pfilter`) store their
+    /// The run store's root, where the commands on it (`pfilter`, `simulate`) store their
     /// results (default `$CAMDL_STORE`, else `./camdl-store`)
     #[arg(long, value_name = "DIR")]
     pub store: Option<PathBuf>,
@@ -2718,7 +2789,7 @@ pub struct ShowArgs {
     #[arg(long, default_value = "./results", env = "CAMDL_OUTPUT_DIR")]
     pub root: PathBuf,
 
-    /// The run store's root, where the commands on it (`pfilter`) store their
+    /// The run store's root, where the commands on it (`pfilter`, `simulate`) store their
     /// results (default `$CAMDL_STORE`, else `./camdl-store`)
     #[arg(long, value_name = "DIR")]
     pub store: Option<PathBuf>,
@@ -2745,7 +2816,7 @@ pub struct CatArgs {
     #[arg(long, default_value = "./results", env = "CAMDL_OUTPUT_DIR")]
     pub root: PathBuf,
 
-    /// The run store's root, where the commands on it (`pfilter`) store their
+    /// The run store's root, where the commands on it (`pfilter`, `simulate`) store their
     /// results (default `$CAMDL_STORE`, else `./camdl-store`)
     #[arg(long, value_name = "DIR")]
     pub store: Option<PathBuf>,
@@ -3519,11 +3590,10 @@ mod tests {
             }
         };
 
-        // simulate --output_dir
+        // simulate is on the run store: no `--store` means `CAMDL_STORE`, else
+        // `./camdl-store`, resolved when the store is opened.
         let s = parse_simulate(&["model.camdl"]);
-        assert_eq!(s.output_dir.to_string_lossy(), expected,
-            "SimulateArgs.output_dir must default to ./{}",
-            DEFAULT_OUTPUT_ROOT);
+        assert!(s.store.is_none(), "SimulateArgs.store has no clap default");
 
         // list
         let l = parse_list();

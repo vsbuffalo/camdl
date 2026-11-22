@@ -3953,8 +3953,6 @@ pub fn simulate_compiled(
 ) -> Result<Trajectory, String> {
     let crate::sim_config::ResolvedCell {
         run: crate::params_resolver::ResolvedParameters { model, .. },
-        // The values are in `model`; the digests are identity only.
-        tables: _,
         seed,
         init_state,
         // For the observation emitters; the run itself starts from `init_state`.
@@ -4147,6 +4145,61 @@ pub fn unseamed_backend_msg(backend: &str) -> String {
     )
 }
 
+/// Why `--event-log` cannot be recorded for `run` over `model`, the model
+/// `load_run_model` returns for it: a restored state, the ODE backend, or a
+/// model with no `#[lineage]` transition. These depend on what was asked
+/// for, not on the cell, so `simulate` refuses them before any cell runs.
+pub fn event_log_refusal(run: &SimRun, model: &ir::Model) -> Option<String> {
+    // gh#641. This function shares the cell resolution (`ResolvedCell::resolve`)
+    // with the ordinary simulate path, so an `--init-state` run arrives here with
+    // `simulation.t_start` ALREADY moved to the forecast origin — but it builds
+    // its state from the model below (`initial_state_mean`) and passes
+    // `Resume::default()`, so the state itself is never restored. Unguarded
+    // that is the worst outcome available: the trajectory starts from
+    // `init {}` while its leaf commits under the run_id that says the state WAS
+    // restored, so two different trajectories share one content address and
+    // whichever ran first wins the cache.
+    //
+    // The refusal is not a gap to close later — it is the engine's own answer.
+    // `chain_binomial`'s resume seam rejects a resume with an attached observer
+    // (the recorder is one): an observer carries mid-run state that an injected
+    // `(state)` cannot reconstruct. This surfaces that at the CLI rather than
+    // letting the event-log path walk around it.
+    if run.init_state.is_some() {
+        return Some(
+            "--event-log cannot be combined with --init-state. The lineage \
+             recorder is an observer attached to the run, and an observer \
+             carries mid-run state — the individual pools it has been tracking \
+             since the run began — that a restored `(state)` cannot \
+             reconstruct; the engine's resume seam refuses such a run for the \
+             same reason.\n  \
+             Fix: record the event log on a continuous run from the model's own \
+             t_start, or forecast without --event-log."
+                .to_string(),
+        );
+    }
+
+    if matches!(run.backend, crate::args::types::ForwardBackend::Ode) {
+        return Some(
+            "the event log is incompatible with the ODE backend: ODE \
+             tracks continuous densities, not individuals. Use \
+             --backend gillespie (exact), or chain_binomial \
+             (batched, with a reported sub-dt bias in `lineage realize`)."
+                .to_string(),
+        );
+    }
+    if model.identity_tracked_compartments.is_empty() {
+        return Some(
+            "--event-log requires a model with at least one #[lineage] \
+             transition. This model has no lineage annotations, so there is \
+             nothing to record. Remove --event-log, or annotate a transition \
+             with #[lineage]."
+                .to_string(),
+        );
+    }
+    None
+}
+
 /// Run a simulation with the Layer-1 lineage **event recorder** attached, and
 /// return the count trajectory, resolved model, the recorded [`EventLog`], and
 /// whether the backend was exact (Gillespie). The recorder draws no identities;
@@ -4166,33 +4219,8 @@ pub fn run_simulation_event_log(
     use crate::args::types::ForwardBackend;
     use sim::lineage::EventRecorder;
 
-    // gh#641. This function shares the cell resolution (`ResolvedCell::resolve`)
-    // with the ordinary simulate path, so an `--init-state` run arrives here with
-    // `simulation.t_start` ALREADY moved to the forecast origin — but it builds
-    // its state from the model below (`initial_state_mean`) and passes
-    // `Resume::default()`, so the state itself is never restored. Unguarded
-    // that is the worst outcome available: the trajectory starts from
-    // `init {}` while its leaf commits under the run_id that says the state WAS
-    // restored, so two different trajectories share one content address and
-    // whichever ran first wins the cache.
-    //
-    // The refusal is not a gap to close later — it is the engine's own answer.
-    // `chain_binomial`'s resume seam rejects a resume with an attached observer
-    // (the recorder is one): an observer carries mid-run state that an injected
-    // `(state)` cannot reconstruct. This surfaces that at the CLI rather than
-    // letting the event-log path walk around it.
-    if run.init_state.is_some() {
-        return Err(
-            "--event-log cannot be combined with --init-state. The lineage \
-             recorder is an observer attached to the run, and an observer \
-             carries mid-run state — the individual pools it has been tracking \
-             since the run began — that a restored `(state)` cannot \
-             reconstruct; the engine's resume seam refuses such a run for the \
-             same reason.\n  \
-             Fix: record the event log on a continuous run from the model's own \
-             t_start, or forecast without --event-log."
-                .to_string(),
-        );
+    if let Some(refusal) = event_log_refusal(run, &load_run_model(run)?) {
+        return Err(refusal);
     }
 
     // Event-log recording is meaningful only for backends with the LINEAGES
@@ -4201,15 +4229,7 @@ pub fn run_simulation_event_log(
     let backend: &dyn Simulate = match run.backend {
         ForwardBackend::Gillespie => &GillespieSim,
         ForwardBackend::ChainBinomial => &ChainBinomialSim,
-        ForwardBackend::Ode => {
-            return Err(
-                "the event log is incompatible with the ODE backend: ODE \
-                 tracks continuous densities, not individuals. Use \
-                 --backend gillespie (exact), or chain_binomial \
-                 (batched, with a reported sub-dt bias in `lineage realize`)."
-                    .to_string(),
-            );
-        }
+        ForwardBackend::Ode => return Err("internal error: the event log on the ODE backend".to_string()),
     };
 
     // The cell resolved and compiled as every forward run is; what runs is
@@ -4217,16 +4237,6 @@ pub fn run_simulation_event_log(
     let cell = crate::sim_config::ResolvedCell::resolve(load_run_model(run)?, run)?;
     let compiled = cell.compile()?;
     let model = &cell.run.model;
-
-    if model.identity_tracked_compartments.is_empty() {
-        return Err(
-            "--event-log requires a model with at least one #[lineage] \
-             transition. This model has no lineage annotations, so there is \
-             nothing to record. Remove --event-log, or annotate a transition \
-             with #[lineage]."
-                .to_string(),
-        );
-    }
 
     // Capability gate (mirrors the OVERDISPERSION / REAL_COMPARTMENTS pattern):
     // the chosen backend must declare LINEAGES.
@@ -5664,5 +5674,23 @@ mod rewrite_carries_sections_tests {
             serde_json::to_string(&original.docs).unwrap(),
             "the doc dictionary is carried through"
         );
+    }
+}
+
+/// Refuses an export path whose directory does not exist, before a command
+/// computes anything: a file an export would write after the result is
+/// stored could not then be written. `-` (standard output) and a path with
+/// no directory part pass.
+pub fn refuse_missing_export_dir(flag: &str, path: &std::path::Path) -> Result<(), String> {
+    if path.as_os_str() == "-" {
+        return Ok(());
+    }
+    match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() && !dir.is_dir() => Err(format!(
+            "{flag} {}: the directory {} does not exist; create it, or name a path in an existing directory",
+            path.display(),
+            dir.display()
+        )),
+        _ => Ok(()),
     }
 }

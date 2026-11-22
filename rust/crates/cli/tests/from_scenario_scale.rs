@@ -11,6 +11,8 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+mod sim_store_cells;
+
 fn manifest() -> PathBuf {
     PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set under cargo test"))
 }
@@ -110,16 +112,14 @@ fn find(root: &Path, file: &str) -> Vec<PathBuf> {
     out
 }
 
-/// The value `simulate --scenario scen` runs `param` at (run.json `inputs.params`).
+/// The value `simulate --scenario scen` runs `param` at (the stored cell's
+/// identity record, `params.values`).
 fn simulate_value(dir: &Path, scen: &str, param: &str) -> f64 {
     let out = camdl(dir, &["simulate", "m.ir.json", "--scenario", scen, "--param", "beta=0.3",
-                           "--output-dir", &format!("sim_{scen}")]);
+                           "--store", &format!("sim_{scen}")]);
     assert!(out.status.success(), "simulate --scenario {scen}: {}", stderr(&out));
-    let runs = find(&dir.join(format!("sim_{scen}")), "run.json");
-    assert_eq!(runs.len(), 1, "one run.json: {runs:?}");
-    let j: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&runs[0]).unwrap()).unwrap();
-    j["inputs"]["params"][param].as_f64().expect("param in run.json inputs.params")
+    let cell = sim_store_cells::only_sim_cell(&dir.join(format!("sim_{scen}")));
+    cell.params()[param].as_f64().expect("param in the cell's identity params.values")
 }
 
 /// The value a `from_scenario` fit holds `param` at: `mle_params.toml` and

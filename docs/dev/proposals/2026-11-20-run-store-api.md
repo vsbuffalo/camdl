@@ -4183,6 +4183,55 @@ are found through their own records.
 | `--quantities-out` is added later                                                         | Each cell is simulated again to evaluate its quantities, as for `--obs`; the banded tables are rendered from the stored per-cell quantities                                                                                                                                |
 | `--stdout` instead of `-o`                                                                | Nothing new is computed; the same rendering is written to standard output                                                                                                                                                                                                  |
 
+### 8. Where the implementation differs from this sketch
+
+`simulate` on the store (`cli/src/sim_store.rs`, `cli/src/sim_command.rs`)
+follows the sections above, with these differences.
+
+- **The scenario field is `ActiveInterventions`,** as `pfilter`'s is: the
+  interventions the selection keeps, by name. A scenario's effect on parameter
+  values is in `SimIdentity.params`. Two scenarios that differ only in their
+  interventions share a parameters directory; two whose `set` differs have one
+  each.
+- **`SimConfig` holds no output schedule.** `--output-every` is written into the
+  compiled model, so it reaches the cell through the model. The window is the
+  cell's start and end and, under `--init-state`, the digest of the state
+  ensemble and the row restored.
+- **The run checks the model it runs,** as `pfilter` does: the stored compiled
+  model with the identity's parameters, interventions and window applied must
+  have the digest of the model the cell's resolution produced, or the cell fails
+  and stores nothing.
+- **`CellLabels` holds `process_seed`,** the seed the table's `seed` column
+  shows, which reproduces the cell under `--seeds`. The coordinate columns are
+  `replicate`, `scenario`, then `point_id` and one `sweep:<p>` per swept
+  parameter for a sweep, or `draw` for draws, then `seed`.
+- **A draw row's replicates are labelled by the rule,** `seed_1` and
+  `seed_1-r1`; the tree under "Parameter draws" shows both as `seed_1`.
+- **The renderings' options carry what the cells' model says:** the origin and
+  time unit for `--dates`, and the observation streams' planned rows and file
+  keys for the observation tables, planned once from the first cell, as the
+  cells share one observation axis. The values are read from the stored files.
+- **An `ExportSink` names its one file `""`** when the export path is that file;
+  any other name is written under the path as a directory.
+- **`--dry-run` asks the store through `Store::get_content`,** a read-only
+  lookup of the compiled model by its content, and `Store::plan`; it opens no
+  store that does not exist and writes nothing.
+- **A cell stores `provenance.json`,** as a filter run does: where each
+  parameter value came from, the resolution's notices and the forcings held
+  under `--allow-forcing-extrapolation`. It is a provenance file, so a recompute
+  does not compare it.
+- **A cell's `run.json` carries no `output_schema`.** The store records no
+  schema, and nothing on the new store reads one.
+- **The `--params` file of a fit's `[provenance]` block is lineage,** by its
+  digest; `--fit` used for draws or anchors records nothing beyond the values it
+  gave.
+- **`diagnostics.tsv`** is still written to the working directory from the first
+  cell when it is computed, as a side effect outside the store.
+- **The resolution reads a reassembled `SimulateArgs`.** The declared inputs are
+  taken apart in full and placed back into the argument struct the existing
+  resolution reads, so a new input does not compile until it is placed; the
+  typed resolution steps of section 2 are not written.
+
 ## Worked example: `camdl fit run`
 
 A fit is a problem, written once and shared, and runs on it, each written in

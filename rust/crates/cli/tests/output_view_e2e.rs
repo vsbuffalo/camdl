@@ -23,10 +23,14 @@ fn model() -> PathBuf {
     Path::new(manifest).join("../../../ir/golden/cholera_siwr.ir.json")
 }
 
+/// Runs `camdl` against a store of its own, so `--stdout` (which also stores
+/// the cell) writes nothing outside a temporary directory.
 fn run(camdl: &Path, args: &[&str]) -> std::process::Output {
+    let store = tempfile::tempdir().unwrap();
     Command::new(camdl).env_remove("CLICOLOR_FORCE")
         .args(args)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("CAMDL_STORE", store.path().join("camdl-store"))
         .output()
         .expect("camdl must invoke")
 }
@@ -39,12 +43,10 @@ fn header(stdout: &[u8]) -> Vec<String> {
     line.split('\t').map(|c| c.to_string()).collect()
 }
 
-/// Count data rows (skip the `# version` comment and the `t\t…` header).
+/// Count data rows (skip the `# version` comment and the header).
 fn data_rows(stdout: &[u8]) -> usize {
     let s = String::from_utf8_lossy(stdout);
-    s.lines()
-        .filter(|l| !l.starts_with('#') && !l.starts_with("t\t"))
-        .count()
+    s.lines().filter(|l| !l.starts_with('#')).skip(1).count()
 }
 
 #[test]
@@ -81,8 +83,9 @@ fn columns_restricts_to_the_allow_list() {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let h = header(&out.stdout);
     let h: Vec<&str> = h.iter().map(String::as_str).collect();
-    assert_eq!(h, ["t", "t_start", "t_stop", "S", "flow_infection"],
-        "--columns must restrict to the time columns + the listed columns (mixed compartment + flow)");
+    assert_eq!(h, ["replicate", "scenario", "seed", "t", "t_start", "t_stop", "S", "flow_infection"],
+        "--columns must restrict to the coordinate and time columns + the listed columns \
+         (mixed compartment + flow)");
 }
 
 #[test]

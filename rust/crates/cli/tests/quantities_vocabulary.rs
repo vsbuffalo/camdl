@@ -113,7 +113,7 @@ impl Fixture {
             "chain_binomial".into(),
             "--seed".into(),
             "7".into(),
-            "--output-dir".into(),
+            "--store".into(),
             store.to_string_lossy().into_owned(),
             "--quantities-out".into(),
             out.to_string_lossy().into_owned(),
@@ -149,25 +149,27 @@ fn quantity_addresses(dir: &Path) -> Vec<String> {
     names
 }
 
-/// The single sim leaf's `run_id` under a CAS store.
+/// The single simulation cell's `run_id` under a run store, read from the
+/// cell's `identity.json`.
 fn only_run_id(store: &Path) -> String {
-    let mut found: Vec<PathBuf> = Vec::new();
+    let mut found: Vec<String> = Vec::new();
     let mut stack = vec![store.to_path_buf()];
     while let Some(d) = stack.pop() {
         for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
             let p = e.path();
             if p.is_dir() {
-                if p.join("run.json").exists() {
-                    found.push(p.clone());
+                if let Ok(txt) = std::fs::read_to_string(p.join("identity.json")) {
+                    let v: serde_json::Value = serde_json::from_str(&txt).unwrap();
+                    if v["kind"] == "sim" {
+                        found.push(v["run_id"].as_str().unwrap().to_string());
+                    }
                 }
                 stack.push(p);
             }
         }
     }
-    assert_eq!(found.len(), 1, "expected exactly one sim leaf under {}", store.display());
-    let meta: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(found[0].join("run.json")).unwrap()).unwrap();
-    meta["run_id"].as_str().unwrap().to_string()
+    assert_eq!(found.len(), 1, "expected exactly one simulation cell under {}", store.display());
+    found.remove(0)
 }
 
 // ── 1. Replacement, not merge ───────────────────────────────────────────────
@@ -368,7 +370,7 @@ fn a_vocabulary_on_compiled_ir_is_refused() {
         "baseline",
         "--seed",
         "7",
-        "--output-dir",
+        "--store",
         f.root.join("store").to_str().unwrap(),
         "--quantities-out",
         f.root.join("out").to_str().unwrap(),
@@ -396,7 +398,7 @@ fn a_vocabulary_without_an_output_directory_is_refused() {
         "baseline",
         "--seed",
         "7",
-        "--output-dir",
+        "--store",
         f.root.join("store").to_str().unwrap(),
         "--quantities",
         va.to_str().unwrap(),

@@ -150,9 +150,11 @@ camdl simulate model.camdl --sweep-file design.tsv --params fixed.toml
 ```
 
 `fixed.toml` gives a value to every parameter the design does not vary. The
-result is one ensemble with a trajectory per design point, which shows whether
-the model can produce dynamics like the data anywhere in the box before any fit
-is run.
+result is one stored cell per design point; `-o design_traj.tsv`, or
+`camdl cat @L` for a run given `--label L`, writes them as one table with a
+`point_id` and a `sweep:<param>` column per parameter. It shows whether the
+model can produce dynamics like the data anywhere in the box before any fit is
+run.
 
 `camdl pfilter --sweep-file` scores every row, a particle-filter estimate of the
 log-likelihood at each design point:

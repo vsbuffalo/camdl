@@ -59,7 +59,7 @@ fn run(backend: &str, extra: &[&str]) -> std::process::Output {
     args.extend(PARAMS.iter().map(|s| s.to_string()));
     args.extend(
         ["--seed", "1", "--backend", backend, "--dt", "1.0",
-         "-o", &traj.to_string_lossy(), "--output-dir", &cas_dir.to_string_lossy()]
+         "-o", &traj.to_string_lossy(), "--store", &cas_dir.to_string_lossy()]
             .iter()
             .map(|s| s.to_string()),
     );

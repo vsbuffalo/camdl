@@ -104,7 +104,7 @@ fn run_simulate(bin: &Path, shim_dir: &Path, model: &Path, cache_dir: &Path, out
         "simulate", model.to_str().unwrap(),
         "--backend", "chain_binomial", "--seed", "1",
         "--param", "beta=0.3", "--param", "gamma=0.1", "--param", "N0=1000",
-        "--output-dir", out.to_str().unwrap(), "--progress", "none",
+        "--store", out.to_str().unwrap(), "--progress", "none",
     ];
     if no_cache { args.push("--no-ir-cache"); }
     let st = Command::new(bin).env_remove("CLICOLOR_FORCE")
@@ -191,7 +191,7 @@ fn run_patches(bin: &Path, shim_dir: &Path, model: &Path, cache_dir: &Path, out:
             "simulate", model.to_str().unwrap(),
             "--backend", "chain_binomial", "--seed", "1",
             "--param", "beta=0.3", "--param", "gamma=0.1", "--param", "I0=5",
-            "--output-dir", out.to_str().unwrap(), "--progress", "none",
+            "--store", out.to_str().unwrap(), "--progress", "none",
         ])
         .env("PATH", format!("{}:{}", shim_dir.display(), old_path))
         .env("CAMDL_IR_CACHE_DIR", cache_dir)
@@ -277,7 +277,7 @@ fn run_simulate_fold_off(bin: &Path, shim_dir: &Path, model: &Path, cache_dir: &
             "simulate", model.to_str().unwrap(),
             "--backend", "chain_binomial", "--seed", "1",
             "--param", "beta=0.3", "--param", "gamma=0.1", "--param", "N0=1000",
-            "--output-dir", out.to_str().unwrap(), "--progress", "none",
+            "--store", out.to_str().unwrap(), "--progress", "none",
         ])
         .env("PATH", format!("{}:{}", shim_dir.display(), old_path))
         .env("CAMDL_IR_CACHE_DIR", cache_dir)
@@ -342,7 +342,7 @@ fn spawn_simulate(bin: &Path, shim_dir: &Path, model: &Path, cache_dir: &Path, o
             "simulate", model.to_str().unwrap(),
             "--backend", "chain_binomial", "--seed", seed,
             "--param", "beta=0.3", "--param", "gamma=0.1", "--param", "N0=1000",
-            "--output-dir", out.to_str().unwrap(), "--progress", "none",
+            "--store", out.to_str().unwrap(), "--progress", "none",
         ])
         .env("PATH", format!("{}:{}", shim_dir.display(), old_path))
         .env("CAMDL_IR_CACHE_DIR", cache_dir)
@@ -463,7 +463,7 @@ fn try_simulate(bin: &Path, shim_dir: &Path, model: &Path, cache_dir: &Path, out
             "simulate", model.to_str().unwrap(),
             "--backend", "chain_binomial", "--seed", "1",
             "--param", "beta=0.3", "--param", "gamma=0.1", "--param", "N0=1000",
-            "--output-dir", out.to_str().unwrap(), "--progress", "none",
+            "--store", out.to_str().unwrap(), "--progress", "none",
         ])
         .env("PATH", format!("{}:{}", shim_dir.display(), old_path))
         .env("CAMDL_IR_CACHE_DIR", cache_dir)

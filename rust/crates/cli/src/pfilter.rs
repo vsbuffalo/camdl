@@ -176,6 +176,29 @@ pub fn cmd_pfilter(inv: crate::args::PfilterInvocation) {
     if let Err(e) = check_per_run_outputs(&inv.args) {
         out.fail(format!("error: {e}"));
     }
+    // A file an export writes after the run is stored must have a directory
+    // to go to; one that has none is refused before the filter runs.
+    {
+        let a = &inv.args;
+        let stem = a.save_prequential.as_deref().map(std::path::PathBuf::from);
+        let file_exports: [(&str, Option<&std::path::Path>); 8] = [
+            ("--output", a.output.as_deref()),
+            ("--trace", a.trace.as_deref().map(std::path::Path::new)),
+            ("--pf-health", a.pf_health.as_deref().map(std::path::Path::new)),
+            ("--save-final-state", a.save_final_state.as_deref()),
+            ("--save-paths", a.save_paths.as_deref()),
+            ("--save-filtering", a.save_filtering.as_deref()),
+            ("--save-filtered-streams", a.save_filtered_streams.as_deref()),
+            ("--save-prequential", stem.as_deref()),
+        ];
+        for (flag, path) in file_exports {
+            if let Some(path) = path {
+                if let Err(e) = crate::util::refuse_missing_export_dir(flag, path) {
+                    out.fail(format!("error: {e}"));
+                }
+            }
+        }
+    }
     let (declared, execution, exports, request, given) = store::Inputs::split(inv).into_parts();
     let (declared, no_licm) = declared.into_parts();
     let crate::args::PfilterInvocationExecution { args: execution, no_ir_cache } = execution;

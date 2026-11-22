@@ -899,3 +899,19 @@ fn the_parameters_and_the_scenario_do_not_key_the_compiled_model() {
     let models: Vec<_> = std::fs::read_dir(build.join("pfilter")).unwrap().flatten().collect();
     assert_eq!(models.len(), 1, "one model directory");
 }
+
+/// An export path in a directory that does not exist is refused before the
+/// filter runs, and nothing is stored.
+#[test]
+fn an_export_into_a_missing_directory_is_refused_before_the_filter_runs() {
+    let cwd = workdir();
+    let store = cwd.path().join("camdl-store");
+    for flag in ["--save-final-state", "--trace", "--output", "--save-paths"] {
+        let out = camdl(cwd.path(), &store, &argv(&pfilter_from(&["sir.ir.json", "--params", "p.toml", "--data", "cases=cases.tsv",
+            "--particles", "20", "--seed", "1", flag, "sub/c.tsv"])), &[]);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{flag}: {err}");
+        assert!(err.contains("sub") && err.contains("does not exist"), "{flag}: {err}");
+        assert!(!observe(&store).iter().any(|r| r.kind == "pfilter"), "{flag}: nothing is stored");
+    }
+}

@@ -139,7 +139,7 @@ fn simulate_runtime_compiles_lean() {
     let model = tmp.path().join("sir.camdl");
     std::fs::write(&model, SIR).unwrap();
     let cache = tmp.path().join("ircache");
-    let out_dir = tmp.path().join("out");
+    let store = tmp.path().join("camdl-store");
 
     let st = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .args([
@@ -155,8 +155,8 @@ fn simulate_runtime_compiles_lean() {
             "gamma=0.1",
             "--param",
             "N0=1000",
-            "--output-dir",
-            out_dir.to_str().unwrap(),
+            "--store",
+            store.to_str().unwrap(),
             "--progress",
             "none",
         ])

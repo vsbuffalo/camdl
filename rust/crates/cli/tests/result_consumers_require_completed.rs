@@ -270,7 +270,7 @@ fn simulate_from_the_posterior_of_a_leaf_that_did_not_complete_is_refused() {
     for state in [NotCompleted::Failed, NotCompleted::Running] {
         state.apply(&leaf);
         let out = run(dir, &["simulate", "model/sir_patches.camdl", "--draws", "posterior",
-            "--fit", &leaf.to_string_lossy(), "-n", "2", "--seed", "1", "--output-dir", "sims"]);
+            "--fit", &leaf.to_string_lossy(), "-n", "2", "--seed", "1", "--store", "camdl-store"]);
         assert_refused(&out, &leaf, state, "simulate --draws posterior");
     }
 }
