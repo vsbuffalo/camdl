@@ -597,7 +597,12 @@ When a compiler change alters golden IR on purpose, run `make update-golden`,
 read each changed file's diff to check the values are the intended ones, and
 commit the compiler change and the golden files together, staged by name so a
 formatter's rewrite of other `*.ir.json` files does not ride along. The changed
-golden files are then the commit's subject, which is how a reviewer sees them.
+golden files are then the commit's subject, which is how a reviewer sees them. A
+broad `git add` once committed a formatter's pretty-printed rewrite of 48 golden
+files under an unrelated documentation commit; every golden file then differed
+from what the compiler writes, and CI did not report it for four days because an
+earlier step of the same job was already failing
+([the incident](../dev/incidents/2026-06-09-golden-format-reverted-by-autoformat.md)).
 
 ## Gotchas
 
