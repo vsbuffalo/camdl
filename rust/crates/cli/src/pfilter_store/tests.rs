@@ -884,6 +884,71 @@ fn a_run_held_from_another_host_with_a_live_beat_is_refused_under_force() {
         "nothing is moved to the quarantine");
 }
 
+/// `camdl` in `cwd` as [`camdl`] runs it, but with `CAMDL_STORE` set only
+/// when `store` is given.
+fn camdl_bare(cwd: &Path, store: Option<&Path>, args: &[&str]) -> Output {
+    let fx = fixture();
+    let mut cmd = Command::new(&fx.camdl);
+    cmd.current_dir(cwd).env_clear();
+    for k in ["PATH", "TMPDIR"] {
+        if let Some(v) = std::env::var_os(k) {
+            cmd.env(k, v);
+        }
+    }
+    cmd.env("HOME", cwd.join("home"))
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("CAMDLC", &fx.camdlc)
+        .env("CAMDL_IR_CACHE_DIR", cwd.join("ir-cache"));
+    if let Some(s) = store {
+        cmd.env("CAMDL_STORE", s);
+    }
+    cmd.args(args).output().expect("spawn camdl")
+}
+
+/// A reading command pointed at a run store, by `--store` or by
+/// `CAMDL_STORE`, reads that store and nothing beside it: not a
+/// `./camdl-store` in the working directory, and not a `./results` it was not
+/// named. Naming the results root (`--root`) still lists its fits.
+#[test]
+fn a_named_store_is_read_alone() {
+    let cwd = workdir();
+    let named = cwd.path().join("named");
+    let base = ["pfilter", "sir.ir.json", "--params", "p.toml", "--data", "cases=cases.tsv", "--particles", "20",
+        "--progress", "none"];
+    let run = |store: &str, seed: &str| {
+        let mut line: Vec<&str> = base.to_vec();
+        line.extend(["--seed", seed, "--store", store]);
+        let out = camdl_bare(cwd.path(), None, &line);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    };
+    run("named", "1");
+    run("camdl-store", "2");
+    let fit = camdl_bare(cwd.path(), None, &["fit", "run", "fit_plain.toml", "--progress", "none"]);
+    assert!(fit.status.success(), "{}", String::from_utf8_lossy(&fit.stderr));
+    assert!(cwd.path().join("results").is_dir() && cwd.path().join("camdl-store").is_dir(), "the strays are there");
+
+    let kinds = |out: Output| -> Vec<String> {
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let mut k: Vec<String> = String::from_utf8_lossy(&out.stdout).lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .map(|v| v["kind"].as_str().unwrap_or("?").to_string())
+            .collect();
+        k.sort();
+        k
+    };
+    let list = ["list", "--format", "json", "--all"];
+    let by_flag = kinds(camdl_bare(cwd.path(), None, &[&list[..], &["--store", "named"]].concat()));
+    let by_env = kinds(camdl_bare(cwd.path(), Some(&named), &list));
+    assert_eq!(by_flag, ["pfilter"], "--store lists the one run in that store");
+    assert_eq!(by_env, ["pfilter"], "CAMDL_STORE lists the one run in that store");
+    let with_root = kinds(camdl_bare(cwd.path(), None, &[&list[..], &["--store", "named", "--root", "results"]].concat()));
+    assert!(with_root.iter().any(|k| k != "pfilter") && with_root.iter().filter(|k| *k == "pfilter").count() == 1,
+        "a named results root is listed beside the store: {with_root:?}");
+    let default = kinds(camdl_bare(cwd.path(), None, &list));
+    assert!(default.iter().any(|k| k != "pfilter") && default.iter().filter(|k| *k == "pfilter").count() == 1,
+        "with nothing named, ./camdl-store and ./results are read: {default:?}");
+}
+
 /// `--no-licm` and `CAMDL_NO_LICM` change the compiled model a run stores,
 /// and so the run's id; an engine switch changes every id through the
 /// ambient identity and leaves the stored log-likelihood alone.

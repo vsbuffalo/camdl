@@ -86,6 +86,19 @@ fn store_root(flag: Option<&Path>) -> PathBuf {
     flag.map(Path::to_path_buf).unwrap_or_else(crate::camdl_store::read_root)
 }
 
+/// The old results root a reading command searches: the one it is given
+/// (`--root`, the `list` positional, or `CAMDL_OUTPUT_DIR`), else
+/// `./results`. When a run store is named (`--store`, or `CAMDL_STORE`) and no
+/// old root is, there is none: a `./results` in the working directory is
+/// never read beside a store the command was pointed at.
+pub(crate) fn old_root(named: Option<&Path>, store: Option<&Path>) -> Option<PathBuf> {
+    match named {
+        Some(r) => Some(r.to_path_buf()),
+        None if store.is_some() || crate::env::get().vars.store.is_some() => None,
+        None => Some(PathBuf::from(format!("./{}", crate::run_paths::DEFAULT_OUTPUT_ROOT))),
+    }
+}
+
 /// Every completed filter run the run store's invocation records list, once,
 /// with the label of the latest invocation that asked for it.
 fn discover_pfilter_rows(root: &Path) -> Vec<PfilterRow> {
@@ -454,12 +467,16 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
     // specific profile. Takes precedence over the default sim/fit
     // enumeration because it's a more specific request; the other
     // filters (since, limit, format) still apply.
+    let legacy = old_root(a.root_flag.as_deref().or(a.root.as_deref()), a.store.as_deref());
     if let Some(parent_hash) = a.parent.as_ref() {
-        list_profile_children(&out, &a.resolved_root().to_string_lossy(), parent_hash, a);
+        let Some(root) = legacy.as_ref() else {
+            out.fail("error: --parent lists a profile's runs, which are kept under the results root; \
+                name it with --root DIR or CAMDL_OUTPUT_DIR");
+        };
+        list_profile_children(&out, &root.to_string_lossy(), parent_hash, a);
         return;
     }
 
-    let root = a.resolved_root().to_string_lossy();
     let filter_since: Option<std::time::Duration> = a.since.as_ref().map(|d| d.0);
     let filter_kind = match a.kind.as_str() {
         "sim" | "simulate"      => KindFilter::Sim,
@@ -484,10 +501,9 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
     // they represent are 461,282 of 550,647 sim leaves. Membership is
     // determined over the whole ensemble set, before any `--limit`/`--since`
     // truncation, so the collapse does not depend on which ensembles print.
-    let ensembles = if !filter_kind.includes_ensembles() {
-        Vec::new()
-    } else {
-        discover_ensemble_rows(&root)
+    let ensembles = match legacy.as_ref() {
+        Some(root) if filter_kind.includes_ensembles() => discover_ensemble_rows(&root.to_string_lossy()),
+        _ => Vec::new(),
     };
     let ensemble_member_ids: std::collections::HashSet<runid::ContentHash> = ensembles
         .iter()
@@ -504,23 +520,24 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
     // to name every member regardless of the ensemble's own age.
     let since_cutoff = filter_since.and_then(|dur| SystemTime::now().checked_sub(dur));
 
-    let runs = if !filter_kind.includes_sims() {
-        Vec::new()
-    } else {
-        discover_sim_rows(
-            &root,
+    let runs = match legacy.as_ref() {
+        Some(root) if filter_kind.includes_sims() => discover_sim_rows(
+            &root.to_string_lossy(),
             cas_read::Bounds { skip: Some(&ensemble_member_ids), not_before: since_cutoff },
-        )
+        ),
+        _ => Vec::new(),
     };
-    let fits = if !filter_kind.includes_fits() {
-        Vec::new()
-    } else {
-        discover_fits(&root).unwrap_or_else(|e| { out.fail(format!("error: {}", e)); })
+    let fits = match legacy.as_ref() {
+        Some(root) if filter_kind.includes_fits() => {
+            discover_fits(&root.to_string_lossy()).unwrap_or_else(|e| { out.fail(format!("error: {}", e)); })
+        }
+        _ => Vec::new(),
     };
-    let profiles = if !filter_kind.includes_profiles() {
-        Vec::new()
-    } else {
-        discover_profiles(&root).unwrap_or_else(|e| { out.fail(format!("error: {}", e)); })
+    let profiles = match legacy.as_ref() {
+        Some(root) if filter_kind.includes_profiles() => {
+            discover_profiles(&root.to_string_lossy()).unwrap_or_else(|e| { out.fail(format!("error: {}", e)); })
+        }
+        _ => Vec::new(),
     };
     let pfilters = if !filter_kind.includes_pfilters() {
         Vec::new()
@@ -563,7 +580,9 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
         })
         .collect();
     fit_folders.sort_by(|x, y| y.entry.created.cmp(&x.entry.created));
-    let mut fit_rows: Vec<FitRunRow> = fit_run_rows(Path::new(&*root), &fit_folders)
+    // Fit folders come only from the old results root, so none exist without one.
+    let fit_rows = legacy.as_deref().map(|root| fit_run_rows(root, &fit_folders)).unwrap_or_default();
+    let mut fit_rows: Vec<FitRunRow> = fit_rows
         .into_iter()
         .filter(|r| a.history || r.history_index.is_none_or(|n| n == 0))
         .collect();
@@ -732,7 +751,6 @@ fn list_profile_children(
 
 pub fn cmd_show(a: &crate::args::ShowArgs) {
     let out = crate::out::Out::new(false);
-    let root = a.root.to_string_lossy();
     let json = show_json(&out, a.format.as_deref());
     if let Some(row) = resolve_stored_pfilter(&store_root(a.store.as_deref()), &a.target) {
         let row = row.unwrap_or_else(|e| out.fail(format!("error: {e}")));
@@ -752,9 +770,8 @@ pub fn cmd_show(a: &crate::args::ShowArgs) {
         }
         return;
     }
-    let resolved = resolve_any(&root, &a.target).unwrap_or_else(|e| {
-        out.fail(format!("error: {}", e));
-    });
+    let resolved = resolve_named(old_root(a.root.as_deref(), a.store.as_deref()).as_deref(), &a.target, a.store.as_deref())
+        .unwrap_or_else(|e| out.fail(format!("error: {}", e)));
     if json {
         let value = match &resolved {
             Resolved::Fit { leaf, rel_path, .. } => fit_show_json(leaf, rel_path),
@@ -1205,10 +1222,8 @@ pub fn cmd_cat(a: &crate::args::CatArgs) {
         let _ = out.data().write_all(&bytes);
         return;
     }
-    let root = a.root.to_string_lossy();
-    let resolved = resolve_any(&root, &a.target).unwrap_or_else(|e| {
-        out.fail(format!("error: {}", e));
-    });
+    let resolved = resolve_named(old_root(a.root.as_deref(), a.store.as_deref()).as_deref(), &a.target, a.store.as_deref())
+        .unwrap_or_else(|e| out.fail(format!("error: {}", e)));
 
     // A chain selection reads a fit run's own stream; every other kind is
     // refused rather than printed whole.
@@ -1600,6 +1615,55 @@ enum Resolved {
     FitEnvelope { segment: PathBuf, run: Option<String>, rel_path: String },
 }
 
+/// A run `show` and `cat` did not find in the run store: resolved under the
+/// old results root `root` when there is one, else only by the path of its
+/// folder.
+fn resolve_named(root: Option<&Path>, key: &str, store: Option<&Path>) -> Result<Resolved, String> {
+    match root {
+        Some(root) => resolve_any(&root.to_string_lossy(), key),
+        None => resolve_path(key)
+            .unwrap_or_else(|| Err(format!("no run matches '{}' in the run store {}", key, store_root(store).display()))),
+    }
+}
+
+/// A run named by the path of its folder, when `key` is one: a fit segment
+/// (its `fit.meta.json` and no `run.json`) or a folder holding a `run.json`.
+fn resolve_path(key: &str) -> Option<Result<Resolved, String>> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let as_path = Path::new(key);
+    // A fit SEGMENT directory addressed by path has the `fit.meta.json` sidecar
+    // but no leaf `run.json` (the fit identity is a path segment, not a leaf
+    // record). Project its output envelope. Checked before the `run.json` form.
+    if as_path.is_dir()
+        && as_path.join("fit.meta.json").exists()
+        && !as_path.join("run.json").exists()
+    {
+        let rel_path = pathdiff_str(as_path, &cwd);
+        return Some(Ok(Resolved::FitEnvelope { segment: as_path.to_path_buf(), run: None, rel_path }));
+    }
+    if as_path.is_dir() && as_path.join("run.json").exists() {
+        let rec = match runid::read_leaf(as_path) {
+            Ok(Some(leaf)) => leaf.record,
+            Ok(None) => return Some(Err(format!("{} holds no run.json", as_path.display()))),
+            Err(u) => {
+                return Some(Err(format!("could not read run.json at {}: {}", as_path.display(), u.reason)))
+            }
+        };
+        let kind = rec.kind;
+        let leaf = cas_read::Leaf { dir: as_path.to_path_buf(), record: rec };
+        let created = leaf_created(&leaf);
+        let rel_path = pathdiff_str(as_path, &cwd);
+        return Some(Ok(match kind {
+            runid::ArtifactKind::FitMethod => Resolved::Fit { leaf, rel_path, created },
+            runid::ArtifactKind::ProfilePoint => Resolved::Profile { leaf, rel_path, created },
+            runid::ArtifactKind::SimEnsemble => Resolved::SimEnsemble { leaf, rel_path, created },
+            _ => Resolved::Sim { leaf, rel_path, created },
+        }));
+    }
+
+    None
+}
+
 /// Resolve a user-supplied key to a single new-format leaf. Accepts either a
 /// path to a `run.json`-containing leaf directory, or a hash prefix where
 /// `{prefix}/{scenario}[/{seed_N}]` narrows sims further. An ambiguous prefix
@@ -1616,35 +1680,8 @@ fn resolve_any(root: &str, key: &str) -> Result<Resolved, String> {
     }
 
     // Path form: read the leaf `run.json` (`RunRecord`) directly.
-    let as_path = Path::new(key);
-    // A fit SEGMENT directory addressed by path has the `fit.meta.json` sidecar
-    // but no leaf `run.json` (the fit identity is a path segment, not a leaf
-    // record). Project its output envelope. Checked before the `run.json` form.
-    if as_path.is_dir()
-        && as_path.join("fit.meta.json").exists()
-        && !as_path.join("run.json").exists()
-    {
-        let rel_path = pathdiff_str(as_path, &cwd);
-        return Ok(Resolved::FitEnvelope { segment: as_path.to_path_buf(), run: None, rel_path });
-    }
-    if as_path.is_dir() && as_path.join("run.json").exists() {
-        let rec = match runid::read_leaf(as_path) {
-            Ok(Some(leaf)) => leaf.record,
-            Ok(None) => return Err(format!("{} holds no run.json", as_path.display())),
-            Err(u) => {
-                return Err(format!("could not read run.json at {}: {}", as_path.display(), u.reason))
-            }
-        };
-        let kind = rec.kind;
-        let leaf = cas_read::Leaf { dir: as_path.to_path_buf(), record: rec };
-        let created = leaf_created(&leaf);
-        let rel_path = pathdiff_str(as_path, &cwd);
-        return Ok(match kind {
-            runid::ArtifactKind::FitMethod => Resolved::Fit { leaf, rel_path, created },
-            runid::ArtifactKind::ProfilePoint => Resolved::Profile { leaf, rel_path, created },
-            runid::ArtifactKind::SimEnsemble => Resolved::SimEnsemble { leaf, rel_path, created },
-            _ => Resolved::Sim { leaf, rel_path, created },
-        });
+    if let Some(resolved) = resolve_path(key) {
+        return resolved;
     }
 
     // Hash-prefix form.

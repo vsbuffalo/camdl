@@ -2705,11 +2705,12 @@ Examples:
   camdl list --format json
 "))]
 pub struct ListArgs {
-    /// Root directory to scan, as a positional: `camdl list [ROOT]`
-    /// (default: ./results, or $CAMDL_OUTPUT_DIR). You may also pass it as
+    /// The results root to scan, as a positional: `camdl list [ROOT]`
+    /// (default `$CAMDL_OUTPUT_DIR`, else ./results; with `--store` or
+    /// `$CAMDL_STORE` and no root named, none). You may also pass it as
     /// `--root DIR`, matching `camdl cat`/`show`.
-    #[arg(default_value = "./results", env = "CAMDL_OUTPUT_DIR")]
-    pub root: PathBuf,
+    #[arg(env = "CAMDL_OUTPUT_DIR")]
+    pub root: Option<PathBuf>,
 
     /// Root directory to scan (alias for the positional ROOT, for consistency
     /// with `camdl cat`/`show`). Wins over the positional when both are given.
@@ -2769,15 +2770,6 @@ pub struct ListArgs {
     pub format: Option<String>,
 }
 
-impl ListArgs {
-    /// The store root to scan: `--root DIR` if given, else the positional
-    /// ROOT (which itself defaults to ./results / $CAMDL_OUTPUT_DIR). Lets
-    /// `camdl list` accept the same `--root` as `cat`/`show` without losing
-    /// the documented `camdl list [ROOT]` positional form.
-    pub fn resolved_root(&self) -> &std::path::Path {
-        self.root_flag.as_deref().unwrap_or(&self.root)
-    }
-}
 
 #[derive(Args)]
 #[command(after_help = colored_help!("\
@@ -2795,9 +2787,10 @@ pub struct ShowArgs {
     /// Short hash prefix or path to run directory
     pub target: String,
 
-    /// Root output directory to search (default: ./results)
-    #[arg(long, default_value = "./results", env = "CAMDL_OUTPUT_DIR")]
-    pub root: PathBuf,
+    /// The results root to search (default `$CAMDL_OUTPUT_DIR`, else
+    /// ./results; with `--store` or `$CAMDL_STORE` and no root named, none)
+    #[arg(long, env = "CAMDL_OUTPUT_DIR")]
+    pub root: Option<PathBuf>,
 
     /// The run store's root, where the commands on it (`pfilter`, `simulate`) store their
     /// results (default `$CAMDL_STORE`, else `./camdl-store`)
@@ -2822,9 +2815,10 @@ pub struct CatArgs {
     /// Short hash prefix or path to run directory
     pub target: String,
 
-    /// Root output directory to search (default: ./results)
-    #[arg(long, default_value = "./results", env = "CAMDL_OUTPUT_DIR")]
-    pub root: PathBuf,
+    /// The results root to search (default `$CAMDL_OUTPUT_DIR`, else
+    /// ./results; with `--store` or `$CAMDL_STORE` and no root named, none)
+    #[arg(long, env = "CAMDL_OUTPUT_DIR")]
+    pub root: Option<PathBuf>,
 
     /// The run store's root, where the commands on it (`pfilter`, `simulate`) store their
     /// results (default `$CAMDL_STORE`, else `./camdl-store`)
@@ -3605,20 +3599,19 @@ mod tests {
         let s = parse_simulate(&["model.camdl"]);
         assert!(s.store.is_none(), "SimulateArgs.store has no clap default");
 
-        // list
+        // list, show and cat name no root by default; the root they search
+        // is then DEFAULT_OUTPUT_ROOT unless a run store is named.
+        std::env::remove_var("CAMDL_STORE");
         let l = parse_list();
-        assert_eq!(l.root.to_string_lossy(), expected,
-            "ListArgs.root must match DEFAULT_OUTPUT_ROOT");
-
-        // show
+        assert!(l.root.is_none() && l.root_flag.is_none(), "ListArgs.root has no clap default");
         let sh = parse_show("abc12345");
-        assert_eq!(sh.root.to_string_lossy(), expected,
-            "ShowArgs.root must match DEFAULT_OUTPUT_ROOT");
-
-        // cat
+        assert!(sh.root.is_none(), "ShowArgs.root has no clap default");
         let c = parse_cat("abc12345");
-        assert_eq!(c.root.to_string_lossy(), expected,
-            "CatArgs.root must match DEFAULT_OUTPUT_ROOT");
+        assert!(c.root.is_none(), "CatArgs.root has no clap default");
+        assert_eq!(crate::browse::old_root(None, None).unwrap().to_string_lossy(), expected,
+            "the default results root is DEFAULT_OUTPUT_ROOT");
+        assert_eq!(crate::browse::old_root(None, Some(std::path::Path::new("s"))), None,
+            "no results root beside a named store");
     }
 
     // ── fit predict: scenario overlay parsing (Layer 1) ──────────────────────

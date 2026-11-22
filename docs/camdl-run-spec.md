@@ -2469,8 +2469,10 @@ results. They read two roots: the run store, for `simulate` and `pfilter`
 (`--store
 DIR`, else `CAMDL_STORE`, else `./camdl-store`), and `results/`, for
 fits and profiles (positional `ROOT` of `list`, `--root DIR`, or
-`CAMDL_OUTPUT_DIR`). Every run's banner hands you the exact `camdl cat` to run
-next.
+`CAMDL_OUTPUT_DIR`, else `./results`). When a run store is named, by `--store`
+or `CAMDL_STORE`, and no results root is, `list`, `show` and `cat` read that
+store alone: a `./results` in the working directory is not read beside it. Every
+run's banner hands you the exact `camdl cat` to run next.
 
 ```bash
 # Tabular overview, most recent first, one section per artifact kind
@@ -8146,7 +8148,8 @@ refusal names `--streams` with the streams the two rows share.
 ```
 camdl list [ROOT]
   --root DIR                  alias for the positional; wins when both are given
-                              (default ./results; env CAMDL_OUTPUT_DIR)
+                              (default $CAMDL_OUTPUT_DIR, else ./results; none
+                              when --store or $CAMDL_STORE names a store)
   --store DIR                 the run store's root, for simulate and pfilter
                               results (default $CAMDL_STORE, else ./camdl-store)
   --model SUBSTR   --scenario NAME   --since 1h|30m|2d
