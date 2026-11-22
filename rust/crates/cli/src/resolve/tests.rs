@@ -1,18 +1,11 @@
-//! Gate properties for the Resolve bridge, proven end-to-end through the
-//! real CLI→runid mapping: gh#147 (a horizon change re-keys the run_id),
-//! the resolved-`process_seed` rule (lone vs sweep-point with the same base
-//! seed → distinct paths), and non-finite params surfacing as `ResolveError`.
-//!
-//! The model-identity gates at the bottom are **cross-kind**: they are
-//! asserted for every CAS kind whose identity folds a model (`sim`, `fit`,
-//! `pfilter`, `sim_ensemble`, `profile`), not just the two that
-//! route through this module.
+//! Gate properties of the old store's identities: the model-identity gates
+//! are cross-kind, asserted for every kind on `runid` whose identity folds a
+//! model (`fit`, `profile`), and the fail-closed reuse rule of the writer
+//! seam.
 
-use std::collections::HashMap;
 
 use super::*;
     use runid::ContentAddressed;
-use crate::args::types::ForwardBackend;
 use ir::model::{
     InitialConditions, Model, OutputConfig, OutputSchedule, RegularOutputSchedule, SimulationConfig,
 };
@@ -58,73 +51,15 @@ pub(crate) fn tiny_model() -> Model {
     }
 }
 
-fn ctx<'a>(
-    model: &'a Model,
-    output: &'a OutputSchedule,
-    params: &'a HashMap<String, f64>,
-    t_end: f64,
-    base_seed: u64,
-    process_seed: u64,
-) -> TrajectoryCtx<'a> {
-    let run = super::legacy_sim::RunConfig::new(
-        ForwardBackend::ChainBinomial,
-        1.0,
-        output,
-        false,
-        false,
-        super::legacy_sim::view(false, &[]),
-    )
-    .unwrap();
-    TrajectoryCtx {
-        model: test_model_digest(model),
-        model_stem: "sir",
-        config: run.cell_config(super::legacy_sim::CellWindow::new(0.0, t_end, None).unwrap()),
-        params,
-        table_digests: vec![],
-        enable: &[],
-        disable: &[],
-        scen_params: params_empty(),
-        scen_scale: &[],
-        param_label: "base",
-        scenario_label: "baseline",
-        base_seed,
-        process_seed,
-    }
-}
 
-/// The `model` level of a trajectory under the fixed IR-version and engine
-/// strings the pins below were recorded with.
-fn test_model_digest(m: &Model) -> ModelDigest {
-    super::legacy_sim::ResolvedModel::new(m.clone(), "0.7", runid::inputs::EngineIdentity::of_build("0.3.0+test"), "sir.camdl").digest
-}
 
 /// The `model`-level digest hash under fixed versions, the unit the gradient
 /// inertness tests compare. Goes through the real `ModelDigest::from_model`.
 fn model_digest_hash(m: &Model) -> ContentHash {
-    ModelDigest::from_model(m, "0.7".into(), runid::inputs::EngineIdentity::of_build("0.3.0")).content_hash()
+    runid::inputs::ModelDigest::from_model(m, "0.7".into(), runid::inputs::EngineIdentity::of_build("0.3.0")).content_hash()
 }
 
-fn params_empty() -> &'static HashMap<String, f64> {
-    use std::sync::OnceLock;
-    static EMPTY: OnceLock<HashMap<String, f64>> = OnceLock::new();
-    EMPTY.get_or_init(HashMap::new)
-}
 
-#[test]
-fn horizon_change_re_keys_the_run_id() {
-    // gh#147: the horizon lives in the config level (not the model level); a
-    // t_end change must change the
-    // config level hash and the run_id (but not the model level).
-    let model = tiny_model();
-    let out = OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 1.0 });
-    let p = HashMap::new();
-    let a = resolve_trajectory(&ctx(&model, &out, &p, 100.0, 1, 1)).unwrap();
-    let b = resolve_trajectory(&ctx(&model, &out, &p, 200.0, 1, 1)).unwrap();
-
-    assert_eq!(a.levels[0].hash, b.levels[0].hash, "model level unchanged");
-    assert_ne!(a.levels[1].hash, b.levels[1].hash, "config level (t_end) must differ");
-    assert_ne!(a.run_id, b.run_id, "a t_end change must re-key the run_id (gh#147)");
-}
 
 #[test]
 fn gradient_maps_are_inert() {
@@ -185,79 +120,9 @@ fn gradient_maps_are_inert() {
     );
 }
 
-#[test]
-fn lone_vs_sweep_point_same_base_seed_distinct_paths() {
-    // The resolved-seed rule, end-to-end: a lone `--seed 42` (process_seed =
-    // 42) and a sweep-point with base 42 (process_seed = mixed) share the
-    // readable `seed_42` label but must produce distinct run_ids AND distinct
-    // store paths. Non-vacuous: both carry base_seed = 42, so this passes
-    // only because the seed level hashes process_seed, not the base.
-    let model = tiny_model();
-    let out = OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 1.0 });
-    let p = HashMap::new();
-    let mixed = crate::util::mix_cell_seed(42, 1, 0);
-    let lone = resolve_trajectory(&ctx(&model, &out, &p, 100.0, 42, 42)).unwrap();
-    let sweep = resolve_trajectory(&ctx(&model, &out, &p, 100.0, 42, mixed)).unwrap();
 
-    assert_ne!(lone.run_id, sweep.run_id, "distinct process_seed → distinct run_id");
 
-    let root = std::path::Path::new("/results");
-    let pa = runid::store_path(root, ArtifactKind::Sim, &lone.levels);
-    let pb = runid::store_path(root, ArtifactKind::Sim, &sweep.levels);
-    assert!(pa.to_string_lossy().contains("/seed_42-"));
-    assert!(pb.to_string_lossy().contains("/seed_42-"));
-    assert_ne!(pa, pb, "lone vs sweep-point with the same base seed → DISTINCT paths");
-}
 
-#[test]
-fn run_id_is_composed_from_the_level_hashes() {
-    // The leaf identity is the factored tuple: run_id = hash(kind, [level
-    // hashes in path order]) — the contract the store/reader rely on.
-    let model = tiny_model();
-    let out = OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 1.0 });
-    let p = HashMap::new();
-    let r = resolve_trajectory(&ctx(&model, &out, &p, 100.0, 5, 5)).unwrap();
-    assert_eq!(r.levels.len(), 5, "model/config/params/scenario/seed");
-    let names: Vec<&str> = r.levels.iter().map(|l| l.name.as_str()).collect();
-    assert_eq!(names, ["model", "config", "params", "scenario", "seed"]);
-    let hs: Vec<_> = r.levels.iter().map(|l| l.hash).collect();
-    assert_eq!(r.run_id, runid::run_id(ArtifactKind::Sim, &hs));
-}
-
-#[test]
-fn non_finite_param_is_a_resolve_error() {
-    let model = tiny_model();
-    let out = OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 1.0 });
-    let mut p = HashMap::new();
-    p.insert("beta".to_string(), f64::NAN);
-    let r = resolve_trajectory(&ctx(&model, &out, &p, 100.0, 1, 1));
-    assert!(
-        matches!(r, Err(ResolveError::NonFiniteParam(_))),
-        "a NaN resolved param must surface as ResolveError before any hashing"
-    );
-}
-
-#[test]
-fn scenario_delta_re_keys_only_the_scenario_level() {
-    // An enable/disable change re-keys the scenario level (and run_id), not
-    // the model/config/params/seed levels.
-    let model = tiny_model();
-    let out = OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 1.0 });
-    let p = HashMap::new();
-    let base = resolve_trajectory(&ctx(&model, &out, &p, 100.0, 1, 1)).unwrap();
-
-    let mut c = ctx(&model, &out, &p, 100.0, 1, 1);
-    let enable = ["vax".to_string()];
-    c.enable = &enable;
-    c.scenario_label = "with_vax";
-    let withvax = resolve_trajectory(&c).unwrap();
-
-    assert_eq!(base.levels[0].hash, withvax.levels[0].hash, "model unchanged");
-    assert_eq!(base.levels[1].hash, withvax.levels[1].hash, "config unchanged");
-    assert_eq!(base.levels[2].hash, withvax.levels[2].hash, "params unchanged");
-    assert_ne!(base.levels[3].hash, withvax.levels[3].hash, "scenario must differ");
-    assert_ne!(base.run_id, withvax.run_id);
-}
 
 // ── gh#241 PR F: input-surface differential harness ───────────────────────────
 //
@@ -267,154 +132,9 @@ fn scenario_delta_re_keys_only_the_scenario_level() {
 // sensitivity + inertness — so a future change that leaks a presentation field
 // into identity, or drops a semantic one, fails here, not silently in the field.
 
-/// A stand-in `--init-state` digest: `ensemble` byte-filled from `f`, restoring
-/// row `row`. gh#641 / gh#697.
-fn init_state(f: u8, row: u64) -> runid::inputs::InitStateDigest {
-    runid::inputs::InitStateDigest {
-        ensemble: runid::inputs::DataDigest(ContentHash::from_bytes([f; 32])),
-        row,
-    }
-}
 
-/// All resolved trajectory inputs, owned, so each case clones the base and
-/// mutates exactly one field. `run_id()` resolves through the real
-/// `resolve_trajectory` path.
-#[derive(Clone)]
-struct SimInputs {
-    model: Model,
-    model_stem: String,
-    backend: ForwardBackend,
-    dt: f64,
-    t_start: f64,
-    t_end: f64,
-    output: OutputSchedule,
-    allow_degenerate_rates: bool,
-    no_flows: bool,
-    columns: std::collections::BTreeSet<String>,
-    base_params: HashMap<String, f64>,
-    enable: Vec<String>,
-    disable: Vec<String>,
-    scen_params: HashMap<String, f64>,
-    scen_scale: Vec<(String, f64)>,
-    param_label: String,
-    scenario_label: String,
-    base_seed: u64,
-    process_seed: u64,
-    init_state: Option<runid::inputs::InitStateDigest>,
-}
 
-impl SimInputs {
-    fn base() -> Self {
-        SimInputs {
-            model: tiny_model(),
-            model_stem: "sir".into(),
-            backend: ForwardBackend::ChainBinomial,
-            dt: 1.0,
-            t_start: 0.0,
-            t_end: 100.0,
-            output: OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 1.0 }),
-            allow_degenerate_rates: false,
-            no_flows: false,
-            columns: std::collections::BTreeSet::new(),
-            base_params: HashMap::new(),
-            enable: vec![],
-            disable: vec![],
-            scen_params: HashMap::new(),
-            scen_scale: vec![],
-            param_label: "base".into(),
-            scenario_label: "baseline".into(),
-            base_seed: 1,
-            process_seed: 1,
-            init_state: None,
-        }
-    }
 
-    fn run_id(&self) -> ContentHash {
-        let run = super::legacy_sim::RunConfig::new(
-            self.backend,
-            self.dt,
-            &self.output,
-            self.allow_degenerate_rates,
-            false,
-            crate::util::OutputColumns { no_flows: self.no_flows, allow: self.columns.clone() },
-        )
-        .expect("run config");
-        let window = super::legacy_sim::CellWindow::new(self.t_start, self.t_end, self.init_state.clone())
-            .expect("window");
-        resolve_trajectory(&TrajectoryCtx {
-            model: test_model_digest(&self.model),
-            model_stem: &self.model_stem,
-            config: run.cell_config(window),
-            params: &self.base_params,
-            table_digests: vec![],
-            enable: &self.enable,
-            disable: &self.disable,
-            scen_params: &self.scen_params,
-            scen_scale: &self.scen_scale,
-            param_label: &self.param_label,
-            scenario_label: &self.scenario_label,
-            base_seed: self.base_seed,
-            process_seed: self.process_seed,
-        })
-        .expect("resolve")
-        .run_id
-    }
-}
-
-#[test]
-fn differential_semantic_inputs_rekey_the_run_id() {
-    let base_rid = SimInputs::base().run_id();
-    // Each closure mutates exactly one SEMANTIC field; the run_id MUST change.
-    let cases: Vec<(&str, Box<dyn Fn(&mut SimInputs)>)> = vec![
-        ("backend",          Box::new(|i: &mut SimInputs| i.backend = ForwardBackend::Gillespie)),
-        ("dt",               Box::new(|i| i.dt = 0.5)),
-        ("t_start",          Box::new(|i| i.t_start = 10.0)),
-        ("t_end",            Box::new(|i| i.t_end = 200.0)),
-        ("output_step",      Box::new(|i| i.output =
-            OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 2.0 }))),
-        ("base_param",       Box::new(|i| { i.base_params.insert("beta".into(), 0.5); })),
-        ("scenario_enable",  Box::new(|i| i.enable = vec!["vacc".into()])),
-        ("scenario_disable", Box::new(|i| i.disable = vec!["aging".into()])),
-        ("scen_param",       Box::new(|i| { i.scen_params.insert("beta".into(), 0.7); })),
-        // gh#573: `scale` multiplies the resolved value, so it is as semantic
-        // as a `set`.
-        ("scen_scale",       Box::new(|i| i.scen_scale = vec![("beta".into(), 0.5)])),
-        ("process_seed",     Box::new(|i| i.process_seed = 2)),
-        ("no_flows",         Box::new(|i| i.no_flows = true)),
-        ("columns",          Box::new(|i| { i.columns.insert("S".into()); })),
-        ("model_structure",  Box::new(|i| i.model.simulation.t_end = 200.0)),
-        // gh#641: the forecast-origin state. Both components are semantic —
-        // a different state FILE, and a different restored ROW of one file.
-        ("init_state_file",  Box::new(|i| i.init_state = Some(init_state(1, 0)))),
-        ("init_state_row",   Box::new(|i| i.init_state = Some(init_state(1, 7)))),
-    ];
-    for (name, mutate) in cases {
-        let mut i = SimInputs::base();
-        mutate(&mut i);
-        assert_ne!(i.run_id(), base_rid, "semantic input `{name}` must re-key the run_id");
-    }
-}
-
-#[test]
-fn differential_presentation_inputs_are_inert() {
-    let base_rid = SimInputs::base().run_id();
-    // Each mutates exactly one PRESENTATION / provenance field; run_id MUST hold.
-    // (`base_seed` is `#[run_input(provenance)]`; the level *labels* never enter
-    // the hash — `run_id` is built from level hashes only.)
-    let cases: Vec<(&str, Box<dyn Fn(&mut SimInputs)>)> = vec![
-        ("model_stem",     Box::new(|i: &mut SimInputs| i.model_stem = "renamed".into())),
-        // The IR's `name` is the file stem too (camdlc sets it from the path).
-        ("model_name",     Box::new(|i| i.model.name = "renamed".into())),
-        ("param_label",    Box::new(|i| i.param_label = "p1".into())),
-        ("scenario_label", Box::new(|i| i.scenario_label = "sc1".into())),
-        ("base_seed",      Box::new(|i| i.base_seed = 99)), // process_seed held fixed
-    ];
-    for (name, mutate) in cases {
-        let mut i = SimInputs::base();
-        mutate(&mut i);
-        assert_eq!(i.run_id(), base_rid, "presentation input `{name}` must NOT affect the run_id");
-    }
-}
 
 // ── Model identity across every CAS kind ──────────────────────────────────────
 //
@@ -427,7 +147,6 @@ fn differential_presentation_inputs_are_inert() {
 
 use crate::fit::config_v2::FitConfig;
 use crate::profile_cas::{resolve_profile_point, ProfilePointCtx};
-use crate::sim_ensemble_cas::{resolve_sim_ensemble, EnsembleCell, EnsembleCtx};
 
 const IRV: &str = "0.7";
 const ENGV: &str = "0.3.0+test";
@@ -454,12 +173,6 @@ fn fit_config() -> FitConfig {
 fn all_kind_identities(model: &Model) -> Vec<(&'static str, ContentHash, ContentHash)> {
     let mut out = Vec::new();
 
-    // sim — `resolve_trajectory`; levels[0] is the `model` level.
-    let out_sched = OutputSchedule::Regular(RegularOutputSchedule { start: 0.0, step: 1.0 });
-    let params: HashMap<String, f64> = HashMap::new();
-    let sim = resolve_trajectory(&ctx(model, &out_sched, &params, 100.0, 1, 1)).expect("sim");
-    out.push(("sim", sim.levels[0].hash, sim.run_id));
-
     // fit — `resolve_fit_method`; levels[0] is the `fit` level (folds the model
     // digest alongside the data/config digests).
     let cfg = fit_config();
@@ -482,28 +195,6 @@ fn all_kind_identities(model: &Model) -> Vec<(&'static str, ContentHash, Content
         vec![("cases".to_string(), ContentHash::digest_bytes(b"cases").to_hex())];
 
 
-    // sim_ensemble — levels[0] is the `model` level.
-    let cells = [EnsembleCell {
-        row: 0,
-        scenario_label: "baseline".into(),
-        process_seed: 1,
-        point_id: 0,
-        sim_run_id: ContentHash::from_bytes([9; 32]),
-        traj_digest: ContentHash::from_bytes([10; 32]),
-        params_level: ContentHash::from_bytes([11; 32]),
-    }];
-    let ens = resolve_sim_ensemble(&EnsembleCtx {
-        model,
-        ir_version: IRV,
-        engine: &runid::inputs::EngineIdentity::of_build(ENGV),
-        stem: "sir",
-        backend: ForwardBackend::ChainBinomial,
-        dt: 1.0,
-        cells: &cells,
-        design: None,
-    })
-    .expect("sim_ensemble");
-    out.push(("sim_ensemble", ens.levels[0].hash, ens.run_id));
 
     // profile — levels[0] is the `profile` base level (folds the model digest).
     let focal = [("beta".to_string(), 0.3_f64)];
@@ -721,9 +412,10 @@ fn cas_identity_pins() {
         // leave the IR) moved every kind once: the model hash no longer
         // writes the two empty strings it hashed for them, so every model
         // level's bytes changed.
-        ("sim", "82ed170f4e0580051cbe8e064c60d982f095be8a3bb90f12536a088575e57dc2"),
+        //
+        // `sim` and `sim_ensemble` leave the list: `simulate` stores its
+        // cells on the run store, whose ids are not runid's.
         ("fit", "937d67de229bc67c23bf862cdc345332dd145f1b66283d4e2635f6022851979f"),
-        ("sim_ensemble", "c784064470aee98529f7a4976382c3a51f85cea46434528ae49dd2d5cb861c37"),
         ("profile", "a3182ce7cbb9eae3f2f5f9bc2a782d2d6d4a5a19ca3921624f1f73ecdff5857b"),
     ];
     // Compared as whole lists so a failure reports EVERY kind that moved, not
@@ -922,23 +614,25 @@ fn golden_run_ids_match_the_reference_table() {
 #[test]
 fn a_build_with_an_incomplete_engine_identity_never_reads_a_stored_leaf() {
     use crate::version::EngineReuse;
-    let m = tiny_model();
-    let out = m.output.times.clone();
-    let rt = resolve_trajectory(&ctx(&m, &out, params_empty(), 100.0, 1, 1)).unwrap();
+    let levels = vec![
+        crate::fit::cas::level("fit", "sir", crate::fit::cas::structural_level_hash(&"fit".to_string())),
+        crate::fit::cas::level("method", "if2", crate::fit::cas::structural_level_hash(&"method".to_string())),
+        crate::fit::cas::level("seed", "seed_1", crate::fit::cas::structural_level_hash(&"seed".to_string())),
+    ];
     let artifact = ResolvedArtifact {
-        kind: ArtifactKind::Sim,
-        levels: rt.levels.clone(),
-        run_id: rt.run_id,
-        display_inputs: rt.display_inputs.clone(),
+        kind: ArtifactKind::FitMethod,
+        run_id: runid::run_id(ArtifactKind::FitMethod, &levels.iter().map(|l| l.hash).collect::<Vec<_>>()),
+        levels,
+        display_inputs: serde_json::Value::Null,
     };
     let root = crate::test_support::unique_temp_dir("fail_closed_reuse");
     let store = FsCasStore::new(&root);
     let calendar = ir::caltime::CalendarAxis::parse("days", None).unwrap();
     let meta = RecordMeta::new("0.7", "sir.camdl", None, calendar,
         &crate::forcing_extrapolation::ForcingPolicy::new(false));
-    let mut files = runid::Artifacts::new();
-    files.insert("traj.tsv", b"time\n0\n".to_vec());
-    begin_resolved_write_atomic(&store, &root, &artifact, &meta, files).unwrap();
+    let claim = begin_resolved_write(&store, &root, &artifact, &meta).unwrap();
+    claim.write("fit_state.toml", b"loglik = 0.0\n").unwrap();
+    claim.finalize(serde_json::Value::Null).unwrap();
 
     let reusable = check_reuse_with(&store, &root, &artifact, WritePolicy::Reuse, EngineReuse::Reusable).unwrap();
     assert!(matches!(reusable, ReuseVerdict::CacheHit { .. }), "a determined build reuses the stored leaf");
@@ -948,7 +642,7 @@ fn a_build_with_an_incomplete_engine_identity_never_reads_a_stored_leaf() {
     let verdict = check_reuse_with(&store, &root, &artifact, WritePolicy::Reuse, unreusable).unwrap();
     assert!(matches!(verdict, ReuseVerdict::MustRun), "an undetermined build computes");
     assert!(
-        runid::find_leaf(&root, ArtifactKind::Sim, &artifact.levels).is_none(),
+        runid::find_leaf(&root, ArtifactKind::FitMethod, &artifact.levels).is_none(),
         "the stored leaf is no longer servable"
     );
     assert!(root.join(".quarantine").read_dir().unwrap().next().is_some(), "it was quarantined, not deleted");

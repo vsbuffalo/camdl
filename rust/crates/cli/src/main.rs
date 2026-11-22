@@ -61,8 +61,6 @@ mod profile_diagnostics;
 mod profile_invocation; // profiles/<base>/invocations/<id>/: the grid an invocation runs, and its heartbeat
 mod profile_table;    // gh#1059: the collected per-cell table a profile run prints
 mod out;           // the stream layer: notices, progress, milestones, colour
-#[cfg(test)]
-mod sim_ensemble_cas; // the old store's ensemble identity, kept only for the golden run-id pins
 mod sim_store;       // camdl simulate on the run store: its cells, their by-products and the combined tables
 mod sim_command;     // the store half of camdl simulate: identities, the batch, the engine under each claim, the exports
 mod lineage;        // three-layer lineage: --event-log record + realize + tree

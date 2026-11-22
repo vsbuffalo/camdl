@@ -345,7 +345,7 @@ impl ResolvedClaim {
 
 /// Assemble the `RunRecord` for `resolved` + `meta` at `status`. The single
 /// record-construction site — every CAS write routes through here.
-pub(crate) fn build_record(resolved: &ResolvedArtifact, meta: &RecordMeta, status: RunStatus) -> RunRecord {
+fn build_record(resolved: &ResolvedArtifact, meta: &RecordMeta, status: RunStatus) -> RunRecord {
     // Display-only, never hashed: a run made under
     // `--allow-forcing-extrapolation` says so, and names what it held.
     let mut inputs = resolved.display_inputs.clone();
@@ -404,10 +404,6 @@ pub fn begin_resolved_write(
     Ok(ResolvedClaim { claim, record, forcing: meta.forcing.clone() })
 }
 
-#[cfg(test)]
-mod legacy_sim;
-#[cfg(test)]
-pub(crate) use legacy_sim::*;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
