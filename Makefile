@@ -272,7 +272,7 @@ test-rust: build-ocaml build-rust
 	@ln -sf $(CAMDLC_ABS) $(CAMDLC_BIN)/camdlc
 	cd rust && PATH="$(CAMDLC_BIN):$$PATH" CAMDL_SKIP_VERSION_CHECK=1 \
 	  CAMDL="$(abspath $(CAMDL))" $(CARGO_WRAP) $(TEST_ENV) \
-	  cargo test --no-fail-fast --workspace --exclude sim
+	  bash ../scripts/no_stray_stores.sh -- cargo test --no-fail-fast --workspace --exclude sim
 endif
 
 # The sim crate — simulation engine (Gillespie/tau-leap/ODE/chain-binomial) plus
