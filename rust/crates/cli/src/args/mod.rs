@@ -183,14 +183,20 @@ pub struct SimBackend {
     #[input(identity, vary = crate::input_fixtures::other_backend)]
     pub backend: Option<ForwardBackend>,
 
-    /// Step size for discrete-time backends (default: 1.0)
+    /// The integration step of the chain-binomial backend and the fixed-step
+    /// ODE integrator. Default: the model's `simulate { dt }`, else 1.0; a
+    /// value given here replaces the model's step. A replay of a fit
+    /// (`--draws … --fit`, or a `--params` file a fit wrote) defaults to the
+    /// fit's step and runs a different one with a note. The commands that fit or score data refuse a
+    /// step that differs from the model's (run spec §1.3.1).
     #[arg(long)]
     #[input(identity, vary = crate::input_fixtures::other_dt)]
     pub dt: Option<f64>,
 
-    /// ODE integrator method override: rk4 (fixed) or rk45 (adaptive). gh#166.
-    /// Tolerances are a model property — set them in
-    /// `simulate { integrator = rk45 { atol = .., rtol = .. } }`.
+    /// The ODE integrator: rk4 (fixed step) or rk45 (adaptive), replacing
+    /// the model's method and keeping its rk45 tolerances, which are set in
+    /// `simulate { integrator = rk45 { atol = .., rtol = .. } }`. Refused on
+    /// a backend other than ode.
     #[arg(long)]
     #[input(identity, vary = crate::input_fixtures::other_integrator)]
     pub integrator: Option<crate::args::types::IntegratorArg>,
@@ -252,7 +258,10 @@ pub struct ForcingExtrapolationArg {
 /// nothing).
 #[derive(Args, Clone, store::Inputs)]
 pub struct ProfileCore {
-    /// Step size (default 1.0).
+    /// The integration step. Default: the model's `simulate { dt }`, else the
+    /// --fit file's `[config] dt`, else 1.0. A value that differs from the
+    /// model's step or the --fit file's is refused: a command that fits or
+    /// scores data integrates at the model's step (run spec §1.3.1).
     #[arg(long)]
     #[input(identity, vary = crate::input_fixtures::other_dt)]
     pub dt: Option<f64>,
@@ -328,7 +337,10 @@ pub struct StreamSelection {
 /// -inf).
 #[derive(Args, Clone, store::Inputs)]
 pub struct PfilterCore {
-    /// Step size (default 1.0).
+    /// The integration step. Default: the model's `simulate { dt }`, else the
+    /// --fit file's `[config] dt`, else 1.0. A value that differs from the
+    /// model's step or the --fit file's is refused: a command that fits or
+    /// scores data integrates at the model's step (run spec §1.3.1).
     #[arg(long)]
     #[input(identity, vary = crate::input_fixtures::other_dt)]
     pub dt: Option<f64>,
@@ -1796,15 +1808,16 @@ pub struct FixedPointFlags {
     #[input(identity, vary = crate::input_fixtures::predict_other_backend)]
     pub backend: Option<ForwardBackend>,
 
-    /// The step of the discrete-time backends, by the one dt rule: the
-    /// model's declared step, a `--dt` that differs refused; 1 when the model
-    /// declares none.
+    /// The integration step. Default: the model's `simulate { dt }`, else
+    /// 1.0. A value that differs from the model's step is refused: a command
+    /// that fits or scores data integrates at the model's step (run spec
+    /// §1.3.1).
     #[arg(long)]
     #[input(identity, vary = crate::input_fixtures::other_dt)]
     pub dt: Option<f64>,
 
     /// The ODE integrator method: rk4 (fixed) or rk45 (adaptive), keeping
-    /// the model's tolerances.
+    /// the model's tolerances. Refused on a backend other than ode.
     #[arg(long)]
     #[input(identity, vary = crate::input_fixtures::other_integrator)]
     pub integrator: Option<crate::args::types::IntegratorArg>,
@@ -3829,6 +3842,25 @@ mod tests {
         // Smoke test — guards against malformed clap derives that would
         // panic at runtime instead of producing a parse error.
         let _ = Cli::command();
+    }
+
+    /// Every command's `--dt` help states the step it defaults to (the
+    /// model's `simulate { dt }`) and points at the rule a fitting or scoring
+    /// command applies to a step that differs, run spec §1.3.1.
+    #[test]
+    fn every_dt_help_names_the_models_step_and_the_rule() {
+        let mut cmd = Cli::command();
+        for path in [&["simulate"][..], &["profile"], &["pfilter"], &["predict"]] {
+            let mut sub = &mut cmd;
+            for name in path {
+                sub = sub.find_subcommand_mut(name).unwrap_or_else(|| panic!("no subcommand {name}"));
+            }
+            let dt = sub.get_arguments().find(|a| a.get_id() == "dt").unwrap_or_else(|| panic!("{path:?} has --dt"));
+            let help = dt.get_long_help().or(dt.get_help()).map(|h| h.to_string()).unwrap_or_default();
+            for needle in ["simulate { dt }", "1.0", "§1.3.1"] {
+                assert!(help.contains(needle), "{path:?} --dt help lacks {needle:?}: {help:?}");
+            }
+        }
     }
 
     /// Regression (gh#183): the `simulate --backend` help text must name
