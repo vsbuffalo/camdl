@@ -3719,6 +3719,7 @@ pub fn resolve_run_parameters_typed(
             point_overrides: &point_overrides,
             fixed_cli: &fixed_cli,
             fixed_files: &fixed_files,
+            swept: &[],
             fit_toml_fixed: &run.fit_fixed,
             fit_toml_estimate: &fte,
             external: &external,

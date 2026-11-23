@@ -389,19 +389,25 @@ fn pfilter_and_profile_refuse_a_scenario_horizon_they_cannot_honour() {
     std::fs::write(&params, "beta = 0.35\ngamma = 0.1\nrho = 0.5\n").unwrap();
     std::fs::write(&data, "time\tcases\n10\t20\n20\t40\n30\t60\n40\t50\n").unwrap();
 
+    // `profile` takes its problem from a fit file.
+    std::fs::write(tmp.path().join("fit.toml"), format!(
+        "[model]\ncamdl = \"{}\"\n[data.observations]\ncases = \"{}\"\n\
+         [estimate]\nbeta = {{}}\ngamma = {{}}\nrho = {{}}\n[fixed]\n",
+        model.display(), data.display())).unwrap();
+    let fit = tmp.path().join("fit.toml");
     for (subcmd, extra) in [
-        ("pfilter", vec![]),
+        ("pfilter", vec!["--data".to_string(), data.to_string_lossy().into_owned()]),
         // `profile` needs a grid and a walk width before it will run at all;
         // both are checked ahead of the guard under test.
-        ("profile", vec!["--sweep", "beta=0.3,0.4", "--rw-sd", "auto"]),
+        ("profile", vec!["--fit".to_string(), fit.to_string_lossy().into_owned(),
+            "--sweep".to_string(), "beta=0.3,0.4".to_string(),
+            "--rw-sd".to_string(), "auto".to_string()]),
     ] {
         let mut cmd = Command::new(&bin);
         cmd.env_remove("CLICOLOR_FORCE").env("CAMDL_STORE", isolated_store());
         cmd.env("CAMDL_SKIP_VERSION_CHECK", "1").args([
             subcmd,
             &model.to_string_lossy(),
-            "--data",
-            &data.to_string_lossy(),
             "--scenario",
             "shorter",
             "--particles",

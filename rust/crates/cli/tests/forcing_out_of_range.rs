@@ -243,6 +243,73 @@ fn held_mult_past_50() -> serde_json::Value {
     })
 }
 
+/// The `problem.toml` of the stored fit problem with run id `problem_id`, in
+/// the build folder that holds the profile point whose `run.json` is
+/// `run_json` (`<store>/<build>/profile_point/...`).
+fn stored_problem_toml(run_json: &Path, problem_id: &str) -> toml::Table {
+    let build = run_json.ancestors()
+        .find(|a| a.file_name().is_some_and(|n| n == "profile_point"))
+        .and_then(Path::parent)
+        .unwrap_or_else(|| panic!("{} is not under a profile_point folder", run_json.display()));
+    let mut stack = vec![build.join("fit")];
+    while let Some(d) = stack.pop() {
+        if let Ok(b) = std::fs::read_to_string(d.join("identity.json")) {
+            let v: serde_json::Value = serde_json::from_str(&b).unwrap();
+            if v["run_id"] == problem_id {
+                let text = std::fs::read_to_string(d.join("problem.toml")).unwrap();
+                return text.parse().unwrap_or_else(|e| panic!("{} parses: {e}", d.display()));
+            }
+        }
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            if e.path().is_dir() { stack.push(e.path()) }
+        }
+    }
+    panic!("no stored problem {problem_id} under {}", build.display())
+}
+
+/// Asserts that a stored run of `command` records the forcing override it ran
+/// under. A `pfilter` run records the override and the forcing it held in its
+/// provenance; a profile point depends on a stored fit problem whose
+/// `problem.toml` records the override, and records it in its `provenance.json`
+/// with the forcings the profile held. `run_json` is the path of the run's `run.json`
+/// and `v` its record as [`statuses`] reads it.
+fn assert_forcing_override_recorded(command: &str, run_json: &Path, v: &serde_json::Value) {
+    if command == "profile" {
+        let identity: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(run_json.with_file_name("identity.json")).unwrap(),
+        )
+        .unwrap();
+        let problem_id = identity["identity"]["problem"]["run_id"].as_str()
+            .unwrap_or_else(|| panic!("{command}: the point depends on a stored problem:\n{identity:#}"));
+        let problem = stored_problem_toml(run_json, problem_id);
+        assert_eq!(
+            problem["config"].get("allow_forcing_extrapolation").and_then(|v| v.as_bool()),
+            Some(true),
+            "{command}: the stored problem {problem_id} of {} records the override:\n{problem}",
+            run_json.display()
+        );
+        let provenance: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(run_json.with_file_name("provenance.json")).unwrap(),
+        )
+        .unwrap();
+        // Which forcings were held depends on how far each cell's filter ran
+        // before its swarm died, so only the override is checked here.
+        assert_eq!(
+            provenance["forcing_extrapolation"]["allowed"],
+            serde_json::json!(true),
+            "{command}: {}:\n{provenance:#}",
+            run_json.display()
+        );
+    } else {
+        assert_eq!(
+            v["inputs"]["forcing_extrapolation"],
+            held_mult_past_50(),
+            "{command}: {}:\n{v:#}",
+            run_json.display()
+        );
+    }
+}
+
 /// A fit under `[config] allow_forcing_extrapolation = true` records the
 /// override and the one forcing it held in its run's `run_inputs.json`, as a
 /// simulate under the flag does in its cell's provenance: the record is the
@@ -272,7 +339,8 @@ fn the_override_records_the_forcing_it_held() {
 
 /// `pfilter` and `profile` given `--fit` read the config's `[config]
 /// allow_forcing_extrapolation`, which `fit run` applied to the fit: under it
-/// alone each runs past the forcing's range, records what it held, and is the
+/// alone each runs past the forcing's range, records the override (`pfilter` also
+/// the forcing it held), and is the
 /// same computation as under the flag, so the second run adds no run id
 /// (gh#1235).
 #[test]
@@ -303,11 +371,12 @@ fn fit_aware_commands_read_the_configs_override() {
         let new: Vec<_> = statuses(tmp.path())
             .into_iter()
             .filter(|(_, v)| v["run_id"].as_str().is_some_and(|id| !before.contains(id)))
-            .filter(|(_, v)| v["status"] == "completed" && v["kind"] != "profile_invocation")
+            .filter(|(_, v)| v["status"] == "completed" && v["kind"] != "profile_invocation"
+                && v["kind"] != "quantities" && v["kind"] != "fit")
             .collect();
         assert!(!new.is_empty(), "{name}: a completed leaf");
         for (path, v) in &new {
-            assert_eq!(v["inputs"]["forcing_extrapolation"], held_mult_past_50(), "{name}: {}:\n{v:#}", path.display());
+            assert_forcing_override_recorded(name, path, v);
         }
         let mut flagged = args.clone();
         flagged.push("--allow-forcing-extrapolation");
@@ -390,8 +459,8 @@ fn a_fit_toml_handle_does_not_stand_for_a_flag_made_fit() {
 /// The commands that read a fit's problem but none of its results (`pfilter`,
 /// `profile`), given a fit made with `--allow-forcing-extrapolation` on the
 /// command line: named by its leaf, the fit's stored config holds the
-/// override, so the command runs past the forcing's range and records what it
-/// held (gh#1235, gh#1268). Neither is the same stored computation as the file
+/// override, so the command runs past the forcing's range and records the
+/// override (`pfilter` also the forcing it held) (gh#1235, gh#1268). Neither is the same stored computation as the file
 /// under the flag: a filter run given a stored fit depends on its problem,
 /// and `profile` keys the config's text as read, which for a stored fit is
 /// its `problem.toml`. Named by its
@@ -455,11 +524,11 @@ fn a_flag_made_fit_is_read_under_its_stored_override_through_its_leaf() {
             .into_iter()
             .filter(|(_, v)| v["run_id"].as_str().is_some_and(|id| !before.contains(id)))
             .filter(|(_, v)| v["status"] == "completed" && v["kind"] != "profile_invocation" && v["kind"] != "fit_method"
-                && v["kind"] != "quantities" && v["kind"] != "compiled_model" && v["kind"] != "data_table")
+                && v["kind"] != "quantities" && v["kind"] != "fit" && v["kind"] != "compiled_model" && v["kind"] != "data_table")
             .collect();
         assert!(!new.is_empty(), "{name}: a completed leaf");
         for (path, v) in &new {
-            assert_eq!(v["inputs"]["forcing_extrapolation"], held_mult_past_50(), "{name}: {}:\n{v:#}", path.display());
+            assert_forcing_override_recorded(name, path, v);
         }
         let mut flagged = args(toml);
         flagged.push("--allow-forcing-extrapolation".into());
@@ -946,6 +1015,64 @@ fn a_stored_held_profile_point_is_not_served_without_the_override() {
     let err = stderr(&o);
     assert!(!o.status.success(), "the stored held profile points must not be served:\n{err}");
     assert!(err.contains("--allow-forcing-extrapolation"), "{err}");
+}
+
+/// A profile refused for a forcing outside its range fails every point it
+/// claimed: none is left `running`, and none is stored completed. The
+/// forcing's data start at t = 10, so every point evaluates it outside its
+/// range at its first step.
+#[test]
+fn a_refused_profile_leaves_no_point_running() {
+    let tmp = tempfile::tempdir().unwrap();
+    let m = model(tmp.path(), "linear", &[(10, 1.0), (50, 0.8), (100, 0.6)]);
+    let toml = fit_toml(tmp.path(), &m, "");
+    let o = camdl(tmp.path(), &[
+        "profile", m.to_str().unwrap(), "--fit", toml.to_str().unwrap(), "--sweep", "gamma=0.1,0.2,0.3",
+        "--particles", "8", "--iterations", "2", "--n-starts", "1", "--seed", "1",
+    ]);
+    let err = stderr(&o);
+    assert!(!o.status.success(), "{err}");
+    assert!(err.contains("forcing `mult`") && err.contains("--allow-forcing-extrapolation"), "{err}");
+    let points: Vec<_> = statuses(&store_of(tmp.path())).into_iter().filter(|(_, v)| v["kind"] == "profile_point").collect();
+    assert_eq!(points.len(), 3, "each point was claimed: {points:?}");
+    for (path, v) in &points {
+        assert_eq!(v["status"], "failed", "{}:\n{v:#}", path.display());
+    }
+}
+
+/// Each profile point records the forcings its own computation held, not
+/// those an earlier point of the same process held: the rate reads `mult`
+/// only when `gamma * 1 'days > 0.15`, so the point at `gamma = 0.1` holds nothing and
+/// the one at `gamma = 0.2` holds `mult` past t = 50.
+#[test]
+fn each_profile_point_records_the_forcings_it_held() {
+    let tmp = tempfile::tempdir().unwrap();
+    let m = model(tmp.path(), "linear", &ROWS_TO_50);
+    let src = std::fs::read_to_string(&m).unwrap().replace(
+        "@ mult * beta * S * (I / N)",
+        "@ (if gamma * 1 'days > 0.15 then mult else 1.0) * beta * S * (I / N)",
+    );
+    assert!(src.contains("if gamma * 1 'days > 0.15"), "the rate was rewritten");
+    std::fs::write(&m, src).unwrap();
+    let toml = fit_toml(tmp.path(), &m, "allow_forcing_extrapolation = true\n");
+    let o = camdl(tmp.path(), &[
+        "profile", m.to_str().unwrap(), "--fit", toml.to_str().unwrap(), "--sweep", "gamma=0.2,0.1",
+        "--particles", "8", "--iterations", "2", "--n-starts", "1", "--seed", "1", "--parallel", "1",
+    ]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let mut held = std::collections::BTreeMap::new();
+    for (path, v) in statuses(&store_of(tmp.path())).into_iter().filter(|(_, v)| v["kind"] == "profile_point") {
+        let identity: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path.with_file_name("identity.json")).unwrap()).unwrap();
+        let gamma = identity["identity"]["focal"].to_string();
+        held.insert(gamma, v["inputs"]["forcing_extrapolation"].clone());
+    }
+    assert_eq!(held.len(), 2, "{held:#?}");
+    let none = serde_json::json!({ "allowed": true, "held": [] });
+    for (focal, record) in &held {
+        let expected = if focal.contains("0.1") && !focal.contains("0.15") { none.clone() } else { held_mult_past_50() };
+        assert_eq!(record, &expected, "the point at {focal}");
+    }
 }
 
 /// A forcing whose data start after the run does is refused too, naming the

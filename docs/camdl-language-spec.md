@@ -6327,7 +6327,7 @@ camdl pfilter MODEL --params P.toml --data cases.tsv \
 camdl fit run fit.toml --seed 42
 
 # Profile likelihood over a grid of one parameter (repeat --sweep for 2D+)
-camdl profile MODEL --starts from_params=P.toml --data cases.tsv \
+camdl profile MODEL --fit fit.toml --starts from_params=P.toml \
     --sweep "R0=lin(0.5,5,20)" \
     --rw-sd "sigma=0.01,gamma=0.01" \
     --particles 500 --iterations 30 --n-starts 3 --parallel 8

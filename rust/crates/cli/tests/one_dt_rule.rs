@@ -186,6 +186,20 @@ fn without_a_model_dt_the_config_dt_is_the_step() {
     assert!(err.contains("dt=0.5"), "{err}");
 }
 
+/// Every profile point folder under the store `root`: a folder whose
+/// `identity.json` has `"kind": "profile_point"`. Entries whose name starts
+/// with `.` are skipped.
+fn profile_points(root: &Path, out: &mut Vec<std::path::PathBuf>) {
+    for e in std::fs::read_dir(root).into_iter().flatten().flatten() {
+        let p = e.path();
+        if !p.is_dir() || e.file_name().to_string_lossy().starts_with('.') { continue; }
+        let is_point = std::fs::read_to_string(p.join("identity.json")).ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .is_some_and(|v| v["kind"] == "profile_point");
+        if is_point { out.push(p) } else { profile_points(&p, out) }
+    }
+}
+
 /// `camdl profile` over a model, with a `--fit` file supplying the base
 /// point; `fit_config` lands in that file, `extra` on the command line.
 fn profile(dir: &Path, ir: &Path, algo: &[&str], fit_config: &str, extra: &[&str]) -> (bool, String, String) {
@@ -204,7 +218,6 @@ N0 = 10000
 "#, ir = ir.display(), data = dir.join("cases.tsv").display())).unwrap();
     let out = Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
         .args(["profile"]).arg(ir).arg("--fit").arg(&fit)
-        .arg("--data").arg(dir.join("cases.tsv"))
         .args(["--sweep", "beta=0.4,0.5", "--rw-sd", "gamma=auto", "--n-starts", "1"])
         .args(algo).args(extra)
         .env("CAMDL_OUTPUT_DIR", dir.join("res")).env("CAMDL_STORE", std::path::Path::new(&dir.join("res")).join("camdl-store"))
@@ -212,17 +225,12 @@ N0 = 10000
         .output().unwrap();
     // The step each stored cell records.
     let mut dts = String::new();
-    let mut stack = vec![dir.join("res")];
-    while let Some(d) = stack.pop() {
-        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
-            let p = e.path();
-            if p.is_dir() { stack.push(p) }
-            else if p.file_name().and_then(|n| n.to_str()) == Some("run.json") {
-                let v: serde_json::Value =
-                    serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
-                if let Some(dt) = v.pointer("/inputs/algorithm/dt") { dts.push_str(&format!("{dt} ")); }
-            }
-        }
+    let mut points = Vec::new();
+    profile_points(&dir.join("res"), &mut points);
+    for p in points {
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(p.join("provenance.json")).unwrap()).unwrap();
+        if let Some(dt) = v.pointer("/algorithm/dt") { dts.push_str(&format!("{dt} ")); }
     }
     (out.status.success(), String::from_utf8_lossy(&out.stderr).into_owned(), dts)
 }

@@ -215,10 +215,11 @@ rather than resolved:
 A fit.toml naming one parameter in both `[estimate]` and `[fixed]` is refused by
 every command that reads it (`fit run`, `profile --fit`); neither block wins.
 
-`profile --fit` refuses a `--fixed` or plain `--fixed-file` over `[estimate]`
-(parameter-roles §4.2), naming the fix: the parameter in `[fixed]` in a copy of
-the config. A draw/sweep value never kicks a parameter out of `[estimate]`, and
-a scenario touching an estimated parameter is refused (above).
+On `profile --fit`, a `--fixed` or `--fixed-file` naming a parameter of
+`[estimate]` holds it and takes it out of `[estimate]`, reported at info (§2.8);
+a fit's `mle_params.toml` is such a file. A draw/sweep value never kicks a
+parameter out of `[estimate]`, and a scenario touching an estimated parameter is
+refused (above).
 
 **Priors** resolve on their own three-tier chain (`fit.toml [estimate.p.prior]`
 → the model IR's `~` declaration → flat). For `camdl profile` the flat tier is a
@@ -301,23 +302,22 @@ project/
 ├── data/            # observation TSVs, lookup tables
 ├── params/          # parameter-point TOMLs
 ├── fits/            # fit.toml configs
-├── results/         # the content-addressed store of profiles (see below)
-└── camdl-store/     # the run store of simulate, pfilter and fits (§4.4, §2.2)
+└── camdl-store/     # the run store (§4.4, §2.2, §2.8)
 ```
 
-Only `results/` and `camdl-store/` have meaning to camdl. They are two stores.
-`camdl simulate`, `camdl pfilter` and `camdl fit run` store their results in the
-run store, whose root is `--store DIR` (`simulate`, `pfilter`), the fit file's
-`store` key (`fit run`, §6.2), else `CAMDL_STORE`, else `./camdl-store`; its
-layout is in §4.4 and, for fits, §2.2. Profiles store theirs under `results/`,
-whose location is `CAMDL_OUTPUT_DIR`, else `./results`
-(`run_paths::output_root`). Neither `--output-dir` nor `CAMDL_OUTPUT_DIR`
-applies to the run store.
+Only `camdl-store/` has meaning to camdl. `camdl simulate`, `camdl pfilter`,
+`camdl fit run` and `camdl profile` store their results in the run store, whose
+root is `--store DIR` (`simulate`, `pfilter`, `profile`), the fit file's `store`
+key (`fit run`, §6.2), else `CAMDL_STORE`, else `./camdl-store`; its layout is
+in §4.4, for fits §2.2 and for profiles §2.8. No command writes a `results/`
+directory; `camdl list`, `show` and `cat` still read one an earlier camdl wrote
+(§2.1). `--output-dir` and `CAMDL_OUTPUT_DIR` name that old root only.
 
-### 2.1 The content-addressed store
+### 2.1 The old results store
 
-The results of profiles live in a store under the output root, partitioned by
-artifact kind:
+An earlier camdl stored profile points in a store under `results/`, partitioned
+by artifact kind, which no command of this camdl writes. `camdl list`, `show`
+and `cat` read it:
 
 ```
 results/
@@ -1401,6 +1401,68 @@ the field is layout 0. This camdl writes layout 1, and no reader checks it.
 `camdl dev migrate PATH [--dry-run]` raises the recorded layout of every
 `results/` folder at or under `PATH` to the current one; a profile folder's
 layout is raised alone.
+
+### 2.8 Profile Result Layout
+
+`camdl profile` stores each point of its grid in the run store (§4.4) as one
+result of kind `profile_point`: one start of one cell at one seed, a fit of the
+problem with the focal parameters held at the cell's values, written in place
+while it works. The layout is that of
+`docs/dev/proposals/2026-11-20-run-store-api.md` ("A profile, and a grid that
+grows"):
+
+```
+<root>/<build>/
+  compiled_model/<model stem>-<12 hex>/          # the compiled model, stored once
+  data_table/<stream>-<12 hex>/                  # each bound data table, stored once
+  profile_point/<model stem>-<12 hex>/           # one group per problem
+    <name>=<value>__…-<12 hex>/                  # the focal values, to four decimals
+      <algorithm>-<12 hex>/                      # the method and its settings
+        seed_<n>-start_<i>-<12 hex>/             # one point
+          identity.json  run.json
+          mle.toml                               # final_loglik, [focal], [mle], [diagnostics]
+          provenance.json                        # where each value came from; wall time
+```
+
+The problem is a fit problem (§2.2) in the same store. `--fit @RUN` names a
+stored fit run, and its problem is the profile's. `--fit FIT.toml` names a fit
+file, whose problem is resolved and stored as `camdl fit run` stores it, so a
+profile and a fit of one file share one stored problem. The store is
+`--store DIR`, else the fit file's `store` key (relative to the file), else
+`CAMDL_STORE`, else `./camdl-store`, so the problem is stored where `fit run`
+would store it (§6.2). `--fixed`, `--fixed-file`, `--table`, the scenario flags,
+the two policies and `--dt` are written into the problem that is stored:
+`--fixed NAME=VALUE` holds `NAME` and takes it out of `[estimate]`, a
+conditional problem of its own, and so does each name a `--fixed-file` gives
+other than a swept one. Each value they replace, and each parameter they take
+out of `[estimate]`, is reported at info and recorded in every point's
+`provenance.json` (§1.3). The cells compute from the stored problem: its
+compile, its training rows and its values. A profile without `--fit`, and
+`--data` or `--obs` beside it, are refused (gh#1354). A `--starts from_params`
+value for a parameter the problem neither estimates nor fixes is refused, naming
+it.
+
+A point's identity holds the problem, the focal values, the method (the
+algorithm with its settings, `dt`, each estimated parameter's domain and IF2
+step, the simplex groups, under IF2 the `--pf-max-substeps` budget and the
+binomial sampler, and for `nl-lbfgs` the compile with the state Jacobian), the
+start's values and a seed. It holds nothing about the grid: a larger grid finds
+every point a smaller one stored and computes only the others. The seed is
+derived from `--seed` (or one of `--seeds`), the focal values and the start's
+values, so a point has one seed in every grid. Starts are drawn once for the
+invocation, so the start's index is a label. Starts with equal values (the
+`from_params` and `from_mle` rules start every chain at one point) are
+independent runs: the second and later of them take a replicate index, the
+number of earlier starts with the same values, into the seed. A start with no
+equal earlier start takes no index. So `--n-starts 4` after `--n-starts 3`
+computes only the fourth start.
+
+A point whose log-likelihood is not finite is a completed point with
+`final_loglik = -inf`: the failure follows from its identity. The profile table
+(§10.12) is rendered from the points the invocation asked for, and is not
+stored. `--force` computes every point again, moving the stored ones to the
+quarantine. `--label L` names the invocation; `@L` is found again through its
+record.
 
 ---
 
@@ -5056,9 +5118,9 @@ different models (the `model` level; `config` is unchanged).
 
 #### 9.2.4 The levels, per artifact kind
 
-| kind (`store_dir`)           | levels, in path order                   | resolver                 |
-| ---------------------------- | --------------------------------------- | ------------------------ |
-| `ProfilePoint` (`profiles/`) | profile · point · method · seed · start | `cli/src/profile_cas.rs` |
+| kind (`store_dir`)           | levels, in path order                   | resolver                    |
+| ---------------------------- | --------------------------------------- | --------------------------- |
+| `ProfilePoint` (`profiles/`) | profile · point · method · seed · start | no command writes it (§2.1) |
 
 A fit's problem and run identities are in §2.2.
 
@@ -5094,8 +5156,6 @@ done by `FiniteF64`'s constructor.
   .staging/                        # in-flight commits
   .quarantine/                     # unidentifiable debris moved aside
   profiles/                        # same {label}-{h8} factoring per §9.2.4
-  profiles/{stem}-{h8}/invocations/{invocation_id}/
-                                   # one per `camdl profile` run; not a leaf (§10.12)
 ```
 
 A path component that would exceed `NAME_MAX` is truncated to 200 bytes and
@@ -5456,10 +5516,6 @@ Sub-artifacts that are _not_ `RunRecord`s:
   with the hash `SHA256("{run_id}:event_log")`. A second `--event-log` run of
   the same run id leaves a complete child as it is, and refuses one whose
   recorded digest differs from the bytes it recorded, overwriting nothing.
-- `profiles/{stem}-{h8}/invocations/{invocation_id}/` — one `camdl profile`
-  invocation's `invocation.json` and `progress.json` (§10.12). Neither enters
-  any hash or record, and a reader that walks `run.json` leaves never meets
-  them.
 
 ### 9.6 The derived index (`index.json`)
 
@@ -6234,99 +6290,18 @@ consequence:
   killed run) starts a new log: the reclaim clears the dead run's log with its
   other files, and the log is created empty when the method begins.
 
-### 10.12 `invocations/`: what a `camdl profile` run will compute, and how far it has got
+### 10.12 A profile's invocation: what it will compute, and how far it has got
 
-A profile's results arrive one start at a time: each start of each grid cell is
-its own leaf, `profiles/<base>/<point>/<method>/<seed>/<start>/`, and appears
-only when that start finishes. The base directory holds no record of its own,
-and several invocations share it — a rerun, another method, more seeds — so the
-leaves alone cannot tell a reader which cells an invocation will fill, how many
-of its starts are done, or whether it is still running. Each invocation
-therefore writes a directory of its own beside the grid points:
-
-```
-profiles/<base>/invocations/<invocation_id>/
-  invocation.json     # what this invocation runs, written once before its first job
-  progress.json       # its heartbeat (§10.10), phase "profiling"
-```
-
-`invocation_id` is `<started_at>-<pid>`, zero-padded so that the directories
-sort by start time, and suffixed `-2`, `-3`, … in the unlikely case that the
-directory already exists. It identifies the execution, not the result: a rerun
-of the same grid gets a new id and writes into the same point directories.
-
-**`invocation.json`** is written atomically, once, after the jobs are resolved
-and before the first one runs:
-
-```json
-{
-  "schema": "camdl.profile-invocation/v1",
-  "invocation_id": "1794964381-46944",
-  "started_at": 1794964381,
-  "label": null,
-  "algorithm": "nl-sbplx",
-  "focal": [
-    { "name": "gamma", "values": [0.2, 0.2833333333333333, 0.3666666666666667, 0.45] }
-  ],
-  "n_starts": 3,
-  "seeds": [1],
-  "points": [
-    { "coords": { "gamma": 0.2 }, "dir": "gamma_0.2000-c713b667" },
-    { "coords": { "gamma": 0.2833333333333333 }, "dir": "gamma_0.2833-98bf299d" },
-    { "coords": { "gamma": 0.3666666666666667 }, "dir": "gamma_0.3667-5d9f2d56" },
-    { "coords": { "gamma": 0.45 }, "dir": "gamma_0.4500-2037d381" }
-  ],
-  "method_dir": "nlopt_sbplx_-82833741",
-  "total_jobs": 12
-}
-```
-
-| field           | what it holds                                                                                                                                                                                                        |
-| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `schema`        | `"camdl.profile-invocation/v1"`. A changed meaning or a removed field is a new version; a new field is not                                                                                                           |
-| `invocation_id` | the directory's name                                                                                                                                                                                                 |
-| `started_at`    | Unix seconds at which the invocation started                                                                                                                                                                         |
-| `label`         | `--label`, or `null`                                                                                                                                                                                                 |
-| `algorithm`     | the per-cell method: `if2`, `nl-sbplx`, `nl-bobyqa` or `nl-lbfgs`                                                                                                                                                    |
-| `focal`         | each swept parameter and its grid values, in `--sweep` order                                                                                                                                                         |
-| `n_starts`      | starts per grid cell and seed                                                                                                                                                                                        |
-| `seeds`         | the seeds the whole grid runs at                                                                                                                                                                                     |
-| `points`        | every grid cell: `coords`, its exact focal values, keyed in `focal`'s order; `dir`, the `<point>` directory under the base that the cell's leaves are written in                                                     |
-| `method_dir`    | the `<method>` directory, under each point's `dir`, that this invocation's leaves are written in. Every job of an invocation shares it; an invocation over the same grid with other method settings writes beside it |
-| `total_jobs`    | `points` × `n_starts` × `seeds`: the heartbeat's `total`                                                                                                                                                             |
-
-`coords` carries the exact floats; the `<point>` directory's label rounds them
-to four decimals, and two cells can share a rounded label, so a reader matches a
-cell to its leaves by `dir`, never by reformatting the coordinates. A cell whose
-`<dir>/<method_dir>/` does not exist yet has no finished start of this
-invocation's method; one holding `n_starts × len(seeds)` completed leaves is
-done.
-
-**`progress.json`** has the format and the staleness rule of a method run's
-(§10.10). It is written as the invocation starts, again each time a job
-finishes, and every five seconds between:
-
-```json
-{
-  "updated_at": 1794964385,
-  "pid": 46944,
-  "state": { "running": { "phase": "profiling", "step": 2, "total": 12 } }
-}
-```
-
-`step` counts the jobs finished, whatever their outcome, and starts at the
-number the store already held: a rerun whose every start is cached writes `step`
-= `total` on its first write. The terminal record is `"done"` once the collected
-table has been written, and `{"failed": {"reason": …}}`, carrying the sentence
-printed on stderr, when camdl stops the invocation on an error. A `running`
-record that has stopped being refreshed is a killed process.
-
-**Outside the identity.** The directory is not a leaf: it holds no `run.json`,
-so the store's walks (`camdl list`, `show`, `cat`, `camdl dev reindex`, the
-derived index) do not visit it, and its name ends in no level hash, so a lookup
-by hash never matches it. Nothing in it enters any hash, `run_id` or record, and
-no run reads it back: the leaves an invocation writes are byte-for-byte those it
-would write without it.
+A profile's points are claimed together when the command starts, and each is
+visible in its folder, with status `running`, while it computes (§2.8). The
+invocation record (`<root>/.invocations/<seq>.json`) lists every point the
+command asked for, in the order (seed, cell, start), each with its labels
+(`model`, `focal`, `method`, `seed`, `start`) and its outcome: `computed`,
+`reused`, `failed` with its reason, or `busy`. While the command runs,
+`<root>/.invocations/<seq>.progress.json` holds a snapshot with phase
+`profiling`, the points finished (stored ones included) and the total. The
+profile table is rendered from this record and the stored points, so `--label L`
+and `@L` name the profile as a whole.
 
 ### 10.13 `opt_trace.tsv`: each NLopt search's running best, while it runs
 
@@ -7796,8 +7771,8 @@ part of the leaf's identity, and the full objective leaves the key unchanged.
 --enable / --disable / --table / --allow-degenerate-rates /
 --pf-max-substeps / --binomial (if2 only)
 -o, --output FILE           where the collected table goes (default stdout): one
-                            row per grid cell, read back from its leaves under
-                            `profiles/`: swept values, best loglik over seeds and
+                            row per grid cell, rendered from the stored points
+                            (§2.8): swept values, best loglik over seeds and
                             starts, the estimates there, loglik_spread_starts,
                             starts_n_completed, n_starts, the best run_id
 --format tsv|json           the table's format (default tsv)

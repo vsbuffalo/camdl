@@ -1,31 +1,29 @@
-//! The collected table of a `camdl profile` run (gh#1059): one row per grid
-//! cell, gathered from the cell's leaves once the run ends.
+//! The rows of a `camdl profile` table: one per grid cell, each from the
+//! stored points of the cell.
 //!
-//! Each `(cell × seed × start)` is its own content-addressed leaf holding an
+//! Each `(cell × seed × start)` is a stored profile point holding an
 //! `mle.toml` (`final_loglik`, `[focal]`, `[mle]`). The profile at a cell is
 //! the best of those starts, so a row carries the swept values, the best
 //! finite log-likelihood over every seed and start of the cell, the
 //! estimated parameters at that start, the spread of the finite
 //! log-likelihoods, how many starts completed out of how many ran, and the
-//! best start's `run_id`. The table is read back from the leaves rather than
-//! kept from the parallel loop, so a rerun served from the store prints the
-//! same table. It is a view: nothing in it is hashed or stored.
+//! best start's `run_id` (in a cell where none completed, the first start's). The table is rendered from the stored points
+//! (`crate::profile_store::ProfileTableRendering`), so a rerun served from
+//! the store prints the same table. Nothing in it is hashed or stored.
 
-use std::path::Path;
-
-/// One start's result, read from its leaf.
+/// One start's result, read from its stored point.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StartOutcome {
     /// `final_loglik`; non-finite when the start failed.
     pub loglik: f64,
     /// The estimated parameters at this start's optimum, in table order.
     pub estimates: Vec<f64>,
-    /// The leaf's `run_id`.
+    /// The point's run id.
     pub run_id: String,
 }
 
 /// One grid cell: its swept values and every start that ran there, in
-/// (seed, start) order. `None` is a start with no readable leaf.
+/// (seed, start) order. `None` is a start with no readable result.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CellRow {
     pub focal: Vec<f64>,
@@ -44,6 +42,12 @@ impl CellRow {
             Some(b) if b.loglik >= s.loglik => Some(b),
             _ => Some(s),
         })
+    }
+
+    /// The start whose point the row names: the best, or, in a cell where
+    /// no start completed, the first stored one, so its point can be read.
+    pub fn named(&self) -> Option<&StartOutcome> {
+        self.best().or_else(|| self.starts.iter().flatten().next())
     }
 
     /// Starts that produced a finite log-likelihood.
@@ -82,8 +86,8 @@ fn tsv_num(v: Option<f64>) -> String {
 
 impl ProfileTable {
     /// One header line, one line per cell. A cell with no finite start has
-    /// `NaN` for its log-likelihood, estimates and spread, and an empty
-    /// `run_id`.
+    /// `NaN` for its log-likelihood, estimates and spread, and the `run_id`
+    /// of its first stored start ([`CellRow::named`]).
     pub fn to_tsv(&self) -> String {
         let mut header: Vec<&str> = self.focal_names.iter().map(String::as_str).collect();
         header.push("loglik");
@@ -101,7 +105,7 @@ impl ProfileTable {
             fields.push(tsv_num(row.spread()));
             fields.push(row.n_completed().to_string());
             fields.push(row.starts.len().to_string());
-            fields.push(best.map(|b| b.run_id.clone()).unwrap_or_default());
+            fields.push(row.named().map(|b| b.run_id.clone()).unwrap_or_default());
             out.push_str(&fields.join("\t"));
             out.push('\n');
         }
@@ -127,7 +131,7 @@ impl ProfileTable {
                 "loglik_spread_starts": row.spread(),
                 "starts_n_completed": row.n_completed(),
                 "n_starts": row.starts.len(),
-                "run_id": best.map(|b| b.run_id.clone()),
+                "run_id": row.named().map(|b| b.run_id.clone()),
             })
         }).collect();
         serde_json::json!({
@@ -140,23 +144,21 @@ impl ProfileTable {
     }
 }
 
-/// Read one start's `mle.toml` from its leaf directory: `final_loglik` and
-/// the `[mle]` value of each name in `estimated`.
-pub fn read_start(leaf: &Path, estimated: &[String], run_id: String) -> Result<StartOutcome, String> {
-    let path = leaf.join("mle.toml");
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    let table: toml::Table = text.parse()
-        .map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
+/// One start's `mle.toml`, as stored: `final_loglik` and the `[mle]` value
+/// of each name in `estimated`.
+pub fn read_start(bytes: &[u8], estimated: &[String], run_id: String) -> Result<StartOutcome, String> {
+    let what = crate::profile_store::MLE_FILE;
+    let text = std::str::from_utf8(bytes).map_err(|e| format!("{what}: {e}"))?;
+    let table: toml::Table = text.parse().map_err(|e| format!("cannot parse {what}: {e}"))?;
     // `render_mle_toml` writes an integral float as a bare integer.
     let num = |v: &toml::Value| v.as_float().or_else(|| v.as_integer().map(|i| i as f64));
     let loglik = table.get("final_loglik").and_then(num)
-        .ok_or_else(|| format!("{} has no numeric final_loglik", path.display()))?;
+        .ok_or_else(|| format!("{what} has no numeric final_loglik"))?;
     let mle = table.get("mle").and_then(|m| m.as_table())
-        .ok_or_else(|| format!("{} has no [mle] table", path.display()))?;
+        .ok_or_else(|| format!("{what} has no [mle] table"))?;
     let estimates = estimated.iter()
         .map(|n| mle.get(n).and_then(num)
-            .ok_or_else(|| format!("{} [mle] has no value for {n}", path.display())))
+            .ok_or_else(|| format!("{what} [mle] has no value for {n}")))
         .collect::<Result<Vec<f64>, String>>()?;
     Ok(StartOutcome { loglik, estimates, run_id })
 }
@@ -180,7 +182,7 @@ mod tests {
     }
 
     /// The best start is the highest finite log-likelihood; a failed start
-    /// (non-finite, or no leaf) counts as run but not completed and never
+    /// (non-finite, or no result) counts as run but not completed and never
     /// enters the spread.
     #[test]
     fn a_row_is_its_best_finite_start() {
@@ -197,26 +199,26 @@ mod tests {
              0.12\t-29.5\t0.33\t0.5\t2\t4\tc\n");
     }
 
-    /// A cell where no start completed is kept, with nothing to report: the
-    /// row says so instead of dropping the grid point.
+    /// A cell where no start completed is kept, with nothing to report but
+    /// the stored point that says so: the row names its first start's run id
+    /// instead of dropping the grid point.
     #[test]
     fn a_cell_with_no_finite_start_is_a_row_of_nan() {
-        let row = CellRow { focal: vec![0.15], starts: vec![start(f64::NEG_INFINITY, 0.9, "b"), None] };
+        let row = CellRow { focal: vec![0.15], starts: vec![None, start(f64::NEG_INFINITY, 0.9, "b")] };
         let t = table(vec![row]);
-        assert_eq!(t.to_tsv().lines().nth(1).unwrap(), "0.15\tNaN\tNaN\tNaN\t0\t2\t");
+        assert_eq!(t.to_tsv().lines().nth(1).unwrap(), "0.15\tNaN\tNaN\tNaN\t0\t2\tb");
         let cell = &t.to_json()["cells"][0];
         assert!(cell["loglik"].is_null() && cell["estimates"]["beta"].is_null());
         assert_eq!(cell["starts_n_completed"], 0);
+        assert_eq!(cell["run_id"], "b");
     }
 
     #[test]
     fn read_start_takes_an_integral_value_written_bare() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("mle.toml"),
-            "final_loglik = -11\n\n[focal]\nR0 = 25\n\n[mle]\nbeta = 1\n").unwrap();
-        let s = read_start(dir.path(), &["beta".into()], "id".into()).unwrap();
+        let bytes = b"final_loglik = -11\n\n[focal]\nR0 = 25\n\n[mle]\nbeta = 1\n";
+        let s = read_start(bytes, &["beta".into()], "id".into()).unwrap();
         assert_eq!((s.loglik, s.estimates), (-11.0, vec![1.0]));
-        assert!(read_start(dir.path(), &["gamma".into()], "id".into())
+        assert!(read_start(bytes, &["gamma".into()], "id".into())
             .unwrap_err().contains("no value for gamma"));
     }
 }

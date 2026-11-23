@@ -57,81 +57,82 @@ fn write_long_form(path: &Path) {
          21\turban\t25\n21\trural\t9\n");
 }
 
-/// Collect the per-grid-point best loglik from the `profile_point` run.json
-/// leaves under `<out_root>/profiles/` (same layout profile_multi_stream reads).
-fn collect_logliks(out_root: &Path) -> Vec<f64> {
-    fn walk(dir: &Path, out: &mut Vec<(String, f64)>) {
-        if let Ok(b) = std::fs::read_to_string(dir.join("run.json")) {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&b) {
-                if v.get("kind").and_then(|k| k.as_str()) == Some("profile_point") {
-                    let point = v.get("levels").and_then(|ls| ls.as_array())
-                        .and_then(|a| a.iter().find(|l|
-                            l.get("name").and_then(|n| n.as_str()) == Some("point")))
-                        .and_then(|l| l.get("label").and_then(|x| x.as_str()))
-                        .unwrap_or("").to_string();
-                    if let Some(ll) = v.get("inputs")
-                        .and_then(|i| i.get("best_loglik")).and_then(|x| x.as_f64()) {
-                        out.push((point, ll));
-                    }
-                }
+/// The best loglik of each profile point stored under `store`, in order of
+/// the focal `beta` value (read from each point's `identity.json` and
+/// `provenance.json`).
+fn collect_logliks(store: &Path) -> Vec<f64> {
+    fn walk(dir: &Path, out: &mut Vec<(f64, f64)>) {
+        if let Ok(b) = std::fs::read_to_string(dir.join("identity.json")) {
+            let v: serde_json::Value = serde_json::from_str(&b).unwrap();
+            if v["kind"] == "profile_point" {
+                let focal = v["identity"]["focal"]["beta"].as_f64().expect("focal beta");
+                let prov: serde_json::Value = serde_json::from_str(
+                    &std::fs::read_to_string(dir.join("provenance.json")).unwrap()).unwrap();
+                out.push((focal, prov["best_loglik"].as_f64().expect("best_loglik")));
             }
         }
         if let Ok(es) = std::fs::read_dir(dir) {
-            for e in es.flatten() { if e.path().is_dir() { walk(&e.path(), out); } }
+            for e in es.flatten() {
+                if e.path().is_dir() && !e.file_name().to_string_lossy().starts_with('.') {
+                    walk(&e.path(), out);
+                }
+            }
         }
     }
     let mut pairs = Vec::new();
-    walk(&out_root.join("profiles"), &mut pairs);
-    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    walk(store, &mut pairs);
+    pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
     pairs.into_iter().map(|(_, ll)| ll).collect()
 }
 
-/// CLI binding path: `--data cases=FILE` on the long-form file. Pre-fix the
-/// wide-column loader fed BOTH patches' rows into each stream → "non-increasing
-/// observation times (7 then 7)". Post-fix each leaf is sliced to its own patch.
+/// The long-form file binds to the model's streams through the fit file's
+/// `[data.observations]` alone: `--data cases=FILE` on the command line is
+/// refused, naming the issue that tracks it, and no point is stored.
 #[test]
-fn profile_cli_family_binding_slices_per_stratum() {
+fn profile_data_flag_on_a_family_binding_is_refused() {
     let bin = skip_if_missing_binary();
     let tmp = tempfile::tempdir().unwrap();
     let data = tmp.path().join("cases_long.tsv");
     write_long_form(&data);
+    let toml = tmp.path().join("prof.toml");
+    write(&toml, &format!(r#"
+[model]
+camdl = "{ir}"
+[data.observations]
+cases = "{data}"
+[estimate]
+gamma = {{ bounds = [0.01, 1.0], start = 0.1 }}
+[fixed]
+rho = 0.6
+k = 5.0
+"#,
+        ir   = long_obs_model().display(),
+        data = data.display(),
+    ));
     let out_root = tmp.path().join("out_cli");
-    let out_tsv = tmp.path().join("profile_cli.tsv");
 
     let output = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .env("CAMDL_OUTPUT_DIR", &out_root)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args([
             "profile", &long_obs_model().to_string_lossy(),
-            "--scenario", "baseline",
+            "--fit", &toml.to_string_lossy(),
             "--data", &format!("cases={}", data.to_string_lossy()),
             "--sweep", "beta=lin(0.04,0.06,2)",
-            "--fixed", "gamma=0.1", "--fixed", "rho=0.6", "--fixed", "k=5.0",
             "--particles", "100", "--iterations", "1", "--n-starts", "1",
             "--rw-sd", "auto", "--seed", "1",
-            "--output", &out_tsv.to_string_lossy(),
         ])
+        .args(["--store", &out_root.to_string_lossy()])
         .output()
         .expect("spawn camdl profile");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(output.status.success(),
-        "profile (CLI family binding) must succeed on long-form data:\nstderr=\n{stderr}");
-    assert!(stderr.contains("cases_urban") && stderr.contains("cases_rural"),
-        "both stratum leaves must bind from the long-form file:\n{stderr}");
-    assert!(!stderr.contains("non-increasing"),
-        "each leaf must be SLICED to its own patch (no cross-patch time collision):\n{stderr}");
-
-    let ll = collect_logliks(&out_root);
-    assert_eq!(ll.len(), 2, "expected 2 grid points, got {ll:?}");
-    for (i, v) in ll.iter().enumerate() {
-        assert!(v.is_finite() && *v < 0.0,
-            "grid {i} loglik must be finite negative, got {v}");
-    }
+    assert!(!output.status.success(), "--data beside --fit must be refused:\n{stderr}");
+    assert!(stderr.contains("gh#1354"), "the refusal must name gh#1354:\n{stderr}");
+    assert!(collect_logliks(&out_root).is_empty(), "a refused profile must store no point");
 }
 
 /// Fit-toml binding path (garki's exact path): `[data.observations] cases =
-/// FILE`, NO `--data`. Pre-fix `effective_observations` returned the raw key
+/// FILE`. Pre-fix `effective_observations` returned the raw key
 /// `cases` and profile exact-matched it against the IR stream names
 /// (`cases_urban`/`cases_rural`) → "bound stream 'cases' has no matching IR
 /// observation block". Post-fix the family root resolves by `source` to both
@@ -173,7 +174,6 @@ cooling    = 0.5
     let out_root = tmp.path().join("out_fit");
     let out_tsv = tmp.path().join("profile_fit.tsv");
     let output = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .env("CAMDL_OUTPUT_DIR", &out_root)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args([
             "profile", &long_obs_model().to_string_lossy(),
@@ -186,6 +186,7 @@ cooling    = 0.5
             "--rw-sd", "auto", "--seed", "1",
             "--output", &out_tsv.to_string_lossy(),
         ])
+        .args(["--store", &out_root.to_string_lossy()])
         .output()
         .expect("spawn camdl profile");
 

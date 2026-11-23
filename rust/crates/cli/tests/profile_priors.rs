@@ -1,26 +1,20 @@
 //! Integration tests for the `camdl profile` prior-provenance surface
 //! (gh#73). Profile cells are maximizations that read no prior, but the
-//! per-parameter prior source is recorded in the profile-base sidecar and
-//! keys the base identity. Each test drives the release binary end-to-end
-//! and asserts observable behaviour: sidecar provenance fields and CAS-dir
-//! hashes. The unit-level counterpart in `crate::fit::priors_precedence`
-//! exercises the precedence helper on synthetic `ir::Model` fixtures.
+//! per-parameter prior source is recorded in each stored point's
+//! `provenance.json`, and the priors are part of the problem the point's run
+//! id is computed from. Each test drives the release binary end-to-end.
 //!
-//! Assertions covered:
-//!
-//!   1. `profile_without_priors_records_flat_fallback`: model has no
-//!      `~` priors, no `--fit`; no prior warning on stderr; the sidecar
-//!      records the estimated param as `flat_fallback`.
+//!   1. `profile_without_priors_records_flat_fallback`: neither the model
+//!      nor the fit file declares a `~` prior; no prior warning on stderr;
+//!      the record gives the estimated param the source `flat_fallback`.
 //!   2. `profile_with_fit_toml_records_fit_toml_priors`: a fit toml
-//!      supplies priors; the sidecar records source = `fit_toml`.
-//!   3. `same_model_different_fit_toml_different_cas_dir`: hash
-//!      provenance — two distinct fit tomls produce two distinct CAS
-//!      dirs (different `fit_toml_hash` → different inner_hash).
-//!   4. `same_model_no_fit_vs_with_fit_different_cas_dir`: same
-//!      provenance with the "no fit" baseline as one of the variants.
+//!      supplies priors; the record gives source = `fit_toml`.
+//!   3. `same_model_different_fit_toml_different_cas_dir`: two distinct fit
+//!      tomls produce disjoint run ids.
+//!   4. `same_model_flat_fit_vs_prior_fit_different_cas_dir`: the same with a
+//!      fit file that declares no priors as one of the variants.
 //!
-//! Skipped when the release binary or the `camdlc` compiler isn't
-//! present (mirrors the rest of the integration suite).
+//! Skipped when the `camdlc` compiler isn't present.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -61,11 +55,8 @@ fn tempdir(tag: &str) -> Tmp {
 /// case fires when `--fit` is absent.
 fn write_fixture(dir: &Path) -> (PathBuf, PathBuf) {
     let camdlc = camdlc_bin().expect("camdlc.exe present");
-    // Values for the `no --fit` test path come from a `start.toml` written
-    // below (the simulator validates that every parameter has a value). The
-    // `--fit toml` path takes them from [estimate].start; the resolver's
-    // prior-source assertion is what each test cares about, not the starting
-    // value.
+    // `start.toml` gives the parameters values for the test that passes
+    // `--starts from_params`.
     let src = r#"
 time_unit = 'days
 compartments { S, I, R }
@@ -112,7 +103,6 @@ simulate { from = 0 'days  to = 6 'days }
 /// same file also serves `fit run`.
 fn write_fit_toml_with_priors(dir: &Path, ir: &Path, data: &Path, name: &str) -> PathBuf {
     let toml = format!(r#"
-store = "{out}"
 [model]
 camdl = "{ir}"
 [data.observations]
@@ -132,11 +122,41 @@ particles  = 10
 iterations = 1
 cooling    = 0.5
 "#,
-        out  = dir.join("results").display(),
         ir   = ir.display(),
         data = data.display(),
     );
     let p = dir.join(format!("{}.toml", name));
+    std::fs::write(&p, toml).unwrap();
+    p
+}
+
+/// Write a fit toml that declares no prior: `beta` and `gamma` are estimated
+/// at the model's bounds, `N0` is held.
+fn write_fit_toml_flat(dir: &Path, ir: &Path, data: &Path) -> PathBuf {
+    let toml = format!(r#"
+[model]
+camdl = "{ir}"
+[data.observations]
+cases = "{data}"
+[config]
+dt = 1.0
+[estimate]
+beta  = {{ bounds = [0.001, 5.0] }}
+gamma = {{ bounds = [0.01, 1.0] }}
+[fixed]
+N0 = 1000
+[method]
+algorithm  = "if2"
+backend    = "chain_binomial"
+chains     = 1
+particles  = 10
+iterations = 1
+cooling    = 0.5
+"#,
+        ir   = ir.display(),
+        data = data.display(),
+    );
+    let p = dir.join("fit_flat.toml");
     std::fs::write(&p, toml).unwrap();
     p
 }
@@ -146,7 +166,6 @@ cooling    = 0.5
 /// priors must produce a different CAS dir.
 fn write_fit_toml_with_priors_variant(dir: &Path, ir: &Path, data: &Path) -> PathBuf {
     let toml = format!(r#"
-store = "{out}"
 [model]
 camdl = "{ir}"
 [data.observations]
@@ -154,7 +173,7 @@ cases = "{data}"
 [config]
 dt = 1.0
 [estimate]
-# Same shape, different mu/sigma → different fit_toml_hash.
+# Same shape, different mu/sigma.
 beta  = {{ bounds = [0.01, 5.0], prior = {{ log_normal = {{ mu = -1.0, sigma = 0.3 }} }}, start = 0.3 }}
 gamma = {{ bounds = [0.01, 1.0], prior = {{ log_normal = {{ mu = -1.5, sigma = 0.3 }} }}, start = 0.1 }}
 [fixed]
@@ -167,7 +186,6 @@ particles  = 10
 iterations = 1
 cooling    = 0.5
 "#,
-        out  = dir.join("results").display(),
         ir   = ir.display(),
         data = data.display(),
     );
@@ -176,29 +194,41 @@ cooling    = 0.5
     p
 }
 
-/// Find the profile-base segment under `<out_root>/profiles/`. Each run
-/// writes one factored tree `profiles/<base>/<point>/<method>/<seed>/<start>/`
-/// with the provenance sidecar at the base; this returns that base dir.
-fn find_profile_base(out_root: &Path) -> PathBuf {
-    let profiles = out_root.join("profiles");
-    let entries: Vec<_> = std::fs::read_dir(&profiles)
-        .unwrap_or_else(|e| panic!("read_dir {}: {}", profiles.display(), e))
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .collect();
-    assert_eq!(entries.len(), 1,
-        "expected exactly one profile-base dir under {}, found {:?}",
-        profiles.display(), entries);
-    entries.into_iter().next().unwrap()
+/// Every stored profile point under `store`: its folder and `identity.json`.
+/// Directories whose own name starts with `.` (the invocation log) are skipped.
+fn profile_points(store: &Path) -> Vec<(PathBuf, serde_json::Value)> {
+    let mut found = Vec::new();
+    let mut stack = vec![store.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        if let Ok(body) = std::fs::read_to_string(d.join("identity.json")) {
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            if v["kind"] == "profile_point" { found.push((d.clone(), v)); continue; }
+        }
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let p = e.path();
+            let hidden = e.file_name().to_string_lossy().starts_with('.');
+            if p.is_dir() && !hidden { stack.push(p); }
+        }
+    }
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    found
 }
 
-/// Read the profile-base `fit.meta.json` provenance sidecar — the single
-/// authoritative home for the fit-wide attributes (`--label`,
-/// `resolved_priors`, `fit_toml_hash`, `estimated`, `data_hashes`).
-fn read_sidecar(base: &Path) -> serde_json::Value {
-    let body = std::fs::read_to_string(base.join("fit.meta.json"))
-        .unwrap_or_else(|e| panic!("read {}/fit.meta.json: {}", base.display(), e));
+/// The run ids of every profile point under `store`, sorted.
+fn point_run_ids(store: &Path) -> Vec<String> {
+    let mut ids: Vec<String> = profile_points(store).iter()
+        .map(|(_, v)| v["run_id"].as_str().unwrap().to_string()).collect();
+    ids.sort();
+    ids
+}
+
+/// The first point's `provenance.json` (the record of how the point's inputs
+/// were resolved: priors, parameter provenance, init provenance).
+fn read_sidecar(store: &Path) -> serde_json::Value {
+    let points = profile_points(store);
+    assert!(!points.is_empty(), "no profile point under {}", store.display());
+    let body = std::fs::read_to_string(points[0].0.join("provenance.json"))
+        .unwrap_or_else(|e| panic!("read provenance.json: {}", e));
     serde_json::from_str::<serde_json::Value>(&body).unwrap()
 }
 
@@ -206,14 +236,12 @@ fn run_profile(
     bin: &Path,
     out_root: &Path,
     ir: &Path,
-    data: &Path,
     extra_args: &[&str],
 ) -> std::process::Output {
+    std::fs::create_dir_all(out_root).unwrap();
     let out_tsv = out_root.join("profile.tsv");
     let mut args: Vec<String> = vec![
         "profile".into(), ir.to_string_lossy().into_owned(),
-        "--data".into(), data.to_string_lossy().into_owned(),
-        "--obs".into(), "cases".into(),
         "--sweep".into(), "beta=lin(0.2,0.4,2)".into(),
         "--algorithm".into(), "if2".into(),
         "--particles".into(), "30".into(),
@@ -223,17 +251,9 @@ fn run_profile(
         "--output".into(), out_tsv.to_string_lossy().into_owned(),
         "--seed".into(), "1".into(),
     ];
-    // Without --fit, start.toml gives beta/gamma/N0 their values and the
-    // estimated parameters start there (a scenario that set them would be
-    // refused: a parameter is estimated or given a value). With --fit, the
-    // config supplies them ([estimate].start, [fixed]).
-    if !extra_args.contains(&"--fit") {
-        args.push("--starts".into());
-        args.push(format!("from_params={}", ir.with_file_name("start.toml").to_string_lossy()));
-    }
     for a in extra_args { args.push((*a).into()); }
     Command::new(bin).env_remove("CLICOLOR_FORCE")
-        .env("CAMDL_OUTPUT_DIR", out_root)
+        .env("CAMDL_STORE", out_root.join("store"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args(args.iter().map(|s| s.as_str()))
         .output()
@@ -248,9 +268,10 @@ fn profile_without_priors_records_flat_fallback() {
     if camdlc_bin().is_none() { return }
     let tmp = tempdir("flat_warning");
     let (ir, data) = write_fixture(tmp.path());
+    let flat = write_fit_toml_flat(tmp.path(), &ir, &data);
     let out_root = tmp.path().join("out_flat");
 
-    let output = run_profile(&bin, &out_root, &ir, &data, &["--fixed", "N0=1000"]);
+    let output = run_profile(&bin, &out_root, &ir, &["--fit", &flat.to_string_lossy()]);
     assert!(output.status.success(),
         "profile run failed: stderr=\n{}",
         String::from_utf8_lossy(&output.stderr));
@@ -263,8 +284,8 @@ fn profile_without_priors_records_flat_fallback() {
 
     // The profile-base sidecar must record sources = "flat_fallback"
     // for the estimated params (gamma; beta is the swept focal).
-    let side = read_sidecar(&find_profile_base(&out_root));
-    let resolved = side.get("resolved_priors").expect("resolved_priors");
+    let side = read_sidecar(&out_root.join("store"));
+    let resolved = side["provenance"].get("resolved_priors").expect("resolved_priors");
     let arr = resolved.as_array().expect("resolved_priors array");
     assert!(!arr.is_empty(), "resolved_priors must have at least one entry");
     let gamma_entry = arr.iter().find(|e| {
@@ -275,11 +296,6 @@ fn profile_without_priors_records_flat_fallback() {
         Some("flat_fallback"),
         "gamma should be flat_fallback when neither model-IR nor --fit \
          declares a prior. Got: {}", gamma_entry);
-    // No --fit → the sidecar's fit_toml_hash is empty (defaults to "",
-    // never a populated 64-hex digest).
-    let fth = side.get("fit_toml_hash").and_then(|h| h.as_str()).unwrap_or("");
-    assert!(fth.is_empty(),
-        "fit_toml_hash must be empty without --fit. Got: {:?}", fth);
 }
 
 #[test]
@@ -291,14 +307,14 @@ fn profile_with_fit_toml_records_fit_toml_priors() {
     let fit_toml = write_fit_toml_with_priors(tmp.path(), &ir, &data, "fit");
     let out_root = tmp.path().join("out_fit");
 
-    let output = run_profile(&bin, &out_root, &ir, &data,
+    let output = run_profile(&bin, &out_root, &ir,
         &["--fit", &fit_toml.to_string_lossy()]);
     assert!(output.status.success(),
         "profile run with --fit failed: stderr=\n{}",
         String::from_utf8_lossy(&output.stderr));
     // Sidecar: gamma resolved from fit_toml (beta is the swept focal).
-    let side = read_sidecar(&find_profile_base(&out_root));
-    let resolved = side.get("resolved_priors").expect("resolved_priors");
+    let side = read_sidecar(&out_root.join("store"));
+    let resolved = side["provenance"].get("resolved_priors").expect("resolved_priors");
     let gamma_entry = resolved.as_array().unwrap().iter().find(|e| {
         e.get("param").and_then(|p| p.as_str()) == Some("gamma")
     }).expect("gamma in resolved_priors");
@@ -306,14 +322,6 @@ fn profile_with_fit_toml_records_fit_toml_priors() {
         gamma_entry.get("source").and_then(|s| s.as_str()),
         Some("fit_toml"),
         "gamma must be sourced from fit_toml. Got: {}", gamma_entry);
-
-    // fit_toml_hash must be present and a 64-char hex string.
-    let hash = side.get("fit_toml_hash").and_then(|h| h.as_str())
-        .filter(|h| !h.is_empty())
-        .expect("fit_toml_hash must be present when --fit is supplied");
-    assert_eq!(hash.len(), 64, "fit_toml_hash must be SHA-256 hex (64 chars), got: {}", hash);
-    assert!(hash.chars().all(|c| c.is_ascii_hexdigit()),
-        "fit_toml_hash must be hex, got: {}", hash);
 }
 
 #[test]
@@ -331,47 +339,48 @@ fn same_model_different_fit_toml_different_cas_dir() {
     let out_a = tmp.path().join("out_a");
     let out_b = tmp.path().join("out_b");
 
-    let a = run_profile(&bin, &out_a, &ir, &data,
+    let a = run_profile(&bin, &out_a, &ir,
         &["--fit", &fit_a.to_string_lossy()]);
-    let b = run_profile(&bin, &out_b, &ir, &data,
+    let b = run_profile(&bin, &out_b, &ir,
         &["--fit", &fit_b.to_string_lossy()]);
     assert!(a.status.success(), "run A failed:\n{}",
         String::from_utf8_lossy(&a.stderr));
     assert!(b.status.success(), "run B failed:\n{}",
         String::from_utf8_lossy(&b.stderr));
 
-    let base_a = find_profile_base(&out_a);
-    let base_b = find_profile_base(&out_b);
-    assert_ne!(base_a.file_name().unwrap(),
-               base_b.file_name().unwrap(),
-        "two distinct fit tomls must produce two distinct CAS dirs. \
-         A={}, B={}", base_a.display(), base_b.display());
+    let ids_a = point_run_ids(&out_a.join("store"));
+    let ids_b = point_run_ids(&out_b.join("store"));
+    assert!(!ids_a.is_empty() && !ids_b.is_empty(), "both runs store points");
+    assert!(ids_a.iter().all(|id| !ids_b.contains(id)),
+        "two distinct fit tomls must produce disjoint run ids. A={:?}, B={:?}",
+        ids_a, ids_b);
 }
 
 #[test]
-fn same_model_no_fit_vs_with_fit_different_cas_dir() {
+fn same_model_flat_fit_vs_prior_fit_different_cas_dir() {
     let bin = camdl_bin();
     if camdlc_bin().is_none() { return }
-    let tmp = tempdir("hash_fit_vs_none");
+    let tmp = tempdir("hash_flat_vs_prior");
     let (ir, data) = write_fixture(tmp.path());
     let fit_toml = write_fit_toml_with_priors(tmp.path(), &ir, &data, "fit");
 
-    let out_no  = tmp.path().join("out_nofit");
-    let out_yes = tmp.path().join("out_yesfit");
+    let flat = write_fit_toml_flat(tmp.path(), &ir, &data);
+    let out_no  = tmp.path().join("out_flat");
+    let out_yes = tmp.path().join("out_prior");
 
-    let no  = run_profile(&bin, &out_no,  &ir, &data, &["--fixed", "N0=1000"]);
-    let yes = run_profile(&bin, &out_yes, &ir, &data,
+    let no  = run_profile(&bin, &out_no,  &ir, &["--fit", &flat.to_string_lossy()]);
+    let yes = run_profile(&bin, &out_yes, &ir,
         &["--fit", &fit_toml.to_string_lossy()]);
     assert!(no.status.success(),
-        "no-fit run failed:\n{}", String::from_utf8_lossy(&no.stderr));
+        "flat-fit run failed:\n{}", String::from_utf8_lossy(&no.stderr));
     assert!(yes.status.success(),
-        "with-fit run failed:\n{}", String::from_utf8_lossy(&yes.stderr));
+        "prior-fit run failed:\n{}", String::from_utf8_lossy(&yes.stderr));
 
-    let base_no  = find_profile_base(&out_no);
-    let base_yes = find_profile_base(&out_yes);
-    assert_ne!(base_no.file_name().unwrap(),
-               base_yes.file_name().unwrap(),
-        "no-fit and with-fit runs must produce distinct CAS dirs");
+    let ids_no  = point_run_ids(&out_no.join("store"));
+    let ids_yes = point_run_ids(&out_yes.join("store"));
+    assert!(!ids_no.is_empty() && !ids_yes.is_empty(), "both runs store points");
+    assert!(ids_no.iter().all(|id| !ids_yes.contains(id)),
+        "a fit with priors and a fit without must produce disjoint run ids");
 }
 
 #[test]
@@ -382,11 +391,12 @@ fn focal_param_in_fixed_errors_clearly() {
     if camdlc_bin().is_none() { return }
     let tmp = tempdir("focal_conflict");
     let (ir, data) = write_fixture(tmp.path());
+    let flat = write_fit_toml_flat(tmp.path(), &ir, &data);
     let out_root = tmp.path().join("out");
 
-    let output = run_profile(&bin, &out_root, &ir, &data,
+    let output = run_profile(&bin, &out_root, &ir,
         // beta is both swept and fixed.
-        &["--fixed", "beta=0.3", "--fixed", "gamma=0.1", "--fixed", "N0=1000"]);
+        &["--fit", &flat.to_string_lossy(), "--fixed", "beta=0.3", "--fixed", "gamma=0.1"]);
     assert!(!output.status.success(),
         "swept+fixed conflict must be a hard error");
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -395,166 +405,44 @@ fn focal_param_in_fixed_errors_clearly() {
          message. Got:\n{}", stderr);
 }
 
-/// Run a `camdl <subcmd>` reader command against the CAS root, returning its
-/// captured stdout (the reader display) as a String.
-fn camdl_read(bin: &Path, out_root: &Path, args: &[&str]) -> String {
-    let out = Command::new(bin).env_remove("CLICOLOR_FORCE")
-        .env("CAMDL_OUTPUT_DIR", out_root)
-        .env("CAMDL_SKIP_VERSION_CHECK", "1")
-        .args(args)
-        .output()
-        .expect("spawn camdl reader");
-    // `list` prints its table on stdout and section headers on stderr; show/cat
-    // print on stdout. Concatenate so a single helper covers all three.
-    format!("{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr))
-}
-
-/// The `run_id` (hex) of the first `ProfilePoint` leaf under a profile base.
-fn first_leaf_run_id(base: &Path) -> String {
-    fn walk(dir: &Path, out: &mut Option<String>) {
-        if out.is_some() { return; }
-        let rj = dir.join("run.json");
-        if rj.is_file() {
-            if let Ok(body) = std::fs::read_to_string(&rj) {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
-                    if v.get("kind").and_then(|k| k.as_str()) == Some("profile_point") {
-                        if let Some(rid) = v.get("run_id").and_then(|r| r.as_str()) {
-                            *out = Some(rid.to_string());
-                            return;
-                        }
-                    }
-                }
-            }
-        }
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for e in entries.flatten() {
-                let p = e.path();
-                if p.is_dir() { walk(&p, out); }
-            }
-        }
-    }
-    let mut found = None;
-    walk(base, &mut found);
-    found.unwrap_or_else(|| panic!("no ProfilePoint leaf under {}", base.display()))
-}
-
-/// P1 provenance discipline (write → read → visible): the audit data the old
-/// per-run `ProfileMeta` carried must be *surfaced by the new reader*, not just
-/// present on disk. A profile run with no `--fit` (flat-prior fallback) and
-/// `--starts from_params` (per-chain init provenance) populates both
-/// provenance kinds; this asserts each is
-/// visible through `camdl show`/`list`/`cat`. The fit migration once dropped
-/// provenance silently — the round-trip is what catches that.
+/// A profile run of a fit that declares no prior (flat-prior fallback) and
+/// `--starts from_params` (per-chain init provenance) records both provenance kinds in
+/// each point's `provenance.json`, and records its `--label` on the
+/// invocation.
 #[test]
-fn provenance_round_trips_through_reader() {
+fn provenance_is_recorded_on_the_point_and_the_invocation() {
     let bin = camdl_bin();
     if camdlc_bin().is_none() { return }
     let tmp = tempdir("prov_roundtrip");
     let (ir, data) = write_fixture(tmp.path());
+    let flat = write_fit_toml_flat(tmp.path(), &ir, &data);
+    let start = tmp.path().join("start.toml");
     let out_root = tmp.path().join("out");
 
-    let output = run_profile(&bin, &out_root, &ir, &data, &[
-        "--fixed", "N0=1000",
+    let output = run_profile(&bin, &out_root, &ir, &[
+        "--fit", &flat.to_string_lossy(),
+        "--starts", &format!("from_params={}", start.display()),
         "--label", "round-trip prov",
     ]);
     assert!(output.status.success(),
         "profile run failed: stderr=\n{}", String::from_utf8_lossy(&output.stderr));
 
-    let base = find_profile_base(&out_root);
+    let store = out_root.join("store");
 
-    // Write side: the leaf record carries both provenance kinds, and the
-    // base sidecar carries the label (its single authoritative home).
-    let rid = first_leaf_run_id(&base);
-    let leaf_dir = {
-        // Re-find the leaf dir holding `rid` for a disk-side sanity check.
-        fn walk(dir: &Path, rid: &str, out: &mut Option<PathBuf>) {
-            if out.is_some() { return; }
-            if let Ok(body) = std::fs::read_to_string(dir.join("run.json")) {
-                if body.contains(rid) { *out = Some(dir.to_path_buf()); return; }
-            }
-            if let Ok(es) = std::fs::read_dir(dir) {
-                for e in es.flatten() { if e.path().is_dir() { walk(&e.path(), rid, out); } }
-            }
-        }
-        let mut f = None; walk(&base, &rid, &mut f);
-        f.expect("leaf dir for run_id")
-    };
-    let leaf: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(leaf_dir.join("run.json")).unwrap()).unwrap();
-    let prov = leaf.get("inputs").and_then(|i| i.get("provenance"))
-        .expect("leaf inputs.provenance present");
+    // Write side: the point's provenance record carries both provenance
+    // kinds, and the invocation record carries the label.
+        let prov = read_sidecar(&store);
+    let prov = prov.get("provenance").expect("provenance.provenance present");
     assert!(prov.get("parameters_provenance").and_then(|p| p.as_object())
         .is_some_and(|o| !o.is_empty()),
-        "parameters_provenance (gh#83/85) must be recorded per leaf");
+        "parameters_provenance (gh#83/85) must be recorded per point");
     assert!(prov.get("init_provenance").map(|v| !v.is_null()).unwrap_or(false),
         "init_provenance must be non-null with --starts from_params. Got: {}", prov);
-    assert_eq!(read_sidecar(&base).get("label").and_then(|l| l.as_str()),
-        Some("round-trip prov"),
-        "label must live on the base sidecar (its single authoritative home)");
-
-    // Read side: `camdl show <leaf>` must SURFACE each provenance kind.
-    let shown = camdl_read(&bin, &out_root, &["show", &rid[..12]]);
-    assert!(shown.contains("round-trip prov"),
-        "show must surface the --label (from sidecar). Got:\n{}", shown);
-    assert!(shown.contains("parameter provenance"),
-        "show must surface the gh#83/85 parameter-resolution provenance. Got:\n{}", shown);
-    assert!(shown.contains("init provenance"),
-        "show must surface the per-chain init provenance. Got:\n{}", shown);
-
-    // `camdl list` surfaces the profile with its label.
-    let listed = camdl_read(&bin, &out_root, &["list"]);
-    assert!(listed.contains("round-trip prov"),
-        "list must surface the profile label. Got:\n{}", listed);
-
-    // `camdl cat <leaf>` returns the per-cell mle.toml.
-    let catted = camdl_read(&bin, &out_root, &["cat", &rid[..12]]);
-    assert!(catted.contains("final_loglik"),
-        "cat must return the leaf's mle.toml. Got:\n{}", catted);
-}
-
-/// `camdl label` on a profile must rewrite the profile-base sidecar (the
-/// label's single authoritative home, guardrail 5) — NOT a per-leaf copy.
-/// Relabeling touches one file regardless of how many cells the profile has.
-#[test]
-fn label_command_relabels_profile_sidecar() {
-    let bin = camdl_bin();
-    if camdlc_bin().is_none() { return }
-    let tmp = tempdir("label_profile");
-    let (ir, data) = write_fixture(tmp.path());
-    let out_root = tmp.path().join("out");
-
-    // Profile with no `--label`.
-    let output = run_profile(&bin, &out_root, &ir, &data, &["--fixed", "N0=1000"]);
-    assert!(output.status.success(), "profile run failed:\n{}",
-        String::from_utf8_lossy(&output.stderr));
-
-    let base = find_profile_base(&out_root);
-    assert!(read_sidecar(&base).get("label").and_then(|l| l.as_str()).is_none(),
-        "a fresh profile (no --label) must have no sidecar label");
-
-    // The profile-base hash prefix is the `hash8` suffix of the base dir name.
-    let dir_name = base.file_name().unwrap().to_string_lossy().into_owned();
-    let hash8 = dir_name.rsplit('-').next().unwrap().to_string();
-
-    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .env("CAMDL_SKIP_VERSION_CHECK", "1")
-        .args(["label", &hash8, "relabelled profile",
-               "--root", &out_root.to_string_lossy()])
-        .output().expect("spawn camdl label");
-    assert!(out.status.success(),
-        "label on profile must succeed: stderr=\n{}",
-        String::from_utf8_lossy(&out.stderr));
-
-    // Read back from the sidecar — the one place the label lives.
-    assert_eq!(read_sidecar(&base).get("label").and_then(|l| l.as_str()),
-        Some("relabelled profile"),
-        "camdl label must write the profile-base sidecar (the label's home)");
-
-    // And `camdl show <leaf>` surfaces the relabelled value.
-    let rid = first_leaf_run_id(&base);
-    let shown = camdl_read(&bin, &out_root, &["show", &rid[..12]]);
-    assert!(shown.contains("relabelled profile"),
-        "show must surface the relabelled profile label. Got:\n{}", shown);
+    let invocations: Vec<serde_json::Value> =
+        std::fs::read_dir(store.join(".invocations")).unwrap().flatten()
+            .map(|e| serde_json::from_str(&std::fs::read_to_string(e.path()).unwrap()).unwrap())
+            .collect();
+    assert_eq!(invocations.len(), 1, "{invocations:?}");
+    assert_eq!(invocations[0]["label"], "round-trip prov",
+        "the label is recorded on the invocation");
 }

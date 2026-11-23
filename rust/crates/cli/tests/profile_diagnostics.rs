@@ -61,7 +61,7 @@ fn tempdir(tag: &str) -> Tmp {
 /// Tiny SIR fixture: two estimated params (`beta`, `gamma`), `N0`
 /// fixed. Same shape used by `profile_priors.rs` so the test set
 /// stays uniform.
-fn write_fixture(dir: &Path) -> (PathBuf, PathBuf) {
+fn write_fixture(dir: &Path) -> PathBuf {
     let camdlc = camdlc_bin().expect("camdlc.exe present");
     let src = r#"
 time_unit = 'days
@@ -102,7 +102,21 @@ simulate { from = 0 'days  to = 6 'days }
     // set them would be refused: a parameter is estimated or given a value.
     std::fs::write(dir.join("start.toml"), "beta = 0.3\ngamma = 0.1\nN0 = 1000\n").unwrap();
 
-    (ir_path, data_path)
+    // The fit problem the profiles are of: the model, its one stream's data,
+    // and the parameters the cells estimate.
+    std::fs::write(dir.join("fit.toml"), format!(
+        "[model]\ncamdl = \"{}\"\n\n[data.observations]\ncases = \"{}\"\n\n\
+         [estimate]\nbeta = {{ bounds = [0.001, 5.0] }}\n\
+         gamma = {{ bounds = [0.01, 1.0] }}\n\n[fixed]\nN0 = 1000\n",
+        ir_path.file_name().unwrap().to_string_lossy(),
+        data_path.file_name().unwrap().to_string_lossy())).unwrap();
+
+    ir_path
+}
+
+/// `--fit` naming the fixture's fit problem, which sits beside its model.
+fn fit_arg(ir: &Path) -> String {
+    ir.with_file_name("fit.toml").to_string_lossy().into_owned()
 }
 
 /// `--starts from_params=<start.toml>` beside the fixture's model.
@@ -158,15 +172,14 @@ fn parse_cell(s: &str) -> f64 {
 }
 
 fn run_profile_if2(
-    bin: &Path, out_root: &Path, ir: &Path, data: &Path,
+    bin: &Path, out_root: &Path, ir: &Path,
     starts: usize, seed: u64,
 ) -> std::process::Output {
     let out_tsv = out_root.join("profile.tsv");
     let args: Vec<String> = vec![
         "profile".into(), ir.to_string_lossy().into_owned(),
         "--starts".into(), starts_arg(ir),
-        "--data".into(), data.to_string_lossy().into_owned(),
-        "--obs".into(), "cases".into(),
+        "--fit".into(), fit_arg(ir),
         "--sweep".into(), "beta=lin(0.2,0.4,2)".into(),
         "--algorithm".into(), "if2".into(),
         "--particles".into(), "30".into(),
@@ -178,7 +191,7 @@ fn run_profile_if2(
         "--seed".into(), format!("{}", seed),
     ];
     Command::new(bin).env_remove("CLICOLOR_FORCE")
-        .env("CAMDL_OUTPUT_DIR", out_root)
+        .env("CAMDL_STORE", out_root)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args(args.iter().map(|s| s.as_str()))
         .output()
@@ -198,10 +211,10 @@ fn profile_loglik_rhat_nan_at_k_lt_3() {
     let bin = camdl_bin();
     if camdlc_bin().is_none() { return }
     let tmp = tempdir("rhat_nan_k2");
-    let (ir, data) = write_fixture(tmp.path());
+    let ir = write_fixture(tmp.path());
     let out_root = tmp.path().join("out");
 
-    let output = run_profile_if2(&bin, &out_root, &ir, &data, 2, 1);
+    let output = run_profile_if2(&bin, &out_root, &ir, 2, 1);
     assert!(output.status.success(),
         "profile if2 failed: stderr=\n{}",
         String::from_utf8_lossy(&output.stderr));
@@ -226,10 +239,10 @@ fn profile_loglik_rhat_finite_at_k_3() {
     let bin = camdl_bin();
     if camdlc_bin().is_none() { return }
     let tmp = tempdir("rhat_finite_k3");
-    let (ir, data) = write_fixture(tmp.path());
+    let ir = write_fixture(tmp.path());
     let out_root = tmp.path().join("out");
 
-    let output = run_profile_if2(&bin, &out_root, &ir, &data, 3, 1);
+    let output = run_profile_if2(&bin, &out_root, &ir, 3, 1);
     assert!(output.status.success(),
         "profile if2 failed: stderr=\n{}",
         String::from_utf8_lossy(&output.stderr));
@@ -255,10 +268,10 @@ fn profile_if2_emits_diagnostic_columns() {
     let bin = camdl_bin();
     if camdlc_bin().is_none() { return }
     let tmp = tempdir("if2_diag");
-    let (ir, data) = write_fixture(tmp.path());
+    let ir = write_fixture(tmp.path());
     let out_root = tmp.path().join("out");
 
-    let output = run_profile_if2(&bin, &out_root, &ir, &data, 3, 1);
+    let output = run_profile_if2(&bin, &out_root, &ir, 3, 1);
     assert!(output.status.success(),
         "profile if2 failed: stderr=\n{}",
         String::from_utf8_lossy(&output.stderr));
@@ -301,16 +314,16 @@ fn profile_tsv_schema_stable_across_runs() {
     let bin = camdl_bin();
     if camdlc_bin().is_none() { return }
     let tmp = tempdir("schema_stable");
-    let (ir, data) = write_fixture(tmp.path());
+    let ir = write_fixture(tmp.path());
 
     let out_a = tmp.path().join("out_a");
     let out_b = tmp.path().join("out_b");
 
-    let out1 = run_profile_if2(&bin, &out_a, &ir, &data, 3, 1);
+    let out1 = run_profile_if2(&bin, &out_a, &ir, 3, 1);
     assert!(out1.status.success(),
         "profile (seed=1) failed: stderr=\n{}",
         String::from_utf8_lossy(&out1.stderr));
-    let out2 = run_profile_if2(&bin, &out_b, &ir, &data, 3, 42);
+    let out2 = run_profile_if2(&bin, &out_b, &ir, 3, 42);
     assert!(out2.status.success(),
         "profile (seed=42) failed: stderr=\n{}",
         String::from_utf8_lossy(&out2.stderr));
@@ -348,15 +361,14 @@ fn profile_starts_n_completed_reflects_diverged_chains() {
     let bin = camdl_bin();
     if camdlc_bin().is_none() { return }
     let tmp = tempdir("diverged");
-    let (ir, data) = write_fixture(tmp.path());
+    let ir = write_fixture(tmp.path());
     let out_root = tmp.path().join("out");
 
     let out_tsv = out_root.join("profile.tsv");
     let args: Vec<String> = vec![
         "profile".into(), ir.to_string_lossy().into_owned(),
         "--starts".into(), starts_arg(&ir),
-        "--data".into(), data.to_string_lossy().into_owned(),
-        "--obs".into(), "cases".into(),
+        "--fit".into(), fit_arg(&ir),
         "--sweep".into(), "beta=lin(2.5,4.5,2)".into(),
         "--algorithm".into(), "if2".into(),
         "--particles".into(), "2".into(),
@@ -368,7 +380,7 @@ fn profile_starts_n_completed_reflects_diverged_chains() {
         "--seed".into(), "7".into(),
     ];
     let output = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .env("CAMDL_OUTPUT_DIR", &out_root)
+        .env("CAMDL_STORE", &out_root)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args(args.iter().map(|s| s.as_str()))
         .output()
@@ -386,24 +398,25 @@ fn profile_starts_n_completed_reflects_diverged_chains() {
     }
 }
 
-/// Collect every `ProfilePoint` leaf's `mle.toml` body under `<out_root>`.
-fn collect_leaf_mle(out_root: &Path) -> Vec<String> {
+/// The `mle.toml` body of every profile point stored under `store`.
+fn collect_leaf_mle(store: &Path) -> Vec<String> {
     fn walk(dir: &Path, out: &mut Vec<String>) {
-        if dir.join("mle.toml").is_file() {
-            if let Ok(b) = std::fs::read_to_string(dir.join("run.json")) {
-                if b.contains("\"profile_point\"") {
-                    if let Ok(m) = std::fs::read_to_string(dir.join("mle.toml")) {
-                        out.push(m);
-                    }
-                }
+        if let Ok(b) = std::fs::read_to_string(dir.join("identity.json")) {
+            let v: serde_json::Value = serde_json::from_str(&b).unwrap();
+            if v["kind"] == "profile_point" {
+                out.push(std::fs::read_to_string(dir.join("mle.toml")).unwrap());
             }
         }
         if let Ok(es) = std::fs::read_dir(dir) {
-            for e in es.flatten() { if e.path().is_dir() { walk(&e.path(), out); } }
+            for e in es.flatten() {
+                if e.path().is_dir() && !e.file_name().to_string_lossy().starts_with('.') {
+                    walk(&e.path(), out);
+                }
+            }
         }
     }
     let mut v = Vec::new();
-    walk(&out_root.join("profiles"), &mut v);
+    walk(store, &mut v);
     v
 }
 
@@ -417,11 +430,11 @@ fn profile_leaf_mle_carries_per_start_diagnostics() {
     let bin = camdl_bin();
     if camdlc_bin().is_none() { return }
     let tmp = tempdir("leaf_diag");
-    let (ir, data) = write_fixture(tmp.path());
+    let ir = write_fixture(tmp.path());
 
     // IF2: the per-start [diagnostics] is present and tagged if2.
     let out_if2 = tmp.path().join("out_if2");
-    let o = run_profile_if2(&bin, &out_if2, &ir, &data, 1, 1);
+    let o = run_profile_if2(&bin, &out_if2, &ir, 1, 1);
     assert!(o.status.success(), "if2 profile failed:\n{}",
         String::from_utf8_lossy(&o.stderr));
     let if2_mles = collect_leaf_mle(&out_if2);

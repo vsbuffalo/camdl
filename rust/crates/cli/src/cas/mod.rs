@@ -45,7 +45,6 @@
 //! (`cas_sink::EVENT_LOG_CHILD`); it is a child so that the leaf's own files
 //! are the same whether or not a run asked for the log.
 
-pub mod typed;
 
 // ─── ISO-8601 timestamp helper ───────────────────────────────────────────────
 

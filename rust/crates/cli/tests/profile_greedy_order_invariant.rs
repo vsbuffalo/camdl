@@ -3,10 +3,10 @@
 //! nearest the current best-loglik cell, so cores stay busy while evaluation
 //! drills toward the optimum and the progress bar's best-loglik metric
 //! converges fast. That scheduling must be *purely* an ordering change — every
-//! job is still evaluated exactly once, and each writes its own
-//! content-addressed leaf keyed on `(grid, seed, start)`, so the per-cell
-//! `mle.toml` results must be **byte-identical** regardless of the order (and
-//! thread count) the cells happen to run in.
+//! job is still evaluated exactly once, and each writes its own stored point,
+//! keyed on the point's own values, so the per-cell `mle.toml` results must be
+//! **byte-identical** regardless of the order (and thread count) the cells
+//! happen to run in.
 //!
 //! This pins the invariant the only way it's observable from outside: run the
 //! same 2D profile twice with different `--parallel` throttles — a different
@@ -56,7 +56,7 @@ fn tempdir(tag: &str) -> Tmp {
 /// Tiny SIR fixture and a `start.toml` supplying base parameter values (the
 /// profile pins the swept params at grid values and optimizes the rest).
 /// Same shape as `profile_diagnostics.rs`.
-fn write_fixture(dir: &Path) -> (PathBuf, PathBuf) {
+fn write_fixture(dir: &Path) -> PathBuf {
     let camdlc = camdlc_bin();
     let src = r#"
 time_unit = 'days
@@ -96,7 +96,19 @@ simulate { from = 0 'days  to = 6 'days }
     // The base point the estimated parameters start from. A scenario that
     // set them would be refused: a parameter is estimated or given a value.
     std::fs::write(dir.join("start.toml"), "beta = 0.3\ngamma = 0.1\nN0 = 1000\n").unwrap();
-    (ir_path, data_path)
+
+    // The fit problem the profiles are of: both swept parameters are
+    // estimated, `N0` is fixed.
+    std::fs::write(dir.join("fit.toml"),
+        "[model]\ncamdl = \"sir.ir.json\"\n\n[data.observations]\ncases = \"cases.tsv\"\n\n\
+         [estimate]\nbeta = { bounds = [0.001, 5.0] }\ngamma = { bounds = [0.01, 1.0] }\n\n\
+         [fixed]\nN0 = 1000\n").unwrap();
+    ir_path
+}
+
+/// `--fit` naming the fixture's fit problem, which sits beside its model.
+fn fit_arg(ir: &Path) -> String {
+    ir.with_file_name("fit.toml").to_string_lossy().into_owned()
 }
 
 /// `--starts from_params=<start.toml>` beside the fixture's model.
@@ -104,21 +116,20 @@ fn starts_arg(ir: &Path) -> String {
     format!("from_params={}", ir.with_file_name("start.toml").to_string_lossy())
 }
 
-/// Run a 2D profile with a given `--parallel` throttle, leaves under `root`
-/// (`CAMDL_OUTPUT_DIR`); return every per-cell `mle.toml` keyed by its path
-/// relative to `root` (the content-addressed leaf path, which is identical
-/// across runs with identical inputs).
-fn run_profile(bin: &Path, ir: &Path, data: &Path, root: &Path, parallel: u32)
+/// Run a 2D profile with a given `--parallel` throttle into the run store at
+/// `root`; return every per-cell `mle.toml` keyed by its path relative to
+/// `root` (the point's folder, which is identical across runs with identical
+/// inputs).
+fn run_profile(bin: &Path, ir: &Path, root: &Path, parallel: u32)
     -> BTreeMap<String, String>
 {
     let out = Command::new(bin).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
-        .env("CAMDL_OUTPUT_DIR", root)
+        .env("CAMDL_STORE", root)
         .args([
             "profile", &ir.to_string_lossy(),
             "--starts", &starts_arg(ir),
-            "--data", &data.to_string_lossy(),
-            "--obs", "cases",
+            "--fit", &fit_arg(ir),
             "--sweep", "beta=lin(0.2,0.4,3)",
             "--sweep", "gamma=lin(0.05,0.15,2)",
             "--algorithm", "if2",
@@ -134,7 +145,7 @@ fn run_profile(bin: &Path, ir: &Path, data: &Path, root: &Path, parallel: u32)
         "camdl profile (--parallel {}) must exit 0.\nstderr:\n{}",
         parallel, String::from_utf8_lossy(&out.stderr));
 
-    // Walk for every `mle.toml` leaf; key by path relative to `root`.
+    // Walk for every point's `mle.toml`; key by path relative to `root`.
     let mut leaves = BTreeMap::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -158,18 +169,18 @@ fn run_profile(bin: &Path, ir: &Path, data: &Path, root: &Path, parallel: u32)
 fn profile_leaves_are_byte_identical_across_parallelism() {
     let bin = camdl_bin();
     let tmp = tempdir("inv");
-    let (ir, data) = write_fixture(tmp.path());
+    let ir = write_fixture(tmp.path());
 
     // Single-threaded vs multi-threaded walk two different work-queue orders
     // over the same 3×2 grid.
-    let serial   = run_profile(&bin, &ir, &data, &tmp.path().join("r1"), 1);
-    let parallel = run_profile(&bin, &ir, &data, &tmp.path().join("r2"), 3);
+    let serial   = run_profile(&bin, &ir, &tmp.path().join("r1"), 1);
+    let parallel = run_profile(&bin, &ir, &tmp.path().join("r2"), 3);
 
     // Non-vacuous: every cell evaluated, none dropped or double-run.
     assert_eq!(serial.len(), 6, "expected 6 profile cells (3×2), got {}", serial.len());
     assert_eq!(parallel.len(), 6, "expected 6 profile cells (3×2), got {}", parallel.len());
 
-    // Identical leaf paths (same CAS identities) and identical mle.toml bodies.
+    // Identical point folders (same identities) and identical mle.toml bodies.
     assert!(serial == parallel,
         "profile per-cell mle.toml leaves must be byte-identical regardless of \
          evaluation order (work-queue scheduling is order-only). \n\

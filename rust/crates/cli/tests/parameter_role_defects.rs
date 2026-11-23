@@ -94,9 +94,14 @@ fn compile(dir: &Path, stem: &str, src: &str) -> PathBuf {
     ir
 }
 
+/// The run store a `profile` invocation in `cwd` writes to.
+fn profile_store(cwd: &Path) -> PathBuf { cwd.join("pstore") }
+
 fn camdl(cwd: &Path, args: &[&str]) -> Output {
     std::fs::create_dir_all(cwd).unwrap();
-    Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
+    let mut cmd = Command::new(camdl_bin());
+    if args.first() == Some(&"profile") { cmd.env("CAMDL_STORE", profile_store(cwd)); }
+    cmd.env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDLC", camdlc_bin())
         .current_dir(cwd)
@@ -111,89 +116,114 @@ fn ok(out: Output) -> Output {
     out
 }
 
-/// Every file named `name` under `root`, sorted.
-fn find(root: &Path, name: &str) -> Vec<PathBuf> {
+fn json(p: &Path) -> serde_json::Value {
+    serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap()
+}
+
+/// The folder of every stored profile point under `store`. Directories whose
+/// own name starts with `.` (the invocation log) are skipped.
+fn profile_points(store: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
+    let mut stack = vec![store.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for e in entries.flatten() {
-                let p = e.path();
-                if p.is_dir() { stack.push(p); }
-                else if p.file_name().is_some_and(|n| n == name) { found.push(p); }
-            }
+        if let Ok(body) = std::fs::read_to_string(dir.join("identity.json")) {
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            if v["kind"] == "profile_point" { found.push(dir); continue; }
+        }
+        for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let hidden = e.file_name().to_string_lossy().starts_with('.');
+            if e.path().is_dir() && !hidden { stack.push(e.path()); }
         }
     }
     found.sort();
     found
 }
 
-fn json(p: &Path) -> serde_json::Value {
-    serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap()
+/// The point's recorded estimated set: the parameters its `partition` gives
+/// the role `estimated`.
+fn profile_estimated(cwd: &Path) -> Vec<String> {
+    let points = profile_points(&profile_store(cwd));
+    assert!(!points.is_empty(), "no profile point under {}", cwd.display());
+    let part = &json(&points[0].join("provenance.json"))["provenance"]["partition"]["parameters"];
+    part.as_object().unwrap().iter()
+        .filter(|(_, v)| v["role"] == "estimated").map(|(k, _)| k.clone()).collect()
 }
 
-/// The profile base's recorded estimated set (`fit.meta.json` `estimated`).
-fn profile_estimated(cwd: &Path) -> Vec<String> {
-    let metas = find(&cwd.join("results").join("profiles"), "fit.meta.json");
-    assert_eq!(metas.len(), 1, "expected one profile base under {}", cwd.display());
-    json(&metas[0])["estimated"].as_array().unwrap().iter()
-        .map(|v| v.as_str().unwrap().to_string()).collect()
+/// Writes `path`, a fit problem on `MODEL` (compiled to `ir`, observed in
+/// `data`) that estimates `estimate` (name, `[estimate]` entry body) and holds
+/// `fixed` (name, value).
+fn write_fit(path: &Path, ir: &Path, data: &Path, estimate: &[(&str, &str)],
+    fixed: &[(&str, &str)]) {
+    let mut body = format!("[model]\ncamdl = \"{}\"\n[data.observations]\ncases = \"{}\"\n[estimate]\n",
+        ir.display(), data.display());
+    for (n, e) in estimate { body.push_str(&format!("{n} = {{ {e} }}\n")); }
+    body.push_str("[fixed]\n");
+    for (n, v) in fixed { body.push_str(&format!("{n} = {v}\n")); }
+    std::fs::write(path, body).unwrap();
 }
 
 const PROFILE_KNOBS: &[&str] = &[
     "--particles", "30", "--iterations", "2", "--n-starts", "1", "--seed", "1",
 ];
 
-/// `--fixed-file` pins the names it carries: `--rw-sd auto` must not estimate
-/// them. It did — the estimated set was every non-focal parameter less only
-/// `--fixed` and `[fixed]`, so a file holding `gamma = 0.15` profiled gamma as
-/// a nuisance parameter and moved it.
+/// A parameter held by `--fixed` or named in a `--fixed-file` is not
+/// estimated: the estimated set is what is left of the fit's `[estimate]`.
 #[test]
 fn profile_rw_sd_auto_does_not_estimate_fixed_file_names() {
     let tmp = tempdir("fixed_file");
     let ir = compile(tmp.path(), "m", MODEL);
-    let fixed = tmp.path().join("fixed.toml");
-    std::fs::write(&fixed,
-        "beta = 0.3\ngamma = 0.15\nrho = 0.6\nk = 10\nN0 = 1000\nI0 = 10\n").unwrap();
-    let cwd = tmp.path().join("run");
     let data = tmp.path().join("cases.tsv");
+    let fit = tmp.path().join("fit.toml");
+    write_fit(&fit, &ir, &data,
+        &[("beta", ""), ("gamma", "start = 0.15"), ("rho", "start = 0.6")],
+        &[("k", "10"), ("N0", "1000"), ("I0", "10")]);
+
+    // Held by --fixed: the estimated set is what is left.
+    let cwd = tmp.path().join("run");
     let mut args = vec![
-        "profile", ir.to_str().unwrap(),
-        "--data", data.to_str().unwrap(),
+        "profile", ir.to_str().unwrap(), "--fit", fit.to_str().unwrap(),
+        "--fixed", "gamma=0.15", "--sweep", "beta=0.2,0.4", "--rw-sd", "auto",
+    ];
+    args.extend_from_slice(PROFILE_KNOBS);
+    ok(camdl(&cwd, &args));
+    let est = profile_estimated(&cwd);
+    assert_eq!(est, vec!["rho".to_string()], "estimated: {est:?}");
+
+    // Named by --fixed-file while estimated by the fit: held the same way.
+    let fixed = tmp.path().join("fixed.toml");
+    std::fs::write(&fixed, "gamma = 0.15\n").unwrap();
+    let cwd = tmp.path().join("file");
+    let mut args = vec![
+        "profile", ir.to_str().unwrap(), "--fit", fit.to_str().unwrap(),
         "--fixed-file", fixed.to_str().unwrap(),
         "--sweep", "beta=0.2,0.4", "--rw-sd", "auto",
     ];
     args.extend_from_slice(PROFILE_KNOBS);
     ok(camdl(&cwd, &args));
     let est = profile_estimated(&cwd);
-    for name in ["gamma", "rho", "k", "N0", "I0"] {
-        assert!(!est.contains(&name.to_string()),
-            "{name} is pinned by --fixed-file but was estimated: {est:?}");
-    }
+    assert_eq!(est, vec!["rho".to_string()], "estimated: {est:?}");
 }
 
 /// A model constant (`let omega : rate = 0.01`) is not a nuisance parameter:
-/// `--rw-sd auto` must not estimate it. It did, alongside every other
-/// non-focal name, while a constant compiled to an IR parameter; it cannot now,
-/// because a constant is not in the IR's parameters at all.
+/// `--rw-sd auto` must not estimate it. A constant is not in the IR's
+/// parameters at all, so it cannot be picked up.
 #[test]
 fn profile_rw_sd_auto_does_not_estimate_a_model_constant() {
     let tmp = tempdir("constant");
     let ir = compile(tmp.path(), "m", MODEL);
-    let fixed = tmp.path().join("fixed.toml");
-    std::fs::write(&fixed, "beta = 0.3\nrho = 0.6\nk = 10\nN0 = 1000\nI0 = 10\n").unwrap();
-    let cwd = tmp.path().join("run");
     let data = tmp.path().join("cases.tsv");
+    let fit = tmp.path().join("fit.toml");
+    // Every declared parameter is focal or held, so the model constant is the
+    // only name `auto` could pick up.
+    write_fit(&fit, &ir, &data, &[("beta", "")],
+        &[("gamma", "0.2"), ("rho", "0.6"), ("k", "10"), ("N0", "1000"), ("I0", "10")]);
+    let cwd = tmp.path().join("run");
     let mut args = vec![
-        "profile", ir.to_str().unwrap(),
-        "--data", data.to_str().unwrap(),
-        "--fixed-file", fixed.to_str().unwrap(),
+        "profile", ir.to_str().unwrap(), "--fit", fit.to_str().unwrap(),
         "--fixed", "gamma=0.15",
         "--sweep", "beta=0.2,0.4", "--rw-sd", "auto",
     ];
     args.extend_from_slice(PROFILE_KNOBS);
-    // Every declared parameter is focal or pinned, so the model constant is
-    // the only name `auto` could pick up.
     ok(camdl(&cwd, &args));
     let est = profile_estimated(&cwd);
     assert!(!est.contains(&"omega".to_string()),
@@ -209,50 +239,39 @@ fn profile_refuses_sweep_values_outside_bounds() {
     let tmp = tempdir("sweep_bounds");
     let ir = compile(tmp.path(), "m", MODEL);
     let data = tmp.path().join("cases.tsv");
-    let fixed = tmp.path().join("fixed.toml");
-    std::fs::write(&fixed,
-        "beta = 0.3\ngamma = 0.15\nrho = 0.6\nk = 10\nN0 = 1000\nI0 = 10\n").unwrap();
-    let run = |cwd: &Path, sweep: &str, fit: Option<&Path>| {
+    let held = [("gamma", "0.15"), ("rho", "0.6"), ("k", "10"), ("N0", "1000"), ("I0", "10")];
+    let run = |cwd: &Path, sweep: &str, fit: &Path| {
         let mut args = vec![
-            "profile", ir.to_str().unwrap(),
-            "--data", data.to_str().unwrap(),
-            "--fixed-file", fixed.to_str().unwrap(),
+            "profile", ir.to_str().unwrap(), "--fit", fit.to_str().unwrap(),
             "--sweep", sweep, "--rw-sd", "auto",
         ];
-        if let Some(f) = fit { args.extend_from_slice(&["--fit", f.to_str().unwrap()]); }
         args.extend_from_slice(PROFILE_KNOBS);
         camdl(cwd, &args)
     };
 
     // Model bounds: beta in [0.05, 1].
-    let out = run(&tmp.path().join("model"), "beta=0.5,2.0,3.0", None);
+    let model_fit = tmp.path().join("model_fit.toml");
+    write_fit(&model_fit, &ir, &data, &[("beta", "")], &held);
+    let out = run(&tmp.path().join("model"), "beta=0.5,2.0,3.0", &model_fit);
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "a sweep to beta=2.0 must be refused:\n{err}");
     assert!(err.contains("beta") && err.contains("2") && err.contains("3")
         && err.contains("[0.05, 1]"),
         "the refusal names the parameter, the values and the bounds:\n{err}");
-    assert!(find(&tmp.path().join("model"), "run.json").is_empty(),
-        "no cell may be written for a refused sweep");
+    assert!(profile_points(&profile_store(&tmp.path().join("model"))).is_empty(),
+        "no point may be written for a refused sweep");
 
     // `[estimate]` bounds narrow the model's: beta in [0.1, 0.5].
     let fit = tmp.path().join("fit.toml");
-    std::fs::write(&fit, format!(r#"[model]
-camdl = "{ir}"
-[data.observations]
-cases = "{data}"
-[estimate]
-beta = {{ bounds = [0.1, 0.5] }}
-[fixed]
-gamma = 0.15
-"#, ir = ir.display(), data = data.display())).unwrap();
-    let out = run(&tmp.path().join("est"), "beta=0.3,0.7", Some(&fit));
+    write_fit(&fit, &ir, &data, &[("beta", "bounds = [0.1, 0.5]")], &held);
+    let out = run(&tmp.path().join("est"), "beta=0.3,0.7", &fit);
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "beta=0.7 is outside [estimate] bounds:\n{err}");
     assert!(err.contains("0.7") && err.contains("[0.1, 0.5]"),
         "the refusal names the narrowed bounds:\n{err}");
 
     // Control: inside the bounds, the same profile runs.
-    ok(run(&tmp.path().join("inside"), "beta=0.2,0.4", Some(&fit)));
+    ok(run(&tmp.path().join("inside"), "beta=0.2,0.4", &fit));
 }
 
 /// `(role, source)` per parameter, from a `parameters_provenance` block.
@@ -263,29 +282,22 @@ fn roles(prov: &serde_json::Value) -> std::collections::BTreeMap<String, String>
 
 /// A profile records each parameter's role as the profile gave it: the swept
 /// parameter `focal`, the ones IF2 moves `estimated`, the rest `fixed`. It
-/// recorded every parameter of a CLI-only profile as `fixed`, and its base
-/// sidecar carried no provenance at all.
+/// recorded every parameter of a CLI-only profile as `fixed`.
 #[test]
 fn profile_records_focal_and_estimated_roles() {
     let tmp = tempdir("roles");
     let ir = compile(tmp.path(), "m", MODEL);
     let data = tmp.path().join("cases.tsv");
     let fixed = tmp.path().join("fixed.toml");
-    std::fs::write(&fixed, "beta = 0.3\nrho = 0.6\nk = 10\nN0 = 1000\nI0 = 10\n").unwrap();
-    // `gamma` is the one estimated parameter; the fit config gives its start.
+    std::fs::write(&fixed, "rho = 0.6\nk = 10\nN0 = 1000\nI0 = 10\n").unwrap();
+    // `beta` is swept and `gamma` is the one estimated parameter; the fit
+    // config gives its start.
     let fit = tmp.path().join("fit.toml");
-    std::fs::write(&fit, format!(r#"[model]
-camdl = "{ir}"
-[data.observations]
-cases = "{data}"
-[estimate]
-gamma = {{ bounds = [0.01, 1.0], start = 0.15 }}
-[fixed]
-"#, ir = ir.display(), data = data.display())).unwrap();
+    write_fit(&fit, &ir, &data, &[("beta", ""), ("gamma", "bounds = [0.01, 1.0], start = 0.15")],
+        &[("rho", "0.5"), ("k", "20"), ("N0", "900"), ("I0", "5")]);
     let cwd = tmp.path().join("run");
     let mut args = vec![
         "profile", ir.to_str().unwrap(),
-        "--data", data.to_str().unwrap(),
         "--fit", fit.to_str().unwrap(),
         "--fixed-file", fixed.to_str().unwrap(),
         "--sweep", "beta=0.2,0.4", "--rw-sd", "gamma=0.02",
@@ -297,16 +309,13 @@ gamma = {{ bounds = [0.01, 1.0], start = 0.15 }}
         ("beta", "focal"), ("gamma", "estimated"), ("rho", "fixed"), ("k", "fixed"),
         ("N0", "fixed"), ("I0", "fixed"),
     ].iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
-    let cells = find(&cwd.join("results").join("profiles"), "run.json");
-    assert_eq!(cells.len(), 2);
-    for cell in &cells {
-        let v = json(cell);
-        assert_eq!(roles(&v["inputs"]["provenance"]["parameters_provenance"]), want,
-            "{}", cell.display());
+    let points = profile_points(&profile_store(&cwd));
+    assert_eq!(points.len(), 2);
+    for point in &points {
+        let v = json(&point.join("provenance.json"));
+        assert_eq!(roles(&v["provenance"]["parameters_provenance"]), want,
+            "{}", point.display());
     }
-    let metas = find(&cwd.join("results").join("profiles"), "fit.meta.json");
-    assert_eq!(roles(&json(&metas[0])["parameters_provenance"]), want,
-        "the profile base sidecar records the same roles");
 }
 
 /// A model whose reporting and recovery read three shares that must sum to
@@ -371,7 +380,8 @@ gamma = 0.2
     };
     let cwd = tmp.path().join("run");
     ok(run(&cwd, "beta=0.2,0.4"));
-    let mles = find(&cwd.join("results").join("profiles"), "mle.toml");
+    let mles: Vec<PathBuf> = profile_points(&profile_store(&cwd)).iter()
+        .map(|p| p.join("mle.toml")).collect();
     assert_eq!(mles.len(), 2);
     for m in &mles {
         let text = std::fs::read_to_string(m).unwrap();

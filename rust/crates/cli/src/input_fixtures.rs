@@ -5,15 +5,16 @@
 //! Every path a function here returns is relative, and names a file of the
 //! fixture directory the command's class check runs in
 //! (`crate::pfilter_store::tests`, `crate::sim_store::tests`,
-//! `crate::fit_command::tests`, `crate::predict_command::tests`), which is the
+//! `crate::fit_command::tests`, `crate::predict_command::tests`,
+//! `crate::profile_store::tests`), which is the
 //! working directory of each run. The values are meaningful only there.
 
 use std::path::PathBuf;
 
 use crate::args::types::{DataSpec, ParamOverride, TableSpec};
 use crate::args::{
-    FitRunArgs, FitRunInvocation, PfilterCore, PfilterInvocation, PredictArgs, PredictInvocation, SimulateArgs,
-    SimulateInvocation,
+    FitRunArgs, FitRunInvocation, PfilterCore, PfilterInvocation, PredictArgs, PredictInvocation, ProfileArgs, ProfileCore,
+    ProfileInvocation, SimulateArgs, SimulateInvocation,
 };
 
 /// The pfilter every check starts from:
@@ -386,4 +387,117 @@ pub(crate) fn predict_no_licm() -> (PredictInvocation, PredictInvocation) {
 pub(crate) fn predict_no_ir_cache() -> (PredictInvocation, PredictInvocation) {
     let base = predict_from(&["@fit", "--mode", "free_forward", "--n-draws", "4", "--quantities", "vocab.camdl"]);
     (PredictInvocation { no_ir_cache: false, ..base.clone() }, PredictInvocation { no_ir_cache: true, ..base })
+}
+
+// ── profile ──────────────────────────────────────────────────────────────────
+
+/// The profile every check starts from: a two-point IF2 profile of the SIR
+/// model posed by `fit.toml`, one start per cell.
+/// `profile sir.ir.json --fit fit.toml --sweep beta_a=0.3,0.4 --particles 20 --iterations 2 --n-starts 1`.
+pub(crate) fn profile_base() -> ProfileInvocation {
+    profile_from(&["sir.ir.json", "--fit", "fit.toml", "--sweep", "beta_a=0.3,0.4", "--particles", "20",
+        "--iterations", "2", "--n-starts", "1"])
+}
+
+/// A profile from its command line, without the program and subcommand
+/// names, and with the global options at their defaults.
+pub(crate) fn profile_from(args: &[&str]) -> ProfileInvocation {
+    #[derive(clap::Parser)]
+    struct Line {
+        #[command(flatten)]
+        args: ProfileArgs,
+    }
+    let line = <Line as clap::Parser>::try_parse_from(std::iter::once("profile").chain(args.iter().copied()))
+        .unwrap_or_else(|e| panic!("a fixture's profile command line does not parse: {e}"));
+    ProfileInvocation {
+        args: line.args,
+        no_licm: false,
+        no_ir_cache: false,
+        verbosity: None,
+        progress: crate::args::types::ProgressMode::None,
+        no_progress: false,
+    }
+}
+
+pub(crate) fn profile_other_model() -> PathBuf {
+    "sir_other.ir.json".into()
+}
+
+/// `--fixed gamma=0.25`, over the fit file's `gamma = 0.2`.
+pub(crate) fn profile_other_fixed() -> Vec<ParamOverride> {
+    vec![ParamOverride { name: "gamma".into(), value: 0.25 }]
+}
+
+/// A params file holding `gamma = 0.25`.
+pub(crate) fn profile_other_fixed_file() -> Vec<PathBuf> {
+    vec!["fixed2.toml".into()]
+}
+
+/// A fit file fixing `beta_b` at another value.
+pub(crate) fn profile_other_fit() -> Option<PathBuf> {
+    Some("fit2.toml".into())
+}
+
+pub(crate) fn profile_starts() -> Option<crate::fit::starts::ChainStarts> {
+    Some("lhs".parse().expect("`lhs` is a starts rule"))
+}
+
+pub(crate) fn profile_starts_chains() -> Option<crate::chain_selection::ChainSelection> {
+    Some(crate::fit::starts::parse_starts_chains("0").expect("`0` is a chain selection"))
+}
+
+pub(crate) fn profile_other_cooling() -> Option<f64> {
+    Some(0.8)
+}
+
+pub(crate) fn profile_other_cooling_target_iters() -> Option<usize> {
+    Some(10)
+}
+
+pub(crate) fn profile_other_rw_sd() -> Option<crate::args::types::RwSd> {
+    Some("rho=0.1".parse().expect("`rho=0.1` is an --rw-sd"))
+}
+
+pub(crate) fn profile_json() -> crate::args::ProfileTableFormat {
+    crate::args::ProfileTableFormat::Json
+}
+
+pub(crate) fn profile_other_algorithm() -> Option<String> {
+    Some("nl-bobyqa".into())
+}
+
+/// `--parallel 1` and `--parallel 4`.
+pub(crate) fn profile_parallel() -> (ProfileCore, ProfileCore) {
+    let base = profile_base().args.inference;
+    (ProfileCore { parallel: 1, ..base.clone() }, ProfileCore { parallel: 4, ..base })
+}
+
+/// `--time-format auto` and `--time-format numeric` on a numeric column.
+pub(crate) fn profile_time_format() -> (ProfileCore, ProfileCore) {
+    use crate::caltime_load::TimeFormat;
+    let base = profile_base().args.inference;
+    (ProfileCore { time_format: TimeFormat::Auto, ..base.clone() }, ProfileCore { time_format: TimeFormat::Numeric, ..base })
+}
+
+/// An IF2 profile with `--backend` unset and given as `chain_binomial`, the
+/// one backend IF2 runs on.
+pub(crate) fn profile_backend() -> (ProfileArgs, ProfileArgs) {
+    let base = profile_base().args;
+    (ProfileArgs { backend: None, ..base.clone() }, ProfileArgs { backend: Some("chain_binomial".into()), ..base })
+}
+
+/// Without and with `--allow-nonconverged-source`, starting from a draws
+/// file named directly, which carries no verdict to lift.
+pub(crate) fn profile_allow_nonconverged_source() -> (ProfileArgs, ProfileArgs) {
+    let mut base = profile_base().args;
+    base.starts = Some("from_posterior=draws.tsv".parse().expect("a starts rule"));
+    (ProfileArgs { allow_nonconverged_source: false, ..base.clone() }, ProfileArgs { allow_nonconverged_source: true, ..base })
+}
+
+/// The model from source, compiled with and without the IR cache.
+pub(crate) fn profile_no_ir_cache() -> (ProfileInvocation, ProfileInvocation) {
+    let mut base = profile_base();
+    base.args.model = "sir.camdl".into();
+    base.args.fit = Some("fit_source.toml".into());
+    (ProfileInvocation { no_ir_cache: false, ..base.clone() }, ProfileInvocation { no_ir_cache: true, ..base })
 }

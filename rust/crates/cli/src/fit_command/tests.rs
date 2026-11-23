@@ -332,8 +332,15 @@ fn observe(root: &Path) -> Vec<ObservedResult> {
 /// Every result folder under `root` with its `identity.json` and `run.json`,
 /// in path order.
 fn folders(root: &Path) -> Vec<(PathBuf, serde_json::Value, serde_json::Value)> {
-    fn walk(dir: &Path, out: &mut Vec<(PathBuf, serde_json::Value, serde_json::Value)>) {
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
+    complete_folders(root).unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// [`folders`], or the first record that cannot be read. A claim writes
+/// `identity.json` and then `run.json`, so a folder a running process is
+/// claiming can hold the first without the second.
+fn complete_folders(root: &Path) -> Result<Vec<(PathBuf, serde_json::Value, serde_json::Value)>, String> {
+    fn walk(dir: &Path, out: &mut Vec<(PathBuf, serde_json::Value, serde_json::Value)>) -> Result<(), String> {
+        let Ok(entries) = std::fs::read_dir(dir) else { return Ok(()) };
         let mut entries: Vec<_> = entries.flatten().collect();
         entries.sort_by_key(|e| e.file_name());
         for e in entries {
@@ -342,15 +349,19 @@ fn folders(root: &Path) -> Vec<(PathBuf, serde_json::Value, serde_json::Value)> 
                 continue;
             }
             if p.join("identity.json").is_file() {
-                let read = |f: &str| serde_json::from_slice(&std::fs::read(p.join(f)).unwrap()).unwrap();
-                out.push((p.clone(), read("identity.json"), read("run.json")));
+                let read = |f: &str| -> Result<serde_json::Value, String> {
+                    let bytes = std::fs::read(p.join(f)).map_err(|e| format!("{}: {e}", p.join(f).display()))?;
+                    serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", p.join(f).display()))
+                };
+                out.push((p.clone(), read("identity.json")?, read("run.json")?));
             }
-            walk(&p, out);
+            walk(&p, out)?;
         }
+        Ok(())
     }
     let mut out = Vec::new();
-    walk(root, &mut out);
-    out
+    walk(root, &mut out)?;
+    Ok(out)
 }
 
 /// The folders of every fit run under `root`.
@@ -1035,7 +1046,9 @@ fn a_killed_run_holds_no_place_in_a_labels_history() {
         .spawn()
         .unwrap();
     let started = std::time::Instant::now();
-    while folders(&store).iter().filter(|(_, id, _)| id["kind"] == "fit_run").count() < 2 {
+    // The long run is claimed once both of its records can be read.
+    let claimed = || complete_folders(&store).map_or(0, |f| f.iter().filter(|(_, id, _)| id["kind"] == "fit_run").count());
+    while claimed() < 2 {
         assert!(started.elapsed() < std::time::Duration::from_secs(60), "the long run started");
         std::thread::sleep(std::time::Duration::from_millis(100));
     }

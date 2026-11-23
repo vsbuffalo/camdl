@@ -16,7 +16,7 @@
 /// The envelope is re-emitted whole (not just the model) so the `#'`
 /// documentation dictionary survives; a fit sidecar's parameter legend reads it
 /// back off this path.
-fn resolve_anchors_into_temp_ir(
+pub(crate) fn resolve_anchors_into_temp_ir(
     out: Option<&crate::out::Out>, ir_path: &str,
     config: &config_v2::Problem,
 ) -> Result<String, String> {
@@ -61,7 +61,7 @@ fn resolve_anchors_into_temp_ir(
 /// with no external input and a config binding none returns `ir_path`
 /// unchanged; a binding the model does not declare, or an input left unbound,
 /// is refused here, before anything runs.
-fn bind_tables_into_temp_ir(
+pub(crate) fn bind_tables_into_temp_ir(
     ir_path: &str,
     config: &config_v2::Problem,
 ) -> Result<(String, crate::external_inputs::BoundFiles), String> {
@@ -1805,7 +1805,7 @@ pub fn cmd_label(args: &crate::args::LabelArgs) {
         }
     };
 
-    // A filter run and a fit run live on the run store, where a completed
+    // A filter run, a fit run and a profile point live on the run store, where a completed
     // record is sealed: each is named by the invocation that runs it, never
     // after.
     if let Some(store) = crate::camdl_store::open_existing(&crate::camdl_store::read_root()) {
@@ -1824,6 +1824,15 @@ pub fn cmd_label(args: &crate::args::LabelArgs) {
                     "error: the filter run {} is sealed: a stored result's record is never rewritten, so \
                      it cannot be labelled after it ran. Name the run when it runs, with `--label`: \
                      `camdl pfilter ... --label {new_label}` reuses the stored result and names it @{new_label}.",
+                    stored.id().key().short12()));
+            }
+        }
+        if let Ok(handle) = args.hash.parse::<store::RunRef<crate::profile_store::ProfilePoint>>() {
+            if let Ok(stored) = store.resolve(&handle) {
+                out.fail(format!(
+                    "error: the profile point {} is sealed: a stored result's record is never rewritten, so \
+                     it cannot be labelled after it ran. Name the profile when it runs, with `--label`: \
+                     `camdl profile ... --label {new_label}` reuses the stored points and names them @{new_label}.",
                     stored.id().key().short12()));
             }
         }

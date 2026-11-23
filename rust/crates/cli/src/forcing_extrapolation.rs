@@ -200,15 +200,19 @@ impl ForcingPolicy {
     /// display inputs. Nothing is added when the override is off: such a run
     /// held nothing, or it was refused before it committed.
     pub fn record_in(&self, inputs: &mut serde_json::Value) {
+        let held = self.0.held.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        self.record_held_in(inputs, &held);
+    }
+
+    /// [`record_in`](Self::record_in) with `held` as the forcings held: those
+    /// one computation's own compiled model recorded, for a command that runs
+    /// several in one process and records each (`profile`'s points).
+    pub fn record_held_in(&self, inputs: &mut serde_json::Value, held: &[OutsideRange]) {
         if !self.0.allowed {
             return;
         }
         let Some(obj) = inputs.as_object_mut() else { return };
-        let held: Vec<serde_json::Value> = self
-            .0
-            .held
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        let held: Vec<serde_json::Value> = held
             .iter()
             .map(|o| {
                 serde_json::json!({

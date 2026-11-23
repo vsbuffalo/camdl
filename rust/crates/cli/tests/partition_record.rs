@@ -91,6 +91,37 @@ fn camdl(dir: &Path, args: &[&str]) -> Output {
     out
 }
 
+/// `camdl profile` in `dir`, storing under `dir/pstore` (`--store`, over the
+/// fit file's `store`).
+fn camdl_profile(dir: &Path, args: &[&str]) -> Output {
+    let out = Command::new(binary()).env_remove("CLICOLOR_FORCE")
+        .args(args).args(["--store", "pstore"]).current_dir(dir).output().expect("spawn");
+    assert!(out.status.success(), "camdl {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    out
+}
+
+/// The `provenance.json` of every profile point under `store`, sorted by
+/// folder. Directories whose own name starts with `.` are skipped.
+fn point_provenances(store: &Path) -> Vec<Value> {
+    let mut found = Vec::new();
+    let mut stack = vec![store.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        if let Ok(body) = std::fs::read_to_string(d.join("identity.json")) {
+            let v: Value = serde_json::from_str(&body).unwrap();
+            if v["kind"] == "profile_point" {
+                found.push((d.clone(), json(&d.join("provenance.json"))));
+                continue;
+            }
+        }
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let hidden = e.file_name().to_string_lossy().starts_with('.');
+            if e.path().is_dir() && !hidden { stack.push(e.path()); }
+        }
+    }
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    found.into_iter().map(|(_, v)| v).collect()
+}
+
 /// Every file named `name` under `root`, sorted.
 fn find_all(root: &Path, name: &str) -> Vec<PathBuf> {
     let mut found = Vec::new();
@@ -192,67 +223,61 @@ fn a_swept_fit_records_each_points_cell_partition() {
     assert_eq!(seen, vec![0.4, 0.6]);
 }
 
-/// `profile` stores under the default output root, `results/`.
+/// `profile` records each point's partition: the cell's `beta` fixed at its
+/// grid value, `gamma` estimated, `rho` held.
 #[test]
-fn profile_records_the_jobs_partition_and_each_cells() {
+fn profile_records_each_points_partition() {
     let tmp = fixture(&fit_toml(ESTIMATE, FIXED));
-    camdl(tmp.path(), &["profile", "model.camdl", "--fit", "fit.toml", "--sweep", "beta=0.3,0.5",
+    camdl_profile(tmp.path(), &["profile", "model.camdl", "--fit", "fit.toml", "--sweep", "beta=0.3,0.5",
         "--rw-sd", "auto", "--particles", "30", "--iterations", "2", "--n-starts", "1"]);
-    // The base segment's sidecar: the job's partition, `beta` the focal design
-    // parameter, its `[estimate]` entry not used.
-    let metas = find_all(&tmp.path().join("results"), "fit.meta.json");
-    assert_eq!(metas.len(), 1, "{metas:?}");
-    let meta = json(&metas[0]);
-    let part = &meta["partition"];
-    assert_eq!(part["status"], "resolved", "{meta:#}");
-    assert_eq!(part["parameters"]["beta"]["role"], "design");
-    assert_eq!(part["parameters"]["beta"]["special"], "profile_focal");
-    assert_eq!(part["parameters"]["gamma"]["role"], "estimated");
-    assert_eq!(part["parameters"]["gamma"]["declared_by"], "fit_estimate");
-    assert_eq!(part["parameters"]["rho"]["role"], "fixed");
-    let (estimated, fixed) = legacy_of(part);
-    assert_eq!((&meta["estimated"], &meta["fixed"]), (&estimated, &fixed));
-    assert_eq!(meta["estimated"], serde_json::json!(["gamma"]));
-
-    // Each leaf: the cell's partition, `beta` fixed at its grid value.
-    let leaves = find_all(&tmp.path().join("results"), "run.json");
-    assert_eq!(leaves.len(), 2, "{leaves:?}");
+    let points = point_provenances(&tmp.path().join("pstore"));
+    assert_eq!(points.len(), 2, "one point per grid value: {points:#?}");
     let mut seen = Vec::new();
-    for leaf in &leaves {
-        let run = json(leaf);
-        let beta = &run["inputs"]["provenance"]["partition"]["parameters"]["beta"];
-        assert_eq!(beta["role"], "fixed", "{run:#}");
+    for prov in &points {
+        let part = &prov["provenance"]["partition"];
+        assert_eq!(part["status"], "resolved", "{prov:#}");
+        let beta = &part["parameters"]["beta"];
+        assert_eq!(beta["role"], "fixed", "{prov:#}");
         assert_eq!(beta["job_role"], "design");
         assert_eq!(beta["special"], "profile_focal");
         assert_eq!(beta["value_from"]["source"], "design_point");
+        assert_eq!(part["parameters"]["gamma"]["role"], "estimated");
+        assert_eq!(part["parameters"]["gamma"]["declared_by"], "fit_estimate");
+        assert_eq!(part["parameters"]["rho"]["role"], "fixed");
+        let (estimated, _) = legacy_of(part);
+        assert_eq!(estimated, serde_json::json!(["gamma"]));
         seen.push(beta["value"].as_f64().unwrap());
     }
     seen.sort_by(f64::total_cmp);
     assert_eq!(seen, vec![0.3, 0.5]);
 }
 
-/// Without a fit config, `--rw-sd`'s names are the estimated set: recorded as
-/// estimate declarations, the rest fixed by `--fixed`.
+/// A profile's `--fixed` takes the parameters it names out of the fit's
+/// `[estimate]`: each point's partition records them as fixed, declared by
+/// `cli_fixed`, and the one parameter left to estimate keeps the fit's
+/// declaration.
 #[test]
-fn a_cli_only_profile_records_its_rw_sd_selection_as_estimate_declarations() {
-    let tmp = fixture(&fit_toml(ESTIMATE, FIXED));
-    // Today a swept parameter still needs a value from elsewhere (proposal
-    // §3.2 item 10): the starts file gives `beta` one.
-    std::fs::write(tmp.path().join("start.toml"), "beta = 0.4\ngamma = 0.15\n").unwrap();
-    camdl(tmp.path(), &["profile", "model.camdl", "--data", "weekly_cases.tsv",
+fn a_profile_records_its_cli_fixed_values_as_cli_fixed_declarations() {
+    let estimate = "beta  = { bounds = [0.1, 0.9], start = 0.4 }\n\
+        gamma = { start = 0.15 }\nN0 = { bounds = [100, 100000] }\n\
+        I0 = { bounds = [1, 100] }\nrho = { bounds = [0.05, 0.95] }";
+    let tmp = fixture(&fit_toml(estimate, ""));
+    camdl_profile(tmp.path(), &["profile", "model.camdl", "--fit", "fit.toml",
         "--sweep", "beta=0.4", "--rw-sd", "gamma=0.02", "--fixed", "N0=10000",
-        "--fixed", "I0=10", "--fixed", "rho=0.6", "--starts", "from_params=start.toml",
+        "--fixed", "I0=10", "--fixed", "rho=0.6",
         "--particles", "30", "--iterations", "2", "--n-starts", "1"]);
-    let meta = json(&find_all(&tmp.path().join("results"), "fit.meta.json")[0]);
-    let part = &meta["partition"];
-    assert_eq!(part["status"], "resolved", "{meta:#}");
+    let points = point_provenances(&tmp.path().join("pstore"));
+    assert_eq!(points.len(), 1, "{points:#?}");
+    let part = &points[0]["provenance"]["partition"];
+    assert_eq!(part["status"], "resolved", "{part:#}");
     assert_eq!(part["parameters"]["gamma"]["role"], "estimated");
-    assert_eq!(part["parameters"]["gamma"]["declared_by"], "cli_estimate");
+    assert_eq!(part["parameters"]["gamma"]["declared_by"], "fit_estimate");
     assert_eq!(part["parameters"]["N0"]["declared_by"], "cli_fixed");
-    assert_eq!(part["parameters"]["beta"]["role"], "design");
-    assert!(part["parameters"]["beta"].get("special").is_none(), "{part:#}");
-    let (estimated, fixed) = legacy_of(part);
-    assert_eq!((&meta["estimated"], &meta["fixed"]), (&estimated, &fixed));
+    assert_eq!(part["parameters"]["N0"]["role"], "fixed");
+    assert_eq!(part["parameters"]["beta"]["role"], "fixed");
+    assert_eq!(part["parameters"]["beta"]["job_role"], "design");
+    let (estimated, _) = legacy_of(part);
+    assert_eq!(estimated, serde_json::json!(["gamma"]));
 }
 
 /// The legacy `estimated` list keeps the order of `[estimate]`, not the

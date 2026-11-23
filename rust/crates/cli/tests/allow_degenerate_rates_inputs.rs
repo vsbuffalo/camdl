@@ -115,9 +115,23 @@ fn profile_logliks(o: &Output) -> Vec<f64> {
     lines.map(|l| l.split('\t').nth(col).unwrap().parse::<f64>().unwrap()).collect()
 }
 
-fn run_profile(dir: &Path, extra: &[&str]) -> Output {
+/// A fit file over the fixture with `beta` swept and `gamma` estimated, its
+/// data the fixture's `cases.tsv`, and `allow_degenerate_rates = {flag}` when
+/// `flag` is given.
+fn profile_fit_toml(flag: Option<bool>) -> String {
+    let config = match flag {
+        Some(f) => format!("[config]\nallow_degenerate_rates = {f}\n\n"),
+        None => String::new(),
+    };
+    format!(
+        "[model]\ncamdl = \"model.camdl\"\n\n[data.observations]\ncases = \"cases.tsv\"\n\n{config}\
+         [estimate]\ngamma = {{ bounds = [0.1, 5.0], start = 1.0 }}\nbeta = {{ bounds = [0.1, 5.0] }}\n\n\
+         [fixed]\n")
+}
+
+fn run_profile(dir: &Path, fit: &str, extra: &[&str]) -> Output {
     let mut args = vec![
-        "profile", "model.camdl", "--data", "cases.tsv", "--obs", "cases",
+        "profile", "model.camdl", "--fit", fit,
         "--sweep", "beta=1.0", "--starts", "from_params=start.toml",
         "--algorithm", "if2", "--particles", "20", "--iterations", "2",
         "--n-starts", "1", "--rw-sd", "gamma=0.02", "--seed", "1",
@@ -131,6 +145,9 @@ fn profile_fixture(tag: &str) -> Tmp {
     std::fs::write(tmp.0.join("model.camdl"), model(40, 0.1)).unwrap();
     std::fs::write(tmp.0.join("cases.tsv"), cases(40)).unwrap();
     std::fs::write(tmp.0.join("start.toml"), "gamma = 1.0\n").unwrap();
+    std::fs::write(tmp.0.join("plain.toml"), profile_fit_toml(None)).unwrap();
+    std::fs::write(tmp.0.join("off.toml"), profile_fit_toml(Some(false))).unwrap();
+    std::fs::write(tmp.0.join("on.toml"), profile_fit_toml(Some(true))).unwrap();
     tmp
 }
 
@@ -141,12 +158,12 @@ fn profile_fixture(tag: &str) -> Tmp {
 #[test]
 fn profile_applies_allow_degenerate_rates() {
     let tmp = profile_fixture("profile_flag");
-    let without = run_profile(&tmp.0, &[]);
+    let without = run_profile(&tmp.0, "plain.toml", &[]);
     assert!(without.status.success(), "{}", text(&without));
     assert!(profile_logliks(&without).iter().all(|l| l.is_nan()),
         "the control: without the flag the collapsing model has no finite cell\n{}", text(&without));
 
-    let with = run_profile(&tmp.0, &["--allow-degenerate-rates"]);
+    let with = run_profile(&tmp.0, "plain.toml", &["--allow-degenerate-rates"]);
     assert!(with.status.success(), "{}", text(&with));
     let ll = profile_logliks(&with);
     assert!(!ll.is_empty() && ll.iter().all(|l| l.is_finite()),
@@ -158,18 +175,11 @@ fn profile_applies_allow_degenerate_rates() {
 #[test]
 fn profile_applies_the_fit_configs_allow_degenerate_rates() {
     let tmp = profile_fixture("profile_config");
-    let toml = |flag: bool| format!(
-        "[model]\ncamdl = \"model.camdl\"\n\n[config]\nallow_degenerate_rates = {flag}\n\n\
-         [estimate]\ngamma = {{ bounds = [0.1, 5.0], start = 1.0 }}\nbeta = {{ bounds = [0.1, 5.0] }}\n\n\
-         [fixed]\n");
-    std::fs::write(tmp.0.join("off.toml"), toml(false)).unwrap();
-    std::fs::write(tmp.0.join("on.toml"), toml(true)).unwrap();
-
-    let off = run_profile(&tmp.0, &["--fit", "off.toml"]);
+    let off = run_profile(&tmp.0, "off.toml", &[]);
     assert!(off.status.success(), "{}", text(&off));
     assert!(profile_logliks(&off).iter().all(|l| l.is_nan()), "{}", text(&off));
 
-    let on = run_profile(&tmp.0, &["--fit", "on.toml"]);
+    let on = run_profile(&tmp.0, "on.toml", &[]);
     assert!(on.status.success(), "{}", text(&on));
     let ll = profile_logliks(&on);
     assert!(!ll.is_empty() && ll.iter().all(|l| l.is_finite()),

@@ -175,6 +175,11 @@ pub struct ParameterInputs<'a> {
     pub point_overrides:    &'a [(String, f64)],
     pub fixed_cli:          &'a [(String, f64)],
     pub fixed_files:        &'a [PathBuf],
+    /// The parameters a design sets at each point (`profile`'s swept
+    /// parameters). A `--fixed-file` value for one is not applied, and does
+    /// not take it out of the estimated set: the point's own value is the
+    /// one computed with.
+    pub swept:              &'a [String],
     pub fit_toml_fixed:     &'a IndexMap<String, f64>,
     pub fit_toml_estimate:  &'a IndexSet<String>,
     /// The files bound to the model's `external("NAME")` tables and
@@ -1142,6 +1147,17 @@ impl TierFiveFlag<'_> {
     }
 }
 
+/// Whether the named scenario sets `param` to a value, and does nothing else
+/// to it: its value then replaces any lower tier's.
+pub(crate) fn scenario_only_sets(model: &ir::Model, scenario: &str, param: &str) -> Result<bool, String> {
+    let s = crate::sim_job::ScenarioRef::Named(scenario.to_string());
+    if !scenario_param_footprint(model, &s)?.contains(param) {
+        return Ok(false);
+    }
+    let actions = scenario_param_actions(model, &s, param)?;
+    Ok(!actions.is_empty() && actions.iter().all(|a| matches!(a, ScenarioParamAction::Set { .. })))
+}
+
 /// The `--param-vec` row key that names `param`: `param` without the
 /// `PREFIX_` that `util::param_vec_name` prepends.
 fn row_key<'p>(prefix: &str, param: &'p str) -> &'p str {
@@ -2046,6 +2062,9 @@ pub fn resolve_parameters_with_starts<'a>(
             context.fit_estimate_files.insert(path.clone());
         }
         for p in &mut model.parameters {
+            if inputs.swept.contains(&p.name) {
+                continue;
+            }
             if let Some(&v) = overrides.get(&p.name) {
                 layers.set(p, ValueSource::FixedFile { path: path.clone() }, v);
             }
@@ -2161,7 +2180,7 @@ pub fn resolve_parameters_with_starts<'a>(
             // name list. The cost is negligible vs simulation, and
             // it keeps tier 4 / tier 5 source attribution explicit.
             if let Ok(overrides) = crate::util::load_params_toml(&path_str) {
-                for (name, &value) in &overrides {
+                for (name, &value) in overrides.iter().filter(|(n, _)| !inputs.swept.contains(n)) {
                     m.insert(name.clone(),
                         (ValueSource::FixedFile { path: path.clone() }, value));
                 }
@@ -2810,6 +2829,7 @@ mod tests {
             point_overrides: &[],
             fixed_cli,
             fixed_files,
+            swept: &[],
             fit_toml_fixed,
             fit_toml_estimate,
             external: &NO_EXTERNAL,

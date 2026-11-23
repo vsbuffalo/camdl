@@ -159,6 +159,7 @@ pub fn cmd_eval(a: &crate::args::EvalArgs, compile: crate::util::CompileSettings
         point_overrides: &[],
         fixed_cli: &fixed_cli,
         fixed_files: &fixed_files,
+        swept: &[],
         fit_toml_fixed: &ftf,
         fit_toml_estimate: &fte,
         external: &external,

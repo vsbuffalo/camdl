@@ -605,7 +605,6 @@ fn starts_from_resolves_short_hash() {
     let prefix = &run_id[..8];
 
     let ir = seed_timing_ir();
-    let data = tmp.path().join("cases.tsv");
     let fit_toml = fit_toml(tmp.path(), "f.toml", &results, 4);
 
     // Removed flags, every one named with its replacement in one message
@@ -636,7 +635,7 @@ fn starts_from_resolves_short_hash() {
         .env("CAMDL_STORE", &results)
         .env("CAMDL_OUTPUT_DIR", &results)
         .args(["profile", &ir.to_string_lossy(),
-               "--data", &format!("cases={}", data.display()),
+               "--fit", &fit_toml.to_string_lossy(),
                "--sweep", "beta=lin(0.1,0.5,2)", "--rw-sd", "auto",
                "--particles", "20",
                "--init", "from_params", "--params", "truth.toml"])

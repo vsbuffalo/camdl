@@ -19,8 +19,8 @@
 //! `experimental` is an unreleased feature, enabled by a variable named
 //! `CAMDL_EXPERIMENTAL_<NAME>`. Every such variable that is set is an
 //! experimental input of the run, whether or not a feature reads it yet: it is
-//! keyed, and `run.json`'s provenance lists it with its value
-//! ([`Environment::experimental_inputs`]). A feature reads its switch from
+//! keyed through the ambient identity of every result on the run store
+//! (`crate::camdl_store::Engine`). A feature reads its switch from
 //! [`Env::experimental`].
 //!
 //! **Identity.** A variable that can change a result is keyed. The alternative
@@ -35,10 +35,8 @@
 //! `run.json` names the switches in `engine_switches` while its
 //! `engine_version` stays the build. `CAMDL_NO_CONSTANT_FOLD` and
 //! `CAMDL_NO_LICM` change the IR the compiler emits and are keyed through the
-//! model level. The commands that store a result under an address key the
-//! switches into it: `simulate` (its trajectories, their observation subtrees
-//! and its ensembles), `fit run` (at the `fit` level), `camdl predict` (its
-//! output directory), `pfilter` and `profile` (a point's base).
+//! compiled model. The commands on the run store key the switches through
+//! the ambient identity of every result.
 //! `compare` scores a chain-binomial fit through a `camdl pfilter` child,
 //! which keys them; its in-process ODE scoring and `dev eval` store nothing
 //! under an address, so they key no switch.
@@ -46,7 +44,8 @@
 //! Not here:
 //!
 //! - `clap`'s `env = "CAMDL_…"` attributes (`CAMDL_SEED`, `CAMDL_OUTPUT`,
-//!   `CAMDL_OUTPUT_DIR` for `simulate`, `CAMDL_PARALLEL`), which are another
+//!   `CAMDL_OUTPUT_DIR` for the readers of the old results root,
+//!   `CAMDL_PARALLEL`), which are another
 //!   spelling of a flag and are classified with it;
 //! - `RUST_LOG`, read by `env_logger` for the log filter;
 //! - the variables camdlc reads itself, in its own process, which inherits
@@ -108,7 +107,6 @@ pub(crate) const VARS: &[Var] = &[
     var("CAMDL_SKIP_VERSION_CHECK", "skip_version_check", Execution, Route::None),
     var("CAMDLC_PATH", "camdlc_path", Execution, Route::None),
     var("CAMDLC", "camdlc", Execution, Route::None),
-    var("CAMDL_OUTPUT_DIR", "output_dir", Execution, Route::None),
     var("CAMDL_STORE", "store", Execution, Route::None),
     var("CAMDL_UNLABELED_THRESHOLD", "unlabeled_threshold", Presentation, Route::None),
     var("PATH", "path", Execution, Route::None),
@@ -153,12 +151,8 @@ pub(crate) struct Env {
     /// the camdl binary.
     pub camdlc_path: Option<PathBuf>,
     pub camdlc: Option<PathBuf>,
-    /// `CAMDL_OUTPUT_DIR`: the store root for a command without
-    /// `--output-dir` and a config that names none.
-    pub output_dir: Option<PathBuf>,
     /// `CAMDL_STORE`: the root of the run store (`store` crate) for a command
-    /// on it without `--store`. The commands still on the old store read
-    /// `CAMDL_OUTPUT_DIR` instead.
+    /// on it without `--store`.
     pub store: Option<PathBuf>,
     /// `CAMDL_UNLABELED_THRESHOLD`: how many unlabelled fits `fit table` lists
     /// before it suggests labels.
@@ -215,7 +209,6 @@ impl Environment {
             skip_version_check: is_set("CAMDL_SKIP_VERSION_CHECK"),
             camdlc_path: path("CAMDLC_PATH"),
             camdlc: path("CAMDLC"),
-            output_dir: path("CAMDL_OUTPUT_DIR"),
             store: path("CAMDL_STORE"),
             unlabeled_threshold: string("CAMDL_UNLABELED_THRESHOLD"),
             path: raw("PATH"),
@@ -256,12 +249,6 @@ impl Environment {
     /// [`runid::inputs::EngineIdentity`]'s.
     pub fn engine_identity(&self, engine_id: &str) -> runid::inputs::EngineIdentity {
         runid::inputs::EngineIdentity { build: engine_id.to_string(), switches: self.engine_switches() }
-    }
-
-    /// Every experimental input set for this process, by name, with its value:
-    /// what `run.json`'s provenance lists.
-    pub fn experimental_inputs(&self) -> BTreeMap<String, String> {
-        self.vars.experimental.clone()
     }
 }
 
@@ -317,7 +304,6 @@ mod tests {
             skip_version_check: _,
             camdlc_path: _,
             camdlc: _,
-            output_dir: _,
             store: _,
             unlabeled_threshold: _,
             path: _,
@@ -329,7 +315,7 @@ mod tests {
         } = Env::default();
         let fields = [
             "trace_steps", "eval_unresolved", "no_binding_cache", "experimental", "no_constant_fold", "no_licm",
-            "no_ir_cache", "ir_cache_dir", "skip_version_check", "camdlc_path", "camdlc", "output_dir",
+            "no_ir_cache", "ir_cache_dir", "skip_version_check", "camdlc_path", "camdlc",
             "store", "unlabeled_threshold", "path", "xdg_cache_home", "home", "no_color", "clicolor_force", "ci",
         ];
         let listed: Vec<&str> = VARS.iter().map(|v| v.field).collect();
@@ -407,15 +393,5 @@ mod tests {
     fn trace_steps_needs_the_value_one() {
         assert!(with(&[("CAMDL_TRACE_STEPS", "1")]).vars.trace_steps);
         assert!(!with(&[("CAMDL_TRACE_STEPS", "0")]).vars.trace_steps);
-    }
-
-    #[test]
-    fn experimental_inputs_lists_every_set_experimental_variable_and_nothing_else() {
-        let env = with(&[("CAMDL_EXPERIMENTAL_X", "on"), ("CAMDL_TRACE_STEPS", "1"), ("CAMDL_SEED", "3")]);
-        assert_eq!(
-            env.experimental_inputs(),
-            BTreeMap::from([("CAMDL_EXPERIMENTAL_X".to_string(), "on".to_string())])
-        );
-        assert!(with(&[("CAMDL_TRACE_STEPS", "1")]).experimental_inputs().is_empty());
     }
 }

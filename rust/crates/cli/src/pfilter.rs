@@ -603,6 +603,7 @@ fn run_pfilter(
             point_overrides: overrides,
             fixed_cli: &fixed_cli,
             fixed_files: &fixed_files,
+            swept: &[],
             fit_toml_fixed: &ftf,
             fit_toml_estimate: &fte,
             external: &external,

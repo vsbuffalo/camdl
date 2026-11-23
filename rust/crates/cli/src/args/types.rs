@@ -401,6 +401,17 @@ pub enum RwSd {
     Map(HashMap<String, Option<f64>>),
 }
 
+/// Recorded as given: `"auto"`, or each name's step (`null` for `auto`),
+/// sorted by name.
+impl serde::Serialize for RwSd {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            RwSd::Auto => s.serialize_str("auto"),
+            RwSd::Map(m) => m.iter().collect::<std::collections::BTreeMap<_, _>>().serialize(s),
+        }
+    }
+}
+
 impl FromStr for RwSd {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {

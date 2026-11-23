@@ -89,11 +89,6 @@ pub struct Out {
     /// Behind a lock because the chain workers report errors through a shared
     /// `&Out`.
     claim: std::sync::Mutex<Option<HeldClaim>>,
-    /// A heartbeat the command itself runs, outside any method — `camdl
-    /// profile`'s invocation record (`profiles/<base>/invocations/<id>/`).
-    /// An error reported while it is held marks it `failed` with the error's
-    /// sentence, `process::exit` included, as the method's heartbeat is.
-    command_heartbeat: std::sync::Mutex<Option<Arc<io::HeartbeatGuard>>>,
     /// A temporary directory the command made (a `--no-store` run's
     /// temporary store), removed when an error ends the command, since
     /// `process::exit` runs no destructor.
@@ -161,17 +156,9 @@ impl Out {
             method: None,
             events: None,
             claim: std::sync::Mutex::new(None),
-            command_heartbeat: std::sync::Mutex::new(None),
             temporary: std::sync::Mutex::new(None),
             forcing: None,
         }
-    }
-
-    /// Hold `hb` as the command's own heartbeat: until the command records
-    /// it `done`, an error reported through this handle records it `failed`
-    /// with the error's sentence.
-    pub fn hold_heartbeat(&self, hb: Arc<io::HeartbeatGuard>) {
-        *self.command_heartbeat.lock().unwrap_or_else(|e| e.into_inner()) = Some(hb);
     }
 
     /// The stderr painter, for call sites that still build their own strings.
@@ -449,17 +436,12 @@ impl Out {
         if let Some(dir) = self.temporary.lock().unwrap_or_else(|p| p.into_inner()).take() {
             let _ = std::fs::remove_dir_all(dir);
         }
-        // The heartbeats first: the held run's failure stores what its
+        // The heartbeat first: the held run's failure stores what its
         // method wrote, the last progress snapshot among it.
         if let Some(m) = &self.method {
             // The same sentence a reader of stderr gets, for a reader holding
             // only `progress.json`.
             m.heartbeat.failed(e.message.as_str());
-        }
-        let command_hb =
-            self.command_heartbeat.lock().unwrap_or_else(|p| p.into_inner()).take();
-        if let Some(hb) = command_hb {
-            hb.failed(e.message.as_str());
         }
         let held = self.claim.lock().unwrap_or_else(|p| p.into_inner()).take();
         if let Some(held) = held {
@@ -474,21 +456,6 @@ impl Out {
             }
         }
         e.code
-    }
-
-    /// [`fail`](Self::fail) for a command that holds `claim` itself rather
-    /// than through [`hold_claim`](Self::hold_claim): the claim is failed
-    /// with `message` first, so its leaf's `run.json` records `failed` and
-    /// why before the process exits (`process::exit` runs no destructor).
-    pub fn fail_with_claim(
-        &self,
-        claim: crate::resolve::ResolvedClaim,
-        operation: &str,
-        message: impl Into<String>,
-    ) -> ! {
-        let mut message = message.into();
-        fail_claim(claim, operation, &mut message);
-        self.fail(message)
     }
 
     /// Report `message` as an error exiting 1, and exit: the
@@ -531,17 +498,6 @@ impl Out {
     pub fn data_raw(&self, text: impl std::fmt::Display) {
         let written = write!(std::io::stdout().lock(), "{text}");
         stdout_written(written);
-    }
-}
-
-/// Fail `claim` with `message` (`run.json` → `failed`, recording it; lock
-/// released), adding to `message` when that record could not be written.
-fn fail_claim(claim: crate::resolve::ResolvedClaim, operation: &str, message: &mut String) {
-    let dir = claim.dir().to_path_buf();
-    let failure = runid::Failure { message: message.clone(), operation: operation.to_string() };
-    if let Err(err) = claim.fail(failure) {
-        message.push_str(&format!(
-            "\n  and {} could not be marked failed: {err}", dir.join("run.json").display()));
     }
 }
 

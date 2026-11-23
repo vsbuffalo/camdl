@@ -219,18 +219,29 @@ fn profile_scores_the_ic_free_objective_of_the_fit_it_profiles() {
         ]),
         "profile",
     );
-    let cells: Vec<serde_json::Value> = find_all(&d.join("results/profiles"), "run.json")
-        .iter()
-        .map(|p| serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap())
-        .collect();
-    let at_mle = cells
-        .iter()
-        .find(|c| c["inputs"]["grid_point"] == 0)
-        .expect("a profile cell at the fit's beta");
-    let profile_ll = at_mle["inputs"]["best_loglik"].as_f64().expect("finite cell loglik");
+    // Each stored point is `(focal beta, provenance.json)`; the cell at the
+    // fit's beta is the one with the smallest focal value.
+    let mut cells: Vec<(f64, serde_json::Value)> =
+        find_all(&d.join("camdl-store"), "identity.json")
+            .iter()
+            .filter_map(|p| {
+                let id: serde_json::Value =
+                    serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap();
+                if id["kind"] != "profile_point" {
+                    return None;
+                }
+                let prov = std::fs::read_to_string(p.with_file_name("provenance.json")).unwrap();
+                Some((id["identity"]["focal"]["beta"].as_f64().unwrap(),
+                      serde_json::from_str(&prov).unwrap()))
+            })
+            .collect();
+    cells.sort_by(|a, b| a.0.total_cmp(&b.0));
+    assert_eq!(cells.len(), 2, "one stored point per sweep value");
+    let at_mle = &cells[0].1;
+    let profile_ll = at_mle["best_loglik"].as_f64().expect("finite cell loglik");
 
     assert_eq!(
-        at_mle["inputs"]["likelihood_objective"], "conditional_on_first_observation",
+        at_mle["likelihood_objective"], "conditional_on_first_observation",
         "the cell record must name the objective it scored"
     );
     assert!(

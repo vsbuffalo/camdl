@@ -117,12 +117,13 @@ gamma = {{ bounds = [0.01, 1.0], start = 0.1 }}
     (ir, fit)
 }
 
-/// Run `camdl profile` with `cwd` as the working directory, so its store
-/// lands in `cwd/results` (profile has no output-root flag).
+/// Run `camdl profile` with `cwd` as the working directory and `cwd/store`
+/// as its run store.
 fn profile(cwd: &Path, ir: &Path, fit: &Path, extra: &[&str]) -> Output {
     std::fs::create_dir_all(cwd).unwrap();
     Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("CAMDL_STORE", cwd.join("store"))
         .current_dir(cwd)
         .args(["profile", &ir.to_string_lossy(), "--fit", &fit.to_string_lossy()])
         .args(["--sweep", "gamma=0.1,0.5", "--particles", "50", "--iterations", "3",
@@ -138,17 +139,22 @@ fn ok(out: Output) -> Output {
     out
 }
 
-/// Every cell's `run.json` under `cwd/results/profiles`, sorted by path.
+/// Every profile point folder under `cwd/store`, sorted by path.
 fn cells(cwd: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
-    let mut stack = vec![cwd.join("results").join("profiles")];
+    let mut stack = vec![cwd.join("store")];
     while let Some(dir) = stack.pop() {
-        if dir.join("run.json").is_file() {
-            found.push(dir.join("run.json"));
+        if let Ok(b) = std::fs::read_to_string(dir.join("identity.json")) {
+            let v: serde_json::Value = serde_json::from_str(&b).unwrap();
+            if v["kind"] == "profile_point" {
+                found.push(dir.clone());
+            }
         }
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for e in entries.flatten() {
-                if e.path().is_dir() { stack.push(e.path()); }
+                if e.path().is_dir() && !e.file_name().to_string_lossy().starts_with('.') {
+                    stack.push(e.path());
+                }
             }
         }
     }
@@ -156,19 +162,22 @@ fn cells(cwd: &Path) -> Vec<PathBuf> {
     found
 }
 
-/// `(resolved N0, its source, best_loglik)` for each cell, in grid order.
+/// `(resolved N0, its source, best_loglik)` for each cell, in order of the
+/// focal `gamma` value.
 fn n0_and_loglik(cwd: &Path) -> Vec<(f64, String, f64)> {
-    let mut rows: Vec<(u64, f64, String, f64)> = cells(cwd).iter().map(|p| {
-        let v: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap();
-        let inputs = &v["inputs"];
-        let n0 = &inputs["provenance"]["parameters_provenance"]["N0"];
-        (inputs["grid_point"].as_u64().unwrap(),
+    let mut rows: Vec<(f64, f64, String, f64)> = cells(cwd).iter().map(|p| {
+        let read = |f: &str| -> serde_json::Value {
+            serde_json::from_slice(&std::fs::read(p.join(f)).unwrap()).unwrap()
+        };
+        let focal = read("identity.json")["identity"]["focal"]["gamma"].as_f64().unwrap();
+        let prov = read("provenance.json");
+        let n0 = &prov["provenance"]["parameters_provenance"]["N0"];
+        (focal,
          n0["value"].as_f64().unwrap_or_else(|| panic!("no N0 value in {}", p.display())),
          n0["source"].as_str().unwrap().to_string(),
-         inputs["best_loglik"].as_f64().unwrap())
+         prov["best_loglik"].as_f64().unwrap())
     }).collect();
-    rows.sort_by_key(|r| r.0);
+    rows.sort_by(|a, b| a.0.total_cmp(&b.0));
     assert_eq!(rows.len(), 2, "expected two profile cells under {}", cwd.display());
     rows.into_iter().map(|(_, a, b, c)| (a, b, c)).collect()
 }

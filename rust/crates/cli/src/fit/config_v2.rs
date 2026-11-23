@@ -3508,12 +3508,6 @@ impl LikelihoodObjective {
     pub fn skips_first_observation(self) -> bool {
         matches!(self, LikelihoodObjective::ConditionalOnFirstObservation)
     }
-
-    /// For `skip_serializing_if` on identity levels: the full objective is
-    /// left out, so a run that never set `ic_free` keeps its key.
-    pub fn is_full(&self) -> bool {
-        matches!(self, LikelihoodObjective::Full)
-    }
 }
 
 impl Problem {

@@ -773,7 +773,7 @@ fn profile_resolves_an_anchored_model() {
     assert!(o.status.success(), "profile must run an anchored model:\n{stderr}");
     assert_both_anchors_announced(&stderr, "profile --fit");
     assert!(
-        stderr.contains("cells written"),
+        stderr.contains("2 cells (2 points) stored under"),
         "profile must have scored its grid:\n{stderr}"
     );
 }
@@ -869,12 +869,12 @@ fn pfilter_scenario_horizon_guard_compares_resolved_numbers() {
     assert_both_anchors_announced(&stderr, "pfilter --scenario (equal horizons)");
 }
 
-/// A resolved anchor re-keys a `profile` too, and it must reach the recorded
-/// `model_identity` as well as the run key. Profile substitutes the anchors in
-/// the `ir::Model` it runs, but records `model_identity` from the IR text, so a
-/// substitution that never reaches the text leaves two data vintages sharing an
-/// identity string that says they are the same model, while their forcing forks
-/// differ by four weeks.
+/// A resolved anchor re-keys a `profile` too, and it must reach the compiled
+/// model each point's stored fit problem records as a dependency (`deps` in the
+/// problem's `run.json`, reached through the point's own `deps`).
+/// A substitution that never reaches the stored model leaves two data vintages
+/// sharing a model identity that says they are the same model, while their
+/// forcing forks differ by four weeks.
 #[test]
 fn profile_records_a_distinct_model_identity_per_data_vintage() {
     let bin = bin();
@@ -882,7 +882,7 @@ fn profile_records_a_distinct_model_identity_per_data_vintage() {
     let model = write_model(tmp.path(), "120 'days"); // LITERAL horizon: only the fork moves
     let data = tmp.path().join("cases.tsv");
     let toml = write_fit_toml(tmp.path(), &model, &data);
-    let root = tmp.path().join("cas");
+    let root = tmp.path().join("store");
 
     let run = |rows: usize| {
         write_data(&data, rows);
@@ -895,7 +895,7 @@ fn profile_records_a_distinct_model_identity_per_data_vintage() {
             .args(["--n-starts", "1", "--rw-sd", "auto", "--seed", "1"])
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
-            .env("CAMDL_OUTPUT_DIR", &root)
+            .args(["--store", root.to_str().unwrap()])
             .output()
             .expect("spawn profile");
         assert!(
@@ -908,32 +908,36 @@ fn profile_records_a_distinct_model_identity_per_data_vintage() {
     run(8); // fork at t = 56
 
     let mut identities: Vec<String> = Vec::new();
-    let mut stack = vec![root.clone()];
-    while let Some(d) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&d) else { continue };
-        for e in rd.flatten() {
-            let p = e.path();
-            if !p.is_dir() {
-                continue;
-            }
-            let meta = p.join("fit.meta.json");
-            if meta.is_file() {
-                let v: serde_json::Value =
-                    serde_json::from_str(&std::fs::read_to_string(&meta).unwrap()).unwrap();
-                if let Some(id) = v.get("model_identity").and_then(|x| x.as_str()) {
-                    identities.push(id.to_string());
-                }
-            }
-            stack.push(p);
-        }
+    let mut points = Vec::new();
+    profile_points(&root, &mut points);
+    assert_eq!(points.len(), 4, "premise: two grid cells per data vintage");
+    for p in &points {
+        let run: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(p.join("run.json")).unwrap()).unwrap();
+        let problem_dep = run["deps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["kind"] == "fit")
+            .unwrap_or_else(|| panic!("a point records the stored problem it ran: {run}"));
+        let problem_dir = run_folder(&root, problem_dep["run_id"].as_str().unwrap());
+        let problem_run: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(problem_dir.join("run.json")).unwrap()).unwrap();
+        let model = problem_run["deps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["kind"] == "compiled_model")
+            .unwrap_or_else(|| panic!("a stored problem records the compiled model it poses: {problem_run}"));
+        identities.push(model["run_id"].as_str().unwrap().to_string());
     }
     identities.sort();
     identities.dedup();
     assert_eq!(
         identities.len(),
         2,
-        "two data vintages fork the forcing differently, so the recorded \
-         model_identity must differ: {identities:?}"
+        "two data vintages fork the forcing differently, so the compiled \
+         model each point records must differ: {identities:?}"
     );
 }
 
@@ -998,6 +1002,47 @@ fn anchors_resolve_at_the_step_the_fit_runs_at() {
 /// A run store of its own for one command, so tests that run the same filter
 /// at once do not meet in a shared root (a filter run another live process
 /// holds is refused).
+/// Every profile point folder under the store `root`: a folder whose
+/// `identity.json` has `"kind": "profile_point"`. Entries whose name starts
+/// with `.` are skipped.
+fn profile_points(root: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    for e in std::fs::read_dir(root).into_iter().flatten().flatten() {
+        let p = e.path();
+        if !p.is_dir() || e.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
+        let is_point = std::fs::read_to_string(p.join("identity.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .is_some_and(|v| v["kind"] == "profile_point");
+        if is_point {
+            out.push(p)
+        } else {
+            profile_points(&p, out)
+        }
+    }
+}
+
+/// The folder under the store `root` whose `identity.json` has run id `run_id`.
+fn run_folder(root: &std::path::Path, run_id: &str) -> std::path::PathBuf {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let found = std::fs::read_to_string(d.join("identity.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .is_some_and(|v| v["run_id"] == run_id);
+        if found {
+            return d;
+        }
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            if e.path().is_dir() {
+                stack.push(e.path());
+            }
+        }
+    }
+    panic!("no run {run_id} under {}", root.display())
+}
+
 fn isolated_store() -> std::path::PathBuf {
     static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(

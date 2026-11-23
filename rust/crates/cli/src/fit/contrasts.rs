@@ -712,6 +712,7 @@ pub(crate) fn resolve_arm(
         point_overrides: overrides,
         fixed_cli: &[],
         fixed_files: &[],
+        swept: &[],
         fit_toml_fixed: &empty_fixed,
         fit_toml_estimate: &empty_estimate,
         external: &no_external,

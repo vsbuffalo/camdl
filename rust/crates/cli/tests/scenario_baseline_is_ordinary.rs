@@ -243,8 +243,8 @@ fn an_undeclared_baseline_is_refused_by_every_verb() {
     ]), "pfilter");
 
     refused(&run(&bin, dir, &[
-        "profile", "model.camdl", "--starts", "from_params=params.toml",
-        "--data", "weekly_cases.tsv", "--particles", "20", "--rw-sd", "auto",
+        "profile", "model.camdl", "--fit", "fit.toml",
+        "--particles", "20", "--rw-sd", "auto",
         "--sweep", "beta=lin(0.3,0.4,2)", "--scenario", "baseline", "--seed", "1",
     ]), "profile");
 

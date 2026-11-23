@@ -74,6 +74,10 @@ fn fixture() -> tempfile::TempDir {
     std::fs::write(tmp.path().join("model.camdl"), MODEL).unwrap();
     std::fs::write(tmp.path().join("params.toml"), PARAMS).unwrap();
     std::fs::write(tmp.path().join("weekly_cases.tsv"), DATA).unwrap();
+    std::fs::write(tmp.path().join("profile_fit.toml"), "[model]\ncamdl = \"model.camdl\"\n\n\
+        [data.observations]\nweekly_cases = \"weekly_cases.tsv\"\n\n\
+        [estimate]\nbeta = { bounds = [0.05, 1.0], start = 0.4 }\n\n\
+        [fixed]\ngamma = 0.15\nrho = 0.6\nN0 = 10000\nI0 = 10\n").unwrap();
     tmp
 }
 
@@ -142,10 +146,9 @@ fn every_value_flag_that_names_a_constant_is_refused_with_its_hint() {
         particles = 20\niterations = 1\ncooling = 0.7\n").unwrap();
     refused_with_hint(&camdl(dir, &["fit", "run", "fit.toml"]), "fit run [fixed] omega");
     refused_with_hint(
-        &camdl(dir, &["profile", "model.camdl", "--data", "weekly_cases.tsv",
-                      "--sweep", "beta=0.4", "--fixed", "gamma=0.15", "--fixed", "rho=0.6",
-                      "--fixed", "N0=10000", "--fixed", "I0=10", "--fixed", "omega=0.02",
-                      "--rw-sd", "auto", "--starts", "from_params=params.toml",
+        &camdl(dir, &["profile", "model.camdl", "--fit", "profile_fit.toml",
+                      "--sweep", "beta=0.4", "--fixed", "omega=0.02",
+                      "--starts", "from_params=params.toml",
                       "--particles", "20", "--iterations", "1"]),
         "profile --fixed omega",
     );
@@ -220,9 +223,8 @@ const FIT_VALUES: &[(&str, f64)] =
 /// `profile` with one `--fixed-file`: a path that reads the file without
 /// `simulate --params`'s own tamper refusal in front of it.
 fn profile_with_file(dir: &Path, file: &str) -> Output {
-    camdl(dir, &["profile", "model.camdl", "--data", "weekly_cases.tsv",
-                 "--sweep", "beta=0.4", "--fixed", "N0=10000", "--fixed", "I0=10",
-                 "--fixed", "rho=0.6", "--fixed-file", file, "--rw-sd", "gamma=0.02",
+    camdl(dir, &["profile", "model.camdl", "--fit", "profile_fit.toml",
+                 "--sweep", "beta=0.4", "--fixed-file", file,
                  "--starts", "from_params=params.toml", "--particles", "20",
                  "--iterations", "1"])
 }

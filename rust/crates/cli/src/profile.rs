@@ -8,26 +8,13 @@
 //! intervals, and parameter interactions. 2D profiles (two `--sweep`
 //! flags) produce a likelihood surface suitable for contour plotting.
 //!
-//! ## Content-addressed layout
-//!
-//! Each `(grid point × seed × start)` is an independent content-
-//! addressed mini-fit, keyed by the five factored `runid` levels
-//! (`profile` / `point` / `method` / `seed` / `start`) resolved in
-//! [`crate::profile_cas`]. The leaf is an `ArtifactKind::ProfilePoint` run
-//! under `profiles/`; each path segment is `{label}-{hash8}`:
-//!
-//! ```text
-//! results/profiles/{stem}-{h8}/{point}-{h8}/{method}-{h8}/seed_{n}-{h8}/start_{k}-{h8}/
-//!   run.json                                # RunRecord (kind = profile_point)
-//!   mle.toml                                # MLE at this (point, seed, start)
-//! ```
-//!
-//! Leaves are written via the store's streaming claim (staging dir +
-//! atomic finalize): a crash mid-IF2 leaves no finalized `run.json`,
-//! so the next invocation reruns only that leaf while completed leaves
-//! are reused bit-for-bit. The per-seed profile curve and the
-//! cross-seed summary are cross-leaf aggregates with no single home in
-//! the factored tree — they are rebuilt from the derived index.
+//! Each `(grid point × seed × start)` is one profile point on the run store
+//! ([`crate::profile_store::ProfilePoint`]), whose identity holds the problem,
+//! the focal values, the method, the start's values and a seed derived from
+//! them, and nothing about the grid. The points are claimed together, those
+//! already stored are reused, and the rest are computed in parallel, each
+//! written in place under its claim. The profile table is rendered from the
+//! points the invocation asked for.
 
 use sim::{
     compiled_model::CompiledModel,
@@ -40,8 +27,7 @@ use sim::{
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::cas::typed::ContentHash;
-use crate::run_paths::output_root;
+
 
 /// Why `camdl profile` has no per-cell PMMH, and what to run instead.
 ///
@@ -77,16 +63,6 @@ pub(crate) enum ProfileAlgo {
 }
 
 impl ProfileAlgo {
-    /// Whether a cell's result depends on the model's gradient maps: an
-    /// `nl-lbfgs` cell takes `det_grad`'s gradient; IF2 and the
-    /// derivative-free optimizers never evaluate one.
-    fn reads_gradients(self) -> bool {
-        match self {
-            ProfileAlgo::If2 => false,
-            ProfileAlgo::Nlopt(a) => a.uses_gradient(),
-        }
-    }
-
     fn method_kind(self) -> crate::run_meta::FitAlgorithm {
         match self {
             ProfileAlgo::If2  => crate::run_meta::FitAlgorithm::If2,
@@ -130,108 +106,7 @@ fn profile_cell_dist2(a: &[f64], b: &[f64]) -> f64 {
 
 /// What to pass when `profile` has no observation data bound. Named once so the
 /// anchored refusal and the ordinary missing-data refusal cannot drift apart.
-const PROFILE_SUPPLY: &str = "pass `--data PATH` (single-stream), \
-    `--data NAME=PATH` (repeatable, multi-stream), or `--fit FOO.toml` with a \
-    [data.observations] section.";
-
-/// The `base` level's identity: the inference PROBLEM a profile is computed
-/// over — which model, data, fixed values, priors and scoring window.
-///
-/// A struct rather than a `json!` literal so the level is include-by-default:
-/// add a field here and it is hashed. The literal this replaced was
-/// exclude-by-default, and a scoring-window setting once fell through it —
-/// present in the computation, absent from the key, so a rerun under a
-/// different window was served the previous landscape.
-#[derive(serde::Serialize)]
-struct ProfileBaseLevel<'a> {
-    base_params: &'a str,
-    fixed: &'a [String],
-    obs_family: &'a str,
-    fit_toml: &'a Option<String>,
-    priors: &'a [(String, String)],
-    /// The likelihood every cell scores. It changes each stored loglik, so it
-    /// is identity. Omitted when full, so a profile that never set `ic_free`
-    /// keeps its key.
-    #[serde(skip_serializing_if = "crate::fit::config_v2::LikelihoodObjective::is_full")]
-    objective: crate::fit::config_v2::LikelihoodObjective,
-    /// The training rows the fit config's `[data] holdout_after` leaves each
-    /// stream (by stream name): every cell is fitted to those rows, so they
-    /// change each stored loglik and are identity. The bound files' bytes and
-    /// the config's bytes are keyed already; this is what says the rows were
-    /// cut. Omitted without `holdout_after`. (`[data.holdout]` files leave the
-    /// training data whole and add nothing here.)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    training_rows: Option<&'a [(String, usize)]>,
-    /// `--allow-forcing-extrapolation`, or the `--fit` config's `[config]
-    /// allow_forcing_extrapolation`: every cell may hold a forcing's end
-    /// value outside its range (D44), so it is identity. Omitted when off.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    allow_forcing_extrapolation: bool,
-    /// `--allow-degenerate-rates`, or the `--fit` config's `[config]
-    /// allow_degenerate_rates`: a collapsing rate is 0 in every cell instead of
-    /// an error, which changes each stored loglik, so it is identity. Omitted
-    /// when off, so a profile without it keeps its key.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    allow_degenerate_rates: bool,
-}
-
-/// The `method` level's identity: the METHOD, i.e. how each cell is fitted.
-#[derive(serde::Serialize)]
-struct ProfileMethodLevel<'a> {
-    algorithm: &'a str,
-    /// The knobs an IF2 cell reads; absent on an nl-* cell, which reads none
-    /// of them (and refuses them on the command line).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    if2: Option<ProfileIf2Knobs>,
-    /// The optimizer budget an nl-* cell reads; absent on an IF2 cell.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    nlopt: Option<ProfileNloptKnobs>,
-    /// Resolved per-parameter perturbation magnitudes, sorted by name.
-    rw_sd: &'a [(&'a str, Option<f64>)],
-    /// `--rw-sd auto` derives magnitudes from the model rather than the flag,
-    /// so it is its own discriminator rather than a value.
-    rw_sd_auto: bool,
-    /// The starts rule as identity hashes it
-    /// ([`crate::fit::starts::ChainStarts::identity_value`]): a sourced rule by
-    /// its kind, its source through the point's `deps` (gh#896).
-    init: serde_json::Value,
-    pf_max_substeps: Option<u64>,
-    /// `--binomial` (gh#747). Omitted when BTPE, so a profile without
-    /// `--binomial btrs` keeps its key.
-    #[serde(skip_serializing_if = "crate::fit::config_v2::is_btpe")]
-    binomial: sim::rng::BinomialAlgorithm,
-    /// The `[[simplex_groups]]` IF2 perturbs jointly, member names in order.
-    /// Omitted when empty, so a profile without groups keeps its key.
-    #[serde(skip_serializing_if = "<[_]>::is_empty")]
-    simplex_groups: &'a [Vec<String>],
-    /// An `nl-lbfgs` cell climbs the ODE forward-sensitivity gradient, so it
-    /// keys on the model's gradient maps too
-    /// ([`runid::inputs::model_ir_hash_with_gradients`]; proposal 2026-11-17
-    /// §1b, as `fit run`'s gradient-reading methods do). Absent for the
-    /// gradient-free cells, which keep their keys.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    gradients: Option<String>,
-}
-
-#[derive(serde::Serialize)]
-struct ProfileIf2Knobs {
-    particles: usize,
-    iterations: usize,
-    cooling: f64,
-    /// The iteration `cooling` is reached at — part of the schedule, so part
-    /// of the identity.
-    cooling_target_iters: usize,
-    dt: f64,
-    starts: usize,
-}
-
-#[derive(serde::Serialize)]
-struct ProfileNloptKnobs {
-    tolerance: f64,
-    max_evals: usize,
-    dt: f64,
-    starts: usize,
-}
+const PROFILE_SUPPLY: &str = "bind the streams in the fit file's [data.observations].";
 
 /// `--iterations` when not given: IF2 iterations per cell.
 pub(crate) const PROFILE_DEFAULT_ITERATIONS: usize = 50;
@@ -313,13 +188,6 @@ pub(crate) fn refuse_if2_flags_for_nlopt(flags: &If2Flags<'_>, algorithm: &str) 
     Ok(())
 }
 
-/// Neither `--rw-sd` nor `--fit` names what a cell estimates.
-pub(crate) const PROFILE_NO_ESTIMATED_SET: &str = "error: nothing names the parameters each cell \
-    estimates. Pass `--fit FIT.toml` (its [estimate], less the swept and pinned \
-    parameters, is the estimated set, with each IF2 step its `rw_sd` or the automatic \
-    default), or `--rw-sd NAME=auto,...` (or `--rw-sd auto`: every parameter not \
-    swept or pinned). An IF2 step is `NAME=SD`; an nl-* cell takes names only.";
-
 /// With `--fit`, an explicit `--rw-sd NAME=…` list that leaves out an
 /// `[estimate]` parameter (not swept, not pinned) would hold that parameter at
 /// its start in every cell, unannounced, while the config says it is
@@ -346,43 +214,6 @@ pub(crate) fn refuse_rw_sd_list_short_of_estimate(
         if left_out.len() == 1 { "it" } else { "them" },
         if left_out.len() == 1 { "it" } else { "them" },
     ))
-}
-
-/// Parameter-roles §4.2: holding a parameter the fit config estimates, from
-/// the command line, turns the config's problem into a conditional one while
-/// the config, the record of the problem, still says it is estimated. A
-/// `--fixed` name (`cli`) or a key of a plain `--fixed-file` (`files`; a fit
-/// artifact carrying `[provenance]` is not passed here) that is in
-/// `[estimate]` and not swept is refused, naming the fix: the parameter in
-/// `[fixed]` in a copy of the config. A swept name has its own refusal.
-pub(crate) fn refuse_fixed_over_fit_estimate(
-    fit_estimate: &indexmap::IndexMap<String, crate::fit::config_v2::EstimateSpecV2>,
-    swept: &[String],
-    cli: &[String],
-    files: &[(std::path::PathBuf, Vec<String>)],
-    fit_path: &str,
-) -> Option<String> {
-    let held = |n: &String| fit_estimate.contains_key(n) && !swept.contains(n);
-    let mut by: Vec<String> = Vec::new();
-    for n in cli.iter().filter(|n| held(n)) {
-        by.push(format!("`--fixed {n}=…` names {n}"));
-    }
-    for (path, names) in files {
-        let mut names: Vec<&String> = names.iter().filter(|n| held(n)).collect();
-        names.sort();
-        for n in names {
-            by.push(format!("`--fixed-file {}` names {n}", path.display()));
-        }
-    }
-    if by.is_empty() {
-        return None;
-    }
-    Some(format!(
-        "{}, which the --fit config '{fit_path}' lists in [estimate]. Holding an \
-         estimated parameter would make every cell solve a conditional problem the \
-         config does not state. To hold it, move it from [estimate] to [fixed] in a \
-         copy of the config and profile that copy (parameter-roles proposal §4.2).",
-        by.join("; ")))
 }
 
 /// A profile cell's IF2 cooling schedule: the one `fit run` uses, from the
@@ -428,25 +259,120 @@ pub(crate) fn profile_if2_config(
     }
 }
 
-/// `camdl profile`, under the compile settings `compile` (`--no-licm`), which
-/// every compile of the model is given. The arguments are read once, into the
-/// resolved configuration ([`crate::profile_config::resolve`]); the run is
-/// built from it and does not see them.
-pub fn cmd_profile(a: &crate::args::ProfileArgs, compile: crate::util::CompileSettings) {
+/// `camdl profile`: its inputs split by class, the configuration resolved
+/// from the declared inputs ([`crate::profile_config::resolve`]), and the run
+/// built from it, which does not see the arguments.
+pub fn cmd_profile(inv: crate::args::ProfileInvocation) {
     // profile has no `--no-color`: its painters follow the environment and
     // whether each stream is a terminal.
     let out = crate::out::Out::new(false);
-    let (config, outputs, execution, label, _forcing_route) = crate::profile_config::resolve(a, compile, &out);
-    run_profile(&out, config, outputs, execution, label);
+    crate::profile_config::refuse_removed(&inv.args, &out);
+    // A fit file is read once, here: its `store` key comes below `--store`
+    // and above `CAMDL_STORE`, as `fit run` reads it, so the profile's problem
+    // is stored where that fit's is.
+    let fit_file = crate::profile_config::read_fit_file(inv.args.fit.as_deref()).unwrap_or_else(|e| {
+        out.fail(format!("error: --fit {}: {e}", inv.args.fit.as_deref().unwrap_or(std::path::Path::new("")).display()))
+    });
+    let file_store = fit_file.as_ref().and_then(|f| f.config.problem.store.as_ref()).map(std::path::PathBuf::from);
+    let (declared, execution, exports, request, given) = store::Inputs::split(inv).into_parts();
+    let (declared, no_licm) = declared.into_parts();
+    let crate::args::ProfileInvocationExecution { args: execution, no_ir_cache } = execution;
+    let crate::args::ProfileExecution {
+        model_overrides: (),
+        scenario: (),
+        inference: crate::args::ProfileCoreExecution { parallel, forcing_extrapolation: (), time_format },
+        allow_nonconverged_source,
+        backend,
+    } = execution;
+    let compile = crate::util::CompileSettings::resolve(no_licm, no_ir_cache);
+    let (exports,) = exports.into_parts();
+    let ((), (), _inference_exports, output, format) = exports.into_parts();
+    let (request,) = request.into_parts();
+    let ((), (), _inference_request, label, force, root) = request.into_parts();
+    let request = crate::camdl_store::store_request(label, force, root.or(file_store));
+    let execution_record = crate::args::ProfileInvocationExecution {
+        args: crate::args::ProfileExecution {
+            model_overrides: (),
+            scenario: (),
+            inference: crate::args::ProfileCoreExecution { parallel, forcing_extrapolation: (), time_format },
+            allow_nonconverged_source,
+            backend: backend.clone(),
+        },
+        no_ir_cache,
+    };
+    let gates = crate::profile_config::ProfileGates { backend, allow_nonconverged_source };
+    let (config, _forcing_route) = crate::profile_config::resolve(declared, gates, compile, &out, fit_file, &crate::camdl_store::root_of(&request));
+    run_profile(
+        &out,
+        config,
+        TableExport { output, format },
+        crate::profile_config::CellExecution { parallel, time_format },
+        StoreSide { request, given, execution: execution_record },
+    );
+}
+
+/// The store-class inputs of one `profile`, and what its records hold.
+struct StoreSide {
+    request: store::StoreRequest,
+    given: store::Given,
+    execution: crate::args::ProfileInvocationExecution,
+}
+
+/// The profile table's export: `--output`, else stdout, in `--format`.
+struct TableExport {
+    output: Option<std::path::PathBuf>,
+    format: crate::args::ProfileTableFormat,
+}
+
+/// Whether the resolver's estimated set and values are the stored problem's:
+/// the same `[estimate]`, in order, and each `[fixed]` value of the problem
+/// equal, bit for bit, to the resolved model's. A parameter the problem
+/// neither estimates nor fixes takes the compile's value or its scenario's,
+/// which only the resolver computes (the problem stores the scenario's
+/// selection, not its values), so there is no second value to compare.
+fn resolution_matches_problem(
+    estimated: &indexmap::IndexSet<String>,
+    resolved_value: impl Fn(&str) -> Option<f64>,
+    problem_estimate: &indexmap::IndexMap<String, crate::fit::config_v2::EstimateSpecV2>,
+    problem_fixed: &indexmap::IndexMap<String, f64>,
+) -> Result<(), String> {
+    if !estimated.iter().eq(problem_estimate.keys()) {
+        return Err(format!(
+            "the parameters resolved as estimated ({}) are not the stored problem's [estimate] ({})",
+            estimated.iter().cloned().collect::<Vec<_>>().join(", "),
+            problem_estimate.keys().cloned().collect::<Vec<_>>().join(", ")));
+    }
+    for (name, &value) in problem_fixed {
+        let resolved = resolved_value(name);
+        if resolved.map(f64::to_bits) != Some(value.to_bits()) {
+            return Err(format!(
+                "{name} resolved to {} where the stored problem's [fixed] holds {value}",
+                resolved.map_or("no value".to_string(), |v| v.to_string())));
+        }
+    }
+    Ok(())
+}
+
+/// A fit problem's `[fixed]` values, its scenario's values expanded into
+/// them, and its `[estimate]` names, as the resolver reads a fit config.
+fn named_fixed_and_estimate(
+    problem: &crate::fit::config_v2::Problem,
+    model: &ir::Model,
+) -> Result<(indexmap::IndexMap<String, f64>, indexmap::IndexSet<String>), String> {
+    let mut fixed = problem.fixed.clone();
+    fixed.expand_from_scenario(model, &problem.estimate)?;
+    let fixed = fixed.resolve_with_model(model)
+        .map_err(|e| format!("--fit toml [fixed].resolve_with_model: {e}"))?;
+    Ok((fixed, problem.estimate.keys().cloned().collect()))
 }
 
 /// The cells of one resolved `profile`, their stored points and the table.
 fn run_profile(
     out: &crate::out::Out,
     config: crate::profile_config::ResolvedProfileConfig,
-    outputs: crate::profile_config::ProfileOutputs,
-    execution: crate::profile_config::ProfileExecution,
-    label_arg: Option<String>,
+    table_export: TableExport,
+    execution: crate::profile_config::CellExecution,
+    store_side: StoreSide,
 ) {
     let crate::profile_config::ResolvedProfileConfig {
         model_path: ir_path,
@@ -460,10 +386,7 @@ fn run_profile(
         fixed_cli: fixed_cli_vec,
         fixed_files: fixed_files_vec,
         tables,
-        data: cli_data_specs,
-        obs: obs_name_arg,
         dt: dt_flag,
-        time_format,
         sweep,
         particles: n_particles,
         iterations: n_iterations,
@@ -476,11 +399,43 @@ fn run_profile(
         seeds,
         pf_max_substeps,
         binomial,
-        engine,
     } = config;
-    let crate::profile_config::ProfileOutputs { output: output_tsv_path, format } = outputs;
-    let crate::profile_config::ProfileExecution { parallel } = execution;
+    let crate::profile_config::CellExecution { parallel, time_format } = execution;
     let cooling = cooling_schedule.fraction;
+    // The model as named, whose stem labels the points.
+    let ir_path_named = ir_path.clone();
+
+    // ── The store, and the problem every point is of ──────────────────────
+    let StoreSide { request, given, execution: execution_record } = store_side;
+    let store = crate::camdl_store::open(&request)
+        .unwrap_or_else(|e| out.fail(format!("error: the run store at {}: {e}", crate::camdl_store::root_of(&request).display())));
+    let info = store::RunInfo::new(&given, &execution_record, &request)
+        .unwrap_or_else(|e| out.fail(format!("error: {e}")));
+    let named_fit = fit.unwrap_or_else(|| out.fail("error: internal: a profile resolved without --fit"));
+    let posed = crate::profile_store::pose_problem(
+        out, &store, &info, &named_fit, &ir_path, compile,
+        &crate::profile_store::ProblemOverrides {
+            fixed: &fixed_cli_vec,
+            fixed_files: &fixed_files_vec,
+            swept: &sweep.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
+            tables: &tables,
+            scenario: &scenario_flags,
+            allow_degenerate_rates: eval.allow_degenerate_rates,
+            allow_forcing_extrapolation: forcing.allowed(),
+            dt: dt_flag,
+        },
+    ).unwrap_or_else(|e| out.fail(format!("error: {e}")));
+    let crate::profile_store::PosedProblem { dep: problem_dep, fit: posed_fit, model_ir } = posed;
+    // `nl-lbfgs` climbs the ODE forward-sensitivity gradient, which reads the
+    // compile with the state Jacobian; every other cell runs the problem's.
+    let jacobian = matches!(profile_algo, ProfileAlgo::Nlopt(sim::inference::deterministic::NloptAlgorithm::Lbfgs))
+        .then(|| crate::profile_store::jacobian_compile(out, &store, &info, &posed_fit, &model_ir, compile)
+            .unwrap_or_else(|e| out.fail(format!("error: {e}"))));
+    let (ir_path, jacobian_model) = match jacobian {
+        Some((ir, dep)) => (ir, Some(dep)),
+        None => (model_ir, None),
+    };
+    let fit = Some(posed_fit);
     let focal_names: Vec<String> = sweep.iter().map(|s| s.name.clone()).collect();
 
     struct FocalGrid { name: String, values: Vec<f64>, param_idx: usize }
@@ -495,8 +450,9 @@ fn run_profile(
     // Load model (pre-resolution). `mut` because the gh#34
     // `[estimate].start` fall-back below seeds values into
     // `model_pre.parameters[i].value` before the resolver call —
-    // same pattern as `fit/runner.rs:144-180`.
-    let (mut model_pre, model_json) = crate::util::load_model(&ir_path, compile)
+    // same pattern as `fit/runner.rs:144-180`. It is the stored problem's
+    // compile, or for `nl-lbfgs` the compile with the state Jacobian.
+    let (mut model_pre, _) = crate::util::load_ir(&ir_path)
         .unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
     // The model before any value is written into it, for the partition.
     let model_declared = model_pre.clone();
@@ -519,11 +475,9 @@ fn run_profile(
     // `[data.holdout]` files are checked to lie after them.
     let mut fit_holdout_after: Option<crate::fit::config_v2::TimeSpecToml> = None;
     let mut fit_holdout_files: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
-    let mut fit_tables = crate::external_inputs::ExternalBindings::none();
-    let (fit_estimate, fit_toml_hash, fit_toml_fixed_indexmap, fit_scenario, fit_simplex_groups,
+    let (fit_estimate, fit_toml_fixed_indexmap, fit_scenario, fit_simplex_groups,
          objective, fit_fixed_via):
         (indexmap::IndexMap<String, crate::fit::config_v2::EstimateSpecV2>,
-         Option<String>,
          indexmap::IndexMap<String, f64>,
          (Option<String>, Vec<String>, Vec<String>),
          Vec<crate::fit::config_v2::SimplexGroup>,
@@ -544,31 +498,20 @@ fn run_profile(
             .unwrap_or_else(|e| {
                 out.fail(format!("error: --fit toml [fixed].resolve_with_model: {}", e));
             });
-        // Hash the config as the user wrote it (the fit file, or a stored
-        // fit's `fit.toml.original`, checked against its `fit_toml_hash` by
-        // `resolve_fit_problem`), as `fit run`'s `fit_toml_hash` does; it
-        // is keyed in the base. What the resolved config adds to it reaches
-        // the base too: a flag's `[config]` value as
-        // `allow_forcing_extrapolation`, the folder's `[fixed]` values through
-        // `base_params` (the hash of every parameter's resolved value).
-        // Path-independent: only the contents participate, matching the
-        // `data_hash` convention.
-        let hash = crate::hashing::sha256_hex(f.original.as_bytes());
         // The likelihood every cell scores is the fit's own (`ic_free`), read
         // through the same function `fit run` uses, so a profile curve is on
         // the scale of the fit it profiles.
         let objective = fit_cfg.likelihood_objective();
-        fit_tables = fit_cfg.external_bindings();
         // The fit's holdout, applied once the data are loaded (gh#1059).
         if let Some(data) = fit_cfg.data.as_ref() {
             fit_holdout_after = data.holdout_after.clone();
             fit_holdout_files = data.holdout.clone().unwrap_or_default();
         }
-        (fit_cfg.estimate, Some(hash), fixed_resolved,
+        (fit_cfg.estimate, fixed_resolved,
          (fit_cfg.scenario, fit_cfg.enable, fit_cfg.disable),
          fit_cfg.simplex_groups, objective, fixed_via)
     } else {
-        (indexmap::IndexMap::new(), None, indexmap::IndexMap::new(),
+        (indexmap::IndexMap::new(), indexmap::IndexMap::new(),
          (None, Vec::new(), Vec::new()), Vec::new(),
          crate::fit::config_v2::LikelihoodObjective::Full, Ok(Vec::new()))
     };
@@ -632,23 +575,6 @@ fn run_profile(
             .collect();
         if !refusals.is_empty() {
             out.fail(format!("error: {}", refusals.join("\n\nerror: ")));
-        }
-    }
-
-    // Parameter-roles §4.2: a `--fixed` or plain `--fixed-file` naming an
-    // `[estimate]` parameter of the fit config is refused, not resolved into a
-    // conditional problem the config does not state (gh#1059).
-    if let Some(f) = fit.as_ref() {
-        let files: Vec<(std::path::PathBuf, Vec<String>)> = fixed_files_vec.iter()
-            .filter(|p| !crate::params_resolver::carries_fit_provenance(p))
-            .filter_map(|p| crate::util::load_params_toml(&p.to_string_lossy()).ok()
-                .map(|m| (p.clone(), m.into_keys().collect())))
-            .collect();
-        let cli: Vec<String> = fixed_cli_vec.iter().map(|(n, _)| n.clone()).collect();
-        if let Some(msg) = refuse_fixed_over_fit_estimate(
-            &fit_estimate, &focal_names, &cli, &files, &f.handle,
-        ) {
-            out.fail(format!("error: {msg}"));
         }
     }
 
@@ -728,23 +654,10 @@ fn run_profile(
     // problem than a missing flag.
     let model_obs_names: Vec<String> = model_pre.observations.iter()
         .map(|o| o.name.clone()).collect();
-    let bound_streams: Option<Vec<(String, std::path::PathBuf)>> = if cli_data_specs.is_empty() {
-        fit.as_ref().map(|f| {
-            out.say("profile: no --data flags supplied, reading bindings \
-                from --fit toml [data.observations]");
-            crate::pfilter::data_observations_of(
-                &f.config.problem, &model_pre, &f.handle,
-            ).unwrap_or_else(|e| {
-                out.fail(format!("error: --fit toml fallback for --data: {}", e));
-            })
-        })
-    } else {
-        if fit.is_some() {
-            out.say("profile: --data on CLI overrides --fit toml [data.observations]");
-        }
-        Some(crate::util::resolve_data_specs(&cli_data_specs, &model_obs_names, obs_name_arg.as_deref())
-            .unwrap_or_else(|e| { out.fail(format!("error: {}", e)); }))
-    };
+    let bound_streams: Option<Vec<(String, std::path::PathBuf)>> = fit.as_ref().map(|f| {
+        crate::pfilter::data_observations_of(&f.config.problem, &model_pre, &f.handle)
+            .unwrap_or_else(|e| out.fail(format!("error: --fit {}: {e}", f.handle)))
+    });
 
     // gh#616: profile binds observation data, so it RESOLVES a model's
     // observation anchors instead of letting `CompiledModel::new` refuse them.
@@ -766,52 +679,26 @@ fn run_profile(
         .transpose()
         .unwrap_or_else(|e| { out.fail(format!("error: {e}")); })
         .flatten();
-    let moved_any_anchor = match &bound_streams {
-        Some(bound) => crate::obs_anchor::resolve_from_bindings(out, &mut model_pre, bound, dt,
-            fit_holdout_after.as_ref(), start.as_ref())
-            .unwrap_or_else(|e| { out.fail(format!("error: {e}")); }),
+    match &bound_streams {
+        Some(bound) => {
+            crate::obs_anchor::resolve_from_bindings(out, &mut model_pre, bound, dt,
+                fit_holdout_after.as_ref(), start.as_ref())
+                .unwrap_or_else(|e| { out.fail(format!("error: {e}")); });
+        }
         None => {
-            let moved = match start.as_ref() {
-                Some(start) => match crate::obs_anchor::apply_start(&mut model_pre, start, None) {
-                    Ok(r) => { crate::obs_anchor::report(out, &[r], &model_pre); true }
+            if let Some(start) = start.as_ref() {
+                match crate::obs_anchor::apply_start(&mut model_pre, start, None) {
+                    Ok(r) => crate::obs_anchor::report(out, &[r], &model_pre),
                     Err(e) => out.fail(format!("error: {e}")),
-                },
-                None => false,
-            };
+                }
+            }
             if let Some(msg) =
                 crate::obs_anchor::refuse_without_data(&model_pre, PROFILE_SUPPLY)
             {
                 out.fail(format!("error: {msg}"));
             }
-            moved
         }
-    };
-    // The run is content-addressed by the IR TEXT (`model_identity_from_ir`),
-    // not by `model_pre`, so the substitution has to reach the text too — else
-    // two data vintages that fork a forcing differently would share a
-    // `model_identity`. Re-emitted only when something actually moved, so an
-    // unanchored model's bytes are untouched.
-    //
-    // The re-emitted text carries the starts rule's values, as it did when
-    // they were written into `model_pre` before the resolver: they now enter
-    // the resolver as their own tier instead, and are seeded into this copy
-    // only so the model identity of an anchored profile does not move.
-    let model_json = if moved_any_anchor {
-        let mut ident_model = model_pre.clone();
-        if let Some((_, values)) = &starts_values {
-            for p in &mut ident_model.parameters {
-                if let Some((_, v)) = values.iter().find(|(n, _)| *n == p.name) {
-                    p.value = p.value.with_value(*v);
-                }
-            }
-        }
-        ir::reemit_with_model(&model_json, &ident_model).unwrap_or_else(|e| {
-            out.fail(format!("error: re-emitting the anchor-resolved IR: {e}"));
-        })
-    } else {
-        model_json
-    };
-
+    }
     // gh#561: every profile point runs the filter, whose window is the
     // observation times — the model horizon is never read here. A scenario's
     // own `simulate { to }` therefore moves nothing, so refuse it rather than
@@ -830,9 +717,17 @@ fn run_profile(
     }
 
     // Run the unified resolver.
-    let fit_toml_estimate: indexmap::IndexSet<String> =
-        fit_estimate.keys().cloned().collect();
-    let external = fit_tables.overlay(crate::external_inputs::ExternalBindings::from_cli(tables));
+    // The resolver reads the fit as named, before the command line's
+    // `--fixed` and `--fixed-file` were written into the stored problem, so it
+    // reports each value they replace as the other commands do (run spec
+    // §1.3). The cells compute from its model, and the points are keyed on
+    // the stored problem, so the two must agree: `resolution_matches_problem`
+    // refuses any difference in the estimated set or in a `[fixed]` value.
+    let (named_fixed, named_estimate) = named_fixed_and_estimate(&named_fit.config.problem, &model_pre)
+        .unwrap_or_else(|e| out.fail(format!("error: {e}")));
+    drop(named_fit);
+    // The stored compile has the problem's tables bound, `--table` among them.
+    let external = crate::external_inputs::ExternalBindings::none();
     let resolved = crate::params_resolver::resolve_parameters_with_starts(
         crate::params_resolver::ParameterInputs {
             model: &model_pre,
@@ -845,14 +740,19 @@ fn run_profile(
             point_overrides: &[],
             fixed_cli: &fixed_cli_vec,
             fixed_files: &fixed_files_vec,
-            fit_toml_fixed: &fit_toml_fixed_indexmap,
-            fit_toml_estimate: &fit_toml_estimate,
+            swept: &focal_names,
+            fit_toml_fixed: &named_fixed,
+            fit_toml_estimate: &named_estimate,
             external: &external,
         },
         starts_values.as_ref().map(|(origin, values)|
             crate::params_resolver::StartsValues { origin, values }),
     ).unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
     let mut resolved = resolved;
+    let resolved_value = |name: &str| resolved.model.parameters.iter().find(|p| p.name == name).and_then(|p| p.value.resolved_value());
+    if let Err(e) = resolution_matches_problem(&resolved.estimate_set, resolved_value, &fit_estimate, &fit_toml_fixed_indexmap) {
+        out.fail(format!("error: internal: {e}"));
+    }
     resolved.attribute_seeded_starts(&seeded);
     crate::params_resolver::emit_notices(out, &[&resolved]);
     // The grid writes each focal value straight over the parameter, so a
@@ -927,9 +827,10 @@ fn run_profile(
     // ROOT (`[data.observations] prevalence = FILE`, source `prevalence`) fans
     // out to every leaf exactly as `fit run` binds it. `bound_streams` (the
     // CLI/toml key-space bindings) is mapped to the by-source `effective` map at
-    // the boundary; it is retained below only for the CAS data-hash, whose
-    // key-space (leaf name / family root) must not change. The typo guard (a
+    // the boundary; it is retained below for the data tables the problem
+    // holds, by binding name (leaf name / family root). The typo guard (a
     // binding key matching no source or name) lives in the adapter.
+    log::debug!("profile: the cells bind the stored problem's data");
     let time_opts = crate::caltime_load::TimeOpts {
         origin: model.origin.as_deref(),
         time_unit: &model.time_unit,
@@ -952,10 +853,6 @@ fn run_profile(
         &time_opts,
     ).unwrap_or_else(|e| { out.fail(format!("error: --fit config: {e}")); });
     partition_lines.say();
-    // The training rows a `holdout_after` cutoff left, for the base identity.
-    let holdout_training_rows: Option<Vec<(String, usize)>> = fit_holdout_after.as_ref()
-        .map(|_| training_partition.streams().iter()
-            .map(|p| (p.stream.clone(), p.rows)).collect());
     let streams = streams;
 
     if streams.len() > 1 {
@@ -1046,7 +943,7 @@ fn run_profile(
             param_idx: idx,
         });
     }
-    // Axes sorted by name, the order the point identity uses. Each leaf's
+    // Axes sorted by name, the order of a point's focal values. Each point's
     // `mle.toml` lists the focal values in this order, so the bytes stored
     // under a run id do not depend on the order of the `--sweep` flags.
     focal_grids.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1284,6 +1181,24 @@ fn run_profile(
     let simplex_names: Vec<Vec<String>> =
         fit_simplex_groups.iter().map(|g| g.params.clone()).collect();
 
+    // A `--starts from_params` file starts the estimated parameters. A value
+    // for a parameter the profile neither estimates, fixes nor sweeps would
+    // set it in every cell outside the problem, so it is refused.
+    if let Some((crate::params_resolver::StartsOrigin::Params { path }, values)) = &starts_values {
+        let stray: Vec<&str> = values.iter()
+            .map(|(n, _)| n.as_str())
+            .filter(|n| !if2_params.iter().any(|p| p.name == *n)
+                && !fixed_names.contains(*n) && !focal_names.iter().any(|f| f == n))
+            .collect();
+        if !stray.is_empty() {
+            out.fail(format!(
+                "error: --starts from_params={}: {} {} neither estimated nor fixed by the profile's problem; \
+                 a starts file starts the estimated parameters only. Drop {} from the file, or give {} a \
+                 value in the fit file's [fixed].",
+                path.display(), stray.join(", "), if stray.len() == 1 { "is" } else { "are" },
+                if stray.len() == 1 { "it" } else { "them" }, if stray.len() == 1 { "it" } else { "them" }));
+        }
+    }
     let if2_params = Arc::new(if2_params);
 
     // ── Prior resolution (gh#73) ─────────────────────────────────────
@@ -1345,9 +1260,9 @@ fn run_profile(
             out.fail(format!("error: {e}"));
         }
     }
-    // A stored fit a sourced rule names is read in the run store, where `fit
-    // run` stores fits.
-    let fit_store = crate::camdl_store::open_existing(&crate::camdl_store::read_root());
+    // A stored fit a sourced rule names is read in the run store this
+    // profile is stored in.
+    let fit_store = crate::camdl_store::open_existing(&crate::fit_store::reader_root());
     let resolved_starts = crate::fit::chain_starts::resolve_starts(
         &init_method, allow_nonconverged_source, fit_store.as_ref())
         .unwrap_or_else(|e| {
@@ -1375,8 +1290,8 @@ fn run_profile(
                 out.fail(format!("error: profile --starts {}: {}", init_method, e));
             })
     };
-    let per_start_params: Option<Arc<Vec<Vec<sim::inference::if2::EstimatedParam>>>> =
-        Some(Arc::new(drawn_starts.to_estimated_params(&if2_params)));
+    let per_start_params: Arc<Vec<Vec<sim::inference::if2::EstimatedParam>>> =
+        Arc::new(drawn_starts.to_estimated_params(&if2_params));
 
     let process = Arc::new(ChainBinomialProcess::new(compiled.clone()));
     // Build the multi-stream observation model from the loaded `ObsStream`s via
@@ -1429,66 +1344,6 @@ fn run_profile(
         grid_points = expanded;
     }
 
-    // ── Resolve content-bearing inputs ─────────────────────────────────
-    //
-    // Each profile leaf's identity is resolved per (point, seed, start)
-    // by `profile_cas::resolve_profile_point`; the values gathered here
-    // (model + data hashes, base params, fixed list, priors, fit.toml,
-    // method config) are its content-bearing inputs.
-    let model_identity = crate::resolve::model_identity_from_ir(&model_json);
-    let base_params_hash = {
-        let mut lines: Vec<String> = model.parameters.iter()
-            .map(|p| format!("{}={}", p.name,
-                p.value.resolved_value().unwrap_or(base_params[compiled.param_index[p.name.as_str()]])))
-            .collect();
-        lines.sort();
-        ContentHash::from_bytes(lines.join("\n").as_bytes()).full().to_string()
-    };
-    // The seeds (`--seeds`, else the single `--seed`) are resolved.
-
-    let root = output_root(None, None);
-    let stem = crate::hashing::path_stem_slug(&ir_path);
-
-    // gh#38: obs_family is the resolved canonical name we used to pick
-    // the IR observation set. For an explicit `--obs`, it's the
-    // user-supplied name. For an implicit single-stream model it's the
-    // sole IR observation's name (so two profiles on the same model
-    // with one obs and the same params still hit the cache).
-    let obs_family_key = obs_name_arg.clone()
-        .unwrap_or_else(|| streams[0].name.clone());
-
-    // gh#39 + gh#90: hash every bound stream's data file bytes at
-    // launch. Each (stream_name, content_hash) pair participates in
-    // the CAS key (sorted by stream name) so:
-    //   - editing any one stream's data file invalidates the cache
-    //     (gh#39 invariant generalised to multi-stream),
-    //   - adding or removing a stream binding invalidates the cache
-    //     (gh#90: switching --data cases=... → --data cases=...
-    //     --data deaths=... is a real content change),
-    //   - reordering --data flags on the CLI does NOT invalidate the
-    //     cache (sort by name).
-    // De-duplicate identical file paths: when a wide TSV serves
-    // multiple streams (`--data cases=wide.tsv --data deaths=wide.tsv`
-    // or family-root single-file expansion), each stream still records
-    // its own (name, hash) pair so adding a stream invalidates even
-    // when the file bytes are unchanged.
-    let mut data_hashes: Vec<(String, String)> = Vec::with_capacity(bound_streams.len());
-    let mut file_cache: HashMap<std::path::PathBuf, String> = HashMap::new();
-    for (sname, spath) in &bound_streams {
-        let h = if let Some(h) = file_cache.get(spath) {
-            h.clone()
-        } else {
-            let bytes = std::fs::read(spath).unwrap_or_else(|e| {
-                out.fail(format!("error: cannot read --data file '{}': {}",
-                    spath.display(), e));
-            });
-            let h = crate::hashing::sha256_hex(&bytes);
-            file_cache.insert(spath.clone(), h.clone());
-            h
-        };
-        data_hashes.push((sname.clone(), h));
-    }
-
     // gh#73: the per-parameter source list is stored in the same
     // order the resolver emitted (declaration order of estimated
     // params). The `inner_hash` sort key normalises this to a
@@ -1510,16 +1365,10 @@ fn run_profile(
             (r.param.clone(), source_str.to_string())
         })
         .collect();
-    // The CLI `--fixed` set is the union of CLI flags + fit-toml's
-    // [fixed] block (CLI wins per spec for collisions, but both
-    // contribute to the canonical fixed list). Sort for stable hashing.
-    let mut fixed_for_cas: Vec<String> = fixed_names.iter().cloned().collect();
-    fixed_for_cas.sort();
-
     // gh#83/gh#85 step 9: build parameters_provenance from the
     // unified resolver output (populated upstream). Each entry maps a
     // resolved parameter name to the value + source + role + audit
-    // fields. NOT part of the CAS hash (provenance is metadata).
+    // fields. Provenance: no identity holds it.
     //
     // The resolver knows only `[estimate]` and the pins, so on its own it
     // records every parameter of a CLI-only profile as `fixed`. The roles
@@ -1540,11 +1389,10 @@ fn run_profile(
     let init_provenance: Option<crate::run_meta::InitProvenance> =
         Some(crate::run_meta::InitProvenance::from_chain_starts(&drawn_starts));
 
-    // Run-level provenance recorded into every profile-point leaf's
-    // `RunRecord.inputs` — display payload, NOT identity-bearing, so it
-    // does not affect the leaf `run_id`. Folds forward the audit data
-    // the old per-run `ProfileMeta` carried: per-parameter resolution
-    // provenance (gh#83/gh#85) and per-chain init provenance.
+    // Run-level provenance recorded in every point's `provenance.json`, a
+    // provenance file no identity holds: per-parameter resolution provenance,
+    // the notices, per-chain init provenance, the prior sources and the
+    // training partition.
     let run_provenance_json = serde_json::json!({
         "parameters_provenance":
             serde_json::to_value(&parameters_provenance).unwrap_or(serde_json::Value::Null),
@@ -1557,6 +1405,18 @@ fn run_profile(
                 .unwrap_or(serde_json::Value::Null),
         "init_provenance":
             serde_json::to_value(&init_provenance).unwrap_or(serde_json::Value::Null),
+        // Where each estimated parameter's prior came from, and the model
+        // prior a `--fit` prior displaced.
+        "resolved_priors": resolved_priors_kv.iter()
+            .map(|(n, s)| crate::run_meta::ResolvedPriorEntry {
+                param: n.clone(), source: s.clone(),
+                overridden_model_prior: prior_overrides.iter()
+                    .find(|o| &o.param == n).map(|o| o.model.clone()) })
+            .collect::<Vec<_>>(),
+        // Which rows each stream trained on.
+        "training_partition": ir::caltime::CalendarAxis::from_model(&model)
+            .map(|calendar| training_partition.record(&calendar))
+            .ok(),
     });
 
     // Each grid point's partition: the focal parameters fixed at the point's
@@ -1575,87 +1435,43 @@ fn run_profile(
         serde_json::to_value(&field).unwrap_or(serde_json::Value::Null)
     }).collect();
 
-    // gh#89: lowercased algorithm tag — a cache-key input for the
-    // method `method` and the `method`-segment display label.
-    let algorithm = format!("{:?}", profile_algo).to_lowercase();
+    // A start drawn from a stored run is keyed by its values; the run is
+    // recorded as lineage.
+    if let Some(src) = &resolved_starts.source {
+        if let crate::fit_store::StartInput::Run { source } = &src.input {
+            info.lineage(source);
+        }
+    }
+    let finite = |what: &str, x: f64| store::Finite::new(x).unwrap_or_else(|e| out.fail(format!("error: {what}: {e}")));
+    let stem = crate::hashing::path_stem_slug(&ir_path_named).unwrap_or_else(|| "model".to_string());
 
-    // ── The profile point's identity ──
-    // A profile point is a store leaf at `profiles/<base>/<point>/<method>/
-    // <seed>/<start>/`; the base is a path segment with no record of its own.
-    // `base_config` below is the inference problem without the method config,
-    // which keys the `method` level; the sweep grid and the chain-start source
-    // join it in the base (`profile_cas::resolve_profile_point`).
-    let mut priors_blob = resolved_priors_kv.clone();
-    priors_blob.sort_by(|a, b| a.0.cmp(&b.0));
-    let base_config_hash = crate::profile_cas::canonical_config_hash(&ProfileBaseLevel {
-        base_params: &base_params_hash,
-        fixed: &fixed_for_cas,
-        obs_family: &obs_family_key,
-        fit_toml: &fit_toml_hash,
-        priors: &priors_blob,
-        objective,
-        training_rows: holdout_training_rows.as_deref(),
-        allow_forcing_extrapolation: forcing.allowed(),
-        allow_degenerate_rates,
-    }, &[]).unwrap_or_else(|e| {
-        out.fail(format!("error: profile base identity: {e}"));
-    });
-    // `canonical_config_hash` refuses a non-finite float anywhere in the level
-    // before serializing it (`json!` would write NaN and Inf alike as `null`),
-    // so every float field of either level is covered without a list.
-    //
-    // Each method setting below changes what a cell computes, so each is in
-    // the key:
-    //
-    //  - rw_sd: the resolved per-parameter IF2 perturbation magnitudes (the
-    //    flag over the fit config), sorted by name; they drive the sampler.
-    //    `auto` is its own discriminator, since it derives the values from the
-    //    model rather than from the flag. An nl-* cell reads the estimated
-    //    set, not the step sizes, so it keys none.
-    //  - init: which starting points seed each start. A sourced rule is keyed
-    //    by its kind; the source it read is the dep `profile_deps` (run id and
-    //    content digest), not the handle as typed.
-    //  - pf_max_substeps: a degeneracy budget whose trip a cell records as a
-    //    log-likelihood of -inf, so a cell under one budget is not a cell
-    //    under another.
-    let mut rw_sd_blob: Vec<(&str, Option<f64>)> = specs.iter()
-        .map(|s| (s.name.as_str(),
-                  if matches!(profile_algo, ProfileAlgo::If2) { s.rw_sd } else { None }))
-        .collect();
-    rw_sd_blob.sort_by(|a, b| a.0.cmp(b.0));
-    let method_config_hash = crate::profile_cas::canonical_config_hash(&ProfileMethodLevel {
-        algorithm: &algorithm,
-        if2: matches!(profile_algo, ProfileAlgo::If2).then(|| ProfileIf2Knobs {
-            particles: n_particles, iterations: n_iterations,
-            cooling, cooling_target_iters: cooling_schedule.target_iters, dt, starts: n_starts,
-        }),
-        nlopt: matches!(profile_algo, ProfileAlgo::Nlopt(_)).then(|| ProfileNloptKnobs {
-            tolerance: nl_tolerance, max_evals: nl_max_evals,
-            dt, starts: n_starts,
-        }),
-        rw_sd: &rw_sd_blob,
-        rw_sd_auto,
-        simplex_groups: &simplex_names,
-        init: init_method.identity_value(),
-        pf_max_substeps,
-        binomial,
-        gradients: profile_algo.reads_gradients()
-            .then(|| runid::inputs::model_ir_hash_with_gradients(&model).to_hex().to_string()),
-    }, &[]).unwrap_or_else(|e| {
-        out.fail(format!("error: profile method identity: {e}"));
-    });
-    // The chain-start source's content is a dep of the base, as in `fit run`:
-    // the resolved `init` in the method level names which source, and the dep
-    // digests what is in it, so rewriting a draws.tsv or params.toml in place,
-    // or re-running the fit a `from_mle` names, re-keys the profile.
-    let profile_deps: Vec<runid::inputs::ArtifactRef> = match &resolved_starts.source {
-        Some(src) => vec![crate::profile_cas::start_source_dep(&resolved_starts.rule, src)
-            .unwrap_or_else(|e| out.fail(format!("error: profile --starts {init_method}: {e}")))],
-        None => Vec::new(),
+    // How each cell is fitted.
+    let algorithm = profile_algo.method_kind().as_str().to_string();
+    let is_if2 = matches!(profile_algo, ProfileAlgo::If2);
+    let method_identity = crate::profile_store::ProfileMethod {
+        algorithm: algorithm.clone(),
+        cell: match profile_algo {
+            ProfileAlgo::If2 => crate::profile_store::CellSettings::If2 {
+                particles: n_particles as u64,
+                iterations: n_iterations as u64,
+                cooling: finite("--cooling", cooling),
+                cooling_target_iters: cooling_schedule.target_iters as u64,
+                max_substeps: pf_max_substeps.unwrap_or(sim::inference::degeneracy::ITER_BUDGET),
+                binomial: binomial.into(),
+            },
+            ProfileAlgo::Nlopt(_) => crate::profile_store::CellSettings::Nlopt {
+                tolerance: finite("the optimizer's tolerance", nl_tolerance),
+                max_evals: nl_max_evals as u64,
+            },
+        },
+        dt: finite("dt", dt),
+        estimated: if2_params.iter()
+            .map(|p| crate::profile_store::EstimatedSetting::of(p, is_if2))
+            .collect::<Result<Vec<_>, String>>()
+            .unwrap_or_else(|e| out.fail(format!("error: {e}"))),
+        simplex_groups: simplex_names.clone(),
+        jacobian_model,
     };
-    let store = runid::FsCasStore::new(&root);
-    let ir_version_str = ir::IR_VERSION.trim().to_string();
-    let stem_label = stem.clone().unwrap_or_else(|| "profile".to_string());
 
     let total_jobs = grid_points.len() * n_starts * seeds.len();
     let dim_str = focal_grids.iter()
@@ -1681,246 +1497,103 @@ fn run_profile(
             nl_tolerance, nl_max_evals,
             if nl_from_fit { " (the --fit method's)" } else { "" })),
     }
+    log::debug!("profile: cells run on backend {}", method.backend.as_str());
+    log::debug!("profile: a starts source's verdict is lifted: {allow_nonconverged_source}");
 
-    // ── Progress + cache scan ─────────────────────────────────────────
-    // One overall bar over all (point × seed × start) jobs, ticked from the
-    // parallel loop (`Task` is `Send + Sync`). The Reporter honors --progress
-    // (Pretty=bar, Plain=throttled `profile pos/len` log lines, None=silent).
-    // No per-tick metric: a best profile-loglik isn't tracked here (each cell
-    // computes its own `final_loglik`; surfacing a global best would mean a
-    // shared accumulator that the bar deliberately avoids).
-    let bar = crate::out::progress::Reporter::new().task(total_jobs as u64, "profile", "jobs");
-
-    // ── gh#147 (M3.3): pre-resolve every job's CAS identity ──────────
-    // Job tuple (seed_idx, grid_idx, start_idx). The grid lives in the
-    // `point` level + the method in `method`; the job's process seed is
-    // derived from (seed, point, start) by the identity resolver.
+    // ── Each point's identity ─────────────────────────────────────────────
+    // One job per (seed, cell, start), in that order: the order the
+    // invocation lists its points in, which the table follows.
+    let start_values: Vec<std::collections::BTreeMap<String, store::Finite>> = per_start_params.iter()
+        .map(|specs| specs.iter().map(|p| (p.name.clone(), finite(&format!("the start of `{}`", p.name), p.initial))).collect())
+        .collect();
+    let cell_focal: Vec<std::collections::BTreeMap<String, store::Finite>> = grid_points.iter()
+        .map(|gp| focal_grids.iter().zip(gp.iter())
+            .map(|(fg, &(_, v))| (fg.name.clone(), finite(&format!("the grid value of `{}`", fg.name), v)))
+            .collect())
+        .collect();
+    // A start's replicate index: how many earlier starts have its values.
+    let replicate: Vec<u32> = (0..start_values.len())
+        .map(|si| start_values[..si].iter().filter(|v| **v == start_values[si]).count() as u32)
+        .collect();
     let jobs: Vec<(usize, usize, usize)> = (0..seeds.len())
         .flat_map(|seed_idx| (0..grid_points.len())
             .flat_map(move |gi| (0..n_starts).map(move |si| (seed_idx, gi, si))))
         .collect();
-
-    // The full sweep grid (each focal axis name and its values), shared by
-    // every point. Folded into each point's base identity so a distinct grid
-    // (wider range, more points, shifted bounds) is a distinct run rather than
-    // a silent merge onto the previous grid's cells.
-    let grid_spec: Vec<(String, Vec<f64>)> = focal_grids.iter()
-        .map(|fg| (fg.name.clone(), fg.values.clone()))
-        .collect();
-    let resolve_pt = |gi: usize, si: usize, seed: u64|
-        -> Result<crate::profile_cas::ResolvedProfilePoint, String>
-    {
-        let focal: Vec<(String, f64)> = focal_grids.iter()
-            .zip(grid_points[gi].iter())
-            .map(|(fg, &(_, v))| (fg.name.clone(), v))
-            .collect();
-        crate::profile_cas::resolve_profile_point(&crate::profile_cas::ProfilePointCtx {
-            model: &model,
-            ir_version: &ir_version_str,
-            engine: &engine,
-            stem: &stem_label,
-            method_name: &algorithm,
-            data: &data_hashes,
-            base_config: base_config_hash,
-            method_config: method_config_hash,
-            focal: &focal,
-            grid: &grid_spec,
-            seed,
-            start_index: si as u32,
-            deps: profile_deps.clone(),
-        })
-    };
-
-    // (seed_idx, gi, si, resolved, cas_path) per job, resolved sequentially.
-    let resolved_jobs: Vec<(usize, usize, usize,
-        crate::profile_cas::ResolvedProfilePoint, std::path::PathBuf)> =
+    let members: Vec<(crate::profile_store::ProfilePointIdentity, crate::profile_store::ProfilePointLabels, store::Wanted<crate::profile_store::ProfilePoint>)> =
         jobs.iter().map(|&(seed_idx, gi, si)| {
-            let resolved = resolve_pt(gi, si, seeds[seed_idx]).unwrap_or_else(|e| {
-                out.fail(format!("error: profile-point identity: {}", e));
-            });
-            let cas_path = runid::store_path(
-                &root, runid::ArtifactKind::ProfilePoint, &resolved.levels);
-            (seed_idx, gi, si, resolved, cas_path)
+            let focal = cell_focal[gi].clone();
+            let start = start_values[si].clone();
+            let seed = crate::profile_store::point_seed(seeds[seed_idx], &focal, &start, replicate[si]);
+            let labels = crate::profile_store::ProfilePointLabels {
+                model: stem.clone(),
+                focal: crate::profile_store::focal_label(&focal),
+                method: method_identity.label(),
+                seed: seeds[seed_idx],
+                start: si as u32,
+            };
+            let identity = crate::profile_store::ProfilePointIdentity {
+                problem: problem_dep.clone(),
+                focal,
+                method: method_identity.clone(),
+                start,
+                seed,
+            };
+            (identity, labels, store::Wanted::none())
         }).collect();
-
-    // The profile-base segment is shared across all jobs — a path segment
-    // with no base-level record (guardrail 2). Write the provenance sidecar
-    // there once (guardrail 4: resolved_priors/estimated/data_hashes carried
-    // with no silent default; not identity-bearing).
-    if let Some((_, _, _, resolved0, _)) = resolved_jobs.first() {
-        let base_seg = runid::store_path(
-            &root, runid::ArtifactKind::ProfilePoint, &resolved0.levels[..1]);
-        let roles = crate::roles::RoleRecord::new(
-            profile_roles.as_ref().map(|p| p.record(&resolved)).map_err(String::clone),
-            || (resolved_priors_kv.iter().map(|(n, _)| n.clone()).collect(), Default::default()),
-        );
-        let calendar = ir::caltime::CalendarAxis::from_model(&model)
-            .unwrap_or_else(|e| out.fail(format!("error: {e}")));
-        let sidecar = crate::run_meta::FitSidecar {
-            // Stamped by `write_fit_sidecar`.
-            schema_version: crate::run_meta::FIT_META_SCHEMA_VERSION,
-            store_layout: runid::STORE_LAYOUT,
-            label: label_arg.clone(),
-            // profile binds no fit folder's external inputs (its leaves record their own).
-            table_hashes: Default::default(),
-            // Recorded by `write_fit_sidecar`, relative to the segment.
-            source_model: None,
-            source_config: None,
-            model_identity: model_identity.clone(),
-            fit_toml_hash: fit_toml_hash.clone().unwrap_or_default(),
-            data_hashes: data_hashes.iter().cloned().collect(),
-            estimated: roles.estimated,
-            fixed: roles.fixed,
-            partition: Some(roles.partition),
-            resolved_priors: resolved_priors_kv.iter()
-                .map(|(n, s)| crate::run_meta::ResolvedPriorEntry {
-                    param: n.clone(), source: s.clone(),
-                    overridden_model_prior: prior_overrides.iter()
-                        .find(|o| &o.param == n).map(|o| o.model.clone()) })
-                .collect(),
-            parameters_provenance: parameters_provenance.clone(),
-            training_partition: Some(training_partition.record(&calendar)),
-            holdout_hashes: Default::default(),
-            schema: None,
-            dt: None,
-            integrator: None,
-            calendar,
-            docs: Default::default(),
-        };
-        // Store the fit's config as a fit folder does: the user's text as
-        // `fit.toml.original`, the configuration resolved from it as
-        // `fit.resolved.toml` (none for a CLI-only profile).
-        // A fit file's resolution is built here, from the `[fixed]` values
-        // resolved above (a `from_scenario` expanded with the model), so it is
-        // the text a fit folder of the file stores, whichever form named it.
-        let written = match fit.as_ref() {
-            Some(f) => match f.resolved.clone().map_or_else(
-                || crate::fit::run_config::resolved_config_text(
-                    &f.original,
-                    crate::fit::run_config::ProblemFlags { allow_forcing_extrapolation: false },
-                    &fit_toml_fixed_indexmap,
-                ),
-                Ok,
-            ) {
-                Ok(resolved) => crate::run_meta::write_fit_sidecar_with_config(
-                    &base_seg, &f.anchor, &f.original, &resolved, std::path::Path::new(&ir_path), &sidecar),
-                Err(e) => out.fail(format!("error: --fit {}: {e}", f.handle)),
-            },
-            None => crate::run_meta::write_fit_sidecar(
-                &base_seg, std::path::Path::new(&ir_path), &sidecar),
-        };
-        if let Err(e) = written {
-            out.say(format_args!("warning: cannot write profile sidecar {}: {}",
-                base_seg.display(), e));
+    // `begin_many` begins each distinct identity once, in the order first
+    // asked for: a seed listed twice in `--seeds` names its points once.
+    let mut distinct: Vec<usize> = Vec::new();
+    {
+        let mut seen = std::collections::BTreeSet::new();
+        for (ji, (identity, _, _)) in members.iter().enumerate() {
+            if seen.insert(store::Identity::key(identity)) {
+                distinct.push(ji);
+            }
         }
     }
-
-    // The invocation record and heartbeat (`profiles/<base>/invocations/<id>/`):
-    // the grid, starts and seeds this invocation runs, each cell's `<point>`
-    // directory, and a `profiling` `progress.json` whose step is the jobs
-    // finished. Outside every leaf and every hash. A record that cannot be
-    // written is a warning, as the sidecar's is: the profile's results do not
-    // depend on it.
-    let invocation_hb: Arc<io::HeartbeatGuard> = match resolved_jobs.first() {
-        None => Arc::new(io::HeartbeatGuard::inert()),
-        Some((_, _, _, resolved0, _)) => {
-            let base_seg = runid::store_path(
-                &root, runid::ArtifactKind::ProfilePoint, &resolved0.levels[..1]);
-            // A cell's `<point>` segment, from any one of its jobs: the point
-            // level does not depend on the seed or the start.
-            let mut point_dirs: Vec<String> = vec![String::new(); grid_points.len()];
-            for (_, gi, _, resolved, _) in &resolved_jobs {
-                if point_dirs[*gi].is_empty() {
-                    let seg = runid::store_path(
-                        &root, runid::ArtifactKind::ProfilePoint, &resolved.levels[..2]);
-                    point_dirs[*gi] = seg.file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                }
-            }
-            let method_dir = runid::store_path(
-                &root, runid::ArtifactKind::ProfilePoint, &resolved0.levels[..3])
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let started_at = crate::profile_invocation::now_unix();
-            let record = crate::profile_invocation::InvocationRecord {
-                schema: crate::profile_invocation::INVOCATION_SCHEMA,
-                invocation_id: crate::profile_invocation::invocation_id(started_at),
-                started_at,
-                label: label_arg.clone(),
-                algorithm: profile_algo.method_kind().as_str().to_string(),
-                focal: focal_grids.iter()
-                    .map(|fg| crate::profile_invocation::FocalAxis {
-                        name: fg.name.clone(), values: fg.values.clone() })
-                    .collect(),
-                n_starts,
-                seeds: seeds.clone(),
-                points: grid_points.iter().zip(point_dirs).map(|(gp, dir)| {
-                    crate::profile_invocation::InvocationPoint {
-                        coords: crate::profile_invocation::Coords(
-                            focal_grids.iter().zip(gp.iter())
-                                .map(|(fg, &(_, v))| (fg.name.clone(), v))
-                                .collect()),
-                        dir,
-                    }
-                }).collect(),
-                method_dir,
-                total_jobs,
-            };
-            match crate::profile_invocation::begin(
-                &base_seg, record, crate::fit::HEARTBEAT_INTERVAL)
-            {
-                Ok((_, hb)) => Arc::new(hb),
-                Err(e) => {
-                    out.say(format_args!(
-                        "warning: cannot write the profile invocation record under {}: {}",
-                        base_seg.join(crate::profile_invocation::INVOCATIONS_DIR).display(), e));
-                    Arc::new(io::HeartbeatGuard::inert())
-                }
-            }
+    let mut failures: Vec<String> = Vec::new();
+    let mut claimed: Vec<(store::Run<crate::profile_store::ProfilePoint>, usize)> = Vec::new();
+    let mut n_stored = 0usize;
+    let mut batch = store.begin_many::<crate::profile_store::ProfilePoint>(&members, &info, request.reuse())
+        .unwrap_or_else(|e| out.fail(format!("error: {e}")));
+    for (begun, &ji) in batch.members().zip(&distinct) {
+        match begun {
+            store::Begin::Reused(_) => n_stored += 1,
+            store::Begin::Busy(owner) => failures.push(format!(
+                "point {} {}: {}", members[ji].1.focal, members[ji].1.start, store::Error::InProgress(owner))),
+            store::Begin::Claimed(run) => claimed.push((run, ji)),
+        }
+    }
+    if n_stored > 0 {
+        out.say(format_args!("profile: {} of {} points already stored", n_stored, distinct.len()));
+    }
+    // While points are claimed, a forcing refusal is kept rather than ending
+    // the process from a worker thread, so each claimed point is failed and
+    // none is left `running`.
+    let _refusal_deferred = forcing.defer_while_claimed();
+    let n_points = distinct.len();
+    let batch = std::sync::Mutex::new(batch);
+    let finished = std::sync::atomic::AtomicUsize::new(n_stored);
+    let progress = || {
+        let n = finished.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let snapshot = serde_json::json!({ "phase": "profiling", "step": n, "total": n_points });
+        if let Err(e) = batch.lock().unwrap_or_else(|e| e.into_inner()).progress(&snapshot) {
+            log::debug!("profile: cannot write the progress snapshot: {e}");
         }
     };
-    out.hold_heartbeat(Arc::clone(&invocation_hb));
 
-    // Cache scan: a job is cached when its leaf already exists. `cached` /
-    // `remaining` hold indices into `resolved_jobs`.
-    let mut cached: Vec<usize> = Vec::new();
-    let mut remaining: Vec<usize> = Vec::new();
-    // A build whose identity is incomplete reuses no stored point: each is
-    // displaced (quarantined) and recomputed (`engine_write_policy`).
-    let reuse = crate::resolve::engine_write_policy(crate::resolve::WritePolicy::Reuse, crate::version::ENGINE_REUSE)
-        == crate::resolve::WritePolicy::Reuse;
-    for (ji, (_, _, _, resolved, cas_path)) in resolved_jobs.iter().enumerate() {
-        let id = runid::LeafIdentity::new(resolved.run_id);
-        if !reuse {
-            if let Err(e) = store.displace(cas_path, &id) {
-                out.fail(format!("error: cannot displace stored profile point {}: {e}", cas_path.display()));
-            }
-        }
-        if reuse && matches!(store.lookup(cas_path, &id), runid::Lookup::Hit(_)) {
-            cached.push(ji);
-        } else {
-            remaining.push(ji);
-        }
-    }
-    if !cached.is_empty() {
-        out.say(format_args!("profile: {} of {} starts already cached — resuming",
-            cached.len(), total_jobs));
-        bar.inc(cached.len() as u64);
-    }
-    // Jobs finished, cached ones included: the invocation heartbeat's step.
-    let job_progress = crate::profile_invocation::JobProgress::new(
-        Arc::clone(&invocation_hb), cached.len() as u64);
+    // ── Progress bar ──────────────────────────────────────────────────────
+    // One overall bar over the points this run computes, ticked from the
+    // parallel loop (`Task` is `Send + Sync`). The Reporter honors --progress
+    // (Pretty=bar, Plain=throttled `profile pos/len` log lines, None=silent).
+    let bar = crate::out::progress::Reporter::new().task(claimed.len() as u64, "profile", "points");
 
     // gh#audit-H13: --parallel / CAMDL_PARALLEL throttles the rayon thread
     // budget. Build a SCOPED local pool and run the parallel job sweep inside
-    // `pool.install(...)`. The earlier fix used `build_global`, but by the
-    // time profile reaches here the global pool is already initialised, so
-    // `build_global` returns AlreadyInitialized and is ignored — the default
-    // all-core pool ran regardless of --parallel. A scoped pool is
-    // order-independent. parallel == 0 means "use rayon's default" (all
-    // logical cores): leave the pool unset and run on the global pool.
+    // `pool.install(...)`: by the time profile reaches here the global pool is
+    // already initialised, so `build_global` would be ignored. parallel == 0
+    // means "use rayon's default" (all logical cores): leave the pool unset
+    // and run on the global pool.
     let prof_pool: Option<rayon::ThreadPool> = if parallel > 0 {
         Some(
             rayon::ThreadPoolBuilder::new()
@@ -1934,7 +1607,7 @@ fn run_profile(
         None
     };
 
-    // ── Run remaining jobs: greedy priority work-queue ──────────────
+    // ── Run the claimed points: greedy priority work-queue ────────────────
     // Per focal axis, its grid's value range — for normalizing cell
     // coordinates so the nearest-to-best ordering is scale-fair.
     let axis_ranges: Vec<(f64, f64)> = focal_grids.iter().map(|fg| {
@@ -1947,15 +1620,57 @@ fn run_profile(
         .collect();
     // The best (finite) profile-loglik seen and the grid cell that produced
     // it. Workers drill toward this cell; the bar surfaces the loglik. This is
-    // a read-only side-channel — each job writes its own identity-keyed leaf,
+    // a read-only side-channel — each point is computed from its own identity,
     // so it never changes any output, only the order cells are visited in.
     let best: std::sync::Mutex<(f64, Option<usize>)> =
         std::sync::Mutex::new((f64::NEG_INFINITY, None));
+    let point_failures: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
-    let eval_job = |ji: usize| {
-        let (_, grid_idx, start_idx, ref resolved_pt_id, ref cas_path) = resolved_jobs[ji];
-        let process = Arc::clone(&process);
-        let obs_model_obj = Arc::clone(&obs_model_obj);
+    // A compiled forcing records once that it was evaluated outside its
+    // range, for every clone of the compiled model (`sim::forcing_range`). So
+    // that each point records the forcings its own computation held, a point
+    // run under the override, of a model with a forcing that has a range,
+    // computes on a model compiled for it alone.
+    let compile_per_point = forcing.allowed() && compiled.time_func_cache.iter().any(|f| f.range.is_some());
+    let compile_point = || -> Result<(Arc<CompiledModel>, Arc<ChainBinomialProcess>, Arc<MultiStreamObsModel>), String> {
+        let compiled = Arc::new(CompiledModel::new(model.clone())
+            .map_err(|e| format!("{e:?}"))?
+            .with_eval_settings(crate::env::eval_settings(allow_degenerate_rates)));
+        let specs = crate::fit::runner::stream_specs_from_obs_streams(&streams);
+        let (bound, _report) = BoundObs::bind(compiled.model.simulation.t_start, specs)
+            .map_err(|report| format!("observation data invalid:\n{}", report.render()))?;
+        let obs = MultiStreamObsModel::new(bound, compiled.clone())
+            .map_err(|e| format!("observation model construction failed: {e:?}"))?;
+        Ok((compiled.clone(), Arc::new(ChainBinomialProcess::new(compiled)), Arc::new(obs)))
+    };
+
+    // A point claimed or computed after a forcing refusal is failed with it.
+    let refused = |run: store::Run<crate::profile_store::ProfilePoint>| -> Option<store::Run<crate::profile_store::ProfilePoint>> {
+        match forcing.refused() {
+            Some(reason) => {
+                let _ = run.fail("forcing outside its range", &reason);
+                None
+            }
+            None => Some(run),
+        }
+    };
+    let eval_job = |run: store::Run<crate::profile_store::ProfilePoint>, ji: usize| {
+        let (_, grid_idx, start_idx) = jobs[ji];
+        let Some(run) = refused(run) else { return };
+        let (compiled, process, obs_model_obj) = if compile_per_point {
+            match compile_point() {
+                Ok(models) => models,
+                Err(e) => {
+                    let reason = format!("compiling the model for the point: {e}");
+                    let _ = run.fail("compiling", &reason);
+                    point_failures.lock().unwrap_or_else(|e| e.into_inner())
+                        .push(format!("profile grid point {grid_idx} (start {start_idx}): {reason}"));
+                    return;
+                }
+            }
+        } else {
+            (Arc::clone(&compiled), Arc::clone(&process), Arc::clone(&obs_model_obj))
+        };
         let if2_params = Arc::clone(&if2_params);
         let focal_values: Vec<f64> = grid_points[grid_idx].iter().map(|&(_, v)| v).collect();
 
@@ -1965,18 +1680,13 @@ fn run_profile(
             params[idx] = val;
         }
 
-        let job_seed = resolved_pt_id.process_seed;
+        let job_seed = run.identity().seed.seed;
         let job_t0 = std::time::Instant::now();
 
-        // gh#42: when --starts lhs/uniform, each start uses its own draw
-        // across the non-focal estimated params; otherwise (Single, or
-        // --starts 1) every start shares `if2_params`. The focal params
-        // are already pinned in `params` above, so the LHS draw on
-        // non-focal indices doesn't perturb the grid point.
-        let per_start_specs: &[sim::inference::if2::EstimatedParam] =
-            per_start_params.as_ref()
-                .map(|psp| psp[start_idx].as_slice())
-                .unwrap_or(if2_params.as_slice());
+        // gh#42: each start uses its own draw across the non-focal estimated
+        // params. The focal params are already pinned in `params` above, so
+        // the draw on non-focal indices doesn't perturb the grid point.
+        let per_start_specs: &[sim::inference::if2::EstimatedParam] = per_start_params[start_idx].as_slice();
 
         // Dispatch on algorithm. IF2 keeps the historical PF-driven
         // per-cell MLE; NLopt branches into the
@@ -2164,11 +1874,24 @@ fn run_profile(
             }
         }
 
-        // gh#147 (M3.3): claim the CAS leaf, write the cell's mle.toml there,
-        // finalize. The profile-base is never written (path segment only);
-        // each (point, method, seed, start) is its own leaf. The display
-        // payload (method/algorithm/loglik) is recorded in `inputs`, not
-        // hashed.
+        // A non-finite cell loglik is a completed point with `final_loglik =
+        // -inf`, and every reader of it (the table, the curve) then has
+        // nothing to plot for this grid point. Say so on stderr: a dropped
+        // grid point is a result the user must see, not a gap to infer. The
+        // usual cause is a particle filter too small to score a θ far from
+        // the optimum (the swarm dies and the estimate is −inf);
+        // `--particles` is the lever.
+        if !final_loglik.is_finite() {
+            out.say(format_args!(
+                "warning: profile grid point {} (start {}) produced a non-finite \
+                 log-likelihood ({}); it is stored with no value and the \
+                 start counts as not completed in the profile table (a cell with no \
+                 completed start is a row of NaN). This is usually a \
+                 particle filter too small to score a θ this far from the optimum — \
+                 re-run with more `--particles`.",
+                grid_idx, start_idx, final_loglik,
+            ));
+        }
         let algorithm_payload = match profile_algo {
             ProfileAlgo::If2 => serde_json::json!({
                 "particles": n_particles, "iterations": n_iterations,
@@ -2178,37 +1901,14 @@ fn run_profile(
                 "tolerance": nl_tolerance, "max_evals": nl_max_evals,
                 "dt": dt }),
         };
-        // A non-finite cell loglik serialises as JSON `null` (JSON has no
-        // ±inf/NaN), and every consumer that reads `best_loglik` — the curve,
-        // the summary, the rollup — then has nothing to plot for this grid
-        // point. The leaf still exists and the run still reports "N cells
-        // written", so without this the point just *disappears* from the
-        // profile with no indication that anything went wrong. Say so on
-        // stderr: a dropped grid point is a result the user must see, not a
-        // gap to infer. The usual cause is a particle filter too small to
-        // score a θ far from the optimum (the swarm dies and the estimate is
-        // −inf); `--particles` is the lever.
-        if !final_loglik.is_finite() {
-            out.say(format_args!(
-                "warning: profile grid point {} (start {}) produced a non-finite \
-                 log-likelihood ({}); its `best_loglik` is recorded as null and the \
-                 start counts as not completed in the profile table (a cell with no \
-                 completed start is a row of NaN). This is usually a \
-                 particle filter too small to score a θ this far from the optimum — \
-                 re-run with more `--particles`.",
-                grid_idx, start_idx, final_loglik,
-            ));
-        }
         // The run's provenance, with this cell's partition.
         let mut provenance = run_provenance_json.clone();
         provenance["partition"] = cell_partitions[grid_idx].clone();
-        let inputs_json = serde_json::json!({
+        let provenance_json = serde_json::json!({
             "method": profile_algo.method_kind().as_str(),
             "seed": job_seed,
             "n_chains": 1,
             "algorithm": algorithm_payload,
-            "grid_point": grid_idx,
-            "start": start_idx,
             "best_loglik": if final_loglik.is_finite() { Some(final_loglik) } else { None },
             // The class of the profiled loglik follows the profile method
             // (gh#280): if2 / marginal / ode_marginal — a marginal in every
@@ -2222,53 +1922,34 @@ fn run_profile(
             "wall_time_seconds": elapsed,
             "provenance": provenance,
         });
-        // Streaming write through the one resolved-writer seam (gh#241 PR D).
-        // The running record carries Null inputs (the cell's loglik summary is
-        // a post-run result); the final inputs are supplied to `finalize`.
-        let resolved_artifact = crate::resolve::ResolvedArtifact {
-            kind: runid::ArtifactKind::ProfilePoint,
-            levels: resolved_pt_id.levels.clone(),
-            run_id: resolved_pt_id.run_id,
-            display_inputs: serde_json::Value::Null,
-        };
-        let calendar = ir::caltime::CalendarAxis::from_model(&model)
-            .unwrap_or_else(|e| out.fail(format!("error: {e}")));
-        let mut meta = crate::resolve::RecordMeta::new(&ir_version_str, &ir_path, None, calendar, &forcing)
-            .with_deps(profile_deps.clone());
-        // The engine the point's identity keyed: `run.json` names its switches.
-        meta.engine = engine.clone();
-        let write = match crate::resolve::begin_resolved_write(
-            &store, &root, &resolved_artifact, &meta,
-        ) {
-            Ok(c) => c,
-            // The identical point is already stored — a cache report, not a
-            // failure (this start recomputed it for nothing).
-            Err(runid::CasError::AlreadyCompleted { .. }) => return,
-            // Another process holds this point right now; its result stands.
-            Err(e @ runid::CasError::FitInProgress { .. }) => {
-                out.say(format_args!("warning: not storing profile point {} — {}",
-                    cas_path.display(), e));
-                return;
-            }
-            // Anything else means this point was NOT recorded: fail loudly
-            // rather than leaving a gap in the landscape the user never sees.
-            Err(e) => {
-                out.fail(format!("error: claim profile point {}: {}", cas_path.display(), e));
-            }
-        };
-
+        let Some(run) = refused(run) else { return };
+        // Under the forcing override, each forcing this point held outside
+        // its range.
+        let mut provenance_json = provenance_json;
+        let held: Vec<sim::forcing_range::OutsideRange> = compiled.time_func_cache.iter()
+            .filter_map(|f| f.range.as_ref())
+            .flat_map(|r| r.held())
+            .collect();
+        forcing.record_held_in(&mut provenance_json, &held);
         let mle_toml = render_mle_toml(&if2_params, &focal_values,
             &focal_grids.iter().map(|fg| fg.name.as_str()).collect::<Vec<_>>(),
             &mle_params, final_loglik, &diag);
-        // Through the claim (fsync'd), error fatal: a discarded write error
-        // could finalize a Completed point with no mle.toml in it.
-        if let Err(e) = write.write("mle.toml", mle_toml.as_bytes()) {
-            out.fail_with_claim(write, "profile", format!(
-                "error: writing mle.toml into {}: {}", cas_path.display(), e));
-        }
-
-        if let Err(e) = write.finalize(inputs_json) {
-            out.say(format_args!("warning: finalize profile point {}: {}", cas_path.display(), e));
+        let write = || -> Result<(), String> {
+            let e = |e: store::Error| e.to_string();
+            run.result_file(crate::profile_store::MLE_FILE).map_err(e)?.write_all(mle_toml.as_bytes()).map_err(e)?;
+            run.provenance_file(crate::profile_store::PROVENANCE_FILE).map_err(e)?
+                .write_all(&serde_json::to_vec_pretty(&provenance_json).unwrap_or_default()).map_err(e)
+        };
+        let failure = match write() {
+            Ok(()) => run.finish().err().map(|e| e.to_string()),
+            Err(reason) => {
+                let _ = run.fail("storing", &reason);
+                Some(reason)
+            }
+        };
+        if let Some(reason) = failure {
+            point_failures.lock().unwrap_or_else(|e| e.into_inner())
+                .push(format!("storing profile grid point {grid_idx} (start {start_idx}): {reason}"));
         }
 
         // Passive progress tick. `Task` handles Pretty (redraw) / Plain
@@ -2276,19 +1957,19 @@ fn run_profile(
         bar.inc(1);
     };
 
-    // N workers pull the pending job whose cell is nearest the current best
+    // N workers pull the pending point whose cell is nearest the current best
     // cell, keeping every core busy while evaluation drills toward the
-    // optimum. Order-independent (each job writes its own identity-keyed
-    // leaf), so no barrier and no determinism requirement — the pick just
+    // optimum. Order-independent (each point is computed from its own
+    // identity), so no barrier and no determinism requirement — the pick just
     // reorders which cell a freed core visits next.
-    let pending: std::sync::Mutex<Vec<usize>> =
-        std::sync::Mutex::new(remaining.clone());
+    let pending: std::sync::Mutex<Vec<(store::Run<crate::profile_store::ProfilePoint>, usize)>> =
+        std::sync::Mutex::new(claimed);
     let worker = || {
         loop {
             // Snapshot the drill target (release the lock before touching
             // `pending`, so the two locks never nest).
             let target = best.lock().map(|b| b.1).unwrap_or(None);
-            let ji = {
+            let (run, ji) = {
                 let mut p = match pending.lock() {
                     Ok(p) => p,
                     Err(_) => break,
@@ -2299,20 +1980,19 @@ fn run_profile(
                     Some(bc) => {
                         let mut best_i = 0usize;
                         let mut best_d = f64::INFINITY;
-                        for (i, &cand) in p.iter().enumerate() {
-                            let d = profile_cell_dist2(
-                                &cell_norm[resolved_jobs[cand].1], &cell_norm[bc]);
+                        for (i, (_, cand)) in p.iter().enumerate() {
+                            let d = profile_cell_dist2(&cell_norm[jobs[*cand].1], &cell_norm[bc]);
                             if d < best_d { best_d = d; best_i = i; }
                         }
                         best_i
                     }
-                    // No finite best yet — take the next pending job.
+                    // No finite best yet — take the next pending point.
                     None => 0,
                 };
                 p.swap_remove(pick)
             };
-            eval_job(ji);
-            job_progress.job_finished();
+            eval_job(run, ji);
+            progress();
         }
     };
     // One worker loop per pool thread, placed by `broadcast` in that thread's
@@ -2321,6 +2001,7 @@ fn run_profile(
     // an IF2 run's particle `par_iter`, which would then drain the whole queue
     // on top of the run it had not finished.
     let run_sweep = || {
+        log::debug!("profile: computing on {} threads", rayon::current_num_threads());
         rayon::broadcast(|_| worker());
     };
     match &prof_pool {
@@ -2329,68 +2010,52 @@ fn run_profile(
     }
 
     bar.finish();
+    failures.extend(point_failures.into_inner().unwrap_or_else(|e| e.into_inner()));
+    drop(batch);
+    let invocation = info.finish(&store).unwrap_or_else(|e| out.fail(format!("error: {e}")));
+    if let Some(refusal) = forcing.refused() {
+        out.fail(refusal);
+    }
+    if let (Some(label), Some(before)) = (invocation.label(), invocation.took_label_from()) {
+        out.say(format_args!("profile: @{label} now names invocation {}, which held it from invocation {before}", invocation.seq()));
+    }
+    if !failures.is_empty() {
+        for f in &failures {
+            out.say(format_args!("error: {f}"));
+        }
+        out.say(format_args!("profile: {} of {} point(s) were not stored; no table was written", failures.len(), n_points));
+        crate::out::ExitCode(1).exit();
+    }
 
     let n_cells = grid_points.len();
-    let n_leaves = resolved_jobs.len();
     out.say(format_args!(
-        "profile: {} cell{} written ({} start{}) under {}",
+        "profile: {} cell{} ({} point{}) stored under {}",
         n_cells, if n_cells == 1 { "" } else { "s" },
-        n_leaves, if n_leaves == 1 { "" } else { "s" },
-        root.join("profiles").display()));
+        n_points, if n_points == 1 { "" } else { "s" },
+        crate::run_paths::display_absolute(store.root()).display()));
 
-    // The collected table (gh#1059): one row per grid cell, read back from
-    // every (seed, start) leaf of the cell, fresh or served from the store, so
-    // a rerun prints the same table. A start whose leaf cannot be read counts
-    // as run and not completed, and is named.
-    let estimated_names: Vec<String> = if2_params.iter().map(|p| p.name.clone()).collect();
-    let rows: Vec<crate::profile_table::CellRow> = (0..grid_points.len()).map(|gi| {
-        let starts = resolved_jobs.iter()
-            .filter(|(_, g, _, _, _)| *g == gi)
-            .map(|(_, _, _, resolved, cas_path)| {
-                match crate::profile_table::read_start(
-                    cas_path, &estimated_names, resolved.run_id.to_hex(),
-                ) {
-                    Ok(s) => Some(s),
-                    Err(e) => {
-                        out.say(format_args!(
-                            "warning: profile table: {e}; the start counts as not completed"));
-                        None
-                    }
-                }
-            })
-            .collect();
-        crate::profile_table::CellRow {
-            focal: grid_points[gi].iter().map(|&(_, v)| v).collect(),
-            starts,
-        }
-    }).collect();
-    let table = crate::profile_table::ProfileTable {
-        focal_names: focal_grids.iter().map(|fg| fg.name.clone()).collect(),
-        estimated: estimated_names,
+    // The profile table: one row per grid cell, rendered from the stored
+    // points the invocation asked for, so a rerun served from the store
+    // prints the same table.
+    let options = crate::profile_store::ProfileTableOptions {
+        estimated: if2_params.iter().map(|p| p.name.clone()).collect(),
         objective,
         loglik_type: crate::fit::loglik::LoglikType::from(profile_algo.method_kind()).tag(),
-        rows,
+        format: table_export.format,
     };
-    let rendered = match format {
-        crate::args::ProfileTableFormat::Tsv => table.to_tsv(),
-        crate::args::ProfileTableFormat::Json => {
-            let mut s = serde_json::to_string_pretty(&table.to_json())
-                .unwrap_or_else(|e| { out.fail(format!("error: profile table JSON: {e}")); });
-            s.push('\n');
-            s
+    match table_export.output {
+        Some(path) => {
+            invocation.render::<crate::profile_store::ProfileTableRendering>(&store, &options, &store::ExportPath(path.clone()))
+                .unwrap_or_else(|e| out.fail(format!("error: cannot write --output {}: {e}", path.display())));
+            out.say(format_args!("profile: table written to {}", path.display()));
         }
-    };
-    match output_tsv_path {
-        Some(ref path) => {
-            std::fs::write(path, rendered).unwrap_or_else(|e| {
-                out.fail(format!("error: cannot write --output {path}: {e}"));
-            });
-            out.say(format_args!("profile: table written to {path}"));
+        None => {
+            let mut bytes = Vec::new();
+            invocation.render_to::<crate::profile_store::ProfileTableRendering>(&store, &options, &mut bytes)
+                .unwrap_or_else(|e| out.fail(format!("error: the profile table: {e}")));
+            out.data_raw(String::from_utf8_lossy(&bytes).into_owned());
         }
-        None => out.data_raw(rendered),
     }
-    invocation_hb.done();
-    invocation_hb.commit();
 }
 
 /// The values a single-point starts rule supplies, and where they came from:
@@ -2422,9 +2087,9 @@ fn starts_values_from_init_method(
         }
         ChainStarts::Point(Point::FromMle { source }) => {
             // The stored fit's point estimate, from the run the handle names.
-            let store = crate::camdl_store::open_existing(&crate::camdl_store::read_root())
-                .ok_or_else(|| format!("--starts from_mle={source}: no run store at {}",
-                    crate::camdl_store::read_root().display()))?;
+            let root = crate::fit_store::reader_root();
+            let store = crate::camdl_store::open_existing(&root)
+                .ok_or_else(|| format!("--starts from_mle={source}: no run store at {}", root.display()))?;
             let run = crate::fit_store::resolve_run(&store, &source.0)
                 .map_err(|e| format!("--starts from_mle={source}: {e}"))?;
             let files = crate::fit_store::RunFiles::of(&run)
@@ -2442,15 +2107,11 @@ fn starts_values_from_init_method(
     Ok(Some((origin, values)))
 }
 
-/// Render a per-start MLE TOML file. Human-readable; also the format
-/// `rewrite_rollup` reads back to reconstruct the rollup.
+/// A point's `mle.toml`: its final log-likelihood, focal values and
+/// estimates, which the profile table reads back.
 ///
-/// gh#74 Option B: emits a trailing `[diagnostics]` block holding the
-/// per-start convergence record. Older `mle.toml` files (pre-gh#74)
-/// have no `[diagnostics]` block; the rollup tolerates the absence
-/// and renders NaN for that start's contribution to the per-cell
-/// aggregate. Cached CAS dirs from older runs therefore continue to
-/// roll up, just without diagnostics columns populated.
+/// It ends with a `[diagnostics]` block holding the per-start convergence
+/// record.
 fn render_mle_toml(
     if2_params: &[sim::inference::if2::EstimatedParam],
     focal_values: &[f64],
@@ -2590,186 +2251,24 @@ fn legacy_role_inputs(sel: LegacySelection<'_>) -> Result<LegacyRoleDecls, Strin
 mod tests {
     use super::*;
 
-    /// `ProfileBaseLevel` / `ProfileMethodLevel` serialize exactly as these
-    /// `json!` literals: the hashed shape of each identity level, stated
-    /// once, so a field added to or dropped from either struct is a
-    /// deliberate, visible re-key rather than a silent one.
-    ///
-    /// `digest_value` canonicalizes (sorts keys recursively), so equality of
-    /// the serialized values is what matters, not field order.
+    /// The resolver's result is checked against the stored problem: an
+    /// estimated set or a `[fixed]` value that differs, by one bit, is an
+    /// error naming the parameter.
     #[test]
-    fn identity_levels_serialize_as_the_stated_literals() {
-        let fixed: Vec<String> = vec!["N0".into()];
-        let priors: Vec<(String, String)> = vec![("beta".into(), "log_normal".into())];
-        let fit_toml: Option<String> = Some("abc123".into());
-
-        let base_struct = serde_json::to_value(ProfileBaseLevel {
-            base_params: "bp-hash",
-            fixed: &fixed,
-            obs_family: "poisson",
-            fit_toml: &fit_toml,
-            priors: &priors,
-            objective: crate::fit::config_v2::LikelihoodObjective::Full,
-            training_rows: None,
-            allow_forcing_extrapolation: false,
-            allow_degenerate_rates: false,
-        }).unwrap();
-        let base_literal = serde_json::json!({
-            "base_params": "bp-hash",
-            "fixed":       fixed,
-            "obs_family":  "poisson",
-            "fit_toml":    fit_toml,
-            "priors":      priors,
-        });
-        assert_eq!(base_struct, base_literal,
-            "ProfileBaseLevel must reproduce the literal");
-
-        // The full objective is omitted, so a profile without `ic_free` keeps
-        // its key; the conditional one (`ic_free = true`) enters the base and
-        // re-keys it.
-        let conditional = serde_json::to_value(ProfileBaseLevel {
-            base_params: "bp-hash",
-            fixed: &fixed,
-            obs_family: "poisson",
-            fit_toml: &fit_toml,
-            priors: &priors,
-            objective: crate::fit::config_v2::LikelihoodObjective::ConditionalOnFirstObservation,
-            training_rows: None,
-            allow_forcing_extrapolation: false,
-            allow_degenerate_rates: false,
-        }).unwrap();
-        let mut conditional_literal = base_literal.clone();
-        conditional_literal["objective"] =
-            serde_json::json!("conditional_on_first_observation");
-        assert_eq!(conditional, conditional_literal,
-            "a conditional objective must enter the base level");
-
-        // A `holdout_after` cutoff enters the base and re-keys it; without
-        // one the base is the literal above (gh#1059).
-        let held_out = serde_json::to_value(ProfileBaseLevel {
-            base_params: "bp-hash",
-            fixed: &fixed,
-            obs_family: "poisson",
-            fit_toml: &fit_toml,
-            priors: &priors,
-            objective: crate::fit::config_v2::LikelihoodObjective::Full,
-            training_rows: Some(&[("cases".to_string(), 3)][..]),
-            allow_forcing_extrapolation: false,
-            allow_degenerate_rates: false,
-        }).unwrap();
-        let mut held_out_literal = base_literal.clone();
-        held_out_literal["training_rows"] = serde_json::json!([["cases", 3]]);
-        assert_eq!(held_out, held_out_literal,
-            "a holdout_after cutoff must enter the base level");
-
-        // `--allow-degenerate-rates` enters the base and re-keys it; without it
-        // the base is the literal above.
-        let degenerate = serde_json::to_value(ProfileBaseLevel {
-            base_params: "bp-hash",
-            fixed: &fixed,
-            obs_family: "poisson",
-            fit_toml: &fit_toml,
-            priors: &priors,
-            objective: crate::fit::config_v2::LikelihoodObjective::Full,
-            training_rows: None,
-            allow_forcing_extrapolation: false,
-            allow_degenerate_rates: true,
-        }).unwrap();
-        let mut degenerate_literal = base_literal.clone();
-        degenerate_literal["allow_degenerate_rates"] = serde_json::json!(true);
-        assert_eq!(degenerate, degenerate_literal,
-            "allow_degenerate_rates must enter the base level");
-
-        let rw_sd: Vec<(&str, Option<f64>)> = vec![("N0", Some(5.0))];
-        let init = crate::fit::starts::ChainStarts::Spread(crate::fit::starts::Spread::Lhs);
-        let method_struct = serde_json::to_value(ProfileMethodLevel {
-            algorithm: "if2",
-            if2: Some(ProfileIf2Knobs {
-                particles: 30, iterations: 5, cooling: 0.7, cooling_target_iters: 50,
-                dt: 1.0, starts: 1,
-            }),
-            nlopt: None,
-            rw_sd: &rw_sd,
-            rw_sd_auto: false,
-            simplex_groups: &[],
-            init: init.identity_value(),
-            pf_max_substeps: None,
-            binomial: sim::rng::BinomialAlgorithm::Btpe,
-            gradients: None,
-        }).unwrap();
-        let method_literal = serde_json::json!({
-            "algorithm": "if2",
-            "if2": { "particles": 30usize, "iterations": 5usize,
-                     "cooling": 0.7, "cooling_target_iters": 50usize,
-                     "dt": 1.0, "starts": 1usize },
-            "rw_sd": rw_sd,
-            "rw_sd_auto": false,
-            "init": init,
-            "pf_max_substeps": None::<u64>,
-        });
-        assert_eq!(method_struct, method_literal,
-            "ProfileMethodLevel must reproduce the literal");
-
-        // Simplex groups enter the method level only when there are some, so a
-        // profile without groups keeps the key above.
-        let groups = vec![vec!["p1".to_string(), "p2".to_string()]];
-        let with_groups = serde_json::to_value(ProfileMethodLevel {
-            algorithm: "if2",
-            if2: Some(ProfileIf2Knobs {
-                particles: 30, iterations: 5, cooling: 0.7, cooling_target_iters: 50,
-                dt: 1.0, starts: 1,
-            }),
-            nlopt: None,
-            rw_sd: &rw_sd,
-            rw_sd_auto: false,
-            simplex_groups: &groups,
-            init: init.identity_value(),
-            pf_max_substeps: None,
-            binomial: sim::rng::BinomialAlgorithm::Btpe,
-            gradients: None,
-        }).unwrap();
-        let mut literal_with_groups = method_literal.clone();
-        literal_with_groups["simplex_groups"] = serde_json::json!(groups);
-        assert_eq!(with_groups, literal_with_groups);
-    }
-
-    /// The digests of a profile's base and method levels as they stood before
-    /// gh#1059's bundle (holdout applied, starts default, `--starts-chains`):
-    /// a profile with no `holdout_after`, an explicit `--starts uniform` and
-    /// no chain subset must keep both. The literal test above pins the shape;
-    /// this pins the bytes the shape hashes to.
-    #[test]
-    fn a_profile_without_the_new_inputs_keeps_its_level_digests() {
-        let fixed: Vec<String> = vec!["N0".into(), "rho".into()];
-        let priors: Vec<(String, String)> = vec![("beta".into(), "fit_toml".into())];
-        let fit_toml: Option<String> = Some("abc123".into());
-        let base = crate::profile_cas::canonical_config_hash(&ProfileBaseLevel {
-            base_params: "bp-hash",
-            fixed: &fixed,
-            obs_family: "weekly_cases",
-            fit_toml: &fit_toml,
-            priors: &priors,
-            objective: crate::fit::config_v2::LikelihoodObjective::Full,
-            training_rows: None,
-            allow_forcing_extrapolation: false,
-            allow_degenerate_rates: false,
-        }, &[]).unwrap().into_inner().to_hex();
-        let rw_sd: Vec<(&str, Option<f64>)> = vec![("beta", None)];
-        let uniform = crate::fit::starts::ChainStarts::Spread(crate::fit::starts::Spread::Uniform);
-        let method = crate::profile_cas::canonical_config_hash(&ProfileMethodLevel {
-            algorithm: "nlopt(sbplx)",
-            if2: None,
-            nlopt: Some(ProfileNloptKnobs { tolerance: 1e-4, max_evals: 1500, dt: 1.0, starts: 2 }),
-            rw_sd: &rw_sd,
-            rw_sd_auto: false,
-            simplex_groups: &[],
-            init: uniform.identity_value(),
-            pf_max_substeps: None,
-            binomial: sim::rng::BinomialAlgorithm::Btpe,
-            gradients: None,
-        }, &[]).unwrap().into_inner().to_hex();
-        assert_eq!(base, "11d76d9cfe912830d6f32260c5bf160d7948b0f664f8f8b408f25e972f8cfb2d", "base level digest moved");
-        assert_eq!(method, "069bdb09a59613aefb5133f4c171825f49357bb501109524999614d61a68d959", "method level digest moved");
+    fn a_resolution_unlike_the_stored_problem_is_refused() {
+        let cfg = crate::fit::config_v2::FitConfig::from_toml_str(
+            "[model]\ncamdl = \"m.camdl\"\n[estimate]\nbeta = { bounds = [0.1, 2.0] }\n[fixed]\nN0 = 1000\n").unwrap();
+        let estimate = cfg.problem.estimate.clone();
+        let fixed: indexmap::IndexMap<String, f64> = [("N0".to_string(), 1000.0)].into_iter().collect();
+        let model = |n0: f64| move |name: &str| match name { "beta" => Some(0.5), "N0" => Some(n0), _ => None };
+        let estimated: indexmap::IndexSet<String> = ["beta".to_string()].into_iter().collect();
+        assert_eq!(resolution_matches_problem(&estimated, model(1000.0), &estimate, &fixed), Ok(()));
+        let off_by_a_bit = f64::from_bits(1000.0f64.to_bits() + 1);
+        let e = resolution_matches_problem(&estimated, model(off_by_a_bit), &estimate, &fixed).unwrap_err();
+        assert!(e.starts_with("N0 resolved to"), "{e}");
+        let none: indexmap::IndexSet<String> = indexmap::IndexSet::new();
+        let e = resolution_matches_problem(&none, model(1000.0), &estimate, &fixed).unwrap_err();
+        assert!(e.contains("not the stored problem's [estimate] (beta)"), "{e}");
     }
 
     /// An nl-* profile optimizes each cell with the `--fit` file's own
@@ -2839,8 +2338,8 @@ mod tests {
 
     #[test]
     fn render_mle_toml_writes_loglik_focal_mle_and_diagnostics() {
-        // The whole body of one IF2 / nl-* leaf, pinned byte for byte: the
-        // leaf is what the deferred rollup (gh#154) reads back.
+        // The whole body of one IF2 / nl-* point, pinned byte for byte: the
+        // profile table reads it back.
         let if2 = vec![estimated_param("beta", 0)];
         let diag = crate::profile_diagnostics::PerStartDiagnostics::default();
         let body = render_mle_toml(&if2, &[25.0], &["R0"], &[0.42], -11.0, &diag);

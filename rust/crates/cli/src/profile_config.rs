@@ -1,38 +1,27 @@
 //! `ResolvedProfileConfig`: the one resolved configuration of a `camdl
-//! profile`, from which both every profile point's identity and what each
-//! cell runs are built (`docs/dev/proposals/2026-11-17-honest-input-addressed-store.md`,
-//! phase 3 "The shape"; step 4 for `profile`).
+//! profile`, from which both every profile point's identity
+//! (`crate::profile_store::ProfilePointIdentity`) and what each cell runs are
+//! built.
 //!
 //! ```text
-//! ProfileArgs + --fit's stored problem + defaults ──resolve──► ResolvedProfileConfig
-//!                                                                │            │
-//!                                    profile_cas::resolve_profile_point     the cells
+//! ProfileInvocation ──split──► declared │ execution │ exports │ request │ given
+//!                                  │
+//!                               resolve (here) ──► ResolvedProfileConfig
 //! ```
 //!
-//! [`resolve`] reads every argument once, with `ProfileArgs` destructured field
-//! by field so an argument added to the command does not compile until it is
-//! placed: into the resolved configuration, [`ProfileOutputs`] (the table
-//! written outside the store), [`ProfileExecution`] (the thread budget) or the
-//! label (provenance). The removed spellings are refused here, before any
-//! file is read. The algorithm and backend are parsed, the IF2 defaults
-//! applied (`--iterations`, `--cooling`, `--cooling-target-iters`), the
-//! `--fit` argument resolved once ([`crate::fit_store::FitArg::read`]),
-//! its `[config] allow_degenerate_rates` and `allow_forcing_extrapolation`
-//! folded with the flags, its nl-* method's budget and `[method] starts` read,
-//! the starts rule in force decided (`--starts`, else the fit's, qualified by
-//! `--starts-chains`) and `--seeds` expanded. Nothing after resolution reads
-//! the command line: `cmd_profile` hands the values to the run, where the
-//! arguments are not in scope.
-//!
-//! **What reaches the identity.** A point's `profile` level hashes the
-//! resolved model (compiled under [`ResolvedProfileConfig::compile`]), the
-//! data, the problem (fixed values, priors, the fit's config text, the
-//! objective, the training rows, the two policies), the sweep grid and
-//! [`ResolvedProfileConfig::engine`], this build and the engine switches set;
-//! its `point` level the cell's focal values; its `method` level the cell's
-//! algorithm and settings; its `seed` and `start` levels the seed and start.
+//! [`resolve`] takes the declared inputs of `profile` (`crate::args::ProfileArgs`,
+//! split by its `#[derive(Inputs)]`) apart in full, so an input added to the
+//! command does not compile until it is placed here. The algorithm and
+//! backend are parsed, the IF2 defaults applied (`--iterations`, `--cooling`,
+//! `--cooling-target-iters`), the `--fit` argument resolved once
+//! ([`crate::fit_store::FitArg::read`]), its `[config] allow_degenerate_rates`
+//! and `allow_forcing_extrapolation` folded with the flags, its nl-* method's
+//! budget and `[method] starts` read, the starts rule in force decided
+//! (`--starts`, else the fit's, qualified by `--starts-chains`) and `--seeds`
+//! expanded. The removed spellings are refused before the split
+//! ([`refuse_removed`]).
 
-use crate::args::types::{DataSpec, RwSd, SweepSpec};
+use crate::args::types::{RwSd, SweepSpec};
 use crate::fit::fitted_model::FittedSettings;
 use crate::fit_store::FitArg as FitProblem;
 use crate::pfilter_config::ScenarioFlags;
@@ -68,14 +57,8 @@ pub(crate) struct ResolvedProfileConfig {
     pub fixed_files: Vec<std::path::PathBuf>,
     /// `--table NAME=FILE`, as given.
     pub tables: Vec<(String, std::path::PathBuf)>,
-    /// `--data`, as given; empty means the fit's `[data]`.
-    pub data: Vec<DataSpec>,
-    /// `--obs`: the stream a single `--data PATH` binds.
-    pub obs: Option<String>,
     /// `--dt`, checked against the model's declared step by the one dt rule.
     pub dt: Option<f64>,
-    /// `--time-format`: how the data's time column is read.
-    pub time_format: crate::caltime_load::TimeFormat,
     /// `--sweep`: the focal axes and their values.
     pub sweep: Vec<SweepSpec>,
     /// `--particles` on an IF2 cell (required there); 0 on an nl-* cell,
@@ -103,8 +86,6 @@ pub(crate) struct ResolvedProfileConfig {
     pub pf_max_substeps: Option<u64>,
     /// `--binomial`, else BTPE.
     pub binomial: sim::rng::BinomialAlgorithm,
-    /// The engine the identity folds: this build and the engine switches set.
-    pub engine: runid::inputs::EngineIdentity,
 }
 
 /// The starts rule as declared: `--starts`, else the fit's `[method]
@@ -129,47 +110,114 @@ pub(crate) struct NloptBudget {
     pub from_fit: bool,
 }
 
-/// The table a profile prints, outside the store.
-pub(crate) struct ProfileOutputs {
-    /// `--output`: the file, else stdout.
-    pub output: Option<String>,
-    pub format: crate::args::ProfileTableFormat,
-}
-
-/// How `profile` computes, never what: the thread budget.
-pub(crate) struct ProfileExecution {
+/// How `profile` computes, never what: the thread budget and how the data's
+/// time column is read.
+pub(crate) struct CellExecution {
     /// `--parallel` / CAMDL_PARALLEL: the scoped pool's size (0 = the global
     /// pool, every core).
     pub parallel: usize,
+    /// `--time-format`: a format the column does not hold is refused.
+    pub time_format: crate::caltime_load::TimeFormat,
 }
 
-/// Resolve `profile`'s configuration from its arguments, the `--fit` handle's
-/// problem and the defaults, under the compile settings `compile`; refuse
-/// (through `out`) a combination that cannot run. Returns the values, the
-/// label, and the forcing policy's installation, held for the command.
+/// The execution inputs that decide only whether a profile may run.
+pub(crate) struct ProfileGates {
+    /// `--backend`: each algorithm runs on one backend, so it is checked
+    /// against the algorithm and selects nothing.
+    pub backend: Option<String>,
+    /// `--allow-nonconverged-source`.
+    pub allow_nonconverged_source: bool,
+}
+
+/// Refuses the spellings `profile` accepts only to refuse them, each naming
+/// what to write instead: `--pmmh-*`, the `--init` family, `--param`,
+/// `--output-dir`, and `--data` and `--obs`, which the problem `--fit` names
+/// sets. They are skip-class inputs, which the split does not carry, so they
+/// are read here, before it.
+pub(crate) fn refuse_removed(a: &crate::args::ProfileArgs, out: &crate::out::Out) {
+    use crate::profile::PROFILE_PMMH_REMOVED;
+    // The `--pmmh-*` flags went with per-cell PMMH. They are trapped so a
+    // stale script is answered with the reason rather than clap's
+    // "unexpected argument", before any file is read.
+    for (flag, given) in [
+        ("--pmmh-steps", a._removed_pmmh_steps.as_deref()),
+        ("--pmmh-particles", a._removed_pmmh_particles.as_deref()),
+        ("--pmmh-rho", a._removed_pmmh_rho.as_deref()),
+    ] {
+        if let Some(raw) = given {
+            out.fail(format!("error: {flag} {raw} is no longer accepted: {PROFILE_PMMH_REMOVED}"));
+        }
+    }
+    // gh#1354: data and stream selection beside `--fit`'s problem.
+    if !a.data.is_empty() {
+        out.fail("error: --data binds data beside --fit, whose problem names its own data; \
+            put the data in the fit file's [data] (gh#1354).");
+    }
+    if a.obs.is_some() {
+        out.fail("error: --obs selects a stream beside --fit, whose problem binds its own streams; \
+            bind the streams in the fit file's [data.observations] (gh#1354).");
+    }
+    if let Some(dir) = &a._removed_output_dir {
+        out.fail(format!(
+            "error: --output-dir {dir} is no longer accepted: a profile is stored on the run store. \
+             Name its root with `--store {dir}` (or `CAMDL_STORE`); the default is ./camdl-store."
+        ));
+    }
+    // M-1 break per docs/dev/proposals/2026-05-25-cli-init-and-params-ux.md
+    // §"Migration": fail loudly on removed flags before any work.
+    a.model_overrides.check_removed_flags("profile");
+    // gh#889: the `--init` family, answered with the same `--starts`
+    // replacements `fit run` gives, from the same builder.
+    if let Some(msg) = crate::fit::removed_flags_message(
+        "profile",
+        crate::fit::starts_family_removed_lines(
+            a._removed_init.as_deref(),
+            a._removed_posterior.as_deref(),
+            a._removed_mle.as_deref(),
+            a._removed_params.as_deref(),
+        ),
+    ) {
+        out.error(crate::out::CommandError {
+            code: crate::out::ExitCode(2),
+            ..crate::out::CommandError::new(format!("error: {msg}"))
+        })
+        .exit();
+    }
+}
+
+/// The fit file `--fit` names, read and parsed once; `None` for a stored fit's
+/// handle, which is read from the run store once the store is known.
+pub(crate) fn read_fit_file(fit: Option<&std::path::Path>) -> Result<Option<FitProblem>, String> {
+    let Some(path) = fit else { return Ok(None) };
+    let text = path.to_string_lossy();
+    if !crate::fit_store::is_config_file(&text) {
+        return Ok(None);
+    }
+    FitProblem::read(&text, None).map(Some)
+}
+
+/// Resolve `profile`'s configuration from its declared inputs, the `--fit`
+/// handle's problem and the defaults, under the compile settings `compile`;
+/// refuse (through `out`) a combination that cannot run. `--backend` and
+/// `--allow-nonconverged-source` are execution inputs, given apart: each
+/// decides only whether the profile may run. `fit_file` is the fit file
+/// `--fit` names, already read ([`read_fit_file`]); a stored fit is read in the
+/// run store at `store_root`. Returns the values and the forcing policy's
+/// installation, held for the command.
 pub(crate) fn resolve(
-    a: &crate::args::ProfileArgs,
+    declared: crate::args::ProfileDeclared,
+    gates: ProfileGates,
     compile: crate::util::CompileSettings,
     out: &crate::out::Out,
-) -> (ResolvedProfileConfig, ProfileOutputs, ProfileExecution, Option<String>, crate::forcing_extrapolation::Installed) {
-    use crate::profile::{PROFILE_NO_ESTIMATED_SET, PROFILE_PMMH_REMOVED};
-    let crate::args::ProfileArgs {
+    fit_file: Option<FitProblem>,
+    store_root: &std::path::Path,
+) -> (ResolvedProfileConfig, crate::forcing_extrapolation::Installed) {
+    use crate::profile::PROFILE_PMMH_REMOVED;
+    let (
         model,
         model_overrides,
-        scenario: crate::args::ScenarioArgs { scenario, enable, disable },
-        inference:
-            crate::args::InferenceCore {
-                dt,
-                seed,
-                parallel,
-                allow_degenerate_rates,
-                forcing_extrapolation: crate::args::ForcingExtrapolationArg { allow_forcing_extrapolation },
-                time_format,
-                pf_max_substeps,
-                binomial,
-            },
-        stream: crate::args::StreamSelection { obs },
-        data,
+        scenario,
+        inference,
         fit,
         sweep,
         particles,
@@ -177,38 +225,18 @@ pub(crate) fn resolve(
         n_starts,
         starts,
         starts_chains,
-        allow_nonconverged_source,
-        _removed_init,
-        _removed_posterior,
-        _removed_mle,
-        _removed_params,
-        _removed_pmmh_steps,
-        _removed_pmmh_particles,
-        _removed_pmmh_rho,
         cooling,
         cooling_target_iters,
         rw_sd,
-        output,
-        format,
         seeds,
-        label,
         algorithm,
-        backend,
-    } = a;
-    let crate::args::InferenceModelOverrides { fixed_cli, fixed_files, table, _removed_param: _ } = model_overrides;
+    ) = declared.into_parts();
+    let (fixed_cli, fixed_files, table) = model_overrides.into_parts();
+    let (scenario, enable, disable) = scenario.into_parts();
+    let (dt, seed, allow_degenerate_rates, forcing_extrapolation, pf_max_substeps, binomial) = inference.into_parts();
+    let (allow_forcing_extrapolation,) = forcing_extrapolation.into_parts();
+    let ProfileGates { backend, allow_nonconverged_source } = gates;
 
-    // The `--pmmh-*` flags went with per-cell PMMH. They are trapped so a
-    // stale script is answered with the reason rather than clap's
-    // "unexpected argument", before any file is read.
-    for (flag, given) in [
-        ("--pmmh-steps", _removed_pmmh_steps.as_deref()),
-        ("--pmmh-particles", _removed_pmmh_particles.as_deref()),
-        ("--pmmh-rho", _removed_pmmh_rho.as_deref()),
-    ] {
-        if let Some(raw) = given {
-            out.fail(format!("error: {flag} {raw} is no longer accepted: {PROFILE_PMMH_REMOVED}"));
-        }
-    }
     // Parse the CLI strings into the typed registry entry (the string boundary);
     // all downstream dispatch reads the typed FitAlgorithm / InferenceBackend.
     let algo_name = algorithm.as_deref().unwrap_or("if2");
@@ -253,12 +281,12 @@ pub(crate) fn resolve(
         }),
         ProfileAlgo::Nlopt(_) => {
             let given = crate::profile::If2Flags {
-                particles: *particles,
-                iterations: *iterations,
-                cooling: *cooling,
-                cooling_target_iters: *cooling_target_iters,
-                pf_max_substeps: *pf_max_substeps,
-                binomial: *binomial,
+                particles,
+                iterations,
+                cooling,
+                cooling_target_iters,
+                pf_max_substeps,
+                binomial,
                 rw_sd: rw_sd.as_ref(),
             };
             if let Err(e) = crate::profile::refuse_if2_flags_for_nlopt(&given, algo_name) {
@@ -267,46 +295,26 @@ pub(crate) fn resolve(
             0
         }
     };
-    let label: Option<String> = label.as_deref().map(|raw| {
-        crate::fit::validate_label(raw).unwrap_or_else(|e| {
-            out.fail(format!("error: invalid --label: {}", e));
-        })
-    });
-    // M-1 break per docs/dev/proposals/2026-05-25-cli-init-and-params-ux.md
-    // §"Migration": fail loudly on removed flags before any work.
-    model_overrides.check_removed_flags("profile");
-    // gh#889: the `--init` family, answered with the same `--starts`
-    // replacements `fit run` gives, from the same builder.
-    if let Some(msg) = crate::fit::removed_flags_message(
-        "profile",
-        crate::fit::starts_family_removed_lines(
-            _removed_init.as_deref(),
-            _removed_posterior.as_deref(),
-            _removed_mle.as_deref(),
-            _removed_params.as_deref(),
-        ),
-    ) {
-        out.error(crate::out::CommandError {
-            code: crate::out::ExitCode(2),
-            ..crate::out::CommandError::new(format!("error: {msg}"))
-        })
-        .exit();
-    }
-    // What names the estimated set: `--rw-sd` when given, else the --fit
-    // config's [estimate]. Without either there is nothing that says what a
-    // cell estimates.
-    if rw_sd.is_none() && fit.is_none() {
-        out.fail(PROFILE_NO_ESTIMATED_SET);
-    }
+    // A profile's problem is a stored fit problem: the one a fit file poses,
+    // or a stored fit's. Flags do not pose one.
+    // gh#1354: a problem posed by flags, and `--data` or `--obs` beside `--fit`.
+    let Some(fit) = fit else {
+        out.fail(
+            "error: a profile is of a fit problem: pass `--fit FIT.toml` (the problem the file poses, \
+             stored as `camdl fit run` stores it) or `--fit @RUN` (a stored fit's). A problem posed \
+             by `--data` and the other flags alone is not accepted yet (gh#1354).",
+        );
+    };
+    let fit = Some(fit);
 
-    // The fit `--fit` names: read once, here.
+    // The fit `--fit` names: the file already read, or a stored fit, read
+    // here from the store this profile is stored in.
+    crate::fit_store::set_reader_root(store_root.to_path_buf());
+    let fit_store = crate::camdl_store::open_existing(store_root);
     let fit: Option<FitProblem> = fit.as_ref().map(|handle| {
-        // A stored fit is read in the run store, where `fit run` stores fits;
-        // the profile itself stays on the old store.
-        let fit_store = crate::camdl_store::open_existing(&crate::camdl_store::read_root());
-        let f = FitProblem::read(&handle.to_string_lossy(), fit_store.as_ref()).unwrap_or_else(|e| {
+        let f = fit_file.unwrap_or_else(|| FitProblem::read(&handle.to_string_lossy(), fit_store.as_ref()).unwrap_or_else(|e| {
             out.fail(format!("error: --fit {}: {e}", handle.display()));
-        });
+        }));
         out.say(format_args!("profile: using --fit '{}' for priors / bounds / [fixed]", f.handle));
         f
     });
@@ -319,7 +327,7 @@ pub(crate) fn resolve(
     let settings = problem
         .map(|p| FittedSettings::of(&p.config))
         .unwrap_or_default()
-        .with_flags(*allow_degenerate_rates, *allow_forcing_extrapolation);
+        .with_flags(allow_degenerate_rates, allow_forcing_extrapolation);
     let eval = crate::env::eval_settings(settings.allow_degenerate_rates);
     // A forcing evaluated outside its range holds its end value under
     // `--allow-forcing-extrapolation` or the fit's `[config]
@@ -344,13 +352,13 @@ pub(crate) fn resolve(
     // `fit run` applies it with (gh#1056).
     let file_starts = fit_method.and_then(|m| m.starts.clone());
     let (rule_in_force, from): (Option<crate::fit::starts::ChainStarts>, &'static str) = match (starts, &file_starts) {
-        (Some(rule), _) => (Some(rule.clone()), "from --starts"),
+        (Some(rule), _) => (Some(rule), "from --starts"),
         (None, Some(rule)) => (Some(rule.clone()), "from the --fit config's [method] starts"),
         (None, None) => (None, ""),
     };
     let rule = match starts_chains {
         Some(subset) => Some(
-            crate::fit::starts::apply_starts_chains(rule_in_force, subset, "profile")
+            crate::fit::starts::apply_starts_chains(rule_in_force, &subset, "profile")
                 .unwrap_or_else(|e| out.fail(format!("error: {e}"))),
         ),
         None => rule_in_force,
@@ -358,7 +366,7 @@ pub(crate) fn resolve(
     // `--seeds` wins; the default is the single `--seed`.
     let seeds: Vec<u64> = match seeds {
         Some(spec) => spec.expand(),
-        None => vec![*seed],
+        None => vec![seed],
     };
     if seeds.is_empty() {
         out.fail("error: --seeds expanded to empty list");
@@ -372,28 +380,23 @@ pub(crate) fn resolve(
         fit,
         eval,
         forcing,
-        scenario: ScenarioFlags { scenario: scenario.clone(), enable: enable.clone(), disable: disable.clone() },
+        scenario: ScenarioFlags { scenario, enable, disable },
         fixed_cli: fixed_cli.iter().map(|p| (p.name.clone(), p.value)).collect(),
-        fixed_files: fixed_files.clone(),
+        fixed_files,
         tables: table.iter().map(|t| (t.name.clone(), t.path.clone())).collect(),
-        data: data.clone(),
-        obs: obs.clone(),
-        dt: *dt,
-        time_format: *time_format,
-        sweep: sweep.clone(),
+        dt,
+        sweep,
         particles,
         iterations: iterations.unwrap_or(crate::profile::PROFILE_DEFAULT_ITERATIONS),
-        cooling: crate::profile::profile_cooling_schedule(*cooling, *cooling_target_iters),
-        n_starts: *n_starts,
-        starts: DeclaredStarts { rule, from, allow_nonconverged_source: *allow_nonconverged_source },
+        cooling: crate::profile::profile_cooling_schedule(cooling, cooling_target_iters),
+        n_starts,
+        starts: DeclaredStarts { rule, from, allow_nonconverged_source },
         nlopt: NloptBudget { tolerance, max_evals, from_fit },
-        rw_sd: rw_sd.clone(),
-        seed: *seed,
+        rw_sd,
+        seed,
         seeds,
-        pf_max_substeps: *pf_max_substeps,
+        pf_max_substeps,
         binomial: binomial.unwrap_or_default(),
-        engine: crate::env::get().engine_identity(crate::version::ENGINE_ID),
     };
-    let outputs = ProfileOutputs { output: output.as_ref().map(|p| p.to_string_lossy().into_owned()), format: *format };
-    (resolved, outputs, ProfileExecution { parallel: *parallel }, label, installed)
+    (resolved, installed)
 }

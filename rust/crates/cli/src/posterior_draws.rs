@@ -440,9 +440,10 @@ mod tests {
                 source: "model_ir".into(),
                 overridden_model_prior: None,
             }],
+            store_layout: runid::STORE_LAYOUT,
             ..Default::default()
         };
-        crate::run_meta::write_fit_sidecar(&seg, Path::new(""), &sidecar).unwrap();
+        crate::run_meta::store_fit_sidecar(&seg, &sidecar).unwrap();
         seg
     }
 
@@ -530,9 +531,10 @@ mod tests {
         fs::create_dir_all(&tmp).unwrap();
         let sidecar = crate::run_meta::FitSidecar {
             fixed: std::collections::BTreeMap::from([("N0".to_string(), 1000.0), ("sigma".to_string(), 0.11)]),
+            store_layout: runid::STORE_LAYOUT,
             ..Default::default()
         };
-        crate::run_meta::write_fit_sidecar(&tmp, Path::new(""), &sidecar).unwrap();
+        crate::run_meta::store_fit_sidecar(&tmp, &sidecar).unwrap();
         let mut got = resolve_fixed_for_backfill(tmp.to_str().unwrap(), &crate::test_support::tiny_model())
             .expect("reads sidecar");
         got.sort_by(|a, b| a.0.cmp(&b.0));

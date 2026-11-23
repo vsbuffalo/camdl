@@ -882,108 +882,11 @@ pub fn read_verified_original(segment: &std::path::Path, recorded: &str) -> Resu
 /// written in. What every reader of a stored fit's config reads.
 pub const RESOLVED_CONFIG: &str = "fit.resolved.toml";
 
-/// Write the fit-level sidecar of a folder that keeps no config: a CLI-only
-/// `profile`'s. A folder that holds a config (a fit's, or a profile's of one)
-/// is written by [`write_fit_sidecar_with_config`], which stores the config as
-/// read and the configuration resolved from it. Idempotent; the caller writes
-/// it once per segment.
-///
-/// `source_model` is recorded from `model_path`, relative to `fit_segment`,
-/// when it is a file; `None` otherwise. `model_path` is the model as the fit
-/// loaded it (a relative path resolves against the working directory, as the
-/// loader resolved it). `source_config` is `None`: there is no config.
-///
-/// A profile's `label` is **sticky** (gh#29): when `sidecar.label` is `None`,
-/// a non-`None` label already on disk at `fit_segment` is preserved; an
-/// explicit `Some(label)` always overrides; a fresh segment with no prior
-/// label stays `None`. (The same one home is what `camdl label` relabels for a
-/// profile.) A fit writes no label here — its label is its run's (gh#896).
-/// Every other field is a derived projection of the current invocation's
-/// inputs and is overwritten as before.
-pub fn write_fit_sidecar(
-    fit_segment: &std::path::Path,
-    model_path: &std::path::Path,
-    sidecar: &FitSidecar,
-) -> std::io::Result<()> {
-    write_fit_sidecar_archiving(fit_segment, None, model_path, sidecar)
-}
-
-/// [`write_fit_sidecar`] for a config already read, and resolved: `config_text`,
-/// read once from `fit_toml_path`, is the archive ([`ARCHIVED_CONFIG`]), and
-/// `resolved_text` the configuration the folder's fits ran under
-/// ([`RESOLVED_CONFIG`]); the file is not read again. `fit run` stores this
-/// way, so every fit folder it writes holds the text it read and the
-/// configuration it ran, whatever happens to the file while it runs.
-pub fn write_fit_sidecar_with_config(
-    fit_segment: &std::path::Path,
-    fit_toml_path: &std::path::Path,
-    config_text: &str,
-    resolved_text: &str,
-    model_path: &std::path::Path,
-    sidecar: &FitSidecar,
-) -> std::io::Result<()> {
-    let config = StoredConfig { path: fit_toml_path, text: config_text, resolved: resolved_text };
-    write_fit_sidecar_archiving(fit_segment, Some(config), model_path, sidecar)
-}
-
-/// The config a fit folder stores: `text`, read from the file at `path` (the
-/// path its relative paths were written against), and the configuration
-/// `resolved` from it.
-struct StoredConfig<'a> {
-    path: &'a std::path::Path,
-    text: &'a str,
-    resolved: &'a str,
-}
-
-fn write_fit_sidecar_archiving(
-    fit_segment: &std::path::Path,
-    config: Option<StoredConfig<'_>>,
-    model_path: &std::path::Path,
-    sidecar: &FitSidecar,
-) -> std::io::Result<()> {
-    std::fs::create_dir_all(fit_segment)?;
-    let mut sidecar = sidecar.clone();
-    sidecar.store_layout = runid::STORE_LAYOUT;
-    sidecar.source_config = None;
-    sidecar.source_model = if model_path.is_file() {
-        Some(relative_path(fit_segment, model_path)?)
-    } else {
-        None
-    };
-    if let Some(StoredConfig { path, text, resolved }) = config {
-        // Each whole or not at all, so a crash cannot leave a torn config
-        // beside a record that names it, and through a temporary of this
-        // writer's own: several `fit run`s of one file (one per seed) write
-        // one folder's configs at once.
-        runid::write_file_atomic(&fit_segment.join(ARCHIVED_CONFIG), text.as_bytes())
-            .map_err(std::io::Error::other)?;
-        runid::write_file_atomic(&fit_segment.join(RESOLVED_CONFIG), resolved.as_bytes())
-            .map_err(std::io::Error::other)?;
-        sidecar.source_config = Some(relative_path(fit_segment, path)?);
-        // gh#353: archive the model `.camdl` source too, symmetric with
-        // fit.toml.original, so the leaf is self-contained (source + config +
-        // IR) and a viewer/reproduction doesn't depend on the original checkout
-        // layout. Best-effort and .camdl-only: a model supplied directly as
-        // `.ir.json` is already captured by the leaf's `model.ir.json`, and a
-        // missing/unreadable source must not fail the fit. `model_path` is
-        // `config.model.camdl`, resolved exactly as the fit loaded it — via
-        // `resolve_ir_path` / `std::fs::read`, i.e. against the process CWD (a
-        // relative path resolves against CWD; an absolute path stays
-        // absolute). Resolving it against the fit.toml's directory would
-        // disagree with the loader and silently skip the archive whenever the
-        // fit is run from a directory other than the fit.toml's parent.
-        if model_path.extension().is_some_and(|e| e == "camdl") && model_path.is_file() {
-            let _ = std::fs::copy(model_path, fit_segment.join("model.camdl.original"));
-        }
-    }
-    store_fit_sidecar(fit_segment, &sidecar)
-}
-
 /// Write `sidecar` as the folder's `fit.meta.json`, stamped with
-/// [`FIT_META_SCHEMA_VERSION`], keeping the sticky fields an on-disk record of
-/// the current version carries when `sidecar` has none (see
-/// [`write_fit_sidecar`]). Archives nothing and records `source_config` as
-/// given: the call for rewriting a sidecar that was read back.
+/// [`FIT_META_SCHEMA_VERSION`], keeping the label and the training partition
+/// an on-disk record of the current version carries when `sidecar` has none.
+/// Archives nothing and records `source_config` as given: the call for
+/// rewriting a sidecar that was read back.
 pub fn store_fit_sidecar(fit_segment: &std::path::Path, sidecar: &FitSidecar) -> std::io::Result<()> {
     // gh#29: keep a profile's label sticky. gh#585: the training partition is
     // sticky the same way — it is recorded after the data load, and a rerun
@@ -1007,26 +910,6 @@ pub fn store_fit_sidecar(fit_segment: &std::path::Path, sidecar: &FitSidecar) ->
     // recording its training partition, `camdl dev migrate` raising the
     // layout) never share a temporary.
     runid::write_file_atomic(&fit_segment.join("fit.meta.json"), &bytes).map_err(std::io::Error::other)
-}
-
-/// `to` as a path relative to the directory `from`, computed between the two
-/// canonical (symlink-resolved, absolute) paths, so joining it back onto `from`
-/// reaches `to` whatever directory the process runs in. Both must exist.
-pub(crate) fn relative_path(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<String> {
-    use std::path::Component;
-    let from = std::fs::canonicalize(from)?;
-    let to = std::fs::canonicalize(to)?;
-    let a: Vec<Component> = from.components().collect();
-    let b: Vec<Component> = to.components().collect();
-    let common = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
-    let mut rel = std::path::PathBuf::new();
-    for _ in common..a.len() {
-        rel.push("..");
-    }
-    for c in &b[common..] {
-        rel.push(c.as_os_str());
-    }
-    Ok(rel.to_string_lossy().into_owned())
 }
 
 /// Read the fit-level sidecar; `Ok(None)` when absent (an incomplete segment —
@@ -1118,71 +1001,6 @@ mod tests {
         let why = check_fit_summary_schema(&other, "mh_summary.json")
             .expect_err("a tag this camdl does not read is refused too");
         assert!(why.contains("v99") && why.contains(FIT_SUMMARY_SCHEMA), "{why}");
-    }
-
-    /// Writing a fit folder stamps the current store layout whatever the
-    /// caller set; rewriting a sidecar that was read back keeps the layout it
-    /// read, so an update to an older folder does not claim the files a newer
-    /// layout promises.
-    #[test]
-    fn the_store_layout_is_stamped_on_write_and_kept_on_a_rewrite() {
-        let dir = std::env::temp_dir().join(format!(
-            "camdl_layout_{}_{}", std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-        let bare = FitSidecar::default();
-        assert_eq!(bare.store_layout, 0);
-        write_fit_sidecar(&dir, std::path::Path::new(""), &bare)
-            .unwrap();
-        assert_eq!(read_fit_sidecar(&dir).unwrap().unwrap().store_layout, runid::STORE_LAYOUT);
-
-        let mut old = read_fit_sidecar(&dir).unwrap().unwrap();
-        old.store_layout = 0;
-        store_fit_sidecar(&dir, &old).unwrap();
-        assert_eq!(read_fit_sidecar(&dir).unwrap().unwrap().store_layout, 0, "a rewrite keeps the layout");
-        let text = std::fs::read_to_string(dir.join("fit.meta.json")).unwrap();
-        let mut value: serde_json::Value = serde_json::from_str(&text).unwrap();
-        value.as_object_mut().unwrap().remove("store_layout");
-        std::fs::write(dir.join("fit.meta.json"), value.to_string()).unwrap();
-        assert_eq!(read_fit_sidecar(&dir).unwrap().unwrap().store_layout, 0, "no field is layout 0");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Several `fit run`s of one fit file (one per seed, in parallel shells)
-    /// write one fit folder's configs and record at once. Every write
-    /// succeeds: no writer's commit renames away a temporary another writer
-    /// is about to commit, and the folder ends holding the configs whole.
-    #[test]
-    fn concurrent_writers_of_one_fit_folders_configs_all_succeed() {
-        let dir = crate::test_support::unique_temp_dir("sidecar_concurrent");
-        let seg = dir.join("fits").join("fit-00000000");
-        std::fs::create_dir_all(&seg).unwrap();
-        let toml = dir.join("fit.toml");
-        std::fs::write(&toml, "[model]\ncamdl = \"m.camdl\"\n").unwrap();
-        let failures: Vec<String> = std::thread::scope(|scope| {
-            let writers: Vec<_> = (0..6)
-                .map(|_| {
-                    scope.spawn(|| {
-                        (0..40)
-                            .filter_map(|_| {
-                                write_fit_sidecar_with_config(
-                                    &seg, &toml, "the file\n", "the resolved config\n",
-                                    std::path::Path::new(""), &FitSidecar::default(),
-                                )
-                                .err()
-                                .map(|e| e.to_string())
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                })
-                .collect();
-            writers.into_iter().flat_map(|w| w.join().unwrap()).collect()
-        });
-        assert!(failures.is_empty(), "{} failed writes, e.g. {:?}", failures.len(), failures.first());
-        assert_eq!(std::fs::read_to_string(seg.join(ARCHIVED_CONFIG)).unwrap(), "the file\n");
-        assert_eq!(std::fs::read_to_string(seg.join(RESOLVED_CONFIG)).unwrap(), "the resolved config\n");
-        assert!(read_fit_sidecar(&seg).unwrap().is_some());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A sidecar write stages its bytes through a temporary file of its own
@@ -1534,130 +1352,33 @@ mod tests {
     fn fit_sidecar_label_is_sticky_across_writes() {
         let tmp = crate::test_support::unique_temp_dir("sidecar_sticky_label");
         let seg = tmp.join("fits").join("demo-5091d4a8");
-        let toml = std::path::Path::new("nonexistent.toml");
+        std::fs::create_dir_all(&seg).unwrap();
         let label = |seg: &std::path::Path| read_fit_sidecar(seg).unwrap().unwrap().label;
 
         // Fresh segment, no prior label, no incoming label → stays `None`.
-        write_fit_sidecar(&seg, toml,
+        store_fit_sidecar(&seg,
             &FitSidecar { label: None, ..Default::default() }).unwrap();
         assert_eq!(label(&seg), None,
             "a fresh segment with no --label must stay unlabeled");
 
         // `fit run mle.toml --label "smoke test scout"`.
-        write_fit_sidecar(&seg, toml,
+        store_fit_sidecar(&seg,
             &FitSidecar { label: Some("smoke test scout".into()), ..Default::default() }).unwrap();
         assert_eq!(label(&seg), Some("smoke test scout".into()));
 
         // `fit run posterior.toml` (no --label): the earlier label must stick.
-        write_fit_sidecar(&seg, toml,
+        store_fit_sidecar(&seg,
             &FitSidecar { label: None, ..Default::default() }).unwrap();
         assert_eq!(label(&seg), Some("smoke test scout".into()),
             "gh#29: a method-only re-run without --label must not clobber the label");
 
         // A later invocation with an explicit --label overrides the sticky one.
-        write_fit_sidecar(&seg, toml,
+        store_fit_sidecar(&seg,
             &FitSidecar { label: Some("validate run".into()), ..Default::default() }).unwrap();
         assert_eq!(label(&seg), Some("validate run".into()),
             "an explicit --label must override the sticky label");
 
         std::fs::remove_dir_all(&tmp).ok();
-    }
-
-    /// gh#353: the fit run leaf archives the model `.camdl` source as
-    /// `model.camdl.original`, symmetric with `fit.toml.original`, so a consumer
-    /// (e.g. camdl-scope's Source tab) can read it from the self-contained leaf
-    /// instead of a checkout-relative path that doesn't resolve elsewhere.
-    ///
-    /// The recorded `model_path` is `config.model.camdl` — the *same* string the
-    /// fit loads through `resolve_ir_path` (`std::fs::read(path)`), i.e. resolved
-    /// against the **process CWD**, never the fit.toml's directory. A fit is
-    /// normally launched from a directory that is not the fit.toml's parent (the
-    /// config and model live in subdirs, run from the repo root), so this test
-    /// puts the two bases in DIFFERENT places: the model lives in a subdir of
-    /// CWD, while the fit.toml lives in a separate temp dir. Resolving the
-    /// recorded path against the fit.toml's directory would look for a file that
-    /// does not exist and silently skip the archive — so this fails red on the
-    /// old (fit.toml-dir-relative) resolution and passes green once the archiver
-    /// resolves the recorded path exactly as `resolve_ir_path` does.
-    #[test]
-    fn fit_sidecar_archives_model_camdl_source() {
-        // A model source in a CWD-relative subdir — this mirrors how
-        // `resolve_ir_path` found it from `config.model.camdl` (the recorded
-        // `model_path`), which is resolved against the process CWD. Unique
-        // subdir name so parallel test threads don't collide; removed before any
-        // assert can panic so the checkout is never left dirty.
-        let unique = crate::test_support::unique_temp_dir("sidecar_cwd_model");
-        let sub = unique.file_name().unwrap().to_str().unwrap().to_string();
-        let model_dir = std::env::current_dir().unwrap().join(&sub);
-        std::fs::create_dir_all(&model_dir).unwrap();
-        let model_src = "compartments { S, I }\n"; // content is opaque to the archive
-        std::fs::write(model_dir.join("m.camdl"), model_src).unwrap();
-        let rel_model_path = format!("{sub}/m.camdl");
-
-        // The fit.toml lives in a SEPARATE temp dir — its parent is neither CWD
-        // nor the model's directory. This is the case the bug missed.
-        let tmp = crate::test_support::unique_temp_dir("sidecar_fit_dir");
-        std::fs::create_dir_all(&tmp).unwrap();
-        let toml = tmp.join("fit.toml");
-        std::fs::write(&toml, format!("[model]\ncamdl = \"{rel_model_path}\"\n")).unwrap();
-        let seg = tmp.join("fits").join("demo-a1b2c3d4");
-
-        let write_result = write_fit_sidecar_with_config(
-            &seg,
-            &toml,
-            "",
-            "",
-            std::path::Path::new(&rel_model_path),
-            &FitSidecar::default(),
-        );
-        // `source_model` is recorded relative to the fit folder and names the
-        // model file from there.
-        let recorded_model = read_fit_sidecar(&seg).ok().flatten()
-            .and_then(|s| s.source_model)
-            .and_then(|m| std::fs::canonicalize(seg.join(m)).ok());
-        let model_file = std::fs::canonicalize(model_dir.join("m.camdl")).ok();
-
-        // A non-.camdl model has no source to archive — the leaf's model.ir.json
-        // already captures it, so no stray file. Base-independent.
-        let seg_ir = tmp.join("fits").join("demo-irjson0");
-        let ir_write_result = write_fit_sidecar_with_config(
-            &seg_ir,
-            &toml,
-            "",
-            "",
-            std::path::Path::new("m.ir.json"),
-            &FitSidecar::default(),
-        );
-
-        // Gather every fact, then clean up BOTH the CWD subdir and the temp dir
-        // before asserting — a failed assert must never leave state behind.
-        let archived = seg.join("model.camdl.original");
-        let archived_is_file = archived.is_file();
-        let archived_bytes = std::fs::read_to_string(&archived).ok();
-        let ir_archive_absent = !seg_ir.join("model.camdl.original").exists();
-        std::fs::remove_dir_all(&model_dir).ok();
-        std::fs::remove_dir_all(&tmp).ok();
-
-        write_result.unwrap();
-        ir_write_result.unwrap();
-        assert!(recorded_model.is_some() && recorded_model == model_file,
-            "source_model resolves against the fit folder to the model file: \
-             {recorded_model:?} vs {model_file:?}");
-        assert!(
-            archived_is_file,
-            "gh#353: the model source must be archived beside fit.toml.original \
-             even when the fit runs from a directory that is not the fit.toml's \
-             parent (model_path is CWD-relative, matching resolve_ir_path)"
-        );
-        assert_eq!(
-            archived_bytes.as_deref(),
-            Some(model_src),
-            "the archived source must be a verbatim copy of the CWD-resolved model file"
-        );
-        assert!(
-            ir_archive_absent,
-            "a non-.camdl model_path must not produce a model.camdl.original"
-        );
     }
 
     // ─── ObsSchema: the observation/dimension descriptor fold ──────────────

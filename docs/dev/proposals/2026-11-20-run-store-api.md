@@ -5133,14 +5133,41 @@ A profile point is the same result whichever grid holds it.
 - **Its identity holds its start's values, not the start's index.** Starts are
   drawn once for a whole run, so the same index can mean different values in two
   runs.
+- **Starts with equal values are independent runs.** The `from_params` and
+  `from_mle` rules start every chain at one point. The second and later starts
+  of an invocation whose values equal an earlier start's take a replicate index
+  (1, 2, ...), the number of earlier starts with those values, and the index
+  enters the seed, as a simulate seed's replicates are `seed_7`, `seed_7-r1`,
+  `seed_7-r2`. A start with no equal earlier start has no index, and its seed is
+  derived from the focal values, the start's values and the user's seed alone,
+  so starts with distinct values keep their seeds. The index depends only on the
+  starts before it, so `--n-starts 4` after `--n-starts 3` computes only the
+  fourth start, and a larger grid still reuses every point it shares.
 - **Its identity has no grid.** Growing a grid reuses the points already stored.
 - **Points are grouped on disk** by the problem they profile, then by focal
   values, then by method, with one folder per seed and start below that. Today's
   levels are the same but for the first, which today includes the grid
   (`cli/src/profile_cas.rs:99-110`, `:130-138`).
-- **The problem is a `FitProblem`.** With `--fit` it is that fit's problem; a
-  profile given no fit resolves its flags to a problem of its own, as
-  `pfilter --fit fit.toml` resolves a configuration to one.
+- **The problem is a `FitProblem`, from exactly one source.** `--fit @run` names
+  a stored fit run, and its `Dep<FitProblem>` is the problem. A model with
+  `--fit fit.toml` is resolved and stored as `fit run fit.toml` stores it, by
+  the same writer, so a profile and a fit of one configuration share one stored
+  problem. Each point computes from the stored problem it depends on, never from
+  a separate binding of the files.
+- **The command line's values enter the problem.** Parameter values follow the
+  run specification's §1.3 chain through the one resolver, unchanged:
+  `--fixed-file` (tier 3), the point's focal values (3.5), the scenario (4) and
+  `--fixed` (5). `--fixed` holds a parameter and takes it out of the estimated
+  set, which poses a different, conditional problem, stored as such; so does
+  each name a `--fixed-file` gives, a fit's `mle_params.toml` among them, other
+  than a swept one. Each replacement is reported as the resolver reports it for
+  every command. A `--starts from_params` file may give values for estimated
+  parameters; a value for a parameter that is neither estimated nor fixed is
+  refused, naming it. `--time-format` is how a profile runs, not part of the
+  problem: a fit configuration reads its dates automatically.
+- **Refused for now** (gh#1354): a profile posed by flags alone, with no
+  `--fit`; `--data` beside `--fit`; and stream selection (`--obs`) beside
+  `--fit`.
 - **No group directory holds a file.** Today the profile's base folder, the
   first level, holds a provenance sidecar, `fit.meta.json`; when a fit was
   given, the archived configuration, `fit.toml.original` and

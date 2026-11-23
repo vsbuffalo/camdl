@@ -12,14 +12,26 @@
 //!
 //! The record reads the times actually evaluated, not the run's span: a
 //! forcing read only under a condition that is false past its range records
-//! nothing. Each side of the range has one set-once flag: a clamped evaluation
-//! loads it and sets it only while it is clear, so it is written once per
+//! nothing. Each side of the range has one state, clear, recording or
+//! recorded: the first clamped evaluation moves it from clear to recording,
+//! records the note, and then marks it recorded, so it is written once per
 //! process for each compiled forcing and particle threads never contend on it;
-//! a counter would be written on every clamped evaluation. The record names
+//! a counter would be written on every clamped evaluation. A clamped
+//! evaluation on another thread that finds it recording waits until it is
+//! recorded, so no evaluation outside the range returns before the note is
+//! reported: a command that reads its policy's verdict after a computation
+//! sees the verdict on every hold that computation made. The record names
 //! the side, not a time: which time outside the range a run over many threads
 //! meets first depends on its threads.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
+
+/// A side's state: no evaluation outside the range yet.
+const CLEAR: u8 = 0;
+/// One evaluation outside the range is recording its note.
+const RECORDING: u8 = 1;
+/// The note is recorded and reported.
+const RECORDED: u8 = 2;
 
 use crate::schedule::output_tol;
 
@@ -113,7 +125,7 @@ impl std::fmt::Display for OutsideRange {
     }
 }
 
-/// The range a compiled forcing is defined on, with one set-once flag per
+/// The range a compiled forcing is defined on, with one record state per
 /// side. Shared (through `Arc`) by every clone of the compiled model, so a run
 /// over many threads records each side once.
 #[derive(Debug)]
@@ -123,8 +135,8 @@ pub struct DefinedRange {
     lo: f64,
     hi: f64,
     lagged: bool,
-    before: AtomicBool,
-    after: AtomicBool,
+    before: AtomicU8,
+    after: AtomicU8,
 }
 
 impl DefinedRange {
@@ -135,8 +147,8 @@ impl DefinedRange {
             lo,
             hi,
             lagged,
-            before: AtomicBool::new(false),
-            after: AtomicBool::new(false),
+            before: AtomicU8::new(CLEAR),
+            after: AtomicU8::new(CLEAR),
         }
     }
 
@@ -155,25 +167,57 @@ impl DefinedRange {
         }
     }
 
+    /// Each side of the range on which this forcing has been evaluated, in
+    /// the order before, after: what this compiled forcing has recorded.
+    pub fn held(&self) -> Vec<OutsideRange> {
+        [(Side::Before, &self.before), (Side::After, &self.after)]
+            .into_iter()
+            .filter(|(_, state)| state.load(Ordering::Acquire) != CLEAR)
+            .map(|(side, _)| self.outside_range(side))
+            .collect()
+    }
+
+    fn outside_range(&self, side: Side) -> OutsideRange {
+        OutsideRange {
+            forcing: self.forcing.clone(),
+            kind: self.kind,
+            lo: self.lo,
+            hi: self.hi,
+            side,
+            lagged: self.lagged,
+        }
+    }
+
     #[cold]
     #[inline(never)]
     fn outside(&self, side: Side) {
-        let flag = match side {
+        let state = match side {
             Side::Before => &self.before,
             Side::After => &self.after,
         };
-        if flag.load(Ordering::Relaxed) {
+        if state.load(Ordering::Acquire) == RECORDED {
             return;
         }
-        if !flag.swap(true, Ordering::Relaxed) {
-            crate::run_notes::record(crate::run_notes::RunNote::ForcingOutsideRange(OutsideRange {
-                forcing: self.forcing.clone(),
-                kind: self.kind,
-                lo: self.lo,
-                hi: self.hi,
-                side,
-                lagged: self.lagged,
-            }));
+        match state.compare_exchange(CLEAR, RECORDING, Ordering::Acquire, Ordering::Acquire) {
+            Ok(_) => {
+                // Marks the side recorded when the report returns, or unwinds,
+                // so a waiting thread never waits on a report that ended. The
+                // Release store makes what the report wrote visible to any
+                // thread that then reads RECORDED.
+                struct Recorded<'a>(&'a AtomicU8);
+                impl Drop for Recorded<'_> {
+                    fn drop(&mut self) {
+                        self.0.store(RECORDED, Ordering::Release);
+                    }
+                }
+                let _recorded = Recorded(state);
+                crate::run_notes::record(crate::run_notes::RunNote::ForcingOutsideRange(self.outside_range(side)));
+            }
+            Err(_) => {
+                while state.load(Ordering::Acquire) != RECORDED {
+                    std::thread::yield_now();
+                }
+            }
         }
     }
 }

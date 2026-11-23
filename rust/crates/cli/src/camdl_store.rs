@@ -78,7 +78,8 @@ pub(crate) fn camdl_top_level() -> TopLevel {
 /// Every kind camdl stores on the run store.
 pub(crate) fn camdl_kinds() -> Kinds {
     let kinds = Kinds::new().register::<CompiledModel>().register::<Quantities>().register::<DataTable>();
-    crate::fit_store::register(crate::sim_store::register(crate::pfilter_store::register(kinds)))
+    let kinds = crate::fit_store::register(crate::sim_store::register(crate::pfilter_store::register(kinds)));
+    crate::profile_store::register(kinds)
 }
 
 // ── The store root and the request ───────────────────────────────────────────

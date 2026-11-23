@@ -3,14 +3,12 @@
 //! A profile of a fit config is read against `fit run` of the same config, so
 //! each cell must score the same data and estimate the same nuisance set:
 //!
-//! * a `[data] holdout_after` is applied as `fit run` applies it, to the
-//!   `--data` binding as to the config's own data, so the held-out rows enter
-//!   no cell's likelihood;
-//! * `[data.holdout]` files are checked against the bound training data as
-//!   `fit run` checks them;
+//! * a `[data] holdout_after` is applied as `fit run` applies it, so the
+//!   held-out rows enter no cell's likelihood;
+//! * `[data.holdout]` files are checked against the training data as `fit run`
+//!   checks them;
 //! * the estimated set is the config's `[estimate]` less the swept and pinned
-//!   names, without `--rw-sd`, on any per-cell algorithm; `--rw-sd` is needed
-//!   only to name the set when there is no `--fit`;
+//!   names, without `--rw-sd`, on any per-cell algorithm;
 //! * a `--starts` rule binds the per-cell estimated set, not the swept
 //!   parameter, which each cell pins; without `--starts` the rule is `fit
 //!   run`'s default, `--starts-chains` and `--allow-nonconverged-source` mean
@@ -82,9 +80,7 @@ const DATA: &str = "time\tweekly_cases\n7\t47\n14\t111\n21\t474\n28\t1066\n\
 /// A fit config estimating `beta` and `gamma`; `extra_data` goes into `[data]`.
 fn fit_toml(extra_data: &str) -> String {
     format!(
-        r#"store = "results"
-
-[model]
+        r#"[model]
 camdl = "sir.camdl"
 
 [data]
@@ -123,6 +119,7 @@ fn profile(dir: &Path, args: &[&str]) -> Output {
         .env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDLC", camdlc_bin())
+        .env("CAMDL_STORE", dir.join("store"))
         .current_dir(dir)
         .arg("profile")
         .arg("sir.camdl")
@@ -147,22 +144,33 @@ fn assert_refused(o: &Output, what: &str, needles: &[&str]) {
     }
 }
 
-/// Every file named `name` under `root`, recursively.
-fn find_all(root: &Path, name: &str) -> Vec<PathBuf> {
+/// Every profile point folder stored under `dir`'s store, found by the
+/// `"kind": "profile_point"` of its `identity.json`.
+fn point_dirs(dir: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
+    let mut stack = vec![dir.join("store")];
     while let Some(d) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&d) else { continue };
         for e in entries.flatten() {
             let p = e.path();
-            if p.is_dir() {
+            if p.is_dir() && !e.file_name().to_string_lossy().starts_with('.') {
                 stack.push(p);
-            } else if p.file_name().is_some_and(|n| n == name) {
-                found.push(p);
+            } else if p.file_name().is_some_and(|n| n == "identity.json") {
+                let v: serde_json::Value =
+                    serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+                if v["kind"] == "profile_point" {
+                    found.push(d.clone());
+                }
             }
         }
     }
+    found.sort();
     found
+}
+
+/// The file `name` of every profile point stored under `dir`.
+fn point_files(dir: &Path, name: &str) -> Vec<PathBuf> {
+    point_dirs(dir).into_iter().map(|d| d.join(name)).collect()
 }
 
 const NL: [&str; 4] = ["--algorithm", "nl-sbplx", "--backend", "ode"];
@@ -170,7 +178,7 @@ const NL: [&str; 4] = ["--algorithm", "nl-sbplx", "--backend", "ode"];
 /// `final_loglik` and the `[mle]` table of every cell the run under `dir`
 /// wrote, sorted, for comparing two profiles cell for cell.
 fn cells(dir: &Path) -> Vec<String> {
-    let mut out: Vec<String> = find_all(&dir.join("results"), "mle.toml")
+    let mut out: Vec<String> = point_files(dir, "mle.toml")
         .iter()
         .map(|f| {
             let t: toml::Table = std::fs::read_to_string(f).unwrap().parse().unwrap();
@@ -182,69 +190,67 @@ fn cells(dir: &Path) -> Vec<String> {
 }
 
 /// Item 1 of gh#1059: with `holdout_after = 35` the fit trains on rows
-/// t <= 35, and a profile cell fits exactly those rows, whether the data come
-/// from `--data` or from the config's own `[data.observations]`: each cell
-/// equals the cell of a profile of the same config without `holdout_after`
-/// bound to a file holding only the training rows.
+/// t <= 35, and a profile cell scores exactly those rows, the training rows of
+/// the stored problem: each cell equals the cell of a profile of the same
+/// config without `holdout_after` whose data file holds only the training rows.
 #[test]
 fn a_holdout_after_is_applied_as_fit_run_applies_it() {
     let train = "time\tweekly_cases\n7\t47\n14\t111\n21\t474\n28\t1066\n35\t1471\n";
-    let base_args = |extra: &[&'static str]| -> Vec<&'static str> {
+    let args = || -> Vec<&'static str> {
         let mut v: Vec<&str> = vec!["--fit", "fit.toml", "--sweep", "gamma=0.12,0.15",
             "--n-starts", "1", "--starts", "single"];
         v.extend_from_slice(&NL);
-        v.extend_from_slice(extra);
         v
     };
     let reference = {
         let tmp = workdir(&fit_toml(""));
-        std::fs::write(tmp.path().join("train.tsv"), train).unwrap();
-        let o = profile(tmp.path(), &base_args(&["--data", "train.tsv"]));
+        std::fs::write(tmp.path().join("weekly_cases.tsv"), train).unwrap();
+        let o = profile(tmp.path(), &args());
         assert_ok(&o, "the training rows, no holdout");
         cells(tmp.path())
     };
     assert_eq!(reference.len(), 2, "one cell per grid value: {reference:?}");
-    for (what, data) in [
-        ("--data on the command line", &["--data", "weekly_cases.tsv"][..]),
-        ("data from the fit config", &[][..]),
-    ] {
-        let tmp = workdir(&fit_toml("holdout_after = 35\n"));
-        let o = profile(tmp.path(), &base_args(data));
-        assert_ok(&o, what);
-        assert_eq!(cells(tmp.path()), reference,
-            "{what}: every cell must fit the training rows only");
-        assert!(stderr(&o).contains("3 observation row(s) ending after t = 35 withheld from training"),
-            "{what}: the run must say what the holdout withheld:\n{}", stderr(&o));
-    }
+    let tmp = workdir(&fit_toml("holdout_after = 35\n"));
+    let o = profile(tmp.path(), &args());
+    assert_ok(&o, "holdout_after = 35");
+    assert_eq!(cells(tmp.path()), reference, "every cell must fit the training rows only");
 }
 
-/// `[data.holdout]` files leave the training data whole, so a profile fits what
-/// the fit fits; their rows are checked to lie after the training data, as
-/// `fit run` checks them. A `--data` file that runs into the held-out rows is
-/// refused.
+/// `[data.holdout]` files are checked against the training data when the
+/// problem is resolved, as `fit run` checks them: rows that reach into the
+/// training data are refused, and a holdout after it leaves every cell scoring
+/// the training data alone.
 #[test]
-fn explicit_holdout_files_are_checked_against_the_bound_data() {
-    let tmp = workdir(&fit_toml("[data.holdout]\nweekly_cases = \"holdout.tsv\"\n"));
-    let dir = tmp.path();
-    std::fs::write(dir.join("train.tsv"),
-        "time\tweekly_cases\n7\t47\n14\t111\n21\t474\n28\t1066\n35\t1471\n").unwrap();
-    std::fs::write(dir.join("holdout.tsv"),
-        "time\tweekly_cases\n42\t533\n49\t300\n56\t40\n").unwrap();
-    let mut base: Vec<&str> = vec!["--fit", "fit.toml", "--sweep", "gamma=0.15",
+fn explicit_holdout_files_are_checked_against_the_training_data() {
+    let train = "time\tweekly_cases\n7\t47\n14\t111\n21\t474\n28\t1066\n35\t1471\n";
+    let mut args: Vec<&str> = vec!["--fit", "fit.toml", "--sweep", "gamma=0.15",
         "--rw-sd", "beta=auto", "--n-starts", "1"];
-    base.extend_from_slice(&NL);
+    args.extend_from_slice(&NL);
+    let holdout_fit = fit_toml("[data.holdout]\nweekly_cases = \"holdout.tsv\"\n");
 
-    let mut overlapping = base.clone();
-    overlapping.extend_from_slice(&["--data", "weekly_cases.tsv"]);
-    let o = profile(dir, &overlapping);
-    assert_refused(&o, "--data overlapping [data.holdout]", &["[data.holdout]", "held-out rows"]);
+    let tmp = workdir(&holdout_fit);
+    std::fs::write(tmp.path().join("holdout.tsv"),
+        "time\tweekly_cases\n35\t1471\n42\t533\n49\t300\n").unwrap();
+    let o = profile(tmp.path(), &args);
+    assert_refused(&o, "a holdout overlapping the training rows",
+        &["[data.holdout]", "held-out row"]);
+    assert!(point_files(tmp.path(), "mle.toml").is_empty(),
+        "a refused profile must store no cell");
 
-    let mut training_only = base.clone();
-    training_only.extend_from_slice(&["--data", "train.tsv"]);
-    let o = profile(dir, &training_only);
-    assert_ok(&o, "--data ending before [data.holdout]");
-    assert!(stderr(&o).contains("held-out observation row(s) bound as the tail"),
-        "the run must say the holdout was checked:\n{}", stderr(&o));
+    let reference = {
+        let tmp = workdir(&fit_toml(""));
+        std::fs::write(tmp.path().join("weekly_cases.tsv"), train).unwrap();
+        let o = profile(tmp.path(), &args);
+        assert_ok(&o, "the training rows, no holdout");
+        cells(tmp.path())
+    };
+    let tmp = workdir(&holdout_fit);
+    std::fs::write(tmp.path().join("weekly_cases.tsv"), train).unwrap();
+    std::fs::write(tmp.path().join("holdout.tsv"),
+        "time\tweekly_cases\n42\t533\n49\t300\n56\t40\n").unwrap();
+    let o = profile(tmp.path(), &args);
+    assert_ok(&o, "a holdout after the training rows");
+    assert_eq!(cells(tmp.path()), reference, "the cells must score the training rows only");
 }
 
 /// Items 3 and 4 of gh#1059: `gamma` is listed in `[estimate]` and swept, so
@@ -261,8 +267,8 @@ fn a_swept_estimate_parameter_needs_no_column_in_a_starts_source() {
     args.extend_from_slice(&NL);
     let o = profile(dir, &args);
     assert_ok(&o, "from_posterior without the swept column");
-    let runs = find_all(&dir.join("results"), "run.json");
-    assert!(!runs.is_empty(), "no run.json written");
+    let runs = point_files(dir, "provenance.json");
+    assert!(!runs.is_empty(), "no point stored");
     for run in &runs {
         let text = std::fs::read_to_string(run).unwrap();
         assert!(text.contains("0.33"),
@@ -285,7 +291,7 @@ fn a_swept_fixed_parameter_is_refused() {
 }
 /// The `[mle]` table of every `mle.toml` the run wrote.
 fn mle_tables(dir: &Path) -> Vec<toml::Table> {
-    let files = find_all(&dir.join("results"), "mle.toml");
+    let files = point_files(dir, "mle.toml");
     assert!(!files.is_empty(), "no mle.toml under {}", dir.display());
     files
         .iter()
@@ -328,15 +334,17 @@ fn an_if2_profile_of_a_fit_config_takes_the_automatic_step() {
         "the cell estimates beta and pins gamma: {:?}", tables[0]);
 }
 
-/// Without `--fit` nothing but `--rw-sd` names the estimated set.
+/// A profile is of a fit problem: without `--fit` it is refused, and the
+/// refusal names the issue that tracks flags-only profiles.
 #[test]
-fn without_a_fit_config_the_estimated_set_must_be_named() {
+fn a_profile_without_a_fit_problem_is_refused() {
     let tmp = workdir(&fit_toml(""));
-    let mut args: Vec<&str> = vec!["--data", "weekly_cases.tsv", "--sweep", "gamma=0.15",
-        "--fixed", "N0=10000", "--fixed", "I0=10", "--fixed", "rho=0.6", "--fixed", "k=10"];
+    let mut args: Vec<&str> = vec!["--sweep", "gamma=0.15", "--rw-sd", "beta=auto"];
     args.extend_from_slice(&NL);
     let o = profile(tmp.path(), &args);
-    assert_refused(&o, "no --fit, no --rw-sd", &["--fit", "--rw-sd NAME=auto"]);
+    assert_refused(&o, "no --fit", &["--fit", "gh#1354"]);
+    assert!(point_files(tmp.path(), "mle.toml").is_empty(),
+        "a refused profile must store no cell");
 }
 
 /// With `--fit`, an explicit `--rw-sd` list that leaves out an `[estimate]`
@@ -396,7 +404,7 @@ fn an_explicit_rw_sd_list_profiles_reproducibly() {
         args.extend_from_slice(&NL);
         let o = profile(dir, &args);
         assert_ok(&o, "explicit --rw-sd list");
-        let mut files = find_all(&dir.join("results"), "mle.toml");
+        let mut files = point_files(dir, "mle.toml");
         files.sort();
         seen.push(files.iter().map(|f| std::fs::read_to_string(f).unwrap()).collect());
     }
@@ -405,8 +413,8 @@ fn an_explicit_rw_sd_list_profiles_reproducibly() {
     }
 }
 
-/// The starts rule every cell's chains were drawn under, from each run.json's
-/// `init_provenance`.
+/// The starts rule every cell's chains were drawn under, from each point's
+/// `provenance.json` `init_provenance`.
 fn starts_rules(dir: &Path) -> Vec<String> {
     fn find(v: &serde_json::Value) -> Option<String> {
         match v {
@@ -420,8 +428,8 @@ fn starts_rules(dir: &Path) -> Vec<String> {
             _ => None,
         }
     }
-    let runs = find_all(&dir.join("results"), "run.json");
-    assert!(!runs.is_empty(), "no run.json under {}", dir.display());
+    let runs = point_files(dir, "provenance.json");
+    assert!(!runs.is_empty(), "no point under {}", dir.display());
     runs.iter()
         .map(|r| {
             let v: serde_json::Value =
@@ -463,7 +471,7 @@ const THREE_CHAINS: &str = "chain\tbeta\n\
     1\t0.331\n1\t0.333\n1\t0.330\n1\t0.332\n1\t0.331\n1\t0.333\n\
     2\t0.900\n2\t0.902\n2\t0.901\n2\t0.903\n2\t0.900\n2\t0.902\n";
 
-/// Every `beta` start value recorded in the run.json files under `dir`.
+/// Every `beta` start value recorded in the `provenance.json` of each point under `dir`.
 fn beta_starts(dir: &Path) -> Vec<f64> {
     fn walk(v: &serde_json::Value, out: &mut Vec<f64>) {
         match v {
@@ -483,7 +491,7 @@ fn beta_starts(dir: &Path) -> Vec<f64> {
         }
     }
     let mut out = Vec::new();
-    for r in find_all(&dir.join("results"), "run.json") {
+    for r in point_files(dir, "provenance.json") {
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(r).unwrap()).unwrap();
         walk(&v, &mut out);
@@ -509,14 +517,21 @@ fn starts_chains_restricts_a_from_posterior_rule() {
     assert!(starts.iter().all(|b| (0.329..0.334).contains(b)),
         "every start must come from chains 0 and 1: {starts:?}");
 
-    // Without the subset, the same profile is another run: its leaves land
-    // beside the first ones rather than on them.
-    let before = find_all(&dir.join("results"), "run.json").len();
+    // Without the subset the starts are drawn from every chain of the
+    // source, chain 2 (beta near 0.9) included, so the profile stores points
+    // beside the first ones and leaves them in place.
+    let before: Vec<PathBuf> = point_dirs(dir);
     let whole: Vec<&str> = args.iter().copied()
         .filter(|a| *a != "--starts-chains" && *a != "0,1").collect();
     assert_ok(&profile(dir, &whole), "the whole cloud");
-    assert_eq!(find_all(&dir.join("results"), "run.json").len(), 2 * before,
-        "the chain subset must be part of the run's identity");
+    let after = point_dirs(dir);
+    assert!(before.iter().all(|p| after.contains(p)),
+        "the points of the chain subset stay stored");
+    assert!(after.len() > before.len(),
+        "the whole cloud must store points the subset did not: {} then {}",
+        before.len(), after.len());
+    assert!(beta_starts(dir).iter().any(|b| *b > 0.8),
+        "the whole cloud must start a chain from chain 2 of the source");
 }
 
 /// A chain subset names chains of a `from_posterior` source; on any other
@@ -551,7 +566,7 @@ fn a_nonconverged_starts_source_is_refused_unless_allowed() {
         &["the selected chains disagree", "--allow-nonconverged-source"]);
     assert!(!stderr(&o).contains("camdl fit run"),
         "the remedy must not name another command:\n{}", stderr(&o));
-    assert!(find_all(&dir.join("results"), "mle.toml").is_empty(),
+    assert!(point_files(dir, "mle.toml").is_empty(),
         "a refused profile must store no cell");
 
     args.push("--allow-nonconverged-source");
@@ -580,10 +595,10 @@ fn allow_nonconverged_source_without_a_fit_source_is_refused() {
 /// Each leaf's `(focal gamma, final_loglik, mle beta, run_id)`.
 fn leaves(dir: &Path) -> Vec<(f64, f64, f64, String)> {
     let num = |v: &toml::Value| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)).unwrap();
-    find_all(&dir.join("results"), "mle.toml").iter().map(|f| {
+    point_files(dir, "mle.toml").iter().map(|f| {
         let t: toml::Table = std::fs::read_to_string(f).unwrap().parse().unwrap();
         let run: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(f.with_file_name("run.json")).unwrap()).unwrap();
+            &std::fs::read_to_string(f.with_file_name("identity.json")).unwrap()).unwrap();
         (num(&t["focal"]["gamma"]), num(&t["final_loglik"]), num(&t["mle"]["beta"]),
          run["run_id"].as_str().unwrap().to_string())
     }).collect()
@@ -632,7 +647,8 @@ fn the_run_writes_one_table_row_per_cell() {
         .chain(["--format", "json"]).collect();
     let o = profile(dir, &json_args);
     assert_ok(&o, "profile --format json");
-    assert!(stderr(&o).contains("already cached"), "the rerun is served from the store");
+    assert!(stderr(&o).contains("profile: 4 of 4 points already stored"),
+        "the rerun is served from the store:\n{}", stderr(&o));
     let doc: serde_json::Value = serde_json::from_slice(&o.stdout)
         .unwrap_or_else(|e| panic!("stdout is not JSON ({e}):\n{}", String::from_utf8_lossy(&o.stdout)));
     let cells = doc["cells"].as_array().expect("cells");
@@ -646,14 +662,14 @@ fn the_run_writes_one_table_row_per_cell() {
     assert_eq!(doc["likelihood_objective"], "full");
 }
 
-/// Parameter-roles §4.2: `--fixed` (or a plain `--fixed-file`) naming a
-/// parameter the fit config lists in `[estimate]` would turn the config's
-/// problem into a conditional one while the config still says the parameter
-/// is estimated. It is refused, and the message names the fix: a copy of the
-/// config with the parameter in `[fixed]`. A `--fixed` over a `[fixed]` entry
-/// is a value tier, not a conflict, and runs.
+/// Parameter-roles §4.2: `--fixed` naming a parameter the fit config lists in
+/// `[estimate]` poses a conditional problem: the parameter is held at the
+/// value in every cell and leaves the stored problem's `[estimate]`, so the
+/// stored problem differs from that of the profile without `--fixed`. A
+/// `--fixed-file` holding the parameter at the same value poses the same
+/// problem, so its point is the one `--fixed` stored.
 #[test]
-fn fixed_over_a_fit_estimate_parameter_is_refused() {
+fn fixed_over_a_fit_estimate_parameter_holds_it_in_a_conditional_problem() {
     let fit = fit_toml("").replace(
         "[fixed]\nN0 = 10000\nI0 = 10\nrho = 0.6\n",
         "rho = { bounds = [0.1, 0.9], start = 0.6 }\n\n[fixed]\nN0 = 10000\nI0 = 10\n");
@@ -667,15 +683,39 @@ fn fixed_over_a_fit_estimate_parameter_is_refused() {
         v.extend_from_slice(extra);
         v
     };
-    for (what, extra) in [
-        ("--fixed", &["--fixed", "rho=0.5"][..]),
-        ("--fixed-file", &["--fixed-file", "hold.toml"][..]),
-    ] {
-        let o = profile(dir, &base(extra));
-        assert_refused(&o, what, &["rho", "[estimate]", "[fixed]", "copy of the config"]);
-        assert!(find_all(&dir.join("results"), "mle.toml").is_empty(),
-            "{what}: a refused profile must store no cell");
+    let problem_ids = |dir: &Path| -> Vec<String> {
+        point_dirs(dir).iter().map(|d| {
+            let v: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(d.join("identity.json")).unwrap()).unwrap();
+            v["identity"]["problem"]["run_id"].as_str().unwrap().to_string()
+        }).collect()
+    };
+    let o = profile(dir, &base(&[]));
+    assert_ok(&o, "the profile without --fixed");
+    let free = problem_ids(dir);
+    assert_eq!(free.len(), 1, "one cell: {free:?}");
+
+    let o = profile(dir, &base(&["--fixed", "rho=0.5"]));
+    assert_ok(&o, "--fixed over an [estimate] parameter");
+    let all = problem_ids(dir);
+    assert_eq!(all.len(), 2, "one more cell: {all:?}");
+    let held: Vec<&String> = all.iter().filter(|id| **id != free[0]).collect();
+    assert_eq!(held.len(), 1, "the conditional problem is stored under its own id: {all:?}");
+
+    let mut roles = 0;
+    for f in point_files(dir, "provenance.json") {
+        let text = std::fs::read_to_string(&f).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let rho = &v["provenance"]["parameters_provenance"]["rho"];
+        if rho["role"] == "fixed" && rho["value"].as_f64() == Some(0.5) { roles += 1; }
     }
+    assert_eq!(roles, 1, "exactly the conditional profile's cell holds rho = 0.5 as fixed");
+
+    let o = profile(dir, &base(&["--fixed-file", "hold.toml"]));
+    assert_ok(&o, "--fixed-file over an [estimate] parameter");
+    assert!(stderr(&o).contains("1 of 1 points already stored"), "{}", stderr(&o));
+    assert_eq!(problem_ids(dir), all, "the same conditional problem");
+
     let o = profile(dir, &base(&["--fixed", "k=12"]));
     assert_ok(&o, "--fixed over a [fixed] entry");
 }
@@ -698,7 +738,7 @@ fn the_starts_rule_is_the_flag_then_the_config_then_the_default() {
         assert_ok(&o, out);
         assert!(stderr(&o).contains(out), "the run must say where the rule came from:\n{}",
             stderr(&o));
-        let _ = std::fs::remove_dir_all(dir.join("results"));
+        let _ = std::fs::remove_dir_all(dir.join("store"));
     };
     run(&[], "profile: starts: lhs (one independent draw per chain) — from the --fit config's [method] starts");
     assert!(starts_rules_after(dir, &[]).iter().all(|r| r == "lhs"));

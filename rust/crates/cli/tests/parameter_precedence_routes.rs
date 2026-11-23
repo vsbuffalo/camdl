@@ -89,24 +89,28 @@ fn read(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
-/// Every `run.json` under `root`, parsed.
-fn run_jsons(root: &Path) -> Vec<serde_json::Value> {
-    let mut out = Vec::new();
+/// The `parameters_provenance` of every stored profile point under the run
+/// store `root`, in folder order. Directories whose own name starts with `.`
+/// (the invocation log) are skipped.
+fn profile_point_provenances(root: &Path) -> Vec<serde_json::Value> {
+    let mut found = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let rj = dir.join("run.json");
-        if rj.is_file() {
-            out.push(serde_json::from_str(&read(&rj)).unwrap());
-        }
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for e in entries.flatten() {
-                if e.path().is_dir() {
-                    stack.push(e.path());
-                }
+        if let Ok(body) = std::fs::read_to_string(dir.join("identity.json")) {
+            let id: serde_json::Value = serde_json::from_str(&body).unwrap();
+            if id["kind"] == "profile_point" {
+                let prov: serde_json::Value = serde_json::from_str(&read(&dir.join("provenance.json"))).unwrap();
+                found.push((dir, prov["provenance"]["parameters_provenance"].clone()));
+                continue;
             }
         }
+        for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let hidden = e.file_name().to_string_lossy().starts_with('.');
+            if e.path().is_dir() && !hidden { stack.push(e.path()); }
+        }
     }
-    out
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    found.into_iter().map(|(_, v)| v).collect()
 }
 
 /// The one filter run in the run store `root`: its `identity.json` and its
@@ -490,49 +494,35 @@ fn profile_fixture(dir: &Path) {
 }
 
 #[test]
-fn profile_reports_and_records_each_replacement_of_a_fixed_value() {
-    // --fixed-file sets gamma 0.12 and the scenario replaces it with 0.1; in a
-    // second run without the scenario, --fixed replaces the file's 0.12 with
-    // 0.15. A --fixed over the scenario's own gamma is refused (gh#571,
-    // `param_flag_over_scenario_gh571.rs`), so the two tier-crossings are two
-    // runs.
+fn profile_reports_and_records_a_fixed_over_a_fixed_file_value() {
+    // --fixed-file sets gamma 0.12; --fixed replaces it with 0.15. (A scenario
+    // that sets a held parameter is refused, so no scenario tier is involved.)
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     profile_fixture(dir);
-
-    let (stderr, provs) =
-        profile_run(dir, "out-scenario", &["--scenario", "base", "--fixed-file", "ff.toml"]);
-    assert_eq!(override_lines(&stderr),
-        vec!["info: scenario `base` replaced gamma = 0.12 (from ff.toml) with 0.1"]);
-    for prov in provs {
-        let gamma = &prov["gamma"];
-        assert_eq!(gamma["value"], 0.1);
-        assert_eq!(gamma["source"], "scenario");
-        assert_eq!(gamma["overrides"], serde_json::json!([
-            { "replaced": { "source": "fixed_file", "value": 0.12, "path": "ff.toml" },
-              "by": { "source": "scenario", "value": 0.1, "scenario": "base" } },
-        ]));
-    }
+    profile_fit_file(dir, &["beta"], &[("gamma", "0.5"), ("N0", "1000")]);
 
     let (stderr, provs) = profile_run(dir, "out-fixed",
         &["--fixed-file", "ff.toml", "--fixed", "gamma=0.15", "--fixed", "N0=1000"]);
-    assert_eq!(override_lines(&stderr),
-        vec!["info: --param/--fixed replaced gamma = 0.12 (from ff.toml) with 0.15"]);
+    assert!(override_lines(&stderr).contains(
+        &"info: --param/--fixed replaced gamma = 0.12 (from ff.toml) with 0.15".to_string()),
+        "{stderr}");
     for prov in provs {
         let gamma = &prov["gamma"];
         assert_eq!(gamma["value"], 0.15);
         assert_eq!(gamma["source"], "fixed_cli");
-        assert_eq!(gamma["overrides"], serde_json::json!([
+        assert_eq!(gamma["role"], "fixed");
+        let overrides = gamma["overrides"].as_array().expect("overrides");
+        assert!(overrides.contains(&serde_json::json!(
             { "replaced": { "source": "fixed_file", "value": 0.12, "path": "ff.toml" },
-              "by": { "source": "fixed_cli", "value": 0.15 } },
-        ]));
+              "by": { "source": "fixed_cli", "value": 0.15 } })), "{gamma}");
     }
 }
 
-/// `profile --fit`: `--fixed` replaces the fit config's `[fixed]` value. (A
-/// `--fixed` over a scenario's value is refused, gh#571.)
+/// `profile --fit`: `--fixed` replaces the fit config's `[fixed]` value, says
+/// so, and every point holds the `--fixed` value.
 #[test]
-fn profile_reports_fixed_over_the_fit_config_and_fixes_the_winner() {
+fn profile_fixed_over_the_fit_config_holds_the_cli_value() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     profile_fixture(dir);
@@ -555,21 +545,19 @@ gamma = 0.1
             "--sweep", "beta=lin(0.2,0.4,2)", "--particles", "30", "--iterations", "3",
             "--n-starts", "1", "--rw-sd", "auto", "--output", "p.tsv", "--seed", "1"])
         .current_dir(dir)
-        .env("CAMDL_OUTPUT_DIR", dir.join("pf"))
+        .env("CAMDL_STORE", dir.join("pf"))
         .output()
         .expect("spawn");
     let stderr = ok(&out, "profile --fit --fixed");
     assert_eq!(override_lines(&stderr),
         vec!["info: --param/--fixed replaced gamma = 0.1 (from fit.toml [fixed]) with 0.15"]);
-    let provs: Vec<serde_json::Value> = run_jsons(&dir.join("pf")).into_iter()
-        .filter(|l| l["inputs"]["provenance"].is_object())
-        .map(|l| l["inputs"]["provenance"]["parameters_provenance"].clone())
-        .collect();
-    assert_eq!(provs.len(), 2, "one leaf per grid point");
+    let provs = profile_point_provenances(&dir.join("pf"));
+    assert_eq!(provs.len(), 2, "one point per grid value");
     for prov in provs {
         let gamma = &prov["gamma"];
         assert_eq!(gamma["value"], 0.15);
         assert_eq!(gamma["source"], "fixed_cli");
+        assert_eq!(gamma["role"], "fixed");
         assert_eq!(gamma["overrides"], serde_json::json!([
             { "replaced": { "source": "fit_toml_fixed", "value": 0.1 },
               "by": { "source": "fixed_cli", "value": 0.15 } },
@@ -577,29 +565,45 @@ gamma = 0.1
     }
 }
 
-/// Run `profile` on the profile fixture with `extra` flags; returns stderr and
-/// every profile-point leaf's `parameters_provenance`.
-fn profile_run(dir: &Path, store: &str, extra: &[&str]) -> (String, Vec<serde_json::Value>) {
-    profile_run_rw(dir, store, "auto", extra)
+/// The bounds the profile fixture's model gives each parameter.
+fn profile_bounds(name: &str) -> &'static str {
+    match name {
+        "beta" => "[0.001, 5.0]",
+        "gamma" => "[0.01, 1.0]",
+        "N0" => "[100, 10000]",
+        other => panic!("not a profile fixture parameter: {other}"),
+    }
 }
 
-/// `profile_run` with `--rw-sd` given: `auto`, or `NAME=SD` to estimate only
-/// NAME and hold every other non-swept parameter.
-fn profile_run_rw(dir: &Path, store: &str, rw_sd: &str, extra: &[&str])
-    -> (String, Vec<serde_json::Value>)
-{
-    let mut argv = vec!["profile", "sir.camdl", "--data", "cases.tsv", "--obs", "cases",
+/// Writes `pfit.toml`, a fit problem on the profile fixture that estimates
+/// `estimate` and holds `fixed` (name, value), and returns its file name.
+fn profile_fit_file(dir: &Path, estimate: &[&str], fixed: &[(&str, &str)]) -> &'static str {
+    let mut body = String::from(
+        "[model]\ncamdl = \"sir.camdl\"\n\n[data.observations]\ncases = \"cases.tsv\"\n\n[estimate]\n");
+    for p in estimate {
+        body.push_str(&format!("{p} = {{ bounds = {} }}\n", profile_bounds(p)));
+    }
+    body.push_str("\n[fixed]\n");
+    for (p, v) in fixed {
+        body.push_str(&format!("{p} = {v}\n"));
+    }
+    std::fs::write(dir.join("pfit.toml"), body).unwrap();
+    "pfit.toml"
+}
+
+/// Run `profile` of the fit problem `pfit.toml` (see [`profile_fit_file`])
+/// with `extra` flags; returns stderr and every profile-point leaf's
+/// `parameters_provenance`.
+fn profile_run(dir: &Path, store: &str, extra: &[&str]) -> (String, Vec<serde_json::Value>) {
+    let mut argv = vec!["profile", "sir.camdl", "--fit", "pfit.toml",
         "--sweep", "beta=lin(0.2,0.4,2)", "--particles", "30", "--iterations", "3",
-        "--n-starts", "1", "--rw-sd", rw_sd, "--output", "p.tsv", "--seed", "1"];
+        "--n-starts", "1", "--rw-sd", "auto", "--output", "p.tsv", "--seed", "1"];
     argv.extend_from_slice(extra);
     let out = Command::new(binary()).env_remove("CLICOLOR_FORCE").args(&argv).current_dir(dir)
-        .env("CAMDL_OUTPUT_DIR", dir.join(store)).env("CAMDL_STORE", std::path::Path::new(&dir.join(store)).join("camdl-store")).output().expect("spawn");
+        .env("CAMDL_STORE", dir.join(store).join("camdl-store")).output().expect("spawn");
     let stderr = ok(&out, &format!("profile {extra:?}"));
-    let provs: Vec<serde_json::Value> = run_jsons(&dir.join(store)).into_iter()
-        .filter(|l| l["inputs"]["provenance"].is_object())
-        .map(|l| l["inputs"]["provenance"]["parameters_provenance"].clone())
-        .collect();
-    assert!(!provs.is_empty(), "no profile-point leaves");
+    let provs = profile_point_provenances(&dir.join(store).join("camdl-store"));
+    assert!(!provs.is_empty(), "no profile points");
     (stderr, provs)
 }
 
@@ -609,6 +613,7 @@ fn profile_starts_from_params_is_recorded_as_the_file_not_the_model_default() {
     let dir = tmp.path();
     profile_fixture(dir);
     std::fs::write(dir.join("start.toml"), "beta = 0.3\ngamma = 0.2\nN0 = 1000\n").unwrap();
+    profile_fit_file(dir, &["beta", "gamma", "N0"], &[]);
     let (stderr, provs) = profile_run(dir, "out", &["--starts", "from_params=start.toml"]);
     assert!(override_lines(&stderr).is_empty(), "{stderr}");
     for prov in provs {
@@ -616,33 +621,6 @@ fn profile_starts_from_params_is_recorded_as_the_file_not_the_model_default() {
             assert_eq!(prov[name]["value"], v, "{name}");
             assert_eq!(prov[name]["source"], "starts_from_params", "{name}");
         }
-    }
-}
-
-#[test]
-fn profile_scenario_over_a_starts_file_is_reported_and_recorded() {
-    let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path();
-    profile_fixture(dir);
-    std::fs::write(dir.join("start.toml"), "beta = 0.3\ngamma = 0.2\nN0 = 1000\n").unwrap();
-    // Only N0 is estimated, so gamma is held at the file's value; `gonly` sets
-    // gamma 0.1 over the file's 0.2. (A scenario that sets a parameter the
-    // profile estimates is refused, so the scenario must leave N0 alone.)
-    let (stderr, provs) = profile_run_rw(dir, "out", "N0=10",
-        &["--starts", "from_params=start.toml", "--scenario", "gonly"]);
-    assert_eq!(override_lines(&stderr), vec![
-        "info: scenario `gonly` replaced gamma = 0.2 (from --starts from_params=start.toml) \
-         with 0.1",
-    ]);
-    for prov in provs {
-        assert_eq!(prov["gamma"]["value"], 0.1);
-        assert_eq!(prov["gamma"]["source"], "scenario");
-        assert_eq!(prov["gamma"]["overrides"], serde_json::json!([
-            { "replaced": { "source": "starts_from_params", "value": 0.2, "path": "start.toml" },
-              "by": { "source": "scenario", "value": 0.1, "scenario": "gonly" } },
-        ]));
-        assert_eq!(prov["N0"]["source"], "starts_from_params");
-        assert!(prov["N0"].get("overrides").is_none(), "{}", prov["N0"]);
     }
 }
 
@@ -682,6 +660,7 @@ starts = \"single\"
     let gamma_mle = state["start_values"]["gamma"].as_float().expect("the source fit's gamma");
     let handle = "@src";
     let starts = format!("from_mle={handle}");
+    profile_fit_file(dir, &["beta", "gamma", "N0"], &[]);
     let (stderr, provs) = profile_run(dir, "out",
         &["--starts", &starts, "--fixed", "gamma=0.15"]);
     assert_eq!(override_lines(&stderr), vec![format!(

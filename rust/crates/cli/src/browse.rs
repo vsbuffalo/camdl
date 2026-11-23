@@ -977,6 +977,11 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
         }
         _ => Vec::new(),
     };
+    let mut stored_profiles = if !filter_kind.includes_profiles() {
+        Vec::new()
+    } else {
+        crate::profile_store::discover_invocations(&store_root(a.store.as_deref()))
+    };
     let pfilters = if !filter_kind.includes_pfilters() {
         Vec::new()
     } else {
@@ -1020,6 +1025,11 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
         .collect();
     filtered_profiles.sort_by(|x, y| y.created.cmp(&x.created));
 
+    stored_profiles.retain(|p| a.model.as_deref().is_none_or(|m| p.model.contains(m))
+        && a.scenario.is_none()
+        && filter_since.is_none_or(|dur| now.duration_since(p.created).is_ok_and(|d| d <= dur)));
+    stored_profiles.sort_by(|x, y| y.created.cmp(&x.created));
+
     let mut filtered_pfilters: Vec<PfilterRow> = pfilters.into_iter()
         .filter(|p| a.model.as_deref().is_none_or(|m| p.labels.model.contains(m)))
         .filter(|_| a.scenario.is_none())
@@ -1055,6 +1065,7 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
         fit_rows.truncate(a.limit);
         filtered_profiles.truncate(a.limit);
         filtered_pfilters.truncate(a.limit);
+        stored_profiles.truncate(a.limit);
         filtered_stored_sims.truncate(a.limit);
         filtered_ensembles.truncate(a.limit);
     }
@@ -1066,6 +1077,9 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
         }
         print_profiles_json(&out, &filtered_profiles);
         print_pfilter_json(&out, &filtered_pfilters);
+        for p in &stored_profiles {
+            out.report_line(format_args!("{}", serde_json::to_string(&p.json()).unwrap_or_default()));
+        }
         for r in &filtered_stored_sims {
             out.report_line(format_args!("{}", serde_json::to_string(&r.json()).unwrap_or_default()));
         }
@@ -1074,6 +1088,7 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
         let any_other = !fit_rows.is_empty()
             || !filtered_profiles.is_empty()
             || !filtered_pfilters.is_empty()
+            || !stored_profiles.is_empty()
             || !filtered_stored_sims.is_empty()
             || !filtered_ensembles.is_empty();
         if !filtered_ensembles.is_empty() {
@@ -1089,6 +1104,11 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
         if !filtered_profiles.is_empty() {
             out.say(format_args!("{}", style::stderr().paint("profiles", Style::Bold)));
             print_profiles_table(&out, &filtered_profiles, now);
+            out.say("");
+        }
+        if !stored_profiles.is_empty() {
+            out.say(format_args!("{}", style::stderr().paint("profiles", Style::Bold)));
+            print_stored_profile_table(&out, &stored_profiles, now);
             out.say("");
         }
         if !filtered_pfilters.is_empty() {
@@ -1179,6 +1199,23 @@ pub fn cmd_show(a: &crate::args::ShowArgs) {
             out.report_line(format_args!("{}", serde_json::to_string_pretty(&row.json()).unwrap_or_default()));
         } else {
             show_stored_pfilter(&out, &row);
+        }
+        return;
+    }
+    if let Some(point) = crate::profile_store::resolve_point(&store_root_for(a.store.as_deref(), &a.target), &a.target) {
+        let point = point.unwrap_or_else(|e| out.fail(format!("error: {e}")));
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let rel_path = pathdiff_str(point.folder(), &cwd);
+        if json {
+            let value = serde_json::json!({
+                "kind": <crate::profile_store::ProfilePoint as store::Artifact>::KIND,
+                "run_id": point.id().key().to_hex(),
+                "path": rel_path,
+                "identity": point.identity(),
+            });
+            out.report_line(format_args!("{}", serde_json::to_string_pretty(&value).unwrap_or_default()));
+        } else {
+            crate::profile_store::show_point(&out, &point, &rel_path);
         }
         return;
     }
@@ -1406,6 +1443,29 @@ pub fn cmd_cat(a: &crate::args::CatArgs) {
             let _ = out.data().write_all(&table);
             return;
         }
+    }
+
+    // A `profile` invocation on the run store, by its label: the profile
+    // table, rendered from its stored points.
+    if a.stream.is_none() && selection.is_none() {
+        if let Some(table) = crate::profile_store::invocation_table(&store_root_for(a.store.as_deref(), &a.target), &a.target) {
+            let table = table.unwrap_or_else(|e| out.fail(format!("error: {e}")));
+            let _ = out.data().write_all(&table);
+            return;
+        }
+    }
+
+    // A profile point on the run store: `mle.toml`, or a named result file.
+    if let Some(point) = crate::profile_store::resolve_point(&store_root_for(a.store.as_deref(), &a.target), &a.target) {
+        let point = point.unwrap_or_else(|e| out.fail(format!("error: {e}")));
+        if let Some(sel) = &selection {
+            out.fail(format!("error: {} selects rows of a fit run's chain-keyed stream; `{}` names a profile point",
+                sel.flag(), a.target));
+        }
+        let name = a.stream.as_deref().unwrap_or(crate::profile_store::MLE_FILE);
+        let bytes = crate::camdl_store::read_stored(&point, name).unwrap_or_else(|e| out.fail(format!("error: {e}")));
+        let _ = out.data().write_all(&bytes);
+        return;
     }
 
     // A `simulate` invocation on the run store, by its label: the combined
@@ -1895,6 +1955,30 @@ fn print_sim_json(out: &crate::out::Out, rows: &[SimRow]) {
         let json = serde_json::to_string(&r.leaf.record).unwrap_or_default();
         out.report_line(format_args!("{}", json));
     }
+}
+
+/// The profiles on the run store, one row per invocation: its sequence
+/// number, label, model, focal parameters, method and points.
+fn print_stored_profile_table(out: &crate::out::Out, rows: &[crate::profile_store::ProfileInvocationRow], now: SystemTime) {
+    use comfy_table::{Table, Cell, ContentArrangement, presets::NOTHING};
+    let mut table = Table::new();
+    table
+        .load_preset(NOTHING)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_header(["CREATED", "INVOCATION", "LABEL", "MODEL", "FOCAL", "METHOD", "POINTS"]
+            .map(|h| Cell::new(h).add_attribute(comfy_table::Attribute::Bold)));
+    for r in rows {
+        table.add_row(vec![
+            Cell::new(fmt_relative_time(r.created, now)).fg(comfy_table::Color::Yellow),
+            Cell::new(r.seq),
+            label_cell(&r.label),
+            Cell::new(&r.model),
+            Cell::new(r.focal.join(",")),
+            Cell::new(&r.method).add_attribute(comfy_table::Attribute::Dim),
+            Cell::new(format!("{}/{}", r.stored, r.points.len())),
+        ]);
+    }
+    out.report_line(format_args!("{table}"));
 }
 
 fn print_pfilter_json(out: &crate::out::Out, rows: &[PfilterRow]) {

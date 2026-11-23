@@ -49,26 +49,28 @@ fn profile(dir: &Path, w: &str) -> Output {
         .current_dir(dir)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDL_IR_CACHE_DIR", dir.join("irc"))
-        .env_remove("CAMDL_OUTPUT_DIR")
-        .env_remove("CAMDL_STORE")
-        .args(["profile", &p("patch.camdl"), "--fixed", "rho=0.5", "--starts", &format!("from_params={}", p("start.toml"))])
-        .args(["--table", &format!("w={}", p(w)), "--data", &p("cases.tsv"), "--sweep", "gamma=0.2"])
+        .env("CAMDL_STORE", dir.join("store"))
+        .args(["profile", &p("patch.camdl"), "--fit", &p("fit.toml"), "--starts", &format!("from_params={}", p("start.toml"))])
+        .args(["--table", &format!("w={}", p(w)), "--sweep", "gamma=0.2"])
         .args(["--rw-sd", "beta=0.05", "--particles", "20", "--iterations", "2", "--n-starts", "1", "--progress", "none"])
         .output()
         .expect("spawn camdl")
 }
 
-/// The profile point leaves under `dir`'s store, by run id.
+/// The run ids of the profile points stored under `dir`'s store.
 fn points(dir: &Path) -> Vec<String> {
     let mut out = Vec::new();
-    let mut stack = vec![dir.join("results")];
+    let mut stack = vec![dir.join("store")];
     while let Some(d) = stack.pop() {
         let Ok(rd) = std::fs::read_dir(&d) else { continue };
         for e in rd.flatten() {
             let p = e.path();
+            if e.file_name().to_string_lossy().starts_with('.') {
+                continue;
+            }
             if p.is_dir() {
                 stack.push(p);
-            } else if p.file_name().is_some_and(|n| n == "run.json") {
+            } else if p.file_name().is_some_and(|n| n == "identity.json") {
                 let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
                 if v["kind"] == "profile_point" {
                     out.push(v["run_id"].as_str().unwrap().to_string());
@@ -89,13 +91,17 @@ fn profile_applies_the_table_flag() {
     std::fs::write(dir.join("w2.tsv"), "1.0\n0.7\n").unwrap();
     std::fs::write(dir.join("start.toml"), "beta = 0.4\n").unwrap();
     std::fs::write(dir.join("cases.tsv"), (1..=10).fold("time\tcases\n".to_string(), |s, t| s + &format!("{t}\t{}\n", 2 + t))).unwrap();
+    std::fs::write(dir.join("fit.toml"),
+        "[model]\ncamdl = \"patch.camdl\"\n\n[data.observations]\ncases = \"cases.tsv\"\n\n\
+         [estimate]\nbeta = { bounds = [0.01, 2.0] }\ngamma = { bounds = [0.01, 1.0] }\n\n\
+         [fixed]\nrho = 0.5\n").unwrap();
     let mut ids = Vec::new();
     for w in ["w1.tsv", "w2.tsv"] {
         let o = profile(dir, w);
         let err = String::from_utf8_lossy(&o.stderr);
         assert!(o.status.success(), "--table w={w} is applied:\n{err}");
         let found = points(dir);
-        assert_eq!(found.len(), ids.len() + 1, "one more point leaf: {found:?}");
+        assert_eq!(found.len(), ids.len() + 1, "one more point: {found:?}");
         ids = found;
     }
 }

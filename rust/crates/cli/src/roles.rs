@@ -309,11 +309,6 @@ impl Partition {
         out
     }
 
-    /// The record of the job's partition: design parameters as design.
-    pub fn record(&self, values: &ResolvedParameters) -> PartitionRecord {
-        self.record_at(values, None)
-    }
-
     /// The partition one cell runs: each design parameter fixed at that
     /// cell's value. `point` must give a value to every design parameter and
     /// to nothing else.
@@ -1493,7 +1488,7 @@ mod tests {
         let vals = values(&[("N0", 1.0), ("I0", 10.0), ("rho", 0.6), ("k", 10.0), ("tau", 0.0),
                             ("c_north", 1.0), ("c_south", 2.0), ("delta", 0.01)]);
         // The job: N0 is a design coordinate, with no single value.
-        let (est, fixed) = p.record(&vals).legacy_fields();
+        let (est, fixed) = p.record_at(&vals, None).legacy_fields();
         assert_eq!(est, vec!["beta", "gamma"]);
         assert!(!fixed.contains_key("N0"));
         assert_eq!(fixed.get("delta"), Some(&0.01), "an undeclared parameter is held");
@@ -1519,7 +1514,7 @@ mod tests {
             fit_estimate: estimate(&[("gamma", ""), ("beta", "")]),
             ..Run::default()
         }.fixed(&["N0", "I0", "rho", "k", "tau", "c_north", "c_south"]);
-        let rec = run.resolve(&FIT_RUN).unwrap().record(&values(&[]));
+        let rec = run.resolve(&FIT_RUN).unwrap().record_at(&values(&[]), None);
         assert_eq!(rec.legacy_fields().0, vec!["gamma", "beta"], "the columns' order");
         let in_record: Vec<&str> = rec.parameters.keys().map(String::as_str).take(2).collect();
         assert_eq!(in_record, vec!["beta", "gamma"], "the record keeps model order");
@@ -1530,7 +1525,7 @@ mod tests {
         let mut run = sir_fit();
         run.fit_estimate.insert("tau".into(), toml::from_str("").unwrap());
         run.fit_fixed.retain(|(n, _)| n != "tau");
-        let rec = run.resolve(&FIT_RUN).unwrap().record(&values(&[("N0", 1.0)]));
+        let rec = run.resolve(&FIT_RUN).unwrap().record_at(&values(&[("N0", 1.0)]), None);
         let field = PartitionField::Resolved(rec);
         let json = serde_json::to_value(&field).unwrap();
         assert_eq!(json["status"], "resolved");

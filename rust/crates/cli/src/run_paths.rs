@@ -1,60 +1,12 @@
-//! Canonical output-path construction for the unified tree.
-//!
-//! Every filesystem path that camdl writes results into goes through
-//! one of the helpers in this module. Centralising construction
-//! prevents the `format!("{}/refine", fit.fit.output_dir)`
-//! scattered-hand-rolling that let the fit and simulate trees drift
-//! apart historically.
-//!
-//! Introduced in commit 3/6 of the output-tree unification
-//! (docs/dev/proposals/2026-04-19-unified-output-tree.md).
+//! Paths camdl shows and the old results root its readers of old stores
+//! search.
 
 use std::path::PathBuf;
 
-/// Overridden by an explicit CLI `--output-dir` (on `simulate`) or fit.toml
-/// `output_dir` — in that precedence order. Callers should resolve via
-/// [`output_root`] so the entry points can't drift.
-///
-/// gh#531: this said "Default output root: `./output`", three lines above the
-/// constant that says `results/`. Stale since the rename.
-/// Default output root. `results/` pairs with `data/` in the research-
-/// workflow vocabulary the project's downstream users (book chapters,
-/// vignettes) already speak. Was briefly `output/` during the
-/// 2026-04-19 unification; reverted per the post-ship review's
-/// naming argument — see hardening proposal §ship-now/#7.
+/// The old results root the readers of old stores search when no root is
+/// named. `results/` pairs with `data/` in the research-workflow vocabulary
+/// the project's downstream users (book chapters, vignettes) speak.
 pub const DEFAULT_OUTPUT_ROOT: &str = "results";
-
-/// Resolve the output root from the three places a user can set it.
-/// Resolve the output root with the project's standard precedence:
-/// **CLI override > config-file value > `CAMDL_OUTPUT_DIR` env var
-/// > default (`./results`)**.
-///
-/// The env-var layer makes this function consistent with the
-/// reader-side commands (`list` / `show` / `cat`) and the writer
-/// `simulate`, all of which honor
-/// `CAMDL_OUTPUT_DIR` via clap's `env = "..."` attribute. Before
-/// this layer existed, `fit run` and `profile` silently ignored
-/// the env var and fell straight through to `DEFAULT_OUTPUT_ROOT`,
-/// which made `CAMDL_OUTPUT_DIR=/tmp/foo camdl ...` redirect some
-/// commands but not others (audit at
-/// `docs/dev/reviews/2026-04-27-output-tree-consistency-review.md`).
-///
-/// Why env *below* config: project-specific config (fit.toml's
-/// `output_dir`) is more authoritative
-/// than ambient shell state. A user who sets `CAMDL_OUTPUT_DIR` to
-/// keep dev runs separate shouldn't have it silently override an
-/// explicit `output_dir = "results/he2010"` in a fit.toml.
-pub fn output_root(cli: Option<&str>, config: Option<&str>) -> PathBuf {
-    output_root_with(cli, config, crate::env::get().vars.output_dir.as_deref())
-}
-
-/// [`output_root`] with the `CAMDL_OUTPUT_DIR` value given.
-fn output_root_with(cli: Option<&str>, config: Option<&str>, env: Option<&std::path::Path>) -> PathBuf {
-    cli.map(PathBuf::from)
-        .or_else(|| config.map(PathBuf::from))
-        .or_else(|| env.map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_OUTPUT_ROOT))
-}
 
 /// Absolutize an output path for DISPLAY, without requiring it to exist.
 ///
@@ -92,50 +44,4 @@ mod tests {
         assert_eq!(display_absolute(std::path::Path::new("/tmp/x/y")),
             PathBuf::from("/tmp/x/y"));
     }
-
-    #[test]
-    fn output_root_precedence_no_env() {
-        // No env, no overrides: hits the default.
-        assert_eq!(output_root_with(None, None, None), PathBuf::from(DEFAULT_OUTPUT_ROOT));
-        assert_eq!(DEFAULT_OUTPUT_ROOT, "results",
-            "default output root is 'results/' (pairs with 'data/')");
-        // Config wins over default.
-        assert_eq!(output_root_with(None, Some("results"), None), PathBuf::from("results"));
-        // CLI wins over default.
-        assert_eq!(output_root_with(Some("/tmp/abc"), None, None), PathBuf::from("/tmp/abc"));
-        // CLI wins over config.
-        assert_eq!(output_root_with(Some("/cli"), Some("/config"), None), PathBuf::from("/cli"));
-    }
-
-    #[test]
-    fn output_root_uses_env_when_cli_and_config_absent() {
-        // Env fires when CLI + config are both absent (the regression
-        // this layer was added to fix — `fit run` and `profile`
-        // calling `output_root(None, ...)` previously fell straight
-        // through to DEFAULT_OUTPUT_ROOT).
-        let env = Some(std::path::Path::new("/tmp/from-env"));
-        assert_eq!(output_root_with(None, None, env), PathBuf::from("/tmp/from-env"));
-    }
-
-    #[test]
-    fn output_root_config_beats_env() {
-        // Config (fit.toml's `output_dir`) is project-specific and
-        // more authoritative than
-        // ambient shell state. Setting CAMDL_OUTPUT_DIR must NOT
-        // silently redirect a fit that explicitly declared
-        // `output_dir = "..."` in its toml.
-        let env = Some(std::path::Path::new("/tmp/from-env"));
-        assert_eq!(output_root_with(None, Some("results/he2010"), env),
-            PathBuf::from("results/he2010"));
-    }
-
-    #[test]
-    fn output_root_cli_beats_env() {
-        // Explicit CLI override sits above env.
-        let env = Some(std::path::Path::new("/tmp/from-env"));
-        assert_eq!(output_root_with(Some("/cli/dir"), None, env), PathBuf::from("/cli/dir"));
-        assert_eq!(output_root_with(Some("/cli/dir"), Some("/config"), env),
-            PathBuf::from("/cli/dir"));
-    }
-
 }

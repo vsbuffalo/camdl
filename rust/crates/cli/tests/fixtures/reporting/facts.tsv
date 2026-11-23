@@ -355,17 +355,16 @@ pfilter.files	stderr	line	filtering marginals written to	f.tsv
 pfilter.files	stderr	line	loglik written to	ll.toml
 pfilter.no_data	stderr	line	error: pfilter needs observation data to score:	or `--fit FOO.toml` with a [data.observations] section.
 profile	stderr	line	profile: using --fit	'if2.toml' for priors / bounds / [fixed]
-profile	stderr	line	profile: no --data flags supplied	reading bindings from --fit toml [data.observations]
 profile	stderr	line	profile: using observation model	'cases' from IR
 profile	stderr	line	profile:	3 grid (beta=3) × 2 starts × 1 seeds = 6 IF2 runs
 profile	stderr	line	profile: IF2 per cell	100 particles × 3 iterations
 profile	stderr	line	profile: starts:	from_prior (one independent draw per chain) — default: every estimated parameter declares a prior
 profile	stderr	line	warning: profile grid point 0 (start 1)	produced a non-finite log-likelihood (-inf)
 profile	stderr	line	warning: profile grid point 0 (start 1)	the start counts as not completed in the profile table
-profile	stderr	line	profile:	3 cells written (6 starts) under results/profiles
+profile	stderr	line	profile:	3 cells (6 points) stored under
 profile	stdout	line	loglik_spread_starts	starts_n_completed
-profile.cached	stderr	line	profile:	6 of 6 starts already cached — resuming
-profile.cached	stderr	line	profile:	3 cells written (6 starts) under results/profiles
+profile.cached	stderr	line	profile:	6 of 6 points already stored
+profile.cached	stderr	line	profile:	3 cells (6 points) stored under
 profile.cached	stdout	line	loglik_spread_starts	starts_n_completed
 profile.refused	stderr	line	error:	--particles is required for an if2 profile
 compare.refused	stderr	line	error:	compare requires either --config FILE or ≥2 stored fit runs (@label, run id or folder)

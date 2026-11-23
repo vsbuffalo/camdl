@@ -55,11 +55,10 @@ mod compare_ode;     // gh#312: the ODE fit's trace, scored in-process
 mod model_diff;     // `camdl diff A B`: gathers two models' inputs for the `diff` crate and prints its report
 mod if2;
 mod profile;
-mod profile_cas;     // gh#147 M3.3: profile-point CAS identity (resolve_profile_point)
 mod profile_config;  // ResolvedProfileConfig: profile's one resolved configuration; identity and cells derive from it
 mod profile_diagnostics;
-mod profile_invocation; // profiles/<base>/invocations/<id>/: the grid an invocation runs, and its heartbeat
-mod profile_table;    // gh#1059: the collected per-cell table a profile run prints
+mod profile_store;   // camdl profile on the run store: a point's identity, its result, the table rendered from them
+mod profile_table;    // the rows of the per-cell table a profile prints
 mod out;           // the stream layer: notices, progress, milestones, colour
 mod sim_store;       // camdl simulate on the run store: its cells, their by-products and the combined tables
 mod sim_command;     // the store half of camdl simulate: identities, the batch, the engine under each claim, the exports
@@ -610,7 +609,14 @@ fn main() {
             no_progress: cli.global.no_progress,
         }),
         Command::If2(a)                 => if2::cmd_if2(&a),
-        Command::Profile(a)             => profile::cmd_profile(&a, compile),
+        Command::Profile(a)             => profile::cmd_profile(args::ProfileInvocation {
+            args: a,
+            no_licm: cli.global.no_licm,
+            no_ir_cache: cli.global.no_ir_cache,
+            verbosity: cli.global.verbosity,
+            progress: cli.global.progress,
+            no_progress: cli.global.no_progress,
+        }),
         Command::Design(DesignCmd::Lhs(a)) => design::cmd_design_lhs(&a, compile),
         Command::Lineage(LineageCmd::Realize(a)) => lineage::cmd_lineage_realize(&a),
         Command::Lineage(LineageCmd::Tree(a)) => lineage::cmd_lineage_tree(&a),

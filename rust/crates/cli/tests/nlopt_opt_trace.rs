@@ -242,8 +242,8 @@ fn a_profile_writes_no_opt_trace() {
     let tmp = workdir(&fit_toml(1, "single", 10));
     let o = camdl(tmp.path(), &["profile", "sir.camdl", "--fit", "fit.toml",
         "--sweep", "gamma=0.12,0.15", "--n-starts", "1", "--starts", "single",
-        "--algorithm", "nl-sbplx", "--backend", "ode"]);
+        "--algorithm", "nl-sbplx", "--backend", "ode", "--store", "profile-store"]);
     assert!(o.status.success(), "profile: {}", String::from_utf8_lossy(&o.stderr));
-    assert_eq!(find_all(&tmp.path().join("results"), "mle.toml").len(), 2, "premise: two cells ran");
+    assert_eq!(find_all(&tmp.path().join("profile-store"), "mle.toml").len(), 2, "premise: two cells ran");
     assert_eq!(find_all(tmp.path(), "opt_trace.tsv"), Vec::<PathBuf>::new());
 }

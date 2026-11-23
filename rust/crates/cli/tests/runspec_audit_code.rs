@@ -80,6 +80,20 @@ fn find_files(root: &Path, name: &str, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// Every profile point folder under the store `root`: a folder whose
+/// `identity.json` has `"kind": "profile_point"`. Entries whose name starts
+/// with `.` are skipped.
+fn profile_points(root: &Path, out: &mut Vec<PathBuf>) {
+    for e in std::fs::read_dir(root).into_iter().flatten().flatten() {
+        let p = e.path();
+        if !p.is_dir() || e.file_name().to_string_lossy().starts_with('.') { continue; }
+        let is_point = std::fs::read_to_string(p.join("identity.json")).ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .is_some_and(|v| v["kind"] == "profile_point");
+        if is_point { out.push(p) } else { profile_points(&p, out) }
+    }
+}
+
 // ─── A: IF2 provenance records the re-score's uncertainty ───────────────────
 
 const IF2_SWARM: usize = 31;
@@ -167,16 +181,17 @@ fn profile_fit_needs_no_start_for_the_swept_or_the_nuisance_parameter() {
                            "--rw-sd", "auto", "--output", "p.tsv", "--seed", "1"]);
     let e = ok(&out, "profile --fit with `beta = {}`, `gamma = {}`");
     assert!(!e.contains("has no value"), "stderr: {e}");
-    let mut runs = Vec::new();
-    find_files(&dir.join("out"), "run.json", &mut runs);
-    let drawn: Vec<_> = runs.iter()
+    let mut points = Vec::new();
+    profile_points(&dir.join("out"), &mut points);
+    assert!(!points.is_empty(), "premise: the profile stored points");
+    let drawn: Vec<_> = points.iter()
         .filter_map(|p| serde_json::from_str::<serde_json::Value>(
-            &std::fs::read_to_string(p).unwrap()).ok())
-        .filter(|v| v["inputs"]["provenance"]["parameters_provenance"]["gamma"]["source"]
+            &std::fs::read_to_string(p.join("provenance.json")).unwrap()).ok())
+        .filter(|v| v["provenance"]["parameters_provenance"]["gamma"]["source"]
             == "estimate_start_drawn")
         .collect();
     assert!(!drawn.is_empty(),
-        "a drawn nuisance start is recorded as `estimate_start_drawn` in a point's run.json");
+        "a drawn nuisance start is recorded as `estimate_start_drawn` in a point's provenance.json");
 }
 
 // ─── C: the resolver's refusals name real flags and fixes ───────────────────

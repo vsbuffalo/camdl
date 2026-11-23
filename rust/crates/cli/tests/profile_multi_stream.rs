@@ -1,25 +1,10 @@
 //! gh#38: integration tests for `camdl profile` against indexed
 //! observation families.
 //!
-//! Symptom the fix targets: previously, `camdl profile --obs cases`
-//! on a model whose IR had 5 expanded `cases_p1`...`cases_p5`
-//! streams scored only the first stream and reported a loglik ~5
-//! orders of magnitude smaller (in absolute value) than the joint
-//! likelihood `camdl fit run` was optimising. Profile-likelihood
-//! plots derived from this output were not commensurate with fit
-//! summaries.
-//!
-//! These tests assert the post-fix behaviour:
-//!
-//! 1. Family-name resolution: `--obs <root>` against a multi-stream
-//!    IR produces a loglik whose magnitude is the sum across all
-//!    expanded streams (single-stream `--obs <leaf>` produces ~1/N
-//!    of the magnitude when N streams expand from the family).
-//! 2. Single-stream profile (one IR observation, no family) keeps
-//!    its prior behaviour.
-//! 3. Default behaviour for a multi-stream model with `--obs`
-//!    omitted is a hard error listing the available stream names —
-//!    no silent fall-back to the first IR observation.
+//! A fit file whose `[data.observations]` binds every stream of an indexed
+//! family (`cases_p1`...`cases_p5`) makes a profile score the joint likelihood
+//! `camdl fit run` optimises. Binding one stream scores that stream alone, and
+//! about 1/N of the magnitude when N streams expand from the family.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -86,54 +71,77 @@ fn start_file(data_path: &Path) -> PathBuf {
     data_path.with_file_name("start.toml")
 }
 
-/// Collect the per-grid-point best loglik from the new-format
-/// `ProfilePoint` leaves under `<out_root>/profiles/`, ordered by the
-/// `point`-level label (so the returned Vec is grid-traversal order). The
-/// cross-point rollup TSV is the deferred M4 derived view (gh#154); the
-/// per-point loglik lives on each leaf's recorded `inputs.best_loglik`.
-fn collect_logliks(out_root: &Path) -> Vec<f64> {
-    fn walk(dir: &Path, out: &mut Vec<(String, f64)>) {
-        if let Ok(b) = std::fs::read_to_string(dir.join("run.json")) {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&b) {
-                if v.get("kind").and_then(|k| k.as_str()) == Some("profile_point") {
-                    let point = v.get("levels").and_then(|ls| ls.as_array())
-                        .and_then(|a| a.iter().find(|l|
-                            l.get("name").and_then(|n| n.as_str()) == Some("point")))
-                        .and_then(|l| l.get("label").and_then(|x| x.as_str()))
-                        .unwrap_or("").to_string();
-                    if let Some(ll) = v.get("inputs")
-                        .and_then(|i| i.get("best_loglik")).and_then(|x| x.as_f64()) {
-                        out.push((point, ll));
-                    }
+/// The best loglik of each profile point stored under `store`, ordered by the
+/// focal `R0` value (read from each point's `identity.json`), so the returned
+/// Vec is grid-traversal order. The per-point loglik is `best_loglik` in the
+/// point's `provenance.json`; a point whose filter returned -inf serialises it
+/// as null and is omitted.
+fn collect_logliks(store: &Path) -> Vec<f64> {
+    fn walk(dir: &Path, out: &mut Vec<(f64, f64)>) {
+        if let Ok(b) = std::fs::read_to_string(dir.join("identity.json")) {
+            let v: serde_json::Value = serde_json::from_str(&b).unwrap();
+            if v["kind"] == "profile_point" {
+                let focal = v["identity"]["focal"]["R0"].as_f64().expect("focal R0");
+                let prov: serde_json::Value = serde_json::from_str(
+                    &std::fs::read_to_string(dir.join("provenance.json")).unwrap()).unwrap();
+                if let Some(ll) = prov["best_loglik"].as_f64() {
+                    out.push((focal, ll));
                 }
             }
         }
         if let Ok(es) = std::fs::read_dir(dir) {
-            for e in es.flatten() { if e.path().is_dir() { walk(&e.path(), out); } }
+            for e in es.flatten() {
+                if e.path().is_dir() && !e.file_name().to_string_lossy().starts_with('.') {
+                    walk(&e.path(), out);
+                }
+            }
         }
     }
     let mut pairs = Vec::new();
-    walk(&out_root.join("profiles"), &mut pairs);
-    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    walk(store, &mut pairs);
+    pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
     pairs.into_iter().map(|(_, ll)| ll).collect()
+}
+
+/// Write the fit problem beside `data_path` that binds the observations file to
+/// each of `streams`, estimates `R0` (swept by the profile)
+/// and the five `N0_p*`, and holds the other parameters. Returns its path.
+fn write_fit_file(data_path: &Path, label: &str, streams: &[&str]) -> PathBuf {
+    let path = data_path.with_file_name(format!("fit_{label}.toml"));
+    let bound: String = streams.iter()
+        .map(|s| format!("{s} = \"{}\"\n", data_path.file_name().unwrap().to_string_lossy()))
+        .collect();
+    let model = seir_spatial_5_inference();
+    std::fs::write(&path, format!(
+        "[model]\ncamdl = \"{model}\"\n\n[data.observations]\n{bound}\n\
+         [estimate]\nR0 = {{ bounds = [5.0, 80.0] }}\n\
+         N0_p1 = {{ bounds = [1000.0, 500000.0] }}\n\
+         N0_p2 = {{ bounds = [1000.0, 500000.0] }}\n\
+         N0_p3 = {{ bounds = [1000.0, 500000.0] }}\n\
+         N0_p4 = {{ bounds = [1000.0, 500000.0] }}\n\
+         N0_p5 = {{ bounds = [1000.0, 500000.0] }}\n\n\
+         [fixed]\nsigma = 0.125\ngamma = 0.2\nkappa = 0.05\namplitude = 0.3\n\
+         iota = 1e-06\nrho = 0.4\nsigma_se = 0.05\nk = 10.0\n",
+        model = model.display(),
+    )).unwrap();
+    path
 }
 
 /// Run `camdl profile` once and return the parsed loglik values.
 fn run_profile(
     bin: &Path,
     output_root: &Path,
-    obs_arg: &str,
+    streams: &[&str],
     data_path: &Path,
     out_tsv: &Path,
 ) -> Vec<f64> {
     let status = Command::new(bin).env_remove("CLICOLOR_FORCE")
-        .env("CAMDL_OUTPUT_DIR", output_root)
+        .env("CAMDL_STORE", output_root)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args([
             "profile", &seir_spatial_5_inference().to_string_lossy(),
             "--starts", &starts_arg(data_path),
-            "--data", &data_path.to_string_lossy(),
-            "--obs", obs_arg,
+            "--fit", &write_fit_file(data_path, &streams.join("_"), streams).to_string_lossy(),
             "--sweep", "R0=lin(15,25,2)",
             // 500, not 100. The sweep straddles the truth (R0 = 20 in the
             // `true_params` scenario that generated the data), so the R0 = 15 cell is scored well off the
@@ -154,29 +162,25 @@ fn run_profile(
             // assertion below is unchanged.
             "--particles", "500", "--iterations", "1", "--n-starts", "1",
             "--rw-sd", "auto",
-            "--fixed", "sigma=0.125", "--fixed", "gamma=0.2",
-            "--fixed", "kappa=0.05", "--fixed", "amplitude=0.3",
-            "--fixed", "iota=1e-06", "--fixed", "rho=0.4",
-            "--fixed", "sigma_se=0.05", "--fixed", "k=10.0",
             "--output", &out_tsv.to_string_lossy(),
             "--seed", "1",
         ])
         .status()
         .expect("spawn camdl profile");
-    assert!(status.success(), "profile run failed for --obs {}", obs_arg);
+    assert!(status.success(), "profile run failed binding {:?}", streams);
     let _ = out_tsv; // --output is accepted; the rollup TSV is the deferred M4 view.
     collect_logliks(output_root)
 }
 
 #[test]
 fn profile_family_root_sums_all_expanded_streams() {
-    // Core gh#38 regression test: `--obs cases` resolves to all 5
+    // Core gh#38 regression test: the `cases` key binds all 5
     // expanded streams (`cases_p1`...`cases_p5`) and the reported
     // loglik must be the joint sum, not the first-stream-only value.
     //
-    // Concretely we expect the magnitude (|loglik|) under
-    // `--obs cases` to be substantially larger than under
-    // `--obs cases_p1`. With a uniform-ish 5-stream split we'd
+    // Concretely we expect the magnitude (|loglik|) under the
+    // `cases` key to be substantially larger than under the
+    // `cases_p1` key. With a uniform-ish 5-stream split we'd
     // expect a factor of ~5; we assert a much weaker lower bound
     // (≥3×) to stay robust to per-stream variation under stochastic
     // IF2 with iterations=1.
@@ -189,8 +193,8 @@ fn profile_family_root_sums_all_expanded_streams() {
     let cases_tsv = tmp.path().join("profile_cases.tsv");
     let p1_tsv    = tmp.path().join("profile_p1.tsv");
 
-    let ll_family = run_profile(&bin, &cases_dir, "cases", &data_path, &cases_tsv);
-    let ll_single = run_profile(&bin, &p1_dir,    "cases_p1", &data_path, &p1_tsv);
+    let ll_family = run_profile(&bin, &cases_dir, &["cases_p1", "cases_p2", "cases_p3", "cases_p4", "cases_p5"], &data_path, &cases_tsv);
+    let ll_single = run_profile(&bin, &p1_dir, &["cases_p1"], &data_path, &p1_tsv);
 
     assert_eq!(ll_family.len(), 2, "expected 2 grid points, got {:?}", ll_family);
     assert_eq!(ll_single.len(), 2, "expected 2 grid points, got {:?}", ll_single);
@@ -216,48 +220,4 @@ fn profile_family_root_sums_all_expanded_streams() {
              (ratio = {:.2}x). Pre-fix: ratio ≈ 1× (silent first-stream-only).",
             i, lf.abs(), ls.abs(), ratio);
     }
-}
-
-#[test]
-fn profile_multi_stream_model_requires_explicit_obs() {
-    // `--obs` omitted on a multi-stream IR must hard-error, not
-    // silently default to the first stream. The error message must
-    // list the available streams so the user knows the family root
-    // (or one specific stream) to pass.
-    let bin = skip_if_missing_binary();
-    let tmp = tempfile::tempdir().unwrap();
-    let data_path = synth_obs_tsv(&bin, tmp.path());
-    let out_dir = tmp.path().join("out_no_obs");
-    let out_tsv = tmp.path().join("profile_no_obs.tsv");
-
-    let output = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .env("CAMDL_OUTPUT_DIR", &out_dir)
-        .env("CAMDL_SKIP_VERSION_CHECK", "1")
-        .args([
-            "profile", &seir_spatial_5_inference().to_string_lossy(),
-            "--starts", &starts_arg(&data_path),
-            "--data", &data_path.to_string_lossy(),
-            "--sweep", "R0=lin(15,25,2)",
-            "--particles", "100", "--iterations", "1", "--n-starts", "1",
-            "--rw-sd", "auto",
-            "--fixed", "sigma=0.125", "--fixed", "gamma=0.2",
-            "--fixed", "kappa=0.05", "--fixed", "amplitude=0.3",
-            "--fixed", "iota=1e-06", "--fixed", "rho=0.4",
-            "--fixed", "sigma_se=0.05", "--fixed", "k=10.0",
-            "--output", &out_tsv.to_string_lossy(),
-            "--seed", "1",
-        ])
-        .output()
-        .expect("spawn camdl profile");
-    assert!(!output.status.success(),
-        "profile must fail without --obs on multi-stream model");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    // gh#90: error now actionable — names both the --data NAME=PATH
-    // and --data PATH --obs NAME paths the user can take.
-    assert!(stderr.contains("--obs"),
-        "error must guide the user to pass --obs: {}", stderr);
-    assert!(stderr.contains("--data NAME=PATH"),
-        "error must suggest --data NAME=PATH multi-stream form: {}", stderr);
-    assert!(stderr.contains("cases_p1"),
-        "error must list at least one available stream: {}", stderr);
 }

@@ -95,13 +95,14 @@ pub struct ModelOverrides {
 /// produce an actionable error at dispatch time (per CLAUDE.md alpha
 /// posture: no backwards-compat shims, hard break with replacement
 /// spelled out).
-#[derive(Args, Clone, Default)]
+#[derive(Args, Clone, Default, store::Inputs)]
 pub struct InferenceModelOverrides {
     /// Pin NAME to VALUE (repeatable; sets value and removes the
     /// parameter from `[estimate]` if present). See `--help-fixed` for
     /// the full precedence / semantics block.
     #[arg(long = "fixed", value_name = "NAME=VALUE",
           long_help = FIXED_LONG_ABOUT)]
+    #[input(identity, vary = crate::input_fixtures::profile_other_fixed)]
     pub fixed_cli: Vec<ParamOverride>,
 
     /// Load fixed values from a flat params TOML (repeatable, layered).
@@ -110,10 +111,12 @@ pub struct InferenceModelOverrides {
     /// if present.
     #[arg(long = "fixed-file", value_name = "TOML",
           long_help = FIXED_LONG_ABOUT)]
+    #[input(identity, vary = crate::input_fixtures::profile_other_fixed_file)]
     pub fixed_files: Vec<PathBuf>,
 
     /// External table for table-lookup expressions, e.g. --table contact=matrix.tsv
     #[arg(long, value_name = "NAME=FILE")]
+    #[input(identity, vary = crate::input_fixtures::other_table)]
     pub table: Vec<TableSpec>,
 
     // ── Removed-flag traps (M-1 break per proposal §"Migration") ──
@@ -132,6 +135,7 @@ pub struct InferenceModelOverrides {
     // these traps exist purely so the error message is actionable.
     // They have no other effect.
     #[arg(long = "param", value_name = "NAME=VALUE", hide = true)]
+    #[input(skip)]
     pub _removed_param: Vec<ParamOverride>,
 }
 
@@ -241,56 +245,65 @@ pub struct ForcingExtrapolationArg {
     pub allow_forcing_extrapolation: bool,
 }
 
-/// Core inference knobs shared by pfilter / profile
-#[derive(Args, Clone)]
-pub struct InferenceCore {
+/// The inference knobs of `camdl profile`. The same flags as
+/// [`PfilterCore`], declared apart because `--pf-max-substeps` is an identity
+/// input of a profile point (a tripped budget is a stored log-likelihood of
+/// -inf) and an execution input of a filter run (a tripped budget stores
+/// nothing).
+#[derive(Args, Clone, store::Inputs)]
+pub struct ProfileCore {
     /// Step size (default 1.0).
     #[arg(long)]
+    #[input(identity, vary = crate::input_fixtures::other_dt)]
     pub dt: Option<f64>,
 
-    /// RNG seed
+    /// RNG seed: draws each cell's starts, and with `--seeds` absent it is
+    /// the one seed every point is computed under.
     #[arg(long, default_value_t = 1)]
+    #[input(identity)]
     pub seed: u64,
 
     /// Rayon thread count (0 = all available cores)
     #[arg(long, default_value_t = 0, env = "CAMDL_PARALLEL")]
+    #[input(execution, exercised_by = crate::input_fixtures::profile_parallel)]
     pub parallel: usize,
 
-    /// gh#audit-C6 / S1. Restore the legacy silent-zero behaviour for
-    /// numerical-collapse paths (Div-by-zero, Pow → NaN, Sqrt of
-    /// negative, etc.) in rate evaluation. Default: hard error
-    /// (SimError::NumericalCollapse). Use only when a model
-    /// legitimately needs the legacy behaviour, e.g. spatial models
-    /// where a stratum-empty divisor is explicitly meant to produce
-    /// zero rate. Counters under EvalStats still increment under
-    /// either mode so you can see how often the path fired.
+    /// Restore the legacy silent-zero behaviour for numerical-collapse paths
+    /// (division by zero, a power that is NaN, the square root of a negative)
+    /// in rate evaluation. Default: hard error. Use only when a model needs it,
+    /// such as a spatial model where an empty stratum's divisor is meant to
+    /// give a zero rate.
     #[arg(long, default_value_t = false)]
+    #[input(identity)]
     pub allow_degenerate_rates: bool,
 
     #[command(flatten)]
+    #[input(group)]
     pub forcing_extrapolation: ForcingExtrapolationArg,
 
     /// Time-column format for `--data`: `auto` (detect numeric-vs-date over
     /// the whole column), `numeric` (force `f64`), or `date` (force ISO
-    /// dates, requires the model's `origin`). Dated columns convert via
-    /// the model `origin` + `time_unit` (2026-05-22 calendar-time).
+    /// dates, requires the model's `origin`). A format the column does not
+    /// hold is refused.
     #[arg(long, default_value = "auto")]
+    #[input(execution, exercised_by = crate::input_fixtures::profile_time_format)]
     pub time_format: crate::caltime_load::TimeFormat,
 
-    /// gh#241. Deterministic per-call compute budget: the maximum cumulative
-    /// particle-substep count one filter evaluation may execute before bailing
-    /// (`PFIterationBudget`). Unset ⇒ the engine default (1e10), which never
-    /// false-trips a legitimate fit. A reproducible, machine-independent
-    /// budget — it replaced `--pf-wallclock-timeout`, a wall-clock timeout that
-    /// set a process env var and made a fit's log-likelihood depend on hardware.
+    /// The maximum cumulative particle-substep count one filter evaluation
+    /// of an IF2 cell may execute (`PFIterationBudget`). Unset: the engine
+    /// default (1e10). A cell whose budget trips is stored with a
+    /// log-likelihood of -inf, so the budget is part of each point's
+    /// identity. Refused for an nl-* cell.
     #[arg(long, value_name = "N")]
+    #[input(identity)]
     pub pf_max_substeps: Option<u64>,
 
     /// Binomial sampler for the chain-binomial draws: `btpe` (default) or
-    /// `btrs` (Hörmann 1993; faster, gh#747). The two are not bit-compatible,
-    /// so a `btrs` run gets its own stored address.
+    /// `btrs` (Hörmann 1993; faster). The two are not bit-compatible, so a
+    /// `btrs` point is a result of its own. Refused for an nl-* cell.
     #[arg(long, value_name = "SAMPLER",
           value_parser = |v: &str| v.parse::<sim::rng::BinomialAlgorithm>())]
+    #[input(identity, vary = crate::input_fixtures::other_binomial)]
     pub binomial: Option<sim::rng::BinomialAlgorithm>,
 }
 
@@ -309,10 +322,10 @@ pub struct StreamSelection {
 }
 
 /// The inference knobs of `camdl pfilter`. The same flags as
-/// [`InferenceCore`], which `profile` flattens, declared here on their own
-/// because `--pf-max-substeps` is an execution input of a filter run (a
-/// tripped budget stores nothing) and an identity input of a profile point (a
-/// tripped budget is a stored log-likelihood of -inf).
+/// [`ProfileCore`], declared apart because `--pf-max-substeps` is an execution
+/// input of a filter run (a tripped budget stores nothing) and an identity
+/// input of a profile point (a tripped budget is a stored log-likelihood of
+/// -inf).
 #[derive(Args, Clone, store::Inputs)]
 pub struct PfilterCore {
     /// Step size (default 1.0).
@@ -450,7 +463,7 @@ pub struct SimulateArgs {
     #[input(identity, vary = crate::input_fixtures::sim_init_state)]
     pub init_state: Option<String>,
 
-    /// gh#audit-C6 / S1. See InferenceCore.allow_degenerate_rates.
+    /// gh#audit-C6 / S1. See ProfileCore.allow_degenerate_rates.
     /// Forward sim is the most likely user of this flag — if a model
     /// has a known empty-stratum-divisor and the user wants to keep
     /// the legacy zero-rate behaviour rather than fix the model.
@@ -1852,7 +1865,8 @@ pub struct FitDiffArgs {
 }
 
 /// Format of the table a `camdl profile` run prints.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProfileTableFormat {
     Tsv,
     Json,
@@ -2282,37 +2296,35 @@ pub struct If2Args {
 
 // ─── profile ──────────────────────────────────────────────────────────────────
 
-#[derive(Args)]
+#[derive(Args, Clone, store::Inputs)]
 #[command(after_help = colored_help!("\
 Examples:
-  # 1D profile likelihood for R0, IF2 in each cell
-  camdl profile sir.camdl --data cases.tsv \\
-      --sweep \"R0=lin(0.5,5,20)\" --particles 2000 --rw-sd auto
+  # 1D profile likelihood for R0 of the problem fit.toml poses, IF2 in
+  # each cell; the problem is stored as `camdl fit run fit.toml` stores it
+  camdl profile sir.camdl --fit fit.toml \\
+      --sweep \"R0=lin(0.5,5,20)\" --particles 2000
 
   # 2D profile (R0 × sigma)
-  camdl profile sir.camdl --data cases.tsv \\
+  camdl profile sir.camdl --fit fit.toml \\
       --sweep \"R0=lin(0.5,5,10)\" --sweep \"sigma=lin(0.1,1.0,10)\" \\
-      --rw-sd auto
+      --particles 2000
 
-  # Slice profile: hold gamma at 0.1, sweep tau (`--rw-sd auto`
-  # estimates neither; with --fit, a held parameter goes in [fixed])
-  camdl profile sir.camdl --data cases.tsv \\
-      --sweep \"tau=lin(-35,-1,30)\" --fixed gamma=0.1 --rw-sd auto
+  # A profile of a stored fit's problem
+  camdl profile sir.camdl --fit @scout --sweep \"R0=lin(0.5,5,20)\" --particles 2000
 
-  # Deterministic per-cell MLE on the ODE backend; the estimated set
-  # and bounds come from the fit config's [estimate] (no --rw-sd)
+  # A conditional profile: hold gamma at 0.1, which takes it out of the
+  # problem's [estimate], sweep tau
+  camdl profile sir.camdl --fit fit.toml \\
+      --sweep \"tau=lin(-35,-1,30)\" --fixed gamma=0.1 --particles 2000
+
+  # Deterministic per-cell MLE on the ODE backend
   camdl profile sir.camdl --fit fit.toml \\
       --sweep \"gamma=lin(0.08,0.2,13)\" --algorithm nl-sbplx --backend ode
 
-  # Warm-start chains from a hand-written params TOML
-  camdl profile sir.camdl --data cases.tsv \\
+  # Warm-start chains from a hand-written params TOML of estimated values
+  camdl profile sir.camdl --fit fit.toml \\
       --sweep \"R0=lin(0.5,5,20)\" --starts from_params=truth.toml \\
-      --n-starts 4 --rw-sd auto
-
-  # Warm-start chains from a prior fit's MLE
-  camdl profile sir.camdl --data cases.tsv \\
-      --sweep \"R0=lin(0.5,5,20)\" --starts from_mle=fits/scout/ \\
-      --n-starts 4 --rw-sd auto
+      --n-starts 4 --particles 2000
 
 WHAT EACH CELL COMPUTES
 
@@ -2325,11 +2337,14 @@ WHAT EACH CELL COMPUTES
 
 OUTPUT
 
-  Each (cell x seed x start) is stored as its own leaf under
-  `profiles/`, with an `mle.toml` (final_loglik, [focal], [mle],
-  [diagnostics]). When the run ends it prints one table, to stdout or
-  to `--output FILE`, one row per grid cell, read back from the cell's
-  leaves (so a rerun served from the store prints the same table):
+  Each point (cell x seed x start) is stored in the run store
+  (`--store`, else `$CAMDL_STORE`, else ./camdl-store) under
+  `profile_point/`, with an `mle.toml` (final_loglik, [focal], [mle],
+  [diagnostics]). A point's identity holds its focal values and its
+  start's values, never the grid, so a larger grid reuses every point
+  already stored. When the run ends it prints one table, to stdout or
+  to `--output FILE`, one row per grid cell, rendered from the stored
+  points (so a rerun served from the store prints the same table):
 
     <focal_1> ... <focal_N>  loglik  <param_1> ... <param_K>
       loglik_spread_starts  starts_n_completed  n_starts  run_id
@@ -2342,7 +2357,7 @@ OUTPUT
                             disagree on the basin.
     starts_n_completed      starts with a finite log-likelihood
     n_starts                starts run at the cell (seeds x --n-starts)
-    run_id                  the best start's leaf run id
+    run_id                  the best start's run id
 
   `--format json` writes the same rows as {focal, estimated,
   likelihood_objective, loglik_type, cells: [...]}, null for a missing
@@ -2354,37 +2369,36 @@ OUTPUT
 "))]
 pub struct ProfileArgs {
     /// IR JSON or .camdl model file
+    #[input(identity, vary = crate::input_fixtures::profile_other_model)]
     pub model: PathBuf,
 
     #[command(flatten)]
+    #[input(group)]
     pub model_overrides: InferenceModelOverrides,
 
     #[command(flatten)]
+    #[input(group)]
     pub scenario: ScenarioArgs,
 
     #[command(flatten)]
-    pub inference: InferenceCore,
+    #[input(group)]
+    pub inference: ProfileCore,
 
-    #[command(flatten)]
-    pub stream: StreamSelection,
+    /// The stream a bare `--data FILE` binds to. Refused: a profile's
+    /// problem binds its own streams.
+    #[arg(long)]
+    #[input(skip)]
+    pub obs: Option<String>,
 
-    /// Observation data TSV.
-    ///
-    /// gh#90: polymorphic, repeatable. Two forms (mutually exclusive
-    /// within a single invocation):
-    ///   --data PATH         single-stream: binds to the model's only
-    ///                       observation block (or the one selected by
-    ///                       --obs NAME).
-    ///   --data NAME=PATH    multi-stream: bind one observation block by
-    ///                       name. Repeat for every stream.
-    /// Mixing the two forms is a hard error. Multi-stream models must
-    /// bind every block (warning fires when only a subset is bound).
+    /// Observation data TSV. Refused: a profile is of the problem `--fit`
+    /// names, whose `[data]` binds the data.
     #[arg(long, value_name = "[NAME=]PATH")]
+    #[input(skip)]
     pub data: Vec<DataSpec>,
 
-    /// Optional fit toml supplying the estimated set, bounds, starting
-    /// values and fixed list (the `[estimate]`, `[fixed]`, `[model]`
-    /// blocks). A swept parameter
+    /// The fit problem the profile is of: a fit file (its problem is
+    /// resolved and stored as `camdl fit run` stores it) or a stored fit
+    /// (`@LABEL`, an id, a folder). Required. A swept parameter
     /// belongs in `[estimate]`, whose entry bounds the grid; each cell pins
     /// it at its grid value and estimates the rest. Listing it in `[fixed]`
     /// is refused. Priors do not
@@ -2394,26 +2408,31 @@ pub struct ProfileArgs {
     /// removes every row ending after the cutoff from every cell's likelihood, and
     /// `[data.holdout]` files must lie after the training rows.
     #[arg(long, value_name = "PATH")]
+    #[input(identity, vary = crate::input_fixtures::profile_other_fit)]
     pub fit: Option<PathBuf>,
 
     /// Profile grid (repeat for 2D+).
     /// SPEC is `V1,V2,...` | `lin(min,max,n)` | `log10(min,max,n)`.
     #[arg(long, value_name = "NAME=SPEC", required = true)]
+    #[input(expands)]
     pub sweep: Vec<SweepSpec>,
 
     /// Particles per IF2 cell. Required for `--algorithm if2`; refused for
     /// an nl-* cell, which runs no particle filter.
     #[arg(long)]
+    #[input(identity)]
     pub particles: Option<usize>,
 
     /// IF2 iterations per grid point (default 50). Refused for an nl-* cell.
     #[arg(long)]
+    #[input(identity)]
     pub iterations: Option<usize>,
 
     /// Independent IF2 starts per grid point — a count, not a rule.
     /// `--starts` is the rule the chains are drawn from; this is how
     /// many are drawn in each cell.
     #[arg(long = "n-starts", value_name = "N", default_value_t = 3)]
+    #[input(identity)]
     pub n_starts: usize,
 
     /// Where each cell's chains begin — the same rule grammar
@@ -2432,6 +2451,7 @@ pub struct ProfileArgs {
     /// run's identity. How many chains:
     /// `--n-starts`.
     #[arg(long, value_name = "SPEC")]
+    #[input(identity, vary = crate::input_fixtures::profile_starts)]
     pub starts: Option<crate::fit::starts::ChainStarts>,
 
     /// Restrict the `from_posterior` rule in force (`--starts`, or the `--fit`
@@ -2441,6 +2461,7 @@ pub struct ProfileArgs {
     /// (their own R̂ is checked in place of the source's whole-run verdict),
     /// and the subset is keyed into the run's identity (gh#1056).
     #[arg(long, value_name = "IDS", value_parser = crate::fit::starts::parse_starts_chains)]
+    #[input(identity, vary = crate::input_fixtures::profile_starts_chains)]
     pub starts_chains: Option<crate::chain_selection::ChainSelection>,
 
     /// Start from a `from_mle` / `from_posterior` source whose stored verdict
@@ -2449,6 +2470,7 @@ pub struct ProfileArgs {
     /// starting from an unconverged fit launders its multi-modality into
     /// every cell. Refused on any other rule, which has no verdict to lift.
     #[arg(long)]
+    #[input(execution, exercised_by = crate::input_fixtures::profile_allow_nonconverged_source)]
     pub allow_nonconverged_source: bool,
 
     // The `--init` family the `[stages]` -> `[method]` split removed on
@@ -2457,20 +2479,27 @@ pub struct ProfileArgs {
     // alpha posture these are not back-compat shims — nothing behind them
     // works — they exist so one message corrects a habitual invocation.
     #[arg(long = "init", value_name = "MODE", hide = true)]
+    #[input(skip)]
     pub _removed_init: Option<String>,
     #[arg(long = "posterior", value_name = "PATH", hide = true)]
+    #[input(skip)]
     pub _removed_posterior: Option<String>,
     #[arg(long = "mle", value_name = "PATH", hide = true)]
+    #[input(skip)]
     pub _removed_mle: Option<String>,
     #[arg(long = "params", value_name = "TOML", hide = true)]
+    #[input(skip)]
     pub _removed_params: Option<String>,
     // The `--pmmh-*` flags went with per-cell PMMH; same shape, one message
     // (answered in `cmd_profile` before any file is read).
     #[arg(long = "pmmh-steps", value_name = "N", hide = true)]
+    #[input(skip)]
     pub _removed_pmmh_steps: Option<String>,
     #[arg(long = "pmmh-particles", value_name = "N", hide = true)]
+    #[input(skip)]
     pub _removed_pmmh_particles: Option<String>,
     #[arg(long = "pmmh-rho", value_name = "F", hide = true)]
+    #[input(skip)]
     pub _removed_pmmh_rho: Option<String>,
 
     /// IF2 cooling fraction (default 0.95): the perturbation SD reaches this
@@ -2478,36 +2507,42 @@ pub struct ProfileArgs {
     /// then keeps cooling (pomp's `cooling.fraction.50`, the same schedule
     /// `fit run`'s `cooling` means). Refused for an nl-* cell.
     #[arg(long)]
+    #[input(identity, vary = crate::input_fixtures::profile_other_cooling)]
     pub cooling: Option<f64>,
 
     /// The iteration at which `--cooling` is reached (default 50, pomp's
     /// `cooling.fraction.50`; `fit run`'s `cooling_target_iters`). Refused
     /// for an nl-* cell.
     #[arg(long, value_name = "N")]
+    #[input(identity, vary = crate::input_fixtures::profile_other_cooling_target_iters)]
     pub cooling_target_iters: Option<usize>,
 
-    /// Optional with `--fit`: without it each cell estimates the fit
-    /// config's `[estimate]` less the swept and pinned parameters, and an IF2
-    /// cell steps each by its `[estimate]` `rw_sd`, or the automatic default
-    /// from its bounds, as `fit run` does. Given, it names the estimated set
-    /// and overrides the steps: `NAME=SD,...`, `NAME=auto,...`, or `auto`
-    /// (every parameter not swept, pinned or a model constant). With `--fit`
-    /// a list must name every `[estimate]` parameter that is not swept or
-    /// pinned. Required without `--fit`. An nl-* cell perturbs nothing, so it
-    /// takes names only (`NAME=auto` or `auto`) and refuses an SD.
+    /// Without it each cell estimates the problem's `[estimate]` less the
+    /// swept and pinned parameters, and an IF2 cell steps each by its
+    /// `[estimate]` `rw_sd`, or the automatic default from its bounds, as
+    /// `fit run` does. Given, it names the estimated set and overrides the
+    /// steps: `NAME=SD,...`, `NAME=auto,...`, or `auto` (every parameter not
+    /// swept, pinned or a model constant). A list must name every
+    /// `[estimate]` parameter that is not swept or pinned. An nl-* cell
+    /// perturbs nothing, so it takes names only (`NAME=auto` or `auto`) and
+    /// refuses an SD.
     #[arg(long)]
+    #[input(identity, vary = crate::input_fixtures::profile_other_rw_sd)]
     pub rw_sd: Option<RwSd>,
 
     /// Where the collected table goes (default: stdout): one row per grid
     /// cell with the swept values, the best log-likelihood over the cell's
     /// seeds and starts, the estimates at that start, the spread of the
     /// finite starts, how many completed out of how many ran, and the best
-    /// start's run id. Written on a rerun served from the store too.
+    /// start's run id. Rendered from the stored points, so a rerun served
+    /// from the store writes the same table.
     #[arg(short, long)]
+    #[input(export)]
     pub output: Option<PathBuf>,
 
     /// Format of the collected table: `tsv` (default) or `json`.
     #[arg(long, value_enum, default_value_t = ProfileTableFormat::Tsv)]
+    #[input(render, vary = crate::input_fixtures::profile_json)]
     pub format: ProfileTableFormat,
 
     /// Multi-seed sensitivity: run the entire profile grid at each
@@ -2517,14 +2552,35 @@ pub struct ProfileArgs {
     /// `--seed` for a single-seed run. Accepts comma list `1,2,3` or
     /// inclusive range `1:5`.
     #[arg(long, value_name = "SPEC")]
+    #[input(expands)]
     pub seeds: Option<SeedSpec>,
 
-    /// User-supplied display label for this profile run. Validated
-    /// against `^[a-zA-Z0-9 ,._-]{1,64}$` after trim. Surfaced in
-    /// `camdl list` and `camdl show`. For multi-seed runs the label
-    /// applies to the umbrella; per-seed children remain unlabelled.
+    /// A name for this invocation, found again as `@LABEL` (1–64 chars after
+    /// trim; allowed: letters, digits, spaces, commas, dot, underscore,
+    /// hyphen). It names the invocation and every point it asked for, never
+    /// a point: rerunning under another label reuses every stored point.
     #[arg(long, value_name = "TEXT")]
+    #[input(store)]
     pub label: Option<String>,
+
+    /// Compute every point again, even when it is stored: the stored folder
+    /// moves to the store's `.quarantine/` first. A point held by an owner
+    /// not known to be stopped is refused; --force takes it unless its owner
+    /// is on this host and running, or on another host with a fresh beat.
+    #[arg(long)]
+    #[input(store)]
+    pub force: bool,
+
+    /// The run store's root (default `$CAMDL_STORE`, else `./camdl-store`).
+    #[arg(long, value_name = "DIR")]
+    #[input(store)]
+    pub store: Option<PathBuf>,
+
+    // `--output-dir` named the old store's root; the run store's root is
+    // `--store`, else `CAMDL_STORE`, else `./camdl-store`.
+    #[arg(long = "output-dir", value_name = "DIR", hide = true)]
+    #[input(skip)]
+    pub _removed_output_dir: Option<String>,
 
     /// Per-cell inference algorithm. When omitted the per-cell runner
     /// uses `if2` on `chain_binomial` (the historical default). Pass an
@@ -2535,13 +2591,38 @@ pub struct ProfileArgs {
     /// Validated against the methods registry at startup; invalid pairs
     /// error with an actionable suggestion.
     #[arg(long, value_name = "NAME")]
+    #[input(identity, vary = crate::input_fixtures::profile_other_algorithm)]
     pub algorithm: Option<String>,
 
     /// Simulation backend. Defaults to `chain_binomial`; pass
     /// `--backend ode` together with an ODE-compatible algorithm
     /// (`nl-sbplx`, `nl-bobyqa`, `nl-lbfgs`) for deterministic per-cell MLE.
     #[arg(long, value_name = "NAME")]
+    #[input(execution, exercised_by = crate::input_fixtures::profile_backend)]
     pub backend: Option<String>,
+}
+
+/// One `camdl profile` as its inputs reach the store: the command's
+/// arguments and the global options, each with its class. Built by the
+/// dispatch in `main.rs`; the global options are not `ProfileArgs`' own.
+#[derive(Clone, store::Inputs)]
+pub struct ProfileInvocation {
+    #[input(group)]
+    pub args: ProfileArgs,
+    /// `--no-licm`: compile without loop-invariant code motion. It changes
+    /// the compiled model, whose bytes every point's identity holds.
+    #[input(identity)]
+    pub no_licm: bool,
+    /// `--no-ir-cache`: compile rather than reuse a cached IR, which is the
+    /// IR a compile emits.
+    #[input(execution, exercised_by = crate::input_fixtures::profile_no_ir_cache)]
+    pub no_ir_cache: bool,
+    #[input(skip)]
+    pub verbosity: Option<log::LevelFilter>,
+    #[input(skip)]
+    pub progress: types::ProgressMode,
+    #[input(skip)]
+    pub no_progress: bool,
 }
 
 // ─── design ───────────────────────────────────────────────────────────────────

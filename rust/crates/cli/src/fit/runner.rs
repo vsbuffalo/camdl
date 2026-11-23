@@ -359,6 +359,7 @@ pub(crate) fn resolve_fit_parameters(
             point_overrides: &[],
             fixed_cli: &[],
             fixed_files: &[],
+            swept: &[],
             fit_toml_fixed: &fixed_resolved,
             fit_toml_estimate: &fit_toml_estimate,
             external: &no_external,

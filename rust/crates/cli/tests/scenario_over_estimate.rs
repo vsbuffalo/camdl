@@ -14,9 +14,10 @@
 //!   parameter `[estimate]` lists** — on every command that reads the fit
 //!   config. The import used to skip the estimated parameters (gh#37).
 //!
-//! Two layered overrides are not refused, and are reported as `info:` lines:
-//! `--fixed` over a name in `[estimate]`, and a profile's scenario setting the
-//! focal parameter the profile steps across its grid.
+//! Two layered overrides are not refused: `--fixed` over a name in
+//! `[estimate]`, which holds that parameter in the stored problem, and a
+//! profile's scenario setting the focal parameter the profile steps across its
+//! grid, which is reported as an `info:` line.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -273,6 +274,8 @@ fn profile(dir: &Path, cwd: &str, fit: &str, extra: &[&str]) -> Output {
         .args(["profile", &ir.to_string_lossy(), "--fit", &fit.to_string_lossy()])
         .args(["--sweep", "gamma=0.1,0.5", "--particles", "50", "--iterations", "3",
                "--n-starts", "1", "--seed", "1"])
+        // The store in the working directory, over the fit file's `store`.
+        .args(["--store", "camdl-store"])
         .args(extra)
         .output()
         .expect("spawn camdl profile")
@@ -319,76 +322,69 @@ fn profile_refuses_a_scenario_that_sets_an_estimated_parameter() {
     ], &dir.join("pf_half").join("results"));
 }
 
-/// `camdl profile` with the given arguments, in `dir/cwd`, no `--fit`.
-fn profile_plain(dir: &Path, cwd: &str, args: &[&str]) -> Output {
+/// `camdl profile` of the fit `fit` (a file in `dir`) with the given
+/// arguments, in `dir/cwd`.
+fn profile_of(dir: &Path, cwd: &str, fit: &str, args: &[&str]) -> Output {
     let cwd = dir.join(cwd);
     std::fs::create_dir_all(&cwd).unwrap();
     Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .current_dir(&cwd)
         .args(["profile", &dir.join("m.ir.json").to_string_lossy(),
-               "--data", &dir.join("cases.tsv").to_string_lossy()])
+               "--fit", &dir.join(fit).to_string_lossy()])
         .args(["--particles", "30", "--iterations", "2", "--n-starts", "1", "--seed", "1"])
+        .args(["--store", "camdl-store"])
         .args(args)
         .output()
         .expect("spawn camdl profile")
 }
 
-/// The parameters a profile estimates are the ones `--rw-sd` selects (`auto`:
-/// every parameter not swept or pinned), whether or not a fit config is given.
-/// A scenario that sets or scales one of them is refused, as it is when the
-/// fit config's `[estimate]` lists it. Before, `--rw-sd auto` under a scenario
-/// that set `gamma` estimated `gamma` anyway: the run exited 0 and run.json
-/// recorded `gamma: {role: estimated, source: scenario}`.
+/// The parameters a profile estimates are the ones the fit's `[estimate]`
+/// lists, less the swept one; `--rw-sd auto` and `--rw-sd gamma=...` both take
+/// them from it. A scenario that sets one of them is refused, and a scenario
+/// that sets a parameter the fit holds in `[fixed]` is refused as two values
+/// for one parameter.
 #[test]
 fn profile_refuses_a_scenario_that_sets_a_parameter_rw_sd_estimates() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     setup(dir);
-    fit_toml(dir, "pf_nuis", "", BETA, "N0 = 1000");
-    let fit = dir.join("pf_nuis.toml").to_string_lossy().into_owned();
+    fit_toml(dir, "pf_est", "", BETA_GAMMA, "N0 = 1000");
+    fit_toml(dir, "pf_held", "", BETA, "N0 = 1000\ngamma = 0.1");
     let sweep = ["--sweep", "beta=0.2,0.4", "--scenario", "fastg"];
-    let cases: [(&str, &str, Vec<&str>, &str); 3] = [
-        ("auto, no fit config", "pn_auto",
-         [&sweep[..], &["--fixed", "N0=1000", "--rw-sd", "auto"]].concat(),
-         "  estimated by: `--rw-sd auto`"),
-        ("explicit, no fit config", "pn_map",
-         [&sweep[..], &["--fixed", "N0=1000", "--rw-sd", "gamma=0.02"]].concat(),
-         "  estimated by: `--rw-sd gamma=...`"),
-        ("auto, with a fit config that does not list it", "pn_fit",
-         [&sweep[..], &["--fit", fit.as_str(), "--rw-sd", "auto"]].concat(),
-         "  estimated by: `--rw-sd auto`"),
-    ];
-    for (what, cwd, args, by) in cases {
-        let out = profile_plain(dir, cwd, &args);
+    for (what, cwd, rw_sd) in [("auto", "pn_auto", "auto"), ("explicit", "pn_map", "gamma=0.02")] {
+        let out = profile_of(dir, cwd, "pf_est.toml", &[&sweep[..], &["--rw-sd", rw_sd]].concat());
         assert_refused(what, &out, &[
             "error: parameter `gamma` is both estimated and set by scenario `fastg`",
-            by,
+            "  [estimate]:  gamma",
             "  scenario:    gamma = 0.9    (set gamma = 0.9)",
         ], &dir.join(cwd).join("results"));
     }
+    let out = profile_of(dir, "pn_held", "pf_held.toml", &sweep);
+    assert_refused("held in [fixed]", &out, &[
+        "error: parameter `gamma` is given two values: by scenario `fastg` and by [fixed] in `",
+    ], &dir.join("pn_held").join("results"));
 }
 
 /// The refusal is about the estimated set: pinning the scenario's parameter
 /// out of it (`--fixed-file` holds `gamma`; the scenario's value is the one
-/// used) lets the profile run. (A scenario that sets only the profiled
-/// parameter stays an info notice: `profile_scenario_setting_the_focal_...`.)
+/// used) lets the profile run.
 #[test]
 fn profile_accepts_a_scenario_whose_parameters_are_pinned() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     setup(dir);
+    fit_toml(dir, "pf_nuis", "", BETA, "N0 = 1000");
+    let sweep = ["--sweep", "beta=0.2,0.4", "--scenario", "fastg", "--rw-sd", "auto"];
     std::fs::write(dir.join("g.toml"), "gamma = 0.5\n").unwrap();
     let g = dir.join("g.toml").to_string_lossy().into_owned();
-    let out = profile_plain(dir, "pn_pinned", &["--sweep", "beta=0.2,0.4", "--scenario", "fastg",
-        "--fixed", "N0=1000", "--fixed-file", g.as_str(), "--rw-sd", "auto"]);
+    let out = profile_of(dir, "pn_pinned", "pf_nuis.toml", &[&sweep[..], &["--fixed-file", g.as_str()]].concat());
     assert!(out.status.success(), "pinned by --fixed-file: {}", stderr(&out));
     // A file value equal to the scenario's leaves no replacement on record,
     // and still pins: the name is read from the file.
     std::fs::write(dir.join("g_eq.toml"), "gamma = 0.9\n").unwrap();
     let g_eq = dir.join("g_eq.toml").to_string_lossy().into_owned();
-    let out = profile_plain(dir, "pn_pinned_eq", &["--sweep", "beta=0.2,0.4", "--scenario",
-        "fastg", "--fixed", "N0=1000", "--fixed-file", g_eq.as_str(), "--rw-sd", "auto"]);
+    let out = profile_of(dir, "pn_pinned_eq", "pf_nuis.toml", &[&sweep[..], &["--fixed-file", g_eq.as_str()]].concat());
     assert!(out.status.success(), "pinned at the scenario's own value: {}", stderr(&out));
 }
 
@@ -399,7 +395,7 @@ fn profile_refuses_from_scenario_that_sets_an_estimated_parameter() {
     let dir = tmp.path();
     setup(dir);
     fit_toml(dir, "sv_carve", "", BETA, "from_scenario = \"base\"");
-    let line = "error: parameter `beta` is both estimated and set by scenario `base`, which \
+    let line = "parameter `beta` is both estimated and set by scenario `base`, which \
                 [fixed] from_scenario imports";
     let out = profile(dir, "pf_carve", "sv_carve.toml", &["--rw-sd", "beta=0.02"]);
     assert_refused("profile from_scenario", &out, &[line],
@@ -408,23 +404,51 @@ fn profile_refuses_from_scenario_that_sets_an_estimated_parameter() {
 
 // ─── layered overrides reported at info ───────────────────────────────────────
 
-/// `--fixed N0=1000` over a fit config listing N0 in `[estimate]` is refused
-/// (parameter-roles §4.2, gh#1059): it would hold an estimated parameter the
-/// config says is estimated. The message names the fix, a copy of the config
-/// with N0 in `[fixed]`. It used to pin N0 with an info notice.
+/// The `parameters_provenance` and the stored problem's run id of the first
+/// profile point under `store`.
+fn first_point(store: &Path) -> (serde_json::Value, String) {
+    let mut stack = vec![store.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        if let Ok(body) = std::fs::read_to_string(d.join("identity.json")) {
+            let id: serde_json::Value = serde_json::from_str(&body).unwrap();
+            if id["kind"] == "profile_point" {
+                let prov: serde_json::Value = serde_json::from_str(
+                    &std::fs::read_to_string(d.join("provenance.json")).unwrap()).unwrap();
+                return (prov["provenance"]["parameters_provenance"].clone(),
+                    id["identity"]["problem"]["run_id"].as_str().expect("problem run_id").to_string());
+            }
+        }
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let hidden = e.file_name().to_string_lossy().starts_with('.');
+            if e.path().is_dir() && !hidden { stack.push(e.path()); }
+        }
+    }
+    panic!("no profile point under {}", store.display());
+}
+
+/// `--fixed N0=1000` over a fit config listing N0 in `[estimate]` holds N0 in
+/// the stored problem: the profile runs, every point records N0 as fixed at
+/// 1000, and the problem it profiles differs from the one profiled without
+/// `--fixed`.
 #[test]
-fn profile_fixed_over_estimate_is_refused() {
+fn profile_fixed_over_estimate_holds_the_parameter() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     setup(dir);
     let est = format!("{BETA_GAMMA}\nN0 = {{ bounds = [100, 10000], start = 1000 }}");
     fit_toml(dir, "pf_kick", "", &est, "");
-    let out = profile(dir, "kick", "pf_kick.toml", &["--fixed", "N0=1000", "--rw-sd", "beta=0.02"]);
-    let err = stderr(&out);
-    assert!(!out.status.success(), "profile --fixed over [estimate] must be refused: {err}");
-    assert!(err.contains("`--fixed N0=…` names N0") && err.contains("lists in [estimate]")
-        && err.contains("move it from [estimate] to [fixed] in a copy of the config"),
-        "the refusal names the parameter and the fix:\n{err}");
+    let held = profile(dir, "kick", "pf_kick.toml", &["--fixed", "N0=1000", "--rw-sd", "beta=0.02"]);
+    assert!(held.status.success(), "profile --fixed over [estimate]: {}", stderr(&held));
+    let free = profile(dir, "free", "pf_kick.toml", &["--rw-sd", "auto"]);
+    assert!(free.status.success(), "profile without --fixed: {}", stderr(&free));
+
+    let (prov, held_problem) = first_point(&dir.join("kick").join("camdl-store"));
+    assert_eq!(prov["N0"]["role"], "fixed", "{prov}");
+    assert_eq!(prov["N0"]["value"], 1000.0, "{prov}");
+    let (free_prov, free_problem) = first_point(&dir.join("free").join("camdl-store"));
+    assert_eq!(free_prov["N0"]["role"], "estimated", "{free_prov}");
+    assert_ne!(held_problem, free_problem,
+        "holding N0 changes the problem the profile is of");
 }
 
 /// A profile's scenario that sets the focal parameter is replaced by the grid,

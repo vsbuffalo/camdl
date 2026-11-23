@@ -1657,16 +1657,6 @@ pub(crate) struct FitArg {
     text: String,
     /// The stored fit, kept open so its copies stay; `None` for a fit file.
     pub stored: Option<Box<OpenedFit>>,
-    /// What a reader on the old store keys and archives as the fit's config
-    /// (`profile`): the fit file as written, or the stored `problem.toml`
-    /// followed by the run's `method.toml` when a run is named.
-    pub original: String,
-    /// The stored `problem.toml`, which is already resolved; `None` for a fit
-    /// file, whose resolution needs the model.
-    pub resolved: Option<String>,
-    /// The path `config`'s relative paths were written against: the fit
-    /// file, or the stored problem's copy of `problem.toml`.
-    pub anchor: std::path::PathBuf,
 }
 
 impl FitArg {
@@ -1681,9 +1671,6 @@ impl FitArg {
             return Ok(FitArg {
                 handle: text.to_string(),
                 config,
-                original: body.clone(),
-                resolved: None,
-                anchor: path,
                 text: body,
                 stored: None,
             });
@@ -1692,18 +1679,9 @@ impl FitArg {
         let opened = open_fit(store, text)?;
         let body = String::from_utf8(read_stored(&opened.fit.problem, PROBLEM_FILE)?)
             .map_err(|e| format!("{PROBLEM_FILE}: {e}"))?;
-        let mut original = body.clone();
-        if let Some(run) = &opened.fit.run {
-            let method = String::from_utf8(read_stored(run, METHOD_FILE)?).map_err(|e| format!("{METHOD_FILE}: {e}"))?;
-            original.push_str(&method);
-        }
-        let anchor = opened.run_dir().map(Path::to_path_buf).unwrap_or_else(|| opened.model_ir.clone());
         Ok(FitArg {
             handle: text.to_string(),
             config: opened.config(),
-            original,
-            resolved: Some(body.clone()),
-            anchor,
             text: body,
             stored: Some(Box::new(opened)),
         })

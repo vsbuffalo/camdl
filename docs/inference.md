@@ -814,37 +814,39 @@ revealing identifiability, confidence intervals, and parameter correlations.
 ### 1D profile
 
 ```bash
-camdl profile model.camdl --starts from_params=p.toml --data cases.tsv \
+camdl profile model.camdl --fit fit.toml --starts from_params=p.toml \
     --sweep "R0=lin(10,80,8)" \
     --rw-sd "sigma=0.01,gamma=0.01" \
     --particles 500 --iterations 30 --n-starts 3 --parallel 8
 ```
 
+A profile is of a fit problem. `--fit fit.toml` names a fit file, whose problem
+is resolved and stored as `camdl fit run` stores it, so a profile and a fit of
+one file share one stored problem; `--fit @RUN` names a stored fit's problem.
+`--fixed NAME=VALUE` holds a parameter and takes it out of the problem's
+`[estimate]`, which poses a conditional problem of its own. A profile without
+`--fit`, and `--data` or `--obs` beside it, are not accepted yet (gh#1354).
+
 Output: TSV with R₀, max loglik at each grid point, and the estimated values of
 all other parameters.
 
-With `--fit`, `--rw-sd` is optional. Each cell then estimates the config's
-`[estimate]` less the swept and pinned parameters, and an IF2 cell steps each by
-its `[estimate]` `rw_sd`, or the automatic default from its bounds, as `fit run`
+`--rw-sd` is optional. Without it each cell estimates the config's `[estimate]`
+less the swept and pinned parameters, and an IF2 cell steps each by its
+`[estimate]` `rw_sd`, or the automatic default from its bounds, as `fit run`
 does; an `nl-*` cell reads no step at all. A swept parameter belongs in
 `[estimate]`: its entry's bounds bound the grid, and each cell pins it and
-estimates the rest (listing it in `[fixed]` is refused). Given with `--fit`, a
-`--rw-sd` list overrides the steps and must name every `[estimate]` parameter
-that is not swept or pinned, since one it left out would be held at its start.
-Without `--fit`, `--rw-sd` names the estimated set and is required.
+estimates the rest (listing it in `[fixed]` is refused). Given, a `--rw-sd` list
+overrides the steps and must name every `[estimate]` parameter that is not swept
+or pinned, since one it left out would be held at its start.
 
 ```bash
 camdl profile model.camdl --fit fit.toml \
     --sweep "gamma=lin(0.08,0.2,13)" --algorithm nl-sbplx --backend ode
 ```
 
-With `--fit`, every cell scores the data `fit run` of that config trains on, and
-the config's holdout applies to the bound data (`--data` included) through the
-function `fit run` uses. `[data] holdout_after` removes every row ending after
-the cutoff, so no cell fits a held-out row; `[data.holdout]` files are checked
-by `fit run`'s tail-only rule, and the training files are fitted whole. The
-training rows a `holdout_after` cutoff leaves are part of the profile's
-identity.
+Every cell scores the training rows of the stored problem, the rows `fit run` of
+that config trains on: `[data] holdout_after` removes every row ending after the
+cutoff, so no cell fits a held-out row, and `[data.holdout]` files are not read.
 
 A sharp peak means R₀ is well-identified. A flat profile means R₀ is not
 identifiable from the data (the model fits equally well across a range of R₀
@@ -853,7 +855,7 @@ values).
 ### 2D profile
 
 ```bash
-camdl profile model.camdl --starts from_params=p.toml --data cases.tsv \
+camdl profile model.camdl --fit fit.toml --starts from_params=p.toml \
     --sweep "alpha=0.85,0.90,0.95,0.99" \
     --sweep "gamma=0.06,0.08,0.10,0.12" \
     --rw-sd "R0=2,sigma=0.01" \
@@ -987,11 +989,14 @@ replacements are:
   _warm-start chain origin_ case — when the file is a starting point for
   inference, not a pin.
 
-On `profile --fit`, a `--fixed` or plain `--fixed-file` naming a parameter the
-config lists in `[estimate]` is refused (parameter-roles proposal §4.2): it
-would make every cell solve a conditional problem the config does not state. To
-slice while holding `gamma`, move `gamma` from `[estimate]` to `[fixed]` in a
-copy of the config and sweep the other parameter.
+On `profile --fit`, a `--fixed` or `--fixed-file` naming a parameter the config
+lists in `[estimate]` holds it at the value and takes it out of `[estimate]`.
+The profile is then of a conditional problem, stored as a problem of its own,
+and the run says so at info:
+
+```
+info: gamma: `--fixed gamma=0.2` pins it, so it is not estimated (the fit config lists it in [estimate])
+```
 
 `camdl fit run` takes no `--fixed`: the fit config is the record of the problem
 it runs, so a held parameter is a `[fixed]` entry, one line moved from
@@ -1101,11 +1106,13 @@ it.
 
 ### The profile table
 
-A profile run stores every (cell × seed × start) as its own leaf under
-`profiles/`, each holding an `mle.toml` (`final_loglik`, `[focal]`, `[mle]`, and
-a `[diagnostics]` block). When the run ends it prints one table, to stdout or to
-`--output FILE`, with one row per grid cell. The table is read back from the
-leaves, so a rerun served from the store prints the same table.
+A profile run stores every (cell × seed × start) as a point in the run store,
+under `profile_point/`, each holding an `mle.toml` (`final_loglik`, `[focal]`,
+`[mle]`, and a `[diagnostics]` block). A point's identity holds its focal values
+and its start's values, never the grid, so a larger grid reuses every point
+already stored. When the run ends it prints one table, to stdout or to
+`--output FILE`, with one row per grid cell. The table is rendered from the
+stored points, so a rerun served from the store prints the same table.
 
 | Column                    | Meaning                                                                                                           |
 | ------------------------- | ----------------------------------------------------------------------------------------------------------------- |
@@ -1115,7 +1122,7 @@ leaves, so a rerun served from the store prints the same table.
 | `loglik_spread_starts`    | `max − min` of the finite starts' log-likelihoods. More than about 5 nats means the starts disagree on the basin. |
 | `starts_n_completed`      | Starts that produced a finite log-likelihood.                                                                     |
 | `n_starts`                | Starts run at the cell: the number of seeds times `--n-starts`.                                                   |
-| `run_id`                  | The best start's leaf `run_id`; empty when no start completed.                                                    |
+| `run_id`                  | The best start's `run_id`; when no start completed, the first start's, whose stored point records why.            |
 
 Read the columns by name. A cell where no start completed stays in the table as
 a row of `NaN`, so a grid point that failed is visible rather than missing.

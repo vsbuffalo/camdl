@@ -685,21 +685,20 @@ with the source can reproduce the result bit-for-bit.
 
 ### The layout the tools expect
 
-| Path           | What                                                                                                                   |
-| -------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `models/`      | `.camdl` model files and their `fit.toml` configs, side by side                                                        |
-| `data/`        | committed input streams plus the lock/manifest pinning their provenance                                                |
-| `results/`     | the content-addressed store of profiles — `results/profiles/`                                                          |
-| `camdl-store/` | the run store of `simulate`, `pfilter` and fits (`--store DIR`, `CAMDL_STORE`, or a fit file's `store` key to move it) |
-| `scripts/`     | everything the Makefile or workflow calls; no logic inline in a rule                                                   |
-| `workflow/`    | the fit DAG (`*.smk`), once the project has enough fan-out to need one                                                 |
-| `tests/`       | offline contract tests — do the data's columns match what the model's `observations` declare?                          |
-| `notes/`       | dated working notes                                                                                                    |
-| `Makefile`     | the named entry points, including the networked/offline split                                                          |
+| Path           | What                                                                                                                  |
+| -------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `models/`      | `.camdl` model files and their `fit.toml` configs, side by side                                                       |
+| `data/`        | committed input streams plus the lock/manifest pinning their provenance                                               |
+| `camdl-store/` | the run store of `simulate`, `pfilter`, profiles and fits (`--store DIR`, `CAMDL_STORE`, or a fit file's `store` key) |
+| `scripts/`     | everything the Makefile or workflow calls; no logic inline in a rule                                                  |
+| `workflow/`    | the fit DAG (`*.smk`), once the project has enough fan-out to need one                                                |
+| `tests/`       | offline contract tests — do the data's columns match what the model's `observations` declare?                         |
+| `notes/`       | dated working notes                                                                                                   |
+| `Makefile`     | the named entry points, including the networked/offline split                                                         |
 
-`results/` and `camdl-store/` are the ones that are not a matter of taste. Every
-run is content-addressed on the tuple above, so keeping them all under these
-roots is what makes a run **addressable**: `camdl list`, `camdl show <run>` and
+`camdl-store/` is the one that is not a matter of taste. Every run is
+content-addressed on the tuple above, so keeping them all under this root is
+what makes a run **addressable**: `camdl list`, `camdl show <run>` and
 `camdl fit table camdl-store` work off them, an identical re-run is a cache hit
 rather than a recompute, and a refit on updated data forks a new problem folder
 beside the old one instead of overwriting it. Scatter fits into per-experiment

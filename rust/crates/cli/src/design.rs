@@ -173,6 +173,7 @@ fn resolve_estimated(
             point_overrides: &[],
             fixed_cli: &[],
             fixed_files: &[],
+            swept: &[],
             fit_toml_fixed: &fixed,
             fit_toml_estimate: &fit_toml_estimate,
             external: &tables,
