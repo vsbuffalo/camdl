@@ -518,17 +518,6 @@ add-golden-model-hashes:
 	cd rust && CAMDL_ADD_GOLDEN_MODEL_HASHES="$$(git rev-parse --short HEAD)" \
 	  cargo test -p runid --test golden_model_hashes
 
-# The run-id side of the same check: for five compiled goldens, the
-# model-bearing level hash and run_id of every CAS kind, with every non-model
-# input fixed (rust/crates/cli/tests/fixtures/golden_run_ids.tsv; the test is
-# golden_run_ids_match_the_reference_table in
-# rust/crates/cli/src/resolve/tests.rs). Run on purpose only, when re-keying
-# those models is the subject of the change.
-.PHONY: update-golden-run-ids
-update-golden-run-ids:
-	cd rust && CAMDL_CAPTURE_GOLDEN_RUN_IDS="$$(git rev-parse --short HEAD)" \
-	  cargo test -p cli golden_run_ids_match_the_reference_table
-
 # The cross-language declared-model fixture: one hand-written value
 # (ocaml/test/declared_fixture.ml) written through the OCaml codec. The OCaml
 # test (test_declared) checks the committed file against that value and the
