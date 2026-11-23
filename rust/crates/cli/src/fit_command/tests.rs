@@ -717,8 +717,10 @@ fn fit_run_summary_is_a_function_of_the_run() {
 
 /// The bytes each method computes for the same fit at seed 7: the digest of
 /// each result file of the run, with every line naming the build
-/// (`0.1.0+<commit>`) and `mle_params.toml`'s `fit_hash` (the problem's id,
-/// which the run store keys differently) dropped. A chain's
+/// (`0.1.0+<commit>`) dropped, and every line naming a run id: the problem's
+/// (`fit_hash` in `mle_params.toml`, `fit_hash` and `fit_id` in
+/// `summary.json`) and the run's own (`run_id` in `summary.json`), each of
+/// which hashes the build's fingerprint. A chain's
 /// `resume_state.bin` is left out: it holds the chain's identity.
 ///
 /// The pins are a regression pin per platform, keyed by `target_os` and
@@ -752,8 +754,11 @@ fn each_method_computes_what_it_computed_before_the_move() {
                     continue;
                 }
                 let text = std::fs::read_to_string(&p).unwrap();
-                let kept: Vec<&str> =
-                    text.split('\n').filter(|l| !l.contains(&build) && !l.starts_with("fit_hash = ")).collect();
+                let names_a_run_id = |l: &str| {
+                    l.starts_with("fit_hash = ")
+                        || ["\"fit_hash\": ", "\"fit_id\": ", "\"run_id\": "].iter().any(|k| l.trim_start().starts_with(k))
+                };
+                let kept: Vec<&str> = text.split('\n').filter(|l| !l.contains(&build) && !names_a_run_id(l)).collect();
                 out.insert(rel, format!("{:x}", Sha256::digest(kept.join("\n").as_bytes()))[..16].to_string());
             }
         }
@@ -794,6 +799,7 @@ const MACOS_AARCH64: Pins = &[
         ("final_params.toml", "a0dab3f9637a3c9a"),
         ("fit_state.toml", "6e9941f83e6d8e7d"),
         ("mle_params.toml", "73e526922980c918"),
+        ("summary.json", "9080721789552981"),
     ]),
     ("pgas", &[
         ("chain_0/trace.tsv", "3521d6750b3cc250"),
@@ -809,6 +815,7 @@ const MACOS_AARCH64: Pins = &[
         ("filter_ess.tsv", "554688ea3f8badab"),
         ("fit_state.toml", "e67fddbcdf771833"),
         ("pgas_summary.json", "bbdcb6daca32e217"),
+        ("summary.json", "885c5627560de3b1"),
     ]),
     ("pmmh", &[
         ("chain_0/trace.tsv", "92443daae545beb8"),
@@ -818,12 +825,14 @@ const MACOS_AARCH64: Pins = &[
         ("draws.tsv", "5994b706bd37af2b"),
         ("fit_state.toml", "6c55b85981879ba8"),
         ("pmmh_summary.json", "2be2a76600467f11"),
+        ("summary.json", "20008983b19f8f99"),
     ]),
     ("pfilter", &[
         ("logliks.tsv", "a6ad8f50f8dc90c0"),
         ("prequential.json", "5e41e81e467a7023"),
         ("prequential.streams.tsv", "ef3604651959eab8"),
         ("prequential.tsv", "c7945ecb9f5cc355"),
+        ("summary.json", "b50e036ada4e5c04"),
     ]),
     ("mh", &[
         ("chain_0/trace.tsv", "eca3a76177c94127"),
@@ -833,24 +842,28 @@ const MACOS_AARCH64: Pins = &[
         ("draws.tsv", "fa9f7eec64e9b83d"),
         ("fit_state.toml", "378f1260aac7388e"),
         ("mh_summary.json", "73bd43f302f43a55"),
+        ("summary.json", "bd4d73f76b1147c6"),
     ]),
     ("sbplx", &[
         ("chain_results.tsv", "dbdead979318df7d"),
         ("diagnostics.json", "4f53cda18c2baa0c"),
         ("fit_state.toml", "e7280a7cdba437eb"),
         ("mle_params.toml", "7f5a3480f4b3eb8b"),
+        ("summary.json", "3721196ec2e37eff"),
     ]),
     ("bobyqa", &[
         ("chain_results.tsv", "fffd90043409d23a"),
         ("diagnostics.json", "4f53cda18c2baa0c"),
         ("fit_state.toml", "b3f101419aae03fc"),
         ("mle_params.toml", "0899337e6d6f7949"),
+        ("summary.json", "45c327f014a7ee26"),
     ]),
     ("lbfgs", &[
         ("chain_results.tsv", "4db4a4b639626dc1"),
         ("diagnostics.json", "4f53cda18c2baa0c"),
         ("fit_state.toml", "9fbc652a646888de"),
         ("mle_params.toml", "697bcdcd8b6fa78c"),
+        ("summary.json", "f09adf3ef96ac626"),
     ]),
 ];
 
@@ -869,6 +882,7 @@ const LINUX: Pins = &[
         ("final_params.toml", "a0dab3f9637a3c9a"),
         ("fit_state.toml", "7dbe99255bc21ff9"),
         ("mle_params.toml", "73e526922980c918"),
+        ("summary.json", "df6c7834aab3c696"),
     ]),
     ("pgas", &[
         ("chain_0/trace.tsv", "3521d6750b3cc250"),
@@ -884,6 +898,7 @@ const LINUX: Pins = &[
         ("filter_ess.tsv", "554688ea3f8badab"),
         ("fit_state.toml", "e67fddbcdf771833"),
         ("pgas_summary.json", "bbdcb6daca32e217"),
+        ("summary.json", "885c5627560de3b1"),
     ]),
     ("pmmh", &[
         ("chain_0/trace.tsv", "92443daae545beb8"),
@@ -893,12 +908,14 @@ const LINUX: Pins = &[
         ("draws.tsv", "5994b706bd37af2b"),
         ("fit_state.toml", "6c55b85981879ba8"),
         ("pmmh_summary.json", "2be2a76600467f11"),
+        ("summary.json", "20008983b19f8f99"),
     ]),
     ("pfilter", &[
         ("logliks.tsv", "a6ad8f50f8dc90c0"),
         ("prequential.json", "5e41e81e467a7023"),
         ("prequential.streams.tsv", "ef3604651959eab8"),
         ("prequential.tsv", "c7945ecb9f5cc355"),
+        ("summary.json", "b50e036ada4e5c04"),
     ]),
     ("mh", &[
         ("chain_0/trace.tsv", "eca3a76177c94127"),
@@ -908,24 +925,28 @@ const LINUX: Pins = &[
         ("draws.tsv", "fa9f7eec64e9b83d"),
         ("fit_state.toml", "378f1260aac7388e"),
         ("mh_summary.json", "73bd43f302f43a55"),
+        ("summary.json", "bd4d73f76b1147c6"),
     ]),
     ("sbplx", &[
         ("chain_results.tsv", "dbdead979318df7d"),
         ("diagnostics.json", "4f53cda18c2baa0c"),
         ("fit_state.toml", "e7280a7cdba437eb"),
         ("mle_params.toml", "7f5a3480f4b3eb8b"),
+        ("summary.json", "3721196ec2e37eff"),
     ]),
     ("bobyqa", &[
         ("chain_results.tsv", "13807c14836c3048"),
         ("diagnostics.json", "4f53cda18c2baa0c"),
         ("fit_state.toml", "597ac41b3e837bd4"),
         ("mle_params.toml", "0899337e6d6f7949"),
+        ("summary.json", "10b522dfa1526183"),
     ]),
     ("lbfgs", &[
         ("chain_results.tsv", "4db4a4b639626dc1"),
         ("diagnostics.json", "4f53cda18c2baa0c"),
         ("fit_state.toml", "9fbc652a646888de"),
         ("mle_params.toml", "697bcdcd8b6fa78c"),
+        ("summary.json", "f09adf3ef96ac626"),
     ]),
 ];
 
