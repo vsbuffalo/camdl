@@ -89,7 +89,6 @@ I0 = 10
     std::fs::write(tmp.path().join("fit.toml"), toml).unwrap();
     let out = Command::new(binary()).env_remove("CLICOLOR_FORCE")
         .args(args)
-        .env("CAMDL_OUTPUT_DIR", tmp.path().join("res"))
         .current_dir(tmp.path())
         .output()
         .expect("spawn");

@@ -116,7 +116,6 @@ fn camdl(dir: &Path, args: &[&str]) -> Output {
         .args(args)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDL_IR_CACHE_DIR", dir.join("irc"))
-        .env("CAMDL_OUTPUT_DIR", dir.join("cas"))
         .env("CAMDL_STORE", store_of(dir))
         .output()
         .expect("spawn camdl")

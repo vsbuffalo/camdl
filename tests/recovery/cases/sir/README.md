@@ -94,7 +94,7 @@ tolerance the sweep itself measures. `sir` passes both; `seir_age` fails (1).
 ```bash
 # fixed-seed baseline data + fit (seed 1)
 make -f tests/recovery/Makefile if2 CASE=tests/recovery/cases/sir   # synth+fit
-camdl fit table --root tests/recovery/cases/sir/results             # read θ̂
+camdl fit table tests/recovery/cases/sir/results                    # read θ̂
 
 # multi-seed recovery sweep (the table above) + pair plot
 #   for s in 1..8: simulate --seed s -> fit -> collect (β,γ,ll)

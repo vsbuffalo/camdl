@@ -280,18 +280,15 @@ fn read_mle_param(mle_toml: &str, key: &str) -> Option<f64> {
 fn synthetic_fit_recovers_params() {
     let bin = skip_if_missing_binary();
     // Absolute toml path: every path inside the toml resolves against the
-    // toml's own directory (gh#22, and `output_dir` too as of gh#507), so they
-    // bind correctly regardless of CWD. The fixture therefore declares NO
-    // `output_dir` — one would put the run tree inside the committed fixture
-    // directory — and the destination is pinned here with CAMDL_OUTPUT_DIR,
-    // the layer that applies when no `output_dir` is declared. Pinning it
-    // explicitly also keeps the test from inheriting a developer's ambient
-    // CAMDL_OUTPUT_DIR.
+    // toml's own directory (gh#22), so they bind correctly regardless of CWD.
+    // The fixture declares no `store`, which would put the store inside the
+    // committed fixture directory; the store is pinned here with CAMDL_STORE,
+    // which also keeps the test from inheriting a developer's ambient one.
     let fit_toml = fixture("polio_afp_es/fit.toml");
     let tmp = tempfile::tempdir().unwrap();
     let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .current_dir(tmp.path())
-        .env("CAMDL_OUTPUT_DIR", tmp.path().join("results")).env("CAMDL_STORE", std::path::Path::new(&tmp.path().join("results")).join("camdl-store"))
+        .env("CAMDL_STORE", std::path::Path::new(&tmp.path().join("results")).join("camdl-store"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         // Compile the model with the dune-built camdlc (a stale PATH camdlc
         // predates the stratified-observation header), mirroring compile_model.

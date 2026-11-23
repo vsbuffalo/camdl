@@ -286,7 +286,7 @@ const SIM_DROP_WITH_VALUE: &[&str] = &[
     "-b", "--bundle",
     "-o", "--output",
     "--obs", "--obs-dir", "--obs-only", "--obs-only-dir",
-    "--draws-out", "--output-dir",
+    "--draws-out",
 ];
 
 /// The global flags a reproduce command carries: the compile settings the

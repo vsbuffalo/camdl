@@ -6,13 +6,10 @@ mod engine_fingerprint; // ENGINE_ID's fingerprint, also compiled into build.rs;
 mod util;
 mod params_resolver;  // unified parameter-value resolver (2026-05-25 CLI UX rev 2)
 mod external_inputs;  // binds external("NAME") tables and forcings to files
-mod cas_read;       // generic RunRecord reader (new-format sims); transitional alongside run_meta (gh#147)
 mod leaf_use;       // command-side checks on a read leaf: a result consumer requires a completed run
-mod cas_index;      // derived run_id→leaf index + `camdl reindex` (gh#147 M4)
 mod hashing;
 mod canonical_json; // canonical JSON text and the finiteness gate for values an identity holds as text
 mod resolve;        // Resolve bridge: CLI inputs → runid identity (CAS run-identity refactor, gh#147)
-mod store_migrate;  // `camdl dev migrate`: raise store folders to the current layout, in place
 mod run_meta;       // cross-cutting run-metadata value types (FitAlgorithm, Backend, provenance records, FitSidecar)
 mod posterior_draws; // resolve a fit run's canonical posterior draws (--draws posterior, predict)
 mod chain_index;    // the chain number, counted from 0: the one index base every fit surface names (gh#990)
@@ -213,7 +210,7 @@ pub(crate) enum Command {
     /// Show what differs between two models, declaration by declaration
     Diff(args::DiffArgs),
 
-    /// Set or update the user-display label on any run (sim, fit, profile, …)
+    /// Refuses: a stored result is sealed, and is named with `--label` when it runs
     Label(args::LabelArgs),
 
     /// Which runs on the run store are running, failed or interrupted
@@ -314,12 +311,6 @@ Render a model for reading or display (delegates to camdlc).
 #[derive(Subcommand)]
 #[command(arg_required_else_help = true)]
 pub(crate) enum DevCmd {
-    /// Rebuild the derived run index (`<root>/index.json`)
-    Reindex(args::ReindexArgs),
-
-    /// Bring store folders an older camdl wrote up to the current store layout
-    Migrate(args::MigrateArgs),
-
     /// Evaluate time-dependent expressions against a model
     Eval(args::EvalArgs),
 
@@ -638,8 +629,6 @@ fn main() {
         Command::Verify(a)  => store_commands::cmd_store(store::StoreCommand::Verify { handle: a.handle }, a.store.store),
         Command::Clean(a)   => store_commands::cmd_store(store::StoreCommand::Clean, a.store.store),
         Command::Reindex(a) => store_commands::cmd_store(store::StoreCommand::Reindex, a.store.store),
-        Command::Dev(DevCmd::Reindex(a)) => cmd_reindex(&a),
-        Command::Dev(DevCmd::Migrate(a)) => store_migrate::cmd_migrate(&a),
         Command::Dev(DevCmd::Eval(a))    => eval::cmd_eval(&a, compile),
         Command::Dev(DevCmd::Compile(a)) => {
             let refs: Vec<&str> = a.args.iter().map(String::as_str).collect();
@@ -667,19 +656,6 @@ fn delegate(subcommand: &str, args: &[String], compile: util::CompileSettings) {
 // below are for the *other*, unrelated RNG streams owned by this module.
 const SEED_MIX_UNIFORM: u64 = 0xd4a5_b1ce;      // uniform draws RNG
 const SEED_MIX_PRIOR: u64  = 0x0014_b1ce;      // prior draws RNG
-
-/// `camdl reindex`: rebuild `<root>/index.json` from a fresh full walk of
-/// every `run.json` under the store. Drops entries for leaves no longer on
-/// disk and adds every leaf found.
-fn cmd_reindex(a: &args::ReindexArgs) {
-    let out = out::Out::new(false);
-    match cas_index::rebuild(&a.root) {
-        Ok(n) => out.report_line(format_args!("reindexed {} run(s) under {}", n, a.root.display())),
-        Err(e) => {
-            out.fail(format!("error: failed to write index at {}: {}", a.root.display(), e));
-        }
-    }
-}
 
 /// Where `--init-state` draws its ensemble of forecast-origin states.
 ///
@@ -921,7 +897,7 @@ fn run_simulate(inv: args::SimulateInvocation) {
     // cell's compiled model through the resolved configuration's engine
     // settings; the forcing-extrapolation policy they hold is installed once
     // they exist, before any cell runs (`EngineSettings::install_forcing_policy`).
-    // `--parallel`, `--output-dir`, `--force`: how the cells are computed and
+    // `--parallel`, `--store`, `--force`: how the cells are computed and
     // where they are stored, never what (`sim_config::Execution`).
     let execution = crate::sim_config::Execution {
         // `--parallel N` / CAMDL_PARALLEL: the Rayon thread count for the

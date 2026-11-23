@@ -331,7 +331,6 @@ fn argv(inv: &ProfileInvocation) -> Vec<String> {
         label,
         force,
         store,
-        _removed_output_dir: _,
         algorithm,
         backend,
     } = args;
@@ -878,10 +877,10 @@ fn a_rerun_prints_the_same_table_and_force_computes_it_again() {
     assert_eq!(forced.stdout, first.stdout);
 }
 
-/// `--output-dir` named the old store's root and is refused, naming
-/// `--store`; nothing is stored.
+/// `--output-dir` is not a flag of `profile`: clap refuses it, and nothing
+/// is stored.
 #[test]
-fn output_dir_is_refused_naming_the_store() {
+fn output_dir_is_not_a_flag() {
     let cwd = workdir();
     let store = cwd.path().join("camdl-store");
     let mut args = argv(&profile_base());
@@ -889,7 +888,7 @@ fn output_dir_is_refused_naming_the_store() {
     let out = camdl(cwd.path(), &store, &args, &[]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "{stderr}");
-    assert!(stderr.contains("--output-dir") && stderr.contains("--store"), "{stderr}");
+    assert!(stderr.contains("unexpected argument '--output-dir'"), "{stderr}");
     assert!(!store.exists() && !cwd.path().join("results").exists(), "nothing is stored");
 }
 

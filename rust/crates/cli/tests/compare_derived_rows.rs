@@ -68,7 +68,6 @@ cooling    = 0.5
 dt = 1.0
 "#, ir = golden_ir().display())).unwrap();
     let out = Command::new(binary()).env_remove("CLICOLOR_FORCE")
-        .env_remove("CAMDL_OUTPUT_DIR")
         .env_remove("CAMDL_STORE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args(["fit", "run", "fit.toml", "--seed", "1", "--label", name])
@@ -86,7 +85,6 @@ fn compare(dir: &Path, extra: &[&str]) -> Output {
         "--particles", "100", "--draws", "1", "--replicates", "2"];
     args.extend_from_slice(extra);
     Command::new(binary()).env_remove("CLICOLOR_FORCE")
-        .env_remove("CAMDL_OUTPUT_DIR")
         .env("CAMDL_STORE", dir.join("fits"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args(&args)
@@ -153,7 +151,6 @@ fn the_trace_records_its_filter_settings_and_compare_checks_them() {
         "sigma = 0.25\ngamma = 0.3\nrho = 0.5\nk = 10.0\np_detect = 0.5\n\
          N0 = 1000\nbeta = 0.1\nI0 = 5\n").unwrap();
     let out = Command::new(binary()).env_remove("CLICOLOR_FORCE")
-        .env_remove("CAMDL_OUTPUT_DIR")
         .env_remove("CAMDL_STORE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args(["pfilter", &golden_ir().to_string_lossy(),
@@ -211,7 +208,6 @@ fn the_trace_records_its_filter_settings_and_compare_checks_them() {
             "--particles", "100", "--draws", "1", "--replicates", "2"];
         args.extend_from_slice(extra);
         Command::new(binary()).env_remove("CLICOLOR_FORCE")
-            .env_remove("CAMDL_OUTPUT_DIR")
             .env("CAMDL_STORE", dir.join("fits"))
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .args(&args).current_dir(dir)

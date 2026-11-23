@@ -336,3 +336,22 @@ fn an_earlier_cadences_subtree_survives_a_later_one() {
         assert_eq!(subtrees.len(), 2, "both cadences under {}: {subtrees:?}", leaf.display());
     }
 }
+
+/// A simulation cell's record is sealed, so `camdl label` cannot name it
+/// after the fact: it refuses, and names `--label` at run time.
+#[test]
+fn label_refuses_a_stored_simulation_cell() {
+    let fx = Fixture::new();
+    assert_ok(&fx.simulate_with("1", "out", &[]), "one cell");
+    let ids = sim_store_cells::sim_run_ids(&fx.path("out"));
+    let out = Command::new(skip_if_missing_binary()).env_remove("CLICOLOR_FORCE")
+        .args(["label", &ids[0][..12], "late"])
+        .current_dir(fx.dir.path())
+        .env("CAMDL_STORE", fx.path("out"))
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .output()
+        .expect("spawn camdl label");
+    let err = stderr(&out);
+    assert!(!out.status.success(), "{err}");
+    assert!(err.contains("sealed") && err.contains("--label late"), "{err}");
+}

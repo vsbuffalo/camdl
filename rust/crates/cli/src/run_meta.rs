@@ -667,8 +667,7 @@ pub struct FitSidecar {
     /// caller set, and kept as read by [`store_fit_sidecar`]. Absent, and so 0,
     /// in a record written before layouts were numbered; a reader of the
     /// folder's stored config refuses any layout but the current one
-    /// ([`require_resolved_config`]), and `camdl dev migrate` brings an older
-    /// folder up to it.
+    /// ([`require_resolved_config`]).
     #[serde(default)]
     pub store_layout: u32,
     /// A profile's label. A fit segment's sidecar carries none: a fit's label
@@ -689,9 +688,8 @@ pub struct FitSidecar {
     /// moved or changed), as a path **relative to the fit folder holding this
     /// sidecar** (`fits/{stem}-{h8}/`), e.g. `../../../fits/sir.toml`; set by
     /// [`write_fit_sidecar`]. Not the archived copy: that is
-    /// `fit.toml.original` in the same folder ([`ARCHIVED_CONFIG`]), which
-    /// carries the config's text but not its location, as does the resolved
-    /// config ([`RESOLVED_CONFIG`]).
+    /// `fit.toml.original` in the same folder, which carries the config's text
+    /// but not its location, as does the resolved config, `fit.resolved.toml`.
     ///
     /// Load-bearing: the stored configs' relative `[model]` / `[data]` paths were
     /// written against the source config's directory, so recovering the config
@@ -841,52 +839,12 @@ impl Default for FitSidecar {
     }
 }
 
-/// The producing config's archived copy inside a fit folder: the user's file
-/// byte for byte, for display and provenance. No reader takes a fit's
-/// configuration from it; that is [`RESOLVED_CONFIG`].
-pub const ARCHIVED_CONFIG: &str = "fit.toml.original";
-
-/// Why a fit folder's [`ARCHIVED_CONFIG`] could not be read as the file its
-/// fits read ([`read_verified_original`]). Each caller words its own refusal.
-#[derive(Debug)]
-pub enum OriginalError {
-    /// The file cannot be read.
-    Unreadable { path: std::path::PathBuf, error: std::io::Error },
-    /// `fit.meta.json` records no `fit_toml_hash`, so there is nothing to
-    /// check the file against. `bytes` are the file as read.
-    NoRecordedHash,
-    /// The file's SHA-256, `found`, is not the `fit_toml_hash` recorded.
-    /// `bytes` are the file as read.
-    Mismatch { found: String, recorded: String, bytes: Vec<u8> },
-}
-
-/// The bytes of `segment`'s [`ARCHIVED_CONFIG`], checked to be the file the
-/// fit read: their SHA-256 is `recorded`, the `fit_toml_hash` its
-/// `fit.meta.json` records (empty when it records none).
-pub fn read_verified_original(segment: &std::path::Path, recorded: &str) -> Result<Vec<u8>, OriginalError> {
-    let path = segment.join(ARCHIVED_CONFIG);
-    let bytes = std::fs::read(&path).map_err(|error| OriginalError::Unreadable { path, error })?;
-    if recorded.is_empty() {
-        return Err(OriginalError::NoRecordedHash);
-    }
-    let found = crate::hashing::sha256_hex(&bytes);
-    if found != recorded {
-        return Err(OriginalError::Mismatch { found, recorded: recorded.to_string(), bytes });
-    }
-    Ok(bytes)
-}
-
-/// The configuration a fit folder's fits ran under
-/// ([`crate::fit::run_config::resolved_config_text`]): the archived file with
-/// the command line's problem-half values and the folder's own `[fixed]`
-/// written in. What every reader of a stored fit's config reads.
-pub const RESOLVED_CONFIG: &str = "fit.resolved.toml";
-
 /// Write `sidecar` as the folder's `fit.meta.json`, stamped with
 /// [`FIT_META_SCHEMA_VERSION`], keeping the label and the training partition
 /// an on-disk record of the current version carries when `sidecar` has none.
 /// Archives nothing and records `source_config` as given: the call for
 /// rewriting a sidecar that was read back.
+#[cfg(test)]
 pub fn store_fit_sidecar(fit_segment: &std::path::Path, sidecar: &FitSidecar) -> std::io::Result<()> {
     // gh#29: keep a profile's label sticky. gh#585: the training partition is
     // sticky the same way — it is recorded after the data load, and a rerun
@@ -906,9 +864,7 @@ pub fn store_fit_sidecar(fit_segment: &std::path::Path, sidecar: &FitSidecar) ->
         .or_else(|| on_disk.and_then(|s| s.training_partition));
     let bytes = serde_json::to_vec_pretty(&merged).map_err(std::io::Error::other)?;
     // Whole or not at all, through a temporary of this writer's own: a
-    // reader never sees a torn record, and two writers of one folder (a fit
-    // recording its training partition, `camdl dev migrate` raising the
-    // layout) never share a temporary.
+    // reader never sees a torn record.
     runid::write_file_atomic(&fit_segment.join("fit.meta.json"), &bytes).map_err(std::io::Error::other)
 }
 

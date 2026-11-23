@@ -1,12 +1,6 @@
-//! Paths camdl shows and the old results root its readers of old stores
-//! search.
+//! Paths camdl shows.
 
 use std::path::PathBuf;
-
-/// The old results root the readers of old stores search when no root is
-/// named. `results/` pairs with `data/` in the research-workflow vocabulary
-/// the project's downstream users (book chapters, vignettes) speak.
-pub const DEFAULT_OUTPUT_ROOT: &str = "results";
 
 /// Absolutize an output path for DISPLAY, without requiring it to exist.
 ///
@@ -29,9 +23,7 @@ mod tests {
     use super::*;
 
     /// gh#507: the announced output path must be absolute even when the
-    /// root came from the `results/` default or `CAMDL_OUTPUT_DIR` (neither
-    /// of which is anchored at the fit.toml), and must survive a path that
-    /// does not exist yet.
+    /// root is relative, and must survive a path that does not exist yet.
     #[test]
     fn display_absolute_absolutizes_a_nonexistent_relative_path() {
         let cwd = std::env::current_dir().unwrap();

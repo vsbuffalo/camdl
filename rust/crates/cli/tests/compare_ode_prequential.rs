@@ -139,7 +139,6 @@ fn run_with_label(store: &Path, label: &str) -> PathBuf {
 
 fn camdl(dir: &Path, args: &[&str]) -> Output {
     Command::new(binary()).env_remove("CLICOLOR_FORCE")
-        .env_remove("CAMDL_OUTPUT_DIR")
         .env("CAMDL_STORE", store_for(dir))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args(args)

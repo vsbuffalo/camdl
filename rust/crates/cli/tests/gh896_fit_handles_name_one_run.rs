@@ -385,8 +385,8 @@ fn every_resolving_verb_prints_the_resolution_line() {
     for args in [
         vec!["fit", "summary", "@post"],
         vec!["predict", "@post", "--mode", "free_forward", "--n-draws", "2"],
-        vec!["show", "@post", "--root", &root],
-        vec!["cat", "@post", "--stream", "draws.tsv", "--root", &root],
+        vec!["show", "@post", "--store", &root],
+        vec!["cat", "@post", "--stream", "draws.tsv", "--store", &root],
     ] {
         let out = p.run(&args);
         assert!(out.status.success(), "{args:?}: {}", text(&out));
@@ -673,7 +673,7 @@ fn camdl_list_json_labels_each_run() {
     let short = p.leaves();
     p.config("post.toml", &pgas(7));
     p.ok(&["fit", "run", "post.toml", "--seed", "1", "--label", "long"]);
-    let out = p.run(&["list", "--kind", "fit", "--format", "json",
+    let out = p.run(&["list", "--kind", "fit", "--format", "json", "--store",
         &p.store().to_string_lossy()]);
     assert!(out.status.success(), "{}", text(&out));
     let rows: Vec<serde_json::Value> = String::from_utf8_lossy(&out.stdout).lines()
@@ -747,7 +747,7 @@ fn a_prediction_is_read_through_its_own_folder() {
     p.ok(&["predict", "@post", "--mode", "free_forward", "--n-draws", "3"]);
     let root = p.store().to_string_lossy().into_owned();
 
-    let out = p.run(&["cat", "@post", "--stream", "predictive/weekly_cases.tsv", "--root", &root]);
+    let out = p.run(&["cat", "@post", "--stream", "predictive/weekly_cases.tsv", "--store", &root]);
     assert!(!out.status.success(),
         "the run holds no predictive file of its own:\n{}", text(&out));
     let leaf = p.leaves().remove(0);
@@ -791,7 +791,7 @@ fn show_of_a_label_describes_that_run() {
     let (long_id, ..) = record(&long);
     let root = p.store().to_string_lossy().into_owned();
 
-    let out = p.run(&["show", "@short", "--root", &root]);
+    let out = p.run(&["show", "@short", "--store", &root]);
     assert!(out.status.success(), "{}", text(&out));
     let shown = stdout(&out);
     assert!(shown.contains(&short_id[..12]), "{shown}");
@@ -811,7 +811,7 @@ fn show_format_json_on_a_run_and_on_a_folder() {
     let (short_id, ..) = record(&short);
     let root = p.store().to_string_lossy().into_owned();
 
-    let out = p.run(&["show", "@short", "--root", &root, "--format", "json"]);
+    let out = p.run(&["show", "@short", "--store", &root, "--format", "json"]);
     assert!(out.status.success(), "{}", text(&out));
     let v: serde_json::Value = serde_json::from_slice(&out.stdout)
         .unwrap_or_else(|e| panic!("show --format json is JSON ({e}):\n{}", text(&out)));
@@ -828,7 +828,7 @@ fn show_format_json_on_a_run_and_on_a_folder() {
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert!(v["files"].as_array().unwrap().iter().any(|f| f == "problem.toml"), "{v}");
 
-    let out = p.run(&["show", "@short", "--root", &root, "--format", "yaml"]);
+    let out = p.run(&["show", "@short", "--store", &root, "--format", "yaml"]);
     assert!(!out.status.success(), "an unknown format is refused:\n{}", text(&out));
 }
 
@@ -841,7 +841,7 @@ fn cat_of_a_label_reads_the_runs_draws_and_a_folder_reads_its_problem() {
     let (short, long) = two_labelled_posteriors(&p);
     let root = p.store().to_string_lossy().into_owned();
 
-    let out = p.run(&["cat", "@long", "--stream", "draws.tsv", "--root", &root]);
+    let out = p.run(&["cat", "@long", "--stream", "draws.tsv", "--store", &root]);
     assert!(out.status.success(), "{}", text(&out));
     assert_eq!(out.stdout, std::fs::read(long.join("draws.tsv")).unwrap(),
         "the bytes of @long's draws.tsv");
@@ -877,7 +877,7 @@ fn list_shows_one_row_per_run_with_its_source() {
     p.config("post.toml", &pgas_from("{ from_mle = \"@scout\" }"));
     p.ok(&["fit", "run", "post.toml", "--seed", "1", "--allow-nonconverged-source"]);
     let root = p.store().to_string_lossy().into_owned();
-    let out = p.run(&["list", "--kind", "fit", &root]);
+    let out = p.run(&["list", "--kind", "fit", "--store", &root]);
     assert!(out.status.success(), "{}", text(&out));
     let stdout = stdout(&out);
     let rows = list_rows(&stdout);
@@ -897,11 +897,11 @@ fn list_shows_each_seed_as_a_run() {
     p.config_with("seeds.toml", "fit_seeds = [1, 2]", &if2(2));
     p.ok(&["fit", "run", "seeds.toml"]);
     let root = p.store().to_string_lossy().into_owned();
-    let listed = stdout(&p.run(&["list", "--kind", "fit", &root]));
+    let listed = stdout(&p.run(&["list", "--kind", "fit", "--store", &root]));
     for leaf in p.leaves() {
         assert!(listed.contains(&record(&leaf).0[..8]), "each run has a row:\n{listed}");
     }
-    let json = stdout(&p.run(&["list", "--kind", "fit", "--format", "json", "--limit", "1", &root]));
+    let json = stdout(&p.run(&["list", "--kind", "fit", "--format", "json", "--limit", "1", "--store", &root]));
     assert_eq!(json.lines().filter(|l| l.contains("\"kind\":\"fit_run\"")).count(), 1,
         "--limit counts runs:\n{json}");
 }
@@ -921,7 +921,7 @@ fn list_labels_each_run_with_the_label_that_held_it() {
     assert_eq!(p.leaves().len(), 2, "premise: two runs");
     let root = p.store().to_string_lossy().into_owned();
 
-    let plain = stdout(&p.run(&["list", "--kind", "fit", &root]));
+    let plain = stdout(&p.run(&["list", "--kind", "fit", "--store", &root]));
     let rows = list_rows(&plain);
     assert_eq!(rows.len(), 2, "one row per run:\n{plain}");
     for leaf in p.leaves() {
@@ -931,7 +931,7 @@ fn list_labels_each_run_with_the_label_that_held_it() {
     }
     assert!(p.ok(&["fit", "summary", "@scout~1"]).contains(&folder_name(&first[0])),
         "the earlier holder is @scout~1");
-    let hist = stdout(&p.run(&["list", "--kind", "fit", "--history", &root]));
+    let hist = stdout(&p.run(&["list", "--kind", "fit", "--history", "--store", &root]));
     assert_eq!(list_rows(&hist), rows, "--history changes nothing in the fits table");
 }
 

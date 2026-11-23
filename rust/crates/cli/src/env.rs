@@ -44,7 +44,6 @@
 //! Not here:
 //!
 //! - `clap`'s `env = "CAMDL_…"` attributes (`CAMDL_SEED`, `CAMDL_OUTPUT`,
-//!   `CAMDL_OUTPUT_DIR` for the readers of the old results root,
 //!   `CAMDL_PARALLEL`), which are another
 //!   spelling of a flag and are classified with it;
 //! - `RUST_LOG`, read by `env_logger` for the log filter;

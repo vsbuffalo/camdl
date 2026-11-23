@@ -81,7 +81,6 @@ impl Project {
     fn command(&self, args: &[&str]) -> Command {
         let mut c = Command::new(camdl_bin());
         c.env_remove("CLICOLOR_FORCE")
-            .env_remove("CAMDL_OUTPUT_DIR")
             .env("CAMDL_STORE", self.store())
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .current_dir(&self.dir)

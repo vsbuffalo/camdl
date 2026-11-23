@@ -128,12 +128,12 @@ $ camdl simulate sir.camdl --param beta=0.3 --param gamma=0.1
 compiling sir.camdl...
  compiled sir.camdl   1.9KB IR in 0.0s (6.1× source)
 simulate · chain_binomial: running …
-   stored ./results/sims/sir-c6bf78fe/…/seed_1-e6a47b86
+   stored ./camdl-store/<build>/sim/sir-c6bf78fe1d2a/…/seed_1-e6a47b86f0c3
           camdl cat 5ed416f2…
 ```
 
-Every run is stored under `results/` keyed by its exact inputs (model, config,
-parameters, scenario, seed), so an identical re-run is instant and the
+Every run is stored under `camdl-store/` keyed by its exact inputs (model,
+config, parameters, scenario, seed), so an identical re-run is instant and the
 `camdl cat <id>` line retrieves the trajectory.
 
 ![camdl syntax mirrors the math you'd write on a whiteboard](docs/assets/math-vs-dsl.png)

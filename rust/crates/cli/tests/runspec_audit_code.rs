@@ -58,7 +58,6 @@ fn camdl(dir: &Path, args: &[&str]) -> Output {
     Command::new(binary()).env_remove("CLICOLOR_FORCE")
         .args(args)
         .current_dir(dir)
-        .env("CAMDL_OUTPUT_DIR", dir.join("out"))
         .env("CAMDL_STORE", dir.join("out").join("camdl-store"))
         .output()
         .expect("spawn camdl")

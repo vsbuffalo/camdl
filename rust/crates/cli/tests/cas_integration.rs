@@ -633,7 +633,6 @@ fn starts_from_resolves_short_hash() {
     let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .current_dir(tmp.path())
         .env("CAMDL_STORE", &results)
-        .env("CAMDL_OUTPUT_DIR", &results)
         .args(["profile", &ir.to_string_lossy(),
                "--fit", &fit_toml.to_string_lossy(),
                "--sweep", "beta=lin(0.1,0.5,2)", "--rw-sd", "auto",

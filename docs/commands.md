@@ -9,8 +9,8 @@ which commands chain into which, and where the boundaries are.
 The organizing distinction is **artifact-producing** vs **read/display**. The
 first group runs a computation and stores a content-addressed run: `simulate`,
 `pfilter` and `fit run` in the run store (`./camdl-store` unless `--store`,
-`CAMDL_STORE` or a fit file's `store` key names another root), `profile` under
-`results/`. The second group reads those runs back or performs a pure utility
+`CAMDL_STORE` or a fit file's `store` key names another root), and `profile`
+there too. The second group reads those runs back or performs a pure utility
 transform. A few commands delegate to the compiler.
 
 ## The command map
@@ -44,7 +44,7 @@ transform. A few commands delegate to the compiler.
 | `cat`                                              | Emit a cached run's trajectory or observations as TSV; `--stream draws.tsv --chains IDS` (or `--exclude-chains IDS`) prints only the selected chains' rows.                           |
 | `compare`                                          | Paired prequential comparison (elpd, CRPS, PIT) across fits. Scores are plug-in + in-sample-optimistic (the caveat is printed with the table); not a leave-future-out forecast score. |
 | `diff`                                             | What differs between two model files, declaration by declaration, with whether the two compile to the same model. Exit 0 identical, 1 different, 2 no report.                         |
-| `label`                                            | Set a label on a `results/` run. A fit run is refused: it is named when it runs, with `fit run --label`.                                                                              |
+| `label`                                            | Refuses every handle: a stored result is sealed. A result is named when it runs, with `--label`.                                                                                      |
 | `fit {run,summary,predict,diff,table,new,methods}` | Run a fit; inspect, summarize, predict-vs-observe, and aggregate fits; scaffold new `fit.toml`s.                                                                                      |
 | `dev eval`                                         | Evaluate model expressions (parameters, forcings) on a time grid — pure inspection, no simulation.                                                                                    |
 | `lineage {realize,tree,sojourn,cohort}`            | Offline projections over an event log — transmission tree, dwell times, cohort incidence.                                                                                             |

@@ -47,10 +47,6 @@ struct FitConfigWire {
     fit_seeds: Option<Vec<u64>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     simplex_groups: Vec<SimplexGroup>,
-    /// Read only to refuse it: a fit is stored on the run store, under
-    /// `store`.
-    #[serde(default, skip_serializing)]
-    output_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     store: Option<String>,
     estimate: IndexMap<String, EstimateSpecV2>,
@@ -204,7 +200,7 @@ pub struct FitConfig {
 impl FitConfigWire {
     fn split(self) -> FitConfig {
         let FitConfigWire {
-            model, data, synthetic, fit_seeds, simplex_groups, output_dir: _, store, estimate, fixed,
+            model, data, synthetic, fit_seeds, simplex_groups, store, estimate, fixed,
             method, config, simulate, scenario, enable, disable, ic_free, provenance,
         } = self;
         FitConfig {
@@ -227,7 +223,7 @@ impl FitConfig {
         } = self.problem.clone();
         let Inference { method, fit_seeds } = self.inference.clone();
         FitConfigWire {
-            model, data, synthetic, fit_seeds, simplex_groups, output_dir: None, store, estimate, fixed,
+            model, data, synthetic, fit_seeds, simplex_groups, store, estimate, fixed,
             method, config, simulate, scenario, enable, disable, ic_free, provenance,
         }
     }
@@ -2702,13 +2698,6 @@ impl FitConfig {
         detect_nuts_algorithm(contents)?;
         let wire: FitConfigWire = toml::from_str(contents)
             .map_err(|e| format!("parse error: {}", e))?;
-        if let Some(dir) = &wire.output_dir {
-            return Err(format!(
-                "`output_dir = \"{dir}\"` is not read: a fit is stored on the run store. Name \
-                 its root with `store = \"{dir}\"` (relative to this file), or set \
-                 CAMDL_STORE; without either it is ./camdl-store."
-            ));
-        }
         // gh#241 (C3): catch typo'd method keys serde silently drops.
         if let Some(method) = &wire.method {
             validate_method_keys(contents, method)?;
@@ -4682,16 +4671,17 @@ cooling = 0.7
         assert_eq!(cfg.problem.store.as_deref(), Some("/tmp/camdl_gh507_explicit"));
     }
 
-    /// The old store's `output_dir` is refused, naming the key that replaces
-    /// it, so a fit is never stored somewhere other than the file asks.
+    /// `output_dir` is not a key of the fit file: it is refused as an
+    /// unknown field, so a fit is never stored somewhere other than the file
+    /// asks.
     #[test]
-    fn output_dir_is_refused_naming_the_store_key() {
+    fn output_dir_is_an_unknown_key() {
         let err = FitConfig::from_toml_str_named(
             "output_dir = \"runs\"\n[model]\ncamdl = \"m.camdl\"\n[estimate]\nbeta = { bounds = [0.01, 2.0] }\n[fixed]\n",
             "fit.toml",
         )
         .unwrap_err();
-        assert!(err.contains("output_dir") && err.contains("store = \"runs\""), "{err}");
+        assert!(err.contains("unknown field `output_dir`"), "{err}");
     }
 
     #[test]

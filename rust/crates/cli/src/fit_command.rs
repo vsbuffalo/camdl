@@ -204,7 +204,6 @@ impl RemovedFlags {
             _removed_starts_from: None,
             _removed_tempering: None,
             _removed_rho: None,
-            _removed_output_dir: None,
         }
     }
 }

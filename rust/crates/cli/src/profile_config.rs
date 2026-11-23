@@ -157,12 +157,6 @@ pub(crate) fn refuse_removed(a: &crate::args::ProfileArgs, out: &crate::out::Out
         out.fail("error: --obs selects a stream beside --fit, whose problem binds its own streams; \
             bind the streams in the fit file's [data.observations] (gh#1354).");
     }
-    if let Some(dir) = &a._removed_output_dir {
-        out.fail(format!(
-            "error: --output-dir {dir} is no longer accepted: a profile is stored on the run store. \
-             Name its root with `--store {dir}` (or `CAMDL_STORE`); the default is ./camdl-store."
-        ));
-    }
     // M-1 break per docs/dev/proposals/2026-05-25-cli-init-and-params-ux.md
     // §"Migration": fail loudly on removed flags before any work.
     a.model_overrides.check_removed_flags("profile");

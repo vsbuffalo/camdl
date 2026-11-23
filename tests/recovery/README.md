@@ -57,8 +57,8 @@ Uses `cargo run` (dev build), so it works from a fresh checkout with no install
 step. Inspect the fits afterward with the normal reader:
 
 ```bash
-camdl list  --root tests/recovery/cases/seir_age/results
-camdl fit table --root tests/recovery/cases/seir_age/results
+camdl list --store tests/recovery/cases/seir_age/results
+camdl fit table tests/recovery/cases/seir_age/results
 ```
 
 ## The seir_age case

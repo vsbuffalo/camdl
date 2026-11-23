@@ -64,7 +64,7 @@ ocaml:
 # stream-name-agnostic so cases with different obs blocks share this harness.
 $(SYNTH): $(CASE)/$(MODEL) $(CASE)/truth.toml | ocaml
 	cd $(CASE) && $(CAMDL) simulate $(MODEL) --backend chain_binomial --seed 1 $(TRUTH) \
-	  --obs-only-dir data --output-dir results
+	  --obs-only-dir data
 	@touch $(SYNTH)
 synth: $(SYNTH) ## simulate at truth.toml → obs streams
 
@@ -74,7 +74,7 @@ pmmh: $(SYNTH) ; cd $(CASE) && $(CAMDL) fit run pmmh.toml ## PMMH fit
 
 ensemble: | ocaml ## 30-replicate forward sim (cells bar)
 	cd $(CASE) && $(CAMDL) simulate $(MODEL) --backend chain_binomial $(TRUTH) \
-	  --replicates 30 --output-dir results
+	  --replicates 30
 
 all: if2 pgas pmmh ## synth + all three fits
 

@@ -34,7 +34,6 @@ fn golden_ir() -> PathBuf {
 fn camdl(dir: &Path, args: &[&str]) -> Output {
     let root = if dir.join("fit.toml").is_file() { dir.parent().unwrap() } else { dir };
     Command::new(binary()).env_remove("CLICOLOR_FORCE")
-        .env_remove("CAMDL_OUTPUT_DIR")
         .env("CAMDL_STORE", root.join("store"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .args(args)

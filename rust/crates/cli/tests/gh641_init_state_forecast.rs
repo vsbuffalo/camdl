@@ -170,18 +170,17 @@ fn run(bin: &Path, args: &[String]) -> std::process::Output {
     run_in_store(bin, args, None)
 }
 
-/// `pfilter` has no `--output-dir` flag; its CAS root comes from
-/// `CAMDL_OUTPUT_DIR`, defaulting to a repo-relative `results/`. Every test
-/// here that omits it therefore shares ONE store with every other test doing
-/// the same, and under the parallel gate a concurrent quarantine/rename can
-/// pull a directory out from under a claim. Isolating the store per fixture
-/// removes that shared mutable state.
+/// The store root comes from `CAMDL_STORE`, defaulting to `./camdl-store`.
+/// Every test here that omits it therefore shares one store with every other
+/// test doing the same, and under the parallel gate a concurrent
+/// quarantine/rename can pull a directory out from under a claim. Isolating
+/// the store per fixture removes that shared mutable state.
 fn run_in_store(bin: &Path, args: &[String], store: Option<&Path>) -> std::process::Output {
     let mut cmd = Command::new(bin);
     cmd.env_remove("CLICOLOR_FORCE");
     cmd.args(args).env("CAMDL_SKIP_VERSION_CHECK", "1");
     if let Some(dir) = store {
-        cmd.env("CAMDL_OUTPUT_DIR", dir).env("CAMDL_STORE", std::path::Path::new(&dir).join("camdl-store"));
+        cmd.env("CAMDL_STORE", std::path::Path::new(&dir).join("camdl-store"));
     }
     cmd.output().expect("spawn camdl")
 }

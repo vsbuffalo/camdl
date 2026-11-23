@@ -243,7 +243,7 @@ fn two_data_vintages_do_not_share_a_run_id() {
             .args(["-o", tmp.path().join(format!("{label}.tsv")).to_str().unwrap()])
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
-            .env("CAMDL_OUTPUT_DIR", &cas).env("CAMDL_STORE", std::path::Path::new(&&cas).join("camdl-store"))
+            .env("CAMDL_STORE", std::path::Path::new(&&cas).join("camdl-store"))
             .output()
             .expect("spawn simulate");
         let stderr = String::from_utf8_lossy(&o.stderr).into_owned();
@@ -308,7 +308,7 @@ fn the_same_data_twice_keeps_one_run_id() {
             .args(["-o", tmp.path().join(format!("{label}.tsv")).to_str().unwrap()])
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
-            .env("CAMDL_OUTPUT_DIR", &cas).env("CAMDL_STORE", std::path::Path::new(&&cas).join("camdl-store"))
+            .env("CAMDL_STORE", std::path::Path::new(&&cas).join("camdl-store"))
             .output()
             .expect("spawn simulate");
         assert!(
@@ -339,7 +339,7 @@ fn an_anchored_model_without_fit_is_refused() {
         .arg("--stdout")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
-        .env("CAMDL_OUTPUT_DIR", tmp.path().join("cas")).env("CAMDL_STORE", std::path::Path::new(&tmp.path().join("cas")).join("camdl-store"))
+        .env("CAMDL_STORE", std::path::Path::new(&tmp.path().join("cas")).join("camdl-store"))
         .output()
         .expect("spawn simulate");
     let stderr = String::from_utf8_lossy(&o.stderr);
@@ -374,7 +374,7 @@ fn an_anchored_horizon_resolves_and_sets_the_grid() {
         .args(["-o", out.to_str().unwrap()])
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
-        .env("CAMDL_OUTPUT_DIR", tmp.path().join("cas")).env("CAMDL_STORE", std::path::Path::new(&tmp.path().join("cas")).join("camdl-store"))
+        .env("CAMDL_STORE", std::path::Path::new(&tmp.path().join("cas")).join("camdl-store"))
         .output()
         .expect("spawn simulate");
     let stderr = String::from_utf8_lossy(&o.stderr);
@@ -539,7 +539,7 @@ fn an_anchored_model_forecasts_from_a_filtered_state() {
         .args(["-o", out.to_str().unwrap()])
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
-        .env("CAMDL_OUTPUT_DIR", tmp.path().join("cas")).env("CAMDL_STORE", std::path::Path::new(&tmp.path().join("cas")).join("camdl-store"))
+        .env("CAMDL_STORE", std::path::Path::new(&tmp.path().join("cas")).join("camdl-store"))
         .output()
         .expect("spawn simulate");
     let stderr = String::from_utf8_lossy(&o.stderr);
@@ -618,7 +618,7 @@ fn an_anchor_resolving_before_the_forecast_origin_is_refused() {
         .args(["-o", tmp.path().join("f.tsv").to_str().unwrap()])
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
-        .env("CAMDL_OUTPUT_DIR", tmp.path().join("cas")).env("CAMDL_STORE", std::path::Path::new(&tmp.path().join("cas")).join("camdl-store"))
+        .env("CAMDL_STORE", std::path::Path::new(&tmp.path().join("cas")).join("camdl-store"))
         .output()
         .expect("spawn simulate");
     let stderr = String::from_utf8_lossy(&o.stderr);
@@ -731,7 +731,7 @@ fn pfilter_resolves_an_anchored_model_and_reports_a_finite_loglik() {
         .arg("--no-save-samples")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
-        .env("CAMDL_OUTPUT_DIR", tmp.path().join("cas")).env("CAMDL_STORE", std::path::Path::new(&tmp.path().join("cas")).join("camdl-store"))
+        .env("CAMDL_STORE", std::path::Path::new(&tmp.path().join("cas")).join("camdl-store"))
         .output()
         .expect("spawn pfilter");
     let stderr = String::from_utf8_lossy(&o.stderr).into_owned();
@@ -766,7 +766,7 @@ fn profile_resolves_an_anchored_model() {
         .args(["--n-starts", "1", "--rw-sd", "auto", "--seed", "1"])
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
-        .env("CAMDL_OUTPUT_DIR", tmp.path().join("cas")).env("CAMDL_STORE", std::path::Path::new(&tmp.path().join("cas")).join("camdl-store"))
+        .env("CAMDL_STORE", std::path::Path::new(&tmp.path().join("cas")).join("camdl-store"))
         .output()
         .expect("spawn profile");
     let stderr = String::from_utf8_lossy(&o.stderr).into_owned();
@@ -795,7 +795,7 @@ fn pfilter_refuses_an_anchored_model_with_no_data_bound() {
         .args(["--particles", "50", "--seed", "1"])
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
-        .env("CAMDL_OUTPUT_DIR", tmp.path().join("cas")).env("CAMDL_STORE", std::path::Path::new(&tmp.path().join("cas")).join("camdl-store"))
+        .env("CAMDL_STORE", std::path::Path::new(&tmp.path().join("cas")).join("camdl-store"))
         .output()
         .expect("spawn pfilter");
     let stderr = String::from_utf8_lossy(&o.stderr).into_owned();
@@ -836,7 +836,7 @@ fn pfilter_scenario_horizon_guard_compares_resolved_numbers() {
             .arg("--no-save-samples")
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
-            .env("CAMDL_OUTPUT_DIR", tmp.path().join("cas")).env("CAMDL_STORE", std::path::Path::new(&tmp.path().join("cas")).join("camdl-store"))
+            .env("CAMDL_STORE", std::path::Path::new(&tmp.path().join("cas")).join("camdl-store"))
             .output()
             .expect("spawn pfilter");
         (o.status.success(), String::from_utf8_lossy(&o.stderr).into_owned())
@@ -968,7 +968,7 @@ fn anchors_resolve_at_the_step_the_fit_runs_at() {
         .arg("--no-progress")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
-        .env("CAMDL_OUTPUT_DIR", tmp.path().join("cas")).env("CAMDL_STORE", std::path::Path::new(&tmp.path().join("cas")).join("camdl-store"))
+        .env("CAMDL_STORE", std::path::Path::new(&tmp.path().join("cas")).join("camdl-store"))
         .output()
         .expect("spawn fit run");
     let stderr = String::from_utf8_lossy(&o.stderr);

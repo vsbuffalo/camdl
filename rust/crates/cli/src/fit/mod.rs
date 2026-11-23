@@ -1776,26 +1776,11 @@ pub fn validate_label(raw: &str) -> Result<String, String> {
     Ok(trimmed.to_string())
 }
 
-/// Set or update the user-display label on any run kind (sim, fit,
-/// profile, replicate-set, fit-method).
-///
-/// Resolves the hash prefix by walking `<root>/{sims,fits,profiles}/**`
-/// for `run.json` files whose `run_id` starts with the prefix. The label is
-/// validated, written to the record's `label`, and the run.json is rewritten
-/// atomically.
-///
-/// A fit run is addressed by its leaf `run_id`, and labelling it makes it the
-/// label's holder whatever its age: the label is stamped
-/// (`provenance.label_set_at`), replacing any label the run carried, and the
-/// run that held it before keeps it only as an earlier holder (`@L~1`). It is
-/// refused while the run is still running (its finalize would rewrite the
-/// record) and while another run carrying the label is. A fit-id prefix names
-/// a problem folder, not a run, and is refused with its runs listed.
-///
-/// Concurrent invocations are last-write-wins; we don't lock the
-/// file. For single-user workflows this is fine; if cross-process
-/// label edits ever become a concern, a flock on run.json is the
-/// minimal extension.
+/// `camdl label HANDLE LABEL`: refuses, because a stored result's record is
+/// sealed. A label names an invocation and is given with `--label` when the
+/// command runs; running the command again with `--label` reuses its stored
+/// results and names them. The label is validated first, so a malformed one is
+/// reported as such.
 pub fn cmd_label(args: &crate::args::LabelArgs) {
     let out = crate::out::Out::new(false);
     let new_label = match validate_label(&args.label) {
@@ -1838,112 +1823,12 @@ pub fn cmd_label(args: &crate::args::LabelArgs) {
         }
     }
 
-    let root = args.root.clone();
-    if !root.exists() {
-        out.fail(format!("error: no results root at {}", root.display()));
-    }
-
-    // Match by hash prefix. Two homes for the label, by kind:
-    //   - sims / fit runs → a per-leaf `run.json` whose
-    //     `provenance.label` IS the label home; resolved by leaf `run_id`
-    //     prefix via the same `cas_read::resolve_*_prefix` machinery `show`
-    //     uses, so anything `show` can address, `label` can too.
-    //   - profiles (M3.3) have no profile-wide `run.json` — the profile-level
-    //     hash is derived from the leaves and the label lives in the base
-    //     sidecar (`fit.meta.json`), so they resolve by base-hash prefix →
-    //     segment and relabel that sidecar.
-    use std::collections::HashSet;
-    let mut matches: Vec<std::path::PathBuf> = Vec::new();
-    let mut seen_leaves: HashSet<std::path::PathBuf> = HashSet::new();
-    for leaf in crate::cas_read::resolve_sim_prefix(&root, &args.hash).into_iter()
-    {
-        if seen_leaves.insert(leaf.dir.clone()) {
-            matches.push(leaf.dir);
-        }
-    }
-    let mut profile_segments: Vec<std::path::PathBuf> = Vec::new();
-    // Profiles (gh#147 M3.3): resolve by the profile-base hash (the `profile`
-    // level of any leaf) → base segment; relabel via the sidecar rewrite.
-    // Dedup so a multi-leaf profile yields one segment.
-    {
-        let mut seen: HashSet<std::path::PathBuf> = HashSet::new();
-        for leaf in crate::cas_read::walk_profile_leaves(&root) {
-            let base_hash = leaf.record.levels.first()
-                .map(|l| l.hash.to_hex()).unwrap_or_default();
-            if !base_hash.starts_with(&args.hash) { continue; }
-            if let Some(seg) = leaf.dir.ancestors().nth(4) {
-                if seen.insert(seg.to_path_buf()) {
-                    profile_segments.push(seg.to_path_buf());
-                }
-            }
-        }
-    }
-
-    let total = matches.len() + profile_segments.len();
-    if total == 0 {
-        out.fail(format!("error: no run found with hash prefix `{}` under {}",
-            args.hash, root.display()));
-    }
-    if total > 1 {
-        out.say(format_args!("error: hash prefix `{}` matches {} runs — \
-                   use a longer prefix", args.hash, total));
-        for p in matches.iter()
-            .chain(profile_segments.iter())
-            .take(8)
-        {
-            out.say(format_args!("  {}", p.display()));
-        }
-        crate::out::ExitCode(1).exit();
-    }
-
-    // A profile: rewrite the base sidecar's label (its authoritative home),
-    // leaving the archived `fit.toml.original` untouched.
-    if let Some(seg) = profile_segments.into_iter().next() {
-        let mut side = match crate::run_meta::read_fit_sidecar(&seg) {
-            Ok(Some(side)) => side,
-            Ok(None) => out.fail(format!("error: {} has no fit.meta.json to label", seg.display())),
-            Err(e) => out.fail(format!("error: {e}")),
-        };
-        let prior = side.label.clone();
-        side.label = Some(new_label.clone());
-        if let Err(e) = crate::run_meta::store_fit_sidecar(&seg, &side) {
-            out.fail(format!("error: cannot write profile sidecar {}: {}", seg.display(), e));
-        }
-        match prior {
-            Some(p) if p != new_label =>
-                out.say(format_args!("ok: label updated from \"{}\" to \"{}\" on {}", p, new_label, seg.display())),
-            Some(_) => out.say(format_args!("ok: label unchanged (\"{}\") on {}", new_label, seg.display())),
-            None => out.say(format_args!("ok: label set to \"{}\" on {}", new_label, seg.display())),
-        }
-        return;
-    }
-
-    let run_dir = matches.into_iter().next().unwrap();
-    let run_json_path = run_dir.join("run.json");
-
-    // Per-leaf kinds (sim / pfilter): the label lives in the leaf's
-    // `run.json` `provenance.label`. These are always written `Completed`, so
-    // there is no in-progress gate. Rewritten under the record lock, through a
-    // uniquely named temporary file.
-    //
-    // Leaf matches come from `resolve_*_prefix`, which only surfaces dirs
-    // holding a parseable `RunRecord` `run.json`. A match whose `run.json`
-    // fails to read here is surfaced with why, rather than relabelled.
-    let leaf = match runid::read_leaf(&run_dir) {
-        Ok(Some(leaf)) => leaf,
-        Ok(None) => out.fail(format!("error: {} holds no run.json — cannot relabel", run_dir.display())),
-        Err(u) => out.fail(format!("error: {} — cannot relabel", crate::leaf_use::unreadable(&u))),
-    };
-    let prior = leaf.record.provenance.label.clone();
-    if let Err(e) = crate::cas_sink::ensure_provenance_label(&run_dir, &new_label) {
-        out.fail(format!("error: cannot write {}: {}", run_json_path.display(), e));
-    }
-    match prior {
-        Some(p) if p != new_label =>
-            out.say(format_args!("ok: label updated from \"{}\" to \"{}\" on {}", p, new_label, run_dir.display())),
-        Some(_) => out.say(format_args!("ok: label unchanged (\"{}\") on {}", new_label, run_dir.display())),
-        None => out.say(format_args!("ok: label set to \"{}\" on {}", new_label, run_dir.display())),
-    }
+    out.fail(format!(
+        "error: a stored result is sealed: its record is never rewritten, so `{}` cannot be \
+         labelled after it ran. Name a result when it runs, with `--label`: running the same \
+         command again with `--label {new_label}` reuses its stored results and names them \
+         @{new_label}.",
+        args.hash));
 }
 
 #[cfg(test)]

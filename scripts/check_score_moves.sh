@@ -40,7 +40,7 @@
 #                            removed on exit unless
 #                            CHECK_SCORE_MOVES_KEEP_WORK=1, so that
 #                            `diff -r` compares outputs only.
-#   Nothing is written outside OUT_DIR: CAMDL_OUTPUT_DIR and
+#   Nothing is written outside OUT_DIR: CAMDL_STORE and
 #   CAMDL_IR_CACHE_DIR point into OUT_DIR/work.
 #
 # What is normalized, and why (every substitution is in normalize() below)
@@ -102,7 +102,7 @@ if [[ "${CHECK_SCORE_MOVES_KEEP_WORK:-0}" != 1 ]]; then
     trap 'rm -rf "$WORK"' EXIT
 fi
 
-export CAMDL_OUTPUT_DIR="$WORK/store"
+export CAMDL_STORE="$WORK/store"
 export CAMDL_IR_CACHE_DIR="$WORK/ir-cache"
 # The binary reads the golden IR, not a .camdl, so the camdlc handshake has
 # nothing to check.

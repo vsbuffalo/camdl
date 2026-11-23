@@ -220,7 +220,7 @@ N0 = 10000
         .args(["profile"]).arg(ir).arg("--fit").arg(&fit)
         .args(["--sweep", "beta=0.4,0.5", "--rw-sd", "gamma=auto", "--n-starts", "1"])
         .args(algo).args(extra)
-        .env("CAMDL_OUTPUT_DIR", dir.join("res")).env("CAMDL_STORE", std::path::Path::new(&dir.join("res")).join("camdl-store"))
+        .env("CAMDL_STORE", std::path::Path::new(&dir.join("res")).join("camdl-store"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output().unwrap();
     // The step each stored cell records.
@@ -265,7 +265,7 @@ fn pfilter(dir: &Path, ir: &Path, extra: &[&str]) -> (bool, String) {
         .args(["--particles", "50", "--param", "beta=0.4", "--param", "gamma=0.3",
                "--param", "N0=10000"])
         .args(extra)
-        .env("CAMDL_OUTPUT_DIR", dir.join("res")).env("CAMDL_STORE", std::path::Path::new(&dir.join("res")).join("camdl-store"))
+        .env("CAMDL_STORE", std::path::Path::new(&dir.join("res")).join("camdl-store"))
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output().unwrap();
     (out.status.success(), String::from_utf8_lossy(&out.stderr).into_owned())

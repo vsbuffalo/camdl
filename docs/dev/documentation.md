@@ -228,8 +228,8 @@ camdl-run-scratch: first-fit
 Every block on that page then runs in a fresh copy of `docs/guide/first-fit/`,
 made once per render and deleted afterwards. The commands read as a user types
 them inside their own project (`camdl fit run fit.toml`), the checkout never
-collects a `results/` directory, and a fit `--label`, which can never be reused,
-is new on every render. `include` paths stay relative to the page.
+collects a `camdl-store/` directory, and a fit `--label`, which can never be
+reused, is new on every render. `include` paths stay relative to the page.
 
 A block that draws a plot names the SVG it writes with `figure="name.svg"` (and
 an optional `caption="..."`), and the filter inlines that file under the block's

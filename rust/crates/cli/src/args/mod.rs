@@ -994,11 +994,6 @@ pub struct FitRunArgs {
     #[arg(long = "rho", value_name = "F", hide = true)]
     #[input(skip)]
     pub _removed_rho: Option<String>,
-    // `--output-dir` named the old store's root; the run store's root is the
-    // fit file's `store` key, else `CAMDL_STORE`, else `./camdl-store`.
-    #[arg(long = "output-dir", value_name = "DIR", hide = true)]
-    #[input(skip)]
-    pub _removed_output_dir: Option<String>,
 }
 
 /// The flags of `fit run` that change the problem.
@@ -1995,45 +1990,23 @@ pub struct FitNewArgs {
 
 #[derive(Args)]
 #[command(after_help = colored_help!("\
+A stored result's record is sealed, so a result is never labelled after it
+ran, and this command refuses every handle. A label names the invocation that
+carries it: pass `--label L` to the command that computes the results, and
+`@L` names them. Running the same command again with `--label L` reuses the
+stored results and names them @L.
+
 Examples:
-  # Label any run kind by its short hash
-  camdl label 04ab12cd \"baseline-2024\"
-  camdl label 9c5d11f0 \"baseline sim, daily reporting\"
-  camdl label 7e2a5d4b \"R0 vs gamma profile, take 2\"
-
-  # Labels are the headline way to find a run again. Label it once,
-  # then list/show surfaces the label so you can spot it by name:
-  camdl label <hash> \"baseline-2024\"
-  camdl list --kind fit          # the labelled fit now shows its name
-  camdl show <hash>              # label appears in the run header
-
-Notes:
-  - Labels are 1–64 characters after trim, restricted to:
-    letters, digits, spaces, commas, dot, underscore, hyphen.
-  - The hash is matched as a prefix (8+ chars recommended) across
-    every kind under <root>/ (sims, fits, profiles, pfilters).
-  - Errors on ambiguous or unmatched prefix.
-  - Errors on a still-running fit (RunStatus::Running); the
-    runner would otherwise overwrite the label at completion.
-  - A fit run labelled L becomes @L, whatever its age; the run that
-    held L before is @L~1 (`camdl list --history` shows the numbering).
-    A label on the run is replaced. Refused while another run carrying
-    L is still running, and for a fit id (a problem folder, not a run).
-  - Concurrent invocations are last-write-wins.
+  camdl fit run fit.toml --label baseline-2024
+  camdl show @baseline-2024
 "))]
 pub struct LabelArgs {
-    /// Hash prefix of the target run (matches against any kind's leaf
-    /// `run.json` `run_id` under
-    /// `<root>/{sims,fits,profiles,pfilters}/`)
+    /// A handle of a stored result: a path, an id prefix, or `@L`
     pub hash: String,
 
-    /// New label text. Validated against ^[a-zA-Z0-9 ,._-]{1,64}$
-    /// after trim. Empty / whitespace-only labels are rejected.
+    /// The label, 1-64 characters after trim: letters, digits, spaces,
+    /// commas, dot, underscore and hyphen
     pub label: String,
-
-    /// Output root to search under (default: ./results)
-    #[arg(long, default_value = "./results", env = "CAMDL_OUTPUT_DIR")]
-    pub root: PathBuf,
 }
 
 // ─── pfilter ──────────────────────────────────────────────────────────────────
@@ -2576,12 +2549,6 @@ pub struct ProfileArgs {
     #[input(store)]
     pub store: Option<PathBuf>,
 
-    // `--output-dir` named the old store's root; the run store's root is
-    // `--store`, else `CAMDL_STORE`, else `./camdl-store`.
-    #[arg(long = "output-dir", value_name = "DIR", hide = true)]
-    #[input(skip)]
-    pub _removed_output_dir: Option<String>,
-
     /// Per-cell inference algorithm. When omitted the per-cell runner
     /// uses `if2` on `chain_binomial` (the historical default). Pass an
     /// algorithm + backend pair from `camdl fit methods` to switch
@@ -2929,20 +2896,7 @@ Examples:
   camdl list --format json
 "))]
 pub struct ListArgs {
-    /// The results root to scan, as a positional: `camdl list [ROOT]`
-    /// (default `$CAMDL_OUTPUT_DIR`, else ./results; with `--store` or
-    /// `$CAMDL_STORE` and no root named, none). You may also pass it as
-    /// `--root DIR`, matching `camdl cat`/`show`.
-    #[arg(env = "CAMDL_OUTPUT_DIR")]
-    pub root: Option<PathBuf>,
-
-    /// Root directory to scan (alias for the positional ROOT, for consistency
-    /// with `camdl cat`/`show`). Wins over the positional when both are given.
-    #[arg(long = "root", value_name = "DIR")]
-    pub root_flag: Option<PathBuf>,
-
-    /// The run store's root, where the commands on it (`pfilter`, `simulate`) store their
-    /// results (default `$CAMDL_STORE`, else `./camdl-store`)
+    /// The run store's root (default `$CAMDL_STORE`, else `./camdl-store`)
     #[arg(long, value_name = "DIR")]
     pub store: Option<PathBuf>,
 
@@ -2958,16 +2912,9 @@ pub struct ListArgs {
     #[arg(long)]
     pub since: Option<ListDuration>,
 
-    /// Filter by run kind: sim, fit, profile, pfilter, ensemble, or
-    /// all (default).
+    /// Filter by run kind: sim, fit, profile, pfilter, or all (default).
     #[arg(long, default_value = "all")]
     pub kind: String,
-
-    /// Filter by parent run hash (e.g. the grid-point × start children
-    /// of a specific `profile` run). Matches on `parent_profile_hash`
-    /// in each run's metadata. Accepts short prefixes (8+ chars).
-    #[arg(long, value_name = "HASH")]
-    pub parent: Option<String>,
 
     /// Maximum number of results to display
     #[arg(long, default_value_t = 50, conflicts_with = "all")]
@@ -3011,13 +2958,7 @@ pub struct ShowArgs {
     /// Short hash prefix or path to run directory
     pub target: String,
 
-    /// The results root to search (default `$CAMDL_OUTPUT_DIR`, else
-    /// ./results; with `--store` or `$CAMDL_STORE` and no root named, none)
-    #[arg(long, env = "CAMDL_OUTPUT_DIR")]
-    pub root: Option<PathBuf>,
-
-    /// The run store's root, where the commands on it (`pfilter`, `simulate`) store their
-    /// results (default `$CAMDL_STORE`, else `./camdl-store`)
+    /// The run store's root (default `$CAMDL_STORE`, else `./camdl-store`)
     #[arg(long, value_name = "DIR")]
     pub store: Option<PathBuf>,
 
@@ -3039,13 +2980,7 @@ pub struct CatArgs {
     /// Short hash prefix or path to run directory
     pub target: String,
 
-    /// The results root to search (default `$CAMDL_OUTPUT_DIR`, else
-    /// ./results; with `--store` or `$CAMDL_STORE` and no root named, none)
-    #[arg(long, env = "CAMDL_OUTPUT_DIR")]
-    pub root: Option<PathBuf>,
-
-    /// The run store's root, where the commands on it (`pfilter`, `simulate`) store their
-    /// results (default `$CAMDL_STORE`, else `./camdl-store`)
+    /// The run store's root (default `$CAMDL_STORE`, else `./camdl-store`)
     #[arg(long, value_name = "DIR")]
     pub store: Option<PathBuf>,
 
@@ -3070,64 +3005,6 @@ pub struct CatArgs {
     pub exclude_chains: Option<String>,
 }
 
-#[derive(Args)]
-#[command(after_help = colored_help!("\
-Rebuilds the derived index (`<root>/index.json`) from a fresh walk of every
-`run.json` under the store. The index is only a cache that accelerates `list`,
-`show`, and `cat`; `run.json` is always the source of truth, so `reindex` is
-optional — it is useful after copying a `results/` tree, or to drop entries for
-leaves that were removed out of band.
-
-Examples:
-  # Rebuild the index for the default ./results store
-  camdl dev reindex
-
-  # Rebuild the index for a specific store root
-  camdl dev reindex /data/runs
-"))]
-pub struct ReindexArgs {
-    /// Root directory to scan (default: ./results)
-    #[arg(default_value = "./results", env = "CAMDL_OUTPUT_DIR")]
-    pub root: PathBuf,
-}
-
-#[derive(Args)]
-#[command(after_help = colored_help!("\
-Every folder of a store records the store layout it was written at: a run
-folder in its `run.json` (`store_layout`), a fit or profile folder in its
-`fit.meta.json`. A folder written before layouts were numbered has none, and is
-layout 0. A command that reads a stored fit's configuration refuses a folder at
-an older layout, naming this command.
-
-`migrate` takes every folder at or under PATH, a single run folder or a whole
-store, through each step from its layout to the current one. A step derives
-what the folder lacks only from what it already records, checks the result
-against those records before writing, and writes each file whole (to a
-temporary file, then renamed), raising the folder's layout last. A file it
-writes says in its header that a migration wrote it, and from what. A folder
-whose records are missing or disagree is refused with the reason and left as it
-was; the rest are migrated, and the command exits 1.
-
-Layout 1 adds `fit.resolved.toml` to a fit folder, from its
-`fit.toml.original`, the fixed values `fit.meta.json` records, and whether its
-runs record forcing extrapolation as allowed. Other folders have their layout
-number raised alone.
-
-Examples:
-  # See what would change in the default ./results store, writing nothing
-  camdl dev migrate results --dry-run
-
-  # Migrate one profile folder a reader refused
-  camdl dev migrate results/profiles/sir-0123abcd
-"))]
-pub struct MigrateArgs {
-    /// A run folder, a fit folder, or a store root: every folder at or under it
-    pub path: PathBuf,
-
-    /// List what would change, and write nothing
-    #[arg(long)]
-    pub dry_run: bool,
-}
 
 // ─── compare ──────────────────────────────────────────────────────────────────
 
@@ -3777,66 +3654,28 @@ mod tests {
         );
     }
 
-    /// Regression: writer-side `DEFAULT_OUTPUT_ROOT` ("results") must
-    /// match every reader-side CLI default. Drift here is what
-    /// produced the 2026-04-19 → 2026-04-27 wart where the grid writer
-    /// wrote to `./results/` but `list / show / cat` defaulted to
-    /// `./output/`, forcing book chapters to pass `--root results`
-    /// to every read command. Keep them in lockstep.
+    /// The commands that write results and the commands that read them name
+    /// no store root by default, so all of them open the one root
+    /// `camdl_store::root_of` resolves: `CAMDL_STORE`, else `./camdl-store`.
     #[test]
-    fn reader_cli_defaults_match_default_output_root() {
-        use crate::run_paths::DEFAULT_OUTPUT_ROOT;
-        // Don't read CAMDL_OUTPUT_DIR from the test environment; it
-        // would mask the default we're trying to assert.
-        std::env::remove_var("CAMDL_OUTPUT_DIR");
-
-        let expected = format!("./{}", DEFAULT_OUTPUT_ROOT);
-
-        let parse_simulate = |args: &[&str]| -> SimulateArgs {
-            let mut full: Vec<&str> = vec!["camdl", "simulate"];
-            full.extend(args);
-            match Cli::try_parse_from(full).unwrap().command {
-                Command::Simulate(a) => a,
-                _ => unreachable!(),
-            }
-        };
-        let parse_list = || -> ListArgs {
-            match Cli::try_parse_from(["camdl", "list"]).unwrap().command {
-                Command::List(a) => a,
-                _ => unreachable!(),
-            }
-        };
-        let parse_show = |hash: &str| -> ShowArgs {
-            match Cli::try_parse_from(["camdl", "show", hash]).unwrap().command {
-                Command::Show(a) => a,
-                _ => unreachable!(),
-            }
-        };
-        let parse_cat = |hash: &str| -> CatArgs {
-            match Cli::try_parse_from(["camdl", "cat", hash]).unwrap().command {
-                Command::Cat(a) => a,
-                _ => unreachable!(),
-            }
-        };
-
-        // simulate is on the run store: no `--store` means `CAMDL_STORE`, else
-        // `./camdl-store`, resolved when the store is opened.
-        let s = parse_simulate(&["model.camdl"]);
-        assert!(s.store.is_none(), "SimulateArgs.store has no clap default");
-
-        // list, show and cat name no root by default; the root they search
-        // is then DEFAULT_OUTPUT_ROOT unless a run store is named.
-        std::env::remove_var("CAMDL_STORE");
-        let l = parse_list();
-        assert!(l.root.is_none() && l.root_flag.is_none(), "ListArgs.root has no clap default");
-        let sh = parse_show("abc12345");
-        assert!(sh.root.is_none(), "ShowArgs.root has no clap default");
-        let c = parse_cat("abc12345");
-        assert!(c.root.is_none(), "CatArgs.root has no clap default");
-        assert_eq!(crate::browse::old_root(None, None).unwrap().to_string_lossy(), expected,
-            "the default results root is DEFAULT_OUTPUT_ROOT");
-        assert_eq!(crate::browse::old_root(None, Some(std::path::Path::new("s"))), None,
-            "no results root beside a named store");
+    fn readers_and_writers_default_to_one_store_root() {
+        let parsed = |args: &[&str]| Cli::try_parse_from(args).unwrap().command;
+        match parsed(&["camdl", "simulate", "model.camdl"]) {
+            Command::Simulate(a) => assert!(a.store.is_none()),
+            _ => unreachable!(),
+        }
+        match parsed(&["camdl", "list"]) {
+            Command::List(a) => assert!(a.store.is_none()),
+            _ => unreachable!(),
+        }
+        match parsed(&["camdl", "show", "abc12345"]) {
+            Command::Show(a) => assert!(a.store.is_none()),
+            _ => unreachable!(),
+        }
+        match parsed(&["camdl", "cat", "abc12345"]) {
+            Command::Cat(a) => assert!(a.store.is_none()),
+            _ => unreachable!(),
+        }
     }
 
     // ── predict: scenario overlay parsing (Layer 1) ──────────────────────────

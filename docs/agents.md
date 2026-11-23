@@ -703,8 +703,7 @@ what makes a run **addressable**: `camdl list`, `camdl show <run>` and
 rather than a recompute, and a refit on updated data forks a new problem folder
 beside the old one instead of overwriting it. Scatter fits into per-experiment
 stores and all three are lost. A stored folder belongs to camdl — never write a
-derived summary into one. Fits stored under `results/fits/` are not read, and
-there is no import.
+derived summary into one.
 
 The reasoning behind each directory, and the house style for a model file's
 header, is `docs/camdl-style.md` in the camdl repo.
@@ -759,18 +758,9 @@ same number: chain `k` is `chain_k/`, and its draws are the rows whose `chain`
 field is `k`. There is no second base, so no `k - 1` anywhere. (Spec:
 `docs/camdl-run-spec.md` §6.8, "One index base".)
 
-**Read `run.json`'s `output_schema` rather than reverse-engineering a header.**
-A `results/` leaf's `run.json` declares, for every tabular file that leaf wrote,
-which column is the time or iteration axis, which are grouping keys (`chain`,
-`replicate`, `scenario`), which are model quantities, and which are sampler
-diagnostics. It is built by classifying each file's **actual** header, so it
-cannot disagree with the file it describes. Consume the _role_, never the name —
-the iteration column is spelled `sweep`, `step`, `draw` or `iteration` depending
-on the method, and `time` (physical) and `iteration` (a sampler index) are
-deliberately distinct roles. Not every producer declares one: `profile`, the
-`camdl predict` outputs, and every result in the run store (fit runs, the cells
-`simulate` stores and the runs `pfilter` stores) do not. A simulated cell's
-`traj.tsv` has the fixed layout of `docs/camdl-run-spec.md` §10.1.
+**A simulated cell's `traj.tsv` has a fixed layout,** that of
+`docs/camdl-run-spec.md` §10.1. No result in the run store declares an
+`output_schema` in its `run.json`.
 
 **To ask whether a long fit is still alive, read `progress.json`, not the
 mtimes.** Every method but `pfilter` writes one and a background thread

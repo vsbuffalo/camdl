@@ -1,40 +1,6 @@
-//! Label helpers of the fit store (`fit run`, `camdl label`), and the
-//! digest that names a simulation cell's observation blocks
+//! The digest that names a simulation cell's observation blocks
 //! ([`obs_subtree_hash`]), which `simulate` folds into each `Obs`
 //! by-product's identity.
-
-/// Rewrite a leaf's `run.json` through `edit`, which returns whether it changed
-/// the record: the store's one record-update path ([`runid::update_record`]),
-/// under the leaf's `.lock` and through the reserved `run.json.tmp`, so no two
-/// updates — and no update and an `augment` — interleave, and a crash leaves
-/// only files the store's exact-set check ignores (gh#896).
-fn rewrite_record(
-    leaf_dir: &std::path::Path,
-    edit: impl FnOnce(&mut runid::RunRecord) -> Result<bool, String>,
-) -> Result<(), String> {
-    runid::update_record(leaf_dir, edit).map_err(|e| match e {
-        runid::CasError::EditRefused { reason, .. } => reason,
-        other => format!("update {}: {other}", leaf_dir.join("run.json").display()),
-    })
-}
-
-/// Ensure a leaf's `run.json` carries `provenance.label == Some(label)`,
-/// rewriting it only when it differs. `provenance` is metadata, not identity —
-/// the run_id and exact-set are untouched — applied at write time so an
-/// explicit `simulate --label` survives a CAS cache hit, which relabels a sim.
-/// Idempotent: a no-op when the leaf already has the requested label. Fit
-/// runs use [`set_fit_label`], which also stamps the time.
-pub(crate) fn ensure_provenance_label(leaf_dir: &std::path::Path, label: &str) -> Result<(), String> {
-    rewrite_record(leaf_dir, |rec| {
-        if rec.provenance.label.as_deref() == Some(label) {
-            return Ok(false);
-        }
-        rec.provenance.label = Some(label.to_string());
-        Ok(true)
-    })
-}
-
-
 
 /// The obs subtree's identity component.
 ///

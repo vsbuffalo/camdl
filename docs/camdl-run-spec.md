@@ -309,81 +309,8 @@ Only `camdl-store/` has meaning to camdl. `camdl simulate`, `camdl pfilter`,
 `camdl fit run` and `camdl profile` store their results in the run store, whose
 root is `--store DIR` (`simulate`, `pfilter`, `profile`), the fit file's `store`
 key (`fit run`, §6.2), else `CAMDL_STORE`, else `./camdl-store`; its layout is
-in §4.4, for fits §2.2 and for profiles §2.8. No command writes a `results/`
-directory; `camdl list`, `show` and `cat` still read one an earlier camdl wrote
-(§2.1). `--output-dir` and `CAMDL_OUTPUT_DIR` name that old root only.
-
-### 2.1 The old results store
-
-An earlier camdl stored profile points in a store under `results/`, partitioned
-by artifact kind, which no command of this camdl writes. `camdl list`, `show`
-and `cat` read it:
-
-```
-results/
-├── index.json            # rebuildable lookup cache (§2.6)
-├── .staging/             # atomic-commit scratch (§2.6)
-└── profiles/             # profile-likelihood grid points
-```
-
-`obs/` and `projections/` are reserved partitions: their store directory and
-run-id tag are pinned but no leaf is emitted for them yet.
-
-A `surveys/` directory holds leaves of kind `survey`, which this camdl does not
-have. They are not read and not changed. `camdl list` does not show them, and a
-run-id prefix of one matches no run. `camdl show` and `camdl cat` given a leaf's
-directory refuse it, naming the kind and the command that wrote it; the walks of
-the whole store (`camdl dev reindex`, and the index rebuild a prefix lookup
-falls back to) skip each with a warning that says the same; and
-`camdl dev migrate` reports each as stale.
-
-**Identity is factored.** A leaf's identity is the ordered tuple of per-level
-content hashes along its path, and the store path is a readable nested
-_factoring_ of that tuple rather than a flat blob directory. Each path segment
-is `{label}-{hash8}`: the **label is provenance** — renaming it yields a new
-directory, i.e. a harmless cache miss, never a wrong answer — and the **`hash8`
-is identity**, the first 4 bytes of that level's SHA-256 rendered as 8 hex
-characters. The leaf's address is
-
-```
-run_id = SHA256( HASH_VERSION ++ kind_tag ++ level_count ++ [level hashes in path order] )
-```
-
-with the kind folded in as a fixed-width enum index and the level list
-length-prefixed, so two kinds with a coincidentally equal level sequence cannot
-alias and `([h1,h2], [h1])` cannot collide with a concatenation. The full 64-hex
-`run_id` and the full per-level hashes are recorded in `run.json`.
-
-The levels per kind:
-
-| kind            | partition  | levels, in path order                   |
-| --------------- | ---------- | --------------------------------------- |
-| `profile_point` | `profiles` | profile · point · method · seed · start |
-
-A `fits/` directory under `results/` is not read: fits are stored in the run
-store (§2.2), and there is no import of a fit stored under `results/fits/`.
-
-**The one rule for consumers: resolve runs by reading `run.json`, never by
-parsing path segments.** Path segments mirror the `levels` array for human
-navigation only. Do not infer kind, parameters, seed, or lineage from a path.
-
-Two mechanics constrain the segment strings. A label is lowercased and every
-character outside `[a-z0-9._-]` is mapped to `_`, so hyphens and dots survive
-(`chain_binomial-dt1`, `nl-sbplx`, `seed_42`); a label longer than 200 bytes is
-truncated to a prefix and suffixed `..{hash16}` so it fits inside the POSIX
-255-byte `NAME_MAX`. If two distinct leaves would land on the same directory
-name because their short hashes collide at every level, the later one's final
-segment gets a `~{disambiguator}` suffix, escalating `~{hash16}` → `~{full64}`
-until unique. A reader enumerates sibling directories and reads each `run.json`
-rather than reconstructing an expected name.
-
-**Presentation is not in the model.** The compiled model holds no field that
-only changes how a result is _rendered_; every identity path hashes the model
-through `ModelDigest::from_model`. A field that changes _which values are
-computed or stored_ is identity and must re-key; a re-encoding of the same
-values is presentation and must not. Re-keys are deliberate, version-bumped
-events: a per-struct `schema_version`, the crate-wide `HASH_VERSION`, or
-`ir/VERSION`.
+in §4.4, for fits §2.2 and for profiles §2.8. `camdl list`, `show` and `cat`
+read the same root (§4.5).
 
 ### 2.2 Fit Result Layout
 
@@ -1225,111 +1152,12 @@ with the same label:
 There is no nesting of sweep points under a shared folder: within a problem, the
 layout of a swept fit is identical to that of an unswept one.
 
-### 2.3.1 Concurrency: the leaf lock
-
-This section describes the `results/` store of profiles. Fit runs, like every
-result in the run store, are claimed and written through the run store's owners
-and locks (`docs/dev/proposals/2026-11-20-run-store-api.md`, "Owners and the
-beat").
-
-The store enforces concurrency at the leaf, in two write modes.
-
-**Mode A (atomic)** — for a leaf whose whole output is known in memory before
-the commit; no command of this camdl writes a `results/` leaf in this mode. The
-leaf is written into a per-attempt staging directory under `<root>/.staging/`,
-fsynced in a fixed order (each artifact, then `run.json`, then the directory),
-then moved into place by `rename`. The staging name carries the process id and a
-process-local counter, so two concurrent same-identity commits never share a
-staging directory.
-
-**Mode B (streaming)** — used by profile points, which write into the leaf as
-they go and whose display summary (a loglik) is only known at the end. The
-writer creates `.lock` with `O_EXCL` inside the leaf directory, writes a
-`Running` `run.json`, streams its files, and commits by flipping status to
-`Completed` and building the file manifest from what it actually wrote. A
-concurrent claimant that finds a live `.lock` gets `CasError::FitInProgress`
-naming the holding pid.
-
-A `.lock` holds its owner's pid and host name, one per line (a lock holding the
-pid alone, as camdl wrote before the host was recorded, is read as this host's).
-Whether its owner is alive is decided in one place (`runid::store::lock_owner`):
-absent; unreadable (treated as held); alive or dead on this host; or on another
-host, whose liveness this host cannot check.
-
-A crashed writer leaves its `.lock` and a `Running` `run.json` behind. A re-run
-reclaims such a leaf when its owner is a dead process on this host (keeping its
-record, below). A leaf held from another host is never reclaimed automatically
-and never reported as interrupted: the claim refuses it (`OwnedOnOtherHost`),
-naming the host and pid. The reclaim: it liveness-checks the recorded pid
-(`kill(pid, 0)` on unix), and a dead holder's lock is removed and the leaf
-re-claimed. Reclaim is serialized through a second `.reclaim` lock — only the
-`.reclaim` holder may remove `.lock`, and it re-confirms the holder is dead
-while holding `.reclaim`, so two processes can never both delete the lock and
-both proceed. On a non-unix platform the pid cannot be checked, so a held lock
-always reports `FitInProgress`. As defense in depth, a claimant that wins the
-lock and then finds a `Completed` record refuses to clear it
-(`ReclaimRaceCompleted`) rather than blind-wiping a finished result, and a
-claimant that finds a `run.json` it cannot read (permission denied, an IO error)
-refuses the leaf (`RecordUnreadable`) rather than quarantine or clear it: an
-unreadable record is not an absent one. A leaf directory with no record is
-quarantined as debris only by a claimant holding its `.lock`, and only if it
-still has no record and holds something besides the lock: from outside the lock,
-a directory a concurrent claimant has just created, or has just finished, looks
-the same as debris.
-
-**A run's end is recorded, never inferred.** A run that completes is committed
-`Completed`. A run camdl stops on an error is committed `Failed` before the
-process exits, with a `failure` record — `{"message": …, "operation": …}`, the
-error camdl printed and the method or command that was running — and its `.lock`
-released. Nothing else writes `Failed`: a `Running` record whose owner died is
-an _interrupted_ run, and stays `Running`. A reader tells the two apart from the
-`.lock` alone — `Running` with a `.lock` naming a live process is in flight;
-`Running` with no `.lock`, or one naming a dead process on this host, is
-interrupted; `Running` held from another host is of unknown liveness — and never
-rewrites the record to say so. A `Failed` record with no `failure` is one a
-camdl before the field wrote, or one the claim's drop guard wrote on a panic:
-readable, its reason unknown.
-
-**A retry keeps the prior attempt's record.** A re-run that reclaims a leaf of
-its own identity (failed, interrupted, or stale) first moves the prior attempt's
-leaf-root files into `.attempts/<n>/` inside the leaf, `n` counting attempts in
-the order they were preserved: its `run.json` (renamed `attempt.json`, so no
-walk of the store finds a second leaf of one identity), `events.jsonl`,
-`execution.json`, `progress.json`, `diagnostics.json`, `chain_starts.tsv` and
-any other file at the leaf root. Its directories (`chain_N/`, `trajectories/`)
-are bulk output, not the record of the attempt, and are cleared with the rest. A
-leaf keeps at most three attempts (`MAX_PRESERVED_ATTEMPTS`); preserving a
-fourth deletes the oldest. `.attempts/` is outside the exact-set manifest and
-the orphan scan, so a retry that completes is a clean `Completed` leaf, a cache
-hit, beside its preserved attempts. `--force` quarantines the whole leaf,
-attempts included.
-
-**Cache semantics.** `lookup` reports one of four outcomes for a path against an
-expected identity: `Hit` (identity matches, status `Completed`, file manifest
-intact), `Miss` (no `run.json`), `Stale` with a reason (`Incomplete` — not
-completed or unparseable; `Corrupt` — a listed file is missing or its size/mtime
-changed; `OrphanFiles` — an undeclared file or directory is present;
-`SchemaDrift` — a stale `hash_version`/`format_version`), or `Collision` (a
-_different_ full identity occupies this path via a short-hash collision, in
-which case the incumbent is never touched and the newcomer is disambiguated).
-The integrity gate is deliberately cheap — presence, size, and mtime, no
-re-digest — so listing a fit with many large chain files does not re-hash them;
-the recorded per-file SHA-256 is there for integrity tooling, and no read path
-recomputes it today. The manifest is an exact set over the leaf's whole subtree,
-except reserved files and _declared children_: a subdirectory the leaf's
-`run.json` declares as a child is a boundary, recognized and not recursed into.
-
-**Which commands skip on a cache hit.** `profile` skips each start whose leaf is
-a `Hit` (reported as `N of M starts already cached`) and has no `--force`.
-`camdl simulate`, `camdl pfilter` and `camdl fit run` store in the run store,
-whose reuse rule is in §4.4 and, for fits, §2.2.
-
 ### 2.4 Simulation Result Layout
 
 `camdl simulate` stores each cell, one realisation at one parameter point, one
-scenario and one seed, as one `sim` result in the run store (§4.4), not under
-`results/`. The layout is that of
-`docs/dev/proposals/2026-11-20-run-store-api.md` ("Layouts, kind by kind"):
+scenario and one seed, as one `sim` result in the run store (§4.4). The layout
+is that of `docs/dev/proposals/2026-11-20-run-store-api.md` ("Layouts, kind by
+kind"):
 
 ```
 <root>/<version>-<12 hex of the ambient key>/          # the build, written <build>
@@ -1359,48 +1187,12 @@ inside the cell folder, each with its own `identity.json` and `run.json`; the
 cell's own record is not changed by them (§4.4). No combined table is stored:
 `-o`, `--stdout` and `camdl cat @LABEL` render it from the stored cells.
 
-### 2.5 Per-leaf metadata
+### 2.5 Per-result metadata
 
-Every leaf directory contains exactly one `run.json`, the serialized
-`RunRecord`. It records the leaf's identity levels, the exact set of files the
-leaf owns with their digests, the upstream artifacts it consumed, its completion
-status, and a free-form provenance block. It is never itself hashed — identity
-comes only from the resolved inputs, which is precisely why a column schema
-cannot change the leaf's `run_id`.
-
-`run.json` also carries an `output_schema` declaring, for each tabular file the
-leaf wrote, which column is the time or iteration axis, which are grouping keys,
-which are model quantities, and which are sampler diagnostics — so a consumer
-can render or join a TSV without reverse-engineering its header.
-
-The full field-by-field contract is §9.5; the column-role vocabulary and the
-rendering rule it implies are §10.9. Both describe leaves under `results/`. A
-result in the run store (§4.4) has its own `identity.json` and `run.json`, whose
-format is that of `docs/dev/proposals/2026-11-20-run-store-api.md`; a `sim`
-cell's and a fit run's `run.json` carry no `output_schema`.
-
-### 2.6 Store-root files
-
-`<root>/index.json` is a rebuildable derived index mapping each `run_id` to its
-path and summary fields, so prefix resolution for `show` and `cat` does not
-re-walk the whole tree on every call. It is a cache and never authoritative;
-§9.6 gives the two invariants that make that operational rather than
-aspirational.
-
-`<root>/.staging/` holds in-flight atomic commits (§2.3.1). Entries left behind
-by a crash are inert debris; they are never read.
-
-### 2.7 Store layout
-
-A change to what a record or a result means is a new identity or a new record
-format (`hash_version`, `format_version`, `fit.meta.json`'s `schema_version`),
-and an older folder of that kind is recomputed rather than read. A `results/`
-leaf records the store layout it was written at as `store_layout` in its
-`run.json` (§9.5), and a profile folder in its `fit.meta.json`; a record without
-the field is layout 0. This camdl writes layout 1, and no reader checks it.
-`camdl dev migrate PATH [--dry-run]` raises the recorded layout of every
-`results/` folder at or under `PATH` to the current one; a profile folder's
-layout is raised alone.
+Every result folder in the run store holds an `identity.json` and a `run.json`,
+the run store's records, whose format is that of
+`docs/dev/proposals/2026-11-20-run-store-api.md`. Neither a `sim` cell's nor a
+fit run's `run.json` carries an `output_schema`.
 
 ### 2.8 Profile Result Layout
 
@@ -2241,8 +2033,7 @@ error: --dates requires the model to declare an `origin` (e.g. `origin = date("2
 `camdl simulate` stores every cell in the run store, whose root is
 `--store DIR`, else `CAMDL_STORE`, else `./camdl-store`, and reports the folder
 plus the `camdl cat` that reads it back. Both lines go to **stderr**, so a
-`--stdout` pipeline stays clean. Storing is not opt-in. `--output-dir` is not
-accepted by `simulate`, and `CAMDL_OUTPUT_DIR` is not read.
+`--stdout` pipeline stays clean. Storing is not opt-in.
 
 ```bash
 # Default: store the cell, print where it went.
@@ -2395,13 +2186,12 @@ camdl simulate seir_vaccine.camdl --params params.toml --scenario baseline,with_
 ### 4.5 `camdl list` / `show` / `cat` / `label` — the primary access path
 
 Because output goes to the store by default, these are **the** way you reach
-results. They read two roots: the run store, for `simulate`, `pfilter` and fits
-(`--store DIR`, else `CAMDL_STORE`, else `./camdl-store`), and `results/`, for
-profiles (positional `ROOT` of `list`, `--root DIR`, or `CAMDL_OUTPUT_DIR`, else
-`./results`). When a run store is named, by `--store` or `CAMDL_STORE`, and no
-results root is, `list`, `show` and `cat` read that store alone: a `./results`
-in the working directory is not read beside it. Every run's banner hands you the
-exact `camdl cat` to run next.
+results. They read one root, the run store (`--store DIR`, else `CAMDL_STORE`,
+else `./camdl-store`); `show` and `cat` given a result's folder read the store
+that folder lies in. Every run's banner hands you the exact `camdl cat` to run
+next. With nothing stored, `list` prints `(no stored results)`; `show` and `cat`
+refuse a handle that names nothing with
+`error: no run matches 'X' in the run store <root>`.
 
 ```bash
 # Tabular overview, most recent first, one section per artifact kind
@@ -2409,7 +2199,7 @@ camdl list
 camdl list --since 1h              # last hour
 camdl list --model seir_vaccine    # substring match on the model path
 camdl list --scenario baseline --all
-camdl list --kind sim              # sim | fit | profile | pfilter | ensemble | all
+camdl list --kind sim              # sim | fit | profile | pfilter | all
 camdl list --format json           # machine-readable; see the caveat below
 
 # Full metadata for one cell (short-hash prefix resolves git-style)
@@ -2449,8 +2239,6 @@ the files it does hold. `camdl cat` on a filter run prints its `loglik.toml`;
 For a cell and a filter run alike, a name without an extension stands for
 `<name>.tsv`. `camdl cat @L` renders the combined table of the invocation
 labelled `L` (§4.4). `--limit` defaults to 50; `--all` removes the cap.
-`--kind ensemble` lists `SimEnsemble` leaves under `results/ensembles/`, a kind
-no command of this camdl writes.
 
 Fits are listed one row per fit run, in a `fits` table:
 
@@ -2481,33 +2269,29 @@ camdl show 3
 error: `3` matches 3 results: 35f6c644d453, 3766108b8da9, 3e4f1379e077
 ```
 
-A `results/` leaf shown by `camdl show` prints its path, kind, model, scenario,
-seed, config, the full `run_id`, every level with its hash, artifact sizes,
-creation time, engine version, and the `argv` that produced the run. A fit run
-shown by `camdl show` prints its path, kind, full `run_id`, problem id, method,
-seed, length and files; `camdl cat <run> --stream NAME` prints one of its files
-(`camdl cat @r0 --stream draws.tsv`).
+A fit run shown by `camdl show` prints its path, kind, full `run_id`, problem
+id, method, seed, length and files; `camdl cat <run> --stream NAME` prints one
+of its files (`camdl cat @r0 --stream draws.tsv`).
 
-`--format json` emits the sim, fit, profile, pfilter, and ensemble sections as
-JSON Lines (one object per line). The stream is therefore not a single JSON
-document; parse it per line or filter with `--kind`. A fit row is one run:
+`--format json` emits the sim, fit, profile and pfilter sections as JSON Lines
+(one object per line). The stream is therefore not a single JSON document; parse
+it per line or filter with `--kind`. A fit row is one run:
 
 ```json
 {"best_loglik":-60.69877640031929,"kind":"fit_run","label":"r0","method":"pmmh","model":"sir_r0","path":"camdl-store/0.1.0_f531753ac.dirty-a20ab6cb-4bff11f93f55/fit/sir_r0-c39a2f446d42/runs/pmmh-fc5c33ebd296/seed_4-44fbdf1c80d9","problem_id":"c39a2f446d42c89dc3cfa679f49cdf99bd1ff0e58b296269e084a9f9d6981771","run_id":"44fbdf1c80d99fc484a400970e0183922961fc530972199790790b5425cbb2d5","seed":4}
 ```
 
-`camdl label` refuses a fit run: a completed record is sealed, and a run is
-named when it runs, with `fit run --label` (§6.8).
-
-`<root>/index.json` is a derived run_id → leaf index, rebuilt lazily on a
-prefix-resolution miss and by `camdl dev reindex <root>`. Deleting it is safe.
+`camdl label HANDLE LABEL` refuses every handle: a stored result's record is
+sealed, and a result is named when it runs, with `--label` (§6.8). Running the
+same command again with `--label L` reuses its stored results and names them
+`@L`.
 
 #### Maintaining the run store: `status`, `verify`, `clean`, `reindex`
 
 Four commands read and tidy the run store, the store of `simulate` and
 `pfilter`. Each takes `--store DIR`, else `CAMDL_STORE`, else `./camdl-store`,
 and refuses a root that has no `store.json`, exiting 1, rather than create a
-store there. None of them reads `results/`.
+store there.
 
 ```bash
 camdl status                 # runs that are running, interrupted or failed
@@ -2558,9 +2342,6 @@ camdl reindex                # rebuild the index from the records
   one log, removes the index logs of owners known to have stopped, and prints
   how many result folders it read. The index is a cache: a result is found
   without it.
-
-`camdl dev reindex` rebuilds `results/index.json`, the index of the store of
-fits and profiles, and is a different command.
 
 ### 4.6 Synthetic Observations
 
@@ -3231,8 +3012,8 @@ Three properties govern the whole surface:
   from_file` and
   `[synthetic] true_params`.
 - **Absolute paths warn.** `absolute_path_warnings` (`config_v2.rs`) emits one
-  stderr line per absolute reference in `[model] camdl`, `output_dir`,
-  `[data] file`, or `[data.observations]`, because an absolute path pins the
+  stderr line per absolute reference in `[model] camdl`, `store`, `[data] file`,
+  `[data.observations]` or `[data.tables]`, because an absolute path pins the
   config to one machine's layout. It is a warning, not an error.
 
 ### 6.2 Top-level keys
@@ -3250,7 +3031,6 @@ with the serde list quoted in §6.9.
 | `[method]`       | table           | `fit run` | —                      | One algorithm, its settings, and the chains' `starts`. Absent, the file is a complete problem for every other reader and `fit run` refuses it. See §6.5.                                                                                                                                                                                                                                                             |
 | `[config]`       | table           | no        | `{ dt = 1.0 }`         | Fit-wide simulator settings. See the sub-table below.                                                                                                                                                                                                                                                                                                                                                                |
 | `store`          | string          | no        | `camdl-store`          | The run store's root (§2.2). Anchored at the `fit.toml`. Overrides `CAMDL_STORE`. Not part of any identity.                                                                                                                                                                                                                                                                                                          |
-| `output_dir`     | string          | no        | —                      | Refused, naming `store`: `fit run` stores every fit in the run store.                                                                                                                                                                                                                                                                                                                                                |
 | `fit_seeds`      | list of ints    | no        | `[--seed]` (CLI, or 1) | One fit per listed seed. Duplicates rejected.                                                                                                                                                                                                                                                                                                                                                                        |
 | `simplex_groups` | array of tables | no        | `[]`                   | `[[simplex_groups]] params = ["a","b",…]` — members must form a probability simplex. Honored by IF2 only; other algorithms warn.                                                                                                                                                                                                                                                                                     |
 | `scenario`       | string          | no        | none                   | Named scenario from the model; applies its enable/disable lists and param overrides before inference. Exclusive with `enable`/`disable`.                                                                                                                                                                                                                                                                             |
@@ -3785,8 +3565,6 @@ and no artifact carries a second base to convert from.
 
 - **`<root>`** is the `fit.toml`'s `store` key (anchored at the `fit.toml`),
   else `$CAMDL_STORE`, else `./camdl-store`. `fit run` has no `--store` flag.
-  `--output-dir` and `CAMDL_OUTPUT_DIR` do not apply, and a fit file's
-  `output_dir` key is refused, naming `store`.
 - **The problem** is labelled by the model file's stem; its 12 hex digits are of
   the problem's identity (§2.2). Two files that pose one problem and differ in
   `[method]` share it.
@@ -3920,7 +3698,7 @@ method executes.
 
 - An unknown top-level key:
 
-  > `` unknown field `bogus`, expected one of `model`, `data`, `synthetic`, `fit_seeds`, `simplex_groups`, `output_dir`, `store`, `estimate`, `fixed`, `method`, `config`, `simulate`, `scenario`, `enable`, `disable`, `ic_free`, `provenance` ``
+  > `` unknown field `bogus`, expected one of `model`, `data`, `synthetic`, `fit_seeds`, `simplex_groups`, `store`, `estimate`, `fixed`, `method`, `config`, `simulate`, `scenario`, `enable`, `disable`, `ic_free`, `provenance` ``
 
 - An unknown key inside `[method]`. `Algorithm` is internally tagged, so serde
   cannot deny unknown fields on it; a post-parse pass compares the raw keys
@@ -4990,33 +4768,9 @@ can return more than one row; the `run` column separates them.
 
 ### 9.1 The identity model
 
-A profile grid point is stored as a **content-addressed leaf** in a store rooted
-at the output directory (default `results/`, see
-`run_paths::DEFAULT_OUTPUT_ROOT`). This section describes that store. A fit, a
-forward simulation and a particle filter evaluation are stored in the run store
-instead (§2.2, §3.7, §4.4). The only thing that is "named" about a profile
-directory is the human-readable _label_ in each path segment, which is
-provenance and never identity.
-
-A leaf's identity is **not** one flat hash. It is an ordered tuple of per-level
-content hashes, and the leaf address is derived from that tuple:
-
-```
-run_id = SHA256( HASH_VERSION:u16 ++ kind_tag:u32 ++ n_levels:u64 ++ level_hash[0..n] )
-```
-
-(`runid::kind::run_id`, `rust/crates/runid/src/kind.rs`). `kind_tag` is the
-`ArtifactKind`'s fixed tag (`Sim`=0, `FitMethod`=1, `Pfilter`=2,
-`ProfilePoint`=4, `Obs`=5, `Projection`=6, `SimEnsemble`=7; 3 is unassigned and
-is not reused), so two kinds with a coincidentally-equal level sequence cannot
-alias.
-
-Each level hash is the `ContentAddressed::content_hash` of a resolved input
-slice, itself `SHA256(HASH_VERSION ++ canonical_bytes)`. The store path is a
-readable _factoring_ of that tuple: one directory segment per level, each
-`{label}-{hash8}`, where `hash8` is the first 4 bytes of the level hash as 8 hex
-characters and the label is cosmetic (`runid::layout`). Navigation and every
-read path resolve through `run.json`, never through path segments.
+Every result is stored in the run store (§4.4), under the id its identity hashes
+to; fits are §2.2, simulation cells §3.7 and profile points §2.8. The
+human-readable label in each folder name is never identity.
 
 Two rules govern what may enter a hash (`rust/crates/runid/src/lib.rs`, "Adding
 a field to identity"):
@@ -5118,10 +4872,6 @@ different models (the `model` level; `config` is unchanged).
 
 #### 9.2.4 The levels, per artifact kind
 
-| kind (`store_dir`)           | levels, in path order                   | resolver                    |
-| ---------------------------- | --------------------------------------- | --------------------------- |
-| `ProfilePoint` (`profiles/`) | profile · point · method · seed · start | no command writes it (§2.1) |
-
 A fit's problem and run identities are in §2.2.
 
 **`Pfilter` `config`** digests
@@ -5148,41 +4898,7 @@ would hash equal. Every JSON-digested identity blob is therefore passed through
 on any non-finite float anywhere in the value. On the typed path the same job is
 done by `FiniteF64`'s constructor.
 
-### 9.3 Store layout and cache semantics
-
-```
-<root>/
-  index.json                       # derived, rebuildable (§9.6)
-  .staging/                        # in-flight commits
-  .quarantine/                     # unidentifiable debris moved aside
-  profiles/                        # same {label}-{h8} factoring per §9.2.4
-```
-
-A path component that would exceed `NAME_MAX` is truncated to 200 bytes and
-suffixed `..{hash16}` of the full label; identity is unaffected because the
-label is never hashed.
-
-**Lookup** (`runid::store::FsCasStore::lookup`) is tiered and returns one of:
-
-| outcome              | meaning                                                                |
-| -------------------- | ---------------------------------------------------------------------- |
-| `Hit(record)`        | identity matches, `Completed`, exact-set integrity ok                  |
-| `Miss`               | no `run.json` at the path                                              |
-| `Stale(Incomplete)`  | `status != Completed` (crashed or in-flight)                           |
-| `Stale(Corrupt)`     | unparseable `run.json`, or a listed file missing / wrong size or mtime |
-| `Stale(OrphanFiles)` | an unlisted, undeclared file or subdirectory is present                |
-| `Stale(SchemaDrift)` | `hash_version` or `format_version` is not current                      |
-| `Collision(record)`  | a _different_ full identity occupies this path (short-hash clash)      |
-
-A `Collision` is never touched: the writer escalates the final segment (`{seg}`
-→ `{seg}~{hash16}` → `{seg}~{full64}`) until it finds a free candidate, and the
-reader enumerates sibling directories rather than reconstructing names.
-
-The integrity gate is `bytes + mtime` per manifest entry. It is a _cheap_ gate —
-`cp` without `-p`, an unzip, or a checkout will change mtimes and make every
-leaf read `Stale`, and conversely a file edited in place to the same length with
-the mtime restored passes. The strong `digest` recorded per artifact is **not**
-recomputed on any read path today.
+### 9.3 Cache semantics
 
 **`simulate` and the run store.** A `sim` cell is stored in the run store, not
 here, and its reuse rule is §4.4: a rerun reuses every stored cell, and
@@ -5271,104 +4987,7 @@ Because the key is the run's identity, it covers every input that re-keys a fit
 (`[config]` with its `dt`, the scenario, `ic_free`, the held-out dates,
 `n_trajectories`) and nothing else.
 
-### 9.5 run.json — the per-run metadata contract
-
-`run.json` is the API between camdl and everything that reads its output
-(`camdl list/show/cat`, viewers, notebooks). The on-disk schema is
-`runid::record::RunRecord` (`rust/crates/runid/src/record.rs`); `FORMAT_VERSION`
-is `2`. **The record itself is never hashed** — identity comes only from the
-levels — which is why declaring a child cannot change the leaf's `run_id`. This
-contract is that of `results/` leaves; a result in the run store has its own
-records (§2.5).
-
-A `results/sims/` leaf record, a kind `camdl list` and `camdl show` read and no
-command of this camdl writes (hashes and paths abbreviated):
-
-```json
-{
-  "format_version": 2,
-  "kind": "sim",
-  "run_id": "467417eb…0258",
-  "hash_version": 1,
-  "ir_version": "0.30",
-  "engine_version": "<32-hex engine id>",
-  "levels": [
-    {
-      "name": "model",
-      "label": "sir_basic",
-      "hash": "cd37d79d…32e0",
-      "schema_version": 1
-    },
-    {
-      "name": "config",
-      "label": "chain_binomial-dt1",
-      "hash": "9fe90ef5…3c4f",
-      "schema_version": 1
-    },
-    {
-      "name": "params",
-      "label": "base",
-      "hash": "39391d3f…4ba3",
-      "schema_version": 1
-    },
-    {
-      "name": "scenario",
-      "label": "baseline",
-      "hash": "812a8a17…5b96",
-      "schema_version": 1
-    },
-    {
-      "name": "seed",
-      "label": "seed_1",
-      "hash": "e6a47b86…c5b4",
-      "schema_version": 1
-    }
-  ],
-  "status": "completed",
-  "artifacts": {
-    "traj.tsv": {
-      "bytes": 1537,
-      "mtime": "1786506768.083634697",
-      "digest": "164a63c1…25f7"
-    }
-  },
-  "output_schema": {
-    "traj.tsv": {
-      "role": "trajectory",
-      "columns": [
-        { "name": "t", "role": "time" },
-        { "name": "t_start", "role": "window_start" },
-        { "name": "t_stop", "role": "window_stop" },
-        { "name": "S", "role": "state" },
-        { "name": "I", "role": "state" },
-        { "name": "R", "role": "state" },
-        { "name": "flow_infection", "role": "flow" },
-        { "name": "flow_recovery", "role": "flow" }
-      ]
-    }
-  },
-  "calendar": { "days_per_unit": 1.0, "origin": "2020-03-01", "time_unit": "days" },
-  "provenance": {
-    "argv": [
-      "<camdl>",
-      "simulate",
-      "<model>.camdl",
-      "--scenario",
-      "baseline",
-      "--seed",
-      "1"
-    ],
-    "created_at": "2026-08-12T03:52:48Z",
-    "camdl_version": "0.1.0+<git>[.dirty-<8-hex>]",
-    "source_paths": ["<model>.camdl"]
-  }
-}
-```
-
-Every leaf carries `calendar`, the model's calendar axis (§2.2.2): with it, the
-`t` column of a `sims/` leaf's `traj.tsv`, and every model time another kind
-stores, maps to dates without the model source, and a model with no `origin`
-records `"origin": null`. The record cannot be built without it.
+### 9.5 A fit run's `run_inputs.json`
 
 A fit run is a result in the run store, and its record is the run store's
 (§2.5). What the run was asked to do and what it found is its `run_inputs.json`
@@ -5464,76 +5083,6 @@ forward. How long each segment took is in the resumed leaf's `execution.json`
 (`earlier_segments`, then its own `wall_time_seconds`). PMMH's `draws.tsv`
 carries no step: draw `k` of chain `c` is the `k`-th retained row of
 `chain_c/trace.tsv`, which carries it.
-
-**Fields.**
-
-| field            | type                                       | meaning                                                                                              |
-| ---------------- | ------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
-| `format_version` | u16                                        | `run.json` schema version; a mismatch is `Stale(SchemaDrift)`                                        |
-| `kind`           | snake-case `ArtifactKind`                  | `sim`, `fit_method`, `pfilter`, `profile_point`, `obs`, `projection`, `sim_ensemble`                 |
-| `run_id`         | 64-hex                                     | the leaf address; the identity gate on every lookup                                                  |
-| `hash_version`   | u16                                        | `HASH_VERSION` of the encoding that produced the hashes                                              |
-| `store_layout`   | u32                                        | the folder's store layout (§2.7); absent, and so 0, in a record written before layouts were numbered |
-| `ir_version`     | string                                     | `ir/VERSION` at write time (e.g. `"0.30"`)                                                           |
-| `engine_version` | string                                     | the engine's build fingerprint (`ENGINE_ID`, 32 hex); `provenance.camdl_version` is readable         |
-| `levels`         | `[{name, label, hash, schema_version}]`    | the factored identity in path order                                                                  |
-| `deps`           | `[{run_id, kind, artifact, digest}]`       | consumed upstreams; omitted when empty                                                               |
-| `status`         | `"running"` \| `"completed"` \| `"failed"` | a plain string, not an object                                                                        |
-| `failure`        | `{message, operation}`                     | on a `"failed"` record camdl stopped: its error, and what was running; omitted otherwise             |
-| `artifacts`      | map path → `{bytes, mtime, digest}`        | EXACT SET over the leaf's own files; `mtime` is `"{secs}.{nanos:09}"`                                |
-| `output_schema`  | map path → `{role, columns}`               | declared column roles (§10.9); omitted when empty                                                    |
-| `children`       | map namespace → `[hash]`                   | declared child sub-artifact dirs (`obs`, `event_log` of a `sims/` leaf); omitted when empty          |
-| `inputs`         | arbitrary JSON                             | display/audit summary, **never hashed**; omitted when null                                           |
-| `provenance`     | object                                     | `argv`, `label`, `created_at`, `camdl_version`, `source_paths` — all recorded, never hashed          |
-
-`status` transitions depend on the write mode. A leaf written in Mode A (§2.3.1)
-commits **atomically**: it appears only once complete, and there is no
-discoverable in-flight record. `profile_point` leaves **stream**: they claim the
-directory, write a `"running"` record and an exclusive `.lock`, stream output
-in, then finalize to `"completed"` with the exact-set manifest and the post-run
-`inputs`. A run camdl stops on an error records `"failed"`, with its `failure`,
-before it exits, and releases the `.lock`; a `"running"` record left behind is
-what a killed or crashed run leaves, and stays `"running"` (§2.3.1, "A run's end
-is recorded, never inferred"). A stale `.lock` whose PID is dead is reclaimed,
-the prior attempt's record preserved under `.attempts/`; a live one refuses with
-`fit in progress`.
-
-Three `provenance` fields — `finished_at`, `host`, `thread_count` — exist in the
-schema and are never populated by any writer.
-
-Sub-artifacts that are _not_ `RunRecord`s:
-
-- `obs/{obs_hash8}-{obs_seed}/obs.json`, in a `results/sims/` leaf —
-  `{obs_hash, obs_seed, process_seed, streams, version}`, where `obs_hash` is
-  the SHA-256 of the model's serialized `observations` block. The parent
-  declares this directory under `children.obs`, but the declared hash is
-  `SHA256("{run_id}:{obs_seed}:{obs_hash}")` and appears nowhere inside the
-  child.
-- `event_log/event_log.json`, in a `results/sims/` leaf —
-  `{parent_run_id, file, bytes, digest}`: the parent leaf's run id and the size
-  and SHA-256 of `event_log.tsv`, written after it, so its presence marks the
-  child complete. The parent declares the directory under `children.event_log`
-  with the hash `SHA256("{run_id}:event_log")`. A second `--event-log` run of
-  the same run id leaves a complete child as it is, and refuses one whose
-  recorded digest differs from the bytes it recorded, overwriting nothing.
-
-### 9.6 The derived index (`index.json`)
-
-`<root>/index.json` caches
-`run_id → (rel_path, kind, label, status,
-created_at)` so prefix resolution in
-`show`/`cat` does not re-walk the tree. It is versioned (`INDEX_VERSION = 1`),
-written with the same atomic tmp+rename+fsync ordering as `run.json`, and
-**never authoritative**:
-
-1. A lookup the index cannot satisfy falls back to a full walk and refreshes the
-   index from it, so a leaf written out of band is still found.
-2. Every index hit is verified against the live tree — the entry's `run.json` is
-   re-read and its `run_id` re-checked. A dead or re-identified entry is dropped
-   and the lookup falls through to the walk.
-
-A malformed, absent, or version-mismatched `index.json` is a clean miss, never
-an error. `camdl dev reindex [ROOT]` rebuilds it from a fresh walk.
 
 ### 9.7 Enumerating a grid — no manifest file
 
@@ -6985,12 +6534,12 @@ or per run, as `camdl fit run … --starts from_posterior=@<label>`.
 
 There is no `camdl summarize`. Four commands cover the ground:
 
-| Command                      | Answers                                                                                                                                                                                                                             |
-| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `camdl list [ROOT]`          | What runs exist? Filter by `--kind sim\|fit\|profile\|pfilter\|ensemble`, `--model`, `--scenario`, `--since 1h`, `--parent <HASH>`. `--format json`.                                                                                |
-| `camdl show <TARGET>`        | Full metadata for one run, by short hash prefix or path.                                                                                                                                                                            |
-| `camdl cat <TARGET>`         | The run's trajectory TSV; `--stream <NAME>` selects an observation stream or the event log (`event_log.tsv`).                                                                                                                       |
-| `camdl label <HASH> <LABEL>` | Name a run so you can find it again. 1–64 chars matching `^[a-zA-Z0-9 ,._-]+$`; refuses a still-running fit, an ambiguous prefix, a fit id (a problem folder, not a run), a label another fit run holds, and relabelling a fit run. |
+| Command                        | Answers                                                                                                                 |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
+| `camdl list`                   | What runs exist? Filter by `--kind sim\|fit\|profile\|pfilter`, `--model`, `--scenario`, `--since 1h`. `--format json`. |
+| `camdl show <TARGET>`          | Full metadata for one run, by short hash prefix or path.                                                                |
+| `camdl cat <TARGET>`           | The run's trajectory TSV; `--stream <NAME>` selects an observation stream or the event log (`event_log.tsv`).           |
+| `camdl label <HANDLE> <LABEL>` | Refuses every handle: a stored result is sealed. Name a result when it runs, with `--label`.                            |
 
 Per-scenario summary statistics over a trajectory tree (peak, time-of-peak,
 final value, integral) are **not** a camdl command. Declare them in the model as
@@ -7362,7 +6911,6 @@ camdl
 ├── docs [TOPIC]                embedded guides (offline, version-matched)
 ├── check-update                query GitHub for a newer release
 └── dev                         developer & maintenance commands
-    ├── reindex [ROOT]          rebuild <root>/index.json
     ├── eval MODEL --expr E     evaluate time-dependent expressions
     ├── compile …               .camdl → IR JSON (delegates to camdlc)
     └── doctest …               compile camdl blocks in Markdown (delegates to camdlc)
@@ -7495,7 +7043,6 @@ Store
                               which cells the store holds; writes nothing
 ```
 
-`--output-dir` is not accepted, and `CAMDL_OUTPUT_DIR` is not read (§4.4).
 `--draws posterior --fit` reads the fit from the run store. There is no
 `--resume` flag: a run reads back the cells the store already holds by default,
 and `--force` overrides it. `camdl fit run --sweep` sweeps a `[fixed]` parameter
@@ -7557,8 +7104,8 @@ Per-algorithm overrides
 `--stage`, `--init`, `--posterior`, `--mle`, `--params`, `--survey-path`,
 `--survey-top-k`, `--allow-nonconverged-scout`, `--starts-from` and
 `--init-method` are parsed only to be refused, each naming its replacement
-(§7.1). `fit run` has no `--output-dir` and no `--store`: the run store's root
-is the fit file's `store` key, else `CAMDL_STORE`, else `./camdl-store`.
+(§7.1). `fit run` has no `--store`: the run store's root is the fit file's
+`store` key, else `CAMDL_STORE`, else `./camdl-store`.
 
 ### `camdl fit` — the other subcommands
 
@@ -7655,10 +7202,9 @@ camdl predict RUN            RUN: the positional run handle, same grammar as `fi
                             ./camdl-store)
 ```
 
-`camdl pfilter` stores its result in the run store (`camdl-store/` by default),
-which `profile`, still writing to `results/`, does not share; `--output-dir` and
-`CAMDL_OUTPUT_DIR` do not apply to it. The store's layout and records are those
-of `docs/dev/proposals/2026-11-20-run-store-api.md`. A filter run is one result,
+`camdl pfilter` stores its result in the run store (`camdl-store/` by default).
+The store's layout and records are those of
+`docs/dev/proposals/2026-11-20-run-store-api.md`. A filter run is one result,
 written in place, under
 `<build>/pfilter/<model>/<settings>/params/seed_<seed>/`: its `loglik.toml`,
 each replicate's log-likelihood in `replicates.tsv` under `--replicates N`, and
@@ -7959,21 +7505,17 @@ refusal names `--streams` with the streams the two rows share.
 ### Browsing and labelling
 
 ```
-camdl list [ROOT]
-  --root DIR                  alias for the positional; wins when both are given
-                              (default $CAMDL_OUTPUT_DIR, else ./results; none
-                              when --store or $CAMDL_STORE names a store)
-  --store DIR                 the run store's root, for simulate, pfilter and
-                              fit results (default $CAMDL_STORE, else ./camdl-store)
+camdl list
+  --store DIR                 the run store's root (default $CAMDL_STORE, else
+                              ./camdl-store)
   --model SUBSTR   --scenario NAME   --since 1h|30m|2d
-  --kind sim|fit|profile|pfilter|ensemble|all             (default all)
-  --parent HASH               children of a specific parent run (8+ char prefix)
+  --kind sim|fit|profile|pfilter|all                      (default all)
   --limit N (default 50) | --all
   --format human|json
 
-camdl show TARGET             --root DIR   --store DIR   --format human|json
-camdl cat TARGET              --root DIR   --store DIR   --stream NAME
-camdl label HASH LABEL        --root DIR
+camdl show TARGET             --store DIR   --format human|json
+camdl cat TARGET              --store DIR   --stream NAME
+camdl label HANDLE LABEL      refuses every handle: a stored result is sealed
 ```
 
 ### Compiler passthroughs
@@ -8016,10 +7558,6 @@ camdl lineage cohort LINE_LIST -o PATH
 ### `camdl dev`
 
 ```
-camdl dev reindex [ROOT]      rebuild <root>/index.json from a fresh walk of every
-                              run.json. The index is only a cache — run.json is the
-                              source of truth — so this is optional; useful after
-                              copying a results/ tree
 camdl dev eval MODEL --expr "a,b"
   --params FILE / --param NAME=VALUE / --table NAME=FILE
   --from T (0) --to T (100) --every DT (1)   |   --at T1,T2,…  (mutually exclusive)

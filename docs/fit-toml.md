@@ -13,7 +13,6 @@ For the workflow these configs drive, see `camdl docs workflow`.
 ```toml
 store = "camdl-store"             # the run store's root (optional; relative
                                   # to this file — see "How paths resolve").
-                                  # An `output_dir` key is refused.
 
 [model]
 camdl = "model.camdl"

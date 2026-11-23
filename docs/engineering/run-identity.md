@@ -48,17 +48,14 @@ keeps an input that belongs to it from being left out.
 
 ## The store
 
-camdl has two stores. `camdl simulate`, `camdl pfilter` and `camdl fit run`
-store their results in the run store, written by the `store` crate
+`camdl simulate`, `camdl pfilter`, `camdl fit run` and `camdl profile` store
+their results in the run store, written by the `store` crate
 (`rust/crates/store`) under `./camdl-store` or the root `--store` or
 `CAMDL_STORE` names; its design is
 `docs/dev/proposals/2026-11-20-run-store-api.md`, and
 [Simulate on the run store](#simulate-on-the-run-store) and
 [A fit on the run store](#a-fit-on-the-run-store) below describe how a
-simulation's and a fit's inputs reach their identities there. Profiles store
-theirs under `results/`, written by the `runid` crate. The sections from here to
-that one describe the `results/` store; what they say about input addressing
-holds for both.
+simulation's and a fit's inputs reach their identities there.
 
 The store is **input-addressed**: a run's address is a hash of the inputs that
 determine it, computed before the run, not a hash of the bytes the run produces.
@@ -99,43 +96,6 @@ trajectory. A raw path or an unresolved preset name would make the key depend on
 how the inputs were spelled, so that two spellings of one computation miss each
 other, or one spelling of two computations (an edited table under an unchanged
 path) collides.
-
-The inputs are not hashed as one blob. For a profile point they are split into
-levels, each a disjoint slice: the profile, the point, the method, the seed and
-the start. Each level is hashed on its own, and the leaf's address is
-[`run_id`](rust:runid::kind::run_id) over the artifact kind and the level hashes
-in order:
-
-```text
-run_id = SHA-256( HASH_VERSION ++ kind index ++ level count ++ level hashes in path order )
-```
-
-The kind enters as a fixed-width index of
-[`ArtifactKind`](rust:runid::kind::ArtifactKind) and the level list carries its
-length, so two kinds with equal level sequences cannot alias, and neither can a
-shorter sequence whose bytes happen to concatenate to a longer one.
-
-The path on disk factors the same tuple:
-[`store_path`](rust:runid::layout::store_path) writes one directory per level,
-named `{label}-{hash8}`, under the kind's partition (`profiles/`). The label is
-provenance, the eight hex characters are the first four bytes of the level's
-hash, and the full hashes are in `run.json`. Grouping falls out of the tree
-without any index: the seeds of one method are sibling directories under one
-method directory. A lookup finds a leaf by its hashes alone
-([`find_leaf`](rust:runid::store::find_leaf)), so a renamed file, whose label
-changes, still finds the result its hashes name.
-
-A leaf found at the expected path is reused only after
-[`FsCasStore::lookup`](rust:runid::store::FsCasStore::lookup) checks it: the
-recorded `run_id` must equal the expected one (a different one is a short-hash
-[`Collision`](rust:runid::store::Lookup), resolved by suffixing the directory,
-never by overwriting), the record's hash and format versions must be current,
-its status `completed`, and its files exactly the ones the record lists. A
-profile's scan of its points makes the reuse decision: a point is reused only
-when `lookup` returns a hit, and only by a build that
-[`engine_write_policy`](rust:cli::resolve::engine_write_policy) allows to reuse.
-A build whose engine identity is incomplete reuses nothing; it quarantines each
-stored point and computes it again.
 
 ## The hash function
 

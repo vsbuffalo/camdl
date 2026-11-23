@@ -85,9 +85,7 @@ pub(crate) fn camdl_kinds() -> Kinds {
 // ── The store root and the request ───────────────────────────────────────────
 
 /// The store-class inputs of a command: its `--label`, its `--force`, and its
-/// `--store` root, over `CAMDL_STORE`, over the default `./camdl-store`. The
-/// old root (`--output-dir`, `CAMDL_OUTPUT_DIR`, `results/`) is never read
-/// here.
+/// `--store` root, over `CAMDL_STORE`, over the default `./camdl-store`.
 ///
 /// `force` asks the store to compute each result again (`Reuse::Force`): a
 /// completed result moves to the quarantine and is claimed anew. A claim held

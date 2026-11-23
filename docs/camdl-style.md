@@ -137,10 +137,10 @@ What does not:
 
 ## Project layout
 
-The directories the tools expect — `models/`, `data/`, `results/`, `scripts/`,
-`workflow/`, `tests/`, `notes/`, `Makefile` — are tabulated in
+The directories the tools expect — `models/`, `data/`, `camdl-store/`,
+`scripts/`, `workflow/`, `tests/`, `notes/`, `Makefile` — are tabulated in
 [`agents.md`](agents.md), "The layout the tools expect" (`camdl docs agents`),
-with the argument for keeping every run under one `results/` root. What that
+with the argument for keeping every run under one `camdl-store/` root. What that
 table does not say:
 
 **A `fit.toml` sits beside its `.camdl` in `models/`, not in a `configs/`.**
@@ -157,9 +157,6 @@ for `Why:`, and the commentary on what earlier arms produced. A file named for
 its topic invites editing to keep it current, and so can go stale; a file named
 for its date cannot.
 
-**Nothing derived is ever written into a `results/` leaf.** A leaf belongs to
-camdl: its `run.json` manifests exactly the files camdl put there, and an
-unlisted file makes the leaf fail that check — the next run reports it stale
-(`OrphanFiles`) rather than taking the cache hit, and recomputes. A hand-written
-summary inside a leaf therefore costs you the cache hit and does not survive.
-Derived artifacts go beside the store, keyed by run id.
+**Nothing derived is ever written into a stored result's folder.** A result
+belongs to camdl: its `run.json` lists exactly the files camdl put there, with
+their digests. Derived artifacts go beside the store, keyed by run id.

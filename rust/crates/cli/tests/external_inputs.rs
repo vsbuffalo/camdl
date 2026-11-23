@@ -353,7 +353,6 @@ impl Fixture {
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("HOME", self.dir.join("home"))
             .env("CAMDL_STORE", self.dir.join("camdl-store"))
-            .env("CAMDL_OUTPUT_DIR", self.dir.join("results"))
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .env("CAMDLC", &self.camdlc)
             .env("CAMDL_IR_CACHE_DIR", self.dir.join("ir-cache"))

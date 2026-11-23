@@ -87,7 +87,7 @@ fn camdl(dir: &Path, args: &[&str]) -> Output {
     Command::new(camdl_bin())
         .env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
-        .env("CAMDL_OUTPUT_DIR", dir.join("out")).env("CAMDL_STORE", std::path::Path::new(&dir.join("out")).join("camdl-store"))
+        .env("CAMDL_STORE", std::path::Path::new(&dir.join("out")).join("camdl-store"))
         .current_dir(dir)
         .args(args)
         .output()

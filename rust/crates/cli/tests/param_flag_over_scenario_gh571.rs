@@ -128,7 +128,6 @@ impl Fixture {
             .args(args)
             .current_dir(self.dir.path())
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
-            .env("CAMDL_OUTPUT_DIR", self.dir.path().join("res"))
             .output()
             .expect("spawn camdl")
     }
