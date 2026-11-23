@@ -131,3 +131,37 @@ fn simulate_integrator_rk45_preserves_declared_tolerance() {
     let to_rk4 = simulate_stdout(&bin, &ir, &params, Some("rk4"));
     assert_ne!(declared, to_rk4, "`--integrator rk4` must override the declared rk45");
 }
+
+/// `--integrator` on a simulation whose backend is not `ode` is refused:
+/// the flag would select nothing, yet change the run's identity. Without
+/// `--backend` the backend is chain_binomial.
+#[test]
+fn simulate_refuses_an_integrator_off_the_ode_backend() {
+    let bin = camdl_bin();
+    assert!(bin.exists(), "release camdl missing: {} (run `make build`)", bin.display());
+    let tmp = tempdir("offode");
+    let ir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../ir/golden/pure_death.ir.json");
+    let params = tmp.path().join("p.toml");
+    std::fs::write(&params, "mu = 0.05\n").unwrap();
+    for (backend, named) in [(None, "chain_binomial"), (Some("gillespie"), "gillespie")] {
+        let mut cmd = Command::new(&bin);
+        cmd.env_remove("CLICOLOR_FORCE")
+            .env("CAMDL_STORE", tmp.path().join("camdl-store"))
+            .env("CAMDL_SKIP_VERSION_CHECK", "1")
+            .args(["simulate"]).arg(&ir)
+            .args(["--params"]).arg(&params)
+            .args(["--integrator", "rk45", "--seed", "1", "--stdout"]);
+        if let Some(b) = backend {
+            cmd.args(["--backend", b]);
+        }
+        let out = cmd.output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "--backend {named}: ran; stderr: {stderr}");
+        let msg = format!(
+            "--integrator selects the ODE integrator, but this simulation runs on {named}, which has \
+             none.\n  Fix: drop --integrator, or pass --backend ode."
+        );
+        assert!(stderr.contains(&msg), "expected {msg:?}; stderr: {stderr}");
+        assert!(!tmp.path().join("camdl-store").exists(), "a refused run stores nothing");
+    }
+}

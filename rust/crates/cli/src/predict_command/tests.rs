@@ -512,6 +512,11 @@ impl Harness {
                     "patch.camdl", "--params", "patch.toml", "--table", "w=w1.tsv", "--data", "cases=patch_cases.tsv",
                     "--mode", "free_forward", "--n-draws", "4",
                 ]),
+                // `--integrator` runs only on the ODE backend.
+                "integrator" => predict_from(&[
+                    "model.camdl", "--params", "point.toml", "--data", "daily_cases=daily_cases.tsv", "--mode",
+                    "free_forward", "--n-draws", "4", "--backend", "ode",
+                ]),
                 "obs" => predict_from(&[
                     "model.camdl", "--params", "point.toml", "--data", "mixed.tsv", "--obs", "daily_cases", "--mode",
                     "free_forward", "--n-draws", "4",
@@ -1478,6 +1483,12 @@ fn the_fixed_point_refusals() {
         ("--particles without a filter", [FIXED, &["--particles", "20"]].concat(), &["--particles"]),
         ("--design without a forecast", [FIXED, &["--design", "survey=design.tsv"]].concat(), &["--design"]),
         ("--binomial off chain-binomial", [FIXED, &["--backend", "ode", "--binomial", "btrs"]].concat(), &["--binomial"]),
+        (
+            "--integrator off ode",
+            [FIXED, &["--integrator", "rk45"]].concat(),
+            &["--integrator selects the ODE integrator, but this prediction runs on chain_binomial, which has none.\n  \
+               Fix: drop --integrator, or pass --backend ode."],
+        ),
         ("a parameter with no value", vec!["predict", "model.camdl", "--data", "daily_cases=daily_cases.tsv"], &["no value"]),
         ("an undeclared --param", [FIXED, &["--param", "nosuch=1"]].concat(), &["nosuch"]),
         ("--chains with a model file", [FIXED, &["--chains", "0"]].concat(), &["--chains", "model file"]),

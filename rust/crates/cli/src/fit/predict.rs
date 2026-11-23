@@ -1805,8 +1805,9 @@ pub(crate) fn predict(
 
 /// The refusals of a fixed-point prediction that its flags alone decide, made
 /// before anything is compiled or stored: a mode the backend cannot run,
-/// `--particles` where no filter runs, `--design` outside a forecast, and
-/// `--binomial` on a backend that draws no binomials. The predictor makes the
+/// `--particles` where no filter runs, `--design` outside a forecast,
+/// `--binomial` on a backend that draws no binomials, and `--integrator` on a
+/// backend other than ODE. The predictor makes the
 /// same checks again on the cloud, for both sources.
 fn refuse_fixed_point_flags(args: &crate::args::PredictArgs) -> Result<(), String> {
     use crate::args::types::{ForwardBackend, PredictModeArg};
@@ -1850,7 +1851,7 @@ fn refuse_fixed_point_flags(args: &crate::args::PredictArgs) -> Result<(), Strin
              backend, which draws none."
         ));
     }
-    Ok(())
+    crate::fit::fitted_model::refuse_integrator_off_ode(args.fixed_point.integrator, backend, "this prediction")
 }
 
 /// Refuse `--covariate` on a prediction that is not a forecast: only a

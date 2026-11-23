@@ -1586,6 +1586,10 @@ fn run_simulate(inv: args::SimulateInvocation) {
         backend = replay.backend;
         dt = replay.dt;
         integrator = replay.integrator;
+    } else if let Err(e) =
+        crate::fit::fitted_model::refuse_integrator_off_ode(integrator, backend, "this simulation")
+    {
+        out.fail(format!("error: {e}"));
     }
 
     let mut base_sim_run = util::SimRun {
