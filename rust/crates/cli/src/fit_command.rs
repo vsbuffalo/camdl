@@ -902,7 +902,6 @@ fn compute_run(out: &mut Out, rc: RunCompute<'_>) -> Result<(), String> {
         resume_guard,
         heartbeat: &heartbeat,
         collector: &collector,
-        data_hashes: crate::fit::provenance_data_hashes(data_digests),
         input_hash,
         forcing,
     });

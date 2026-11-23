@@ -401,9 +401,6 @@ pub(crate) struct MethodContext<'a> {
     pub resume_guard: &'a str,
     pub heartbeat: &'a std::sync::Arc<io::HeartbeatGuard>,
     pub collector: &'a std::sync::Arc<sim::inference::diagnostic::DiagnosticCollector>,
-    /// Each bound source's data digest, for the provenance block of
-    /// `mle_params.toml`.
-    pub data_hashes: Vec<(String, String)>,
     /// The problem's run id, which `mle_params.toml` records as the fit it
     /// came from.
     pub input_hash: &'a str,
@@ -641,7 +638,6 @@ pub(crate) fn run_method(out: &mut crate::out::Out, cx: MethodContext<'_>) -> Me
             let mle_path = format!("{}/mle_params.toml", method_dir.display());
             let model_identity =
                 crate::resolve::model_identity_from_ir(&run_config.model_ir_json);
-            let data_hashes = cx.data_hashes.clone();
             let rescore = &chain_results.loglik_eval.per_chain
                 [chain_results.loglik_eval.overall_winner_idx];
             let metadata = provenance::MleMetadata {
@@ -652,7 +648,6 @@ pub(crate) fn run_method(out: &mut crate::out::Out, cx: MethodContext<'_>) -> Me
                 input_hash: cx.input_hash.to_string(),
                 // The leaf is `<fit folder>/<method>-<h8>/seed_<n>-<h8>`.
                 model_identity: model_identity.clone(),
-                data_hashes: data_hashes.clone(),
                 seed,
                 method: method_name.to_string(),
                 best_chain: chain_results.best_chain,
@@ -795,7 +790,6 @@ pub(crate) fn run_method(out: &mut crate::out::Out, cx: MethodContext<'_>) -> Me
                     .unwrap_or_else(|e| abandon_method(out, format!("error: {e}")));
                 let model_identity_for_prov =
                     crate::resolve::model_identity_from_ir(&model_ir_json);
-                let data_hashes_for_prov = cx.data_hashes.clone();
                 // Deterministic ODE dt-check at θ̂ (gh#52, gh#227). On by
                 // default. gh#726: the method's dt_check field — CLI
                 // overrides were applied through `apply_cli_overrides`
@@ -813,7 +807,6 @@ pub(crate) fn run_method(out: &mut crate::out::Out, cx: MethodContext<'_>) -> Me
                     resolved_starts,
                     cx.input_hash,
                     &model_identity_for_prov,
-                    &data_hashes_for_prov,
                     &nl_dt_check,
                     heartbeat,
                 ).unwrap_or_else(|e| {
@@ -1359,15 +1352,6 @@ pub(crate) fn read_data_digests(
     model: &ir::Model,
 ) -> Result<stream_bindings::BoundDataDigests, String> {
     stream_bindings::StreamBindings::resolve(model, data)?.digests()
-}
-
-/// `mle_params.toml`'s `[provenance.data]` entries: `"<source> (<path>)"` →
-/// the full SHA-256 of the training file, from the digests the run identity
-/// was built from.
-pub(crate) fn provenance_data_hashes(data: &stream_bindings::BoundDataDigests) -> Vec<(String, String)> {
-    data.training_files()
-        .map(|(source, path, hex)| (format!("{source} ({path})"), hex))
-        .collect()
 }
 
 /// `camdl fit diff`'s data side: the full SHA-256 of each training file a

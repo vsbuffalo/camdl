@@ -558,3 +558,77 @@ dt = 1.0
             "{name}: fit.meta.json must record the applied training window: {meta}");
     }
 }
+
+/// A stored run's result files are a function of its identity. A held-out
+/// value, with its date unchanged, is not part of the problem's identity
+/// (which holds the training lines and the held-out dates), so after it
+/// changes a recompute under `--force` has the same run id and must write the
+/// same `mle_params.toml`, for each method that writes one.
+#[test]
+fn a_held_out_value_does_not_reach_the_stored_estimate() {
+    let bin = skip_if_missing_binary();
+    let methods = [
+        ("if2", "algorithm = \"if2\"\nbackend = \"chain_binomial\"\nchains = 1\n\
+                 particles = 50\niterations = 1\ncooling = 0.5\n"),
+        ("nl-sbplx", "algorithm = \"nl-sbplx\"\nbackend = \"ode\"\nchains = 1\n"),
+    ];
+    for (name, method) in methods {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let obs = |last: u32| format!("time\tweekly_cases\n7\t1\n14\t2\n21\t3\n28\t4\n35\t{last}\n");
+        std::fs::write(dir.join("obs.tsv"), obs(5)).unwrap();
+        std::fs::write(dir.join("fit.toml"), format!(r#"
+store = "results"
+
+[model]
+camdl = "{ir}"
+
+[data]
+holdout_after = 21.0
+
+[data.observations]
+weekly_cases = "obs.tsv"
+
+[estimate.beta]
+bounds = [0.01, 0.5]
+start  = 0.1
+
+[fixed]
+sigma    = 0.25
+gamma    = 0.3
+rho      = 0.5
+k        = 10.0
+p_detect = 0.5
+N0       = 1000
+I0       = 5
+
+[method]
+{method}
+[config]
+dt = 1.0
+"#, ir = golden_path())).unwrap();
+        let run = |extra: &[&str]| {
+            let mut args = vec!["fit", "run", "fit.toml", "--seed", "1"];
+            args.extend_from_slice(extra);
+            let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
+                .args(&args)
+                .current_dir(dir)
+                .env("CAMDL_SKIP_VERSION_CHECK", "1")
+                .output()
+                .expect("spawn camdl");
+            assert!(out.status.success(), "{name} {args:?}:\n{}", String::from_utf8_lossy(&out.stderr));
+        };
+        let store = dir.join("results");
+        run(&[]);
+        let first = fit_store_support::the_run(&store);
+        let id = fit_store_support::run_id(&first);
+        let before = std::fs::read_to_string(first.join("mle_params.toml")).unwrap();
+
+        std::fs::write(dir.join("obs.tsv"), obs(50)).unwrap();
+        run(&["--force"]);
+        let second = fit_store_support::the_run(&store);
+        assert_eq!(fit_store_support::run_id(&second), id, "{name}: a held-out value is not in the identity");
+        let after = std::fs::read_to_string(second.join("mle_params.toml")).unwrap();
+        assert_eq!(after, before, "{name}: one run id, one mle_params.toml");
+    }
+}

@@ -43,7 +43,6 @@ pub fn run_method(
     starts: &super::chain_starts::ResolvedStarts,
     parent_fit_hash: &str,
     model_identity: &str,
-    data_hashes: &[(String, String)],
     dt_check_cfg: &DtCheckConfig,
     // The method's liveness/progress heartbeat, owned by the runner
     // (`fit::method_heartbeat`). Its step is one objective evaluation, against
@@ -393,7 +392,6 @@ pub fn run_method(
         input_hash: parent_fit_hash.to_string(),
         // The leaf is `<fit folder>/<method>-<h8>/seed_<n>-<h8>`.
         model_identity: model_identity.to_string(),
-        data_hashes: data_hashes.to_vec(),
         seed,
         method: method_name.to_string(),
         best_chain: ChainIndex(winner_idx),

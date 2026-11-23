@@ -106,7 +106,7 @@ impl StreamBindings {
     /// Read and hash every bound file once: training and holdout, by source.
     /// An unreadable file is an error, as it is for the run identity built
     /// from these digests.
-    #[expect(clippy::disallowed_methods, reason = "not declared: hashes each whole `[data]` file as read now, and `fit run` writes the training files' digests and paths into `mle_params.toml`, a result file, while the problem's identity holds only the training lines and the held-out rows' dates, so a changed held-out value or a moved file changes the result and not its id")]
+    #[expect(clippy::disallowed_methods, reason = "hashes each whole `[data]` file for the run's `fit.meta.json`, a provenance file; no result file holds these digests")]
     pub(crate) fn digests(&self) -> Result<BoundDataDigests, String> {
         let read = |map: &IndexMap<String, String>| -> Result<BTreeMap<String, (String, ContentHash)>, String> {
             map.iter().map(|(source, path)| {
@@ -179,11 +179,6 @@ impl BoundDataDigests {
     /// Source → full hex digest of its holdout file.
     pub(crate) fn holdout_hex(&self) -> BTreeMap<String, String> {
         self.holdout.iter().map(|(s, (_, h))| (s.clone(), h.to_hex())).collect()
-    }
-
-    /// Every training file as (source, path, full hex digest), by source.
-    pub(crate) fn training_files(&self) -> impl Iterator<Item = (&str, &str, String)> {
-        self.training.iter().map(|(s, (p, h))| (s.as_str(), p.as_str(), h.to_hex()))
     }
 }
 

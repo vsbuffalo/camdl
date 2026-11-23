@@ -53,10 +53,6 @@ pub struct MleProvenance {
     /// with where the store is. The fit folder's `fit.meta.json` records the
     /// model's file (`source_model`).
     pub model_identity: String,
-    /// Per-stream data hash. Serialized as a table under `[provenance.data]`;
-    /// by content, for the reason `model_identity` is.
-    #[serde(default)]
-    pub data: std::collections::BTreeMap<String, DataEntry>,
     pub seed: u64,
     /// The method that produced this estimate, by the label of its `method`
     /// store level (`if2`, `nl-sbplx`, …) — the same word the config, the
@@ -77,11 +73,6 @@ pub struct MleProvenance {
     pub ess_mean: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ess_min: Option<f64>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct DataEntry {
-    pub hash: String,
 }
 
 /// Wrapper type for the full mle_params.toml file: a `[provenance]`
@@ -120,20 +111,6 @@ pub fn write_mle_params(
     let mut f = std::fs::File::create(path)
         .map_err(|e| format!("cannot write {}: {}", path, e))?;
 
-    let data_map: std::collections::BTreeMap<String, DataEntry> = metadata
-        .data_hashes.iter()
-        .map(|(name, hash)| {
-            // The stored name is either bare ("cases") or
-            // "cases (path/to/cases.tsv)", the path as the fit read it; the
-            // block keys the stream by its name alone.
-            let stream_name = match name.find(" (") {
-                Some(open) => name[..open].to_string(),
-                None => name.clone(),
-            };
-            (stream_name, DataEntry { hash: hash.clone() })
-        })
-        .collect();
-
     let prov = MleProvenance {
         camdl_version: version::VERSION_SHORT.to_string(),
         content_hash: content_hash.clone(),
@@ -141,7 +118,6 @@ pub fn write_mle_params(
         backend: metadata.backend,
         dt: metadata.dt,
         model_identity: metadata.model_identity.clone(),
-        data: data_map,
         seed: metadata.seed,
         method: metadata.method.clone(),
         chain: metadata.best_chain,
@@ -239,7 +215,6 @@ pub fn verify_content_hash(path: &str, declared: &str) -> Result<ContentVerifica
 pub struct MleMetadata {
     pub input_hash: String,
     pub model_identity: String,
-    pub data_hashes: Vec<(String, String)>,
     pub seed: u64,
     /// The method label, written to `[provenance] method`.
     pub method: String,
@@ -280,7 +255,6 @@ mod tests {
         let meta = MleMetadata {
             input_hash: "deadbeef".into(),
             model_identity: "f00d".into(),
-            data_hashes: vec![("cases".into(), "abc".into())],
             seed: 1,
             method: "if2".into(),
             best_chain: ChainIndex(0),
@@ -304,18 +278,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The block records the model and the data by content, never by path:
-    /// the file is part of a leaf's stored bytes, which must not change with
-    /// where the store is relative to the files the fit read. The same fit
+    /// The block records the model by content and the data not at all: the
+    /// file is a result file, whose bytes are a function of the run's
+    /// identity, and the identity holds the training lines and the held-out
+    /// dates, not a data file's path or whole-file digest. The same fit
     /// written from two directories writes the same block.
     #[test]
     fn the_provenance_block_records_no_path() {
         let root = crate::test_support::unique_temp_dir("mle_params_no_path");
         let params: std::collections::BTreeMap<String, f64> = [("beta".to_string(), 0.3)].into();
-        let meta = |data: &str| MleMetadata {
+        let meta = MleMetadata {
             input_hash: "deadbeef".into(),
             model_identity: "f00d".into(),
-            data_hashes: vec![(format!("cases ({data})"), "abc".into())],
             seed: 1,
             method: "if2".into(),
             best_chain: ChainIndex(0),
@@ -327,18 +301,17 @@ mod tests {
             ess_at_mle: None,
         };
         let mut written = Vec::new();
-        for (sub, data) in [("a/results/fits/sir-abcd1234/if2-0/seed_1-0", "data/cases.tsv"),
-                            ("b/deeper/results/fits/sir-abcd1234/if2-0/seed_1-0", "../x/cases.tsv")] {
+        for sub in ["a/results/fits/sir-abcd1234/if2-0/seed_1-0", "b/deeper/results/fits/sir-abcd1234/if2-0/seed_1-0"] {
             let leaf = root.join(sub);
             std::fs::create_dir_all(&leaf).unwrap();
             let path = leaf.join("mle_params.toml");
-            write_mle_params(&path.to_string_lossy(), &params, &meta(data)).unwrap();
+            write_mle_params(&path.to_string_lossy(), &params, &meta).unwrap();
             written.push(std::fs::read_to_string(&path).unwrap());
         }
         let _ = std::fs::remove_dir_all(&root);
         assert_eq!(written[0], written[1], "the block depends on where the fit ran");
         assert!(!written[0].contains("source") && !written[0].contains("timestamp"), "{}", written[0]);
-        assert!(written[0].contains("[provenance.data.cases]\nhash = \"abc\""), "{}", written[0]);
+        assert!(!written[0].contains("[provenance.data"), "{}", written[0]);
     }
 
     /// The file a fit writes verifies; a value edited afterwards is reported
@@ -355,7 +328,6 @@ mod tests {
         let meta = MleMetadata {
             input_hash: "deadbeef".into(),
             model_identity: "f00d".into(),
-            data_hashes: vec![],
             seed: 1,
             method: "if2".into(),
             best_chain: ChainIndex(0),
@@ -432,7 +404,6 @@ mod tests {
         let meta = MleMetadata {
             input_hash: "deadbeef".into(),
             model_identity: "f00d".into(),
-            data_hashes: vec![],
             seed: 1,
             method: "if2".into(),
             best_chain: ChainIndex(0),

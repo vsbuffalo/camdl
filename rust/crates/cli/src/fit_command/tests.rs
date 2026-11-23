@@ -758,7 +758,7 @@ const MACOS_AARCH64: Pins = &[
         ("diagnostics.tsv", "f71d947e76c79190"),
         ("final_params.toml", "a0dab3f9637a3c9a"),
         ("fit_state.toml", "6e9941f83e6d8e7d"),
-        ("mle_params.toml", "f5d9f997522c36f9"),
+        ("mle_params.toml", "73e526922980c918"),
     ]),
     ("pgas", &[
         ("chain_0/trace.tsv", "3521d6750b3cc250"),
@@ -803,19 +803,19 @@ const MACOS_AARCH64: Pins = &[
         ("chain_results.tsv", "dbdead979318df7d"),
         ("diagnostics.json", "4f53cda18c2baa0c"),
         ("fit_state.toml", "e7280a7cdba437eb"),
-        ("mle_params.toml", "f06eaf34fa4e5387"),
+        ("mle_params.toml", "7f5a3480f4b3eb8b"),
     ]),
     ("bobyqa", &[
         ("chain_results.tsv", "fffd90043409d23a"),
         ("diagnostics.json", "4f53cda18c2baa0c"),
         ("fit_state.toml", "b3f101419aae03fc"),
-        ("mle_params.toml", "6f5a3579b4a08831"),
+        ("mle_params.toml", "0899337e6d6f7949"),
     ]),
     ("lbfgs", &[
         ("chain_results.tsv", "4db4a4b639626dc1"),
         ("diagnostics.json", "4f53cda18c2baa0c"),
         ("fit_state.toml", "9fbc652a646888de"),
-        ("mle_params.toml", "17f314a510b3923f"),
+        ("mle_params.toml", "697bcdcd8b6fa78c"),
     ]),
 ];
 
@@ -833,7 +833,7 @@ const LINUX: Pins = &[
         ("diagnostics.tsv", "f71d947e76c79190"),
         ("final_params.toml", "a0dab3f9637a3c9a"),
         ("fit_state.toml", "7dbe99255bc21ff9"),
-        ("mle_params.toml", "f5d9f997522c36f9"),
+        ("mle_params.toml", "73e526922980c918"),
     ]),
     ("pgas", &[
         ("chain_0/trace.tsv", "3521d6750b3cc250"),
@@ -878,19 +878,19 @@ const LINUX: Pins = &[
         ("chain_results.tsv", "dbdead979318df7d"),
         ("diagnostics.json", "4f53cda18c2baa0c"),
         ("fit_state.toml", "e7280a7cdba437eb"),
-        ("mle_params.toml", "f06eaf34fa4e5387"),
+        ("mle_params.toml", "7f5a3480f4b3eb8b"),
     ]),
     ("bobyqa", &[
         ("chain_results.tsv", "13807c14836c3048"),
         ("diagnostics.json", "4f53cda18c2baa0c"),
         ("fit_state.toml", "597ac41b3e837bd4"),
-        ("mle_params.toml", "6f5a3579b4a08831"),
+        ("mle_params.toml", "0899337e6d6f7949"),
     ]),
     ("lbfgs", &[
         ("chain_results.tsv", "4db4a4b639626dc1"),
         ("diagnostics.json", "4f53cda18c2baa0c"),
         ("fit_state.toml", "9fbc652a646888de"),
-        ("mle_params.toml", "17f314a510b3923f"),
+        ("mle_params.toml", "697bcdcd8b6fa78c"),
     ]),
 ];
 

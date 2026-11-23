@@ -517,25 +517,25 @@ post-warm-up cloud), `diagnostics.json`, and per chain `chain_N/trace.tsv`,
 so a bare `toml` reader still sees the parameters at the top level. The block
 records `camdl_version`, `content_hash` (a tamper hash over the numeric values
 only, at 12-decimal precision, so editing a provenance field does not invalidate
-it), `fit_hash` (the problem's id), `backend`, `dt`, `model_identity`,
-per-stream `[provenance.data.<stream>]` entries of `hash` (the full SHA-256 of
-the data file the fit file names, before the training cut; the problem's
-identity keys the stored training lines instead), `seed`, `method`, `chain`
-(counted from 0, §6.8), `log_likelihood`, `loglik_sd`, `n_particles`, and
-optional `ess_mean`/`ess_min`. It records the model and the data by content and
-holds no time and no path: the file is part of the run's stored bytes, and a
-path relative to the store would change with where the store is. The model's
-file is the problem folder's `model.camdl` (or `model.ir.json`). For IF2,
-`log_likelihood` is the loglik-eval re-score of the winning chain, so
-`loglik_sd` is that re-score's Monte Carlo standard error (the `±` on the stderr
-line), `n_particles` its particles per replicate (not the IF2 swarm's size), and
-`ess_mean`/`ess_min` its effective sample size; an ODE-backend NLopt fit has no
-particle filter and records `loglik_sd = 0` and `n_particles = 0`.
-`camdl simulate --params` reads `backend`/`dt` back to warn when a downstream
-simulation would run under different dynamics than the fit, and refuses the file
-when its parameter values no longer hash to `content_hash` (they were edited
-after the fit), naming the file: re-run the fit, or remove the `[provenance]`
-block to run the edited values as a plain params file.
+it), `fit_hash` (the problem's id), `backend`, `dt`, `model_identity`, `seed`,
+`method`, `chain` (counted from 0, §6.8), `log_likelihood`, `loglik_sd`,
+`n_particles`, and optional `ess_mean`/`ess_min`. It records the model by
+content and holds no time, no path and no data-file digest: the file is a result
+of the run, a function of its identity, and the identity holds the training
+lines and the held-out dates rather than whole data files. The whole-file
+SHA-256 of each data file the fit read is in the run's `fit.meta.json`
+(`data_hashes`), a provenance file. The model's file is the problem folder's
+`model.camdl` (or `model.ir.json`). For IF2, `log_likelihood` is the loglik-eval
+re-score of the winning chain, so `loglik_sd` is that re-score's Monte Carlo
+standard error (the `±` on the stderr line), `n_particles` its particles per
+replicate (not the IF2 swarm's size), and `ess_mean`/`ess_min` its effective
+sample size; an ODE-backend NLopt fit has no particle filter and records
+`loglik_sd = 0` and `n_particles = 0`. `camdl simulate --params` reads
+`backend`/`dt` back to warn when a downstream simulation would run under
+different dynamics than the fit, and refuses the file when its parameter values
+no longer hash to `content_hash` (they were edited after the fit), naming the
+file: re-run the fit, or remove the `[provenance]` block to run the edited
+values as a plain params file.
 
 #### 2.2.1 `fit.meta.json` — the run's record of its problem
 
