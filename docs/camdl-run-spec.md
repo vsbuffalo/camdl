@@ -589,11 +589,10 @@ times from the run's start to the cut:
 - a linear table depends on the first row after the cut when the cut falls
   strictly between two rows and the run reads an argument between the last row
   before the cut and the cut;
-- a step table (`method = constant`) never does, except through a negative lag;
-- a negative lag reads arguments after the cut from model times before it, so
-  the rows after the cut up to the last argument read count (for a linear table,
-  with the first row beyond that argument), and a lag that is a parameter is
-  taken to read every row after the cut.
+- a step table (`method = constant`) never does;
+- a lag, which is never negative (language spec §7, "Lagged forcing"), moves the
+  arguments read before the cut earlier, and a lag that is a parameter is judged
+  as a lag of 0, the value whose arguments reach closest to the cut.
 
 The note reads "forcing `pop` (linear table): values before the cut (t = 24, the
 training extent) depend on 1 row after it". A fit records it in `fit.meta.json`
@@ -754,22 +753,23 @@ advance (a planned campaign, a scenario), observed later, or not known; camdl
 cannot tell which. Before any filter runs, a forecast classifies each forcing
 the model declares. A forcing is read after the origin when the run, up to the
 end of the reach, evaluates its table at an argument after the origin. The
-argument is `t − lag` for a forcing with a `lag`: a positive lag is read after
-the origin only once the reach exceeds the lag, a negative lag reads arguments
-after the origin from model times before it, and a lag that is a parameter may
-be negative, so it is taken to read every row of its table after the origin. An
-`interpolated` forcing with `method = linear` (whatever its source) is so read
-when its table has a row after the origin and the last argument passes the
-origin; one with `method = constant` only when such a row lies at or before the
-last argument. One with `method = spline` is so read whenever its table has a
-row after the origin, whatever the lag and the reach, because a natural cubic
-spline's value at every argument depends on every row. The periodic kinds, a
-formula in `t`, a `piecewise` forcing (whose values the model declares, and
-which holds its last value after its last breakpoint) and a `bspline` are never
-so read; a forecast whose reach passes a `piecewise` breakpoint says so in a
-note, on stderr and in `forecast.json`. A forecast that reads a table forcing
-after its origin is refused until the user states what those values are, with
-`--covariate FORCING=STATEMENT` (repeatable, one per forcing):
+argument is `t − lag` for a forcing with a `lag`, which is never negative
+(language spec §7, "Lagged forcing"): a positive lag is read after the origin
+only once the reach exceeds the lag, and a lag that is a parameter may be
+shorter than the reach, so it is taken to read every row of its table after the
+origin. An `interpolated` forcing with `method = linear` (whatever its source)
+is so read when its table has a row after the origin and the last argument
+passes the origin; one with `method = constant` only when such a row lies at or
+before the last argument. One with `method = spline` is so read whenever its
+table has a row after the origin, whatever the lag and the reach, because a
+natural cubic spline's value at every argument depends on every row. The
+periodic kinds, a formula in `t`, a `piecewise` forcing (whose values the model
+declares, and which holds its last value after its last breakpoint) and a
+`bspline` are never so read; a forecast whose reach passes a `piecewise`
+breakpoint says so in a note, on stderr and in `forecast.json`. A forecast that
+reads a table forcing after its origin is refused until the user states what
+those values are, with `--covariate FORCING=STATEMENT` (repeatable, one per
+forcing):
 
 ```
 error: forcing `pop` is read after the forecast origin and nothing says how.
@@ -797,10 +797,9 @@ The times are dates under a model `origin`, and model time otherwise.
   is not evaluated past its table, so it raises no `forcing-outside-range`.
   `hold` is refused for a cubic-spline table (`method = spline`), whose value at
   every time depends on every row, so that cutting it at the origin would change
-  the forcing before the origin too. It is refused for a forcing whose lag is
-  negative or a parameter: model times at or before the origin read such a table
-  after the origin, so a hold from the origin would change the forcing before
-  the origin in model time.
+  the forcing before the origin too. A forcing with a `lag`, a parameter lag
+  included, can be held: a model time at or before the origin reads the table at
+  `t − lag`, at or before the origin, so the hold changes none of those values.
 
 An indexed forcing (`pop[p in patch]`) is one forcing per level, and each is
 stated by its underscore-joined name (`--covariate pop_p0=hold`), as `--sweep`

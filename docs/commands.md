@@ -310,12 +310,11 @@ is. `hold` holds the forcing at the table's interpolated value at the origin
 wherever its argument `t − lag` is after the origin, and leaves every value
 before the origin unchanged; for a `linear` table the held value depends on the
 first row after the origin. `hold` is refused for a cubic-spline table
-(`method = spline`), whose value before the origin depends on its rows after it,
-and for a forcing whose lag is negative or a parameter, whose model times before
-the origin read the table after it. A forcing with a positive `lag` reads its
-table at `t − lag`, so it needs a statement only once the reach exceeds the lag;
-a spline table needs one whenever it has a row after the origin. An indexed
-forcing is stated per level by its underscore-joined name
+(`method = spline`), whose value before the origin depends on its rows after it.
+A forcing with a positive `lag` reads its table at `t − lag`, so it needs a
+statement only once the reach exceeds the lag, and one whose lag is a parameter
+always needs one; a spline table needs one whenever it has a row after the
+origin. An indexed forcing is stated per level by its underscore-joined name
 (`--covariate pop_p0=hold`), as `--sweep` names an indexed parameter. Periodic
 forcings, `piecewise` forcings and `bspline`s need none, and a statement for one
 is refused; a forecast whose reach passes a `piecewise` breakpoint says so in a

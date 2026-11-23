@@ -14,9 +14,11 @@
 //! "After the origin" is judged on the table's argument: a forcing with a lag
 //! `ℓ` reads its table at `t − ℓ`, so a run to the end of a forecast from
 //! origin `o` with reach `h` reads arguments up to `o + h − ℓ`, and reads none
-//! after `o` while `h ≤ ℓ`. A negative lag reads arguments after `o` from model
-//! times before it. A lag that is a parameter may take any value over the
-//! draws, negative included, so every row after the origin is taken as read.
+//! after `o` while `h ≤ ℓ`. A negative lag would read arguments after `o` from
+//! model times before it; the compiler refuses one (E424), so only IR built
+//! directly carries it. A lag that is a parameter is zero or more (E425 and the
+//! parameter's kind range) but may take any such value over the draws, shorter
+//! than the reach included, so every row after the origin is taken as read.
 //! A cubic spline's value at every argument depends on every row, so a spline
 //! table with a row after the origin is read after it whatever the lag.
 //!
@@ -56,11 +58,13 @@ pub(crate) enum TableMethod {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum Lag {
     None,
-    /// A constant lag, which may be negative: a model time `t` reads the
-    /// table at `t − ℓ`, after the origin for every `t > origin + ℓ`.
+    /// A constant lag: a model time `t` reads the table at `t − ℓ`, after the
+    /// origin for every `t > origin + ℓ`. A compiled model's constant lag is
+    /// at least 0; a negative one comes only from IR built directly.
     Constant(f64),
-    /// The lag is a parameter, so it differs between draws and may be
-    /// negative: every row of the table after the origin is taken as read.
+    /// The lag is a parameter, at least 0 but different between draws and
+    /// possibly shorter than the reach: every row of the table after the
+    /// origin is taken as read.
     Parameter,
 }
 
@@ -75,15 +79,19 @@ impl Lag {
         }
     }
 
-    /// Why `hold` cannot be applied under this lag, if it cannot. Under a
-    /// negative or parameter lag, model times at or before the origin read the
-    /// table after the origin, so a hold of the table from the origin would
-    /// change the forcing before the origin in model time.
+    /// Why `hold` cannot be applied under this lag, if it cannot. A hold of
+    /// the table from the origin changes only arguments after the origin. A
+    /// model time `t` at or before the origin reads the argument `t − ℓ`,
+    /// which is at or before the origin for every `ℓ ≥ 0`, so under no lag, a
+    /// lag of 0 or more, or a parameter lag (at least 0), the hold leaves
+    /// every value at and before the origin as it is. Only a negative lag
+    /// reads the table after the origin from model times before it.
     fn refuses_hold(self) -> Option<String> {
         match self {
+            // The compiler refuses a negative constant lag (E424); this arm
+            // serves IR built directly.
             Lag::Constant(l) if l < 0.0 => Some(format!("its lag, {}, is negative", crate::quantile::fmt_time(l))),
-            Lag::Parameter => Some("its lag is a parameter, which may be negative".to_string()),
-            Lag::None | Lag::Constant(_) => None,
+            Lag::None | Lag::Constant(_) | Lag::Parameter => None,
         }
     }
 }
@@ -234,11 +242,13 @@ pub(crate) struct PreCutDependence {
 ///   row before the cut and the cut;
 /// - a step table (`method = constant`) depends only on rows at or before its
 ///   argument, so on rows after the cut only through a negative lag;
-/// - a negative lag reads arguments after the cut from model times before
-///   it, so the rows after the cut up to the last argument read count (for a
-///   linear table, with the first row after that argument);
-/// - a lag that is a parameter may be negative, so every row after the cut
-///   counts.
+/// - a negative lag, which only IR built directly carries (the compiler
+///   refuses one, E424), reads arguments after the cut from model times
+///   before it, so the rows after the cut up to the last argument read count
+///   (for a linear table, with the first row after that argument);
+/// - a lag that is a parameter is at least 0, so the arguments read before
+///   the cut are at or before it, and it is judged as a lag of 0, the value
+///   whose arguments reach closest to the cut.
 ///
 /// A label only: this changes no value and refuses nothing.
 pub(crate) fn pre_cut_dependence(
@@ -268,33 +278,29 @@ pub(crate) fn pre_cut_dependence(
                 Some(ResolvedExpr::Const(l)) => Lag::Constant(*l),
                 Some(_) => Lag::Parameter,
             };
-            let n = match lag {
-                Lag::Parameter => rows_after,
-                Lag::None | Lag::Constant(_) => {
-                    let shift = if let Lag::Constant(l) = lag { l } else { 0.0 };
-                    // The arguments the model times [t_start, cut] read.
-                    let (lo, hi) = (t_start - shift, cut - shift);
-                    match method {
-                        TableMethod::Spline => rows_after,
-                        TableMethod::Constant => times.iter().filter(|&&x| after(x) && x <= hi + TIME_TIE_EPS).count(),
-                        TableMethod::Linear if after(hi) => {
-                            // A negative lag: the rows after the cut up to the
-                            // last argument, and the row after that argument
-                            // that the stretch before it interpolates toward.
-                            let within = times.iter().filter(|&&x| after(x) && x <= hi + TIME_TIE_EPS).count();
-                            let toward = times.iter().any(|&x| x > hi + TIME_TIE_EPS)
-                                && !times.iter().any(|&x| (x - hi).abs() <= TIME_TIE_EPS);
-                            within + usize::from(toward)
-                        }
-                        TableMethod::Linear => {
-                            // The cut strictly between two rows, and an
-                            // argument read between the row before it and it.
-                            let before = times.iter().copied().rfind(|&x| x <= cut + TIME_TIE_EPS);
-                            match before {
-                                Some(prev) if !after(prev) && (prev - cut).abs() > TIME_TIE_EPS && hi > prev + TIME_TIE_EPS && lo <= hi => 1,
-                                _ => 0,
-                            }
-                        }
+            // A parameter lag, at least 0, is judged as a lag of 0.
+            let shift = if let Lag::Constant(l) = lag { l } else { 0.0 };
+            // The arguments the model times [t_start, cut] read.
+            let (lo, hi) = (t_start - shift, cut - shift);
+            let n = match method {
+                TableMethod::Spline => rows_after,
+                TableMethod::Constant => times.iter().filter(|&&x| after(x) && x <= hi + TIME_TIE_EPS).count(),
+                TableMethod::Linear if after(hi) => {
+                    // A negative lag: the rows after the cut up to the
+                    // last argument, and the row after that argument
+                    // that the stretch before it interpolates toward.
+                    let within = times.iter().filter(|&&x| after(x) && x <= hi + TIME_TIE_EPS).count();
+                    let toward = times.iter().any(|&x| x > hi + TIME_TIE_EPS)
+                        && !times.iter().any(|&x| (x - hi).abs() <= TIME_TIE_EPS);
+                    within + usize::from(toward)
+                }
+                TableMethod::Linear => {
+                    // The cut strictly between two rows, and an
+                    // argument read between the row before it and it.
+                    let before = times.iter().copied().rfind(|&x| x <= cut + TIME_TIE_EPS);
+                    match before {
+                        Some(prev) if !after(prev) && (prev - cut).abs() > TIME_TIE_EPS && hi > prev + TIME_TIE_EPS && lo <= hi => 1,
+                        _ => 0,
                     }
                 }
             };
@@ -606,8 +612,8 @@ fn refusal(forcing: &str, t: &TableRead, ctx: &ReachContext) -> String {
             ctx.span(l),
             ctx.at(ctx.reach_end - l)
         ),
-        Lag::Parameter => msg += "  Its lag is a parameter, which may be negative or shorter than the reach, \
-                                  so every row of its table after the origin is taken as read.\n",
+        Lag::Parameter => msg += "  Its lag is a parameter, which may be shorter than the reach, so every \
+                                  row of its table after the origin is taken as read.\n",
     }
     let hold = hold_refusal(t);
     let mut options = vec![
@@ -900,12 +906,14 @@ mod tests {
 
     /// A step table with rows at 0, 20, 40 and 63, from an origin at day 24
     /// with a reach of 14 days. With no lag its next row, day 40, is past the
-    /// reach. A lag of −5 days reads arguments up to day 43, and a lag that is
-    /// a parameter may be negative, so both read the day-40 row and need a
-    /// statement; neither can be held, since model times before the origin
-    /// read the table after it.
+    /// reach. A lag of −5 days (IR built directly; the compiler refuses one)
+    /// reads arguments up to day 43, and a lag that is a parameter may be
+    /// shorter than the reach, so both are taken to read the day-40 row and
+    /// need a statement. The negative lag cannot be held, since model times
+    /// before the origin read the table after it; the parameter lag, at least
+    /// 0, can.
     #[test]
-    fn a_negative_or_parameter_lag_reads_rows_after_the_origin_and_cannot_be_held() {
+    fn a_negative_or_parameter_lag_reads_rows_after_the_origin_and_only_the_negative_cannot_be_held() {
         let step = || {
             let t = [0.0, 20.0, 40.0, 63.0].map(Expr::const_).to_vec();
             let v = [1.0, 2.0, 3.0, 4.0].map(Expr::const_).to_vec();
@@ -924,12 +932,15 @@ mod tests {
         for (what, r, lag) in [("negative", &negative, Lag::Constant(-5.0)), ("parameter", &parameter, Lag::Parameter)] {
             let ReadKind::Table(t) = kind_of(r, "pop") else { panic!("{what}: the day-40 row is read") };
             assert_eq!(t.lag, lag);
-            let err = Covariates::resolve(r, &[], &c).unwrap_err();
-            assert!(err.contains("`hold` is not offered") && !err.contains("pop=hold "), "{what}: {err}");
-            let err = Covariates::resolve(r, &[spec("pop=hold")], &c).unwrap_err();
-            assert!(err.contains("cannot be held") && err.contains(what) && err.contains("before the origin"), "{what}: {err}");
             assert!(Covariates::resolve(r, &[spec("pop=realised")], &c).is_ok(), "{what}");
         }
+        let err = Covariates::resolve(&negative, &[], &c).unwrap_err();
+        assert!(err.contains("`hold` is not offered") && !err.contains("pop=hold "), "{err}");
+        let err = Covariates::resolve(&negative, &[spec("pop=hold")], &c).unwrap_err();
+        assert!(err.contains("cannot be held") && err.contains("negative") && err.contains("before the origin"), "{err}");
+        let err = Covariates::resolve(&parameter, &[], &c).unwrap_err();
+        assert!(err.contains("pop=hold ") && !err.contains("`hold` is not offered") && !err.contains("negative"), "{err}");
+        assert!(Covariates::resolve(&parameter, &[spec("pop=hold")], &c).is_ok());
     }
 
     /// The refusal's statements line up in one column whatever the forcing's
@@ -981,8 +992,9 @@ mod tests {
 
     /// A lag shifts the arguments the run before the cut reads. A positive
     /// lag can keep them before the stretch the next row reaches into; a
-    /// negative one reads rows after the cut, even of a step table; a lag
-    /// that is a parameter is taken to read every row after the cut.
+    /// negative one (IR built directly) reads rows after the cut, even of a
+    /// step table; a lag that is a parameter, at least 0, is judged as a lag
+    /// of 0.
     #[test]
     fn a_lag_judges_the_dependence_on_the_tables_argument() {
         let linear = |lag| vec![forcing("pop", table(InterpMethod::Linear), lag)];
@@ -992,8 +1004,10 @@ mod tests {
         assert_eq!(dependence(linear(Some(-15.0)), 50.0), vec![("pop".to_string(), 2)], "the row at 60, and 100 beyond the argument 65");
         let step = |lag| vec![forcing("pop", table(InterpMethod::Constant), lag)];
         assert_eq!(dependence(step(Some(-15.0)), 50.0), vec![("pop".to_string(), 1)]);
-        let parameter = vec![TimeFunction { lag: Some(Expr::param("gamma")), ..forcing("pop", table(InterpMethod::Constant), None) }];
-        assert_eq!(dependence(parameter, 50.0), vec![("pop".to_string(), 2)]);
+        let parameter = |m| vec![TimeFunction { lag: Some(Expr::param("gamma")), ..forcing("pop", table(m), None) }];
+        assert_eq!(dependence(parameter(InterpMethod::Constant), 50.0), vec![], "a step table reads no row after the cut");
+        assert_eq!(dependence(parameter(InterpMethod::Linear), 50.0), vec![("pop".to_string(), 1)], "as with no lag");
+        assert_eq!(dependence(parameter(InterpMethod::Spline), 50.0), vec![("pop".to_string(), 2)]);
     }
 
     /// Holding applies to the compiled model each forcing stated `hold`, at

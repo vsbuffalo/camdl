@@ -823,8 +823,10 @@ fn a_fit_records_a_linear_table_whose_training_extent_falls_between_rows() {
 /// A step table whose next row after the origin (day 40) is past a two-week
 /// reach from day 24, read at `t − tau` with `tau` a `duration` parameter at
 /// 5 days. The forecast classifier takes every row after the origin as read
-/// under a parameter lag, whatever its value, so the forecast is refused with
-/// no statement, `hold` is refused and not offered, and a statement runs.
+/// under a parameter lag, which may be shorter than the reach, so the
+/// forecast is refused with no statement. A parameter lag is at least 0, so
+/// `hold` is offered and runs, and the filtering before the origin is the
+/// same under `hold` as under `prospective`.
 #[test]
 fn a_parameter_lag_reads_a_step_tables_rows_after_the_origin() {
     let fresh = tempfile::tempdir().unwrap();
@@ -849,13 +851,26 @@ fn a_parameter_lag_reads_a_step_tables_rows_after_the_origin() {
             assert!(!err.contains(n), "{extra:?}: {n:?} in:\n{err}");
         }
     };
-    refused(&[], &["forcing `pop` is read after the forecast origin", "Its lag is a parameter", "`hold` is not offered"], &[
-        "--covariate pop=hold ",
+    refused(&[], &["forcing `pop` is read after the forecast origin", "Its lag is a parameter", "--covariate pop=hold "], &[
+        "`hold` is not offered",
+        "negative",
     ]);
-    refused(&["--covariate", "pop=hold"], &["cannot be held", "a parameter, which may be negative"], &[]);
     assert!(predictions(&root).is_empty(), "nothing is stored");
-    let out = predict_in(cwd.path(), &root, &line(&["--covariate", "pop=prospective"]));
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let mut manifests = BTreeMap::new();
+    for statement in ["pop=prospective", "pop=hold"] {
+        let before: std::collections::BTreeSet<PathBuf> = predictions(&root).into_iter().map(|(p, _)| p).collect();
+        let out = predict_in(cwd.path(), &root, &line(&["--covariate", statement]));
+        assert!(out.status.success(), "--covariate {statement}:\n{}", String::from_utf8_lossy(&out.stderr));
+        let new: Vec<PathBuf> = predictions(&root).into_iter().map(|(p, _)| p).filter(|p| !before.contains(p)).collect();
+        assert_eq!(new.len(), 1, "--covariate {statement} is a prediction of its own: {new:?}");
+        let doc: serde_json::Value = serde_json::from_slice(&std::fs::read(new[0].join("forecast.json")).unwrap()).unwrap();
+        manifests.insert(statement, doc);
+    }
+    assert_eq!(manifests["pop=hold"]["covariates"]["forcings"][0]["lag"], "parameter");
+    assert_eq!(
+        manifests["pop=hold"]["filter_diagnostics"], manifests["pop=prospective"]["filter_diagnostics"],
+        "a hold under a parameter lag moved the filtering before the origin"
+    );
 }
 
 /// A lag parameter whose declared range admits negative values, which would
