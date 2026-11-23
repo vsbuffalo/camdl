@@ -48,7 +48,8 @@ pub use inputs::{
     release, Class, EnvInputs, EnvParts, FieldInfo, FileInputs, Given, InputFile, Inputs, Parsed, SourceBytes, Split, Vary,
 };
 pub use invocation::{
-    ByProductRendering, ExportFiles, ExportPath, ExportSink, Invocation, Member, MemberWith, Rendering, RunInfo, StoreRequest,
+    ByProductRendering, ExportFiles, ExportPath, ExportSink, Invocation, Member, MemberWith, Output, OutputFile, Rendering, RunInfo,
+    StoreRequest,
 };
 pub use layout::{path_label, Layout, Placed, LABEL_CAP};
 pub use maintenance::{Cleaned, VerifyFailure};
@@ -57,7 +58,7 @@ pub use record::{Lineage, Status, MAX_PRESERVED_ATTEMPTS, RECORD_FORMAT, STORE_F
 pub use run::{ByProductRun, FileHandle, Run};
 pub use fsutil::write_file_atomic;
 pub use storage::{Batch, Begin, PlanState, Planned, Reuse, Store, Wanted};
-pub use stored::{Dep, Entry, EntryState, Stored};
+pub use stored::{Dep, Entry, EntryState, Located, Stored};
 pub use store_derive::{EnvInputs, FileInputs, Identity, Inputs};
 
 /// Items the derives expand to. Not for use by hand.

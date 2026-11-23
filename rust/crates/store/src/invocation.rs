@@ -351,6 +351,28 @@ fn previous_holder(inner: &Inner, file: &InvocationFile) -> Result<Option<u64>> 
         .max())
 }
 
+/// One result an ended invocation listed, as a consumer outside the store
+/// reads it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Output {
+    pub kind: String,
+    pub run_id: Key,
+    /// The result this one is a by-product of.
+    pub upstream: Option<Key>,
+    /// The labels the invocation record gave it.
+    pub labels: serde_json::Value,
+    /// Every file of role result in the result's `run.json`, by stored name.
+    pub files: std::collections::BTreeMap<String, OutputFile>,
+}
+
+/// One result file of an [`Output`]: its digest and size as `run.json`
+/// records them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutputFile {
+    pub sha256: Key,
+    pub bytes: u64,
+}
+
 /// An invocation record, as read back.
 #[derive(Debug, Clone)]
 pub struct Invocation {
@@ -393,6 +415,44 @@ impl Invocation {
                 Ok((Id::from_key(r.run_id), labels))
             })
             .collect()
+    }
+
+    /// Each distinct (kind, run id) this invocation listed, in first-listed
+    /// order, read from the results' records alone. Refused with
+    /// [`Error::MemberNotCompleted`], naming each, when any entry did not end
+    /// `computed` or `reused`.
+    pub fn outputs(&self, store: &Store) -> Result<Vec<Output>> {
+        let missing: Vec<Key> = self
+            .file
+            .results
+            .iter()
+            .filter(|r| !matches!(r.outcome, Outcome::Computed | Outcome::Reused))
+            .map(|r| r.run_id)
+            .collect();
+        if !missing.is_empty() {
+            return Err(Error::MemberNotCompleted { invocation: self.file.seq, members: missing });
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        let mut out = Vec::new();
+        for r in &self.file.results {
+            if !seen.insert((r.kind.as_str(), r.run_id)) {
+                continue;
+            }
+            let located = store.locate(r.run_id)?;
+            if located.kind() != r.kind {
+                return Err(Error::Damaged {
+                    run_id: r.run_id,
+                    what: format!("invocation {} lists it as `{}`, and its record says `{}`", self.file.seq, r.kind, located.kind()),
+                });
+            }
+            let files = located
+                .result_files()
+                .into_iter()
+                .map(|(name, (sha256, bytes))| (name.to_string(), OutputFile { sha256, bytes }))
+                .collect();
+            out.push(Output { kind: r.kind.clone(), run_id: r.run_id, upstream: located.upstream(), labels: r.labels.clone(), files });
+        }
+        Ok(out)
     }
 
     /// Every member of kind `R::Of`, completed, with its labels.

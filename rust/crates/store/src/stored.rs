@@ -14,9 +14,9 @@ use crate::hash::{CanonicalHasher, ContentAddressed, Key};
 use crate::identity::{DepInfo, Identity};
 use crate::invocation::ExportPath;
 use crate::owner::{Liveness, Owner};
-use crate::record::{read_record, FileEntry, IdentityFile, Lineage, Role, RunFile, IDENTITY_FILE, RUN_FILE};
+use crate::record::{read_record, FileEntry, IdentityFile, Lineage, Relation, Role, RunFile, IDENTITY_FILE, RUN_FILE};
 use crate::run::read_checked;
-use crate::storage::Inner;
+use crate::storage::{Inner, Store};
 
 /// A completed result. The only type that opens result files or makes a
 /// [`Dep`].
@@ -172,6 +172,115 @@ impl<A: Artifact> Stored<A> {
 impl<A: Artifact> std::fmt::Debug for Stored<A> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Stored<{}>({} at {})", A::KIND, self.id.key(), self.dir.display())
+    }
+}
+
+/// A completed result of any registered kind, read from its records alone,
+/// without its typed identity: for a reader that names a result by run id
+/// and a file by name.
+#[derive(Debug, Clone)]
+pub struct Located {
+    run_id: Key,
+    kind: String,
+    dir: PathBuf,
+    upstream: Option<Key>,
+    files: BTreeMap<String, FileEntry>,
+}
+
+impl Store {
+    /// The completed result `run_id` names, of any kind registered at open.
+    /// Refused with [`Error::NotFound`] when no folder holds it,
+    /// [`Error::UnknownKind`] when its kind is not registered,
+    /// [`Error::NotCompleted`] when it is running or failed, and
+    /// [`Error::Damaged`] when its records or files no longer match.
+    pub fn locate(&self, run_id: Key) -> Result<Located> {
+        let Some((dir, ident)) = self.inner.find_any_kind(&run_id)? else {
+            return Err(Error::NotFound { handle: run_id.to_hex() });
+        };
+        if !self.inner.kinds.kinds.contains_key(ident.kind.as_str()) {
+            return Err(Error::UnknownKind { kind: ident.kind });
+        }
+        let upstream = ident.parent.as_ref().filter(|p| p.relation == Relation::Upstream).map(|p| p.run_id);
+        match crate::storage::folder_state(&dir, &run_id, &self.inner.kinds) {
+            crate::storage::State::Completed { dir, run } => {
+                Ok(Located { run_id, kind: ident.kind, dir, upstream, files: run.files })
+            }
+            crate::storage::State::Damaged { what, .. } => Err(Error::Damaged { run_id, what }),
+            crate::storage::State::Failed { .. } => Err(Error::NotCompleted { run_id, status: "failed" }),
+            _ => Err(Error::NotCompleted { run_id, status: "running" }),
+        }
+    }
+
+    /// The completed result a handle names, of any registered kind. A label
+    /// names its invocation's one result; an invocation with several is
+    /// refused with [`Error::NotOneResult`].
+    pub fn locate_handle(&self, handle: &crate::Handle) -> Result<Located> {
+        let key = match handle {
+            crate::Handle::Label { .. } => {
+                let inv = self.invocation(handle)?;
+                let mut keys: Vec<Key> = inv.file.results.iter().map(|r| r.run_id).collect();
+                keys.sort();
+                keys.dedup();
+                match keys.len() {
+                    1 => keys[0],
+                    _ => return Err(Error::NotOneResult { handle: handle.to_string(), members: keys }),
+                }
+            }
+            _ => self.resolve_key(handle, "")?.0,
+        };
+        self.locate(key)
+    }
+}
+
+impl Located {
+    pub fn run_id(&self) -> Key {
+        self.run_id
+    }
+
+    pub fn kind(&self) -> &str {
+        &self.kind
+    }
+
+    /// The result's folder, for display and for a reader outside the store.
+    pub fn folder(&self) -> &Path {
+        &self.dir
+    }
+
+    /// The result this one is a by-product of; `None` for a result that is
+    /// not a by-product, a result placed inside a parent included.
+    pub fn upstream(&self) -> Option<Key> {
+        self.upstream
+    }
+
+    /// Every result file, by stored name, with its digest and size.
+    pub fn result_files(&self) -> BTreeMap<&str, (Key, u64)> {
+        self.files
+            .iter()
+            .filter(|(_, e)| e.role == Role::Result)
+            .map(|(n, e)| (n.as_str(), (e.sha256.expect("a result file has a digest"), e.bytes.unwrap_or(0))))
+            .collect()
+    }
+
+    /// The path of a result or provenance file and the digest `run.json`
+    /// records for it. An attempt file, which has no digest, and a name the
+    /// record does not hold are refused with [`Error::BadFileName`].
+    pub fn file(&self, stored_name: &str) -> Result<(PathBuf, Key)> {
+        match self.files.get(stored_name) {
+            Some(e) if e.role != Role::Attempt => {
+                Ok((self.dir.join(stored_name), e.sha256.expect("a result or provenance file has a digest")))
+            }
+            Some(_) => Err(Error::BadFileName {
+                name: format!("{stored_name} (an attempt file of {}, which has no digest)", self.run_id.short12()),
+            }),
+            None => Err(Error::BadFileName { name: format!("{stored_name} (not a file of {})", self.run_id.short12()) }),
+        }
+    }
+
+    /// A result or provenance file's bytes, checked against the recorded
+    /// digest.
+    pub fn read(&self, stored_name: &str) -> Result<Vec<u8>> {
+        let (_, digest) = self.file(stored_name)?;
+        read_checked(self.run_id, &self.dir, stored_name, &digest)
     }
 }
 
@@ -444,3 +553,6 @@ pub(crate) fn cache<T: Send + Sync + 'static>(digest: Key, value: Arc<T>) -> Arc
     let entry = c.entry((TypeId::of::<T>(), digest)).or_insert_with(|| value as Arc<dyn Any + Send + Sync>);
     Arc::clone(entry).downcast::<T>().expect("the cache is keyed by type")
 }
+
+#[cfg(test)]
+mod tests;

@@ -31,6 +31,8 @@ pub enum Error {
     Damaged { run_id: Key, what: String },
     #[error("{path} has format version {found}; this program reads version {reads}")]
     OldRecord { path: PathBuf, found: u16, reads: u16 },
+    #[error("the result {run_id} is {status}, not completed")]
+    NotCompleted { run_id: Key, status: &'static str },
     #[error("no stored result matches `{handle}`")]
     NotFound { handle: String },
     #[error("`{handle}` matches {} results: {}", matches.len(), list_keys(matches))]

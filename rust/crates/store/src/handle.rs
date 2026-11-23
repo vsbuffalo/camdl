@@ -92,7 +92,7 @@ impl<A: Artifact> std::str::FromStr for RunRef<A> {
 
 impl Store {
     /// The run id a handle names, with its kind as its record states it.
-    fn resolve_key(&self, handle: &Handle, kind: &'static str) -> Result<(Key, String)> {
+    pub(crate) fn resolve_key(&self, handle: &Handle, kind: &'static str) -> Result<(Key, String)> {
         let text = handle.to_string();
         match handle {
             Handle::Path(p) => {

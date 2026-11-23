@@ -697,6 +697,18 @@ impl Inner {
         Ok(found.into_iter().find(|(_, f)| &f.run_id == run_id && f.kind == kind).map(|(d, _)| d))
     }
 
+    /// The folder of `run_id` in any status and of any kind, with its identity
+    /// file: the index, else a walk of every result tree.
+    pub(crate) fn find_any_kind(&self, run_id: &Key) -> Result<Option<(PathBuf, IdentityFile)>> {
+        if let Some(d) = self.index_folder(run_id) {
+            if let Some(f) = identity_of(&d).filter(|f| &f.run_id == run_id) {
+                return Ok(Some((d, f)));
+            }
+        }
+        let found = self.walk_and_reindex()?;
+        Ok(found.into_iter().find(|(_, f)| &f.run_id == run_id))
+    }
+
     /// The folder and record of a completed, undamaged result.
     pub(crate) fn find_completed(&self, kind: &str, run_id: &Key) -> Result<Option<(PathBuf, RunFile)>> {
         let Some(dir) = self.find_any(kind, run_id)? else { return Ok(None) };
