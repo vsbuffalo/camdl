@@ -10967,6 +10967,298 @@ let expand_time_functions ctx : Ir.time_function list * (string * float) list =
   (List.map fst pairs,
    List.map (fun ((tf : Ir.time_function), s) -> (tf.Ir.name, s)) pairs)
 
+(* ── Forcing lags: never negative ────────────────────────────────────────── *)
+
+(* Why the compiler cannot establish that a lag is zero or more. *)
+type lag_doubt =
+  | Doubt_param of string
+      (* A parameter, by IR name, whose declared range admits a negative
+         value: a `real` without a lower bound, or a lower bound below 0. *)
+  | Doubt_instant of string
+      (* A parameter declared `instant`: a point in time, not a length. *)
+  | Doubt_negative_operand of float
+      (* A negative constant combined with a term that reads a parameter. *)
+  | Doubt_form of string
+      (* Any other expression; the string says what it does. *)
+
+(* The sign of a forcing's resolved `lag`, as far as the compiler can
+   establish it. *)
+type lag_sign =
+  | Lag_value of float
+      (* Closed arithmetic over constants, with its value in model time
+         units. *)
+  | Lag_nonneg
+      (* It reads a parameter, and is zero or more for every value in the
+         declared ranges of the parameters it reads. *)
+  | Lag_unsigned of lag_doubt
+
+(* The lowest value a parameter's declared range admits: the lower bound of
+   its `in [lo, hi]`, else the lower end its kind carries (spec §4.4). [None]
+   when the range has no lower end (`real`, `instant`). *)
+let param_range_lower (p : Ir.parameter) : float option =
+  match Ir.param_bounds p, p.Ir.param_kind with
+  | Some (lo, _), _ -> Some lo
+  | None, Some (Ir.Rate | Ir.Probability | Ir.Count | Ir.Positive | Ir.Duration) ->
+    Some 0.0
+  | None, (Some (Ir.Real | Ir.Instant) | None) -> None
+
+(* The sign of [e], a lag. A lag is known to be non-negative when it is a
+   finite constant at least 0, a parameter whose declared range starts at 0
+   or above, or one of these forms over terms known to be non-negative: a
+   sum, product, quotient or `min` of them, a power whose base is one, a
+   conditional both of whose branches are, a `max` with at least one such
+   argument, `sqrt`, `floor` or `ceil` of one; or `abs`, `exp` or `tanh` of
+   any term. A `mod` and a table cell chosen when the model runs are not
+   analysed. [constants] are the model's typed constants; a shared binding
+   is read through [ctx.hoisted_rev]. *)
+let lag_sign ctx ~(parameters : Ir.parameter list)
+    ~(constants : Ir.constant list) (e : Ir.expr) : lag_sign =
+  let nonneg = function
+    | Lag_nonneg -> true
+    | Lag_value v -> Float.is_finite v && v >= 0.0
+    | Lag_unsigned _ -> false
+  in
+  (* The reason a combination of [args] is not known to be non-negative. *)
+  let doubt_of args =
+    match List.find_opt (function Lag_unsigned _ -> true | _ -> false) args with
+    | Some (Lag_unsigned d) -> d
+    | _ ->
+      (match List.find_opt (function Lag_value v -> v < 0.0 | _ -> false) args with
+       | Some (Lag_value v) -> Doubt_negative_operand v
+       | _ ->
+         if List.exists (function Lag_value v -> not (Float.is_finite v) | _ -> false) args
+         then Doubt_form "has a term that is not a finite number"
+         else Doubt_form "combines its terms in a way whose sign is not analysed")
+  in
+  let rec go (e : Ir.expr) : lag_sign =
+    match e with
+    | Ir.Const v | Ir.UnitLiteral { value = v; _ } -> Lag_value v
+    | Ir.ConstRef c ->
+      (match List.find_opt (fun (k : Ir.constant) -> k.Ir.c_name = c) constants with
+       | Some k -> Lag_value k.Ir.c_value
+       | None -> Lag_unsigned (Doubt_form (Printf.sprintf "reads '%s'" c)))
+    | Ir.BindingRef b ->
+      (match List.assoc_opt b ctx.hoisted_rev with
+       | Some body -> go body
+       | None -> Lag_unsigned (Doubt_form (Printf.sprintf "reads '%s'" b)))
+    | Ir.Param name ->
+      (match List.find_opt (fun (p : Ir.parameter) -> p.Ir.name = name) parameters with
+       | Some { Ir.param_kind = Some Ir.Instant; _ } -> Lag_unsigned (Doubt_instant name)
+       | Some p ->
+         (match param_range_lower p with
+          | Some lo when lo >= 0.0 -> Lag_nonneg
+          | Some _ | None -> Lag_unsigned (Doubt_param name))
+       | None -> Lag_unsigned (Doubt_param name))
+    | Ir.UnOp { op; arg } ->
+      let a = go arg in
+      (match op, a with
+       | _, Lag_value v ->
+         Lag_value (match op with
+           | Ir.Neg -> Float.neg v | Ir.Exp -> exp v | Ir.Log -> log v
+           | Ir.Sqrt -> sqrt v | Ir.Abs -> Float.abs v
+           | Ir.Floor -> floor v | Ir.Ceil -> ceil v
+           | Ir.Sin -> sin v | Ir.Cos -> cos v | Ir.Tanh -> tanh v)
+       | (Ir.Abs | Ir.Exp), _ -> Lag_nonneg
+       | (Ir.Sqrt | Ir.Floor | Ir.Ceil | Ir.Tanh), Lag_nonneg -> Lag_nonneg
+       | Ir.Neg, Lag_nonneg -> Lag_unsigned (Doubt_form "negates a term")
+       | Ir.Log, Lag_nonneg -> Lag_unsigned (Doubt_form "takes a logarithm")
+       | (Ir.Sin | Ir.Cos), Lag_nonneg ->
+         Lag_unsigned (Doubt_form "takes a sine or cosine")
+       | _, Lag_unsigned d -> Lag_unsigned d)
+    | Ir.BinOp { op; left; right } ->
+      let l = go left and r = go right in
+      (match op, l, r with
+       | (Ir.Add | Ir.Sub | Ir.Mul | Ir.Div | Ir.Pow | Ir.Min | Ir.Max),
+         Lag_value a, Lag_value b ->
+         Lag_value (match op with
+           | Ir.Add -> a +. b | Ir.Sub -> a -. b | Ir.Mul -> a *. b
+           | Ir.Div -> a /. b | Ir.Pow -> Float.pow a b
+           | Ir.Min -> Float.min a b | _ -> Float.max a b)
+       | (Ir.Add | Ir.Mul | Ir.Div | Ir.Min), _, _ when nonneg l && nonneg r -> Lag_nonneg
+       | Ir.Pow, _, _ when nonneg l -> Lag_nonneg
+       | Ir.Max, _, _ when nonneg l || nonneg r -> Lag_nonneg
+       | Ir.Sub, _, _ when nonneg l && nonneg r ->
+         Lag_unsigned (Doubt_form "subtracts one term from another")
+       | Ir.Mod, _, _ -> Lag_unsigned (Doubt_form "takes a `mod`")
+       | _ -> Lag_unsigned (doubt_of [l; r]))
+    | Ir.Reduce terms ->
+      let signs = List.map go terms in
+      if List.for_all (function Lag_value _ -> true | _ -> false) signs then
+        Lag_value (List.fold_left (fun acc s ->
+          match s with Lag_value v -> acc +. v | _ -> acc) 0.0 signs)
+      else if List.for_all nonneg signs then Lag_nonneg
+      else Lag_unsigned (doubt_of signs)
+    | Ir.Time -> Lag_unsigned (Doubt_form "reads the model time `t`")
+    | Ir.Dt -> Lag_unsigned (Doubt_form "reads the step length `dt`")
+    | Ir.Pop _ | Ir.PopSum _ ->
+      Lag_unsigned (Doubt_form "reads the state of a compartment")
+    | Ir.TimeFunc _ -> Lag_unsigned (Doubt_form "reads a forcing")
+    | Ir.TableLookup _ ->
+      Lag_unsigned (Doubt_form "reads a table cell chosen when the model runs")
+    | Ir.Cond { then_; else_; _ } ->
+      let a = go then_ and b = go else_ in
+      if nonneg a && nonneg b then Lag_nonneg
+      else Lag_unsigned (doubt_of [a; b])
+    | Ir.UncheckedDim { inner; _ } -> go inner
+    | Ir.PerEvalRef _ | Ir.Projected | Ir.ObsColumnRef _ | Ir.ObsAnchor _
+    | Ir.ForcingBasis _ ->
+      Lag_unsigned (Doubt_form "has a form whose sign is not analysed")
+  in
+  go e
+
+(* The forcing declaration an expanded forcing comes from: the one of that
+   name, or the indexed family whose members are named `<family>_<levels>`. *)
+let forcing_decl_of_ir_name ctx (name : string) : func_decl option =
+  match List.find_opt (fun (fd : func_decl) -> fd.fname = name) ctx.func_decls with
+  | Some fd -> Some fd
+  | None ->
+    List.find_opt (fun (fd : func_decl) ->
+      fd.findices <> [] && String.starts_with ~prefix:(fd.fname ^ "_") name)
+      ctx.func_decls
+
+(* The parameter declaration an IR parameter name comes from, with the name
+   the model writes: the scalar of that name, or the indexed family one of
+   whose cells it is. *)
+let param_decl_of_ir_name ctx (name : string) : (string * param_type * bounds option) option =
+  List.find_map (function
+    | PScalar { pname; pkind; pbounds; _ } when pname = name -> Some (pname, pkind, pbounds)
+    | PIndexed { pname; pdims; pkind; pbounds; _ }
+      when List.mem name (expand_indexed_decl_names ctx pname pdims) ->
+      Some (pname, pkind, pbounds)
+    | _ -> None) ctx.param_decls
+
+(* How a lag parameter's kind is written in a corrected declaration: a
+   `duration` as itself, a kind whose dimension is inferred with `dim T`. *)
+let lag_kind_text (k : param_type) : string =
+  match k with
+  | PPositive | PReal -> Param_annot.kind_name k ^ " dim T"
+  | _ -> Param_annot.kind_name k
+
+(* A forcing's `lag` sets the time the forcing is read at, t − lag, so a
+   negative lag reads the forcing's value after t. In a fit that trains each
+   data point on forcing values from after it, and in a forecast it reads
+   table rows after the forecast origin while filtering before it. A lag
+   whose sign depends on a parameter is accepted only when the parameter's
+   declared range makes it non-negative ([lag_sign]): a constant lag below
+   0, or not a finite number, is E424, and any other lag not known to be at
+   least 0 is E425. A
+   value supplied at run time is checked against the declared bounds by the
+   runtime, not here. Each diagnostic is reported once per declaration, so
+   an indexed forcing family does not repeat it for every member. *)
+let check_forcing_lags ctx ~(time_functions : Ir.time_function list)
+    ~(parameters : Ir.parameter list) ~(constants : Ir.constant list) =
+  let reported = Hashtbl.create 4 in
+  List.iter (fun (tf : Ir.time_function) ->
+    match tf.Ir.lag with
+    | None -> ()
+    | Some lag ->
+      let decl = forcing_decl_of_ir_name ctx tf.Ir.name in
+      let fname = match decl with Some fd -> fd.fname | None -> tf.Ir.name in
+      let loc = forcing_loc ctx fname in
+      let written = match decl with
+        | Some fd ->
+          (match List.assoc_opt "lag" fd.fargs with
+           | Some (FExpr e) -> written_expr_to_string ~subst:[] e
+           | _ -> "...")
+        | None -> "..." in
+      let once code message ~detail ~hint =
+        if not (Hashtbl.mem reported (fname, code)) then begin
+          Hashtbl.replace reported (fname, code) ();
+          Diagnostics.error ctx.diags ~code ~loc ~message ~detail ~hint ()
+        end
+      in
+      let reads_past =
+        "a forcing with `lag = L` is read at t − L, its value L earlier; a \
+         lag below 0 reads the forcing's value after t, so a fit is trained \
+         on forcing values from after each data point and a forecast reads \
+         them from after its origin"
+      in
+      match lag_sign ctx ~parameters ~constants lag with
+      | Lag_value v when v < 0.0 || not (Float.is_finite v) ->
+        let what =
+          if Float.is_finite v then
+            Printf.sprintf "is negative (%g %s)" v (Param_annot.unit_name ctx.time_unit)
+          else Printf.sprintf "is not a finite number (%g)" v
+        in
+        once "E424"
+          (Printf.sprintf
+             "forcing '%s': `lag = %s` %s; a lag reads the forcing's past, so \
+              it must be a finite duration of zero or more"
+             fname written what)
+          ~detail:reads_past
+          ~hint:"to make the forcing lead the dynamics, shift its data \
+                 instead: add the lead to the time column of its table (or, \
+                 for a `sinusoidal` forcing, to its `phase`), and remove \
+                 the `lag`"
+      | Lag_value _ | Lag_nonneg -> ()
+      | Lag_unsigned doubt ->
+        let param_name ir_name = match param_decl_of_ir_name ctx ir_name with
+          | Some (pname, kind, bounds) -> (pname, Some kind, bounds)
+          | None -> (ir_name, None, None)
+        in
+        let message, hint = match doubt with
+          | Doubt_param ir_name ->
+            let (pname, kind, bounds) = param_name ir_name in
+            let declared = match kind, bounds with
+              | Some k, Some b ->
+                let (lo, _) = bounds_exprs b in
+                Printf.sprintf "declared `%s` with the lower bound %s, below 0"
+                  (Param_annot.kind_name k) (written_expr_to_string ~subst:[] lo)
+              | Some k, None ->
+                Printf.sprintf "declared `%s` with no lower bound"
+                  (Param_annot.kind_name k)
+              | None, _ -> "whose declared range is not known to be non-negative"
+            in
+            let hint = match kind, bounds with
+              | Some k, Some b ->
+                let (_, hi) = bounds_exprs b in
+                Printf.sprintf
+                  "raise the lower bound of '%s' to 0 or more: `%s : %s in \
+                   [0 'days, %s]`"
+                  pname pname (lag_kind_text k) (written_expr_to_string ~subst:[] hi)
+              | Some k, None ->
+                Printf.sprintf
+                  "declare '%s' `duration`, whose range is [0, ∞), or give it a \
+                   lower bound of 0 or more: `%s : %s in [0 'days, 30 'days]`"
+                  pname pname (lag_kind_text k)
+              | None, _ ->
+                Printf.sprintf "declare '%s' `duration`, whose range is [0, ∞)" pname
+            in
+            (Printf.sprintf
+               "forcing '%s': `lag = %s` reads parameter '%s', %s, so the lag \
+                can be negative"
+               fname written pname declared,
+             hint)
+          | Doubt_instant ir_name ->
+            let (pname, _, _) = param_name ir_name in
+            (Printf.sprintf
+               "forcing '%s': `lag = %s` reads parameter '%s', declared \
+                `instant`; an instant is a point in time, and a lag is a \
+                length of time"
+               fname written pname,
+             Printf.sprintf "declare '%s' as a length of time: `%s : duration`"
+               pname pname)
+          | Doubt_negative_operand v ->
+            (Printf.sprintf
+               "forcing '%s': the compiler cannot establish that `lag = %s` is \
+                zero or more: it combines a parameter with the negative \
+                constant %g"
+               fname written v,
+             "write the lag as a parameter declared `duration`, or bounded \
+              below by 0, and derive any other quantity from it")
+          | Doubt_form what ->
+            (Printf.sprintf
+               "forcing '%s': the compiler cannot establish that `lag = %s` is \
+                zero or more: the expression %s"
+               fname written what,
+             "write the lag as a constant duration, or as a parameter \
+              declared `duration` or bounded below by 0; a sum, product, \
+              quotient, power, `min`, `max` or conditional of these is also \
+              accepted")
+        in
+        once "E425" message ~detail:reads_past ~hint
+  ) time_functions
+
 (* The expanded cell a `set`/`add` target denotes (proposal
    2026-11-01-indexed-set-targets). Both verbs resolve it the same way, and the
    result then goes through [check_action_target].
@@ -16786,6 +17078,7 @@ let expand_detail ?(source_dir = "") ?(filename = "<input>") (name : string) (de
   let initial_conditions = expand_init ctx ~comps:expanded_comps in
   let constants = expand_constants ctx in
   let parameters = expand_parameters ctx in
+  check_forcing_lags ctx ~time_functions:expanded_time_functions ~parameters ~constants;
   let observations = expand_observations ctx ~transitions:expanded_trs in
   let interventions = expand_interventions ctx in
   let ode_equations = expand_ode_equations ctx in

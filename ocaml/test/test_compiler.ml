@@ -5683,6 +5683,181 @@ let test_forcing_with_param_lag () =
    | Some _ -> Alcotest.fail "expected lag = Param tau"
    | None   -> Alcotest.fail "expected Some lag")
 
+(* A model whose forcing `vc` has `lag = <lag>`, with [params] and [lets]
+   added to its declarations. A lag reads the forcing's past, so a lag that
+   can be negative is refused: a negative constant with E424, and any other
+   lag not known to be at least 0 with E425. *)
+let lag_src ?(params = "") ?(lets = "") lag = Printf.sprintf {|
+    compartments { S, I, R }
+    parameters {
+      gamma : rate
+      N0    : count
+      I0    : count
+      %s
+    }
+    %s
+    forcing {
+      vc : interpolated 'ratio {
+        times  = [0.0, 10.0, 20.0]
+        values = [1.0, 2.0, 3.0]
+        method = linear
+        lag    = %s
+      }
+    }
+    let N = S + I + R
+    transitions {
+      infection : S --> I  @ vc(t) * S * I / N
+      recovery  : I --> R  @ gamma * I
+    }
+    init { S = N0 - I0  I = I0 }
+    simulate { from = 0 'days  to = 365 'days }
+  |} params lets lag
+
+let test_lag_accepted () =
+  List.iter (fun (params, lets, lag) ->
+    ignore (compile_expect_ok (lag_src ~params ~lets lag)))
+    [ "", "", "0";
+      "", "", "0 'days";
+      "", "", "4 'years";
+      "", "", "10 'days - 3 'days";
+      "", "let L = 5 'days", "L";
+      "", "let L : duration = 5 'days", "L";
+      "tau : duration", "", "tau";
+      "tau : positive dim T", "", "tau";
+      "tau : real dim T in [0 'days, 30 'days]", "", "tau";
+      "tau : duration in [1 'days, 30 'days]", "", "tau";
+      "tau : duration", "", "2 * tau + 3 'days";
+      "tau : duration", "", "max(tau - 5 'days, 0 'days)";
+      "tau : duration", "let L = tau", "L";
+      (* A conditional whose branches are both non-negative, whatever its
+         condition reads. *)
+      "tau : duration", "", "if t > 30 'days then tau else 2 'days";
+      (* A power whose base is non-negative. *)
+      "tau : duration", "", "(tau / (1 'days)) ^ 2 * 1 'days";
+      "", "", "2 ^ 3 * 1 'days" ]
+
+let test_negative_constant_lag_is_e424 () =
+  compile_expect_error_code ~code:"E424"
+    ~contains:"forcing 'vc': `lag = -5 'days` is negative (-5 days)"
+    (lag_src "-5 'days");
+  compile_expect_error_code ~code:"E424" ~contains:"reads the forcing's past"
+    (lag_src "3 'days - 10 'days");
+  (* A constant reached through a `let`, typed or not. *)
+  compile_expect_error_code ~code:"E424" ~contains:"`lag = L` is negative"
+    (lag_src ~lets:"let L = -1 'weeks" "L");
+  compile_expect_error_code ~code:"E424" ~contains:"`lag = L` is negative"
+    (lag_src ~lets:"let L : duration = -1 'weeks" "L");
+  compile_expect_error_code ~code:"E424" ~contains:"time column of its table"
+    (lag_src "-5 'days");
+  (* A constant that is not a finite number: NaN and an infinity. *)
+  compile_expect_error_code ~code:"E424"
+    ~contains:"`lag = 0 'days * (1 / 0)` is not a finite number (nan)"
+    (lag_src "0 'days * (1 / 0)");
+  compile_expect_error_code ~code:"E424" ~contains:"is not a finite number (nan)"
+    (lag_src "sqrt(-1) * 1 'days");
+  compile_expect_error_code ~code:"E424" ~contains:"is not a finite number (inf)"
+    (lag_src "1 'days / 0")
+
+let test_unbounded_param_lag_is_e425 () =
+  compile_expect_error_code ~code:"E425"
+    ~contains:"reads parameter 'tau', declared `real` with no lower bound"
+    (lag_src ~params:"tau : real dim T" "tau");
+  compile_expect_error_code ~code:"E425"
+    ~contains:"declare 'tau' `duration`, whose range is [0, ∞), or give it a \
+               lower bound of 0 or more: `tau : real dim T in [0 'days, 30 'days]`"
+    (lag_src ~params:"tau : real dim T" "tau");
+  (* A bounded parameter: the message names its lower bound, never "no lower
+     bound", and the hint keeps its kind and upper bound. *)
+  compile_expect_error_code ~code:"E425"
+    ~contains:"declared `duration` with the lower bound -3 'days, below 0"
+    (lag_src ~params:"tau : duration in [-3 'days, 5 'days]" "tau");
+  compile_expect_error_code ~code:"E425"
+    ~contains:"`tau : duration in [0 'days, 5 'days]`"
+    (lag_src ~params:"tau : duration in [-3 'days, 5 'days]" "tau");
+  compile_expect_error_code ~code:"E425"
+    ~contains:"declared `real` with the lower bound -3 'days, below 0"
+    (lag_src ~params:"tau : real dim T in [-3 'days, 5 'days]" "tau");
+  compile_expect_error_code ~code:"E425"
+    ~contains:"`tau : real dim T in [0 'days, 5 'days]`"
+    (lag_src ~params:"tau : real dim T in [-3 'days, 5 'days]" "tau");
+  compile_expect_error_code ~code:"E425"
+    ~contains:"`tau : positive dim T in [0 'days, 8 'days]`"
+    (lag_src ~params:"tau : positive dim T in [-2 'days, 8 'days]" "tau");
+  compile_expect_error_code ~code:"E425" ~contains:"declared `instant`"
+    (lag_src ~params:"tau : instant" "tau")
+
+let test_unsigned_lag_expression_is_e425 () =
+  compile_expect_error_code ~code:"E425"
+    ~contains:"cannot establish that `lag = tau - 2 'days` is zero or more: \
+               the expression subtracts one term from another"
+    (lag_src ~params:"tau : duration" "tau - 2 'days");
+  compile_expect_error_code ~code:"E425"
+    ~contains:"combines a parameter with the negative constant -1"
+    (lag_src ~params:"tau : duration" "-1 * tau");
+  compile_expect_error_code ~code:"E425"
+    ~contains:"reads parameter 'tau'"
+    (lag_src ~params:"tau : real dim T" "2 * tau");
+  (* A conditional with a branch that can be negative. *)
+  compile_expect_error_code ~code:"E425"
+    ~contains:"reads parameter 'tau'"
+    (lag_src ~params:"tau : real dim T" "if t > 30 'days then tau else 2 'days");
+  compile_expect_error_code ~code:"E425"
+    ~contains:"combines a parameter with the negative constant -2"
+    (lag_src ~params:"tau : duration" "if t > 30 'days then tau else -2 'days");
+  (* A power whose base can be negative, and a `mod`, which is not
+     analysed. *)
+  compile_expect_error_code ~code:"E425" ~contains:"reads parameter 'tau'"
+    (lag_src ~params:"tau : real dim T" "(tau / (1 'days)) ^ 2 * 1 'days");
+  compile_expect_error_code ~code:"E425" ~contains:"takes a `mod`"
+    (lag_src ~params:"tau : duration" "mod(tau, 7 'days)")
+
+(* An indexed forcing family whose lag reads an indexed parameter is
+   reported once, naming the declarations rather than the expanded cells. *)
+let test_indexed_lag_is_e425_once () =
+  let src family_kind = Printf.sprintf {|
+    dimensions { patch = [a, b] }
+    compartments { S, I, R }
+    stratify(by = patch)
+    parameters {
+      gamma : rate
+      tau[patch] : %s
+    }
+    forcing {
+      vc[p in patch] : interpolated 'ratio {
+        times  = [0.0, 10.0, 20.0]
+        values = [1.0, 2.0, 3.0]
+        method = linear
+        lag    = tau[p]
+      }
+    }
+    transitions {
+      infection[p in patch] : S[p] --> I[p] @ vc[p] * S[p] * I[p] / (S[p] + I[p] + R[p])
+      recovery[p in patch]  : I[p] --> R[p] @ gamma * I[p]
+    }
+    init {
+      S[a] = 990
+      S[b] = 990
+      I[a] = 10
+      I[b] = 10
+    }
+    simulate { from = 0 'days  to = 365 'days }
+  |} family_kind in
+  ignore (compile_expect_ok (src "duration"));
+  compile_expect_error_code ~code:"E425"
+    ~contains:"forcing 'vc': `lag = tau[p]` reads parameter 'tau'"
+    (src "real dim T");
+  match compile_errors (src "real dim T") with
+  | Ok _ -> Alcotest.fail "expected E425"
+  | Error e ->
+    let needle = "\"code\":\"E425\"" in
+    let k = String.length needle in
+    let rec count i acc =
+      if i + k > String.length e then acc
+      else if String.sub e i k = needle then count (i + k) (acc + 1)
+      else count (i + 1) acc in
+    let n = count 0 0 in
+    Alcotest.(check int) "one E425 for the family" 1 n
+
 let rec expr_contains_time_func name = function
   | Ir.TimeFunc n        -> n = name
   | Ir.BinOp b           -> expr_contains_time_func name b.Ir.left
@@ -19465,6 +19640,11 @@ let () =
       Alcotest.test_case "gh#314 forcing without lag ⇒ None"     `Quick test_forcing_without_lag_is_none;
       Alcotest.test_case "gh#314 lag = 10 'days ⇒ Some 10.0"     `Quick test_forcing_with_literal_lag;
       Alcotest.test_case "gh#314 lag = tau ⇒ Some (Param tau)"   `Quick test_forcing_with_param_lag;
+      Alcotest.test_case "a lag known to be ≥ 0 compiles"        `Quick test_lag_accepted;
+      Alcotest.test_case "a negative constant lag is E424"       `Quick test_negative_constant_lag_is_e424;
+      Alcotest.test_case "a lag parameter that can be negative is E425" `Quick test_unbounded_param_lag_is_e425;
+      Alcotest.test_case "a lag expression of unknown sign is E425" `Quick test_unsigned_lag_expression_is_e425;
+      Alcotest.test_case "an indexed family's lag is E425 once" `Quick test_indexed_lag_is_e425_once;
     ];
     "read_long", [
       Alcotest.test_case "1D array from TSV file"            `Quick test_read_long_1d;

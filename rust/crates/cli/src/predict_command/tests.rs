@@ -129,16 +129,17 @@ fn forced_model() -> String {
     forced
 }
 
-/// The forced fixture model with `pop` a step table through rows at days 0,
-/// 20, 40 and 63, read at `t − tau` for a parameter `tau`, which the point
-/// `point_lagged.toml` sets to −5 days.
+/// The forced fixture model with `pop` a step table through rows at days −10,
+/// 20, 40 and 63, read at `t − tau` for a parameter `tau : duration`, which
+/// the point `point_lagged.toml` sets to 5 days. The first row is before day
+/// 0 so that the run's start, which reads the table at −5, is inside it.
 fn lagged_model() -> String {
     let m = forced_model();
     let lagged = m
-        .replace("[0 'days, 20 'days, 30 'days, 63 'days]", "[0 'days, 20 'days, 40 'days, 63 'days]")
+        .replace("[0 'days, 20 'days, 30 'days, 63 'days]", "[-10 'days, 20 'days, 40 'days, 63 'days]")
         .replace("    method = linear\n  }", "    method = constant\n    lag    = tau\n  }")
-        .replace("  I0    : count\n", "  I0    : count\n  tau   : real dim T\n");
-    assert!(lagged.contains("lag    = tau") && lagged.contains("tau   : real dim T") && lagged.contains("40 'days"),
+        .replace("  I0    : count\n", "  I0    : count\n  tau   : duration\n");
+    assert!(lagged.contains("lag    = tau") && lagged.contains("tau   : duration") && lagged.contains("40 'days"),
         "the forced fixture moved");
     lagged
 }
@@ -173,7 +174,7 @@ fn fixed_point_files() -> Vec<(&'static str, String)> {
         ("forced.camdl", forced_model()),
         ("lagged.camdl", lagged_model()),
         ("fit_forced.toml", FIT.replace("model.camdl", "forced.camdl")),
-        ("point_lagged.toml", format!("{POINT}tau = -5.0\n")),
+        ("point_lagged.toml", format!("{POINT}tau = 5.0\n")),
         ("patch.toml", "beta = 0.4\ngamma = 0.2\nrho = 0.5\n".into()),
         ("patch_cases.tsv", (1..=10).fold("time\tcases\n".to_string(), |s, t| s + &format!("{t}\t{}\n", 2 + t))),
         ("w1.tsv", "1.0\n0.5\n".into()),
@@ -820,10 +821,10 @@ fn a_fit_records_a_linear_table_whose_training_extent_falls_between_rows() {
 }
 
 /// A step table whose next row after the origin (day 40) is past a two-week
-/// reach from day 24, read at `t − tau` with `tau` a parameter at −5 days:
-/// the run reads the day-40 row from day 35, and a parameter lag may be
-/// negative, so the forecast is refused with no statement, `hold` is refused
-/// and not offered, and a statement runs.
+/// reach from day 24, read at `t − tau` with `tau` a `duration` parameter at
+/// 5 days. The forecast classifier takes every row after the origin as read
+/// under a parameter lag, whatever its value, so the forecast is refused with
+/// no statement, `hold` is refused and not offered, and a statement runs.
 #[test]
 fn a_parameter_lag_reads_a_step_tables_rows_after_the_origin() {
     let fresh = tempfile::tempdir().unwrap();
@@ -855,6 +856,24 @@ fn a_parameter_lag_reads_a_step_tables_rows_after_the_origin() {
     assert!(predictions(&root).is_empty(), "nothing is stored");
     let out = predict_in(cwd.path(), &root, &line(&["--covariate", "pop=prospective"]));
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+}
+
+/// A lag parameter whose declared range admits negative values, which would
+/// read the forcing's rows after the origin while filtering before it, is
+/// refused when the model compiles (E425), before any forecast runs.
+#[test]
+fn a_lag_parameter_that_can_be_negative_is_refused_at_compile_time() {
+    let fx = fixture();
+    let dir = tempfile::tempdir().unwrap();
+    let model = dir.path().join("lagged_real.camdl");
+    let src = lagged_model().replace("  tau   : duration\n", "  tau   : real dim T\n");
+    assert!(src.contains("tau   : real dim T"), "the lagged fixture moved");
+    std::fs::write(&model, src).unwrap();
+    let out = Command::new(&fx.camdlc).arg("check").arg(&model).output().unwrap();
+    let err = format!("{}{}", String::from_utf8_lossy(&out.stderr), String::from_utf8_lossy(&out.stdout));
+    assert!(!out.status.success(), "a `real` lag parameter compiled:\n{err}");
+    assert!(err.contains("E425") && err.contains("reads parameter 'tau', declared `real` with no lower bound"),
+        "the refusal is E425 naming `tau`:\n{err}");
 }
 
 /// `camdl fit predict` and `camdl predict --fit` are refused, each naming

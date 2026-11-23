@@ -13,6 +13,36 @@ How to read an entry: **what changed**, the **migration** (old → new), and the
 
 ---
 
+## 2026-11-23 — a forcing's `lag` must be zero or more
+
+**What.** A forcing with `lag = L` is read at t − L. A negative constant lag
+(`lag = -5 'days`) and a lag parameter that can be negative (`lag = tau` with
+`tau : real dim T`) used to compile, and made the model read the forcing's value
+after t: a fit was trained on forcing values from after each data point, and a
+forecast read table rows from after its origin. A lag is now accepted only when
+the compiler can establish that it is zero or more: a finite constant at least
+0; a parameter whose declared range starts at 0 or above (`duration` or
+`positive` with no bounds, or `in [lo, hi]` with `lo ≥ 0`); a sum, product,
+quotient or `min` of such terms, a power whose base is one, a conditional both
+of whose branches are, or a `max` with at least one such argument
+(`max(tau - 5 'days, 0 'days)`); `abs`, `exp` or `tanh` of any term, and `sqrt`,
+`floor` or `ceil` of a non-negative one. A difference, a `mod`, a table cell
+chosen at run time and an `instant` parameter are refused. A constant lag that
+is not a finite number (`1 'days / 0`) is refused too.
+
+**Migration.** For a lead, remove the negative `lag` and shift the forcing's
+data: add the lead to its table's time column, or to a `sinusoidal` forcing's
+`phase`. For a lag parameter, declare it `tau : duration`, or bound it below by
+zero, `tau : real dim T in [0 'days, 60 'days]`. Write a lag such as
+`tau - 2 'days` as a single parameter declared `duration`.
+
+**Diagnostic.** E424, "forcing 'wave': `lag = -5 'days` is negative (-5 days); a
+lag reads the forcing's past, so it must be a finite duration of zero or more",
+and E425, "forcing 'wave': `lag = tau` reads parameter 'tau', declared `real`
+with no lower bound, so the lag can be negative".
+
+---
+
 ## 2026-11-20 — `diagnostic_test` is refused as an initial-state law
 
 **What.**

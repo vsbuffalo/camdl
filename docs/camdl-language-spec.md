@@ -1942,10 +1942,68 @@ shifted time.
 - The delay is a point delay: the evaluation time is shifted by `lag`. A
   distributed lag, which averages the forcing over a window, is not supported.
 
+**A lag is zero or more.** A lag reads the forcing's past. A negative lag would
+read its value after `t`: a fit would be trained on forcing values from after
+each data point, and a forecast would read them from after its origin. A
+forcing that leads the dynamics is written by shifting its data instead: the
+lead is added to the time column of its table, or to a `sinusoidal` forcing's
+`phase`. The compiler accepts a `lag` only when it can establish that the lag
+is zero or more, which holds for:
+
+- a finite constant at least 0: a number, a duration literal, or a `let` or
+  typed constant of either (`lag = 4 'years`);
+- a parameter whose declared range starts at 0 or above: a `duration` or
+  `positive` parameter with no bounds, whose kind carries [0, ∞) (§4.4), or a
+  parameter whose `in [lo, hi]` has `lo ≥ 0`
+  (`tau : real dim T in [0 'days, 60 'days]`);
+- a sum, product, quotient or `min` of terms of these two forms or of this
+  one (`lag = tau + 7 'days`), a power whose base is such a term, an
+  `if … then … else …` both of whose branches are, and a `max` with at least
+  one such argument (`lag = max(tau - 5 'days, 0 'days)`);
+- `abs`, `exp` or `tanh` of any term, and `sqrt`, `floor` or `ceil` of a term
+  known to be zero or more.
+
+A `mod` and a table cell chosen when the model runs are not analysed, so a lag
+that uses either is refused, as is a difference such as `tau - 2 'days`.
+
+```camdl preamble=forcing-demo
+forcing {
+  school_entry : sinusoidal 'ratio {
+    amplitude = 0.1
+    period    = 1 'years
+    phase     = 0 'days
+    baseline  = 1.0
+    lag       = 4 'years        # births reach school age four years later
+  }
+}
+```
+
+Every other lag is refused:
+
+```
+lag = -5 'days            # E424: a negative constant
+lag = 1 'days / 0         # E424: a constant that is not a finite number
+lag = tau                 # E425 for tau : real dim T, whose range has no lower end
+lag = tau                 # E425 for tau : duration in [-3 'days, 5 'days]
+lag = tau                 # E425 for tau : instant, a point in time, not a length
+lag = tau - 2 'days       # E425: a difference, whose sign the compiler cannot establish
+```
+
+The check reads the declaration. A value supplied when the model is run is
+checked against the parameter's declared bounds only (§4.1), so a `duration`
+lag parameter declared without bounds and given a negative value by
+`--param` is not refused; declare `in [0 'days, hi]` for the run to refuse
+one.
+
 The compiler emits no derivative with respect to `lag`, so a fit that
 estimates a `lag` parameter with NUTS is refused. A method that uses no
 gradient estimates it: `if2`, the particle filter, or `pgas` with `--no-nuts`.
 A constant `lag` is accepted by every method.
+
+**What is refused.** **E309** for a `lag` that is not a duration, **E424** for
+a constant `lag` below 0 or not a finite number, and **E425** for any other `lag` the compiler cannot
+establish is zero or more, naming the parameter whose declared range admits a
+negative value.
 
 ### Breakpoints anchored to the data
 
@@ -7394,6 +7452,8 @@ information.
 | E378 | Error   | A reactive trigger's threshold is neither a constant nor a parameter (§13.9) |
 | E379 | Error   | A probability-valued distribution argument (`p`, `pi`, a `diagnostic_test` `sens` or `spec`) that is a constant outside `[0, 1]`, or a `beta`/`beta_binomial` `mean` that is a constant outside `(0, 1)`, or either not a finite number, in a measurement or an initial-value law (§12.2) |
 | E423 | Error   | A destination split's constant weights are not a probability distribution: a weight is not finite or lies outside [0, 1], or all are constant and do not sum to 1 (within `1e-9`) (§9.1.2) |
+| E424 | Error   | A forcing's `lag` is a constant below 0, or not a finite number (§7, "Lagged forcing") |
+| E425 | Error   | A forcing's `lag` that the compiler cannot establish is zero or more: it reads a parameter whose declared range admits a negative value or an `instant` parameter, or is an expression such as a difference (§7, "Lagged forcing") |
 | W103 | Warning | Let binding name shadows a stratum value in some dimension                                |
 
 `camdlc FILE.camdl --json-errors` writes the diagnostics to standard error as a
