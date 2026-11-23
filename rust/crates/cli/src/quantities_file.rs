@@ -46,6 +46,7 @@ impl QuantitiesOverride {
     /// Read and digest a vocabulary file. Errors name the path — a mistyped
     /// `--quantities` must not degrade into "the model's own block was used",
     /// which is the same silent-fallback the whole feature exists to avoid.
+    #[expect(clippy::disallowed_methods, reason = "reads the vocabulary file `--quantities` names (declared `#[input(identity)]` on `SimulateArgs`), whose content digest keys what is computed from it")]
     pub fn load(path: &Path) -> Result<Self, String> {
         let bytes = std::fs::read(path).map_err(|e| {
             format!("cannot read the quantities file {}: {e}", path.display())

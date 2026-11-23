@@ -75,6 +75,7 @@ pub(crate) fn is_retained(index: usize, burn_in: usize, thin: usize) -> bool {
 /// or a segment whose numbering restarted, is refused rather than read as more
 /// draws. Parameter values are the trace's shortest round-trip rendering, so
 /// they parse back to the exact values the parent sampled.
+#[expect(clippy::disallowed_methods, reason = "reads a resumed chain's `trace.tsv` in this run's working directory: the base run's rows, carried in through the run's `resumed_from` dependency, followed by the rows this process appended")]
 pub(crate) fn inherited_draws(
     trace: &Path,
     index_col: &str,
@@ -130,6 +131,7 @@ pub(crate) fn inherited_draws(
 /// The sweeps below `boundary` a resumed PGAS chain's `trajectories.tsv` holds
 /// a saved path for (its `draw` column), in file order, each once. Empty when
 /// the parent saved no paths for the chain.
+#[expect(clippy::disallowed_methods, reason = "reads a resumed chain's `trajectories.tsv` in this run's working directory: the base run's rows, carried in through the run's `resumed_from` dependency, followed by the rows this process appended")]
 pub(crate) fn inherited_saved_sweeps(trajectories: &Path, boundary: usize) -> Result<Vec<usize>, String> {
     if !trajectories.is_file() {
         return Ok(Vec::new());

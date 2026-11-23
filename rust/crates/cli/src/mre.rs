@@ -159,6 +159,7 @@ fn default_bundle_path(from: &Path) -> PathBuf {
 /// comes from the resolved `FitConfig` plus the model's compile-time `read()`
 /// closure. The fit.toml's directory is the root, so the config's own dest is
 /// its bare name and the reproduce command points at that.
+#[expect(clippy::disallowed_methods, reason = "reads the fit config `camdl mre fit` bundles; `mre` writes a tarball and stores no result")]
 fn collect_fit(args: &MreFitArgs, compile: crate::util::CompileSettings) -> Result<BundlePlan, String> {
     let config = args.config.as_path();
     if !config.exists() {
@@ -426,6 +427,7 @@ fn write_bundle(out: &crate::out::Out, plan: &BundlePlan, bundle: &Path) -> Resu
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 /// Compile the model and parse its read-closure depfile → resolved paths.
+#[expect(clippy::disallowed_methods, reason = "reads the depfile camdlc wrote to a temporary file; `mre` writes a tarball and stores no result")]
 fn read_closure(model_path: &Path, compile: crate::util::CompileSettings) -> Result<Vec<String>, String> {
     let tmp = tempfile::Builder::new()
         .suffix(".deps.json")
@@ -520,6 +522,7 @@ fn copy_into(src: &Path, dst: &Path) -> Result<(), String> {
         .map_err(|e| format!("cannot copy {} → bundle: {e}", src.display()))
 }
 
+#[expect(clippy::disallowed_methods, reason = "hashes a file `camdl mre` bundles, for the bundle's inventory; `mre` stores no result")]
 fn digest_file(path: &Path) -> Result<(u64, String), String> {
     let bytes = fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let mut h = Sha256::new();
@@ -528,6 +531,7 @@ fn digest_file(path: &Path) -> Result<(u64, String), String> {
 }
 
 /// Count non-empty, non-comment data rows (minus the header) for the inventory.
+#[expect(clippy::disallowed_methods, reason = "counts the rows of a data file `camdl mre` bundles, for the bundle's inventory; `mre` stores no result")]
 fn count_data_rows(path: &Path) -> Result<u64, String> {
     let text = fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let mut rows: u64 = 0;

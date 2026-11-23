@@ -687,6 +687,12 @@ impl SamplingScheme for Stratified {
 
 /// Parse a TSV line list (the [`super::writer::COLUMNS`] layout) back into
 /// entries. Used by the offline `camdl lineage tree` path and tests.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a library parser of the path its caller passes; the callers, `camdl lineage tree`, \
+              `sojourn` and `cohort`, read the line-list file the user names and write their \
+              output to a path the user names, storing no result"
+)]
 pub fn read_tsv(path: &std::path::Path) -> Result<Vec<LineListEntry>, SimError> {
     let body = std::fs::read_to_string(path)
         .map_err(|e| SimError::Validation(format!("read line list {}: {}", path.display(), e)))?;
@@ -772,6 +778,12 @@ pub fn read_tsv(path: &std::path::Path) -> Result<Vec<LineListEntry>, SimError> 
 }
 
 #[cfg(feature = "lineage-parquet")]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a library parser of the path its caller passes; the callers, `camdl lineage tree`, \
+              `sojourn` and `cohort`, read the line-list file the user names and write their \
+              output to a path the user names, storing no result"
+)]
 pub fn read_parquet(path: &std::path::Path) -> Result<Vec<LineListEntry>, SimError> {
     use arrow::array::{Float64Array, Int64Array, StringArray, UInt32Array, UInt64Array};
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;

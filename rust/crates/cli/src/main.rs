@@ -829,6 +829,7 @@ fn resolve_paired_posterior(
     )
 }
 
+#[expect(clippy::disallowed_methods, reason = "reads the IR camdlc compiled, the `--init-state` file (declared `#[input(identity)]`; its digest is the cell identity's ensemble) and the `--params` file, whose digest is recorded as lineage while its values are hashed")]
 fn run_simulate(inv: args::SimulateInvocation) {
     // simulate has no `--no-color`: its painters follow the environment and
     // whether each stream is a terminal.
@@ -2808,6 +2809,7 @@ fn resolve_simulate_obs_anchors(
 /// fit refuses it. A fit folder that keeps a config it cannot be read under
 /// (another store layout, its resolved config gone) is `Err`: passed over, the
 /// run would start where the model says rather than where the fit did.
+#[expect(clippy::disallowed_methods, reason = "reads `[simulate] from` of the fit file `--fit` names (declared `#[input(identity)]` on `SimulateArgs`) or of `fit.toml` in the scratch copy `fit_store::opened` makes; the start becomes each cell's window, which its identity holds")]
 fn simulate_fit_config_start(fit_ref: &std::path::Path) -> Result<Option<String>, String> {
     let raw = fit_ref.to_string_lossy();
     let text = if crate::fit_store::is_config_file(&raw) {
@@ -4081,6 +4083,7 @@ pub(crate) struct KeyedDraw {
 /// Parse a `draws.tsv` KEEPING the `(chain, draw)` key. The single parser;
 /// [`load_draws_tsv`] wraps this and drops the key so every param-only reader
 /// (predict's schema validator, the engine, compare) is unchanged.
+#[expect(clippy::disallowed_methods, reason = "parses the draws file its caller names (`--draws FILE`, or a stored fit's draws through `posterior_draws`); each row's parameter values are what a cell's identity hashes")]
 pub(crate) fn load_draws_tsv_keyed(path: &str) -> Result<Vec<KeyedDraw>, String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read {}: {}", path, e))?;
@@ -4168,6 +4171,7 @@ pub(crate) fn load_draws_tsv(path: &str) -> Result<Vec<HashMap<String, f64>>, St
 
 /// Print a dry run summary: resolved parameters with provenance.
 #[allow(clippy::too_many_arguments)]
+#[expect(clippy::disallowed_methods, reason = "reads the header of the `--draws` file to print its size for `--dry-run`, which runs and stores nothing")]
 fn print_dry_run(
     out: &crate::out::Out,
     ir_path: &str,

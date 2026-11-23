@@ -366,6 +366,7 @@ impl ChainSelection {
 /// parsing the parameter columns — the chain set a selection is resolved
 /// against when the cloud itself is not needed (`fit table`, `compare`'s
 /// record, `cat`).
+#[expect(clippy::disallowed_methods, reason = "reads the chain column of a draws file its caller names: a scratch copy of a stored fit's files (`fit_store::opened`, `browse::select_chain_rows`'s temporary copy) or the draws directory `simulate --fit` names, to resolve a chain selection")]
 pub fn chains_in_draws(path: &Path) -> Result<BTreeSet<ChainIndex>, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;

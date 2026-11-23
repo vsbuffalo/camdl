@@ -163,6 +163,7 @@ impl ChainPaths {
     /// order), and every draw must span the same substeps as the first, in the
     /// same order; anything else is a corrupt record and is refused.
     /// `Ok(None)` is a file with a header and no rows.
+    #[expect(clippy::disallowed_methods, reason = "reads a chain's `trajectories.tsv` under a method directory: the working directory this process's `fit run` is writing, or a `fit_store::RunFiles` copy of a stored run read out through the store")]
     pub fn from_trajectories_tsv(path: &Path) -> Result<Option<(Self, Vec<String>)>, String> {
         let txt = std::fs::read_to_string(path)
             .map_err(|e| format!("cannot read {}: {e}", path.display()))?;

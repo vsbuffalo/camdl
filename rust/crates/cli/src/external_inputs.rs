@@ -250,6 +250,7 @@ pub fn declares_any(model: &ir::Model) -> bool {
 /// forcing file without the declared columns, with an unparseable cell, or
 /// with no row for the forcing's stratum. Each bound file is read once, however
 /// many declarations read it; what was read is returned.
+#[expect(clippy::disallowed_methods, reason = "reads each file bound to an external input (`--table`, declared `#[input(identity)]` on the model overrides, or a fit config's `[data.tables]`) and returns its bytes and digest for the caller's identity")]
 pub fn bind(model: &mut ir::Model, bindings: &ExternalBindings) -> Result<BoundFiles, BindError> {
     let declared = declared(model);
     for (name, binding) in bindings.iter() {

@@ -278,6 +278,12 @@ pub fn write_trajectories_tsv(
 /// model, method, granularity, calendar or column layout differs is refused,
 /// never appended to under a header that does not describe the new rows.
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "rereads the trajectories file it is about to append to, in the fit's own working \
+              directory (`fit::pgas`); on a resume that file is the base run's copy, carried in \
+              through `Run::open_in` on the declared `resumed_from` dependency"
+)]
 pub fn append_trajectories_tsv(
     path: &Path,
     draws: &[PosteriorDraw],
@@ -445,6 +451,12 @@ fn write_draw_rows(
 /// Errors if the file has no row for `(chain, draw)` at a snapshot time within
 /// [`SNAPSHOT_TIME_TOL`] of `t_star` — i.e. the saved cadence does not contain
 /// T*. (`Sampled` paths only; an ODE fit recomputes X(T*) from θ instead.)
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a library parser of the path its caller passes; the one caller, `fit::contrasts`, \
+              passes a chain's `trajectories.tsv` in the scratch copy of a stored fit that \
+              `fit_store::open_fit` made"
+)]
 pub fn read_state_at(
     path: &Path,
     columns: &TrajColumnSpec,
@@ -518,6 +530,12 @@ pub fn read_state_at(
 /// latest saved snapshot strictly *before* a toggled intervention's fire time:
 /// the derived fork must coincide with a saved snapshot, since [`read_state_at`]
 /// reads the forked state from exactly that snapshot.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a library parser of the path its caller passes; the one caller, `fit::contrasts`, \
+              passes a chain's `trajectories.tsv` in the scratch copy of a stored fit that \
+              `fit_store::open_fit` made"
+)]
 pub fn snapshot_times(path: &Path, chain: usize, draw: usize) -> Result<Vec<f64>, String> {
     let txt = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
@@ -596,6 +614,14 @@ pub struct TerminalState {
 /// Returns one entry per `(chain, draw)` present, sorted by that key. An empty
 /// file (header only) yields an empty vector — "no saved paths" is a state the
 /// caller reports, not an error here.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a library parser of the path its caller passes; the one caller, \
+              `fit::joint::resolve_forecast_ensemble` (`simulate --init-state fit`), passes each \
+              chain's `trajectories.tsv` from the scratch copy `fit_store::open_fit` made, or \
+              from a bare directory of draws named by `--fit`, and digests the states it uses \
+              into the run's identity as its `ensemble`"
+)]
 pub fn read_terminal_states(
     path: &Path,
     columns: &TrajColumnSpec,
@@ -753,6 +779,12 @@ pub fn read_trajectory(
 ///
 /// Real flows are refused exactly as [`read_trajectory`] refuses them — see
 /// its "Chain-binomial only, loudly" note.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a library parser of the path its caller passes; outside this module the one \
+              caller, `fit::predict`, passes a chain's `trajectories.tsv` in the scratch copy \
+              of a stored fit that `fit_store::open_fit` made"
+)]
 pub fn read_trajectories(
     path: &Path,
     columns: &TrajColumnSpec,

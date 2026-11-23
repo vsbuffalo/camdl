@@ -90,6 +90,7 @@ struct Shared {
     quantities: Option<store::Dep<crate::camdl_store::Quantities>>,
 }
 
+#[expect(clippy::disallowed_methods, reason = "reads the model file `model` names (declared `#[input(identity)]` on `SimulateArgs`), kept as provenance, and the IR camdlc compiled from it, the stored compiled model the cells' identities name")]
 pub(crate) fn run(ctx: StoreRun<'_>) {
     let out = ctx.out;
     let fail = |e: String| -> ! { out.fail(format!("error: {e}")) };

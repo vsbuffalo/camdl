@@ -86,7 +86,8 @@ jobs:
         # `cargo clippy` lints only that package and compiles `sim`, `cli` and
         # `io` as dependencies, which clippy-driver never inspects. Without it
         # the gate cannot go red for anything in the real crates (gh#743).
-        run: cd rust && cargo clippy --workspace --all-targets -- -D warnings
+        # `make lint` runs the two passes the undeclared-read guard needs.
+        run: make lint
 
       - name: score builds for wasm32
         # The target is added from rust/ so it lands on the toolchain pinned by

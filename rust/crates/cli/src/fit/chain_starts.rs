@@ -408,6 +408,7 @@ impl ResolvedStarts {
     /// A sourced rule bound directly to a loose file — the test seam, and the
     /// shape [`resolve_starts`] produces for a file-shaped handle. The file's
     /// bytes are what the run's identity holds of it.
+    #[expect(clippy::disallowed_methods, reason = "reads the start file a `from_params` or `from_posterior` rule names, whose bytes the run's identity then holds as `StartInput::File`")]
     pub fn from_file(rule: ChainStarts, file: PathBuf) -> Result<Self, String> {
         let bytes = std::fs::read(&file)
             .map_err(|e| format!("starts = {}: cannot read `{}`: {e}", rule.spelled(), file.display()))?;
@@ -1227,6 +1228,7 @@ fn draw_from_mle(
 }
 
 /// `from_params`: all chains at a hand-written flat params TOML.
+#[expect(clippy::disallowed_methods, reason = "reads the `from_params` file `ResolvedStarts::from_file` read, whose bytes the run's identity holds as `StartInput::File`")]
 fn draw_from_params(
     resolved: &ResolvedParameters,
     path: &Path,
@@ -1358,6 +1360,7 @@ pub(crate) fn read_draws_tsv(path: &Path) -> Result<(Vec<String>, Vec<Vec<String
     read_tsv(path).map_err(|e| e.to_string())
 }
 
+#[expect(clippy::disallowed_methods, reason = "reads a `from_posterior` draws file: one whose bytes the run's identity holds as `StartInput::File`, or `draws.tsv` in a `fit_store::RunFiles` copy of the source run, which the identity names as a `Dep`")]
 fn read_tsv(path: &Path) -> Result<(Vec<String>, Vec<Vec<String>>), InitError> {
     let path_buf: PathBuf = path.to_path_buf();
     let raw = std::fs::read_to_string(path).map_err(|e| InitError::Io {

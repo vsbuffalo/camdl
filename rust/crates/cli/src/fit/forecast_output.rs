@@ -288,6 +288,7 @@ struct DesignFile {
 /// Each `--design SOURCE=FILE`, read for every leaf whose source (or name) is
 /// SOURCE (D81): the leaf's design rows, by leaf name, and each file's
 /// content digest.
+#[expect(clippy::disallowed_methods, reason = "reads each `--design` file, declared `#[input(identity)]` on `PredictFlags`, which `store_prediction` stores as a `DataTable` the prediction's identity depends on")]
 fn prospective_design(
     model: &ir::Model,
     specs: &[String],

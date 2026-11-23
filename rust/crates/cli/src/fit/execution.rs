@@ -126,6 +126,7 @@ impl Execution {
     /// The record of the attempt that wrote `leaf`; `Ok(None)` when the leaf
     /// has none. A record that exists and cannot be read or parsed is an
     /// error, not an absence.
+    #[expect(clippy::disallowed_methods, reason = "reads `execution.json` from a method directory: the working directory this process's `fit run` is writing, or a `fit_store::RunFiles` copy of a stored run read out through the store")]
     pub fn read(leaf: &Path) -> Result<Option<Self>, String> {
         let path = leaf.join(runid::EXECUTION_RECORD);
         match std::fs::read(&path) {

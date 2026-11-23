@@ -952,6 +952,7 @@ impl FitResult {
 /// classification** ([`min_ess_over`]) rather than a bare fold. Returns
 /// [`ConvergenceStatus::NotAssessed`] when no summary or no R̂ is present (a
 /// single-chain method), so a band is never silently "converged".
+#[expect(clippy::disallowed_methods, reason = "reads a method's summary JSON from the `fit_store::RunFiles` copy of the stored run the prediction is made from")]
 fn read_convergence(out: &crate::out::Out, method_dir: &Path, method: Option<FitAlgorithm>) -> ConvergenceStatus {
     // Chains that began at one point agree by construction; the leaf's R̂
     // is not a verdict (proposal 2026-09-08, §3.4), so the band carries no
@@ -1628,6 +1629,7 @@ pub(crate) fn predict(args: &crate::args::PredictArgs, compile: crate::util::Com
 /// its problem and the options. A prediction already stored is reused, and
 /// the files just written are dropped. Returns the prediction's folder.
 #[allow(clippy::result_large_err)] // the store's error carries the paths a person acts on, returned once
+#[expect(clippy::disallowed_methods, reason = "reads each `--design` file, declared `#[input(identity)]` on `PredictFlags`, to store it as a `DataTable` the prediction's identity depends on, and the files this process wrote in its scratch directory, to store them as the prediction's result files")]
 fn store_prediction(p: &ToStore, info: store::RunInfo) -> Result<PathBuf, String> {
     use crate::fit_store::Prediction;
     // The prediction sits inside its run, so it is stored in the store that

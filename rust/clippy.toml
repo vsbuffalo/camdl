@@ -1,0 +1,11 @@
+# The guard against undeclared reads (run-store proposal, "Guarding against
+# undeclared reads"): code outside the store crate reads its inputs through
+# the store (`Run::open`, an `InputFile`, the declared environment inputs),
+# not by a direct file or environment read. `crates/store/clippy.toml` exempts
+# the store crate, where those declared paths are implemented.
+disallowed-methods = [
+    { path = "std::fs::read",           reason = "read inputs through Run::open or InputFile" },
+    { path = "std::fs::read_to_string", reason = "read inputs through Run::open or InputFile" },
+    { path = "std::fs::File::open",     reason = "read inputs through Run::open or InputFile" },
+    { path = "std::env::var",           reason = "declare the variable in the environment inputs" },
+]

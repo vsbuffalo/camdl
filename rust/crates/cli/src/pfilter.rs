@@ -235,6 +235,7 @@ struct RunExports {
 }
 
 /// The particle filter of one resolved `pfilter`, and its stored result.
+#[expect(clippy::disallowed_methods, reason = "reads the model file `model` names (declared `#[input(identity)]` on `PfilterArgs`), kept as the stored compiled model's provenance")]
 fn run_pfilter(
     out: &crate::out::Out,
     config: crate::pfilter_config::ResolvedPfilterConfig,
@@ -2278,6 +2279,7 @@ pub(crate) fn missing_covers_error(obs: &ir::observation::ObservationModel) -> S
 /// The `window_start` cells of every row of `path`, in model time and as
 /// written, for a stream declared with per-row windows; `None` for any other
 /// stream, which has no such column to read.
+#[expect(clippy::disallowed_methods, reason = "reads a bound observation data file whose path its caller passes (`fit::observed_rows`, pfilter's stream loader); the fit problem's training tables or the filter run's `DataTable` dependency hold its bytes")]
 pub(crate) fn load_window_starts_if_windowed(
     obs: &ir::observation::ObservationModel,
     path: &str,
@@ -2455,6 +2457,7 @@ fn stream_times_of_measures(
 /// accumulator still resets there) but it carries no value (no likelihood
 /// term). Only the value column may contain `NA`. Read through
 /// [`crate::fit::observed_rows::observed_rows`].
+#[expect(clippy::disallowed_methods, reason = "reads a bound observation data file whose path its caller passes (`fit::observed_rows`); the fit problem's training tables or the filter run's `DataTable` dependency hold its bytes")]
 pub(crate) fn load_data_tsv_column_cells_as_written(
     path: &str,
     time_column: &str,
@@ -2532,6 +2535,7 @@ fn dim_column_names(obs: &ir::observation::ObservationModel) -> Vec<&str> {
 /// ([`load_data_tsv_column_cells_as_written`]) produces, with this leaf's time
 /// cells as written beside their converted times. Read through
 /// [`crate::fit::observed_rows::observed_rows`].
+#[expect(clippy::disallowed_methods, reason = "reads a bound observation data file whose path its caller passes (`fit::observed_rows`); the fit problem's training tables or the filter run's `DataTable` dependency hold its bytes")]
 pub(crate) fn load_long_form_stream_as_written(
     path: &str,
     obs_block: &ir::observation::ObservationModel,
@@ -2779,6 +2783,7 @@ pub fn stream_aux_columns(obs: &ir::observation::ObservationModel) -> Vec<String
 /// hole; `binomial(n = NA)` is unconstructible). An aux column declared but
 /// whose header is absent is a located error (strict by-name, no fallback).
 /// Each column is read in its own [`CellDomain`] (a binomial `n` is a count).
+#[expect(clippy::disallowed_methods, reason = "reads a bound observation data file whose path its caller passes (`fit::observed_rows`); the fit problem's training tables or the filter run's `DataTable` dependency hold its bytes")]
 pub fn load_stream_aux(
     path: &str,
     aux_cols: &[(String, CellDomain)],

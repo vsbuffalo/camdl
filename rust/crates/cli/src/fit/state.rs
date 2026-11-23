@@ -259,6 +259,7 @@ impl FitState {
     /// 1 is refused first (gh#990): its `best_chain` and `chain_eval_ids`
     /// are in the old base too, and reading them as the current one would
     /// name the wrong chain everywhere this file is rendered.
+    #[expect(clippy::disallowed_methods, reason = "reads `fit_state.toml` from a method directory: the working directory this process's `fit run` is writing, or a `fit_store::RunFiles` copy of a stored run read out through the store")]
     pub fn load(dir: &str) -> Result<Self, String> {
         crate::chain_index::refuse_one_based_layout(std::path::Path::new(dir))?;
         let path = format!("{}/fit_state.toml", dir);

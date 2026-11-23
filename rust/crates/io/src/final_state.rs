@@ -178,6 +178,12 @@ pub fn final_states_bytes(
 ///   compartment is refused (the file came from a different model, or from a
 ///   camdl that still wrote the retired `flow_*` columns);
 /// - every row must parse as `i64` at every compartment column.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a library parser of the path its caller passes; the one caller is `simulate \
+              --init-state FILE`, declared on `SimulateArgs` as `#[input(identity)]`, whose \
+              bytes the caller digests into the run's identity as its `ensemble`"
+)]
 pub fn read_final_states(path: &Path, columns: &TrajColumnSpec) -> Result<FinalStates, String> {
     if !columns.real_comps.is_empty() {
         return Err(format!(

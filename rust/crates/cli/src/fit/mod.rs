@@ -16,6 +16,7 @@
 /// The envelope is re-emitted whole (not just the model) so the `#'`
 /// documentation dictionary survives; a fit sidecar's parameter legend reads it
 /// back off this path.
+#[expect(clippy::disallowed_methods, reason = "reads the compiled IR `util::resolve_ir_path` produced from the fit's `[model]`; `fit run` and `profile` store the model rewritten from it as the `CompiledModel` the problem's identity names")]
 pub(crate) fn resolve_anchors_into_temp_ir(
     out: Option<&crate::out::Out>, ir_path: &str,
     config: &config_v2::Problem,
@@ -61,6 +62,7 @@ pub(crate) fn resolve_anchors_into_temp_ir(
 /// with no external input and a config binding none returns `ir_path`
 /// unchanged; a binding the model does not declare, or an input left unbound,
 /// is refused here, before anything runs.
+#[expect(clippy::disallowed_methods, reason = "reads the compiled IR `util::resolve_ir_path` produced from the fit's `[model]`; `fit run` and `profile` store the model rewritten from it as the `CompiledModel` the problem's identity names")]
 pub(crate) fn bind_tables_into_temp_ir(
     ir_path: &str,
     config: &config_v2::Problem,
@@ -1375,6 +1377,7 @@ pub(crate) fn provenance_data_hashes(data: &stream_bindings::BoundDataDigests) -
 /// `[data.observations]` is then hashed as written, which is by source too. A
 /// file that cannot be read is left out: this compares two configs, it builds
 /// no identity.
+#[expect(clippy::disallowed_methods, reason = "`fit diff` hashes the data files two fit configs bind, to compare them; it stores nothing")]
 fn resolved_data_hashes(
     problem: &config_v2::Problem,
     model: Option<&ir::Model>,
@@ -1692,6 +1695,7 @@ pub fn cmd_fit_diff(args: &crate::args::FitDiffArgs, compile: crate::util::Compi
 
 // ─── camdl fit new ──────────────────────────────────────────────────────────
 
+#[expect(clippy::disallowed_methods, reason = "`fit new` reads the fit config it copies and writes the copy outside the store; it stores nothing")]
 pub fn cmd_fit_new(a: &crate::args::FitNewArgs, compile: crate::util::CompileSettings) {
     let out = crate::out::Out::new(false);
     let from = a.from.to_string_lossy().into_owned();

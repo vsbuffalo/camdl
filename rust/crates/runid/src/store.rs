@@ -1295,6 +1295,11 @@ pub fn leaf_state(dir: &Path, record: &RunRecord) -> LeafState {
     }
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "reads a leaf's `run.json` for the old run store (`FsCasStore` and \
+              `update_record`), which no code outside this crate calls"
+)]
 fn read_record(dir: &Path) -> ReadResult {
     match fs::read(dir.join("run.json")) {
         Err(e) if e.kind() == ErrorKind::NotFound => ReadResult::Absent,
@@ -1427,6 +1432,11 @@ fn build_manifest(
     Ok(manifest)
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "checksums a leaf's own files for the old run store's manifest (`build_manifest`, \
+              reached only from `FsCasStore`'s claims), which no code outside this crate calls"
+)]
 fn collect_own_files(
     root: &Path,
     dir: &Path,
@@ -1508,6 +1518,11 @@ fn pid_is_alive(_pid: u32) -> bool {
 
 /// The PID recorded in a `.lock` (or `.reclaim`), if present and parseable:
 /// the first line.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "reads the PID in an old-store leaf's `.lock` for `LeafLock::acquire`, reached \
+              only from `FsCasStore` and `update_record`, which no code outside this crate calls"
+)]
 fn read_lock_pid(lock: &Path) -> Option<u32> {
     fs::read_to_string(lock).ok().and_then(|s| s.lines().next()?.trim().parse().ok())
 }
@@ -1572,6 +1587,12 @@ impl LockOwner {
 }
 
 /// [`LockOwner`] of the lock file at `lock`.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "reads the PID and host in an old-layout leaf's `.lock`; live only through \
+              `read_leaf`'s `leaf_state`, to say whether a run recorded as running is still \
+              alive, and a lock holds no input of a stored result"
+)]
 fn lock_owner_of(lock: &Path) -> LockOwner {
     let text = match fs::read_to_string(lock) {
         Ok(t) => t,
@@ -1840,6 +1861,11 @@ fn fmt_mtime(t: SystemTime) -> String {
     format!("{}.{:09}", d.as_secs(), d.subsec_nanos())
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "opens a directory only to fsync it and reads no bytes; live through \
+              `write_file_atomic`, which `cli` uses to write files it owns"
+)]
 fn fsync_dir(path: &Path) -> Result<(), CasError> {
     // On Unix a directory can be opened read-only and `sync_all`'d to make
     // its entries durable.

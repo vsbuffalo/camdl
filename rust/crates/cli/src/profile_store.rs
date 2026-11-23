@@ -95,6 +95,7 @@ pub(crate) struct PosedProblem {
 /// the stored problem's copies, with the method and the run settings of
 /// `[estimate]` of `fit`.
 #[allow(clippy::too_many_arguments)]
+#[expect(clippy::disallowed_methods, reason = "reads the model `model` names (declared `#[input(identity)]` on `ProfileArgs`) and the stored fit's model source copied out by `OpenedFit::model_source`, to refuse a profile on another model and to keep the source as provenance")]
 pub(crate) fn pose_problem(
     out: &crate::out::Out,
     store: &store::Store,
@@ -261,6 +262,7 @@ pub(crate) fn pose_problem(
 /// `nl-lbfgs` cell runs, stored: rewritten from the problem's data as the
 /// problem's compile is, and refused unless it is the same model as
 /// `problem_ir`. Returns its IR file and its dependency.
+#[expect(clippy::disallowed_methods, reason = "reads the stored model source copied out by `OpenedFit::model_source` and the IR camdlc compiled from it, which is stored as a `CompiledModel` dependency")]
 pub(crate) fn jacobian_compile(
     out: &crate::out::Out,
     store: &store::Store,
@@ -286,6 +288,7 @@ pub(crate) fn jacobian_compile(
 }
 
 /// Refuses a positional model other than the one a stored fit was posed on.
+#[expect(clippy::disallowed_methods, reason = "reads the stored model source copied out by `OpenedFit::model_source`, only to refuse a positional model that differs from it")]
 fn refuse_another_model(given: &[u8], opened: &crate::fit_store::OpenedFit, model: &str, handle: &str) -> Result<(), String> {
     let src = opened.model_source()?;
     let stored = std::fs::read(&src).map_err(|e| format!("cannot read {}: {e}", src.display()))?;
@@ -301,6 +304,7 @@ fn refuse_another_model(given: &[u8], opened: &crate::fit_store::OpenedFit, mode
 
 /// Stores the compile at `ir`, as `fit run` stores a problem's: the model
 /// part, depended on, and its quantities, named as lineage.
+#[expect(clippy::disallowed_methods, reason = "reads the IR camdlc compiled, which this function stores as the `CompiledModel` the result depends on")]
 pub(crate) fn put_compile(
     store: &store::Store,
     info: &store::RunInfo,

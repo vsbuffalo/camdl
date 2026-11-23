@@ -560,6 +560,7 @@ fn canonical_json(v: &serde_json::Value) -> Result<String, String> {
     serde_json::to_string(&crate::canonical_json::canonical(v)).map_err(|e| e.to_string())
 }
 
+#[expect(clippy::disallowed_methods, reason = "reads a data or table file the fit config names, for `resolve_problem`, which hashes the bytes into the problem's identity")]
 fn read_file(path: &str, what: &str) -> Result<Vec<u8>, String> {
     std::fs::read(path).map_err(|e| format!("cannot read {what} ({path}): {e}"))
 }
@@ -581,6 +582,7 @@ fn time_opts(model: &ir::Model, dt: f64) -> crate::caltime_load::TimeOpts<'_> {
 /// `problem` must bind its data through `[data]`: generated datasets are
 /// resolved after they are written, as data. Paths in `problem` are read as
 /// given, so they must already be anchored.
+#[expect(clippy::disallowed_methods, reason = "reads the `[synthetic]` truth file the fit config names: its bytes enter `SyntheticOrigin` in the identity for a generated dataset, and are kept as provenance outside the identity for a real-data fit, whose result they do not change")]
 pub(crate) fn resolve_problem(
     problem: &Problem,
     model: &ir::Model,
@@ -1328,6 +1330,7 @@ impl RunFiles {
 
 /// The inputs `dir`, a run's folder or a copy of it, records
 /// ([`RUN_INPUTS_FILE`]).
+#[expect(clippy::disallowed_methods, reason = "reads `run_inputs.json` from the directory its caller passes, a scratch copy of a stored run's files (`RunFiles` for `--resume`, an `OpenedFit` run copy)")]
 pub(crate) fn read_run_inputs(dir: &Path) -> Result<serde_json::Value, String> {
     let path = dir.join(RUN_INPUTS_FILE);
     let bytes = std::fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
@@ -1662,6 +1665,7 @@ pub(crate) struct FitArg {
 impl FitArg {
     /// A `--fit` argument: a fit file when it names one, else a handle in
     /// `store`.
+    #[expect(clippy::disallowed_methods, reason = "reads the fit file `--fit` names, declared `#[input(identity)]` on the `pfilter` and `profile` arguments; a stored fit is read through `open_fit` instead")]
     pub fn read(text: &str, store: Option<&Store>) -> Result<FitArg, String> {
         if is_config_file(text) {
             let path = std::path::PathBuf::from(text);

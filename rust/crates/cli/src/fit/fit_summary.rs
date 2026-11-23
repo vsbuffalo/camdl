@@ -1002,6 +1002,7 @@ fn build_summary_doc(
 /// read from the method leaf. `result` is the typed result already loaded
 /// (and, under `--exclude-chains`, recomputed over the kept chains); `model`
 /// is the fit's model, for the observation-stream checks.
+#[expect(clippy::disallowed_methods, reason = "`fit summary` reads `pmmh_summary.json` from the `fit_store::RunFiles` copy of the stored run that `fit_store::opened_run` made")]
 fn load_method_facts(
     resolved: &ResolvedMethod,
     result: MethodResult,

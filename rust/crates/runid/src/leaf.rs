@@ -423,6 +423,14 @@ fn scan_dir(entries: std::fs::ReadDir, stack: &mut Vec<PathBuf>) -> Found {
 /// `scope` excludes it on its header, or it vanished with no `.lock` left
 /// behind (a leaf removed mid-walk). `guard`: apply the interrupted-run
 /// guard ([`read_leaf`]); off for the guard's own second read.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "reads an old-layout leaf's `run.json` in a directory the caller passes; live \
+              through `read_leaf` from `cli::leaf_use::read` (`posterior_draws`, for a bare \
+              directory of draws or a fit-view method) and `fit::report::build`, where the \
+              record only decides whether a run completed and supplies a label and engine \
+              version, so it changes no stored result"
+)]
 fn read_candidate(dir: &Path, scope: &Scope, guard: bool) -> Option<Result<Leaf, UnreadableLeaf>> {
     let bytes = match std::fs::read(dir.join("run.json")) {
         Ok(b) => b,

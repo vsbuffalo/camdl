@@ -321,6 +321,12 @@ pub fn write_progress(dir: &Path, p: &Progress) -> io::Result<()> {
 }
 
 /// Read and parse a run's `progress.json`.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "reads `progress.json`, the liveness diagnostic a running command writes into its \
+              own working directory; outside tests the only caller is `ProgressWriter::failed`, \
+              rereading the file it wrote, and no stored result is computed from it"
+)]
 pub fn read_progress(dir: &Path) -> io::Result<Progress> {
     let bytes = fs::read(dir.join(PROGRESS_FILE))?;
     serde_json::from_slice(&bytes).map_err(io::Error::other)

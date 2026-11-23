@@ -91,6 +91,7 @@ impl PmmhMethodOpts {
 
 // See pgas::run_method for the comment on this allow.
 #[allow(clippy::too_many_arguments)]
+#[expect(clippy::disallowed_methods, reason = "reads each chain's `resume_state.bin`, carried into this method's working directory from the base run through the run's `resumed_from` dependency, and the `trace.tsv` files this process wrote there")]
 pub fn run_method(
     fit: &super::config_v2::Problem,
     method: &super::config_v2::Method,

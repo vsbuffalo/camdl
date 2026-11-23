@@ -13,6 +13,12 @@
 //! renders hand-written pages about the code ([`engineering`]), resolving
 //! their references against the same inputs. The output is the same, byte
 //! for byte, for the same inputs and commit.
+#![expect(
+    clippy::disallowed_methods,
+    reason = "a documentation generator outside the engine: it reads source files, \
+              rustdoc JSON and the pages it wrote before, none of which is an input of a \
+              stored result"
+)]
 
 mod code;
 mod engineering;

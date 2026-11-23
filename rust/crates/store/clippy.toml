@@ -1,0 +1,5 @@
+# The store crate implements the declared reads (`Run::open`, `InputFile`)
+# that the workspace's `disallowed-methods` guard routes every other crate
+# through, so it is the one crate the guard does not apply to. Clippy reads
+# the nearest clippy.toml and does not merge it with `rust/clippy.toml`.
+disallowed-methods = []

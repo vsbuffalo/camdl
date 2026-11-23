@@ -114,6 +114,7 @@ pub struct SweepFile {
 /// is not a number, and a `point_id` that is not a non-negative integer or
 /// repeats an earlier row's. The file enters the design by its content
 /// digest, never its path.
+#[expect(clippy::disallowed_methods, reason = "reads a `--sweep-file` design (declared `#[input(expands)]` on `simulate` and `pfilter`); the parameter values of each row are hashed into the identity of its run")]
 pub fn read_sweep_file(path: &Path, model: &ir::Model) -> Result<SweepFile, String> {
     let bytes = std::fs::read(path)
         .map_err(|e| format!("cannot read --sweep-file {}: {}", path.display(), e))?;

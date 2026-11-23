@@ -794,6 +794,7 @@ fn resolve_read_target(as_written: &str, model_path: &str) -> std::path::PathBuf
 /// stored values. A missing/unparseable sidecar, a vanished input, or any hash
 /// mismatch ⇒ not fresh (recompile). A model with no `read()`s has an empty
 /// sidecar and is always fresh.
+#[expect(clippy::disallowed_methods, reason = "reads the IR cache's sidecar and hashes the compile-time `read()` files it lists, to decide whether a cached compile may be served")]
 fn read_deps_fresh(cache_path: &std::path::Path, model_path: &str) -> bool {
     let sidecar = deps_sidecar_path(cache_path);
     let Ok(txt) = std::fs::read_to_string(&sidecar) else { return false; };
@@ -818,6 +819,7 @@ fn read_deps_fresh(cache_path: &std::path::Path, model_path: &str) -> bool {
 /// an entry reads as a miss and is recompiled (the recompile's atomic rename
 /// replaces it in place). An unreadable or version-less entry is a miss too —
 /// fail closed, like the sidecar-schema check above.
+#[expect(clippy::disallowed_methods, reason = "reads the head of an IR cache entry for its IR version; the cache holds no stored result")]
 fn entry_ir_version_matches(cache_path: &std::path::Path) -> bool {
     use std::io::Read;
     let mut head = Vec::with_capacity(IR_VERSION_SCAN_BYTES);
@@ -864,6 +866,7 @@ fn note_version_mismatched_entry(cache_path: &std::path::Path, model_path: &str)
 /// `read()` file's current bytes, keyed by its as-written path. `Err` if the
 /// depfile is unreadable/unparseable or an input vanished — the caller then
 /// declines to cache (an entry without a valid sidecar would be unservable).
+#[expect(clippy::disallowed_methods, reason = "reads the depfile camdlc wrote and hashes the compile-time `read()` files it lists, for the IR cache's sidecar")]
 fn build_read_deps(depfile: &std::path::Path) -> Result<Vec<ReadDep>, String> {
     let txt = std::fs::read_to_string(depfile)
         .map_err(|e| format!("cannot read depfile {}: {e}", depfile.display()))?;
@@ -1105,6 +1108,7 @@ mod single_flight {
 
     /// Classify the holder of `lock_path` by reading its recorded PID and
     /// checking liveness. Mirrors `runid::store::pid_is_alive` (`kill(pid, 0)`).
+    #[expect(clippy::disallowed_methods, reason = "reads the process id in camdlc's compile lock, which holds no stored result")]
     fn holder_state(lock_path: &Path) -> HolderState {
         let Ok(contents) = std::fs::read_to_string(lock_path) else {
             // The lock may have just been removed by its holder (race) — treat
@@ -1173,6 +1177,7 @@ mod single_flight {
 /// camdlc as `--quantities <path>`, and its bytes key the cache entry, so a
 /// second vocabulary over the same model compiles rather than being served the
 /// first one's IR. The compile runs under `compile`, the command's settings.
+#[expect(clippy::disallowed_methods, reason = "reads the model source to key the IR cache; the compiled IR it resolves to is what the model's identity hashes")]
 pub(crate) fn resolve_ir_path(
     path: &str,
     needs_state_grad: bool,
@@ -1314,6 +1319,7 @@ pub(crate) fn resolve_ir_path(
 /// (gh#161): the model knob is the default, `--dt` overrides it. Returns
 /// `None` on any read/parse error — the authoritative `load_model` runs later
 /// and surfaces a real diagnostic, so a peek failure must not abort or mislead.
+#[expect(clippy::disallowed_methods, reason = "reads the model's default step from the compiled IR `resolve_ir_path` produced; the resolved step is hashed into each run's identity")]
 pub fn peek_simulation_dt(path: &str) -> Option<f64> {
     // `path` is already a resolved `.ir.json` (resolve_ir_path ran upstream),
     // so this is a plain read, never a camdlc invocation.
@@ -1326,6 +1332,7 @@ pub fn peek_simulation_dt(path: &str) -> Option<f64> {
 /// shares. With `Some(compile)` a `.camdl` is compiled under the command's
 /// settings and a `.ir.json` read; with `None` the path must already be
 /// compiled IR and a `.camdl` is refused ([`require_compiled`]).
+#[expect(clippy::disallowed_methods, reason = "reads the compiled IR at the path its caller passes; the compiled model is what a run's identity hashes")]
 fn ir_text(path: &str, compile: Option<CompileSettings>) -> Result<String, String> {
     match compile {
         // Full IR (state-Jacobian emitted). The metadata / identity / docs
@@ -2429,6 +2436,7 @@ pub fn parse_table_text(content: &str, path: &std::path::Path) -> Result<Vec<ir:
 }
 
 /// Load parameter overrides from a TOML file.
+#[expect(clippy::disallowed_methods, reason = "parses the params file its caller names: `--params` and `--fixed-file` (declared `#[input(identity)]`) in `params_resolver` and `profile`, a `from_params` start, a `[synthetic]` truth file, or a stored run's copied files")]
 pub fn load_params_toml(path: &str) -> Result<HashMap<String, f64>, String> {
     // gh#637 (ebola item 9): a `.tsv` params file is the column-per-parameter
     // format `simulate --draws FILE` reads and `--draws-out` writes — accept
@@ -2478,6 +2486,7 @@ pub fn load_params_toml(path: &str) -> Result<HashMap<String, f64>, String> {
 /// One-row column-per-parameter TSV → parameter map (gh#637). Bookkeeping
 /// columns (`chain`, `draw`, `replicate`, `seed`, `scenario`) are skipped so
 /// a row cut from `draws.tsv` or written by `--draws-out` reads back as-is.
+#[expect(clippy::disallowed_methods, reason = "parses a one-row params TSV whose path `load_params_toml` passes on from its caller")]
 fn load_params_single_row_tsv(path: &str) -> Result<HashMap<String, f64>, String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("{}: {}", path, e))?;
@@ -2563,6 +2572,7 @@ pub fn validate_parameter_values(model: &ir::Model) -> Result<(), String> {
 }
 
 /// Load a keyed TSV file (two columns: name<TAB>value) for --param-vec.
+#[expect(clippy::disallowed_methods, reason = "parses the file `--param-vec` names (declared `#[input(identity)]` on `SimulateArgs`)")]
 pub fn load_keyed_tsv(path: &str) -> Result<Vec<(String, f64)>, String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("{}: {}", path, e))?;
@@ -4426,6 +4436,7 @@ fn apply_output_every(model: &mut ir::Model, step: f64) {
 /// CAS identity load `base_model` from this path, so the override reaches
 /// simulation and the `run_id` together (it rides the model digest, re-keying
 /// only runs that use it). When `every` is `None`, the path is unchanged.
+#[expect(clippy::disallowed_methods, reason = "reads the compiled IR to write a copy with the `--output-every` cadence, whose content the model's identity then hashes")]
 pub fn rematerialize_with_output_every(
     ir_path: &str,
     every: Option<f64>,

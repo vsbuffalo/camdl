@@ -896,6 +896,7 @@ impl FixedParams {
     /// will see an empty map and may produce slightly less informative
     /// output — that's fine for diff/inspection paths, not OK for the
     /// fit pipeline (which uses `resolve_with_model`).
+    #[expect(clippy::disallowed_methods, reason = "a library parser of `[fixed] from_file`, the params file a fit config names; callers checked: `fit run`, whose problem identity holds the values read (`FitProblemIdentity::fixed`), `fit diff`, which stores nothing, and `simulate --fit`, declared `#[input(identity)]` on `SimulateArgs`")]
     pub fn resolve(&self) -> Result<IndexMap<String, f64>, String> {
         let mut merged = match &self.from_file {
             Some(path) => {
@@ -2722,6 +2723,7 @@ impl FitConfig {
     /// file's path relative to the segment, so its directory is known even when
     /// that file has moved or changed; pass `<segment>/<source_config>` here and
     /// every path resolves as it did at fit time.
+    #[expect(clippy::disallowed_methods, reason = "a library parser of the fit config at the path its caller passes; callers checked: `fit diff`, which stores nothing, and `Problem::load` and `fit_config_simulator` for a `--fit` argument, declared `#[input(identity)]` on `SimulateArgs` and `PfilterArgs`")]
     pub fn load_anchored_at(
         read_path: &std::path::Path,
         anchor_toml: &std::path::Path,

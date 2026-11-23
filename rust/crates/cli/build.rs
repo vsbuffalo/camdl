@@ -13,6 +13,11 @@
 //! moves, so the fingerprint is never stale. Features, profile, flags, target
 //! and toolchain changes re-run it by themselves.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "a build script reads cargo's environment and the source files it fingerprints; it computes no run"
+)]
+
 #[path = "src/engine_fingerprint.rs"]
 mod engine_fingerprint;
 

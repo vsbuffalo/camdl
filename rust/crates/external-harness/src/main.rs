@@ -1,6 +1,12 @@
 //! External-harness driver binary.
 //!
 //! See docs/dev/proposals/2026-04-23-external-validation-harness.md.
+#![expect(
+    clippy::disallowed_methods,
+    reason = "a developer validation tool outside the engine: it reads case manifests, \
+              cached reference fixtures, the outputs of the camdl runs it starts and its own \
+              environment variables, and nothing it reads is an input of a stored result"
+)]
 
 mod compare;
 mod hashing;

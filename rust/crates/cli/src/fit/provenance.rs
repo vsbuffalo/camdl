@@ -183,6 +183,7 @@ pub fn write_mle_params(
 /// Read the `[provenance]` block from an mle_params.toml file. Returns
 /// None if the file has no such block (legacy format or a non-fit
 /// params file); Err on malformed TOML.
+#[expect(clippy::disallowed_methods, reason = "reads a params file a command names with `--params` (declared `#[input(identity)]` on `ModelOverrides`) or `--fixed-file` (declared on `InferenceModelOverrides`), for its `[provenance]` block")]
 pub fn read_mle_provenance(path: &str) -> Result<Option<MleProvenance>, String> {
     let contents = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read {}: {}", path, e))?;
@@ -212,6 +213,7 @@ pub enum ContentVerification {
 /// The scope is the parameter values only: editing a provenance field does
 /// not invalidate the hash, editing a value does. A `[provenance]` table is
 /// skipped exactly as `util::load_params_toml` skips it.
+#[expect(clippy::disallowed_methods, reason = "reads a params file a command names with `--params` (declared `#[input(identity)]` on `ModelOverrides`) or `--fixed-file` (declared on `InferenceModelOverrides`), to check its values against its `[provenance]` block")]
 pub fn verify_content_hash(path: &str, declared: &str) -> Result<ContentVerification, String> {
     let contents = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read {}: {}", path, e))?;

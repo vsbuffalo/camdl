@@ -177,6 +177,7 @@ fn horizons_moved(fitted: &ir::Model, given: &ir::Model) -> Option<String> {
 
 /// Do the files at `a` and `b` hold the same bytes? `None` when either cannot
 /// be read.
+#[expect(clippy::disallowed_methods, reason = "compares the model file a replay was given with the model file the stored problem keeps, only to word the refusal of a replay on another model; nothing stored is computed from it")]
 fn same_bytes(a: &Path, b: &Path) -> Option<bool> {
     Some(std::fs::read(a).ok()? == std::fs::read(b).ok()?)
 }
@@ -203,6 +204,7 @@ fn stored_model_file(run_copy: &std::path::Path) -> Option<std::path::PathBuf> {
 /// The model path a stored run's fit file named, resolved against where that
 /// file was: the run's `run.json` records the fit file as typed, and the run
 /// keeps that file, whose `[model] camdl` is relative to it.
+#[expect(clippy::disallowed_methods, reason = "reads the store's `run.json` record in the run's folder and the `fit.toml` in a `fit_store::RunFiles` copy, only to name the fitted model's path in a refusal; nothing stored is computed from it")]
 fn recorded_model_source(run_copy: &std::path::Path) -> Option<String> {
     let folder = crate::fit_store::shown(run_copy);
     let record: serde_json::Value = serde_json::from_slice(&std::fs::read(folder.join("run.json")).ok()?).ok()?;
@@ -522,6 +524,7 @@ pub(crate) fn stored_fit_model(
 /// step and the config's written `[config] dt` (a disagreeing one is refused,
 /// as `fit run` refuses it), the model's integrator, and the config's
 /// `[config]` settings.
+#[expect(clippy::disallowed_methods, reason = "reads the fit config that `simulate --fit` names, declared `#[input(identity)]` on `SimulateArgs`, for the backend and step a replay runs on")]
 pub fn fit_config_simulator(fit_toml: &str, model: &ir::Model) -> Result<FittedSimulator, String> {
     let config = crate::fit::config_v2::FitConfig::load(fit_toml)?;
     let raw = std::fs::read_to_string(fit_toml).map_err(|e| format!("cannot read {fit_toml}: {e}"))?;

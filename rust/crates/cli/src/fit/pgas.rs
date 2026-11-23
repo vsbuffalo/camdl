@@ -275,6 +275,7 @@ impl PgasMethodOpts {
 // `main::build_simulate_cas_sink` and `main::run_simulate`, both of which
 // also carry this allow.
 #[allow(clippy::too_many_arguments)]
+#[expect(clippy::disallowed_methods, reason = "reads each chain's `resume_state.bin`, which `fit run` carried into this method's working directory from the base run through the run's `resumed_from` dependency")]
 pub fn run_method(
     fit: &super::config_v2::Problem,
     method: &super::config_v2::Method,

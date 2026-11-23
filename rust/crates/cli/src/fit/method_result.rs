@@ -124,6 +124,7 @@ impl PfilterRun {
         PfilterRun { ll_mean, ll_sd, n_replicates: n, n_particles }
     }
 
+    #[expect(clippy::disallowed_methods, reason = "reads a pfilter run's `logliks.tsv` from its method directory: the working directory this process's `fit run` is writing, or a `fit_store::RunFiles` copy of a stored run read out through the store")]
     pub fn load(method_dir: &Path) -> Result<Self, MethodResultError> {
         let inputs = read_method_inputs(method_dir)?;
         let n_particles = inputs.get("algorithm").and_then(|a| a.get("particles"))
@@ -935,6 +936,7 @@ fn compute_if2_gate_verdict(state: &FitState) -> GateVerdict {
 /// across all rows), since clean-eval re-scoring is done per
 /// (chain × candidate) and the IF2's `best_chain` is the overall
 /// max. Returns `None` if the file is absent or malformed.
+#[expect(clippy::disallowed_methods, reason = "reads `chain_evaluations.tsv` from a method directory: the working directory this process's `fit run` is writing, or a `fit_store::RunFiles` copy of a stored run read out through the store")]
 fn read_ess_at_mle(method_dir: &Path) -> Option<EssSummary> {
     let path = method_dir.join("chain_evaluations.tsv");
     let contents = std::fs::read_to_string(&path).ok()?;
@@ -1372,6 +1374,7 @@ fn read_f64_map(summary: &serde_json::Value, key: &str) -> BTreeMap<String, f64>
 /// The `schema` tag is **required** (gh#728). This is the one typed loader
 /// every `MethodResult` goes through, so refusing here is what keeps a
 /// `rhat` written under one definition from being reported under another.
+#[expect(clippy::disallowed_methods, reason = "reads a method's summary JSON from its method directory: the working directory this process's `fit run` is writing, or a `fit_store::RunFiles` copy of a stored run read out through the store")]
 fn read_summary_json(
     method_dir: &Path,
     filename: &str,
@@ -1396,6 +1399,7 @@ fn read_summary_json(
 /// stores them, and the number of draw rows. `draws.tsv` is the canonical
 /// posterior-sample table written by both PGAS and PMMH (post-burn-in,
 /// thinned, all params). An absent or empty file is no draws.
+#[expect(clippy::disallowed_methods, reason = "reads a method's `draws.tsv`: the working directory this process's `fit run` is writing, or a `fit_store::RunFiles` copy of a stored run read out through the store")]
 pub(crate) fn read_draw_columns(
     method_dir: &Path,
     est_names: &[String],

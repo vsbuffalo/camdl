@@ -285,6 +285,7 @@ fn refuse_before_storing(out: &Out, resolved: &crate::fit::run_config::ResolvedF
 
 }
 
+#[expect(clippy::disallowed_methods, reason = "reads the model file the fit config's `[model]` names, kept as provenance, and the IR camdlc compiled from it, stored as the `CompiledModel` the problem depends on; the fit config is `config`, declared `#[input(identity)]` on `FitRunArgs`")]
 fn run_fit(mut out: Out, cx: FitCommand<'_>) -> Vec<String> {
     let FitCommand { fit_path, source, resolved, store, info, reuse } = cx;
     let crate::fit::run_config::ResolvedFitConfig {
@@ -1054,6 +1055,7 @@ fn store_start_file(run: &store::Run<FitRun>, starts: &crate::fit::chain_starts:
 }
 
 /// Write every file under `work` into `run`, by its role.
+#[expect(clippy::disallowed_methods, reason = "reads the files a method wrote in this process's temporary working directory, to write them into the run")]
 fn ingest(run: &store::Run<FitRun>, work: &Path) -> Result<(), String> {
     let mut files: Vec<PathBuf> = Vec::new();
     let mut stack = vec![work.to_path_buf()];
@@ -1100,6 +1102,7 @@ struct Mirrored {
 
 /// Passes on to `run` what `work`'s progress snapshot and event log hold
 /// beyond `state`.
+#[expect(clippy::disallowed_methods, reason = "reads the progress snapshot and event log a running method writes in this process's temporary working directory; neither is a result")]
 fn mirror_once(run: &store::Run<FitRun>, work: &Path, state: &mut Mirrored) {
     if let Ok(bytes) = std::fs::read(work.join("progress.json")) {
         if state.last_progress.as_deref() != Some(&bytes[..]) {

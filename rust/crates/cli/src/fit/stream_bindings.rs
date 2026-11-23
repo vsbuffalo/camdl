@@ -106,6 +106,7 @@ impl StreamBindings {
     /// Read and hash every bound file once: training and holdout, by source.
     /// An unreadable file is an error, as it is for the run identity built
     /// from these digests.
+    #[expect(clippy::disallowed_methods, reason = "not declared: hashes each whole `[data]` file as read now, and `fit run` writes the training files' digests and paths into `mle_params.toml`, a result file, while the problem's identity holds only the training lines and the held-out rows' dates, so a changed held-out value or a moved file changes the result and not its id")]
     pub(crate) fn digests(&self) -> Result<BoundDataDigests, String> {
         let read = |map: &IndexMap<String, String>| -> Result<BTreeMap<String, (String, ContentHash)>, String> {
             map.iter().map(|(source, path)| {

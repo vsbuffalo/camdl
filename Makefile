@@ -194,8 +194,16 @@ endif
 # workspace root as a package of its own (`camdl-tests`), so a bare
 # `cargo clippy` lints only that package and compiles `sim`, `cli` and `io` as
 # dependencies, which clippy-driver never inspects (gh#743).
+#
+# Two passes, because `rust/clippy.toml`'s `disallowed-methods` (the guard
+# against reads of a run's inputs behind the store's back) applies to the code
+# that computes results and not to tests, which read output files to check
+# them, and clippy has no per-target setting. The first pass lints libraries,
+# binaries and build scripts with the guard on; the second lints every target,
+# tests and benches included, with the guard allowed.
 lint:
-	cd rust && $(CARGO_WRAP) cargo clippy --workspace --all-targets -- -D warnings
+	cd rust && $(CARGO_WRAP) cargo clippy --workspace --lib --bins -- -D warnings
+	cd rust && $(CARGO_WRAP) cargo clippy --workspace --all-targets -- -D warnings -A clippy::disallowed_methods
 
 # The `score` crate builds for a browser target (scoring-report proposal, test
 # 16): it shows the crate and its dependencies compile for

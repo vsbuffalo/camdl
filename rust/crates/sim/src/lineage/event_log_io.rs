@@ -164,6 +164,12 @@ pub fn to_tsv_bytes(log: &EventLog) -> Result<Vec<u8>, SimError> {
 }
 
 /// Read a TSV event log back into an [`EventLog`].
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a library parser of the path its caller passes; the one caller, \
+              `sim_command::export_event_log`, reads a stored event log to export it to the \
+              path `--event-log` names, and no stored result is computed from it"
+)]
 pub fn read_tsv(path: &Path) -> Result<EventLog, SimError> {
     let body = std::fs::read_to_string(path)
         .map_err(|e| SimError::Validation(format!("read event log {}: {}", path.display(), e)))?;
@@ -218,6 +224,12 @@ pub fn read_tsv(path: &Path) -> Result<EventLog, SimError> {
 
 /// TSV header reader: magic + the two metadata lines, stopping before the rows.
 /// Cheap regardless of file size (reads ~4 lines).
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a library parser of the path its caller passes; the one caller, `camdl lineage \
+              realize` through `realize_from_path`, reads the event-log file the user names and \
+              writes a line list to a path the user names, storing no result"
+)]
 fn read_metadata_tsv(path: &Path) -> Result<EventLogMeta, SimError> {
     let file = File::open(path)
         .map_err(|e| SimError::Validation(format!("read event log {}: {}", path.display(), e)))?;
@@ -253,6 +265,12 @@ fn read_metadata_tsv(path: &Path) -> Result<EventLogMeta, SimError> {
 /// Skips the 4 header lines (magic, two metadata, column header); the metadata
 /// is read separately by [`read_metadata_tsv`]. Bounded memory: one line at a
 /// time.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a library parser of the path its caller passes; the one caller, `camdl lineage \
+              realize` through `realize_from_path`, reads the event-log file the user names and \
+              writes a line list to a path the user names, storing no result"
+)]
 fn for_each_event_tsv(
     path: &Path,
     mut f: impl FnMut(EventRecord) -> Result<(), SimError>,
@@ -511,6 +529,12 @@ mod parquet_impl {
         Ok(())
     }
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a library parser of the path its caller passes; the one caller, `camdl \
+                  lineage realize` through `realize_from_path`, reads the event-log file the \
+                  user names and writes a line list to a path the user names, storing no result"
+    )]
     fn open_builder(path: &Path) -> Result<ParquetRecordBatchReaderBuilder<File>, SimError> {
         let file = File::open(path)
             .map_err(|e| SimError::Validation(format!("open event log {}: {}", path.display(), e)))?;

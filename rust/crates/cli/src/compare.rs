@@ -469,6 +469,7 @@ struct DataFreshness {
 /// Hash every training file a derived row is about to score (`streams`,
 /// source → path, [`StreamBindings::training_by_source`]) and compare each
 /// with the sidecar's record for its source (see [`DataFreshness`]).
+#[expect(clippy::disallowed_methods, reason = "hashes each data file a derived row is about to score, to compare it with the hash the stored fit recorded; `compare` stores no result")]
 fn check_training_freshness(
     streams: &indexmap::IndexMap<String, String>,
     recorded: &DataIdentity,
@@ -552,6 +553,7 @@ fn positional_model_names(paths: &[String]) -> Vec<String> {
     (0..paths.len()).map(|i| name_at(i, depth[i])).collect()
 }
 
+#[expect(clippy::disallowed_methods, reason = "reads the `--config` compare.toml that lists the rows to compare; `compare` prints a table and stores no result")]
 pub(crate) fn cmd_compare(a: &crate::args::CompareArgs, compile: crate::util::CompileSettings) {
     // The forcing-extrapolation policy this command's evaluations run under,
     // installed for the rest of the command.
@@ -2561,6 +2563,7 @@ fn fit_data_identity(
 /// path, a `@label` / hash prefix, a `.toml`, or a directory with no
 /// `prequential.json`. Only a `.json` file or a `<dir>/prequential.json` is
 /// read — so a `fit.toml` handle is never mis-parsed as a trace.
+#[expect(clippy::disallowed_methods, reason = "reads a prequential.json the user names as a row; `compare` prints a table and stores no result")]
 fn try_load_explicit_prequential(path: &str) -> Result<Option<PrequentialTrace>, String> {
     let p = Path::new(path);
     let json_path = if p.is_dir() {
@@ -2638,6 +2641,7 @@ fn refuse_held_out_scoring(resolved: &ResolvedFit) -> Result<(), String> {
     ))
 }
 
+#[expect(clippy::disallowed_methods, reason = "hashes the held-out files against the stored fit's record and reads back the trace a `camdl pfilter --no-store` child wrote to a temporary path; `compare` stores no result")]
 fn derive_prequential(
     out: &crate::out::Out,
     resolved: &ResolvedFit,
@@ -3330,6 +3334,7 @@ fn thinned_draws_params_tomls(
 /// the same schema by declaration); holdout rows are strictly after the
 /// training tail (validated when the fit ran), so appending preserves
 /// time order.
+#[expect(clippy::disallowed_methods, reason = "reads a training file and its held-out file, named by the stored fit's config, into a temporary scored series; `compare` stores no result")]
 fn merge_holdout_file(train: &str, holdout: &str, out: &Path) -> Result<(), String> {
     let t = std::fs::read_to_string(train)
         .map_err(|e| format!("reading training data {train}: {e}"))?;

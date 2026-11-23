@@ -50,6 +50,7 @@ pub struct SyntheticDataset {
 /// identity-bearing here: it changes the generated files' bytes, and the fit
 /// hashes each training stream's bytes (`FitDigest.data`), so the fit re-keys.
 /// Correct — the data changed.
+#[expect(clippy::disallowed_methods, reason = "reads `[synthetic] true_params`, whose bytes a synthetic problem's identity holds (`SyntheticOrigin::truth`), and copies it into this process's working directory")]
 pub fn generate_synthetic_datasets(
     spec: &SyntheticSpec,
     model_path: &str,
