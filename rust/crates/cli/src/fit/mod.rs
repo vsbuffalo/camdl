@@ -1126,6 +1126,9 @@ pub(crate) struct SidecarInputs<'a> {
     pub seed: u64,
     /// Which rows trained, as the stored problem records it.
     pub partition: crate::run_meta::TrainingPartitionRecord,
+    /// The table forcings whose values before the training extent depend on
+    /// rows after it.
+    pub forcing_interpolation: Vec<crate::run_meta::ForcingInterpolationRecord>,
 }
 
 /// The run's `fit.meta.json`: the fit's provenance as the run resolved it —
@@ -1149,6 +1152,7 @@ pub(crate) fn run_sidecar(i: &SidecarInputs<'_>, out: &crate::out::Out) -> Resul
     side.fixed = roles.fixed;
     side.partition = Some(roles.partition);
     side.training_partition = Some(i.partition.clone());
+    side.forcing_interpolation = i.forcing_interpolation.clone();
     side.schema_version = crate::run_meta::FIT_META_SCHEMA_VERSION;
     serde_json::to_value(&side).map_err(|e| format!("cannot encode fit.meta.json: {e}"))
 }
@@ -1537,6 +1541,8 @@ fn build_fit_sidecar(
         // must come from the code path that applied the declaration); sticky
         // across cache-hit reruns in `write_fit_sidecar`.
         training_partition: None,
+        // Recorded by `run_sidecar` from the forcings and the partition.
+        forcing_interpolation: Vec::new(),
         // The simulator the segment's runs integrate on. `config.dt` is the
         // step the dt rule resolved before this is built (`cmd_fit_run_v2`);
         // `resolved_dt` gives the same answer for a config read without it.

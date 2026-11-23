@@ -172,6 +172,7 @@ fn fixed_point_files() -> Vec<(&'static str, String)> {
         ("patch.camdl", PATCH.to_string()),
         ("forced.camdl", forced_model()),
         ("lagged.camdl", lagged_model()),
+        ("fit_forced.toml", FIT.replace("model.camdl", "forced.camdl")),
         ("point_lagged.toml", format!("{POINT}tau = -5.0\n")),
         ("patch.toml", "beta = 0.4\ngamma = 0.2\nrho = 0.5\n".into()),
         ("patch_cases.tsv", (1..=10).fold("time\tcases\n".to_string(), |s, t| s + &format!("{t}\t{}\n", 2 + t))),
@@ -757,6 +758,17 @@ fn a_forecast_reading_a_table_forcing_after_its_origin_needs_a_statement() {
     // pop(24) on the segment from (20, 1.2) to (30, 0.7).
     let held = manifests["pop=hold"]["covariates"]["forcings"][0]["held"]["value"].as_f64().unwrap();
     assert!((held - 1.0).abs() < 1e-12, "hold carries pop's value at the origin: {held}");
+    // `pop`'s rows are at 0, 20, 30 and 63: the origin, day 24, falls between
+    // two rows, so its values before the origin depend on the row at 30, and
+    // every forecast records it beside its statement.
+    for (statement, doc) in &manifests {
+        let interp = &doc["covariates"]["interpolation"];
+        assert_eq!(interp[0]["forcing"], "pop", "{statement}: {:#}", doc["covariates"]);
+        assert_eq!(interp[0]["method"], "linear");
+        assert_eq!(interp[0]["rows_after_cut"], 1);
+        assert_eq!(interp[0]["cut"]["t"], 24.0);
+        assert_eq!(interp.as_array().unwrap().len(), 1, "{statement}: `week` is periodic and has no table");
+    }
     // The filter before the origin is the same under every statement, so
     // each draw's last assimilation has the same effective sample size.
     for statement in ["pop=realised", "pop=hold"] {
@@ -765,6 +777,46 @@ fn a_forecast_reading_a_table_forcing_after_its_origin_needs_a_statement() {
             "{statement}: the filtering before the origin moved"
         );
     }
+}
+
+/// A fit of the forced fixture model, its rows after day 24 held out: the
+/// training extent, day 24, falls between `pop`'s rows at 20 and 30, so the
+/// fit says once that `pop`'s values before the cut depend on 1 row after it,
+/// and records it in the run's `fit.meta.json`; `week`, periodic, is not
+/// named.
+#[test]
+fn a_fit_records_a_linear_table_whose_training_extent_falls_between_rows() {
+    let fresh = tempfile::tempdir().unwrap();
+    let root = fresh.path().join("camdl-store");
+    let cwd = workdir(&root);
+    let args: Vec<String> =
+        ["fit", "run", "fit_forced.toml", "--label", "forced", "--progress", "none"].map(String::from).into();
+    let out = camdl(cwd.path(), &root, &args, &[]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    let note = "note: forcing `pop` (linear table): values before the cut (t = 24, the training extent) depend on 1 row after it";
+    assert_eq!(err.matches(note).count(), 1, "said once:\n{err}");
+    assert!(!err.contains("forcing `week`"), "{err}");
+    let mut metas = Vec::new();
+    let mut stack = vec![root.clone()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.file_name().is_some_and(|n| n == "fit.meta.json") {
+                let doc: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+                if doc["forcing_interpolation"].is_array() {
+                    metas.push(doc);
+                }
+            }
+        }
+    }
+    assert_eq!(metas.len(), 1, "the forced fit's run records it, and no fixture fit does");
+    assert_eq!(
+        metas[0]["forcing_interpolation"],
+        serde_json::json!([{ "forcing": "pop", "method": "linear", "cut": { "t": 24.0 }, "rows_after_cut": 1 }])
+    );
 }
 
 /// A step table whose next row after the origin (day 40) is past a two-week

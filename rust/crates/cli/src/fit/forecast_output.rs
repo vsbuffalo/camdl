@@ -451,7 +451,7 @@ pub(crate) fn run_forecast(
     let plan = ForecastPlan::new(partition, reach, &plan_streams).map_err(|e| e.to_string())?;
     // The table forcings the forecast reads after its origin, each with its
     // statement; refused here, before any filter runs, when one has none.
-    let covariates = Covariates::resolve(
+    let mut covariates = Covariates::resolve(
         &classify(model, job.compiled, plan.origin(), plan.origin() + plan.horizon()),
         &job.args.flags.covariate,
         &ReachContext {
@@ -461,6 +461,21 @@ pub(crate) fn run_forecast(
             calendar: job.calendar,
         },
     )?;
+    // The table forcings whose values before the origin, which the filter
+    // reads, depend on rows after it: a label beside any statement, said
+    // once. It enters no key and changes no value.
+    {
+        let origin = plan.origin();
+        let cut = crate::run_meta::TimePoint {
+            t: origin,
+            date: job.calendar.date_of(origin).map(ir::caltime::RenderedInstant::into_string),
+        };
+        let at = cut.date.clone().unwrap_or_else(|| format!("t = {}", crate::quantile::fmt_time(origin)));
+        for d in crate::fit::forecast_covariates::pre_cut_dependence(model, job.compiled, origin, model.simulation.t_start) {
+            out.say(format_args!("predict: note: {}", d.note(&at, "the forecast origin")));
+            covariates.interpolation.push(d.record(cut.clone()));
+        }
+    }
     // Each target's held-out value (D79), bound as a held-out cell: the
     // filter's scoring likelihood evaluates it and nothing else reads it, so
     // the predictions below do not depend on it.

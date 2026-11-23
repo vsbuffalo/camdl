@@ -212,6 +212,130 @@ pub(crate) fn classify(model: &ir::Model, compiled: &sim::CompiledModel, origin:
         .collect()
 }
 
+/// A table forcing whose values before a cut depend on its rows after it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PreCutDependence {
+    pub forcing: String,
+    pub method: TableMethod,
+    /// How many table rows after the cut the values before it depend on.
+    pub rows_after_cut: usize,
+}
+
+/// Each table forcing of `compiled` (whose declarations are `model`'s) whose
+/// values at model times from `t_start` up to `cut` depend on table rows after
+/// `cut`. The cut is a fit's training extent or a forecast's origin; a fit or
+/// forecast with such a forcing uses, before its cut, information from after
+/// it. The judgement is on the table's argument, `t − lag`:
+///
+/// - a cubic spline depends on every row, so on every row after the cut,
+///   whenever the run reads it at all;
+/// - a linear table depends on the first row after the cut when the cut falls
+///   strictly between two rows and the run reads an argument between the last
+///   row before the cut and the cut;
+/// - a step table (`method = constant`) depends only on rows at or before its
+///   argument, so on rows after the cut only through a negative lag;
+/// - a negative lag reads arguments after the cut from model times before
+///   it, so the rows after the cut up to the last argument read count (for a
+///   linear table, with the first row after that argument);
+/// - a lag that is a parameter may be negative, so every row after the cut
+///   counts.
+///
+/// A label only: this changes no value and refuses nothing.
+pub(crate) fn pre_cut_dependence(
+    model: &ir::Model,
+    compiled: &sim::CompiledModel,
+    cut: f64,
+    t_start: f64,
+) -> Vec<PreCutDependence> {
+    let after = |t: f64| t > cut + TIME_TIE_EPS;
+    model
+        .time_functions
+        .iter()
+        .filter_map(|decl| {
+            let tf = &compiled.time_func_cache[*compiled.time_func_index.get(decl.name.as_str())?];
+            let (method, times) = match &tf.kind {
+                CompiledTimeFuncKind::Interpolated { times, .. } => (TableMethod::Linear, times.as_slice()),
+                CompiledTimeFuncKind::Constant { times, .. } => (TableMethod::Constant, times.as_slice()),
+                CompiledTimeFuncKind::CubicSpline(s) => (TableMethod::Spline, s.xs.as_slice()),
+                _ => return None,
+            };
+            let rows_after = times.iter().filter(|&&x| after(x)).count();
+            if rows_after == 0 || t_start > cut + TIME_TIE_EPS {
+                return None;
+            }
+            let lag = match &tf.lag {
+                None => Lag::None,
+                Some(ResolvedExpr::Const(l)) => Lag::Constant(*l),
+                Some(_) => Lag::Parameter,
+            };
+            let n = match lag {
+                Lag::Parameter => rows_after,
+                Lag::None | Lag::Constant(_) => {
+                    let shift = if let Lag::Constant(l) = lag { l } else { 0.0 };
+                    // The arguments the model times [t_start, cut] read.
+                    let (lo, hi) = (t_start - shift, cut - shift);
+                    match method {
+                        TableMethod::Spline => rows_after,
+                        TableMethod::Constant => times.iter().filter(|&&x| after(x) && x <= hi + TIME_TIE_EPS).count(),
+                        TableMethod::Linear if after(hi) => {
+                            // A negative lag: the rows after the cut up to the
+                            // last argument, and the row after that argument
+                            // that the stretch before it interpolates toward.
+                            let within = times.iter().filter(|&&x| after(x) && x <= hi + TIME_TIE_EPS).count();
+                            let toward = times.iter().any(|&x| x > hi + TIME_TIE_EPS)
+                                && !times.iter().any(|&x| (x - hi).abs() <= TIME_TIE_EPS);
+                            within + usize::from(toward)
+                        }
+                        TableMethod::Linear => {
+                            // The cut strictly between two rows, and an
+                            // argument read between the row before it and it.
+                            let before = times.iter().copied().rfind(|&x| x <= cut + TIME_TIE_EPS);
+                            match before {
+                                Some(prev) if !after(prev) && (prev - cut).abs() > TIME_TIE_EPS && hi > prev + TIME_TIE_EPS && lo <= hi => 1,
+                                _ => 0,
+                            }
+                        }
+                    }
+                }
+            };
+            (n > 0).then(|| PreCutDependence { forcing: decl.name.clone(), method, rows_after_cut: n })
+        })
+        .collect()
+}
+
+impl PreCutDependence {
+    /// The note a fit or forecast prints, naming the cut as `cut_name`.
+    pub(crate) fn note(&self, cut_at: &str, cut_name: &str) -> String {
+        format!(
+            "forcing `{}` ({} table): values before the cut ({cut_at}, {cut_name}) depend on {} row{} after it",
+            self.forcing,
+            self.method.as_str(),
+            self.rows_after_cut,
+            if self.rows_after_cut == 1 { "" } else { "s" }
+        )
+    }
+
+    /// The record a fit's `fit.meta.json` and a forecast's `forecast.json` hold.
+    pub(crate) fn record(&self, cut: crate::run_meta::TimePoint) -> crate::run_meta::ForcingInterpolationRecord {
+        crate::run_meta::ForcingInterpolationRecord {
+            forcing: self.forcing.clone(),
+            method: self.method.as_str().to_string(),
+            cut,
+            rows_after_cut: self.rows_after_cut,
+        }
+    }
+}
+
+impl TableMethod {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            TableMethod::Linear => "linear",
+            TableMethod::Constant => "constant",
+            TableMethod::Spline => "spline",
+        }
+    }
+}
+
 fn table(method: TableMethod, times: &[f64], values: &[f64], value_at_origin: f64) -> ReadKind {
     let mut rows = String::new();
     for (t, v) in times.iter().zip(values) {
@@ -277,6 +401,9 @@ pub(crate) struct Covariates {
     /// In the model's order of forcings.
     pub stated: Vec<Stated>,
     pub notes: Vec<String>,
+    /// The table forcings whose values before the origin depend on rows
+    /// after it ([`pre_cut_dependence`]), whatever their statement.
+    pub interpolation: Vec<crate::run_meta::ForcingInterpolationRecord>,
 }
 
 impl Covariates {
@@ -354,7 +481,7 @@ impl Covariates {
                 _ => None,
             })
             .collect();
-        Ok(Covariates { stated, notes })
+        Ok(Covariates { stated, notes, interpolation: Vec::new() })
     }
 
     /// The statements as the prediction's identity holds them, by forcing.
@@ -391,7 +518,7 @@ impl Covariates {
     /// nothing to say, so a forecast that reads no table forcing after its
     /// origin writes no block.
     pub(crate) fn manifest(&self, origin: f64, point: impl Fn(f64) -> serde_json::Value) -> Option<serde_json::Value> {
-        if self.stated.is_empty() && self.notes.is_empty() {
+        if self.stated.is_empty() && self.notes.is_empty() && self.interpolation.is_empty() {
             return None;
         }
         let forcings: Vec<serde_json::Value> = self
@@ -427,6 +554,9 @@ impl Covariates {
             })
             .collect();
         let mut doc = serde_json::json!({ "forcings": forcings, "notes": self.notes });
+        if !self.interpolation.is_empty() {
+            doc["interpolation"] = serde_json::to_value(&self.interpolation).expect("a record serializes");
+        }
         if self.conditional_on_realised() {
             doc["label"] = serde_json::json!(REALISED_LABEL);
         }
@@ -821,6 +951,49 @@ mod tests {
             .collect();
         assert_eq!(columns.len(), 3, "{err}");
         assert!(columns.iter().all(|&c| c == columns[0]), "{err}");
+    }
+
+    /// The rows after a cut at `cut` that each forcing's values before it
+    /// depend on, for a run from day 0.
+    fn dependence(forcings: Vec<TimeFunction>, cut: f64) -> Vec<(String, usize)> {
+        let (m, c) = model(forcings);
+        pre_cut_dependence(&m, &c, cut, 0.0).into_iter().map(|d| (d.forcing, d.rows_after_cut)).collect()
+    }
+
+    /// A cut at day 50 of the table with rows at 0, 20, 40, 60 and 100: a
+    /// spline depends on both rows after it; a linear table, whose cut falls
+    /// between the rows at 40 and 60, on the row at 60; a step table on
+    /// none. A linear table cut at one of its rows, and one ending at the
+    /// cut, depend on none.
+    #[test]
+    fn values_before_the_cut_depend_on_rows_after_it_for_splines_and_linear_tables_cut_between_rows() {
+        assert_eq!(dependence(vec![forcing("pop", table(InterpMethod::Spline), None)], 50.0), vec![("pop".to_string(), 2)]);
+        assert_eq!(dependence(vec![forcing("pop", table(InterpMethod::Linear), None)], 50.0), vec![("pop".to_string(), 1)]);
+        assert_eq!(dependence(vec![forcing("pop", table(InterpMethod::Constant), None)], 50.0), vec![]);
+        assert_eq!(dependence(vec![forcing("pop", table(InterpMethod::Linear), None)], 40.0), vec![], "a cut at a row");
+        let ends = TimeFuncKind::Interpolated(Interpolated::knots(
+            [0.0, 12.0, 24.0].map(Expr::const_).to_vec(),
+            [1.0, 2.0, 3.0].map(Expr::const_).to_vec(),
+            InterpMethod::Spline,
+        ));
+        assert_eq!(dependence(vec![forcing("pop", ends, None)], 24.0), vec![], "a table ending at the cut");
+    }
+
+    /// A lag shifts the arguments the run before the cut reads. A positive
+    /// lag can keep them before the stretch the next row reaches into; a
+    /// negative one reads rows after the cut, even of a step table; a lag
+    /// that is a parameter is taken to read every row after the cut.
+    #[test]
+    fn a_lag_judges_the_dependence_on_the_tables_argument() {
+        let linear = |lag| vec![forcing("pop", table(InterpMethod::Linear), lag)];
+        assert_eq!(dependence(linear(Some(15.0)), 50.0), vec![], "arguments up to 35 read no row after 40");
+        assert_eq!(dependence(linear(Some(5.0)), 50.0), vec![("pop".to_string(), 1)], "arguments up to 45 interpolate toward 60");
+        assert_eq!(dependence(linear(Some(-5.0)), 50.0), vec![("pop".to_string(), 1)]);
+        assert_eq!(dependence(linear(Some(-15.0)), 50.0), vec![("pop".to_string(), 2)], "the row at 60, and 100 beyond the argument 65");
+        let step = |lag| vec![forcing("pop", table(InterpMethod::Constant), lag)];
+        assert_eq!(dependence(step(Some(-15.0)), 50.0), vec![("pop".to_string(), 1)]);
+        let parameter = vec![TimeFunction { lag: Some(Expr::param("gamma")), ..forcing("pop", table(InterpMethod::Constant), None) }];
+        assert_eq!(dependence(parameter, 50.0), vec![("pop".to_string(), 2)]);
     }
 
     /// Holding applies to the compiled model each forcing stated `hold`, at

@@ -90,6 +90,28 @@ the prior with nothing assimilated from the training window, which is a
 different (and unfairly harsh) quantity. The recipe is spelled out under
 "Out-of-sample validation" in `camdl docs inference`.
 
+A table forcing can carry information from after the training extent into the
+fit: a cubic-spline table (`method = spline`) depends on every row, so its
+values before the extent depend on its rows after it, and a linear table whose
+extent falls strictly between two rows interpolates toward the first row after
+it. `fit run` says so once per forcing, as a note ("values before the cut depend
+on N rows after it", the cut being the training extent), and records it in
+`fit.meta.json` as `forcing_interpolation`. It refuses nothing and changes no
+value: to keep the held-out period out of the fit, end the table at the extent,
+or use `method = constant`, whose value at a time depends only on rows at or
+before it. A forcing with a `lag` is judged at `t − lag`, and a negative lag or
+one that is a parameter is reported whenever its table has a row after the
+extent. The rules are the run spec's, §2.2.1, "Table forcings across a cut".
+
+camdl can judge only the rows it is given. A table processed before camdl reads
+it can carry information from after its last row: values smoothed or
+interpolated over a longer series (a smoothing spline fitted to 1944–1964 and
+then cut at 1960 still holds the 1961–1964 data in every value), imputed or
+back-filled values, revised values, or a column shifted in time in the file
+rather than through a `lag`. camdl cannot detect any of these. For a held-out
+score that means what it says, build each covariate table from data up to the
+training extent, and express a delay as a `lag` in the model.
+
 `camdl profile --fit` applies the holdout as `fit run` does, through the same
 function, whether its data come from `--data` or from the config: under
 `holdout_after` every cell fits only the rows that end at or before the cutoff,

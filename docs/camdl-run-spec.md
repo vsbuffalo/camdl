@@ -562,15 +562,43 @@ recorded whichever method ran, since the resolution is a fact about the problem;
 a sampler refuses an implicit flat prior before it starts),
 `parameters_provenance` (per parameter: resolved value, the tier that supplied
 it, and its role), `training_partition` (the problem's `partition.json`, §2.2;
-`date` is present when the model has an `origin`), `dt` (the integration step
-the run ran at — the model's declared `simulate { dt }`, else the config's
-`[config] dt`, else 1.0) and `integrator` (the ODE integrator the model
-declares, `{"method": "rk4"}` when it declares none), which a replay of the
-fit's parameters runs on by default (§3.4), `calendar` (the model's calendar
-axis, §2.2.2's block, so the fit's model times can be dated without the model;
-required), `schema` (the observation/dimension schema below), and `docs` (the
-model's `#'` documentation dictionary, keyed by declaration name, so a consumer
-can label any output column).
+`date` is present when the model has an `origin`), `forcing_interpolation`
+(absent when empty; one `{forcing, method, cut, rows_after_cut}` entry per table
+forcing whose values before the cut, the training extent, depend on
+`rows_after_cut` rows after it, which `fit run` also says once as a note:
+"values before the cut depend on N rows after it"; see "Table forcings across a
+cut" below), `dt` (the integration step the run ran at — the model's declared
+`simulate { dt }`, else the config's `[config] dt`, else 1.0) and `integrator`
+(the ODE integrator the model declares, `{"method": "rk4"}` when it declares
+none), which a replay of the fit's parameters runs on by default (§3.4),
+`calendar` (the model's calendar axis, §2.2.2's block, so the fit's model times
+can be dated without the model; required), `schema` (the observation/dimension
+schema below), and `docs` (the model's `#'` documentation dictionary, keyed by
+declaration name, so a consumer can label any output column).
+
+**Table forcings across a cut.** A fit's cut is its training extent, and a
+forecast's is its origin. A table forcing can give values before the cut that
+depend on table rows after it, so a fit or the filtering before a forecast's
+origin reads information from after the cut. camdl records such a forcing and
+says so; it refuses nothing and changes no value, and the record is provenance,
+in no identity. It is judged on the table's argument `t − lag`, over the model
+times from the run's start to the cut:
+
+- a cubic-spline table (`method = spline`) depends on every row, so on every row
+  after the cut whenever it has one;
+- a linear table depends on the first row after the cut when the cut falls
+  strictly between two rows and the run reads an argument between the last row
+  before the cut and the cut;
+- a step table (`method = constant`) never does, except through a negative lag;
+- a negative lag reads arguments after the cut from model times before it, so
+  the rows after the cut up to the last argument read count (for a linear table,
+  with the first row beyond that argument), and a lag that is a parameter is
+  taken to read every row after the cut.
+
+The note reads "forcing `pop` (linear table): values before the cut (t = 24, the
+training extent) depend on 1 row after it". A fit records it in `fit.meta.json`
+(`forcing_interpolation`); a forecast records it in `forecast.json`'s
+`covariates.interpolation` (§2.2.2), beside any `--covariate` statement.
 
 `schema_version` is 3, and every reader refuses any other value, naming it,
 rather than reading an older record's fields as if they meant the same thing.
@@ -1097,10 +1125,15 @@ model.
   labelled a conditional score using realised future design, not an
   unconditional forecast), `streams`, and `files`: each `--design` file's
   `stream` and the `sha256` of its bytes (the path typed is not recorded).
-- `covariates`: absent when the forecast reads no table forcing after its origin
-  and passes no `piecewise` breakpoint. Otherwise `forcings`, one entry per
-  `--covariate` statement with the `forcing`, its `statement`, its `method`, its
-  `table` (`source`, the `data = "path"` as written in the model or `null`;
+- `covariates`: absent when the forecast reads no table forcing after its
+  origin, passes no `piecewise` breakpoint, and has no table forcing whose
+  values before the origin depend on rows after it. Otherwise `interpolation`
+  (absent when empty), one `{forcing, method, cut, rows_after_cut}` entry per
+  table forcing whose values before the origin depend on `rows_after_cut` rows
+  after it, as a fit's `forcing_interpolation` records ("Table forcings across a
+  cut", §2.2.1), whatever its statement; `forcings`, one entry per `--covariate`
+  statement with the `forcing`, its `statement`, its `method`, its `table`
+  (`source`, the `data = "path"` as written in the model or `null`;
   `rows_sha256`, the SHA-256 of its rows as the forecast reads them; the times
   of its `first` and `end` rows), its `lag` (`null`, a number, or `"parameter"`)
   and, under `hold`, `held` (`after`, the origin as a value of the table's

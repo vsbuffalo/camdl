@@ -578,6 +578,22 @@ fn run_fit(mut out: Out, cx: FitCommand<'_>) -> Vec<String> {
                     ran.streams, partition.streams));
             }
         }
+        // The table forcings whose values before the training extent depend
+        // on rows after it: said once per problem and recorded in each run's
+        // provenance. A label only; nothing it reads changes a value.
+        let forcing_interpolation: Vec<crate::run_meta::ForcingInterpolationRecord> = match &window {
+            Some(w) => {
+                let cut = partition.extent.clone();
+                let at = cut.date.clone().unwrap_or_else(|| format!("t = {}", crate::quantile::fmt_time(cut.t)));
+                let found = crate::fit::forecast_covariates::pre_cut_dependence(
+                    &w.model, &w.compiled, cut.t, w.model.simulation.t_start);
+                for d in &found {
+                    out.say(format_args!("note: {}", d.note(&at, "the training extent")));
+                }
+                found.iter().map(|d| d.record(cut.clone())).collect()
+            }
+            None => Vec::new(),
+        };
         let (_, perturbation) = crate::fit_store::split_estimate(&cell.problem.estimate)
             .unwrap_or_else(|e| out.fail(format!("error: {e}")));
         let data_digests = crate::fit::read_data_digests(cell.problem.data_spec().unwrap_or_else(|e| out.fail(format!("error: {e}"))), &model)
@@ -667,6 +683,7 @@ fn run_fit(mut out: Out, cx: FitCommand<'_>) -> Vec<String> {
                     roles: &fit_roles,
                     sweep_point: &cell.sweep_point,
                     partition: &partition,
+                    forcing_interpolation: &forcing_interpolation,
                 },
                 store_root: store.root(),
             });
@@ -786,6 +803,7 @@ struct RunRecord<'a> {
     roles: &'a Result<crate::roles::Partition, String>,
     sweep_point: &'a [(String, f64)],
     partition: &'a crate::run_meta::TrainingPartitionRecord,
+    forcing_interpolation: &'a [crate::run_meta::ForcingInterpolationRecord],
 }
 
 /// One claimed run, and what computing it needs.
@@ -974,6 +992,7 @@ fn compute_run(out: &mut Out, rc: RunCompute<'_>) -> Result<(), String> {
         sweep_point: record.sweep_point,
         seed,
         partition: record.partition.clone(),
+        forcing_interpolation: record.forcing_interpolation.to_vec(),
     }, out)
     .unwrap_or_else(|e| crate::fit::abandon_method(out, format!("error: {e}")));
     write_json(crate::fit_store::FIT_META_FILE, &sidecar)

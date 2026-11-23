@@ -607,6 +607,22 @@ pub struct TimePoint {
     pub date: Option<String>,
 }
 
+/// A table forcing whose values before a cut (a fit's training extent, a
+/// forecast's origin) depend on table rows after it: a cubic spline through
+/// a table with rows after the cut, a linear table whose cut falls between
+/// two rows, or a table read at `t − lag` with a lag that reaches past the
+/// cut. A label only: the run's values and identity are what they would be
+/// without it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ForcingInterpolationRecord {
+    pub forcing: String,
+    /// `linear`, `constant` or `spline`.
+    pub method: String,
+    pub cut: TimePoint,
+    /// How many table rows after the cut the values before it depend on.
+    pub rows_after_cut: usize,
+}
+
 /// One stream's training rows: rows `[0, rows)`, and their row digest (hex).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RowPrefixRecord {
@@ -769,6 +785,11 @@ pub struct FitSidecar {
     /// load (all-cache-hit) must not erase it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub training_partition: Option<TrainingPartitionRecord>,
+    /// Each table forcing whose values before the training extent depend on
+    /// table rows after it ([`ForcingInterpolationRecord`]). Empty, and
+    /// omitted, when none does.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forcing_interpolation: Vec<ForcingInterpolationRecord>,
     /// The integration step every run in this segment ran at: the one dt
     /// rule's answer (`crate::dt_rule`) over the model's declared
     /// `simulate { dt }` and the config's `[config] dt`. A replay of the fit's
@@ -827,6 +848,7 @@ impl Default for FitSidecar {
             parameters_provenance: BTreeMap::new(),
             schema: None,
             training_partition: None,
+            forcing_interpolation: Vec::new(),
             dt: None,
             integrator: None,
             calendar: ir::caltime::CalendarAxis::parse("days", None).expect("a known unit"),
