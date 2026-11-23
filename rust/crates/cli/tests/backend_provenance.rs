@@ -167,12 +167,12 @@ fn simulate_warns_on_explicit_backend_mismatch() {
         "simulate should proceed despite mismatch warning; stderr: {}",
         String::from_utf8_lossy(&out.stderr));
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("backend mismatch"),
-        "expected warning on mismatch, got: {}", stderr);
-    assert!(stderr.contains("chain_binomial") && stderr.contains("gillespie"),
-        "warning should name both backends: {}", stderr);
-    assert!(stderr.contains("incidents/2026-04-19-backend-default-mismatch"),
-        "warning should cite the incident file: {}", stderr);
+    let note = format!(
+        "note: {} was fitted on chain_binomial at dt = 1; this replay runs on gillespie at dt = 1 \
+         (--backend as given), so the parameters drive a different simulator",
+        mle.display()
+    );
+    assert!(stderr.contains(&note), "expected {note:?}; stderr: {stderr}");
 }
 
 #[test]
@@ -194,8 +194,8 @@ fn simulate_silent_on_matching_explicit_backend() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!stderr.contains("backend auto-matched"),
         "matching explicit backend should not emit auto-match log: {}", stderr);
-    assert!(!stderr.contains("backend mismatch"),
-        "matching explicit backend should not emit warning: {}", stderr);
+    assert!(!stderr.contains("different simulator"),
+        "matching explicit backend should not emit the note: {}", stderr);
 }
 
 #[test]
@@ -217,8 +217,8 @@ fn simulate_unchanged_on_standalone_params_file() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!stderr.contains("backend auto-matched"),
         "standalone params should not trigger auto-match log");
-    assert!(!stderr.contains("backend mismatch"),
-        "standalone params should not trigger warning");
+    assert!(!stderr.contains("different simulator"),
+        "standalone params should not trigger the note");
 }
 
 #[test]
@@ -380,6 +380,78 @@ fn explicit_backend_overrides_provenance_in_run_json() {
         &["--backend", "gillespie"]);
     let (backend, _dt) = read_sim_config(&output);
     assert_eq!(backend, "Gillespie", "explicit --backend must override provenance");
+}
+
+/// `simulate --params` with a fit's params file, run with the arguments
+/// `extra`: the store root and the command's stderr.
+fn simulate_with_stderr(bin: &Path, tmp: &Path, mle: &Path, extra: &[&str]) -> (PathBuf, String) {
+    let output = tmp.join("out");
+    let mut args: Vec<String> = vec![
+        "simulate".into(), golden_pure_death().to_string_lossy().to_string(),
+        "--params".into(), mle.to_string_lossy().to_string(),
+        "--seed".into(), "1".into(),
+        "--store".into(), output.to_string_lossy().to_string(),
+        "-o".into(), tmp.join("t.tsv").to_string_lossy().to_string(),
+    ];
+    args.extend(extra.iter().map(|a| a.to_string()));
+    let out = Command::new(bin).env_remove("CLICOLOR_FORCE").args(&args).output().expect("spawn");
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "simulate should succeed; stderr: {stderr}");
+    (output, stderr)
+}
+
+/// A `--backend` equal to the fit's moves nothing: the run keeps the fit's
+/// step, as a replay of a stored fit does, and says nothing.
+#[test]
+fn an_explicit_backend_equal_to_the_fits_keeps_the_fits_dt() {
+    let bin = skip_if_missing();
+    let tmp = tempfile::tempdir().unwrap();
+    let mle = tmp.path().join("mle.toml");
+    write_fake_mle(&mle, "chain_binomial", 0.5);
+    let (output, stderr) = simulate_with_stderr(&bin, tmp.path(), &mle, &["--backend", "chain_binomial"]);
+    assert_eq!(read_sim_config(&output), ("ChainBinomial".to_string(), 0.5), "stderr: {stderr}");
+    assert!(!stderr.contains("note:"), "an equal flag runs silently: {stderr}");
+}
+
+/// A `--dt` that differs from the fit's runs at the flag's step, with the
+/// note a replay of a stored fit prints, naming both simulators.
+#[test]
+fn a_dt_differing_from_the_fits_runs_with_the_different_simulator_note() {
+    let bin = skip_if_missing();
+    let tmp = tempfile::tempdir().unwrap();
+    let mle = tmp.path().join("mle.toml");
+    write_fake_mle(&mle, "chain_binomial", 0.5);
+    let (output, stderr) = simulate_with_stderr(&bin, tmp.path(), &mle, &["--dt", "0.25"]);
+    assert_eq!(read_sim_config(&output), ("ChainBinomial".to_string(), 0.25));
+    let note = format!(
+        "note: {} was fitted on chain_binomial at dt = 0.5; this replay runs on chain_binomial \
+         at dt = 0.25 (--dt as given), so the parameters drive a different simulator",
+        mle.display()
+    );
+    assert!(stderr.contains(&note), "expected {note:?}; stderr: {stderr}");
+}
+
+/// `--integrator` on a fit's estimate whose backend has no integrator is
+/// refused, as on a replay of a stored fit.
+#[test]
+fn an_integrator_off_the_fits_ode_less_backend_is_refused() {
+    let bin = skip_if_missing();
+    let tmp = tempfile::tempdir().unwrap();
+    let mle = tmp.path().join("mle.toml");
+    write_fake_mle(&mle, "chain_binomial", 1.0);
+    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
+        .args(["simulate", &golden_pure_death().to_string_lossy(),
+               "--params", &mle.to_string_lossy(), "--integrator", "rk45",
+               "--seed", "1", "--store", &tmp.path().join("out").to_string_lossy()])
+        .output().expect("spawn");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "stderr: {stderr}");
+    let msg = format!(
+        "--integrator selects the ODE integrator, but this replay of {} runs on chain_binomial, \
+         which has none.\n  Fix: drop --integrator, or pass --backend ode.",
+        mle.display()
+    );
+    assert!(stderr.contains(&msg), "expected {msg:?}; stderr: {stderr}");
 }
 
 #[test]

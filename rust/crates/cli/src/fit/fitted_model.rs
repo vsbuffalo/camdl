@@ -2,8 +2,11 @@
 //! simulator did the fit run it on?
 //!
 //! The second question has one reader, [`stored_fit_simulator`] (with
-//! [`fit_config_simulator`] for a fit config), and one rule for the flags over
-//! it, [`replay_simulator`]; see the section near the end of this file.
+//! [`fit_config_simulator`] for a fit config, and
+//! [`FittedDynamics::of_provenance`] for a params file's fit `[provenance]`
+//! block), and one rule for the flags over it, [`replay_dynamics`], which
+//! [`replay_simulator`] extends with the fit's settings; see the section near
+//! the end of this file.
 //!
 //! A stored fit's parameters — its posterior draws, its `[fixed]` block — mean
 //! something only under the model they were estimated with. A command that
@@ -451,9 +454,56 @@ fn describe_simulator(backend: Option<ForwardBackend>, dt: f64, integrator: &Int
 }
 
 impl FittedSimulator {
+    /// The backend, step and integrator the fit ran on, without its
+    /// `[config]` settings.
+    pub fn dynamics(&self) -> FittedDynamics {
+        FittedDynamics { backend: self.backend, dt: self.dt, integrator: self.integrator.clone() }
+    }
+}
+
+/// The backend, step and integrator a fit's parameters were estimated on: the
+/// part of [`FittedSimulator`] a fit's params file records in its
+/// `[provenance]` block, which holds no `[config]` settings.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FittedDynamics {
+    /// The forward backend; `None` when the fit names none.
+    pub backend: Option<ForwardBackend>,
+    /// The integration step (`crate::dt_rule`).
+    pub dt: f64,
+    /// The ODE integrator the fit's model declares.
+    pub integrator: Integrator,
+}
+
+impl FittedDynamics {
+    /// The simulator a params file's fit `[provenance]` block records, beside
+    /// `model`, the model the file is simulated on. The block records the
+    /// backend and the step; a fit takes no integrator override, so its
+    /// integrator is the one its model declares.
+    pub fn of_provenance(prov: &crate::fit::provenance::MleProvenance, model: &ir::Model) -> Self {
+        FittedDynamics { backend: Some(prov.backend), dt: prov.dt, integrator: model.simulation.integrator.clone() }
+    }
+
     pub fn describe(&self) -> String {
         describe_simulator(self.backend, self.dt, &self.integrator)
     }
+}
+
+/// The refusal of `--integrator` on a run whose backend has no integrator.
+/// `what` names the run ("this replay of @r0", "this simulation"). The flag
+/// would select nothing, yet change the run's identity.
+pub fn refuse_integrator_off_ode(
+    integrator: Option<IntegratorArg>,
+    backend: ForwardBackend,
+    what: &str,
+) -> Result<(), String> {
+    if integrator.is_some() && backend != ForwardBackend::Ode {
+        return Err(format!(
+            "--integrator selects the ODE integrator, but {what} runs on {}, which has none.\n  \
+             Fix: drop --integrator, or pass --backend ode.",
+            backend.as_str()
+        ));
+    }
+    Ok(())
 }
 
 /// The simulator of a stored fit — the one reader.
@@ -557,30 +607,64 @@ pub struct ReplaySimulator {
     pub notice: Option<String>,
 }
 
+/// What a replay integrates with: the fit's backend, step and integrator,
+/// with each explicit flag applied.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReplayDynamics {
+    pub backend: ForwardBackend,
+    pub dt: f64,
+    /// The `--integrator` override to apply; `None` runs the model's own.
+    pub integrator: Option<IntegratorArg>,
+    /// The one notice when a flag moved the replay off the fit's simulator.
+    pub notice: Option<String>,
+}
+
 /// Resolve the simulator a replay of `fit`'s parameters runs on.
 ///
 /// `fallback_backend` is what the command runs without a fit (its default,
 /// or a backend matched from a params file's provenance), used only when the
-/// fit names no backend. Each flag replaces its own setting and nothing else:
-/// dt is a `[config]` setting every backend integrates at, so it carries
-/// across a `--backend` change. The setting that belongs to one backend is the
-/// integrator, so `--integrator` on a backend other than ODE is refused — it
-/// would select nothing, yet change the run's identity. The fit's own
-/// integrator lives in the model and is inert off ODE.
+/// fit names no backend. The settings are the fit's with the flags folded in
+/// ([`FittedSettings::with_flags`]); the backend, step and integrator are
+/// [`replay_dynamics`].
 pub fn replay_simulator(
     fit_name: &str,
     fit: &FittedSimulator,
     flags: SimulatorFlags,
     fallback_backend: ForwardBackend,
 ) -> Result<ReplaySimulator, String> {
+    let ReplayDynamics { backend, dt, integrator, notice: simulator_notice } =
+        replay_dynamics(fit_name, &fit.dynamics(), flags, fallback_backend)?;
+    let settings =
+        fit.settings.with_flags(flags.settings.allow_degenerate_rates, flags.settings.allow_forcing_extrapolation);
+    let settings_notice = fit.settings.turned_on_note(settings, fit_name, "this replay runs");
+    let notice = match (simulator_notice, settings_notice) {
+        (Some(a), Some(b)) => Some(format!("{a}\n{b}")),
+        (a, b) => a.or(b),
+    };
+    Ok(ReplaySimulator { backend, dt, integrator, settings, notice })
+}
+
+/// The backend, step and integrator a replay of `fit`'s parameters runs on,
+/// from `flags`' `--backend`, `--dt` and `--integrator` (its settings are not
+/// read). Read by every replay of a fit's parameters: a stored fit or a fit
+/// config ([`replay_simulator`]) and a params file carrying a fit's
+/// `[provenance]` block (`simulate --params`).
+///
+/// Each flag replaces its own setting and nothing else: dt is a `[config]`
+/// setting every backend integrates at, so it carries across a `--backend`
+/// change. The setting that belongs to one backend is the integrator, so
+/// `--integrator` on a backend other than ODE is refused
+/// ([`refuse_integrator_off_ode`]). The fit's own integrator lives in the
+/// model and is inert off ODE. A flag that moves the replay off the fit's
+/// simulator runs with one notice naming both.
+pub fn replay_dynamics(
+    fit_name: &str,
+    fit: &FittedDynamics,
+    flags: SimulatorFlags,
+    fallback_backend: ForwardBackend,
+) -> Result<ReplayDynamics, String> {
     let backend = flags.backend.or(fit.backend).unwrap_or(fallback_backend);
-    if flags.integrator.is_some() && backend != ForwardBackend::Ode {
-        return Err(format!(
-            "--integrator selects the ODE integrator, but this replay of {fit_name} runs on \
-             {}, which has none.\n  Fix: drop --integrator, or pass --backend ode.",
-            backend.as_str()
-        ));
-    }
+    refuse_integrator_off_ode(flags.integrator, backend, &format!("this replay of {fit_name}"))?;
     let dt = flags.dt.unwrap_or(fit.dt);
     let used_integrator = match flags.integrator {
         Some(m) => crate::util::overridden_integrator(&fit.integrator, m),
@@ -595,7 +679,7 @@ pub fn replay_simulator(
         .iter()
         .filter_map(|(on, flag)| on.then_some(*flag))
         .collect();
-    let simulator_notice = (!moved.is_empty()).then(|| {
+    let notice = (!moved.is_empty()).then(|| {
         format!(
             "note: {fit_name} was fitted on {}; this replay runs on {} ({} as given), so the \
              parameters drive a different simulator from the one they were estimated on",
@@ -604,14 +688,7 @@ pub fn replay_simulator(
             moved.join(", ")
         )
     });
-    let settings =
-        fit.settings.with_flags(flags.settings.allow_degenerate_rates, flags.settings.allow_forcing_extrapolation);
-    let settings_notice = fit.settings.turned_on_note(settings, fit_name, "this replay runs");
-    let notice = match (simulator_notice, settings_notice) {
-        (Some(a), Some(b)) => Some(format!("{a}\n{b}")),
-        (a, b) => a.or(b),
-    };
-    Ok(ReplaySimulator { backend, dt, integrator: flags.integrator, settings, notice })
+    Ok(ReplayDynamics { backend, dt, integrator: flags.integrator, notice })
 }
 
 #[cfg(test)]

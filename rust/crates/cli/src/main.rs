@@ -981,18 +981,13 @@ fn run_simulate(inv: args::SimulateInvocation) {
             out.fail(format!("error: {}", e));
         }
     };
-    // Track explicit vs default flags for the backend-provenance guardrail.
-    // Option<_> fields mean None ↔ not explicitly passed.
-    let backend_explicit = a.backend.backend.is_some();
-    let dt_explicit      = a.backend.dt.is_some();
     // Default is chain_binomial so `simulate` and `fit` agree at the
     // same MLE params (see docs/dev/incidents/2026-04-19-backend-default-mismatch.md).
     let mut backend      = a.backend.backend.unwrap_or(args::types::ForwardBackend::ChainBinomial);
-    // dt precedence (gh#161): an explicit `--dt` always wins. Otherwise the
-    // model's own `simulate { dt = … }` is the default (dt is a model knob).
-    // If neither is set, fall back to 1.0. A fit-provenance `dt` (below) can
-    // still override the model default when a fit-MLE params file is passed and
-    // `--dt` was not given, so the consumer reproduces the fit's step.
+    // The exploratory step: `--dt`, else the model's own `simulate { dt = … }`,
+    // else 1.0. A replay of a fit's parameters (a `--fit`, or a params file
+    // carrying a fit's `[provenance]`) replaces both with the fit's simulator
+    // below.
     let model_dt: Option<f64> = util::peek_simulation_dt(&ir_path_compiled);
     let mut dt           = a.backend.dt.or(model_dt).unwrap_or(1.0_f64);
     let seed             = a.seed;
@@ -1350,22 +1345,16 @@ fn run_simulate(inv: args::SimulateInvocation) {
     }
 
 
-    // ── Backend-provenance guardrail ─────────────────────────────
+    // ── A params file's fit `[provenance]` block ────────────────────────────
     //
-    // If any of the params files carries a `[provenance]` block from
-    // a fit, apply the three-way matching rule for backend + dt.
-    // See docs/dev/proposals/2026-04-19-backend-provenance-guardrail.md
-    // and the incident at
-    // docs/dev/incidents/2026-04-19-backend-default-mismatch.md.
-    //
-    // We read the first fit-provenance block found; if the user passes
-    // multiple --params files, one can be a fit MLE and others can be
-    // standalone overrides, but two conflicting fit-provenance blocks
-    // is itself a misconfiguration we'd flag — for the v1 of this
-    // feature we stop at the first block and trust single-fit
-    // workflows.
+    // A params file a fit wrote records the backend and step the fit ran on.
+    // The run replays on them by the rule a replay of a stored fit follows
+    // (`fit::fitted_model::replay_dynamics`, applied below). Only the first
+    // block found is read: one file can be a fit's estimate and the others
+    // plain overrides.
     let mut from_fit_hash: Option<String> = None;
     let mut from_fit_params_file: Option<String> = None;
+    let mut fit_provenance: Option<(String, crate::fit::provenance::MleProvenance)> = None;
     for pf in &params_files {
         // A malformed block is refused, not treated as no block: skipping it
         // would silently drop the backend match, the tamper check and the
@@ -1407,32 +1396,8 @@ fn run_simulate(inv: args::SimulateInvocation) {
         }
         from_fit_hash = prov.fit_hash.clone();
         from_fit_params_file = Some(pf.clone());
-
-        if !backend_explicit {
-            // Auto-match path.
-            out.say(format_args!("[info] backend auto-matched to {} (dt={}) from fit \
-                      provenance in {}. Pass --backend explicitly to override; \
-                      the fit's backend is the consistent default for forward \
-                      sims of the MLE.",
-                prov.backend, prov.dt, pf));
-            backend = prov.backend;
-            if !dt_explicit { dt = prov.dt; }
-        } else if backend != prov.backend {
-            // Explicit-differs path — warn.
-            out.say("warning: backend mismatch.");
-            out.say(format_args!("  {} was produced by a fit that used {} (dt={}).",
-                pf, prov.backend, prov.dt));
-            out.say(format_args!("  You passed --backend {}, which is a different \
-                       dynamical model at the same parameters.", backend));
-            out.say("  The resulting trajectories will NOT reproduce the \
-                       fit's behavior — this combination has caused real \
-                       confusion; see");
-            out.say("  docs/dev/incidents/2026-04-19-backend-default-mismatch.md.");
-            out.say("  If this is intentional (e.g. cross-backend \
-                       comparison), ignore this warning.");
-        }
-        // If backend_explicit and matches: silent. Normal case.
-
+        // The fit's simulator, which the run replays on (below).
+        fit_provenance = Some((pf.clone(), prov));
         break;
     }
 
@@ -1574,14 +1539,17 @@ fn run_simulate(inv: args::SimulateInvocation) {
         allow_degenerate_rates: a.allow_degenerate_rates,
         allow_forcing_extrapolation: a.forcing_extrapolation.allow_forcing_extrapolation,
     };
+    let simulator_flags = crate::fit::fitted_model::SimulatorFlags {
+        backend: a.backend.backend,
+        dt: a.backend.dt,
+        integrator: a.backend.integrator,
+        settings: eval_settings,
+    };
     if let Some((fit_name, fitted)) = &fitted_simulator {
-        let flags = crate::fit::fitted_model::SimulatorFlags {
-            backend: a.backend.backend,
-            dt: a.backend.dt,
-            integrator: a.backend.integrator,
-            settings: eval_settings,
-        };
-        let replay = crate::fit::fitted_model::replay_simulator(fit_name, fitted, flags, backend)
+        // A fit config with no `[method]` names no backend: the params file's
+        // fit, else the default, is the one run.
+        let fallback = fit_provenance.as_ref().map_or(backend, |(_, prov)| prov.backend);
+        let replay = crate::fit::fitted_model::replay_simulator(fit_name, fitted, simulator_flags, fallback)
             .unwrap_or_else(|e| {
                 out.fail(format!("error: {e}"));
             });
@@ -1592,6 +1560,32 @@ fn run_simulate(inv: args::SimulateInvocation) {
         dt = replay.dt;
         integrator = replay.integrator;
         eval_settings = replay.settings;
+    } else if let Some((pf, prov)) = &fit_provenance {
+        // The block records no `[config]` settings, so the flags' are the
+        // run's.
+        let model = util::load_ir(&ir_path_compiled).map(|(m, _)| m).unwrap_or_else(|e| {
+            out.fail(format!("error: {e}"));
+        });
+        let fitted = crate::fit::fitted_model::FittedDynamics::of_provenance(prov, &model);
+        let replay = crate::fit::fitted_model::replay_dynamics(pf, &fitted, simulator_flags, backend)
+            .unwrap_or_else(|e| {
+                out.fail(format!("error: {e}"));
+            });
+        let flagged = a.backend.backend.is_some() || a.backend.dt.is_some() || a.backend.integrator.is_some();
+        if !flagged {
+            out.say(format_args!(
+                "[info] backend auto-matched to {} (dt={}) from fit provenance in {pf}: the \
+                 simulator the fit ran on. A --backend, --dt or --integrator that differs runs \
+                 with a note.",
+                replay.backend, replay.dt
+            ));
+        }
+        if let Some(notice) = &replay.notice {
+            out.say(format_args!("{notice}"));
+        }
+        backend = replay.backend;
+        dt = replay.dt;
+        integrator = replay.integrator;
     }
 
     let mut base_sim_run = util::SimRun {
