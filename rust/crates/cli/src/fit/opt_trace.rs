@@ -15,7 +15,10 @@
 //!
 //! It is a record of one execution, not of the computation: which
 //! evaluations get a row depends partly on wall-clock time, so the file is
-//! outside the leaf's manifest ([`runid::OPT_TRACE`]).
+//! a provenance file of the run, not a result file ([`OPT_TRACE`]).
+
+/// The trace's file name in a method directory.
+pub(crate) const OPT_TRACE: &str = "opt_trace.tsv";
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -76,7 +79,7 @@ pub(super) struct OptTraceFile {
 
 impl OptTraceFile {
     pub(super) fn create(method_dir: &Path, est_names: &[String]) -> Result<Self, String> {
-        let path = method_dir.join(runid::OPT_TRACE);
+        let path = method_dir.join(OPT_TRACE);
         std::fs::write(&path, header(est_names))
             .map_err(|e| format!("writing {}: {e}", path.display()))?;
         let file = std::fs::OpenOptions::new()

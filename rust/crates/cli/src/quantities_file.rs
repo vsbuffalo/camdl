@@ -23,7 +23,7 @@
 //! copies of one vocabulary share an address.
 //!
 //! Model/fit identity is deliberately untouched: `quantities` are excluded from
-//! `Model::hash_into` (pinned by `runid`'s `ir_quantities_excluded_from_hash`),
+//! `Model::hash_into` (pinned by `ir::model_hash`'s `ir_quantities_excluded_from_hash`),
 //! so the trajectory and the posterior a vocabulary is read off do not move. It
 //! is the *report* that is keyed, not the run.
 

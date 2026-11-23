@@ -65,8 +65,8 @@ and a setting one method needs is never carried, as a placeholder, by another.
 The split is defined in `proposals/2026-10-29-method-scoped-settings.md` §6.1
 (branch `docs/method-scoped-settings`).
 
-**`RunRecord`** (`run.json`) is what was executed: the factored identity levels
-and the `run_id` derived from them, the engine and IR versions, and the parents.
+**The run record** (`run.json`, with `identity.json`) is what was executed: the
+identity record and the run id derived from it, the build, and the dependencies.
 It describes what happened and never depends on an assessment policy. Every
 stored artifact resolves to exactly one `run_id`. A label is a name for a run
 and never stands in for its identity. A parent is recorded by its `run_id`.

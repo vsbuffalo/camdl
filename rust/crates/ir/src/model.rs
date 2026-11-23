@@ -210,7 +210,7 @@ pub struct InitialConditions(pub indexmap::IndexMap<String, InitSpec>);
 ///
 /// `IndexMap`'s own `PartialEq` compares entry sets and ignores order. That is
 /// the wrong contract here: the order is folded into the model's content hash
-/// (see the `ContentAddressed` impl in `runid`), so an order-blind `==` would
+/// (see the `ContentAddressed` impl in `model_hash`), so an order-blind `==` would
 /// let two models compare equal and key differently — and a serialization
 /// round-trip that silently lost the order would pass an `assert_eq!(model,
 /// reparsed)` while every stored run under it moved.

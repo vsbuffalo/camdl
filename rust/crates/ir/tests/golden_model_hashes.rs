@@ -56,7 +56,7 @@ fn model_hash(rel: &str) -> String {
     let path = repo_root().join(rel);
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     let model = ir::from_str(&text).unwrap_or_else(|e| panic!("parse {rel}: {e}"));
-    runid::inputs::model_ir_hash(&model).to_hex()
+    ir::model_hash::model_ir_hash(&model).to_hex()
 }
 
 fn read_table() -> (Vec<String>, BTreeMap<String, String>) {

@@ -51,7 +51,7 @@
 //! compiled model must never pass through a generic `serde_json::Value`: in
 //! this workspace `Value` sorts object keys, the order of a model's
 //! `initial_conditions` is part of its identity, and the round trip therefore
-//! yields a different model (`rust/crates/runid/tests/value_round_trip.rs` pins
+//! yields a different model (`rust/crates/ir/tests/value_round_trip.rs` pins
 //! this). To take the section out of an envelope, parse the envelope with a
 //! typed reader, or extract the `declared` member's own text.
 

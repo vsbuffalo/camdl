@@ -269,11 +269,6 @@ pub struct ProvenanceReport {
     /// build's ([`crate::version::build_note`] says how it differs: another
     /// commit, or only uncommitted changes).
     pub stale_camdl_version: Option<String>,
-    /// The run's `ENGINE_ID` (`run.json`'s `engine_version`), when its record
-    /// was read: under this build's readable version, another id is another
-    /// build configuration ([`crate::version::build_note`]).
-    #[serde(skip)]
-    pub recorded_engine: Option<String>,
     /// Whether `final_params.toml` and `mle_params.toml` were there to
     /// compare, so the text can name the absent one.
     #[serde(skip)]
@@ -596,18 +591,13 @@ pub(crate) fn if2_provenance(state: &If2Record, method_dir: &str) -> ProvenanceR
         }
         _ => None,
     };
-    let recorded_engine = runid::read_leaf(std::path::Path::new(method_dir))
-        .ok()
-        .flatten()
-        .map(|l| l.record.engine_version);
     let stale = state.camdl_version.as_deref()
-        .filter(|v| version::build_note(v, recorded_engine.as_deref(), str::to_string).is_some())
+        .filter(|v| version::build_note(v, str::to_string).is_some())
         .map(str::to_string);
     ProvenanceReport {
         final_params_matches_mle_params: final_matches_mle,
         fit_state_winner_matches_final_params: state_matches_final,
         stale_camdl_version: stale,
-        recorded_engine,
         final_params_present: final_params.is_some(),
         mle_params_present: mle_params.is_some(),
     }

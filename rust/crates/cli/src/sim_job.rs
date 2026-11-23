@@ -142,9 +142,10 @@ pub struct InitStateSource {
     /// The ensemble, in the order the row axis indexes.
     pub states: Vec<OriginState>,
     pub axis: InitStateRowAxis,
-    /// Content digest of the ensemble — the identity input (see
-    /// [`runid::inputs::InitStateDigest`]).
-    pub ensemble_digest: runid::ContentHash,
+    /// Content digest of the ensemble, the identity input: for a file, the
+    /// SHA-256 of its bytes; for `fit`, the key of
+    /// [`crate::sim_store::InitStateEnsemble`].
+    pub ensemble_digest: store::Key,
 }
 
 /// Where parameter vectors come from — run-spec §3.2. Exactly one variant

@@ -65,7 +65,7 @@ pub(crate) fn draft_owner(name: &str) -> Option<&str> {
 /// Writes `bytes` to `path` so a reader sees the old file or the whole new
 /// one: through a temporary file of this writer's own in the same directory,
 /// renamed over `path`, and the directory synced.
-pub(crate) fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+pub fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let tmp = path.with_file_name(format!(".{}.tmp", unique_name(&name)));
     let committed = write_file_synced(&tmp, bytes).and_then(|()| fs::rename(&tmp, path).at("replace", path));

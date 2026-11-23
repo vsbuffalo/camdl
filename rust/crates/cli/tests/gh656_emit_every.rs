@@ -436,8 +436,8 @@ fn distinct_cadences_are_distinct_obs_artifacts_and_the_same_cadence_collides() 
 
 /// The model identity does not move.
 ///
-/// A `fit` against REAL data keys on the model's IR (`FitDigest.model`), which
-/// is the same digest the sim leaf's `run_id` folds. Lowering `--emit-every`
+/// A `fit` against REAL data keys on its stored compile of the model, as a
+/// simulation cell does. Lowering `--emit-every`
 /// into the IR — the way `--output-every` does — would move that digest, so a
 /// purely cosmetic change to emitted output would orphan a completed fit. It
 /// must not: same leaf, same `run_id`, with and without the flag.

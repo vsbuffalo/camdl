@@ -232,8 +232,8 @@ fn cas_different_seed_new_cache_entry() {
 }
 
 /// gh#135 regression. Two structurally different models under identical
-/// params/backend/dt/seed must NOT collide to one CAS entry: the runid
-/// `model`-level digest (the whole-IR structural hash) has to separate them.
+/// params/backend/dt/seed must NOT collide to one stored cell: the
+/// model's digest (the whole-IR structural hash) has to separate them.
 ///
 /// The two models share a basename (`model.ir.json`) so the path's
 /// model-stem prefix is identical — the ONLY thing that can separate

@@ -1,6 +1,5 @@
 //! `#[derive(Differentiate)]` — generates `Differentiable::diffables` over all
-//! fields, **include-by-default** (the same technique as `runid-derive`'s
-//! `#[derive(RunInput)]`).
+//! fields, **include-by-default**.
 //!
 //! The generated `diffables` returns `(field_name, &Diffable)` for every field
 //! in declaration order, so adding a differentiable argument to a likelihood

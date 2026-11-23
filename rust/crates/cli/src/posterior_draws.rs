@@ -82,18 +82,13 @@ impl From<PosteriorDrawsError> for String {
     }
 }
 
-/// [`crate::leaf_use::require_completed`] for a method leaf of a fit view: its
-/// state read from its `run.json` and `.lock`, so the refusal says whether it
-/// failed (and why), is running, or was interrupted.
+/// Refuses a method leaf of a fit view that is not a completed run.
 fn require_completed(m: &crate::fit::fit_view::FitMethodView) -> Result<(), PosteriorDrawsError> {
     use PosteriorDrawsError::Other;
     if m.completed() {
         return Ok(());
     }
-    match crate::leaf_use::read(&m.method_dir).map_err(Other)? {
-        Some(leaf) => crate::leaf_use::require_completed(&leaf).map_err(Other),
-        None => Err(Other(format!("{} holds no run.json", m.method_dir.display()))),
-    }
+    Err(Other(format!("{} is not a completed run", m.method_dir.display())))
 }
 
 /// [`crate::chain_index::refuse_one_based_layout`], as a resolution failure
@@ -114,11 +109,9 @@ fn refuse_old_layout(method_dir: &Path) -> Result<(), PosteriorDrawsError> {
 /// including a leaf refused for its chain numbering
 /// ([`PosteriorDrawsError::Other`]).
 ///
-/// Only a completed run's `draws.tsv` is a posterior. A run that failed after
-/// writing it, or was killed after writing it, leaves a file that looks
-/// complete; such a leaf — named, or among the runs with draws — is refused
-/// with its state ([`crate::leaf_use::require_completed`]), never read and
-/// never passed over in silence.
+/// Only a completed run's `draws.tsv` is a posterior. A fit view's leaves are
+/// copies of stored runs, which the store hands out only for a completed
+/// result.
 pub fn resolve_posterior_draws(
     fit_ref: &str,
     method: Option<&str>,
@@ -198,23 +191,13 @@ pub fn resolve_posterior_draws(
         });
     }
 
-    // Leaf-dir-passed-directly case: no fit-level view, but the directory
-    // itself may hold a draws.tsv — a leaf outside a fit folder, or a bare
-    // directory of draws. A leaf must be a completed run, and its label comes
-    // from its own `run.json`; a record that cannot be read is refused rather
-    // than taken as a bare directory.
+    // No fit-level view, but the directory itself holds a draws.tsv: a bare
+    // directory of draws, read as given, with no method name.
     let draws_path = dir.join(DRAWS_FILE);
     if draws_path.is_file() {
-        let leaf = crate::leaf_use::read(dir).map_err(Other)?;
-        if let Some(leaf) = &leaf {
-            crate::leaf_use::require_completed(leaf).map_err(Other)?;
-        }
         refuse_old_layout(dir)?;
-        let method = leaf
-            .and_then(|l| l.record.inputs.get("method").and_then(|s| s.as_str()).map(String::from))
-            .unwrap_or_default();
         return Ok(PosteriorDrawsRef {
-            name: method,
+            name: String::new(),
             draws_path,
             method: None,
             backend: None,
@@ -440,7 +423,7 @@ mod tests {
                 source: "model_ir".into(),
                 overridden_model_prior: None,
             }],
-            store_layout: runid::STORE_LAYOUT,
+            store_layout: u32::from(store::STORE_FORMAT),
             ..Default::default()
         };
         crate::run_meta::store_fit_sidecar(&seg, &sidecar).unwrap();
@@ -485,23 +468,6 @@ mod tests {
         fs::remove_dir_all(&tmp).ok();
     }
 
-    /// A directory holding a `draws.tsv` beside a `run.json` that is not a run
-    /// record is refused, naming the file's problem, rather than read as a
-    /// bare directory of draws.
-    #[test]
-    fn a_dir_with_draws_and_an_unreadable_run_json_is_refused() {
-        let tmp = crate::test_support::unique_temp_dir("pdraws_unreadable");
-        fs::create_dir_all(&tmp).unwrap();
-        fs::write(tmp.join(DRAWS_FILE), TWO_DRAWS).unwrap();
-        fs::write(tmp.join("run.json"), "{ truncated").unwrap();
-        let err = resolve_posterior_draws(tmp.to_str().unwrap(), None).unwrap_err();
-        assert!(matches!(err, PosteriorDrawsError::Other(_)), "{err:?}");
-        let err = err.to_string();
-        assert!(err.contains(&tmp.display().to_string()) && err.contains("its run.json is not a run record"),
-            "{err}");
-        fs::remove_dir_all(&tmp).ok();
-    }
-
     #[test]
     fn resolves_dir_with_draws_directly() {
         // A bare directory holding a draws.tsv (no fit view) resolves via the
@@ -531,7 +497,7 @@ mod tests {
         fs::create_dir_all(&tmp).unwrap();
         let sidecar = crate::run_meta::FitSidecar {
             fixed: std::collections::BTreeMap::from([("N0".to_string(), 1000.0), ("sigma".to_string(), 0.11)]),
-            store_layout: runid::STORE_LAYOUT,
+            store_layout: u32::from(store::STORE_FORMAT),
             ..Default::default()
         };
         crate::run_meta::store_fit_sidecar(&tmp, &sidecar).unwrap();

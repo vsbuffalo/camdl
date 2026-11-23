@@ -52,7 +52,6 @@ numerics = { path = "../numerics" }
 rand = "0.8"
 rand_distr = "0.4"
 rayon = "1"
-runid = { path = "../runid" }
 score = { path = "../score" }
 # Semver parse + compare for `camdl check-update` (release tag vs this binary).
 semver = "1"
@@ -72,8 +71,7 @@ ureq = { version = "2", default-features = false, features = ["tls"] }
 [target.'cfg(unix)'.dependencies]
 # Process-liveness check (kill(pid, 0)) for the single-flight IR-compile lock:
 # a contender waits only while the lock holder is alive, and reclaims a lock
-# left by a crashed/OOM-killed leader. Same idiom as `runid::store`'s Mode-B
-# `.lock` reclaim (gh#214).
+# left by a crashed/OOM-killed leader (gh#214).
 libc = "0.2"
 
 [features]

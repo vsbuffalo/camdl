@@ -318,19 +318,19 @@ YAML front matter, and no second `#` heading.
 and a full path, written as the language writes it:
 
 ```markdown
-A run starts from a [`Seed`](rust:runid::inputs::Seed), and the compiler writes
-[`Ir.model`](ocaml:Ir.model).
+A run starts from a [`ProcessSeed`](rust:cli::camdl_store::ProcessSeed), and the
+compiler writes [`Ir.model`](ocaml:Ir.model).
 ```
 
 The path is resolved exactly, against the same JSON the generated pages are made
 from, without the scope search a doc comment gets:
 
-| The path names                                             | The link goes to                                        |
-| ---------------------------------------------------------- | ------------------------------------------------------- |
-| a type (`rust:runid::inputs::Seed`, `ocaml:Ast.Located.t`) | the type's entry on its generated page                  |
-| a field, variant, constructor or trait item of a type      | the type's entry (members have no anchors of their own) |
-| a Rust function, constant, static or inherent method       | its line on the source file's page                      |
-| a module (`rust:runid::inputs`)                            | the module's page, or its section on its parent's page  |
+| The path names                                                       | The link goes to                                        |
+| -------------------------------------------------------------------- | ------------------------------------------------------- |
+| a type (`rust:cli::camdl_store::ProcessSeed`, `ocaml:Ast.Located.t`) | the type's entry on its generated page                  |
+| a field, variant, constructor or trait item of a type                | the type's entry (members have no anchors of their own) |
+| a Rust function, constant, static or inherent method                 | its line on the source file's page                      |
+| a module (`rust:ir::model_hash`)                                     | the module's page, or its section on its parent's page  |
 
 Functions and methods resolve only in Rust: the OCaml extractor lists types, not
 values. When a path could name several things, the first of type, member, value
@@ -339,7 +339,7 @@ and module in that order is taken.
 **Embedded declarations.** A line holding only
 
 ```markdown
-<!-- decl: rust:runid::inputs::Seed -->
+<!-- decl: rust:cli::camdl_store::ProcessSeed -->
 ```
 
 is replaced by that type's entry as its own page shows it: a link to the entry

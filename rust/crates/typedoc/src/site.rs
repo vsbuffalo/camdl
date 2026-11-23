@@ -766,11 +766,11 @@ impl<'a> Site<'a> {
     }
 
     /// What a full path names, written outside any module as an engineering
-    /// page's reference is: a type (`runid::inputs::Seed`, `Ir.model`), a
-    /// member of one (`runid::inputs::Seed::value`), a function, constant,
+    /// page's reference is: a type (`store::hash::Key`, `Ir.model`), a
+    /// member of one (`store::hash::Key::to_hex`), a function, constant,
     /// static or method the extractor lists in [`Module::values`]
-    /// (`runid::compute`, `runid::inputs::Seed::new`), or a module
-    /// (`runid::inputs`). Only modules in `language` are searched.
+    /// (`ir::model_hash::model_ir_hash`, `store::hash::Key::digest_bytes`), or
+    /// a module (`ir::model_hash`). Only modules in `language` are searched.
     ///
     /// Module paths are matched exactly, with neither the scope search nor
     /// the dropping of a wrapper module that [`Site::resolve_type`] does: a

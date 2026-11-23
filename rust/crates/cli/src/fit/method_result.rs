@@ -1524,7 +1524,7 @@ mod tests {
         TempDir(p)
     }
 
-    /// Write a `FitMethod` `runid::RunRecord` leaf at `dir` carrying the
+    /// Write a method directory with a `run.json` at `dir` carrying the
     /// `inputs` the loaders read (`method`, `n_chains`, `algorithm`).
     fn write_method_run(dir: &Path, method: crate::run_meta::FitAlgorithm, n_chains: usize, algorithm: serde_json::Value) {
         std::fs::create_dir_all(dir).unwrap();

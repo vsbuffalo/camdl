@@ -508,15 +508,15 @@ update-reactive-golden: build-ocaml
 	@$(CAMDLC) $(REACTIVE_DIR)/reactive_indexed_patch_sia.camdl      -o $(REACTIVE_DIR)/ir/reactive_indexed_patch_sia.ir.json
 
 # model_ir_hash of every compiled golden model, as a committed reference table
-# (rust/crates/runid/tests/fixtures/golden_model_hashes.tsv). The test
-# rust/crates/runid/tests/golden_model_hashes.rs recomputes each hash from the
+# (rust/crates/ir/tests/fixtures/golden_model_hashes.tsv). The test
+# rust/crates/ir/tests/golden_model_hashes.rs recomputes each hash from the
 # goldens and compares, so a change that re-keys a golden model fails unless
 # this target is run on purpose. Not part of update-golden: regenerating the
 # goldens must not move the identities they are checked against.
 .PHONY: update-golden-model-hashes
 update-golden-model-hashes:
 	cd rust && CAMDL_CAPTURE_GOLDEN_MODEL_HASHES="$$(git rev-parse --short HEAD)" \
-	  cargo test -p runid --test golden_model_hashes
+	  cargo test -p ir --test golden_model_hashes
 
 # Add rows to that table for goldens it does not hold yet, and nothing else:
 # every existing row, and the commit the table was recorded at, stay as they
@@ -524,7 +524,7 @@ update-golden-model-hashes:
 .PHONY: add-golden-model-hashes
 add-golden-model-hashes:
 	cd rust && CAMDL_ADD_GOLDEN_MODEL_HASHES="$$(git rev-parse --short HEAD)" \
-	  cargo test -p runid --test golden_model_hashes
+	  cargo test -p ir --test golden_model_hashes
 
 # The cross-language declared-model fixture: one hand-written value
 # (ocaml/test/declared_fixture.ml) written through the OCaml codec. The OCaml
@@ -569,7 +569,7 @@ check-declared-names-golden: build-ocaml
 # The hoisted-identity fixture (gh#1046): one model compiled twice, in full and
 # with --no-state-grad. Its recovery rate has a parameter-only factor that the
 # compiler hoists and numbers differently in the two compiles;
-# rust/crates/runid/tests/hoisted_identity.rs checks the two files are one
+# rust/crates/ir/tests/hoisted_identity.rs checks the two files are one
 # model. Compile-only.
 HOISTED_DIR := tests/fixtures/hoisted_identity
 update-hoisted-identity-golden: build-ocaml
@@ -747,8 +747,8 @@ validate-bspline: build-ocaml build-rust
 	  --test periodic_bspline_oracle --test bspline_forcing --test bspline_gradient_check --test bspline_harness \
 	  --test smooth_prior_calibration
 	cd rust && cargo test -p ir --test forcing_basis_validate --test schema_validates_goldens
-	cd rust && cargo test -p runid --lib ir_spline_link_changes_hash
-	cd rust && cargo test -p runid --lib ir_forcing_basis_hashes_its_forcing_and_index
+	cd rust && cargo test -p ir --lib ir_spline_link_changes_hash
+	cd rust && cargo test -p ir --lib ir_forcing_basis_hashes_its_forcing_and_index
 	cd rust && PATH="$(CAMDLC_BIN):$$PATH" CAMDL_SKIP_VERSION_CHECK=1 cargo test -p cli --test bspline_e2e
 	cd rust && cargo test --release -p sim --test bspline_inference --test bspline_harness -- --ignored --skip sweeps_to_convergence
 
@@ -974,7 +974,7 @@ COMPILER_ML   := $(sort $(filter-out %/ir_version_generated.ml, \
 # nothing. Without any pages it writes none and succeeds. Docs:
 # docs/dev/documentation.md, "Engineering pages".
 ENGINEERING_PAGES := docs/engineering
-RUNTIME_CRATES    := ir declared runid io numerics score sim diff
+RUNTIME_CRATES    := ir declared io numerics score sim diff
 RUNTIME_OVERVIEW  := rust/docs-overview.md
 RUSTDOC_JSON      := RUSTC_BOOTSTRAP=1 cargo rustdoc --quiet
 RUSTDOC_JSON_ARGS := -- -Z unstable-options --output-format json --document-private-items \

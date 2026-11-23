@@ -78,7 +78,7 @@ pub(crate) fn render_md_method(method: &MethodReport) -> String {
     }
     if let Some(prov) = &method.provenance {
         if let Some(note) = prov.stale_camdl_version.as_deref()
-            .and_then(|v| version::build_note(v, prov.recorded_engine.as_deref(), |s| format!("camdl `{s}`")))
+            .and_then(|v| version::build_note(v, |s| format!("camdl `{s}`")))
         {
             s.push_str(&format!("- ⚠ {note}\n"));
         }

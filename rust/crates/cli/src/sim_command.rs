@@ -420,7 +420,7 @@ fn plan_cell(ctx: &StoreRun<'_>, shared: &Shared, spec: crate::engine::CellSpec)
             t_end: finite("the end", model.simulation.t_end)?,
             init_state: cell.init_state.as_ref().map(|i| {
                 Ok::<_, (String, String)>(InitStateRow {
-                    ensemble: store::Key::from_hex(&i.ensemble_digest.to_hex()).map_err(|e| err(e.to_string()))?,
+                    ensemble: i.ensemble_digest,
                     row: i.row,
                 })
             })

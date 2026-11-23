@@ -136,8 +136,8 @@ it should.
 
 Each file in a crate's `tests/` directory is compiled into a test binary of its
 own that links the crate as a library. There are 187 in `sim`, a few in `ir`,
-`declared`, `diff`, `runid`, `score` and `typedoc`, and two at the workspace
-root in `rust/tests/`. In `sim`, for example:
+`declared`, `diff`, `score` and `typedoc`, and two at the workspace root in
+`rust/tests/`. In `sim`, for example:
 
 | File                                                      | What it checks                                                                                    |
 | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |

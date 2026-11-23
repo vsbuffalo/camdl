@@ -1054,12 +1054,11 @@ fit run only), and `"flat_fallback"` (profile only — the silent-fallback case)
 Reviewers reading a fit dir's `run.json` can audit at a glance whether the chain
 targeted a posterior with priors or the unconditioned likelihood.
 
-The fit CAS identity includes the model IR (the model digest in `FitDigest`, via
-`cas::fit_level_hash`), so re-running against the same fit toml after editing a
-`~` prior in the model file produces a different cache dir. For profile, the CAS
-hash additionally keys on `fit_toml_hash` + resolved per-parameter prior sources
-so re-running against the same model with a different `--fit` flag produces a
-different umbrella.
+A fit's identity includes its stored compile of the model, so re-running the
+same fit toml after editing a `~` prior in the model file poses a different
+problem and stores a different run. For profile, the CAS hash additionally keys
+on `fit_toml_hash` + resolved per-parameter prior sources so re-running against
+the same model with a different `--fit` flag produces a different umbrella.
 
 ### Reparameterization for better sampler geometry
 

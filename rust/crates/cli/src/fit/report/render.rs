@@ -699,9 +699,8 @@ pub(crate) fn if2_block(version_lead: bool, report: &MethodReport, if2: &If2Run)
         headline.push_str("  (loglik-eval, max across chains)");
     }
     out.push(plain(headline));
-    let recorded_engine = report.provenance.as_ref().and_then(|p| p.recorded_engine.as_deref());
     if let Some(note) = state.camdl_version.as_deref()
-        .and_then(|v| crate::version::build_note(v, recorded_engine, str::to_string))
+        .and_then(|v| crate::version::build_note(v, str::to_string))
     {
         out.push(indented("                ", format!("⚠ {note}"), Style::Warn));
     }

@@ -29,11 +29,11 @@ pub const GIT_HASH: &str = env!("CAMDL_GIT_HASH");
 /// uncommitted changes), `Cargo.lock`, the binary's resolved features, the
 /// profile, `rustc -vV`, `RUSTFLAGS` and the target
 /// (`engine_fingerprint.rs`). It is the build of the engine a run's
-/// identity records (`runid::inputs::EngineIdentity::build`), and what
+/// identity records (`camdl_store::Engine::build`), and what
 /// `run.json`'s `engine_version` holds, for every run. The engine switches a
-/// run was keyed with are a field of their own beside it (`EngineIdentity::
-/// switches`, `run.json`'s `engine_switches`), so a run made with one by this
-/// build is this build's run.
+/// run was keyed with are a field of their own beside it
+/// (`camdl_store::Engine::env`), so a run made with one by this build is this
+/// build's run.
 pub const ENGINE_ID: &str = env!("CAMDL_ENGINE_ID");
 
 /// Whether this binary may serve a stored result in place of computing it.
@@ -94,26 +94,14 @@ pub fn build_relation(recorded: &str, current: &str) -> BuildRelation {
 /// from uncommitted changes: produced by X, current is Y` when only the
 /// uncommitted changes differ. `quote` wraps each version (backticks in
 /// Markdown).
-///
-/// `recorded_engine` is the run's `ENGINE_ID` (its `run.json`'s
-/// `engine_version`, the build alone, whatever engine switches the run had),
-/// when it is known: under the same readable version and another id, the run
-/// was built with [`ANOTHER_CONFIGURATION`].
-pub fn build_note(recorded: &str, recorded_engine: Option<&str>, quote: impl Fn(&str) -> String) -> Option<String> {
+pub fn build_note(recorded: &str, quote: impl Fn(&str) -> String) -> Option<String> {
     let what = match build_relation(recorded, VERSION_SHORT) {
-        BuildRelation::Same if recorded_engine.is_some_and(|e| e != ENGINE_ID) => ANOTHER_CONFIGURATION,
         BuildRelation::Same => return None,
         BuildRelation::UncommittedChanges => "built from uncommitted changes",
         BuildRelation::Stale => "stale",
     };
     Some(format!("{what}: produced by {}, current is {}", quote(recorded), quote(VERSION_SHORT)))
 }
-
-/// What differs between two builds whose readable versions agree and whose
-/// `ENGINE_ID`s do not: the build configuration, which the label leaves out
-/// (an uncommitted `Cargo.lock` change moves the id and not the label).
-pub const ANOTHER_CONFIGURATION: &str =
-    "built with another build configuration (features, profile, toolchain, flags or dependencies)";
 
 #[cfg(test)]
 mod tests {

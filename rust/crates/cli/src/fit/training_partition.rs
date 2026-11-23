@@ -16,20 +16,21 @@
 
 use std::collections::BTreeMap;
 
-use runid::{CanonicalHasher, ContentHash, FiniteF64};
+use store::{CanonicalHasher, ContentAddressed, Finite, Key as ContentHash};
 
 use super::observed_rows::ObservedRow;
 use crate::caltime_load::TemporalCell;
 
 /// The version of the rule that decides which rows train. Recorded with every
-/// partition and folded into the fit identity
-/// (`runid::inputs::FitDigest::partition_rule_version`), so a change to the
-/// rule bumps it and re-keys every fit with no `HASH_VERSION` bump.
+/// partition, so a change to the rule bumps it.
 pub(crate) const PARTITION_RULE_VERSION: u16 = 1;
 
 /// The version of the row digest's encoding (the score-artifact proposal's row
-/// digest v1, `docs/dev/proposals/2026-11-14-score-artifact.md`, "The row
-/// digest").
+/// digest, `docs/dev/proposals/2026-11-14-score-artifact.md`, "The row
+/// digest"). A partition record does not name the version, and a fit stored
+/// by another build is read through its handle, so a change to the encoding
+/// makes every stored digest disagree with a recomputed one: the change needs
+/// a version the record carries.
 pub(crate) const ROW_DIGEST_VERSION: u16 = 1;
 
 /// "The same observation time" at the training boundary: float noise from a
@@ -47,7 +48,7 @@ impl RowDigest {
     }
 }
 
-/// Row digest version 1 over `rows`, in order.
+/// The row digest ([`ROW_DIGEST_VERSION`]) over `rows`, in order.
 ///
 /// Hashes the digest version; the number of temporal columns the stream binds
 /// (2 for per-row windows, 1 otherwise) and each column's kind (0 numbers, 1
@@ -57,7 +58,7 @@ impl RowDigest {
 /// auxiliary values sorted by name. The leaf's name is not hashed: one series
 /// has one digest wherever it is bound.
 pub(crate) fn row_digest(rows: &[ObservedRow]) -> Result<RowDigest, String> {
-    let finite = |x: f64, what: &str| FiniteF64::new(x)
+    let finite = |x: f64, what: &str| Finite::new(x)
         .map_err(|_| format!("internal error: a non-finite {what} ({x}) reached the row digest"));
     let mut h = CanonicalHasher::new();
     h.write_u16(ROW_DIGEST_VERSION);
@@ -77,7 +78,7 @@ pub(crate) fn row_digest(rows: &[ObservedRow]) -> Result<RowDigest, String> {
         for cell in &row.temporal {
             match cell {
                 TemporalCell::Number(x) => {
-                    h.write_f64_bits(finite(*x, "time cell")?.get());
+                    finite(*x, "time cell")?.hash_into(&mut h);
                 }
                 TemporalCell::Date(d) => h.write_str(d),
             }
@@ -86,7 +87,7 @@ pub(crate) fn row_digest(rows: &[ObservedRow]) -> Result<RowDigest, String> {
             None => h.write_u8(0),
             Some(sim::inference::ObsCell::Scalar(v)) => {
                 h.write_u8(1);
-                h.write_f64_bits(finite(v, "observed value")?.get());
+                finite(v, "observed value")?.hash_into(&mut h);
             }
             // A row read from a file holds an observed value or NA; held-out
             // cells (D79) are made for the filter from rows and never stored
@@ -102,7 +103,7 @@ pub(crate) fn row_digest(rows: &[ObservedRow]) -> Result<RowDigest, String> {
         h.write_u64(aux.len() as u64);
         for (name, v) in aux {
             h.write_str(name);
-            h.write_f64_bits(finite(*v, "auxiliary value")?.get());
+            finite(*v, "auxiliary value")?.hash_into(&mut h);
         }
     }
     Ok(RowDigest(h.finalize()))

@@ -99,104 +99,53 @@ path) collides.
 
 ## The hash function
 
-Every hash in the store goes through one encoder,
-[`CanonicalHasher`](rust:runid::hash::CanonicalHasher), driven by one trait,
-[`ContentAddressed`](rust:runid::hash::ContentAddressed). A type implements
-`hash_into`, which feeds its canonical bytes into the hasher;
-[`content_hash`](rust:runid::hash::ContentAddressed::content_hash) is the root,
-and is the only place [`HASH_VERSION`](rust:runid::hash::HASH_VERSION) is
-written. The encoding is designed so that equal values always produce equal
-bytes and distinct values never do: each named type writes its fully qualified
-name and a schema version first, so two structs with the same field bytes
-differ; every string, vector, map and set is prefixed by its length, so
-`("ab", "c")` and `("a", "bc")` differ; maps and sets are written in sorted key
-order, so iteration order cannot leak in; an enum writes its variant index; an
-`Option` writes a tag byte.
+Every identity is hashed through one encoder, the `store` crate's
+`CanonicalHasher`, driven by one trait, `ContentAddressed`. A type implements
+`hash_into`, which feeds its canonical bytes into the hasher; `content_hash` is
+the root, and the only place `HASH_VERSION` is written. The encoding is designed
+so that equal values always produce equal bytes and distinct values never do:
+each struct or enum writes the tag it states and its version first; each field
+is written after its name, in name order; every string, vector, map and set is
+prefixed by its length, so `("ab", "c")` and `("a", "bc")` differ; maps and sets
+are written in sorted key order; an enum writes its variant's name. The byte
+rules are the run-store proposal's "Keys" section
+(`docs/dev/proposals/2026-11-20-run-store-api.md`).
 
-<!-- decl: rust:runid::hash::CanonicalHasher -->
+A float enters an identity only as a `store::Finite`: construction refuses `NaN`
+and `±Inf`, as a value rather than a panic, and turns `-0.0` into `+0.0`, so
+that `--param x=-0` and `--param x=0` are one run. `f64` itself does not
+implement `ContentAddressed`, so a float field in an identity does not compile
+until its author makes it a `Finite`.
 
-Floating-point numbers get two policies, and the policy is chosen by the type of
-the field. A resolved input (a parameter value, `dt`, a time, a bound) is a
-[`FiniteF64`](rust:runid::float::FiniteF64): construction refuses `NaN` and
-`±Inf`, as a value rather than a panic, and turns `-0.0` into `+0.0`, so that
-`--param x=-0` and `--param x=0` are one run. A float inside the compiled model
-is hashed by its raw bits through
-[`write_f64_bits`](rust:runid::hash::CanonicalHasher::write_f64_bits), which
-keeps `-0.0` and `+0.0` apart and accepts `NaN`, because the IR's own equality
-treats them as distinct constants and a model holding a `NaN` constant must
-still be hashable. `f64` itself does not implement `ContentAddressed`, so a new
-float field in a run input does not compile until its author picks one of the
-two.
+The compiled model enters a result's identity as the digest of the stored
+compiled model: the canonical bytes of every field except its name, its
+description, its quantities and its contrasts. A separate structural hash of the
+model, [`model_ir_hash`](rust:ir::model_hash::model_ir_hash), is what `camdl`
+prints and compares models by (`camdl diff`, the check that a model given to
+`predict` is the fit's). It leaves out the gradient maps, and its impls for the
+IR tree are written by hand in `ir::model_hash`.
 
-<!-- decl: rust:runid::float::FiniteF64 -->
+## The `Identity` derive
 
-The compiled model is a foreign type tree from the `ir` crate; its
-`ContentAddressed` impls are written by hand in
-[`runid::ir_hash`](rust:runid::ir_hash), and
-[`model_ir_hash`](rust:runid::inputs::model_ir_hash) hashes every field of the
-model. The model has no field that only says how a result is rendered. Every
-identity path builds its model level through
-[`ModelDigest::from_model`](rust:runid::inputs::ModelDigest::from_model), which
-calls it.
+The identity types do not implement `ContentAddressed` by hand. They derive it
+with `#[derive(store::Identity)]`, which states the type's tag and version and
+hashes every field; there is no attribute that leaves a field out, so a value
+that is not identity is not a field of an identity type. The settings of a
+simulation cell show the shape:
 
-## The `RunInput` derive
+<!-- decl: rust:cli::sim_store::SimConfig -->
 
-The run-input types (the level digests and the leaf inputs in
-[`runid::inputs`](rust:runid::inputs)) do not implement `ContentAddressed` by
-hand. They derive it with `#[derive(RunInput)]`, from the `runid-derive` crate,
-which hashes every field in declaration order. A field is left out only when it
-is marked `#[run_input(provenance)]`, and there is no rule that leaves a field
-out when it holds its default. The configuration level of a simulation shows the
-shape:
+The seed is the one the engine draws from:
 
-<!-- decl: rust:runid::inputs::SimConfig -->
+<!-- decl: rust:cli::camdl_store::ProcessSeed -->
 
-The seed level shows the one exclusion on the simulation path:
-
-<!-- decl: rust:runid::inputs::Seed -->
-
-`process_seed` is the seed the engine draws from. It is derived from the user's
-`--seed` by [`mix_cell_seed`](rust:cli::util::mix_cell_seed), which mixes in the
-cell's position: `--seed 5 --replicates 3` runs three cells with three process
-seeds, all from base seed 5. Hashing the base seed would put those three cells,
-which hold three different trajectories, under one `run_id`. `base_seed` is
-therefore provenance. The run store's cell identity makes the same choice: it
-holds the process seed, and the cell's folder is labelled by the seed typed, so
-the three cells of `--seed 5 --replicates 3` are `seed_5-…`, `seed_5-r1-…` and
-`seed_5-r2-…`.
-
-For `Seed`, the derive generates the equivalent of the following. This is a hand
-expansion for reading, not code in the repository; it is modelled on the hand
-impls in `rust/crates/runid/src/macro_eq.rs`:
-
-```rust
-// Hand expansion of #[derive(RunInput)] on Seed (illustrative).
-impl runid::ContentAddressed for Seed {
-    fn hash_into(&self, __h: &mut runid::CanonicalHasher) {
-        // The type tag: the type's full path, "runid::inputs::Seed".
-        __h.write_type_tag(concat!(module_path!(), "::", stringify!(Seed)));
-        // Version 1, the default; #[run_input(schema_version = N)] sets another.
-        __h.write_schema_version(1);
-        runid::ContentAddressed::hash_into(&self.process_seed, __h);
-        // base_seed carries #[run_input(provenance)], so no line is emitted.
-    }
-}
-```
-
-An enum is expanded the same way, with a `match` that writes the variant's index
-as a `u32` before the variant's fields. Because each field is hashed through
-`<FieldType as ContentAddressed>`, a field whose type has no impl is a compile
-error, so a new input cannot be added in a form the hash cannot see.
-
-The derive replaces hand-written hashing, so its output has to be the encoding
-the hand impls define. `rust/crates/runid/src/macro_eq.rs` pins that: it derives
-`RunInput` on a struct, an enum with unit, tuple and struct variants, and a
-struct with a `schema_version` override, writes the expected `hash_into` for
-each by hand in the same module (so `module_path!()` gives the same type tag),
-and asserts the two digests are equal (`struct_macro_equals_hand`,
-`enum_macro_equals_hand`, `schema_version_override_matches_hand`). A fourth
-test, `struct_provenance_field_is_skipped`, asserts that changing a provenance
-field leaves the hash unchanged.
+`seed` is the process seed. It is derived from the user's `--seed` by
+[`mix_cell_seed`](rust:cli::util::mix_cell_seed), which mixes in the cell's
+position: `--seed 5 --replicates 3` runs three cells with three process seeds,
+all from base seed 5. Hashing the base seed would put those three cells, which
+hold three different trajectories, under one run id. The cell's folder is
+labelled by the seed typed, so the three cells of `--seed 5 --replicates 3` are
+`seed_5-…`, `seed_5-r1-…` and `seed_5-r2-…`.
 
 Including by default is the safe direction of error. A field that should have
 been excluded but was not costs a cache miss: the run is recomputed, and two
@@ -290,25 +239,16 @@ parameters, which are read off the resolved model the engine runs.
 
 An environment variable that can change a result is keyed. The alternative
 evaluation paths (`CAMDL_EVAL_UNRESOLVED`, `CAMDL_NO_BINDING_CACHE`) and every
-set `CAMDL_EXPERIMENTAL_<NAME>` are the engine switches: a typed field of the
-engine identity beside the build,
-[`EngineIdentity`](rust:runid::inputs::EngineIdentity) `{ build, switches }`
-([`Environment::engine_identity`](rust:cli::env::Environment::engine_identity)).
-It is hashed as one string, the build followed by each switch length-prefixed
-(`+<len>:<NAME>`, and `=<len>:<VALUE>` for an experimental input) so that no
-value can pass for another switch; with no switch on it is the build alone, so a
-default run's identity is unchanged. `run.json` keeps the build in
-`engine_version` and lists the switches in `engine_switches`, so a run this
-build made with a switch is this build's run. The commands that store a result
-under an address key the switches: `simulate` (in the ambient key of the run
-store, which names the build directory every cell is under), `fit run` and
-`camdl predict` (in the ambient key of the run store, as `simulate`; a
-prediction's manifests also record `engine_version` and `engine_switches`),
-`pfilter` (at the `model` level) and `profile` (a point's base). `compare`
-scores a chain-binomial fit through a `camdl pfilter` child, which keys them;
-its in-process ODE scoring and `dev eval` store nothing under an address. The
-switches themselves are fields of the evaluator settings each compiled model
-carries ([`EvalSettings`](rust:sim::compiled_model::EvalSettings)), set by
+set `CAMDL_EXPERIMENTAL_<NAME>` are the engine switches. They are fields of the
+run store's ambient identity beside the build,
+[`Engine`](rust:cli::camdl_store::Engine) `{ build, env }`, whose key names the
+build directory every stored result is under, so every command that stores a
+result keys them. A prediction's manifests also record `engine_version` and the
+switches that were on, `engine_switches`. `compare` scores a chain-binomial fit
+through a `camdl pfilter` child, which keys them; its in-process ODE scoring and
+`dev eval` store nothing under an address. The switches themselves are fields of
+the evaluator settings each compiled model carries
+([`EvalSettings`](rust:sim::compiled_model::EvalSettings)), set by
 [`eval_settings`](rust:cli::env::eval_settings). `CAMDL_NO_CONSTANT_FOLD` and
 `CAMDL_NO_LICM` change the compiled IR. An experimental input is also listed in
 the `provenance.experimental` field of `run.json`.
@@ -503,35 +443,32 @@ included unless it is named as left out.
 A change that alters the bytes being hashed re-keys some set of stored leaves.
 Which set is chosen by which version moves, and each move is deliberate:
 
-| Version                                                                               | Folded into                                                           | A bump re-keys                                                                                              |
-| ------------------------------------------------------------------------------------- | --------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| a struct's `#[run_input(schema_version = N)]`                                         | that type's hash, after its type tag                                  | every leaf whose input embeds the type                                                                      |
-| [`HASH_VERSION`](rust:runid::hash::HASH_VERSION)                                      | every root hash and every `run_id`                                    | every leaf of every kind                                                                                    |
-| `ir/VERSION`                                                                          | the `ir_version` field of `ModelDigest`                               | every leaf with a model level: every kind at present                                                        |
-| the engine identity (`ENGINE_ID`, the build fingerprint, and the engine switches)     | the `engine` field of `ModelDigest`; the ambient key of the run store | every leaf with a model level, and every result in the run store, whenever camdl is built from other source |
-| [`PARTITION_RULE_VERSION`](rust:cli::fit::training_partition::PARTITION_RULE_VERSION) | the problem's `partition`                                             | every fit                                                                                                   |
+| Version                                                                               | Folded into                       | A bump re-keys                                                           |
+| ------------------------------------------------------------------------------------- | --------------------------------- | ------------------------------------------------------------------------ |
+| a type's `#[identity(version = N)]`                                                   | that type's hash, after its tag   | every result whose identity embeds the type                              |
+| the store's `HASH_VERSION`                                                            | every root hash and every run id  | every result of every kind                                               |
+| `ir/VERSION`                                                                          | the stored compiled model's bytes | every result with a model                                                |
+| the engine identity (`ENGINE_ID`, the build fingerprint, and the engine switches)     | the ambient key of the run store  | every result in the run store, whenever camdl is built from other source |
+| [`PARTITION_RULE_VERSION`](rust:cli::fit::training_partition::PARTITION_RULE_VERSION) | the problem's `partition`         | every fit                                                                |
 
-A leaf written under an older `HASH_VERSION` stays readable, so `camdl show`,
-`fit summary` and the browsers still read it, but a lookup reports it as
-[`StaleReason::SchemaDrift`](rust:runid::store::StaleReason) and the run is
-computed again. [`FORMAT_VERSION`](rust:runid::record::FORMAT_VERSION) versions
-the `run.json` schema the same way without entering any hash. `SimConfig`'s doc
-comment above shows the per-struct version in use: each bump records a change to
-the field set or to the bytes a leaf holds.
+The store's `RECORD_FORMAT` versions the `run.json` schema without entering any
+hash. `SimConfig`'s `#[identity(..)]` above shows the per-type version in use:
+each bump records a change to the field set or to the bytes a result holds.
 
 ## Where a change lands
 
-| The change                                               | Edit                                                                                                                        | Version                                             | Pinned by                                                                                                                             |
-| -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| A `simulate` flag that changes the stored trajectory     | an `#[input(identity)]` field of `SimulateArgs`, carried into a field of `sim_store::SimConfig` (or lowered into the model) | the `version` of `SimConfig`'s `#[identity(..)]`    | `every_simulate_input_keeps_its_class`, with a `vary` fixture for the field                                                           |
-| A key in the fit configuration                           | a field of `config_v2::Problem`, placed by `fit_store::resolve_problem` in a field of the problem's or the run's identity   | the `version` of that struct's `#[identity(..)]`    | `every_fit_run_input_keeps_its_class`, with a `vary` fixture for the field                                                            |
-| A `fit run` flag that changes a method's output          | a field of `FitMethodFlags`, `CliMethodOverrides`, an `OverrideFlag` row, and the copy in `fit::run_config::resolve`        | none: the method level hashes the method as written | `every_cli_sampler_flag_changes_the_method_identity`                                                                                  |
-| A field that is displayed but does not change the output | `#[run_input(provenance)]` on the field, or record it only in `run.json` (`Provenance`, `RecordMeta`)                       | none                                                | a case in `differential_presentation_inputs_are_inert`                                                                                |
-| A float policy, or any other rule of the encoding        | `runid::hash` or `runid::float`, and the hand impls in `runid::ir_hash`                                                     | `HASH_VERSION`, with an entry in its doc            | the property tests in `rust/crates/runid/src/tests.rs`; `macro_eq.rs`; the golden model-hash table                                    |
-| The IR schema                                            | the atomic OCaml, Rust and golden update (`.claude/skills/golden-update`)                                                   | `ir/VERSION`                                        | `rust/crates/runid/tests/golden_model_hashes.rs`, regenerated by `make update-golden-model-hashes` only when the re-key is the change |
+| The change                                               | Edit                                                                                                                        | Version                                             | Pinned by                                                                                                                          |
+| -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| A `simulate` flag that changes the stored trajectory     | an `#[input(identity)]` field of `SimulateArgs`, carried into a field of `sim_store::SimConfig` (or lowered into the model) | the `version` of `SimConfig`'s `#[identity(..)]`    | `every_simulate_input_keeps_its_class`, with a `vary` fixture for the field                                                        |
+| A key in the fit configuration                           | a field of `config_v2::Problem`, placed by `fit_store::resolve_problem` in a field of the problem's or the run's identity   | the `version` of that struct's `#[identity(..)]`    | `every_fit_run_input_keeps_its_class`, with a `vary` fixture for the field                                                         |
+| A `fit run` flag that changes a method's output          | a field of `FitMethodFlags`, `CliMethodOverrides`, an `OverrideFlag` row, and the copy in `fit::run_config::resolve`        | none: the method level hashes the method as written | `every_cli_sampler_flag_changes_the_method_identity`                                                                               |
+| A field that is displayed but does not change the output | not a field of an identity type: record it only as provenance in `run.json` or a provenance file                            | none                                                | a case in `differential_presentation_inputs_are_inert`                                                                             |
+| A float policy, or any other rule of the encoding        | the store's `hash` and `identity` modules                                                                                   | the store's `HASH_VERSION`                          | the store crate's tests                                                                                                            |
+| A rule of the model's structural hash                    | `ir::model_hash`                                                                                                            | its `HASH_VERSION`                                  | `rust/crates/ir/tests/model_hash_pins.rs`; the golden model-hash table                                                             |
+| The IR schema                                            | the atomic OCaml, Rust and golden update (`.claude/skills/golden-update`)                                                   | `ir/VERSION`                                        | `rust/crates/ir/tests/golden_model_hashes.rs`, regenerated by `make update-golden-model-hashes` only when the re-key is the change |
 
 The golden model-hash table pins absolute values.
-`rust/crates/runid/tests/fixtures/golden_model_hashes.tsv` holds the model hash
-of every compiled golden. The run ids of each kind on the run store are pinned
-by that command's own tests. A row that moves is a re-key, and it is the subject
-of its commit, never a side effect of it.
+`rust/crates/ir/tests/fixtures/golden_model_hashes.tsv` holds the model hash of
+every compiled golden. The run ids of each kind on the run store are pinned by
+that command's own tests. A row that moves is a re-key, and it is the subject of
+its commit, never a side effect of it.

@@ -1268,11 +1268,11 @@ resolved fact becomes a directory on disk.
 Three type families do the work, and conflating them is the usual source of
 confusion:
 
-| Family              | Purpose                                                | Lives in                          |
-| ------------------- | ------------------------------------------------------ | --------------------------------- |
-| **Surface types**   | Parse the CLI surface: clap args                       | `rust/crates/cli/src/args/`       |
-| **Engine input**    | The resolved job the surface lowers to                 | `rust/crates/cli/src/sim_job.rs`  |
-| **Identity values** | Hashed, per-level digests of the fully-resolved inputs | `rust/crates/runid/src/inputs.rs` |
+| Family              | Purpose                                      | Lives in                           |
+| ------------------- | -------------------------------------------- | ---------------------------------- |
+| **Surface types**   | Parse the CLI surface: clap args             | `rust/crates/cli/src/args/`        |
+| **Engine input**    | The resolved job the surface lowers to       | `rust/crates/cli/src/sim_job.rs`   |
+| **Identity values** | The fully-resolved inputs a cell is keyed by | `rust/crates/cli/src/sim_store.rs` |
 
 The pipeline is:
 
@@ -1280,11 +1280,10 @@ The pipeline is:
 camdl simulate <args>  ─→  SimulateJob  ─→  engine::run_job  ─→  per-cell SimRun
                             (resolved)        (cell grid)          (resolved θ, σ, seed)
                                                                             │
-                                          runid identity values  ←──────────┘
-                                          (ModelDigest, SimConfig, ResolvedParams,
-                                           ResolvedScenario, Seed)
+                                          SimIdentity  ←────────────────────┘
+                                          (model, config, params, scenario, seed)
                                                     │
-                                        five LevelIds  →  run_id  →  store path
+                                          run id  →  the cell's folder (§4.4)
 ```
 
 `SimulateJob` deliberately has no serde derives: the surface _lowers to one
@@ -4772,8 +4771,7 @@ Every result is stored in the run store (§4.4), under the id its identity hashe
 to; fits are §2.2, simulation cells §3.7 and profile points §2.8. The
 human-readable label in each folder name is never identity.
 
-Two rules govern what may enter a hash (`rust/crates/runid/src/lib.rs`, "Adding
-a field to identity"):
+Two rules govern what may enter a hash:
 
 - A field that **changes the stored bytes is identity** and must re-key.
 - A pure **re-encoding of the same values is presentation** and is stripped.
@@ -4784,119 +4782,46 @@ over-invalidation.
 
 ### 9.2 What enters a run's identity
 
-#### 9.2.1 The canonical hasher
+#### 9.2.1 The encoding
 
-One pinned function and encoding, in `rust/crates/runid/src/hash.rs`:
+Every stored result's identity is a typed value hashed through one encoder, the
+`store` crate's. Its byte rules are the run-store proposal's "Keys" section
+(`docs/dev/proposals/2026-11-20-run-store-api.md`), and they are not restated
+here. In outline:
 
-- SHA-256, recorded by `HASH_VERSION` (currently `5`), folded into every root
-  hash so the whole store migrates on a single bump.
-- **Domain separation.** Every named type writes its fully-qualified type name
-  (length-prefixed) then its `SCHEMA_VERSION` before any field.
-- **Length prefixing.** Every variable-length value (string, byte slice, `Vec`,
-  map, set) writes a `u64` LE element count first.
-- **Primitives.** Fixed-width little-endian integers; `bool` as one byte; `char`
-  as `u32`.
-- **Floats, two policies.** Resolved user inputs go through `FiniteF64`, which
-  rejects `NaN`/`±Inf` at construction and normalizes `-0.0 → +0.0`. Structural
-  IR floats are hashed as raw `f64::to_bits`, keeping `±0.0` and NaN payloads
-  distinct to match the IR's own `ConstExpr::PartialEq`. Bare `f64` is
-  deliberately **not** `ContentAddressed`, so a field cannot silently pick up
-  the wrong policy.
-- **Maps and sets** iterate in sorted key order, count-prefixed. **`Option`** is
-  a `0`/`1` tag byte then payload. **Enums** write the variant index as `u32` LE
-  in declaration order, then the payload.
+- SHA-256, under `HASH_VERSION` (currently `9`), written first at the root, so a
+  change to the encoding re-keys every stored result at once.
+- A struct or enum writes the tag it states and its version; each field is
+  written after its name, in name order; an enum writes its variant's name.
+- Every variable-length value writes its length or count first.
+- A float enters only as a finite value: `NaN` and `±Inf` are refused, and
+  `-0.0` is written as `+0.0`.
+- An input file enters by the SHA-256 of its bytes, and an upstream result by
+  its run id.
 
-#### 9.2.2 Include-by-default, with one explicit escape
+Every field of an identity type is hashed; a field that is not part of the
+identity is not a field of it. An identity type that gains a field re-keys every
+result of its kind.
 
-`#[derive(RunInput)]` (`rust/crates/runid-derive/src/lib.rs`) folds **every**
-field of a struct in declaration order. There is no skip-if-default: adding a
-field re-keys every existing leaf of that kind even at its default value, and
-that turnover is intended, not a bug to engineer around. Two attributes exist:
+#### 9.2.2 The model
 
-- `#[run_input(provenance)]` on a field — excluded entirely (recorded in
-  `run.json`, never hashed).
-- `#[run_input(schema_version = N)]` on the type — bumps only that type's key.
+A result's model enters its identity as the digest of the stored compiled model
+(§3.7): the canonical bytes of every field of the compiled model except its
+name, its description, its quantities and its contrasts, the derivative tables
+included. Two compiles that differ in anything the engine reads are two models.
 
-A field whose type is not `ContentAddressed` is a compile error, so an input
-cannot be made unhashable by accident.
+`camdl` also computes a structural hash of a model, `ir::model_hash`, which no
+identity holds. It is the `model_hash` of a PGAS trajectory manifest (§10.6),
+the check that the model given to `predict` or `simulate --fit` is the one the
+fit ran on, and `camdl diff`'s "same model" line. It leaves out the model's
+name, its quantities and contrasts, and the compiler-derived gradient maps, so a
+`--no-state-grad` compile and a full one hash alike.
 
-A profile of a fit takes the other path for the fit file: the file enters its
-identity as the digest of its key-sorted canonical JSON, so
-`#[serde(skip_serializing_if = …)]` controls hash membership there — a
-default-skipped field stays out of the hash.
+#### 9.2.3 The identities, per artifact kind
 
-#### 9.2.3 The model digest
-
-`ModelDigest::from_model` (`rust/crates/runid/src/inputs.rs`) is the single
-constructor every identity path uses:
-
-| field        | value                                                |
-| ------------ | ---------------------------------------------------- |
-| `ir`         | `model_ir_hash(model)` — the whole canonical IR      |
-| `ir_version` | the `ir/VERSION` string (e.g. `"0.42"`)              |
-| `engine`     | `EngineVersion` = `"{CARGO_PKG_VERSION}+{git-hash}"` |
-
-The IR walk is hand-written (`rust/crates/runid/src/ir_hash.rs`, hashing-policy
-schema version `SV`, currently 4). `Model::hash_into` folds, in order:
-`version`, `time_unit`, `description`, `origin`, `origin_rata_die`,
-`compartments`, `transitions`, `ode_equations`, `time_functions`, `tables`,
-`interventions`, `observations`, `parameters`, `constants` (the typed `let`
-constants, whose values are identity), `bindings`, `per_eval_bindings`,
-`initial_conditions`, `output`, `simulation`, `presets`, `model_structure`,
-`balance`, `identity_tracked_compartments`. Every field is folded
-unconditionally: a value's presence or non-default status is never what is
-hashed, only the value.
-
-The `ir::Model` fields below are deliberately **not** hashed:
-
-- `name` — `camdlc` sets it to the source file's stem, so it is a label. Two
-  byte-identical models under different file names are the same model and share
-  a `run_id`.
-- `ic_grad` and every compiler-derived gradient map (`rate_grad`,
-  `rate_state_grad`, `sigma_sq_grad`, `projection_state_grad`, each obs
-  `Diffable`'s `grad`/`proj_grad`) — deterministic autodiff of already-hashed
-  rates over already-hashed parameters, so model identity is
-  gradient-independent and a `--no-state-grad` compile keys the same. A profile
-  whose method reads them (`nl-lbfgs`) hashes them in its `method` level instead
-  (`runid::inputs::model_ir_hash_with_gradients`): its result depends on the
-  gradients, and they on the compiler's autodiff, so a compiler that emits other
-  gradients for one forward model re-keys those profiles and no other.
-- `quantities` and `contrasts` — reporting-only reductions written to a
-  regenerated sidecar outside the leaf (§10.8), never to the leaf itself.
-
-Within `SimulationConfig::hash_into` the integrator is always folded: a variant
-tag, then for `Rk45` each tolerance as an `Option`, so RK4, RK45 at the runtime
-default tolerances, and each explicit tolerance hash distinctly. `--integrator`
-changes the resolved model's integrator, so the two settings key as two
-different models (the `model` level; `config` is unchanged).
-
-#### 9.2.4 The levels, per artifact kind
-
-A fit's problem and run identities are in §2.2.
-
-**`Pfilter` `config`** digests
-`{particles, replicates, dt, obs_block,
-flow_indices, data}`, plus `objective`
-when it is conditional and `allow_forcing_extrapolation` when the override is
-on, where `data` is the sorted per-stream file digests; `params` digests the
-sorted scored point. Scenario selection reaches identity through the model
-digest, because the pfilter path hashes the _resolver's_ model (scenario already
-applied), unlike `Sim`.
-
-**Lineage.** `deps` is a set of `ArtifactRef { run_id, kind, artifact, digest }`
-hashed **sorted by `run_id`** (the one documented exception to the
-order-sensitive `Vec` rule), with `kind` provenance-only. Folding the consumed
-file's digest as well as the producer's `run_id` means a regenerated upstream
-re-keys the consumer while a change to an unrelated sibling artifact does not.
-
-#### 9.2.5 Non-finite floats cannot collide
-
-`serde_json` renders `NaN`/`±Inf` as `null` in both `to_value` and the text
-serializer without erroring, so two configs differing only in a non-finite float
-would hash equal. Every JSON-digested identity blob is therefore passed through
-`fit::cas::ensure_finite` first, a `Serializer` that produces nothing and fails
-on any non-finite float anywhere in the value. On the typed path the same job is
-done by `FiniteF64`'s constructor.
+A fit's problem and run identities are in §2.2, a simulation cell's in §3.7 and
+a profile point's in §2.8. Each lists its fields; every result's id also holds
+the build that computed it (§4.4).
 
 ### 9.3 Cache semantics
 
@@ -5823,16 +5748,13 @@ status 1, `error: cannot write …/events.jsonl: …`): before the method is
 recorded `done` if the failure came while it ran, after the end-of-run block if
 it came at the report, the leaf then already committed.
 
-**Outside the manifest and the identity.** The end-of-run report is built from
-the committed leaf, so it is appended after the commit; the store's exact-set
-check and manifest pass over `events.jsonl` by name (`runid::EVENT_LOG`), and it
-is never listed in `run.json.artifacts`. It enters no hash: it is a record of
-what one execution showed, not an input to anything a run computes. In
-consequence:
+**Outside the stored run and the identity.** The log is written in the method's
+working directory while the method runs, and `fit run` does not store it with
+the run. It enters no hash: it is a record of what one execution showed, not an
+input to anything a run computes. In consequence:
 
-- **A cache hit writes nothing.** The method does not run, so the stored leaf
-  keeps the log of the run that computed it, and the cache-hit line on stderr is
-  not an event.
+- **A reused run writes nothing.** The method does not run, and the line on
+  stderr that says the run was reused is not an event.
 - **A resumed run** writes its own log in its new leaf; the base leaf's log is
   not copied or touched.
 - **A recomputed leaf** (`--force`, or a stale `Running` leaf reclaimed after a

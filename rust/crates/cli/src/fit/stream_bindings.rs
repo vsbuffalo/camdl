@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 
 use indexmap::IndexMap;
 
-use runid::ContentHash;
+use store::Key as ContentHash;
 
 use super::config_v2::DataSpec;
 
@@ -141,10 +141,7 @@ impl StreamBindings {
 }
 
 /// The SHA-256 of every file a fit binds, each read once
-/// ([`StreamBindings::digests`]). The run identity (`FitDigest.data`,
-/// `.holdout_data`), `fit.meta.json` and the per-method provenance all take
-/// their digests from here, so they cannot disagree about which bytes a fit
-/// read.
+/// ([`StreamBindings::digests`]), for a run's `fit.meta.json`.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct BoundDataDigests {
     /// Source → (training file, its digest), sorted by source.

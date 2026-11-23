@@ -262,7 +262,7 @@ impl TimeFuncKind {
 ///
 /// # Not run identity
 ///
-/// Neither field is folded into `Model::hash_into` (`runid::ir_hash`), and two
+/// Neither field is folded into `Model::hash_into` (`model_hash`), and two
 /// tests there pin that:
 ///
 /// - `sha256` is redundant with the inlined knots, which *are* hashed. A file

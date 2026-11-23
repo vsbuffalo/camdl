@@ -1,25 +1,18 @@
 //! Hand-written `ContentAddressed` impls for the `ir` type tree reachable
-//! from [`ir::Model`].
+//! from [`crate::Model`].
 //!
-//! Why hand-written, not derived: `ir::Model` is a *foreign* type tree with
-//! ~60 nested foreign types pervaded by `HashMap<String, f64>`,
-//! `HashMap<String, Vec<String>>` (`compartment_dims`), and raw `f64`. You
-//! cannot `#[derive]` on types you don't own, and hashing the IR via serde
-//! bytes would be unsound (NaN → `null`, `HashMap` order not guaranteed
-//! sorted). The orphan rule allows these impls (local trait, foreign types).
+//! Why hand-written, not derived: the tree has ~60 nested types pervaded by
+//! `HashMap<String, f64>`, `HashMap<String, Vec<String>>`
+//! (`compartment_dims`), and raw `f64`, and hashing the IR via serde bytes
+//! would be unsound (NaN → `null`, `HashMap` order not guaranteed sorted).
 //!
 //! The compiler-derived gradient maps (`rate_grad`, `rate_state_grad`,
-//! `sigma_sq_grad`, `projection_state_grad`, `ic_grad`, and each obs
-//! `Diffable`'s `grad` / `proj_grad`) are deliberately **NOT** folded into these
-//! impls: they are redundant autodiff of the rates/args over the already-hashed
-//! params/tables/forcings, so model identity is gradient-independent (`SV = 2`
-//! note below; proposal `2026-07-16-gradient-maps-out-of-run-identity.md`).
-//! They are folded in only under [`CanonicalHasher::with_gradients`], the mode
-//! of [`crate::inputs::model_ir_hash_with_gradients`]: the digest a fit whose
-//! method reads gradients puts in its method level, so a compiler whose
-//! autodiff changed re-keys exactly those fits (proposal
-//! `2026-11-17-honest-input-addressed-store.md` §1b). Outside that mode no
-//! byte below changes.
+//! `sigma_sq_grad`, `projection_state_grad`, `ic_grad`, each obs `Diffable`'s
+//! `grad` / `proj_grad`, and an action's `*_grad`) are not hashed: they are
+//! autodiff of rates and arguments the hash already covers, so a full compile
+//! and a `--no-state-grad` compile of one source are one model. The model's
+//! name, quantities and contrasts are not hashed either: they are a label and
+//! reporting, not what the engine runs.
 //!
 //! Two policies applied throughout:
 //!
@@ -27,9 +20,9 @@
 //!   [`CanonicalHasher::write_f64_bits`] (raw `to_bits`), keeping `±0.0`
 //!   and NaN payloads distinct — matching the IR's own `ConstExpr::PartialEq`
 //!   (`expr.rs`), which compares `to_bits()` precisely so two ASTs differing
-//!   only in zero sign or NaN payload are observably distinct. Routing IR
-//!   floats through `FiniteF64` would erase that distinction *and* reject
-//!   NaN-bearing consts at hash time (a totality break).
+//!   only in zero sign or NaN payload are observably distinct. A
+//!   finite-float encoding would erase that distinction and could not hash a
+//!   NaN-bearing constant at all.
 //! - **Sorted maps.** Every `HashMap`/`BTreeMap` is hashed in sorted key
 //!   order (`compartment_dims` is a `HashMap` inside the IR).
 //!
@@ -37,10 +30,10 @@
 //! and production handles multi-GB IRs without overflow, so a recursive
 //! `hash_into` is exactly as safe as the engine itself.
 
-use ir::deriv::{DerivEntry, Diffable, GradMap, UnsupportedReason};
-use ir::Differentiable;
-use ir::anchor::AnchoredTime;
-use ir::expr::{
+use crate::deriv::Diffable;
+use crate::Differentiable;
+use crate::anchor::AnchoredTime;
+use crate::expr::{
     BinOp, BinOpExpr, BinOpWrap, BindingRefWrap, CondExpr, CondWrap, ConstExpr, ConstRefExpr,
     DtExpr, Expr,
     BasisSpace, ForcingBasisRef, ForcingBasisWrap,
@@ -49,75 +42,45 @@ use ir::expr::{
     TimeFuncWrap, UnOp, UnOpExpr, UnOpWrap, UncheckedDimExpr, UncheckedDimWrap, UnitLiteralExpr,
     UnitLiteralWrap,
 };
-use ir::intervention::{
+use crate::intervention::{
     AbsoluteTransfer, Action, AddAction, CmpOp, FractionTransfer, GroupedAmount, GroupedTransfer,
     SetAction, FireSource, Intervention, InterventionKind,
     InterventionSchedule, ObsReducer, ReactiveTrigger, RecurringSchedule, TriggerExpr,
     TriggerQuantity, TriggerThreshold,
 };
-use ir::model::{
+use crate::model::{
     BalanceSpec, Binding, Compartment, CompartmentKind, Dimension, InitCountLaw, InitRealLaw,
     InitSpec, InitialConditions,
     Model, ModelStructure, OutputConfig, OutputSchedule, Preset, RegularOutputSchedule,
     SimulationConfig,
 };
-use ir::observation::{
+use crate::observation::{
     BernoulliLikelihood, BetaBinomialLikelihood, BetaLikelihood, BinomialLikelihood,
     NegBinomialLikelihood, NormalLikelihood, PoissonLikelihood,
     ZeroInflatedNegBinomialLikelihood, ColumnRole, Covers, Likelihood, ObsColumn, ObservationModel, ObservationSchedule,
     Projection, RegularSchedule, StratumKey,
 };
-use ir::ode_equation::OdeEquation;
-use ir::parameter::{
+use crate::ode_equation::OdeEquation;
+use crate::parameter::{
     BetaPrior, ExponentialPrior, GammaPrior, HalfNormalPrior, LogNormalPrior, LogUniformPrior,
     Constant, NormalPrior, TruncatedNormalPrior, UniformPrior, HierarchicalKind, HierarchicalPrior, ParamKind, ParamValue, Parameter, PriorDist, PriorSpec,
 };
-use ir::table::{OobPolicy, Table, TableAxis, TableSource};
-use ir::time_func::{
+use crate::table::{OobPolicy, Table, TableAxis, TableSource};
+use crate::time_func::{
     BSpline, BSplineKnots, ExternalSeries, Fourier, InterpMethod, InterpSource, Interpolated,
     Periodic, PeriodicSpline, Piecewise, SeriesKey,
     Sinusoidal, SplineCoefs, SplineLink, TimeFuncKind, TimeFunction,
 };
-use ir::transition::{
+use crate::transition::{
     DrawMethod, StoichiometryEntry, Transition, TransitionLineage, TransitionMetadata,
 };
 
-use crate::hash::{CanonicalHasher, ContentAddressed};
+use super::hash::{CanonicalHasher, ContentAddressed};
 
-/// Schema version for the `ir` tree's encoding. A change to *how* the IR is
-/// hashed (a field's policy) bumps this; bumping it re-keys IR-derived
-/// identities. (The IR's own *content* version is `ir_version`; this is the
-/// hashing policy version, which is independent.)
-///
-/// `SV = 2` (2026-07-16): model identity is now gradient-independent. The
-/// compiler-derived gradient maps — transition `rate_grad` / `rate_state_grad`,
-/// overdispersion `sigma_sq_grad`, observation-model `projection_state_grad` and
-/// each likelihood `Diffable`'s `grad` / `proj_grad`, and model `ic_grad` — are
-/// no longer folded into `hash_into`. They are deterministic autodiff of the
-/// rates / observation arguments over the (already-hashed) params, tables, and
-/// forcings, so they are redundant in an identity hash; dropping them makes
-/// run_id invariant to which gradients a compile emitted (e.g. `camdlc
-/// --no-state-grad`, gh#439). Removing the (even-empty) length prefixes shifts
-/// every model hash — a deliberate, version-bumped re-key, pinned by the golden
-/// hash + the gradient-inert tests. See
-/// `docs/dev/proposals/2026-07-16-gradient-maps-out-of-run-identity.md`.
-///
-/// `SV = 3` (gh#583): every field is hashed unconditionally. The integrator,
-/// the observation-anchored horizons (`simulation.t_end_anchor`,
-/// `preset.t_end_anchor`), an observation model's `stratum` and its `covers`
-/// had each been folded in only when non-default or present, so a model's
-/// digest was a function of *whether* a value was the default rather than of
-/// the value — the exception that let `--integrator` go missing from the run
-/// identity unnoticed on a code read. They now write their value (a variant
-/// tag, an `Option` presence byte, a length prefix) like every other field.
-/// Re-keys every model-bearing leaf.
-///
-/// `SV = 4`: the model's `name` is no longer hashed. `camdlc` sets it to the
-/// source file's stem, so it is a label, not identity: two byte-identical
-/// models under different file names are the same model and must share a
-/// run_id. Hashing it also made identity depend on the IR cache, which keys on
-/// content, so a warm cache served one file the IR compiled for the other and
-/// with it the other's name. Re-keys every model-bearing leaf.
+/// The schema version every IR type's header writes. A change to how a field
+/// is hashed changes it, and with it every model hash. The IR's own content
+/// version is `ir_version`; this is the version of its hashing, which is
+/// independent.
 const SV: u16 = 4;
 
 /// Write the per-type domain-separation header: tag + schema version.
@@ -141,58 +104,15 @@ fn hash_opt_f64(h: &mut CanonicalHasher, x: &Option<f64>) {
 
 // ── deriv.rs ─────────────────────────────────────────────────────────────────
 //
-// `DerivEntry` / `UnsupportedReason` and the gradient maps that carry them
-// (`rate_grad`, `rate_state_grad`, `sigma_sq_grad`, `projection_state_grad`,
-// `ic_grad`, obs `grad` / `proj_grad`) are hashed only in the gradient mode
-// (`CanonicalHasher::with_gradients`); model identity leaves them out (SV = 2;
-// proposal 2026-07-16-gradient-maps-out-of-run-identity.md).
-
-impl ContentAddressed for UnsupportedReason {
-    fn hash_into(&self, h: &mut CanonicalHasher) {
-        header(h, "ir::deriv::UnsupportedReason");
-        h.write_u32(match self {
-            UnsupportedReason::Lag => 0,
-            UnsupportedReason::PeriodicCoeff => 1,
-            UnsupportedReason::StructuralForcing => 2,
-            UnsupportedReason::NonConstTableIndex => 3,
-            UnsupportedReason::Mod => 4,
-            UnsupportedReason::ParametricN => 5,
-            UnsupportedReason::NonsmoothState => 6,
-        });
-    }
-}
-
-impl ContentAddressed for DerivEntry {
-    fn hash_into(&self, h: &mut CanonicalHasher) {
-        header(h, "ir::deriv::DerivEntry");
-        match self {
-            DerivEntry::Grad(e) => {
-                h.write_u32(0);
-                e.hash_into(h);
-            }
-            // `node` is a display label (`DerivEntry` doc): only the code is
-            // what the entry says.
-            DerivEntry::Unsupported { node: _, code } => {
-                h.write_u32(1);
-                code.hash_into(h);
-            }
-        }
-    }
-}
-
-/// A gradient map, in sorted key order, when the hasher is in the gradient
-/// mode; nothing otherwise.
-fn hash_grad_map(h: &mut CanonicalHasher, m: &GradMap) {
-    if h.hashes_gradients() {
-        h.write_str_map(m.iter());
-    }
-}
+// The gradient maps (`rate_grad`, `rate_state_grad`, `sigma_sq_grad`,
+// `projection_state_grad`, `ic_grad`, obs `grad` / `proj_grad`) are not hashed
+// (SV = 2; proposal 2026-07-16-gradient-maps-out-of-run-identity.md).
 
 impl ContentAddressed for Diffable {
     fn hash_into(&self, h: &mut CanonicalHasher) {
         // Exhaustive destructure: a new IR field must not silently escape the
         // model hash — add it below, or bind it `_` with the reason.
-        let Diffable { expr, grad, proj_grad } = self;
+        let Diffable { expr, grad: _, proj_grad: _ } = self;
         header(h, "ir::deriv::Diffable");
         // Only the semantic argument `expr` is identity. The classified gradient
         // maps `grad` (∂arg/∂θ) and `proj_grad` (∂arg/∂projected) are
@@ -201,10 +121,6 @@ impl ContentAddressed for Diffable {
         // 2026-07-16-gradient-maps-out-of-run-identity.md). This is the obs half
         // of gradient-independent model identity, mirroring the rate side below.
         expr.hash_into(h);
-        if h.hashes_gradients() {
-            hash_grad_map(h, grad);
-            proj_grad.hash_into(h);
-        }
     }
 }
 
@@ -262,7 +178,7 @@ impl ContentAddressed for Expr {
         // Every payload is destructured exhaustively, down through the wrapper
         // structs, so a field added to any of them is a compile error here
         // rather than a silently unhashed field (two models differing only in
-        // it would otherwise share a run_id).
+        // it would otherwise share a hash).
         match self {
             Expr::Const(ConstExpr { value }) => {
                 h.write_u32(0);
@@ -438,14 +354,12 @@ impl ContentAddressed for DrawMethod {
         header(h, "ir::transition::DrawMethod");
         match self {
             DrawMethod::Poisson => h.write_u32(0),
-            DrawMethod::Overdispersed { sigma_sq, sigma_sq_grad } => {
+            DrawMethod::Overdispersed { sigma_sq, sigma_sq_grad: _ } => {
                 h.write_u32(1);
                 // Only the semantic σ² expr is identity; `sigma_sq_grad`
                 // (∂σ²/∂θ) is compiler-derived and NOT hashed (SV = 2; proposal
-                // 2026-07-16-gradient-maps-out-of-run-identity.md), except in
-                // the gradient mode.
+                // 2026-07-16-gradient-maps-out-of-run-identity.md).
                 sigma_sq.hash_into(h);
-                hash_grad_map(h, sigma_sq_grad);
             }
             DrawMethod::Deterministic => h.write_u32(2),
         }
@@ -469,7 +383,7 @@ impl ContentAddressed for Transition {
         // model hash — add it below, or bind it `_` with the reason.
         let Transition {
             name, stoichiometry, rate, metadata, draw_method,
-            rate_grad, rate_state_grad, lineage,
+            rate_grad: _, rate_state_grad: _, lineage,
         } = self;
         header(h, "ir::transition::Transition");
         h.write_str(name);
@@ -481,10 +395,7 @@ impl ContentAddressed for Transition {
         // gh#275) are compiler-derived autodiff of `rate` over the already-hashed
         // params/compartments/forcings, so they are NOT hashed — model identity is
         // gradient-independent (SV = 2; proposal
-        // 2026-07-16-gradient-maps-out-of-run-identity.md), except in the
-        // gradient mode.
-        hash_grad_map(h, rate_grad);
-        hash_grad_map(h, &rate_state_grad.0);
+        // 2026-07-16-gradient-maps-out-of-run-identity.md).
         lineage.hash_into(h);
     }
 }
@@ -676,10 +587,9 @@ impl ContentAddressed for Parameter {
 impl ContentAddressed for Projection {
     fn hash_into(&self, h: &mut CanonicalHasher) {
         header(h, "ir::observation::Projection");
-        // Run-id stability: each variant's index is PERMANENT. A new variant
-        // takes the next unused index and is appended at the end; existing
-        // indices are NEVER renumbered — renumbering churns the run_id of
-        // every stored run whose model uses the shifted variant.
+        // Each variant's index is permanent. A new variant takes the next
+        // unused index and is appended at the end; renumbering an existing one
+        // changes the hash of every model that uses the shifted variant.
         match self {
             Projection::CumulativeFlow(s) => {
                 h.write_u32(0);
@@ -738,7 +648,7 @@ impl ContentAddressed for Likelihood {
         //
         // EXHAUSTIVE, no `_` arm (gh#734). A wildcard here would let a new
         // family whose argument is a bare `Expr` go silently un-hashed, and two
-        // models differing only in that argument would share a run_id. `n` is
+        // models differing only in that argument would share a hash. `n` is
         // the standing proof that the hazard is real rather than hypothetical.
         // Adding a variant is a compile error here.
         //
@@ -870,7 +780,7 @@ impl ContentAddressed for ObservationModel {
         // model hash — add it below, or bind it `_` with the reason.
         let ObservationModel {
             name, source, columns, scored, emit_schedule, stratum, covers, projection,
-            projection_state_grad, likelihood,
+            projection_state_grad: _, likelihood,
         } = self;
         header(h, "ir::observation::ObservationModel");
         h.write_str(name);
@@ -887,9 +797,7 @@ impl ContentAddressed for ObservationModel {
         // projection_state_grad (∂projection/∂compartment, gh#275 §1h) is the
         // compiler-derived WrtPop gradient of a DerivedExpr projection — pure
         // autodiff of `projection` — so it is NOT hashed (SV = 2; proposal
-        // 2026-07-16-gradient-maps-out-of-run-identity.md), except in the
-        // gradient mode.
-        hash_grad_map(h, &projection_state_grad.0);
+        // 2026-07-16-gradient-maps-out-of-run-identity.md).
         likelihood.hash_into(h);
     }
 }
@@ -912,8 +820,8 @@ impl ContentAddressed for OdeEquation {
 impl ContentAddressed for OobPolicy {
     fn hash_into(&self, h: &mut CanonicalHasher) {
         header(h, "ir::table::OobPolicy");
-        // Keep Error at index 2 (its value when Clamp=0 / Wrap=1 existed) so
-        // removing those dead variants stayed run_id-neutral — do NOT renumber.
+        // Error keeps index 2; indices 0 and 1 are unused. Renumbering would
+        // change the hash of every model with an `Error` table.
         let idx: u32 = match self {
             OobPolicy::Error => 2,
         };
@@ -993,9 +901,8 @@ impl ContentAddressed for TimeFuncKind {
                     }
                     // An external forcing hashes its declaration — which file
                     // name, which rows, which columns, the unit scale — never
-                    // the file: the bound file's bytes are a run input, hashed
-                    // where the run's inputs are (`ResolvedParams.tables`, and
-                    // `FitDigest.tables`), so one model serves every binding.
+                    // the file: the bound file's bytes are an input of the run
+                    // that binds it, so one model serves every binding.
                     // Tag 7: no other forcing kind uses it.
                     InterpSource::External(ExternalSeries {
                         external, time_col, value_col, key, value_scale,
@@ -1111,9 +1018,9 @@ impl ContentAddressed for TimeFunction {
         //
         // Pinned by `ir_forcing_data_source_excluded_from_hash` (both fields
         // are inert) and `ir_forcing_knots_change_hash` (the file's CONTENT
-        // still re-keys, via the values) in ir_hash/tests.rs. Adding the field
-        // here without a version bump would silently re-key every file-backed
-        // forcing's fits.
+        // still moves the hash, via the values) in `impls/tests.rs`. Adding the
+        // field here would make a moved or re-saved data file a different
+        // model.
     }
 }
 
@@ -1277,16 +1184,13 @@ impl ContentAddressed for Action {
         // compile error here rather than a silently unhashed one.
         // The `*_grad` maps (∂amount/∂θ) are compiler-derived autodiff of the
         // amount expression over the already-hashed params, so model identity
-        // leaves them out, exactly as for a transition's `rate_grad`; they are
-        // folded in only in the gradient mode, for a fit whose method reads
-        // them (`hash_grad_map`).
+        // leaves them out, exactly as for a transition's `rate_grad`.
         match self {
-            Action::FractionTransfer(FractionTransfer { src, dst, fraction, fraction_grad }) => {
+            Action::FractionTransfer(FractionTransfer { src, dst, fraction, fraction_grad: _ }) => {
                 h.write_u32(0);
                 h.write_str(src);
                 h.write_str(dst);
                 fraction.hash_into(h);
-                hash_grad_map(h, fraction_grad);
             }
             Action::AbsoluteTransfer(AbsoluteTransfer { src, dst, count }) => {
                 h.write_u32(1);
@@ -1302,10 +1206,9 @@ impl ContentAddressed for Action {
                     h.write_str(dst);
                 }
                 match amount {
-                    GroupedAmount::Fraction { fraction, fraction_grad } => {
+                    GroupedAmount::Fraction { fraction, fraction_grad: _ } => {
                         h.write_u32(0);
                         fraction.hash_into(h);
-                        hash_grad_map(h, fraction_grad);
                     }
                     GroupedAmount::Count { count } => {
                         h.write_u32(1);
@@ -1313,17 +1216,15 @@ impl ContentAddressed for Action {
                     }
                 }
             }
-            Action::Set(SetAction { compartment, value, value_grad }) => {
+            Action::Set(SetAction { compartment, value, value_grad: _ }) => {
                 h.write_u32(2);
                 h.write_str(compartment);
                 value.hash_into(h);
-                hash_grad_map(h, value_grad);
             }
-            Action::Add(AddAction { compartment, count, count_grad }) => {
+            Action::Add(AddAction { compartment, count, count_grad: _ }) => {
                 h.write_u32(3);
                 h.write_str(compartment);
                 count.hash_into(h);
-                hash_grad_map(h, count_grad);
             }
         }
     }
@@ -1391,7 +1292,7 @@ impl ContentAddressed for InitCountLaw {
         // The θ-independent `n` (Binomial) carries no gradient, so it is not a
         // `Diffable` and the derived traversal below cannot see it — hash it
         // explicitly, or two models differing only in their number of trials
-        // would share a run_id. Exhaustive (no `_` arm) so a new law whose
+        // would share a hash. Exhaustive (no `_` arm) so a new law whose
         // argument is a bare `Expr` is a compile error here, not a silent
         // omission (gh#734).
         // The family structs are destructured exhaustively as in `Likelihood`:
@@ -1534,10 +1435,10 @@ impl ContentAddressed for SimulationConfig {
 /// Hash the ODE integrator choice: a variant tag, then (for `Rk45`) each
 /// tolerance as an `Option` — so `Rk4`, `Rk45` at runtime defaults, and each
 /// explicit tolerance hash distinctly and none of them hashes as nothing.
-fn hash_integrator(h: &mut CanonicalHasher, i: &ir::model::Integrator) {
+fn hash_integrator(h: &mut CanonicalHasher, i: &crate::model::Integrator) {
     match i {
-        ir::model::Integrator::Rk4 => h.write_u8(0),
-        ir::model::Integrator::Rk45 { atol, rtol } => {
+        crate::model::Integrator::Rk4 => h.write_u8(0),
+        crate::model::Integrator::Rk45 { atol, rtol } => {
             h.write_u8(1);
             hash_opt_f64(h, atol);
             hash_opt_f64(h, rtol);
@@ -1634,7 +1535,7 @@ impl ContentAddressed for Model {
         // gh#1046: digest each hoisted subtree's body, in order, each in terms
         // of the ones before it (a hoisted subtree may contain an earlier one).
         // Every reference in the fields is then hashed as the body it names.
-        let mut hoisted = crate::hash::HoistedBodies::new();
+        let mut hoisted = super::hash::HoistedBodies::new();
         for b in &self.per_eval_bindings {
             let digest = CanonicalHasher::digest_with_hoisted_bodies(&b.expr, &hoisted);
             hoisted.insert(b.name.clone(), digest);
@@ -1663,11 +1564,11 @@ impl HashFields for Model {
             interventions, observations, parameters, constants, bindings,
             // Not hashed as a list; see below, at `bindings`.
             per_eval_bindings: _,
-            initial_conditions, ic_grad, output, simulation, presets,
+            initial_conditions, ic_grad: _, output, simulation, presets,
             model_structure, balance, identity_tracked_compartments,
             // Reporting-only reductions/contrasts, documented in `ir::model` as
-            // deliberately excluded from `Model::hash_into` — non-identity, must
-            // never re-key a sim/fit.
+            // deliberately excluded from `Model::hash_into`: a different
+            // vocabulary over one model is one model.
             quantities: _, contrasts: _,
         } = self;
         header(h, "ir::model::Model");
@@ -1700,17 +1601,7 @@ impl HashFields for Model {
         // compiler-derived autodiff of the parameterized initial conditions over
         // the already-hashed params, so it is NOT hashed — model identity is
         // gradient-independent (SV = 2; proposal
-        // 2026-07-16-gradient-maps-out-of-run-identity.md), except in the
-        // gradient mode.
-        if h.hashes_gradients() {
-            let mut comps: Vec<(&String, &GradMap)> = ic_grad.iter().collect();
-            comps.sort_by(|a, b| a.0.cmp(b.0));
-            h.write_len(comps.len() as u64);
-            for (comp, m) in comps {
-                h.write_str(comp);
-                hash_grad_map(h, m);
-            }
-        }
+        // 2026-07-16-gradient-maps-out-of-run-identity.md).
         output.hash_into(h);
         simulation.hash_into(h);
         presets.hash_into(h);

@@ -160,8 +160,8 @@ pub fn resolve_joint(pref: &PosteriorDrawsRef) -> Result<JointEnsemble, String> 
 pub struct ForecastDraw {
     pub params: HashMap<String, f64>,
     /// The `(chain, draw)` key this pair came from — provenance for the error
-    /// messages, and part of what keys the run (see `runid::inputs::
-    /// InitStateRow`).
+    /// messages, and part of what keys the run (see
+    /// [`crate::sim_store::InitStateDraw`]).
     pub chain: usize,
     pub draw: usize,
     /// Integer compartment counts at the origin, in model order.

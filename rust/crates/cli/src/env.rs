@@ -28,10 +28,10 @@
 //! to be equivalent to the default path and pass the current differential tests,
 //! but finite tests do not establish equivalence on every model, so they are
 //! keyed until stronger justification exists. They and the experimental inputs
-//! are the engine switches ([`Environment::engine_switches`]), a typed field of
-//! the engine identity beside the build ([`Environment::engine_identity`],
-//! `runid::inputs::EngineIdentity`): a run made with one set never shares an
-//! address with a default run, a default run's identity is unchanged, and
+//! are the engine switches ([`Environment::engine_switches`]), held by the
+//! store's ambient identity beside the build
+//! ([`crate::camdl_store::CamdlEnvIdentity`]): a run made with one set never
+//! shares an address with a default run, and
 //! `run.json` names the switches in `engine_switches` while its
 //! `engine_version` stays the build. `CAMDL_NO_CONSTANT_FOLD` and
 //! `CAMDL_NO_LICM` change the IR the compiler emits and are keyed through the
@@ -67,8 +67,9 @@ pub(crate) const EXPERIMENTAL_PREFIX: &str = "CAMDL_EXPERIMENTAL_";
 pub(crate) enum Route {
     /// It does not change a result (its class is not `keyed`).
     None,
-    /// As an engine switch of the engine identity the model (or fit) level
-    /// folds ([`Environment::engine_identity`]).
+    /// As an engine switch, held by the store's ambient identity
+    /// ([`crate::camdl_store::CamdlEnvIdentity`]), which every result's id
+    /// holds.
     Engine,
     /// Through the compiled IR the model level hashes.
     CompiledModel,
@@ -223,8 +224,7 @@ impl Environment {
     /// The engine switches that are on, in [`VARS`] order: the keyed variables
     /// whose route is [`Route::Engine`], each by name, an experimental input
     /// with its value.
-    pub fn engine_switches(&self) -> Vec<runid::inputs::EngineSwitch> {
-        use runid::inputs::EngineSwitch;
+    pub fn engine_switches(&self) -> Vec<EngineSwitch> {
         let flag = |name: &str| EngineSwitch { name: name.to_string(), value: None };
         let mut on = Vec::new();
         for v in VARS.iter().filter(|v| matches!(v.class, Keyed(_)) && v.route == Route::Engine) {
@@ -240,15 +240,18 @@ impl Environment {
         }
         on
     }
+}
 
-    /// The engine identity a converted command's identity folds: `engine_id`
-    /// (the build fingerprint) and the engine switches that are on, as a typed
-    /// value. With no switch on it is the build alone, so a default run keeps
-    /// its identity; how it is hashed is
-    /// [`runid::inputs::EngineIdentity`]'s.
-    pub fn engine_identity(&self, engine_id: &str) -> runid::inputs::EngineIdentity {
-        runid::inputs::EngineIdentity { build: engine_id.to_string(), switches: self.engine_switches() }
-    }
+/// One engine switch that is on: an environment variable that selects an
+/// alternative evaluation path (`CAMDL_EVAL_UNRESOLVED`) or turns on an
+/// experimental feature (`CAMDL_EXPERIMENTAL_<NAME>`, with its value). A
+/// prediction's manifest lists them; the identity of a result holds them
+/// through [`crate::camdl_store::CamdlEnvIdentity`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct EngineSwitch {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
 }
 
 /// The process's environment, read on first use and never again.
@@ -269,8 +272,8 @@ pub(crate) fn install_engine_switches(env: &Env) {
 /// (`CAMDL_EVAL_UNRESOLVED`, `CAMDL_NO_BINDING_CACHE`). The switches ride on
 /// each compiled model rather than on the process, so a model compiled
 /// without them, in this process or any other, evaluates on the default path.
-/// They are keyed through [`Environment::engine_identity`], which reads the
-/// same environment.
+/// They are keyed through [`crate::camdl_store::CamdlEnvIdentity`], which
+/// reads the same environment.
 pub(crate) fn eval_settings(allow_degenerate_rates: bool) -> sim::EvalSettings {
     let vars = &get().vars;
     sim::EvalSettings {
@@ -358,20 +361,23 @@ mod tests {
     }
 
     #[test]
-    fn an_engine_switch_keys_the_engine_and_the_default_does_not() {
-        let spelled = |env: Environment, build: &str| env.engine_identity(build).hashed_spelling();
-        assert_eq!(with(&[]).engine_identity("abc"), runid::inputs::EngineIdentity::of_build("abc"));
-        assert_eq!(spelled(with(&[("CAMDL_EVAL_UNRESOLVED", "1")]), "abc"), "abc+21:CAMDL_EVAL_UNRESOLVED");
+    fn an_engine_switch_is_listed_and_the_default_lists_none() {
+        let names = |env: Environment| -> Vec<(String, Option<String>)> {
+            env.engine_switches().into_iter().map(|s| (s.name, s.value)).collect()
+        };
+        assert!(names(with(&[])).is_empty());
+        assert_eq!(names(with(&[("CAMDL_EVAL_UNRESOLVED", "1")])), [("CAMDL_EVAL_UNRESOLVED".to_string(), None)]);
         assert_eq!(
-            spelled(with(&[("CAMDL_NO_BINDING_CACHE", ""), ("CAMDL_EVAL_UNRESOLVED", "x")]), "e"),
-            "e+21:CAMDL_EVAL_UNRESOLVED+22:CAMDL_NO_BINDING_CACHE"
+            names(with(&[("CAMDL_NO_BINDING_CACHE", ""), ("CAMDL_EVAL_UNRESOLVED", "x")])),
+            [("CAMDL_EVAL_UNRESOLVED".to_string(), None), ("CAMDL_NO_BINDING_CACHE".to_string(), None)]
         );
-        assert_eq!(spelled(with(&[("CAMDL_EXPERIMENTAL_FOO", "2")]), "e"), "e+22:CAMDL_EXPERIMENTAL_FOO=1:2");
+        assert_eq!(
+            names(with(&[("CAMDL_EXPERIMENTAL_FOO", "2")])),
+            [("CAMDL_EXPERIMENTAL_FOO".to_string(), Some("2".to_string()))]
+        );
         // A diagnostic changes no result, and a compile switch is keyed
         // through the IR, so neither is an engine switch.
         assert!(with(&[("CAMDL_TRACE_STEPS", "1"), ("CAMDL_NO_LICM", "1")]).engine_switches().is_empty());
-        // The build stays the build: switches are a field of their own.
-        assert_eq!(with(&[("CAMDL_EVAL_UNRESOLVED", "1")]).engine_identity("e").build, "e");
     }
 
     #[test]

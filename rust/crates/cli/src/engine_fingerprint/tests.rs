@@ -348,7 +348,7 @@ fn every_tests_rs_under_a_src_dir_is_declared_cfg_test() {
 fn the_watched_paths_cover_every_crate_source_dir() {
     let root = this_repo();
     let watched = watched_source_paths(&root);
-    for rel in ["rust/crates/sim/src", "rust/crates/cli/src", "rust/crates/runid/src", "rust/crates/sim/build.rs",
+    for rel in ["rust/crates/sim/src", "rust/crates/cli/src", "rust/crates/store/src", "rust/crates/sim/build.rs",
                 "rust/crates/cli/build.rs", "rust/Cargo.lock", "rust/Cargo.toml", "ir/VERSION"] {
         assert!(watched.contains(&root.join(rel)), "{rel} is not watched");
     }

@@ -7,7 +7,7 @@ edition = "2021"
 build = false
 
 # A leaf crate: types, serde and serde_json only. It must not depend on `ir`,
-# `runid`, `sim` or `cli`, so that a reader of a published declared-model
+# `sim` or `cli`, so that a reader of a published declared-model
 # document never needs the runtime's reader for compiled models.
 [dependencies]
 serde = { version = "1", features = ["derive"] }

@@ -3,7 +3,7 @@
 //!
 //! `[stages]` became one `[method]` per fit.toml, and the code, the store, the
 //! run.json `kind` and the run-identity types were renamed to say method. This
-//! test fails if one of the old identifiers comes back in `cli`, `runid` or
+//! test fails if one of the old identifiers comes back in `cli` or
 //! `io` (source and tests), so a revert or a copy from an old branch cannot
 //! reintroduce the vocabulary quietly.
 //!
@@ -39,13 +39,11 @@ const CAMEL: &[&str] =
 /// old run.json kind, the test that plants such a record, and the two
 /// run-id pin ledgers, whose comments record which renamed types moved a pin.
 const ALLOWED: &[(&str, &str)] = &[
-    ("runid/src/record.rs", "fit_stage"),
     ("cli/tests/cas_integration.rs", "fit_stage"),
     ("cli/src/resolve/tests.rs", "StageConfig"),
     ("cli/src/resolve/tests.rs", "StageLevel"),
     ("cli/src/resolve/tests.rs", "FitStageInput"),
     ("cli/src/resolve/tests.rs", "ProfileStage"),
-    ("runid/src/inputs/tests.rs", "StageConfig"),
 ];
 
 fn is_removed(ident: &str) -> bool {
@@ -85,11 +83,11 @@ fn the_predicate_matches_the_old_names_and_nothing_disease_shaped() {
 }
 
 #[test]
-fn no_fitting_sense_stage_identifier_in_cli_runid_or_io() {
+fn no_fitting_sense_stage_identifier_in_cli_or_io() {
     let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let this_file = Path::new(file!()).file_name().unwrap().to_owned();
     let mut files = Vec::new();
-    for krate in ["cli", "runid", "io"] {
+    for krate in ["cli", "io"] {
         for sub in ["src", "tests"] {
             rust_files(&crates.join(krate).join(sub), &mut files);
         }

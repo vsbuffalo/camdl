@@ -1,24 +1,31 @@
 ---
 paths:
-  - "rust/crates/runid/**"
+  - "rust/crates/store/**"
+  - "rust/crates/store-derive/**"
+  - "rust/crates/ir/src/model_hash.rs"
+  - "rust/crates/ir/src/model_hash/**"
+  - "rust/crates/cli/src/camdl_store.rs"
   - "rust/crates/cli/src/resolve.rs"
-  - "rust/crates/cli/src/fit/cas.rs"
 description: CAS / run-identity — what re-keys a run, what is presentation, and the required reading before touching either
 ---
 
 # CAS and run identity
 
-Applies to anything that feeds a `run_id`: a new `SimConfig` / `FitConfigV2`
-field, a new identity level, an output-affecting CLI flag.
+Applies to anything that feeds a run id: a new field of an identity type
+(`sim_store::SimConfig`, a fit problem's or run's identity), an output-affecting
+CLI flag.
 
 ## Required reading
 
-- The `runid` crate doc (`rust/crates/runid/src/lib.rs`) — the two hashing paths
-  and the version stack.
-- `rust/crates/cli/src/resolve.rs` — the factored model / config / params /
-  scenario / seed levels; `model_ir_hash`, which they share, is in
-  `rust/crates/runid/src/inputs.rs`.
-- `rust/crates/cli/src/fit/cas.rs` — the fit canonical-JSON hash.
+- The run-store proposal's "API 1: inputs and identity" and its "Keys" section
+  (`docs/dev/proposals/2026-11-20-run-store-api.md`): the input classes, the
+  `Identity` derive and the encoding.
+- `rust/crates/store/src/hash.rs` and `identity.rs`: the one encoder and the
+  identity types it hashes.
+- `rust/crates/cli/src/camdl_store.rs`: camdl's ambient identity and the
+  compiled model's stored part.
+- `rust/crates/ir/src/model_hash.rs`: the model's structural hash, which camdl
+  prints and compares models by and which no identity holds.
 
 ## The rule
 

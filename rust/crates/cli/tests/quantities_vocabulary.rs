@@ -17,7 +17,7 @@
 //!    Correcting a formula and re-running must produce a new table, not a cache
 //!    hit on the old one.
 //! 4. **The run's identity does not move.** `quantities` are excluded from
-//!    `Model::hash_into` (`runid`'s `ir_quantities_excluded_from_hash`), so the
+//!    `Model::hash_into` (`ir::model_hash`'s `ir_quantities_excluded_from_hash`), so the
 //!    trajectory a vocabulary is read off is byte-identically the same run.
 
 use std::path::{Path, PathBuf};

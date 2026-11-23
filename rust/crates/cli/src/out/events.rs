@@ -11,9 +11,9 @@
 //! chain workers write to it through the handle's collector and progress
 //! tasks, so every line goes through one [`EventLog`] behind one lock. Each
 //! line is written whole with one `write`, so a reader tailing the file sees
-//! whole lines. The log is a display record: it enters no hash, and the
-//! store's exact set passes over it ([`runid::EVENT_LOG`]), because the
-//! end-of-run report is appended after the leaf commits.
+//! whole lines. The log is a display record: it enters no hash, and `fit
+//! run` does not store it ([`EVENT_LOG`]), because the end-of-run report is
+//! appended after the run's files are stored.
 //!
 //! A write that fails is the run's failure, as `diagnostics.json`'s is: the
 //! first failure is kept, later events are not written, and the run reports
@@ -38,6 +38,9 @@ use sim::inference::diagnostic::{AcceptanceBand, Diagnostic};
 /// The schema every line names. A change to what an existing field means,
 /// or a removed field, is a new version; a new event or a new field is not.
 pub const SCHEMA: &str = "camdl.events/v1";
+
+/// The event log's file name in a method directory.
+pub const EVENT_LOG: &str = "events.jsonl";
 
 /// One event a running method reports.
 #[derive(Debug, Serialize)]
@@ -149,7 +152,7 @@ struct State {
 impl EventLog {
     /// Create `dir/events.jsonl`, replacing any log a previous run left.
     pub fn create(dir: &Path) -> Result<Self, String> {
-        let path = dir.join(runid::EVENT_LOG);
+        let path = dir.join(EVENT_LOG);
         let file = std::fs::File::create(&path).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
         Ok(EventLog(Arc::new(Inner {
             path,

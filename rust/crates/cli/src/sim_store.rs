@@ -74,6 +74,30 @@ impl Backend {
     }
 }
 
+/// The paired `(θ_i, X_i(T))` origin ensemble a `--init-state fit` run
+/// forecasts from, as its identity holds it: the origin time and every
+/// selected draw's restored state, in selection order. Content, not the fit's
+/// run id, so two selections that restore different states never share a key.
+/// θ is not here: each draw's parameter values are a cell's own parameters.
+#[derive(store::Identity, Clone, Debug)]
+#[identity(tag = "init_state_ensemble", version = 1)]
+pub struct InitStateEnsemble {
+    pub origin_t: store::Finite,
+    pub rows: Vec<InitStateDraw>,
+}
+
+/// One selected draw of an [`InitStateEnsemble`]: its chain and draw, and
+/// its integer and real compartment values at the origin, in the model's
+/// compartment order.
+#[derive(store::Identity, Clone, Debug)]
+#[identity(tag = "init_state_draw", version = 1)]
+pub struct InitStateDraw {
+    pub chain: u64,
+    pub draw: u64,
+    pub counts: Vec<i64>,
+    pub reals: Vec<store::Finite>,
+}
+
 /// The forecast-origin state a cell restores (`--init-state`): the content
 /// digest of the state ensemble and the row the cell restores.
 #[derive(store::Identity, Clone, Debug)]

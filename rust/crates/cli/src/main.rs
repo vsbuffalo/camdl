@@ -6,10 +6,9 @@ mod engine_fingerprint; // ENGINE_ID's fingerprint, also compiled into build.rs;
 mod util;
 mod params_resolver;  // unified parameter-value resolver (2026-05-25 CLI UX rev 2)
 mod external_inputs;  // binds external("NAME") tables and forcings to files
-mod leaf_use;       // command-side checks on a read leaf: a result consumer requires a completed run
 mod hashing;
 mod canonical_json; // canonical JSON text and the finiteness gate for values an identity holds as text
-mod resolve;        // Resolve bridge: CLI inputs → runid identity (CAS run-identity refactor, gh#147)
+mod resolve;        // the model identity string a fit's provenance records
 mod run_meta;       // cross-cutting run-metadata value types (FitAlgorithm, Backend, provenance records, FitSidecar)
 mod posterior_draws; // resolve a fit run's canonical posterior draws (--draws posterior, predict)
 mod chain_index;    // the chain number, counted from 0: the one index base every fit surface names (gh#990)
@@ -788,17 +787,17 @@ fn resolve_paired_posterior(
     // selection order. Content, not the fit's run_id: keying on provenance
     // means enumerating every knob that changes the selection, and a missed one
     // is two different clouds sharing a cache entry.
-    let origin_t = runid::FiniteF64::new(ens.origin_t).unwrap_or_else(|e| {
+    let origin_t = store::Finite::new(ens.origin_t).unwrap_or_else(|e| {
         out.fail(format!("error: --init-state fit: non-finite forecast origin ({e})"));
     });
-    let rows: Vec<runid::inputs::InitStateRow> = selected
+    let rows: Vec<crate::sim_store::InitStateDraw> = selected
         .iter()
-        .map(|d| runid::inputs::InitStateRow {
+        .map(|d| crate::sim_store::InitStateDraw {
             chain: d.chain as u64,
             draw: d.draw as u64,
             counts: d.counts.clone(),
             reals: d.reals.iter()
-                .map(|&v| runid::FiniteF64::new(v).unwrap_or_else(|e| {
+                .map(|&v| store::Finite::new(v).unwrap_or_else(|e| {
                     out.fail(format!(
                         "error: --init-state fit: (chain {}, draw {}) has a non-finite \
                          real compartment at the origin ({e})",
@@ -808,9 +807,7 @@ fn resolve_paired_posterior(
                 .collect(),
         })
         .collect();
-    let digest = runid::ContentAddressed::content_hash(
-        &runid::inputs::InitStateEnsemble { origin_t, rows },
-    );
+    let digest = store::Identity::key(&crate::sim_store::InitStateEnsemble { origin_t, rows });
 
     let params: Vec<HashMap<String, f64>> =
         selected.iter().map(|d| d.params.clone()).collect();
@@ -1724,7 +1721,7 @@ fn run_simulate(inv: args::SimulateInvocation) {
                 "simulate: --init-state {} → {} particle states at t = {}",
                 path.display(), states.len(), states.origin_t
             ));
-            let digest = runid::ContentHash::digest_bytes(&bytes);
+            let digest = store::Key::digest_bytes(&bytes);
             init_state_source = Some(std::sync::Arc::new(crate::sim_job::InitStateSource {
                 origin_t: states.origin_t,
                 states: states.counts.into_iter()

@@ -6,26 +6,26 @@
 
 use std::collections::HashMap;
 
-use ir::expr::{BinOp, Expr, ProjectedExpr, UnOp};
-use ir::intervention::{
-    Action, AddAction, FractionTransfer, GroupedAmount, GroupedTransfer, Intervention, InterventionSchedule, RecurringSchedule, SetAction,
+use crate::expr::{BinOp, Expr, ProjectedExpr, UnOp};
+use crate::intervention::{
+    Action, FractionTransfer, GroupedAmount, GroupedTransfer, Intervention, InterventionSchedule, RecurringSchedule, SetAction,
 };
-use ir::model::{
+use crate::model::{
     BalanceSpec, Binding, Compartment, CompartmentKind, Dimension, InitialConditions, Integrator,
     Model, ModelStructure, OutputConfig, OutputSchedule, Preset, RegularOutputSchedule,
     SimulationConfig,
 };
-use ir::observation::{
+use crate::observation::{
     Likelihood, ObservationModel, ObservationSchedule, PoissonLikelihood, Projection, RegularSchedule,
 };
-use ir::ode_equation::OdeEquation;
-use ir::parameter::{Parameter, PriorDist, UniformPrior};
-use ir::table::{OobPolicy, Table, TableSource};
-use ir::time_func::{Sinusoidal, TimeFuncKind, TimeFunction};
-use ir::transition::{DrawMethod, StoichiometryEntry, Transition, TransitionMetadata};
+use crate::ode_equation::OdeEquation;
+use crate::parameter::{Parameter, PriorDist, UniformPrior};
+use crate::table::{OobPolicy, Table, TableSource};
+use crate::time_func::{Sinusoidal, TimeFuncKind, TimeFunction};
+use crate::transition::{DrawMethod, StoichiometryEntry, Transition, TransitionMetadata};
 
 use super::{hash_anchor_opt, hash_integrator};
-use crate::hash::{CanonicalHasher, ContentAddressed};
+use crate::model_hash::{CanonicalHasher, ContentAddressed};
 
 /// A broad, representative SIR-with-seasonality model that exercises a wide
 /// slice of the IR tree: integer + real compartments, a transition with a
@@ -40,10 +40,10 @@ fn representative_model() -> Model {
         Expr::bin_op(BinOp::Mul, Expr::param("beta"), Expr::pop("S")),
         Expr::pop("I"),
     );
-    let mut rate_grad: HashMap<String, ir::deriv::DerivEntry> = HashMap::new();
+    let mut rate_grad: HashMap<String, crate::deriv::DerivEntry> = HashMap::new();
     rate_grad.insert(
         "beta".into(),
-        ir::deriv::DerivEntry::Grad(Expr::bin_op(BinOp::Mul, Expr::pop("S"), Expr::pop("I"))),
+        crate::deriv::DerivEntry::Grad(Expr::bin_op(BinOp::Mul, Expr::pop("S"), Expr::pop("I"))),
     );
 
     // Declaration order is part of the model's identity (`InitialConditions` is
@@ -117,7 +117,7 @@ fn representative_model() -> Model {
         interventions: vec![Intervention {
             name: "pulse_vax".into(),
             base_name: None,
-            fire: ir::intervention::FireSource::Scheduled(InterventionSchedule::Recurring(RecurringSchedule {
+            fire: crate::intervention::FireSource::Scheduled(InterventionSchedule::Recurring(RecurringSchedule {
                 start: 100.0,
                 period: 365.0,
                 end: 1000.0,
@@ -128,14 +128,14 @@ fn representative_model() -> Model {
                 value: Expr::const_(0.0),
                 value_grad: Default::default(),
             })],
-            kind: ir::intervention::InterventionKind::Scenario,
+            kind: crate::intervention::InterventionKind::Scenario,
         }],
         observations: vec![ObservationModel {
             name: "cases".into(),
             source: "cases".into(),
             columns: vec![
-                ir::observation::ObsColumn { name: "time".into(), role: ir::observation::ColumnRole::Time },
-                ir::observation::ObsColumn { name: "cases".into(), role: ir::observation::ColumnRole::Value(ir::parameter::ParamKind::Count) },
+                crate::observation::ObsColumn { name: "time".into(), role: crate::observation::ColumnRole::Time },
+                crate::observation::ObsColumn { name: "cases".into(), role: crate::observation::ColumnRole::Value(crate::parameter::ParamKind::Count) },
             ],
             scored: "cases".into(),
             emit_schedule: Some(ObservationSchedule::Regular(RegularSchedule {
@@ -148,14 +148,14 @@ fn representative_model() -> Model {
             projection: Projection::CumulativeFlow("infection".into()),
             projection_state_grad: Default::default(),
             likelihood: Likelihood::Poisson(PoissonLikelihood {
-                rate: ir::Diffable::new(Expr::bin_op(
+                rate: crate::Diffable::new(Expr::bin_op(
                     BinOp::Mul,
                     Expr::param("rho"),
                     Expr::Projected(ProjectedExpr { projected: () }),
                 )),
             }),
         }],
-        parameters: vec![Parameter { name: "beta".into(), value: ir::parameter::ParamValue::Estimated { init: Some(0.5), bounds: Some((0.0, 2.0)), prior: ir::parameter::PriorSpec::Dist(PriorDist::Uniform(UniformPrior { lower: 0.0, upper: 2.0 })) }, param_kind: Some(ir::parameter::ParamKind::Rate), param_dim: Some((0, -1)) }],
+        parameters: vec![Parameter { name: "beta".into(), value: crate::parameter::ParamValue::Estimated { init: Some(0.5), bounds: Some((0.0, 2.0)), prior: crate::parameter::PriorSpec::Dist(PriorDist::Uniform(UniformPrior { lower: 0.0, upper: 2.0 })) }, param_kind: Some(crate::parameter::ParamKind::Rate), param_dim: Some((0, -1)) }],
         constants: vec![],
         bindings: vec![Binding {
             name: "N".into(),
@@ -278,7 +278,7 @@ fn model_golden_hash() {
     // gh#733 (ir/VERSION -> 0.34): `initial_conditions` stopped being a
     // three-variant enum over the whole block and became one ordered map of
     // per-compartment `InitSpec`s. `hash_into` now writes an
-    // `ir::model::InitialConditions` header, a length, and then each entry
+    // `crate::model::InitialConditions` header, a length, and then each entry
     // through `InitSpec::hash_into` in DECLARATION order — where the
     // `Explicit` arm previously wrote a SORTED `str -> f64` map. The
     // representative model's three literals shift the model hash once — a
@@ -329,18 +329,18 @@ fn model_golden_hash() {
 /// nothing else would carry its value into the hash.
 #[test]
 fn ir_constant_value_changes_hash() {
-    let constant = |name: &str, value: f64, kind: ir::parameter::ParamKind| {
+    let constant = |name: &str, value: f64, kind: crate::parameter::ParamKind| {
         let mut m = representative_model();
-        m.constants.push(ir::parameter::Constant { name: name.into(), value, kind });
+        m.constants.push(crate::parameter::Constant { name: name.into(), value, kind });
         m.content_hash()
     };
-    let base = constant("omega", 0.01, ir::parameter::ParamKind::Rate);
+    let base = constant("omega", 0.01, crate::parameter::ParamKind::Rate);
     assert_ne!(representative_model().content_hash(), base, "adding a constant re-keys");
-    assert_ne!(base, constant("omega", 0.02, ir::parameter::ParamKind::Rate),
+    assert_ne!(base, constant("omega", 0.02, crate::parameter::ParamKind::Rate),
         "a constant's value is identity");
-    assert_ne!(base, constant("omega", 0.01, ir::parameter::ParamKind::Count),
+    assert_ne!(base, constant("omega", 0.01, crate::parameter::ParamKind::Count),
         "a constant's kind is identity");
-    assert_ne!(base, constant("omegb", 0.01, ir::parameter::ParamKind::Rate),
+    assert_ne!(base, constant("omegb", 0.01, crate::parameter::ParamKind::Rate),
         "a constant's name is identity");
     assert_ne!(Expr::const_ref("omega").content_hash(), Expr::param("omega").content_hash(),
         "a constant reference and a parameter reference of one name differ");
@@ -451,7 +451,7 @@ fn a_hoisted_rate_and_the_inline_rate_differ() {
 /// (Previously asserted the opposite; flipped by the proposal.)
 #[test]
 fn ir_rate_state_grad_is_inert() {
-    use ir::deriv::{CompGradMap, DerivEntry};
+    use crate::deriv::{CompGradMap, DerivEntry};
     let base = representative_model().content_hash();
     let mut m = representative_model();
     let mut g = std::collections::HashMap::new();
@@ -472,7 +472,7 @@ fn ir_rate_state_grad_is_inert() {
 /// (Previously asserted the opposite; flipped by the proposal.)
 #[test]
 fn ir_ic_grad_is_inert() {
-    use ir::deriv::DerivEntry;
+    use crate::deriv::DerivEntry;
     let base = representative_model().content_hash();
     let mut m = representative_model();
     let mut inner = std::collections::HashMap::new();
@@ -493,8 +493,8 @@ fn ir_ic_grad_is_inert() {
 /// (Previously asserted the opposite; flipped by the proposal.)
 #[test]
 fn ir_proj_grad_is_inert() {
-    use ir::deriv::DerivEntry;
-    use ir::observation::Likelihood;
+    use crate::deriv::DerivEntry;
+    use crate::observation::Likelihood;
     let base = representative_model().content_hash();
     let mut m = representative_model();
     match &mut m.observations[0].likelihood {
@@ -518,7 +518,7 @@ fn ir_proj_grad_is_inert() {
 /// without. (Previously asserted the opposite; flipped by the proposal.)
 #[test]
 fn ir_projection_state_grad_is_inert() {
-    use ir::deriv::DerivEntry;
+    use crate::deriv::DerivEntry;
     let base = representative_model().content_hash();
     let mut m = representative_model();
     m.observations[0]
@@ -541,7 +541,7 @@ fn ir_projection_state_grad_is_inert() {
 /// `rate_grad_map_order_invariant`, which pinned the now-deleted rate_grad sort).
 #[test]
 fn ir_rate_grad_is_inert() {
-    use ir::deriv::DerivEntry;
+    use crate::deriv::DerivEntry;
     let base = representative_model().content_hash();
     let mut m = representative_model();
     let mut rg: HashMap<String, DerivEntry> = HashMap::new();
@@ -562,8 +562,8 @@ fn ir_rate_grad_is_inert() {
 /// 2026-07-16-gradient-maps-out-of-run-identity.md.
 #[test]
 fn ir_sigma_sq_grad_is_inert() {
-    use ir::deriv::DerivEntry;
-    use ir::transition::DrawMethod;
+    use crate::deriv::DerivEntry;
+    use crate::transition::DrawMethod;
     let mk = |grad: bool| {
         let mut m = representative_model();
         let mut sg: HashMap<String, DerivEntry> = HashMap::new();
@@ -603,8 +603,8 @@ fn ir_sigma_sq_grad_is_inert() {
 /// 2026-07-16-gradient-maps-out-of-run-identity.md.
 #[test]
 fn ir_likelihood_grad_is_inert() {
-    use ir::deriv::DerivEntry;
-    use ir::observation::Likelihood;
+    use crate::deriv::DerivEntry;
+    use crate::observation::Likelihood;
     let base = representative_model().content_hash();
     let mut m = representative_model();
     match &mut m.observations[0].likelihood {
@@ -672,7 +672,7 @@ fn compartment_dims_map_order_invariant() {
 /// derive-based `ContentAddressed`) would trip this.
 #[test]
 fn ir_quantities_excluded_from_hash() {
-    use ir::quantity::{Quantity, QuantityBody, QuantitySource, TemporalReduce, ValueReduce};
+    use crate::quantity::{Quantity, QuantityBody, QuantitySource, TemporalReduce, ValueReduce};
     let base = representative_model().content_hash();
     let mut m = representative_model();
     m.quantities.push(Quantity {
@@ -700,7 +700,7 @@ fn ir_quantities_excluded_from_hash() {
 /// refactor that re-adds the walk line would trip it.
 #[test]
 fn ir_contrasts_excluded_from_hash() {
-    use ir::contrast::{Contrast, ContrastExpr, RunNamespace};
+    use crate::contrast::{Contrast, ContrastExpr, RunNamespace};
     let base = representative_model().content_hash();
     let mut m = representative_model();
     m.contrasts.push(Contrast {
@@ -735,7 +735,7 @@ fn ir_contrasts_excluded_from_hash() {
 /// both spline kinds.
 #[test]
 fn ir_spline_link_changes_hash() {
-    use ir::time_func::{BSpline, BSplineKnots, PeriodicSpline, SplineCoefs, SplineLink};
+    use crate::time_func::{BSpline, BSplineKnots, PeriodicSpline, SplineCoefs, SplineLink};
     let coefs = || vec![Expr::const_(0.2), Expr::const_(-0.1), Expr::const_(0.4), Expr::const_(0.0)];
     let bspline = |link| {
         TimeFuncKind::BSpline(BSpline {
@@ -774,10 +774,10 @@ fn ir_spline_link_changes_hash() {
 /// it relies on.
 #[test]
 fn ir_forcing_basis_hashes_its_forcing_and_index() {
-    use ir::expr::{ForcingBasisRef, ForcingBasisWrap};
+    use crate::expr::{ForcingBasisRef, ForcingBasisWrap};
     let fb = |name: &str, index: u32| {
         Expr::ForcingBasis(ForcingBasisWrap {
-            forcing_basis: ForcingBasisRef { name: name.into(), index, space: ir::expr::BasisSpace::Spline },
+            forcing_basis: ForcingBasisRef { name: name.into(), index, space: crate::expr::BasisSpace::Spline },
         })
         .content_hash()
     };
@@ -785,14 +785,14 @@ fn ir_forcing_basis_hashes_its_forcing_and_index() {
         Expr::ForcingBasis(ForcingBasisWrap { forcing_basis: ForcingBasisRef { name: "f".into(), index: 0, space } })
             .content_hash()
     };
-    use ir::expr::BasisSpace;
+    use crate::expr::BasisSpace;
     assert_ne!(spaced(BasisSpace::Spline), spaced(BasisSpace::Whitened), "the space is hashed");
     assert_ne!(spaced(BasisSpace::Whitened), spaced(BasisSpace::Linear), "the space is hashed");
     assert_ne!(fb("f", 0), fb("f", 1), "the basis index is hashed");
     assert_ne!(fb("f", 0), fb("g", 0), "the forcing name is hashed");
     assert_eq!(fb("f", 2), fb("f", 2));
-    assert_ne!(fb("f", 0), Expr::TimeFunc(ir::expr::TimeFuncWrap {
-        time_func: ir::expr::TimeFuncRef { name: "f".into() } }).content_hash(),
+    assert_ne!(fb("f", 0), Expr::TimeFunc(crate::expr::TimeFuncWrap {
+        time_func: crate::expr::TimeFuncRef { name: "f".into() } }).content_hash(),
         "a basis node is not its forcing's value");
 }
 
@@ -842,7 +842,7 @@ fn ir_forcing_lag_changes_hash() {
 /// `ir_forcing_knots_change_hash`.
 #[test]
 fn ir_forcing_data_source_excluded_from_hash() {
-    use ir::time_func::DataSource;
+    use crate::time_func::DataSource;
     let with_source = |path: &str, sha: &str| {
         let mut m = representative_model();
         m.time_functions[0].data_source = Some(DataSource {
@@ -882,10 +882,10 @@ fn ir_forcing_data_source_excluded_from_hash() {
 fn ir_forcing_knots_change_hash() {
     let knots = |v: f64| {
         let mut m = representative_model();
-        m.time_functions[0].kind = TimeFuncKind::Interpolated(ir::time_func::Interpolated::knots(
+        m.time_functions[0].kind = TimeFuncKind::Interpolated(crate::time_func::Interpolated::knots(
             vec![Expr::const_(0.0), Expr::const_(30.0)],
             vec![Expr::const_(1.4), Expr::const_(v)],
-            ir::time_func::InterpMethod::Linear,
+            crate::time_func::InterpMethod::Linear,
         ));
         m.content_hash()
     };
@@ -904,7 +904,7 @@ fn ir_forcing_knots_change_hash() {
 /// cannot collide with a knot-backed forcing.
 #[test]
 fn ir_external_forcing_hashes_its_declaration() {
-    use ir::time_func::{ExternalSeries, InterpMethod, InterpSource, Interpolated, SeriesKey};
+    use crate::time_func::{ExternalSeries, InterpMethod, InterpSource, Interpolated, SeriesKey};
     let base = ExternalSeries {
         external: "school".into(),
         time_col: "date".into(),
@@ -965,9 +965,9 @@ fn ir_const_signed_zero_is_distinct() {
     let mut m_pos = representative_model();
     let mut m_neg = representative_model();
     m_pos.initial_conditions.0.insert(
-        "R".into(), ir::model::InitSpec::Deterministic(ir::expr::Expr::const_(0.0)));
+        "R".into(), crate::model::InitSpec::Deterministic(crate::expr::Expr::const_(0.0)));
     m_neg.initial_conditions.0.insert(
-        "R".into(), ir::model::InitSpec::Deterministic(ir::expr::Expr::const_(-0.0)));
+        "R".into(), crate::model::InitSpec::Deterministic(crate::expr::Expr::const_(-0.0)));
     assert_ne!(
         m_pos.content_hash(),
         m_neg.content_hash(),
@@ -992,7 +992,7 @@ fn init_condition_order_changes_the_model_hash() {
     let mut entries: Vec<_> =
         base.initial_conditions.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
     entries.swap(0, 1);
-    reordered.initial_conditions = ir::model::InitialConditions(entries.into_iter().collect());
+    reordered.initial_conditions = crate::model::InitialConditions(entries.into_iter().collect());
 
     let keys = |m: &Model| m.initial_conditions.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>();
     // Non-vacuity: same entries, different sequence.
@@ -1078,7 +1078,7 @@ fn defaults_are_not_hash_invisible() {
 /// substitutes) hashes as an absent value, distinct from every anchor.
 #[test]
 fn t_end_anchor_changes_run_id() {
-    use ir::anchor::{AnchoredTime, ObsAnchor};
+    use crate::anchor::{AnchoredTime, ObsAnchor};
     let with = |a: Option<AnchoredTime>| {
         let mut m = representative_model();
         m.simulation.t_end_anchor = a;
@@ -1099,7 +1099,7 @@ fn t_end_anchor_changes_run_id() {
 /// A preset's anchored horizon re-keys on the same terms.
 #[test]
 fn preset_t_end_anchor_changes_run_id() {
-    use ir::anchor::{AnchoredTime, ObsAnchor};
+    use crate::anchor::{AnchoredTime, ObsAnchor};
     let with = |a: Option<AnchoredTime>| {
         let mut m = representative_model();
         m.presets[0].t_end_anchor = a;
@@ -1232,7 +1232,7 @@ fn projection_variant_hashes_are_pinned() {
 /// `ModelDocs`.
 #[test]
 fn a_model_level_doc_does_not_re_key_the_model() {
-    use crate::inputs::model_ir_hash;
+    use crate::model_hash::model_ir_hash;
 
     let plain = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -1247,8 +1247,8 @@ fn a_model_level_doc_does_not_re_key_the_model() {
     );
     assert_ne!(plain, documented, "the splice must actually change the JSON");
 
-    let env_plain = ir::envelope_from_str(&plain).expect("parse plain envelope");
-    let env_doc = ir::envelope_from_str(&documented).expect("parse documented envelope");
+    let env_plain = crate::envelope_from_str(&plain).expect("parse plain envelope");
+    let env_doc = crate::envelope_from_str(&documented).expect("parse documented envelope");
 
     // Non-vacuous: the doc really is present on one side and absent on the other.
     assert!(env_plain.docs.model.is_none());
@@ -1264,162 +1264,6 @@ fn a_model_level_doc_does_not_re_key_the_model() {
 
 // ── Proposal 2026-11-17 §1b: the gradient mode ──────────────────────────────
 
-/// Every compiler-derived gradient map, changed alone, leaves the model's
-/// identity where it was and moves the digest a gradient-reading method keys
-/// on. One case per map, so a map the gradient mode forgets fails by name.
-#[test]
-fn each_gradient_map_moves_the_gradient_digest_and_not_the_model_hash() {
-    use crate::inputs::{model_ir_hash, model_ir_hash_with_gradients};
-    use ir::deriv::{CompGradMap, DerivEntry};
-    use ir::observation::Likelihood;
-    type Edit = Box<dyn Fn(&mut Model)>;
-    fn g(e: Expr) -> DerivEntry { DerivEntry::Grad(e) }
-    let cases: Vec<(&str, Edit)> = vec![
-        ("rate_grad", Box::new(|m| {
-            m.transitions[0].rate_grad.insert("beta".into(), g(Expr::pop("S")));
-        })),
-        ("rate_state_grad", Box::new(|m| {
-            m.transitions[0].rate_state_grad = CompGradMap(HashMap::from([("S".into(), g(Expr::param("beta")))]));
-        })),
-        ("an unsupported entry's code", Box::new(|m| {
-            m.transitions[0].rate_grad.insert("beta".into(), DerivEntry::Unsupported {
-                node: "lag".into(), code: ir::deriv::UnsupportedReason::Lag,
-            });
-        })),
-        ("sigma_sq_grad", Box::new(|m| {
-            m.transitions[0].draw_method = DrawMethod::Overdispersed {
-                sigma_sq: Expr::param("sigma_se"),
-                sigma_sq_grad: HashMap::from([("k".into(), g(Expr::const_(1.0)))]),
-            };
-        })),
-        ("projection_state_grad", Box::new(|m| {
-            m.observations[0].projection_state_grad.0.insert("I".into(), g(Expr::param("beta")));
-        })),
-        ("ic_grad", Box::new(|m| {
-            m.ic_grad.insert("I".into(), HashMap::from([("beta".into(), g(Expr::param("beta")))]));
-        })),
-        ("a likelihood's grad", Box::new(|m| match &mut m.observations[0].likelihood {
-            Likelihood::Poisson(p) => { p.rate.grad.insert("rho".into(), g(Expr::pop("S"))); }
-            other => panic!("expected Poisson, got {other:?}"),
-        })),
-        ("a likelihood's proj_grad", Box::new(|m| match &mut m.observations[0].likelihood {
-            Likelihood::Poisson(p) => p.rate.proj_grad = Some(g(Expr::const_(1.0))),
-            other => panic!("expected Poisson, got {other:?}"),
-        })),
-        ("a set action's value_grad", Box::new(|m| match &mut m.interventions[0].actions[0] {
-            Action::Set(s) => { s.value_grad.insert("beta".into(), g(Expr::const_(1.0))); }
-            other => panic!("expected Set, got {other:?}"),
-        })),
-        ("an add action's count_grad", Box::new(|m| match &mut m.interventions[0].actions[0] {
-            Action::Add(a) => { a.count_grad.insert("beta".into(), g(Expr::const_(1.0))); }
-            other => panic!("expected Add, got {other:?}"),
-        })),
-        ("a fraction transfer's fraction_grad", Box::new(|m| match &mut m.interventions[0].actions[0] {
-            Action::FractionTransfer(f) => { f.fraction_grad.insert("beta".into(), g(Expr::const_(1.0))); }
-            other => panic!("expected FractionTransfer, got {other:?}"),
-        })),
-        ("a grouped transfer's fraction_grad", Box::new(|m| match &mut m.interventions[0].actions[0] {
-            Action::GroupedTransfer(GroupedTransfer {
-                amount: GroupedAmount::Fraction { fraction_grad, .. }, ..
-            }) => { fraction_grad.insert("beta".into(), g(Expr::const_(1.0))); }
-            other => panic!("expected a grouped fraction transfer, got {other:?}"),
-        })),
-    ];
-    // The sigma_sq case changes the draw method too, and the add and fraction
-    // transfer cases need that action; each base is the same model with an
-    // empty gradient.
-    let base_for = |what: &str| {
-        let mut m = representative_model();
-        if what == "sigma_sq_grad" {
-            m.transitions[0].draw_method = DrawMethod::Overdispersed {
-                sigma_sq: Expr::param("sigma_se"),
-                sigma_sq_grad: HashMap::new(),
-            };
-        }
-        if what == "an add action's count_grad" {
-            m.interventions[0].actions[0] = Action::Add(AddAction {
-                compartment: "I".into(),
-                count: Expr::param("beta"),
-                count_grad: Default::default(),
-            });
-        }
-        if what == "a fraction transfer's fraction_grad" {
-            m.interventions[0].actions[0] = Action::FractionTransfer(FractionTransfer {
-                src: "S".into(),
-                dst: "I".into(),
-                fraction: Expr::param("beta"),
-                fraction_grad: Default::default(),
-            });
-        }
-        if what == "a grouped transfer's fraction_grad" {
-            m.interventions[0].actions[0] = grouped(
-                &[("S", "R"), ("I", "R")],
-                GroupedAmount::Fraction { fraction: Expr::param("beta"), fraction_grad: Default::default() },
-            );
-        }
-        m
-    };
-    for (what, edit) in cases {
-        let base = base_for(what);
-        let mut m = base_for(what);
-        edit(&mut m);
-        assert_eq!(model_ir_hash(&base), model_ir_hash(&m), "{what}: model identity is gradient-independent");
-        assert_ne!(
-            model_ir_hash_with_gradients(&base),
-            model_ir_hash_with_gradients(&m),
-            "{what}: a gradient-reading method must re-key when it changes"
-        );
-    }
-}
-
-/// The two entries of one gradient map differing only in a display label are
-/// one gradient: only the refusal code is what the entry says.
-#[test]
-fn an_unsupported_entrys_display_label_is_not_hashed() {
-    use crate::inputs::model_ir_hash_with_gradients;
-    use ir::deriv::{DerivEntry, UnsupportedReason};
-    let with_node = |node: &str| {
-        let mut m = representative_model();
-        m.transitions[0].rate_grad.insert("beta".into(), DerivEntry::Unsupported {
-            node: node.into(), code: UnsupportedReason::Mod,
-        });
-        model_ir_hash_with_gradients(&m)
-    };
-    assert_eq!(with_node("mod(t, 7)"), with_node("mod(t,7)"));
-}
-
-/// A subtree hoisted only out of a gradient expression enters the gradient
-/// digest through the reference to it, as its body: a different body under
-/// the same name is a different gradient (gh#1046's table resolves it).
-#[test]
-fn a_gradient_only_hoisted_subtree_enters_the_gradient_digest_as_its_body() {
-    use crate::inputs::{model_ir_hash, model_ir_hash_with_gradients};
-    use ir::deriv::DerivEntry;
-    let with_body = |body: Expr| {
-        let mut m = hoisted_model(vec![("__licm_0", rate_piece()), ("__licm_1", body)], "__licm_0");
-        m.transitions[0].rate_grad.insert("kappa".into(), DerivEntry::Grad(Expr::per_eval_ref("__licm_1")));
-        m
-    };
-    let a = with_body(gradient_only_piece());
-    let b = with_body(Expr::un_op(UnOp::Exp, Expr::param("kappa")));
-    assert_eq!(model_ir_hash(&a), model_ir_hash(&b), "not model identity");
-    assert_ne!(model_ir_hash_with_gradients(&a), model_ir_hash_with_gradients(&b), "but the gradient differs");
-}
-
-/// The gradient mode is scoped: hashing with it leaves every other hash's
-/// bytes alone (the default path is what the goldens pin).
-#[test]
-fn the_gradient_mode_is_off_by_default_and_restored_after() {
-    let m = representative_model();
-    let mut h = CanonicalHasher::new();
-    assert!(!h.hashes_gradients());
-    h.with_gradients(|h| assert!(h.hashes_gradients()));
-    assert!(!h.hashes_gradients());
-    let mut with = m.clone();
-    with.transitions[0].rate_grad.insert("beta".into(), ir::deriv::DerivEntry::Grad(Expr::pop("S")));
-    assert_eq!(m.content_hash(), with.content_hash());
-}
-
 fn grouped(pairs: &[(&str, &str)], amount: GroupedAmount) -> Action {
     Action::GroupedTransfer(GroupedTransfer {
         pairs: pairs.iter().map(|(s, d)| ((*s).to_string(), (*d).to_string())).collect(),
@@ -1432,7 +1276,7 @@ fn grouped(pairs: &[(&str, &str)], amount: GroupedAmount) -> Action {
 /// the amount is a fraction or a count, and the amount.
 #[test]
 fn a_grouped_transfer_is_model_identity_in_every_field() {
-    use crate::inputs::model_ir_hash;
+    use crate::model_hash::model_ir_hash;
     let frac = |f: f64| GroupedAmount::Fraction { fraction: Expr::const_(f), fraction_grad: Default::default() };
     let with = |a: Action| {
         let mut m = representative_model();

@@ -834,24 +834,21 @@ recorded" for a model without an origin.
 
 The training rule is part of a fit's identity: a `holdout_after` fit on a start-
 or day-labelled stream trains on different rows after this change, so it must
-re-key. Each change to identity bumped `HASH_VERSION` (`runid::hash`; D58, which
-supersedes D47's single shared bump): the removal of `obs_alignment` from the
-fit identity is the bump from 3 to 4, and the bump from 4 to 5 covers two
-changes together, the training rule (rows decided by period, `last_obs` read
+re-key. Each change to identity bumped `HASH_VERSION` (the old store's encoder;
+D58, which supersedes D47's single shared bump): the removal of `obs_alignment`
+from the fit identity is the bump from 3 to 4, and the bump from 4 to 5 covers
+two changes together, the training rule (rows decided by period, `last_obs` read
 over training rows) and the forcing-extrapolation override entering the identity
 of `simulate`, `pfilter` and `profile` runs. The score-artifact proposal's
 identity step will be a later bump.
 
-`FitDigest` carries the partition rule's version (`partition_rule_version`, set
-from `PARTITION_RULE_VERSION`), so a change to the rule re-keys every fit with
-no `HASH_VERSION` bump. It keeps the whole-file digests of the training files
-and the digests of the `[data.holdout]` files: with `holdout_after` in the
-config and the rule version, they determine the partition, so a stored fit never
-answers for another one. Replacing them with the per-stream training row
-digests, and dropping the holdout files from fit identity, is the score-artifact
-proposal's identity step. A forecast plan's mode, origin, horizon and target
-list will be identity for any stored predictive or score result; its notes are
-presentation (Phase B).
+A fit problem's identity holds each data file's training lines and each stream's
+held-out dates without their values (`fit_store::FitProblemIdentity`), so two
+partitions of one file pose two problems and a held-out value is in no identity.
+The partition record carries the rule's version (`PARTITION_RULE_VERSION`) and
+each stream's training row digest. A forecast plan's mode, origin, horizon and
+target list will be identity for any stored predictive or score result; its
+notes are presentation (Phase B).
 
 ### 5.5 Names
 

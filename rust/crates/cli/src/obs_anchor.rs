@@ -989,7 +989,7 @@ mod tests {
         let moved = substitute(&mut anchored, W).expect("resolves");
         assert!(moved.iter().any(|r| r.site == "simulate { from }" && r.resolved == 7.0), "{moved:?}");
         assert_eq!(anchored, literal);
-        assert_eq!(runid::inputs::model_ir_hash(&anchored), runid::inputs::model_ir_hash(&literal));
+        assert_eq!(ir::model_hash::model_ir_hash(&anchored), ir::model_hash::model_ir_hash(&literal));
     }
 
     /// A literal start moved by an override moves the output schedule and the

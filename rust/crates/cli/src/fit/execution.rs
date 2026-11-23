@@ -7,7 +7,8 @@
 //! it took, which process on which host ran it, how many worker threads it
 //! had, what its sampling cost in wall time — differs between two attempts,
 //! so it is kept here, beside the leaf and outside its manifest
-//! ([`runid::EXECUTION_RECORD`], one of [`runid::PER_ATTEMPT_RECORDS`]).
+//! ([`EXECUTION_RECORD`]); `fit run` stores it as a provenance file of the
+//! run, not a result file.
 //!
 //! The run writes the record when it claims the leaf, so an attempt that dies
 //! still leaves when and where it ran, and rewrites it with the finish when
@@ -28,6 +29,9 @@ use crate::fit::report::SamplingCost;
 
 /// The tag a reader keys on to know the record's layout.
 pub const SCHEMA: &str = "camdl.execution/v1";
+
+/// The record's file name in a method directory.
+pub const EXECUTION_RECORD: &str = "execution.json";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Execution {
@@ -101,7 +105,7 @@ impl Execution {
             finished_at: None,
             wall_time_seconds: None,
             pid: std::process::id(),
-            host: runid::this_host().to_string(),
+            host: store::this_host().to_string(),
             threads: rayon::current_num_threads(),
             cost: None,
             sampling_seconds: None,
@@ -117,10 +121,10 @@ impl Execution {
 
     /// Write the record into `leaf`, atomically.
     pub fn write(&self, leaf: &Path) -> Result<(), String> {
-        let path = leaf.join(runid::EXECUTION_RECORD);
+        let path = leaf.join(EXECUTION_RECORD);
         let json = serde_json::to_vec_pretty(self)
             .map_err(|e| format!("cannot encode {}: {e}", path.display()))?;
-        runid::write_file_atomic(&path, &json).map_err(|e| format!("cannot write {}: {e}", path.display()))
+        store::write_file_atomic(&path, &json).map_err(|e| format!("cannot write {}: {e}", path.display()))
     }
 
     /// The record of the attempt that wrote `leaf`; `Ok(None)` when the leaf
@@ -128,7 +132,7 @@ impl Execution {
     /// error, not an absence.
     #[expect(clippy::disallowed_methods, reason = "reads `execution.json` from a method directory: the working directory this process's `fit run` is writing, or a `fit_store::RunFiles` copy of a stored run read out through the store")]
     pub fn read(leaf: &Path) -> Result<Option<Self>, String> {
-        let path = leaf.join(runid::EXECUTION_RECORD);
+        let path = leaf.join(EXECUTION_RECORD);
         match std::fs::read(&path) {
             Ok(bytes) => serde_json::from_slice(&bytes)
                 .map(Some)
@@ -214,15 +218,15 @@ mod tests {
 
         let segs = Execution::segments_resuming(&d, "parent");
         assert_eq!(segs, vec![SegmentTime { run_id: "parent".into(), wall_time_seconds: Some(2.0) }]);
-        std::fs::write(d.join(runid::EXECUTION_RECORD), b"not json").unwrap();
+        std::fs::write(d.join(EXECUTION_RECORD), b"not json").unwrap();
         assert!(Execution::read(&d).is_err(), "an unparseable record is an error");
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// The heartbeat file is one of the store's per-attempt records by the
-    /// name the heartbeat writes it under: the two crates name it apart.
+    /// The heartbeat file is one `fit run` does not store, by the name the
+    /// heartbeat writes it under: the two crates name it apart.
     #[test]
-    fn the_heartbeat_is_a_per_attempt_record() {
-        assert!(runid::PER_ATTEMPT_RECORDS.contains(&io::PROGRESS_FILE));
+    fn the_heartbeat_is_not_stored() {
+        assert!(crate::fit_command::is_skipped(io::PROGRESS_FILE));
     }
 }

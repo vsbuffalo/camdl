@@ -10,9 +10,10 @@
 //! reaches `sim::CompiledModel::new` carries no external source. Every command
 //! reaches it through `params_resolver::resolve_parameters`.
 //!
-//! The file's *content digest* is a run input, hashed where each command hashes
-//! its inputs (`ResolvedParams.tables` for `simulate`, `FitDigest.tables` for a
-//! fit); the model's own hash covers only the declaration.
+//! The file's bytes are a run input, held where each command holds its
+//! inputs (a simulation cell's parameters, a fit problem's
+//! `FitProblemIdentity::tables`); the model's own hash covers only the
+//! declaration.
 //!
 //! An external forcing's file is read exactly as `camdlc` reads a
 //! `data = "path"` forcing (`read_csv_rows` and `load_interpolated_for_level`
@@ -125,7 +126,7 @@ impl ExternalBindings {
 pub struct BoundFile {
     pub path:   PathBuf,
     pub bytes:  Vec<u8>,
-    pub digest: runid::ContentHash,
+    pub digest: store::Key,
 }
 
 /// Every file [`bind`] read, by external name. The values bound into the model,
@@ -286,7 +287,7 @@ pub fn bind(model: &mut ir::Model, bindings: &ExternalBindings) -> Result<BoundF
             .map_err(|_| unreadable("the file is not UTF-8 text".to_string()))?;
         read.files.insert(name.clone(), BoundFile {
             path: binding.path.clone(),
-            digest: runid::ContentHash::digest_bytes(&bytes),
+            digest: store::Key::digest_bytes(&bytes),
             bytes,
         });
         files.insert(name.as_str(), (spelled, text));

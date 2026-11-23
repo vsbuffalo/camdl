@@ -16,7 +16,7 @@
 
 use std::path::Path;
 
-use runid::inputs::model_ir_hash;
+use ir::model_hash::model_ir_hash;
 
 const GOLDEN: &str = "../../../ocaml/golden/init_dependency_order.ir.json";
 

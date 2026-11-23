@@ -22,16 +22,16 @@
 //! destructures the value with every field named, so a field added here does
 //! not compile there until it is used.
 //!
-//! **What reaches the identity, and how.** The fit's identity is still the
-//! canonical-JSON hash of its configuration (`fit::cas`; the typed identity is
-//! the follow-up proposal): the problem half of [`ResolvedFitConfig::config`]
-//! at the `fit` level, its method at the `method` level, each seed at the
-//! `seed` level. [`ResolvedFitConfig::model`] and [`ResolvedFitConfig::engine`]
-//! (this build and the engine switches set, `env::Environment::engine_identity`)
-//! are the fit level's model and engine. The compile settings reach it through
-//! the IR they produce. `--sweep` and `--seed`/`fit_seeds` expand the run into
-//! leaves; `--emit-every` keys a synthetic fit through the data it generates;
-//! `--resume` through the method level's target length and its dep on the base.
+//! **What reaches the identity, and how.** `fit_command` builds each run's
+//! identity from this value: the problem half of [`ResolvedFitConfig::config`]
+//! poses the problem (`fit_store::FitProblemIdentity`), and the method and the
+//! seed name the run on it (`fit_store::FitRunIdentity`). The model enters as
+//! the stored compile of [`ResolvedFitConfig::model`]; the build and the
+//! environment switches enter through the store's ambient identity
+//! (`camdl_store::Engine`). The compile settings reach it through the IR they
+//! produce. `--sweep` and `--seed`/`fit_seeds` expand the command into runs;
+//! `--emit-every` keys a synthetic fit through the data it generates;
+//! `--resume` through the run's target length and its dependency on the base.
 //!
 //! **What is not here.** `--parallel` and `--force` are execution: how the
 //! leaves are computed, never what. `--label` is provenance, and the progress
@@ -59,9 +59,9 @@ pub(crate) struct ResolvedFitConfig {
     /// anchors resolved and external inputs bound: what every method loads
     /// (from `config.problem.compiled_ir`) and what the fit level hashes.
     pub model: ir::Model,
-    /// The files `[data.tables]` bound into `model`, read once: their digests
-    /// enter the fit level (`FitDigest.tables`) and their bytes are stored in
-    /// each fit folder. Empty for a model with no external input.
+    /// The files `[data.tables]` bound into `model`, read once: the problem
+    /// holds their bytes (`FitProblemIdentity::tables`). Empty for a model
+    /// with no external input.
     pub tables: crate::external_inputs::BoundFiles,
     /// `[config] allow_forcing_extrapolation`, as the policy every model the
     /// fit evaluates runs under and every record it writes names; built once,
@@ -217,8 +217,8 @@ pub(crate) fn resolve(
     // Deliberately NOT written into `config`: the fit-identity hash serializes
     // that document, so parking it there would re-key a real-data fit over a
     // knob that fit cannot see. The override travels as an argument to
-    // generation, and keys the fit the honest way — through the generated
-    // data's bytes, which `FitDigest.data` already hashes.
+    // generation, and keys the fit through the generated data's bytes, which
+    // the problem holds as its training lines.
     let emit_every = crate::emit_every::EmitEvery::from_cli_specs(&a.problem.emit_every)
         .unwrap_or_else(|e| {
             out.fail(format!("error: {}", e));

@@ -22,7 +22,7 @@
 //! 3. **The hash tracks the bytes, and the knots track the values.** Editing
 //!    only a comment line in the data file moves the recorded hash and leaves
 //!    the inlined knots identical — which is the whole reason the hash is
-//!    provenance and not run identity (`runid::ir_hash`:
+//!    provenance and not run identity (`ir::model_hash`:
 //!    `ir_forcing_data_source_excluded_from_hash`).
 
 use std::path::{Path, PathBuf};
@@ -270,7 +270,7 @@ fn a_live_compile_records_the_file_and_tracks_its_bytes() {
 /// the test would pass for a reason unrelated to its claim.
 #[test]
 fn the_same_data_at_a_different_path_keeps_one_identity() {
-    use runid::hash::ContentAddressed;
+    use ir::model_hash::ContentAddressed;
     let Some(cc) = camdlc() else { return };
 
     let here = tempfile::tempdir().unwrap();

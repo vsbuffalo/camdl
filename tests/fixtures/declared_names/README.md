@@ -25,7 +25,7 @@ What reads them:
   each model holds its kind.
 - `rust/crates/declared/tests/golden_sections.rs` reads each committed section
   through the Rust types.
-- `rust/crates/runid/tests/golden_model_hashes.rs` pins each model's identity.
+- `rust/crates/ir/tests/golden_model_hashes.rs` pins each model's identity.
 
 `data/` holds the two files `table_time_dimension.camdl` reads. Both are
 synthetic, written for this fixture, with no external source: a contact

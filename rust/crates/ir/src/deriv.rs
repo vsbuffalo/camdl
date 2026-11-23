@@ -26,7 +26,7 @@ use crate::expr::Expr;
 /// emitted. A STABLE, hashed code — the human-readable message is derived from
 /// it at display time (§4.1), so a copy-edit never re-keys run_id.
 ///
-/// New reasons append at the END: the run_id hash (`runid::ir_hash`) tags
+/// New reasons append at the END: the model hash (`model_hash`) tags
 /// variants by position, so declaration order == hash index, and that index is
 /// permanent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

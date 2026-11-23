@@ -19,11 +19,9 @@ use sha2::{Digest, Sha256};
 /// Version of the encoding, written first by every [`ContentAddressed::content_hash`]
 /// and every run id. Raising it re-keys every stored result.
 ///
-/// It continues the numbering of the `runid` crate's encoding, whose last
-/// version is 8. Version 9 differs from it in three rules: a struct or enum is
-/// tagged with the string it states rather than its module path, each field's
-/// name is written before its bytes and fields are taken in name order, and an
-/// enum's variant is written as its name rather than its position.
+/// A struct or enum is tagged with the string it states, each field's name is
+/// written before its bytes and fields are taken in name order, and an enum's
+/// variant is written as its name.
 pub const HASH_VERSION: u16 = 9;
 
 /// A 32-byte SHA-256 digest: the key of an identity, the digest of a file's

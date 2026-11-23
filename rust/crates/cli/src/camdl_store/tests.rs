@@ -62,7 +62,7 @@ fn the_model_part_keeps_the_initial_conditions_order() {
     let mut stored = back.model().clone();
     stored.name = m.name.clone();
     stored.description = m.description.clone();
-    assert_eq!(runid::inputs::model_ir_hash(&stored), runid::inputs::model_ir_hash(&m));
+    assert_eq!(ir::model_hash::model_ir_hash(&stored), ir::model_hash::model_ir_hash(&m));
     let mut swapped = m.clone();
     swapped.initial_conditions.0.swap_indices(0, 1);
     assert_ne!(model_digest(swapped), p.model.digest(), "the order is part of the model");

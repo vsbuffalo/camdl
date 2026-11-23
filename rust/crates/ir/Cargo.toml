@@ -14,6 +14,8 @@ indexmap = { version = "2", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
 thiserror = "1"
+sha2 = "0.10"
+hex = "0.4"
 differentiate-derive = { path = "../differentiate-derive" }
 # The declared-model types; `ParamKind` is defined there and re-exported here.
 declared = { path = "../declared" }

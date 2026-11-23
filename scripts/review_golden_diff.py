@@ -18,7 +18,7 @@ default to 0.43 and 0.44, the bump that added the declared section.
 Blind spot: files are compared as parsed JSON, which ignores the order of
 object keys, and the order of `initial_conditions` is part of model identity.
 A reordering is caught by the hash test
-(`rust/crates/runid/tests/golden_model_hashes.rs`), not by this script.
+(`rust/crates/ir/tests/golden_model_hashes.rs`), not by this script.
 """
 import json
 import subprocess

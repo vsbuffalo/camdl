@@ -13,7 +13,7 @@ pub enum Projection {
     CurrentPop(String),
     CurrentPopSum(Vec<String>),
     DerivedExpr(Expr),
-    // New variants append at the END: the run_id hash (runid::ir_hash) tags
+    // New variants append at the END: the model hash (`model_hash`) tags
     // variants by position, so declaration order == hash index, and that
     // index is permanent. Inserting earlier would churn stored run_ids.
     CumulativeFlowSum(Vec<String>),

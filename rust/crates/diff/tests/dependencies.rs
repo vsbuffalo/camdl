@@ -1,10 +1,10 @@
 //! `diff` depends on `declared`, `serde` and `serde_json`, and on nothing
-//! else. In particular not on `ir`, `runid`, `sim` or `cli`: the diff of two
+//! else. In particular not on `ir`, `sim` or `cli`: the diff of two
 //! published declared-model documents must not need the reader for compiled
 //! models, and the function must stay callable from a viewer.
 //!
 //! The manifest is read as text. `[dev-dependencies]` is allowed and not
-//! checked: the tests compute model hashes with `runid`, which the library
+//! checked: the tests compute model hashes with `ir`, which the library
 //! never does.
 
 use std::collections::BTreeSet;

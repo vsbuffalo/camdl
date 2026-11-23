@@ -6,7 +6,7 @@
 //! Every edit to the golden's text here is textual. Parsing a compiled model
 //! to a generic JSON value and writing it back reorders object keys, and the
 //! order of `initial_conditions` is part of the model
-//! (`rust/crates/runid/tests/value_round_trip.rs`).
+//! (`rust/crates/ir/tests/value_round_trip.rs`).
 
 use std::path::Path;
 

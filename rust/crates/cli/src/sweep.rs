@@ -244,7 +244,7 @@ pub fn read_sweep_file(path: &Path, model: &ir::Model) -> Result<SweepFile, Stri
     }
     let design = ResolvedDesign::File {
         params,
-        digest: runid::ContentHash::digest_bytes(&bytes).to_hex(),
+        digest: store::Key::digest_bytes(&bytes).to_hex(),
         n_points: points.len(),
         point_ids: points.iter().map(|(id, _)| *id).collect(),
     };

@@ -11,7 +11,7 @@ publish = false
 # models and their two model hashes
 # (docs/dev/proposals/2026-11-13-model-structure-diff.md). It reads no files,
 # consults no store and hashes nothing, so the command line and a viewer can
-# call the same function. It must not depend on `ir`, `runid`, `sim` or `cli`:
+# call the same function. It must not depend on `ir`, `sim` or `cli`:
 # a diff of two published declared-model documents never needs the reader for
 # compiled models. `tests/dependencies.rs` holds the list below.
 [dependencies]
@@ -23,4 +23,3 @@ serde_json.workspace = true
 # rows against what the two files compile to.
 [dev-dependencies]
 ir = { path = "../ir" }
-runid = { path = "../runid" }

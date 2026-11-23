@@ -368,9 +368,8 @@ pub struct DataSpec {
     /// external("NAME")` forcing, as `--table NAME=path` does on the command
     /// line (which wins over this where both bind a name). Paths are relative
     /// to this config, as for `[data.observations]`. Only the files' bytes are
-    /// identity — `FitDigest.tables`, by content, never by path — so the
-    /// paths are left out of the hashed config blob (`fit::cas`); the
-    /// skip keeps a config without the section serializing as before.
+    /// identity (`FitProblemIdentity::tables`, by content, never by path); the
+    /// skip keeps a config without the section serializing without it.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub tables: IndexMap<String, String>,
 }

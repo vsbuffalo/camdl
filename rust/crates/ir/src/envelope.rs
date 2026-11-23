@@ -278,7 +278,7 @@ mod doc_dict_tests {
     /// Run on a real committed model (`ir/golden/sir_basic.ir.json`) rather
     /// than a stub, so it covers every field a model actually carries. The
     /// run-identity half of the claim — that the hash does not move — is
-    /// asserted in `runid` (`ir_hash::tests`), which owns `model_ir_hash`.
+    /// asserted in `model_hash`'s tests, beside `model_ir_hash`.
     #[test]
     fn a_model_doc_parses_off_a_real_envelope_without_touching_the_model() {
         let plain = std::fs::read_to_string(concat!(

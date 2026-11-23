@@ -2,13 +2,10 @@
 //!
 //! # Not run identity (gh#241)
 //!
-//! Artifact run identity is built exclusively by the `runid`/`resolve` paths
-//! (`resolve::resolve_trajectory`, `resolve::model_identity_from_ir`,
-//! `cas::fit_level_hash`, the `runid` factored levels). NOTHING in this module
-//! participates in a `run_id`, and there is no longer any "semantic digest"
-//! helper here: the legacy `model_hash` / `fit_content_hash` were retired in
-//! favor of the `runid` model / fit-level digests. The functions here are one
-//! of two kinds:
+//! A result's identity is built by the store's `Identity` types and the model
+//! hash (`ir::model_hash`). Nothing in this module participates in a run id,
+//! and it holds no "semantic digest" helper. The functions here are one of two
+//! kinds:
 //!
 //! - **byte digests**: [`sha256_hex`] — hash some bytes. A fit's data files
 //!   are hashed once per run by
@@ -19,7 +16,7 @@
 //!
 //! **DO NOT** reintroduce a run-identity or "model / fit digest" construction
 //! here. A field that changes stored bytes is identity and must re-key through
-//! `runid`; a re-encoding of the same values is presentation. The guard test
+//! the store's identity; a re-encoding of the same values is presentation. The guard test
 //! below fails if `model_hash(` / `fit_content_hash(` reappears as a call in
 //! the crate's production source.
 
@@ -56,11 +53,9 @@ mod tests {
     use super::*;
 
     // There is no `model_hash` / `fit_content_hash` / `sim_hash` /
-    // `scen_hash` / `canonical_params` here anymore. A run's identity is the
-    // factored `runid` identity (`runid::run_id` over the per-level hashes; see
-    // `crate::resolve::resolve_trajectory`), the model identity is
-    // `crate::resolve::model_identity_from_ir`, and the fit-level identity is
-    // `crate::fit::cas::fit_level_hash`.
+    // `scen_hash` / `canonical_params` here. A result's identity is its store
+    // `Identity`, and the model identity is
+    // `crate::resolve::model_identity_from_ir`.
 
     // ── legacy-identity guard (gh#241) ────────────────────────────────────────
 
@@ -128,7 +123,7 @@ mod tests {
         assert!(
             offenders.is_empty(),
             "legacy semantic digests are retired (gh#241) — these production \
-             call sites must use `runid`/`resolve` identity instead:\n{}",
+             call sites must use the store's identity instead:\n{}",
             offenders.join("\n")
         );
     }

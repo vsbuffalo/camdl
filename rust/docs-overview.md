@@ -2,9 +2,9 @@
 
 The runtime is the Rust half of camdl: the `camdl` command, which reads the JSON
 a compiled model is written in, simulates it, fits it to data and stores every
-result under the hash of its inputs. It is one cargo workspace, `rust/`, of nine
-crates documented here. The compiler, `camdlc`, is a separate OCaml program that
-`camdl` runs as a subprocess.
+result under the hash of its inputs. It is one cargo workspace, `rust/`, of
+eight crates documented here. The compiler, `camdlc`, is a separate OCaml
+program that `camdl` runs as a subprocess.
 
 A command runs these steps:
 
@@ -22,7 +22,7 @@ sim::compiled_model        names resolved to indices, expressions compiled
     |   sim backends (Gillespie, chain-binomial, ODE)
     |   sim::inference (particle filter, PGAS, PMMH, IF2, NUTS)
     v
-results ------------------> runid   the run's identity: a hash of its inputs
+results ------------------> store   each result, keyed by a hash of its inputs
                             io      trajectories as TSV
                             score   model comparison
 ```
@@ -40,11 +40,13 @@ so a reader of a published declared-model document needs only it.
 
 ## Run identity and output files {#identity}
 
-`runid` computes the identity of every run: a structural hash of its complete,
-typed input set, which names the run's directory in the store. `io` writes the
-trajectories that simulation and inference produce, in one long TSV format.
+The `store` crate, not documented here, keys every stored result by a hash of
+its complete, typed input set and names the result's folder from it.
+`ir::model_hash` is the model's structural hash, by which `camdl` compares and
+prints models. `io` writes the trajectories that simulation and inference
+produce, in one long TSV format.
 
-<!-- modules: runid io -->
+<!-- modules: io -->
 
 ## Numerics and scoring {#scoring}
 

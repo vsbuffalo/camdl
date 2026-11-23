@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 488" role="img" aria-labelledby="t d">
   <title id="t">How a camdl command runs</title>
-  <desc id="d">camdlc, the OCaml compiler, run as a subprocess, turns model.camdl into the IR envelope in JSON. The crate ir reads it into ir::envelope and ir::model, the compiled model, and the crate declared reads the model as written. The cli crate parses the command line and resolves parameters and data, and the model becomes sim::compiled_model, with names resolved to indices and expressions compiled. The sim backends (Gillespie, chain-binomial, ODE) and sim::inference (particle filter, PGAS, PMMH, IF2, NUTS) produce the results, which go to runid, the run's identity as a hash of its inputs; io, trajectories as TSV; and score, model comparison.</desc>
+  <desc id="d">camdlc, the OCaml compiler, run as a subprocess, turns model.camdl into the IR envelope in JSON. The crate ir reads it into ir::envelope and ir::model, the compiled model, and the crate declared reads the model as written. The cli crate parses the command line and resolves parameters and data, and the model becomes sim::compiled_model, with names resolved to indices and expressions compiled. The sim backends (Gillespie, chain-binomial, ODE) and sim::inference (particle filter, PGAS, PMMH, IF2, NUTS) produce the results, which go to store, the run store, which keys each result by a hash of its inputs; io, trajectories as TSV; and score, model comparison.</desc>
   <defs>
     <marker id="irp-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
       <path d="M0,0 L10,5 L0,10 z" class="fig-arrow"/>
@@ -45,8 +45,8 @@
   <!-- side branch: the crates that take the results -->
   <line x1="233" y1="382" x2="338" y2="382" class="s-arrow" marker-end="url(#irp-arrow)"/>
   <rect x="342" y="356" width="296" height="128" rx="4" class="fig-panel s-line"/>
-  <text x="356" y="378" class="t-mono-label fig-ink">runid</text>
-  <text x="356" y="396" class="t-small fig-muted">the run's identity: a hash of its inputs</text>
+  <text x="356" y="378" class="t-mono-label fig-ink">store</text>
+  <text x="356" y="396" class="t-small fig-muted">each result, keyed by a hash of its inputs</text>
   <text x="356" y="418" class="t-mono-label fig-ink">io</text>
   <text x="356" y="436" class="t-small fig-muted">trajectories as TSV</text>
   <text x="356" y="458" class="t-mono-label fig-ink">score</text>

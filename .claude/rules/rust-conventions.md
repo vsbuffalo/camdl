@@ -15,16 +15,15 @@ description: Rust code conventions — crate layout, dead code, existing seams, 
 Intra-workspace dependencies, read from the `Cargo.toml` files:
 
 ```
-cli  → declared, diff, io, ir, numerics, runid, score, sim
+cli  → declared, diff, io, ir, numerics, score, sim, store
 io   → ir, sim
 sim  → ir, numerics, score
-runid → ir, runid-derive
 store → store-derive
 ir   → declared, differentiate-derive
 score → numerics
 diff → declared
 external-harness → numerics
-declared, numerics, differentiate-derive, runid-derive, store-derive  → (leaves)
+declared, numerics, differentiate-derive, store-derive  → (leaves)
 ```
 
 `declared` holds the types of the declared-model section of the IR envelope (the
@@ -39,8 +38,8 @@ alone for the same reason.
 
 There is **no `observe` crate.** Projection and likelihood scoring live in `sim`
 and `cli`. CLAUDE.md carried `cli → io → observe → sim → ir` for a long time; it
-named a crate that does not exist and omitted `numerics` and `runid`. Check
-`ls rust/crates` before repeating a dependency claim.
+named a crate that does not exist and omitted `numerics`. Check `ls rust/crates`
+before repeating a dependency claim.
 
 ## Delete dead code on sight
 

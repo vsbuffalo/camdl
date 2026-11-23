@@ -18,7 +18,7 @@
 //! - R3 PGAS+NUTS integration and recovery: `bspline_inference.rs`; the
 //!   prior-only run of `smooth`: here; the prior's calibration:
 //!   `smooth_prior_calibration.rs`.
-//! - R4 the `link` no-collision hash: `runid` `ir_spline_link_changes_hash`;
+//! - R4 the `link` no-collision hash: `ir::model_hash`'s `ir_spline_link_changes_hash`;
 //!   round-trip and reproducibility: here.
 //! - R5 (simulation-based calibration) awaits the maintainer and is not here.
 

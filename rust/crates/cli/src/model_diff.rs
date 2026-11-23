@@ -4,7 +4,7 @@
 //! This file only gathers the inputs and prints. Each side is compiled (a
 //! `.camdl`) or read (a compiled `.ir.json`); its declared section and the
 //! hash of its compiled model go to `diff::diff`, which decides every row and
-//! the outcome. The hash is `runid::inputs::model_ir_hash`, the one model
+//! the outcome. The hash is `ir::model_hash::model_ir_hash`, the one model
 //! identity.
 //!
 //! Exit status: 0 when the two are identical in every layer present, 1 when
@@ -59,7 +59,7 @@ fn load(out: &Out, path: &Path, compile: crate::util::CompileSettings) -> Loaded
         .unwrap_or_else(|e| refuse(out, format!("error: {e}"), None));
     Loaded {
         name,
-        model_hash: runid::inputs::model_ir_hash(&envelope.model).to_hex(),
+        model_hash: ir::model_hash::model_ir_hash(&envelope.model).to_hex(),
         compiler: envelope.validated_by,
         declared: envelope.declared,
     }

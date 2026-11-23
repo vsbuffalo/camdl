@@ -69,8 +69,8 @@ fn a_full_and_a_no_state_grad_compile_are_one_model() {
     );
 
     assert_eq!(
-        runid::inputs::model_ir_hash(&full).to_hex(),
-        runid::inputs::model_ir_hash(&lean).to_hex(),
+        ir::model_hash::model_ir_hash(&full).to_hex(),
+        ir::model_hash::model_ir_hash(&lean).to_hex(),
         "a full and a --no-state-grad compile of one source must be one model"
     );
 }
@@ -89,7 +89,7 @@ fn the_hoisted_factor_a_rate_reads_is_identity() {
         .expect("the rate's factor is in the table");
     b.expr = Expr::param("beta");
     assert_ne!(
-        runid::inputs::model_ir_hash(&base).to_hex(),
-        runid::inputs::model_ir_hash(&changed).to_hex()
+        ir::model_hash::model_ir_hash(&base).to_hex(),
+        ir::model_hash::model_ir_hash(&changed).to_hex()
     );
 }

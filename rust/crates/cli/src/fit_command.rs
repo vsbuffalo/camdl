@@ -1030,11 +1030,18 @@ fn compute_run(out: &mut Out, rc: RunCompute<'_>) -> Result<(), String> {
 /// as provenance.
 fn role_of(name: &str) -> FileRole {
     match name {
-        "progress.json" | "events.jsonl" => FileRole::Skip,
-        "execution.json" | "opt_trace.tsv" => FileRole::Provenance,
+        io::PROGRESS_FILE | crate::out::events::EVENT_LOG => FileRole::Skip,
+        crate::fit::execution::EXECUTION_RECORD | crate::fit::opt_trace::OPT_TRACE => FileRole::Provenance,
         n if n == crate::fit_store::RUN_INPUTS_FILE || n == crate::fit_store::FIT_META_FILE => FileRole::Provenance,
         _ => FileRole::Result,
     }
+}
+
+/// Whether `fit run` leaves the method-directory file `name` out of the run
+/// it stores.
+#[cfg(test)]
+pub(crate) fn is_skipped(name: &str) -> bool {
+    matches!(role_of(name), FileRole::Skip)
 }
 
 enum FileRole {

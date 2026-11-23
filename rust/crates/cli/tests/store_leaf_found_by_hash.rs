@@ -4,7 +4,7 @@
 //!
 //! A leaf's `run_id` is its five level hashes alone; its directory is
 //! `{label}-{hash8}` per level, and the label is provenance. Before
-//! `runid::find_leaf`, both reuse checks and the write seam built the path
+//! a lookup by hash, both reuse checks and the write seam built the path
 //! from the *current* labels, so a leaf whose label had changed while its
 //! content had not — a renamed model file (the model level's label is the
 //! file stem), or an arm relabelled from `baseline` — was a miss although the
@@ -13,7 +13,7 @@
 //!
 //! The proposal also lists a renamed scenario preset among the label-only
 //! changes. It is not one: a preset's `name` enters the whole-IR model digest
-//! (`runid::ir_hash`, `impl ContentAddressed for Preset` writes `name`), so
+//! (`ir::model_hash`, `impl ContentAddressed for Preset` writes `name`), so
 //! renaming a preset re-keys the model level and every leaf of that model is
 //! a genuine miss. The relabelled-arm case below exercises what that case
 //! was meant to: a scenario directory whose label changed under a fixed

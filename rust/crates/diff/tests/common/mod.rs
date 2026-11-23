@@ -2,7 +2,7 @@
 //!
 //! Source: committed `*.ir.json` files (primary: what the compiler emits). The
 //! declared section is read from the envelope and the model hash is computed by
-//! `runid::inputs::model_ir_hash`, the one model identity; the diff itself
+//! `ir::model_hash::model_ir_hash`, the one model identity; the diff itself
 //! never computes a hash.
 
 #![allow(dead_code)] // each test file uses its own part of this module
@@ -30,7 +30,7 @@ impl Compiled {
         let envelope = ir::envelope_from_str(&text).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
         Compiled {
             name: path.file_name().expect("a file name").to_string_lossy().into_owned(),
-            model_hash: runid::inputs::model_ir_hash(&envelope.model).to_hex(),
+            model_hash: ir::model_hash::model_ir_hash(&envelope.model).to_hex(),
             compiler: envelope.validated_by.clone(),
             declared: envelope.declared,
         }

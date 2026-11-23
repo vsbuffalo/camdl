@@ -212,7 +212,7 @@ pub(crate) fn cmd_fit_summary(args: &FitSummaryArgs, compile: crate::util::Compi
     // completed one (see `discover_methods`).
     let discovered = discover_methods(Path::new(&dir));
     let completed: Vec<ResolvedMethod> =
-        discovered.iter().filter(|m| m.status == runid::RunStatus::Completed).cloned().collect();
+        discovered.iter().filter(|m| m.status == store::Status::Completed).cloned().collect();
     if completed.is_empty() {
         let mut message = format!(
             "error: no completed method leaf under {dir}, so there is nothing to summarise."
@@ -328,7 +328,7 @@ struct ResolvedMethod {
     run_id: String,
     /// What the leaf's `run.json` says: only a completed leaf has a result;
     /// a failed or running one is listed with its status.
-    status: runid::RunStatus,
+    status: store::Status,
 }
 
 /// One method leaf as the summary lists it: which run, what state it is in,
@@ -343,7 +343,7 @@ pub struct LeafEntry {
     pub run_id: String,
     /// `completed`, `running` (or stopped without recording an outcome) or
     /// `failed`.
-    pub status: runid::RunStatus,
+    pub status: store::Status,
     /// The completed run's verdict (`methods[].verdict`); `null` for a run
     /// that did not complete or could not be read.
     pub verdict: Option<score::convergence::Verdict>,
@@ -354,28 +354,43 @@ pub struct LeafEntry {
     /// read. Omitted otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// The leaf's state as its `run.json` and `.lock` give it
-    /// (`runid::LeafState`): `completed`; `failed` with the recorded
-    /// `failure`; `failed_reason_unknown`; `running` with the owner's pid; or
-    /// `interrupted`, a `running` record no live process holds. Omitted when
-    /// the record cannot be read.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub state: Option<runid::LeafState>,
+    /// The run's state as the store reports it (`store::EntryState`),
+    /// written as `{"state": "<word>"}`. Omitted when the run cannot be read.
+    #[serde(skip_serializing_if = "Option::is_none", serialize_with = "state_json")]
+    pub state: Option<store::EntryState>,
 }
 
 /// A run status as one word.
-pub(crate) fn status_word(status: runid::RunStatus) -> &'static str {
+pub(crate) fn status_word(status: store::Status) -> &'static str {
     match status {
-        runid::RunStatus::Completed => "completed",
-        runid::RunStatus::Running => "running",
-        runid::RunStatus::Failed => "failed",
+        store::Status::Completed => "completed",
+        store::Status::Running => "running",
+        store::Status::Failed => "failed",
     }
 }
 
 /// A stored run's state: every run a reader opens through the store is a
 /// completed one.
-fn recorded_state(_leaf: &Path) -> Option<runid::LeafState> {
-    Some(runid::LeafState::Completed)
+fn recorded_state(_leaf: &Path) -> Option<store::EntryState> {
+    Some(store::EntryState::Completed)
+}
+
+/// [`LeafEntry::state`] as JSON: `{"state": "completed"}`, and for a run that
+/// is not completed the store's word for its state.
+fn state_json<S: serde::Serializer>(state: &Option<store::EntryState>, s: S) -> Result<S::Ok, S::Error> {
+    use serde::ser::SerializeMap;
+    use store::EntryState as S;
+    let word = match state {
+        Some(S::Completed) => "completed",
+        Some(S::Running { .. }) => "running",
+        Some(S::Damaged { .. }) => "damaged",
+        Some(S::Failed { .. }) => "failed",
+        Some(S::Interrupted { .. }) => "interrupted",
+        None => return s.serialize_none(),
+    };
+    let mut map = s.serialize_map(Some(1))?;
+    map.serialize_entry("state", word)?;
+    map.end()
 }
 
 
@@ -400,18 +415,14 @@ fn verdict_text(report: &MethodReport) -> String {
 
 impl LeafEntry {
     fn of(r: &ResolvedMethod) -> Self {
-        use runid::LeafState as S;
+        use store::EntryState as S;
         let state = recorded_state(&r.method_dir);
         let (verdict_text, error) = match &state {
             Some(S::Completed) => (String::new(), None),
-            Some(S::Failed { failure }) => ("failed".into(), Some(failure.message.clone())),
-            Some(S::FailedReasonUnknown) => ("failed (no reason recorded)".into(), None),
-            Some(S::Running { pid: Some(pid) }) => (format!("running (pid {pid})"), None),
-            Some(S::Running { pid: None }) => ("running".into(), None),
-            Some(S::OwnerUnknown { pid, host }) => (
-                format!("running on host {host} (pid {pid}), whose liveness this host cannot check"),
-                None,
-            ),
+            Some(S::Failed { reason: Some(reason), .. }) => ("failed".into(), Some(reason.clone())),
+            Some(S::Failed { reason: None, .. }) => ("failed (no reason recorded)".into(), None),
+            Some(S::Running { owner, .. }) => (format!("running (pid {})", owner.pid), None),
+            Some(S::Damaged { what }) => ("damaged".into(), Some(what.clone())),
             Some(S::Interrupted { .. }) => {
                 ("interrupted: no live process holds it, and it recorded no outcome".into(), None)
             }
@@ -454,8 +465,8 @@ fn leaf_index(entries: &[LeafEntry]) -> Vec<crate::out::paint::Line> {
     let w_verdict = entries.iter().map(|e| e.verdict_text.chars().count()).max().unwrap_or(0);
     for e in entries {
         let style = match e.status {
-            runid::RunStatus::Completed if e.error.is_none() => Style::Ok,
-            runid::RunStatus::Running => Style::Warn,
+            store::Status::Completed if e.error.is_none() => Style::Ok,
+            store::Status::Running => Style::Warn,
             _ => Style::Err,
         };
         out.push(Line(vec![
@@ -476,7 +487,7 @@ fn not_completed_section(
     view: View,
 ) -> Vec<crate::out::paint::Line> {
     use crate::out::paint::{Line, Span};
-    let style = if r.status == runid::RunStatus::Running { Style::Warn } else { Style::Err };
+    let style = if r.status == store::Status::Running { Style::Warn } else { Style::Err };
     let mut out = vec![Line::default(), Line(vec![
         Span::plain(format!("  {} · ", r.method)),
         Span::styled(status_word(r.status), style),
@@ -486,7 +497,7 @@ fn not_completed_section(
         .and_then(|inputs| inputs.get("header").cloned())
         .and_then(|h| serde_json::from_value(h).ok());
     match (r.status, header) {
-        (runid::RunStatus::Failed, Some(header)) => {
+        (store::Status::Failed, Some(header)) => {
             let findings = crate::fit::report::read_findings(&r.method_dir)
                 .map(|f| f.findings).unwrap_or_default();
             let error = entry.error.clone().unwrap_or_else(|| {
@@ -573,7 +584,7 @@ fn discover_methods(fit_dir: &Path) -> Vec<ResolvedMethod> {
             method_dir: m.method_dir,
             algorithm: m.method,
             run_id: m.run_id,
-            status: runid::RunStatus::Completed,
+            status: store::Status::Completed,
         })
         .collect()
 }
@@ -621,7 +632,7 @@ fn format_text(
     for resolved in methods {
         let version_lead = std::mem::replace(&mut first, false);
         let method_dir_str = crate::fit::report::display_path(&resolved.method_dir);
-        if resolved.status != runid::RunStatus::Completed {
+        if resolved.status != store::Status::Completed {
             let entry = LeafEntry::of(resolved);
             let view = View::Summary(SummaryView { explain: args.explain, version_lead });
             sections.push(not_completed_section(resolved, &entry, view));
@@ -905,7 +916,7 @@ fn build_summary_doc(
     let fit_hash = FitView::read(Path::new(dir)).map(|v| v.fit_hash).unwrap_or_default();
     for resolved in methods {
         let method_dir_str = crate::fit::report::display_path(&resolved.method_dir);
-        if resolved.status != runid::RunStatus::Completed {
+        if resolved.status != store::Status::Completed {
             leaves.push(LeafEntry::of(resolved));
             continue;
         }
@@ -1103,7 +1114,7 @@ pub(crate) fn winner_params_toml(run_dir: &Path) -> Result<String, String> {
     let dir = run_dir.to_string_lossy();
     let completed: Vec<ResolvedMethod> = discover_methods(run_dir)
         .into_iter()
-        .filter(|m| m.status == runid::RunStatus::Completed)
+        .filter(|m| m.status == store::Status::Completed)
         .collect();
     dump_params_only(&dir, &completed)
 }
@@ -3277,7 +3288,7 @@ mod tests {
         .unwrap();
     }
 
-    /// Write a `FitMethod` `runid::RunRecord` leaf for `method` under `method_dir`.
+    /// Write a method directory with a `run.json` for `method` under `method_dir`.
     /// `parent_hash` seeds the shared `fit`-level hash; the `inputs` carry the
     /// per-leaf numbers (`method`, `n_chains`, `best_loglik`, …) the views
     /// project. The `method` LEVEL label is the leaf's name, and it is the
@@ -3903,7 +3914,7 @@ mod tests {
             method_dir: PathBuf::from(format!("/nonexistent/{name}")),
             algorithm: crate::run_meta::FitAlgorithm::Pgas,
             run_id: String::new(),
-            status: runid::RunStatus::Completed,
+            status: store::Status::Completed,
         }
     }
 
@@ -3975,37 +3986,4 @@ mod tests {
         }
     }
 
-    /// A run recorded under this build's readable version but another
-    /// `ENGINE_ID` (its `run.json`'s `engine_version`) was built with another
-    /// configuration — features, profile, toolchain, flags or dependencies —
-    /// and the report says so rather than nothing.
-    #[test]
-    fn a_report_names_another_build_configuration_under_the_same_label() {
-        let dir = crate::test_support::unique_temp_dir("report_other_engine");
-        std::fs::create_dir_all(&dir).unwrap();
-        let rec = serde_json::json!({
-            "format_version": 1, "kind": "fit_method", "run_id": "ab".repeat(32),
-            "hash_version": 1, "calendar": {"days_per_unit": 1.0, "origin": null, "time_unit": "days"},
-            "ir_version": "0.7", "engine_version": "0".repeat(32),
-            "levels": [], "status": "completed", "artifacts": {}, "inputs": {"method": "if2"},
-            "provenance": {"camdl_version": crate::version::VERSION_SHORT},
-        });
-        std::fs::write(dir.join("run.json"), rec.to_string()).unwrap();
-        crate::fit_store::write_test_inputs(&dir, &rec);
-        let mut state = synthetic_fit_state();
-        state.camdl_version = Some(crate::version::VERSION_SHORT.to_string());
-        let method_dir = dir.to_string_lossy().into_owned();
-        let run = If2Run::from_state(&dir, &state, state.n_chains, 0);
-        let block = plain_formatter().method_block("", "scout", &method_dir, &run).text;
-        assert!(block.contains("another build configuration"), "{block}");
-        let report = if2_method_report("scout", &method_dir, &run, &CalendarContext::default());
-        assert!(render_md_method(&report).contains("another build configuration"));
-
-        // The same record under this build's own id says nothing.
-        std::fs::write(dir.join("run.json"),
-            rec.to_string().replace(&"0".repeat(32), crate::version::ENGINE_ID)).unwrap();
-        let block = plain_formatter().method_block("", "scout", &method_dir, &run).text;
-        assert!(!block.contains("⚠ stale") && !block.contains("another build"), "{block}");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 }

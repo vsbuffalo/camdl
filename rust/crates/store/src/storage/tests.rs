@@ -1,6 +1,5 @@
 //! A result's life: claim, write, finish or fail, reuse, retry, reclaim and
-//! quarantine. These carry over the cases of the `runid` store's tests to the
-//! new store's API.
+//! quarantine.
 
 use std::path::Path;
 use std::time::Duration;

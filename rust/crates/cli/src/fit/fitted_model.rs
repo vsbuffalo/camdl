@@ -15,10 +15,10 @@
 //! There is one comparison, [`compare_to_fitted`], and every such check uses
 //! it: `camdl predict --quantities` (is the source still the fitted model, so a
 //! vocabulary compiled against it may be transplanted?) and the replaying
-//! `simulate` paths. It is `runid::inputs::model_ir_hash` — the
+//! `simulate` paths. It is `ir::model_hash::model_ir_hash` — the
 //! presentation-normalized model identity, which excludes `quantities` and
 //! `contrasts` (reporting-only, `Model::hash_into`), the model's file-stem
-//! name, and the gradient maps (runid SV=2). That is exactly the question a
+//! name, and the gradient maps (model hash SV=2). That is exactly the question a
 //! replay must answer yes to: the same model apart from what it reports.
 //!
 //! A fit archives its model with the observation anchors resolved
@@ -29,7 +29,7 @@
 
 use std::path::{Path, PathBuf};
 
-use runid::ContentHash;
+use ir::model_hash::ContentHash;
 
 /// How a given model relates to the model a fit ran on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,8 +81,8 @@ pub fn without_hoisting(m: &ir::Model) -> Result<ir::Model, String> {
 /// Compare `given` against the fit's model `fitted` — the one comparison
 /// (module doc).
 pub fn compare_to_fitted(fitted: &ir::Model, given: &ir::Model) -> ModelAgreement {
-    let fitted_h = runid::inputs::model_ir_hash(fitted);
-    let given_h = runid::inputs::model_ir_hash(given);
+    let fitted_h = ir::model_hash::model_ir_hash(fitted);
+    let given_h = ir::model_hash::model_ir_hash(given);
     if fitted_h != given_h {
         return ModelAgreement::Differs { fitted: fitted_h, given: given_h };
     }

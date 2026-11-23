@@ -9,10 +9,6 @@
 //! switches arrive as values (`sim::trace::configure`, and the
 //! `sim::EvalSettings` each compiled model carries).
 //!
-//! One read is exempt by name, with its reason: `runid`'s host name on a
-//! non-Unix platform (`COMPUTERNAME`), recorded on an execution record and in
-//! no identity.
-//!
 //! Comments and `#[cfg(test)]` items are removed before the search, as in
 //! `sim/tests/sim_prints_nothing.rs`, whose scanner this shares.
 
@@ -23,13 +19,13 @@ mod source_scan;
 use source_scan::{rust_files, without_comments, without_test_items};
 
 /// The crates whose `src/` is compiled into the binary.
-const CRATES: &[&str] = &["cli", "sim", "io", "ir", "runid", "score", "numerics", "declared", "diff"];
+const CRATES: &[&str] = &["cli", "sim", "io", "ir", "score", "numerics", "declared", "diff"];
 
 /// The module allowed to read the environment.
 const THE_MODULE: &str = "cli/src/env.rs";
 
 /// Reads allowed elsewhere: (file, the variable it names).
-const EXEMPT: &[(&str, &str)] = &[("runid/src/store.rs", "COMPUTERNAME")];
+const EXEMPT: &[(&str, &str)] = &[];
 
 const READS: &[&str] = &["env::var(", "env::var_os(", "env::vars(", "env::vars_os("];
 

@@ -102,8 +102,8 @@ So the atomic commit is six steps, not the four in `.claude/rules/ir-schema.md`:
 1. `ir/schema.json` + `ir/VERSION` (read it, take the next one)
 2. OCaml — `ocaml/lib/ir/ir.ml`, `ocaml/lib/ir/serde.ml`
 3. Rust — `rust/crates/ir/src/observation.rs`, and the **positional** hash tag
-   in `rust/crates/runid/src/ir_hash.rs` (`WeightedFlowSum` appends at **5**;
-   0..4 are taken and permanent)
+   in `rust/crates/ir/src/model_hash/impls.rs` (`WeightedFlowSum` appends at
+   **5**; 0..4 are taken and permanent)
 4. `make update-golden` — the regenerable sets
 5. **hand-bump `ir_version` in the 17 frozen `ir/golden/*.ir.json`** — the step
    no target performs and no doc mentions

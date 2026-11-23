@@ -35,7 +35,7 @@ pub(crate) fn write_resume_state<T: serde::Serialize>(
     let path = chain_dir.join(RESUME_STATE_FILE);
     let encoded = bincode::serialize(state)
         .map_err(|e| format!("cannot encode {}: {e}", path.display()))?;
-    runid::write_file_atomic(&path, &encoded)
+    store::write_file_atomic(&path, &encoded)
         .map_err(|e| format!("cannot write the chain's resume state: {e}"))
 }
 

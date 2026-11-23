@@ -8,7 +8,7 @@
 //! carries on after that sentence. In the body:
 //!
 //! - A link whose destination is `rust:<path>` or `ocaml:<path>` is a
-//!   reference to the code, by its full path: `[`Seed`](rust:runid::inputs::Seed)`,
+//!   reference to the code, by its full path: `[`Key`](rust:store::hash::Key)`,
 //!   `[`Ir.model`](ocaml:Ir.model)`. It is rewritten to the generated page of
 //!   what the path names ([`Site::named`]): a type's entry, the entry of the
 //!   type a field, variant or trait item belongs to, a function's or method's

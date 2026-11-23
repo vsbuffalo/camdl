@@ -665,7 +665,7 @@ fn camdlc_identity() -> Option<String> {
 ///
 /// Note the state-Jacobian bit is a COMPILE-cache concern only, not a run-identity
 /// one: a lean IR and a full IR of the same model have different bytes (so must
-/// key distinctly here) but the SAME model digest (runid excludes the gradient
+/// key distinctly here) but the SAME model digest (the model hash excludes the gradient
 /// maps, SV=2). Serving a lean entry to a nuts+ode fit would leave it without the
 /// Jacobian it needs, so the two variants must not collide in this cache.
 pub(crate) fn ir_cache_key(
@@ -963,7 +963,7 @@ fn ir_cache_dir() -> Option<std::path::PathBuf> {
 /// holder — compiles and atomic-writes; the others wait and serve the result.
 ///
 /// **Lock primitive.** O_EXCL `create_new` on `<cache_path>.lock`, the same
-/// race guard `runid::store`'s Mode-B leaf `.lock` uses — no new dependency, no
+/// race guard the run store's claims use, with no new dependency and no
 /// `flock`/`fs2`. Whoever creates the file is the leader; the create is atomic
 /// across processes. The holder's PID is written into the file so a contender
 /// can tell a live compile (keep waiting — a national compile legitimately
@@ -1107,7 +1107,7 @@ mod single_flight {
     }
 
     /// Classify the holder of `lock_path` by reading its recorded PID and
-    /// checking liveness. Mirrors `runid::store::pid_is_alive` (`kill(pid, 0)`).
+    /// checking liveness with `kill(pid, 0)`.
     #[expect(clippy::disallowed_methods, reason = "reads the process id in camdlc's compile lock, which holds no stored result")]
     fn holder_state(lock_path: &Path) -> HolderState {
         let Ok(contents) = std::fs::read_to_string(lock_path) else {
@@ -1338,7 +1338,7 @@ fn ir_text(path: &str, compile: Option<CompileSettings>) -> Result<String, Strin
         // Full IR (state-Jacobian emitted). The metadata / identity / docs
         // loaders that read through here must never withhold the WrtPop
         // Jacobian: a full IR is a safe superset for every consumer, and run
-        // identity is gradient-independent (runid SV=2), so a full vs lean
+        // identity is gradient-independent (model hash SV=2), so a full vs lean
         // compile of the same model share the same digest. The lean opt-out
         // (`--no-state-grad`) lives on the run-producing path
         // (`resolve_ir_path`), which knows the method and so can safely drop
@@ -2904,7 +2904,7 @@ pub struct CellInitState {
     /// can share a `process_seed` and still restore different rows.
     pub row: u64,
     /// Content digest of the whole origin ensemble. Identity.
-    pub ensemble_digest: runid::ContentHash,
+    pub ensemble_digest: store::Key,
 }
 
 /// Apply a CLI integrator-method override (gh#166) to the model in place.

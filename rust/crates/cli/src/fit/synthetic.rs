@@ -47,9 +47,8 @@ pub struct SyntheticDataset {
 ///
 /// `emit` is `fit run --emit-every` (gh#656). This is the one path where the
 /// emission cadence determines data that is then FITTED, so it is
-/// identity-bearing here: it changes the generated files' bytes, and the fit
-/// hashes each training stream's bytes (`FitDigest.data`), so the fit re-keys.
-/// Correct — the data changed.
+/// identity-bearing here: it changes the generated files' bytes, which the
+/// problem holds as its training lines, so the fit re-keys.
 #[expect(clippy::disallowed_methods, reason = "reads `[synthetic] true_params`, whose bytes a synthetic problem's identity holds (`SyntheticOrigin::truth`), and copies it into this process's working directory")]
 pub fn generate_synthetic_datasets(
     spec: &SyntheticSpec,

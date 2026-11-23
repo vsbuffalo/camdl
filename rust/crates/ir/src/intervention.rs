@@ -49,7 +49,7 @@ pub enum InterventionSchedule {
 // jump `min(count, source)` is nonsmooth, so the gate refuses it rather than
 // differentiate it. A `GroupedTransfer` follows the same split: its fraction
 // form carries `fraction_grad`, its count form nothing. Not run identity (gradient maps are compiler-derived;
-// `runid::ir_hash`, SV = 2).
+// `model_hash`, SV = 2).
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FractionTransfer {

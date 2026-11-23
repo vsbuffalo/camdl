@@ -1911,7 +1911,7 @@ fn run_predict(
     //     it — a wrong answer of exactly the plausible-looking kind.
     //
     //     Safety comes from a hash, not from trust: `model_ir_hash` EXCLUDES
-    //     `quantities` (runid's `ir_quantities_excluded_from_hash`), so the
+    //     `quantities` (`ir::model_hash`'s `ir_quantities_excluded_from_hash`), so the
     //     recompiled model and the archived one must hash equal. If they do the
     //     source is the same model that was fit, modulo exactly the reporting
     //     layer we are replacing, and transplanting its quantities is sound. If
@@ -3509,12 +3509,12 @@ fn run_predict(
 /// same model the fit ran on.
 ///
 /// The equality test is [`crate::fit::fitted_model::compare_to_fitted`] —
-/// `runid::inputs::model_ir_hash`, which excludes `quantities` (and
+/// `ir::model_hash::model_ir_hash`, which excludes `quantities` (and
 /// `contrasts`), the comparison every replay of a fit through a given model
 /// shares. That is what makes it the right test rather
 /// than merely a convenient one: it asks "is this the same model apart from its
 /// reporting layer?", which is exactly the question a reporting-layer swap has
-/// to answer yes to. It is also gradient-independent (runid SV=2), so the lean
+/// to answer yes to. It is also gradient-independent (model hash SV=2), so the lean
 /// recompile here and a full-Jacobian fit compile still agree.
 fn quantities_from_vocabulary(
     archived: &ir::Model,
@@ -4118,15 +4118,15 @@ impl PredictOptions {
 
     /// The address key of a prediction of `run_id` with these options by this
     /// engine: the first [`PREDICT_KEY_HEX`] hex digits (128 bits) of the
-    /// SHA-256 of [`PredictAddress`]'s JSON. The engine is the identity every
-    /// other command keys ([`crate::env::Environment::engine_identity`]): the
-    /// build fingerprint [`crate::version::ENGINE_ID`] and the engine switches
-    /// that are on, in its hashed spelling. So a build with uncommitted changes
-    /// never reads or overwrites another build's prediction, and neither does a
-    /// prediction made under a switch (`CAMDL_EVAL_UNRESOLVED`, …) one made
-    /// without it. With no switch on the spelling is the build alone.
+    /// SHA-256 of [`PredictAddress`]'s JSON. The engine is the key of the
+    /// ambient identity every result on the store is grouped by
+    /// ([`crate::camdl_store::ambient`]): the build fingerprint
+    /// [`crate::version::ENGINE_ID`] and the environment switches that can
+    /// change a result. So a build with uncommitted changes never reads or
+    /// overwrites another build's prediction, and neither does a prediction
+    /// made under a switch (`CAMDL_EVAL_UNRESOLVED`, …) one made without it.
     pub(crate) fn address_key(&self, run_id: &str) -> String {
-        self.address_key_by(run_id, &prediction_engine().hashed_spelling())
+        self.address_key_by(run_id, &prediction_engine_key())
     }
 
     fn address_key_by(&self, run_id: &str, engine: &str) -> String {
@@ -4136,11 +4136,13 @@ impl PredictOptions {
     }
 }
 
-/// The engine a prediction is made by: this build and the engine switches that
-/// are on, the identity every other command keys
-/// ([`crate::env::Environment::engine_identity`]).
-fn prediction_engine() -> runid::inputs::EngineIdentity {
-    crate::env::get().engine_identity(crate::version::ENGINE_ID)
+/// The key of the engine a prediction is made by: this build and the
+/// environment switches that can change a result, as the store keys them
+/// ([`crate::camdl_store::ambient`]).
+fn prediction_engine_key() -> String {
+    match crate::camdl_store::ambient() {
+        store::Build::Known(e) | store::Build::Incomplete(e) => store::Identity::key(&e).to_hex(),
+    }
 }
 
 /// Record on a prediction's manifest `doc` the engine that made it, spelled as
@@ -4150,11 +4152,10 @@ fn prediction_engine() -> runid::inputs::EngineIdentity {
 /// the engine are told apart inside their files as well as by their
 /// directories.
 pub(crate) fn stamp_engine(doc: &mut serde_json::Value) {
-    let engine = prediction_engine();
-    doc["engine_version"] = serde_json::Value::String(engine.build);
-    if !engine.switches.is_empty() {
-        doc["engine_switches"] =
-            serde_json::to_value(&engine.switches).expect("an engine switch serializes");
+    doc["engine_version"] = serde_json::Value::String(crate::version::ENGINE_ID.to_string());
+    let switches = crate::env::get().engine_switches();
+    if !switches.is_empty() {
+        doc["engine_switches"] = serde_json::to_value(&switches).expect("an engine switch serializes");
     }
 }
 

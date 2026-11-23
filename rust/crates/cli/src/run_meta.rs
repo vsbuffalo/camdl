@@ -1,8 +1,6 @@
-//! Shared run-metadata types for the content-addressed `output/` tree.
-//!
-//! Every run is a `runid::RunRecord` leaf on disk; the per-kind readers live in
-//! `cas_read`, `browse`, and `fit::fit_view`. This module keeps the small,
-//! cross-cutting value types those readers and writers share:
+//! Shared run-metadata types of a fit run's files, read by `browse` and
+//! `fit::fit_view`. This module keeps the small, cross-cutting value types
+//! those readers and writers share:
 //!
 //! - [`FitAlgorithm`] / [`InferenceBackend`] — the (algorithm, backend) tags a
 //!   fit method records and a reader projects.
@@ -644,8 +642,8 @@ pub const FIT_META_SCHEMA_VERSION: u32 = 3;
 /// `estimated`/`fixed`/`data_hashes`, `model_identity`, paths).
 ///
 /// It is **derived provenance, not a source of truth**: a faithful readable
-/// projection of inputs already hashed into the leaf identity (the `FitDigest`
-/// — different priors already produce a different fit identity). It is written
+/// projection of inputs the run's identity already holds (different priors
+/// already pose a different problem). It is written
 /// post-identity and is never fed back into any hash. The producing `fit.toml`
 /// is archived beside it byte for byte as `fit.toml.original`, and the
 /// configuration the folder's fits ran under as `fit.resolved.toml`: the
@@ -662,12 +660,9 @@ pub struct FitSidecar {
     /// the caller set; [`read_fit_sidecar`] refuses any other.
     #[serde(default)]
     pub schema_version: u32,
-    /// The folder's store layout ([`runid::STORE_LAYOUT`]), set by
-    /// [`write_fit_sidecar`] and [`write_fit_sidecar_with_config`] whatever the
-    /// caller set, and kept as read by [`store_fit_sidecar`]. Absent, and so 0,
-    /// in a record written before layouts were numbered; a reader of the
-    /// folder's stored config refuses any layout but the current one
-    /// ([`require_resolved_config`]).
+    /// The run store's format ([`store::STORE_FORMAT`]) the run was written
+    /// under. Absent, and so 0, in a record written before formats were
+    /// numbered. Nothing reads it.
     #[serde(default)]
     pub store_layout: u32,
     /// A profile's label. A fit segment's sidecar carries none: a fit's label
@@ -735,7 +730,8 @@ pub struct FitSidecar {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub holdout_hashes: BTreeMap<String, String>,
     /// External input name → full SHA-256 of the file `[data.tables]` bound
-    /// to it, the digest the fit's identity folds (`FitDigest.tables`). The
+    /// to it; the problem's identity holds the bytes
+    /// (`FitProblemIdentity::tables`). The
     /// bytes themselves are stored beside this record, in
     /// [`STORED_INPUTS_DIR`]. Empty, and omitted, for a model with no external
     /// input.
@@ -865,7 +861,7 @@ pub fn store_fit_sidecar(fit_segment: &std::path::Path, sidecar: &FitSidecar) ->
     let bytes = serde_json::to_vec_pretty(&merged).map_err(std::io::Error::other)?;
     // Whole or not at all, through a temporary of this writer's own: a
     // reader never sees a torn record.
-    runid::write_file_atomic(&fit_segment.join("fit.meta.json"), &bytes).map_err(std::io::Error::other)
+    store::write_file_atomic(&fit_segment.join("fit.meta.json"), &bytes).map_err(std::io::Error::other)
 }
 
 /// Read the fit-level sidecar; `Ok(None)` when absent (an incomplete segment —

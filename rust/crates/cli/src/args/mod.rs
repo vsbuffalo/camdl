@@ -204,7 +204,7 @@ pub struct SimBackend {
 /// `every` overrides the model's `output { every }` schedule, so it rides the
 /// model digest and re-keys only runs that use it. `no_flows` / `columns`
 /// change which columns are written to the content-addressed leaf, so they ride
-/// the `config`-level identity (`runid::inputs::SimConfig`): a non-default view
+/// identity of a simulation cell's settings: a non-default view
 /// is a distinct, reproducible artifact.
 #[derive(Args, Clone, Debug, Default, store::Inputs)]
 pub struct OutputView {

@@ -528,7 +528,6 @@ dependencies = [
  "rand 0.8.5",
  "rand_distr",
  "rayon",
- "runid",
  "score",
  "semver",
  "serde",
@@ -760,7 +759,6 @@ version = "0.1.0"
 dependencies = [
  "declared",
  "ir",
- "runid",
  "serde",
  "serde_json",
 ]
@@ -1188,10 +1186,12 @@ dependencies = [
  "boon",
  "declared",
  "differentiate-derive",
+ "hex",
  "indexmap",
  "proptest",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror",
 ]
 
@@ -1843,29 +1843,6 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
-]
-
-[[package]]
-name = "runid"
-version = "0.1.0"
-dependencies = [
- "hex",
- "ir",
- "libc",
- "runid-derive",
- "serde",
- "serde_json",
- "sha2",
- "thiserror",
-]
-
-[[package]]
-name = "runid-derive"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
 ]
 
 [[package]]

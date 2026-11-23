@@ -11,7 +11,7 @@
 //!      default emits it on a state-dependent model;
 //!   2. run_id-neutrality — a lean and a full compile of the SAME model share the
 //!      SAME model identity (`content_hash`), the precondition A2 relies on
-//!      (runid SV=2). If this fails, the gradient-independent-identity fix is
+//!      (model hash SV=2). If this fails, the gradient-independent-identity fix is
 //!      incomplete and A2 would re-key the store;
 //!   3. the `camdl simulate` runtime path actually compiles lean (the cached IR
 //!      it produces carries no state-Jacobian).
@@ -93,7 +93,7 @@ fn all_transitions_state_grad_empty(m: &ir::Model) -> bool {
 /// gate or the identity hash, not the CLI wiring.
 #[test]
 fn lean_and_full_emission_and_run_id_neutral() {
-    use runid::ContentAddressed;
+    use ir::model_hash::ContentAddressed;
     let Some((_bin, camdlc)) = skip_if_unbuilt() else {
         return;
     };
@@ -115,7 +115,7 @@ fn lean_and_full_emission_and_run_id_neutral() {
     );
 
     // A2 precondition: dropping the gradient maps must NOT change model identity
-    // (runid SV=2, `content_hash` excludes the gradient maps). If these differ,
+    // (model hash SV=2, `content_hash` excludes the gradient maps). If these differ,
     // making `simulate` compile lean would re-key the CAS store — the whole point
     // of the identity fix that unblocked A2 is that it does not.
     assert_eq!(
@@ -123,7 +123,7 @@ fn lean_and_full_emission_and_run_id_neutral() {
         lean.content_hash(),
         "lean and full compiles of the same model must share a model identity \
          (run_id-neutral); if they differ, the gradient-independent-identity fix \
-         (runid SV=2) is incomplete and A2 would re-key the store"
+         (model hash SV=2) is incomplete and A2 would re-key the store"
     );
 }
 

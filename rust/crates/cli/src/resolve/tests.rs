@@ -1,8 +1,8 @@
 //! The model fixture the crate's unit tests share, and the inertness of the
-//! gradient maps in `runid`'s model digest, which
-//! [`super::model_identity_from_ir`] records.
+//! gradient maps in the model hash, which [`super::model_identity_from_ir`]
+//! records.
 
-use runid::{ContentAddressed, ContentHash};
+use ir::model_hash::ContentHash;
 use ir::model::{
     InitialConditions, Model, OutputConfig, OutputSchedule, RegularOutputSchedule, SimulationConfig,
 };
@@ -48,21 +48,18 @@ pub(crate) fn tiny_model() -> Model {
     }
 }
 
-/// The `model`-level digest hash under fixed versions, the unit the gradient
-/// inertness tests compare. Goes through the real `ModelDigest::from_model`.
+/// The model hash, the unit the gradient inertness tests compare.
 fn model_digest_hash(m: &Model) -> ContentHash {
-    runid::inputs::ModelDigest::from_model(m, "0.7".into(), runid::inputs::EngineIdentity::of_build("0.3.0")).content_hash()
+    ir::model_hash::model_ir_hash(m)
 }
 
 #[test]
 fn gradient_maps_are_inert() {
-    // Model identity is gradient-independent (proposal
-    // 2026-07-16-gradient-maps-out-of-run-identity.md): the compiler-derived
-    // gradient maps are not folded into the model hash, so the SAME model
-    // compiled full (with gradients, for nuts/ode) and lean (`camdlc
-    // --no-state-grad`, for simulate/mh) shares ONE model digest — the re-key-free
-    // guarantee that unblocks gh#439 A2. Proven end-to-end through
-    // `ModelDigest::from_model`, the identity used for every `model` level.
+    // `model_ir_hash` leaves the compiler-derived gradient maps out, so the
+    // same model compiled full (with gradients) and lean (`camdlc
+    // --no-state-grad`) has one model identity string. A stored result keys on
+    // the stored compile instead, gradient maps included, so this test says
+    // nothing about reuse.
     use ir::deriv::{CompGradMap, DerivEntry};
     use ir::expr::{BinOp, Expr};
     use ir::transition::{DrawMethod, StoichiometryEntry, Transition};

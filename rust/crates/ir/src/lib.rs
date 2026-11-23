@@ -11,7 +11,7 @@
 //! `serde_json::Value`. In this workspace `Value` keeps object keys sorted,
 //! and the order of a model's `initial_conditions` is part of its identity, so
 //! that round trip yields a different model with a different
-//! `model_ir_hash`. `rust/crates/runid/tests/value_round_trip.rs` pins this.
+//! `model_ir_hash`. `rust/crates/ir/tests/value_round_trip.rs` pins this.
 //!
 //! A command that has to change a compiled model (resolve an observation
 //! anchor, override the output schedule) reads the envelope through the typed
@@ -29,6 +29,7 @@ pub mod expr;
 pub mod init_order;
 pub mod intervention;
 pub mod model;
+pub mod model_hash;
 pub mod observation;
 pub mod ode_equation;
 pub mod parameter;
