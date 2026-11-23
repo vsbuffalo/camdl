@@ -5908,10 +5908,11 @@ times are exact when every rate is constant between events. A rate that reads
 `t`, a forcing or a real compartment changes during the wait; Gillespie holds
 it at its value at the last event or at the last output or effect time,
 whichever is later, so its event times are approximate, with an error that
-shrinks as the output grid is refined. A run with such a rate warns. The CLI
-`--dt` overrides the model's `dt` for one run,
-as a convergence check or a sensitivity sweep needs. With neither set, the step
-is 1 in the model's `time_unit`.
+shrinks as the output grid is refined. A run with such a rate warns.
+`camdl simulate --dt` overrides the model's `dt` for one run, as a convergence
+check or a sensitivity sweep needs; a command that fits or scores data refuses a
+written step that differs from the model's (run spec §1.3.1). With neither set,
+the step is 1 in the model's `time_unit`.
 
 **The integrator.** `integrator` selects the ODE method and has no effect on
 the chain-binomial or Gillespie backends:
