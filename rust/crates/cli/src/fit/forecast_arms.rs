@@ -47,12 +47,17 @@ pub(crate) struct ArmLabel {
 }
 
 impl ArmLabel {
-    pub(crate) fn baseline() -> Self {
-        ArmLabel { scenario: crate::args::FITTED.to_string(), sweep: Vec::new() }
+    /// The arm with no overlay, named `name`: `fitted` for a posterior,
+    /// `(none)` for a fixed point.
+    pub(crate) fn baseline(name: &str) -> Self {
+        ArmLabel { scenario: name.to_string(), sweep: Vec::new() }
     }
 
+    /// Whether this is the arm with no overlay. Neither of its names can be
+    /// a scenario's: `fitted` is reserved (E291) and `(none)` is not an
+    /// identifier.
     pub(crate) fn is_baseline(&self) -> bool {
-        self.scenario == crate::args::FITTED && self.sweep.is_empty()
+        (self.scenario == crate::args::FITTED || self.scenario == crate::sim_job::IMPLICIT_ARM_LABEL) && self.sweep.is_empty()
     }
 
     /// How a message names the arm: `'late'`, or `'late' at cull_frac = 0.5`.
@@ -117,7 +122,7 @@ pub(crate) struct ArmInputs<'a> {
 /// placed there is refused, before any filtering, with the reason.
 pub(crate) fn build_arms(i: ArmInputs) -> Result<Vec<Arm>, String> {
     let mut arms = vec![Arm {
-        label: ArmLabel::baseline(),
+        label: ArmLabel::baseline(i.scenarios.first().map(ScenarioRef::name).unwrap_or(crate::args::FITTED)),
         compiled: i.baseline.clone(),
         param_sets: i.baseline_params.to_vec(),
         difference: None,

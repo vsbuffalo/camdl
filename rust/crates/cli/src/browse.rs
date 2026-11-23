@@ -358,7 +358,9 @@ impl RunExtras {
                     continue;
                 }
                 let Ok(Some(p)) = store.get(&id) else { continue };
-                let crate::fit_store::ParameterSourceRecord::Posterior { draws, .. } = &p.identity().source;
+                let crate::fit_store::ParameterSourceRecord::Posterior { draws, .. } = &p.identity().source else {
+                    continue;
+                };
                 if draws.id() == run.id() {
                     let rel = p.folder().strip_prefix(run.folder()).unwrap_or(p.folder()).display().to_string();
                     predictions.push((format!("{rel}/"), p));
@@ -461,8 +463,22 @@ impl StoredFitResult {
             }
         }
         if let StoredFitResult::Prediction(s) = self {
-            let crate::fit_store::ParameterSourceRecord::Posterior { draws, .. } = &s.identity().source;
-            field("draws of", &draws.id().key().to_hex());
+            match &s.identity().source {
+                crate::fit_store::ParameterSourceRecord::Posterior { draws, .. } => {
+                    field("draws of", &draws.id().key().to_hex());
+                }
+                crate::fit_store::ParameterSourceRecord::FixedPoint { model, trained_through, .. } => {
+                    field("model", &model.id().key().to_hex());
+                    field(
+                        "parameters",
+                        &"one fixed point (treatment plug_in): the bands carry process and observation \
+                          noise and no parameter uncertainty",
+                    );
+                    if let Some(t) = trained_through {
+                        field("trained through", &t.get());
+                    }
+                }
+            }
         }
         out.report_line(format_args!("{}", style::stdout().paint("files", Style::Dim)));
         for f in self.result_files() {

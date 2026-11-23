@@ -630,7 +630,7 @@ fn the_particle_count_defaults_to_the_fits_and_is_recorded_and_addressed() {
     forecast(&[]);
     let default_dir = predict_dirs().remove(0);
     let m = manifest(&default_dir);
-    assert_eq!(m["particles"], serde_json::json!({"n": 100, "source": "fit_pmmh"}));
+    assert_eq!(m["particles"], serde_json::json!({"n": 100}), "where the count came from is not recorded: it is not addressed");
     assert_eq!(m["options"]["particles"], 100, "the resolved count is in the address");
     let samples = || std::fs::read(default_dir.join("forecast-samples.tsv")).unwrap();
     let before = samples();
@@ -674,7 +674,7 @@ fn the_particle_count_defaults_to_the_fits_and_is_recorded_and_addressed() {
     let p = walk(&dir.join("results")).into_iter().find(|p| p.file_name().is_some_and(|n| n == "predictive.json"))
         .expect("the one-step predictive.json");
     let pj: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap();
-    assert_eq!(pj["particles"], serde_json::json!({"n": 40, "source": "flag"}));
+    assert_eq!(pj["particles"], serde_json::json!({"n": 40}), "where the count came from is not recorded");
     let out = run(dir, &["predict", "@fit", "--mode", "free_forward", "--particles", "40"]);
     assert!(!out.status.success(), "{}", stderr(&out));
     assert!(stderr(&out).contains("this predict runs neither (--mode free_forward)"), "{}", stderr(&out));

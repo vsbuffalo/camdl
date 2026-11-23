@@ -143,14 +143,14 @@ fn show_lists_each_forecast_with_its_origin_horizon_chains_and_particles() {
         "    origin     t = 24",
         "    horizon    4 weeks (28 days)",
         "    chains     all (80 posterior draws)",
-        "    particles  100 per draw (the PMMH fit's filter)",
+        "    particles  100 per draw",
     ], "{shown}");
     let e = forecast_entry(&forecasts, &subset);
     assert_eq!(e, vec![
         "    origin     t = 24",
         "    horizon    2 weeks (14 days)",
         "    chains     kept 0, left out 1, of 2 (40 posterior draws)",
-        "    particles  50 per draw (--particles)",
+        "    particles  50 per draw",
     ], "{shown}");
 
     // The run named by its id prefix lists the same forecasts.

@@ -124,7 +124,7 @@ impl ForecastSummary {
             Some(s) => format!("kept {}, left out {}, of {} ({} posterior draws)",
                 ids(&s.kept), ids(&s.excluded), s.n_total, self.n_draws),
         };
-        let particles = format!("{} per draw ({})", self.particles.n, self.particles.source.describe());
+        let particles = format!("{} per draw", self.particles.n);
         vec![("origin", origin), ("horizon", horizon), ("chains", chains), ("particles", particles)]
     }
 }
@@ -136,6 +136,26 @@ pub(crate) const FORECAST_SAMPLES_FILE: &str = "forecast-samples.tsv";
 pub(crate) const FORECAST_TABLES_DIR: &str = "forecast";
 
 
+/// Why a fixed point cannot be forecast on `backend`; `None` on
+/// chain-binomial, the one backend whose forecast exists.
+pub(crate) fn fixed_point_forecast_refusal(backend: crate::args::types::ForwardBackend) -> Option<String> {
+    use crate::args::types::ForwardBackend;
+    match backend {
+        ForwardBackend::ChainBinomial => None,
+        ForwardBackend::Ode => Some(
+            "a fixed-origin forecast on the ODE backend (the cumulative-flow difference on the \
+             trajectory) is unsupported; forecast on --backend chain_binomial, or use \
+             --mode free_forward."
+                .to_string(),
+        ),
+        ForwardBackend::Gillespie => Some(
+            "a forecast filters the conditioned rows, and the Gillespie backend runs no particle \
+             filter; forecast on --backend chain_binomial, or use --mode free_forward."
+                .to_string(),
+        ),
+    }
+}
+
 /// Refuse what forecast mode does not support, before any work: the backends
 /// and options of the Stage 5 capability matrix that have no forecast yet.
 pub(crate) fn refuse_unsupported(
@@ -144,6 +164,11 @@ pub(crate) fn refuse_unsupported(
 ) -> Result<(), String> {
     use crate::args::types::ForwardBackend;
     let leaf = &posterior.name;
+    if posterior.treatment() == crate::fit::predict::TreatmentKind::PlugIn {
+        if let Some(why) = fixed_point_forecast_refusal(posterior.backend) {
+            return Err(why);
+        }
+    }
     match posterior.backend {
         ForwardBackend::ChainBinomial => {}
         ForwardBackend::Ode => return Err(format!(
@@ -212,7 +237,8 @@ pub(crate) struct ForecastJob<'a> {
     pub config: &'a crate::fit::config_v2::Problem,
     pub fit_base: &'a crate::util::FitBase,
     pub posterior: &'a PosteriorDraws,
-    pub segment: &'a std::path::Path,
+    /// Where the rows the parameters were fitted to are recorded.
+    pub partition: &'a crate::fit::training_partition::RecordedPartition,
     /// The directory the forecast's files are written into.
     pub out_dir: &'a std::path::Path,
     /// Each stream's held-out rows without their values, as the stored
@@ -235,8 +261,11 @@ pub(crate) struct ForecastJob<'a> {
     pub scenarios: &'a [crate::sim_job::ScenarioRef],
     /// The `--sweep` grid, one entry per point; empty without `--sweep`.
     pub sweep_points: &'a [Vec<(String, f64)>],
-    /// The filters' particle count per draw and where it came from (D85).
+    /// The filters' particle count per draw.
     pub particles: crate::fit::predict::PredictParticles,
+    /// The name of the arm with no overlay: `fitted`, or `(none)` for a
+    /// fixed point.
+    pub baseline: &'a str,
 }
 
 /// The held-out rows of one stream, from the stored problem's
@@ -362,7 +391,7 @@ pub(crate) fn run_forecast(
     // The parameter set: the rows the fit recorded, verified against the data.
     let rows: BTreeMap<String, Vec<ObservedRow>> =
         streams.iter().map(|s| (s.name.clone(), s.rows.clone())).collect();
-    let (record, partition) = TrainingPartition::read_recorded(job.segment, &rows)?;
+    let (record, partition) = TrainingPartition::read(job.partition, &rows)?;
 
     // Each stream's held-out rows, from the stored problem's dates: they only
     // name a target's held-out row, and are never filtered. A stored fit
@@ -479,11 +508,16 @@ pub(crate) fn run_forecast(
     }
     // Each draw is named by its row of draws.tsv, which under a chain
     // selection is not its place `i` in the retained cloud.
-    let keys = job.posterior.keys()
-        .ok_or("internal error: the posterior cloud carries no draws.tsv rows to name its draws by")?;
-    let draw_refs: Vec<DrawRef> = idx.iter()
-        .map(|&i| DrawRef { cloud_row: keys.rows[i], key: keys.per_draw[i] })
-        .collect();
+    // A fixed point's copies are named by their place among the copies.
+    let draw_refs: Vec<DrawRef> = match (job.posterior.keys(), job.posterior.treatment()) {
+        (Some(keys), _) => idx.iter().map(|&i| DrawRef { cloud_row: keys.rows[i], key: keys.per_draw[i] }).collect(),
+        (None, crate::fit::predict::TreatmentKind::PlugIn) => {
+            idx.iter().map(|&i| DrawRef { cloud_row: i, key: None }).collect()
+        }
+        (None, crate::fit::predict::TreatmentKind::Posterior) => {
+            return Err("internal error: the posterior cloud carries no draws.tsv rows to name its draws by".into())
+        }
+    };
     let param_sets: Vec<Vec<f64>> = idx.iter()
         .map(|&i| {
             let mut p = compiled.default_params.clone();
@@ -529,7 +563,10 @@ pub(crate) fn run_forecast(
             false => format!("{s} (forecast arm {})", arm.label.describe()),
         };
         let fc = fixed_origin_forecast(plan.clone(), &streams, &held_out_values, arm.compiled.clone(), &arm.param_sets, config)
-            .map_err(|f| name_arm(f.describe(|d| draw_refs[d].describe())))?;
+            .map_err(|f| name_arm(f.describe(|d| match job.posterior.treatment() {
+                crate::fit::predict::TreatmentKind::PlugIn => format!("copy {} of the fixed point", draw_refs[d].cloud_row),
+                crate::fit::predict::TreatmentKind::Posterior => draw_refs[d].describe(),
+            })))?;
         if let Some(base) = forecasts.first() {
             check_shared_past(&base.fc, &fc, &arm.label, &draw_refs)?;
         }
@@ -801,7 +838,7 @@ fn write_manifest(arms: &[ArmForecast], job: &ForecastJob, m: ManifestInputs) ->
         "options": options,
         "calendar": job.calendar.to_json(),
         "mode": "fixed_origin",
-        "treatment": "posterior",
+        "treatment": job.posterior.treatment().label(),
         "method": job.posterior.method.map(|m| m.as_str()),
         "origin": point(fc.plan.origin()),
         "horizon": { "as_written": reach_as_written, "duration": fc.plan.horizon() },
@@ -842,8 +879,7 @@ fn write_manifest(arms: &[ArmForecast], job: &ForecastJob, m: ManifestInputs) ->
             "draw": r.key.map(|k| k.1),
         })).collect::<Vec<_>>(),
         "n_particles": fc.n_particles,
-        // D85: where the particle count came from (`flag`: --particles;
-        // `fit_pmmh`: the PMMH fit's own filter's count; `default`: 500).
+        // The filters' particle count per draw, as `{"n": N}`.
         "particles": job.particles,
         // D85: per draw, in the order of `draws`, the effective sample size
         // of its filter's weights at its last assimilation before the origin,
@@ -917,32 +953,39 @@ fn write_manifest(arms: &[ArmForecast], job: &ForecastJob, m: ManifestInputs) ->
     // D83: with more than one arm, how the arms' random numbers are coupled
     // and what `forecast-contrasts.tsv` holds.
     if arms.len() > 1 {
+        // What the contrasts are taken against: the fitted model, or for a
+        // fixed point the `(none)` arm, the point with no scenario.
+        let base_arm = if job.baseline == crate::args::FITTED {
+            "the fitted model's".to_string()
+        } else {
+            format!("the `{}` arm's", job.baseline)
+        };
         doc["coupling"] = serde_json::json!({
             "method": "shared_seed_per_particle_streams",
-            "description": "posterior draw m runs with the same seed in every arm, and every \
+            "description": format!("posterior draw m runs with the same seed in every arm, and every \
                 particle draws from its own random stream derived from that seed, so the arms \
                 share the filter through the training rows (checked bit for bit) and particle \
                 i of draw m starts every arm's forecast from the same state. After the origin \
-                an arm's streams stay aligned with the fitted model's only until its dynamics \
+                an arm's streams stay aligned with {base_arm} only until its dynamics \
                 differ; how strongly the arms are coupled after that is a property of the \
-                implementation, not of the scenarios.",
+                implementation, not of the scenarios."),
         });
         doc["contrasts"] = serde_json::json!({
             "file": FORECAST_CONTRASTS_FILE,
-            "baseline": crate::args::FITTED,
-            "delta": "the mean of the arm's predictive draws at the target minus the fitted \
-                model's (all particles of all draws)",
+            "baseline": job.baseline,
+            "delta": format!("the mean of the arm's predictive draws at the target minus {base_arm} \
+                (all particles of all draws)"),
             "delta_mcse": {
                 "kind": "monte_carlo_standard_error",
                 "description": "the Monte Carlo standard error of delta: how far it would move \
                     were the forecast rerun with other random numbers and other posterior draws. \
                     It is not the predictive uncertainty of either arm, nor the uncertainty of \
                     the scenario's effect.",
-                "method": "per posterior draw, the arm's mean over its particles minus the fitted \
-                    model's; per chain, the sample variance of those differences over the \
+                "method": format!("per posterior draw, the arm's mean over its particles minus \
+                    {base_arm}; per chain, the sample variance of those differences over the \
                     effective sample size of a variant of Geyer's initial-positive-sequence \
                     estimator (the chain's draws in order); chains combined as \
-                    independent, weighted by their share of the draws",
+                    independent, weighted by their share of the draws"),
                 "min_ess_per_chain": crate::fit::forecast_contrast::CONTRAST_MIN_ESS,
             },
             "paired_band": "none: a band of paired differences A[s] − B[s] would be set by the \

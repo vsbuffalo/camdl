@@ -173,8 +173,8 @@ pub(crate) enum Command {
     #[command(subcommand)]
     Fit(FitCmd),
 
-    /// Predict from a stored fit run's posterior: the free-forward and
-    /// one-step bands, or a forecast
+    /// Predict from a stored fit run's posterior, or from one point given
+    /// with a model file: the free-forward and one-step bands, or a forecast
     Predict(args::PredictArgs),
 
     /// Standalone bootstrap particle filter at fixed parameters

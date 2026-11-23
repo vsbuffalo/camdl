@@ -1373,6 +1373,12 @@ Examples:
   # the pooled one, under a leading `chain` column
   camdl predict @post --by-chain
 
+  # Predict at one point given with a model file, conditioned on the rows
+  # through 2026-03-01: bands of process and observation noise only
+  # (treatment plug_in), stored at prediction/<model>-<id>/<mode>-<id>/
+  camdl predict seir.camdl --params mle.toml --data cases=cases.tsv \\
+      --holdout-after 2026-03-01 --horizon '4 weeks'
+
 Outputs, stored inside the run at predict/<mode>-<id>/:
   predictive/<stream>.tsv   scenario | time | <dims...> | horizon | treatment
                             | role | fit_rhat_max | fit_ess_min | rhat_mean
@@ -1465,10 +1471,12 @@ the file is a superset of the pooled one — and composes with
 --exclude-chains 3,5 writes predictive-excl3_5/ with a `chain` column, and the
 ids there are the fit's own numbering with 3 and 5 simply absent."))]
 pub struct PredictArgs {
-    /// The stored fit run whose posterior draws the prediction uses, by
-    /// handle: its `@label`, a run-id prefix or its folder. A `fit.toml`
-    /// names no run and is refused, with the runs it made listed.
-    #[arg(value_name = "RUN", required_unless_present = "_removed_fit")]
+    /// Where the parameters come from. A handle (`@label`, a run-id prefix
+    /// or a result folder) names a stored fit run, whose posterior draws the
+    /// prediction uses. A model file (`.camdl` or `.ir.json`) names a model,
+    /// predicted at the one point `--params` and `--param` give. A
+    /// `fit.toml` names no run and is refused, with the runs it made listed.
+    #[arg(value_name = "RUN|MODEL", required_unless_present = "_removed_fit")]
     #[input(identity, vary = crate::input_fixtures::predict_other_run)]
     pub source: Option<String>,
 
@@ -1479,6 +1487,10 @@ pub struct PredictArgs {
     #[command(flatten)]
     #[input(group)]
     pub posterior: PosteriorFlags,
+
+    #[command(flatten)]
+    #[input(group)]
+    pub fixed_point: FixedPointFlags,
 
     // `--fit` named the run before the run became the positional argument;
     // the dispatch answers it with the command line that replaces it.
@@ -1584,19 +1596,21 @@ pub struct PredictFlags {
     #[input(identity, vary = crate::input_fixtures::predict_quantities)]
     pub quantities: Option<PathBuf>,
 
-    /// Cap the posterior cloud subsample for BOTH horizons (default 200). Each
-    /// horizon pools plenty at a few hundred draws (one-step over
-    /// `draws × particles`, free-forward over one forward replay per draw), so a
-    /// larger cloud is evenly subsampled — a strided pick across the whole cloud,
-    /// never silently run at full size (a full free-forward replay of a
-    /// long-burn-in ODE fit is hours of solves).
+    /// The draws the bands pool over (default 200): from a stored fit, a cap
+    /// on the posterior subsample; from a model file, the number of copies of
+    /// the point, each under its own seed. Each horizon pools plenty at a few
+    /// hundred draws (one-step over `draws × particles`, free-forward over one
+    /// forward replay per draw), so a larger posterior cloud is evenly
+    /// subsampled — a strided pick across the whole cloud, never silently run
+    /// at full size (a full free-forward replay of a long-burn-in ODE fit is
+    /// hours of solves).
     #[arg(long, value_name = "N")]
     #[input(identity, vary = crate::input_fixtures::predict_n_draws)]
     pub n_draws: Option<usize>,
 
-    /// Particles per posterior draw in the filters this command runs (the
-    /// one-step band's and the forecast's). Default: the fit's own filter's
-    /// count for a PMMH fit, else 500. The resolved count is part of the
+    /// Particles per draw in the filters this command runs (the one-step
+    /// band's and the forecast's). Default: the fit's own filter's count for a
+    /// PMMH fit, else 500. The resolved count is part of the
     /// output directory's key and is recorded in the manifest.
     #[arg(long, value_name = "N")]
     #[input(identity, vary = crate::input_fixtures::predict_particles)]
@@ -1606,6 +1620,36 @@ pub struct PredictFlags {
     #[arg(long)]
     #[input(identity)]
     pub seed: Option<u64>,
+
+    /// Export a copy of the prediction's result files into the directory
+    /// DIR, at the paths they have in the prediction's folder. DIR is made
+    /// when its parent exists. A prediction reused from the store is
+    /// exported the same way.
+    #[arg(short, long, value_name = "DIR")]
+    #[input(export)]
+    pub output: Option<PathBuf>,
+
+    /// Compute the prediction again even when it is stored; the stored
+    /// prediction moves to the store's `.quarantine/` first. A prediction
+    /// held by an owner not known to be stopped is refused.
+    #[arg(long)]
+    #[input(store)]
+    pub force: bool,
+
+    /// A name for this invocation, found again as `@LABEL`. It names the
+    /// invocation, never the prediction: rerunning with another label reuses
+    /// the stored prediction.
+    #[arg(long, value_name = "TEXT")]
+    #[input(store)]
+    pub label: Option<String>,
+
+    /// The run store's root (default `$CAMDL_STORE`, else `./camdl-store`):
+    /// where a fixed-point prediction is stored, and where a run handle is
+    /// looked up. A run named by its folder is predicted in the store that
+    /// holds the folder.
+    #[arg(long, value_name = "DIR")]
+    #[input(store)]
+    pub store: Option<PathBuf>,
 }
 
 /// The flags of `camdl predict` that read a fit's posterior: its chains and
@@ -1680,6 +1724,143 @@ pub struct PosteriorFlags {
     pub realised_design: bool,
 }
 
+/// The flags of `camdl predict` that pose a prediction from a fixed point:
+/// the point, the data it conditions on and the numerics, which a stored fit
+/// problem holds for a posterior prediction. Each is refused with a handle.
+#[derive(Args, Clone, Default, store::Inputs)]
+pub struct FixedPointFlags {
+    /// A parameters TOML file (repeatable; later files override earlier
+    /// ones), as `simulate` and `pfilter` read it: the point the prediction
+    /// is made at. `camdl fit summary RUN --params-only` writes one.
+    #[arg(long, value_name = "FILE")]
+    #[input(identity, vary = crate::input_fixtures::predict_other_params)]
+    pub params: Vec<PathBuf>,
+
+    /// One parameter's value, e.g. `--param beta=0.4` (repeatable); it
+    /// overrides every `--params` file.
+    #[arg(long, value_name = "NAME=VALUE")]
+    #[input(identity, vary = crate::input_fixtures::predict_other_param)]
+    pub param: Vec<ParamOverride>,
+
+    /// An external table for table-lookup expressions, e.g.
+    /// `--table contact=matrix.tsv` (repeatable).
+    #[arg(long, value_name = "NAME=FILE")]
+    #[input(identity, vary = crate::input_fixtures::predict_other_table)]
+    pub table: Vec<TableSpec>,
+
+    /// The observations, required: `--data PATH` for a model with one
+    /// stream (or the one `--obs` names), `--data NAME=PATH` (repeatable)
+    /// otherwise, bound as `pfilter` binds them. Every row is parsed, to find
+    /// the cut `--holdout-after` makes, so a malformed held-out row is refused;
+    /// only the rows up to the cut are stored and used.
+    #[arg(long, value_name = "[NAME=]PATH")]
+    #[input(identity, vary = crate::input_fixtures::predict_other_data)]
+    pub data: Vec<DataSpec>,
+
+    /// The observation stream a single `--data PATH` binds to (required
+    /// when the model declares more than one).
+    #[arg(long, value_name = "STREAM")]
+    #[input(identity, vary = crate::input_fixtures::predict_other_obs)]
+    pub obs: Option<String>,
+
+    /// The end of the rows the point was fitted to: a model-time number, a
+    /// date, or `last_obs` with an offset (`last_obs - 2 weeks`), with the
+    /// grammar and the cut of `fit.toml`'s `[data] holdout_after`. The rows
+    /// after it are parsed to find the cut, then neither stored nor used, and
+    /// a forecast starts at the cut. A `last_obs - …` cut resolves over the
+    /// whole bound files, held-out rows included, as a fit's does.
+    #[arg(long, value_name = "TIME")]
+    #[input(identity, vary = crate::input_fixtures::predict_holdout_after)]
+    pub holdout_after: Option<String>,
+
+    /// The simulation backend (default chain_binomial).
+    #[arg(long)]
+    #[input(identity, vary = crate::input_fixtures::predict_other_backend)]
+    pub backend: Option<ForwardBackend>,
+
+    /// The step of the discrete-time backends, by the one dt rule: the
+    /// model's declared step, a `--dt` that differs refused; 1 when the model
+    /// declares none.
+    #[arg(long)]
+    #[input(identity, vary = crate::input_fixtures::other_dt)]
+    pub dt: Option<f64>,
+
+    /// The ODE integrator method: rk4 (fixed) or rk45 (adaptive), keeping
+    /// the model's tolerances.
+    #[arg(long)]
+    #[input(identity, vary = crate::input_fixtures::other_integrator)]
+    pub integrator: Option<crate::args::types::IntegratorArg>,
+
+    /// The sampler of the chain-binomial draws: `btpe` (default) or `btrs`.
+    /// The two are not bit-compatible. Refused on another backend.
+    #[arg(long, value_name = "SAMPLER",
+          value_parser = |v: &str| v.parse::<sim::rng::BinomialAlgorithm>())]
+    #[input(identity, vary = crate::input_fixtures::other_binomial)]
+    pub binomial: Option<sim::rng::BinomialAlgorithm>,
+
+    /// A rate that collapses (division by zero, a power that is NaN, the
+    /// square root of a negative) is 0 instead of an error.
+    #[arg(long, default_value_t = false)]
+    #[input(identity)]
+    pub allow_degenerate_rates: bool,
+
+    /// Check each `--data` file's time column against a format: `auto`,
+    /// `numeric` or `date` (requires the model's `origin`). A format the
+    /// column does not hold is refused. The check is all it does: every later
+    /// read detects the format from the whole column, so it does not silence
+    /// W326 (`internal-days` is checked as `numeric`).
+    #[arg(long, default_value = "auto")]
+    #[input(execution, exercised_by = crate::input_fixtures::predict_time_format)]
+    pub time_format: crate::caltime_load::TimeFormat,
+}
+
+impl FixedPointFlags {
+    /// The flags given, by their spelling, for the refusal of a fixed-point
+    /// flag beside a handle.
+    pub fn given(&self) -> Vec<&'static str> {
+        let mut v = Vec::new();
+        let mut push = |set: bool, name: &'static str| {
+            if set {
+                v.push(name);
+            }
+        };
+        push(!self.params.is_empty(), "--params");
+        push(!self.param.is_empty(), "--param");
+        push(!self.table.is_empty(), "--table");
+        push(!self.data.is_empty(), "--data");
+        push(self.obs.is_some(), "--obs");
+        push(self.holdout_after.is_some(), "--holdout-after");
+        push(self.backend.is_some(), "--backend");
+        push(self.dt.is_some(), "--dt");
+        push(self.integrator.is_some(), "--integrator");
+        push(self.binomial.is_some(), "--binomial");
+        push(self.allow_degenerate_rates, "--allow-degenerate-rates");
+        push(self.time_format != crate::caltime_load::TimeFormat::Auto, "--time-format");
+        v
+    }
+}
+
+impl PosteriorFlags {
+    /// The flags given, by their spelling, for the refusal of a posterior
+    /// flag beside a model file.
+    pub fn given(&self) -> Vec<&'static str> {
+        let mut v = Vec::new();
+        if self.by_chain {
+            v.push("--by-chain");
+        }
+        if self.exclude_chains.is_some() {
+            v.push("--exclude-chains");
+        }
+        if self.chains.is_some() {
+            v.push("--chains");
+        }
+        if self.realised_design {
+            v.push("--realised-design");
+        }
+        v
+    }
+}
+
 /// One `camdl predict` as its inputs reach the store: the command's
 /// arguments and the global options, each with its class. Built by the
 /// dispatch in `main.rs`; the global options are not `PredictArgs`' own.
@@ -1687,13 +1868,15 @@ pub struct PosteriorFlags {
 pub struct PredictInvocation {
     #[input(group)]
     pub args: PredictArgs,
-    /// `--no-licm`: compile a `--quantities` vocabulary against the fit's
-    /// model source without loop-invariant code motion. A prediction runs
-    /// the fit's stored compile. The vocabulary's compile is checked against
-    /// it with every hoisted subexpression written back in place, so it
-    /// agrees with a fit compiled under either setting, and it contributes
-    /// only its quantities, which hoisting does not touch.
-    #[input(execution, exercised_by = crate::input_fixtures::predict_no_licm)]
+    /// `--no-licm`: compile without loop-invariant code motion. A model
+    /// file's compile is the compiled model a fixed-point prediction's
+    /// identity holds, so it re-keys the prediction through the model's key.
+    /// A posterior prediction runs the fit's stored compile, and the flag
+    /// reaches only a `--quantities` vocabulary's compile, which is checked
+    /// against the fit's with every hoisted subexpression written back in
+    /// place and contributes only its quantities, which hoisting does not
+    /// touch; there it changes nothing.
+    #[input(identity)]
     pub no_licm: bool,
     /// `--no-ir-cache`: compile a `--quantities` vocabulary rather than reuse
     /// a cached IR, which is the IR a compile emits.
@@ -1767,10 +1950,24 @@ impl PredictFlags {
     /// `scenario_name = None`, exactly like `simulate`'s `(none)` arm). `fitted` is
     /// reserved: an explicit `--scenario fitted` is rejected with the same
     /// migration-style diagnostic the OCaml `scenarios {}` reservation uses.
+    #[cfg(test)]
     pub fn scenario_refs(&self) -> Result<Vec<crate::sim_job::ScenarioRef>, String> {
+        self.scenario_refs_named(FITTED)
+    }
+
+    /// [`Self::scenario_refs`], with the no-overlay arm named `no_overlay`:
+    /// `fitted` for a posterior, `(none)` for a fixed point.
+    pub fn scenario_refs_named(&self, no_overlay: &str) -> Result<Vec<crate::sim_job::ScenarioRef>, String> {
         use crate::sim_job::ScenarioRef;
         let names = split_scenario_names(&self.scenarios)?;
         if let Some(bad) = names.iter().find(|n| n.as_str() == FITTED) {
+            if no_overlay != FITTED {
+                return Err(format!(
+                    "scenario name '{bad}' is reserved, so no model declares a scenario by it \
+                     (E291); the arm with no scenario applied is `{no_overlay}`, and it is emitted \
+                     automatically."
+                ));
+            }
             return Err(format!(
                 "scenario name '{bad}' is reserved: it labels the no-overlay row \
                  (the fitted model, no scenario applied) in the `scenario` column.\n  \
@@ -1785,7 +1982,7 @@ impl PredictFlags {
             // byte-identical to today's hardcoded baseline replay when no
             // enable/disable is given.
             Ok(vec![ScenarioRef::Inline {
-                name: FITTED.to_string(),
+                name: no_overlay.to_string(),
                 enable: self.enable.clone(),
                 disable: self.disable.clone(),
                 params: indexmap::IndexMap::new(),
@@ -1800,7 +1997,7 @@ impl PredictFlags {
             // `--scenario` conflicts with `--enable`/`--disable` at the clap
             // level, so the prepended arm is guaranteed pure no-overlay.
             let mut refs = vec![ScenarioRef::Inline {
-                name: FITTED.to_string(),
+                name: no_overlay.to_string(),
                 enable: self.enable.clone(),
                 disable: self.disable.clone(),
                 params: indexmap::IndexMap::new(),

@@ -106,6 +106,7 @@ pub(crate) mod forecast_driver; // the fixed-origin forecast: one bootstrap filt
 pub(crate) mod forecast_arms; // the scenario and sweep arms of a forecast, each differing only after the origin
 pub(crate) mod forecast_contrast; // the difference of two arms' predictive means and its Monte Carlo error (D83)
 pub(crate) mod forecast_output; // `camdl predict --mode forecast`: the plan, the driver, the artifact
+pub(crate) mod fixed_point; // `camdl predict MODEL`: the point, its data and its numerics, stored before the prediction
 pub(crate) mod forecast_score; // the marginal and joint log scores of a forecast against held-out values (D79)
 pub mod runner;
 pub mod priors_precedence;  // gh#75: shared prior-resolution chain for fit run + profile

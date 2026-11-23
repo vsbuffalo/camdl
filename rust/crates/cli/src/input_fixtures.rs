@@ -375,9 +375,67 @@ pub(crate) fn predict_chain_ids() -> Option<String> {
     Some("1".into())
 }
 
+/// The fixed-point prediction the checks of the fixed-point flags start
+/// from: the free-forward band of four copies of `point.toml` on the
+/// fixture model, conditioned on its daily cases.
+/// `predict model.camdl --params point.toml --data daily_cases=daily_cases.tsv --mode free_forward --n-draws 4`.
+#[cfg(test)]
+pub(crate) fn predict_fixed_base() -> PredictInvocation {
+    predict_from(&[
+        "model.camdl", "--params", "point.toml", "--data", "daily_cases=daily_cases.tsv", "--mode", "free_forward",
+        "--n-draws", "4",
+    ])
+}
+
+/// A second point of the fixture model.
+pub(crate) fn predict_other_params() -> Vec<PathBuf> {
+    vec!["point2.toml".into()]
+}
+
+pub(crate) fn predict_other_param() -> Vec<ParamOverride> {
+    vec![ParamOverride { name: "beta".into(), value: 0.45 }]
+}
+
+/// The patch model's other weight table.
+pub(crate) fn predict_other_table() -> Vec<TableSpec> {
+    vec![TableSpec { name: "w".into(), path: "w2.tsv".into() }]
+}
+
+/// The fixture model's daily cases with other counts.
+pub(crate) fn predict_other_data() -> Vec<DataSpec> {
+    vec![DataSpec::Named { name: "daily_cases".into(), path: "daily_cases2.tsv".into() }]
+}
+
+/// The other stream `mixed.tsv` holds.
+pub(crate) fn predict_other_obs() -> Option<String> {
+    Some("survey".into())
+}
+
+pub(crate) fn predict_holdout_after() -> Option<String> {
+    Some("20".into())
+}
+
+pub(crate) fn predict_other_backend() -> Option<crate::args::types::ForwardBackend> {
+    Some(crate::args::types::ForwardBackend::Ode)
+}
+
+/// `--time-format auto` and `--time-format numeric` on a numeric column.
+pub(crate) fn predict_time_format() -> (crate::args::FixedPointFlags, crate::args::FixedPointFlags) {
+    use crate::caltime_load::TimeFormat;
+    let base = predict_from(&["model.camdl", "--params", "point.toml", "--data", "daily_cases=daily_cases.tsv"])
+        .args
+        .fixed_point;
+    (
+        crate::args::FixedPointFlags { time_format: TimeFormat::Auto, ..base.clone() },
+        crate::args::FixedPointFlags { time_format: TimeFormat::Numeric, ..base },
+    )
+}
+
+
 /// A vocabulary compiled with and without loop-invariant code motion against
 /// the source of `@hoisted`, a fit whose infection rate has a factor the
-/// motion hoists.
+/// motion hoists: on a posterior, `--no-licm` reaches only this compile.
+#[cfg(test)]
 pub(crate) fn predict_no_licm() -> (PredictInvocation, PredictInvocation) {
     let base = predict_from(&["@hoisted", "--mode", "free_forward", "--n-draws", "4", "--quantities", "vocab.camdl"]);
     (PredictInvocation { no_licm: false, ..base.clone() }, PredictInvocation { no_licm: true, ..base })

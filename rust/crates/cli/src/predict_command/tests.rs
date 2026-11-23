@@ -23,7 +23,7 @@ use store::{Artifact, Class, ClassFailure, FieldInfo, InputHarness, Inputs, Key,
 
 use crate::args::PredictInvocation;
 use crate::test_support::Pins;
-use crate::input_fixtures::{predict_base, predict_from};
+use crate::input_fixtures::{predict_base, predict_fixed_base, predict_from};
 
 const FORECAST: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/forecast");
 
@@ -80,6 +80,74 @@ fn hoisted_model() -> String {
     hoisted
 }
 
+/// A two-patch SIR model whose infection rate reads an external weight
+/// table `w`, for the check of `--table`.
+const PATCH: &str = r#"
+time_unit = 'days
+dimensions { patch = [p0, p1] }
+compartments { S, I, R }
+stratify(by = patch)
+parameters { beta : rate in [0.01, 2.0]  gamma : rate in [0.01, 1.0]  rho : probability in [0.05, 0.95] }
+tables {
+  w : patch = external("w")
+  W : patch × patch = [[0.0, 0.5],
+                       [0.5, 0.0]]
+}
+let N[l in patch] = S[l] + I[l] + R[l]
+transitions {
+  infection[l in patch] : S[l] --> I[l] @ beta * w[l] * S[l] * sum(q in patch, W[l, q] * I[q] / N[q])
+  recovery[l in patch]  : I[l] --> R[l] @ gamma * I[l]
+}
+init {
+  S[p0] = 990  I[p0] = 10
+  S[p1] = 1000  I[p1] = 5
+}
+observations {
+  cases {
+    columns       { time : time, cases : count }
+    covers        = closing_at(time, 1 'days)
+    projected     = sum(l in patch, incidence(infection[l]))
+    emit_schedule = every 1 'days
+    cases         ~ poisson(rate = rho * projected + 0.5)
+  }
+}
+simulate { from = 0 'days  to = 10 'days }
+"#;
+
+/// The point the fixture model is predicted at, `@fit`'s fixed values with
+/// `beta` at 0.5.
+const POINT: &str = "beta = 0.5\ngamma = 0.25\nrho = 0.5\nk = 10.0\nN0 = 1000\nI0 = 5\n";
+
+/// The files of the fixed-point predictions: two points of the fixture
+/// model, its daily cases with other counts, one file holding the daily
+/// cases and the survey (for `--obs`), and the patch model with its data,
+/// point and two weight tables.
+fn fixed_point_files() -> Vec<(&'static str, String)> {
+    let daily = std::fs::read_to_string(Path::new(FORECAST).join("daily_cases.tsv")).unwrap();
+    let daily2: String = daily
+        .lines()
+        .enumerate()
+        .map(|(i, l)| match (i, l.split_once('\t')) {
+            (0, _) | (_, None) => format!("{l}\n"),
+            (_, Some((t, y))) => format!("{t}\t{}\n", y.parse::<u64>().unwrap() + 1),
+        })
+        .collect();
+    let mixed = (1..=28).fold("time\tdaily_cases\tpositives\ttested\n".to_string(), |s, t| {
+        s + &format!("{t}\t{}\t{}\t40\n", 2 + t % 5, t % 7)
+    });
+    vec![
+        ("point.toml", POINT.to_string()),
+        ("point2.toml", POINT.replace("beta = 0.5", "beta = 0.55")),
+        ("daily_cases2.tsv", daily2),
+        ("mixed.tsv", mixed),
+        ("patch.camdl", PATCH.to_string()),
+        ("patch.toml", "beta = 0.4\ngamma = 0.2\nrho = 0.5\n".into()),
+        ("patch_cases.tsv", (1..=10).fold("time\tcases\n".to_string(), |s, t| s + &format!("{t}\t{}\n", 2 + t))),
+        ("w1.tsv", "1.0\n0.5\n".into()),
+        ("w2.tsv", "1.0\n0.7\n".into()),
+    ]
+}
+
 /// The binaries under test, the fixture directory, and the store holding
 /// `@fit` and `@other`, `@hoisted`, a fit of [`hoisted_model`], and `@ode`,
 /// an MH fit on the ODE backend, made once.
@@ -124,6 +192,9 @@ fn fixture() -> &'static Fixture {
         std::fs::write(dir.join("vocab.camdl"), "quantities {\n  peak_R = max(R)\n}\n").unwrap();
         std::fs::write(dir.join("design.tsv"), "time\ttested\n28\t60\n35\t70\n").unwrap();
         std::fs::write(dir.join("design2.tsv"), "time\ttested\n28\t61\n35\t70\n").unwrap();
+        for (name, text) in fixed_point_files() {
+            std::fs::write(dir.join(name), text).unwrap();
+        }
         let store = dir.join("template-store");
         let fx = Fixture { camdl, camdlc, dir, store };
         for (seed, label) in [("1", "fit"), ("2", "other")] {
@@ -204,11 +275,30 @@ fn argv(inv: &PredictInvocation) -> Vec<String> {
                 n_draws,
                 particles,
                 seed,
+                output,
+                force,
+                label,
+                store,
             },
         posterior: crate::args::PosteriorFlags { by_chain, exclude_chains, chains, realised_design },
+        fixed_point:
+            crate::args::FixedPointFlags {
+                params,
+                param,
+                table,
+                data,
+                obs,
+                holdout_after,
+                backend,
+                dt,
+                integrator,
+                binomial,
+                allow_degenerate_rates,
+                time_format,
+            },
         _removed_fit: _,
     } = args;
-    let mut v: Vec<String> = vec!["predict".into(), source.clone().expect("a run")];
+    let mut v: Vec<String> = vec!["predict".into(), source.clone().expect("a run or a model")];
     let mut opt = |flag: &str, value: Option<String>| {
         if let Some(x) = value {
             v.push(flag.into());
@@ -242,6 +332,33 @@ fn argv(inv: &PredictInvocation) -> Vec<String> {
     opt("--seed", seed.map(|x| x.to_string()));
     opt("--exclude-chains", exclude_chains.clone());
     opt("--chains", chains.clone());
+    for p in params {
+        opt("--params", Some(p.to_string_lossy().into_owned()));
+    }
+    for p in param {
+        opt("--param", Some(format!("{}={}", p.name, p.value)));
+    }
+    for t in table {
+        opt("--table", Some(format!("{}={}", t.name, t.path.display())));
+    }
+    for d in data {
+        opt("--data", Some(match d {
+            crate::args::types::DataSpec::Single(p) => p.to_string_lossy().into_owned(),
+            crate::args::types::DataSpec::Named { name, path } => format!("{name}={}", path.display()),
+        }));
+    }
+    opt("--obs", obs.clone());
+    opt("-o", output.as_ref().map(|p| p.to_string_lossy().into_owned()));
+    opt("--label", label.clone());
+    opt("--store", store.as_ref().map(|p| p.to_string_lossy().into_owned()));
+    opt("--holdout-after", holdout_after.clone());
+    opt("--backend", backend.map(|b| b.as_str().to_string()));
+    opt("--dt", dt.map(|x| x.to_string()));
+    opt("--integrator", integrator.map(|i| serde_json::to_value(i).unwrap().as_str().unwrap().to_string()));
+    opt("--binomial", binomial.map(|b| b.to_string()));
+    if *time_format != crate::caltime_load::TimeFormat::Auto {
+        opt("--time-format", Some(serde_json::to_value(time_format).unwrap().as_str().unwrap().to_string()));
+    }
     let mut flag = |set: bool, name: &str| {
         if set {
             v.push(name.into());
@@ -249,6 +366,8 @@ fn argv(inv: &PredictInvocation) -> Vec<String> {
     };
     flag(*allow_forcing_extrapolation, "--allow-forcing-extrapolation");
     flag(*by_chain, "--by-chain");
+    flag(*allow_degenerate_rates, "--allow-degenerate-rates");
+    flag(*force, "--force");
     flag(*realised_design, "--realised-design");
     flag(*no_licm, "--no-licm");
     flag(*no_ir_cache, "--no-ir-cache");
@@ -320,6 +439,10 @@ fn used(stderr: &str, ir_cache: &Path) -> BTreeMap<String, String> {
             let off = rest.split_whitespace().next() == Some("off");
             seen.entry("used.no_licm".into()).or_default().insert(off.to_string());
         }
+        if let Some((_, rest)) = line.split_once("predict: --data checked under --time-format ") {
+            let f = rest.split_whitespace().next().unwrap_or_default().to_lowercase();
+            seen.entry("used.args.fixed_point.time_format".into()).or_default().insert(f);
+        }
     }
     seen.entry("used.no_ir_cache".into())
         .or_default()
@@ -345,6 +468,22 @@ impl Harness {
                 "@fit", "--horizon", "2 weeks", "--stream", "survey", "--design", "survey=design.tsv", "--n-draws", "4",
                 "--particles", "20",
             ]),
+            _ if name.starts_with("args.fixed_point.") => match field {
+                "table" => predict_from(&[
+                    "patch.camdl", "--params", "patch.toml", "--table", "w=w1.tsv", "--data", "cases=patch_cases.tsv",
+                    "--mode", "free_forward", "--n-draws", "4",
+                ]),
+                "obs" => predict_from(&[
+                    "model.camdl", "--params", "point.toml", "--data", "mixed.tsv", "--obs", "daily_cases", "--mode",
+                    "free_forward", "--n-draws", "4",
+                ]),
+                _ => predict_fixed_base(),
+            },
+            // A model file's compile is the fixed point's model.
+            "no_licm" => predict_from(&[
+                "hoisted.camdl", "--params", "point.toml", "--data", "daily_cases=daily_cases.tsv", "--mode", "free_forward",
+                "--n-draws", "4",
+            ]),
             _ => predict_base(),
         };
         Harness { base }
@@ -361,12 +500,26 @@ impl InputHarness for Harness {
     fn varied(&self, field: &FieldInfo) -> PredictInvocation {
         match field.class {
             Class::Identity => self.base.varied(field.name),
+            Class::Export if field.name == "args.flags.output" => {
+                let mut inv = self.base.clone();
+                inv.args.flags.output = Some("exported".into());
+                inv
+            }
             class => panic!("no second value for {} ({class:?})", field.name),
         }
     }
 
     fn exercised(&self, field: &FieldInfo) -> (PredictInvocation, PredictInvocation) {
-        <PredictInvocation as Inputs>::exercised(field.name)
+        match field.name.strip_prefix("args.fixed_point.") {
+            Some(f) => {
+                let (x, y) = <crate::args::FixedPointFlags as Inputs>::exercised(f);
+                let (mut a, mut b) = (predict_fixed_base(), predict_fixed_base());
+                a.args.fixed_point = x;
+                b.args.fixed_point = y;
+                (a, b)
+            }
+            None => <PredictInvocation as Inputs>::exercised(field.name),
+        }
     }
 
     /// An execution input is used when what the run did with it ([`used`])
@@ -381,7 +534,7 @@ impl InputHarness for Harness {
         let fresh = tempfile::tempdir().unwrap();
         let root = store.map(Path::to_path_buf).unwrap_or_else(|| fresh.path().join("camdl-store"));
         let cwd = workdir(&root);
-        let out = camdl(cwd.path(), &root, &argv(invocation), &[("RUST_LOG", "camdl::util=debug")]);
+        let out = camdl(cwd.path(), &root, &argv(invocation), &[("RUST_LOG", "camdl::util=debug,camdl::fit::fixed_point=debug")]);
         if !out.status.success() {
             return Err(store::Error::Parse {
                 what: format!("camdl {:?}", argv(invocation)),
@@ -390,7 +543,33 @@ impl InputHarness for Harness {
         }
         let mut effects = crate::test_support::recorded_execution(&root, crate::fit_store::Prediction::KIND);
         effects.extend(used(&String::from_utf8_lossy(&out.stderr), &cwd.path().join("ir-cache")));
-        Ok(Observed { results: observe(&root), effects, ..Observed::default() })
+        // `-o DIR` copies the prediction's result files: each export names
+        // the stored file it copies.
+        let results = observe(&root);
+        let mut exports = BTreeMap::new();
+        let mut copies = BTreeMap::new();
+        if let Some(dir) = &invocation.args.flags.output {
+            let prediction = results
+                .iter()
+                .find(|r| r.kind == crate::fit_store::Prediction::KIND)
+                .map(|r| r.run_id)
+                .expect("a stored prediction");
+            let mut stack = vec![cwd.path().join(dir)];
+            while let Some(d) = stack.pop() {
+                for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        stack.push(p);
+                        continue;
+                    }
+                    let rel = p.strip_prefix(cwd.path()).unwrap().to_path_buf();
+                    let file = p.strip_prefix(cwd.path().join(dir)).unwrap().to_string_lossy().into_owned();
+                    exports.insert(rel.clone(), Key::digest_bytes(&std::fs::read(&p).unwrap()));
+                    copies.insert(rel, store::StoredFile { run_id: prediction, file });
+                }
+            }
+        }
+        Ok(Observed { results, exports, copies, effects })
     }
 }
 
@@ -751,3 +930,500 @@ const ARM64: Pins = &[
         ("report.json", "d47528701a6bf746"),
     ]),
 ];
+
+// ── Fixed-point predictions ──────────────────────────────────────────────────
+
+/// `camdl predict` in a fresh copy of the fixture, as a line of words.
+fn predict_in(cwd: &Path, root: &Path, line: &[&str]) -> Output {
+    let mut args: Vec<String> = line.iter().map(|s| s.to_string()).collect();
+    args.extend(["--progress".to_string(), "none".to_string()]);
+    camdl(cwd, root, &args, &[])
+}
+
+/// Every stored prediction under `root`: its folder and identity record.
+fn predictions(root: &Path) -> Vec<(PathBuf, serde_json::Value)> {
+    folders(root)
+        .into_iter()
+        .filter(|(_, id, _)| id["kind"] == crate::fit_store::Prediction::KIND)
+        .map(|(p, id, _)| (p, id))
+        .collect()
+}
+
+/// The fixed-point base line: four copies of `point.toml`, free-forward,
+/// conditioned on the daily cases.
+const FIXED: &[&str] = &[
+    "predict", "model.camdl", "--params", "point.toml", "--data", "daily_cases=daily_cases.tsv", "--mode", "free_forward",
+    "--n-draws", "4",
+];
+
+/// The rows of a TSV, as maps from its header.
+fn tsv_rows(text: &str) -> Vec<BTreeMap<String, String>> {
+    let mut lines = text.lines().filter(|l| !l.starts_with('#'));
+    let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
+    lines
+        .filter(|l| !l.is_empty())
+        .map(|l| header.iter().zip(l.split('\t')).map(|(h, v)| (h.to_string(), v.to_string())).collect())
+        .collect()
+}
+
+/// A fixed-point prediction is stored under `prediction/`, grouped by its
+/// model and named by its mode; its identity record is the `FixedPoint`
+/// variant; every band row is `plug_in` under the `(none)` arm, with the
+/// columns that compare chains or count effective draws empty.
+#[test]
+fn a_fixed_point_prediction_is_stored_under_prediction_and_labelled_plug_in() {
+    let fresh = tempfile::tempdir().unwrap();
+    let root = fresh.path().join("camdl-store");
+    let cwd = workdir(&root);
+    let out = predict_in(cwd.path(), &root, &[&FIXED[..2], &["--params", "point.toml", "--data", "daily_cases=daily_cases.tsv", "--n-draws", "4"]].concat());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    let found = predictions(&root);
+    let fixed: Vec<&(PathBuf, serde_json::Value)> =
+        found.iter().filter(|(_, id)| id["identity"]["source"].get("FixedPoint").is_some()).collect();
+    assert_eq!(fixed.len(), 1, "one fixed-point prediction: {found:#?}");
+    let (folder, id) = fixed[0];
+    let parts: Vec<String> = folder.components().rev().take(3).map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+    assert!(parts[0].starts_with("all-"), "named by the mode the default resolves to on chain_binomial: {parts:?}");
+    assert!(parts[1].starts_with("model-"), "grouped by the model: {parts:?}");
+    assert_eq!(parts[2], "prediction", "{parts:?}");
+    let source = &id["identity"]["source"]["FixedPoint"];
+    assert_eq!(source["params"]["values"]["beta"], serde_json::json!(0.5), "{source:#}");
+    assert!(source["trained_through"].is_null(), "no --holdout-after: every row is conditioned on");
+    let rows = tsv_rows(&std::fs::read_to_string(folder.join("predictive/daily_cases.tsv")).unwrap());
+    assert!(!rows.is_empty());
+    for r in &rows {
+        assert_eq!(r["treatment"], "plug_in", "{r:?}");
+        assert_eq!(r["scenario"], "(none)", "{r:?}");
+        for c in ["fit_rhat_max", "fit_ess_min", "rhat_mean", "ess_mean", "rhat_pred", "ess_pred"] {
+            assert_eq!(r[c], "", "{c} is empty for a fixed point: {r:?}");
+        }
+    }
+    assert!(rows.iter().any(|r| r["horizon"] == "one_step") && rows.iter().any(|r| r["horizon"] == "free_forward"));
+    let ff: Vec<&BTreeMap<String, String>> = rows.iter().filter(|r| r["horizon"] == "free_forward").collect();
+    assert!(ff.iter().all(|r| r["n_draws"] == "4"), "the band pools the four copies");
+    // The roles: every data row trained, every row past them is future.
+    assert!(rows.iter().all(|r| r["role"] == "trained" || r["role"] == "future"), "no row is held out");
+    // `camdl show` says what the bands carry.
+    let show = camdl(cwd.path(), &root, &["show".to_string(), folder.to_string_lossy().into_owned()], &[]);
+    let text = String::from_utf8_lossy(&show.stdout);
+    assert!(show.status.success(), "{}", String::from_utf8_lossy(&show.stderr));
+    assert!(text.contains("no parameter uncertainty"), "{text}");
+}
+
+/// A fixed-point prediction already stored is reused on a repeat, without
+/// being computed again.
+#[test]
+fn a_fixed_point_prediction_is_reused_on_repeat() {
+    let fresh = tempfile::tempdir().unwrap();
+    let root = fresh.path().join("camdl-store");
+    let cwd = workdir(&root);
+    let first = predict_in(cwd.path(), &root, FIXED);
+    assert!(first.status.success(), "{}", String::from_utf8_lossy(&first.stderr));
+    let before = predictions(&root);
+    let second = predict_in(cwd.path(), &root, FIXED);
+    let err = String::from_utf8_lossy(&second.stderr);
+    assert!(second.status.success(), "{err}");
+    assert!(err.contains("reused the stored prediction"), "{err}");
+    assert!(!err.contains("predict: mode="), "nothing is computed on a repeat:\n{err}");
+    assert_eq!(predictions(&root), before, "no prediction is added or changed");
+}
+
+/// The run id of the one fixed-point prediction the line makes in a fresh
+/// copy of the fixture, and its identity record.
+fn fixed_point_id(line: &[&str], files: &[(&str, String)]) -> (String, serde_json::Value) {
+    let fresh = tempfile::tempdir().unwrap();
+    let root = fresh.path().join("camdl-store");
+    let cwd = workdir(&root);
+    for (name, text) in files {
+        std::fs::write(cwd.path().join(name), text).unwrap();
+    }
+    let out = predict_in(cwd.path(), &root, line);
+    assert!(out.status.success(), "{line:?}: {}", String::from_utf8_lossy(&out.stderr));
+    let fixed: Vec<(PathBuf, serde_json::Value)> = predictions(&root)
+        .into_iter()
+        .filter(|(_, id)| id["identity"]["source"].get("FixedPoint").is_some())
+        .collect();
+    assert_eq!(fixed.len(), 1, "{line:?}");
+    (fixed[0].1["run_id"].as_str().unwrap().to_string(), fixed[0].1.clone())
+}
+
+/// The identity follows the point, the conditioned data and the numerics,
+/// and not the held-out rows: changing a row after `--holdout-after`, or
+/// appending one, leaves the run id and the stored data table as they were,
+/// while changing a conditioned row changes them.
+#[test]
+fn the_identity_follows_point_data_and_numerics_and_not_held_out_rows() {
+    let base = fixed_point_id(FIXED, &[]).0;
+    let with = |extra: &[&'static str]| -> Vec<&'static str> { [FIXED, extra].concat() };
+    assert_ne!(fixed_point_id(&with(&["--param", "beta=0.45"]), &[]).0, base, "the point");
+    assert_ne!(fixed_point_id(&with(&["--dt", "0.5"]), &[]).0, base, "the numerics: dt");
+    assert_ne!(fixed_point_id(&with(&["--allow-degenerate-rates"]), &[]).0, base, "the numerics: degenerate rates");
+    assert_ne!(fixed_point_id(&with(&["--binomial", "btrs"]), &[]).0, base, "the numerics: the sampler");
+
+    let daily = std::fs::read_to_string(Path::new(FORECAST).join("daily_cases.tsv")).unwrap();
+    let edit = |at: &str, to: &str| -> String {
+        daily
+            .lines()
+            .map(|l| match l.split_once('\t') {
+                Some((t, _)) if t == at => format!("{t}\t{to}\n"),
+                _ => format!("{l}\n"),
+            })
+            .collect()
+    };
+    let cut = [
+        "predict", "model.camdl", "--params", "point.toml", "--data", "daily_cases=edited.tsv", "--mode", "free_forward",
+        "--n-draws", "4", "--holdout-after", "20",
+    ];
+    let (held, held_id) = fixed_point_id(&cut, &[("edited.tsv", daily.clone())]);
+    assert_ne!(held, base, "--holdout-after cuts the conditioned rows");
+    assert_eq!(held_id["identity"]["source"]["FixedPoint"]["trained_through"], serde_json::json!(20.0), "{held_id:#}");
+    let (moved_late, _) = fixed_point_id(&cut, &[("edited.tsv", edit("30", "999"))]);
+    assert_eq!(moved_late, held, "a held-out row's value is not in the identity");
+    let (appended, _) = fixed_point_id(&cut, &[("edited.tsv", daily.clone() + "64\t1\n")]);
+    assert_eq!(appended, held, "an appended held-out row is not in the identity");
+    let (moved_early, _) = fixed_point_id(&cut, &[("edited.tsv", edit("10", "999"))]);
+    assert_ne!(moved_early, held, "a conditioned row's value is");
+}
+
+/// A held-out row is not stored: the data table a prediction with
+/// `--holdout-after` depends on holds the conditioned lines only.
+#[test]
+fn a_held_out_row_is_not_stored() {
+    let fresh = tempfile::tempdir().unwrap();
+    let root = fresh.path().join("camdl-store");
+    let cwd = workdir(&root);
+    let out = predict_in(cwd.path(), &root, &[FIXED, &["--holdout-after", "20"]].concat());
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let tables: Vec<String> = folders(&root)
+        .into_iter()
+        .filter(|(_, id, _)| id["kind"] == crate::camdl_store::DataTable::KIND)
+        .map(|(p, _, _)| std::fs::read_to_string(p.join(<crate::camdl_store::DataTable as store::ContentArtifact>::FILE)).unwrap())
+        .collect();
+    assert_eq!(tables.len(), 1, "{tables:?}");
+    let times: Vec<f64> = tsv_rows(&tables[0]).iter().map(|r| r["time"].parse().unwrap()).collect();
+    assert_eq!(times.last(), Some(&20.0), "the stored table ends at the cutoff: {times:?}");
+}
+
+/// A free-forward prediction at a fixed point replays what `simulate`
+/// simulates at that point under the same seed. The point is the posterior
+/// mean of `@fit`'s draws; it is repeated once per draw, and each copy runs
+/// under the process seed `simulate --draws` gives the draw at its place. So
+/// the band of the latent quantity `peak_I = max(I)` over the four copies
+/// has, quantile for quantile and digit for digit, the band of the four
+/// simulated trajectories' maxima of `I`, and the copies differ.
+#[test]
+fn a_fixed_point_free_forward_band_replays_what_simulate_simulates() {
+    let fresh = tempfile::tempdir().unwrap();
+    let root = fresh.path().join("camdl-store");
+    let cwd = workdir(&root);
+    let run = |line: &[&str]| camdl(cwd.path(), &root, &line.iter().map(|s| s.to_string()).collect::<Vec<_>>(), &[]);
+    // `@fit`'s run folder, as `camdl show` names it, and its posterior draws.
+    let show = run(&["show", "@fit"]);
+    let text = String::from_utf8_lossy(&show.stdout).into_owned();
+    assert!(show.status.success(), "{}", String::from_utf8_lossy(&show.stderr));
+    let folder = text.lines().skip_while(|l| l.trim() != "path").nth(1).expect("a path").trim().to_string();
+    let folder = cwd.path().join(folder);
+    let mut stack = vec![folder.clone()];
+    let mut found = None;
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap().flatten() {
+            if e.path().is_dir() {
+                stack.push(e.path());
+            } else if e.file_name() == "draws.tsv" {
+                found = Some(e.path());
+            }
+        }
+    }
+    let draws = tsv_rows(&std::fs::read_to_string(found.expect("@fit's draws.tsv")).unwrap());
+    let names = ["beta", "gamma", "rho", "k", "N0", "I0"];
+    let mean = |n: &str| draws.iter().map(|r| r[n].parse::<f64>().unwrap()).sum::<f64>() / draws.len() as f64;
+    let point: Vec<(&str, f64)> = names.iter().map(|n| (*n, mean(n))).collect();
+    let toml_text: String = point.iter().map(|(n, v)| format!("{n} = {v:?}\n")).collect();
+    std::fs::write(cwd.path().join("mean.toml"), &toml_text).unwrap();
+    let mut rows = names.join("\t") + "\n";
+    for _ in 0..4 {
+        rows += &(point.iter().map(|(_, v)| format!("{v:?}")).collect::<Vec<_>>().join("\t") + "\n");
+    }
+    std::fs::write(cwd.path().join("draws4.tsv"), rows).unwrap();
+
+    let out = predict_in(cwd.path(), &root, &[
+        "predict", "model.camdl", "--params", "mean.toml", "--data", "daily_cases=daily_cases.tsv", "--mode", "free_forward",
+        "--n-draws", "4", "--seed", "7",
+    ]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let (folder, _) = predictions(&root)
+        .into_iter()
+        .find(|(_, id)| id["identity"]["source"].get("FixedPoint").is_some())
+        .expect("the fixed-point prediction");
+    let peak = tsv_rows(&std::fs::read_to_string(folder.join("quantities-model/peak_I.tsv")).unwrap());
+    assert_eq!(peak.len(), 1, "{peak:?}");
+    assert_eq!(peak[0]["n_draws"], "4", "{peak:?}");
+    for c in ["rhat", "ess"] {
+        assert!(peak[0].get(c).is_none_or(|v| v.is_empty()), "{c} is empty for a fixed point: {peak:?}");
+    }
+
+    let sim = run(&["simulate", "model.camdl", "--draws", "draws4.tsv", "--seed", "7", "-o", "traj.tsv", "--progress", "none"]);
+    assert!(sim.status.success(), "{}", String::from_utf8_lossy(&sim.stderr));
+    let traj = tsv_rows(&std::fs::read_to_string(cwd.path().join("traj.tsv")).unwrap());
+    let mut peaks: BTreeMap<String, f64> = BTreeMap::new();
+    for r in &traj {
+        let i: f64 = r.get("I").unwrap_or_else(|| panic!("traj.tsv columns: {:?}", r.keys())).parse().unwrap();
+        let e = peaks.entry(r["replicate"].clone()).or_insert(f64::NEG_INFINITY);
+        *e = e.max(i);
+    }
+    assert_eq!(peaks.len(), 4, "four simulated copies: {:?}", peaks.keys());
+    let simulated: Vec<f64> = peaks.values().copied().collect();
+    assert!(simulated.iter().any(|p| *p != simulated[0]), "the copies differ in their process noise: {simulated:?}");
+    let qs = crate::quantile::band(&simulated).unwrap();
+    for ((_, label), q) in crate::quantile::QUANTILE_LEVELS.iter().zip(&qs) {
+        assert_eq!(
+            peak[0][*label],
+            crate::quantile::fmt_value(*q),
+            "the band's {label} of peak_I against simulate's four trajectories at the point ({simulated:?})"
+        );
+    }
+}
+
+/// Each refusal of a fixed-point prediction, and of the flags of one source
+/// given with the other, before anything is stored.
+#[test]
+fn the_fixed_point_refusals() {
+    let cases: &[(&str, Vec<&str>, &[&str])] = &[
+        ("a posterior flag with a model file", [FIXED, &["--by-chain"]].concat(), &["--by-chain", "model file"]),
+        ("--exclude-chains with a model file", [FIXED, &["--exclude-chains", "1"]].concat(), &["--exclude-chains"]),
+        ("a fixed-point flag with a handle", vec!["predict", "@fit", "--params", "point.toml", "--mode", "free_forward"], &["--params", "stored fit run"]),
+        ("no --data", vec!["predict", "model.camdl", "--params", "point.toml"], &["--data"]),
+        ("one-step on ODE", [FIXED, &["--backend", "ode"]].concat().into_iter().map(|s| if s == "free_forward" { "one_step" } else { s }).collect(), &["ODE", "free_forward"]),
+        ("one-step on Gillespie", [FIXED, &["--backend", "gillespie"]].concat().into_iter().map(|s| if s == "free_forward" { "one_step" } else { s }).collect(), &["Gillespie"]),
+        ("a forecast on Gillespie", vec!["predict", "model.camdl", "--params", "point.toml", "--data", "daily_cases=daily_cases.tsv", "--horizon", "2 weeks", "--backend", "gillespie"], &["Gillespie", "forecast"]),
+        ("--particles without a filter", [FIXED, &["--particles", "20"]].concat(), &["--particles"]),
+        ("--design without a forecast", [FIXED, &["--design", "survey=design.tsv"]].concat(), &["--design"]),
+        ("--binomial off chain-binomial", [FIXED, &["--backend", "ode", "--binomial", "btrs"]].concat(), &["--binomial"]),
+        ("a parameter with no value", vec!["predict", "model.camdl", "--data", "daily_cases=daily_cases.tsv"], &["no value"]),
+        ("an undeclared --param", [FIXED, &["--param", "nosuch=1"]].concat(), &["nosuch"]),
+        ("--chains with a model file", [FIXED, &["--chains", "0"]].concat(), &["--chains", "model file"]),
+        (
+            "--realised-design with a model file",
+            vec![
+                "predict", "model.camdl", "--params", "point.toml", "--data", "survey=survey.tsv", "--horizon", "2 weeks",
+                "--realised-design",
+            ],
+            &["--realised-design", "model file"],
+        ),
+    ];
+    for (what, line, says) in cases {
+        let fresh = tempfile::tempdir().unwrap();
+        let root = fresh.path().join("camdl-store");
+        let cwd = workdir(&root);
+        let before: Vec<String> = files_under(&root).into_keys().collect();
+        let out = predict_in(cwd.path(), &root, line);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{what}: ran\n{err}");
+        for s in *says {
+            assert!(err.contains(s), "{what}: the refusal names `{s}`:\n{err}");
+        }
+        let after: Vec<String> = files_under(&root).into_keys().collect();
+        assert_eq!(after, before, "{what}: a refused command writes nothing to the store");
+    }
+}
+
+/// A window-column stream with no emit schedule has nothing to forecast at
+/// from a fixed point, which keeps no held-out rows: it is refused with the
+/// reason a fit with no held-out rows gives.
+#[test]
+fn a_windowed_stream_with_no_rhythm_is_refused_for_a_forecast() {
+    let fresh = tempfile::tempdir().unwrap();
+    let root = fresh.path().join("camdl-store");
+    let cwd = workdir(&root);
+    let model = std::fs::read_to_string(cwd.path().join("model.camdl")).unwrap();
+    let windowed = model.replace(
+        "  daily_cases {\n    columns       { time : time, daily_cases : count }\n    covers        = closing_at(time, 1 'days)\n    projected     = incidence(infection)\n    emit_schedule = every 1 'days\n",
+        "  daily_cases {\n    columns       { start : window_start, stop : window_stop, daily_cases : count }\n    projected     = incidence(infection)\n",
+    );
+    assert_ne!(windowed, model, "the fixture's daily stream moved");
+    std::fs::write(cwd.path().join("windowed.camdl"), windowed).unwrap();
+    let rows = (0..24).fold("start\tstop\tdaily_cases\n".to_string(), |s, t| s + &format!("{t}\t{}\t{}\n", t + 1, 2 + t % 4));
+    std::fs::write(cwd.path().join("windows.tsv"), rows).unwrap();
+    let out = predict_in(cwd.path(), &root, &[
+        "predict", "windowed.camdl", "--params", "point.toml", "--data", "daily_cases=windows.tsv", "--horizon", "1 weeks",
+        "--n-draws", "2", "--particles", "10",
+    ]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "the windowed stream was forecast:\n{err}");
+    assert!(err.contains("daily_cases") && err.contains("which period comes next"), "{err}");
+}
+
+// ── The store and export flags, for both sources ─────────────────────────────
+
+/// A posterior prediction and a fixed-point one, each as a command line.
+fn both_sources() -> [(&'static str, Vec<&'static str>); 2] {
+    [("posterior", vec!["predict", "@fit", "--mode", "free_forward", "--n-draws", "4"]), ("fixed point", FIXED.to_vec())]
+}
+
+/// Every file under `dir`, by its path there, with its bytes.
+fn files_under(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+    let mut out = BTreeMap::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                out.insert(p.strip_prefix(dir).unwrap().to_string_lossy().into_owned(), std::fs::read(&p).unwrap());
+            }
+        }
+    }
+    out
+}
+
+/// `--store DIR` names the store over `CAMDL_STORE`: a run handle is looked
+/// up there and the prediction stored inside the run, and a fixed point's
+/// prediction is stored there; the store `CAMDL_STORE` names is not made.
+#[test]
+fn store_names_the_store_for_both_sources() {
+    for (what, line) in both_sources() {
+        let fresh = tempfile::tempdir().unwrap();
+        let root = fresh.path().join("camdl-store");
+        let cwd = workdir(&root);
+        let elsewhere = fresh.path().join("elsewhere");
+        let root_text = root.to_string_lossy().into_owned();
+        let out = predict_in(cwd.path(), &elsewhere, &[line.as_slice(), &["--store", &root_text]].concat());
+        assert!(out.status.success(), "{what}: {}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(predictions(&root).len(), 1, "{what}: the prediction is in the --store store");
+        assert!(!elsewhere.exists(), "{what}: the CAMDL_STORE store is not made");
+    }
+}
+
+/// `--label NAME` names the invocation: `camdl show @NAME` then shows the
+/// prediction it made.
+#[test]
+fn label_names_the_invocation_for_both_sources() {
+    for (what, line) in both_sources() {
+        let fresh = tempfile::tempdir().unwrap();
+        let root = fresh.path().join("camdl-store");
+        let cwd = workdir(&root);
+        let out = predict_in(cwd.path(), &root, &[line.as_slice(), &["--label", "mine"]].concat());
+        assert!(out.status.success(), "{what}: {}", String::from_utf8_lossy(&out.stderr));
+        let show = camdl(cwd.path(), &root, &["show".to_string(), "@mine".to_string()], &[]);
+        let text = String::from_utf8_lossy(&show.stdout);
+        assert!(show.status.success(), "{what}: {}", String::from_utf8_lossy(&show.stderr));
+        let (folder, _) = &predictions(&root)[0];
+        let name = folder.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(text.contains(&name), "{what}: @mine shows the prediction {name}:\n{text}");
+    }
+}
+
+/// `--force` computes a stored prediction again, moving the stored one to
+/// the store's quarantine; without it a repeat is reused.
+#[test]
+fn force_computes_again_for_both_sources() {
+    for (what, line) in both_sources() {
+        let fresh = tempfile::tempdir().unwrap();
+        let root = fresh.path().join("camdl-store");
+        let cwd = workdir(&root);
+        let first = predict_in(cwd.path(), &root, &line);
+        assert!(first.status.success(), "{what}: {}", String::from_utf8_lossy(&first.stderr));
+        let forced = predict_in(cwd.path(), &root, &[line.as_slice(), &["--force"]].concat());
+        let err = String::from_utf8_lossy(&forced.stderr);
+        assert!(forced.status.success(), "{what}: {err}");
+        assert!(!err.contains("reused the stored prediction") && err.contains("predict: mode="), "{what}: computed again:\n{err}");
+        let quarantined = files_under(&root.join(".quarantine"));
+        assert!(quarantined.keys().any(|k| k.ends_with("predictive.json")), "{what}: the stored prediction is quarantined: {:?}", quarantined.keys());
+        assert_eq!(predictions(&root).len(), 1, "{what}: one prediction stays stored");
+    }
+}
+
+/// `-o DIR` exports a copy of the prediction's result files, byte for byte,
+/// both when it is computed and when it is reused.
+#[test]
+fn output_exports_the_result_files_for_both_sources() {
+    for (what, line) in both_sources() {
+        let fresh = tempfile::tempdir().unwrap();
+        let root = fresh.path().join("camdl-store");
+        let cwd = workdir(&root);
+        for dir in ["computed", "reused"] {
+            let out = predict_in(cwd.path(), &root, &[line.as_slice(), &["-o", dir]].concat());
+            assert!(out.status.success(), "{what} ({dir}): {}", String::from_utf8_lossy(&out.stderr));
+            let (folder, _) = &predictions(&root)[0];
+            let mut stored = files_under(folder);
+            stored.retain(|k, _| k != "identity.json" && k != "run.json");
+            let exported = files_under(&cwd.path().join(dir));
+            assert!(!exported.is_empty(), "{what} ({dir}): nothing exported");
+            assert_eq!(exported, stored, "{what} ({dir}): the export is the stored result files");
+        }
+    }
+}
+
+// ── Review fixes ─────────────────────────────────────────────────────────────
+
+/// A reporting vocabulary is checked against the model file a fixed point
+/// was compiled from with `--integrator` applied to both sides: a
+/// non-default integrator is not a change to the model.
+#[test]
+fn a_vocabulary_is_checked_against_a_fixed_point_whatever_its_integrator() {
+    let fresh = tempfile::tempdir().unwrap();
+    let root = fresh.path().join("camdl-store");
+    let cwd = workdir(&root);
+    let line = [FIXED, &["--backend", "ode", "--integrator", "rk45", "--quantities", "vocab.camdl"]].concat();
+    let out = predict_in(cwd.path(), &root, &line);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    assert!(!err.contains("this fit"), "a fixed point is not a fit:\n{err}");
+    let (folder, _) = &predictions(&root)[0];
+    assert!(files_under(folder).keys().any(|k| k.ends_with("peak_R.tsv")), "the vocabulary's quantity is written");
+}
+
+/// A stored prediction whose report records a deterministic failure fails
+/// a rerun that reuses it as it failed the run that computed it: exit 1,
+/// with the failure named, for both sources.
+#[test]
+fn a_reused_prediction_with_failures_exits_1_for_both_sources() {
+    let fresh = tempfile::tempdir().unwrap();
+    let root = fresh.path().join("camdl-store");
+    let cwd = workdir(&root);
+    // A posterior fit of the daily cases alone, so a stream the fit did not
+    // bind can be asked for, as the fixed point's data binds the daily cases
+    // alone.
+    let daily_only = FIT
+        .replace("weekly_cases = \"weekly_cases.tsv\"\n", "")
+        .replace("survey = \"survey.tsv\"\n", "");
+    std::fs::write(cwd.path().join("fit_daily.toml"), daily_only).unwrap();
+    let fitted = camdl(
+        cwd.path(),
+        &root,
+        &["fit", "run", "fit_daily.toml", "--label", "daily", "--progress", "none"].map(String::from),
+        &[],
+    );
+    assert!(fitted.status.success(), "{}", String::from_utf8_lossy(&fitted.stderr));
+    let posterior: Vec<&str> = vec!["predict", "@daily", "--mode", "free_forward", "--n-draws", "4"];
+    for (what, line) in [("posterior", posterior), ("fixed point", FIXED.to_vec())] {
+        // `--stream weekly_cases` asks for a stream with no bound data: a
+        // deterministic failure, recorded, with the daily cases still written.
+        let line = [line.as_slice(), &["--stream", "daily_cases", "--stream", "weekly_cases"]].concat();
+        let first = predict_in(cwd.path(), &root, &line);
+        let err = String::from_utf8_lossy(&first.stderr);
+        assert_eq!(first.status.code(), Some(1), "{what}: the computing run fails:\n{err}");
+        assert!(err.contains("weekly_cases"), "{what}: {err}");
+        let second = predict_in(cwd.path(), &root, &line);
+        let err = String::from_utf8_lossy(&second.stderr);
+        assert!(err.contains("reused the stored prediction"), "{what}: {err}");
+        assert_eq!(second.status.code(), Some(1), "{what}: the reusing run fails too:\n{err}");
+        assert!(err.contains("✗") && err.contains("weekly_cases"), "{what}: the failure is named:\n{err}");
+    }
+}
+
+/// `--no-licm` on a posterior prediction reaches only a `--quantities`
+/// vocabulary's compile, which is checked against the fit's with hoisting
+/// written back: with and without it, one prediction with one set of bytes.
+#[test]
+fn no_licm_changes_no_posterior_prediction() {
+    let (off, on) = crate::input_fixtures::predict_no_licm();
+    let h = Harness { base: off.clone() };
+    let a = h.run(&off, None).unwrap();
+    let b = h.run(&on, None).unwrap();
+    let ids = |o: &Observed| o.results.iter().map(|r| (r.kind.clone(), r.run_id, r.files.clone())).collect::<Vec<_>>();
+    assert!(!a.results.is_empty());
+    assert_eq!(ids(&a), ids(&b), "--no-licm moved a posterior prediction");
+}

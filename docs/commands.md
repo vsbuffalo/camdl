@@ -29,11 +29,12 @@ transform. A few commands delegate to the compiler.
 
 ### Produce inference artifacts
 
-| Command   | Produces                                                                                                                                                                                                                                   |
-| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `fit run` | Fit a `fit.toml`'s problem with its one `[method]` — an MLE (`if2`, the NLopt optimizers), a posterior (`pgas`, `pmmh`, `mh`) or a filter evaluation (`pfilter`), with its diagnostics. The production path.                               |
-| `pfilter` | A log-likelihood at _fixed_ parameters via a bootstrap particle filter (no estimation); with `--sweep-file`, one per row of a design file — see [Evaluate the model over a parameter design](#evaluate-the-model-over-a-parameter-design). |
-| `profile` | A profile-likelihood curve over a grid of one or more focal parameters — per-cell IF2 (`chain_binomial`) or an `nl-*` optimizer (`ode`).                                                                                                   |
+| Command   | Produces                                                                                                                                                                                                                                                      |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fit run` | Fit a `fit.toml`'s problem with its one `[method]` — an MLE (`if2`, the NLopt optimizers), a posterior (`pgas`, `pmmh`, `mh`) or a filter evaluation (`pfilter`), with its diagnostics. The production path.                                                  |
+| `pfilter` | A log-likelihood at _fixed_ parameters via a bootstrap particle filter (no estimation); with `--sweep-file`, one per row of a design file — see [Evaluate the model over a parameter design](#evaluate-the-model-over-a-parameter-design).                    |
+| `profile` | A profile-likelihood curve over a grid of one or more focal parameters — per-cell IF2 (`chain_binomial`) or an `nl-*` optimizer (`ode`).                                                                                                                      |
+| `predict` | Bands of a stored fit run's posterior (`camdl predict @run`), or of one point given with a model file (`camdl predict MODEL --params FILE --data ...`): free-forward, one-step or a forecast — see [Predict from a fixed point](#predict-from-a-fixed-point). |
 
 ### Read, display, compare
 
@@ -358,6 +359,63 @@ unconverged fit launders its multi-modality into this one, and
 `--allow-nonconverged-source` records the choice to do it anyway. Every
 multi-chain sampler writes `chain_starts.tsv`, the record of where each chain
 actually began.
+
+### Predict from a fixed point
+
+`camdl predict` takes a model file in place of a run handle to predict at one
+point given on the command line: an estimate made elsewhere, an optimizer fit's
+estimate (`camdl fit summary <run> --params-only`), or values from the
+literature.
+
+```bash
+camdl predict seir.camdl --params mle.toml --data cases=cases.tsv \
+  --holdout-after 2026-03-01 --horizon '4 weeks' --scenario school_closure
+```
+
+The point is the model's values, each `--params` file in order, then each
+`--param NAME=VALUE`; a parameter with no value after all of them is refused.
+`--data` is required in every mode, bound as `pfilter` binds it, and the streams
+and rows predicted are the bound streams' rows. `--holdout-after` has the
+grammar and the cut of `fit.toml`'s `[data] holdout_after`: the rows after it
+are parsed to find the cut, so a malformed one is refused, and are then neither
+stored nor used; a forecast starts at the end of the rows before it. A
+`last_obs - …` cut resolves over the whole bound files, held-out rows included,
+as a fit's does. Without it every bound row is conditioned on. `--table`,
+`--backend`, `--dt`, `--integrator`, `--binomial` and `--allow-degenerate-rates`
+mean what they mean for `simulate` and `pfilter`. `--time-format` checks each
+`--data` file's time column against the format given and refuses one it does not
+hold; the reads after it detect the format from the column, so it does not
+silence W326.
+
+The point is repeated `--n-draws` times (default 200), each copy under its own
+seed derived from `--seed`, and every mode pools over the copies as it pools
+over a posterior's draws: free-forward runs one replay per copy, one-step and
+forecast one filter per copy, pooled over particles (default 500) and copies.
+The bands therefore carry process and observation noise and no parameter
+uncertainty. Every row's `treatment` is `plug_in`, the arm with no scenario is
+named `(none)`, and the columns that compare chains or count effective draws are
+empty. `camdl show` says that the bands carry no parameter uncertainty.
+
+The prediction is stored at `prediction/<model>-<12 hex>/<mode>-<12 hex>/`,
+grouped by the compiled model, with the compile and each stream's conditioned
+rows stored as the results it depends on. A repeat with the same inputs reuses
+it without computing it again.
+
+Both forms take the store flags every stored command takes. `--store DIR` names
+the run store, over `CAMDL_STORE` and `./camdl-store`: a fixed-point prediction
+is stored there, and a run handle is looked up there (a run named by its folder
+is predicted in the store holding it). `--label NAME` names the invocation, so
+`camdl show @NAME` finds the prediction. `--force` computes a stored prediction
+again, moving the stored one to the store's `.quarantine/`. `-o DIR` exports a
+copy of the prediction's result files into `DIR`, at their paths in its folder,
+whether the prediction was computed or reused.
+
+The flags that read a posterior (`--by-chain`, `--exclude-chains`, `--chains`,
+`--realised-design`) are refused with a model file, and the flags that pose a
+fixed point are refused with a run handle, whose problem holds its model, data
+and numerics. The other refusals are those of a posterior prediction: one-step
+on ODE or Gillespie, a forecast on Gillespie, `--particles` where no filter
+runs, `--design` outside a forecast.
 
 ### Sweeps and scenario grids: `simulate --sweep`
 

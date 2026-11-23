@@ -19,7 +19,7 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// The schema tag of `report.json`. Bumped by any change to the failure shape,
 /// since it is the only thing telling a consumer what contract the file was
@@ -30,7 +30,7 @@ pub const REPORT_SCHEMA: &str = "camdl.predict-report/v2";
 ///
 /// Serializes externally-tagged: `"free_forward"` for the unit variant,
 /// `{"quantity": "<name>"}` for the named one.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Site {
     /// The free-forward tail as a whole — the replay past the last observation.
@@ -77,7 +77,7 @@ impl Site {
 /// `EvaluationFailed` is the whole-site kind — a horizon or a replay refused
 /// and no single draw is to blame. `NonFinite` names the draw whose value could
 /// not be published.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DeterministicFailure {
     /// A step of the run refused: an unresolvable horizon, a scenario window
@@ -122,7 +122,7 @@ impl DeterministicFailure {
 /// failing it (D76). A skipped stream was never eligible, so it is named and
 /// the exit status is unaffected. A stream that was eligible, or was asked for
 /// by `--stream`, and cannot be produced is a [`DeterministicFailure`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SkipReason {
     /// The fit bound no data file to the stream's source, so the stream has
@@ -152,7 +152,7 @@ impl SkipReason {
 }
 
 /// A stream left out of a predictive, and why.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkippedStream {
     /// The leaf (observation block) name.
     pub stream: String,
@@ -203,6 +203,18 @@ pub fn write_report(
         .map_err(|e| format!("serializing the predictive report: {e}"))?;
     std::fs::write(&path, text).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     Ok(path)
+}
+
+/// The failures and skipped streams a `report.json` [`write_report`] wrote
+/// records, read back from its bytes.
+pub fn read_report(bytes: &[u8]) -> Result<(Vec<DeterministicFailure>, Vec<SkippedStream>), String> {
+    #[derive(Deserialize)]
+    struct Report {
+        failures: Vec<DeterministicFailure>,
+        skipped: Vec<SkippedStream>,
+    }
+    let r: Report = serde_json::from_slice(bytes).map_err(|e| format!("reading the predictive report: {e}"))?;
+    Ok((r.failures, r.skipped))
 }
 
 #[cfg(test)]

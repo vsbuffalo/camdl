@@ -425,12 +425,43 @@ pub(crate) struct PredictOptions {
     pub design: BTreeMap<String, Dep<crate::camdl_store::DataTable>>,
 }
 
+/// The numerics a fixed-point prediction runs under: what a posterior
+/// prediction reads from its fit problem's settings. The ODE integrator is
+/// not here: `--integrator` is written into the compiled model before it is
+/// keyed, as `simulate` writes it.
+#[derive(store::Identity, Clone, Debug)]
+#[identity(tag = "predict_numerics", version = 1)]
+pub(crate) struct Numerics {
+    pub backend: crate::sim_store::Backend,
+    /// The step, by the one dt rule (`crate::dt_rule`).
+    pub dt: Finite,
+    /// The chain-binomial draws' sampler; BTPE on the other backends.
+    pub binomial: crate::pfilter_store::Binomial,
+    /// A collapsing rate is 0 instead of an error.
+    pub allow_degenerate_rates: bool,
+}
+
 /// Where a prediction's parameters come from.
 #[derive(store::Identity, Clone, Debug)]
 #[identity(tag = "parameter_source", version = 1)]
 pub(crate) enum ParameterSource {
     /// A fit run's draws, and the problem they were fitted on.
     Posterior { draws: Dep<FitRun>, problem: Dep<FitProblem> },
+    /// One point given on the command line, repeated once per draw: the
+    /// bands carry process and observation noise and no parameter
+    /// uncertainty.
+    FixedPoint {
+        /// The compile rewritten from the data (anchored times, bound
+        /// tables, `--integrator`).
+        model: Dep<CompiledModel>,
+        /// Every parameter's value: the model's, then each `--params` file,
+        /// then each `--param`.
+        params: ResolvedParams,
+        numerics: Numerics,
+        /// `--holdout-after` in model time: the rows the point was fitted to
+        /// end here. `None` when every bound row is conditioned on.
+        trained_through: Option<Finite>,
+    },
 }
 
 /// One prediction.
@@ -467,8 +498,11 @@ impl Artifact for Prediction {
 
 impl Primary for Prediction {
     fn layout(id: &PredictIdentity, labels: &PredictionLabels) -> Placed {
-        let ParameterSource::Posterior { draws, .. } = &id.source;
-        Layout::inside(draws.id(), "predict").result(&labels.mode)
+        match &id.source {
+            ParameterSource::Posterior { draws, .. } => Layout::inside(draws.id(), "predict"),
+            ParameterSource::FixedPoint { model, .. } => Layout::in_kind().group(&labels.model, model),
+        }
+        .result(&labels.mode)
     }
 }
 
@@ -507,6 +541,13 @@ pub(crate) struct ResolvedProblem {
     /// A real-data fit's `[synthetic]` table (`fit recovery`'s truth), kept
     /// as provenance files outside the identity.
     recovery: Option<RecoveryTruth>,
+}
+
+impl ResolvedProblem {
+    /// Which rows trained, as `partition.json` records it.
+    pub(crate) fn partition(&self) -> &TrainingPartitionRecord {
+        &self.partition
+    }
 }
 
 /// Where a problem's observation data came from.

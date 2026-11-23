@@ -526,8 +526,10 @@ all applicable for the fit's backend:
 message — such a fit returns one best-fit point, not a distribution, so there is
 no posterior band to draw; get its parameters with
 `camdl fit summary <run>
---params-only` and run a plug-in
-`camdl simulate --params …` instead.
+--params-only` and predict at that point with
+`camdl predict <model> --params params.toml --data …`, whose bands carry process
+and observation noise and no parameter uncertainty (`treatment` is `plug_in`;
+see [Predict from a fixed point](commands.md#predict-from-a-fixed-point)).
 
 If the model declares a `quantities {}` block, `camdl predict` also bands each
 derived quantity over the same posterior draws into

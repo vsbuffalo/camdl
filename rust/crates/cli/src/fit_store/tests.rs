@@ -365,6 +365,28 @@ fn the_tree_is_the_layout() {
     assert!(named(&q[7], "forecast"), "{q:?}");
 }
 
+/// A posterior prediction's parameter source encodes as it did when the
+/// source had no other variant: an enum writes its variant's name first, so
+/// adding `FixedPoint` re-keys no stored posterior prediction. Checked
+/// against an enum with the same tag and version and only the posterior
+/// variant.
+#[test]
+fn the_fixed_point_variant_re_keys_no_posterior_prediction() {
+    #[derive(store::Identity, Clone, Debug)]
+    #[identity(tag = "parameter_source", version = 1)]
+    enum PosteriorOnly {
+        Posterior { draws: Dep<FitRun>, problem: Dep<FitProblem> },
+    }
+    let fx = fixture();
+    let o = open();
+    let config = fx.config(&fit_toml("file = \"wide.tsv\"", 0.02));
+    let problem = store_problem(&o, &resolved(&fx, &o, &config));
+    let run = store_run(&o, &problem, &config);
+    let now = ParameterSource::Posterior { draws: run.dep_all(), problem: problem.dep_all() };
+    let before = PosteriorOnly::Posterior { draws: run.dep_all(), problem: problem.dep_all() };
+    assert_eq!(now.key(), before.key());
+}
+
 /// `rw_sd`, `perturb_only_at_t0` and `start` are the run's: two fit files
 /// that differ only in `rw_sd` pose one problem and are two runs on it, and
 /// a run read back carries its own `rw_sd` and method.

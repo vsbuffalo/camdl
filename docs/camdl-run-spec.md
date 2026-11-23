@@ -652,6 +652,38 @@ a JSON manifest for each that records the run's full `run_id`. Two runs of one
 problem keep separate predictions, and each file is attributable to the run it
 replays.
 
+`camdl predict MODEL`, with a `.camdl` or `.ir.json` model file in place of the
+handle, predicts at one point: the model's values, each `--params` file, then
+each `--param` (§1.3, without a fit config's tier). `--data` is required and
+bound as `pfilter` binds it; `--holdout-after` cuts each bound file as a fit
+problem's `inputs/` are cut (§2.2.1): every row is parsed to find the cut, so a
+malformed held-out row is refused, and a held-out row is then neither stored nor
+used (a `last_obs - …` cut resolves over the whole files, held-out rows
+included, as a fit's does); `--table`, `--backend`, `--dt`, `--integrator`,
+`--binomial` and `--allow-degenerate-rates` are the numerics `simulate`
+resolves. The point is repeated `--n-draws` times (default 200), each copy under
+the seed a posterior draw at its place gets, and every mode pools over the
+copies as it pools over a posterior, so the bands carry no parameter
+uncertainty. The prediction is stored at
+`prediction/<model>-<12 hex>/<mode>-<12 hex>/`, grouped by the compiled model.
+Its identity is the compiled model rewritten from the data (anchored times,
+bound tables, `--integrator`), every parameter's value, the numerics (backend,
+step, binomial sampler, `allow_degenerate_rates`), the cut in model time, each
+stream's conditioned rows as a stored data table, the model's quantities, and
+the same options as a posterior prediction's; a held-out row's value is in none
+of them. `--no-licm` changes the compiled model and so re-keys it. A posterior
+flag (`--by-chain`, `--exclude-chains`, `--chains`, `--realised-design`) is
+refused with a model file, and a fixed-point flag with a handle. A window-column
+stream with no emit schedule has no forecast target, since no held-out row is
+kept, and is refused for a forecast. Contrasts, which fork from a fit's saved
+smoothing paths, are skipped with a notice.
+
+Both forms take `--store DIR` (the store a fixed-point prediction is stored in
+and a run handle is looked up in, over `CAMDL_STORE`; a folder handle names its
+own store), `--label`, `--force` (compute a stored prediction again) and
+`-o DIR`, which exports a copy of the stored result files into `DIR`. These are
+requests to the store and an export, and change no identity.
+
 A prediction's identity is the run whose draws it uses and that run's problem,
 the stored training data the filter conditions on, by stream, and every predict
 option that changes the output, resolved to the values used: the mode
@@ -670,20 +702,21 @@ a prediction. A forecast from a stored fit reads its targets from the problem's
 `held_out/` files, computes no held-out score, and refuses `--realised-design`,
 whose design values are held-out values; no command scores the held-out rows of
 a stored fit (`compare` refuses them, Appendix A, `camdl compare`). A rerun of
-`camdl predict` with the same inputs is served from the store.
-`predictive.json`, `observed.json` and `forecast.json` record the key under
-`address_key` and the options under `options`. Every manifest of a prediction
-(`predictive.json`, `observed.json`, the quantities manifest, `report.json`,
-`forecast.json`) records the engine that made it as `run.json` does:
-`engine_version`, the build fingerprint, and `engine_switches`, absent when no
-switch was on. `fit table --quantity` reads the address its own free-forward
-derivation writes. Inside the directory, `--exclude-chains` and `--quantities`
-also name the files (`predictive-excl3/`, `quantities-<key8>/`), so a
-chain-subset or other-vocabulary table says so in its name. A forecast's files
-carry no such suffix (D86): `forecast.json`, `forecast-samples.tsv`, `forecast/`
-and `report.json` keep their names, the directory alone is keyed by the
-selection, and `forecast.json` states `options.excluded_chains` (`[]` for the
-full cloud).
+`camdl predict` with the same inputs is served from the store, without computing
+the prediction again for every mode but a forecast, whose identity holds the
+target set it computes. `predictive.json`, `observed.json` and `forecast.json`
+record the key under `address_key` and the options under `options`. Every
+manifest of a prediction (`predictive.json`, `observed.json`, the quantities
+manifest, `report.json`, `forecast.json`) records the engine that made it as
+`run.json` does: `engine_version`, the build fingerprint, and `engine_switches`,
+absent when no switch was on. `fit table --quantity` reads the address its own
+free-forward derivation writes. Inside the directory, `--exclude-chains` and
+`--quantities` also name the files (`predictive-excl3/`, `quantities-<key8>/`),
+so a chain-subset or other-vocabulary table says so in its name. A forecast's
+files carry no such suffix (D86): `forecast.json`, `forecast-samples.tsv`,
+`forecast/` and `report.json` keep their names, the directory alone is keyed by
+the selection, and `forecast.json` states `options.excluded_chains` (`[]` for
+the full cloud).
 
 The free-forward replay projects each row off its own recorded trajectories, so
 it records a snapshot at every time a row reads — each data time and each
@@ -766,17 +799,19 @@ draws the fit made. `simulate` does not follow this rule when it replays a fit
 (`--draws posterior --fit FIT`, `--init-state fit`): it draws with BTPE whatever
 the fit ran.
 
-The `treatment` column is `posterior` when the band averages over the whole draw
-cloud — the only treatment the band-builder accepts today, enforced by typing
-rather than a runtime check, so a posterior-labelled band over a single point
-estimate is unrepresentable — with `plug_in` reserved. `fit_rhat_max`/
-`fit_ess_min` are the producing leaf's **rank-normalized split R̂** and
-**bulk-ESS** of Vehtari et al. (2021) — the maximum R̂ and the minimum ESS over
-the leaf's estimated parameters — empty when the leaf reported none, and
-`fit_ess_min` withheld entirely whenever any assessed parameter has no pooled
-ESS rather than minimized over the ones that do. Their names say whose numbers
-they are: the fit's worst parameter, repeated identically on every row —
-provenance, not a statement about the value beside them.
+The `treatment` column is `posterior` when the band averages over a fit run's
+draw cloud and `plug_in` when it pools copies of one fixed point. The label is
+read off the cloud, which is built either from a fit's draws or from a point's
+copies, so a posterior-labelled band over a single point is unrepresentable. A
+`plug_in` row leaves `fit_rhat_max`, `fit_ess_min` and the per-row `rhat_*` and
+`ess_*` cells empty. `fit_rhat_max`/ `fit_ess_min` are the producing leaf's
+**rank-normalized split R̂** and **bulk-ESS** of Vehtari et al. (2021) — the
+maximum R̂ and the minimum ESS over the leaf's estimated parameters — empty when
+the leaf reported none, and `fit_ess_min` withheld entirely whenever any
+assessed parameter has no pooled ESS rather than minimized over the ones that
+do. Their names say whose numbers they are: the fit's worst parameter, repeated
+identically on every row — provenance, not a statement about the value beside
+them.
 
 Beside them sit two per-row convergence channels, both reducing the same draws
 the quantiles pool over but grouped by the chain each draw came from.

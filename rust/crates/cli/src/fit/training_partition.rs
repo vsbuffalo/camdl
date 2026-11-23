@@ -130,6 +130,17 @@ pub(crate) enum WholeFiles {
     SeparateHoldoutFiles,
 }
 
+/// Where the rows a prediction's parameters were fitted to are recorded.
+#[derive(Debug, Clone)]
+pub(crate) enum RecordedPartition {
+    /// The `fit.meta.json` in this directory, a copy of a stored fit run's
+    /// files.
+    FitSegment(std::path::PathBuf),
+    /// The partition a fixed-point prediction's `--holdout-after` gives, cut
+    /// by the rule a fit problem's is.
+    Given(crate::run_meta::TrainingPartitionRecord),
+}
+
 /// One stream's training rows: rows `[0, rows)` of the stream, and their
 /// digest.
 #[derive(Debug, Clone, PartialEq)]
@@ -302,6 +313,18 @@ impl TrainingPartition {
                 record.extent.t, partition.extent));
         }
         Ok(partition)
+    }
+
+    /// The partition `recorded` names, with its record, checked against
+    /// `rows` ([`Self::from_record`]).
+    pub(crate) fn read(
+        recorded: &RecordedPartition,
+        rows: &BTreeMap<String, Vec<ObservedRow>>,
+    ) -> Result<(crate::run_meta::TrainingPartitionRecord, Self), String> {
+        match recorded {
+            RecordedPartition::FitSegment(segment) => Self::read_recorded(segment, rows),
+            RecordedPartition::Given(record) => Ok((record.clone(), Self::from_record(record, rows)?)),
+        }
     }
 
     /// The partition the fit at `segment` recorded in its `fit.meta.json`,
