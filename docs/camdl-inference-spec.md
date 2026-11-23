@@ -1148,6 +1148,9 @@ camdl pfilter model.camdl --data cases.tsv \
 Emits only the winner θ̂ as a flat parameter TOML — no headers beyond a single
 `# camdl ...` comment, no `[provenance]` block, no metadata. A fit carries one
 method leaf per seed; the last completed leaf in label order is the one emitted.
+The θ̂ is read from the run's `final_params.toml`, which IF2 writes, else from
+its `mle_params.toml`, which an NLopt run writes alone. A run of a posterior
+sampler (PMMH, PGAS, MH) writes neither, and is refused.
 
 Use case: re-run the pfilter under a higher particle budget or a different RNG
 seed at the reported MLE, without hand-stripping metadata from

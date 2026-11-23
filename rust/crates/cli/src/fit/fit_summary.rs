@@ -1145,7 +1145,22 @@ fn dump_params_only(
     };
     let target_method = target.name.clone();
     let method_path = target.method_dir.clone();
-    let path = format!("{}/final_params.toml", method_path.to_string_lossy());
+    // The winner θ̂: IF2 writes it to `final_params.toml` (and the same values
+    // to `mle_params.toml`); an NLopt run writes `mle_params.toml` alone. The
+    // loader skips the latter's `[provenance]` block.
+    let final_path = method_path.join("final_params.toml");
+    let mle_path = method_path.join("mle_params.toml");
+    let path = match (final_path.exists(), mle_path.exists()) {
+        (true, _) => final_path,
+        (false, true) => mle_path,
+        (false, false) => {
+            return Err(format!(
+                "{} holds no winner θ̂: neither final_params.toml (IF2) nor mle_params.toml (NLopt) is there",
+                crate::fit::report::display_path(&method_path)
+            ))
+        }
+    };
+    let path = path.to_string_lossy().into_owned();
     let params = crate::util::load_params_toml(&path)
         .map_err(|e| format!("cannot read {}: {}", path, e))?;
     let mut keys: Vec<&String> = params.keys().collect();
@@ -3469,6 +3484,29 @@ mod tests {
         assert!((loaded["R0"] - 56.0).abs() < 1e-9);
         assert!((loaded["sigma"] - 0.08).abs() < 1e-9);
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An NLopt run writes its winner θ̂ to `mle_params.toml` alone, with a
+    /// `[provenance]` block after the values; `--params-only` prints the
+    /// values from it, and the block is not printed.
+    #[test]
+    fn params_only_reads_the_mle_file_of_a_run_with_no_final_params() {
+        let state = synthetic_fit_state();
+        let dir = make_fit_dir("nl-sbplx", &state, &[("R0", 56.0), ("sigma", 0.08), ("gamma", 0.08)]);
+        std::fs::remove_file(dir.join("final_params.toml")).unwrap();
+        std::fs::write(
+            dir.join("mle_params.toml"),
+            "R0 = 56.0\nsigma = 0.08\ngamma = 0.08\n\n[provenance]\nmethod = \"nl-sbplx\"\nseed = 1\n",
+        )
+        .unwrap();
+        let methods = discover_methods(&dir);
+        let s = dump_params_only(&dir.to_string_lossy(), &methods).unwrap();
+        assert!(!s.contains("[provenance]") && !s.contains("seed"), "{s}");
+        let tmp = dir.join("emitted.toml");
+        std::fs::write(&tmp, &s).unwrap();
+        let loaded = crate::util::load_params_toml(tmp.to_str().unwrap()).unwrap();
+        assert!((loaded["R0"] - 56.0).abs() < 1e-9 && (loaded["gamma"] - 0.08).abs() < 1e-9, "{loaded:?}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
