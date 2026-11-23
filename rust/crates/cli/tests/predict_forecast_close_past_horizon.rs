@@ -104,7 +104,7 @@ fn q50_by_time(tsv: &str, horizon: Option<&str>) -> Vec<(f64, f64)> {
             .unwrap_or_else(|| panic!("column {name} in header {header:?}"))
     };
     let (c_time, c_q50) = (ix("time"), ix("q50"));
-    let c_hor = horizon.map(|_| ix("horizon"));
+    let c_hor = horizon.map(|_| ix("mode"));
     let mut out = Vec::new();
     for l in lines {
         let c: Vec<&str> = l.split('\t').collect();

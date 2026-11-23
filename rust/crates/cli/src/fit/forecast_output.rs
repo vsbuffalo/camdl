@@ -6,10 +6,10 @@
 //! builds the [`ForecastPlan`], runs the [`fixed_origin_forecast`] driver over
 //! the posterior draws, and writes the forecast artifact:
 //!
-//! - `forecast/<stream>.tsv`: one row per target, with its period, horizon,
-//!   lead time, quantiles and mean;
+//! - `forecast/<stream>.tsv`: one row per target, with its period, mode,
+//!   horizon, lead time, quantity, quantiles and mean;
 //! - `forecast-samples.tsv`: joint samples, each a complete trajectory across
-//!   every target (D54);
+//!   every target (D54), with the quantity each value is a draw of;
 //! - `forecast.json`: the plan (origin, reach, targets and where each stream's
 //!   came from), the parameter set and the state set, and the calendar.
 
@@ -25,7 +25,7 @@ use crate::fit::forecast_plan::{parse_reach, DesignInput, ForecastPlan, HeldOut,
 use crate::fit::observed_rows::{Measures, ObservedRow};
 use crate::fit::predict::PosteriorDraws;
 use crate::fit::training_partition::TrainingPartition;
-use crate::quantile::{band, fmt_time, fmt_value, QUANTILE_LEVELS};
+use crate::quantile::{band, fmt_time, fmt_value, Quantity, QUANTILE_LEVELS};
 
 /// Joint samples written per posterior draw, evenly strided over its
 /// particles. Every particle is a draw from the same predictive (equal weights
@@ -52,7 +52,7 @@ impl DrawRef {
 }
 
 /// The `schema` tag of `forecast.json`.
-pub(crate) const FORECAST_SCHEMA: &str = "camdl.forecast/v4";
+pub(crate) const FORECAST_SCHEMA: &str = "camdl.forecast/v5";
 
 /// The file [`write_manifest`] writes in a forecast's directory.
 pub(crate) const FORECAST_MANIFEST: &str = "forecast.json";
@@ -681,7 +681,7 @@ fn write_tables(
         let dims = crate::fit::predict::index_dims_for(schema, source, &stratum_of(first).into_iter().map(|(d, _)| d).collect::<Vec<_>>());
         let mut header: Vec<String> = arm_header(&sweep);
         header.extend(dims.iter().cloned());
-        header.extend(["t_start", "t_stop", "horizon", "lead", "mean"]
+        header.extend(["t_start", "t_stop", "mode", "horizon", "lead", "quantity", "mean"]
             .map(String::from));
         header.extend(QUANTILE_LEVELS.iter().map(|(_, l)| l.to_string()));
         header.push("n_samples".into());
@@ -698,8 +698,10 @@ fn write_tables(
                 .map(|d| stratum.iter().find(|(dd, _)| dd == d).map(|(_, l)| l.clone()).unwrap_or_default()));
             cells.push(fmt_time(t.measures.start()));
             cells.push(fmt_time(t.measures.end()));
+            cells.push(FORECAST_MODE.to_string());
             cells.push(t.horizon.to_string());
             cells.push(fmt_time(t.lead));
+            cells.push(FORECAST_QUANTITY.as_str().to_string());
             cells.push(fmt_value(mean));
             cells.extend(qs.iter().map(|q| fmt_value(*q)));
             cells.push(ys.len().to_string());
@@ -714,7 +716,7 @@ fn write_tables(
     let n = fc0.n_particles;
     let per = FORECAST_SAMPLES_PER_DRAW.min(n);
     let mut tsv = arm_header(&sweep).join("\t")
-        + "\tsample\tchain\tdraw\tcloud_row\tparticle\tstream\tt_start\tt_stop\thorizon\tvalue\n";
+        + "\tsample\tchain\tdraw\tcloud_row\tparticle\tstream\tt_start\tt_stop\thorizon\tquantity\tvalue\n";
     for arm in arms {
         let lead = arm_cells(&arm.label, &sweep).join("\t");
         let mut sample = 0usize;
@@ -726,9 +728,9 @@ fn write_tables(
             for j in 0..per {
                 let p = j * n / per;
                 for (k, t) in targets.iter().enumerate() {
-                    tsv += &format!("{lead}\t{sample}\t{chain}\t{draw}\t{}\t{p}\t{}\t{}\t{}\t{}\t{}\n",
+                    tsv += &format!("{lead}\t{sample}\t{chain}\t{draw}\t{}\t{p}\t{}\t{}\t{}\t{}\t{}\t{}\n",
                         r.cloud_row, t.stream, fmt_time(t.measures.start()), fmt_time(t.measures.end()),
-                        t.horizon, fmt_value(arm.fc.draws[k][d * n + p]));
+                        t.horizon, FORECAST_QUANTITY.as_str(), fmt_value(arm.fc.draws[k][d * n + p]));
                 }
                 sample += 1;
             }
@@ -742,6 +744,13 @@ fn write_tables(
     }
     Ok(written)
 }
+
+/// The `mode` cell of every row of `forecast/<stream>.tsv`.
+const FORECAST_MODE: &str = crate::fit_store::PredictMode::Forecast.label();
+
+/// What the forecast's bands and samples are of: the driver draws each
+/// target's value from the observation model at each particle.
+const FORECAST_QUANTITY: Quantity = Quantity::Observation;
 
 /// The file of [`write_contrasts`].
 pub(crate) const FORECAST_CONTRASTS_FILE: &str = "forecast-contrasts.tsv";

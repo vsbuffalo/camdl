@@ -56,7 +56,7 @@ fn times(tsv: &str, horizon: Option<&str>) -> Vec<f64> {
     let header: Vec<&str> = lines.next().expect("header").split('\t').collect();
     let ix = |n: &str| header.iter().position(|h| *h == n).unwrap_or_else(|| panic!("{n} in {header:?}"));
     let c_time = ix("time");
-    let c_hor = horizon.map(|_| ix("horizon"));
+    let c_hor = horizon.map(|_| ix("mode"));
     lines
         .filter_map(|l| {
             let c: Vec<&str> = l.split('\t').collect();

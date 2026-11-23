@@ -4,7 +4,7 @@
 # ///
 """Plot posterior predictive checks from `camdl predict` output.
 
-One row per fit, one column per horizon: `free_forward` (simulated from day 0
+One row per fit, one column per mode: `free_forward` (simulated from day 0
 without the data) and `one_step` (each day predicted from the counts up to the
 day before). Each panel shows the 50% and 90% bands, the median, and the
 observed counts. Writes an SVG.
@@ -27,7 +27,7 @@ import polars as pl
 
 INK = "#010203"  # becomes currentColor, as in plot_prior.py
 BAND = "#2f6f8f"
-HORIZONS = {"free_forward": "free-forward, from day 0", "one_step": "one day ahead"}
+MODES = {"free_forward": "free-forward, from day 0", "one_step": "one day ahead"}
 
 
 def main(out_path: str, fits: list[str]) -> None:
@@ -54,15 +54,15 @@ def main(out_path: str, fits: list[str]) -> None:
         label, directory = spec.split("=", 1)
         pred = pl.read_csv(Path(directory) / "predictive" / "in_bed.tsv", separator="\t")
         obs = pl.read_csv(Path(directory) / "observed" / "in_bed.tsv", separator="\t")
-        for ax, (horizon, title) in zip(row, HORIZONS.items()):
-            band = pred.filter(pl.col("horizon") == horizon).sort("time")
+        for ax, (mode, title) in zip(row, MODES.items()):
+            band = pred.filter(pl.col("mode") == mode).sort("time")
             joined = band.join(obs, on="time")
             inside = ((joined["value"] >= joined["q05"]) & (joined["value"] <= joined["q95"])).sum()
             ax.fill_between(band["time"], band["q05"], band["q95"], color=BAND, alpha=0.18, lw=0)
             ax.fill_between(band["time"], band["q25"], band["q75"], color=BAND, alpha=0.32, lw=0)
             ax.plot(band["time"], band["q50"], color=BAND, lw=1.5)
             ax.plot(obs["time"], obs["value"], "o-", color=INK, ms=4, lw=1.2)
-            # One model: the horizon names the panel. Several: each row's
+            # One model: the mode names the panel. Several: each row's
             # model label tells the rows apart.
             heading = title if len(fits) == 1 else f"{label}: {title}"
             ax.set_title(heading, loc="center", fontsize=13, fontweight="bold")

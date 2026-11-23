@@ -125,7 +125,7 @@ fn a_forecast_starts_at_the_training_extent_and_counts_each_streams_own_periods(
 
     let manifest: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(fdir.join("forecast.json")).unwrap()).unwrap();
-    assert_eq!(manifest["schema"], "camdl.forecast/v4");
+    assert_eq!(manifest["schema"], "camdl.forecast/v5");
     let fit_run = fit_store_support::the_run(&dir.join("results"));
     let identity = fit_store_support::json(&fit_run.join("identity.json"));
     // The engine stamp is spelled as the run's `identity.json` spells it: the
@@ -174,12 +174,16 @@ fn a_forecast_starts_at_the_training_extent_and_counts_each_streams_own_periods(
     assert_eq!((daily[0]["t_start"].as_str(), daily[0]["t_stop"].as_str()), ("24", "25"));
     assert_eq!(daily[27]["horizon"], "27");
     for r in daily.iter().chain(&weekly) {
+        assert_eq!((r["mode"].as_str(), r["quantity"].as_str()), ("forecast", "observation"), "{r:?}");
+    }
+    for r in daily.iter().chain(&weekly) {
         assert_eq!(r["n_samples"], (8 * 100).to_string());
     }
 
     // Joint samples: one value per target per sample.
     let samples = rows(&fdir.join("forecast-samples.tsv"));
     assert_eq!(samples.len(), 8 * 5 * 32);
+    assert!(samples.iter().all(|r| r["quantity"] == "observation"), "every sample is of the observation");
 
     // Each draw is named by its row of the fit's draws.tsv and the
     // (chain, draw) key written there, never by its place in the subsample.

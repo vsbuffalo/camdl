@@ -368,7 +368,7 @@ profile.cached	stderr	line	profile:	3 cells (6 points) stored under
 profile.cached	stdout	line	loglik_spread_starts	starts_n_completed
 profile.refused	stderr	line	error:	--particles is required for an if2 profile
 compare.refused	stderr	line	error:	compare requires either --config FILE or ≥2 stored fit runs (@label, run id or folder)
-predict	stderr	line	predict: free_forward horizon	subsampling 5 of 400 posterior draws (raise with --n-draws)
+predict	stderr	line	predict: free_forward mode	subsampling 5 of 400 posterior draws (raise with --n-draws)
 predict	stderr	line	predict: mode=free_forward	treatment=posterior, 1 scenario(s) [fitted], 1 stream(s), 400 draws from pmmh method 'pmmh'
 predict	stderr	line	wrote	/predictive/cases.tsv
 predict	stderr	line	wrote	/observed/cases.tsv

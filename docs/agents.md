@@ -63,15 +63,15 @@ check -> simulate (sanity) -> synthetic recovery -> choose a method
 The predicted-vs-observed step is **one verb, not a hand-rolled pipeline**:
 `camdl predict @fit --stream <name>` resolves the fit's posterior draws and
 writes a tidy `predictive/<stream>.tsv` (`q05…q95` ribbon + typed
-`horizon`/`treatment` columns, a `role` column saying whether the fit `trained`
-on each row or `held_out` it, the fit's `fit_rhat_max`/`fit_ess_min` stamp, and
-the per-row `rhat_mean`/`rhat_pred` convergence channels — act on `rhat_mean`,
-which observation noise cannot dilute) and `observed/<stream>.tsv` under the run
+`mode`/`treatment` columns, a `role` column saying whether the fit `trained` on
+each row or `held_out` it, the fit's `fit_rhat_max`/`fit_ess_min` stamp, and the
+per-row `rhat_mean`/`rhat_pred` convergence channels — act on `rhat_mean`, which
+observation noise cannot dilute) and `observed/<stream>.tsv` under the run
 directory. Join the two on `(time, <dims>)` and plot — do not glob the run store
 for `trace.tsv`, re-inject fixed params, shell `simulate --draws`, and
 pivot/quantile by hand; that reconstruction is exactly what this verb owns. Omit
-`--mode` for all applicable horizons (chain-binomial → `free_forward` +
-`one_step`; ODE → `free_forward`).
+`--mode` for all applicable modes (chain-binomial → `free_forward` + `one_step`;
+ODE → `free_forward`).
 
 Two reflexes it drills (and you should not import elsewhere): a failing
 convergence gate is _information_, not a thing to tune away; and `Â` (IF2

@@ -91,7 +91,7 @@ fn rows_for<'a>(tsv: &'a str, scenario: &str, horizon: &str) -> Vec<(f64, &'a st
     let mut lines = tsv.lines();
     let header: Vec<&str> = lines.next().expect("header").split('\t').collect();
     let ix = |name: &str| header.iter().position(|h| *h == name).unwrap_or_else(|| panic!("column {name} in header {header:?}"));
-    let (c_scen, c_time, c_hor, c_q50) = (ix("scenario"), ix("time"), ix("horizon"), ix("q50"));
+    let (c_scen, c_time, c_hor, c_q50) = (ix("scenario"), ix("time"), ix("mode"), ix("q50"));
     let (c_q05, c_q95) = (ix("q05"), ix("q95"));
     let mut out = Vec::new();
     for l in lines {

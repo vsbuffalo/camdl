@@ -16,6 +16,33 @@
 pub const QUANTILE_LEVELS: &[(f64, &str)] =
     &[(0.05, "q05"), (0.25, "q25"), (0.50, "q50"), (0.75, "q75"), (0.95, "q95")];
 
+/// Which random quantity of an observation row a band or a sample is of: the
+/// `quantity` column of every prediction table and of `filtered_streams.tsv`.
+///
+/// The two have the same mean. The observation's variance is the
+/// expectation's plus the mean of the observation model's own variance, so an
+/// expectation band is narrower by the observation noise, and observed data
+/// are compared with an observation band only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Quantity {
+    /// `y`, a draw from the observation model: its spread carries the
+    /// parameters, the latent state and the observation noise.
+    Observation,
+    /// `E[y | x, θ]`, the observation model's mean at one state and one
+    /// parameter vector, with no observation noise drawn.
+    Expectation,
+}
+
+impl Quantity {
+    /// The value written into the `quantity` column.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Quantity::Observation => "observation",
+            Quantity::Expectation => "expectation",
+        }
+    }
+}
+
 // ── Pure numerics: the quantile reduction ──────────────────────────────────
 
 /// Linear-interpolated quantile of `xs` at `q ∈ [0, 1]` (the numpy/`type-7`

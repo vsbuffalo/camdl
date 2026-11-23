@@ -116,10 +116,10 @@ fn one_step_rows(path: &Path) -> Vec<String> {
         .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     let mut lines = text.lines();
     let header: Vec<&str> = lines.next().expect("header").split('\t').collect();
-    let horizon = header.iter().position(|c| *c == "horizon")
-        .unwrap_or_else(|| panic!("no `horizon` column in {header:?}"));
+    let mode = header.iter().position(|c| *c == "mode")
+        .unwrap_or_else(|| panic!("no `mode` column in {header:?}"));
     lines
-        .filter(|l| l.split('\t').nth(horizon) == Some("one_step"))
+        .filter(|l| l.split('\t').nth(mode) == Some("one_step"))
         .map(|l| l.to_string())
         .collect()
 }

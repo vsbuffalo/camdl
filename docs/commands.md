@@ -214,8 +214,8 @@ camdl predict @label --stream onset       # predicted-vs-observed artifact
 ```
 
 `camdl predict` resolves the fit's posterior draws and writes
-`predictive/<stream>.tsv` (the `q05…q95` ribbon, with typed
-`horizon`/`treatment` columns, a `role` column, the fit's
+`predictive/<stream>.tsv` (the `q05…q95` ribbon, with typed `mode`/`treatment`
+columns, a `role` and a `quantity` column, the fit's
 `fit_rhat_max`/`fit_ess_min` stamp, and the per-row `rhat_mean`/`rhat_pred`
 convergence channels) and `observed/<stream>.tsv` under the run directory. Join
 the two on `(time, <dims>)` and plot, one facet per stratum. `role` is `trained`
@@ -223,16 +223,18 @@ for a row of the fit's training prefix (an `NA` row included), `held_out` for a
 row of the bound file after that prefix (`[data] holdout_after`), and `future`
 for a free-forward row past the last row of the bound file: this prediction read
 no data row for this period (a `[data.holdout]` file is not read, so the periods
-it covers are `future` too, gh#1309). For a stream labelled by each period's
-start, `one_step` rows carry the period's end in `time` while `free_forward`
-rows and `observed/` carry the label (gh#1152), and the `free_forward` rows past
-the data are mis-timed (gh#1151); `role` is read by row position and is right on
-both. The `one_step` band covers the training rows only: a stored fit keeps its
-held-out rows' dates and not their values, and filtering through a row needs its
-value. A forecast from the end of the training rows is `--horizon`. Omit
-`--mode` for all applicable horizons (chain-binomial → `free_forward` +
-`one_step`; ODE → `free_forward` only); an optimizer fit (IF2 / NLopt) is
-refused since it has no posterior cloud.
+it covers are `future` too, gh#1309). A fixed-point prediction given no
+`--holdout-after` labels its data rows `unknown`. `quantity` is `observation`:
+the band is of draws from the observation model. For a stream labelled by each
+period's start, `one_step` rows carry the period's end in `time` while
+`free_forward` rows and `observed/` carry the label (gh#1152), and the
+`free_forward` rows past the data are mis-timed (gh#1151); `role` is read by row
+position and is right on both. The `one_step` band covers the training rows
+only: a stored fit keeps its held-out rows' dates and not their values, and
+filtering through a row needs its value. A forecast from the end of the training
+rows is `--horizon`. Omit `--mode` for all applicable horizons (chain-binomial →
+`free_forward` + `one_step`; ODE → `free_forward` only); an optimizer fit (IF2 /
+NLopt) is refused since it has no posterior cloud.
 
 Every mode predicts each stream the fit bound data to. A stream the model
 declares but the fit bound no data to is _skipped_: it is named on stderr and in
@@ -289,13 +291,13 @@ value the data checks refuse, such as a count above its trials, is left
 unscored, never refusing the prediction.
 
 It writes `forecast/<stream>.tsv` (one row per target: `t_start`, `t_stop`,
-`horizon`, `lead`, the mean and the `q05…q95` band), `forecast-samples.tsv`
-(joint samples, each one trajectory across every target), and `forecast.json`
-(the origin, the reach, the rows that conditioned the parameters and the state,
-each target's design values and the design mode with its label, and the
-calendar). Forecasts are available for chain-binomial posteriors (PMMH, PGAS);
-an ODE posterior, `--enable`, `--disable`, `--quantities` and `--by-chain` are
-refused in this mode for now.
+`mode`, `horizon`, `lead`, `quantity`, the mean and the `q05…q95` band),
+`forecast-samples.tsv` (joint samples, each one trajectory across every target),
+and `forecast.json` (the origin, the reach, the rows that conditioned the
+parameters and the state, each target's design values and the design mode with
+its label, and the calendar). Forecasts are available for chain-binomial
+posteriors (PMMH, PGAS); an ODE posterior, `--enable`, `--disable`,
+`--quantities` and `--by-chain` are refused in this mode for now.
 
 `--scenario NAME` and `--sweep` add _arms_ to a forecast: the fitted model is
 the first arm, each scenario and each sweep point another, and every table gains

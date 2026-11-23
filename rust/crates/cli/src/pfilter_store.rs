@@ -161,14 +161,14 @@ pub(crate) const REPLICATES_FILE: &str = "replicates.tsv";
 pub(crate) const PROVENANCE_FILE: &str = "provenance.json";
 
 /// A by-product of a filter run whose identity is the run's alone, with its
-/// kind, its folder's label and its one file.
+/// kind, its identity's version, its folder's label and its one file.
 macro_rules! run_by_product {
-    ($(#[$doc:meta])* $name:ident, $identity:ident, $tag:literal, $label:literal, $file:literal) => {
+    ($(#[$doc:meta])* $name:ident, $identity:ident, $tag:literal, $version:literal, $label:literal, $file:literal) => {
         $(#[$doc])*
         pub(crate) struct $name;
 
         #[derive(store::Identity, Clone, Debug)]
-        #[identity(tag = $tag, version = 1)]
+        #[identity(tag = $tag, version = $version)]
         pub(crate) struct $identity {
             pub filter: PfilterIdentityRecord,
         }
@@ -199,25 +199,25 @@ macro_rules! run_by_product {
 run_by_product!(
     /// `--trace`: per observation, the log-likelihood increment, the ESS and
     /// the one-step predictive quantiles.
-    Trace, TraceIdentity, "trace", "trace", "trace.tsv"
+    Trace, TraceIdentity, "trace", 1, "trace", "trace.tsv"
 );
 run_by_product!(
     /// `--pf-health`: per observation, the ESS, its fraction of the swarm and
     /// the log-weight variance.
-    PfHealth, PfHealthIdentity, "pf_health", "pf_health", "pf_health.tsv"
+    PfHealth, PfHealthIdentity, "pf_health", 1, "pf_health", "pf_health.tsv"
 );
 run_by_product!(
     /// `--save-filtering`: every particle's state and log-weight at every step.
-    Filtering, FilteringIdentity, "filtering", "filtering", "filtering.tsv"
+    Filtering, FilteringIdentity, "filtering", 1, "filtering", "filtering.tsv"
 );
 run_by_product!(
     /// `--save-filtered-streams`: each stream's conditional mean, summarised
     /// over the swarm before and after each step is scored.
-    FilteredStreams, FilteredStreamsIdentity, "filtered_streams", "filtered_streams", "filtered_streams.tsv"
+    FilteredStreams, FilteredStreamsIdentity, "filtered_streams", 2, "filtered_streams", "filtered_streams.tsv"
 );
 run_by_product!(
     /// `--save-final-state`: the swarm after the last observation.
-    FinalState, FinalStateIdentity, "final_state", "final_state", "final_state.tsv"
+    FinalState, FinalStateIdentity, "final_state", 1, "final_state", "final_state.tsv"
 );
 
 /// `--save-paths`: sample paths from the smoothing distribution, traced

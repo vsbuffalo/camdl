@@ -428,24 +428,29 @@ integrates over the cloud by pooling and quantiling, and writes two files under
 the run directory:
 
 - `predictive/<stream>.tsv` —
-  `time | <dims…> | horizon | treatment | role | fit_rhat_max | fit_ess_min | rhat_mean | ess_mean | rhat_pred | ess_pred | n_draws | q05 q25 q50 q75 q95`.
-  The `q05…q95` columns are the ribbon; the `horizon` and `treatment` columns
-  make the two predictive axes explicit (so an honestly-wide posterior band is
-  never confused with a narrow plug-in one), and `fit_rhat_max`/`fit_ess_min`
-  carry the fit's own convergence numbers alongside every band. The `role`
-  column says what part the row played in the fit: `trained` (a row of the fit's
-  training prefix), `held_out` (a row of the bound file after it), or `future`
-  (a free-forward row past the last row of the bound file: the prediction read
-  no data row for that period). **`fit_rhat_max` is the rank-normalized split R̂
-  and `fit_ess_min` the bulk-ESS** (see
+  `time | <dims…> | mode | horizon | treatment | role | quantity | fit_rhat_max | fit_ess_min | rhat_mean | ess_mean | rhat_pred | ess_pred | n_draws | q05 q25 q50 q75 q95`.
+  The `q05…q95` columns are the ribbon; the `mode` and `treatment` columns make
+  the two predictive axes explicit (so an honestly-wide posterior band is never
+  confused with a narrow plug-in one), and `fit_rhat_max`/`fit_ess_min` carry
+  the fit's own convergence numbers alongside every band. `horizon` is a
+  forecast target's position after its origin and is empty here. `quantity` is
+  `observation` on every row: the band is of draws `y` from the observation
+  model, which is what observed data are compared with, not of its mean
+  `E[y | x, θ]`. The `role` column says what part the row played in the fit:
+  `trained` (a row of the fit's training prefix), `held_out` (a row of the bound
+  file after it), `future` (a free-forward row past the last row of the bound
+  file: the prediction read no data row for that period), or `unknown` (a data
+  row of a fixed-point prediction given no `--holdout-after`). **`fit_rhat_max`
+  is the rank-normalized split R̂ and `fit_ess_min` the bulk-ESS** (see
   [Which R̂, and which ESS](#which-r-and-which-ess)); `fit_ess_min` is left empty
   when any assessed parameter has no pooled ESS, rather than minimizing over the
   ones that do. The sibling `predictive.json` tags this contract
-  `camdl.predictive/v4`. Earlier tags are not join-compatible with it and **must
-  not be joined without keying on the tag**: `/v3` had no `role` column, `/v2`
-  spelled these two columns `rhat_max`/`ess_min` and had no per-row channels,
-  and `/v1` carried classic Gelman–Rubin R̂ and a per-chain Geyer sum under those
-  same two names — the same header, a different statistic.
+  `camdl.predictive/v5`. Earlier tags are not join-compatible with it and **must
+  not be joined without keying on the tag**: `/v4` held the mode in a column
+  named `horizon` and had no `quantity` column, `/v3` had no `role` column,
+  `/v2` spelled these two columns `rhat_max`/`ess_min` and had no per-row
+  channels, and `/v1` carried classic Gelman–Rubin R̂ and a per-chain Geyer sum
+  under those same two names — the same header, a different statistic.
 
   `fit_rhat_max`/`fit_ess_min` describe **the fit**, not the row — which is what
   their names say. They are the worst parameter's numbers, repeated identically
@@ -467,12 +472,12 @@ the run directory:
   quoting is genuinely dominated by irreducible observation noise. An empty cell
   is a refusal — fewer than 2 chains, fewer than 4 draws per chain, a
   `draws.tsv` with no chain column, or a row that never moved — never a pass;
-  the `one_step` horizon leaves both pairs empty, because its cell pools over
+  the `one_step` mode leaves both pairs empty, because its cell pools over
   filter particles as well as draws.
 
   `--by-chain` is the follow-up once `rhat_mean` has flagged a row: it adds a
   leading `chain` column and one extra band per chain beside the pooled `all`
-  rows, on **both** horizons, so you can see _which_ way the chains disagree.
+  rows, on **both** modes, so you can see _which_ way the chains disagree.
   Overlapping per-chain forward bands mean the pooled band summarises one
   forecast; separated ones mean it is a mixture of several, and quoting its
   quantiles reads as uncertainty where the truth is disagreement — opposite
@@ -509,7 +514,7 @@ pred = pl.read_csv(".../predictive/onset.tsv", separator="\t")
 obs  = pl.read_csv(".../observed/onset.tsv",   separator="\t")
 ```
 
-**Two horizons answer two questions** (see
+**Two modes answer two questions** (see
 [`camdl docs diagnosing-fits`](diagnosing-fits.md) §5). Omit `--mode` to emit
 all applicable for the fit's backend:
 
@@ -519,8 +524,8 @@ all applicable for the fit's backend:
 - `--mode one_step` — the honest short-horizon forecast `p(y_t | y_{1:t-1})`:
   re-condition on the data each step. Chain-binomial only (an ODE fit's one-step
   is identical to its free-forward and is refused with a redirect). Pools over a
-  posterior subsample (`--n-draws`, default 200); both horizons stack in the
-  same file, distinguished by the `horizon` column.
+  posterior subsample (`--n-draws`, default 200); both modes stack in the same
+  file, distinguished by the `mode` column.
 
 `camdl predict` refuses an optimizer fit (IF2 / NLopt) with an actionable
 message — such a fit returns one best-fit point, not a distribution, so there is

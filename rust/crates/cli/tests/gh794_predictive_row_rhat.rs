@@ -113,7 +113,7 @@ fn col(header: &[&str], name: &str) -> usize {
 fn rows_of<'a>(tsv: &'a str, horizon: &str) -> (Vec<&'a str>, Vec<Vec<&'a str>>) {
     let mut lines = tsv.lines();
     let header: Vec<&str> = lines.next().expect("header").split('\t').collect();
-    let c_hor = col(&header, "horizon");
+    let c_hor = col(&header, "mode");
     let rows: Vec<Vec<&str>> = lines
         .map(|l| l.split('\t').collect::<Vec<&str>>())
         .filter(|c| c[c_hor] == horizon)
@@ -456,7 +456,7 @@ fn by_chain_adds_a_chain_column_and_leaves_the_pooled_rows_byte_identical() {
     // A per-chain row is a band over one chain, so it carries no between-chain
     // statistic — and its n_draws is its own chain's, not the pooled count.
     let ix = |name: &str| header.iter().position(|h| *h == name).unwrap();
-    let (c_n, c_hor) = (ix("n_draws"), ix("horizon"));
+    let (c_n, c_hor) = (ix("n_draws"), ix("mode"));
     let mut pooled_n = String::new();
     let mut per_chain_n: Vec<String> = Vec::new();
     for l in with_chain.lines().skip(1) {
@@ -573,7 +573,7 @@ fn by_chain_composes_with_exclude_chains_without_renumbering_or_a_second_address
     // than computed over a single chain. The consequence of excluding down to
     // one chain, made visible rather than papered over with a number.
     let ix = |name: &str| col(&header, name);
-    let c_hor = ix("horizon");
+    let c_hor = ix("mode");
     let mut saw_free_forward = false;
     for l in txt.lines().skip(1) {
         let c: Vec<&str> = l.split('\t').collect();
@@ -697,7 +697,7 @@ fn by_chain_decomposes_the_one_step_horizon_too() {
     let with_chain = std::fs::read_to_string(&pred).unwrap();
     let header: Vec<&str> = with_chain.lines().next().unwrap().split('\t').collect();
     let ix = |name: &str| col(&header, name);
-    let (c_hor, c_n, c_time) = (ix("horizon"), ix("n_draws"), ix("time"));
+    let (c_hor, c_n, c_time) = (ix("mode"), ix("n_draws"), ix("time"));
 
     let one_step: Vec<Vec<&str>> = with_chain
         .lines()

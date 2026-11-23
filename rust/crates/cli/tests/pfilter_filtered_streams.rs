@@ -61,11 +61,13 @@ type Row = (f64, String, String, [f64; 6]);
 fn read_rows(path: &Path) -> Vec<Row> {
     let text = std::fs::read_to_string(path).unwrap();
     let mut lines = text.lines();
-    assert_eq!(lines.next(), Some("time\tstream\tphase\tmean\tq05\tq25\tq50\tq75\tq95"));
+    assert_eq!(lines.next(), Some("time\tstream\tphase\tquantity\tmean\tq05\tq25\tq50\tq75\tq95"));
     lines.map(|l| {
         let c: Vec<&str> = l.split('\t').collect();
-        assert_eq!(c.len(), 9, "row: {l}");
-        let v: Vec<f64> = c[3..].iter().map(|x| x.parse().unwrap()).collect();
+        assert_eq!(c.len(), 10, "row: {l}");
+        // Every summary is of the stream's conditional mean, E[y | x, θ].
+        assert_eq!(c[3], "expectation", "row: {l}");
+        let v: Vec<f64> = c[4..].iter().map(|x| x.parse().unwrap()).collect();
         (c[0].parse().unwrap(), c[1].to_string(), c[2].to_string(), v.try_into().unwrap())
     }).collect()
 }

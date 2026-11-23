@@ -398,7 +398,7 @@ pub(crate) enum PredictMode {
 }
 
 impl PredictMode {
-    pub fn label(self) -> &'static str {
+    pub const fn label(self) -> &'static str {
         match self {
             PredictMode::All => "all",
             PredictMode::FreeForward => "free_forward",
@@ -466,7 +466,7 @@ pub(crate) enum ParameterSource {
 
 /// One prediction.
 #[derive(store::Identity, Clone, Debug)]
-#[identity(tag = "prediction", version = 1)]
+#[identity(tag = "prediction", version = 2)]
 pub(crate) struct PredictIdentity {
     pub source: ParameterSource,
     /// The data the filter conditions on, by stream; never held-out outcomes.

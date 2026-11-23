@@ -2962,8 +2962,9 @@ fn filtering_bytes(
 /// `--save-filtered-streams`: one row per stop of the observation axis,
 /// stream scheduled there, and phase (`predictive`, then `filtered`), holding
 /// the weighted mean and quantiles over the swarm of the stream's conditional
-/// mean `E[y_t | x_t, θ]`. `time` is the stop's model time, the `--trace`
-/// column of the same name. A summary with no weight behind it prints `NA`.
+/// mean `E[y_t | x_t, θ]`, which the `quantity` column labels `expectation`.
+/// `time` is the stop's model time, the `--trace` column of the same name. A
+/// summary with no weight behind it prints `NA`.
 fn filtered_streams_bytes(
     steps: &[sim::inference::particle_filter::StreamMeanStep],
     observations: &[Observation],
@@ -2971,11 +2972,12 @@ fn filtered_streams_bytes(
 ) -> Vec<u8> {
     let cell = |v: f64| if v.is_finite() { format!("{v}") } else { "NA".to_string() };
     let mut w: Vec<u8> = Vec::new();
-    writeln!(w, "time\tstream\tphase\tmean\tq05\tq25\tq50\tq75\tq95").unwrap();
+    let quantity = crate::quantile::Quantity::Expectation.as_str();
+    writeln!(w, "time\tstream\tphase\tquantity\tmean\tq05\tq25\tq50\tq75\tq95").unwrap();
     for step in steps {
         for (phase, s) in [("predictive", &step.predictive), ("filtered", &step.filtered)] {
-            writeln!(w, "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-                observations[step.obs_idx].time, stream_names[step.stream], phase,
+            writeln!(w, "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                observations[step.obs_idx].time, stream_names[step.stream], phase, quantity,
                 cell(s.mean), cell(s.q05), cell(s.q25), cell(s.q50), cell(s.q75), cell(s.q95)).unwrap();
         }
     }

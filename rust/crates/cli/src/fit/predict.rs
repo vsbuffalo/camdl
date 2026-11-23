@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 use indexmap::IndexMap;
 
-use crate::quantile::{band, fmt_time, fmt_value, QUANTILE_LEVELS};
+use crate::quantile::{band, fmt_time, fmt_value, Quantity, QUANTILE_LEVELS};
 
 use score::convergence::ChainIndex;
 use crate::chain_selection::{warn_active_selection, ChainSelection, SubsetInfo};
@@ -35,10 +35,11 @@ use crate::run_meta::{FitAlgorithm, ObsSchema};
 
 // ── The two axes, as types ─────────────────────────────────────────────────
 
-/// What is predicted. The `horizon` artifact column is this axis, typed so a
-/// one-step band is never read as a free-forward one (or vice versa).
+/// What is predicted: the mode of a band in `predictive/<stream>.tsv`, its
+/// `mode` column, typed so a one-step band is never read as a free-forward
+/// one (or vice versa).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Horizon {
+pub enum PredictiveMode {
     /// Run the fitted model forward from the start and see what it generates —
     /// `p(y_t | θ)`, never re-anchored to data. The generative check.
     FreeForward,
@@ -49,12 +50,12 @@ pub enum Horizon {
     OneStepAhead,
 }
 
-impl Horizon {
-    /// The legible value written into the `horizon` artifact column.
+impl PredictiveMode {
+    /// The legible value written into the `mode` artifact column.
     pub fn as_str(&self) -> &'static str {
         match self {
-            Horizon::FreeForward => "free_forward",
-            Horizon::OneStepAhead => "one_step",
+            PredictiveMode::FreeForward => "free_forward",
+            PredictiveMode::OneStepAhead => "one_step",
         }
     }
 }
@@ -77,6 +78,10 @@ pub enum RowRole {
     /// past the last row of the stream's bound file. Under `[data.holdout]`
     /// that includes the periods the holdout file covers, which is not read.
     Future,
+    /// A data row of a fixed-point prediction given no `--holdout-after`:
+    /// nothing records which rows the point was fitted to, so the row may
+    /// have trained it or not.
+    Unknown,
 }
 
 impl RowRole {
@@ -86,6 +91,7 @@ impl RowRole {
             RowRole::Trained => "trained",
             RowRole::HeldOut => "held_out",
             RowRole::Future => "future",
+            RowRole::Unknown => "unknown",
         }
     }
 
@@ -113,6 +119,11 @@ struct ParameterSet {
     /// `held_out/`. A stored problem keeps only its training rows as data, so
     /// a predicted row past them at one of these times is a held-out row.
     held_out_times: BTreeMap<String, Vec<f64>>,
+    /// `true` for a fixed point given no `--holdout-after`, whose partition
+    /// marks every row trained only because nothing says otherwise: its data
+    /// rows are then [`RowRole::Unknown`]. A stored fit's partition, and a
+    /// fixed point's `--holdout-after`, say which rows trained.
+    training_unknown: bool,
 }
 
 impl ParameterSet {
@@ -166,7 +177,12 @@ impl ParameterSet {
         }
         holdout_sources.sort();
         holdout_sources.dedup();
-        Ok(ParameterSet { record, partition, holdout_sources, held_out_times })
+        let training_unknown = matches!(
+            recorded,
+            crate::fit::training_partition::RecordedPartition::Given(r)
+                if r.rule == crate::run_meta::PartitionRuleRecord::All
+        );
+        Ok(ParameterSet { record, partition, holdout_sources, held_out_times, training_unknown })
     }
 
     /// The role of a predicted row past the stream's data rows, at time `t`:
@@ -179,6 +195,9 @@ impl ParameterSet {
 
     /// The role of the data row at `position` of the leaf stream `stream`.
     fn role(&self, stream: &str, position: usize) -> RowRole {
+        if self.training_unknown {
+            return RowRole::Unknown;
+        }
         RowRole::of_data_row(position, self.partition.rows(stream))
     }
 }
@@ -657,12 +676,12 @@ pub struct ObservedRow {
 
 // ── Rendering the tidy artifact ────────────────────────────────────────────
 
-/// One (scenario, horizon) contribution to a `predictive/<stream>.tsv`: its rows,
-/// plus the labels they carry (the scenario overlay axis, the horizon axis, the
-/// treatment, the convergence, the draw count). Stacking several of these under
-/// one header is how `camdl predict` writes every scenario's `free_forward` rows
-/// plus the `one_step` rows into the same file — the `scenario` and `horizon`
-/// columns distinguish them.
+/// One (scenario, mode) contribution to a `predictive/<stream>.tsv`: its rows,
+/// plus the labels they carry (the scenario overlay axis, the mode axis, the
+/// treatment, the quantity, the convergence, the draw count). Stacking several
+/// of these under one header is how `camdl predict` writes every scenario's
+/// `free_forward` rows plus the `one_step` rows into the same file — the
+/// `scenario` and `mode` columns distinguish them.
 pub struct PredictiveSection<'a> {
     /// Which chains this section's band was drawn from (gh#794). The `chain`
     /// column is emitted only when some section carries a
@@ -672,28 +691,31 @@ pub struct PredictiveSection<'a> {
     pub chain: ChainLabel,
     /// The overlay axis value: a scenario name, or `fitted` for the no-overlay
     /// (fitted-model) rows. ALWAYS present (the leading column), the way
-    /// `horizon`/`treatment` are.
+    /// `mode`/`treatment` are.
     pub scenario: String,
     /// This cell's sweep coordinate: one `(param, value)` per swept parameter,
     /// in sorted-name order. EMPTY when no `--sweep` (and on the sweep-agnostic
     /// one-step section), so no `sweep:<param>` column is emitted and the header
     /// stays byte-identical to the no-sweep path.
     pub sweep: Vec<(String, f64)>,
-    pub horizon: Horizon,
+    pub mode: PredictiveMode,
     pub treatment: TreatmentKind,
+    /// What the band is of.
+    pub quantity: Quantity,
     pub convergence: ConvergenceStatus,
     pub n_draws: usize,
     pub rows: &'a [BandRow],
 }
 
-/// Render `predictive/<stream>.tsv`: `scenario | time | <dims…> | horizon |
-/// treatment | role | fit_rhat_max | fit_ess_min | rhat_mean | ess_mean | rhat_pred |
-/// ess_pred |
-/// n_draws | q05 … q95`. Tidy, plot-ready; the axes and the convergence channels
-/// are columns so a new predictive cell — a new scenario, a new horizon, a new
-/// treatment — is more rows, never new consumer code. Several
-/// [`PredictiveSection`]s (one per (scenario, horizon)) stack under the single
-/// header.
+/// Render `predictive/<stream>.tsv`: `scenario | time | <dims…> | mode |
+/// horizon | treatment | role | quantity | fit_rhat_max | fit_ess_min |
+/// rhat_mean | ess_mean | rhat_pred | ess_pred | n_draws | q05 … q95`. Tidy,
+/// plot-ready; the axes and the convergence channels are columns so a new
+/// predictive cell — a new scenario, a new mode, a new treatment — is more
+/// rows, never new consumer code. Several [`PredictiveSection`]s (one per
+/// (scenario, mode)) stack under the single header. `horizon`, a forecast
+/// target's position after its origin, is empty: neither mode written here
+/// has an origin.
 ///
 /// Two convergence channels sit side by side and must not be confused (gh#794).
 /// `fit_rhat_max`/`fit_ess_min` are the *producing method's* worst-parameter numbers,
@@ -737,7 +759,7 @@ pub fn render_predictive_tsv_sections(
         out.push_str(d);
     }
     out.push_str(
-        "\thorizon\ttreatment\trole\tfit_rhat_max\tfit_ess_min\
+        "\tmode\thorizon\ttreatment\trole\tquantity\tfit_rhat_max\tfit_ess_min\
          \trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws",
     );
     for (_, label) in QUANTILE_LEVELS {
@@ -772,11 +794,15 @@ pub fn render_predictive_tsv_sections(
                 out.push_str(level_for(&row.stratum, dim));
             }
             out.push('\t');
-            out.push_str(section.horizon.as_str());
+            out.push_str(section.mode.as_str());
+            // `horizon`: empty, as no row here has a forecast origin.
+            out.push('\t');
             out.push('\t');
             out.push_str(section.treatment.label());
             out.push('\t');
             out.push_str(row.role.as_str());
+            out.push('\t');
+            out.push_str(section.quantity.as_str());
             out.push('\t');
             out.push_str(&rhat);
             out.push('\t');
@@ -3066,7 +3092,7 @@ fn run_predict(
             }
             if ff_n_draws < posterior.n_draws() {
                 out.say(format_args!(
-                    "predict: free_forward horizon — subsampling {ff_n_draws} of {} \
+                    "predict: free_forward mode — subsampling {ff_n_draws} of {} \
                      posterior draws (raise with --n-draws)",
                     posterior.n_draws()
                 ));
@@ -3561,7 +3587,8 @@ fn run_predict(
                 chain: ChainLabel::All,
                 scenario: cell.scenario.clone(),
                 sweep: cell.sweep.clone(),
-                horizon: Horizon::FreeForward,
+                mode: PredictiveMode::FreeForward,
+                quantity: Quantity::Observation,
                 treatment: treatment_kind,
                 convergence: posterior.convergence,
                 n_draws: ff_n_draws,
@@ -3576,7 +3603,8 @@ fn run_predict(
                     chain: ChainLabel::One(ChainIndex(*chain)),
                     scenario: cell.scenario.clone(),
                     sweep: cell.sweep.clone(),
-                    horizon: Horizon::FreeForward,
+                    mode: PredictiveMode::FreeForward,
+                    quantity: Quantity::Observation,
                     treatment: treatment_kind,
                     convergence: posterior.convergence,
                     n_draws: ff_draws_per_chain.get(chain).copied().unwrap_or(0),
@@ -3592,7 +3620,8 @@ fn run_predict(
                 // data through the fitted model, so a swept-parameter overlay is
                 // ill-defined) — empty sweep ⇒ empty `sweep:<param>` cells.
                 sweep: Vec::new(),
-                horizon: Horizon::OneStepAhead,
+                mode: PredictiveMode::OneStepAhead,
+                quantity: Quantity::Observation,
                 treatment: treatment_kind,
                 convergence: posterior.convergence,
                 n_draws: one_step_n,
@@ -3606,7 +3635,8 @@ fn run_predict(
                     chain: ChainLabel::One(ChainIndex(*chain)),
                     scenario: no_overlay.to_string(),
                     sweep: Vec::new(),
-                    horizon: Horizon::OneStepAhead,
+                    mode: PredictiveMode::OneStepAhead,
+                    quantity: Quantity::Observation,
                     treatment: treatment_kind,
                     convergence: posterior.convergence,
                     n_draws: one_step_n_by_chain.get(chain).copied().unwrap_or(0),
@@ -3617,7 +3647,8 @@ fn run_predict(
         // Record this stream's join contract for `predictive.json`. Coordinate
         // columns (the group-by keys) in header order: the `chain` column when
         // `--by-chain` wrote one, `scenario`, the `sweep:<param>` columns,
-        // `time`, the stratum dims, `horizon`, `treatment`, `role`. The band columns are
+        // `time`, the stratum dims, `mode`, `horizon`, `treatment`, `role`,
+        // `quantity`. The band columns are
         // the quantile labels; the diagnostics
         // are the method-provenance pair (`fit_rhat_max` / `fit_ess_min`, constant down
         // the file), the per-row pairs (`rhat_mean` / `ess_mean` over the latent
@@ -3632,9 +3663,11 @@ fn run_predict(
         coordinates.extend(sweep_col_names.iter().map(|n| format!("sweep:{n}")));
         coordinates.push("time".to_string());
         coordinates.extend(index_dims.iter().cloned());
+        coordinates.push("mode".to_string());
         coordinates.push("horizon".to_string());
         coordinates.push("treatment".to_string());
         coordinates.push("role".to_string());
+        coordinates.push("quantity".to_string());
         let value_kind = model
             .observations
             .iter()
@@ -3670,7 +3703,7 @@ fn run_predict(
             // A free-forward band runs the fitted model from its start and is
             // never conditioned on a row.
             state_sets.insert(
-                Horizon::FreeForward.as_str().to_string(),
+                PredictiveMode::FreeForward.as_str().to_string(),
                 serde_json::json!({ "conditioning": "none", "streams": [] }),
             );
         }
@@ -3682,31 +3715,15 @@ fn run_predict(
             // say whether held-out rows were filtered through; no prose
             // restates them.
             state_sets.insert(
-                Horizon::OneStepAhead.as_str().to_string(),
+                PredictiveMode::OneStepAhead.as_str().to_string(),
                 serde_json::json!({ "conditioning": "filtered", "streams": &o.filtered }),
             );
         }
         let mut manifest = serde_json::json!({
-            // The tag is the only thing telling a consumer which column
-            // contract a stored artifact was written under, so every change to
-            // the column set bumps it.
-            //
-            // v1: `rhat_max`/`ess_min` carried classic Gelman-Rubin R̂ and a
-            //     Geyer per-chain sum.
-            // v2 (gh#84): the same two column NAMES, now the rank-normalized
-            //     split R̂ and bulk-ESS of Vehtari et al. (2021), with `ess_min`
-            //     withheld whenever any assessed parameter has no pooled ESS
-            //     rather than silently minimizing over the ones that do. Same
-            //     names, different statistics — which is exactly why the tag
-            //     has to be keyed on.
-            // v3 (gh#794): those two are renamed `fit_rhat_max`/`fit_ess_min`,
-            //     because they describe the *fit* and not the row they sit on,
-            //     and the per-row `rhat_mean`/`ess_mean`/`rhat_pred`/`ess_pred`
-            //     channels join them.
-            // v4 (gh#1079): the `role` coordinate joins `horizon` and
-            //     `treatment`, and the manifest gains `parameter_set` and
-            //     `state_sets`.
-            "schema": "camdl.predictive/v4",
+            // The tag names the column contract the file was written under;
+            // every change to the column set bumps it. The versions are
+            // listed in docs/camdl-run-spec.md §2.2.2.
+            "schema": "camdl.predictive/v5",
             // gh#896: the run whose draws these bands replay, and the options
             // that shaped them (they also key this directory's address).
             "run_id": run_id,
@@ -3725,7 +3742,7 @@ fn run_predict(
             // extent and each stream's training rows. A row's `role` is its
             // position against that stream's `rows`.
             "parameter_set": &parameter_set.record,
-            // The state set of each section written, keyed by its `horizon`
+            // The state set of each section written, keyed by its `mode`
             // value: the rows the latent state behind a band was conditioned
             // on.
             "state_sets": state_sets,
@@ -4879,7 +4896,7 @@ fn pool_one_step_draws(
     if skipped.len() == n_total && n_total > 0 {
         let (first_idx, first_err) = &skipped[0];
         return Err(format!(
-            "one_step horizon: the one-step filter degenerated on ALL {n_total} posterior \
+            "one_step mode: the one-step filter degenerated on ALL {n_total} posterior \
              draws — there is nothing to pool. First failure (draw {first_idx}): \
              {first_err}"
         ));
@@ -4887,7 +4904,7 @@ fn pool_one_step_draws(
     if !skipped.is_empty() {
         let (first_idx, first_err) = &skipped[0];
         out.say(format_args!(
-            "predict: one_step horizon — skipped {}/{} posterior draws whose one-step \
+            "predict: one_step mode — skipped {}/{} posterior draws whose one-step \
              filter degenerated (a small tail of degenerate draws is expected in a \
              converging posterior; first: draw {first_idx}: {first_err}); bands pool the \
              remaining {} draws",
@@ -4916,14 +4933,14 @@ fn pool_one_step_draws(
         }
         if n_pooled == 0 {
             out.say(format_args!(
-                "predict: one_step horizon -- chain {} contributed no band: all \
+                "predict: one_step mode -- chain {} contributed no band: all \
                  {n_offered} of its replayed draws degenerated. It is omitted from the \
                  per-chain rows rather than banded over nothing.",
                 ChainIndex(*id)
             ));
         } else {
             out.say(format_args!(
-                "predict: one_step horizon -- chain {} bands over {n_pooled} of the \
+                "predict: one_step mode -- chain {} bands over {n_pooled} of the \
                  {n_offered} draws it was given ({} degenerated); its rows report \
                  n_draws = {n_pooled}, so a narrower band there may be a thinner \
                  sample rather than a more certain chain.",
@@ -4947,7 +4964,7 @@ fn pool_one_step_draws(
 /// samples `ỹ ∼ p(y | x_t, θ)` at each observation time (the particles are
 /// distributed as `p(x_t | y_{1:t-1}, θ)` at that point). Pool over
 /// (particles × draws) per `(stream-leaf, time)`, quantile, and group by logical
-/// source + stratum exactly like the free-forward path. Horizon = one_step.
+/// source + stratum exactly like the free-forward path. Mode = one_step.
 ///
 /// [`OneStepBands::n_pooled`] is the number of draws actually pooled — the
 /// subsample minus any degenerate-skipped draws (gh#620) — for the `n_draws`
@@ -5126,7 +5143,7 @@ fn one_step_bands(
     let n_used = chosen.len();
     if n_used < total {
         out.say(format_args!(
-            "predict: one_step horizon — subsampling {n_used} of {total} posterior \
+            "predict: one_step mode — subsampling {n_used} of {total} posterior \
              draws (raise with --n-draws)"
         ));
     }
@@ -5179,7 +5196,7 @@ fn one_step_bands(
     // report. Empty without `--by-chain`, and empty on an unkeyed cloud.
     let chain_ids: Vec<usize> = if by_chain { pool.bandable_chains() } else { Vec::new() };
     if by_chain && chain_ids.is_empty() {
-        out.say("predict: one_step horizon — --by-chain wrote no per-chain rows: this \
+        out.say("predict: one_step mode — --by-chain wrote no per-chain rows: this \
              fit's draws.tsv carries no chain column, so no chain can be named.");
     }
     let n_pooled_by_chain: BTreeMap<usize, usize> = chain_ids
@@ -6061,8 +6078,8 @@ mod tests {
 
     #[test]
     fn one_step_horizon_label_is_legible() {
-        assert_eq!(Horizon::OneStepAhead.as_str(), "one_step");
-        assert_eq!(Horizon::FreeForward.as_str(), "free_forward");
+        assert_eq!(PredictiveMode::OneStepAhead.as_str(), "one_step");
+        assert_eq!(PredictiveMode::FreeForward.as_str(), "free_forward");
     }
 
     /// gh#1079: a data row's role is its position against the stream's
@@ -6290,7 +6307,8 @@ mod tests {
                 chain: ChainLabel::All,
                 scenario: "fitted".to_string(),
                 sweep: Vec::new(),
-                horizon: Horizon::FreeForward,
+                mode: PredictiveMode::FreeForward,
+                quantity: Quantity::Observation,
                 treatment: TreatmentKind::Posterior,
                 convergence: ConvergenceStatus::Reported { rhat_max: 2.7863, ess_min: 5.8 },
                 n_draws: 80,
@@ -6343,7 +6361,8 @@ mod tests {
             chain: ChainLabel::All,
             scenario: "fitted".to_string(),
             sweep: Vec::new(),
-            horizon: Horizon::FreeForward,
+            mode: PredictiveMode::FreeForward,
+            quantity: Quantity::Observation,
             treatment: TreatmentKind::Posterior,
             convergence: conv,
             n_draws: 40,
@@ -6363,7 +6382,8 @@ mod tests {
             chain: ChainLabel::All,
             scenario: "fitted".to_string(),
             sweep: Vec::new(),
-            horizon: Horizon::FreeForward,
+            mode: PredictiveMode::FreeForward,
+            quantity: Quantity::Observation,
             treatment: TreatmentKind::Posterior,
             convergence: conv,
             n_draws: 40,
@@ -6395,7 +6415,8 @@ mod tests {
             chain,
             scenario: "fitted".to_string(),
             sweep: Vec::new(),
-            horizon: Horizon::FreeForward,
+            mode: PredictiveMode::FreeForward,
+            quantity: Quantity::Observation,
             treatment: TreatmentKind::Posterior,
             convergence: conv,
             n_draws: 40,
@@ -6444,7 +6465,8 @@ mod tests {
                 chain: ChainLabel::One(ChainIndex(0)),
                 scenario: "fitted".to_string(),
                 sweep: Vec::new(),
-                horizon: Horizon::FreeForward,
+                mode: PredictiveMode::FreeForward,
+                quantity: Quantity::Observation,
                 treatment: TreatmentKind::Posterior,
                 convergence: ConvergenceStatus::NotAssessed,
                 n_draws: 16,
@@ -6484,7 +6506,8 @@ mod tests {
                 chain: ChainLabel::All,
                 scenario: "fitted".to_string(),
                 sweep: Vec::new(),
-                horizon: Horizon::FreeForward,
+                mode: PredictiveMode::FreeForward,
+                quantity: Quantity::Observation,
                 treatment: TreatmentKind::Posterior,
                 convergence: ConvergenceStatus::Reported { rhat_max: 1.01, ess_min: 420.0 },
                 n_draws: 40,
@@ -6493,12 +6516,12 @@ mod tests {
         );
         let lines: Vec<&str> = tsv.trim_end().lines().collect();
         assert_eq!(lines[0],
-            "scenario\ttime\tpatch\thorizon\ttreatment\trole\tfit_rhat_max\tfit_ess_min\
+            "scenario\ttime\tpatch\tmode\thorizon\ttreatment\trole\tquantity\tfit_rhat_max\tfit_ess_min\
              \trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws\tq05\tq25\tq50\tq75\tq95");
         assert_eq!(lines[1],
-            "fitted\t7\tBo\tfree_forward\tposterior\ttrained\t1.0100\t420\t\t\t\t\t40\t0\t1\t3\t6\t12");
+            "fitted\t7\tBo\tfree_forward\t\tposterior\ttrained\tobservation\t1.0100\t420\t\t\t\t\t40\t0\t1\t3\t6\t12");
         assert_eq!(lines[2],
-            "fitted\t7\tBombali\tfree_forward\tposterior\ttrained\t1.0100\t420\t\t\t\t\t40\t0\t0\t1\t3\t7");
+            "fitted\t7\tBombali\tfree_forward\t\tposterior\ttrained\tobservation\t1.0100\t420\t\t\t\t\t40\t0\t0\t1\t3\t7");
         assert_eq!(lines.len(), 3, "header + one row per (time, stratum)");
     }
 
@@ -6516,7 +6539,8 @@ mod tests {
                 chain: ChainLabel::All,
                 scenario: "fitted".to_string(),
                 sweep: Vec::new(),
-                horizon: Horizon::FreeForward,
+                mode: PredictiveMode::FreeForward,
+                quantity: Quantity::Observation,
                 treatment: TreatmentKind::Posterior,
                 convergence: ConvergenceStatus::NotAssessed,
                 n_draws: 12,
@@ -6527,9 +6551,9 @@ mod tests {
         // No dim column; not-assessed rhat/ess are empty cells, not fabricated
         // values; n_draws is still carried. Scenario leads.
         assert_eq!(lines[0],
-            "scenario\ttime\thorizon\ttreatment\trole\tfit_rhat_max\tfit_ess_min\
+            "scenario\ttime\tmode\thorizon\ttreatment\trole\tquantity\tfit_rhat_max\tfit_ess_min\
              \trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws\tq05\tq25\tq50\tq75\tq95");
-        assert_eq!(lines[1], "fitted\t1\tfree_forward\tposterior\ttrained\t\t\t\t\t\t\t12\t1\t2\t3\t4\t5");
+        assert_eq!(lines[1], "fitted\t1\tfree_forward\t\tposterior\ttrained\tobservation\t\t\t\t\t\t\t12\t1\t2\t3\t4\t5");
     }
 
     #[test]
@@ -6546,7 +6570,8 @@ mod tests {
                     chain: ChainLabel::All,
                     scenario: "fitted".to_string(),
                     sweep: vec![("k".to_string(), 8.0)],
-                    horizon: Horizon::FreeForward,
+                    mode: PredictiveMode::FreeForward,
+                    quantity: Quantity::Observation,
                     treatment: TreatmentKind::Posterior,
                     convergence: conv,
                     n_draws: 10,
@@ -6556,7 +6581,8 @@ mod tests {
                     chain: ChainLabel::All,
                     scenario: "fitted".to_string(),
                     sweep: vec![("k".to_string(), 12.0)],
-                    horizon: Horizon::FreeForward,
+                    mode: PredictiveMode::FreeForward,
+                    quantity: Quantity::Observation,
                     treatment: TreatmentKind::Posterior,
                     convergence: conv,
                     n_draws: 10,
@@ -6566,7 +6592,8 @@ mod tests {
                     chain: ChainLabel::All,
                     scenario: "fitted".to_string(),
                     sweep: Vec::new(), // one-step is sweep-agnostic
-                    horizon: Horizon::OneStepAhead,
+                    mode: PredictiveMode::OneStepAhead,
+                    quantity: Quantity::Observation,
                     treatment: TreatmentKind::Posterior,
                     convergence: conv,
                     n_draws: 10,
@@ -6577,17 +6604,17 @@ mod tests {
         let lines: Vec<&str> = tsv.trim_end().lines().collect();
         assert_eq!(
             lines[0],
-            "scenario\tsweep:k\ttime\thorizon\ttreatment\trole\tfit_rhat_max\tfit_ess_min\
+            "scenario\tsweep:k\ttime\tmode\thorizon\ttreatment\trole\tquantity\tfit_rhat_max\tfit_ess_min\
              \trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws\tq05\tq25\tq50\tq75\tq95",
             "sweep:k column follows scenario"
         );
         assert_eq!(lines[1],
-            "fitted\t8\t7\tfree_forward\tposterior\ttrained\t1.0000\t100\t\t\t\t\t10\t1\t2\t3\t4\t5");
+            "fitted\t8\t7\tfree_forward\t\tposterior\ttrained\tobservation\t1.0000\t100\t\t\t\t\t10\t1\t2\t3\t4\t5");
         assert_eq!(lines[2],
-            "fitted\t12\t7\tfree_forward\tposterior\ttrained\t1.0000\t100\t\t\t\t\t10\t1\t2\t3\t4\t5");
+            "fitted\t12\t7\tfree_forward\t\tposterior\ttrained\tobservation\t1.0000\t100\t\t\t\t\t10\t1\t2\t3\t4\t5");
         // One-step row: the sweep:k cell is blank (empty), not a fabricated value.
         assert_eq!(lines[3],
-            "fitted\t\t7\tone_step\tposterior\ttrained\t1.0000\t100\t\t\t\t\t10\t1\t2\t3\t4\t5");
+            "fitted\t\t7\tone_step\t\tposterior\ttrained\tobservation\t1.0000\t100\t\t\t\t\t10\t1\t2\t3\t4\t5");
     }
 
     #[test]
@@ -6606,8 +6633,8 @@ mod tests {
     }
 
     #[test]
-    fn treatment_and_horizon_labels_are_legible() {
-        assert_eq!(Horizon::FreeForward.as_str(), "free_forward");
+    fn treatment_and_mode_labels_are_legible() {
+        assert_eq!(PredictiveMode::FreeForward.as_str(), "free_forward");
         assert_eq!(TreatmentKind::Posterior.label(), "posterior");
         assert_eq!(TreatmentKind::PlugIn.label(), "plug_in");
         let point: IndexMap<String, f64> = [("beta".to_string(), 0.5)].into_iter().collect();

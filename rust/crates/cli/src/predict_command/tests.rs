@@ -999,11 +999,17 @@ fn a_fixed_point_prediction_is_stored_under_prediction_and_labelled_plug_in() {
             assert_eq!(r[c], "", "{c} is empty for a fixed point: {r:?}");
         }
     }
-    assert!(rows.iter().any(|r| r["horizon"] == "one_step") && rows.iter().any(|r| r["horizon"] == "free_forward"));
-    let ff: Vec<&BTreeMap<String, String>> = rows.iter().filter(|r| r["horizon"] == "free_forward").collect();
+    assert!(rows.iter().any(|r| r["mode"] == "one_step") && rows.iter().any(|r| r["mode"] == "free_forward"));
+    let ff: Vec<&BTreeMap<String, String>> = rows.iter().filter(|r| r["mode"] == "free_forward").collect();
     assert!(ff.iter().all(|r| r["n_draws"] == "4"), "the band pools the four copies");
-    // The roles: every data row trained, every row past them is future.
-    assert!(rows.iter().all(|r| r["role"] == "trained" || r["role"] == "future"), "no row is held out");
+    // Outside a forecast a row has no horizon, and every band is of the
+    // observation.
+    assert!(rows.iter().all(|r| r["horizon"].is_empty()), "no horizon outside a forecast");
+    assert!(rows.iter().all(|r| r["quantity"] == "observation"), "every band is of the observation");
+    // No --holdout-after: which rows the point was fitted to is not known, so
+    // every data row is `unknown`, and every row past them is `future`.
+    assert!(rows.iter().any(|r| r["role"] == "unknown"), "{rows:?}");
+    assert!(rows.iter().all(|r| r["role"] == "unknown" || r["role"] == "future"), "no row is trained or held out");
     // `camdl show` says what the bands carry.
     let show = camdl(cwd.path(), &root, &["show".to_string(), folder.to_string_lossy().into_owned()], &[]);
     let text = String::from_utf8_lossy(&show.stdout);
@@ -1103,6 +1109,25 @@ fn a_held_out_row_is_not_stored() {
     assert_eq!(tables.len(), 1, "{tables:?}");
     let times: Vec<f64> = tsv_rows(&tables[0]).iter().map(|r| r["time"].parse().unwrap()).collect();
     assert_eq!(times.last(), Some(&20.0), "the stored table ends at the cutoff: {times:?}");
+}
+
+/// A fixed point given `--holdout-after` labels the rows it conditions on
+/// `trained`, as declared; without it the same rows are `unknown`.
+#[test]
+fn a_declared_holdout_labels_the_conditioned_rows_trained() {
+    let fresh = tempfile::tempdir().unwrap();
+    let root = fresh.path().join("camdl-store");
+    let cwd = workdir(&root);
+    let out = predict_in(cwd.path(), &root, &[FIXED, &["--holdout-after", "20"]].concat());
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let found = predictions(&root);
+    assert_eq!(found.len(), 1, "{found:#?}");
+    let rows = tsv_rows(&std::fs::read_to_string(found[0].0.join("predictive/daily_cases.tsv")).unwrap());
+    let role_at = |t: f64| -> Vec<&str> {
+        rows.iter().filter(|r| r["time"].parse::<f64>().unwrap() == t).map(|r| r["role"].as_str()).collect()
+    };
+    assert_eq!(role_at(10.0), ["trained"], "a conditioned row: {rows:?}");
+    assert!(rows.iter().all(|r| r["role"] != "unknown"), "a declared holdout leaves no row unknown: {rows:?}");
 }
 
 /// A free-forward prediction at a fixed point replays what `simulate`

@@ -154,7 +154,7 @@ fn free_forward_convergence_cells(pred_tsv: &str) -> (String, String) {
     let mut lines = pred_tsv.lines();
     let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
     let col = |name: &str| header.iter().position(|c| *c == name).unwrap();
-    let (hi, ri, ei) = (col("horizon"), col("fit_rhat_max"), col("fit_ess_min"));
+    let (hi, ri, ei) = (col("mode"), col("fit_rhat_max"), col("fit_ess_min"));
     for l in lines {
         let f: Vec<&str> = l.split('\t').collect();
         if f.get(hi).copied() == Some("free_forward") {

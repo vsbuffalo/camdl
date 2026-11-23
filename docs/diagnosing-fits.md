@@ -640,15 +640,15 @@ one hides the very misfit you're hunting.
   `held_out` in the `role` column of `predictive/<stream>.tsv`. A model can pass
   the free-forward check (wide enough to contain the data) yet fail one-step
   (can't predict next week), and vice versa — which is why both are worth
-  emitting and carry a typed `horizon` column so neither is read as the other.
+  emitting and carry a typed `mode` column so neither is read as the other.
 - **Conditioned / smoothed path** — `camdl pfilter --save-paths`. This is pulled
   toward the data by construction and will track it even for a misspecified
   model. It **cheats** for the purpose of model-checking: a smoothed ribbon that
   hugs the data is not evidence the model is right.
 
-`camdl predict` writes both predictive horizons (stacked in
-`predictive/<stream>.tsv`, keyed by the `horizon` column) and the observed
-series (`observed/<stream>.tsv`) under the run directory, ready to join on
+`camdl predict` writes both predictive modes (stacked in
+`predictive/<stream>.tsv`, keyed by the `mode` column) and the observed series
+(`observed/<stream>.tsv`) under the run directory, ready to join on
 `(time, <dims>)` and plot — one facet per stratum. Read the predictive band as a
 **quantile ribbon** (`q05…q95`), never a mean: averaging stochastic replicates
 with jittered epidemic take-offs smears the peak later and lower than any single

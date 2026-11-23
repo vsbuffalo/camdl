@@ -137,7 +137,7 @@ fn d76_row1_every_eligible_stream_is_forecast_and_the_exit_status_is_0() {
     let out = forecast(tmp.path(), &[]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     let m = json(&predict_dir(tmp.path(), "forecast.json").join("forecast.json"));
-    assert_eq!(m["schema"], "camdl.forecast/v4");
+    assert_eq!(m["schema"], "camdl.forecast/v5");
     assert_eq!(names(&m["produced"]), ["daily_cases", "weekly_cases"]);
     assert_eq!(m["skipped"], serde_json::json!([]));
     assert_eq!(m["failed"], serde_json::json!([]));

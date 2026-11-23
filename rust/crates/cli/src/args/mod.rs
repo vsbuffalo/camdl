@@ -1380,9 +1380,10 @@ Examples:
       --holdout-after 2026-03-01 --horizon '4 weeks'
 
 Outputs, stored inside the run at predict/<mode>-<id>/:
-  predictive/<stream>.tsv   scenario | time | <dims...> | horizon | treatment
-                            | role | fit_rhat_max | fit_ess_min | rhat_mean
-                            | ess_mean | rhat_pred | ess_pred | n_draws | q05..q95
+  predictive/<stream>.tsv   scenario | time | <dims...> | mode | horizon
+                            | treatment | role | quantity | fit_rhat_max
+                            | fit_ess_min | rhat_mean | ess_mean | rhat_pred
+                            | ess_pred | n_draws | q05..q95
   observed/<stream>.tsv     time | <dims...> | value
 Read both, join on (time, <dims>), plot observed over the predictive ribbon.
 
@@ -1397,6 +1398,9 @@ The role column says what part each row played in the fit:
              free_forward row past the last row of the bound file. A
              [data.holdout] file is not read, so the periods it covers are
              future too (gh#1309).
+  unknown    a data row of a fixed-point prediction given no
+             --holdout-after: nothing records which rows the point was
+             fitted to.
 predictive.json records both sets: parameter_set (the rows the parameters
 were fitted to) and state_sets (the rows each band's state was filtered
 through).
@@ -1432,7 +1436,7 @@ rhat_mean strips the observation noise and sees the disagreement.
 
 An empty cell means the reduction was refused, never that it passed: fewer
 than 2 chains, fewer than 4 draws per chain, a draws.tsv with no chain column,
-or a constant row. The one_step horizon leaves both pairs empty (its cells
+or a constant row. The one_step mode leaves both pairs empty (its cells
 pool over particles as well as draws).
 
 quantities-model/<name>.tsv carries the same reduction as `rhat` and `ess` — one
@@ -2361,8 +2365,8 @@ pub struct PfilterArgs {
     /// mean E[y_t | x_t, θ] (e.g. rho × the step's accumulated flow), twice:
     /// `predictive` (before y_t is scored, given the data through the step
     /// before) and `filtered` (after, given the data through t). Columns:
-    /// time, stream, phase, mean, q05, q25, q50, q75, q95. A by-product of the
-    /// run.
+    /// time, stream, phase, quantity (always `expectation`), mean, q05, q25,
+    /// q50, q75, q95. A by-product of the run.
     #[arg(long)]
     #[input(adds)]
     pub save_filtered_streams: Option<PathBuf>,

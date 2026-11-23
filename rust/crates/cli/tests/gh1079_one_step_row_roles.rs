@@ -148,7 +148,7 @@ fn rows(path: &Path) -> Vec<HashMap<String, String>> {
 /// `(time, role)` of the rows of `stream` on `horizon`, in file order.
 fn roles(dir: &Path, stream: &str, horizon: &str) -> Vec<(f64, String)> {
     rows(&dir.join(format!("predictive/{stream}.tsv"))).into_iter()
-        .filter(|r| r["horizon"] == horizon)
+        .filter(|r| r["mode"] == horizon)
         .map(|r| (r["time"].parse().unwrap(), r.get("role").cloned().unwrap_or_else(|| "<no role column>".into())))
         .collect()
 }
@@ -192,10 +192,10 @@ fn rows_past_the_training_prefix_are_held_out_and_the_manifest_names_both_sets()
     assert_eq!(at("role"), at("treatment") + 1, "{h:?}");
 
     let m = read_json(&out.join("predictive.json"));
-    assert_eq!(m["schema"], "camdl.predictive/v4");
+    assert_eq!(m["schema"], "camdl.predictive/v5");
     for s in m["streams"].as_array().unwrap() {
         let coords: Vec<&str> = s["coordinates"].as_array().unwrap().iter().map(|c| c.as_str().unwrap()).collect();
-        assert_eq!(&coords[coords.len() - 3..], ["horizon", "treatment", "role"], "{s}");
+        assert_eq!(&coords[coords.len() - 5..], ["mode", "horizon", "treatment", "role", "quantity"], "{s}");
     }
     // The parameter set: the partition the fit recorded.
     let p = &m["parameter_set"];

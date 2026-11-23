@@ -729,8 +729,8 @@ tables stay on the declared output grid.
 
 ```
 <run folder>/predict/<mode>-<12 hex>/predictive/<stream>.tsv
-  scenario | sweep:<param>… | time | <dims…> | horizon | treatment | role
-           | fit_rhat_max | fit_ess_min
+  scenario | sweep:<param>… | time | <dims…> | mode | horizon | treatment | role
+           | quantity | fit_rhat_max | fit_ess_min
            | rhat_mean | ess_mean | rhat_pred | ess_pred
            | n_draws | q05 | q25 | q50 | q75 | q95
 
@@ -741,42 +741,55 @@ tables stay on the declared output grid.
 `predictive/<stream>.tsv` summarizes the model's distribution over the
 observable as quantiles of sampled `y_rep` per
 `(scenario, sweep point, time, stratum)`. Every axis is a column, so a new
-predictive cell is more rows and never new consumer code. The `horizon` column
-is `free_forward` (run the fitted model forward from the start, `p(y_t | θ)`) or
+predictive cell is more rows and never new consumer code. The `mode` column is
+`free_forward` (run the fitted model forward from the start, `p(y_t | θ)`) or
 `one_step` (`p(y_t | y_{1:t-1})`, re-running a bootstrap filter per posterior
 draw and pooling over particles × draws); both stack under one header. The two
-horizons walk the step the fit ran at — the model's declared `dt` when it has
-one (the one dt rule), else the fit's `[config] dt` — since either horizon on
-another step would replay a different process than the posterior describes.
+modes walk the step the fit ran at — the model's declared `dt` when it has one
+(the one dt rule), else the fit's `[config] dt` — since either mode on another
+step would replay a different process than the posterior describes. `horizon` is
+a forecast target's position after its origin (as in `forecast/<stream>.tsv`)
+and is empty on every row here, since neither mode has an origin. `quantity`
+says what a band is of: `observation`, a draw `y` from the observation model, on
+every row `camdl predict` writes; `expectation`, the observation model's mean
+`E[y | x, θ]` with no observation noise drawn, is the other value, written by
+`pfilter --save-filtered-streams`. Observed data are compared with an
+`observation` band; an `expectation` band is narrower by the observation noise.
 
 **Each row carries its role in the fit.** The `role` column is `trained` for a
 row of the fit's training prefix of its stream (an `NA` row included),
 `held_out` for a row of the bound file after that prefix
 (`[data] holdout_after`), and `future` for a free-forward row past the last row
-of the bound file: this prediction read no data row for this period. (`target`
-is reserved for a forecast's targets, which carry a horizon and a lead; these
-two modes write none.) Membership is the row's position in its stream, read from
-the training partition the fit recorded and checked against the data files; a
-fit that recorded none is refused. A `one_step` band covers every row of the
-bound files. At a `held_out` row its parameters were fitted without that row,
-and its state was filtered through every earlier row of every stream this
-predict covers (all bound streams, or those `--stream` names), earlier held-out
-rows among them, so it is not a forecast from the end of the training rows
-(`--horizon` writes that one). For a stream labelled by each period's start, the
-`one_step` rows' `time` is the period's end while `free_forward` rows and
-`observed/` carry the label (gh#1152), and the `free_forward` rows past the data
-are mis-timed (gh#1151); `role` is read by row position and is right on both.
-`predictive.json` records both sets:
+of the bound file: this prediction read no data row for this period. A
+prediction from a fixed point (`camdl predict MODEL --params …`) given no
+`--holdout-after` labels each of its data rows `unknown`, since nothing records
+which rows the point was fitted to; with `--holdout-after` the rows it
+conditions on are `trained`, as declared and not checked. A fixed point takes no
+`[data.holdout]` file, so `--holdout-after` is its only way to declare its
+training rows. (`target` is reserved for a forecast's targets, which carry a
+horizon and a lead; these two modes write none.) Membership is the row's
+position in its stream, read from the training partition the fit recorded and
+checked against the data files; a fit that recorded none is refused. A
+`one_step` band covers every row of the bound files. At a `held_out` row its
+parameters were fitted without that row, and its state was filtered through
+every earlier row of every stream this predict covers (all bound streams, or
+those `--stream` names), earlier held-out rows among them, so it is not a
+forecast from the end of the training rows (`--horizon` writes that one). For a
+stream labelled by each period's start, the `one_step` rows' `time` is the
+period's end while `free_forward` rows and `observed/` carry the label
+(gh#1152), and the `free_forward` rows past the data are mis-timed (gh#1151);
+`role` is read by row position and is right on both. `predictive.json` records
+both sets:
 
 - `parameter_set`: the fit's training partition, as `forecast.json` carries it
   (the `rule`, the training `extent` as `{t, date}`, and each stream's training
   `rows` and their digest).
-- `state_sets`, keyed by `horizon` value, one per section written.
-  `free_forward` is `{"conditioning": "none", "streams": []}`: the band is never
-  conditioned on a row. `one_step` is `"conditioning": "filtered"` with, per
-  stream, the `rows` the filter walked, how many of them are `held_out_rows`,
-  and the rows' digest. The filter walks a stored fit's training rows, so
-  `held_out_rows` is 0; under `--stream` only the selected streams are listed.
+- `state_sets`, keyed by `mode` value, one per section written. `free_forward`
+  is `{"conditioning": "none", "streams": []}`: the band is never conditioned on
+  a row. `one_step` is `"conditioning": "filtered"` with, per stream, the `rows`
+  the filter walked, how many of them are `held_out_rows`, and the rows' digest.
+  The filter walks a stored fit's training rows, so `held_out_rows` is 0; under
+  `--stream` only the selected streams are listed.
 - `holdout_files`, at the top level: `null` without `[data.holdout]`, and under
   it `{"read": false, "sources": […]}`. These two modes do not read the holdout
   files, so their rows are neither filtered through nor predicted as data rows.
@@ -826,24 +839,24 @@ much the chains disagree — worst on overdispersed counts. Decide on `rhat_mean
 read `rhat_pred` only for an interval genuinely dominated by irreducible
 observation noise. An empty cell is a refusal (fewer than 2 chains, fewer than 4
 draws per chain, a `draws.tsv` with no chain column, a constant row), never a
-pass; the `one_step` horizon leaves both pairs empty, because its cell pools
-over filter particles as well as draws.
+pass; the `one_step` mode leaves both pairs empty, because its cell pools over
+filter particles as well as draws.
 
 `camdl predict --by-chain` adds a leading `chain` column — `all` on the pooled
-rows, the chain id on one additional band per chain, on **both** horizons. The
+rows, the chain id on one additional band per chain, on **both** modes. The
 pooled band is unchanged and remains the default object; without the flag no
 `chain` column is written. A per-chain band carries no `rhat_*`/`ess_*` cell,
 because those compare chains, and reports its own chain's `n_draws`.
 
-The two horizons answer different questions per chain, and a reader must know
-which they are looking at. A **free-forward** per-chain band asks whether the
-chains _project_ the same future; it runs free past the data, so a separation
-there mixes disagreement about the fitted trajectory with extrapolation
-uncertainty. A **one-step** per-chain band asks whether each chain _explains the
-observed record_; it is re-anchored to the data at every step, so a separation
-there is disagreement about the fitted trajectory itself, with the extrapolation
-removed. The one-step half is therefore the sharper statement about mixing, and
-the in-sample counterpart of the free-forward one.
+The two modes answer different questions per chain, and a reader must know which
+they are looking at. A **free-forward** per-chain band asks whether the chains
+_project_ the same future; it runs free past the data, so a separation there
+mixes disagreement about the fitted trajectory with extrapolation uncertainty. A
+**one-step** per-chain band asks whether each chain _explains the observed
+record_; it is re-anchored to the data at every step, so a separation there is
+disagreement about the fitted trajectory itself, with the extrapolation removed.
+The one-step half is therefore the sharper statement about mixing, and the
+in-sample counterpart of the free-forward one.
 
 Grouping the one-step pool by chain is a regrouping of the same reduction, not a
 decomposition of the particle contribution: each chain's band pools its own
@@ -886,7 +899,7 @@ tidy keys. A hole — a scheduled but unobserved cell — renders as an empty
 per stratum, using `index_dims` from the `fit.meta.json` schema and no
 run-store, DSL, or likelihood knowledge.
 
-`predictive.json` (schema tag `camdl.predictive/v4`) records the `run_id` whose
+`predictive.json` (schema tag `camdl.predictive/v5`) records the `run_id` whose
 draws it replays and declares, per stream, which columns are join coordinates
 versus band versus per-cell diagnostics, the `value_kind`, and the band's
 quantile levels; it also carries a `chain_selection` block when
@@ -901,12 +914,13 @@ produce; they follow the stream contract below.
 **The tag is load-bearing, and a stored artifact must be read under its own.**
 The versions do not carry the same numbers under the same column names:
 
-| tag  | the two fit-provenance columns           | what they hold                                                                                                               |
-| ---- | ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `v1` | `rhat_max`, `ess_min`                    | classic Gelman–Rubin R̂ and a Geyer per-chain sum                                                                             |
-| `v2` | `rhat_max`, `ess_min` — _the same names_ | rank-normalized split R̂ and bulk-ESS (gh#84), `ess_min` withheld rather than minimized when any parameter has none           |
-| `v3` | `fit_rhat_max`, `fit_ess_min`            | the v2 statistics, renamed to say whose they are, plus the per-row `rhat_mean`/`ess_mean`/`rhat_pred`/`ess_pred` channels    |
-| `v4` | `fit_rhat_max`, `fit_ess_min`            | the v3 statistics; the `role` coordinate is added after `treatment`, and the manifest gains `parameter_set` and `state_sets` |
+| tag  | the two fit-provenance columns           | what they hold                                                                                                                                                                          |
+| ---- | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `v1` | `rhat_max`, `ess_min`                    | classic Gelman–Rubin R̂ and a Geyer per-chain sum                                                                                                                                        |
+| `v2` | `rhat_max`, `ess_min` — _the same names_ | rank-normalized split R̂ and bulk-ESS (gh#84), `ess_min` withheld rather than minimized when any parameter has none                                                                      |
+| `v3` | `fit_rhat_max`, `fit_ess_min`            | the v2 statistics, renamed to say whose they are, plus the per-row `rhat_mean`/`ess_mean`/`rhat_pred`/`ess_pred` channels                                                               |
+| `v4` | `fit_rhat_max`, `fit_ess_min`            | the v3 statistics; the `role` coordinate is added after `treatment`, and the manifest gains `parameter_set` and `state_sets`                                                            |
+| `v5` | `fit_rhat_max`, `fit_ess_min`            | the v4 statistics; the mode-valued `horizon` column is renamed `mode`, `horizon` holds a forecast target's position (empty here), `quantity` follows `role`, and `role` gains `unknown` |
 
 The v1 → v2 row is why the tag exists at all: the estimator changed and the
 column names did not, so for those two versions the tag is the _only_ signal
@@ -954,12 +968,29 @@ is a failure. The exit status follows:
 | an eligible stream fails while it is produced (e.g. refused a forecast) | 1    |
 
 The manifest — `predictive.json` for the free-forward and one-step modes,
-`forecast.json` (`camdl.forecast/v4`) for a forecast — lists `produced` (leaf
+`forecast.json` (`camdl.forecast/v5`) for a forecast — lists `produced` (leaf
 names), `skipped` (`{"stream", "reason"}`) and `failed`
 (`{"stream", "reason"}`), so a consumer reads completeness off the artifact
 rather than the exit status. A forecast also skips an eligible stream none of
 whose periods ends within the reach, with the reason `no_target_within_horizon`,
 and fails it instead when `--stream` named it.
+
+A forecast's tables are:
+
+```
+<run folder>/predict/forecast-<12 hex>/forecast/<stream>.tsv
+  scenario | sweep:<param>… | <dims…> | t_start | t_stop | mode | horizon | lead
+           | quantity | mean | q05 | q25 | q50 | q75 | q95 | n_samples
+
+<run folder>/predict/forecast-<12 hex>/forecast-samples.tsv
+  scenario | sweep:<param>… | sample | chain | draw | cloud_row | particle
+           | stream | t_start | t_stop | horizon | quantity | value
+```
+
+`mode` is `forecast` on every row, `horizon` the target's position among its
+stream's targets, `lead` its end minus the origin, and `quantity` is
+`observation`: the bands and the samples are of draws from the observation
+model.
 
 `forecast.json` also records what made the forecast and what it holds:
 
@@ -4552,8 +4583,8 @@ writes the predicted-vs-observed pair:
 
 ```
 $ camdl predict @posterior --n-draws 20
-predict: free_forward horizon — subsampling 20 of 60 posterior draws (raise with --n-draws)
-predict: one_step horizon — subsampling 20 of 60 posterior draws (raise with --n-draws)
+predict: free_forward mode — subsampling 20 of 60 posterior draws (raise with --n-draws)
+predict: one_step mode — subsampling 20 of 60 posterior draws (raise with --n-draws)
 predict: mode=free_forward+one_step(20 draws) treatment=posterior, 1 scenario(s) [fitted], 1 stream(s), 60 draws from pgas method 'pgas'
 wrote camdl-store/<build>/fit/sir-…/runs/pgas-…/seed_1-…/predict/all-…/predictive/weekly_cases.tsv
 wrote camdl-store/<build>/fit/sir-…/runs/pgas-…/seed_1-…/predict/all-…/predictive.json
@@ -4563,14 +4594,14 @@ wrote camdl-store/<build>/fit/sir-…/runs/pgas-…/seed_1-…/predict/all-…/o
 
 ```
 $ cut -f1-7 camdl-store/<build>/fit/sir-…/runs/pgas-…/seed_1-…/predict/all-…/predictive/weekly_cases.tsv | head -3
-scenario	time	horizon	treatment	role	fit_rhat_max	fit_ess_min
-fitted	0	free_forward	posterior	trained	2.0652	
-fitted	7	free_forward	posterior	trained	2.0652
+scenario	time	mode	horizon	treatment	role	quantity
+fitted	0	free_forward		posterior	trained	observation
+fitted	7	free_forward		posterior	trained	observation
 ```
 
-(`cut` keeps the excerpt narrow; the full row continues with the per-row
-`rhat_mean`/`ess_mean`/`rhat_pred`/`ess_pred` channels, `n_draws`, and the
-`q05…q95` band.)
+(`cut` keeps the excerpt narrow; the full row continues with `fit_rhat_max`,
+`fit_ess_min`, the per-row `rhat_mean`/`ess_mean`/`rhat_pred`/`ess_pred`
+channels, `n_draws`, and the `q05…q95` band.)
 
 > **Current limitation.** A `pfilter` leaf has no row in `camdl fit table`, and
 > no entry in `fit summary --format json`'s `table_rows`; it is listed in
@@ -5986,13 +6017,14 @@ camdl predict @posterior
 It emits, under the run's `predict/<mode>-<12 hex>/` (§2.2.2):
 
 ```
-predictive/<stream>.tsv   time | <dims…> | horizon | treatment | role | fit_rhat_max | fit_ess_min
+predictive/<stream>.tsv   time | <dims…> | mode | horizon | treatment | role | quantity
+                          | fit_rhat_max | fit_ess_min
                           | rhat_mean | ess_mean | rhat_pred | ess_pred
                           | n_draws | q05..q95
 observed/<stream>.tsv     time | <dims…> | value
 ```
 
-with two horizons where the backend supports them — `free_forward` (one forward
+with two modes where the backend supports them — `free_forward` (one forward
 replay per draw) and `one_step` (the filter's one-step-ahead predictive; chain-
 binomial only, a hard error on an ODE fit). The posterior cloud is subsampled to
 `--n-draws` (default 200) by a strided pick across the whole cloud.

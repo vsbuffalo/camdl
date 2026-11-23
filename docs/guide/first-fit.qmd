@@ -291,8 +291,8 @@ Convergence says the sampler found the posterior. Whether the model describes
 the school is a separate question. A *posterior predictive check* asks it
 directly: simulate the epidemic from posterior draws, add the observation
 noise, and see whether the observed counts look like a typical simulation.
-`camdl predict` does this two ways. The `free_forward` horizon simulates each
-epidemic from day 0 without looking at the data. The `one_step` horizon
+`camdl predict` does this two ways. The `free_forward` mode simulates each
+epidemic from day 0 without looking at the data. The `one_step` mode
 predicts each day's count from the particle filter's picture of the epidemic
 given the counts up to the day before.
 

@@ -279,7 +279,7 @@ fn free_forward_n_draws(pred_tsv: &str) -> BTreeSet<usize> {
             .position(|c| *c == name)
             .unwrap_or_else(|| panic!("no `{name}` column in:\n{pred_tsv}"))
     };
-    let (hi, ni) = (col("horizon"), col("n_draws"));
+    let (hi, ni) = (col("mode"), col("n_draws"));
     let mut out = BTreeSet::new();
     for l in lines {
         let f: Vec<&str> = l.split('\t').collect();

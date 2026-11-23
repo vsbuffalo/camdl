@@ -241,7 +241,7 @@ one-step-ahead band that carries full posterior parameter uncertainty is
 `camdl predict @fit --mode one_step`: it re-runs the bootstrap filter once per
 posterior draw, samples `ỹ` from the propagated (pre-reweight) particles at each
 observation time, and pools over (particles × draws) into the `q05…q95` columns
-of `predictive/<stream>.tsv` — `horizon=one_step,
+of `predictive/<stream>.tsv` — `mode=one_step,
 treatment=posterior`. This is
 chain-binomial only (an ODE fit's one-step reduces to its free-forward band).
 Under `[data] holdout_after` the band covers the training rows only, since a
@@ -520,14 +520,17 @@ The file is a long TSV, one row per step, stream scheduled at that step, and
 phase, `predictive` before `filtered`:
 
 ```text
-time  stream  phase       mean    q05   q25   q50   q75   q95
-1     cases   predictive  9.989   6.5   8.5   10    11.5  14
-1     cases   filtered    9.008   6     8     9     10    12
+time  stream  phase       quantity     mean    q05   q25   q50   q75   q95
+1     cases   predictive  expectation  9.989   6.5   8.5   10    11.5  14
+1     cases   filtered    expectation  9.008   6     8     9     10    12
 ```
 
 - `time`: the step's model time, the `--trace` column of the same name.
 - `stream`: the observation stream's name.
 - `phase`: `predictive` or `filtered`, as above.
+- `quantity`: `expectation` on every row, since the summaries are of
+  `E[y_t | x_t, θ]`. The bands `camdl predict` writes carry the same column with
+  `observation`, since they are of draws of `y_t`.
 - `mean`: the weighted mean of `E[y_t | x_t, θ]` over the particles.
 - `q05` … `q95`: its weighted 5%, 25%, 50%, 75% and 95% quantiles, each the
   smallest particle value at which the cumulative weight reaches the level (the
