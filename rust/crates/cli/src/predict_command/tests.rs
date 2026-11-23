@@ -114,6 +114,35 @@ observations {
 simulate { from = 0 'days  to = 10 'days }
 "#;
 
+/// The fixture model with its infection rate scaled by `pop`, a forcing read
+/// linearly from a table with rows to day 63, and by `week`, a periodic
+/// forcing.
+fn forced_model() -> String {
+    let m = model();
+    let forced = m.replace("beta * S * I / N", "beta * pop * week * S * I / N").replace(
+        "transitions {",
+        "forcing {\n  pop : interpolated 'ratio {\n    times  = [0 'days, 20 'days, 30 'days, 63 'days]\n    \
+         values = [1.0, 1.2, 0.7, 1.0]\n    method = linear\n  }\n  week : periodic 'ratio {\n    \
+         period = 7 'days\n    values = [1.0, 0.9]\n  }\n}\n\ntransitions {",
+    );
+    assert!(forced.contains("beta * pop * week") && forced.contains("forcing {"), "the fixture's infection rate moved");
+    forced
+}
+
+/// The forced fixture model with `pop` a step table through rows at days 0,
+/// 20, 40 and 63, read at `t − tau` for a parameter `tau`, which the point
+/// `point_lagged.toml` sets to −5 days.
+fn lagged_model() -> String {
+    let m = forced_model();
+    let lagged = m
+        .replace("[0 'days, 20 'days, 30 'days, 63 'days]", "[0 'days, 20 'days, 40 'days, 63 'days]")
+        .replace("    method = linear\n  }", "    method = constant\n    lag    = tau\n  }")
+        .replace("  I0    : count\n", "  I0    : count\n  tau   : real dim T\n");
+    assert!(lagged.contains("lag    = tau") && lagged.contains("tau   : real dim T") && lagged.contains("40 'days"),
+        "the forced fixture moved");
+    lagged
+}
+
 /// The point the fixture model is predicted at, `@fit`'s fixed values with
 /// `beta` at 0.5.
 const POINT: &str = "beta = 0.5\ngamma = 0.25\nrho = 0.5\nk = 10.0\nN0 = 1000\nI0 = 5\n";
@@ -141,6 +170,9 @@ fn fixed_point_files() -> Vec<(&'static str, String)> {
         ("daily_cases2.tsv", daily2),
         ("mixed.tsv", mixed),
         ("patch.camdl", PATCH.to_string()),
+        ("forced.camdl", forced_model()),
+        ("lagged.camdl", lagged_model()),
+        ("point_lagged.toml", format!("{POINT}tau = -5.0\n")),
         ("patch.toml", "beta = 0.4\ngamma = 0.2\nrho = 0.5\n".into()),
         ("patch_cases.tsv", (1..=10).fold("time\tcases\n".to_string(), |s, t| s + &format!("{t}\t{}\n", 2 + t))),
         ("w1.tsv", "1.0\n0.5\n".into()),
@@ -271,6 +303,7 @@ fn argv(inv: &PredictInvocation) -> Vec<String> {
                 mode,
                 horizon,
                 design,
+                covariate,
                 quantities,
                 n_draws,
                 particles,
@@ -325,6 +358,9 @@ fn argv(inv: &PredictInvocation) -> Vec<String> {
     opt("--horizon", horizon.clone());
     for d in design {
         opt("--design", Some(d.clone()));
+    }
+    for c in covariate {
+        opt("--covariate", Some(format!("{}={}", c.forcing, c.statement.as_str())));
     }
     opt("--quantities", quantities.as_ref().map(|p| p.to_string_lossy().into_owned()));
     opt("--n-draws", n_draws.map(|x| x.to_string()));
@@ -468,6 +504,7 @@ impl Harness {
                 "@fit", "--horizon", "2 weeks", "--stream", "survey", "--design", "survey=design.tsv", "--n-draws", "4",
                 "--particles", "20",
             ]),
+            "covariate" => predict_from(&forced_forecast(&["--covariate", "pop=prospective"])),
             _ if name.starts_with("args.fixed_point.") => match field {
                 "table" => predict_from(&[
                     "patch.camdl", "--params", "patch.toml", "--table", "w=w1.tsv", "--data", "cases=patch_cases.tsv",
@@ -636,6 +673,136 @@ fn a_realised_design_forecast_is_refused() {
     assert!(!out.status.success(), "--realised-design ran:\n{err}");
     assert!(err.contains("--realised-design") && err.contains("held-out"), "{err}");
     assert!(folders(&root).iter().all(|(_, id, _)| id["kind"] != crate::fit_store::Prediction::KIND), "nothing is stored");
+}
+
+/// The forecast of the forced fixture model from a fixed point: the daily
+/// cases to day 24 assimilated and two weeks of reach, with `extra`.
+fn forced_forecast(extra: &[&'static str]) -> Vec<&'static str> {
+    let mut line = vec![
+        "forced.camdl", "--params", "point.toml", "--data", "daily_cases=daily_cases.tsv", "--holdout-after", "24",
+        "--horizon", "2 weeks", "--n-draws", "4", "--particles", "20",
+    ];
+    line.extend_from_slice(extra);
+    line
+}
+
+/// A forecast that reads the table forcing `pop` after its origin is refused
+/// with no statement, naming the forcing, the origin, the reach and the
+/// table's end; a statement for the periodic forcing `week`, which needs
+/// none, is refused, as is `--covariate` outside a forecast. Each of the
+/// three statements then runs, as a prediction of its own; `realised` labels
+/// the forecast's manifest, and `hold` records the value it carries.
+#[test]
+fn a_forecast_reading_a_table_forcing_after_its_origin_needs_a_statement() {
+    let fresh = tempfile::tempdir().unwrap();
+    let root = fresh.path().join("camdl-store");
+    let cwd = workdir(&root);
+    let run = |line: &[&str]| {
+        let mut v = vec!["predict"];
+        v.extend_from_slice(line);
+        predict_in(cwd.path(), &root, &v)
+    };
+    let refused = |line: &[&str], want: &[&str]| {
+        let out = run(line);
+        let err = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(!out.status.success(), "{line:?} ran:\n{err}");
+        for w in want {
+            assert!(err.contains(w), "{line:?}: missing {w:?} in:\n{err}");
+        }
+        assert!(predictions(&root).is_empty(), "{line:?}: nothing is stored");
+    };
+    refused(&forced_forecast(&[]), &[
+        "forcing `pop` is read after the forecast origin and nothing says how.",
+        "origin t = 24, reach 2 weeks (to t = 38); its table has rows to t = 63.",
+        "--covariate pop=prospective",
+        "--covariate pop=realised",
+        "--covariate pop=hold",
+    ]);
+    refused(&forced_forecast(&["--covariate", "pop=prospective", "--covariate", "week=hold"]), &[
+        "forcing `week` needs no statement",
+    ]);
+    refused(
+        &["forced.camdl", "--params", "point.toml", "--data", "daily_cases=daily_cases.tsv", "--mode", "free_forward",
+          "--n-draws", "4", "--covariate", "pop=hold"],
+        &["--covariate pop=hold", "not a forecast"],
+    );
+
+    let mut manifests = BTreeMap::new();
+    let mut tables = BTreeMap::new();
+    for statement in ["pop=prospective", "pop=realised", "pop=hold"] {
+        let before: std::collections::BTreeSet<PathBuf> = predictions(&root).into_iter().map(|(p, _)| p).collect();
+        let out = run(&forced_forecast(&["--covariate", statement]));
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "--covariate {statement}:\n{err}");
+        let new: Vec<PathBuf> = predictions(&root).into_iter().map(|(p, _)| p).filter(|p| !before.contains(p)).collect();
+        assert_eq!(new.len(), 1, "--covariate {statement} is a prediction of its own: {new:?}");
+        let doc: serde_json::Value = serde_json::from_slice(&std::fs::read(new[0].join("forecast.json")).unwrap()).unwrap();
+        manifests.insert(statement, doc);
+        tables.insert(statement, std::fs::read_to_string(new[0].join("forecast/daily_cases.tsv")).unwrap());
+    }
+    assert_eq!(tables["pop=prospective"], tables["pop=realised"], "both read the table as it is");
+    assert_ne!(tables["pop=prospective"], tables["pop=hold"], "hold forecasts with pop held at its value at the origin");
+    for (statement, doc) in &manifests {
+        let block = &doc["covariates"];
+        assert_eq!(block["forcings"][0]["forcing"], "pop", "{statement}: {block:#}");
+        assert_eq!(&format!("pop={}", block["forcings"][0]["statement"].as_str().unwrap()), statement);
+        assert_eq!(doc["options"]["forecast"]["covariates"]["pop"], statement.trim_start_matches("pop="));
+    }
+    assert_eq!(
+        manifests["pop=realised"]["covariates"]["label"],
+        crate::fit::forecast_covariates::REALISED_LABEL,
+        "a realised statement labels the forecast"
+    );
+    assert!(manifests["pop=prospective"]["covariates"].get("label").is_none());
+    // pop(24) on the segment from (20, 1.2) to (30, 0.7).
+    let held = manifests["pop=hold"]["covariates"]["forcings"][0]["held"]["value"].as_f64().unwrap();
+    assert!((held - 1.0).abs() < 1e-12, "hold carries pop's value at the origin: {held}");
+    // The filter before the origin is the same under every statement, so
+    // each draw's last assimilation has the same effective sample size.
+    for statement in ["pop=realised", "pop=hold"] {
+        assert_eq!(
+            manifests[statement]["filter_diagnostics"], manifests["pop=prospective"]["filter_diagnostics"],
+            "{statement}: the filtering before the origin moved"
+        );
+    }
+}
+
+/// A step table whose next row after the origin (day 40) is past a two-week
+/// reach from day 24, read at `t − tau` with `tau` a parameter at −5 days:
+/// the run reads the day-40 row from day 35, and a parameter lag may be
+/// negative, so the forecast is refused with no statement, `hold` is refused
+/// and not offered, and a statement runs.
+#[test]
+fn a_parameter_lag_reads_a_step_tables_rows_after_the_origin() {
+    let fresh = tempfile::tempdir().unwrap();
+    let root = fresh.path().join("camdl-store");
+    let cwd = workdir(&root);
+    let line = |extra: &[&'static str]| {
+        let mut v = vec![
+            "predict", "lagged.camdl", "--params", "point_lagged.toml", "--data", "daily_cases=daily_cases.tsv",
+            "--holdout-after", "24", "--horizon", "2 weeks", "--n-draws", "4", "--particles", "20",
+        ];
+        v.extend_from_slice(extra);
+        v
+    };
+    let refused = |extra: &[&'static str], want: &[&str], not: &[&str]| {
+        let out = predict_in(cwd.path(), &root, &line(extra));
+        let err = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(!out.status.success(), "{extra:?} ran:\n{err}");
+        for w in want {
+            assert!(err.contains(w), "{extra:?}: missing {w:?} in:\n{err}");
+        }
+        for n in not {
+            assert!(!err.contains(n), "{extra:?}: {n:?} in:\n{err}");
+        }
+    };
+    refused(&[], &["forcing `pop` is read after the forecast origin", "Its lag is a parameter", "`hold` is not offered"], &[
+        "--covariate pop=hold ",
+    ]);
+    refused(&["--covariate", "pop=hold"], &["cannot be held", "a parameter, which may be negative"], &[]);
+    assert!(predictions(&root).is_empty(), "nothing is stored");
+    let out = predict_in(cwd.path(), &root, &line(&["--covariate", "pop=prospective"]));
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
 }
 
 /// `camdl fit predict` and `camdl predict --fit` are refused, each naming

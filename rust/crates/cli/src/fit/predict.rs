@@ -1843,6 +1843,7 @@ fn refuse_fixed_point_flags(args: &crate::args::PredictArgs) -> Result<(), Strin
                     forecast; pass --horizon DURATION (--mode forecast)."
             .to_string());
     }
+    refuse_covariate_outside_forecast(args, mode)?;
     if args.fixed_point.binomial.is_some() && !filterable {
         return Err(format!(
             "--binomial sets the sampler of the chain-binomial draws, and this prediction runs on the {backend} \
@@ -1850,6 +1851,23 @@ fn refuse_fixed_point_flags(args: &crate::args::PredictArgs) -> Result<(), Strin
         ));
     }
     Ok(())
+}
+
+/// Refuse `--covariate` on a prediction that is not a forecast: only a
+/// forecast has an origin after which a forcing's values can be stated.
+fn refuse_covariate_outside_forecast(
+    args: &crate::args::PredictArgs,
+    mode: Option<crate::args::types::PredictModeArg>,
+) -> Result<(), String> {
+    match args.flags.covariate.first() {
+        Some(c) if mode != Some(crate::args::types::PredictModeArg::Forecast) => Err(format!(
+            "--covariate {}={} states what a forcing's values after a forecast's origin are, and this \
+             predict is not a forecast; pass --horizon DURATION (--mode forecast).",
+            c.forcing,
+            c.statement.as_str()
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// The failures and skipped streams the stored prediction's report records:
@@ -2364,6 +2382,7 @@ fn run_predict(
              forecast; pass --horizon DURATION (--mode forecast).",
             if args.posterior.realised_design { "--realised-design" } else { "--design" }));
     }
+    refuse_covariate_outside_forecast(args, mode)?;
     if let Some(v) = &vocabulary {
         // The vocabulary compiles against the model file the problem keeps.
         let mut posed = config.clone();
@@ -4486,6 +4505,12 @@ pub(crate) struct ForecastKey {
     /// Where the design values came from, when any target reads one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub design_mode: Option<crate::fit::forecast_plan::DesignMode>,
+    /// What each data-table forcing the forecast reads after its origin is
+    /// stated to be there (`--covariate`), by forcing. Empty, and absent from
+    /// the encoding, when the forecast reads no table forcing after its
+    /// origin.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub covariates: BTreeMap<String, crate::args::types::CovariateStatement>,
 }
 
 /// What [`PredictOptions::address_key`] hashes: the run, the engine that
@@ -5506,18 +5531,42 @@ mod tests {
             ("allow_forcing_extrapolation",
              PredictOptions { allow_forcing_extrapolation: true, ..base.clone() }),
             ("forecast", PredictOptions {
-                forecast: Some(ForecastKey { targets: "cd".repeat(32), design_mode: None }),
+                forecast: Some(ForecastKey { targets: "cd".repeat(32), design_mode: None, covariates: BTreeMap::new() }),
                 ..base.clone()
             }),
         ];
-        let forecast = |design_mode, targets: &str| PredictOptions {
-            forecast: Some(ForecastKey { targets: targets.to_string(), design_mode }),
-            ..base.clone()
-        }.address_key_by(RUN, ENGINE);
+        let forecast_with = |design_mode, targets: &str, covariates: &[(&str, crate::args::types::CovariateStatement)]| {
+            PredictOptions {
+                forecast: Some(ForecastKey {
+                    targets: targets.to_string(),
+                    design_mode,
+                    covariates: covariates.iter().map(|(f, s)| (f.to_string(), *s)).collect(),
+                }),
+                ..base.clone()
+            }
+            .address_key_by(RUN, ENGINE)
+        };
+        let forecast = |design_mode, targets: &str| forecast_with(design_mode, targets, &[]);
         use crate::fit::forecast_plan::DesignMode::{ExPost, Prospective};
         assert_ne!(forecast(Some(ExPost), "ab"), forecast(Some(Prospective), "ab"), "the design mode keys the address");
         assert_ne!(forecast(None, "ab"), forecast(Some(Prospective), "ab"));
         assert_ne!(forecast(None, "ab"), forecast(None, "ac"), "and the target set");
+        {
+            use crate::args::types::CovariateStatement::{Hold, Prospective as Stated, Realised};
+            let keys = [
+                forecast(None, "ab"),
+                forecast_with(None, "ab", &[("pop", Stated)]),
+                forecast_with(None, "ab", &[("pop", Realised)]),
+                forecast_with(None, "ab", &[("pop", Hold)]),
+                forecast_with(None, "ab", &[("births", Hold)]),
+            ];
+            let distinct: std::collections::BTreeSet<&String> = keys.iter().collect();
+            assert_eq!(distinct.len(), keys.len(), "each statement, and the forcing it is for, keys the address");
+            // A forecast that reads no table forcing after its origin states
+            // nothing, and its key's encoding has no field for it.
+            let none = ForecastKey { targets: "ab".into(), design_mode: None, covariates: BTreeMap::new() };
+            assert_eq!(serde_json::to_string(&none).unwrap(), r#"{"targets":"ab"}"#);
+        }
         for (what, o) in &varied {
             assert_ne!(o.address_key_by(RUN, ENGINE), k, "{what} must move the key");
         }

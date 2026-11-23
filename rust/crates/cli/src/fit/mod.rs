@@ -102,6 +102,7 @@ pub mod provenance;
 pub(crate) mod observed_rows; // one leaf's data rows, each with the instant or period it measures
 pub(crate) mod training_partition; // which rows trained: per stream a prefix and its row digest
 pub(crate) mod forecast_plan; // what a fixed-origin forecast predicts: its origin, reach and targets
+pub(crate) mod forecast_covariates; // the table forcings a forecast reads after its origin, and their statements
 pub(crate) mod forecast_driver; // the fixed-origin forecast: one bootstrap filter per posterior draw
 pub(crate) mod forecast_arms; // the scenario and sweep arms of a forecast, each differing only after the origin
 pub(crate) mod forecast_contrast; // the difference of two arms' predictive means and its Monte Carlo error (D83)

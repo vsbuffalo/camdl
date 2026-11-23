@@ -1310,7 +1310,7 @@ mod tests {
             let plan = ForecastPlan::new(partition(&rows), 14.0, &[
                 PlanStream { obs: &o, training: &train, held_out: &held, design: DesignInput::NotSupplied },
             ]).unwrap();
-            crate::fit::forecast_output::forecast_options(&crate::fit::predict::PredictOptions::defaults(), &plan)
+            crate::fit::forecast_output::forecast_options(&crate::fit::predict::PredictOptions::defaults(), &plan, &Default::default())
                 .address_key("run")
         };
         let whole = address(vec![(28.0, 35.0, 7.0)]);

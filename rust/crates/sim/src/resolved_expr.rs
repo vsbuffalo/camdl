@@ -17,7 +17,7 @@ use ir::deriv::{CompGradMap, DerivEntry, UnsupportedReason};
 use ir::table::OobPolicy;
 
 use crate::error::SimError;
-use crate::propensity::{eval_forcing, EvalCtx};
+use crate::propensity::EvalCtx;
 
 // ── Resolved expression tree ─────────────────────────────────────────────────
 
@@ -706,8 +706,7 @@ pub fn eval_resolved(expr: &ResolvedExpr, ctx: &EvalCtx<'_>) -> f64 {
                 Some(lag) => ctx.t - eval_resolved(lag, ctx),
                 None => ctx.t,
             };
-            tf.note_evaluated_at(t_eff);
-            eval_forcing(&tf.kind, t_eff, ctx)
+            tf.value_at(t_eff, ctx)
         }
 
         // The same lag as the forcing's value, so ∂f/∂cₖ is taken at the time

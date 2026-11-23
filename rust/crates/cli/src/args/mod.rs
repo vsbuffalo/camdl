@@ -1588,6 +1588,19 @@ pub struct PredictFlags {
     #[input(identity, vary = crate::input_fixtures::predict_design)]
     pub design: Vec<String>,
 
+    /// Forecast mode: what the values of the data-table forcing FORCING after
+    /// the forecast origin are (repeatable, one per forcing). `prospective`:
+    /// fixed or assumed at the origin, read as they are. `realised`: observed
+    /// after the origin, read as they are, and the forecast is labelled
+    /// conditional on covariates observed after its origin. `hold`: the
+    /// forcing's value at the origin is carried forward, and its table after
+    /// the origin is not read (refused for a cubic-spline table). A forecast
+    /// that reads a table forcing after its origin with no statement is
+    /// refused; one that reads none takes no `--covariate`.
+    #[arg(long = "covariate", value_name = "FORCING=STATEMENT")]
+    #[input(identity, vary = crate::input_fixtures::predict_covariate)]
+    pub covariate: Vec<crate::args::types::CovariateSpec>,
+
     /// Report this fit with the `quantities {}` block in FILE instead of the
     /// model's own. FILE is an ordinary `.camdl` file containing ONLY a
     /// `quantities {}` block; it is compiled against this fit's model source and

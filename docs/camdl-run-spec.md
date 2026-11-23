@@ -693,10 +693,12 @@ option that changes the output, resolved to the values used: the mode
 one selection are one key), the particle count, the SHA-256 of a `--quantities`
 file, `--allow-forcing-extrapolation`, and, for a forecast, its target set (each
 target's stream, period or instant, and design values where it reads any; D80,
-D81) and the design mode. The build is in the ambient key, as for every result
-in the run store. Two predictions that differ in the run, the build or any of
-those inputs therefore never share a folder. The held-out outcomes are not in
-the identity: they change no prediction (D79). The data are the problem's stored
+D81), the design mode, and each `--covariate` statement, by forcing. A forecast
+that reads no table forcing after its origin states none, and its identity has
+no field for them. The build is in the ambient key, as for every result in the
+run store. Two predictions that differ in the run, the build or any of those
+inputs therefore never share a folder. The held-out outcomes are not in the
+identity: they change no prediction (D79). The data are the problem's stored
 training files, so an edit to the user's data file after the fit does not reach
 a prediction. A forecast from a stored fit reads its targets from the problem's
 `held_out/` files, computes no held-out score, and refuses `--realised-design`,
@@ -717,6 +719,72 @@ files carry no such suffix (D86): `forecast.json`, `forecast-samples.tsv`,
 `forecast/` and `report.json` keep their names, the directory alone is keyed by
 the selection, and `forecast.json` states `options.excluded_chains` (`[]` for
 the full cloud).
+
+**Forcings read after the origin.** A forcing read from a data table is an input
+at every time, and after a forecast's origin its values may have been fixed in
+advance (a planned campaign, a scenario), observed later, or not known; camdl
+cannot tell which. Before any filter runs, a forecast classifies each forcing
+the model declares. A forcing is read after the origin when the run, up to the
+end of the reach, evaluates its table at an argument after the origin. The
+argument is `t − lag` for a forcing with a `lag`: a positive lag is read after
+the origin only once the reach exceeds the lag, a negative lag reads arguments
+after the origin from model times before it, and a lag that is a parameter may
+be negative, so it is taken to read every row of its table after the origin. An
+`interpolated` forcing with `method = linear` (whatever its source) is so read
+when its table has a row after the origin and the last argument passes the
+origin; one with `method = constant` only when such a row lies at or before the
+last argument. One with `method = spline` is so read whenever its table has a
+row after the origin, whatever the lag and the reach, because a natural cubic
+spline's value at every argument depends on every row. The periodic kinds, a
+formula in `t`, a `piecewise` forcing (whose values the model declares, and
+which holds its last value after its last breakpoint) and a `bspline` are never
+so read; a forecast whose reach passes a `piecewise` breakpoint says so in a
+note, on stderr and in `forecast.json`. A forecast that reads a table forcing
+after its origin is refused until the user states what those values are, with
+`--covariate FORCING=STATEMENT` (repeatable, one per forcing):
+
+```
+error: forcing `pop` is read after the forecast origin and nothing says how.
+  origin 1961-01-01, reach 8 weeks (to 1961-02-26); its table has rows to 1964-12-31.
+  State one of:
+    --covariate pop=prospective   the values after the origin were fixed or assumed at the origin
+    --covariate pop=realised      they were observed after the origin
+    --covariate pop=hold          carry the value at the origin forward
+```
+
+The times are dates under a model `origin`, and model time otherwise.
+
+- `prospective` reads the table as it is: the forecast is conditional on those
+  values. The word is the one a prospective design uses (`--design`).
+- `realised` reads the table as it is, and labels the forecast "conditional on
+  covariates observed after the origin": an ex-post evaluation, as a forecast
+  under `--realised-design` is.
+- `hold` holds the forcing at its table's value at the origin wherever its
+  argument `t − lag` is after the origin. The held value is the table's
+  interpolated value at the origin, so for a `linear` table it depends on the
+  first row after the origin as well as the last row before it; for a `constant`
+  table it is the last row's value at or before the origin. Every evaluation
+  whose argument is at or before the origin is unchanged, bit for bit, so the
+  filtering through the training rows is the same as without it. A held forcing
+  is not evaluated past its table, so it raises no `forcing-outside-range`.
+  `hold` is refused for a cubic-spline table (`method = spline`), whose value at
+  every time depends on every row, so that cutting it at the origin would change
+  the forcing before the origin too. It is refused for a forcing whose lag is
+  negative or a parameter: model times at or before the origin read such a table
+  after the origin, so a hold from the origin would change the forcing before
+  the origin in model time.
+
+An indexed forcing (`pop[p in patch]`) is one forcing per level, and each is
+stated by its underscore-joined name (`--covariate pop_p0=hold`), as `--sweep`
+names an indexed parameter; the refusal names each level that needs a statement.
+
+`--covariate` is refused outside a forecast, for a forcing the model does not
+declare, for a forcing named twice, and for a forcing that needs no statement,
+with the reason. A table that ends before the reach is still refused as
+`forcing-outside-range` past its end, under `prospective` or `realised`, unless
+`--allow-forcing-extrapolation` holds its last value; an estimated `bspline`
+past its window is refused the same way. The statements are in the prediction's
+identity (above) and in `forecast.json` (`covariates`, below).
 
 The free-forward replay projects each row off its own recorded trajectories, so
 it records a snapshot at every time a row reads — each data time and each
@@ -1029,6 +1097,17 @@ model.
   labelled a conditional score using realised future design, not an
   unconditional forecast), `streams`, and `files`: each `--design` file's
   `stream` and the `sha256` of its bytes (the path typed is not recorded).
+- `covariates`: absent when the forecast reads no table forcing after its origin
+  and passes no `piecewise` breakpoint. Otherwise `forcings`, one entry per
+  `--covariate` statement with the `forcing`, its `statement`, its `method`, its
+  `table` (`source`, the `data = "path"` as written in the model or `null`;
+  `rows_sha256`, the SHA-256 of its rows as the forecast reads them; the times
+  of its `first` and `end` rows), its `lag` (`null`, a number, or `"parameter"`)
+  and, under `hold`, `held` (`after`, the origin as a value of the table's
+  argument, `on`, which says so, `"the table's argument, t − lag"`, and the
+  `value` carried); `notes`, one per `piecewise` forcing whose breakpoints the
+  reach passes; and, when any statement is `realised`, `label`:
+  `"conditional on covariates observed after the origin"`.
 - `chain_selection`, under a chain selection: the block `predictive.json`
   carries.
 - `arms` (D50): the fitted model (`"baseline": true`), then each `--scenario`
@@ -7135,6 +7214,11 @@ camdl predict RUN            RUN: the positional run handle, same grammar as `fi
                               target, from FILE (prospective; repeatable)
   --realised-design           forecast: design values from the held-out rows (a
                               conditional score using realised future design)
+  --covariate FORCING=STATEMENT
+                              forecast: what a table forcing's values after the
+                              origin are: prospective, realised or hold
+                              (repeatable; required for each table forcing the
+                              forecast reads after its origin; §2.2.2)
   --n-draws N                 posterior subsample cap for both horizons (default 200)
   --particles N               particles per draw in the one-step and forecast filters
                               (default: the PMMH fit's count, else 500)

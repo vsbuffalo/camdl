@@ -369,6 +369,22 @@ pub struct CompiledTimeFunc {
     /// periodic kinds and `piecewise`, which are defined for all time. Every
     /// evaluation notes its time against it ([`Self::note_evaluated_at`]).
     pub range: Option<std::sync::Arc<crate::forcing_range::DefinedRange>>,
+    /// A data-table forcing held at its value at one argument for every later
+    /// argument ([`CompiledModel::hold_forcing_after`]); `None` for every
+    /// forcing a run has not been told to hold.
+    pub held: Option<HeldAfter>,
+}
+
+/// A forcing held from an argument on: for every argument after `from` its
+/// value is `value`, the forcing's value at `from`, and its table is not read.
+/// At and before `from` the forcing is evaluated as it is defined.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HeldAfter {
+    /// The last argument (the forcing's time, `t − lag` for a lagged forcing)
+    /// at which the table is read, in model time.
+    pub from: f64,
+    /// The forcing's value at `from`.
+    pub value: f64,
 }
 
 impl CompiledTimeFunc {
@@ -380,6 +396,22 @@ impl CompiledTimeFunc {
         if let Some(r) = &self.range {
             r.note(t);
         }
+    }
+
+    /// The forcing's value at the argument `t` (already shifted by the lag).
+    /// A held forcing returns its held value after the hold's `from` without
+    /// reading its table, so no evaluation there is outside the table's range;
+    /// every other evaluation is noted against the range and evaluated as the
+    /// forcing is defined.
+    #[inline]
+    pub fn value_at(&self, t: f64, ctx: &crate::propensity::EvalCtx<'_>) -> f64 {
+        if let Some(h) = &self.held {
+            if t > h.from {
+                return h.value;
+            }
+        }
+        self.note_evaluated_at(t);
+        crate::propensity::eval_forcing(&self.kind, t, ctx)
     }
 
     /// The defined range of `kind`, for the kinds that hold an end value
@@ -2328,7 +2360,7 @@ impl CompiledModel {
                 Some(e) => Some(resolve_coeff(e, &param_index, &const_values)?),
             };
             let range = CompiledTimeFunc::defined_range(&tf.name, &kind, lag.is_some());
-            time_func_cache.push(CompiledTimeFunc { kind, lag, range });
+            time_func_cache.push(CompiledTimeFunc { kind, lag, range, held: None });
         }
 
         // Precompute fire **times** (continuous, dt-invariant) for all
@@ -2730,6 +2762,36 @@ impl CompiledModel {
     pub fn with_eval_settings(mut self, eval: EvalSettings) -> Self {
         self.eval = eval;
         self
+    }
+
+    /// Hold the data-table forcing `name` at its value at the argument `from`
+    /// for every later argument ([`HeldAfter`]), and return that value. The
+    /// forcing is unchanged at and before `from`, bit for bit, because it is
+    /// still evaluated there as it is defined.
+    ///
+    /// Only a table read linearly or as a step (`interpolated` with `method =
+    /// linear` or `constant`) can be held. A cubic spline is refused: its
+    /// value before `from` depends on its knots after `from`, so no hold
+    /// leaves the forcing before `from` as it is while removing what comes
+    /// after. Every other kind is refused: it has no table.
+    pub fn hold_forcing_after(&mut self, name: &str, from: f64) -> Result<f64, SimError> {
+        let idx = *self.time_func_index.get(name)
+            .ok_or_else(|| SimError::UnknownTimeFunction(name.to_string()))?;
+        let tf = &mut self.time_func_cache[idx];
+        let value = match &tf.kind {
+            CompiledTimeFuncKind::Interpolated { times, values } =>
+                crate::propensity::interpolated_value(times, values, from),
+            CompiledTimeFuncKind::Constant { times, values } =>
+                crate::propensity::constant_value(times, values, from),
+            CompiledTimeFuncKind::CubicSpline(_) => return Err(SimError::Validation(format!(
+                "forcing '{name}' is a cubic spline through its table, whose value at every time \
+                 depends on every knot, so it cannot be held after t = {from} without changing it \
+                 before"))),
+            _ => return Err(SimError::Validation(format!(
+                "forcing '{name}' is not read from a data table, so there is no table to hold"))),
+        };
+        tf.held = Some(HeldAfter { from, value });
+        Ok(value)
     }
 
     /// Features this model requires from a backend.
@@ -3888,5 +3950,93 @@ mod tests {
         assert!(!expr_is_time_dependent(&rate, &nb));
         // `dt` is the step size, a constant — not time-varying.
         assert!(!expr_is_time_dependent(&Expr::dt(), &nb));
+    }
+
+    /// A model with one `interpolated` forcing `f` through the rows
+    /// (0, 1), (10, 3), (20, 2), (30, 5), read by `method`, with a lag of
+    /// `lag` days when given.
+    fn with_table_forcing(method: ir::time_func::InterpMethod, lag: Option<f64>) -> CompiledModel {
+        use ir::expr::ConstExpr;
+        use ir::time_func::{Interpolated, TimeFuncKind, TimeFunction};
+        let konst = |v: f64| Expr::Const(ConstExpr { value: v });
+        let mut model = load_with_params("sir_basic");
+        model.time_functions.push(TimeFunction {
+            name: "f".to_string(),
+            kind: TimeFuncKind::Interpolated(Interpolated::knots(
+                [0.0, 10.0, 20.0, 30.0].map(konst).to_vec(),
+                [1.0, 3.0, 2.0, 5.0].map(konst).to_vec(),
+                method,
+            )),
+            dim: (0, 0),
+            lag: lag.map(konst),
+            data_source: None,
+        });
+        CompiledModel::new(model).unwrap()
+    }
+
+    /// The value a run reads of forcing `f` at time `t`.
+    fn forcing_at(model: &CompiledModel, t: f64) -> f64 {
+        let idx = model.time_func_index["f"];
+        let (int_s, real_s) = model.initial_state_mean(&model.default_params).unwrap();
+        let ctx = crate::propensity::EvalCtx {
+            model, int_s: &int_s, real_s: &real_s, params: &model.default_params,
+            t, dt: 1.0, projected: None, aux: None, int_float_override: None, per_eval: None,
+        };
+        crate::resolved_expr::eval_resolved(&crate::resolved_expr::ResolvedExpr::TimeFunc(idx), &ctx)
+    }
+
+    /// A held table forcing reads, at and before the argument it is held
+    /// from, the same value bit for bit as the forcing not held, including
+    /// inside the row interval the hold cuts; after it, its value there. A
+    /// lagged forcing is held on its argument, `t − lag`.
+    #[test]
+    fn a_held_forcing_is_unchanged_before_its_hold_and_constant_after() {
+        use ir::time_func::InterpMethod;
+        for method in [InterpMethod::Linear, InterpMethod::Constant] {
+            for lag in [None, Some(5.0)] {
+                let plain = with_table_forcing(method.clone(), lag);
+                let mut held = with_table_forcing(method.clone(), lag);
+                let from = 13.7;
+                let value = held.hold_forcing_after("f", from).unwrap();
+                let shift = lag.unwrap_or(0.0);
+                assert_eq!(value.to_bits(), forcing_at(&plain, from + shift).to_bits(),
+                    "{method:?}, lag {lag:?}: the held value is the forcing's at the hold");
+                for k in 0..=400 {
+                    let t = k as f64 * 0.1;
+                    let (a, b) = (forcing_at(&plain, t), forcing_at(&held, t));
+                    if t - shift <= from {
+                        assert_eq!(a.to_bits(), b.to_bits(), "{method:?}, lag {lag:?}: t = {t} differs before the hold");
+                    } else {
+                        assert_eq!(b.to_bits(), value.to_bits(), "{method:?}, lag {lag:?}: t = {t} is not held");
+                    }
+                }
+                assert_ne!(forcing_at(&plain, 25.0 + shift), value, "the table changes after the hold, so the check above is not vacuous");
+            }
+        }
+    }
+
+    /// A held forcing evaluated past the end of its table reads no row there,
+    /// so nothing is recorded as outside its range; the same forcing not held
+    /// records it.
+    #[test]
+    fn a_held_forcing_past_its_table_records_nothing_outside_its_range() {
+        let plain = with_table_forcing(ir::time_func::InterpMethod::Linear, None);
+        let mut held = with_table_forcing(ir::time_func::InterpMethod::Linear, None);
+        held.hold_forcing_after("f", 13.7).unwrap();
+        forcing_at(&plain, 40.0);
+        forcing_at(&held, 40.0);
+        let recorded = |m: &CompiledModel| m.time_func_cache[m.time_func_index["f"]].range.as_ref().unwrap().held();
+        assert_eq!(recorded(&plain).len(), 1, "the plain forcing records its evaluation past its table");
+        assert!(recorded(&held).is_empty(), "the held forcing reads no row past its table");
+    }
+
+    /// A cubic spline through a table cannot be held: its value before the
+    /// hold depends on its rows after it.
+    #[test]
+    fn a_spline_table_cannot_be_held() {
+        let mut m = with_table_forcing(ir::time_func::InterpMethod::Spline, None);
+        let err = m.hold_forcing_after("f", 13.7).unwrap_err().to_string();
+        assert!(err.contains("cubic spline") && err.contains("'f'"), "{err}");
+        assert!(m.time_func_cache[m.time_func_index["f"]].held.is_none());
     }
 }

@@ -38,7 +38,7 @@
 
 use ir::expr::{BinOp, UnOp};
 
-use crate::propensity::{eval_forcing, EvalCtx};
+use crate::propensity::EvalCtx;
 use crate::resolved_expr::{eval_resolved, ResolvedExpr};
 
 /// A flat opcode. Kept small (tag + payload) so the tape is dense and
@@ -484,8 +484,7 @@ unsafe fn run(
                     Some(lag) => ctx.t - eval_resolved(lag, ctx),
                     None => ctx.t,
                 };
-                tf.note_evaluated_at(t_eff);
-                let v = eval_forcing(&tf.kind, t_eff, ctx);
+                let v = tf.value_at(t_eff, ctx);
                 push!(v);
             }
             Op::IntPopSum(idx) => {

@@ -21,6 +21,7 @@ use crate::fit::failures::{DeterministicFailure, Site, SkipReason, SkippedStream
 use crate::fit::forecast_arms::{build_arms, ArmInputs, ArmLabel, Difference};
 use crate::fit::predict_streams::StreamSelection;
 use crate::fit::forecast_driver::{extend_run, fixed_origin_forecast, DriverConfig, Forecast, HeldOutValues, StateConditioning};
+use crate::fit::forecast_covariates::{classify, Covariates, ReachContext};
 use crate::fit::forecast_plan::{parse_reach, DesignInput, ForecastPlan, HeldOut, PlanStream, RowFile};
 use crate::fit::observed_rows::{Measures, ObservedRow};
 use crate::fit::predict::PosteriorDraws;
@@ -347,15 +348,18 @@ fn prospective_design(
 }
 
 /// The options a forecast's directory is keyed by: `base`, with what the
-/// plan contributes to the predictions' inputs.
+/// plan contributes to the predictions' inputs and the statements of the
+/// table forcings it reads after its origin.
 pub(crate) fn forecast_options(
     base: &crate::fit::predict::PredictOptions,
     plan: &ForecastPlan,
+    covariates: &Covariates,
 ) -> crate::fit::predict::PredictOptions {
     crate::fit::predict::PredictOptions {
         forecast: Some(crate::fit::predict::ForecastKey {
             targets: plan.targets_digest(),
             design_mode: plan.design_mode(),
+            covariates: covariates.key(),
         }),
         ..base.clone()
     }
@@ -445,17 +449,32 @@ pub(crate) fn run_forecast(
             o.name));
     }
     let plan = ForecastPlan::new(partition, reach, &plan_streams).map_err(|e| e.to_string())?;
+    // The table forcings the forecast reads after its origin, each with its
+    // statement; refused here, before any filter runs, when one has none.
+    let covariates = Covariates::resolve(
+        &classify(model, job.compiled, plan.origin(), plan.origin() + plan.horizon()),
+        &job.args.flags.covariate,
+        &ReachContext {
+            origin: plan.origin(),
+            reach_end: plan.origin() + plan.horizon(),
+            as_written: raw,
+            calendar: job.calendar,
+        },
+    )?;
     // Each target's held-out value (D79), bound as a held-out cell: the
     // filter's scoring likelihood evaluates it and nothing else reads it, so
     // the predictions below do not depend on it.
     let held_out_values = HeldOutValues::from_rows(&plan, &held_out, model)?;
     // The address (D81, D86): the options with the design inputs that
     // determine the predictions. The held-out outcomes are not among them.
-    let options = forecast_options(job.options, &plan);
+    let options = forecast_options(job.options, &plan, &covariates);
     let address_key = options.address_key(job.run_id);
     let out_dir = job.out_dir.to_path_buf();
     if let Some(mode) = plan.design_mode() {
         out.say(format_args!("predict: forecast design values: {}", mode.label()));
+    }
+    for line in covariates.describe() {
+        out.say(format_args!("predict: {line}"));
     }
     // An eligible stream the plan refused is a failure; one with no target
     // within the reach is skipped, unless `--stream` asked for it.
@@ -494,9 +513,11 @@ pub(crate) fn run_forecast(
              (t = {}), with interventions planned to that end; nothing else is extended.",
             plan.run_end(), model.simulation.t_end));
     }
-    let compiled = Arc::new(sim::CompiledModel::new(fitted)
+    let mut compiled = sim::CompiledModel::new(fitted)
         .map_err(|e| format!("compiling the fitted model for the forecast: {e:?}"))?
-        .with_eval_settings(job.compiled.eval));
+        .with_eval_settings(job.compiled.eval);
+    covariates.apply_holds(&mut compiled, plan.origin())?;
+    let compiled = Arc::new(compiled);
 
     // The posterior draws, subsampled as the other modes do.
     let cap = job.args.flags.n_draws.unwrap_or(crate::fit::predict::DEFAULT_PREDICT_DRAWS);
@@ -542,6 +563,7 @@ pub(crate) fn run_forecast(
         baseline: &compiled,
         baseline_params: &param_sets,
         plan: &plan,
+        covariates: &covariates,
         dt: job.dt,
     })?;
     let config = DriverConfig {
@@ -577,7 +599,7 @@ pub(crate) fn run_forecast(
     written.push(write_manifest(&forecasts, &job, ManifestInputs {
         record: &record, reach_as_written: raw, skipped: &skipped, failures: &failures,
         draw_refs: &draw_refs, design_files: &design_digests, out_dir: &out_dir, address_key: &address_key,
-        options: &options,
+        options: &options, covariates: &covariates,
     })?);
     let fc = &forecasts[0].fc;
     out.say(format_args!(
@@ -806,12 +828,15 @@ struct ManifestInputs<'a> {
     address_key: &'a str,
     /// The options `address_key` hashes, with the design inputs (D81).
     options: &'a crate::fit::predict::PredictOptions,
+    /// The statements of the table forcings read after the origin.
+    covariates: &'a Covariates,
 }
 
 /// `forecast.json`: what the forecast predicted and what conditioned it.
 fn write_manifest(arms: &[ArmForecast], job: &ForecastJob, m: ManifestInputs) -> Result<PathBuf, String> {
     let ManifestInputs {
         record, reach_as_written, skipped, failures, draw_refs, design_files, out_dir, address_key, options,
+        covariates,
     } = m;
     let fc = &arms[0].fc;
     let point = |t: f64| serde_json::json!({
@@ -947,6 +972,12 @@ fn write_manifest(arms: &[ArmForecast], job: &ForecastJob, m: ManifestInputs) ->
             "files": design_files,
         })),
     });
+    // The table forcings read after the origin, their statements and the
+    // notes on piecewise forcings the reach passes; absent when there are
+    // none.
+    if let Some(block) = covariates.manifest(fc.plan.origin(), point) {
+        doc["covariates"] = block;
+    }
     // D86: the same `chain_selection` block `predictive.json` carries, absent
     // when the full cloud was used.
     if let Some(info) = job.posterior.selection() {

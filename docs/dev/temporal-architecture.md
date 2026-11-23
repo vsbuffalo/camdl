@@ -740,9 +740,13 @@ message says so.
 Separately, a forecast that reads a data-table forcing's values after the
 forecast origin uses covariate values that would not have been known at the
 origin, if they are observations rather than a scenario. camdl cannot tell
-which. _Not yet built (Phase B):_ the plan will record a note naming the forcing
-and the span, and the artifact will carry it, so a reader can tell a scenario
-forecast from one that used realised future covariates.
+which, so the forecast is refused before any filter runs until each such forcing
+has a statement, `--covariate FORCING=prospective|realised|hold`, judged on the
+table's argument `t − lag` (`cli::fit::forecast_covariates`). The statements key
+the prediction, and `forecast.json` records them; `realised` labels the forecast
+conditional on covariates observed after the origin, and `hold` holds the
+compiled forcing at its value at the origin (`sim::compiled_model::HeldAfter`).
+The rules are the run spec's, §2.2.2, "Forcings read after the origin".
 
 ### 4.7 `last_obs` (D40)
 

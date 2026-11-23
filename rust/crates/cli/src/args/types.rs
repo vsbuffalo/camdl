@@ -138,6 +138,63 @@ pub enum PredictModeArg {
     Forecast,
 }
 
+/// What a forecast states the values of a data-table forcing after its
+/// origin are (`--covariate FORCING=STATEMENT`). The words follow the design
+/// values a forecast states: `prospective` as in a prospective design
+/// (`--design`), and `realised` as in `--realised-design`, an ex-post
+/// evaluation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CovariateStatement {
+    /// The values after the origin were fixed or assumed at the origin (a
+    /// planned campaign, a scenario). The table is read as it is.
+    Prospective,
+    /// The values after the origin were observed after it. The table is read
+    /// as it is, and the forecast is conditional on covariates observed after
+    /// its origin: an ex-post evaluation, not a forecast that could have been
+    /// made at the origin.
+    Realised,
+    /// The forcing's value at the origin is carried forward over the reach,
+    /// and the table after the origin is not read.
+    Hold,
+}
+
+impl CovariateStatement {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CovariateStatement::Prospective => "prospective",
+            CovariateStatement::Realised => "realised",
+            CovariateStatement::Hold => "hold",
+        }
+    }
+}
+
+/// `--covariate FORCING=STATEMENT`, e.g. `--covariate pop=hold`.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct CovariateSpec {
+    pub forcing: String,
+    pub statement: CovariateStatement,
+}
+
+impl FromStr for CovariateSpec {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (forcing, statement) = s.split_once('=')
+            .ok_or_else(|| format!("expected FORCING=STATEMENT, got '{s}'"))?;
+        if forcing.is_empty() {
+            return Err(format!("empty forcing name in --covariate '{s}'"));
+        }
+        let statement = match statement {
+            "prospective" => CovariateStatement::Prospective,
+            "realised" => CovariateStatement::Realised,
+            "hold" => CovariateStatement::Hold,
+            other => return Err(format!(
+                "'{other}' in --covariate '{s}' is not a statement; use prospective, realised or hold")),
+        };
+        Ok(CovariateSpec { forcing: forcing.to_string(), statement })
+    }
+}
+
 /// CLI override for the ODE integrator METHOD (gh#166). Method-only by design:
 /// the tolerances are a model property (the `simulate { integrator = rk45 { … } }`
 /// block, where the type forbids orphan tolerances), so there is no `--atol`/

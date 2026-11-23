@@ -114,6 +114,9 @@ pub(crate) struct ArmInputs<'a> {
     pub baseline: &'a Arc<sim::CompiledModel>,
     pub baseline_params: &'a [Vec<f64>],
     pub plan: &'a ForecastPlan,
+    /// The statements of the table forcings read after the origin: each arm
+    /// holds the forcings the baseline holds.
+    pub covariates: &'a crate::fit::forecast_covariates::Covariates,
     pub dt: f64,
 }
 
@@ -188,9 +191,11 @@ fn resolve(
     }
     let mut model = model.ok_or_else(|| "internal error: a forecast arm with no posterior draw".to_string())?;
     extend_run(&mut model, i.plan);
-    let compiled = Arc::new(sim::CompiledModel::new(model)
+    let mut compiled = sim::CompiledModel::new(model)
         .map_err(|e| format!("compiling forecast arm '{run}': {e:?}"))?
-        .with_eval_settings(i.baseline.eval));
+        .with_eval_settings(i.baseline.eval);
+    i.covariates.apply_holds(&mut compiled, i.plan.origin())?;
+    let compiled = Arc::new(compiled);
     if compiled.param_index != i.baseline.param_index {
         return Err(format!(
             "internal error: forecast arm '{run}' orders its parameters differently from the fitted model"));

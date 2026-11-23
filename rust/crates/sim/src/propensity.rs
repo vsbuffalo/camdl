@@ -258,8 +258,7 @@ pub fn eval_expr(expr: &Expr, ctx: &EvalCtx<'_>) -> Result<f64, SimError> {
                 Some(lag) => ctx.t - eval_resolved(lag, ctx),
                 None => ctx.t,
             };
-            tf.note_evaluated_at(t_eff);
-            Ok(eval_forcing(&tf.kind, t_eff, ctx))
+            Ok(tf.value_at(t_eff, ctx))
         }
 
         Expr::ForcingBasis(w) => {

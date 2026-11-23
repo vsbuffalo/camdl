@@ -357,6 +357,12 @@ pub(crate) fn predict_design() -> Vec<String> {
     vec!["survey=design2.tsv".into()]
 }
 
+/// The forced fixture model's population table, stated held after the
+/// forecast origin where the base states it prospective.
+pub(crate) fn predict_covariate() -> Vec<crate::args::types::CovariateSpec> {
+    vec!["pop=hold".parse().expect("a covariate statement")]
+}
+
 /// A reporting vocabulary in place of the model's own quantities.
 pub(crate) fn predict_quantities() -> Option<PathBuf> {
     Some("vocab.camdl".into())

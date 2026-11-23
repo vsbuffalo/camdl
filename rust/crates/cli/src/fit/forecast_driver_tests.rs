@@ -946,7 +946,7 @@ fn held_out_outcomes_change_only_the_scores_and_never_the_samples_or_the_address
         ForecastPlan::new(partition, 14.0, &ps).unwrap()
     };
     let address = |plan: &ForecastPlan| crate::fit::forecast_output::forecast_options(
-        &PredictOptions::defaults(), plan).address_key("run-under-test");
+        &PredictOptions::defaults(), plan, &Default::default()).address_key("run-under-test");
     let forecast = |held: &[HeldOut]| {
         let plan = plan_of(held);
         let rows = BTreeMap::from([("survey".to_string(), held.to_vec()),

@@ -290,6 +290,39 @@ design-reading stream's (its values were realised under their own design), and a
 value the data checks refuse, such as a count above its trials, is left
 unscored, never refusing the prediction.
 
+A forcing read from a data table (an `interpolated` forcing, a population or a
+birth series) is an input at every time, and camdl cannot tell whether its
+values after the origin were fixed in advance, observed later, or not known. A
+forecast that reads such a table after its origin is refused, before any filter
+runs, naming the forcing, the origin, the reach and the date its table ends,
+until `--covariate FORCING=STATEMENT` says which (repeatable, one per forcing):
+
+```bash
+camdl predict @sir --horizon "8 weeks" --covariate pop=prospective  # fixed or assumed at the origin
+camdl predict @sir --horizon "8 weeks" --covariate pop=realised     # observed after the origin
+camdl predict @sir --horizon "8 weeks" --covariate pop=hold         # the value at the origin, carried forward
+```
+
+`prospective` and `realised` read the table as it is; `realised` labels the
+forecast _conditional on covariates observed after the origin_ in
+`forecast.json`, an after-the-fact evaluation in the sense `--realised-design`
+is. `hold` holds the forcing at the table's interpolated value at the origin
+wherever its argument `t − lag` is after the origin, and leaves every value
+before the origin unchanged; for a `linear` table the held value depends on the
+first row after the origin. `hold` is refused for a cubic-spline table
+(`method = spline`), whose value before the origin depends on its rows after it,
+and for a forcing whose lag is negative or a parameter, whose model times before
+the origin read the table after it. A forcing with a positive `lag` reads its
+table at `t − lag`, so it needs a statement only once the reach exceeds the lag;
+a spline table needs one whenever it has a row after the origin. An indexed
+forcing is stated per level by its underscore-joined name
+(`--covariate pop_p0=hold`), as `--sweep` names an indexed parameter. Periodic
+forcings, `piecewise` forcings and `bspline`s need none, and a statement for one
+is refused; a forecast whose reach passes a `piecewise` breakpoint says so in a
+note. The statements are part of the prediction's identity, so the three
+forecasts above are three predictions. The rules are in the run spec, §2.2.2,
+"Forcings read after the origin".
+
 It writes `forecast/<stream>.tsv` (one row per target: `t_start`, `t_stop`,
 `mode`, `horizon`, `lead`, `quantity`, the mean and the `q05…q95` band),
 `forecast-samples.tsv` (joint samples, each one trajectory across every target),
@@ -417,7 +450,7 @@ The flags that read a posterior (`--by-chain`, `--exclude-chains`, `--chains`,
 fixed point are refused with a run handle, whose problem holds its model, data
 and numerics. The other refusals are those of a posterior prediction: one-step
 on ODE or Gillespie, a forecast on Gillespie, `--particles` where no filter
-runs, `--design` outside a forecast.
+runs, `--design` and `--covariate` outside a forecast.
 
 ### Sweeps and scenario grids: `simulate --sweep`
 
