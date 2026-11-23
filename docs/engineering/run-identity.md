@@ -48,9 +48,9 @@ keeps an input that belongs to it from being left out.
 
 ## The store
 
-`camdl simulate`, `camdl pfilter`, `camdl fit run` and `camdl profile` store
-their results in the run store, written by the `store` crate
-(`rust/crates/store`) under `./camdl-store` or the root `--store` or
+`camdl simulate`, `camdl pfilter`, `camdl fit run`, `camdl predict` and
+`camdl profile` store their results in the run store, written by the `store`
+crate (`rust/crates/store`) under `./camdl-store` or the root `--store` or
 `CAMDL_STORE` names; its design is
 `docs/dev/proposals/2026-11-20-run-store-api.md`, and
 [Simulate on the run store](#simulate-on-the-run-store) and
@@ -63,9 +63,9 @@ This is the model of the Nix package store, which Dolstra calls the
 _extensional_ model, as opposed to a _content-addressed_ (intensional) one in
 which an object's address is the hash of the object itself, as in git (E.
 Dolstra, _The Purely Functional Software Deployment Model_, PhD thesis, Utrecht
-University, 2006, chapters 5 and 6). The code's name for the store, the
-"content-addressed store" of `CasSink` and `FsCasStore`, describes the second
-model; only the input files are content-addressed here.
+University, 2006, chapters 5 and 6). The exceptions are the stored contents a
+result depends on, such as a compiled model or a data table: each is stored
+under the digest of its bytes.
 
 An input-addressed store is a memo table for a function, and it is correct only
 if the function is:
@@ -175,29 +175,30 @@ The forcing-extrapolation policy is a value too:
 command from its resolved `--allow-forcing-extrapolation` or its fit config's
 `[config] allow_forcing_extrapolation`, and holding what the run held and the
 refusal it kept while it held a store claim. The command keys its leaf from the
-value's `allowed()`, passes the value to every record it writes
-([`RecordMeta::new`](rust:cli::resolve::RecordMeta::new)), and installs it for
-its duration. Installing is needed because the engine's run notes reach the
-command through `sim::run_notes`, whose reporter is one function installed at
-start-up: the reporter routes each forcing note into the installed policy
-through one routing slot, which is the policy's only process-wide state. With
-none installed, a note is refused. `sim::run_notes` says each other distinct
-note once per process, but reports a forcing note every time it is recorded (the
-engine records one at most once per forcing, side and compiled model), and the
-policy says it once per policy, skipping a forcing already in its `held` list.
-So every policy installed in one process is told of the forcings its own runs
-held, provided its models are compiled after it is installed: the engine's
-set-once flag is on the compiled forcing, shared by the model's clones, so a
-model that already reported a forcing under one policy does not report it under
-the next. Every command installs its policy before compiling, and `compare`
-compiles each in-process fit's model after installing that fit's policy. Most
-commands install one policy. `camdl predict` alone nests a second, an allowing
-one, once it has read the stored fit's config; a refusal under the first has
-already ended the command, and the inner guard's drop puts the first back. A
-claim-holding `fit run` keeps a refusal for its claim, and each chain polls the
-command's policy (held by `Out` from `hold_claim` to `take_claim`, apart from
-the claim itself), so the first chain to fail the claim does not hide the
-refusal from the others.
+value's `allowed()`, records the override and the forcings it held in every
+`run.json` it writes
+([`ForcingPolicy::record_in`](rust:cli::forcing_extrapolation::ForcingPolicy::record_in)),
+and installs it for its duration. Installing is needed because the engine's run
+notes reach the command through `sim::run_notes`, whose reporter is one function
+installed at start-up: the reporter routes each forcing note into the installed
+policy through one routing slot, which is the policy's only process-wide state.
+With none installed, a note is refused. `sim::run_notes` says each other
+distinct note once per process, but reports a forcing note every time it is
+recorded (the engine records one at most once per forcing, side and compiled
+model), and the policy says it once per policy, skipping a forcing already in
+its `held` list. So every policy installed in one process is told of the
+forcings its own runs held, provided its models are compiled after it is
+installed: the engine's set-once flag is on the compiled forcing, shared by the
+model's clones, so a model that already reported a forcing under one policy does
+not report it under the next. Every command installs its policy before
+compiling, and `compare` compiles each in-process fit's model after installing
+that fit's policy. Most commands install one policy. `camdl predict` alone nests
+a second, an allowing one, once it has read the stored fit's config; a refusal
+under the first has already ended the command, and the inner guard's drop puts
+the first back. A claim-holding `fit run` keeps a refusal for its claim, and
+each chain polls the command's policy (held by `Out` from `hold_claim` to
+`take_claim`, apart from the claim itself), so the first chain to fail the claim
+does not hide the refusal from the others.
 
 A command that replays a stored fit runs under the fit's own settings. The
 simulator a fit ran on,
@@ -282,10 +283,10 @@ its own `[fixed]` values. The fit is read once, and its
 with the flags in resolution. A `pfilter` run's identity holds a dependency on
 the stored problem when `--fit` names one. A profile of a stored fit keys the
 text of `problem.toml`, followed by the run's `method.toml` when a run is named;
-a profile of a fit file keys the file's text. Every input of each is classified
-(`input_class::PFILTER`, `PROFILE`); `pfilter`'s are checked by
-`every_pfilter_input_keeps_its_class` and `profile`'s by
-`rust/crates/cli/tests/profile_input_classes.rs`.
+a profile of a fit file keys the file's text. Every input of each is declared
+with its class on the argument types (`#[derive(store::Inputs)]`); `pfilter`'s
+are checked by `every_pfilter_input_keeps_its_class` and `profile`'s by
+`every_profile_input_keeps_its_class`.
 
 `fit run` routes its method flags through one struct,
 [`CliMethodOverrides`](rust:cli::fit::config_v2::CliMethodOverrides), which
@@ -300,9 +301,9 @@ that writes into the fit configuration instead (`--allow-forcing-extrapolation`
 sets `[config] allow_forcing_extrapolation`).
 
 So when you add a `fit run` or `profile` flag that changes what a run computes
-or stores, carry it through each step above, add a case to the differential
-test, and write the end-to-end test that runs camdl with and without the flag
-and finds two leaves. A `simulate` flag is declared with its class instead
+or stores, carry it through each step above and declare it `identity`, with a
+`vary` fixture, so that the command's class check runs camdl with and without it
+and requires two run ids. A `simulate` flag is declared the same way
 ([below](#simulate-on-the-run-store)).
 
 ## Testing a classification
@@ -323,14 +324,14 @@ two ways:
   nothing. Runs that could have been reused are computed again; no result is
   wrong.
 
-`fit run`'s inputs are tested against this rule in
-`rust/crates/cli/tests/fit_run_input_classes.rs`, against the `fit`, `method`
-and `seed` levels, with a `removed` case for each old spelling it refuses, and
-`profile`'s in `rust/crates/cli/tests/profile_input_classes.rs`. `simulate`'s
-and `pfilter`'s are tested by the run store's class checks
-([below](#simulate-on-the-run-store)). The other commands' flags are not yet
-tested this way. These are regression evidence on small fixtures, not proof that
-no model behaves otherwise.
+The commands on the run store test their inputs against this rule with the
+store's class checks (`store::check_input_classes`):
+`every_simulate_input_keeps_its_class`, `every_pfilter_input_keeps_its_class`,
+`every_fit_run_input_keeps_its_class`, `every_predict_input_keeps_its_class` and
+`every_profile_input_keeps_its_class`, each in its command's `tests.rs`
+([below](#simulate-on-the-run-store)). The other commands store no result. These
+are regression evidence on small fixtures, not proof that no model behaves
+otherwise.
 
 ## Simulate on the run store
 
@@ -462,7 +463,7 @@ each bump records a change to the field set or to the bytes a result holds.
 | A `simulate` flag that changes the stored trajectory     | an `#[input(identity)]` field of `SimulateArgs`, carried into a field of `sim_store::SimConfig` (or lowered into the model) | the `version` of `SimConfig`'s `#[identity(..)]`    | `every_simulate_input_keeps_its_class`, with a `vary` fixture for the field                                                        |
 | A key in the fit configuration                           | a field of `config_v2::Problem`, placed by `fit_store::resolve_problem` in a field of the problem's or the run's identity   | the `version` of that struct's `#[identity(..)]`    | `every_fit_run_input_keeps_its_class`, with a `vary` fixture for the field                                                         |
 | A `fit run` flag that changes a method's output          | a field of `FitMethodFlags`, `CliMethodOverrides`, an `OverrideFlag` row, and the copy in `fit::run_config::resolve`        | none: the method level hashes the method as written | `every_cli_sampler_flag_changes_the_method_identity`                                                                               |
-| A field that is displayed but does not change the output | not a field of an identity type: record it only as provenance in `run.json` or a provenance file                            | none                                                | a case in `differential_presentation_inputs_are_inert`                                                                             |
+| A field that is displayed but does not change the output | not a field of an identity type: record it only as provenance in `run.json` or a provenance file                            | none                                                | a `render` class on its argument, which the command's `every_<command>_input_keeps_its_class` checks changes no stored file        |
 | A float policy, or any other rule of the encoding        | the store's `hash` and `identity` modules                                                                                   | the store's `HASH_VERSION`                          | the store crate's tests                                                                                                            |
 | A rule of the model's structural hash                    | `ir::model_hash`                                                                                                            | its `HASH_VERSION`                                  | `rust/crates/ir/tests/model_hash_pins.rs`; the golden model-hash table                                                             |
 | The IR schema                                            | the atomic OCaml, Rust and golden update (`.claude/skills/golden-update`)                                                   | `ir/VERSION`                                        | `rust/crates/ir/tests/golden_model_hashes.rs`, regenerated by `make update-golden-model-hashes` only when the re-key is the change |

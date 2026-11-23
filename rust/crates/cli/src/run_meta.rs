@@ -870,7 +870,7 @@ pub fn store_fit_sidecar(fit_segment: &std::path::Path, sidecar: &FitSidecar) ->
 /// when it cannot be parsed, or when its `schema_version` is not
 /// [`FIT_META_SCHEMA_VERSION`]: an older record is refused, never read with
 /// its fields reinterpreted.
-#[expect(clippy::disallowed_methods, reason = "reads `fit.meta.json` from the fit folder its caller passes (an `OpenedFit` copy in `compare` and `fitted_model`, the `--fit` directory in `posterior_draws`); the `[fixed]` values it yields are hashed as parameter values")]
+#[expect(clippy::disallowed_methods, reason = "reads `fit.meta.json` from the fit folder its caller passes: a scratch copy of a stored run read out through the store (`compare`, `fitted_model`, `predict`, `fit_view`, `training_partition`), or the `--fit` directory of `posterior_draws`, whose `[fixed]` values are hashed as parameter values")]
 pub fn read_fit_sidecar(fit_segment: &std::path::Path) -> Result<Option<FitSidecar>, String> {
     let path = fit_segment.join("fit.meta.json");
     let bytes = match std::fs::read(&path) {

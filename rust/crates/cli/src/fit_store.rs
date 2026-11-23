@@ -647,6 +647,7 @@ pub(crate) fn resolve_problem(
         ic_free,
         provenance: _,
         compiled_ir: _,
+        compiled_digest: _,
     } = problem;
     if model_dep.digest() != crate::camdl_store::model_part_digest(model) {
         return Err("internal error: the model given is not the stored compile the problem names".into());
@@ -1371,7 +1372,7 @@ impl RunFiles {
 
 /// The inputs `dir`, a run's folder or a copy of it, records
 /// ([`RUN_INPUTS_FILE`]).
-#[expect(clippy::disallowed_methods, reason = "reads `run_inputs.json` from the directory its caller passes, a scratch copy of a stored run's files (`RunFiles` for `--resume`, an `OpenedFit` run copy)")]
+#[expect(clippy::disallowed_methods, reason = "reads `run_inputs.json` from the directory its caller passes: a scratch copy of a stored run's files read out through the store (`RunFiles` for `--resume`, an `OpenedFit` run copy), or the working directory this process's `fit run` is writing")]
 pub(crate) fn read_run_inputs(dir: &Path) -> Result<serde_json::Value, String> {
     let path = dir.join(RUN_INPUTS_FILE);
     let bytes = std::fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;

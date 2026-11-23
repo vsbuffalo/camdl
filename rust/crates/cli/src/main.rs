@@ -28,7 +28,7 @@ mod sim_job;       // SimulateJob / ParamSource / Seeds / ScenarioRef (run-spec 
 mod roles;         // parameter roles: the partition, resolved from role declarations before any value
 mod sweep;         // the design axis: --sweep / --sweep-file expansion, checks, the resolved design
 mod engine;        // run_job: the engine behind simulate's cell grid (run-spec §3.1)
-mod cas_sink;      // CasSink: the content-addressed store sink for simulate's cells
+mod cas_sink;      // the digest of a simulate cell's observation blocks, in each obs by-product's identity
 mod sim_config;    // ResolvedSimConfig: simulate's one resolved configuration; identity and engine settings derive from it
 mod eval;
 mod dt_rule;      // the one integration-step rule: the model's declared dt, else the written one
@@ -1976,7 +1976,7 @@ fn run_simulate(inv: args::SimulateInvocation) {
                     report_replay_check(&out, util::load_ir(&ir_path_given).and_then(|(given, _)| {
                         crate::fit::fitted_model::check_stored_fit(
                             fit_handle,
-                            &resolved.segment,
+                            resolved,
                             &resolved.config.problem,
                             &given,
                             &ir_path,
@@ -2540,7 +2540,7 @@ fn materialize_obs_for_quantities(
 
 /// Resolve `simulate`'s configuration once: the base model and its `model`
 /// level, the run-wide `config` level, and the scenario arms. Both the run
-/// identity of every cell (through [`crate::cas_sink::CasSink`]) and the
+/// identity of every cell (`sim_store::SimIdentity`) and the
 /// engine's settings (`ResolvedSimConfig::engine_settings`) are derived from
 /// the value this returns.
 ///
@@ -2549,7 +2549,8 @@ fn materialize_obs_for_quantities(
 ///     engine (observation anchors substituted, `--integrator` applied; params
 ///     NOT applied), so the model level digest is constant across the grid
 ///     and carries no param values — those live in the `params` level, which
-///     `CasSink::cell_resolve` resolves per cell from the cell's own `SimRun`.
+///     `sim_config::ResolvedCell::resolve` resolves per cell from the cell's own
+///     `SimRun`.
 ///   - each arm carries the hash-relevant enable/disable/params delta (a model
 ///     preset's own fields, or the CLI ad-hoc patch).
 fn resolve_sim_config(
@@ -3626,7 +3627,7 @@ fn check_replay_model(
         let resolved = crate::fit_store::opened(fit_ref)?;
         crate::fit::fitted_model::check_stored_fit(
             fit_ref,
-            &resolved.segment,
+            &resolved,
             &resolved.config.problem,
             &given,
             model_path,
@@ -4080,7 +4081,7 @@ pub(crate) struct KeyedDraw {
 /// Parse a `draws.tsv` KEEPING the `(chain, draw)` key. The single parser;
 /// [`load_draws_tsv`] wraps this and drops the key so every param-only reader
 /// (predict's schema validator, the engine, compare) is unchanged.
-#[expect(clippy::disallowed_methods, reason = "parses the draws file its caller names (`--draws FILE`, or a stored fit's draws through `posterior_draws`); each row's parameter values are what a cell's identity hashes")]
+#[expect(clippy::disallowed_methods, reason = "parses the draws file its caller names: `--draws FILE` or a stored fit's draws through `posterior_draws`, whose rows' parameter values a cell's identity hashes, or a chain subset's draws, read only to recompute diagnostics")]
 pub(crate) fn load_draws_tsv_keyed(path: &str) -> Result<Vec<KeyedDraw>, String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read {}: {}", path, e))?;

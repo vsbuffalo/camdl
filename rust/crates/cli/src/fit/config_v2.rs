@@ -170,6 +170,14 @@ pub struct Problem {
     /// bytes).
     #[serde(skip)]
     pub compiled_ir: Option<String>,
+
+    /// Runtime-only: the digest of the stored compiled model `compiled_ir`
+    /// must load to, set by `fit run` for each problem it runs. The model a
+    /// method loads ([`super::runner::resolve_fit_parameters`]) is refused
+    /// unless it has this digest, so a run never computes from a model other
+    /// than the compile its identity names. Never serialized.
+    #[serde(skip)]
+    pub compiled_digest: Option<store::Key>,
 }
 
 /// The inference half: what only `fit run` reads.
@@ -207,6 +215,7 @@ impl FitConfigWire {
             problem: Problem {
                 model, data, synthetic, simplex_groups, store, estimate, fixed, config,
                 simulate, scenario, enable, disable, ic_free, provenance, compiled_ir: None,
+                compiled_digest: None,
             },
             inference: Inference { method, fit_seeds },
         }
@@ -220,6 +229,7 @@ impl FitConfig {
         let Problem {
             model, data, synthetic, simplex_groups, store, estimate, fixed, config,
             simulate, scenario, enable, disable, ic_free, provenance, compiled_ir: _,
+            compiled_digest: _,
         } = self.problem.clone();
         let Inference { method, fit_seeds } = self.inference.clone();
         FitConfigWire {
@@ -895,7 +905,7 @@ impl FixedParams {
     /// will see an empty map and may produce slightly less informative
     /// output — that's fine for diff/inspection paths, not OK for the
     /// fit pipeline (which uses `resolve_with_model`).
-    #[expect(clippy::disallowed_methods, reason = "a library parser of `[fixed] from_file`, the params file a fit config names; callers checked: `fit run`, whose problem identity holds the values read (`FitProblemIdentity::fixed`), `fit diff`, which stores nothing, and `simulate --fit`, declared `#[input(identity)]` on `SimulateArgs`")]
+    #[expect(clippy::disallowed_methods, reason = "a library parser of `[fixed] from_file`, the params file a fit config names; `fit run` holds the values read in its problem identity (`FitProblemIdentity::fixed`), `--fit` of `simulate`, `pfilter` and `profile` is declared `#[input(identity)]`, and `fit diff`, `fit validate` and `design lhs` store nothing")]
     pub fn resolve(&self) -> Result<IndexMap<String, f64>, String> {
         let mut merged = match &self.from_file {
             Some(path) => {
@@ -2722,7 +2732,7 @@ impl FitConfig {
     /// file's path relative to the segment, so its directory is known even when
     /// that file has moved or changed; pass `<segment>/<source_config>` here and
     /// every path resolves as it did at fit time.
-    #[expect(clippy::disallowed_methods, reason = "a library parser of the fit config at the path its caller passes; callers checked: `fit diff`, which stores nothing, and `Problem::load` and `fit_config_simulator` for a `--fit` argument, declared `#[input(identity)]` on `SimulateArgs` and `PfilterArgs`")]
+    #[expect(clippy::disallowed_methods, reason = "a library parser of the fit config at the path its caller passes, through `FitConfig::load`: a `--fit` argument, declared `#[input(identity)]` on `SimulateArgs`, `PfilterArgs` and `ProfileArgs`, or `fit diff` and `simulate --design-from`, which store nothing")]
     pub fn load_anchored_at(
         read_path: &std::path::Path,
         anchor_toml: &std::path::Path,

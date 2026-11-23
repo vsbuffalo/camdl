@@ -907,3 +907,18 @@ fn a_claim_is_cleared_only_while_it_still_names_the_owner_that_was_read() {
     run.result_file("traj.tsv").unwrap().write_all(b"x").unwrap();
     run.finish().unwrap();
 }
+
+#[test]
+fn a_result_file_with_another_digest_is_refused_naming_its_result() {
+    let root = TempRoot::new("damaged-read");
+    let store = open(root.path());
+    let stored = run_sim(&store, &info(), 31);
+    std::fs::write(stored.folder().join("traj.tsv"), b"t\tI\n0\t2\n").unwrap();
+    match stored.open("traj.tsv") {
+        Err(Error::Damaged { run_id, what }) => {
+            assert_eq!(run_id, stored.id().key(), "the error names the result whose file was read");
+            assert!(what.contains("traj.tsv"), "{what}");
+        }
+        other => panic!("a changed result file is refused as damaged: {other:?}"),
+    }
+}

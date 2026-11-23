@@ -1228,7 +1228,7 @@ fn draw_from_mle(
 }
 
 /// `from_params`: all chains at a hand-written flat params TOML.
-#[expect(clippy::disallowed_methods, reason = "reads the `from_params` file `ResolvedStarts::from_file` read, whose bytes the run's identity holds as `StartInput::File`")]
+#[expect(clippy::disallowed_methods, reason = "reads again the `from_params` file whose bytes `ResolvedStarts::from_file` read and the run's identity holds as `StartInput::File`; a file changed between the two reads is not detected")]
 fn draw_from_params(
     resolved: &ResolvedParameters,
     path: &Path,

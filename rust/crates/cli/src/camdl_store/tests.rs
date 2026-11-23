@@ -125,3 +125,16 @@ fn a_non_finite_parameter_is_refused() {
     let b = ResolvedParams::new([("gamma".to_string(), 0.1), ("beta".to_string(), 0.3)]).unwrap();
     assert_eq!(a.key(), b.key(), "the parameters are a map, not a list");
 }
+
+/// A model is accepted as the stored compile only when its model part has the
+/// stored digest; another model is refused, naming the digest it lacks.
+#[test]
+fn only_the_stored_compile_is_accepted_as_the_model_a_result_runs() {
+    let model = crate::test_support::tiny_model();
+    let stored = model_digest(model.clone());
+    assert!(require_stored_model(&model, stored, "fit", "m.ir.json").is_ok());
+    let mut other = model;
+    other.simulation.dt = Some(other.simulation.dt.unwrap_or(1.0) * 2.0);
+    let err = require_stored_model(&other, stored, "fit", "m.ir.json").unwrap_err();
+    assert!(err.contains("is not the stored compiled model") && err.contains(&stored.short12()), "{err}");
+}

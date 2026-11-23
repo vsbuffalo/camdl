@@ -462,6 +462,9 @@ fn run_fit(mut out: Out, cx: FitCommand<'_>) -> Vec<String> {
     for (dataset, problem) in data_problems {
         for point in &sweep_points {
             let mut p = problem.clone();
+            // The compile every method of this problem loads: the one with
+            // the state Jacobian when the runs need it, else the problem's.
+            p.compiled_digest = Some(jacobian_model.as_ref().unwrap_or(&problem_model_dep).digest());
             for (name, val) in point {
                 p.fixed.values.insert(name.clone(), *val);
             }

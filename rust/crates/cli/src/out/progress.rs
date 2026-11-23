@@ -216,8 +216,8 @@ impl Default for Reporter {
 ///
 /// `inc`/`set` take `&self` (interior-mutable throttle + metric) so one bar
 /// can be shared across rayon workers — `pfilter` ticks a single overall bar
-/// from its parallel replicates, `CasSink` ticks it from the sequential merge
-/// loop, and fit gives each chain its own bar. `Task` is `Send + Sync`.
+/// from its parallel replicates, `simulate` ticks one as each of its cells
+/// ends, and fit gives each chain its own bar. `Task` is `Send + Sync`.
 pub struct Task {
     pb: ProgressBar,
     /// A clone of the owning `MultiProgress`, held only to keep it alive for

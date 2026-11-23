@@ -216,9 +216,26 @@ pub(crate) fn apply(model: &ir::Model, params: &ResolvedParams, active: &ActiveI
     m
 }
 
+/// Checks that the model a result is about to run is the stored compile its
+/// identity names.
+///
+/// Refuses `model`, loaded from `path`, unless its model part has the digest
+/// `stored`. `what` names the computation (a fit, a prediction, a profile) in
+/// the refusal. A result is thus never stored under the identity of a model
+/// it did not run.
+pub(crate) fn require_stored_model(model: &ir::Model, stored: Key, what: &str, path: &str) -> Result<(), String> {
+    if model_part_digest(model) == stored {
+        return Ok(());
+    }
+    Err(format!(
+        "internal error: the model this {what} runs ({path}) is not the stored compiled model {} its identity names",
+        stored.short12()
+    ))
+}
+
 /// The digest the model part of `model` would be stored under.
 pub(crate) fn model_part_digest(model: &ir::Model) -> Key {
-    Key::digest_bytes(&CompiledModelContent::of(model.clone()).bytes)
+    Key::digest_bytes(&model_part_bytes(model))
 }
 
 /// The seed of one process: the seed every random stream of a result is
@@ -269,22 +286,27 @@ fn canonical_bytes(v: &impl serde::Serialize) -> Vec<u8> {
 
 impl CompiledModelContent {
     fn of(model: ir::Model) -> Self {
-        let mut v = serde_json::to_value(&model).expect("an IR model encodes as JSON");
-        if let Some(o) = v.as_object_mut() {
-            for k in NOT_THE_MODEL_PART {
-                o.remove(k);
-            }
-            let ordered: Vec<serde_json::Value> = model
-                .initial_conditions
-                .0
-                .iter()
-                .map(|(name, spec)| serde_json::json!([name, spec]))
-                .collect();
-            o.insert(INITIAL_CONDITIONS.into(), serde_json::Value::Array(ordered));
-        }
-        let bytes = serde_json::to_vec(&crate::canonical_json::canonical(&v)).expect("a JSON value encodes");
+        let bytes = model_part_bytes(&model);
         CompiledModelContent { model, bytes }
     }
+}
+
+/// The bytes the model part of `model` is stored as.
+fn model_part_bytes(model: &ir::Model) -> Vec<u8> {
+    let mut v = serde_json::to_value(model).expect("an IR model encodes as JSON");
+    if let Some(o) = v.as_object_mut() {
+        for k in NOT_THE_MODEL_PART {
+            o.remove(k);
+        }
+        let ordered: Vec<serde_json::Value> = model
+            .initial_conditions
+            .0
+            .iter()
+            .map(|(name, spec)| serde_json::json!([name, spec]))
+            .collect();
+        o.insert(INITIAL_CONDITIONS.into(), serde_json::Value::Array(ordered));
+    }
+    serde_json::to_vec(&crate::canonical_json::canonical(&v)).expect("a JSON value encodes")
 }
 
 impl store::Content for CompiledModelContent {
@@ -553,3 +575,6 @@ impl ContentArtifact for DataTable {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod poisoning;

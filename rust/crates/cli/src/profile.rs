@@ -454,6 +454,16 @@ fn run_profile(
     // compile, or for `nl-lbfgs` the compile with the state Jacobian.
     let (mut model_pre, _) = crate::util::load_ir(&ir_path)
         .unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
+    // Every point runs this model, so it must be the stored compile the
+    // points' identities name, through their problem or the Jacobian compile.
+    let stored_model = match &jacobian_model {
+        Some(dep) => dep.digest(),
+        None => fit.as_ref().and_then(|f| f.stored.as_ref()).map(|o| o.fit.model.digest())
+            .unwrap_or_else(|| out.fail("error: internal: the profiled problem is not stored")),
+    };
+    if let Err(e) = crate::camdl_store::require_stored_model(&model_pre, stored_model, "profile", &ir_path) {
+        out.fail(format!("error: {e}"));
+    }
     // The model before any value is written into it, for the partition.
     let model_declared = model_pre.clone();
 

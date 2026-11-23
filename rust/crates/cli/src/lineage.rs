@@ -2,10 +2,10 @@
 //!
 //! Entry points:
 //!   - [`finish_event_log`]: the `camdl simulate --event-log` follow-up
-//!     (Layer 1). The recorder runs in the engine (`main::run_simulate`) and
-//!     `CasSink` stores the [`sim::lineage::EventLog`] as the run leaf's
-//!     event-log child; this writes the optional `--event-log PATH`
-//!     mirror and prints the `lineage realize` hint. No identities are drawn.
+//!     (Layer 1). The recorder runs in the engine and the run store keeps the
+//!     [`sim::lineage::EventLog`] as the cell's `event_log` by-product; this
+//!     writes the `--event-log PATH` export and prints the `lineage realize`
+//!     hint. No identities are drawn.
 //!   - [`cmd_lineage_realize`]: the offline `camdl lineage realize` path
 //!     (Layer 2). Replays an event log at `--identity-seed`, sampling identity
 //!     attributions from the recorded weights, and writes a line list with the

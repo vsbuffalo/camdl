@@ -255,6 +255,7 @@ pub struct EngineSwitch {
 }
 
 /// The process's environment, read on first use and never again.
+#[expect(clippy::disallowed_methods, reason = "the one read of the environment, into `Environment`, whose `VARS` table classes every variable camdl reads; `environment_is_read_in_one_module.rs` checks that nothing else reads it")]
 pub(crate) fn get() -> &'static Environment {
     static ENV: OnceLock<Environment> = OnceLock::new();
     ENV.get_or_init(|| Environment::read(|name| std::env::var_os(name), std::env::vars_os()))

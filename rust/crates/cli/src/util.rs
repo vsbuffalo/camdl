@@ -1024,6 +1024,7 @@ mod single_flight {
     /// read()-inputs unchanged, gh#260) — not a bare `exists()`, so a
     /// stale-but-present entry is correctly treated as a miss to recompile, and
     /// a peer that publishes a fresh entry while we wait is served.
+    #[expect(clippy::disallowed_methods, reason = "creates camdlc's compile lock beside the IR cache entry, which holds no stored result, to write this process's id into it")]
     pub fn acquire(cache_path: &Path, is_cached: &dyn Fn() -> bool) -> Lease {
         let lock_path = lock_path_for(cache_path);
         if let Some(parent) = lock_path.parent() {
@@ -1332,7 +1333,7 @@ pub fn peek_simulation_dt(path: &str) -> Option<f64> {
 /// shares. With `Some(compile)` a `.camdl` is compiled under the command's
 /// settings and a `.ir.json` read; with `None` the path must already be
 /// compiled IR and a `.camdl` is refused ([`require_compiled`]).
-#[expect(clippy::disallowed_methods, reason = "reads the compiled IR at the path its caller passes; the compiled model is what a run's identity hashes")]
+#[expect(clippy::disallowed_methods, reason = "reads the compiled IR at the path its caller passes; a command that stores a result hashes the compiled model into its identity, and the other callers store nothing from it")]
 fn ir_text(path: &str, compile: Option<CompileSettings>) -> Result<String, String> {
     match compile {
         // Full IR (state-Jacobian emitted). The metadata / identity / docs
@@ -2436,7 +2437,7 @@ pub fn parse_table_text(content: &str, path: &std::path::Path) -> Result<Vec<ir:
 }
 
 /// Load parameter overrides from a TOML file.
-#[expect(clippy::disallowed_methods, reason = "parses the params file its caller names: `--params` and `--fixed-file` (declared `#[input(identity)]`) in `params_resolver` and `profile`, a `from_params` start, a `[synthetic]` truth file, or a stored run's copied files")]
+#[expect(clippy::disallowed_methods, reason = "parses the params file its caller names: `--params` and `--fixed-file` (declared `#[input(identity)]`) in `params_resolver` and `profile`, a `from_params` start, a `[synthetic]` truth file, a stored run's files copied out through the store, or the `--dry-run` listing, which stores nothing")]
 pub fn load_params_toml(path: &str) -> Result<HashMap<String, f64>, String> {
     // gh#637 (ebola item 9): a `.tsv` params file is the column-per-parameter
     // format `simulate --draws FILE` reads and `--draws-out` writes — accept
@@ -3622,13 +3623,10 @@ pub fn load_run_model(run: &SimRun) -> Result<ir::Model, String> {
 /// (model default < `--params` < draw/sweep point < scenario < `--param` /
 /// `--param-vec`, spec §1.3), over `model` as [`load_run_model`] returns it.
 ///
-/// The one resolution both sides of a run take: [`resolve_run_model`] runs the
-/// values it returns, and `CasSink::cell_resolve` hashes them into the cell's
-/// `params` level. The identity used to rebuild the parameter map in a walk of
-/// its own — `--params`, then `--param-vec`, then `--param`, then the draw row
-/// on top — which put a draw/sweep value ABOVE `--param` where the resolver
-/// puts it below, so `--draws d.tsv` and `--draws d.tsv --param beta=0.6` hashed
-/// to one `run_id` while simulating different β (gh#583).
+/// The one resolution of a cell's values, through [`resolve_loaded_run`]: the
+/// engine runs the model it returns, and the cell's identity reads its
+/// parameter values off that same model (`sim_config::ResolvedCell::resolve`),
+/// so the values hashed are the values run.
 pub fn resolve_run_parameters(
     model: &ir::Model,
     run: &SimRun,

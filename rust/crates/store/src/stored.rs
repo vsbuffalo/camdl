@@ -102,7 +102,7 @@ impl<A: Artifact> Stored<A> {
     /// extracted bytes, and the whole file's digest is recorded.
     pub fn dep_part(&self, file: &str, part: &str, extract: impl Fn(&[u8]) -> Result<Vec<u8>>) -> Result<Dep<A>> {
         let whole = self.result_digest(file)?;
-        let bytes = read_checked(&self.dir, file, &whole)?;
+        let bytes = read_checked(self.id.key(), &self.dir, file, &whole)?;
         let digest = Key::digest_bytes(&extract(&bytes)?);
         Ok(self.make_dep(DepFiles::Part { file: file.to_string(), part: part.to_string() }, digest, Some(whole)))
     }
@@ -111,7 +111,7 @@ impl<A: Artifact> Stored<A> {
     /// a run, such as a rendering; a running computation uses `Run::open`.
     pub fn open(&self, file: &str) -> Result<std::io::Cursor<Vec<u8>>> {
         let digest = self.result_digest(file)?;
-        Ok(std::io::Cursor::new(read_checked(&self.dir, file, &digest)?))
+        Ok(std::io::Cursor::new(read_checked(self.id.key(), &self.dir, file, &digest)?))
     }
 
     /// The provenance file names, in name order: files in the manifest that a
@@ -131,13 +131,13 @@ impl<A: Artifact> Stored<A> {
                 })
             }
         };
-        Ok(std::io::Cursor::new(read_checked(&self.dir, file, &digest)?))
+        Ok(std::io::Cursor::new(read_checked(self.id.key(), &self.dir, file, &digest)?))
     }
 
     /// A byte copy of one stored result file.
     pub fn export(&self, file: &str, to: &ExportPath) -> Result<()> {
         let digest = self.result_digest(file)?;
-        let bytes = read_checked(&self.dir, file, &digest)?;
+        let bytes = read_checked(self.id.key(), &self.dir, file, &digest)?;
         write_file_atomic(to.path(), &bytes)
     }
 
@@ -145,6 +145,17 @@ impl<A: Artifact> Stored<A> {
     /// model's whole file.
     pub fn recorded(&self, name: &str) -> Option<&serde_json::Value> {
         self.run.recorded.get(name)
+    }
+
+    /// The inputs as given to the computation that made it, as `run.json`
+    /// records them; provenance, never part of its identity.
+    pub fn given(&self) -> &serde_json::Value {
+        &self.run.given
+    }
+
+    /// When the computation that made it started.
+    pub fn started(&self) -> &crate::owner::Timestamp {
+        &self.run.started
     }
 
     /// The dependencies its identity holds, as recorded.

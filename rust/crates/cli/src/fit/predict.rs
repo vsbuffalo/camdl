@@ -2089,6 +2089,9 @@ struct SourceReads {
     posterior: PosteriorDraws,
     /// The compiled IR every cell of the engine loads.
     compiled_ir: String,
+    /// The digest of the stored compiled model the prediction's identity
+    /// names: the fit problem's, or the fixed point's.
+    stored_model: store::Key,
     _ir_tmp: Option<PathBuf>,
     /// The copy of the run's files, which the contrasts fork from; `None`
     /// for a fixed point.
@@ -2127,6 +2130,7 @@ impl SourceReads {
                     selection: None,
                     posterior: point,
                     compiled_ir: p.model_ir.to_string_lossy().into_owned(),
+                    stored_model: p.model.digest(),
                     _ir_tmp: None,
                     run_dir: None,
                     partition: crate::fit::training_partition::RecordedPartition::Given(p.partition.clone()),
@@ -2201,6 +2205,7 @@ impl SourceReads {
             selection,
             posterior,
             compiled_ir,
+            stored_model: fit.fit.model.digest(),
             _ir_tmp,
             run_dir: Some(run_dir),
             partition: crate::fit::training_partition::RecordedPartition::FitSegment(segment),
@@ -2226,6 +2231,7 @@ fn run_predict(
         selection,
         posterior,
         compiled_ir,
+        stored_model,
         _ir_tmp,
         run_dir,
         partition,
@@ -2285,6 +2291,9 @@ fn run_predict(
     }
 
     let (mut model, _) = crate::util::load_ir(&compiled_ir)?;
+    // Every engine below runs the model at `compiled_ir`, so it must be the
+    // stored compile the prediction's identity names.
+    crate::camdl_store::require_stored_model(&model, stored_model, "prediction", &compiled_ir)?;
 
     // 3a. `--quantities FILE` (proposal 2026-08-19): report this fit with a
     //     supplied reporting vocabulary in place of the model's own. This is the

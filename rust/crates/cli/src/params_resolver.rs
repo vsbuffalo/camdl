@@ -714,13 +714,12 @@ pub struct PresetDelta {
 
 /// Resolve a named preset to its effective [`PresetDelta`].
 ///
-/// The single authority for "what does scenario X change," read by both the
-/// value resolver ([`resolve_parameters`], which applies the delta) and the
-/// run identity (`cas_sink::ResolvedEntry::from_preset`, which hashes it). The
-/// two reading one function is what makes it impossible for a preset to
-/// change the trajectory without changing the `run_id` (gh#573: the identity
-/// used to read the preset's own literal fields, missing `scale` and every
-/// field inherited through `compose`).
+/// What scenario X changes, every field it inherits through `compose`
+/// included: read by the value resolver ([`resolve_parameters`], which applies
+/// the delta) and by `util::FitBase::lists`, a stored fit's intervention
+/// selection. A run identity holds the parameter values and interventions the
+/// resolver applied, not the preset's own fields, so a field the preset
+/// inherits reaches the identity through the values it sets.
 pub fn resolve_preset_delta(
     model: &ir::Model,
     preset_name: &str,

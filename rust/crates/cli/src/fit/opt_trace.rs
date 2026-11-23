@@ -78,6 +78,7 @@ pub(super) struct OptTraceFile {
 }
 
 impl OptTraceFile {
+    #[expect(clippy::disallowed_methods, reason = "opens the optimizer trace it has just created in this process's `fit run` working directory, to append rows; it reads nothing")]
     pub(super) fn create(method_dir: &Path, est_names: &[String]) -> Result<Self, String> {
         let path = method_dir.join(OPT_TRACE);
         std::fs::write(&path, header(est_names))

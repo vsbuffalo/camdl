@@ -136,6 +136,7 @@ pub(crate) fn resolve(
         ic_free: None,
         provenance: None,
         compiled_ir: None,
+        compiled_digest: None,
     };
     if let Ok(data) = problem.data_spec() {
         crate::fit::stream_bindings::StreamBindings::resolve(&model_in, data)?;

@@ -8,4 +8,7 @@ disallowed-methods = [
     { path = "std::fs::read_to_string", reason = "read inputs through Run::open or InputFile" },
     { path = "std::fs::File::open",     reason = "read inputs through Run::open or InputFile" },
     { path = "std::env::var",           reason = "declare the variable in the environment inputs" },
+    { path = "std::env::var_os",        reason = "declare the variable in the environment inputs" },
+    { path = "std::env::vars_os",       reason = "declare the variable in the environment inputs" },
+    { path = "std::fs::OpenOptions::open", reason = "read inputs through Run::open or InputFile; write through the store" },
 ]

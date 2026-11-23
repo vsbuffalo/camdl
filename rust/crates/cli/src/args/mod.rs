@@ -1549,7 +1549,8 @@ pub struct PredictFlags {
     /// column. `GRID` is a list (`q=0,30,60`), `lin(min,max,n)`, or
     /// `log10(min,max,n)`. Composes with `--scenario` on DISTINCT parameters; a
     /// scenario and a sweep on the SAME parameter is a hard error (pin OR vary,
-    /// not both). Free-forward only — the one-step horizon is sweep-agnostic.
+    /// not both). It makes arms of the free-forward and forecast predictions;
+    /// the one-step rows are sweep-agnostic.
     #[arg(long = "sweep", value_name = "PARAM=GRID")]
     #[input(identity, vary = crate::input_fixtures::predict_sweep)]
     pub sweep: Vec<crate::args::types::SweepSpec>,

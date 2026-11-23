@@ -838,7 +838,8 @@ fn export_event_log(ctx: &StoreRun<'_>, store: &store::Store, invocation: &store
     let stored = store.get(&id).ok().flatten().unwrap_or_else(|| fail("the event log is not stored".into()));
     let bytes = crate::camdl_store::read_stored(&stored, EventLog::FILE).unwrap_or_else(|e| fail(e));
     let file = stored.folder().join(EventLog::FILE);
-    let log = sim::lineage::event_log_io::read_tsv(&file).unwrap_or_else(|e| fail(format!("reading the stored event log: {e:?}")));
+    let log = sim::lineage::event_log_io::from_tsv_bytes(&bytes)
+        .unwrap_or_else(|e| fail(format!("reading the stored event log: {e:?}")));
     let exact = matches!(ctx.engine.backend, crate::args::types::ForwardBackend::Gillespie);
     crate::lineage::finish_event_log(
         out,

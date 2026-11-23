@@ -163,16 +163,11 @@ pub fn to_tsv_bytes(log: &EventLog) -> Result<Vec<u8>, SimError> {
     Ok(buf)
 }
 
-/// Read a TSV event log back into an [`EventLog`].
-#[expect(
-    clippy::disallowed_methods,
-    reason = "a library parser of the path its caller passes; the one caller, \
-              `sim_command::export_event_log`, reads a stored event log to export it to the \
-              path `--event-log` names, and no stored result is computed from it"
-)]
-pub fn read_tsv(path: &Path) -> Result<EventLog, SimError> {
-    let body = std::fs::read_to_string(path)
-        .map_err(|e| SimError::Validation(format!("read event log {}: {}", path.display(), e)))?;
+/// Read the bytes of a TSV event log, as [`to_tsv_bytes`] writes them, back
+/// into an [`EventLog`].
+pub fn from_tsv_bytes(bytes: &[u8]) -> Result<EventLog, SimError> {
+    let body = std::str::from_utf8(bytes)
+        .map_err(|e| SimError::Validation(format!("event log: not UTF-8: {e}")))?;
     let mut lines = body.lines();
     let magic = lines
         .next()
@@ -641,7 +636,7 @@ mod tests {
         let log = sample_log();
         let path = std::env::temp_dir().join(format!("camdl_evlog_{}.tsv", std::process::id()));
         write_tsv(&log, &path).unwrap();
-        let back = read_tsv(&path).unwrap();
+        let back = from_tsv_bytes(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(log, back);
         std::fs::remove_file(&path).ok();
     }

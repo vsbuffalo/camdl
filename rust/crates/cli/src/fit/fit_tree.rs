@@ -38,18 +38,11 @@ pub struct FitDirEntry {
 /// What the store records of `opened`'s run beside its files, written into
 /// its view: the fit file it was given (`source_config`) and when it started
 /// (`created_at`), from its `run.json`, and `label`.
-#[expect(clippy::disallowed_methods, reason = "reads the store's `run.json` record of a stored run in its folder, only to show the fit file and start time in `fit table` and `fit summary`; nothing stored is computed from it")]
 pub fn fill_from_record(view: &mut FitView, opened: &crate::fit_store::OpenedFit, label: Option<String>) {
-    let record: Option<serde_json::Value> = opened
-        .fit
-        .run
-        .as_ref()
-        .and_then(|run| std::fs::read(run.folder().join("run.json")).ok())
-        .and_then(|b| serde_json::from_slice(&b).ok());
-    if let Some(r) = &record {
-        view.source_config = r.pointer("/given/config/path").and_then(|v| v.as_str()).map(String::from);
+    if let Some(run) = &opened.fit.run {
+        view.source_config = run.given().pointer("/config/path").and_then(|v| v.as_str()).map(String::from);
         if let Some(m) = view.methods.first_mut() {
-            m.created_at = r["started"].as_str().unwrap_or_default().to_string();
+            m.created_at = run.started().0.clone();
         }
     }
     if let Some(m) = view.methods.first_mut() {

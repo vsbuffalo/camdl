@@ -8,8 +8,8 @@
 //! policy, as a value: each command builds a [`ForcingPolicy`] from its
 //! resolved `--allow-forcing-extrapolation` (or a fit config's `[config]
 //! allow_forcing_extrapolation = true`), installs it for its duration
-//! ([`ForcingPolicy::install`]), and hands it to every store write it makes
-//! ([`crate::resolve::RecordMeta::new`]). By default a note is an error: the
+//! ([`ForcingPolicy::install`]), and records it in every `run.json` it writes
+//! ([`ForcingPolicy::record_in`]). By default a note is an error: the
 //! command says which forcing, its range and the side it was evaluated on,
 //! and exits before it commits anything. A command that holds a store claim
 //! while its model runs (`fit run`) takes the refusal itself

@@ -355,10 +355,10 @@ impl<A: Artifact> Run<A> {
     pub fn open<U: Artifact>(&mut self, dep: &Dep<U>) -> Result<std::io::Cursor<Vec<u8>>> {
         let (dir, _) = self.core.upstream(dep)?;
         let bytes = match dep.files() {
-            DepFiles::One(name) => read_checked(&dir, &name, &dep.digest())?,
+            DepFiles::One(name) => read_checked(dep.id().key(), &dir, &name, &dep.digest())?,
             DepFiles::Part { file, .. } => {
                 let whole = dep.whole().expect("a part dependency records its whole file");
-                read_checked(&dir, &file, &whole)?
+                read_checked(dep.id().key(), &dir, &file, &whole)?
             }
             DepFiles::All | DepFiles::Some(_) => {
                 return Err(Error::BadFileName { name: format!("{} (use open_in to read one file of it)", dep.file()) })
@@ -389,7 +389,7 @@ impl<A: Artifact> Run<A> {
             });
         }
         let digest = files.get(file).and_then(|e| e.sha256).expect("a result file has a digest");
-        let bytes = read_checked(&dir, file, &digest)?;
+        let bytes = read_checked(dep.id().key(), &dir, file, &digest)?;
         self.core.run_file.reads.push(ReadEntry { kind: U::KIND.into(), run_id: dep.id().key(), file: file.into() });
         Ok(std::io::Cursor::new(bytes))
     }
@@ -441,13 +441,13 @@ impl<A: Artifact> Drop for Run<A> {
 }
 
 /// Reads `name` in `dir` and checks it against `digest`.
-pub(crate) fn read_checked(dir: &Path, name: &str, digest: &Key) -> Result<Vec<u8>> {
+pub(crate) fn read_checked(run_id: Key, dir: &Path, name: &str, digest: &Key) -> Result<Vec<u8>> {
     let path = dir.join(name);
     let bytes = std::fs::read(&path).at("read", &path)?;
     let found = Key::digest_bytes(&bytes);
     if &found != digest {
         return Err(Error::Damaged {
-            run_id: Key::from_bytes([0; 32]),
+            run_id,
             what: format!("{} has digest {found}, where {digest} was recorded", path.display()),
         });
     }

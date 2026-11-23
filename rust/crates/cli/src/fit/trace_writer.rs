@@ -46,6 +46,7 @@ impl TraceWriter {
     ///
     /// - `append = false`: creates file and writes header.
     /// - `append = true`: opens in append mode (header already exists).
+    #[expect(clippy::disallowed_methods, reason = "opens a chain's `trace.tsv` in this process's `fit run` working directory to append rows (a resumed chain's carries the base run's rows, copied in through the run's `resumed_from` dependency); it reads nothing")]
     pub fn new(
         path: &str,
         index_col: &str,

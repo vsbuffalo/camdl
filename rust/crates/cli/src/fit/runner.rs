@@ -284,6 +284,9 @@ pub(crate) fn resolve_fit_parameters(
         })?;
         crate::obs_anchor::report(&crate::out::detached(), &moved, &model_pre);
     }
+    if let Some(expected) = fit.compiled_digest {
+        crate::camdl_store::require_stored_model(&model_pre, expected, "fit", model_path)?;
+    }
     // Keep a copy of the unfiltered model so the startup diagnostic
     // can show what was declared vs what's active. Cheap clone — the
     // intervention list is small.
@@ -4765,6 +4768,27 @@ dt = 1.0
         assert_eq!(config.smc_config().dt, 7.0);
         let config = FitRunConfig::build(&fit, None, 1, 100, 1, 0.5, 50, 1, false).unwrap();
         assert_eq!(config.if2_config.dt, 1.0, "no declared step: the config's");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A method runs the model its problem's identity names: with the
+    /// stored compile's digest set, the model `compiled_ir` loads is refused
+    /// unless it has that digest, and accepted when it does.
+    #[test]
+    fn a_fit_runs_only_the_stored_compile_its_problem_names() {
+        let dir = ic_free_test_dir("stored_compile");
+        let mut fit = ic_free_fixture(&dir, false, false);
+        let (model, _) = crate::util::load_ir(fit.compiled_model().unwrap()).unwrap();
+        fit.compiled_digest = Some(crate::camdl_store::model_part_digest(&model));
+        assert!(resolve_fit_parameters(&fit, 1).is_ok(), "the stored compile itself runs");
+        let mut other = model.clone();
+        other.simulation.dt = Some(other.simulation.dt.unwrap_or(1.0) * 2.0);
+        fit.compiled_digest = Some(crate::camdl_store::model_part_digest(&other));
+        let err = match resolve_fit_parameters(&fit, 1) {
+            Ok(_) => panic!("a model other than the stored compile must be refused"),
+            Err(e) => e,
+        };
+        assert!(err.contains("is not the stored compiled model"), "{err}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

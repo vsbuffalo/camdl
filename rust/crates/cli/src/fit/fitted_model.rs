@@ -177,52 +177,44 @@ fn horizons_moved(fitted: &ir::Model, given: &ir::Model) -> Option<String> {
 
 /// Do the files at `a` and `b` hold the same bytes? `None` when either cannot
 /// be read.
-#[expect(clippy::disallowed_methods, reason = "compares the model file a replay was given with the model file the stored problem keeps, only to word the refusal of a replay on another model; nothing stored is computed from it")]
+#[expect(clippy::disallowed_methods, reason = "compares the model file a replay was given with the copy of the stored problem's model file that `OpenedFit::model_source` read through the store, only to word the refusal of a replay on another model; nothing stored is computed from it")]
 fn same_bytes(a: &Path, b: &Path) -> Option<bool> {
     Some(std::fs::read(a).ok()? == std::fs::read(b).ok()?)
 }
 
-/// Refuse to replay a STORED fit's parameters through `given` unless it is the
-/// model the fit ran on, read from the fit's archived `model.ir.json`.
-///
-/// `fit` is the handle as the user typed it; `segment` the fit's problem
-/// folder; `problem` the fit's own config — its `[model]` source path
-/// (absolute, resolved at load) and the `[data]` its observation anchors
-/// resolve against. `given` is the command-line model as loaded, anchors
-/// unresolved; it goes through the fit's anchor substitution ([`as_fitted`])
-/// before the comparison. Returns the notice to print when only the reporting
-/// layer differs, `None` when the models are the same.
-/// The model file the stored problem a run's files belong to keeps, given
-/// the copy of the run's files: `<problem>/model.<ext>` in the store.
-fn stored_model_file(run_copy: &std::path::Path) -> Option<std::path::PathBuf> {
-    let run_folder = crate::fit_store::shown(run_copy);
-    let problem = run_folder.ancestors().nth(3)?;
-    std::fs::read_dir(problem).ok()?.flatten().map(|e| e.path())
-        .find(|p| p.is_file() && p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("model.")))
-}
-
 /// The model path a stored run's fit file named, resolved against where that
 /// file was: the run's `run.json` records the fit file as typed, and the run
-/// keeps that file, whose `[model] camdl` is relative to it.
-#[expect(clippy::disallowed_methods, reason = "reads the store's `run.json` record in the run's folder and the `fit.toml` in a `fit_store::RunFiles` copy, only to name the fitted model's path in a refusal; nothing stored is computed from it")]
-fn recorded_model_source(run_copy: &std::path::Path) -> Option<String> {
-    let folder = crate::fit_store::shown(run_copy);
-    let record: serde_json::Value = serde_json::from_slice(&std::fs::read(folder.join("run.json")).ok()?).ok()?;
-    let config = std::path::PathBuf::from(record.pointer("/given/config/path")?.as_str()?);
-    let text = std::fs::read_to_string(run_copy.join(crate::fit_store::FIT_TOML_FILE)).ok()?;
+/// keeps that file, whose `[model] camdl` is relative to it. `None` for a
+/// problem handle, which names no run.
+fn recorded_model_source(opened: &crate::fit_store::OpenedFit) -> Option<String> {
+    let run = opened.fit.run.as_ref()?;
+    let config = PathBuf::from(run.given().pointer("/config/path")?.as_str()?);
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut run.open_provenance(crate::fit_store::FIT_TOML_FILE).ok()?, &mut text).ok()?;
     let doc: toml::Table = text.parse().ok()?;
     let camdl = doc.get("model")?.get("camdl")?.as_str()?;
     let path = config.parent().map(|d| d.join(camdl)).unwrap_or_else(|| camdl.into());
     Some(path.to_string_lossy().into_owned())
 }
 
+/// Refuse to replay a STORED fit's parameters through `given` unless it is the
+/// model the fit ran on, read from the fit's archived `model.ir.json`.
+///
+/// `fit` is the handle as the user typed it; `opened` the stored fit, read
+/// out of the store; `problem` the fit's own config — its `[model]` source
+/// path (absolute, resolved at load) and the `[data]` its observation anchors
+/// resolve against. `given` is the command-line model as loaded, anchors
+/// unresolved; it goes through the fit's anchor substitution ([`as_fitted`])
+/// before the comparison. Returns the notice to print when only the reporting
+/// layer differs, `None` when the models are the same.
 pub fn check_stored_fit(
     fit: &str,
-    segment: &Path,
+    opened: &crate::fit_store::OpenedFit,
     problem: &crate::fit::config_v2::Problem,
     given: &ir::Model,
     given_path: &str,
 ) -> Result<Option<String>, String> {
+    let segment = opened.segment.as_path();
     let archive: PathBuf = segment.join("model.ir.json");
     if !archive.is_file() {
         return Err(format!(
@@ -250,10 +242,10 @@ pub fn check_stored_fit(
         ModelAgreement::Differs { fitted: fitted_h, given: given_h } => {
             // The model file the stored problem keeps, in the store: the
             // source (or IR) the fit was posed on.
-            let source_copy = stored_model_file(segment).unwrap_or_else(|| segment.join("model.camdl"));
+            let source_copy = opened.model_source().unwrap_or_else(|_| segment.join("model.camdl"));
             // The model path the fit was given, as typed (the run records its
             // fit file and keeps that file); else the stored copy.
-            let recorded_source_shown = recorded_model_source(segment)
+            let recorded_source_shown = recorded_model_source(opened)
                 .unwrap_or_else(|| crate::fit::report::display_path(&source_copy));
             let recorded_source = recorded_source_shown.as_str();
             let stem = format!(

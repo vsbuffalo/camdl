@@ -2797,23 +2797,23 @@ The compiler and the types carry most of it. Two things they cannot carry are
 that an execution input leaves the result unchanged, and that engine code reads
 nothing behind the store's back.
 
-| Property                                                               | Enforced by                                                                                                                                                                                                                          | What remains open                                                                                                                                   |
-| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Every argument, settings-file key and environment variable has a class | Compiler: the derives reject an unannotated field; an unknown file key fails to parse                                                                                                                                                | Code that reads the environment outside the declared struct                                                                                         |
-| Every declared input reaches a resolution step                         | Compiler: generated structs have private fields and one `into_parts` that returns them all; unused bindings are denied                                                                                                               | A step that ignores what an input means; the identity tests cover it                                                                                |
-| The hash covers the whole identity                                     | Compiler: one derive, every field hashed, the key computed from the record form                                                                                                                                                      | A content type whose byte form leaves something out                                                                                                 |
-| A content's digest is the SHA-256 of the stored bytes                  | Types: a content artifact's identity is its file's digest; `put` and `finish` check each digest `Identity::held_content` lists against a result file                                                                                 | Nothing                                                                                                                                             |
-| What ran is what was hashed                                            | Types: the engine takes its settings and content from the run                                                                                                                                                                        | Engine code that reads a global or opens a file directly                                                                                            |
-| An output is a function of its identity                                | Library: the divergence check in reproducing mode, whenever a by-product is produced after its upstream                                                                                                                              | A dependence that no reproducing run has yet exposed; a recompute under `Force` or an incomplete build, which quarantines first and is not compared |
-| Execution inputs do not change results                                 | Generated tests, each with a named fixture that exercises the input                                                                                                                                                                  | Only as good as the fixture; not provable                                                                                                           |
-| Identity inputs do change the id                                       | Generated tests, using each field's `Vary` value                                                                                                                                                                                     | A second value that happens to be equivalent                                                                                                        |
-| Only completed results are reused or read as results                   | Types: `Stored<A>` exists only for a completed result                                                                                                                                                                                | A reader that opens files by a path it built                                                                                                        |
-| Completed records are sealed                                           | Types: nothing takes a completed result mutably; labels live in invocation records                                                                                                                                                   | A hand-built path                                                                                                                                   |
-| Every write goes through the store                                     | Types: a run hands out files and never its folder                                                                                                                                                                                    | A hand-built path under the root; a test can check that non-store commands leave the root untouched                                                 |
-| Every upstream read is declared                                        | Types: `Run::open` takes a `Dep`                                                                                                                                                                                                     | A plain file read on a hand-built path; the two guards below                                                                                        |
-| One id is never computed twice at once                                 | Library: a claim in both write modes; a second request for an atomic id waits for the first, and one for an in-place id is refused. A content artifact is not claimed: two writers produce identical bytes and the first rename wins | Filesystems without exclusive create                                                                                                                |
-| A dead run is noticed                                                  | Library: the owner check, with start time, and the beat counter                                                                                                                                                                      | A hung process still beats                                                                                                                          |
-| Old records are never misread                                          | Library: versions in every record; a mismatch is refused by name                                                                                                                                                                     | Nothing                                                                                                                                             |
+| Property                                                               | Enforced by                                                                                                                                                                                                                          | What remains open                                                                                                                                                                                    |
+| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Every argument, settings-file key and environment variable has a class | Compiler: the derives reject an unannotated field; an unknown file key fails to parse                                                                                                                                                | Code that reads the environment outside the declared struct                                                                                                                                          |
+| Every declared input reaches a resolution step                         | Compiler: generated structs have private fields and one `into_parts` that returns them all; unused bindings are denied                                                                                                               | A step that ignores what an input means; the identity tests cover it                                                                                                                                 |
+| The hash covers the whole identity                                     | Compiler: one derive, every field hashed; the record form is generated from the same field list and hashes the same bytes, and `store verify` recomputes each run id from its record                                                 | A content type whose byte form leaves something out                                                                                                                                                  |
+| A content's digest is the SHA-256 of the stored bytes                  | Types: a content artifact's identity is its file's digest; `put` and `finish` check each digest `Identity::held_content` lists against a result file                                                                                 | Nothing                                                                                                                                                                                              |
+| What ran is what was hashed                                            | Types: the engine takes its settings and content from the run                                                                                                                                                                        | Engine code that reads a global or opens a file directly                                                                                                                                             |
+| An output is a function of its identity                                | Library: the divergence check in reproducing mode, whenever a by-product is produced after its upstream                                                                                                                              | A dependence that no reproducing run has yet exposed; a recompute under `Force` or an incomplete build, which quarantines first and is not compared                                                  |
+| Execution inputs do not change results                                 | Generated tests, each with a named fixture that exercises the input                                                                                                                                                                  | Only as good as the fixture; not provable                                                                                                                                                            |
+| Identity inputs do change the id                                       | Generated tests, using each field's `Vary` value                                                                                                                                                                                     | A second value that happens to be equivalent                                                                                                                                                         |
+| Only completed results are reused or read as results                   | Types: `Stored<A>` exists only for a completed result                                                                                                                                                                                | A reader that opens files by a path it built                                                                                                                                                         |
+| Completed records are sealed                                           | Types: nothing takes a completed result mutably; labels live in invocation records                                                                                                                                                   | A hand-built path                                                                                                                                                                                    |
+| Every write goes through the store                                     | Types: a run hands out files; its folder only as a path to show (`Run::folder`, `Stored::folder`)                                                                                                                                    | A hand-built path under the root; a test can check that non-store commands leave the root untouched                                                                                                  |
+| Every upstream read is declared                                        | Types: `Run::open` takes a `Dep`; the two guards below                                                                                                                                                                               | A plain file read on a hand-built path that an exemption from the lint covers; a read while a command resolves its inputs, before any run, of a stored fit it names, which the poisoning test allows |
+| One id is never computed twice at once                                 | Library: a claim in both write modes; a second request for an atomic id waits for the first, and one for an in-place id is refused. A content artifact is not claimed: two writers produce identical bytes and the first rename wins | Filesystems without exclusive create                                                                                                                                                                 |
+| A dead run is noticed                                                  | Library: the owner check, with start time, and the beat counter                                                                                                                                                                      | A hung process still beats                                                                                                                                                                           |
+| Old records are never misread                                          | Library: versions in every record; a mismatch is refused by name                                                                                                                                                                     | Nothing                                                                                                                                                                                              |
 
 ### Guarding against undeclared reads
 
@@ -2831,16 +2831,41 @@ disallowed-methods = [
     { path = "std::fs::read_to_string", reason = "read inputs through Run::open or InputFile" },
     { path = "std::fs::File::open",     reason = "read inputs through Run::open or InputFile" },
     { path = "std::env::var",           reason = "declare the variable in the environment inputs" },
+    { path = "std::env::var_os",        reason = "declare the variable in the environment inputs" },
+    { path = "std::env::vars_os",       reason = "declare the variable in the environment inputs" },
+    { path = "std::fs::OpenOptions::open", reason = "read inputs through Run::open or InputFile; write through the store" },
 ]
 ```
 
-Only the store crate, where `InputFile` lives, is exempt. CI treats the lint as
-an error. An `#[allow]` can silence it, so it is a strong default and not a
-proof.
+The store crate, where `InputFile` lives, is exempt as a whole
+(`crates/store/clippy.toml`). Elsewhere each remaining direct read carries an
+`#[expect(clippy::disallowed_methods, reason = ...)]` whose reason says why it
+is not an undeclared input: a file the user names whose bytes enter an identity,
+a scratch copy of a stored result read out through the store, the command's own
+working directory, the IR cache, or a command that stores nothing. `make lint`
+treats the lint as an error on library and binary targets, and not on tests. An
+exemption silences it, so it is a strong default and not a proof. camdl reads
+its environment in one function, `cli::env::get`, the one exemption from the
+environment bans in the engine crates, and
+`environment_is_read_in_one_module.rs` checks that no other code reads it.
+`std::fs::read_dir` is not banned: a listing yields no bytes of a file.
 
 **2. A poisoning test.** For each kind of run, corrupt every upstream file that
 is not among its declared dependencies, run again, and require identical output.
 A changed output means an undeclared read.
+
+The test is `every_stored_kind_reads_only_its_declared_dependencies`
+(`rust/crates/cli/src/camdl_store/poisoning/tests.rs`). A base store holds a
+result of every kind; each case runs one command on a copy of it, then on a copy
+in which every file of every result is corrupted, keeping its size and
+modification time, except the files reached from the new results' `deps`,
+followed through each dependency's own `deps`. The second run must compute the
+same run ids with the same result digests. A stored fit the command names
+(`--fit @fit`, `camdl predict @fit`) is opened whole while the command resolves
+its inputs, so its files, and the quantities its lineage names, are left
+uncorrupted: what the command takes from it enters the identity by value, which
+the input-class tests check. Every kind the store registers must be computed by
+some case, so a new kind fails the test until a case stores it.
 
 Two stronger guards, an open-file audit and a sandbox, are listed under future
 features.
@@ -5136,7 +5161,7 @@ it belongs to.
 | `--design SOURCE=FILE`                                                        | both        | `identity`  | A forecast's design values for stream SOURCE's targets, stored as a `DataTable`                                                           |
 | `--stream NAME`                                                               | both        | `identity`  | Restricts the streams predicted                                                                                                           |
 | `--scenario NAME`, `--enable`, `--disable`                                    | both        | `identity`  | The arms, each a scenario selection, in the order given                                                                                   |
-| `--sweep PARAM=GRID`                                                          | both        | `identity`  | Sweep arms over one parameter; free-forward only                                                                                          |
+| `--sweep PARAM=GRID`                                                          | both        | `identity`  | Sweep arms, one per grid point (repeatable, Cartesian), for free-forward and forecast; the one-step rows ignore it                        |
 | `--n-draws N`                                                                 | both        | `identity`  | The draws pooled: a cap on the posterior subsample, or the number of copies of the point. Default 200 for both                            |
 | `--particles N`                                                               | both        | `identity`  | Particles per draw in each filter. Default 500 for a fixed point                                                                          |
 | `--seed N`                                                                    | both        | `identity`  | The seed every draw's process seed is derived from. Default 1                                                                             |
@@ -5248,8 +5273,11 @@ the point was fitted.
 - **No `--data`.**
 - **A mode the backend cannot run,** with the messages `camdl predict @fit`
   gives: one-step on ODE or Gillespie, forecast on Gillespie.
-- **`--sweep` with one-step or forecast,** and a scenario and a sweep on the
-  same parameter, as for a posterior.
+- **A scenario and a sweep on the same parameter,** as for a posterior. A sweep
+  is otherwise accepted in every mode, as for a posterior: free-forward and
+  forecast predictions get one arm per grid point, and the one-step rows are
+  sweep-agnostic by construction (run spec §2.2.2), filtering the data through
+  the model at the point with their `sweep:<param>` cells empty.
 - **A parameter with no value after every source,** or a `--param` the model
   does not declare, by `resolve_params`.
 - **`--particles` without a filtering mode, `--design` without a forecast.**
@@ -5942,13 +5970,14 @@ ends with its verdict.
 
 ### A leaf's segment may exceed the limit on one path component
 
-- **What.** A level label is capped at 200 bytes (`runid/src/layout.rs:34`), and
-  a segment is the label, `-` and an 8-hex hash (`layout.rs:110-112`). The
-  commit's escalation appends `~` and all 64 hex digits of the run id to the
-  leaf's segment (`store.rs:1462-1483`). The longest segment is then 200 + 1 +
-  8 + 1 + 64 = 274 bytes, over the 255-byte limit (`NAME_MAX`) that the comment
-  at `layout.rs:30-33` says the cap leaves room for. `mkdir` would fail with
-  `ENAMETOOLONG`. Not reproduced.
+- **What.** A level label is capped at 200 bytes (`layout.rs:34` of the deleted
+  `runid` crate), and a segment is the label, `-` and an 8-hex hash
+  (`layout.rs:110-112`, the same crate). The commit's escalation appends `~` and
+  all 64 hex digits of the run id to the leaf's segment (`store.rs:1462-1483`,
+  the same crate). The longest segment is then 200 + 1 + 8 + 1 + 64 = 274 bytes,
+  over the 255-byte limit (`NAME_MAX`) that the comment at `layout.rs:30-33`
+  says the cap leaves room for. `mkdir` would fail with `ENAMETOOLONG`. Not
+  reproduced.
 - **The test.** Give a leaf's last level a label of over 200 bytes, occupy its
   plain and 16-hex paths with folders of another identity so that the commit
   escalates to the 64-hex suffix, and require the commit to succeed.
@@ -5957,19 +5986,21 @@ ends with its verdict.
 - **Verdict.** Reproduced (a 300-byte label failed to commit with "File name too
   long") and fixed in `9ae418855`: the cap is 181 bytes, 255 less the `-<8 hex>`
   of every segment and the longest suffix the store adds. Labels enter no hash,
-  so nothing re-keys. Two quarantine names in `runid/src/store.rs` can still
-  exceed 255 bytes for a long segment; they are formed only when a folder is
-  quarantined, and `runid` is deleted at the end of this work.
+  so nothing re-keys. Two quarantine names in the `runid` crate's `store.rs`
+  could still exceed 255 bytes for a long segment; that crate is deleted. The
+  store caps a label at `store::LABEL_CAP`, 64 bytes
+  (`rust/crates/store/src/layout.rs:14`).
 
 ### Two takers can take over one dead lock
 
 - **What.** A taker that finds the `.reclaim` serialiser left by a dead taker
-  removes it by path after reading it (`runid/src/store.rs:1731-1735`). If that
-  file has meanwhile been replaced by a live taker's, the live one is removed,
-  and a third taker can then create its own: both find the lock still naming the
-  dead owner and both rename theirs over it. The new store keeps the protocol
-  (`fsutil.rs`, `take_over`). Not reproduced; it needs a crashed taker and three
-  concurrent ones.
+  removes it by path after reading it (`store.rs:1731-1735` of the deleted
+  `runid` crate). If that file has meanwhile been replaced by a live taker's,
+  the live one is removed, and a third taker can then create its own: both find
+  the lock still naming the dead owner and both rename theirs over it. The new
+  store keeps the protocol (`rust/crates/store/src/fsutil.rs:225-255`,
+  `take_over`, which removes a stranded `.reclaim` by path at `:237`). Not
+  reproduced; it needs a crashed taker and three concurrent ones.
 - **The test.** Leave a `.reclaim` naming a dead process beside a `.lock` naming
   another, start several takers at once with the removal paused between reading
   and removing, and require exactly one to hold the lock.
@@ -5979,8 +6010,8 @@ ends with its verdict.
 
 ### Documentation found out of date
 
-- The module comment in `runid/src/store.rs` says `pfilter`, `survey` and
-  profile points are written atomically; they are written in place.
+- The module comment in `store.rs` of the deleted `runid` crate said `pfilter`,
+  `survey` and profile points are written atomically; they are written in place.
 - `docs/dev/cas-path-shape-contract.md` says the fit's shared record holds the
   label; labels live on runs.
 - `docs/dev/proposals/2026-11-14-moving-labels-and-run-level-handles.md` reads

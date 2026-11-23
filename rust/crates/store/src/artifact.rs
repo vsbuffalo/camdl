@@ -164,7 +164,8 @@ impl Kinds {
         check(record).map_err(|why| Error::Parse { what: format!("an identity record of kind `{kind}`"), why })
     }
 
-    pub(crate) fn names(&self) -> impl Iterator<Item = &'static str> + '_ {
+    /// The `KIND` of every registered artifact, in name order.
+    pub fn names(&self) -> impl Iterator<Item = &'static str> + '_ {
         self.kinds.keys().copied()
     }
 }
