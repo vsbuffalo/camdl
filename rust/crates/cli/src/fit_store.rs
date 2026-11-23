@@ -307,7 +307,7 @@ pub(crate) struct ChainIdentity {
 
 /// One run on a problem.
 #[derive(store::Identity, Clone, Debug)]
-#[identity(tag = "fit_run", version = 1)]
+#[identity(tag = "fit_run", version = 2)]
 pub(crate) struct FitRunIdentity {
     pub chain: ChainIdentity,
     /// Sweeps or iterations, for a method that can be extended; 0 otherwise.

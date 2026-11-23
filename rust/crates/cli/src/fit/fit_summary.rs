@@ -787,10 +787,21 @@ fn format_json(
 }
 
 /// The document as `--format json` writes it.
+///
+/// The entry of a run that holds a stored summary is that summary, with the
+/// fields it leaves out taken from this rendering.
 fn summary_json(doc: &FitSummaryDoc) -> String {
-    crate::fit::report::exact::exact_json(doc)
-        .and_then(|v| serde_json::to_string_pretty(&v))
-        .expect("FitSummaryDoc must serialize")
+    let mut v = crate::fit::report::exact::exact_json(doc).expect("FitSummaryDoc must serialize");
+    for s in &doc.stored_summaries {
+        let report = v["methods"][s.report].clone();
+        let row = s.row.map(|i| v["table_rows"][i].clone());
+        let (report, row) = crate::fit::run_summary::with_rendered(&s.summary, &report, row.as_ref());
+        v["methods"][s.report] = report;
+        if let (Some(i), Some(row)) = (s.row, row) {
+            v["table_rows"][i] = row;
+        }
+    }
+    serde_json::to_string_pretty(&v).expect("a JSON value encodes")
 }
 
 fn format_md(out: &mut Out, dir: &str, methods: &[ResolvedMethod], strict: bool, selection: Option<&ChainSelection>, compile: crate::util::CompileSettings) -> Vec<LoadFailure> {
@@ -860,6 +871,43 @@ pub struct FitSummaryDoc {
     /// summary, so existing machine consumers are unaffected.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chain_selection: Option<serde_json::Value>,
+    /// The stored summary of each completed run that holds one, by the
+    /// position of its report in `methods` and of its row in `table_rows`.
+    #[serde(skip)]
+    pub stored_summaries: Vec<StoredSummary>,
+}
+
+/// A run's stored summary (`summary.json`), and where its entry sits in the
+/// rendered document.
+#[derive(Debug, Clone)]
+pub struct StoredSummary {
+    pub report: usize,
+    pub row: Option<usize>,
+    pub summary: serde_json::Value,
+}
+
+/// The report and `fit table` row of the one completed run whose files `dir`
+/// holds, as `fit summary --format json` writes them, built from the run's
+/// files and `model`, the model it was fitted to. For the run's stored
+/// summary ([`crate::fit::run_summary`]).
+pub(crate) fn run_entry(dir: &Path, model: &ir::Model) -> Result<(serde_json::Value, Option<serde_json::Value>), String> {
+    let resolved = match discover_methods(dir).as_slice() {
+        [one] => one.clone(),
+        found => return Err(format!("{} holds {} runs, where one is summarised", dir.display(), found.len())),
+    };
+    let typed = MethodResult::load_from(dir, &resolved.method).map_err(|e| e.to_string())?;
+    let facts = load_method_facts(&resolved, typed, Some(model), None)?;
+    let report = build_method_report(facts, &CalendarContext::of_model(model));
+    let row = if MethodResult::is_fitted(resolved.algorithm) {
+        let fit_hash = FitView::read(dir).map(|v| v.fit_hash).unwrap_or_default();
+        Some(stored_row(dir, ConfigDiff::identity(&fit_hash), 0).map_err(|e| e.to_string())?)
+    } else {
+        None
+    };
+    use crate::fit::report::exact::exact_json;
+    let report = exact_json(&report).map_err(|e| e.to_string())?;
+    let row = row.as_ref().map(exact_json).transpose().map_err(|e| e.to_string())?;
+    Ok((report, row))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -907,6 +955,7 @@ fn build_summary_doc(
     let mut advised = false;
     let mut leaves: Vec<LeafEntry> = Vec::new();
     let mut table_rows: Vec<TableRow> = Vec::new();
+    let mut stored_summaries: Vec<StoredSummary> = Vec::new();
     // For a single-fit summary each row is alone in scope, so config_diff is
     // the identity diff (empty diff vs self) and `delta_ll_vs_best` is 0.0.
     let now_unix = std::time::SystemTime::now()
@@ -985,11 +1034,25 @@ fn build_summary_doc(
         }
         // The run's `fit table` row, built from the leaf alone. A run with no
         // tabulated result (pfilter) has no row, as in `fit table`.
+        let mut row = None;
         if MethodResult::is_fitted(resolved.algorithm) {
             match stored_row(&resolved.method_dir, ConfigDiff::identity(&fit_hash), now_unix) {
-                Ok(row) => table_rows.push(row),
+                Ok(r) => {
+                    row = Some(table_rows.len());
+                    table_rows.push(r);
+                }
                 Err(e) => out.say(format_args!(
                     "warning: cannot build the table row for {}: {}", method_dir_str, e)),
+            }
+        }
+        // The run's stored summary, which the JSON is written from. Under
+        // `--exclude-chains` the figures are recomputed over the kept chains,
+        // so the stored ones, over every chain, are not read.
+        if selection.is_none() {
+            match read_stored_summary(&resolved.method_dir) {
+                Ok(Some(summary)) => stored_summaries.push(StoredSummary { report: method_reports.len() - 1, row, summary }),
+                Ok(None) => {}
+                Err(e) => out.say(format_args!("warning: {method_dir_str}: {e}")),
             }
         }
     }
@@ -1005,6 +1068,19 @@ fn build_summary_doc(
         methods: method_reports,
         failures,
         chain_selection: chain_selection_json,
+        stored_summaries,
+    }
+}
+
+/// The stored summary in the copy `dir` of a run's files, when the run holds
+/// one.
+#[expect(clippy::disallowed_methods, reason = "reads `summary.json` from the `fit_store::RunFiles` copy of the stored run that `fit_store::opened_run` made, read out through the store")]
+fn read_stored_summary(dir: &Path) -> Result<Option<serde_json::Value>, String> {
+    let path = dir.join(crate::fit::run_summary::FILE);
+    match std::fs::read(&path) {
+        Ok(bytes) => crate::fit::run_summary::parse(&bytes).map(Some),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("cannot read {}: {e}", path.display())),
     }
 }
 
@@ -3385,6 +3461,31 @@ mod tests {
         assert_eq!(with(Some(-12.5)), serde_json::json!(-12.5));
         assert!(!summary_json(&doc).contains("NaN,") && !summary_json(&doc).contains(": NaN"),
             "never a bare NaN token");
+    }
+
+    /// A run that holds `summary.json` is written from it: its figures come
+    /// from the stored summary, and the fields the summary leaves out (here
+    /// the leaf's path and the table row's start time) from the rendering.
+    #[test]
+    fn json_is_written_from_the_runs_stored_summary_with_the_rendered_fields_added() {
+        let state = synthetic_fit_state();
+        let dir = make_fit_dir("if2", &state, &[("R0", 56.0_f64), ("sigma", 0.08), ("gamma", 0.08)]);
+        let methods = discover_methods(&dir);
+        let compile = crate::util::CompileSettings::default();
+        let fresh: serde_json::Value =
+            serde_json::from_str(&summary_json(&build_summary_doc(&mut Out::new(true), &dir.to_string_lossy(), &methods, None, compile))).unwrap();
+        let mut stored = crate::fit::run_summary::stored(&fresh["methods"][0], Some(&fresh["table_rows"][0]));
+        stored["report"]["best_loglik"] = serde_json::json!(-1.0);
+        stored["table_row"]["best_loglik"] = serde_json::json!(-2.0);
+        std::fs::write(dir.join(crate::fit::run_summary::FILE), crate::fit::run_summary::to_bytes(&stored)).unwrap();
+        let doc = build_summary_doc(&mut Out::new(true), &dir.to_string_lossy(), &methods, None, compile);
+        let got: serde_json::Value = serde_json::from_str(&summary_json(&doc)).unwrap();
+        assert_eq!(got["methods"][0]["best_loglik"], -1.0);
+        assert_eq!(got["table_rows"][0]["best_loglik"], -2.0);
+        assert_eq!(got["methods"][0]["stored"], fresh["methods"][0]["stored"]);
+        assert!(got["methods"][0]["stored"]["leaf"].is_string());
+        assert_eq!(got["table_rows"][0]["created_at"], fresh["table_rows"][0]["created_at"]);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

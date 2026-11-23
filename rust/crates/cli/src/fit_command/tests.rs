@@ -637,6 +637,7 @@ fn a_fit_makes_the_tree_of_the_proposal() {
         "            progress.json",
         "            run.json",
         "            run_inputs.json",
+        "            summary.json",
         "  quantities",
         "    sir-*",
         "      identity.json",
@@ -678,6 +679,40 @@ fn a_resume_sits_beside_its_base_and_a_config_file_names_no_run() {
         .filter(|r| err.contains(r.file_name().unwrap().to_string_lossy().rsplit_once('-').unwrap().1))
         .collect();
     assert_eq!(listed.len(), 1, "the refusal lists the one run the file made:\n{err}");
+}
+
+/// Two runs of one identity, in two stores at different times, store the same
+/// `summary.json`, a result file, and it holds no time, path, label, build or
+/// baseline field: the two runs differ in their store, their time, their
+/// label and the path their configuration is named by.
+#[test]
+fn fit_run_summary_is_a_function_of_the_run() {
+    let cwd = workdir();
+    // The second run names its configuration by an absolute path, which the
+    // run records as given.
+    let summary = |name: &str, config: &str| -> Vec<u8> {
+        let store = cwd.path().join(name);
+        let args: Vec<String> = ["fit", "run", config, "--seed", "7", "--label", name, "--progress", "none"].map(String::from).into();
+        let out = camdl(cwd.path(), &store, &args, &[]);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let dir = run_folders(&store).into_iter().next().unwrap();
+        let run: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("run.json")).unwrap()).unwrap();
+        assert_eq!(run["files"]["summary.json"]["role"], "result", "{run}");
+        std::fs::read(dir.join("summary.json")).unwrap()
+    };
+    let a = summary("store-a", "fit_mh.toml");
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let b = summary("store-b-at-another-path", &cwd.path().join("fit_mh.toml").to_string_lossy());
+    assert_eq!(String::from_utf8_lossy(&a), String::from_utf8_lossy(&b));
+    let text = String::from_utf8_lossy(&a);
+    let v: serde_json::Value = serde_json::from_slice(&a).unwrap();
+    assert_eq!(v["schema"], "camdl.fit-run-summary/v1");
+    assert_eq!(v["report"]["method"], "mh");
+    for field in ["created_at", "age_seconds", "fit_dir", "\"leaf\"", "config_diff_from_baseline", "camdl_version",
+                  "wall_time_secs", "sampling_seconds", "\"label\"", "\"stem\"", "store-a"] {
+        assert!(!text.contains(field), "summary.json holds {field}:\n{text}");
+    }
+    assert!(!text.contains(&cwd.path().to_string_lossy().into_owned()), "summary.json holds a path:\n{text}");
 }
 
 /// The bytes each method computes for the same fit at seed 7: the digest of

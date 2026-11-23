@@ -1016,6 +1016,17 @@ fn compute_run(out: &mut Out, rc: RunCompute<'_>) -> Result<(), String> {
         Ok(outcome) => out.method_report(&outcome),
         Err(e) => out.say(format_args!("warning: the run's report could not be built: {e}")),
     }
+    // The run's summary, as `fit summary` builds it from the run's files,
+    // stored with them.
+    let summary = crate::fit::fit_summary::run_entry(work, model)
+        .map(|(report, row)| crate::fit::run_summary::stored(&report, row.as_ref()))
+        .and_then(|s| {
+            std::fs::write(work.join(crate::fit::run_summary::FILE), crate::fit::run_summary::to_bytes(&s))
+                .map_err(|e| format!("cannot write {}: {e}", crate::fit::run_summary::FILE))
+        });
+    if let Err(e) = summary {
+        crate::fit::abandon_method(out, format!("error: the run's summary: {e}"));
+    }
     mirror.stop();
     out.release_failure();
     let run = held.lock().unwrap_or_else(|e| e.into_inner()).take()

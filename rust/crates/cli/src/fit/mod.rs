@@ -119,6 +119,7 @@ pub mod table_row;
 pub mod fit_table;
 pub use fit_table::cmd_fit_table;
 pub mod fit_summary;
+pub(crate) mod run_summary; // summary.json: a fit run's stored summary, without its rendered fields
 pub(crate) use fit_summary::cmd_fit_summary;
 pub mod pmmh;
 // The fit report: what a method run shows (proposal 2026-11-08).
