@@ -51,8 +51,8 @@ keeps an input that belongs to it from being left out.
 `camdl simulate`, `camdl pfilter`, `camdl fit run`, `camdl predict` and
 `camdl profile` store their results in the run store, written by the `store`
 crate (`rust/crates/store`) under `./camdl-store` or the root `--store` or
-`CAMDL_STORE` names; its design is
-`docs/dev/proposals/2026-11-20-run-store-api.md`, and
+`CAMDL_STORE` names; how the store works is [The run store](run-store.md), its
+design is `docs/dev/proposals/2026-11-20-run-store-api.md`, and
 [Simulate on the run store](#simulate-on-the-run-store) and
 [A fit on the run store](#a-fit-on-the-run-store) below describe how a
 simulation's and a fit's inputs reach their identities there.

@@ -2,6 +2,8 @@
 
 Nov 20, 2026 · @Vince Buffalo
 
+Status: implemented (main de896b47c).
+
 Supersedes: phase 3 of `2026-11-17-honest-input-addressed-store.md` (the input
 architecture) and its named follow-up, the fit's typed identity. Phases 1 and 2
 of that proposal stand.
