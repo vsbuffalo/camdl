@@ -60,19 +60,21 @@ mislocate: parameter **priors** (`p ~ Normal(0, 1)` in the `parameters` block)
 and named **scenario presets**. It does not own concrete parameter point values
 outside a preset.
 
-| Concern               | Declared in                                 | Overridable by                                     |
-| --------------------- | ------------------------------------------- | -------------------------------------------------- |
-| Model structure       | `.camdl` only                               | never                                              |
-| Parameter names/types | `.camdl` only                               | never                                              |
-| Parameter values (M)  | params TOML, `[fixed]`, a scenario's `set`  | draw/sweep point, scenario, `--param`/`--fixed`    |
-| Scenarios (σ)         | `.camdl scenarios { }`                      | CLI `--enable`/`--disable`                         |
-| Interventions         | `.camdl` only                               | scenarios and `--enable`/`--disable` toggle them   |
-| Priors                | `.camdl` `~`, `fit.toml [estimate.p.prior]` | fit.toml wins over the model                       |
-| Backend / `dt`        | CLI, fit.toml `[method]`                    | `--backend` / `--dt` on the simulate-side commands |
-| Seeds                 | CLI, `fit_seeds`                            | `--seed` / `--seeds`                               |
-| Sweep / design        | CLI `--sweep` / `--sweep-file`              | never                                              |
-| Estimate vs fixed     | `fit.toml` only                             | `fit run --sweep` varies a `[fixed]` parameter     |
-| Which method runs     | `fit.toml [method]`                         | never — a second method is a second file           |
+| Concern               | Declared in                                 | Overridable by                                                |
+| --------------------- | ------------------------------------------- | ------------------------------------------------------------- |
+| Model structure       | `.camdl` only                               | never                                                         |
+| Parameter names/types | `.camdl` only                               | never                                                         |
+| Parameter values (M)  | params TOML, `[fixed]`, a scenario's `set`  | draw/sweep point, scenario, `--param`/`--fixed`               |
+| Scenarios (σ)         | `.camdl scenarios { }`                      | CLI `--enable`/`--disable`                                    |
+| Interventions         | `.camdl` only                               | scenarios and `--enable`/`--disable` toggle them              |
+| Priors                | `.camdl` `~`, `fit.toml [estimate.p.prior]` | fit.toml wins over the model                                  |
+| Backend               | fit.toml `[method]`, CLI `--backend`        | `--backend` on `simulate` and `predict MODEL`                 |
+| Integration step `dt` | `.camdl` `simulate { dt }`, `[config] dt`   | `simulate --dt`; elsewhere a written step must agree (§1.3.1) |
+| ODE integrator        | `.camdl` `simulate { integrator }`          | `--integrator` on `simulate`, `predict MODEL`                 |
+| Seeds                 | CLI, `fit_seeds`                            | `--seed` / `--seeds`                                          |
+| Sweep / design        | CLI `--sweep` / `--sweep-file`              | never                                                         |
+| Estimate vs fixed     | `fit.toml` only                             | `fit run --sweep` varies a `[fixed]` parameter                |
+| Which method runs     | `fit.toml [method]`                         | never — a second method is a second file                      |
 
 **The model file is self-contained for a single run** provided every parameter
 gets a value from somewhere: a params TOML, a scenario, or a `--param`. A
@@ -81,6 +83,14 @@ priors only), so a parameter with no value from any source is a hard error
 naming the parameter and the sources that were consulted.
 
 ### 1.3 Precedence Chains
+
+Settings resolve by one of two rules. A parameter value follows the last-wins
+chain below: a later source replaces an earlier one, and the replacement is
+reported on stderr. The integration step and the ODE integrator define which
+model is integrated, and follow the rules of §1.3.1: on a command that fits or
+scores data, a written step that differs from the model's is refused rather than
+replacing it, and a flag that moves a replay of a stored fit off the fit's step,
+backend or integrator runs with a note naming both.
 
 Parameter resolution for the simulate-side commands (`simulate`, `pfilter`,
 `profile`, `eval`) is a single function, `params_resolver::resolve_parameters`
@@ -227,6 +237,64 @@ fallback that is recorded but not warned about; for `camdl fit run` it is
 reachable only by writing `prior = { flat = {} }` explicitly — an implicit
 fall-through to a flat prior is a hard validation error before the fit starts,
 and the resolved source per parameter is recorded in `fit.meta.json`.
+
+#### 1.3.1 The integration step and integrator
+
+The integration step `dt` is the substep length of the chain-binomial backend
+and of the fixed-step ODE integrator; the ODE integrator (`rk4` or `rk45`) is
+the method the `ode` backend integrates with. Both are keys of the model's
+`simulate {}` block (language spec §18). How a value written outside the model
+combines with the model's depends on what the command does with the result.
+
+**Fitting and scoring against data** (`fit run`, `camdl predict MODEL`,
+`profile`, `pfilter`). The model's `simulate { dt }` is the step. A step written
+by the caller, a fit config's `[config] dt` or a `--dt` flag, must equal it and
+each other; when the model declares none, the written step is the step, and 1.0
+when nothing declares one. `fit run` has no `--dt`; its step is the model's or
+the config's `[config] dt`. `profile` and `pfilter` read both `--dt` and the
+`--fit` file's written `[config] dt`; `camdl predict MODEL` reads `--dt` only.
+Each disagreement is refused before anything runs:
+
+```
+error: fit.toml: [config] dt = 0.25 is not the integration step: the model declares `simulate { dt = 0.5 }`, which every run of it integrates at. Drop [config] dt, or change the model's `dt`.
+error: --dt = 0.25 is not the integration step: the model declares `simulate { dt = 0.5 }`, which every run of it integrates at. Drop --dt, or change the model's `dt`.
+error: the --fit file's [config] dt = 0.25 is not the integration step: ...
+error: --dt 0.25 and the --fit file's `[config] dt = 0.5` disagree; drop one.
+```
+
+The integrator on these commands is the model's. `camdl predict MODEL` takes
+`--integrator`, which replaces the method and keeps the model's `rk45`
+tolerances; `fit run`, `profile` and `pfilter` take no integrator flag. A fit
+records the step it ran at in `fit.meta.json` (`dt`, §2.2.1).
+
+**Replaying a stored fit** (`simulate --draws posterior|prior|<file> --fit`).
+The replay runs on the fit's backend, step and integrator (§3.4). A `--backend`,
+`--dt` or `--integrator` that differs from the fit's runs, with one stderr note
+naming both simulators:
+
+```
+note: @r0 was fitted on chain_binomial at dt = 0.1; this replay runs on chain_binomial at dt = 0.5 (--dt as given), so the parameters drive a different simulator from the one they were estimated on
+```
+
+`--integrator` on a replay whose backend is not `ode` is refused:
+
+```
+error: --integrator selects the ODE integrator, but this replay of @r0 runs on chain_binomial, which has none.
+  Fix: drop --integrator, or pass --backend ode.
+```
+
+When `--fit` names a fit config rather than a stored run, the fit's step is
+resolved from the config and the model by the rule above, so a disagreeing
+`[config] dt` is refused there too. `camdl predict @run` replays at the fit's
+step and integrator and takes none of `--backend`, `--dt` or `--integrator`: a
+run handle with any of them is refused, naming the flags given.
+
+**Exploratory simulation** (`simulate` without a fit). The step is `--dt`, else
+the model's `simulate { dt }`, else 1.0; `--dt` replaces the model's step
+without a refusal. A `--params` file carrying a fit's `[provenance]` block sets
+the backend to the fit's when `--backend` is not given, and the step to the
+fit's when `--dt` is not given either, said on stderr. `--integrator` replaces
+the model's method on any backend, and is inert off `ode`.
 
 ### 1.4 Core Design Rules
 
@@ -686,24 +754,24 @@ bound as `pfilter` binds it; `--holdout-after` cuts each bound file as a fit
 problem's `inputs/` are cut (§2.2.1): every row is parsed to find the cut, so a
 malformed held-out row is refused, and a held-out row is then neither stored nor
 used (a `last_obs - …` cut resolves over the whole files, held-out rows
-included, as a fit's does); `--table`, `--backend`, `--dt`, `--integrator`,
-`--binomial` and `--allow-degenerate-rates` are the numerics `simulate`
-resolves. The point is repeated `--n-draws` times (default 200), each copy under
-the seed a posterior draw at its place gets, and every mode pools over the
-copies as it pools over a posterior, so the bands carry no parameter
-uncertainty. The prediction is stored at
-`prediction/<model>-<12 hex>/<mode>-<12 hex>/`, grouped by the compiled model.
-Its identity is the compiled model rewritten from the data (anchored times,
-bound tables, `--integrator`), every parameter's value, the numerics (backend,
-step, binomial sampler, `allow_degenerate_rates`), the cut in model time, each
-stream's conditioned rows as a stored data table, the model's quantities, and
-the same options as a posterior prediction's; a held-out row's value is in none
-of them. `--no-licm` changes the compiled model and so re-keys it. A posterior
-flag (`--by-chain`, `--exclude-chains`, `--chains`, `--realised-design`) is
-refused with a model file, and a fixed-point flag with a handle. A window-column
-stream with no emit schedule has no forecast target, since no held-out row is
-kept, and is refused for a forecast. Contrasts, which fork from a fit's saved
-smoothing paths, are skipped with a notice.
+included, as a fit's does); `--table`, `--backend`, `--integrator`, `--binomial`
+and `--allow-degenerate-rates` are the numerics `simulate` resolves, and `--dt`
+must agree with the model's declared step (§1.3.1). The point is repeated
+`--n-draws` times (default 200), each copy under the seed a posterior draw at
+its place gets, and every mode pools over the copies as it pools over a
+posterior, so the bands carry no parameter uncertainty. The prediction is stored
+at `prediction/<model>-<12 hex>/<mode>-<12 hex>/`, grouped by the compiled
+model. Its identity is the compiled model rewritten from the data (anchored
+times, bound tables, `--integrator`), every parameter's value, the numerics
+(backend, step, binomial sampler, `allow_degenerate_rates`), the cut in model
+time, each stream's conditioned rows as a stored data table, the model's
+quantities, and the same options as a posterior prediction's; a held-out row's
+value is in none of them. `--no-licm` changes the compiled model and so re-keys
+it. A posterior flag (`--by-chain`, `--exclude-chains`, `--chains`,
+`--realised-design`) is refused with a model file, and a fixed-point flag with a
+handle. A window-column stream with no emit schedule has no forecast target,
+since no held-out row is kept, and is refused for a forecast. Contrasts, which
+fork from a fit's saved smoothing paths, are skipped with a notice.
 
 Both forms take `--store DIR` (the store a fixed-point prediction is stored in
 and a run handle is looked up in, over `CAMDL_STORE`; a folder handle names its
@@ -2168,7 +2236,7 @@ editing it produces a new leaf. `pfilter`, `profile` and `simulate --fit` take
 
 ```bash
 --backend {gillespie|chain_binomial|ode}   # default chain_binomial
---dt N                                     # step size for discrete-time backends (default 1.0)
+--dt N                                     # step size for discrete-time backends (default: the model's dt, else 1.0)
 --integrator {rk4|rk45}                    # ODE method override; tolerances live in the model
 ```
 
@@ -7033,7 +7101,8 @@ Scenario
 
 Engine
   --backend gillespie|chain_binomial|ode        (default chain_binomial)
-  --dt DT                     step for discrete-time backends (default 1.0)
+  --dt DT                     step for discrete-time backends (default: the
+                              model's dt, else 1.0; replaces the model's)
   --integrator rk4|rk45       ODE method override; tolerances live in the model's
                               `simulate { integrator = rk45 { atol, rtol } }`
   --allow-degenerate-rates    restore legacy silent-zero on numerical collapse
