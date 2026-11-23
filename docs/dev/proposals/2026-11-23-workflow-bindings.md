@@ -722,6 +722,15 @@ links working; otherwise it is absolute. A command builds the label's directory
 beside its final place and swaps it in, so a reader sees the old links or the
 new ones and no link from an earlier run with other files survives.
 
+Links point at the results of the latest successful invocation with that label,
+as `@label` does. A command removes its label's link directory when it starts,
+as it removes its manifest, so a failed or killed run leaves no links that look
+current. A link whose target the store no longer holds dangles visibly (opening
+it fails); rerunning the command, a cache hit, writes it again. Links are for
+reading. A workflow step that must name exactly what an earlier step made
+depends on the manifest, whose run ids and digests do not move when a label is
+reused.
+
 Links are an export, like the manifest: they are never part of an identity and a
 command with them reuses what a command without them stored. camdl runs on Linux
 and macOS, where symbolic links need no privilege; Windows is unsupported.
