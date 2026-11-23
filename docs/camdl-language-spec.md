@@ -861,11 +861,13 @@ declares no bounds, and the transform inference uses (§4.4). `count` and
 `duration` take the same transforms as `rate`, and `real` and `instant` the
 identity, or a one- or two-sided map when bounded. σ is the logistic function.
 
-The search range of `rate`, `positive`, `count` and `duration` is [0, ∞). A
-value supplied for a parameter of these kinds is checked against declared
-bounds only; with no `in [lo, hi]`, a negative value is not refused when
-parameter values are resolved, and a negative rate fails only when it makes a
-transition's propensity negative.
+The range of `rate`, `positive`, `count` and `duration` is [0, ∞), closed at
+0, and it is their search range under inference. A value supplied for a
+parameter of these kinds that declares no `in [lo, hi]` is checked against it
+when parameter values are resolved: a value below 0, from `--param`, a params
+file, a scenario or a fit's fixed values, is refused with an error naming the
+parameter, its kind and the value. A value of 0 is accepted. A parameter that
+declares `in [lo, hi]` is checked against its bounds instead (§4.4).
 
 An initial state is given in the `init { }` block (§15), and is estimated with
 the fit setting `ic_free`; there is no parameter kind for it.
@@ -1989,11 +1991,9 @@ lag = tau                 # E425 for tau : instant, a point in time, not a lengt
 lag = tau - 2 'days       # E425: a difference, whose sign the compiler cannot establish
 ```
 
-The check reads the declaration. A value supplied when the model is run is
-checked against the parameter's declared bounds only (§4.1), so a `duration`
-lag parameter declared without bounds and given a negative value by
-`--param` is not refused; declare `in [0 'days, hi]` for the run to refuse
-one.
+The compiler checks the declaration. A value supplied when the model is run is
+checked against the same range (§4.1): a `duration` lag parameter given
+`--param tau=-5` is refused.
 
 The compiler emits no derivative with respect to `lag`, so a fit that
 estimates a `lag` parameter with NUTS is refused. A method that uses no

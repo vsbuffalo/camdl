@@ -418,3 +418,104 @@ fn probability_inside_the_unit_interval_is_accepted() {
             v, stderr);
     }
 }
+
+// ─── The [0, ∞) of rate, positive, count and duration ───────────────────────
+
+/// A model with one unbounded parameter of each kind whose range is
+/// [0, ∞) (`rate`, `positive`, `count`, `duration`), an unbounded `real`,
+/// and a `duration` whose declared bounds admit negative values. `tau` is a
+/// forcing lag: a negative value would read the forcing's future.
+fn write_kind_range_model(path: &Path) {
+    let src = r#"
+time_unit = 'days
+
+compartments { S, I, R }
+
+parameters {
+  beta  : rate
+  gamma : rate
+  k     : positive dim 1
+  tau   : duration
+  shift : duration in [-3 'days, 5 'days]
+  x     : real dim 1
+  N0    : count
+}
+
+forcing {
+  wave : sinusoidal 'ratio {
+    amplitude = 0.1
+    period    = 365 'days
+    phase     = shift
+    baseline  = 1.0 + 0 * x
+    lag       = tau
+  }
+}
+
+init { S = 990  I = 10  R = 0 }
+
+transitions {
+  infect  : S --> I  @ k * beta * wave * S * I / N0
+  recover : I --> R  @ gamma * I
+}
+
+simulate { from = 0 'days  to = 5 'days }
+"#;
+    std::fs::write(path, src).unwrap();
+}
+
+fn write_kind_range_params(path: &Path) {
+    std::fs::write(path,
+        "beta = 0.3\ngamma = 0.1\nk = 1.0\ntau = 7.0\nshift = 0.0\nx = 0.0\nN0 = 1000\n")
+        .unwrap();
+}
+
+/// A value below 0 for an unbounded parameter of a kind whose range is
+/// [0, ∞) is refused, from `--param` and from a params file, and the error
+/// names the parameter, its kind and the value.
+#[test]
+fn negative_value_for_a_nonnegative_kind_errors() {
+    let bin = skip_if_missing_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let model = tmp.path().join("m.camdl");
+    let params = tmp.path().join("p.toml");
+    write_kind_range_model(&model);
+    write_kind_range_params(&params);
+
+    for (name, kind) in [("tau", "duration"), ("k", "positive"), ("gamma", "rate"),
+                         ("N0", "count")] {
+        let (status, stderr) = run_simulate(
+            &bin, &model, &params, &["--param", &format!("{name}=-5")]);
+        assert!(!status.success(),
+            "{name} = -5 is below the [0, ∞) of `{kind}` and must be refused; \
+             stderr:\n{stderr}");
+        assert!(stderr.contains(&format!("parameter '{name}' = -5"))
+                && stderr.contains(&format!("`{kind}`"))
+                && stderr.contains("[0, ∞)"),
+            "the error names the parameter, its kind and the value; got:\n{stderr}");
+    }
+
+    let negative_file = tmp.path().join("neg.toml");
+    std::fs::write(&negative_file,
+        "beta = 0.3\ngamma = 0.1\nk = 1.0\ntau = -7.0\nshift = 0.0\nx = 0.0\nN0 = 1000\n")
+        .unwrap();
+    let (status, stderr) = run_simulate(&bin, &model, &negative_file, &[]);
+    assert!(!status.success() && stderr.contains("parameter 'tau' = -7"),
+        "a negative lag from a params file must be refused; stderr:\n{stderr}");
+}
+
+/// The [0, ∞) of these kinds is closed at 0 (spec §4.4), a `real` has no
+/// lower end, and declared bounds replace the kind's range.
+#[test]
+fn zero_real_and_declared_bounds_are_accepted() {
+    let bin = skip_if_missing_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let model = tmp.path().join("m.camdl");
+    let params = tmp.path().join("p.toml");
+    write_kind_range_model(&model);
+    write_kind_range_params(&params);
+
+    for arg in ["tau=0", "k=0", "gamma=0", "N0=1000", "x=-5", "shift=-2"] {
+        let (status, stderr) = run_simulate(&bin, &model, &params, &["--param", arg]);
+        assert!(status.success(), "{arg} must be accepted; stderr:\n{stderr}");
+    }
+}

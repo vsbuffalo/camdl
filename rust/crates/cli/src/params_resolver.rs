@@ -125,6 +125,18 @@ pub fn kind_support(kind: ir::parameter::ParamKind) -> Option<(f64, f64)> {
     }
 }
 
+/// Whether a parameter kind's range is [0, ∞) (spec §4.4): `rate`,
+/// `positive`, `count` and `duration`. A supplied value below 0 for such a
+/// parameter with no declared bounds is refused.
+pub fn has_nonnegative_range(kind: ir::parameter::ParamKind) -> bool {
+    use ir::parameter::ParamKind::*;
+    // Exhaustive over ParamKind (no `_`): a new kind must state its range.
+    match kind {
+        Rate | Positive | Count | Duration => true,
+        Probability | Real | Instant => false,
+    }
+}
+
 /// The range a parameter is valid on: the model's declared `in [lo, hi]` when
 /// present, else the range its declared kind carries ([`kind_support`]).
 ///
@@ -483,6 +495,11 @@ pub enum ResolveError {
     /// The model's external tables and forcings could not be bound.
     External(crate::external_inputs::BindError),
     BoundsViolation      { name: String, value: f64, lo: f64, hi: f64 },
+    /// A value below 0 for a parameter that declares no `in [lo, hi]` and
+    /// whose kind's range is [0, ∞): `rate`, `positive`, `count` or
+    /// `duration` (spec §4.4).
+    KindRangeViolation   { name: String, kind: ir::parameter::ParamKind, value: f64,
+                           source: ValueSource },
     NestedCompose        { name: String },
     /// A fit config lists these names in both `[fixed]` and `[estimate]`
     /// ([`fixed_estimate_overlap_message`]).
@@ -560,6 +577,13 @@ impl std::fmt::Display for ResolveError {
                      [{lo}, {hi}].\n  \
                      Fix: either widen the bounds in the model, or supply a \
                      value within the declared range.")
+            }
+            ResolveError::KindRangeViolation { name, kind, value, source } => {
+                write!(f,
+                    "parameter '{name}' = {value} is below 0, outside the range [0, ∞) \
+                     of its kind `{kind}`; it came from {}.\n  \
+                     Fix: give it a value of 0 or more there.",
+                    subject_phrase(source, &ResolveContext::default()))
             }
             ResolveError::NestedCompose { name } => {
                 write!(f,
@@ -2247,6 +2271,26 @@ pub fn resolve_parameters_with_starts<'a>(
                 violations.push(ResolveError::BoundsViolation {
                     name: p.name.clone(),
                     value, lo, hi,
+                });
+                continue;
+            }
+        }
+        // With no declared bounds, a `rate`, `positive`, `count` or
+        // `duration` still has the range [0, ∞), closed at 0 (spec §4.4).
+        // [`resolved_bounds`] leaves that range out, because the fit's
+        // search box and starting points read it and an infinite upper end
+        // would reach them; this check reads the kind directly. A negative
+        // `duration` used as a forcing lag would read the forcing's value
+        // after the current time.
+        if p.bounds().is_none() && value < 0.0 {
+            if let Some(kind) = p.param_kind.filter(|k| has_nonnegative_range(*k)) {
+                violations.push(ResolveError::KindRangeViolation {
+                    name: p.name.clone(),
+                    kind,
+                    value,
+                    source: layers.source.get(&p.name)
+                        .and_then(|s| s.clone())
+                        .unwrap_or(ValueSource::ModelDefault),
                 });
                 continue;
             }
