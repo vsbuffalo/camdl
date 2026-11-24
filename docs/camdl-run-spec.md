@@ -3455,7 +3455,12 @@ A lookup is among the candidate results its source names:
   by-product stored for it (the results whose `upstream` it is, §2.10), so a
   cell's handle reads its observation streams. Every rule below is tried on the
   result itself before its by-products, so `run.json` names the cell's record,
-  and `obs:run.json` its observations'.
+  and `obs:run.json` its observations'. For a name qualified by
+  `model_presentation` (`model_presentation:render`), the presentation of the
+  model the result ran is a candidate too: the one the latest invocation that
+  listed the result recorded with its compiled model, or, when none did, its
+  upstream's (§2.9, `model_presentation`). A label and a manifest list the
+  presentation among their results already.
 
 `--kind KIND` keeps the candidates of one kind, and `--run PREFIX` the one whose
 run id begins with `PREFIX`. A name is resolved by the first of these rules that
