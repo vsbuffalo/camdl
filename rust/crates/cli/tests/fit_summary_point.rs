@@ -216,6 +216,16 @@ fn the_posterior_mean_is_the_mean_of_the_draws_and_replays_on_the_fit_simulator(
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("backend auto-matched") && stderr.contains("chain_binomial"), "{stderr}");
 
+    // An edited summary is refused, and the advice is to print it again.
+    let edited = text.replacen("\nN0 = 10000.0\n", "\nN0 = 10001.0\n", 1);
+    assert_ne!(edited, text);
+    std::fs::write(dir.join("edited.toml"), &edited).unwrap();
+    let out = run(dir, &["simulate", "model.camdl", "--params", "edited.toml", "--seed", "1", "-o", "e.tsv"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{stderr}");
+    let again = format!("camdl fit summary {} --point posterior-mean", prov["run_id"].as_str().unwrap());
+    assert!(stderr.contains(&again) && !stderr.contains("mle_params.toml it writes"), "{stderr}");
+
     // `predict MODEL --params` predicts at the point, labelled plug_in.
     let out = run(dir, &["predict", "model.camdl", "--params", "mean.toml", "--data", "weekly_cases=weekly_cases.tsv",
         "--mode", "free_forward", "--n-draws", "8"]);

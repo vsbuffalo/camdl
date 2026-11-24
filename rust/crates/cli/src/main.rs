@@ -1442,12 +1442,22 @@ fn run_simulate(inv: args::SimulateInvocation) {
         match crate::fit::provenance::verify_content_hash(pf, &prov.content_hash) {
             Ok(crate::fit::provenance::ContentVerification::Valid) => {}
             Ok(crate::fit::provenance::ContentVerification::Modified { declared, computed }) => {
+                let again = match &prov.estimate {
+                    crate::fit::provenance::Estimate::Winner(_) => {
+                        "To simulate the fit's estimate, re-run the fit and use the mle_params.toml it writes."
+                            .to_string()
+                    }
+                    crate::fit::provenance::Estimate::PosteriorSummary(s) => format!(
+                        "To simulate the posterior summary, print it again with `camdl fit summary {} --point {}`.",
+                        s.run_id,
+                        s.statistic.flag_value()
+                    ),
+                };
                 out.fail(format!(
                     "error: params file {pf} was edited after the fit that produced it.\n  \
                      Its [provenance] block declares content_hash = \"{declared}\", but the \
                      parameter values in the file now hash to \"{computed}\".\n  \
-                     To simulate the fit's estimate, re-run the fit and use the \
-                     mle_params.toml it writes.\n  \
+                     {again}\n  \
                      To run the edited values knowingly, remove the [provenance] block from \
                      {pf}: the file is then a plain params file (no backend or dt is matched \
                      from it, and no fit lineage is recorded)."

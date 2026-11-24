@@ -65,9 +65,11 @@ pub struct ParamsProvenance {
 }
 
 /// What the parameter values of a fit-written params file are. The block
-/// carries no tag: a winner's fields begin with `chain`, a posterior
-/// summary's with `statistic`, and a reader tries the winner first.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+/// carries no tag, so an optimizer's `mle_params.toml` keeps its bytes: the
+/// variant is told by its fields ([`WINNER_FIELDS`],
+/// [`POSTERIOR_SUMMARY_FIELDS`]). A block holding fields of both, or of
+/// neither, is refused, naming what each variant needs.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(untagged)]
 pub enum Estimate {
     /// An optimizer's best point (IF2, NLopt).
@@ -110,6 +112,51 @@ pub struct PosteriorSummaryRecord {
     pub n_draws: usize,
     /// The fit run whose draws these are, by its full run id.
     pub run_id: String,
+}
+
+/// The fields of a winner block, by which its variant is told apart.
+pub const WINNER_FIELDS: [&str; 6] = ["chain", "log_likelihood", "loglik_sd", "n_particles", "ess_mean", "ess_min"];
+/// The fields of a posterior-summary block, by which its variant is told
+/// apart.
+pub const POSTERIOR_SUMMARY_FIELDS: [&str; 3] = ["statistic", "n_draws", "run_id"];
+
+impl<'de> serde::Deserialize<'de> for Estimate {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        // The block's fields the enclosing struct did not take, other
+        // fields included: a reader ignores a field it does not know.
+        let fields = toml::Table::deserialize(d)?;
+        let pick = |names: &[&str]| -> toml::Table {
+            fields.iter().filter(|(k, _)| names.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect()
+        };
+        let winner = pick(&WINNER_FIELDS);
+        let summary = pick(&POSTERIOR_SUMMARY_FIELDS);
+        const WINNER_NEEDS: &str = "a winner's block (an optimizer's mle_params.toml) needs chain, log_likelihood, \
+                                    loglik_sd and n_particles";
+        const SUMMARY_NEEDS: &str = "a posterior summary's block (`fit summary --point`) needs statistic, n_draws \
+                                     and run_id";
+        let names = |t: &toml::Table| t.keys().cloned().collect::<Vec<_>>().join(", ");
+        match (winner.is_empty(), summary.is_empty()) {
+            (false, false) => Err(D::Error::custom(format!(
+                "the [provenance] block holds fields of a winner ({}) and of a posterior summary ({}); a block \
+                 describes one or the other",
+                names(&winner),
+                names(&summary)
+            ))),
+            (false, true) => toml::Value::Table(winner)
+                .try_into()
+                .map(Estimate::Winner)
+                .map_err(|e| D::Error::custom(format!("{WINNER_NEEDS}: {e}"))),
+            (true, false) => toml::Value::Table(summary)
+                .try_into()
+                .map(Estimate::PosteriorSummary)
+                .map_err(|e| D::Error::custom(format!("{SUMMARY_NEEDS}: {e}"))),
+            (true, true) => Err(D::Error::custom(format!(
+                "the [provenance] block describes neither a winner nor a posterior summary: {WINNER_NEEDS}, and \
+                 {SUMMARY_NEEDS}"
+            ))),
+        }
+    }
 }
 
 /// The text of a fit-written params file: `header` as comment lines, the
@@ -497,6 +544,44 @@ mod tests {
         let prov = read_mle_provenance(&winner.to_string_lossy()).unwrap().unwrap();
         assert!(matches!(prov.estimate, Estimate::Winner(WinnerRecord { chain: ChainIndex(1), .. })), "{prov:?}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A block mixing the two variants' fields is refused naming both sets;
+    /// a block of neither, or a winner missing a field, names what each
+    /// variant needs.
+    #[test]
+    fn a_block_is_one_variant_and_a_refusal_says_what_each_needs() {
+        let read = |estimate: &str| -> String {
+            let dir = crate::test_support::unique_temp_dir("provenance_variant");
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("p.toml");
+            std::fs::write(
+                &path,
+                format!(
+                    "beta = 0.3\n\n[provenance]\ncamdl_version = \"t\"\ncontent_hash = \"x\"\nbackend = \"ode\"\n\
+                     dt = 1.0\nmodel_identity = \"m\"\nseed = 1\nmethod = \"pmmh\"\ntimestamp = \"ignored\"\n{estimate}"
+                ),
+            )
+            .unwrap();
+            let r = read_mle_provenance(&path.to_string_lossy());
+            let _ = std::fs::remove_dir_all(&dir);
+            match r {
+                Err(e) => e,
+                Ok(p) => format!("read {:?}", p.map(|p| p.estimate)),
+            }
+        };
+        let both = read("chain = 0\nlog_likelihood = -1.0\nloglik_sd = 0.0\nn_particles = 0\nstatistic = \"posterior_mean\"\nn_draws = 4\nrun_id = \"ab\"\n");
+        assert!(both.contains("fields of a winner (chain, log_likelihood, loglik_sd, n_particles)")
+            && both.contains("of a posterior summary (n_draws, run_id, statistic)"), "{both}");
+        let neither = read("");
+        assert!(neither.contains("neither a winner nor a posterior summary")
+            && neither.contains("needs chain, log_likelihood")
+            && neither.contains("needs statistic, n_draws"), "{neither}");
+        let short = read("chain = 0\nlog_likelihood = -1.0\n");
+        assert!(short.contains("a winner's block") && short.contains("loglik_sd"), "{short}");
+        assert!(!short.contains("untagged"), "{short}");
+        let summary = read("statistic = \"posterior_median\"\nn_draws = 4\nrun_id = \"ab\"\n");
+        assert!(summary.starts_with("read Some(PosteriorSummary"), "{summary}");
     }
 
     #[test]
