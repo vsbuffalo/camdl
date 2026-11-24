@@ -670,6 +670,26 @@ pub fn format_hard_verdict(
 /// R̂ was never applicable (one chain) is not refused — there is no verdict to
 /// contradict. `handle` names the source in the message.
 pub fn check_source_converged(leaf: &Path, handle: &str, allow: bool) -> Result<(), String> {
+    match source_verdict(leaf, handle)? {
+        None => Ok(()),
+        Some(msg) if allow => {
+            crate::out::detached().say(format_args!(
+                "{w} starts source {handle}: {msg}\n  \
+                 --allow-nonconverged-source: starting from it anyway.",
+                w = crate::out::paint::warning_tag()
+            ));
+            Ok(())
+        }
+        Some(msg) => Err(format!("starts source {handle}: {msg}")),
+    }
+}
+
+/// The stored convergence verdict of the run at `leaf`, by the rule
+/// [`check_source_converged`] applies: `None` when converged (or when no
+/// verdict applies), `Some` with why not otherwise. A verdict that cannot be
+/// read is an error, which no override lifts. `handle` names the run in an
+/// error.
+pub fn source_verdict(leaf: &Path, handle: &str) -> Result<Option<String>, String> {
     let dir = leaf.to_string_lossy().into_owned();
     use crate::run_meta::FitAlgorithm;
     // A verdict that cannot be read is refused, never read as converged; and
@@ -765,18 +785,7 @@ pub fn check_source_converged(leaf: &Path, handle: &str, allow: bool) -> Result<
              camdl cannot judge, so its convergence cannot be checked",
             state.method)),
     };
-    match verdict {
-        None => Ok(()),
-        Some(msg) if allow => {
-            crate::out::detached().say(format_args!(
-                "{w} starts source {handle}: {msg}\n  \
-                 --allow-nonconverged-source: starting from it anyway.",
-                w = crate::out::paint::warning_tag()
-            ));
-            Ok(())
-        }
-        Some(msg) => Err(format!("starts source {handle}: {msg}")),
-    }
+    Ok(verdict)
 }
 
 /// The convergence gate for a `from_posterior` source restricted to a chain
@@ -800,6 +809,32 @@ pub fn check_subset_converged(
     handle: &str,
     allow: bool,
 ) -> Result<(), String> {
+    let who = format!("starts source {handle} (chains {})", subset.ids_csv());
+    match subset_verdict(file, subset, handle)? {
+        None => Ok(()),
+        Some(msg) if allow => {
+            crate::out::detached().say(format_args!(
+                "{w} {who}: {msg}\n  --allow-nonconverged-source: starting from them anyway.",
+                w = crate::out::paint::warning_tag()
+            ));
+            Ok(())
+        }
+        Some(msg) => Err(format!(
+            "{who}: {msg}.\n\n  To start from them anyway, re-run with \
+             --allow-nonconverged-source"
+        )),
+    }
+}
+
+/// The convergence verdict of the chains `subset` selects from the draws
+/// file `file`, by the rule [`check_subset_converged`] applies: `None` when
+/// they agree, `Some` with why not otherwise. A file that cannot be read is
+/// an error, which no override lifts.
+pub fn subset_verdict(
+    file: &Path,
+    subset: &crate::chain_selection::ChainSelection,
+    handle: &str,
+) -> Result<Option<String>, String> {
     use score::convergence::RHAT_CONVERGED_THRESHOLD;
     use super::row_convergence::{partition_by_chain, ChainOfDraw};
     use sim::inference::convergence::rank_convergence;
@@ -844,20 +879,7 @@ pub fn check_subset_converged(
     } else {
         None
     };
-    match verdict {
-        None => Ok(()),
-        Some(msg) if allow => {
-            crate::out::detached().say(format_args!(
-                "{w} {who}: {msg}\n  --allow-nonconverged-source: starting from them anyway.",
-                w = crate::out::paint::warning_tag()
-            ));
-            Ok(())
-        }
-        Some(msg) => Err(format!(
-            "{who}: {msg}.\n\n  To start from them anyway, re-run with \
-             --allow-nonconverged-source"
-        )),
-    }
+    Ok(verdict)
 }
 
 fn parse_algorithm_is(method: &str, want: crate::run_meta::FitAlgorithm) -> bool {
