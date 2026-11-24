@@ -65,8 +65,8 @@ pub(crate) struct ResolvedPfilterConfig {
     /// call at the point's values would score it.
     pub sweep_file: Option<PathBuf>,
     pub seed: u64,
-    /// `--binomial`, else BTPE.
-    pub binomial: sim::rng::BinomialAlgorithm,
+    /// `--binomial`; `None` when not given.
+    pub binomial: Option<sim::rng::BinomialAlgorithm>,
     /// `--save-final-state` was given: under the fit's `holdout_after` the
     /// bound rows are cut to the training rows, which the identity keys.
     pub save_final_state: bool,
@@ -242,7 +242,7 @@ pub(crate) fn resolve(
         replicates,
         sweep_file,
         seed,
-        binomial: binomial.unwrap_or_default(),
+        binomial,
         save_final_state: save_final_state.is_some(),
     };
     let requests = ByProductRequests {

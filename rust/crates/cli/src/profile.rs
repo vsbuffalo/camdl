@@ -551,12 +551,24 @@ fn run_profile(
     // policy, `profile_config::resolve`), keyed in the base identity below.
     let allow_degenerate_rates = eval.allow_degenerate_rates;
 
-    // The step every cell integrates at (the one dt rule), from the model,
-    // --dt and the --fit file's written `[config] dt`.
+    // The simulator every cell integrates with, under the fitting rule: the
+    // method's backend, the model's declared step (a `--dt` or `--fit` file's
+    // written `[config] dt` that differs is refused), and `--binomial`, else
+    // BTPE. The cells' own configurations take plain numbers.
     let fit_written_dt: Option<f64> =
         fit.as_ref().and_then(|f| crate::fit::config_v2::written_config_dt(f.config_text()));
-    let dt = crate::dt_rule::effective_dt_for_command(dt_flag, fit_written_dt, model_pre.simulation.dt, crate::dt_rule::FIT_FLAG_FILE)
-        .unwrap_or_else(|e| { out.fail(format!("error: {e}")); });
+    let (simulator, _) = crate::simulator::Simulator::resolve(
+        crate::simulator::ModelSimulate::of(&model_pre.simulation),
+        crate::simulator::WrittenSimulator { dt: dt_flag, config_dt: fit_written_dt, binomial, ..Default::default() },
+        crate::simulator::Basis::Fitting {
+            backend: crate::args::types::ForwardBackend::from(method.backend),
+            run: "this profile",
+            file: crate::dt_rule::FIT_FLAG_FILE,
+        },
+    )
+    .unwrap_or_else(|e| { out.fail(format!("error: {e}")); });
+    let dt = simulator.dt().get();
+    let binomial = simulator.binomial();
 
     // An nl-* cell's optimizer budget and the starts rule in force are
     // resolved (`profile_config::resolve`): the `--fit` method's own, else the

@@ -84,8 +84,8 @@ pub(crate) struct ResolvedProfileConfig {
     pub seeds: Vec<u64>,
     /// `--pf-max-substeps`, as given (the method level keys it as given).
     pub pf_max_substeps: Option<u64>,
-    /// `--binomial`, else BTPE.
-    pub binomial: sim::rng::BinomialAlgorithm,
+    /// `--binomial`; `None` when not given.
+    pub binomial: Option<sim::rng::BinomialAlgorithm>,
 }
 
 /// The starts rule as declared: `--starts`, else the fit's `[method]
@@ -390,7 +390,7 @@ pub(crate) fn resolve(
         seed,
         seeds,
         pf_max_substeps,
-        binomial: binomial.unwrap_or_default(),
+        binomial,
     };
     (resolved, installed)
 }

@@ -356,16 +356,26 @@ fn run_pfilter(
         adhoc_enable = enable;
         adhoc_disable = disable;
     }
-    // The one dt rule (`crate::dt_rule`): the model's declared step; a
-    // `--dt` or `--fit` `[config] dt` that differs is refused; 1.0 when
-    // nothing declares one.
+    // The filter's simulator, under the fitting rule: chain-binomial, the
+    // model's declared step (a `--dt` or `--fit` `[config] dt` that differs is
+    // refused; 1.0 when nothing declares one), and `--binomial`, else BTPE.
     let fit_written_dt: Option<f64> =
         fit.as_ref().and_then(|f| crate::fit::config_v2::written_config_dt(f.config_text()));
-    let dt = crate::dt_rule::effective_dt_for_command(
-        dt_flag, fit_written_dt, model_in.simulation.dt, crate::dt_rule::FIT_FLAG_FILE,
-    ).unwrap_or_else(|e| {
+    let (simulator, _) = crate::simulator::Simulator::resolve(
+        crate::simulator::ModelSimulate::of(&model_in.simulation),
+        crate::simulator::WrittenSimulator { dt: dt_flag, config_dt: fit_written_dt, binomial, ..Default::default() },
+        crate::simulator::Basis::Fitting {
+            backend: crate::args::types::ForwardBackend::ChainBinomial,
+            run: "this filter",
+            file: crate::dt_rule::FIT_FLAG_FILE,
+        },
+    )
+    .unwrap_or_else(|e| {
         out.fail(format!("error: {e}"));
     });
+    // The particle filter's own configuration takes plain numbers.
+    let dt = simulator.dt().get();
+    let binomial = simulator.binomial();
 
     // ── Resolve --data flags (gh#90) ─────────────────────────────────
     //
