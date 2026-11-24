@@ -60,21 +60,21 @@ mislocate: parameter **priors** (`p ~ Normal(0, 1)` in the `parameters` block)
 and named **scenario presets**. It does not own concrete parameter point values
 outside a preset.
 
-| Concern               | Declared in                                 | Overridable by                                                |
-| --------------------- | ------------------------------------------- | ------------------------------------------------------------- |
-| Model structure       | `.camdl` only                               | never                                                         |
-| Parameter names/types | `.camdl` only                               | never                                                         |
-| Parameter values (M)  | params TOML, `[fixed]`, a scenario's `set`  | draw/sweep point, scenario, `--param`/`--fixed`               |
-| Scenarios (σ)         | `.camdl scenarios { }`                      | CLI `--enable`/`--disable`                                    |
-| Interventions         | `.camdl` only                               | scenarios and `--enable`/`--disable` toggle them              |
-| Priors                | `.camdl` `~`, `fit.toml [estimate.p.prior]` | fit.toml wins over the model                                  |
-| Backend               | fit.toml `[method]`, CLI `--backend`        | `--backend` on `simulate` and `predict MODEL`                 |
-| Integration step `dt` | `.camdl` `simulate { dt }`, `[config] dt`   | `simulate --dt`; elsewhere a written step must agree (§1.3.1) |
-| ODE integrator        | `.camdl` `simulate { integrator }`          | `--integrator` on `simulate`, `predict MODEL`                 |
-| Seeds                 | CLI, `fit_seeds`                            | `--seed` / `--seeds`                                          |
-| Sweep / design        | CLI `--sweep` / `--sweep-file`              | never                                                         |
-| Estimate vs fixed     | `fit.toml` only                             | `fit run --sweep` varies a `[fixed]` parameter                |
-| Which method runs     | `fit.toml [method]`                         | never — a second method is a second file                      |
+| Concern               | Declared in                                                       | Overridable by                                                                                                                   |
+| --------------------- | ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| Model structure       | `.camdl` only                                                     | never                                                                                                                            |
+| Parameter names/types | `.camdl` only                                                     | never                                                                                                                            |
+| Parameter values (M)  | params TOML, `[fixed]`, a scenario's `set`                        | draw/sweep point, scenario, `--param`/`--fixed`                                                                                  |
+| Scenarios (σ)         | `.camdl scenarios { }`                                            | CLI `--enable`/`--disable`                                                                                                       |
+| Interventions         | `.camdl` only                                                     | scenarios and `--enable`/`--disable` toggle them                                                                                 |
+| Priors                | `.camdl` `~`, `fit.toml [estimate.p.prior]`                       | fit.toml wins over the model                                                                                                     |
+| Backend               | fit.toml `[method]`, CLI `--backend`                              | `--backend` on `simulate` and `predict MODEL`                                                                                    |
+| Integration step `dt` | `.camdl` `simulate { dt }`, or written as `--dt` or `[config] dt` | only `simulate --dt`; elsewhere a written step must equal the model's, and a `--dt` beside a fit file its `[config] dt` (§1.3.1) |
+| ODE integrator        | `.camdl` `simulate { integrator }`                                | `--integrator` on `simulate`, `predict MODEL`                                                                                    |
+| Seeds                 | CLI, `fit_seeds`                                                  | `--seed` / `--seeds`                                                                                                             |
+| Sweep / design        | CLI `--sweep` / `--sweep-file`                                    | never                                                                                                                            |
+| Estimate vs fixed     | `fit.toml` only                                                   | `fit run --sweep` varies a `[fixed]` parameter                                                                                   |
+| Which method runs     | `fit.toml [method]`                                               | never — a second method is a second file                                                                                         |
 
 **The model file is self-contained for a single run** provided every parameter
 gets a value from somewhere: a params TOML, a scenario, or a `--param`. A
@@ -250,16 +250,19 @@ combines with the model's depends on what the command does with the result.
 `profile`, `pfilter`). The model's `simulate { dt }` is the step. A step written
 by the caller, a fit config's `[config] dt` or a `--dt` flag, must equal it and
 each other; when the model declares none, the written step is the step, and 1.0
-when nothing declares one. `fit run` has no `--dt`; its step is the model's or
-the config's `[config] dt`. `profile` and `pfilter` read both `--dt` and the
-`--fit` file's written `[config] dt`; `camdl predict MODEL` reads `--dt` only.
-Each disagreement is refused before anything runs:
+when nothing declares one. `fit run` reads both `--dt` and its fit file's
+written `[config] dt`, and writes the resolved step into the problem's
+`[config] dt`, so a run at another step is another problem (§2.2). `profile` and
+`pfilter` read both `--dt` and the `--fit` file's written `[config] dt`;
+`camdl predict MODEL` reads `--dt` only. Each disagreement is refused before
+anything runs:
 
 ```
 error: fit.toml: [config] dt = 0.25 is not the integration step: the model declares `simulate { dt = 0.5 }`, which every run of it integrates at. Drop [config] dt, or change the model's `dt`.
 error: --dt = 0.25 is not the integration step: the model declares `simulate { dt = 0.5 }`, which every run of it integrates at. Drop --dt, or change the model's `dt`.
 error: the --fit file's [config] dt = 0.25 is not the integration step: ...
 error: --dt 0.25 and the --fit file's `[config] dt = 0.5` disagree; drop one.
+error: fit.toml: --dt 0.25 and `[config] dt = 0.5` disagree; drop one.
 ```
 
 The integrator on these commands is the model's. `camdl predict MODEL` takes
@@ -455,7 +458,8 @@ label.
 data file's training lines; each stream's held-out rows, by date and without
 their values; the partition rule; the `[data.tables]` files; `[estimate]`'s
 estimated set with its bounds and priors; every `[fixed]` value after
-resolution, a sweep point's included; `simplex_groups`; the settings (`dt`,
+resolution, a sweep point's included; `simplex_groups`; the settings (`dt`, the
+step resolved from the model, `--dt` and `[config] dt` by §1.3.1,
 `allow_degenerate_rates`, `allow_forcing_extrapolation`); the scenario request
 (`scenario`, `enable`, `disable`) as given; `ic_free`; and, for a `[synthetic]`
 problem, what generated its data: the true parameters file's bytes, the
@@ -5244,6 +5248,11 @@ pub struct FitRunArgs {
     /// SPEC is `V1,V2,...` | `lin(min,max,n)` | `log10(min,max,n)`.
     #[arg(long, value_name = "NAME=SPEC")]
     pub sweep: Vec<SweepSpec>,
+
+    /// The integration step, written into the problem's `[config] dt`
+    /// under the rule of §1.3.1.
+    #[arg(long)]
+    pub dt: Option<f64>,
 
     /// Display label, 1–64 chars of `[A-Za-z0-9 ,._-]`.
     #[arg(long, value_name = "TEXT")]

@@ -344,18 +344,17 @@ pub(crate) fn resolve(
         out.fail(format!("error: {}", e));
     });
     // The one dt rule (`crate::dt_rule`): the model's declared step is the
-    // integration step for every method; a `[config] dt` the file writes that
-    // differs is refused. The resolved step is written into the config before
-    // anything reads it — the observation grid, the synthetic generator, every
-    // runner, and the fit identity, which so keys on the step the fit ran at.
+    // integration step for every method; a `--dt` or a `[config] dt` the file
+    // writes that differs from it, or from each other, is refused. The
+    // resolved step is written into the config before anything reads it — the
+    // observation grid, the synthetic generator, every runner, and the
+    // problem's identity, which so keys on the step the fit ran at.
     {
         let written = config_v2::table_declares_key(&config_text, "config", "dt")
             .then_some(config.problem.config.dt);
-        match crate::dt_rule::effective_dt(model.simulation.dt, written) {
+        match crate::dt_rule::effective_dt_for_command(a.problem.dt, written, model.simulation.dt, "") {
             Ok(dt) => config.problem.config.dt = dt,
-            Err(m) => {
-                out.fail(format!("error: {fit_path}: {}", m.message("[config] dt")));
-            }
+            Err(e) => out.fail(format!("error: {fit_path}: {e}")),
         }
     }
     // How each `[fixed]` name reached the config, for the partition — read

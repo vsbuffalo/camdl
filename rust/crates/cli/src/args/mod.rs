@@ -898,6 +898,10 @@ Examples:
   # Every chain at the point in a hand-written flat params TOML
   camdl fit run fit.toml --starts from_params=truth.toml
 
+  # One cell of a design over the integration step, from a base file that
+  # writes no `[config] dt`, on a model that declares no `simulate { dt }`
+  camdl fit run base.toml --dt 0.5
+
 Notes:
   - PGAS/PMMH fits can resume a partial run with `--resume`.
   - The problem is stored under `<store>/<build>/fit/<model>-<hash>/`, and
@@ -1072,6 +1076,15 @@ pub struct FitProblemFlags {
     #[arg(long = "emit-every", value_name = "N | NAME=N")]
     #[input(identity, vary = crate::input_fixtures::fit_emit_every)]
     pub emit_every: Vec<String>,
+
+    /// The integration step, written into the problem's `[config] dt`.
+    /// Default: the model's `simulate { dt }`, else the file's `[config] dt`,
+    /// else 1.0. A value that differs from the model's step or from the
+    /// file's `[config] dt` is refused: a fit integrates at the model's step
+    /// (run spec §1.3.1). A different step is a different problem.
+    #[arg(long)]
+    #[input(identity, vary = crate::input_fixtures::other_dt)]
+    pub dt: Option<f64>,
 
     /// Cartesian sweep over a fixed parameter (may repeat): one problem per
     /// point. SPEC is `V1,V2,...` | `lin(min,max,n)` | `log10(min,max,n)`.

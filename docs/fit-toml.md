@@ -217,9 +217,13 @@ run in turn.
 model that declares none (default `1.0`). A model that declares
 `simulate { dt = … }` is integrated at that step by every method; a
 `[config] dt` that differs from it is refused, and an agreeing one is accepted.
-A `dt` written at the top level of the file is a typo, not a setting. (The
-forward backend for synthetic-data generation is `[synthetic].backend`, not a
-`[config]` setting — gh#241; the method declares its own `backend`.)
+`fit run --dt` sets the step from the command line under the same rule: it must
+equal the model's step, and the file's `[config] dt` when the file writes one. A
+design whose cells differ only in the step can so share one file that writes no
+`[config] dt`, each cell passing its own `--dt`. A `dt` written at the top level
+of the file is a typo, not a setting. (The forward backend for synthetic-data
+generation is `[synthetic].backend`, not a `[config]` setting — gh#241; the
+method declares its own `backend`.)
 
 `allow_forcing_extrapolation = true` lets the fit evaluate a forcing outside the
 range it is defined on — an `interpolated` forcing before its first or after its

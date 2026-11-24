@@ -46,25 +46,33 @@ pub fn effective_dt(model_dt: Option<f64>, written: Option<f64>) -> Result<f64, 
     }
 }
 
-/// The step for a command that takes both a `--dt` and a `--fit` file
-/// (`camdl profile`, `camdl pfilter`): the model's declared step; a written
-/// one — `--dt`, or the fit file's `[config] dt` — must agree with it and with
-/// each other; 1.0 when nothing declares one. The error names the source.
+/// The step for a command that takes both a `--dt` and a fit file
+/// (`fit run`, `camdl profile`, `camdl pfilter`): the model's declared step; a
+/// written one — `--dt`, or the fit file's `[config] dt` — must agree with it
+/// and with each other; 1.0 when nothing declares one. The error names the
+/// source.
+///
+/// `file` names the fit file in front of its `[config] dt` in an error: "the
+/// --fit file's " where the file is a flag's value, or "" where the caller
+/// already names the file at the head of the error (`fit run`).
 pub fn effective_dt_for_command(
     cli_dt: Option<f64>,
     fit_dt: Option<f64>,
     model_dt: Option<f64>,
+    file: &str,
 ) -> Result<f64, String> {
     if let (Some(cli), Some(fit)) = (cli_dt, fit_dt) {
         if cli != fit {
-            return Err(format!(
-                "--dt {cli} and the --fit file's `[config] dt = {fit}` disagree; drop one."
-            ));
+            return Err(format!("--dt {cli} and {file}`[config] dt = {fit}` disagree; drop one."));
         }
     }
-    let what = if cli_dt.is_some() { "--dt" } else { "the --fit file's [config] dt" };
-    effective_dt(model_dt, cli_dt.or(fit_dt)).map_err(|m| m.message(what))
+    let what = if cli_dt.is_some() { "--dt".to_string() } else { format!("{file}[config] dt") };
+    effective_dt(model_dt, cli_dt.or(fit_dt)).map_err(|m| m.message(&what))
 }
+
+/// Where `camdl profile` and `camdl pfilter` name their fit file in a step
+/// error, for [`effective_dt_for_command`].
+pub const FIT_FLAG_FILE: &str = "the --fit file's ";
 
 /// The step a run already checked by [`effective_dt`] used, recovered from the
 /// model and the config value it carried (`[config] dt`, the written value or
@@ -96,16 +104,16 @@ mod tests {
     /// other.
     #[test]
     fn a_command_reads_both_dt_and_a_fit_files_config_dt() {
-        assert_eq!(effective_dt_for_command(None, None, Some(0.5)), Ok(0.5));
-        assert_eq!(effective_dt_for_command(Some(0.5), Some(0.5), Some(0.5)), Ok(0.5));
-        assert_eq!(effective_dt_for_command(None, None, None), Ok(1.0));
-        assert_eq!(effective_dt_for_command(Some(0.25), None, None), Ok(0.25));
-        assert_eq!(effective_dt_for_command(None, Some(0.25), None), Ok(0.25));
-        let err = effective_dt_for_command(Some(0.25), None, Some(0.5)).unwrap_err();
+        assert_eq!(effective_dt_for_command(None, None, Some(0.5), FIT_FLAG_FILE), Ok(0.5));
+        assert_eq!(effective_dt_for_command(Some(0.5), Some(0.5), Some(0.5), FIT_FLAG_FILE), Ok(0.5));
+        assert_eq!(effective_dt_for_command(None, None, None, FIT_FLAG_FILE), Ok(1.0));
+        assert_eq!(effective_dt_for_command(Some(0.25), None, None, FIT_FLAG_FILE), Ok(0.25));
+        assert_eq!(effective_dt_for_command(None, Some(0.25), None, FIT_FLAG_FILE), Ok(0.25));
+        let err = effective_dt_for_command(Some(0.25), None, Some(0.5), FIT_FLAG_FILE).unwrap_err();
         assert!(err.contains("--dt = 0.25") && err.contains("dt = 0.5"), "{err}");
-        let err = effective_dt_for_command(None, Some(0.25), Some(0.5)).unwrap_err();
+        let err = effective_dt_for_command(None, Some(0.25), Some(0.5), FIT_FLAG_FILE).unwrap_err();
         assert!(err.contains("--fit file's [config] dt = 0.25"), "{err}");
-        let err = effective_dt_for_command(Some(0.5), Some(0.25), None).unwrap_err();
+        let err = effective_dt_for_command(Some(0.5), Some(0.25), None, FIT_FLAG_FILE).unwrap_err();
         assert!(err.contains("disagree"), "{err}");
     }
 

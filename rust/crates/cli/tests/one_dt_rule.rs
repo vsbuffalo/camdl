@@ -99,8 +99,12 @@ N0 = 10000
 }
 
 fn fit_run(fit: &Path) -> (bool, String) {
+    fit_run_with(fit, &[])
+}
+
+fn fit_run_with(fit: &Path, extra: &[&str]) -> (bool, String) {
     let out = Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
-        .args(["fit", "run"]).arg(fit).args(["--no-progress"])
+        .args(["fit", "run"]).arg(fit).args(["--no-progress"]).args(extra)
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .output().unwrap();
     (out.status.success(), String::from_utf8_lossy(&out.stderr).into_owned())
@@ -184,6 +188,65 @@ fn without_a_model_dt_the_config_dt_is_the_step() {
     let (ok, err) = fit_run(&write_fit(&tmp.0, &ir, "[config]\ndt = 0.5\n", IF2));
     assert!(ok, "{err}");
     assert!(err.contains("dt=0.5"), "{err}");
+}
+
+/// The step the one stored fit problem in `dir/out` records, its
+/// `problem.toml` `[config] dt`.
+fn stored_problem_dt(dir: &Path) -> f64 {
+    let text = std::fs::read_to_string(fit_segment_name(dir).join("problem.toml")).unwrap();
+    let doc: toml::Table = text.parse().unwrap();
+    doc["config"]["dt"].as_float().unwrap_or_else(|| panic!("problem.toml has a float [config] dt:\n{text}"))
+}
+
+/// `fit run --dt`, with no step in the model or the file, is the step, and
+/// the stored problem records it.
+#[test]
+fn fit_run_dt_is_the_step_when_nothing_else_declares_one() {
+    let tmp = tempdir("fit_run_dt");
+    let ir = write_model(&tmp.0, None);
+    let (ok, err) = fit_run_with(&write_fit(&tmp.0, &ir, "", IF2), &["--dt", "0.5"]);
+    assert!(ok, "{err}");
+    assert!(err.contains("dt=0.5"), "IF2 runs at --dt 0.5:\n{err}");
+    assert_eq!(stored_problem_dt(&tmp.0), 0.5);
+}
+
+/// `fit run --dt` that differs from the file's `[config] dt` is refused,
+/// naming both, before any work.
+#[test]
+fn fit_run_dt_against_a_differing_config_dt_is_refused() {
+    let tmp = tempdir("fit_run_dt_cfg");
+    let ir = write_model(&tmp.0, None);
+    let (ok, err) = fit_run_with(&write_fit(&tmp.0, &ir, "[config]\ndt = 1.0\n", IF2), &["--dt", "0.5"]);
+    assert!(!ok, "--dt 0.5 beside [config] dt = 1.0 must be refused:\n{err}");
+    assert!(err.contains("--dt 0.5") && err.contains("[config] dt = 1"), "{err}");
+    assert!(!tmp.0.join("out").exists(), "refused before any work");
+}
+
+/// `fit run --dt` that differs from the model's declared step is refused,
+/// naming the model's step.
+#[test]
+fn fit_run_dt_against_the_models_step_is_refused() {
+    let tmp = tempdir("fit_run_dt_model");
+    let ir = write_model(&tmp.0, Some(1.0));
+    let (ok, err) = fit_run_with(&write_fit(&tmp.0, &ir, "", IF2), &["--dt", "0.5"]);
+    assert!(!ok, "--dt 0.5 beside the model's dt = 1 must be refused:\n{err}");
+    assert!(err.contains("--dt = 0.5") && err.contains("simulate { dt = 1 }"), "{err}");
+    assert!(!tmp.0.join("out").exists(), "refused before any work");
+}
+
+/// `fit run --dt` equal to the file's `[config] dt` runs, and poses the
+/// problem the file poses without the flag: one stored problem.
+#[test]
+fn fit_run_dt_equal_to_the_config_dt_is_the_same_problem() {
+    let tmp = tempdir("fit_run_dt_same");
+    let ir = write_model(&tmp.0, None);
+    let fit = write_fit(&tmp.0, &ir, "[config]\ndt = 0.5\n", IF2);
+    let (ok, err) = fit_run(&fit);
+    assert!(ok, "{err}");
+    let without = fit_segment_name(&tmp.0);
+    let (ok, err) = fit_run_with(&fit, &["--dt", "0.5"]);
+    assert!(ok, "an agreeing --dt runs:\n{err}");
+    assert_eq!(fit_segment_name(&tmp.0), without, "--dt equal to [config] dt is the problem without it");
 }
 
 /// Every profile point folder under the store `root`: a folder whose

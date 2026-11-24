@@ -362,7 +362,7 @@ fn run_pfilter(
     let fit_written_dt: Option<f64> =
         fit.as_ref().and_then(|f| crate::fit::config_v2::written_config_dt(f.config_text()));
     let dt = crate::dt_rule::effective_dt_for_command(
-        dt_flag, fit_written_dt, model_in.simulation.dt,
+        dt_flag, fit_written_dt, model_in.simulation.dt, crate::dt_rule::FIT_FLAG_FILE,
     ).unwrap_or_else(|e| {
         out.fail(format!("error: {e}"));
     });

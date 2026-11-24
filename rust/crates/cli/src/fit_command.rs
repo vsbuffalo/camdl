@@ -64,7 +64,7 @@ pub(crate) fn cmd_fit_run(inv: crate::args::FitRunInvocation) {
     let (_problem_exports, (), (), manifest, link_root) = exports.into_parts();
     let (declared, no_licm) = declared.into_parts();
     let (config, problem, run, method) = declared.into_parts();
-    let (forcing_extrapolation, emit_every, sweep) = problem.into_parts();
+    let (forcing_extrapolation, emit_every, dt, sweep) = problem.into_parts();
     let (allow_forcing_extrapolation,) = forcing_extrapolation.into_parts();
     let (seed, starts, starts_chains, resume) = run.into_parts();
     let (
@@ -98,6 +98,7 @@ pub(crate) fn cmd_fit_run(inv: crate::args::FitRunInvocation) {
         problem: crate::args::FitProblemFlags {
             forcing_extrapolation: crate::args::ForcingExtrapolationArg { allow_forcing_extrapolation },
             emit_every,
+            dt,
             sweep,
         },
         run: crate::args::FitRunFlags { seed, starts, starts_chains, resume },

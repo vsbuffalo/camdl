@@ -211,6 +211,7 @@ fn argv(inv: &FitRunInvocation) -> Vec<String> {
         problem: crate::args::FitProblemFlags {
             forcing_extrapolation: crate::args::ForcingExtrapolationArg { allow_forcing_extrapolation },
             emit_every,
+            dt,
             sweep,
         },
         run: crate::args::FitRunFlags { seed, starts, starts_chains, resume },
@@ -257,6 +258,7 @@ fn argv(inv: &FitRunInvocation) -> Vec<String> {
         let values: Vec<String> = s.grid.expand().iter().map(f64::to_string).collect();
         opt("--sweep", Some(format!("{}={}", s.name, values.join(","))));
     }
+    opt("--dt", dt.map(|x| x.to_string()));
     opt("--seed", seed.map(|x| x.to_string()));
     opt(
         "--starts",

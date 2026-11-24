@@ -108,7 +108,7 @@ pub(crate) fn resolve(
     let leaf_names: Vec<String> = model_in.observations.iter().map(|o| o.name.clone()).collect();
     let bound = crate::util::resolve_data_specs(&flags.data, &leaf_names, flags.obs.as_deref())?;
     let observations = bind_by_source(&model_in, &bound)?;
-    let dt = crate::dt_rule::effective_dt_for_command(flags.dt, None, model_in.simulation.dt)?;
+    let dt = crate::dt_rule::effective_dt_for_command(flags.dt, None, model_in.simulation.dt, crate::dt_rule::FIT_FLAG_FILE)?;
 
     let holdout_after = flags.holdout_after.as_deref().map(|raw| match raw.trim().parse::<f64>() {
         Ok(v) => TimeSpecToml::Num(v),
