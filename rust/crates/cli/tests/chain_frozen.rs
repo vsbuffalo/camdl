@@ -184,3 +184,73 @@ fn a_moving_pgas_fit_raises_no_frozen_chain() {
     let doc: serde_json::Value = serde_json::from_str(&doc).unwrap();
     assert_ne!(doc["methods"][0]["verdict"]["kind"], "chains_frozen", "{doc}");
 }
+
+/// `camdl` in the work dir, its exit status, stdout and stderr.
+fn camdl_status(work: &Path, args: &[&str]) -> (bool, String, String) {
+    let bin = manifest().join("../../target/release/camdl");
+    let out = Command::new(&bin)
+        .env_remove("CLICOLOR_FORCE")
+        .current_dir(work)
+        .env("CAMDL_STORE", work.join("camdl-store"))
+        .args(args)
+        .output()
+        .unwrap();
+    (out.status.success(), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
+}
+
+/// `fit summary --point` refuses a run with a frozen chain, naming it and the
+/// exclusion that leaves it out, and `--allow-nonconverged-source` does not
+/// lift that.
+#[test]
+fn a_posterior_point_refuses_a_frozen_chain() {
+    let (_guard, work) = workdir("point_frozen");
+    let (leaf, _) = pgas(&work, "frozen", 20, 60, 10);
+    let leaf_s = leaf.to_str().unwrap();
+    for extra in [&[][..], &["--allow-nonconverged-source"][..]] {
+        let mut args = vec!["fit", "summary", leaf_s, "--point", "posterior-mean"];
+        args.extend_from_slice(extra);
+        let (ok, stdout, stderr) = camdl_status(&work, &args);
+        assert!(!ok && stdout.is_empty(), "{extra:?}: {stdout}{stderr}");
+        assert!(stderr.contains("chain(s) 0, 1 of the 'pgas' run took no step after burn-in")
+            && stderr.contains("--exclude-chains 0,1"), "{extra:?}: {stderr}");
+    }
+}
+
+/// A chain left out is left out of the statistic and recorded; the verdict of
+/// the one chain kept cannot be certified, so the summary is refused until
+/// `--allow-nonconverged-source`, which the block records.
+#[test]
+fn a_posterior_point_over_a_chain_subset_records_it() {
+    let (_guard, work) = workdir("point_subset");
+    let (leaf, _) = pgas(&work, "moving", 50, 150, 100);
+    let leaf_s = leaf.to_str().unwrap();
+    let base = ["fit", "summary", leaf_s, "--point", "posterior-mean", "--exclude-chains", "1"];
+    let (ok, _, stderr) = camdl_status(&work, &base);
+    assert!(!ok && stderr.contains("--allow-nonconverged-source"), "{stderr}");
+
+    let mut args = base.to_vec();
+    args.push("--allow-nonconverged-source");
+    let (ok, stdout, stderr) = camdl_status(&work, &args);
+    assert!(ok, "{stderr}");
+    let mut table: toml::Table = stdout.parse().unwrap();
+    let prov = table.remove("provenance").unwrap();
+    let excluded: Vec<i64> = prov["excluded_chains"].as_array().unwrap().iter().map(|v| v.as_integer().unwrap()).collect();
+    assert_eq!(excluded, [1], "{stdout}");
+    assert_eq!(prov["nonconverged_allowed"].as_bool(), Some(true), "{stdout}");
+
+    // The mean is chain 0's alone.
+    let draws = std::fs::read_to_string(leaf.join("draws.tsv")).unwrap();
+    let mut lines = draws.lines();
+    let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
+    let chain = header.iter().position(|h| *h == "chain").unwrap();
+    let beta = header.iter().position(|h| *h == "beta").unwrap();
+    let xs: Vec<f64> = lines
+        .map(|l| l.split('\t').collect::<Vec<_>>())
+        .filter(|f| f[chain] == "0")
+        .map(|f| f[beta].parse().unwrap())
+        .collect();
+    let mean = xs.iter().sum::<f64>() / xs.len() as f64;
+    let written: f64 = format!("{mean:.10}").parse().unwrap();
+    assert_eq!(table["beta"].as_float(), Some(written), "{stdout}");
+    assert_eq!(prov["n_draws"].as_integer(), Some(xs.len() as i64), "{stdout}");
+}

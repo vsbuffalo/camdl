@@ -449,13 +449,19 @@ camdl predict seir.camdl --params mean.toml --data cases=cases.tsv
 ```
 
 `--point` takes each estimated parameter's mean (or median) over the run's
-posterior draws, every chain pooled, on the parameter's natural scale; a mean
-taken on the log or logit scale is a different number. The file's `[provenance]`
-block records the run, the statistic, the number of draws, and the backend and
-`dt` the fit ran on, which `camdl simulate --params mean.toml` replays on. The
-point is one no chain visited: a band predicted at it carries process and
-observation noise only, labelled `plug_in`, and leaves out the parameter
-uncertainty the posterior predictive of `camdl predict @post` carries.
+posterior draws, the retained chains pooled, on the parameter's natural scale; a
+mean taken on the log or logit scale is a different number. A run whose chains
+disagree is refused, since the mean of two modes can fall between them: leave a
+chain out with `--exclude-chains`, or summarise anyway with
+`--allow-nonconverged-source`, which the file records. The file's `[provenance]`
+block records the run, the statistic, the number of draws, and of the simulator
+the backend and `dt` only, which `camdl simulate --params
+mean.toml` replays on
+with the model's integrator and default settings; a fit made with
+`allow_degenerate_rates`, `allow_forcing_extrapolation` or another integrator is
+refused. The point is one no chain visited: a band predicted at it carries
+process and observation noise only, labelled `plug_in`, and leaves out the
+parameter uncertainty the posterior predictive of `camdl predict @post` carries.
 
 ```bash
 camdl predict seir.camdl --params mle.toml --data cases=cases.tsv \

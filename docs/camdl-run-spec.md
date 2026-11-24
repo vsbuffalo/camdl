@@ -635,18 +635,36 @@ plain params file.
 file of the same form for a sampler run (MH, PMMH, PGAS). Each estimated
 parameter's value is the arithmetic mean (or the median, interpolated between
 the two middle draws when their number is even) of its column of the run's
-`draws.tsv`, every chain pooled, and each fixed parameter's is the value the fit
-held it at. The statistic is taken on the natural scale `draws.tsv` holds; a
-mean taken on a transformed scale differs (the exponentiated mean of log β is
-the geometric mean, below the arithmetic mean unless every draw is equal). The
-point is not one a chain visited and was not scored. Its `[provenance]` block
-holds `camdl_version`, `content_hash`, `fit_hash` (the problem's id), `backend`,
-`dt`, `model_identity`, `seed` and `method` as above, then `statistic`
-(`posterior_mean` or `posterior_median`), `n_draws` and `run_id` (the fit run's
-full id) in place of `chain` and the log-likelihood fields. `simulate --params`
-replays it on `backend`/`dt` and checks `content_hash` as it does an optimizer's
-file, and `camdl predict MODEL --params` predicts at it (§4). An optimizer run
-is refused, naming `--params-only`, which prints its winner.
+`draws.tsv`, the retained chains pooled, and each fixed parameter's is the value
+the fit held it at. The statistic is taken on the natural scale `draws.tsv`
+holds; a mean taken on a transformed scale differs (the exponentiated mean of
+log β is the geometric mean, below the arithmetic mean unless every draw is
+equal). The point is not one a chain visited and was not scored.
+
+The chains pooled must agree, since a mean of two modes can fall between them. A
+chain that took no step after burn-in is refused, naming it and the
+`--exclude-chains` that leaves it out; `--allow-nonconverged-source` does not
+lift this. A convergence verdict that is not converged is refused by the rule a
+`from_posterior` source is judged by (§6.6): the run's stored verdict, or under
+`--exclude-chains`/`--chains` the R̂ of the chains kept.
+`--allow-nonconverged-source` summarises such a run with a warning. A verdict
+that cannot be read is refused in either case.
+
+Its `[provenance]` block holds `camdl_version`, `content_hash`, `fit_hash` (the
+problem's id), `backend` (the run's own), `dt`, `model_identity`, `seed` and
+`method` as above, then `statistic` (`posterior_mean` or `posterior_median`),
+`n_draws`, `run_id` (the fit run's full id), `excluded_chains` (when chains were
+left out) and `nonconverged_allowed = true` (when the override was used), in
+place of `chain` and the log-likelihood fields. A block holding fields of both
+kinds is refused. Of the simulator the block records the backend and `dt` only:
+`simulate --params` replays the file on them with the model's integrator,
+default settings and its own binomial sampler, checks `content_hash` as it does
+an optimizer's file, and advises printing the summary again when the values were
+edited. A run fitted with `allow_degenerate_rates`,
+`allow_forcing_extrapolation` or an integrator other than the model's is
+refused, naming the setting. `camdl predict MODEL --params` predicts at the file
+(§4). An optimizer run is refused, naming `--params-only`, which prints its
+winner.
 
 #### 2.2.1 `fit.meta.json` — the run's record of its problem
 
@@ -8349,7 +8367,10 @@ camdl fit summary FIT
   --params-only               print only θ̂ as a flat params TOML (pipeable)
   --point posterior-mean|posterior-median
                               print a sampler run's posterior mean or median as a
-                              params TOML with a [provenance] block (§2.2)
+                              params TOML with a [provenance] block (§2.2); with
+                              --exclude-chains / --chains over the chains kept
+  --allow-nonconverged-source with --point: summarise a run whose convergence
+                              verdict is not converged (recorded in the block)
   --no-color                  disable ANSI colour (NO_COLOR is honoured regardless)
   --strict                    exit non-zero on provenance mismatch; auto-on when CI=true
   --exclude-chains IDS        recompute diagnostics over a chain subset (view only;

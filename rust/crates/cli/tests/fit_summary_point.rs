@@ -63,7 +63,7 @@ const DATA: &str = "time\tweekly_cases\n7\t16\n14\t166\n21\t626\n28\t1303\n35\t1
 /// The fit file: `beta` and `gamma` estimated at `[config] dt = 0.5`, which
 /// is not the model's own step, so a replay that found the step in the
 /// params file runs at it.
-fn fit_toml(method: &str) -> String {
+fn fit_toml(method: &str, config: &str) -> String {
     format!(
         r#"store = "results"
 
@@ -75,6 +75,7 @@ weekly_cases = "weekly_cases.tsv"
 
 [config]
 dt = 0.5
+{config}
 
 [estimate]
 beta  = {{ bounds = [0.05, 1.0], start = 0.4 }}
@@ -96,8 +97,8 @@ algorithm = "pmmh"
 backend = "chain_binomial"
 chains = 2
 particles = 100
-iterations = 60
-burn_in = 20
+iterations = 1500
+burn_in = 300
 thin = 1"#;
 
 const IF2: &str = r#"[method]
@@ -132,10 +133,15 @@ fn ok(out: &Output, what: &str) -> String {
 /// A project directory holding the model, the data and a fit of `method`
 /// labelled `fit`.
 fn fitted(tag: &str, method: &str) -> tempfile::TempDir {
+    fitted_with(tag, method, "")
+}
+
+/// As [`fitted`], with `config` added to the fit file's `[config]`.
+fn fitted_with(tag: &str, method: &str, config: &str) -> tempfile::TempDir {
     let tmp = tempfile::Builder::new().prefix(&format!("camdl_point_{tag}_")).tempdir().unwrap();
     std::fs::write(tmp.path().join("model.camdl"), MODEL).unwrap();
     std::fs::write(tmp.path().join("weekly_cases.tsv"), DATA).unwrap();
-    std::fs::write(tmp.path().join("fit.toml"), fit_toml(method)).unwrap();
+    std::fs::write(tmp.path().join("fit.toml"), fit_toml(method, config)).unwrap();
     ok(&run(tmp.path(), &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]), "fit run");
     tmp
 }
@@ -268,6 +274,18 @@ fn an_optimizer_run_is_refused_and_pointed_at_params_only() {
     assert!(!out.status.success(), "{stderr}");
     assert!(stderr.contains("optimizer fit") && stderr.contains("camdl fit summary @fit --params-only"), "{stderr}");
     assert!(out.stdout.is_empty(), "nothing printed: {}", String::from_utf8_lossy(&out.stdout));
+}
+
+/// A fit made under a setting the block does not record is refused, naming
+/// it: `simulate --params` would replay the summary without it.
+#[test]
+fn a_setting_the_block_cannot_carry_is_refused() {
+    let tmp = fitted_with("degenerate", PMMH, "allow_degenerate_rates = true");
+    let out = run(tmp.path(), &["fit", "summary", "@fit", "--point", "posterior-mean"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success() && out.stdout.is_empty(), "{stderr}");
+    assert!(stderr.contains("was fitted with allow_degenerate_rates = true")
+        && stderr.contains("records only the backend and dt"), "{stderr}");
 }
 
 #[test]

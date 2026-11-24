@@ -112,13 +112,24 @@ pub struct PosteriorSummaryRecord {
     pub n_draws: usize,
     /// The fit run whose draws these are, by its full run id.
     pub run_id: String,
+    /// The chains left out of the statistic (`--exclude-chains`, or those
+    /// `--chains` does not name), counted from 0. Empty, and not written,
+    /// when every chain is pooled.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_chains: Vec<ChainIndex>,
+    /// True when the convergence verdict of the pooled chains was not
+    /// converged and `--allow-nonconverged-source` summarised them anyway.
+    /// Not written when the verdict passed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub nonconverged_allowed: bool,
 }
 
 /// The fields of a winner block, by which its variant is told apart.
 pub const WINNER_FIELDS: [&str; 6] = ["chain", "log_likelihood", "loglik_sd", "n_particles", "ess_mean", "ess_min"];
 /// The fields of a posterior-summary block, by which its variant is told
 /// apart.
-pub const POSTERIOR_SUMMARY_FIELDS: [&str; 3] = ["statistic", "n_draws", "run_id"];
+pub const POSTERIOR_SUMMARY_FIELDS: [&str; 5] =
+    ["statistic", "n_draws", "run_id", "excluded_chains", "nonconverged_allowed"];
 
 impl<'de> serde::Deserialize<'de> for Estimate {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
@@ -504,6 +515,8 @@ mod tests {
             statistic: crate::args::PointStatistic::PosteriorMean,
             n_draws: 80,
             run_id: "ab".repeat(32),
+            excluded_chains: vec![ChainIndex(2)],
+            nonconverged_allowed: true,
         });
         let text = params_file_text(&["a header"], &params, |content_hash| ParamsProvenance {
             camdl_version: "test".into(),

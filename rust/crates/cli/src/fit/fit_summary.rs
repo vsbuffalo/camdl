@@ -252,7 +252,20 @@ pub(crate) fn cmd_fit_summary(args: &FitSummaryArgs, compile: crate::util::Compi
         }
     }
     if let Some(statistic) = args.point {
-        match posterior_point_toml(&args.fit, &opened, &dir, &completed, statistic, compile) {
+        let selection = match ChainSelection::from_flags(args.chains.as_deref(), args.exclude_chains.as_deref()) {
+            Ok(s) => s,
+            Err(e) => out.error(CommandError::new(format!("error: {e}"))).exit(),
+        };
+        match posterior_point_toml(
+            &args.fit,
+            &opened,
+            &dir,
+            &completed,
+            statistic,
+            selection.as_ref(),
+            args.allow_nonconverged_source,
+            compile,
+        ) {
             Ok(s) => {
                 write_data(&mut out, &s);
                 return;
@@ -1273,21 +1286,38 @@ fn the_one_run(dir: &str, completed: &[ResolvedMethod], flag: &str) -> Result<Re
 /// ([`crate::fit::provenance::params_file_text`]).
 ///
 /// Each estimated parameter (the problem's `[estimate]`) takes the statistic
-/// of its column of the run's `draws.tsv`, every chain pooled, on the scale
-/// the column holds, the parameter's natural scale. Every other column of
-/// `draws.tsv` is a parameter the fit held fixed and holds one value, which is
-/// written as it is. The block records the fit's backend and dt, as
-/// [`crate::fit::fitted_model::stored_fit_simulator`] reads them, so a
-/// replay of the file runs on the simulator the draws came from.
+/// of its column of the run's `draws.tsv`, the retained chains pooled, on the
+/// scale the column holds, the parameter's natural scale. Every other column
+/// of `draws.tsv` is a parameter the fit held fixed and holds one value,
+/// which is written as it is.
+///
+/// The pooled chains must be fit to pool. A chain that took no step after
+/// burn-in ([`crate::fit::chain_diagnostics::chain_is_frozen`]) is refused,
+/// naming it, since its draws are one point. A convergence verdict that is
+/// not converged is refused by the rule a warm-start source is
+/// ([`crate::fit::gating::check_source_converged`], or for a chain selection
+/// [`crate::fit::gating::check_subset_converged`]): pooling two modes puts
+/// the mean between them. `allow_nonconverged` lifts that refusal and is
+/// recorded in the block.
+///
+/// The block records the backend the run's draws were made on and the dt
+/// [`crate::fit::fitted_model::stored_fit_simulator`] reads. It records
+/// nothing else about the simulator, so a run whose fit used any other
+/// setting a replay could not reproduce (`allow_degenerate_rates`,
+/// `allow_forcing_extrapolation`, an integrator other than the model's) is
+/// refused, naming it.
 ///
 /// An optimizer run is refused: its point is the winner `--params-only`
 /// prints.
+#[allow(clippy::too_many_arguments)]
 fn posterior_point_toml(
     handle: &str,
     opened: &crate::fit_store::OpenedFit,
     dir: &str,
     completed: &[ResolvedMethod],
     statistic: crate::args::PointStatistic,
+    selection: Option<&ChainSelection>,
+    allow_nonconverged: bool,
     compile: crate::util::CompileSettings,
 ) -> Result<String, String> {
     let flag = format!("--point {}", statistic.flag_value());
@@ -1300,16 +1330,109 @@ fn posterior_point_toml(
             target.name, target.method
         ));
     }
-    let draws = crate::posterior_draws::resolve_posterior_draws(dir, None).map_err(String::from)?;
-    let (rows, _) = draws.load_params_with_info()?;
+
+    // The simulator the draws were made on, and what of it a replay of the
+    // file cannot carry.
+    let model = crate::fit::fitted_model::stored_fit_model(opened, compile)?;
+    let simulator = crate::fit::fitted_model::stored_fit_simulator(opened, &model)?;
+    let mut unreplayable: Vec<String> = Vec::new();
+    if simulator.settings.allow_degenerate_rates {
+        unreplayable.push("allow_degenerate_rates = true".into());
+    }
+    if simulator.settings.allow_forcing_extrapolation {
+        unreplayable.push("allow_forcing_extrapolation = true".into());
+    }
+    if simulator.integrator != model.simulation.integrator {
+        unreplayable.push(format!(
+            "the integrator {:?}, where the model declares {:?}",
+            simulator.integrator, model.simulation.integrator
+        ));
+    }
+    if !unreplayable.is_empty() {
+        return Err(format!(
+            "{flag}: the '{}' run was fitted with {}, and the file's [provenance] block records only the \
+             backend and dt, so `simulate --params` would replay the summary without it. Replay the \
+             fit's posterior with `camdl predict {handle}` instead",
+            target.name,
+            unreplayable.join(" and ")
+        ));
+    }
+
+    let draws = crate::posterior_draws::resolve_posterior_draws(dir, None)
+        .map_err(String::from)?
+        .with_selection(selection.cloned());
+    let backend: crate::args::types::ForwardBackend = draws
+        .backend
+        .map(Into::into)
+        .ok_or_else(|| format!("the '{}' run records no backend to replay its posterior on", target.name))?;
+    let (keyed, subset) = draws.load_keyed_with_info()?;
     let shown = crate::fit::report::display_path(&draws.draws_path);
-    let Some(first) = rows.first() else {
+    let Some(first) = keyed.first().map(|d| &d.params) else {
         return Err(format!("{shown} holds no posterior draws, so there is nothing to summarise"));
     };
     let estimated: Vec<&String> = opened.config.problem.estimate.keys().collect();
     if let Some(missing) = estimated.iter().find(|p| !first.contains_key(p.as_str())) {
         return Err(format!("{shown} has no column for the estimated parameter `{missing}`"));
     }
+
+    // A chain that took no step after burn-in is one point: refused, with
+    // the way to leave it out.
+    let mut by_chain: BTreeMap<usize, Vec<&crate::KeyedDraw>> = BTreeMap::new();
+    for d in &keyed {
+        by_chain.entry(d.chain.unwrap_or(0)).or_default().push(d);
+    }
+    let frozen: Vec<String> = by_chain
+        .iter()
+        .filter(|(_, rows)| {
+            let cols: Vec<Vec<f64>> = estimated
+                .iter()
+                .map(|p| rows.iter().filter_map(|r| r.params.get(p.as_str()).copied()).collect())
+                .collect();
+            crate::fit::chain_diagnostics::chain_is_frozen(cols.iter().map(Vec::as_slice))
+        })
+        .map(|(c, _)| c.to_string())
+        .collect();
+    if !frozen.is_empty() {
+        return Err(format!(
+            "{flag}: chain(s) {} of the '{}' run took no step after burn-in, so their draws are one \
+             point each and would weigh the {} toward it. Leave them out with\n  \
+             camdl fit summary {handle} {flag} --exclude-chains {}",
+            frozen.join(", "),
+            target.name,
+            statistic.flag_value().trim_start_matches("posterior-"),
+            frozen.join(",")
+        ));
+    }
+
+    // The convergence verdict of the chains pooled, by the rule a warm-start
+    // source is judged by. A verdict that cannot be read is an error the
+    // override does not lift.
+    let verdict = match selection {
+        None => crate::fit::gating::source_verdict(&target.method_dir, handle),
+        Some(sel) => crate::fit::gating::subset_verdict(&draws.draws_path, sel, handle),
+    }
+    .map_err(|e| format!("{flag}: {e}"))?;
+    let nonconverged_allowed = match verdict {
+        None => false,
+        Some(msg) if allow_nonconverged => {
+            crate::out::detached().say(format_args!(
+                "{} {flag}: the '{}' run: {msg}\n  --allow-nonconverged-source: summarising it anyway; \
+                 the [provenance] block records nonconverged_allowed = true.",
+                crate::out::paint::warning_tag(),
+                target.name
+            ));
+            true
+        }
+        Some(msg) => {
+            return Err(format!(
+                "{flag}: the '{}' run: {msg}\n  A mean or median of chains that disagree can fall between \
+                 their modes. Leave a disagreeing chain out with --exclude-chains, or summarise them anyway \
+                 with --allow-nonconverged-source",
+                target.name
+            ))
+        }
+    };
+    let rows: Vec<&std::collections::HashMap<String, f64>> = keyed.iter().map(|d| &d.params).collect();
     let mut point: BTreeMap<String, f64> = BTreeMap::new();
     for name in first.keys() {
         let column: Vec<f64> = rows
@@ -1329,14 +1452,16 @@ fn posterior_point_toml(
         point.insert(name.clone(), value);
     }
 
-    let model = crate::fit::fitted_model::stored_fit_model(opened, compile)?;
-    let simulator = crate::fit::fitted_model::stored_fit_simulator(opened, &model)?;
-    let backend = simulator
-        .backend
-        .ok_or_else(|| format!("the '{}' run records no backend to replay its posterior on", target.name))?;
     let model_identity = crate::run_meta::read_fit_sidecar(&opened.segment)?
         .map(|s| s.model_identity)
-        .unwrap_or_default();
+        .filter(|m| !m.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "the '{}' run's fit.meta.json records no model identity, which the [provenance] block \
+                 names the model by",
+                target.name
+            )
+        })?;
     let run = opened.fit.run.as_ref().ok_or("the handle names a fit problem, not a run")?;
     let n_draws = rows.len();
     let header = [
@@ -1367,6 +1492,8 @@ fn posterior_point_toml(
                     statistic,
                     n_draws,
                     run_id: run.id().key().to_hex(),
+                    excluded_chains: subset.map(|s| s.excluded).unwrap_or_default(),
+                    nonconverged_allowed,
                 },
             ),
         }

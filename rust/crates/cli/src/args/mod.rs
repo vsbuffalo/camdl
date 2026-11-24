@@ -1398,11 +1398,17 @@ pub struct FitSummaryArgs {
 
     /// Print a summary of a sampler run's posterior (MH, PMMH, PGAS) as a
     /// params TOML: each estimated parameter's posterior mean or median over
-    /// the run's `draws.tsv`, all chains pooled, and each fixed parameter's
-    /// value, followed by a `[provenance]` block naming the run, the
-    /// statistic and the number of draws, and the backend and dt the fit ran
-    /// on. `camdl simulate --params` replays the file on that simulator, and
-    /// `camdl predict MODEL --params` predicts at it (treatment `plug_in`).
+    /// the run's `draws.tsv`, the retained chains pooled, and each fixed
+    /// parameter's value, followed by a `[provenance]` block. The block names
+    /// the run, the statistic, the number of draws, any chains left out and
+    /// whether `--allow-nonconverged-source` was needed, and of the simulator
+    /// only the backend the draws were made on and the dt. `camdl simulate
+    /// --params` replays the file on that backend and dt, with the model's
+    /// integrator and default settings, and `camdl predict MODEL --params`
+    /// predicts at it (treatment `plug_in`). The binomial sampler the fit
+    /// drew with is not recorded. A run fitted with `allow_degenerate_rates`,
+    /// `allow_forcing_extrapolation` or an integrator other than the model's
+    /// is refused, naming the setting, since the replay would leave it out.
     ///
     /// The statistic is taken on each parameter's natural scale, the scale
     /// `draws.tsv` holds. A mean on a transformed scale differs: the mean of
@@ -1412,11 +1418,23 @@ pub struct FitSummaryArgs {
     /// between the two middle draws when their number is even. Neither point
     /// is one the sampler visited, and neither was scored.
     ///
-    /// An optimizer run (IF2, NLopt) is refused: it has one winning point,
-    /// which `--params-only` prints.
+    /// The chains pooled must agree: a chain that took no step after burn-in
+    /// is refused, naming it, and so is a run whose convergence verdict is
+    /// not converged (the rule `starts = { from_posterior }` applies to a
+    /// source), since a mean of two modes can fall between them. Leave
+    /// chains out with `--exclude-chains` or `--chains`; the verdict is then
+    /// that of the chains kept. An optimizer run (IF2, NLopt) is refused: it
+    /// has one winning point, which `--params-only` prints.
     #[arg(long, value_enum, value_name = "STATISTIC",
-          conflicts_with_all = ["params_only", "format", "exclude_chains", "chains", "parameters", "explain"])]
+          conflicts_with_all = ["params_only", "format", "parameters", "explain"])]
     pub point: Option<PointStatistic>,
+
+    /// With `--point`: summarise a run whose convergence verdict is not
+    /// converged, with a warning. The `[provenance]` block records
+    /// `nonconverged_allowed = true`. A verdict that cannot be read is still
+    /// refused.
+    #[arg(long, requires = "point")]
+    pub allow_nonconverged_source: bool,
 
     /// Disable ANSI colour even on a TTY. Honours `NO_COLOR` env var
     /// regardless of this flag.
