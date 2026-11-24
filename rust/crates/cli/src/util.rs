@@ -1455,22 +1455,10 @@ pub(crate) fn delegate_to_camdlc(args: &[&str], compile: CompileSettings) -> Res
     std::process::exit(status.code().unwrap_or(1));
 }
 
-/// Render a `.camdl` model to its display JSON (`camdlc render --format json`),
-/// capturing the bytes. Used to archive `model.render.json` beside a run so a
-/// viewer can show the model's math without recompiling. Best-effort — the
-/// caller treats an `Err` as "skip the archive", never a hard failure.
-/// Is `model_path` a `.camdl` SOURCE path, rather than a compiled `.ir.json`?
+/// Whether `model_path` names a `.camdl` source rather than compiled IR.
 ///
-/// `resolve_ir_path` accepts either, so anything downstream that needs source
-/// specifically has to ask — the render archive shells out to `camdlc render`,
-/// which does not read IR and reports "parse error in <your>.ir.json", a
-/// message that reads as "your compiled IR is malformed" when nothing is wrong.
-///
-/// Deliberately the same test `resolve_ir_path` applies (`ends_with`, not an
-/// extension parse), so the two cannot disagree about what a model path is.
-///
-/// Lives beside `resolve_ir_path` so the two cannot drift apart; the render
-/// archives of `fit run` and `camdl predict` (gh#496, gh#536) are the callers.
+/// It applies the test `resolve_ir_path` applies (`ends_with`, not an
+/// extension parse), so the two agree about what a model path is.
 pub fn model_is_camdl_source(model_path: &str) -> bool {
     model_path.ends_with(".camdl")
 }
