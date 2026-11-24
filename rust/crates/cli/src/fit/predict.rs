@@ -1912,7 +1912,7 @@ fn refuse_fixed_point_flags(args: &crate::args::PredictArgs) -> Result<(), Strin
              backend, which draws none."
         ));
     }
-    crate::fit::fitted_model::refuse_integrator_off_ode(args.fixed_point.integrator, backend, "this prediction")
+    crate::simulator::refuse_integrator_off_ode(args.fixed_point.integrator, backend, "this prediction")
 }
 
 /// Refuse `--covariate` on a prediction that is not a forecast: only a

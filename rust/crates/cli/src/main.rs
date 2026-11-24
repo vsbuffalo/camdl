@@ -32,6 +32,7 @@ mod cas_sink;      // the digest of a simulate cell's observation blocks, in eac
 mod sim_config;    // ResolvedSimConfig: simulate's one resolved configuration; identity and engine settings derive from it
 mod eval;
 mod dt_rule;      // the one integration-step rule: the model's declared dt, else the written one
+mod simulator;    // Simulator: a run's backend, step, integrator and sampler, built by one resolver
 mod pfilter;        // used internally by fit runner for data loading
 mod prequential_out; // the one prequential.tsv/.json writer (gh#650)
 mod pfilter_store;  // camdl pfilter on the run store: its identity, result and by-products
@@ -1047,13 +1048,11 @@ fn run_simulate(inv: args::SimulateInvocation) {
     };
     // Default is chain_binomial so `simulate` and `fit` agree at the
     // same MLE params (see docs/dev/incidents/2026-04-19-backend-default-mismatch.md).
-    let mut backend      = a.backend.backend.unwrap_or(args::types::ForwardBackend::ChainBinomial);
-    // The exploratory step: `--dt`, else the model's own `simulate { dt = … }`,
-    // else 1.0. A replay of a fit's parameters (a `--fit`, or a params file
-    // carrying a fit's `[provenance]`) replaces both with the fit's simulator
-    // below.
+    // The step the observed window is read at, before the run's simulator is
+    // resolved (`simulator::Simulator::resolve`, below): `--dt`, else the
+    // model's own `simulate { dt = … }`, else 1.0.
     let model_dt: Option<f64> = util::peek_simulation_dt(&ir_path_compiled);
-    let mut dt           = a.backend.dt.or(model_dt).unwrap_or(1.0_f64);
+    let anchor_dt = a.backend.dt.or(model_dt).unwrap_or(crate::dt_rule::DEFAULT_DT);
     let seed             = a.seed;
     // The engine's Rayon branch runs on the global pool, which defaults to
     // every core, so the pool is capped here (mirrors fit/pfilter/profile);
@@ -1174,6 +1173,7 @@ fn run_simulate(inv: args::SimulateInvocation) {
     let (model_raw, _) = util::load_ir(&ir_path_compiled).unwrap_or_else(|e| {
         out.fail(format!("error: {}", e));
     });
+    let model_simulate_block = model_raw.simulation.clone();
     let to_is_anchored = matches!(
         a.to.as_deref().map(|raw| crate::fit::runner::parse_time_spec(
             "--to", raw, model_raw.origin.as_deref(), &model_raw.time_unit)),
@@ -1226,7 +1226,7 @@ fn run_simulate(inv: args::SimulateInvocation) {
                 ));
             };
             let (first, last) = resolve_simulate_obs_anchors(
-                &crate::obs_anchor::window_model(&model_raw, start_override.as_ref()), fit_ref, dt)
+                &crate::obs_anchor::window_model(&model_raw, start_override.as_ref()), fit_ref, anchor_dt)
                 .unwrap_or_else(|e| {
                     out.fail(format!("error: resolving observation anchors: {e}"));
                 });
@@ -1605,66 +1605,80 @@ fn run_simulate(inv: args::SimulateInvocation) {
             }
         }
     }
-    let mut integrator = a.backend.integrator;
     // The evaluator settings: the flags, or, on a replay of a fit, the fit's
     // `[config]` settings with the flags folded in (gh#1235). Read into the
     // resolved configuration below, which keys them and derives what runs.
-    let mut eval_settings = crate::fit::fitted_model::FittedSettings {
+    let flag_settings = crate::fit::fitted_model::FittedSettings {
         allow_degenerate_rates: a.allow_degenerate_rates,
         allow_forcing_extrapolation: a.forcing_extrapolation.allow_forcing_extrapolation,
     };
-    let simulator_flags = crate::fit::fitted_model::SimulatorFlags {
-        backend: a.backend.backend,
-        dt: a.backend.dt,
-        integrator: a.backend.integrator,
-        settings: eval_settings,
+    let mut eval_settings = flag_settings;
+    // The fit the run replays: a stored fit or fit config, else a params
+    // file's fit `[provenance]` block, which records the backend and the step;
+    // its integrator is the model's, since a fit takes no integrator flag.
+    let replayed: Option<crate::simulator::StoredSimulator> = match (&fitted_simulator, &fit_provenance) {
+        (Some((name, f)), _) => Some(crate::simulator::StoredSimulator {
+            name: name.clone(),
+            backend: f.backend,
+            dt: f.dt,
+            integrator: f.integrator.clone(),
+            binomial: None,
+            settings: Some(f.settings),
+        }),
+        (None, Some((pf, prov))) => Some(crate::simulator::StoredSimulator {
+            name: pf.clone(),
+            backend: Some(prov.backend),
+            dt: prov.dt,
+            integrator: model_simulate_block.integrator.clone(),
+            binomial: None,
+            settings: None,
+        }),
+        (None, None) => None,
     };
-    if let Some((fit_name, fitted)) = &fitted_simulator {
+    let written = crate::simulator::WrittenSimulator {
         // A fit config with no `[method]` names no backend: the params file's
         // fit, else the default, is the one run.
-        let fallback = fit_provenance.as_ref().map_or(backend, |(_, prov)| prov.backend);
-        let replay = crate::fit::fitted_model::replay_simulator(fit_name, fitted, simulator_flags, fallback)
+        backend: a.backend.backend.or_else(|| {
+            replayed.as_ref().filter(|r| r.backend.is_none()).and(fit_provenance.as_ref()).map(|(_, p)| p.backend)
+        }),
+        dt: a.backend.dt,
+        config_dt: None,
+        integrator: a.backend.integrator,
+        binomial: None,
+    };
+    let basis = replayed.as_ref().map_or(crate::simulator::Basis::Exploratory, crate::simulator::Basis::Replay);
+    let (simulator, simulator_note) =
+        crate::simulator::Simulator::resolve(crate::simulator::ModelSimulate::of(&model_simulate_block), written, basis)
             .unwrap_or_else(|e| {
                 out.fail(format!("error: {e}"));
             });
-        if let Some(notice) = &replay.notice {
-            out.say(format_args!("{notice}"));
-        }
-        backend = replay.backend;
-        dt = replay.dt;
-        integrator = replay.integrator;
-        eval_settings = replay.settings;
-    } else if let Some((pf, prov)) = &fit_provenance {
-        // The block records no `[config]` settings, so the flags' are the
-        // run's.
-        let model = util::load_ir(&ir_path_compiled).map(|(m, _)| m).unwrap_or_else(|e| {
-            out.fail(format!("error: {e}"));
-        });
-        let fitted = crate::fit::fitted_model::FittedDynamics::of_provenance(prov, &model);
-        let replay = crate::fit::fitted_model::replay_dynamics(pf, &fitted, simulator_flags, backend)
-            .unwrap_or_else(|e| {
-                out.fail(format!("error: {e}"));
-            });
+    if let (None, Some((pf, _))) = (&fitted_simulator, &fit_provenance) {
         let flagged = a.backend.backend.is_some() || a.backend.dt.is_some() || a.backend.integrator.is_some();
         if !flagged {
             out.say(format_args!(
                 "[info] backend auto-matched to {} (dt={}) from fit provenance in {pf}: the \
                  simulator the fit ran on. A --backend, --dt or --integrator that differs runs \
                  with a note.",
-                replay.backend, replay.dt
+                simulator.backend(),
+                simulator.dt().get()
             ));
         }
-        if let Some(notice) = &replay.notice {
-            out.say(format_args!("{notice}"));
-        }
-        backend = replay.backend;
-        dt = replay.dt;
-        integrator = replay.integrator;
-    } else if let Err(e) =
-        crate::fit::fitted_model::refuse_integrator_off_ode(integrator, backend, "this simulation")
-    {
-        out.fail(format!("error: {e}"));
     }
+    if let Some(note) = &simulator_note {
+        out.say(format_args!("{note}"));
+    }
+    // A stored fit's `[config]` settings, with the flags folded in; a params
+    // file's block records none, so the flags' are the run's.
+    if let Some((fit_name, settings)) = replayed.as_ref().and_then(|r| r.settings.map(|s| (&r.name, s))) {
+        eval_settings =
+            settings.with_flags(flag_settings.allow_degenerate_rates, flag_settings.allow_forcing_extrapolation);
+        if let Some(note) = settings.turned_on_note(eval_settings, fit_name, "this replay runs") {
+            out.say(format_args!("{note}"));
+        }
+    }
+    let backend = simulator.backend();
+    let dt = simulator.dt().get();
+    let integrator = a.backend.integrator;
 
     let mut base_sim_run = util::SimRun {
         // The already-compiled IR: every engine cell loads this directly, so
@@ -1701,9 +1715,8 @@ fn run_simulate(inv: args::SimulateInvocation) {
         backend,
         dt,
         seed, // overridden per-replicate below
-        integrator, // gh#166: --integrator, checked against the replayed fit above
-        // `simulate` draws with BTPE, including `--draws posterior --fit`.
-        binomial: sim::rng::BinomialAlgorithm::Btpe,
+        integrator, // gh#166: --integrator, checked by the simulator's resolution above
+        binomial: simulator.binomial(),
         // Replaced, like `backend` and `dt`, from the resolved configuration's
         // engine settings once it exists.
         eval: sim::EvalSettings::default(),
@@ -2073,9 +2086,8 @@ fn run_simulate(inv: args::SimulateInvocation) {
                 Err(e) => out.say(format_args!(
                     "draws: {fit_ref} is not a stored fit run ({e}); no fit \
                      scenario/enable/disable is applied, the model runs as written, \
-                     on {} at dt = {}",
-                    backend.as_str(),
-                    dt
+                     on {}",
+                    simulator.describe()
                 )),
             }
             if matches!(init_state_arg, Some(InitStateSourceArg::Fit)) {
