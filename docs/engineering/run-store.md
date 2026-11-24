@@ -1968,6 +1968,13 @@ result or of one of its by-products, such as `trace.tsv` or `draws.tsv`, and
 `identity.json` and each manifest file's SHA-256, and exits 1 when it finds a
 damaged result (`maintenance.rs:143`).
 
+A result received from another store (`camdl receive`, under
+[Maintaining a store](#maintaining-a-store)) is read like a local one: `list`
+and `@label` find it through the invocation record `receive` wrote, and a
+computation here can depend on it by run id, although its folder is under the
+other build's directory. Its `run.json` keeps the `invocation` number it had in
+the other store, which names no invocation, or another one, here.
+
 To work out why a result is what it is, look in its folder. `identity.json` is
 the complete list of what the run id hashed, so two results that should have
 been one and are not differ somewhere in two `identity.json` files, and
@@ -1989,7 +1996,7 @@ mounted, and camdl's own `list` and `show` take their place
 
 ### Maintaining a store
 
-Three commands look after the store as a whole.
+Four commands look after the store as a whole.
 
 `camdl status` lists what is running, failed or interrupted.
 
@@ -1999,6 +2006,28 @@ deletes no result.
 
 `camdl reindex` rebuilds the index from the records and the invocation records.
 The index is a cache, so this is safe at any time.
+
+`camdl receive <copy>` brings in results computed in another store, such as a
+cloud machine's (`Store::receive`, `receive.rs`). The copy holds the other
+store's `store.json`, the result folders wanted at the paths they had there,
+with the parent folders a nested result sits in, and the invocation records that
+listed them. The copy is moved into `<root>/.staging/receive.<owner>.<n>`, and
+every result folder in it is checked as `verify` checks one, hashing every file;
+each result's dependencies (`run.json`'s `deps`) must also be in the copy or
+completed here, so no result is placed that its readers cannot open. Nothing is
+placed unless every folder passes, and a refused copy is moved back where it was
+given. Each result keeps its path relative to the root, so a result of another
+build sits under that build's directory. A run id held here with the same result
+files is left in place; one held with other result files, or a destination
+already taken, is refused with `Error::ReceivedDiffers`, naming both folders.
+Each folder is placed by a rename that never replaces what is at the destination
+(`fsutil::rename_noreplace`: `renamex_np` with `RENAME_EXCL` on macOS,
+`renameat2` with `RENAME_NOREPLACE` on Linux with glibc, a check before the
+rename elsewhere), so a concurrent receive of the same result that placed it
+first makes it `present`. One local invocation lists every received result with
+outcome `reused` and the labels the copy's records gave it, so `camdl list` and
+`@label` find them. A receive stopped midway leaves each folder it placed whole,
+and `clean` removes its staging once its process has stopped.
 
 ## What is enforced, and by what
 

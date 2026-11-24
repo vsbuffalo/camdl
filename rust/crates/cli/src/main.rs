@@ -224,6 +224,9 @@ pub(crate) enum Command {
     /// Rebuild the run store's index from its records
     Reindex(args::StoreReindexArgs),
 
+    /// Check results copied from another run store, then place and record them in this one
+    Receive(args::ReceiveArgs),
+
     /// Parse and type-check a .camdl model (delegates to camdlc)
     #[command(after_help = colored_help!("\
 This subcommand forwards all arguments verbatim to the OCaml compiler
@@ -628,6 +631,7 @@ fn main() {
         Command::Verify(a)  => store_commands::cmd_store(store::StoreCommand::Verify { handle: a.handle }, a.store.store),
         Command::Clean(a)   => store_commands::cmd_store(store::StoreCommand::Clean, a.store.store),
         Command::Reindex(a) => store_commands::cmd_store(store::StoreCommand::Reindex, a.store.store),
+        Command::Receive(a) => store_commands::cmd_receive(a),
         Command::Dev(DevCmd::Eval(a))    => eval::cmd_eval(&a, compile),
         Command::Dev(DevCmd::Compile(a)) => {
             let refs: Vec<&str> = a.args.iter().map(String::as_str).collect();

@@ -91,6 +91,47 @@ pub struct CleanArgs {
     pub store: StoreRootArgs,
 }
 
+#[derive(Args, Debug, Clone, store::Inputs)]
+#[command(after_help = colored_help!("\
+COPY is a partial copy of another run store, such as a cloud machine's: its
+`store.json`, the result folders wanted, each at the path it had there with
+the parent folders a nested result sits in (a fit run inside its fit problem,
+a prediction inside its fit run), and the invocation records that listed
+them.
+
+The copy is moved into this store's `.staging/`, and every result folder in it
+is checked as `camdl verify` checks one: its run id computed again from its
+`identity.json`, and every file hashed and compared with `run.json`. Nothing is
+placed unless every folder passes. Each result then goes to the path it had in
+the other store, under that build's directory, beside this build's results. A
+result already stored here with the same result files is left in place; one
+stored here with other files is refused, naming both folders. One invocation
+records every result received, with the labels the copy's invocation records
+gave them, so `camdl list` shows them and `@LABEL` names them. A refused copy
+is moved back where it was given; a received one is gone.
+
+Examples:
+  camdl receive pull-staging/ --label m4w_mh_cloud
+  camdl receive pull-staging/ --store /data/camdl-store
+"))]
+pub struct ReceiveArgs {
+    /// The copy of another run store to receive from
+    #[input(recorded)]
+    pub copy: PathBuf,
+
+    /// A name for this invocation, found again as `@LABEL`. Refused while an
+    /// invocation labelled LABEL is still running.
+    #[arg(long, value_name = "TEXT")]
+    #[input(store)]
+    pub label: Option<String>,
+
+    /// The run store to place the results in (default `$CAMDL_STORE`, else
+    /// `./camdl-store`); created when absent
+    #[arg(long, value_name = "DIR")]
+    #[input(store)]
+    pub store: Option<PathBuf>,
+}
+
 #[derive(Args, Debug, Clone)]
 #[command(after_help = colored_help!("\
 Reads every `identity.json`, `run.json` and invocation record in the run store,

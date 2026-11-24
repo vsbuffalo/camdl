@@ -50,9 +50,27 @@ pub(crate) fn claim_draft_name(owner: &Owner, hex: &str) -> String {
     format!("{hex}.{}.{}", owner.file_stem(), N.fetch_add(1, Ordering::Relaxed))
 }
 
-/// The owner-name part of a `.staging/` entry named by [`claim_draft_name`],
-/// or `None` for any other name.
+/// The prefix of the `.staging/` folder a store copy is checked in by
+/// [`crate::Store::receive`].
+const RECEIVE_DRAFT: &str = "receive";
+
+/// The name of the folder under `.staging/` that a store copy is moved into
+/// while `receive` checks and places it: `receive.<host>-<pid>-<start>.<n>`,
+/// naming the owner, so that `clean` removes it once that owner has stopped
+/// ([`draft_owner`]).
+pub(crate) fn receive_draft_name(owner: &Owner) -> String {
+    static N: AtomicU64 = AtomicU64::new(0);
+    format!("{RECEIVE_DRAFT}.{}.{}", owner.file_stem(), N.fetch_add(1, Ordering::Relaxed))
+}
+
+/// The owner-name part of a `.staging/` entry named by [`claim_draft_name`]
+/// or [`receive_draft_name`], or `None` for any other name.
 pub(crate) fn draft_owner(name: &str) -> Option<&str> {
+    if let Some(rest) = name.strip_prefix(RECEIVE_DRAFT).and_then(|r| r.strip_prefix('.')) {
+        let (stem, n) = rest.rsplit_once('.')?;
+        n.parse::<u64>().ok()?;
+        return Some(stem);
+    }
     let (hex, rest) = name.split_at_checked(64)?;
     if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
         return None;
@@ -294,6 +312,81 @@ pub(crate) fn rel_key(root: &Path, file: &Path) -> String {
         .map(|c| c.as_os_str().to_string_lossy().into_owned())
         .collect::<Vec<_>>()
         .join("/")
+}
+
+/// Renames `from` to `to` only when nothing is at `to`, failing with
+/// `AlreadyExists` otherwise. On macOS (`renamex_np` with `RENAME_EXCL`) and on
+/// Linux with glibc (`renameat2` with `RENAME_NOREPLACE`) the check and the
+/// rename are one system call, so a folder another process creates at `to`
+/// meanwhile is never replaced. Elsewhere, and on a filesystem that does not
+/// support the flag, `to` is checked first and then renamed onto, which leaves
+/// a window in which an empty directory created at `to` would be replaced.
+pub(crate) fn rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
+    match rename_exclusive(from, to) {
+        Some(r) => r,
+        None => {
+            if fs::symlink_metadata(to).is_ok() {
+                return Err(std::io::Error::from(ErrorKind::AlreadyExists));
+            }
+            fs::rename(from, to)
+        }
+    }
+}
+
+/// The platform's exclusive rename, or `None` where there is none or the
+/// filesystem refuses the flag.
+#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+fn rename_exclusive(from: &Path, to: &Path) -> Option<std::io::Result<()>> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let (Ok(f), Ok(t)) = (CString::new(from.as_os_str().as_bytes()), CString::new(to.as_os_str().as_bytes())) else {
+        return Some(Err(std::io::Error::from(ErrorKind::InvalidInput)));
+    };
+    // SAFETY: both arguments are NUL-terminated strings that outlive the call.
+    #[cfg(target_os = "macos")]
+    let rc = unsafe { libc::renamex_np(f.as_ptr(), t.as_ptr(), libc::RENAME_EXCL) };
+    // SAFETY: as above; `AT_FDCWD` makes both paths relative to the working
+    // directory, as `rename` does.
+    #[cfg(target_os = "linux")]
+    let rc = unsafe { libc::renameat2(libc::AT_FDCWD, f.as_ptr(), libc::AT_FDCWD, t.as_ptr(), libc::RENAME_NOREPLACE) };
+    if rc == 0 {
+        return Some(Ok(()));
+    }
+    let e = std::io::Error::last_os_error();
+    match e.raw_os_error() {
+        Some(libc::EINVAL) | Some(libc::ENOTSUP) | Some(libc::ENOSYS) => None,
+        _ => Some(Err(e)),
+    }
+}
+
+#[cfg(not(any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))))]
+fn rename_exclusive(_from: &Path, _to: &Path) -> Option<std::io::Result<()>> {
+    None
+}
+
+/// Copies the directory tree at `from` to `to`, which must not exist, keeping
+/// each file's modification time; symbolic links are refused. Each file is
+/// synced after it is written.
+pub(crate) fn copy_tree(from: &Path, to: &Path) -> Result<()> {
+    fs::create_dir(to).at("create directory", to)?;
+    for entry in fs::read_dir(from).at("list", from)? {
+        let entry = entry.at("list", from)?;
+        let (src, dst) = (entry.path(), to.join(entry.file_name()));
+        let kind = entry.file_type().at("stat", &src)?;
+        if kind.is_dir() {
+            copy_tree(&src, &dst)?;
+        } else if kind.is_file() {
+            fs::copy(&src, &dst).at("copy", &src)?;
+            let f = OpenOptions::new().write(true).open(&dst).at("open", &dst)?;
+            if let Ok(t) = entry.metadata().and_then(|m| m.modified()) {
+                f.set_modified(t).at("set the modification time of", &dst)?;
+            }
+            f.sync_all().at("sync", &dst)?;
+        } else {
+            return Err(Error::Io { op: "copy", path: src, source: std::io::Error::other("not a file or a directory") });
+        }
+    }
+    fsync_dir(to)
 }
 
 /// Removes `path`, a file or a directory tree; an absent path is not an error.

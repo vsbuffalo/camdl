@@ -2602,6 +2602,68 @@ camdl reindex                # rebuild the index from the records
   how many result folders it read. The index is a cache: a result is found
   without it.
 
+#### Receiving results from another store: `receive`
+
+`camdl receive COPY` places results computed in another run store, such as a
+cloud machine's, in this one. COPY is a partial copy of the other store: its
+`store.json`, the result folders wanted, each at the path it had relative to
+that store's root, with the parent folders a nested result sits in (a fit run
+inside its fit problem, a prediction inside its fit run), and the invocation
+records that listed them. `--store DIR` names the store to place them in, else
+`CAMDL_STORE`, else `./camdl-store`, which is created when absent. `--label L`
+names the invocation that records them, so that `@L` names them.
+
+```bash
+camdl receive pull-staging/ --label m4w_mh_cloud
+```
+
+The copy is moved into the store's `.staging/`, and every result folder in it is
+checked: its record is completed, of a kind and a record format this binary
+reads; its run id computes again from its `identity.json`; every result and
+provenance file has the SHA-256 `run.json` records for it; it holds no file its
+record does not name; an invocation record in the copy lists it; a nested
+result's parent is in the copy or already in this store; and every result it
+depends on, reads or records in its lineage, such as a fit's compiled model,
+data tables and quantities, is in the copy or already completed in this store. A
+symbolic link anywhere in the copy, and a dot-named directory inside a result
+other than the store's own `.staging/` and `.attempts/`, are refused, since no
+check reads what they hold. A folder that fails is refused by its path and the
+reason, nothing from the copy is placed, the copy is moved back where it was
+given, and the command exits 1. A failure while the folders are being placed,
+such as a directory of the store that cannot be written, moves every folder
+already placed back into the copy, so the store and the copy are as they were
+and no invocation is recorded.
+
+What belongs to the other store's processes, not to a result, is left behind:
+each placed folder loses its `.staging/`, its `.attempts/`, its lock files and
+any folder holding only a lock, and the temporaries of its records.
+
+Each result goes to the path it had in the other store, which begins with that
+build's directory, so it sits beside this build's results and never among them.
+A nested result whose parent is already here goes to the same path inside the
+parent's folder. A run id already stored here with the same result files is left
+in place and printed as `present`; one stored with other result files, or a path
+held by another result, is refused, naming both folders. Provenance files are
+not compared. A folder placed by another process at a result's path while the
+receive runs is never replaced: when it holds the same result files the result
+is `present`, and otherwise it is refused, naming that folder.
+
+One invocation records every result received, parents first, as reused, with the
+labels the copy's invocation records gave it. `camdl list` and `@L` then see the
+received results as they see local ones, and a command run here can read one,
+such as a prediction from a received fit run. The command prints one line per
+result, `placed` or `present`, with its kind, its 12-hex run id and its folder.
+A received copy is gone: its results are in the store and the rest is deleted.
+
+A receive whose process is killed while it places folders leaves each folder it
+placed whole, and the rest of the copy in `.staging/`, which `clean` deletes
+once the process has stopped. The copy must then be pulled again; receiving it
+again finds the results already placed `present`.
+
+`receive` takes no `--manifest` or `--link-root` yet. It gains them with the
+output manifest and the link tree, when the other commands that store results
+do.
+
 ### 4.6 Synthetic Observations
 
 ```bash

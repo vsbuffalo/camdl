@@ -144,7 +144,7 @@ fn holds_nested_results(dir: &Path, parent: &Key, kinds: &Kinds) -> bool {
     true
 }
 
-fn only_a_lock(dir: &Path) -> bool {
+pub(crate) fn only_a_lock(dir: &Path) -> bool {
     let Ok(entries) = fs::read_dir(dir) else { return false };
     let names: Vec<String> = entries.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
     names.iter().any(|n| n == LOCK_FILE) && names.iter().all(|n| is_lock_entry(n) || is_temporary_of(n, IDENTITY_FILE))

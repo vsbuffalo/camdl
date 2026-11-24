@@ -1,0 +1,289 @@
+//! `camdl receive`: a fit run, its fit problem and a prediction inside the
+//! run, made in one run store under another build and copied as `pull`
+//! copies them, placed in a second store and recorded there.
+//!
+//! End to end because what is tested is what the second store's commands
+//! then see (`list`, `@LABEL`, `verify`, a prediction from the received run)
+//! and the exit status of a refused copy. The fit is the SEIR golden IR with
+//! one estimated parameter under PGAS at 2 chains x 20 particles x 4 sweeps.
+
+mod fit_store_support;
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+fn binary() -> PathBuf {
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    Path::new(&manifest).join("../../target/release/camdl")
+}
+
+fn camdlc_bin() -> PathBuf {
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    Path::new(&manifest).join("../../../ocaml/_build/default/bin/camdlc.exe")
+}
+
+fn golden_ir() -> PathBuf {
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    Path::new(&manifest).join("../../../ocaml/golden/seir_observations.ir.json")
+}
+
+/// The environment variable that puts the other store's results under
+/// another build: every set `CAMDL_EXPERIMENTAL_*` is part of the ambient
+/// identity.
+const OTHER_BUILD: (&str, &str) = ("CAMDL_EXPERIMENTAL_RECEIVE_TEST", "remote");
+
+/// A scratch directory holding the data, a fit config and two stores:
+/// `remote/`, where the results are made, and `local/`, which receives them.
+struct Project {
+    tmp: tempfile::TempDir,
+}
+
+impl Project {
+    fn new() -> Project {
+        assert!(binary().exists(), "release camdl missing: {} — run `make build-rust`", binary().display());
+        assert!(camdlc_bin().exists(), "camdlc.exe missing: {} — run `make build-ocaml`", camdlc_bin().display());
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("obs.tsv"), "time\tweekly_cases\n7\t1\n14\t2\n21\t3\n28\t4\n35\t5\n").unwrap();
+        let config = format!(
+            r#"
+[model]
+camdl = "{ir}"
+
+[data.observations]
+weekly_cases = "obs.tsv"
+
+[estimate.beta]
+bounds = [0.01, 0.5]
+start  = 0.123
+prior  = {{ log_normal = {{ mu = -2.0, sigma = 0.5 }} }}
+
+[fixed]
+sigma    = 0.25
+gamma    = 0.3
+rho      = 0.5
+k        = 10.0
+p_detect = 0.5
+N0       = 1000
+I0       = 1
+
+[method]
+algorithm = "pgas"
+backend = "chain_binomial"
+chains = 2
+particles = 20
+sweeps = 4
+burn_in = 1
+thin = 1
+
+[config]
+dt = 1.0
+"#,
+            ir = golden_ir().display(),
+        );
+        std::fs::write(tmp.path().join("fit.toml"), config).unwrap();
+        Project { tmp }
+    }
+
+    fn dir(&self) -> &Path {
+        self.tmp.path()
+    }
+
+    fn remote(&self) -> PathBuf {
+        self.dir().join("remote")
+    }
+
+    fn local(&self) -> PathBuf {
+        self.dir().join("local")
+    }
+
+    fn copy(&self) -> PathBuf {
+        self.dir().join("pull-staging")
+    }
+
+    fn run(&self, store: &Path, env: &[(&str, &str)], args: &[&str]) -> Output {
+        let mut c = Command::new(binary());
+        c.env_remove("CLICOLOR_FORCE")
+            .current_dir(self.dir())
+            .env("CAMDL_STORE", store)
+            .env("CAMDL_SKIP_VERSION_CHECK", "1")
+            .env("CAMDLC", camdlc_bin());
+        for (k, v) in env {
+            c.env(k, v);
+        }
+        c.args(args).output().expect("spawn camdl")
+    }
+
+    fn ok(&self, store: &Path, env: &[(&str, &str)], args: &[&str]) -> String {
+        let out = self.run(store, env, args);
+        let all = text(&out);
+        assert!(out.status.success(), "`camdl {}` failed:\n{all}", args.join(" "));
+        all
+    }
+
+    /// A fit run labelled `m4w`, and a prediction from it, in `remote/`.
+    fn make_remote(&self, env: &[(&str, &str)]) {
+        self.ok(&self.remote(), env, &["fit", "run", "fit.toml", "--seed", "1", "--label", "m4w"]);
+        self.ok(&self.remote(), env, &["predict", "@m4w", "--mode", "free_forward", "--label", "m4w_pred"]);
+    }
+
+    /// What `pull` hands over: the remote store's `store.json`, invocation
+    /// records and result trees, without its index or owners' beats.
+    fn pull(&self) {
+        copy_tree(&self.remote(), &self.copy(), &|name| !name.starts_with('.') || name == ".invocations");
+    }
+}
+
+fn text(out: &Output) -> String {
+    format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
+}
+
+/// Copies `from` to `to`; at the top level only the entries `keep` accepts.
+fn copy_tree(from: &Path, to: &Path, keep: &dyn Fn(&str) -> bool) {
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(from).unwrap().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if !keep(&name) {
+            continue;
+        }
+        if e.path().is_dir() {
+            copy_tree(&e.path(), &to.join(&name), &|_| true);
+        } else {
+            std::fs::copy(e.path(), to.join(&name)).unwrap();
+        }
+    }
+}
+
+/// The result folders of each fit kind under `root`, relative to it.
+fn fit_folders(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for kind in ["fit", "fit_run", "prediction"] {
+        for f in fit_store_support::folders_of(root, kind) {
+            out.push(f.strip_prefix(root).unwrap().to_path_buf());
+        }
+    }
+    out
+}
+
+#[test]
+fn receive_places_and_records_a_pulled_fit() {
+    let p = Project::new();
+    p.make_remote(&[OTHER_BUILD]);
+    p.pull();
+    let report = p.ok(&p.local(), &[], &["receive", "pull-staging", "--label", "m4w_cloud"]);
+    assert!(report.contains("placed"), "{report}");
+
+    // The fit problem, the run inside it and the prediction inside the run
+    // are at the paths they had, under the other build's directory.
+    let remote = fit_folders(&p.remote());
+    assert_eq!(remote.len(), 3, "premise: a problem, a run and a prediction: {remote:?}");
+    assert_eq!(fit_folders(&p.local()), remote);
+    let run = fit_store_support::the_run(&p.local());
+    assert!(fit_store_support::predictions(&p.local())[0].starts_with(&run));
+    assert!(run.starts_with(&fit_store_support::problems(&p.local())[0]));
+    assert!(!p.copy().exists(), "the copy is consumed");
+
+    // `list` shows the run under the receive's label, `@LABEL` names it, and
+    // every received result verifies.
+    let list = p.ok(&p.local(), &[], &["list", "--kind", "fit"]);
+    assert!(list.contains("m4w_cloud"), "{list}");
+    let summary = p.ok(&p.local(), &[], &["fit", "summary", "@m4w_cloud"]);
+    assert!(summary.contains("pgas"), "{summary}");
+    p.ok(&p.local(), &[], &["verify", "@m4w_cloud"]);
+
+    // This build predicts from the received run: its prediction sits beside
+    // the received one, inside the run.
+    p.ok(&p.local(), &[], &["predict", "@m4w_cloud", "--mode", "free_forward", "--n-draws", "2"]);
+    let preds = fit_store_support::predictions(&p.local());
+    assert_eq!(preds.len(), 2, "{preds:?}");
+    assert!(preds.iter().all(|d| d.starts_with(&run)));
+    // The same fit run here goes under this build's directory, which is not
+    // the received one.
+    p.ok(&p.local(), &[], &["fit", "run", "fit.toml", "--seed", "1"]);
+    let top = |d: &Path| d.strip_prefix(p.local()).unwrap().components().next().unwrap().as_os_str().to_owned();
+    let tops: std::collections::BTreeSet<_> = fit_store_support::runs(&p.local()).iter().map(|d| top(d)).collect();
+    assert_eq!(tops.len(), 2, "one fit run per build directory: {tops:?}");
+    assert!(tops.contains(&top(&run)));
+}
+
+/// A copy without the quantities the fit run's lineage names is refused, so
+/// no received run is left whose prediction here could not find them.
+#[test]
+fn receive_refuses_a_copy_without_the_runs_quantities() {
+    let p = Project::new();
+    p.make_remote(&[OTHER_BUILD]);
+    p.pull();
+    for kind in ["prediction", "quantities"] {
+        for d in fit_store_support::folders_of(&p.copy(), kind) {
+            std::fs::remove_dir_all(d).unwrap();
+        }
+    }
+    let out = p.run(&p.local(), &[], &["receive", "pull-staging", "--label", "m4w_cloud"]);
+    let all = text(&out);
+    assert_eq!(out.status.code(), Some(1), "{all}");
+    assert!(all.contains("dependency") && all.contains("quantities"), "{all}");
+    assert!(fit_folders(&p.local()).is_empty(), "nothing is placed");
+}
+
+#[test]
+fn receive_refuses_a_damaged_copy_and_places_nothing() {
+    let p = Project::new();
+    p.make_remote(&[OTHER_BUILD]);
+    p.pull();
+    let run = fit_store_support::the_run(&p.copy());
+    let file = std::fs::read_dir(&run)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|f| f.extension().is_some_and(|x| x == "tsv"))
+        .expect("a fit run holds a .tsv");
+    let mut bytes = std::fs::read(&file).unwrap();
+    let last = bytes.len() - 2;
+    bytes[last] = if bytes[last] == b'0' { b'1' } else { b'0' };
+    std::fs::write(&file, &bytes).unwrap();
+
+    let out = p.run(&p.local(), &[], &["receive", "pull-staging", "--label", "m4w_cloud"]);
+    let all = text(&out);
+    assert_eq!(out.status.code(), Some(1), "{all}");
+    assert!(all.contains("cannot be received") && all.contains("recorded digest"), "{all}");
+    assert!(fit_folders(&p.local()).is_empty(), "nothing is placed");
+    assert!(p.copy().join("store.json").exists(), "the copy is back where it was given");
+    let list = p.ok(&p.local(), &[], &["list"]);
+    assert!(!list.contains("m4w_cloud"), "{list}");
+}
+
+/// A copy without the compiled model the fit depends on is refused, naming
+/// the model, so no received run is left that a prediction here could not
+/// read.
+#[test]
+fn receive_refuses_a_copy_without_its_compiled_model() {
+    let p = Project::new();
+    p.make_remote(&[OTHER_BUILD]);
+    p.pull();
+    let models = fit_store_support::folders_of(&p.copy(), "compiled_model");
+    assert_eq!(models.len(), 1, "premise: one compiled model: {models:?}");
+    std::fs::remove_dir_all(&models[0]).unwrap();
+
+    let out = p.run(&p.local(), &[], &["receive", "pull-staging", "--label", "m4w_cloud"]);
+    let all = text(&out);
+    assert_eq!(out.status.code(), Some(1), "{all}");
+    assert!(all.contains("dependency") && all.contains("compiled_model"), "{all}");
+    assert!(fit_folders(&p.local()).is_empty(), "nothing is placed");
+}
+
+#[test]
+fn receive_of_results_already_here_leaves_them_in_place() {
+    let p = Project::new();
+    // One build for both stores, so the fit computed here has the run ids of
+    // the fit in the copy.
+    p.make_remote(&[]);
+    p.pull();
+    p.ok(&p.local(), &[], &["fit", "run", "fit.toml", "--seed", "1"]);
+    let run = fit_store_support::the_run(&p.local());
+    let report = p.ok(&p.local(), &[], &["receive", "pull-staging", "--label", "m4w_cloud"]);
+    let present: Vec<&str> = report.lines().filter(|l| l.starts_with("present")).collect();
+    assert!(present.iter().any(|l| l.contains("fit_run")), "{report}");
+    assert!(report.lines().any(|l| l.starts_with("placed") && l.contains("prediction")), "{report}");
+    assert_eq!(fit_store_support::the_run(&p.local()), run);
+    assert!(fit_store_support::predictions(&p.local())[0].starts_with(&run));
+    p.ok(&p.local(), &[], &["verify"]);
+}
