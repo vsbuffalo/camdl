@@ -1,24 +1,484 @@
----
-date: 2026-10-29
-status: accepted 2026-10-29 — built on the maintainer decisions of 2026-10-29 listed in §1; D1–D24 (§14) are decided, nothing is pending; the default steps are decided heuristics (§4.4)
-  area: fit config / run identity / resolved problem and execution plan / IF2, PMMH and MH step sizes / profile CLI
-  issues: gh#1001
-  supersedes: 2026-10-29-support-keyed-transforms.md D9 and its commit series (ii) (its §11 commits 11–12)
-  amends:
-    - 2026-10-29-support-keyed-transforms.md §2, §4.1, §9.1, §9.2, §9.5, §10, §11, §13 (§13.1 here)
-    - 2026-10-26-parameter-roles.md §3.2 item 8, §4.1, §4.2, §5.3, §6.3, §6.4, §6.6, §7.1, §7.2, §7.3, §10.1, §10.2, §10.3, §11.2 Stages 2 and 3, D5, §13 (§13.3 here)
-    - 2026-09-08-workflow-first-fit-config.md §5 and decision 12; its §9 follow-up is done (§13.2 here)
----
-
 # A step size belongs to the method that takes it: `[estimate]` states the problem, `[method]` states how each algorithm moves through it
 
-Code references are against `origin/main` at `a9a89178` unless marked _branch_,
-which means `origin/feat/support-transforms` at `193525d9`, the implementation
-of the support-keyed transforms proposal. That proposal is cited from the
-branch; its section numbers are the same as in the revision on main. A claim
-marked _verified_ was read at the cited line or produced by the command shown.
-_Inferred_ means reasoned from the code and not executed. No fit was run for
-this document.
+Date: 2026-10-29. Status: accepted 2026-10-29: built on the maintainer decisions
+of 2026-10-29 listed in §1; D1–D24 (§14) are decided, nothing is pending; the
+default steps are decided heuristics (§4.4). Amended 2026-11-23: "Identity on
+the run store" (the first section) restates §5 and §11 against the run store;
+where it and §5 or §11 differ, it governs.
+
+Area: fit config, run identity, resolved problem and execution plan, IF2, PMMH
+and MH step sizes, profile CLI. Issue: gh#1001. Supersedes
+2026-10-29-support-keyed-transforms.md D9 and its commit series (ii) (its §11
+commits 11–12). Amends:
+
+- 2026-10-29-support-keyed-transforms.md §2, §4.1, §9.1, §9.2, §9.5, §10, §11,
+  §13 (§13.1 here);
+- 2026-10-26-parameter-roles.md §3.2 item 8, §4.1, §4.2, §5.3, §6.3, §6.4, §6.6,
+  §7.1, §7.2, §7.3, §10.1, §10.2, §10.3, §11.2 Stages 2 and 3, D5, §13 (§13.3
+  here);
+- 2026-09-08-workflow-first-fit-config.md §5 and decision 12; its §9 follow-up
+  is done (§13.2 here).
+
+Code references in §1–§15 are against `origin/main` at `a9a89178` unless marked
+_branch_, which means `origin/feat/support-transforms` at `193525d9`, the
+implementation of the support-keyed transforms proposal. That proposal is cited
+from the branch; its section numbers are the same as in the revision on main. A
+claim marked _verified_ was read at the cited line or produced by the command
+shown. _Inferred_ means reasoned from the code and not executed. No fit was run
+for this document.
+
+## Identity on the run store
+
+§5 and §11 were written against the content-addressed store that the run store
+(`2026-11-20-run-store-api.md`, implemented; `docs/engineering/run-store.md`)
+replaced. `cas.rs`, the `runid` crate, the fit-level and method-level digests,
+`FitStageCtx`, `stage_config_hash`, `resume_guard` and `run.json`'s `inputs` no
+longer exist. This section maps that design onto the store's types, and it
+governs where it differs from §5 or §11. The rest of the proposal (the config
+surface of §4, the legacy refusal of §7, the profile flags of §8, the decisions
+of §14) is unchanged.
+
+Code references in this section are against `origin/main` at `016e43b09`. A
+claim marked _verified_ was read at the cited line or produced by the command
+shown; _inferred_ means reasoned from the code and not executed. No fit was run.
+
+### What the transforms work left on main
+
+The support-keyed transforms series (i), on which this proposal builds, is on
+main (_verified_). `Transform` has its five maps, `LogInterval` among them
+(`sim/src/inference/types.rs:30-40`); `default_if2_step`, `default_mh_step` and
+`step_from_natural` are at `types.rs:160`, `:171` and `:191`; and the domain is
+computed from the model and the box by `roles::effective_domain`
+(`cli/src/roles.rs:1000`). The branch `feat/support-transforms` itself is not an
+ancestor of main (`git branch -r --merged origin/main` lists only
+`feat/support-transforms-s5`); its content reached main through that branch
+(_inferred_ from the code above being on main).
+
+Two commits of the old series A have also landed, so they leave the series
+(_verified_):
+
+- old commit 1: `fit_state.toml` writes no `[rw_sd]`
+  (`fit_state_writes_no_rw_sd_and_still_loads_one_that_has_it`,
+  `cli/src/fit/state.rs:447`), and `runner::auto_rw_sd` is gone
+  (`grep -rn 'fn auto_rw_sd\b' rust/crates/cli/src` matches nothing);
+- old commit 8: the decided defaults, `IF2_INTERVAL_STEP` and
+  `IF2_LOG_INTERVAL_STEP` 1/20, `IF2_HALF_BOUNDED_STEP` 1/5 and
+  `PGAS_MWG_DEFAULT_STEP` 0.25 (`types.rs:75`, `:78`, `:86`, `:102`; commits
+  `806bcd5f8` and `8f6c5c313`).
+
+The step itself is unchanged: `EstimatedParam` still carries `rw_sd`,
+`rw_sd_auto` and `perturb_only_at_t0` (`types.rs:383-410`), an explicit `rw_sd`
+is still natural-scale and converted once (`step_from_natural`), and PMMH's and
+MH's initial proposal is still five times an explicit step
+(`EstimatedParam::mh_initial_step`, `types.rs:461-467`).
+
+### The store already keeps steps and starts out of the problem
+
+A fit on the store is two artifact kinds (`cli/src/fit_store.rs`). A
+`FitProblem` is keyed by `FitProblemIdentity` (`:193-217`), which holds the
+model, the training rows, the partition, the tables, `estimate`, `fixed`,
+`simplex_groups`, `settings`, the scenario request, `ic_free` and a synthetic
+origin. A `FitRun` sits inside its problem and is keyed by `FitRunIdentity`
+(`:309-317`), a `ChainIdentity` plus the run's length and a resume base:
+
+```rust
+// cli/src/fit_store.rs, today
+pub(crate) struct Estimated {             // :133-140, one per [estimate] entry
+    pub name: String,
+    pub bounds: Option<(Finite, Finite)>,
+    pub prior: Option<String>,
+}
+
+pub(crate) struct ChainIdentity {          // :296-306
+    pub problem: Dep<FitProblem>,
+    pub method: MethodSettings,
+    pub perturbation: PerturbationSettings, // rw_sd, perturb_only_at_t0, start
+    pub jacobian_model: Option<Dep<CompiledModel>>,
+    pub seed: ProcessSeed,
+    pub starts: StartSource,
+}
+
+pub(crate) struct MethodSettings {         // :262-269
+    pub algorithm: String,                 // the `algorithm` key
+    pub settings: String,                  // canonical JSON of the rest of [method]
+}
+
+pub(crate) struct Perturbation {           // :151-158; PerturbationSettings holds a Vec
+    pub name: String,
+    pub rw_sd: Option<Finite>,             // as written, natural scale
+    pub perturb_only_at_t0: bool,
+    pub start: Option<Finite>,
+}
+```
+
+`split_estimate` (`:803-829`) divides each `[estimate]` entry between the two:
+bounds and prior to the problem's `Estimated`, `rw_sd`, `perturb_only_at_t0` and
+`start` to the run's `Perturbation`. The test `rw_sd_belongs_to_the_run`
+(`fit_store/tests.rs:394`) pins the split for `rw_sd`. The levels of §5 map onto
+the store's types as follows:
+
+| §5 term                     | on the store                                                                            | status                                          |
+| --------------------------- | --------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| fit level, the problem      | `FitProblemIdentity`                                                                    | steps and starts already absent (_verified_)    |
+| method level                | `ChainIdentity.method` (`MethodSettings`), with `perturbation` and `starts` beside it   | steps keyed as written, not resolved            |
+| `ResolvedSteps::identity()` | a field of each method variant's identity (below)                                       | to do                                           |
+| `starts_base` (§5.2)        | `Perturbation.start`, keyed per parameter in the run                                    | already in the run (_verified_)                 |
+| `resume_guard`              | `ResumeBase::resolve`, which compares the base's `ChainIdentity` (`fit_command.rs:735`) | follows the identity; no separate change        |
+| profile base level          | `ProfilePointIdentity.problem: Dep<FitProblem>` (`profile_store.rs:442-453`)            | the raw-bytes defect of §3.3 is gone            |
+| profile method level        | `ProfileMethod.estimated: Vec<EstimatedSetting>` (`profile_store.rs:340-397`)           | keys the resolved z step; flag keyed under nl-* |
+| `run.json` `inputs` (§5.6)  | the provenance file `run_inputs.json` (`fit_store.rs:1300`)                             | to do                                           |
+
+§5.1 and §5.2 are therefore done. No step and no start reaches
+`FitProblemIdentity`, so the defect of §3.7 does not arise on the store. An IF2
+file that writes `perturb_only_at_t0` and a PGAS file that may not write it pose
+one problem, because `Estimated` holds only the name, the bounds and the prior
+(_inferred_ from `fit_store.rs:133-148` and `:803-829`; the test below has not
+been run). What remains of §5 is the method level. There, a run keys the step
+the user wrote, not the step it ran with: `rw_sd = None` and `rw_sd` written at
+the default value are two keys for one computation, and the run's identity holds
+the step outside the method it belongs to.
+
+`profile` is nearer the design. `EstimatedSetting::of`
+(`profile_store.rs:415-434`) keys `p.rw_sd`, the resolved step in z, only under
+IF2, so §5.4's change of method level is done. One defect remains there.
+`perturb_only_at_t0` is keyed under every algorithm (`:431`), so an `nl-*`
+profile point re-keys on a flag it does not read (_verified_ by reading; no
+run).
+
+### The step moves into a typed method identity
+
+`MethodSettings` holds the method as two strings. The workflow-bindings proposal
+(`2026-11-23-workflow-bindings.md`, "The file set follows the method") needs a
+run's file set as a function of its identity and cannot compute it from these
+strings. The step move is where that is fixed, because with a typed identity
+each step becomes a field of the variant that reads it. `MethodSettings`,
+`Perturbation` and `PerturbationSettings` are replaced by one enum with a
+variant per algorithm, derived with `store::Identity` like the store's other
+identities:
+
+```rust
+// cli/src/fit_store.rs, after
+#[derive(store::Identity, Clone, Debug)]
+#[identity(tag = "fit_method", version = 2)]
+pub(crate) enum MethodIdentity {
+    If2(If2Identity),
+    Pgas(PgasIdentity),
+    Pmmh(PmmhIdentity),
+    Mh(MhIdentity),
+    Pfilter(PfilterMethodIdentity),
+    NlSbplx(NloptIdentity),
+    NlBobyqa(NloptIdentity),
+    NlLbfgs(NloptIdentity),
+}
+
+#[derive(store::Identity, Clone, Debug)]
+#[identity(tag = "fit_method_if2", version = 1)]
+pub(crate) struct If2Identity {
+    pub backend: Backend,                     // ChainBinomial | Ode
+    pub chains: u64,
+    pub particles: u64,
+    pub iterations: u64,
+    pub cooling: Finite,
+    pub cooling_target_iters: u64,
+    pub loglik_eval: LoglikEvalIdentity,
+    pub gate: GateIdentity,
+    pub dt_check: DtCheckIdentity,
+    pub binomial: Binomial,                   // pfilter_store::Binomial
+    /// Every estimated parameter's resolved perturbation (§4.4), by name.
+    pub perturbation: BTreeMap<String, PerturbationIdentity>,
+    /// One map per `[[simplex_groups]]` entry: each member's SD on the
+    /// log-ratio coordinate.
+    pub simplex: Vec<BTreeMap<String, Finite>>,
+}
+
+#[derive(store::Identity, Clone, Copy, Debug)]
+#[identity(tag = "fit_if2_perturbation", version = 1)]
+pub(crate) struct PerturbationIdentity {
+    pub sd: Finite,                           // ZSd, unwrapped at the boundary
+    pub at: PerturbAtIdentity,                // EveryObservation | TimeZeroOnly
+}
+
+#[derive(store::Identity, Clone, Debug)]
+#[identity(tag = "fit_method_pmmh", version = 1)]
+pub(crate) struct PmmhIdentity {
+    pub backend: Backend,
+    pub chains: u64,
+    pub particles: u64,
+    pub burn_in: Option<u64>,
+    pub thin: Option<u64>,
+    pub adapt: bool,
+    pub adapt_start: u64,
+    pub binomial: Binomial,
+    /// Every estimated parameter's resolved initial proposal SD in z, by name.
+    pub proposal: BTreeMap<String, Finite>,
+}
+// MhIdentity: PmmhIdentity's fields less `particles` and `binomial`, plus
+// `burnin_dt: Option<Finite>`, `dt_check` and the same `proposal`.
+// PgasIdentity, PfilterMethodIdentity, NloptIdentity: today's fields of their
+// `config_v2::Algorithm` variant (`config_v2.rs:992`), no step table (D6).
+
+#[derive(store::Identity, Clone, Debug)]
+#[identity(tag = "fit_starts", version = 2)]
+pub(crate) struct StartSource {               // :285-292, gains the written starts
+    pub rule: String,
+    pub input: StartInput,
+    /// `[estimate].start`, by name: execution, keyed with the rule (§5.2).
+    pub written: BTreeMap<String, Finite>,
+}
+
+#[derive(store::Identity, Clone, Debug)]
+#[identity(tag = "fit_chain", version = 2)]
+pub(crate) struct ChainIdentity {
+    pub problem: Dep<FitProblem>,
+    pub method: MethodIdentity,               // was MethodSettings + PerturbationSettings
+    pub jacobian_model: Option<Dep<CompiledModel>>,
+    pub seed: ProcessSeed,
+    pub starts: StartSource,
+}
+```
+
+The length stays outside the method, in `FitRunIdentity.length`, as
+`MethodSettings::of` keeps it today (`fit_store.rs:355-374`); `starts` stays in
+`StartSource`, whose `rule` stays the rule's canonical JSON; typing it is
+outside this proposal. The derive accepts tuple variants and named fields
+(`store-derive/src/lib.rs:145-170`), and `profile_store::CellSettings`
+(`profile_store.rs:365-384`) is an existing typed per-algorithm identity of the
+same shape.
+
+`MethodIdentity::of(method: &Method, steps: &ResolvedSteps) -> Result<(MethodIdentity, u64), String>`
+replaces `MethodSettings::of`. It destructures each `Algorithm` variant with no
+`..`, as `resolve_problem` destructures `Problem` (`fit_store.rs:634-651`), so a
+field added to `config_v2::Algorithm` is a compile error until it is placed in
+the identity or excluded by name. That compile error replaces the guarantee the
+JSON form gave by subtraction, which the test
+`identity_payload_includes_every_field_but_the_named_exclusions`
+(`config_v2.rs:4277`) checked. A `NotFinite` float is refused by `Finite::new`
+instead of by `ensure_finite`.
+
+What the typed identity buys:
+
+- **The file set is a function of the identity.** The workflow proposal's
+  `MethodFiles::files` reads the variant, `chains`, PGAS `n_trajectories` and
+  the pfilter method's `record_prequential` from `MethodIdentity`, and resume
+  and a named starts file from `FitRunIdentity.resumed_from` and
+  `StartSource.input`. A stored run's typed record is `Stored::identity()`
+  (`store/src/stored.rs:50`), so name lookup and the store's expected-set check
+  read the same value the run was keyed by, with no re-parse of `method.toml`.
+- **Every setting is type-checked into the key.** A step is a `Finite` in z in
+  the variant that reads it, so a proposal SD cannot key an IF2 run and an IF2
+  perturbation cannot key a PMMH run. A written default and an omitted name
+  resolve to the same value and key the same, as §5.3 required.
+- **The method group is the method.** A run's group folder is hashed from
+  `id.chain.method` (`fit_store.rs:343-349`). Today two runs that differ only in
+  `rw_sd` share a group folder; after the change their steps are method
+  settings, and they sit in two `runs/<algorithm>-…/` groups.
+
+What moves, and what changes in the key:
+
+| setting                               | keyed today in                   | keyed after in                                                | what changes in the key                                        |
+| ------------------------------------- | -------------------------------- | ------------------------------------------------------------- | -------------------------------------------------------------- |
+| `rw_sd` under IF2                     | `Perturbation.rw_sd`, as written | `If2Identity.perturbation[name].sd`, resolved, in z           | an omitted step and its default key the same                   |
+| `rw_sd` under PMMH and MH             | `Perturbation.rw_sd`, as written | `PmmhIdentity.proposal[name]`, `MhIdentity.proposal[name]`, z | the key holds the SD the sampler starts with, with no ×5       |
+| `rw_sd` under PGAS, pfilter, `nl-*`   | `Perturbation.rw_sd`             | nowhere; refused (§4.3, §7.1)                                 | an inert setting no longer re-keys                             |
+| `perturb_only_at_t0`                  | `Perturbation`, every method     | `PerturbationIdentity.at`, IF2 only                           | none beyond the move                                           |
+| `[estimate].start`                    | `Perturbation.start`             | `StartSource.written`                                         | none beyond the move                                           |
+| every other `[method]` key            | `MethodSettings.settings`, JSON  | its variant's typed field                                     | the same values; `binomial = "btpe"` is keyed, not omitted     |
+| profile `rw_sd`, `perturb_only_at_t0` | `EstimatedSetting`               | `EstimatedSetting.perturbation: Option<PerturbationIdentity>` | `None` under `nl-*`, so the flag no longer re-keys an nl point |
+
+The new tag versions change the identity key of every fit run and every profile
+point once. `FitProblemIdentity` is unchanged, so no problem's identity key
+changes. Every run id also holds the build's ambient key, so a new build
+computes problems and runs again in any case (`docs/engineering/run-store.md`,
+"The run id"). No `ir/VERSION` bump and no golden change is involved.
+
+The run record keeps what the identity does not. `method.toml` is a result file
+(`fit_store.rs:1116-1120`), compared whenever the run is computed again
+(`run-store.md`, "The record files"), so it writes the resolved tables, a
+function of the identity: `[method.perturbation]` or `[method.proposal]` with
+every estimated parameter's z value, and `[estimate]` with the written starts.
+`StepFrom` (written or default) and each step's natural-scale equivalent at the
+resolved start (the `StepRecord` of §5.6) are not functions of the identity, and
+they go in the provenance file `run_inputs.json` as `steps`.
+
+### The four series against today's code
+
+§11 planned a new pin test, `fit_fixed_seed_pin.rs`. The run store's move
+brought one with the same purpose, and it serves instead:
+`each_method_computes_what_it_computed_before_the_move`
+(`cli/src/fit_command/tests.rs:697`). It runs `fit run --seed 7` for IF2, PGAS,
+PMMH, pfilter, MH and the three `nl-*` methods on one SIR fixture with default
+steps (`:62-74`, `:77-84`) and compares each stored file's digest per platform.
+It skips `method.toml`, `identity.json` and `run.json` (`:699-702`), so an
+identity change moves no pin. Two other pin tests cover commands the series
+touch: `the_deterministic_profiles_store_what_they_stored_before_the_move`
+(`profile_store/tests.rs:1059`, `nl-*` profiles only) and
+`each_prediction_computes_what_fit_predict_computed`
+(`predict_command/tests.rs`). Each commit below is green under `make test`.
+
+**Series A, the step correction.** On a branch from main.
+
+1. **The typed method identity.** `MethodIdentity` and its variant structs
+   replace `MethodSettings`, carrying today's settings only; `Perturbation`
+   stays for now. Files: `fit_store.rs`, `fit_command.rs` (`:512`, `:607-614`,
+   `:735`), the test helpers `Method::identity_payload` and
+   `Algorithm::cas_target_length` (`config_v2.rs:3835-3862`) and the identity
+   tests that use them (`:4140-4407`, `:8090`). Re-keys every fit run. No pin
+   moves.
+2. **The step types in `sim`.** `ZSd`, `PerturbAt`, `Perturbation`, `If2Step`,
+   `IF2Config.steps`; `EstimatedParam` loses its three fields; the readers of
+   §4.2 move, `if2.rs` at its read sites only. Files:
+   `sim/src/inference/types.rs`, `if2.rs`, `cli/src/fit/runner.rs`,
+   `cli/src/fit/pmmh.rs`, `cli/src/fit/mod.rs`, `cli/src/profile.rs`
+   (`cooling_final`, `:1788-1802`), `cli/src/profile_store.rs`
+   (`EstimatedSetting::of`), and the test literals. The CLI fills the vectors
+   from today's values, so no pin moves.
+3. **The tables, their resolution and their identity.** `fit/steps.rs` with
+   `resolve_steps`, called in `fit_command.rs` beside the starts resolution
+   (`:511`) and fed by `roles::effective_domain`; `[method.perturbation]` and
+   `[method.proposal]` (§4.3); `EstimateSpecV2` loses `rw_sd` and
+   `perturb_only_at_t0`; the steps enter `If2Identity`, `PmmhIdentity` and
+   `MhIdentity` resolved; `Perturbation`, `PerturbationSettings`,
+   `split_estimate`'s run half and `PerturbationEntry` go, and the starts move
+   to `StartSource.written`; `method_toml` and `read_fit`
+   (`fit_store.rs:1067-1113`, `:1275`) write and read the resolved tables;
+   `profile_store::pose_problem` copies `[method.perturbation]` in place of the
+   three `[estimate]` fields (`:250-256`); the formula refusal (§7.1) and
+   `load_archived` (§7.2). The factor of five goes here. No pin moves, because
+   every pinned fixture takes the default steps, whose values do not change
+   (`MH_DEFAULT_STEP` is already the PMMH default, `types.rs:95`).
+   `rw_sd_belongs_to_the_run` is rewritten for the tables, and the §5.5 tests
+   land here in store form, each mutation-checked:
+   - `an_if2_file_and_a_pgas_file_of_one_problem_share_a_problem`, in
+     `fit_store/tests.rs`: equal `FitProblemIdentity` keys. It is green before
+     this commit too (_inferred_); its mutation adds the IF2 flag to
+     `Estimated`.
+   - configs identical but for `[method.perturbation] beta`: equal problem key,
+     different `ChainIdentity` key; mutation: leave `perturbation` out of
+     `If2Identity`.
+   - `beta = 0.05` written against the line omitted, on a `LogInterval`
+     parameter whose default is 1/20: equal run keys; mutation: key the written
+     table.
+   - `beta = 0.05` against `beta = { sd = 0.05, initial_state = true }`:
+     different run keys; mutation: drop `at`.
+   - configs identical but for `beta.start`: equal problem key, different run
+     key; mutation: leave `written` out of `StartSource`.
+   - a `profile --algorithm nl-sbplx` point with and without
+     `[method.perturbation]` in `--fit`: equal point key; mutation: key the
+     perturbation under nl-*.
+4. **The D16 commit** (§7.5): the `FitState` schema tag, the
+   `load_input`/`load_for_inspection` split and the rename to
+   `initial_state_params`. The input paths are now `draw_from_mle`
+   (`fit/chain_starts.rs:1208`), `check_source_converged` (`fit/gating.rs:672`),
+   `profile`'s `from_mle` read (`profile.rs:2107`) and the runner's read-back
+   (`fit/mod.rs:1314`). A source run made by an earlier build can still be
+   named, since a `Dep` records the build it was made under (`run-store.md`,
+   "The build directory"), so the refusal is still needed. **This commit moves
+   pins**: the tag adds a line to every `fit_state.toml`, so the
+   `fit_state.toml` rows of `if2`, `pgas`, `pmmh`, `mh`, `sbplx`, `bobyqa` and
+   `lbfgs` in `each_method_computes_what_it_computed_before_the_move` are
+   re-captured on each platform, and the pin diff is the commit's subject
+   (_inferred_; the rename alone moves none, since the field is skipped when
+   empty and no fixture has an initial-state parameter).
+5. **The converted values** of §7.3 and §7.4 (`load_with_model`), with a test
+   per row of §7.4. No pin moves.
+6. **`fit run --dt`**, under the dt rule (the last subsection below). No pin
+   moves.
+7. **Documents** (§9.2–§9.4), the run spec's fit-run identity text and its §1.2
+   backend / `dt` row (below), and `docs/engineering/run-store.md`'s "`fit run`"
+   paragraph, which names `rw_sd`, `perturb_only_at_t0` and `start` as
+   `ChainIdentity` fields.
+
+Old commits 1 and 8 are on main. Old commit 5 (the identity change) is split
+between commits 1 and 3, and old commit 7 (profile) is in commits 2 and 3.
+
+**Series C, `param_surfaces` and the initial-state refusals** (§4.6), follows A
+on any branch, unchanged. It changes no identity type, and no pin moves: no
+pinned fixture has an initial-state parameter.
+
+**Series B, the plan series** (§6), before parameter-roles Stage 2. Its
+`ExecutionPlan` takes the resolved steps from `ResolvedSteps`, the same value
+`MethodIdentity::of` reads. Its `ResolvedProblem` shares a name with
+`fit_store::ResolvedProblem` (`fit_store.rs:535`), the posed problem with its
+identity; the plan series renames one of them when it lands. Each backend commit
+is bit-identical at a fixed seed, so no pin moves.
+
+**Series D, the profile flags** (§8), in parameter-roles Stage 3. `--rw-sd`
+(`args/mod.rs:2707-2719`) gives way to `--estimate`, `--perturbation` and
+`--initial-state`; `ProfileMethod` re-keys. No pin moves:
+`the_deterministic_profiles_store_what_they_stored_before_the_move` profiles
+with `nl-*` only.
+
+The landing order of §11 holds, with A's commit 1 free to land first and alone.
+
+### The integration step: `fit run --dt` under the dt rule
+
+The London measles project runs a factorial design whose cells differ in the
+integration step `dt` and must each state their `dt` without editing a shared
+base fit config. The rule for every written step is settled in
+`rust/crates/cli/src/dt_rule.rs` (its module doc), and it binds `fit run`,
+`predict`, `profile` and `pfilter` (_verified_ by reading):
+
+- A model that declares `simulate { dt = … }` is integrated at that step. A
+  written step, `--dt` or `[config] dt`, must equal it or is refused
+  (`effective_dt`; for `fit run`, `fit/run_config.rs:345-358`).
+- With no model step, a written value is the step. A command that takes both a
+  `--dt` and a `--fit` file requires the two to agree
+  (`effective_dt_for_command`, used by `profile.rs:537`, `profile_store.rs:174`
+  and `pfilter.rs:348`).
+- With neither, the step is `DEFAULT_DT`, 1.0.
+- Only `camdl simulate --dt` overrides the model's step, because simulation fits
+  nothing.
+
+A written value that disagrees is refused rather than replaced, because a
+replaced value would run a computation other than the one asked for.
+
+What today's code lacks, _verified_ by reading:
+
+- `fit run` has no `--dt`. `FitRunArgs` and its groups `FitProblemFlags`,
+  `FitRunFlags` and `FitMethodFlags` (`args/mod.rs:898-1209`) declare none;
+  `simulate`, `profile`, `pfilter` and `predict` each have one (`:189`, `:258`,
+  `:334`, `:1804`).
+- `dt` is a problem setting: `[config] dt` (`FitBackendConfig.dt`,
+  `config_v2.rs:285`), keyed as `FitSettings.dt` in `FitProblemIdentity`
+  (`fit_store.rs:169-176`, filled at `:694` and `:791-795`). `[method]` has no
+  `dt` key: no `Algorithm` variant has one (`config_v2.rs:992-…`); MH's
+  `burnin_dt` is a coarser step over the unscored warm-up only.
+- The run spec's §1.2 table (`docs/camdl-run-spec.md:71`) is out of date against
+  the code. It places `dt` under fit.toml `[method]` and calls it "overridable
+  by `--dt` on the simulate-side commands", which holds only for `simulate`.
+
+The step stays in the problem, not in `[method]`. On the chain-binomial backend
+`dt` defines the stochastic process fitted: gh#1154 measures a London-sized SEIR
+whose yearly epidemic sequence at `dt = 1` differs from the ODE's and loses the
+two-year cycle in all 20 runs, against 95% kept at `dt = 0.1`. A `[method] dt`
+would let an IF2 run and a PMMH run on one stored problem fit two different
+models. §6.4, which moves `dt` into the engine's `FilterSettings`, is the layout
+of an engine configuration and changes neither.
+
+The implementation, commit 6 of series A:
+
+- `fit run --dt X` is a `FitProblemFlags` entry, because it changes the problem.
+  It is resolved with the fit file's written `[config] dt` and the model's step
+  by `effective_dt_for_command`, as `profile` and `pfilter` resolve theirs: it
+  is accepted when the file writes no `[config] dt` or the same value, refused
+  when they disagree, and refused when it differs from a model-declared step.
+  The result is written into the problem's `[config] dt`, re-keys the problem
+  through `FitSettings.dt`, which `problem.toml` records, and needs no new
+  identity field.
+- `profile --dt` and `pfilter --dt` are unchanged; they already follow the rule.
+- Its red tests: `fit run --dt 0.5` on a file with no `[config] dt` and a model
+  with no step stores a problem whose `FitSettings.dt` is 0.5; the same flag
+  against `[config] dt = 1.0` is refused naming both; against a model declaring
+  `simulate { dt = 1 }` it is refused naming the model's step. No pin moves,
+  since no pinned fixture passes `--dt` (_inferred_).
+
+For the London cells: the base fit file omits `[config] dt`, the model declares
+no step, and each cell passes its own `--dt`.
+
+The documents commit rewrites the §1.2 row to state this rule: `dt` is declared
+by the model's `simulate { dt }` or written in the CLI or `fit.toml` `[config]`;
+a written value must equal the model's step, and a `--dt` beside a `--fit` file
+must equal its `[config] dt`; only `simulate --dt` overrides.
 
 ## 1. The decisions this builds on
 
