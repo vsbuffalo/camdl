@@ -258,11 +258,25 @@ impl Store {
     /// the result it sits in: a result placed inside it, or a by-product of
     /// it. Ordered by folder path. A child that is running, failed or damaged
     /// is left out, as [`Store::get`] leaves it out, and so is a folder whose
-    /// `identity.json` does not read.
+    /// `identity.json` does not read, with a `log::warn!` naming it.
     pub fn children_of<A: Artifact, P: Artifact>(&self, parent: &Stored<P>) -> Result<Vec<Stored<A>>> {
+        // Every folder under the parent with an identity.json; one that does
+        // not read is skipped with a warning, since it may be a child.
+        fn visit(dir: &Path, out: &mut Vec<(PathBuf, IdentityFile)>) {
+            for child in crate::storage::visible_dirs(dir) {
+                match read_record::<IdentityFile>(&child.join(IDENTITY_FILE)) {
+                    crate::record::Read::Ok(f) => out.push((child.clone(), f)),
+                    crate::record::Read::Bad(e) => {
+                        log::warn!("skipping {}: its {IDENTITY_FILE} does not read: {e}", child.display())
+                    }
+                    crate::record::Read::Absent => {}
+                }
+                visit(&child, out);
+            }
+        }
         let parent_key = parent.id().key();
         let mut found = Vec::new();
-        crate::maintenance::visit(parent.folder(), &mut found);
+        visit(parent.folder(), &mut found);
         found.sort_by(|a, b| a.0.cmp(&b.0));
         let mut children = Vec::new();
         for (dir, ident) in found {

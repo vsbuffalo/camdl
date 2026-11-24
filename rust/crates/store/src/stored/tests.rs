@@ -97,6 +97,10 @@ fn the_children_of_a_result_are_its_completed_results_of_one_kind_in_folder_orde
     drop(begin_pred(&store, &fit, 3));
     let running = begin_pred(&store, &fit, 5);
     begin_pred(&store, &other, 6).finish().unwrap();
+    // A folder whose identity.json does not read is skipped, not an error.
+    let junk = fit.folder().join("predictions").join("junk");
+    std::fs::create_dir_all(&junk).unwrap();
+    std::fs::write(junk.join("identity.json"), b"{").unwrap();
 
     let children = store.children_of::<Pred, Fit>(&fit).unwrap();
     let keys: Vec<Key> = children.iter().map(|c| c.id().key()).collect();
