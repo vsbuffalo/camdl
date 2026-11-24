@@ -1852,6 +1852,25 @@ ended, as `chain_starts.tsv` records it: `accepted` (ran to the end), `skipped`
   Each search's every evaluation and its running best. Header: `chain`, `eval`,
   `loglik`, `best_loglik`, each estimated parameter.
 
+#### `model_presentation`
+
+How a model file is shown: everything a compile yields that no computation
+reads. A result does not depend on it; the compiled model's entry in each
+invocation record names the presentation that invocation compiled. Contract
+version 1.
+
+- `source`: `source.camdl`, camdl (always; `source.ir.json` for a compiled
+  model). The model file as written.
+- `docs`: `docs.json`, JSON (always). The model's `description` and its `#'`
+  documentation, by declaration.
+- `declared`: `declared.json`, JSON (always). The model as its author declared
+  it.
+- `render`: `model.render.json`, JSON (a `.camdl` model that camdlc rendered).
+  The model's mathematics as KaTeX strings, as `camdlc render --format json`
+  writes them.
+- `graph`: `model.graph.json`, JSON (a `.camdl` model that camdlc rendered). The
+  compartment flow graph, as `camdlc render --format graph` writes it.
+
 #### `fit`
 
 A fit problem: the model, the data and the rows that train. Contract version 1.

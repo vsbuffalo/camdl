@@ -9,8 +9,9 @@
 //! finishes ([`declare`]). The store refuses to finish a run whose files
 //! differ from its last declaration (`store::Error::FileSetMismatch`), and a
 //! run that declared none (`store::Error::NoExpectedFiles`). A content
-//! artifact stored with `Store::put` holds the one file its kind names and
-//! its provenance files, which `put` declares itself. The run spec's
+//! artifact stored with `Store::put` holds the files its identity names and
+//! its provenance files, which `put` declares itself; a model's presentation
+//! names its files by an enum, as a claimed kind does. The run spec's
 //! result-file contract (§2.9) is generated from the same variants, with
 //! their formats, meanings and header rows ([`contract`]). The design is
 //! `docs/dev/proposals/2026-11-23-workflow-bindings.md`, "Result files as
@@ -20,6 +21,7 @@ pub(crate) mod contract;
 pub(crate) mod fit;
 pub(crate) mod fit_run;
 pub(crate) mod pfilter;
+pub(crate) mod presentation;
 pub(crate) mod profile;
 pub(crate) mod sim;
 
@@ -127,7 +129,8 @@ fn find<F: ResultFile>(candidates: impl IntoIterator<Item = F>, stored: &str) ->
     candidates.into_iter().find(|f| f.stored() == stored)
 }
 
-/// A kind camdl stores through a claim, with the enum of its files.
+/// A kind whose files are an enum: every kind camdl stores through a claim,
+/// and a model's presentation.
 pub(crate) trait Files: store::Artifact {
     type File: ParseFile;
     /// The version of the kind's file contract: which files it stores, under
@@ -197,12 +200,13 @@ fn content<C: store::ContentArtifact>() -> (&'static str, KindContract) {
 }
 
 /// The file contract of every kind camdl stores, by kind name.
-fn contracts() -> [(&'static str, KindContract); 20] {
+fn contracts() -> [(&'static str, KindContract); 21] {
     use crate::{camdl_store as cs, fit_store as fs, pfilter_store as ps, profile_store as pr, sim_store as ss};
     [
         content::<cs::CompiledModel>(),
         content::<cs::Quantities>(),
         content::<cs::DataTable>(),
+        claimed::<cs::ModelPresentation>(),
         claimed::<fs::FitProblem>(),
         claimed::<fs::FitRun>(),
         claimed::<fs::Prediction>(),
@@ -230,12 +234,12 @@ pub(crate) fn contract(kind: &str) -> Option<KindContract> {
 }
 
 /// Whether `kind` is a content artifact (`compiled_model`, `quantities`,
-/// `data_table`): a result named by its content, which a command stores as an
-/// input of the results it computes.
+/// `data_table`, `model_presentation`): a result named by its content, which
+/// a command stores beside the results it computes.
 pub(crate) fn is_content(kind: &str) -> bool {
     use crate::camdl_store as cs;
     use store::Artifact;
-    [cs::CompiledModel::KIND, cs::Quantities::KIND, cs::DataTable::KIND].contains(&kind)
+    [cs::CompiledModel::KIND, cs::Quantities::KIND, cs::DataTable::KIND, cs::ModelPresentation::KIND].contains(&kind)
 }
 
 /// The expected set of a run that will hold exactly `files`.

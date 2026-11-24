@@ -319,19 +319,16 @@ pub(crate) fn put_compile(
     let parts = crate::camdl_store::CompiledParts::split(
         envelope,
         stem.to_string(),
-        crate::camdl_store::ModelSource { bytes: source, path: std::path::Path::new(source_path) },
+        crate::camdl_store::ModelSource::read(source, std::path::Path::new(source_path)),
     )?;
-    let crate::camdl_store::CompiledParts { model, quantities, labels, provenance } = parts;
+    let crate::camdl_store::CompiledParts { model, quantities, presentation, labels, provenance } = parts;
     let quantities = store
         .put::<crate::camdl_store::Quantities>(quantities, &labels, &store::Provenance::none(), info)
         .map_err(|e| format!("storing the quantities: {e}"))?
         .dep(crate::camdl_store::Quantities::FILE)
         .map_err(|e| format!("storing the quantities: {e}"))?;
     info.lineage(&quantities);
-    store
-        .put::<CompiledModel>(model, &labels, &provenance, info)
-        .map_err(|e| format!("storing the compiled model: {e}"))?
-        .dep(CompiledModel::FILE)
+    crate::camdl_store::put_compiled(store, info, model, presentation, &labels, &provenance)
         .map_err(|e| format!("storing the compiled model: {e}"))
 }
 

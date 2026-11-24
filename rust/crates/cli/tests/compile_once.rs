@@ -77,14 +77,15 @@ simulate { from = 0 'days  to = 20 'days }
 /// Build a counting wrapper for camdlc: each *compile* invocation appends a
 /// line to `counter_file`, then execs the real camdlc with all args. A bare
 /// `--camdl-version` probe (the existence check `find_camdlc` runs once per
-/// process) is NOT counted — only real model compiles are. Returns the dir
+/// process) and a `camdlc render` (which emits no IR) are NOT counted — only
+/// real model compiles are. Returns the dir
 /// containing the wrapper (to prepend to PATH).
 fn counting_camdlc_shim(dir: &Path, real: &Path, counter_file: &Path) -> PathBuf {
     let shim = dir.join("camdlc");
     let script = format!(
         "#!/bin/sh\n\
          case \"$1\" in\n\
-           --camdl-version) ;;\n\
+           --camdl-version|render) ;;\n\
            *) echo invoked >> '{counter}' ;;\n\
          esac\n\
          exec '{real}' \"$@\"\n",

@@ -1455,6 +1455,25 @@ pub(crate) fn delegate_to_camdlc(args: &[&str], compile: CompileSettings) -> Res
     std::process::exit(status.code().unwrap_or(1));
 }
 
+/// The output of `camdlc render <path> --format <format>`: the model's
+/// mathematics (`json`) or its compartment flow graph (`graph`). camdlc reads
+/// `.camdl` source only. The error carries camdlc's stderr.
+pub(crate) fn camdlc_render(path: &std::path::Path, format: &str) -> Result<Vec<u8>, String> {
+    let camdlc = find_camdlc()?;
+    let output = std::process::Command::new(&camdlc)
+        .arg("render")
+        .arg(path)
+        .arg("--format")
+        .arg(format)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("cannot run {}: {e}", camdlc.display()))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(output.stdout)
+}
+
 /// Whether `model_path` names a `.camdl` source rather than compiled IR.
 ///
 /// It applies the test `resolve_ir_path` applies (`ends_with`, not an

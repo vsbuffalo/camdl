@@ -14,9 +14,10 @@
 //!
 //! The compiled model is split by [`CompiledParts::split`] into the part every
 //! result depends on ([`CompiledModelContent`]), the quantities, the model's
-//! name (a label) and provenance. The model part is keyed by its own bytes, so
-//! a docstring, the description, a quantity or the file's name changes no
-//! result's key, and every other field, derivative tables included, does.
+//! presentation ([`presentation`]), the model's name (a label) and
+//! provenance. The model part is keyed by its own bytes, so a docstring, the
+//! description, a quantity or the file's name changes no result's key, and
+//! every other field, derivative tables included, does.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -81,7 +82,11 @@ pub(crate) fn camdl_top_level() -> TopLevel {
 
 /// Every kind camdl stores on the run store.
 pub(crate) fn camdl_kinds() -> Kinds {
-    let kinds = Kinds::new().register::<CompiledModel>().register::<Quantities>().register::<DataTable>();
+    let kinds = Kinds::new()
+        .register::<CompiledModel>()
+        .register::<Quantities>()
+        .register::<DataTable>()
+        .register::<ModelPresentation>();
     let kinds = crate::fit_store::register(crate::sim_store::register(crate::pfilter_store::register(kinds)));
     crate::profile_store::register(kinds)
 }
@@ -456,10 +461,17 @@ impl store::Content for QuantitiesContent {
     }
 }
 
-/// The compiled model's name: the stem of the model file, as a label.
+/// The compiled model's name: the stem of the model file, as a label. A
+/// compiled model's labels in an invocation also name the presentation that
+/// invocation compiled it from.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ModelLabels {
     pub name: String,
+    /// The run id (hex) of the [`ModelPresentation`] stored with the compiled
+    /// model, set by [`put_compiled`]; `None` in the labels of every other
+    /// kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation: Option<String>,
 }
 
 /// Everything one compile yields, each field of the compiled output in
@@ -467,18 +479,29 @@ pub(crate) struct ModelLabels {
 pub(crate) struct CompiledParts {
     pub model: Hashed<CompiledModelContent>,
     pub quantities: Hashed<QuantitiesContent>,
+    /// The source file, the description, the `#'` documentation, the
+    /// declared model and the renders.
+    pub presentation: PresentationIdentity,
     pub labels: ModelLabels,
-    /// The `#'` documentation, the declared model, the source file, the
-    /// description, the envelope's `ir_version` and `validated_by`, and the
-    /// digests of the whole compiled output and of the source file.
+    /// The envelope's `ir_version` and `validated_by`, and the digests of the
+    /// whole compiled output and of the source file.
     pub provenance: Provenance,
 }
 
-/// The model file a compile came from: its bytes and its extension
-/// (`camdl` or `json`), which names the provenance file.
+/// The model file a compile came from: its bytes, its path, whose extension
+/// (`.camdl` or not) names the presentation's source file, and its renders.
 pub(crate) struct ModelSource<'a> {
     pub bytes: &'a [u8],
     pub path: &'a Path,
+    pub rendered: Rendered,
+}
+
+impl<'a> ModelSource<'a> {
+    /// The model file at `path`, whose bytes are `bytes`, rendered by camdlc
+    /// when it is a `.camdl` ([`Rendered::of`]).
+    pub fn read(bytes: &'a [u8], path: &'a Path) -> Self {
+        ModelSource { bytes, path, rendered: Rendered::of(path) }
+    }
 }
 
 impl CompiledParts {
@@ -549,17 +572,10 @@ impl CompiledParts {
         let quantities = QuantitiesContent {
             bytes: canonical_bytes(&serde_json::json!({ "quantities": quantities, "contrasts": contrasts })),
         };
-        let source_name = match source.path.extension().and_then(|e| e.to_str()) {
-            Some("camdl") => "source.camdl",
-            _ => "source.ir.json",
-        };
-        let pretty = |what: &str, r: serde_json::Result<Vec<u8>>| r.map_err(|e| format!("encoding the {what}: {e}"));
+        let camdl = crate::util::model_is_camdl_source(&source.path.to_string_lossy());
+        let presentation = PresentationIdentity::of(source.bytes, camdl, description, docs, &declared, source.rendered)?;
         let e = |e: store::Error| e.to_string();
         let provenance = Provenance::none()
-            .file(source_name, source.bytes.to_vec())
-            .file("docs.json", pretty("documentation", serde_json::to_vec_pretty(&docs))?)
-            .file("declared.json", pretty("declared model", serde_json::to_vec_pretty(&declared))?)
-            .value("description", &description).map_err(e)?
             .value("ir_version", &ir_version).map_err(e)?
             .value("validated_by", &validated_by).map_err(e)?
             .value("whole_sha256", &whole.to_hex()).map_err(e)?
@@ -567,7 +583,8 @@ impl CompiledParts {
         Ok(CompiledParts {
             model: Hashed::new(CompiledModelContent::of(model_part)),
             quantities: Hashed::new(quantities),
-            labels: ModelLabels { name },
+            presentation,
+            labels: ModelLabels { name, presentation: None },
             provenance,
         })
     }
@@ -661,6 +678,9 @@ impl ContentArtifact for DataTable {
     type Content = Table;
     const FILE: &'static str = "table.tsv";
 }
+
+pub(crate) mod presentation;
+pub(crate) use presentation::{present, put_compiled, recorded_presentation, Presentation, ModelPresentation, PresentationIdentity, Rendered};
 
 #[cfg(test)]
 mod tests;

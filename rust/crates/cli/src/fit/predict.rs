@@ -1987,6 +1987,7 @@ fn resolve_source(
             compile,
             info,
             request,
+            None,
         )?;
         return Ok(PredictSource::FixedPoint(std::sync::Arc::new(point)));
     }
@@ -2264,6 +2265,12 @@ pub(crate) fn repose(
                 .and_then(|m| m.into_iter().find(|(i, _)| i == stored.id()).map(|(_, l)| l.model))
                 .unwrap_or_else(|| "model".to_string());
             let mut envelope = crate::fit_store::stored_envelope(store, model, &name)?;
+            let handle = store::Handle::IdPrefix(stored.id().key().to_hex());
+            crate::camdl_store::present(store, &handle, model, &mut envelope);
+            let reposed = match crate::camdl_store::recorded_presentation(store, &handle, model) {
+                Some(hex) => crate::camdl_store::Presentation::Stored(hex),
+                None => crate::camdl_store::Presentation::Unknown,
+            };
             if let Some(q) = &id.quantities {
                 let qs: store::Stored<crate::camdl_store::Quantities> = store
                     .get(q.id())
@@ -2332,6 +2339,7 @@ pub(crate) fn repose(
                 crate::util::CompileSettings::resolve(false, false),
                 info,
                 request,
+                Some(reposed),
             )?;
             (model_path, PredictSource::FixedPoint(std::sync::Arc::new(point)), fixed_point)
         }

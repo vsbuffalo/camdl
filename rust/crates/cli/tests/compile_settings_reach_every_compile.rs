@@ -6,8 +6,9 @@
 //! 2026-11-17, phase 3).
 //!
 //! Each case runs a command with a logging `camdlc` shim first on `PATH`: the
-//! shim records, for every compiler invocation but the version probe, whether
-//! it was told to disable LICM (`CAMDL_NO_LICM=1`, how camdl tells camdlc),
+//! shim records, for every compiler invocation but the version probe and
+//! `camdlc render` (which emits no IR, and whose output LICM does not
+//! change), whether it was told to disable LICM (`CAMDL_NO_LICM=1`, how camdl tells camdlc),
 //! then runs the real compiler. A case passes when the command compiled at
 //! least once, every compile under `--no-licm` was told, and no compile
 //! without it was. The IR cache is off, so every compile reaches the shim.
@@ -170,7 +171,7 @@ fn case() -> Case {
     std::fs::write(
         &shim,
         format!(
-            "#!/bin/sh\ncase \"$1\" in\n  --camdl-version) ;;\n  *) echo \"no_licm=${{CAMDL_NO_LICM:-0}} $*\" >> '{log}' ;;\nesac\nexec '{real}' \"$@\"\n",
+            "#!/bin/sh\ncase \"$1\" in\n  --camdl-version|render) ;;\n  *) echo \"no_licm=${{CAMDL_NO_LICM:-0}} $*\" >> '{log}' ;;\nesac\nexec '{real}' \"$@\"\n",
             log = log.display(),
             real = real_camdlc().display(),
         ),

@@ -1522,9 +1522,10 @@ impl OpenedFit {
     }
 }
 
-/// The compiled model a stored problem names, as an IR envelope: the model
-/// part with the name, the description and the documentation the compile's
-/// provenance records restored.
+/// The compiled model a stored result names, as an IR envelope: the model
+/// part, named `name`. The description and the documentation are a
+/// presentation's, which [`crate::camdl_store::present`] restores; without
+/// it the envelope has neither.
 pub(crate) fn stored_envelope(store: &Store, dep: &Dep<CompiledModel>, name: &str) -> Result<ir::IrEnvelope, String> {
     let stored: Stored<CompiledModel> = store
         .get(dep.id())
@@ -1537,14 +1538,7 @@ pub(crate) fn stored_envelope(store: &Store, dep: &Dep<CompiledModel>, name: &st
     let part = <crate::camdl_store::CompiledModelContent as Content>::from_bytes(&content).map_err(|e| e.to_string())?;
     let mut model = part.model().clone();
     model.name = name.to_string();
-    model.description = stored.recorded("description").and_then(|v| v.as_str()).map(str::to_string);
-    let mut envelope = ir::IrEnvelope::wrap(model, None, declared::DeclaredSection::not_recorded());
-    if let Ok(mut docs) = stored.open_provenance("docs.json") {
-        let mut bytes = Vec::new();
-        std::io::Read::read_to_end(&mut docs, &mut bytes).map_err(|e| e.to_string())?;
-        envelope.docs = serde_json::from_slice(&bytes).map_err(|e| format!("docs.json: {e}"))?;
-    }
-    Ok(envelope)
+    Ok(ir::IrEnvelope::wrap(model, None, declared::DeclaredSection::not_recorded()))
 }
 
 /// The quantities part the invocation that `handle` names recorded for
@@ -1655,6 +1649,7 @@ pub(crate) fn open_fit(store: &Store, text: &str) -> Result<OpenedFit, String> {
     let labels = problem_labels(store, &fit.problem);
     let name = labels.as_ref().map(|l| l.model.clone()).unwrap_or_else(|| "model".to_string());
     let mut envelope = stored_envelope(store, &fit.model, &name)?;
+    crate::camdl_store::present(store, &handle, &fit.model, &mut envelope);
     let quantities = match &fit.run {
         Some(run) => match run_quantities(store, &handle, text, run)? {
             Some(q) => Some(q),

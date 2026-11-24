@@ -1548,8 +1548,7 @@ The model part is every field of [`ir::Model`](rust:ir::model::Model) except its
 name, description, quantities and contrasts, written as canonical JSON with
 object keys sorted, except that the initial conditions are an array in the
 model's declaration order, which the runtime evaluates by. The name becomes a
-label, the quantities and contrasts are the `Quantities` content, and the source
-file, the documentation and the declared model become provenance files.
+label, and the quantities and contrasts are the `Quantities` content.
 
 A model's docstring, file name or quantities block therefore changes no
 simulation's or filter run's key. The parameters and scenario are applied after
@@ -1557,6 +1556,22 @@ the model is keyed, so runs at other parameter values share one compiled model
 (`the_parameters_and_the_scenario_do_not_key_the_compiled_model`). The results
 that evaluate quantities (`sim_quantities`, `prediction`) hold a
 `Dep<Quantities>` of their own.
+
+### A model's presentation
+
+The source file, the description, the documentation, the declared model and, for
+a `.camdl`, the model's mathematics and flow graph as `camdlc render` writes
+them, are the model's presentation
+([`camdl_store::presentation`](rust:cli::camdl_store::presentation)): a content
+artifact of several files, `model_presentation`, keyed by their bytes. No result
+depends on it, so a comment edit re-keys nothing. `put_compiled` stores it, then
+the compiled model, and the compiled model's labels in that invocation record
+name the presentation. Two files that differ only in their comments therefore
+share one compiled model, and each invocation records its own presentation. A
+reader takes the presentation the invocation it names recorded: `@label`'s
+invocation, or the latest one that listed the result. A presentation that cannot
+be read leaves the reader without the documentation and is reported as a
+warning; nothing is computed from it.
 
 ### Storing a content artifact
 

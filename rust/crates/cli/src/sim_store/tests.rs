@@ -435,7 +435,7 @@ fn observe(root: &Path) -> Vec<ObservedResult> {
                 };
                 let kind = id["kind"].as_str().unwrap().to_string();
                 out.push(ObservedResult {
-                    content: ["compiled_model", "quantities", "data_table"].contains(&kind.as_str()),
+                    content: crate::result_files::is_content(&kind),
                     kind,
                     run_id: Key::from_hex(id["run_id"].as_str().unwrap()).unwrap(),
                     files,
@@ -739,10 +739,14 @@ fn a_run_makes_the_tree_of_the_proposal() {
         build.as_str(),
         "  compiled_model",
         "    sir-*",
+        "      identity.json",
+        "      model.ir.json",
+        "      run.json",
+        "  model_presentation",
+        "    sir-*",
         "      declared.json",
         "      docs.json",
         "      identity.json",
-        "      model.ir.json",
         "      run.json",
         "      source.ir.json",
         "  quantities",

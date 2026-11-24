@@ -577,14 +577,11 @@ fn run_pfilter(
             .with_model(keyed_model.clone());
         let parts = crate::camdl_store::CompiledParts::split(
             envelope, stem.clone(),
-            crate::camdl_store::ModelSource { bytes: &source, path: std::path::Path::new(&ir_path) },
+            crate::camdl_store::ModelSource::read(&source, std::path::Path::new(&ir_path)),
         ).unwrap_or_else(|e| out.fail(format!("error: {e}")));
-        let crate::camdl_store::CompiledParts { model: model_part, quantities, labels: model_labels, provenance } = parts;
+        let crate::camdl_store::CompiledParts { model: model_part, quantities, presentation, labels: model_labels, provenance } = parts;
         store::release(quantities, "a filter run reports no quantities");
-        let model = store
-            .put::<crate::camdl_store::CompiledModel>(model_part, &model_labels, &provenance, &info)
-            .unwrap_or_else(|e| out.fail(format!("error: storing the compiled model: {e}")))
-            .dep(crate::camdl_store::CompiledModel::FILE)
+        let model = crate::camdl_store::put_compiled(&store, &info, model_part, presentation, &model_labels, &provenance)
             .unwrap_or_else(|e| out.fail(format!("error: storing the compiled model: {e}")));
         let mut data = std::collections::BTreeMap::new();
         for (name, path, table) in tables {
@@ -4081,12 +4078,10 @@ mod tests {
         let parts = crate::camdl_store::CompiledParts::split(
             envelope,
             "m".into(),
-            crate::camdl_store::ModelSource { bytes: src.as_bytes(), path: std::path::Path::new("m.camdl") },
+            crate::camdl_store::ModelSource { bytes: src.as_bytes(), path: std::path::Path::new("m.camdl"), rendered: crate::camdl_store::Rendered::nothing() },
         )
         .unwrap();
-        let model_dep = store.put::<crate::camdl_store::CompiledModel>(parts.model, &parts.labels, &parts.provenance, &info)
-            .unwrap()
-            .dep(crate::camdl_store::CompiledModel::FILE)
+        let model_dep = crate::camdl_store::put_compiled(&store, &info, parts.model, parts.presentation, &parts.labels, &parts.provenance)
             .unwrap();
         let identity = PfilterIdentity {
             model: model_dep,

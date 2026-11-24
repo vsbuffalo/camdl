@@ -123,6 +123,7 @@ fn every_contract_version_is_pinned_to_its_files() {
     use sha2::Digest;
     const PINS: &[(&str, u16, &str)] = &[
         ("fit_run", 1, "dd2bd91bcb57e9e3"),
+        ("model_presentation", 1, "5e161da1b9744beb"),
         ("fit", 1, "25b195434f1880a2"),
         ("prediction", 2, "99cfdc3334a62eeb"),
         ("score", 1, "ae160b79b23fb23c"),

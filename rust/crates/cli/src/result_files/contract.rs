@@ -11,6 +11,7 @@ use super::fit::{PredictionFile, PredictionPart, ProblemFile, ScoreFile};
 use super::fit_run::{
     CommonFile, FitRunFile, If2File, McmcFile, NloptFile, PfilterMethodFile, PgasFile, Sampler,
 };
+use super::presentation::PresentationFile;
 use super::pfilter::{
     FilteredStreamsFile, FilteringFile, FinalStateFile, PfHealthFile, PfilterFile, PrequentialFile, SavedPathsFile,
     TraceFile,
@@ -99,6 +100,17 @@ pub(super) fn kinds() -> Vec<(&'static str, &'static str, Vec<Row>)> {
                 row(FitRunFile::Common(C::FitMeta), every),
                 row(FitRunFile::Common(C::Execution), every),
                 row(FitRunFile::Nlopt(NloptFile::OptTrace), "nl-sbplx, nl-bobyqa, nl-lbfgs"),
+            ],
+        ),
+        (
+            "model_presentation",
+            "How a model file is shown: everything a compile yields that no computation reads. A result does not depend on it; the compiled model's entry in each invocation record names the presentation that invocation compiled.",
+            vec![
+                row(PresentationFile::Source { camdl: true }, "always; `source.ir.json` for a compiled model"),
+                row(PresentationFile::Docs, "always"),
+                row(PresentationFile::Declared, "always"),
+                row(PresentationFile::Render, "a `.camdl` model that camdlc rendered"),
+                row(PresentationFile::Graph, "a `.camdl` model that camdlc rendered"),
             ],
         ),
         (

@@ -191,7 +191,7 @@ fn manifest_digests_are_the_store_digests() {
     assert_eq!(m["label"], "one");
     assert_eq!(m["camdl"]["engine_id"].as_str().unwrap().len(), 32);
     assert_eq!(m["camdl"]["ambient_key"].as_str().unwrap().len(), 64);
-    assert_eq!(kinds(&m), ["compiled_model", "sim", "obs"]);
+    assert_eq!(kinds(&m), ["model_presentation", "compiled_model", "sim", "obs"]);
     let records = run_records(&p.path("store"));
     for r in results(&m) {
         let id = r["run_id"].as_str().unwrap();
@@ -218,13 +218,13 @@ fn manifest_digests_are_the_store_digests() {
             assert_eq!(f["bytes"], stored["bytes"], "the size is run.json's");
         }
     }
-    let sim = &results(&m)[1];
+    let sim = results(&m).iter().find(|r| r["kind"] == "sim").unwrap();
     assert_eq!(sim["files"]["traj"]["file"], "traj.tsv", "a cell's trajectory is named `traj`");
     assert!(sim["files"].get("provenance").is_none(), "a provenance file is not listed");
-    let obs = &results(&m)[2];
+    let obs = results(&m).iter().find(|r| r["kind"] == "obs").unwrap();
     assert_eq!(obs["upstream"], sim["run_id"], "a by-product names its upstream");
     assert_eq!(obs["files"]["cases"]["file"], "cases.tsv", "an observation stream is named by its stream");
-    assert!(results(&m)[0]["files"]["model"]["file"] == "model.ir.json", "the compiled model's file is `model`");
+    assert!(results(&m).iter().find(|r| r["kind"] == "compiled_model").unwrap()["files"]["model"]["file"] == "model.ir.json", "the compiled model's file is `model`");
 }
 
 /// A workflow step reads a run id and a stored name from the manifest, reads
@@ -269,10 +269,11 @@ fn a_batch_manifest_lists_every_member() {
     let p = Project::new();
     p.ok(&sweep(&["--sweep", "beta=lin(0.2,0.4,3)", "--seeds", "1:2", "--manifest", "build/grid.json"]));
     let m = p.manifest("build/grid.json");
-    assert_eq!(kinds(&m), ["compiled_model", "sim", "sim", "sim", "sim", "sim", "sim"]);
+    assert_eq!(kinds(&m), ["model_presentation", "compiled_model", "sim", "sim", "sim", "sim", "sim", "sim"]);
     let ids: std::collections::BTreeSet<&str> = results(&m).iter().map(|r| r["run_id"].as_str().unwrap()).collect();
-    assert_eq!(ids.len(), 7, "every cell is a distinct result");
-    let points: Vec<String> = results(&m)[1..].iter().map(|r| r["labels"]["point"].to_string()).collect();
+    assert_eq!(ids.len(), 8, "every cell is a distinct result");
+    let points: Vec<String> =
+        results(&m).iter().filter(|r| r["kind"] == "sim").map(|r| r["labels"]["point"].to_string()).collect();
     assert_eq!(points.iter().collect::<std::collections::BTreeSet<_>>().len(), 3, "three sweep points: {points:?}");
 }
 
@@ -363,7 +364,7 @@ fn manifest_lists_by_products_with_their_upstream() {
     ]);
     let m = p.manifest("build/pf.json");
     let k = kinds(&m);
-    assert_eq!(k[..3], ["compiled_model", "data_table", "pfilter"], "{k:?}");
+    assert_eq!(k[..4], ["model_presentation", "compiled_model", "data_table", "pfilter"], "{k:?}");
     let run = results(&m).iter().find(|r| r["kind"] == "pfilter").unwrap();
     assert!(run["files"]["loglik"]["file"] == "loglik.toml");
     for kind in ["pf_health", "filtered_streams"] {
@@ -445,7 +446,7 @@ fn a_profile_manifest_lists_every_point() {
         results(&m).iter().filter(|r| r["kind"] == "profile_point").map(|r| r["run_id"].as_str().unwrap().to_string()).collect();
     assert!(stored_points.len() >= 2, "every grid value has a point: {k:?}");
     assert_eq!(listed, stored_points, "the manifest lists every stored profile point");
-    assert_eq!(k[..3], ["quantities", "compiled_model", "fit"], "{k:?}");
+    assert_eq!(k[..4], ["quantities", "model_presentation", "compiled_model", "fit"], "{k:?}");
     for point in results(&m).iter().filter(|r| r["kind"] == "profile_point") {
         assert_eq!(point["files"]["mle"]["file"], "mle.toml");
     }
@@ -459,8 +460,8 @@ fn fit_predict_and_score_manifests() {
     let p = Project::new();
     p.ok(&["fit", "run", "fit.toml", "--seed", "1", "--label", "f", "--manifest", "build/fit.json"]);
     let m = p.manifest("build/fit.json");
-    assert_eq!(kinds(&m), ["quantities", "compiled_model", "fit", "fit_run"]);
-    let run = &results(&m)[3];
+    assert_eq!(kinds(&m), ["quantities", "model_presentation", "compiled_model", "fit", "fit_run"]);
+    let run = results(&m).iter().find(|r| r["kind"] == "fit_run").unwrap();
     let names: Vec<&str> = run["files"].as_object().unwrap().keys().map(String::as_str).collect();
     for want in ["draws", "chain_0/trace", "chain_1/trace", "sampler_summary", "summary", "method", "fit_state"] {
         assert!(names.contains(&want), "the fit run lists `{want}`: {names:?}");
@@ -469,7 +470,7 @@ fn fit_predict_and_score_manifests() {
     for provenance in ["fit_config", "run_inputs", "fit_meta", "execution"] {
         assert!(!names.contains(&provenance), "the provenance file `{provenance}` is not listed");
     }
-    let problem = &results(&m)[2];
+    let problem = results(&m).iter().find(|r| r["kind"] == "fit").unwrap();
     assert!(problem["files"]["problem"]["file"] == "problem.toml");
     assert!(problem["files"]["inputs/cases"].is_object(), "the training lines are `inputs/<source>`: {}", problem["files"]);
 

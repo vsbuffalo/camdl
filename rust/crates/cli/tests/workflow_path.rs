@@ -298,7 +298,7 @@ fn path_names_every_kind_through_every_handle_form() {
         }
     }
     let want: std::collections::BTreeSet<String> =
-        ["compiled_model", "data_table", "quantities", "sim", "obs", "pfilter", "pf_health", "fit", "fit_run", "prediction", "score", "profile_point"]
+        ["compiled_model", "model_presentation", "data_table", "quantities", "sim", "obs", "pfilter", "pf_health", "fit", "fit_run", "prediction", "score", "profile_point"]
             .into_iter()
             .map(String::from)
             .collect();
@@ -343,7 +343,7 @@ fn path_prints_several_names_in_order_and_all_files() {
     assert_eq!(all.lines().collect::<Vec<_>>(), want, "every result file, by logical name in name order");
     assert_eq!(p.ok(&["path", "@f", "--all"]), all, "a label names the fit run of its `fit run`");
     let err = p.refused(&["path", "--manifest", "build/fit.json", "--all"]);
-    assert!(err.contains("names 4 results, where one is needed") && err.contains("--kind"), "{err}");
+    assert!(err.contains("names 5 results, where one is needed") && err.contains("--kind"), "{err}");
 }
 
 /// A name is refused, naming what exists: a file the result's method does
@@ -453,10 +453,10 @@ fn path_each_takes_the_union_of_label_keys() {
     let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
     assert_eq!(header, ["run_id", "name", "model", "method", "quantities", "seed", "path"]);
     let rows: Vec<Vec<&str>> = lines.map(|l| l.split('\t').collect()).collect();
-    assert_eq!(rows.len(), 4, "quantities, compiled model, fit problem, fit run");
+    assert_eq!(rows.len(), 5, "quantities, model presentation, compiled model, fit problem, fit run");
     assert_eq!(rows[0][1], "sir", "the quantities' name");
     assert_eq!(rows[0][3], "", "the quantities have no method");
-    assert_eq!(rows[3][3], "pgas", "the run's method");
+    assert_eq!(rows[4][3], "pgas", "the run's method");
     assert!(rows.iter().all(|r| r[6].ends_with("/run.json")));
 }
 

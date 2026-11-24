@@ -872,7 +872,7 @@ fn statuses(root: &Path) -> Vec<(PathBuf, serde_json::Value)> {
                 if let Some(id) = run_store_identity(&p) {
                     // The run store's content artifacts are inputs of a run,
                     // not runs.
-                    if id["kind"] == "compiled_model" || id["kind"] == "data_table" {
+                    if id["kind"] == "compiled_model" || id["kind"] == "data_table" || id["kind"] == "model_presentation" {
                         continue;
                     }
                     v["run_id"] = id["run_id"].clone();
@@ -1008,7 +1008,11 @@ fn run_ids(cas: &Path) -> std::collections::BTreeSet<String> {
                 let v: serde_json::Value = match run_store_identity(&p) {
                     // The run store's content artifacts are inputs of a run,
                     // not runs.
-                    Some(id) if id["kind"] == "compiled_model" || id["kind"] == "data_table" || id["kind"] == "quantities" => continue,
+                    Some(id)
+                        if ["compiled_model", "data_table", "quantities", "model_presentation"].contains(&id["kind"].as_str().unwrap_or("")) =>
+                    {
+                        continue
+                    }
                     Some(id) => id,
                     None => serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap(),
                 };

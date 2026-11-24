@@ -179,15 +179,6 @@ const CASES: &[Case] = &[
     },
 ];
 
-/// The kinds whose results are contents, stored under the digest of their
-/// bytes: a command reuses one that is stored, so only a run that stores it
-/// first computes it.
-const CONTENT_KINDS: [&str; 3] = [
-    <crate::camdl_store::CompiledModel as store::Artifact>::KIND,
-    <crate::camdl_store::Quantities as store::Artifact>::KIND,
-    <crate::camdl_store::DataTable as store::Artifact>::KIND,
-];
-
 /// The binaries under test, and a directory holding the fixture files and
 /// the base store, removed when the fixture is dropped. Each test makes its
 /// own: a fixture in a `static` would never be dropped, so its directory would
@@ -502,7 +493,7 @@ fn check_case(fx: &Fixture, case: &Case) -> Result<BTreeSet<String>, String> {
     }
     let reused: Vec<&(String, String)> = again
         .iter()
-        .filter(|((kind, _), outcome)| *outcome != "computed" && !CONTENT_KINDS.contains(&kind.as_str()))
+        .filter(|((kind, _), outcome)| *outcome != "computed" && !crate::result_files::is_content(kind))
         .map(|(at, _)| at)
         .collect();
     if !reused.is_empty() {
@@ -603,7 +594,7 @@ fn results_of(fx: &Fixture, cwd: &Path, store: &Path, args: &[&str]) -> Result<B
     let stored = completed_results(store);
     let mut by_kind: BTreeMap<String, BTreeMap<String, BTreeMap<String, String>>> = BTreeMap::new();
     for (kind, id) in last_invocation(store).into_keys() {
-        if CONTENT_KINDS.contains(&kind.as_str()) {
+        if crate::result_files::is_content(&kind) {
             continue;
         }
         let digests = stored[&id].result_digests().into_iter().map(|(n, d)| (n.to_string(), d.to_string())).collect();

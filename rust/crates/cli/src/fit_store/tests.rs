@@ -1,5 +1,5 @@
 use super::*;
-use store::{Begin, ContentArtifact, Given, Identity, Reuse, RunInfo, StoreRequest};
+use store::{Begin, Given, Identity, Reuse, RunInfo, StoreRequest};
 
 /// Two daily incidence streams of one SIR, which one wide file can carry.
 const MODEL: &str = r#"
@@ -118,10 +118,10 @@ fn model_dep(o: &Opened, model: &ir::Model) -> Dep<CompiledModel> {
     let parts = crate::camdl_store::CompiledParts::split(
         envelope,
         "model".into(),
-        crate::camdl_store::ModelSource { bytes: MODEL.as_bytes(), path: Path::new("model.camdl") },
+        crate::camdl_store::ModelSource { bytes: MODEL.as_bytes(), path: Path::new("model.camdl"), rendered: crate::camdl_store::Rendered::nothing() },
     )
     .unwrap();
-    o.store.put::<CompiledModel>(parts.model, &parts.labels, &parts.provenance, &o.info).unwrap().dep(CompiledModel::FILE).unwrap()
+    crate::camdl_store::put_compiled(&o.store, &o.info, parts.model, parts.presentation, &parts.labels, &parts.provenance).unwrap()
 }
 
 fn try_resolved(fx: &Fixture, o: &Opened, config: &FitConfig) -> Result<ResolvedProblem, String> {
@@ -212,6 +212,48 @@ fn bound_rows(model: &ir::Model, problem: &Problem, prefix: Option<&TrainingPart
 /// to, cut to the training lines, and the rebuilt problem binds each stream to
 /// exactly the rows it trained on: the same rows, holes and positions
 /// included, as the wide table cut by the partition.
+/// Two model files that differ only in a `#'` doc line compile to one model
+/// part, and each reader of the stored model is given the documentation of
+/// the file its invocation compiled, not of the file that was stored first.
+/// An id names the latest invocation; a label names its own.
+#[test]
+fn a_reader_is_given_the_documentation_of_its_own_model_file() {
+    let documented = |doc: &str| MODEL.replacen("  beta  : rate", &format!("  #' {doc}\n  beta  : rate"), 1);
+    let o = open();
+    let mut deps = Vec::new();
+    for (label, doc) in [("first", "the first doc"), ("second", "the second doc")] {
+        let src = documented(doc);
+        let fx = compiled(&src);
+        let ir = std::fs::read_to_string(fx.dir.path().join("model.ir.json")).unwrap();
+        let envelope = ir::envelope_from_str(&ir).unwrap();
+        let parts = crate::camdl_store::CompiledParts::split(
+            envelope,
+            "model".into(),
+            crate::camdl_store::ModelSource {
+                bytes: src.as_bytes(),
+                path: Path::new("model.camdl"),
+                rendered: crate::camdl_store::Rendered::nothing(),
+            },
+        )
+        .unwrap();
+        let info = RunInfo::new(&Given::default(), &(), &StoreRequest::new(Some(label.into()), false, None)).unwrap();
+        deps.push(
+            crate::camdl_store::put_compiled(&o.store, &info, parts.model, parts.presentation, &parts.labels, &parts.provenance)
+                .unwrap(),
+        );
+        info.finish(&o.store).unwrap();
+    }
+    assert_eq!(deps[0].id(), deps[1].id(), "a doc comment does not change the compiled model");
+    let doc = |handle: Handle| {
+        let mut envelope = stored_envelope(&o.store, &deps[0], "model").unwrap();
+        crate::camdl_store::present(&o.store, &handle, &deps[0], &mut envelope);
+        envelope.docs.parameters["beta"].text.clone().unwrap()
+    };
+    assert_eq!(doc(Handle::IdPrefix(deps[0].id().key().to_hex())), "the second doc");
+    assert_eq!(doc(Handle::Label { name: "first".into(), back: 0 }), "the first doc");
+    assert_eq!(doc(Handle::Label { name: "second".into(), back: 0 }), "the second doc");
+}
+
 #[test]
 fn a_wide_table_stored_per_stream_binds_identical_rows() {
     let fx = fixture();

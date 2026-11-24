@@ -371,9 +371,9 @@ fn run_fit(mut out: Out, cx: FitCommand<'_>) -> Vec<String> {
             .unwrap_or_else(|e| out.fail(format!("error: IR load error from {ir_path}: {e}")));
         let parts = crate::camdl_store::CompiledParts::split(
             envelope, model_stem.clone(),
-            crate::camdl_store::ModelSource { bytes: &model_bytes, path: Path::new(&model_path) },
+            crate::camdl_store::ModelSource::read(&model_bytes, Path::new(&model_path)),
         ).unwrap_or_else(|e| out.fail(format!("error: {e}")));
-        let crate::camdl_store::CompiledParts { model: part, quantities, labels, provenance } = parts;
+        let crate::camdl_store::CompiledParts { model: part, quantities, presentation, labels, provenance } = parts;
         // The quantities and contrasts do not change the fit, so the problem
         // names them as lineage: `camdl predict` evaluates them.
         let quantities = store.put::<crate::camdl_store::Quantities>(quantities, &labels, &store::Provenance::none(), info)
@@ -381,8 +381,7 @@ fn run_fit(mut out: Out, cx: FitCommand<'_>) -> Vec<String> {
             .unwrap_or_else(|e| out.fail(format!("error: storing the quantities: {e}")));
         info.lineage(&quantities);
         *run_quantities.borrow_mut() = Some(quantities.id().key().to_hex());
-        store.put::<CompiledModel>(part, &labels, &provenance, info)
-            .and_then(|s| s.dep(CompiledModel::FILE))
+        crate::camdl_store::put_compiled(store, info, part, presentation, &labels, &provenance)
             .unwrap_or_else(|e| out.fail(format!("error: storing the compiled model: {e}")))
     };
     let run_ir = config.problem.compiled_model().unwrap_or_else(|e| out.fail(format!("error: {e}"))).to_string();

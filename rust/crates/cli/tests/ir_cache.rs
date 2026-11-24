@@ -80,7 +80,7 @@ const POP_TSV_B: &str = "patch\tN0\nnorth\t99999\nsouth\t30000\n";
 fn counting_shim(dir: &Path, real: &Path, counter: &Path) -> PathBuf {
     let shim = dir.join("camdlc");
     std::fs::write(&shim, format!(
-        "#!/bin/sh\ncase \"$1\" in\n  --camdl-version) ;;\n  *) echo x >> '{}' ;;\nesac\nexec '{}' \"$@\"\n",
+        "#!/bin/sh\ncase \"$1\" in\n  --camdl-version|render) ;;\n  *) echo x >> '{}' ;;\nesac\nexec '{}' \"$@\"\n",
         counter.display(), real.display())).unwrap();
     #[cfg(unix)]
     {

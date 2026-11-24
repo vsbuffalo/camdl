@@ -89,7 +89,7 @@ fn placement(kind: &str) -> Option<Placement> {
         "score" => Placement::Group("scores"),
         "obs" | "event_log" | "sim_quantities" | "trace" | "pf_health" | "filtering" | "filtered_streams" | "final_state"
         | "saved_paths" | "prequential" => Placement::WithUpstream,
-        "compiled_model" | "quantities" | "data_table" | "fit" => Placement::None,
+        "compiled_model" | "quantities" | "data_table" | "model_presentation" | "fit" => Placement::None,
         _ => return None,
     })
 }
