@@ -77,6 +77,35 @@ after checking that the store holds the bytes the manifest records, and
 `camdl path --manifest build/sweep.json traj --each` prints one row per cell:
 its run id, its labels and the path. The lookup rules are run spec §4.5.
 
+**Browsing results as plain files.** `--link-root DIR`, else the environment
+variable `CAMDL_LINK_ROOT`, makes `simulate`, `fit run`, `pfilter`, `profile`,
+`predict`, `score` and `receive` also write a symbolic link to each stored
+result file under DIR, at `DIR/<group>/<label>/<file>`: `fits/`, `sims/`,
+`filters/`, `predictions/`, `profiles/` and `scores/`, then the command's
+`--label`, then each file's logical name with its extension. The links under a
+root follow the latest command with the label that succeeded with that root: a
+command removes its label's links there, in every group, when it starts and
+writes the new ones when it succeeds, so a failed command leaves none. A command
+run without the root leaves the tree as it was. A workflow step that must read
+exactly what an earlier step made reads through the manifest, whose run ids do
+not move when the label is reused. The layout and the rules are run spec §2.11.
+
+```bash
+camdl fit run fit.toml --label m0 --manifest build/m0.json --link-root results
+ls results/fits/m0/        # chain_0/  chain_1/  draws.tsv  fit_state.toml  …
+```
+
+A relative root is relative to the directory the command runs in. To keep one
+root for a whole project, set the store and the link root in the project's
+`.envrc`, which direnv reads after `direnv allow`; `$PWD` there is the directory
+holding the file, so the paths hold from any subdirectory:
+
+```bash
+# .envrc
+export CAMDL_STORE="$PWD/camdl-store"
+export CAMDL_LINK_ROOT="$PWD/results"
+```
+
 **Selecting chains.** Every reader of a posterior cloud takes `--chains IDS`
 (keep only those chains) or `--exclude-chains IDS` (drop those), never both:
 `fit summary`, `camdl predict`, `fit table --quantity`,

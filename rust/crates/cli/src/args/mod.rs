@@ -837,6 +837,15 @@ pub struct SimulateArgs {
     #[arg(long, value_name = "PATH", conflicts_with_all = ["dry_run", "design_from"])]
     #[input(export)]
     pub manifest: Option<PathBuf>,
+
+    /// Also write a symbolic link to each stored result file under DIR once
+    /// the command has succeeded, at DIR/<group>/<label>/<file> (default
+    /// `$CAMDL_LINK_ROOT`; run spec §2.11). The label's earlier links are
+    /// removed when the command starts, so a failed command leaves none.
+    /// Links are for browsing; a workflow depends on --manifest.
+    #[arg(long, value_name = "DIR", conflicts_with_all = ["dry_run", "design_from"])]
+    #[input(export)]
+    pub link_root: Option<PathBuf>,
 }
 
 /// One `camdl simulate` as its inputs reach the store: the command's
@@ -983,6 +992,15 @@ pub struct FitRunArgs {
     #[arg(long, value_name = "PATH")]
     #[input(export)]
     pub manifest: Option<PathBuf>,
+
+    /// Also write a symbolic link to each stored result file under DIR once
+    /// the command has succeeded, at DIR/<group>/<label>/<file> (default
+    /// `$CAMDL_LINK_ROOT`; run spec §2.11). The label's earlier links are
+    /// removed when the command starts, so a failed command leaves none.
+    /// Links are for browsing; a workflow depends on --manifest.
+    #[arg(long, value_name = "DIR")]
+    #[input(export)]
+    pub link_root: Option<PathBuf>,
 
     // ── Removed-flag traps ───────────────────────────────────────────
     //
@@ -1693,6 +1711,15 @@ pub struct PredictFlags {
     #[input(export)]
     pub manifest: Option<PathBuf>,
 
+    /// Also write a symbolic link to each stored result file under DIR once
+    /// the command has succeeded, at DIR/<group>/<label>/<file> (default
+    /// `$CAMDL_LINK_ROOT`; run spec §2.11). The label's earlier links are
+    /// removed when the command starts, so a failed command leaves none.
+    /// Links are for browsing; a workflow depends on --manifest.
+    #[arg(long, value_name = "DIR")]
+    #[input(export)]
+    pub link_root: Option<PathBuf>,
+
     /// Compute the prediction again even when it is stored; the stored
     /// prediction moves to the store's `.quarantine/` first. A prediction
     /// held by an owner not known to be stopped is refused.
@@ -2007,6 +2034,15 @@ pub struct ScoreArgs {
     #[arg(long, value_name = "PATH")]
     #[input(export)]
     pub manifest: Option<PathBuf>,
+
+    /// Also write a symbolic link to each stored result file under DIR once
+    /// the command has succeeded, at DIR/<group>/<label>/<file> (default
+    /// `$CAMDL_LINK_ROOT`; run spec §2.11). The label's earlier links are
+    /// removed when the command starts, so a failed command leaves none.
+    /// Links are for browsing; a workflow depends on --manifest.
+    #[arg(long, value_name = "DIR")]
+    #[input(export)]
+    pub link_root: Option<PathBuf>,
 
     /// Compute the score again even when it is stored; the stored score
     /// moves to the store's `.quarantine/` first.
@@ -2578,6 +2614,15 @@ pub struct PfilterArgs {
     #[arg(long, value_name = "PATH", conflicts_with = "no_store")]
     #[input(export)]
     pub manifest: Option<PathBuf>,
+
+    /// Also write a symbolic link to each stored result file under DIR once
+    /// the command has succeeded, at DIR/<group>/<label>/<file> (default
+    /// `$CAMDL_LINK_ROOT`; run spec §2.11). The label's earlier links are
+    /// removed when the command starts, so a failed command leaves none.
+    /// Links are for browsing; a workflow depends on --manifest.
+    #[arg(long, value_name = "DIR", conflicts_with = "no_store")]
+    #[input(export)]
+    pub link_root: Option<PathBuf>,
 }
 
 /// One `camdl pfilter` as its inputs reach the store: the command's
@@ -2909,6 +2954,15 @@ pub struct ProfileArgs {
     #[arg(long, value_name = "PATH")]
     #[input(export)]
     pub manifest: Option<PathBuf>,
+
+    /// Also write a symbolic link to each stored result file under DIR once
+    /// the command has succeeded, at DIR/<group>/<label>/<file> (default
+    /// `$CAMDL_LINK_ROOT`; run spec §2.11). The label's earlier links are
+    /// removed when the command starts, so a failed command leaves none.
+    /// Links are for browsing; a workflow depends on --manifest.
+    #[arg(long, value_name = "DIR")]
+    #[input(export)]
+    pub link_root: Option<PathBuf>,
 
     /// Per-cell inference algorithm. When omitted the per-cell runner
     /// uses `if2` on `chain_binomial` (the historical default). Pass an

@@ -41,16 +41,18 @@ pub(crate) fn cmd_score(inv: crate::args::ScoreInvocation) {
     let (args,) = declared.into_parts();
     let (prediction, data, held_out) = args.into_parts();
     let (exports,) = exports.into_parts();
-    let (output, manifest) = exports.into_parts();
+    let (output, manifest, link_root) = exports.into_parts();
     let (request,) = request.into_parts();
     let (force, label, root_flag) = request.into_parts();
+    let link_label = label.clone();
     let request = crate::camdl_store::store_request(label, force, root_flag);
     if let Some(dir) = &output {
         if let Err(e) = crate::util::refuse_missing_export_dir("-o", dir) {
             out.fail(format!("error: {e}"));
         }
     }
-    let manifest = crate::output_manifest::claim(&out, manifest.as_deref());
+    let link_root = crate::link_tree::link_root(link_root.as_deref());
+    let bindings = crate::bindings::claim(&out, manifest.as_deref(), link_root, link_label.as_deref());
     // A prediction named by its folder is in the store holding the folder.
     let root = crate::fit_store::store_holding(Path::new(&prediction)).unwrap_or_else(|| crate::camdl_store::root_of(&request));
     crate::fit_store::set_reader_root(root.clone());
@@ -63,7 +65,7 @@ pub(crate) fn cmd_score(inv: crate::args::ScoreInvocation) {
             if let Some(dir) = &output {
                 export(&out, &stored, dir);
             }
-            crate::output_manifest::write(&out, manifest.as_ref(), &store, &invocation);
+            crate::bindings::write(&out, &bindings, &store, &invocation);
         }
         Err(e) => out.fail(format!("error: {e}")),
     }

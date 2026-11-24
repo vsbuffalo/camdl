@@ -1781,7 +1781,7 @@ pub(crate) fn predict(
     info: store::RunInfo,
     request: &store::StoreRequest,
     output: Option<&Path>,
-    manifest: Option<&crate::output_manifest::ManifestPath>,
+    bindings: &crate::bindings::Bindings,
 ) {
     // The forcing-extrapolation policy this command's evaluations run under,
     // installed for the rest of the command.
@@ -1819,7 +1819,7 @@ pub(crate) fn predict(
                     stored.result_files().len()
                 ));
             }
-            crate::output_manifest::write(&out, manifest, &store, &invocation);
+            crate::bindings::write(&out, bindings, &store, &invocation);
         }
         Ok(Outcome::Computed(outcome)) => {
             let stored = store_prediction(&outcome.stored, &info, request.reuse())
@@ -1856,7 +1856,7 @@ pub(crate) fn predict(
                     outcome.written.len()
                 ));
             }
-            crate::output_manifest::write(&out, manifest, &store, &invocation);
+            crate::bindings::write(&out, bindings, &store, &invocation);
         }
         Err(e) => {
             out.fail(format!("error: {e}"));

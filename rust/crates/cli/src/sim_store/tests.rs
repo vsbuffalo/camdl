@@ -294,6 +294,7 @@ fn argv(inv: &SimulateInvocation) -> Vec<String> {
         tsv,
         reactive_log,
         manifest,
+        link_root,
     } = args;
     let p = |p: &Path| p.to_string_lossy().into_owned();
     let mut v: Vec<String> = vec!["simulate".into(), p(model)];
@@ -375,6 +376,7 @@ fn argv(inv: &SimulateInvocation) -> Vec<String> {
     opt("--format", format.clone());
     opt("--reactive-log", reactive_log.as_deref().map(p));
     opt("--manifest", manifest.as_deref().map(p));
+    opt("--link-root", link_root.as_deref().map(p));
     if let Some(e) = event_log {
         if e.as_os_str() == "auto" {
             v.push("--event-log".into());
@@ -489,7 +491,11 @@ fn run(inv: &SimulateInvocation, store: Option<&Path>) -> store::Result<Observed
     }
     let mut effects = crate::test_support::recorded_execution(&root, crate::sim_store::Sim::KIND);
     effects.extend(used(&String::from_utf8_lossy(&out.stderr), &cwd.path().join("ir-cache")));
-    Ok(Observed { results: observe(&root), exports, effects, ..Observed::default() })
+    let mut copies = BTreeMap::new();
+    if let Some(links) = &a.link_root {
+        crate::test_support::link_exports(cwd.path(), links, &mut exports, &mut copies);
+    }
+    Ok(Observed { results: observe(&root), exports, copies, effects })
 }
 
 /// What a run's execution inputs did, each under `used.<field>`: from its
@@ -602,6 +608,7 @@ impl InputHarness for Harness {
             ("args.projected_out", _) => a.projected_out = Some("proj".into()),
             ("args.reactive_log", _) => a.reactive_log = Some("rl.tsv".into()),
             ("args.manifest", _) => a.manifest = Some("m.json".into()),
+            ("args.link_root", _) => a.link_root = Some("links".into()),
             ("args.dates", _) => a.dates = true,
             ("args.format", _) => a.format = Some("tsv".into()),
             ("args.tsv", _) => a.tsv = true,

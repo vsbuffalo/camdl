@@ -267,7 +267,8 @@ pub fn cmd_profile(inv: crate::args::ProfileInvocation) {
     // whether each stream is a terminal.
     let out = crate::out::Out::new(false);
     crate::profile_config::refuse_removed(&inv.args, &out);
-    let manifest = crate::output_manifest::claim(&out, inv.args.manifest.as_deref());
+    let link_root = crate::link_tree::link_root(inv.args.link_root.as_deref());
+    let bindings = crate::bindings::claim(&out, inv.args.manifest.as_deref(), link_root, inv.args.label.as_deref());
     // A fit file is read once, here, before the store is chosen: its `store`
     // key places the profile, and the fit problem it stores, in that fit's
     // store (run spec §2.1).
@@ -287,7 +288,7 @@ pub fn cmd_profile(inv: crate::args::ProfileInvocation) {
     } = execution;
     let compile = crate::util::CompileSettings::resolve(no_licm, no_ir_cache);
     let (exports,) = exports.into_parts();
-    let ((), (), _inference_exports, output, format, _manifest) = exports.into_parts();
+    let ((), (), _inference_exports, output, format, _manifest, _link_root) = exports.into_parts();
     let (request,) = request.into_parts();
     let ((), (), _inference_request, label, force, root) = request.into_parts();
     let request = crate::camdl_store::store_request_with_fit_file(label, force, root, file_store);
@@ -308,7 +309,7 @@ pub fn cmd_profile(inv: crate::args::ProfileInvocation) {
         config,
         TableExport { output, format },
         crate::profile_config::CellExecution { parallel, time_format },
-        StoreSide { request, given, execution: execution_record, manifest },
+        StoreSide { request, given, execution: execution_record, bindings },
     );
 }
 
@@ -317,8 +318,8 @@ struct StoreSide {
     request: store::StoreRequest,
     given: store::Given,
     execution: crate::args::ProfileInvocationExecution,
-    /// `--manifest`, claimed before the store was opened.
-    manifest: Option<crate::output_manifest::ManifestPath>,
+    /// `--manifest` and `--link-root`, claimed before the store was opened.
+    bindings: crate::bindings::Bindings,
 }
 
 /// The profile table's export: `--output`, else stdout, in `--format`.
@@ -409,7 +410,7 @@ fn run_profile(
     let ir_path_named = ir_path.clone();
 
     // ── The store, and the problem every point is of ──────────────────────
-    let StoreSide { request, given, execution: execution_record, manifest } = store_side;
+    let StoreSide { request, given, execution: execution_record, bindings } = store_side;
     let store = crate::camdl_store::open(&request)
         .unwrap_or_else(|e| out.fail(format!("error: the run store at {}: {e}", crate::camdl_store::root_of(&request).display())));
     let info = store::RunInfo::new(&given, &execution_record, &request)
@@ -2069,7 +2070,7 @@ fn run_profile(
             out.data_raw(String::from_utf8_lossy(&bytes).into_owned());
         }
     }
-    crate::output_manifest::write(out, manifest.as_ref(), &store, &invocation);
+    crate::bindings::write(out, &bindings, &store, &invocation);
 }
 
 /// The values a single-point starts rule supplies, and where they came from:

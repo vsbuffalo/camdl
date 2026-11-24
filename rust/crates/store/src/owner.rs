@@ -159,7 +159,7 @@ pub fn this_owner() -> &'static Owner {
 
 /// Whether a process with this id exists on this host.
 #[cfg(unix)]
-fn pid_exists(pid: u32) -> bool {
+pub fn pid_exists(pid: u32) -> bool {
     if pid == 0 {
         return false;
     }
@@ -168,8 +168,10 @@ fn pid_exists(pid: u32) -> bool {
     rc == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
 }
 
+/// Whether a process with this id exists on this host: without a way to
+/// probe, every process is taken to exist.
 #[cfg(not(unix))]
-fn pid_exists(_pid: u32) -> bool {
+pub fn pid_exists(_pid: u32) -> bool {
     true
 }
 

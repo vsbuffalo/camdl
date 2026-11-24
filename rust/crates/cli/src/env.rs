@@ -108,6 +108,7 @@ pub(crate) const VARS: &[Var] = &[
     var("CAMDLC_PATH", "camdlc_path", Execution, Route::None),
     var("CAMDLC", "camdlc", Execution, Route::None),
     var("CAMDL_STORE", "store", Execution, Route::None),
+    var("CAMDL_LINK_ROOT", "link_root", Execution, Route::None),
     var("CAMDL_UNLABELED_THRESHOLD", "unlabeled_threshold", Presentation, Route::None),
     var("PATH", "path", Execution, Route::None),
     var("XDG_CACHE_HOME", "xdg_cache_home", Execution, Route::None),
@@ -154,6 +155,10 @@ pub(crate) struct Env {
     /// `CAMDL_STORE`: the root of the run store (`store` crate) for a command
     /// on it without `--store`.
     pub store: Option<PathBuf>,
+    /// `CAMDL_LINK_ROOT`: the link root of a command that stores results
+    /// without `--link-root` (`crate::link_tree::link_root`). Empty names
+    /// none.
+    pub link_root: Option<PathBuf>,
     /// `CAMDL_UNLABELED_THRESHOLD`: how many unlabelled fits `fit table` lists
     /// before it suggests labels.
     pub unlabeled_threshold: Option<String>,
@@ -210,6 +215,7 @@ impl Environment {
             camdlc_path: path("CAMDLC_PATH"),
             camdlc: path("CAMDLC"),
             store: path("CAMDL_STORE"),
+            link_root: path("CAMDL_LINK_ROOT").filter(|p| !p.as_os_str().is_empty()),
             unlabeled_threshold: string("CAMDL_UNLABELED_THRESHOLD"),
             path: raw("PATH"),
             xdg_cache_home: path("XDG_CACHE_HOME"),
@@ -308,6 +314,7 @@ mod tests {
             camdlc_path: _,
             camdlc: _,
             store: _,
+            link_root: _,
             unlabeled_threshold: _,
             path: _,
             xdg_cache_home: _,
@@ -319,7 +326,7 @@ mod tests {
         let fields = [
             "trace_steps", "eval_unresolved", "no_binding_cache", "experimental", "no_constant_fold", "no_licm",
             "no_ir_cache", "ir_cache_dir", "skip_version_check", "camdlc_path", "camdlc",
-            "store", "unlabeled_threshold", "path", "xdg_cache_home", "home", "no_color", "clicolor_force", "ci",
+            "store", "link_root", "unlabeled_threshold", "path", "xdg_cache_home", "home", "no_color", "clicolor_force", "ci",
         ];
         let listed: Vec<&str> = VARS.iter().map(|v| v.field).collect();
         assert_eq!(fields.to_vec(), listed, "VARS lists Env's fields, in order");

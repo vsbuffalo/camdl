@@ -318,3 +318,25 @@ fn receive_of_results_already_here_leaves_them_in_place() {
     assert!(fit_store_support::predictions(&p.local())[0].starts_with(&run));
     p.ok(&p.local(), &[], &["verify"]);
 }
+
+/// `receive --link-root` links the received results by the receive's label,
+/// as every other storing command does: the fit run under `fits/`, the
+/// prediction inside it under `predictions/`, each link resolving to the
+/// file `camdl path` names through the receive's manifest.
+#[test]
+fn receive_links_what_it_received() {
+    let p = Project::new();
+    p.make_remote(&[OTHER_BUILD]);
+    p.pull();
+    p.ok(&p.local(), &[], &["receive", "pull-staging", "--label", "m4w_cloud", "--manifest", "local.json", "--link-root", "links"]);
+    let path = |name: &str| -> PathBuf {
+        let out = p.run(&p.local(), &[], &["path", "--manifest", "local.json", name]);
+        assert!(out.status.success(), "{}", text(&out));
+        PathBuf::from(String::from_utf8(out.stdout).unwrap().trim())
+    };
+    let link = p.dir().join("links/fits/m4w_cloud/draws.tsv");
+    assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+    assert_eq!(link.canonicalize().unwrap(), path("draws").canonicalize().unwrap());
+    let report = p.dir().join("links/predictions/m4w_cloud/report.json");
+    assert_eq!(report.canonicalize().unwrap(), path("report").canonicalize().unwrap());
+}

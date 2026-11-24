@@ -98,7 +98,7 @@ impl OutputManifest {
         if !missing.is_empty() {
             let stored = named(true);
             return Err(format!(
-                "no manifest is written, because {} result(s) the command asked for were not stored: {}. {}; \
+                "no manifest or links are written, because {} result(s) the command asked for were not stored: {}. {}; \
                  ask for the missing results again, and a later request computes them",
                 missing.len(),
                 missing.join(", "),
@@ -257,10 +257,14 @@ impl ManifestPath {
         Ok(ManifestPath(path.to_path_buf()))
     }
 
-    /// Writes the manifest of `invocation` at the claimed path, atomically.
-    pub(crate) fn write(&self, store: &store::Store, invocation: &store::Invocation) -> Result<(), String> {
-        let manifest = OutputManifest::of(store, invocation).map_err(|e| format!("--manifest {}: {e}", self.0.display()))?;
+    /// Writes `manifest` at the claimed path, atomically.
+    pub(crate) fn write(&self, manifest: &OutputManifest) -> Result<(), String> {
         self.write_bytes(&manifest.to_bytes())
+    }
+
+    /// The claimed path.
+    pub(crate) fn path(&self) -> &Path {
+        &self.0
     }
 
     /// Writes the manifest of the results `run_ids` of `store` at the
@@ -298,14 +302,6 @@ fn holds_a_manifest_or_nothing(path: &Path) -> Result<bool, String> {
 /// Claims `path` when one is given, or fails the command with the refusal.
 pub(crate) fn claim(out: &crate::out::Out, path: Option<&Path>) -> Option<ManifestPath> {
     path.map(|p| ManifestPath::claim(p).unwrap_or_else(|e| out.fail(format!("error: {e}"))))
-}
-
-/// Writes the manifest of `invocation` when a path was claimed, or fails the
-/// command.
-pub(crate) fn write(out: &crate::out::Out, manifest: Option<&ManifestPath>, store: &store::Store, invocation: &store::Invocation) {
-    if let Some(m) = manifest {
-        m.write(store, invocation).unwrap_or_else(|e| out.fail(format!("error: {e}")));
-    }
 }
 
 #[cfg(test)]

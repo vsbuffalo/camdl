@@ -138,6 +138,15 @@ pub struct ReceiveArgs {
     #[arg(long, value_name = "PATH")]
     #[input(export)]
     pub manifest: Option<PathBuf>,
+
+    /// Also write a symbolic link to each stored result file under DIR once
+    /// the command has succeeded, at DIR/<group>/<label>/<file> (default
+    /// `$CAMDL_LINK_ROOT`; run spec §2.11). The label's earlier links are
+    /// removed when the command starts, so a failed command leaves none.
+    /// Links are for browsing; a workflow depends on --manifest.
+    #[arg(long, value_name = "DIR")]
+    #[input(export)]
+    pub link_root: Option<PathBuf>,
 }
 
 #[derive(Args, Debug, Clone)]

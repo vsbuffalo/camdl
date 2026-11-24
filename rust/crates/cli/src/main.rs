@@ -42,6 +42,8 @@ mod score_command;   // camdl score on the run store: a stored prediction scored
 mod store_commands; // `camdl status`, `verify`, `clean`, `reindex`: the run store's maintenance commands
 mod camdl_store;    // camdl on the run store: ambient identity, kinds, root, content artifacts
 mod result_files;   // the files each kind of result stores, as types, and the set each run declares
+mod bindings;        // what a storing command writes for a workflow: its manifest and its links
+mod link_tree;       // --link-root: symbolic links to a command's stored files, by label
 mod output_manifest; // --manifest: the JSON file listing what a command stored, for a workflow tool
 mod resolve_file;    // a stored file from a handle or a manifest and a name: what `path`, `cat` and `show` share
 mod input_fixtures; // the second values and fixtures of the input-class checks
@@ -896,7 +898,7 @@ fn run_simulate(inv: args::SimulateInvocation) {
     let (backend_flag, dt_flag, integrator_flag) = backend.into_parts();
     let (every, no_flows, columns) = output_view.into_parts();
     let (exports,) = exports.into_parts();
-    let ((), (), (), (), draws_out, output, stdout, design_from, projected_out, dates, format, tsv, reactive_log, manifest) =
+    let ((), (), (), (), draws_out, output, stdout, design_from, projected_out, dates, format, tsv, reactive_log, manifest, link_root) =
         exports.into_parts();
     let (request,) = request.into_parts();
     let ((), (), (), (), store_root, force, label) = request.into_parts();
@@ -928,11 +930,14 @@ fn run_simulate(inv: args::SimulateInvocation) {
         seed, seeds, replicates, draws, sweep, sweep_file, fit, n_draws, chains, exclude_chains, draws_out, output,
         stdout, emit_every, obs, obs_dir, obs_only, obs_only_dir, design_from, projected_out, dates, quantities_out,
         quantities, dry_run, store: store_root, parallel, force, label, event_log, format, tsv, reactive_log,
-        manifest,
+        manifest, link_root,
     };
     // A file an export writes after the cells are stored must have a
     // directory to go to; one that has none is refused before anything runs.
-    let manifest = output_manifest::claim(&out, a.manifest.as_deref());
+    // A dry run and a design-preserving simulation keep nothing in the store,
+    // so they take no link root, from the flag (refused) or the environment.
+    let link_root = if a.dry_run || a.design_from.is_some() { None } else { link_tree::link_root(a.link_root.as_deref()) };
+    let bindings = bindings::claim(&out, a.manifest.as_deref(), link_root, a.label.as_deref());
     let file_exports: [(&str, Option<&std::path::Path>); 6] = [
         ("-o", a.output.as_deref()),
         ("--obs", a.obs.as_deref()),
@@ -2477,7 +2482,7 @@ fn run_simulate(inv: args::SimulateInvocation) {
             event_log_tsv: a.tsv,
             event_log_format: a.format.clone(),
             reactive_log: a.reactive_log.clone(),
-            manifest,
+            bindings,
         },
         dry_run,
     });

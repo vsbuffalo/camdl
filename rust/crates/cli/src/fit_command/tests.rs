@@ -240,6 +240,7 @@ fn argv(inv: &FitRunInvocation) -> Vec<String> {
         label,
         store,
         manifest,
+        link_root,
         ..
     } = args;
     let mut v: Vec<String> = vec!["fit".into(), "run".into(), config.to_string_lossy().into_owned()];
@@ -283,6 +284,7 @@ fn argv(inv: &FitRunInvocation) -> Vec<String> {
     opt("--label", label.clone());
     opt("--store", store.as_ref().map(|p| p.to_string_lossy().into_owned()));
     opt("--manifest", manifest.as_ref().map(|p| p.to_string_lossy().into_owned()));
+    opt("--link-root", link_root.as_ref().map(|p| p.to_string_lossy().into_owned()));
     let mut flag = |set: bool, name: &str| {
         if set {
             v.push(name.into());
@@ -458,6 +460,7 @@ impl InputHarness for Harness {
             ("args.method.n_trajectories", _) => m.n_trajectories = Some(2),
             ("args.method.adapt_start", _) => m.adapt_start = Some(3),
             ("args.manifest", Class::Export) => inv.args.manifest = Some("m.json".into()),
+            ("args.link_root", Class::Export) => inv.args.link_root = Some("links".into()),
             (name, Class::Identity) => return self.base.varied(name),
             (name, class) => panic!("no second value for {name} ({class:?})"),
         }
@@ -508,7 +511,11 @@ impl InputHarness for Harness {
             let bytes = std::fs::read(cwd.path().join(path)).unwrap_or_default();
             exports.insert(path.clone(), Key::digest_bytes(&bytes));
         }
-        Ok(Observed { results: observe(&root), exports, effects, ..Observed::default() })
+        let mut copies = BTreeMap::new();
+        if let Some(links) = &invocation.args.link_root {
+            crate::test_support::link_exports(cwd.path(), links, &mut exports, &mut copies);
+        }
+        Ok(Observed { results: observe(&root), exports, copies, effects })
     }
 }
 

@@ -61,7 +61,7 @@ pub(crate) fn cmd_fit_run(inv: crate::args::FitRunInvocation) {
     let removed = RemovedFlags::of(&inv.args);
     let (declared, execution, exports, request, given) = store::Inputs::split(inv).into_parts();
     let (exports,) = exports.into_parts();
-    let (_problem_exports, (), (), manifest) = exports.into_parts();
+    let (_problem_exports, (), (), manifest, link_root) = exports.into_parts();
     let (declared, no_licm) = declared.into_parts();
     let (config, problem, run, method) = declared.into_parts();
     let (forcing_extrapolation, emit_every, sweep) = problem.into_parts();
@@ -125,9 +125,17 @@ pub(crate) fn cmd_fit_run(inv: crate::args::FitRunInvocation) {
         force,
         label: label.clone(),
         manifest: manifest.clone(),
+        link_root: link_root.clone(),
         ..removed.into_args()
     };
-    let manifest = crate::output_manifest::claim(&out, manifest.as_deref());
+    // A malformed label is refused before the claim removes anything.
+    if let Some(raw) = label.as_deref() {
+        if let Err(e) = crate::fit::validate_label(raw) {
+            out.fail(format!("error: invalid --label: {e}"));
+        }
+    }
+    let link_root = crate::link_tree::link_root(link_root.as_deref());
+    let bindings = crate::bindings::claim(&out, manifest.as_deref(), link_root, label.as_deref());
 
     // gh#162: a fit nests Rayon parallelism (chains × particle filter) on the
     // global pool; `--parallel` / CAMDL_PARALLEL caps it (0 = all cores).
@@ -135,11 +143,6 @@ pub(crate) fn cmd_fit_run(inv: crate::args::FitRunInvocation) {
         let _ = rayon::ThreadPoolBuilder::new().num_threads(a.parallel).build_global();
     }
     log::debug!("fit run: running on {} threads", rayon::current_num_threads());
-    if let Some(raw) = label.as_deref() {
-        if let Err(e) = crate::fit::validate_label(raw) {
-            out.fail(format!("error: invalid --label: {e}"));
-        }
-    }
 
     // The fit file, read once: the text every step parses and what each run
     // keeps as its `fit.toml`.
@@ -169,7 +172,7 @@ pub(crate) fn cmd_fit_run(inv: crate::args::FitRunInvocation) {
         out.fail(format!("error: {} of this invocation's problems and runs did not complete:\n  {}",
             failures.len(), failures.join("\n  ")));
     }
-    crate::output_manifest::write(&out, manifest.as_ref(), &store, &invocation);
+    crate::bindings::write(&out, &bindings, &store, &invocation);
 }
 
 /// The skipped removed-flag fields, which the split does not carry; the
@@ -193,6 +196,7 @@ impl RemovedFlags {
             label: None,
             store: None,
             manifest: None,
+            link_root: None,
             _removed_stage: None,
             _removed_init: None,
             _removed_posterior: None,

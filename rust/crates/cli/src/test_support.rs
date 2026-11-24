@@ -160,3 +160,39 @@ fn render_pins(name: &str, got: &std::collections::BTreeMap<String, std::collect
     }
     s + "];\n"
 }
+
+/// Each link of the link tree at `root` (relative to `cwd`), as an export
+/// that copies the stored file it points at: the bytes' digest in `exports`
+/// and the file in `copies`, each under the link's path relative to `cwd`.
+/// A link directory's record of its links is not a stored file's copy and is
+/// left out. For a harness's `InputHarness::run`.
+pub(crate) fn link_exports(
+    cwd: &std::path::Path,
+    root: &std::path::Path,
+    exports: &mut std::collections::BTreeMap<PathBuf, store::Key>,
+    copies: &mut std::collections::BTreeMap<PathBuf, store::StoredFile>,
+) {
+    let mut stack = vec![cwd.join(root)];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else { continue };
+        for e in entries.flatten() {
+            let p = e.path();
+            let meta = std::fs::symlink_metadata(&p).unwrap();
+            if meta.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            if !meta.file_type().is_symlink() {
+                continue;
+            }
+            let target = p.canonicalize().unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+            let folder = target.ancestors().find(|a| a.join("identity.json").is_file()).expect("a link points into a result's folder");
+            let identity: serde_json::Value = serde_json::from_slice(&std::fs::read(folder.join("identity.json")).unwrap()).unwrap();
+            let run_id = store::Key::from_hex(identity["run_id"].as_str().unwrap()).unwrap();
+            let file = target.strip_prefix(folder).unwrap().to_string_lossy().into_owned();
+            let rel = p.strip_prefix(cwd).unwrap().to_path_buf();
+            exports.insert(rel.clone(), store::Key::digest_bytes(&std::fs::read(&target).unwrap()));
+            copies.insert(rel, store::StoredFile { run_id, file });
+        }
+    }
+}

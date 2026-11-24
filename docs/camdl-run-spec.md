@@ -2042,9 +2042,9 @@ modification time.
 A manifest lists only completed results. When a by-product the command asked for
 was recorded as not computed while the command otherwise succeeded, such as the
 by-products of a filter run with nothing to record, the command exits 1 and
-writes no manifest; the message names each result that was not stored, by kind
-and run id, and the results that were, the run among them, so the missing ones
-can be asked for again.
+writes no manifest and no links (§2.11); the message names each result that was
+not stored, by kind and run id, and the results that were, the run among them,
+so the missing ones can be asked for again.
 
 #### What it holds
 
@@ -2185,6 +2185,154 @@ writes the bytes the computation wrote.
   with the labels the copy's invocation records gave it (§4.5). A result's entry
   is the one the command that computed it wrote, apart from `camdl` and `label`,
   which are the receiving build's and the receive's own.
+
+### 2.11 The link tree
+
+`--link-root DIR` makes a command that stores results also write, once it has
+succeeded, a symbolic link to each result file of each result it lists, under a
+tree named by the command's `--label`. The links are for a person browsing
+results, or a program that wants plain paths to open. A workflow step that must
+read exactly what an earlier step made depends on that step's output manifest
+(§2.10), whose run ids and digests do not move when a label is reused; the links
+follow the label. The design is
+`docs/dev/proposals/2026-11-23-workflow-bindings.md`, "Links".
+
+`simulate`, `fit run`, `pfilter`, `profile`, `predict`, `score` and `receive`
+take it:
+
+```bash
+camdl fit run fits/m4w_mh.toml --label m4w_mh --link-root results
+camdl simulate measles.camdl --seeds 1:2 --label pair --link-root results
+```
+
+```text
+$ ls results/fits/m4w_mh/
+chain_0  chain_1  chain_starts.tsv  diagnostics.json  draws.tsv  fit_state.toml  …
+$ ls results/sims/pair/
+19d4817e5869  825d02b237bd
+```
+
+#### The root
+
+The link root is `--link-root DIR`, else the environment variable
+`CAMDL_LINK_ROOT`, else none, and with none the command writes no links. An
+empty value names no root. A relative root is relative to the directory the
+command runs in, as a relative store root is (§2.1). A project can set the
+variable once in an `.envrc` file, which direnv reads after `direnv allow`.
+Written as `$PWD/results`, the root is the project directory's `results/`
+whichever of its subdirectories a command runs in, since direnv evaluates the
+file in the directory that holds it:
+
+```bash
+# .envrc
+export CAMDL_STORE="$PWD/camdl-store"
+export CAMDL_LINK_ROOT="$PWD/results"
+```
+
+`simulate --dry-run`, `simulate --design-from` and `pfilter --no-store` keep no
+result in the store: `--link-root` is refused there by argument parsing (exit
+2), and `CAMDL_LINK_ROOT` is ignored. Symbolic links are written on Linux and
+macOS; on any other platform a command given a link root is refused with exit 1
+before it stores anything.
+
+#### The layout
+
+Each link is at
+
+```text
+<root>/<group>/<label>/<logical name>.<ext>
+```
+
+- The group is the result's kind's family: `fits` for a `fit_run`, `sims` for a
+  `sim` cell, `filters` for a `pfilter` run, `predictions`, `profiles` for a
+  `profile_point`, and `scores`. A content artifact (`compiled_model`,
+  `quantities`, `data_table`) and a fit problem (`fit`) get no links.
+- The label is the command's `--label`. Without one, each result's directory is
+  named by its run id's first 12 hex digits.
+- The file's name is its logical name (§2.9) followed by the extension of its
+  stored name, so `chain_0/trace` links as `chain_0/trace.tsv` and a
+  `prequential` by-product's `joint` as `joint.tsv`. A logical name holding a
+  `/` makes a subdirectory.
+- A by-product's files sit with its upstream's: a filter run's `pf_health.tsv`
+  links as `<root>/filters/<label>/pf_health.tsv`, and a cell's observation
+  stream `cases` as `<root>/sims/<label>/cases.tsv`. A by-product file whose
+  name the upstream already uses sits under the by-product's kind instead
+  (`obs/traj.tsv` for a stream named `traj`).
+- When a command's results include several of one group, each sits one level
+  deeper, under its run id's first 12 hex digits:
+  `<root>/sims/pair/19d4817e5869/traj.tsv`.
+
+A link's target is relative when the store root and the link root, with every
+symbolic link in them resolved, share a directory below the filesystem's root,
+so that moving that directory, such as the project, keeps the links working;
+otherwise it is absolute.
+
+Each link directory (`<root>/<group>/<label>`) holds `.camdl-links.json`, the
+record of the directory's name as camdl gave it (the label, or the run id's
+digits) and of the links camdl wrote in it, each with its target. The record is
+how camdl tells its own links from anything else at the path. The name is
+compared byte for byte: two labels that the filesystem resolves to one
+directory, such as `Up` and `up` on a case-insensitive volume (the default on
+macOS), or two Unicode normalizations of one word, never take each other's
+links.
+
+#### When links are written and removed
+
+The links under a root follow the latest command with the label that succeeded
+with that link root. A command run without a link root, or with another one,
+leaves an earlier tree under this root in place, so its links can name the
+results of an earlier invocation than `@label` does (§4.5).
+
+- After its arguments have parsed and before its first call to the store, the
+  command removes every link directory of its label, in every group, at the
+  point where it removes an earlier manifest (§2.10). A command that then fails,
+  in any of the ways that leave no manifest, leaves no links for the label.
+- When the command succeeds, cache hits included, it writes its links from the
+  results its output manifest lists, before the manifest. Every link directory's
+  place is checked before any is written, and a write refused part way removes
+  the directories it wrote, so a refused write leaves no links. Each link
+  directory is built under a temporary name beside its place and renamed into
+  it, so a reader finds no directory or a whole one, never links of two commands
+  mixed. Each link is checked to resolve to its stored file. A command whose
+  manifest cannot be written removes the links it wrote.
+- A directory camdl replaces or removes is first renamed aside and then checked,
+  so what is checked is what is removed; one that fails the check is renamed
+  back.
+- A link whose target the store no longer holds dangles: opening it fails.
+  Running the command again, a cache hit, writes the link again.
+
+A temporary directory left by a killed process is named `.<label>.camdl-new.…`
+or `.<label>.camdl-old.…`, beside the link directory, with the process's id
+after the second `.`. Its leading `.` keeps it out of a listing. A later command
+with the label removes those whose process is no longer running on this host,
+when they hold only what camdl wrote, and refuses one that holds anything else.
+
+Links are an export: they are never part of an identity, a command given a link
+root reuses what the same command without one stored, and the output manifest
+does not mention them.
+
+#### What is refused
+
+A command refuses, with exit 1 and before anything is stored:
+
+- a link root that is not a directory;
+- a label that cannot name a directory: empty, beginning with `.`, holding a
+  `/`, or longer than 207 bytes, which leaves room in the 255-byte limit on a
+  file name for a temporary directory's suffix;
+- anything camdl did not write at one of its label's link directories, or at one
+  of its temporary directories: a file, a symbolic link, a directory holding
+  anything other than its record and the links the record names with the targets
+  it records, or a directory whose record names another label. The message names
+  the path, and for another label both labels; the path is left as it is.
+
+An empty directory at a link directory's place is not refused: it is removed.
+
+Once the command has stored its results, its links are refused, with exit 1 and
+no manifest, when the link root or a group directory, with every symbolic link
+resolved, is the run store's root or lies inside it (a store inside the link
+root is allowed); when a place holds anything camdl did not write, as above,
+which for a command without a label is checked only here; and when a written
+link does not resolve to its stored file.
 
 ---
 
@@ -3465,7 +3613,7 @@ again finds the results already placed `present`.
 
 `--manifest PATH` writes the output manifest of the received results, placed and
 present alike (§2.10), so a workflow rule can declare a pull's manifest as its
-output. `receive` takes no `--link-root`.
+output, and `--link-root DIR` links them under the receive's label (§2.11).
 
 ### 4.6 Synthetic Observations
 
@@ -8091,6 +8239,9 @@ Store
                               names a cell
   --manifest PATH             write the output manifest once the command succeeds
                               (§2.10); refused with --dry-run and --design-from
+  --link-root DIR             link the stored result files under DIR (default
+                              $CAMDL_LINK_ROOT; §2.11); refused with --dry-run and
+                              --design-from
   --dry-run                   print the resolved plan and, for a multi-cell run,
                               which cells the store holds; writes nothing
 ```
@@ -8117,6 +8268,8 @@ of a fit (§7.3).
                               key (§2.1)
   --manifest PATH             write the output manifest once the command succeeds
                               (§2.10)
+  --link-root DIR             link the stored result files under DIR (default
+                              $CAMDL_LINK_ROOT; §2.11)
   --emit-every N | NAME=N     override a `[synthetic]` fit's observation emission
                               cadence (same grammar as `simulate --emit-every`);
                               refused on a fit with no `[synthetic]` block; the
@@ -8262,6 +8415,8 @@ camdl predict RUN            RUN: the positional run handle, same grammar as `fi
                             key (§2.1)
 --manifest PATH             write the output manifest once the command succeeds
                             (§2.10); refused with --no-store
+--link-root DIR             link the stored result files under DIR (default
+                            $CAMDL_LINK_ROOT; §2.11); refused with --no-store
 ```
 
 `camdl pfilter` stores its result in the run store (§2.1). The store's layout
@@ -8386,6 +8541,8 @@ part of the leaf's identity, and the full objective leaves the key unchanged.
 --label TEXT
 --manifest PATH             write the output manifest once the command succeeds
                             (§2.10)
+--link-root DIR             link the stored result files under DIR (default
+                            $CAMDL_LINK_ROOT; §2.11)
 ```
 
 ### `camdl compare [PATHS…]`

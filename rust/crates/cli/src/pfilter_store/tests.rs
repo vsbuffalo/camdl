@@ -266,6 +266,7 @@ fn argv(inv: &PfilterInvocation) -> Vec<String> {
         label,
         store,
         manifest,
+        link_root,
     } = args;
     let p = |p: &Path| p.to_string_lossy().into_owned();
     let mut v: Vec<String> = vec!["pfilter".into(), p(model)];
@@ -319,6 +320,7 @@ fn argv(inv: &PfilterInvocation) -> Vec<String> {
     opt("--save-prequential", save_prequential.clone());
     opt("--score-from", score_from.clone());
     opt("--manifest", manifest.as_deref().map(p));
+    opt("--link-root", link_root.as_deref().map(p));
     opt("--label", label.clone());
     opt("--store", store.as_deref().map(p));
     let mut flag = |set: bool, name: &str| {
@@ -431,9 +433,13 @@ fn run(inv: &PfilterInvocation, store: Option<&Path>) -> store::Result<Observed>
         let bytes = std::fs::read(cwd.path().join(path)).unwrap_or_default();
         exports.insert(path.clone(), Key::digest_bytes(&bytes));
     }
+    let mut copies = BTreeMap::new();
+    if let Some(links) = &a.link_root {
+        crate::test_support::link_exports(cwd.path(), links, &mut exports, &mut copies);
+    }
     let mut effects = crate::test_support::recorded_execution(&root, crate::pfilter_store::Pfilter::KIND);
     effects.extend(used(&String::from_utf8_lossy(&out.stderr), &cwd.path().join("ir-cache")));
-    Ok(Observed { results: observe(&root), exports, effects, ..Observed::default() })
+    Ok(Observed { results: observe(&root), exports, copies, effects })
 }
 
 /// The log filter under which a run reports what its execution inputs did:
@@ -532,6 +538,7 @@ impl InputHarness for Harness {
             ("args.pf_health", _) => a.pf_health = Some("health.tsv".into()),
             ("args.output", _) => a.output = Some("ll.txt".into()),
             ("args.manifest", _) => a.manifest = Some("m.json".into()),
+            ("args.link_root", _) => a.link_root = Some("links".into()),
             ("args.sweep_file", Class::Expands) => a.sweep_file = Some("design3.tsv".into()),
             (name, Class::Identity | Class::Render) => return self.base.varied(name),
             (name, class) => panic!("no second value for {name} ({class:?})"),

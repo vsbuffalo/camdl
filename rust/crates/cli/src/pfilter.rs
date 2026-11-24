@@ -199,7 +199,10 @@ pub fn cmd_pfilter(inv: crate::args::PfilterInvocation) {
             }
         }
     }
-    let manifest = crate::output_manifest::claim(&out, inv.args.manifest.as_deref());
+    // `--no-store` keeps nothing, so it takes no link root, from the flag
+    // (refused) or the environment.
+    let link_root = if inv.args.no_store { None } else { crate::link_tree::link_root(inv.args.link_root.as_deref()) };
+    let bindings = crate::bindings::claim(&out, inv.args.manifest.as_deref(), link_root, inv.args.label.as_deref());
     // A fit file is read once, here, before the store is chosen: its `store`
     // key places the filter run in that fit's store (run spec §2.1). A stored
     // fit's handle is read in the store, below.
@@ -217,7 +220,7 @@ pub fn cmd_pfilter(inv: crate::args::PfilterInvocation) {
     let compile = crate::util::CompileSettings::resolve(no_licm, no_ir_cache);
     let filter_execution = crate::pfilter_config::execution(&inference);
     let (exports,) = exports.into_parts();
-    let ((), (), _inference_exports, (), output, _manifest) = exports.into_parts();
+    let ((), (), _inference_exports, (), output, _manifest, _link_root) = exports.into_parts();
     let (request,) = request.into_parts();
     let ((), (), _inference_request, (), no_store, force, label, root) = request.into_parts();
     let request = crate::camdl_store::store_request_with_fit_file(label, force, root, file_store);
@@ -227,7 +230,7 @@ pub fn cmd_pfilter(inv: crate::args::PfilterInvocation) {
     };
     let (config, requests, _forcing_route) = crate::pfilter_config::resolve(declared, compile, &out, fit_file, &crate::camdl_store::root_of(&request));
     let store = StoreSide { request, no_store, given, execution: execution_record };
-    run_pfilter(&out, config, requests, RunExports { output, manifest }, filter_execution, store);
+    run_pfilter(&out, config, requests, RunExports { output, bindings }, filter_execution, store);
 }
 
 /// The store-class inputs of one `pfilter`, and what its records hold.
@@ -243,8 +246,8 @@ struct StoreSide {
 struct RunExports {
     /// `-o`: the log-likelihood table, rendered from the stored result.
     output: Option<std::path::PathBuf>,
-    /// `--manifest`, claimed before the store was opened.
-    manifest: Option<crate::output_manifest::ManifestPath>,
+    /// `--manifest` and `--link-root`, claimed before the store was opened.
+    bindings: crate::bindings::Bindings,
 }
 
 /// The particle filter of one resolved `pfilter`, and its stored result.
@@ -287,7 +290,7 @@ fn run_pfilter(
         score_from,
         samples: save_samples,
     } = requests;
-    let RunExports { output: output_path, manifest } = exports;
+    let RunExports { output: output_path, bindings } = exports;
     let crate::pfilter_config::FilterExecution { parallel, time_format, max_substeps } = execution;
     let fit_problem: Option<&crate::fit::config_v2::Problem> = fit.as_ref().map(|f| &f.config.problem);
 
@@ -1355,7 +1358,7 @@ fn run_pfilter(
             let Some(Prepared { store, info, .. }) = prepared.into_inner() else {
                 unreachable!("a point that returns has opened the store")
             };
-            report_design(out, &points, results, store, info, output_path.as_deref(), manifest.as_ref(), no_store);
+            report_design(out, &points, results, store, info, output_path.as_deref(), &bindings, no_store);
         }
         None => {
             let result = score_point(&[], PointRole::Single, Gate::Here);
@@ -1371,7 +1374,7 @@ fn run_pfilter(
                 filtering: save_filtering.as_deref(),
                 filtered_streams: save_filtered_streams.as_deref(),
             };
-            report_single(out, result, store, info, &paths, output_path.as_deref(), manifest.as_ref(), no_store, &model_in);
+            report_single(out, result, store, info, &paths, output_path.as_deref(), &bindings, no_store, &model_in);
         }
     }
 }
@@ -1618,7 +1621,7 @@ fn report_design(
     store: store::Store,
     info: store::RunInfo,
     output: Option<&std::path::Path>,
-    manifest: Option<&crate::output_manifest::ManifestPath>,
+    bindings: &crate::bindings::Bindings,
     no_store: bool,
 ) {
     use crate::pfilter_store::*;
@@ -1680,7 +1683,7 @@ fn report_design(
              or stopped with an error), so they have no log-likelihood; the first: {message}",
             every_failed.len()));
     }
-    crate::output_manifest::write(out, manifest, &store, &invocation);
+    crate::bindings::write(out, bindings, &store, &invocation);
 }
 
 /// End the single call's invocation, export the by-products asked for from
@@ -1694,7 +1697,7 @@ fn report_single(
     info: store::RunInfo,
     paths: &ExportPaths<'_>,
     output_path: Option<&std::path::Path>,
-    manifest: Option<&crate::output_manifest::ManifestPath>,
+    bindings: &crate::bindings::Bindings,
     no_store: bool,
     model: &ir::Model,
 ) {
@@ -1849,7 +1852,7 @@ fn report_single(
         }
     }
     milestone();
-    crate::output_manifest::write(out, manifest, &store, &invocation);
+    crate::bindings::write(out, bindings, &store, &invocation);
 }
 
 /// The filter's outcome: one run, an error the filter stopped with, or each
