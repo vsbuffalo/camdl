@@ -149,7 +149,7 @@ fn resolved(fx: &Fixture, o: &Opened, config: &FitConfig) -> ResolvedProblem {
 
 fn store_problem(o: &Opened, problem: &ResolvedProblem) -> Stored<FitProblem> {
     let labels = ProblemLabels { model: "model".into(), sweep_point: None };
-    match o.store.begin::<FitProblem>(&problem.identity, &labels, &o.info, Reuse::IfCompleted).unwrap() {
+    match crate::camdl_store::begin::<FitProblem>(&o.store, &problem.identity, &labels, &o.info, Reuse::IfCompleted, problem_files(problem)).unwrap() {
         Begin::Claimed(mut run) => {
             write_problem(&mut run, problem).unwrap();
             run.finish().unwrap()
@@ -177,7 +177,7 @@ fn run_identity(problem: &Stored<FitProblem>, config: &FitConfig) -> (FitRunIden
 
 fn store_run(o: &Opened, problem: &Stored<FitProblem>, config: &FitConfig) -> Stored<FitRun> {
     let (id, labels) = run_identity(problem, config);
-    match o.store.begin::<FitRun>(&id, &labels, &o.info, Reuse::IfCompleted).unwrap() {
+    match crate::camdl_store::begin::<FitRun>(&o.store, &id, &labels, &o.info, Reuse::IfCompleted, [crate::result_files::fit_run::FitRunFile::Common(crate::result_files::fit_run::CommonFile::Method)]).unwrap() {
         Begin::Claimed(mut run) => {
             write_method(&mut run, config.inference.method.as_ref().unwrap()).unwrap();
             run.finish().unwrap()
@@ -352,9 +352,9 @@ fn the_tree_is_the_layout() {
         options: PredictOptions { mode: PredictMode::Forecast, settings: "{\"reach\":\"7 days\"}".into(), design: BTreeMap::new() },
     };
     let labels = PredictionLabels { mode: PredictMode::Forecast.label().into(), scenarios: Vec::new(), model: "model".into() };
-    let prediction = match o.store.begin::<Prediction>(&id, &labels, &o.info, Reuse::IfCompleted).unwrap() {
+    let prediction = match crate::camdl_store::begin::<Prediction>(&o.store, &id, &labels, &o.info, Reuse::IfCompleted, crate::result_files::fit::PredictionFile::parse("predictive.json")).unwrap() {
         Begin::Claimed(run) => {
-            run.result_file("predictions.tsv").unwrap().write_all(b"t\n").unwrap();
+            run.result_file("predictive.json").unwrap().write_all(b"{}").unwrap();
             run.finish().unwrap()
         }
         _ => panic!("the prediction is new"),
@@ -363,6 +363,169 @@ fn the_tree_is_the_layout() {
     assert_eq!(&q[..6], &r[..], "{q:?}");
     assert_eq!(q[6], "predict");
     assert!(named(&q[7], "forecast"), "{q:?}");
+}
+
+/// A prediction declares the tables its manifests list: a stream table the
+/// predictive manifest lists and `camdl predict` never wrote is refused as
+/// missing when the prediction is stored; a predictive table no manifest
+/// lists is left out of the set, and so refused; the forecast's produced
+/// streams and its samples file are declared, and a contrast table, which no
+/// manifest lists, is declared as written.
+#[test]
+fn a_prediction_declares_the_tables_its_manifests_list() {
+    use crate::result_files::fit::PredictionFile;
+    use crate::result_files::ResultFile;
+    let scratch = tempfile::tempdir().unwrap();
+    let write = |name: &str, text: &str| {
+        let p = scratch.path().join(name);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    };
+    write("predictive.json", r#"{"streams": [{"file": "predictive/cases.tsv"}, {"file": "predictive/deaths.tsv"}], "skipped": ["hosp"]}"#);
+    write("predictive/cases.tsv", "t\n");
+    write("predictive/hosp.tsv", "t\n");
+    write("forecast.json", r#"{"produced": ["cases"], "samples": {"file": "forecast-samples.tsv"}}"#);
+    write("forecast/cases.tsv", "t\n");
+    write("forecast-samples.tsv", "t\n");
+    write("contrasts/averted.tsv", "t\n");
+    write("report.json", "{}");
+    let declared: Vec<String> = PredictionFile::of_dir(scratch.path()).unwrap().iter().map(ResultFile::stored).collect();
+    assert_eq!(
+        declared,
+        [
+            "contrasts/averted.tsv", "forecast-samples.tsv", "forecast.json", "forecast/cases.tsv", "predictive.json",
+            "predictive/cases.tsv", "predictive/deaths.tsv", "report.json",
+        ]
+    );
+
+    let fx = fixture();
+    let o = open();
+    let config = fx.config(&fit_toml("file = \"wide.tsv\"", 0.02));
+    let problem = store_problem(&o, &resolved(&fx, &o, &config));
+    let run = store_run(&o, &problem, &config);
+    let id = PredictIdentity {
+        source: ParameterSource::Posterior { draws: run.dep_all(), problem: problem.dep_all() },
+        data: BTreeMap::new(),
+        quantities: None,
+        options: PredictOptions { mode: PredictMode::All, settings: "{}".into(), design: BTreeMap::new() },
+    };
+    let labels = PredictionLabels { mode: PredictMode::All.label().into(), scenarios: Vec::new(), model: "model".into() };
+    let declared = PredictionFile::of_dir(scratch.path()).unwrap();
+    let Begin::Claimed(prediction) =
+        crate::camdl_store::begin::<Prediction>(&o.store, &id, &labels, &o.info, Reuse::IfCompleted, declared).unwrap()
+    else {
+        panic!("the prediction is new")
+    };
+    for name in ["predictive.json", "predictive/cases.tsv", "predictive/hosp.tsv", "forecast.json", "forecast/cases.tsv",
+                 "forecast-samples.tsv", "contrasts/averted.tsv", "report.json"] {
+        prediction.result_file(name).unwrap().write_all(b"x").unwrap();
+    }
+    match prediction.finish() {
+        Err(store::Error::FileSetMismatch { missing, unexpected, .. }) => {
+            assert_eq!(missing, ["predictive/deaths.tsv"], "a listed stream's table never written");
+            assert_eq!(unexpected, ["predictive/hosp.tsv"], "a skipped stream's table no manifest lists");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A method's working directory holding a file its method does not store is
+/// refused by name when the method completed: an MH run's output refuses IF2's
+/// `mle_params.toml` and writes nothing for it. A failing run keeps the
+/// declared files it finds, keeps the other as an attempt file and names it.
+#[test]
+fn a_method_output_refuses_a_file_its_method_does_not_store() {
+    use crate::result_files::fit_run::{MethodOutput, Mh};
+    let fx = fixture();
+    let o = open();
+    let config = fx.config(&fit_toml("file = \"wide.tsv\"", 0.02));
+    let problem = store_problem(&o, &resolved(&fx, &o, &config));
+    let (id, labels) = run_identity(&problem, &config);
+    let Begin::Claimed(mut run) = o.store.begin::<FitRun>(&id, &labels, &o.info, Reuse::IfCompleted).unwrap() else {
+        panic!("the run is new")
+    };
+    let work = tempfile::tempdir().unwrap();
+    std::fs::write(work.path().join("draws.tsv"), "chain\tdraw\n").unwrap();
+    std::fs::write(work.path().join("mle_params.toml"), "beta = 0.4\n").unwrap();
+    let err = MethodOutput::new(&mut run, &Mh, 1, None).transfer(work.path(), true).unwrap_err();
+    assert!(err.contains("the mh method wrote `mle_params.toml`") && err.contains("chain_0/trace"), "{err}");
+    assert!(!run.folder().unwrap().join("mle_params.toml").exists(), "the refused file is not written");
+    drop(run);
+
+    let Begin::Claimed(mut run) = o.store.begin::<FitRun>(&id, &labels, &o.info, Reuse::IfCompleted).unwrap() else {
+        panic!("a failed run is claimed again")
+    };
+    let stray = MethodOutput::new(&mut run, &Mh, 1, None).transfer(work.path(), false).unwrap();
+    assert_eq!(stray, vec!["mle_params.toml".to_string()], "the kept stray file is named");
+    let folder = run.folder().unwrap().to_path_buf();
+    assert!(folder.join("draws.tsv").is_file());
+    assert_eq!(std::fs::read_to_string(folder.join("mle_params.toml")).unwrap(), "beta = 0.4\n", "kept as an attempt file");
+    run.fail("fitting", "stopped").unwrap();
+    let record: serde_json::Value = serde_json::from_slice(&std::fs::read(folder.join("run.json")).unwrap()).unwrap();
+    assert_eq!(record["status"], "failed", "{record}");
+}
+
+/// The files a two-chain MH run's working directory holds: every file whose
+/// presence does not depend on the outcome, and `chain_starts.tsv` recording
+/// each chain's end.
+fn mh_work(ends: [&str; 2]) -> tempfile::TempDir {
+    use crate::result_files::fit_run::{MethodFiles, Mh};
+    use crate::result_files::ResultFile as _;
+    let work = tempfile::tempdir().unwrap();
+    for f in Mh.files(2) {
+        let p = work.path().join(f.stored());
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, "x\n").unwrap();
+    }
+    let rows: String = ends.iter().enumerate().map(|(c, e)| format!("{c}\t0\t{e}\tsingle\t0.4\t\t\n")).collect();
+    std::fs::write(work.path().join("chain_starts.tsv"), format!("# camdl chain_starts\nchain_id\tattempt\tstatus\tsource\tbeta\tess\treason\n{rows}")).unwrap();
+    work
+}
+
+/// A completed run is stored only with every file its recorded outcome
+/// states: a two-chain MH run that wrote no chain's trace is refused at
+/// `finish`, naming each chain's missing files; with them it is stored; a
+/// chain `chain_starts.tsv` records as refused has its trace and no resume
+/// state, and a resume state it wrote is refused.
+#[test]
+fn a_completed_run_missing_a_chains_files_is_refused() {
+    use crate::result_files::fit_run::{MethodOutput, Mh};
+    let fx = fixture();
+    let o = open();
+    let config = fx.config(&fit_toml("file = \"wide.tsv\"", 0.02));
+    let problem = store_problem(&o, &resolved(&fx, &o, &config));
+    let (id, labels) = run_identity(&problem, &config);
+    let claim = || match o.store.begin::<FitRun>(&id, &labels, &o.info, Reuse::IfCompleted).unwrap() {
+        Begin::Claimed(run) => run,
+        _ => panic!("the run is claimed"),
+    };
+
+    let work = mh_work(["accepted", "accepted"]);
+    let mut run = claim();
+    MethodOutput::new(&mut run, &Mh, 2, None).transfer(work.path(), true).unwrap();
+    match run.finish() {
+        Err(store::Error::FileSetMismatch { missing, unexpected, .. }) => {
+            assert_eq!(missing, ["chain_0/resume_state.bin", "chain_0/trace.tsv", "chain_1/resume_state.bin", "chain_1/trace.tsv"]);
+            assert!(unexpected.is_empty(), "{unexpected:?}");
+        }
+        other => panic!("a run with no chain's trace is refused: {other:?}"),
+    }
+
+    let work = mh_work(["accepted", "refused"]);
+    for f in ["chain_0/trace.tsv", "chain_0/resume_state.bin", "chain_1/trace.tsv", "chain_1/resume_state.bin"] {
+        std::fs::create_dir_all(work.path().join(f).parent().unwrap()).unwrap();
+        std::fs::write(work.path().join(f), "x\n").unwrap();
+    }
+    let mut run = claim();
+    let err = MethodOutput::new(&mut run, &Mh, 2, None).transfer(work.path(), true).unwrap_err();
+    assert!(err.contains("`chain_1/resume_state.bin`"), "a refused chain writes no resume state: {err}");
+    drop(run);
+
+    std::fs::remove_file(work.path().join("chain_1/resume_state.bin")).unwrap();
+    let mut run = claim();
+    MethodOutput::new(&mut run, &Mh, 2, None).transfer(work.path(), true).unwrap();
+    let stored = run.finish().expect("every file the outcome states is there");
+    assert!(stored.folder().join("chain_1/trace.tsv").is_file() && !stored.folder().join("chain_1/resume_state.bin").exists());
 }
 
 /// A posterior prediction's parameter source encodes as it did when the

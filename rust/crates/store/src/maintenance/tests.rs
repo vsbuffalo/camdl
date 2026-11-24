@@ -48,7 +48,8 @@ fn clean_removes_quarantine_attempts_dead_staging_and_empty_directories_only() {
     let f = FitId { problem: "p".into(), method: "m".into() };
     let Begin::Claimed(run) = store.begin::<Fit>(&f, &(), &info(), Reuse::IfCompleted).unwrap() else { panic!() };
     run.fail("x", "y").unwrap();
-    let Begin::Claimed(run) = store.begin::<Fit>(&f, &(), &info(), Reuse::IfCompleted).unwrap() else { panic!() };
+    let Begin::Claimed(mut run) = store.begin::<Fit>(&f, &(), &info(), Reuse::IfCompleted).unwrap() else { panic!() };
+    run.expect(expecting(&[]));
     let fit = run.finish().unwrap();
     let (id, labels) = sim(3);
     let Begin::Claimed(run) = store.begin::<Sim>(&id, &labels, &info(), Reuse::IfCompleted).unwrap() else { panic!() };
@@ -316,7 +317,8 @@ fn concurrent_claims_of_one_in_place_result_never_fail_with_an_io_error() {
                 barrier.wait();
                 let f = FitId { problem: "p".into(), method: "race".into() };
                 match store.begin::<Fit>(&f, &(), &info(), Reuse::IfCompleted).unwrap() {
-                    Begin::Claimed(run) => {
+                    Begin::Claimed(mut run) => {
+                        run.expect(expecting(&[]));
                         std::thread::sleep(std::time::Duration::from_millis(100));
                         run.finish().unwrap();
                         "claimed"

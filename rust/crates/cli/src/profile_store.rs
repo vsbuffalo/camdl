@@ -228,7 +228,7 @@ pub(crate) fn pose_problem(
                 crate::fit_store::DataOrigin::Files,
             )?;
             let labels = ProblemLabels { model: stem, sweep_point: None };
-            let stored = match store.begin::<FitProblem>(&posed.identity, &labels, info, store::Reuse::IfCompleted).map_err(|e| e.to_string())? {
+            let stored = match crate::camdl_store::begin::<FitProblem>(store, &posed.identity, &labels, info, store::Reuse::IfCompleted, crate::fit_store::problem_files(&posed)).map_err(|e| e.to_string())? {
                 store::Begin::Reused(stored) => stored,
                 store::Begin::Busy(owner) => return Err(store::Error::InProgress(owner).to_string()),
                 store::Begin::Claimed(mut run) => match crate::fit_store::write_problem(&mut run, &posed) {

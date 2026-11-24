@@ -2005,7 +2005,8 @@ fn store_prediction(
     let store = p.source.store()?;
     let design = design_deps(&store, &p.design, info)?;
     let (identity, labels) = p.source.identity(&p.options, design)?;
-    let stored = match store.begin::<Prediction>(&identity, &labels, info, reuse)
+    let declared = crate::result_files::fit::PredictionFile::of_dir(p.dir.path())?;
+    let stored = match crate::camdl_store::begin::<Prediction>(&store, &identity, &labels, info, reuse, declared)
         .map_err(|e| e.to_string())?
     {
         store::Begin::Reused(stored) => stored,

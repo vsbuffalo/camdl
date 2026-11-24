@@ -209,12 +209,33 @@ pub(crate) fn sim(seed: u64) -> (SimId, SimLabels) {
     (SimId { model: "sir".into(), dt: Finite::new(0.5).unwrap(), seed }, SimLabels { model: "sir".into(), seed })
 }
 
+/// A file set of the result files `names` and no provenance file.
+pub(crate) fn expecting(names: &[&str]) -> crate::ExpectedFiles {
+    files(names, &[])
+}
+
+/// A file set of the result files `result` and the provenance files
+/// `provenance`.
+pub(crate) fn files(result: &[&str], provenance: &[&str]) -> crate::ExpectedFiles {
+    crate::ExpectedFiles {
+        result: result.iter().map(|n| n.to_string()).collect(),
+        provenance: provenance.iter().map(|n| n.to_string()).collect(),
+    }
+}
+
+/// The observations wanted of `run`, if they were, declared as `obs.tsv`.
+pub(crate) fn also_obs(run: &mut crate::Run<Sim>) -> Option<crate::ByProductRun<Obs>> {
+    let mut obs = run.also::<Obs>().unwrap()?;
+    obs.expect(expecting(&["obs.tsv"]));
+    Some(obs)
+}
+
 /// Begins a simulation and, if claimed, writes `traj.tsv` from its seed and
 /// finishes it.
 pub(crate) fn run_sim(store: &Store, info: &RunInfo, seed: u64) -> crate::Stored<Sim> {
     let (id, labels) = sim(seed);
     store
-        .run::<Sim, crate::Error>(&id, &labels, info, crate::Reuse::IfCompleted, "simulating", |run| {
+        .run::<Sim, crate::Error>(&id, &labels, info, crate::Reuse::IfCompleted, expecting(&["traj.tsv"]), "simulating", |run| {
             run.result_file("traj.tsv")?.write_all(format!("t\tI\n0\t{seed}\n").as_bytes())
         })
         .map_err(|e| e.to_string())

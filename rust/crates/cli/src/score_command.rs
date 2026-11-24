@@ -179,7 +179,7 @@ pub(crate) fn score_prediction(
         outcomes,
         settings: ScoreSettings { intervals: (finite(INTERVALS.0)?, finite(INTERVALS.1)?), pit_seed },
     };
-    let run = match store.begin::<Score>(&identity, &(), info, request.reuse()).map_err(|e| e.to_string())? {
+    let run = match crate::camdl_store::begin::<Score>(store, &identity, &(), info, request.reuse(), crate::result_files::fit::ScoreFile::ALL).map_err(|e| e.to_string())? {
         store::Begin::Reused(stored) => {
             out.say(format_args!("score: reused the stored score {}", stored.folder().display()));
             return Ok(stored);

@@ -9,9 +9,10 @@ fn sim_with_obs(store: &Store, info: &RunInfo, seed: u64) -> crate::Stored<Sim> 
     let (id, labels) = sim(seed);
     let wanted = Wanted::<Sim>::none().with::<Obs>(ObsId { sim: id.record(), rate: Finite::new(0.3).unwrap() }, ());
     let Begin::Claimed(mut run) = store.begin_with(&id, &labels, &wanted, info, Reuse::IfCompleted).unwrap() else { panic!() };
+    run.expect(files(&["traj.tsv"], &["execution.json"]));
     run.result_file("traj.tsv").unwrap().write_all(format!("t\tI\n0\t{seed}\n").as_bytes()).unwrap();
     run.provenance_file("execution.json").unwrap().write_all(b"{}").unwrap();
-    run.also::<Obs>().unwrap().unwrap().result_file("obs.tsv").unwrap().write_all(b"o").unwrap();
+    also_obs(&mut run).unwrap().result_file("obs.tsv").unwrap().write_all(b"o").unwrap();
     run.finish().unwrap()
 }
 
@@ -49,11 +50,13 @@ fn a_by_product_is_located_with_its_upstream_and_a_nested_result_without_one() {
     assert_eq!(located.upstream(), Some(s.id().key()));
 
     let fit_id = FitId { problem: "p".into(), method: "mh".into() };
-    let Begin::Claimed(fit) = store.begin::<Fit>(&fit_id, &(), &info(), Reuse::IfCompleted).unwrap() else { panic!() };
+    let Begin::Claimed(mut fit) = store.begin::<Fit>(&fit_id, &(), &info(), Reuse::IfCompleted).unwrap() else { panic!() };
+    fit.expect(expecting(&["draws.tsv"]));
     fit.result_file("draws.tsv").unwrap().write_all(b"d").unwrap();
     let fit = fit.finish().unwrap();
     let pred = PredId { fit: fit.dep("draws.tsv").unwrap(), n: 1 };
-    let Begin::Claimed(run) = store.begin::<Pred>(&pred, &(), &info(), Reuse::IfCompleted).unwrap() else { panic!() };
+    let Begin::Claimed(mut run) = store.begin::<Pred>(&pred, &(), &info(), Reuse::IfCompleted).unwrap() else { panic!() };
+    run.expect(expecting(&["p.tsv"]));
     run.result_file("p.tsv").unwrap().write_all(b"p").unwrap();
     let pred = run.finish().unwrap();
     assert_eq!(store.locate(pred.id().key()).unwrap().upstream(), None);
@@ -121,7 +124,7 @@ fn outputs_refuse_an_invocation_with_a_result_that_did_not_complete() {
     let i = info();
     let ok = run_sim(&store, &i, 9);
     let (id, labels) = sim(10);
-    let _ = store.run::<Sim, String>(&id, &labels, &i, Reuse::IfCompleted, "simulating", |_| Err("no".into()));
+    let _ = store.run::<Sim, String>(&id, &labels, &i, Reuse::IfCompleted, expecting(&[]), "simulating", |_| Err("no".into()));
     let inv = i.finish(&store).unwrap();
     match inv.outputs(&store) {
         Err(Error::MemberNotCompleted { members, .. }) => {

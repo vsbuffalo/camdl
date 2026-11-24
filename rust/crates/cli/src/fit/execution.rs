@@ -227,6 +227,6 @@ mod tests {
     /// heartbeat writes it under: the two crates name it apart.
     #[test]
     fn the_heartbeat_is_not_stored() {
-        assert!(crate::fit_command::is_skipped(io::PROGRESS_FILE));
+        assert!(crate::result_files::fit_run::is_attempt_channel(io::PROGRESS_FILE));
     }
 }

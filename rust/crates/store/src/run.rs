@@ -2,7 +2,7 @@
 //! with it, and how it ends.
 
 use std::any::Any;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::{Read as _, Write};
 use std::marker::PhantomData;
@@ -128,17 +128,37 @@ impl Write for HandleWriter<'_> {
     }
 }
 
+/// The files a run must hold when it finishes, by name: its result files and
+/// its provenance files. Attempt files are not in it; a run may write any.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExpectedFiles {
+    pub result: BTreeSet<String>,
+    pub provenance: BTreeSet<String>,
+}
+
 /// The files one run, or one by-product's part of it, has opened.
 pub(crate) struct FileTable {
     dir: PathBuf,
     reserved: Vec<&'static str>,
     files: Mutex<BTreeMap<String, FileHandle>>,
     ended: Arc<AtomicBool>,
+    /// The files the run declared it will hold; the last declaration holds.
+    expected: Mutex<Option<ExpectedFiles>>,
 }
 
 impl FileTable {
     pub(crate) fn new(dir: PathBuf, kinds: Vec<&'static str>) -> Self {
-        FileTable { dir, reserved: kinds, files: Mutex::new(BTreeMap::new()), ended: Arc::new(AtomicBool::new(false)) }
+        FileTable {
+            dir,
+            reserved: kinds,
+            files: Mutex::new(BTreeMap::new()),
+            ended: Arc::new(AtomicBool::new(false)),
+            expected: Mutex::new(None),
+        }
+    }
+
+    pub(crate) fn expect(&self, files: ExpectedFiles) {
+        *self.expected.lock().unwrap_or_else(|e| e.into_inner()) = Some(files);
     }
 
     fn check_name(&self, name: &str) -> Result<()> {
@@ -224,6 +244,42 @@ impl FileTable {
         Ok(out)
     }
 
+    /// Checks `out`, the files [`FileTable::close_all`] returned, against the
+    /// declared set. Refused with [`Error::NoExpectedFiles`] when the run
+    /// declared none, and with [`Error::FileSetMismatch`] when its result and
+    /// provenance files differ from it. Attempt files are not compared.
+    pub(crate) fn check_expected(&self, run_id: Key, out: &BTreeMap<String, FileEntry>) -> Result<()> {
+        let expected = self.expected.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let Some(expected) = expected else { return Err(Error::NoExpectedFiles { run_id }) };
+        // Each file as (name, whether it is provenance).
+        let written: BTreeSet<(&str, bool)> = out
+            .iter()
+            .filter(|(_, e)| e.role != Role::Attempt)
+            .map(|(n, e)| (n.as_str(), e.role == Role::Provenance))
+            .collect();
+        let wanted: BTreeSet<(&str, bool)> = expected
+            .result
+            .iter()
+            .map(|n| (n.as_str(), false))
+            .chain(expected.provenance.iter().map(|n| (n.as_str(), true)))
+            .collect();
+        if written != wanted {
+            let named = |(name, provenance): &(&str, bool)| {
+                if *provenance {
+                    format!("{name} (provenance)")
+                } else {
+                    name.to_string()
+                }
+            };
+            return Err(Error::FileSetMismatch {
+                run_id,
+                missing: wanted.difference(&written).map(named).collect(),
+                unexpected: written.difference(&wanted).map(named).collect(),
+            });
+        }
+        Ok(())
+    }
+
     fn end(&self) {
         self.ended.store(true, Ordering::Release);
     }
@@ -290,6 +346,13 @@ impl<A: Artifact> Run<A> {
 
     pub fn identity(&self) -> &A::Identity {
         &self.identity
+    }
+
+    /// Declares the files this run will hold when it finishes, replacing any
+    /// earlier declaration. `finish` refuses a run that declared none, and a
+    /// run whose result and provenance files differ from the declared set.
+    pub fn expect(&mut self, files: ExpectedFiles) {
+        self.core.table.expect(files);
     }
 
     /// A file in the manifest, determined by the identity.
@@ -557,6 +620,18 @@ impl Core {
             Self::check_held(&bp.held, &f)?;
             bp_files.push(f);
         }
+        // A recomputed upstream that differs from its stored copy is
+        // divergent whatever it declared, so that check comes first.
+        let check_expected = |core: &Core, files: &BTreeMap<String, FileEntry>, bp_files: &[BTreeMap<String, FileEntry>]| {
+            core.table.check_expected(core.run_id, files)?;
+            for (bp, f) in core.by_products.iter().zip(bp_files) {
+                bp.table.check_expected(bp.run_id, f)?;
+            }
+            Ok::<(), Error>(())
+        };
+        if !matches!(self.place, Place::Reproducing { .. }) {
+            check_expected(self, &files, &bp_files)?;
+        }
         let now = Timestamp::now();
         match &self.place {
             Place::Reproducing { stored_dir, stored, files_dir } => {
@@ -590,6 +665,7 @@ impl Core {
                     self.settled = true;
                     return Err(err);
                 }
+                check_expected(self, &files, &bp_files)?;
                 remove_all(files_dir)?;
                 for (bp, f) in self.by_products.iter_mut().zip(bp_files) {
                     commit_staged_by_product(&self.store, self.run_id, &stored_dir, bp, f, &now)?;
@@ -794,6 +870,11 @@ pub struct ByProductRun<B: ByProduct> {
 impl<B: ByProduct> ByProductRun<B> {
     pub fn identity(&self) -> &B::Identity {
         &self.identity
+    }
+    /// Declares the files this by-product will hold, as [`Run::expect`] does
+    /// for its upstream; the upstream's `finish` refuses it otherwise.
+    pub fn expect(&mut self, files: ExpectedFiles) {
+        self.table.expect(files);
     }
     pub fn result_file(&self, name: &str) -> Result<FileHandle> {
         self.table.open(name, Role::Result)

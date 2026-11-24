@@ -779,6 +779,79 @@ fn each_method_computes_what_it_computed_before_the_move() {
     crate::test_support::assert_pinned(PINS, &got, "the files each method computes moved");
 }
 
+/// Each method's fixture run holds exactly the files its method declares:
+/// those that do not depend on the outcome (`MethodFiles::files`) and those
+/// its recorded outcome states (`MethodFiles::outcome_files`, from the run's
+/// own `chain_starts.tsv` and `pgas_summary.json`), each in its declared
+/// role. The method is planned from the fixture's own `[method]` table, so
+/// PGAS's `n_trajectories` is the fixture's. Each stored table's header row
+/// is the one its variant states in the result-file contract
+/// (`ResultFile::columns`). Every chain of these fixtures runs to the end.
+#[test]
+fn every_method_declares_its_files() {
+    use crate::result_files::fit_run::{ChainEnd, FitOutcome, PlannedMethod};
+    use crate::result_files::{header_matches, ResultFile, Role};
+    let cwd = workdir();
+    for m in ["if2", "pgas", "pmmh", "pfilter", "pfilter_quiet", "mh", "sbplx", "bobyqa", "lbfgs"] {
+        let path = cwd.path().join(format!("fit_{m}.toml"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        let config = crate::fit::config_v2::FitConfig::parse_anchored_at(&text, &path, &path).unwrap();
+        let algorithm = &config.inference.method.as_ref().unwrap().algorithm;
+        let planned = PlannedMethod::of(algorithm);
+        let n_chains = u32::try_from(algorithm.chains()).unwrap();
+
+        let store = cwd.path().join(format!("store-{m}"));
+        let args: Vec<String> = ["fit", "run", &format!("fit_{m}.toml"), "--seed", "7", "--progress", "none"].map(String::from).into();
+        let out = camdl(cwd.path(), &store, &args, &[]);
+        assert!(out.status.success(), "{m}: {}", String::from_utf8_lossy(&out.stderr));
+        let dir = run_folders(&store).into_iter().next().unwrap();
+        let outcome = FitOutcome::read(&dir);
+        for c in 0..n_chains {
+            assert_eq!(outcome.end(c), ChainEnd::Accepted, "{m}: chain {c} of the fixture runs to the end");
+        }
+        let declared: BTreeMap<String, crate::result_files::fit_run::FitRunFile> = planned
+            .files(n_chains, None)
+            .into_iter()
+            .chain(planned.outcome_files(n_chains, &outcome))
+            .map(|f| (f.stored(), f))
+            .collect();
+        let run: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("run.json")).unwrap()).unwrap();
+        let got: BTreeMap<String, String> = run["files"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(_, e)| e["role"] != "attempt")
+            .map(|(n, e)| (n.clone(), e["role"].as_str().unwrap().to_string()))
+            .collect();
+        let want: BTreeMap<String, String> = declared
+            .iter()
+            .map(|(n, f)| (n.clone(), if f.role() == Role::Result { "result" } else { "provenance" }.to_string()))
+            .collect();
+        assert_eq!(got, want, "{m}: the files its run holds, against the files its method and outcome declare");
+        for (name, file) in &declared {
+            if file.columns().is_empty() {
+                continue;
+            }
+            let text = std::fs::read_to_string(dir.join(name)).unwrap();
+            let mut lines = text.lines();
+            let header = if file.commented() {
+                lines.find(|l| !l.starts_with('#')).unwrap_or("")
+            } else {
+                let first = lines.next().unwrap_or("");
+                assert!(!first.starts_with('#'), "{m}: `{name}` opens with a comment line the contract does not state");
+                first
+            };
+            let header: Vec<&str> = header.split('\t').collect();
+            assert!(header_matches(file.columns(), &header), "{m}: `{name}`'s header {header:?} is not the contract's {:?}", file.columns());
+        }
+        if m == "pgas" {
+            for f in ["filter_ess.tsv", "cross_chain_compat.json", "chain_0/trajectories.tsv", "chain_1/trajectories.json"] {
+                assert!(want.contains_key(f), "pgas: the fixture's outcome states `{f}`: {want:?}");
+            }
+        }
+    }
+}
+
 /// The pins of [`each_method_computes_what_it_computed_before_the_move`], per
 /// `(target_os, target_arch)`.
 const PINS: &[((&str, &str), Pins)] = &[

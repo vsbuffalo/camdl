@@ -62,7 +62,7 @@ fn a_label_names_the_latest_invocation_whose_results_all_completed() {
     // An invocation with a failed result does not take the name.
     let i3 = labelled("base");
     let (id, labels) = sim(3);
-    let _ = store.run::<Sim, String>(&id, &labels, &i3, Reuse::IfCompleted, "simulating", |_| Err("no".into()));
+    let _ = store.run::<Sim, String>(&id, &labels, &i3, Reuse::IfCompleted, expecting(&[]), "simulating", |_| Err("no".into()));
     i3.finish(&store).unwrap();
     assert_eq!(resolve_sim(&store, "@base").unwrap().id(), second.id());
 
@@ -157,7 +157,7 @@ fn a_rendering_combines_an_invocations_results_with_their_labels() {
     let i = labelled("broken");
     run_sim(&store, &i, 3);
     let (id, labels) = sim(4);
-    let _ = store.run::<Sim, String>(&id, &labels, &i, Reuse::IfCompleted, "simulating", |_| Err("no".into()));
+    let _ = store.run::<Sim, String>(&id, &labels, &i, Reuse::IfCompleted, expecting(&[]), "simulating", |_| Err("no".into()));
     let inv = i.finish(&store).unwrap();
     assert!(matches!(inv.render_to::<Combined>(&store, &false, &mut Vec::new()), Err(Error::MemberNotCompleted { .. })));
 
@@ -204,8 +204,9 @@ fn a_by_product_rendering_reads_each_members_own_by_product() {
         let Begin::Claimed(mut run) = store.begin_with::<Sim>(&id, &labels, &wanted, &i, Reuse::IfCompleted).unwrap() else {
             panic!("claimed")
         };
+        run.expect(expecting(&["traj.tsv"]));
         run.result_file("traj.tsv").unwrap().write_all(b"t\n").unwrap();
-        if let Some(o) = run.also::<Obs>().unwrap() {
+        if let Some(o) = also_obs(&mut run) {
             o.result_file("obs.tsv").unwrap().write_all(format!("o{seed}").as_bytes()).unwrap();
         }
         run.finish().unwrap();

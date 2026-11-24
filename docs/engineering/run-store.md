@@ -1169,6 +1169,7 @@ no computation can leave a file in the folder that the manifest does not list.
 ```rust
 // rust/crates/store/src/run.rs
 impl<A: Artifact> Run<A> {
+    pub fn expect(&mut self, files: ExpectedFiles);                   // the files finish requires
     pub fn result_file(&self, name: &str) -> Result<FileHandle>;      // :296  in the manifest, compared
     pub fn provenance_file(&self, name: &str) -> Result<FileHandle>;  // :301  in the manifest, not compared
     pub fn attempt_file(&self, name: &str) -> Result<FileHandle>;     // :306  outside the manifest
@@ -1199,18 +1200,27 @@ buffered writer from `FileHandle::writer` is alive
 `finish` or `fail` is refused
 ([`Error::WriteAfterEnd`](rust:store::error::Error::WriteAfterEnd)).
 
+A run declares the files it will hold with `Run::expect`, by name and role
+(`ExpectedFiles`: its result and its provenance files; attempt files are not in
+it), and a by-product with `ByProductRun::expect`. The last declaration holds.
+camdl declares each kind's set from that kind's file enum, when it begins the
+run (`camdl_store::begin`) and again from the outcome before it finishes
+(`result_files::declare`); `Store::put` declares a content artifact's set
+itself.
+
 `pfilter` writes its run and every by-product it claimed in one function:
 
 ```rust
 // rust/crates/cli/src/pfilter.rs:1782
 fn write_run(run: &mut store::Run<Pfilter>, f: &RunFiles) -> store::Result<()> {
-    run.result_file(LOGLIK_FILE)?.write_all(&f.loglik.to_bytes())?;
+    declare(run, PfilterFile::of(f.replicates.is_some()));
+    create(run, &PfilterFile::Loglik)?.write_all(&f.loglik.to_bytes())?;
     if let Some(b) = &f.replicates {
-        run.result_file(REPLICATES_FILE)?.write_all(b)?;
+        create(run, &PfilterFile::Replicates)?.write_all(b)?;
     }
-    run.provenance_file(PROVENANCE_FILE)?.write_all(&f.parameters)?;
-    // for each by-product B the run was asked for:
-    //     if let Some(bp) = run.also::<B>()? { bp.result_file(name)?.write_all(bytes)?; }
+    create(run, &PfilterFile::Provenance)?.write_all(&f.parameters)?;
+    // for each by-product B the run was asked for, declared with its files:
+    //     if let Some(bp) = camdl_store::also::<B>(run, files)? { create_by_product(&bp, &file)?.write_all(bytes)?; }
     // ...
 }
 ```
@@ -1218,8 +1228,13 @@ fn write_run(run: &mut store::Run<Pfilter>, f: &RunFiles) -> store::Result<()> {
 #### Finishing a run
 
 `finish` (`run.rs:545`, `finish_inner`) closes every handle and builds the
-manifest. It checks that each digest the identity holds as `Hashed` content has
-a result file with that digest
+manifest. It refuses a run, or a by-product of it, that declared no file set
+([`Error::NoExpectedFiles`](rust:store::error::Error::NoExpectedFiles)), and one
+whose result and provenance files differ from its declaration
+([`Error::FileSetMismatch`](rust:store::error::Error::FileSetMismatch), naming
+the missing and the undeclared files); a reproduced upstream is compared with
+its stored copy first. It checks that each digest the identity holds as `Hashed`
+content has a result file with that digest
 ([`Error::ContentMissing`](rust:store::error::Error::ContentMissing)), and
 writes `run.json` completed. For an atomic result it then renames the staging
 folder into place; for an in-place one it replaces `run.json` through

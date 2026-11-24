@@ -45,6 +45,7 @@ use crate::fit_store::{
     RunLabels, StartInput, StartSource,
 };
 use crate::out::Out;
+use crate::result_files::fit_run::PlannedMethod;
 
 /// The files a resume carries from its base, per chain.
 const CARRIED: [&str; 3] = crate::fit::resumed_chain::CARRIED_CHAIN_FILES;
@@ -507,6 +508,11 @@ fn run_fit(mut out: Out, cx: FitCommand<'_>) -> Vec<String> {
     }
     let start_input = resolved_starts.source.as_ref().map(|s| s.input.clone()).unwrap_or(StartInput::None);
     let starts_identity = StartSource::of(&method, start_input).unwrap_or_else(|e| out.fail(format!("error: {e}")));
+    let starts_ext: Option<String> = match &starts_identity.input {
+        StartInput::File { file } => Some(file.ext.clone()),
+        _ => None,
+    };
+    let run_files = PlannedMethod::of(&method.algorithm).files(chain_count(&method.algorithm), starts_ext.as_deref());
     let (method_settings, length) = MethodSettings::of(&method).unwrap_or_else(|e| out.fail(format!("error: {e}")));
 
     // ── Each problem, and the runs on it ──────────────────────────────────
@@ -538,7 +544,7 @@ fn run_fit(mut out: Out, cx: FitCommand<'_>) -> Vec<String> {
         if let Some(w) = &window {
             w.partition_lines.say();
         }
-        let stored_problem: Stored<FitProblem> = match store.begin::<FitProblem>(&posed_problem.identity, &labels, info, Reuse::IfCompleted) {
+        let stored_problem: Stored<FitProblem> = match crate::camdl_store::begin::<FitProblem>(store, &posed_problem.identity, &labels, info, Reuse::IfCompleted, crate::fit_store::problem_files(&posed_problem)) {
             Ok(Begin::Reused(stored)) => stored,
             Ok(Begin::Busy(owner)) => {
                 failures.push(format!("problem {}: {}", cell_i + 1, store::Error::InProgress(owner)));
@@ -623,7 +629,7 @@ fn run_fit(mut out: Out, cx: FitCommand<'_>) -> Vec<String> {
                 resumed_from: base.as_ref().map(|b| b.dep.clone()),
             };
             let run_labels = RunLabels { method: method_name.to_string(), seed, quantities: run_quantities.borrow().clone() };
-            let mut run = match store.begin::<FitRun>(&identity, &run_labels, info, reuse) {
+            let mut run = match crate::camdl_store::begin::<FitRun>(store, &identity, &run_labels, info, reuse, run_files.clone()) {
                 Ok(Begin::Reused(stored)) => {
                     out.say(format_args!("  {}", crate::out::paint::stderr().paint(
                         &format!("cache hit — reusing {}", relative(stored.folder(), store.root())),
@@ -843,13 +849,21 @@ fn compute_run(out: &mut Out, rc: RunCompute<'_>) -> Result<(), String> {
         let held = Arc::clone(&held);
         let mirrored = Arc::clone(&mirrored);
         let work_dir = work.to_path_buf();
+        let failing = PlannedMethod::of(&method.algorithm);
+        let n_chains = chain_count(&method.algorithm);
         out.hold_failure(
             Box::new(move |operation: &str, reason: &str| {
                 match held.lock().unwrap_or_else(|e| e.into_inner()).take() {
-                    Some(run) => {
+                    Some(mut run) => {
                         mirror_once(&run, &work_dir, &mut mirrored.lock().unwrap_or_else(|e| e.into_inner()));
-                        let _ = ingest(&run, &work_dir);
-                        let failed = run.fail(operation, reason).map_err(|e| e.to_string());
+                        // What the transfer kept or could not keep is part of
+                        // why the run failed.
+                        let reason = match failing.write(&mut run, n_chains, &work_dir, None, false) {
+                            Ok(stray) if stray.is_empty() => reason.to_string(),
+                            Ok(stray) => format!("{reason} (kept as attempt files, not files of this method: {})", stray.join(", ")),
+                            Err(e) => format!("{reason} (its files could not all be kept: {e})"),
+                        };
+                        let failed = run.fail(operation, &reason).map_err(|e| e.to_string());
                         // The process ends after this, so the command's
                         // working directory (this run's parent) is removed
                         // here: the run's files are now in the store.
@@ -1027,10 +1041,21 @@ fn compute_run(out: &mut Out, rc: RunCompute<'_>) -> Result<(), String> {
     }
     mirror.stop();
     out.release_failure();
-    let run = held.lock().unwrap_or_else(|e| e.into_inner()).take()
+    let mut run = held.lock().unwrap_or_else(|e| e.into_inner()).take()
         .expect("the run is held until the method ends");
-    let stored = match ingest(&run, work).and_then(|()| store_start_file(&run, starts)) {
-        Ok(()) => run.finish().map_err(|e| e.to_string()),
+    let starts_file = match starts.source.as_ref().map(|s| &s.input) {
+        Some(StartInput::File { file }) => Some((file.ext.clone(), file.bytes())),
+        _ => None,
+    };
+    let written = PlannedMethod::of(&method.algorithm).write(
+        &mut run,
+        chain_count(&method.algorithm),
+        work,
+        starts_file.as_ref().map(|(ext, bytes)| (ext.as_str(), bytes.as_slice())),
+        true,
+    );
+    let stored = match written {
+        Ok(_) => run.finish().map_err(|e| e.to_string()),
         Err(e) => {
             let _ = run.fail("storing the run's files", &e);
             Err(e)
@@ -1055,70 +1080,9 @@ fn compute_run(out: &mut Out, rc: RunCompute<'_>) -> Result<(), String> {
     Ok(())
 }
 
-/// The files of a method's working directory that are not the run's result:
-/// what the store writes itself (the progress snapshot and the event log,
-/// passed on while the method ran) and the records of this execution, kept
-/// as provenance.
-fn role_of(name: &str) -> FileRole {
-    match name {
-        io::PROGRESS_FILE | crate::out::events::EVENT_LOG => FileRole::Skip,
-        crate::fit::execution::EXECUTION_RECORD | crate::fit::opt_trace::OPT_TRACE => FileRole::Provenance,
-        n if n == crate::fit_store::RUN_INPUTS_FILE || n == crate::fit_store::FIT_META_FILE => FileRole::Provenance,
-        _ => FileRole::Result,
-    }
-}
-
-/// Whether `fit run` leaves the method-directory file `name` out of the run
-/// it stores.
-#[cfg(test)]
-pub(crate) fn is_skipped(name: &str) -> bool {
-    matches!(role_of(name), FileRole::Skip)
-}
-
-enum FileRole {
-    Result,
-    Provenance,
-    Skip,
-}
-
-/// A starts file named directly (`from_params`, or a `from_mle` or
-/// `from_posterior` file outside the store) is part of the run's identity by
-/// its bytes, so the run stores them, as `inputs/starts.<ext>`.
-fn store_start_file(run: &store::Run<FitRun>, starts: &crate::fit::chain_starts::ResolvedStarts) -> Result<(), String> {
-    let Some(StartInput::File { file }) = starts.source.as_ref().map(|s| &s.input) else { return Ok(()) };
-    let name = format!("inputs/starts.{}", file.ext);
-    let handle = run.result_file(&name).map_err(|e| format!("{name}: {e}"))?;
-    handle.write_all(&file.bytes()).map_err(|e| format!("{name}: {e}"))
-}
-
-/// Write every file under `work` into `run`, by its role.
-#[expect(clippy::disallowed_methods, reason = "reads the files a method wrote in this process's temporary working directory, to write them into the run")]
-fn ingest(run: &store::Run<FitRun>, work: &Path) -> Result<(), String> {
-    let mut files: Vec<PathBuf> = Vec::new();
-    let mut stack = vec![work.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        for e in std::fs::read_dir(&d).map_err(|e| format!("cannot read {}: {e}", d.display()))? {
-            let p = e.map_err(|e| e.to_string())?.path();
-            if p.is_dir() {
-                stack.push(p);
-            } else {
-                files.push(p);
-            }
-        }
-    }
-    files.sort();
-    for p in files {
-        let name = p.strip_prefix(work).expect("under the working directory").to_string_lossy().into_owned();
-        let handle = match role_of(&name) {
-            FileRole::Skip => continue,
-            FileRole::Provenance => run.provenance_file(&name),
-            FileRole::Result => run.result_file(&name),
-        }
-        .map_err(|e| format!("{name}: {e}"))?;
-        let bytes = std::fs::read(&p).map_err(|e| format!("cannot read {}: {e}", p.display()))?;
-        handle.write_all(&bytes).map_err(|e| format!("{name}: {e}"))?;
-    }
-    Ok(())
+/// The number of chains a run of `algorithm` has, as its files are numbered.
+fn chain_count(algorithm: &Algorithm) -> u32 {
+    u32::try_from(algorithm.chains()).expect("a fit has fewer than 2^32 chains")
 }
 
 /// Passes a running method's progress snapshot and each new line of its event

@@ -386,6 +386,7 @@ fn print_index(out: &crate::out::Out) {
     out.report_line("  camdl docs <topic>        print a guide");
     out.report_line("  camdl docs --search TERM  find where a term is discussed");
     out.report_line("  camdl docs --all          print every guide (full corpus)");
+    out.report_line(format_args!("  camdl docs {RESULT_FILES_TOPIC}  the files each kind of result stores, as this build stores them"));
     out.report_line("  camdl docs --json         machine-readable topic index");
 }
 
@@ -457,6 +458,9 @@ fn search(out: &crate::out::Out, query: &str) {
     }
 }
 
+/// The topic that prints the result-file contract this binary stores by.
+const RESULT_FILES_TOPIC: &str = "result-files";
+
 pub fn cmd_docs(a: &crate::args::DocsArgs) {
     let out = crate::out::Out::new(false);
     if let Some(q) = &a.search {
@@ -473,6 +477,11 @@ pub fn cmd_docs(a: &crate::args::DocsArgs) {
     }
     match &a.topic {
         None => print_index(&out),
+        // The result-file contract of this binary, rendered from its file
+        // enums: the run spec's Â§2.9 as this build stores files.
+        Some(name) if name == RESULT_FILES_TOPIC => {
+            out.report_raw(format_args!("# The result-file contract\n\n{}", crate::result_files::contract::render()))
+        }
         Some(name) => match resolve(name) {
             Some(t) => out.report_raw(format_args!("{}", terminal_text(t))),
             None => {

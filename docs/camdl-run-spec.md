@@ -1686,6 +1686,307 @@ stored. `--force` computes every point again, moving the stored ones to the
 quarantine. `--label L` names the invocation; `@L` is found again through its
 record.
 
+### 2.9 The result-file contract
+
+The files each kind of result stores, which a program reading the store relies
+on. A kind's files are fixed by the kind and its inputs; the folders they sit in
+are not part of the contract (§2.1). The three content artifacts each store one
+file: `compiled_model` its `model.ir.json`, `quantities` its `quantities.json`
+and `data_table` its `table.tsv`, beside the provenance files their writer
+records.
+
+<!-- The result-file contract below is generated from the file enums of rust/crates/cli/src/result_files; run `make update-result-file-contract` after changing them. -->
+
+Each kind's files, by logical name: the stored name, the format, when a result
+holds the file, what it holds and, for a table, its header row. A provenance
+file is recorded with its digest and not compared when a result is computed
+again. `chain_N` stands for each chain, numbered from 0. A run that holds any
+other file, or lacks one it declared, is not stored.
+
+#### `fit_run`
+
+One fit run of a problem. Its files depend on its method and on how each chain
+ended, as `chain_starts.tsv` records it: `accepted` (ran to the end), `skipped`
+(ran and was dropped, IF2) or `refused` (never ran).
+
+- `method`: `method.toml`, TOML (every method). The run's `[method]` table as
+  merged, with its perturbation keys.
+- `summary`: `summary.json`, JSON (every method). `camdl.fit-run-summary/v1`:
+  the run's fit summary, without times, paths or a baseline.
+- `inputs/starts`: `inputs/starts.<ext>`, TSV (a starts file named directly). A
+  starts file named directly, as read.
+- `draws`: `draws.tsv`, TSV (mh, pmmh, pgas). The thinned post-warm-up draws of
+  every chain, with every parameter, estimated and fixed. Header: `chain`,
+  `draw`, every parameter, estimated and fixed.
+- `chain_N/trace`: `chain_N/trace.tsv`, TSV (mh, pmmh, each chain; a refused
+  chain's holds no row). One chain's every step: the log densities, whether it
+  was accepted, and the parameters. Header: `step`, `log_likelihood`,
+  `log_posterior`, `accepted`, each estimated parameter.
+- `chain_N/trace`: `chain_N/trace.tsv`, TSV (pgas, each chain; a refused chain's
+  holds no row). One chain's every sweep: the log densities, the sampler's
+  diagnostics and the parameters. Header: `sweep`, `log_complete_data_ll`,
+  `log_posterior`, the sampler's per-sweep diagnostics, then each estimated
+  parameter.
+- `chain_N/resume_state`: `chain_N/resume_state.bin`, binary (mh, pmmh, pgas,
+  each chain that ran). One chain's internal state for `--resume`.
+- `sampler_summary`: `mh_summary.json`, JSON (mh; pmmh and pgas as
+  `pmmh_summary.json` and `pgas_summary.json`). The sampler's summary: the
+  convergence and acceptance figures.
+- `chain_starts`: `chain_starts.tsv`, TSV (if2, mh, pmmh, pgas). Each chain's
+  starting point, and every start a chain tried and was refused. Header after
+  `#` comment lines: `chain_id`, `attempt`, `status`, `source`, each estimated
+  parameter, `ess`, `reason`.
+- `diagnostics`: `diagnostics.json`, JSON (every method but pfilter). An array
+  of findings, each with `kind`, `severity`, `message` and `method`.
+- `fit_state`: `fit_state.toml`, TOML (every method but pfilter). The run's
+  state: its method, chains and verdict.
+- `chain_N/trajectories`: `chain_N/trajectories.tsv`, TSV (pgas, each chain that
+  ran to the end and saved paths (`n_trajectories` above zero,
+  `trajectories.n_saved` above zero in the summary)). One chain's saved
+  posterior paths, stacked, one row per draw and time. Header after `#` comment
+  lines: `chain`, `draw`, `time`, the step's bounds or date, each compartment,
+  each `flow_<name>` and each projection.
+- `chain_N/trajectories_meta`: `chain_N/trajectories.json`, JSON (as
+  `chain_N/trajectories`). What one chain's `trajectories.tsv` holds: its draws,
+  columns and granularity.
+- `cross_chain_compat`: `cross_chain_compat.json`, JSON (pgas, when two or more
+  chains ran to the end). The log density of each chain's final path under every
+  other chain's parameters.
+- `filter_ess`: `filter_ess.tsv`, TSV (pgas, when its summary holds the
+  `filter_ess` block). The conditional filter's effective sample size at every
+  observation, pooled over sweeps. Header: `chain`, `obs`, `time`, `ess_mean`,
+  `ess_min`, `n_sweeps`.
+- `latent_convergence`: `latent_convergence.tsv`, TSV (pgas, when its summary
+  holds the `latent_convergence` block). Whether the chains agree about the
+  latent states, per cell of the paths.
+- `chain_N/parameter_traces`: `chain_N/parameter_traces.tsv`, TSV (if2, each
+  chain: IF2 runs a chain whose every start was refused from its last one). One
+  chain's estimate at every iteration, with its log-likelihoods. Header after
+  `#` comment lines: `iteration`, `loglik`, `if2_perturbed_loglik`, each
+  estimated parameter.
+- `chain_N/final_params`: `chain_N/final_params.toml`, TOML (if2, each chain
+  that produced a result, as its row in `chain_evaluations.tsv` records). One
+  chain's final estimate.
+- `final_params`: `final_params.toml`, TOML (if2). The winning chain's estimate:
+  the same values as `mle_params`.
+- `mle_params`: `mle_params.toml`, TOML (if2, nl-sbplx, nl-bobyqa, nl-lbfgs).
+  The point estimate, parameters at the top level and a `[provenance]` table;
+  read by `--params`.
+- `chain_evaluations`: `chain_evaluations.tsv`, TSV (if2). Each chain's final
+  estimate, evaluated by a fresh filter, with its standard error and ESS. Header
+  after `#` comment lines: `chain`, `loglik`, `se`, `ess_mean`, `ess_min`,
+  `ess_min_step`, `n_neg_inf_incr`, each estimated parameter.
+- `iteration_diagnostics`: `diagnostics.tsv`, TSV (if2). Each chain's
+  log-likelihoods at every iteration. Header after `#` comment lines: `chain`,
+  `iteration`, `loglik`, `if2_perturbed_loglik`.
+- `chain_results`: `chain_results.tsv`, TSV (nl-sbplx, nl-bobyqa, nl-lbfgs).
+  Each search's end: its log-likelihood, status, evaluations and estimate.
+  Header: `chain`, `loglik`, `status`, `n_evals`, each estimated parameter.
+- `logliks`: `logliks.tsv`, TSV (pfilter). Each replicate filter's
+  log-likelihood. Header: `replicate`, `loglik`.
+- `prequential_joint`: `prequential.tsv`, TSV (pfilter, when
+  `record_prequential` is on). At each observation time, the joint
+  one-step-ahead log score and the ESS. Header: `t`, `log_score`, `ess`.
+- `prequential_streams`: `prequential.streams.tsv`, TSV (pfilter, when
+  `record_prequential` is on). At each observation time and stream, the
+  predictive quantiles and the scores. Header: `t`, `stream`, `y_obs`,
+  `y_pred_q05`, `y_pred_q25`, `y_pred_q50`, `y_pred_q75`, `y_pred_q95`,
+  `log_score`, `crps`, `pit`.
+- `prequential_record`: `prequential.json`, JSON (pfilter, when
+  `record_prequential` is on). The prequential record: the scores and each
+  stream's predictive samples.
+- `fit_config`: `fit.toml`, TOML, provenance (every method). The fit
+  configuration file as given.
+- `run_inputs`: `run_inputs.json`, JSON, provenance (every method). What the run
+  was asked to do and its best log-likelihood and chain.
+- `fit_meta`: `fit.meta.json`, JSON, provenance (every method). The run's
+  sidecar: the data digests, the roles and the training partition.
+- `execution`: `execution.json`, JSON, provenance (every method). The attempt's
+  wall times, process and cost.
+- `opt_trace`: `opt_trace.tsv`, TSV, provenance (nl-sbplx, nl-bobyqa, nl-lbfgs).
+  Each search's every evaluation and its running best. Header: `chain`, `eval`,
+  `loglik`, `best_loglik`, each estimated parameter.
+
+#### `fit`
+
+A fit problem: the model, the data and the rows that train.
+
+- `problem`: `problem.toml`, TOML (always). The problem in fit-file syntax: the
+  model, the data, the estimated and fixed parameters.
+- `partition`: `partition.json`, JSON (always). Which rows of each stream train,
+  and where training ends.
+- `inputs/<source>`: `inputs/<source>.<ext>`, TSV (each stream source). One
+  stream source's training lines, as read.
+- `inputs/tables/<name>`: `inputs/tables/<name>.<ext>`, TSV (each external
+  table). One external table, as read.
+- `held_out/<stream>`: `held_out/<stream>.tsv`, TSV (each stream with held-out
+  rows). One stream's held-out rows, without their values.
+- `synthetic/truth`: `synthetic/truth.toml`, TOML (a problem on a generated
+  dataset). The true parameters the dataset was generated at.
+- `synthetic/truth`: `synthetic/truth.toml`, TOML, provenance (a real-data fit
+  with a `[synthetic]` table). The true parameters `fit recovery` compares
+  estimates with.
+- `synthetic`: `synthetic.toml`, TOML, provenance (a real-data fit with a
+  `[synthetic]` table). The fit file's `[synthetic]` table.
+- `model`: `model.camdl`, camdl, provenance (always; `model.ir.json` for a
+  compiled model). The model file the problem was compiled from.
+
+#### `prediction`
+
+A prediction from a fit run's posterior or from a fixed point. A name carries a
+suffix when chains were excluded or a quantities vocabulary was read.
+
+- `predictive`: `predictive.json`, JSON (always). A part's manifest: its schema,
+  its tables and how they were made.
+- `predictive/<stream>`: `predictive/<stream>.tsv`, TSV (each stream predicted).
+  One stream's predictive or forecast bands, per time, mode and quantity.
+- `observed`: `observed.json`, JSON (when observations are bound). A part's
+  manifest: its schema, its tables and how they were made.
+- `observed/<stream>`: `observed/<stream>.tsv`, TSV (each stream observed). One
+  stream's observed values: `time` and `value`.
+- `forecast`: `forecast.json`, JSON (a forecast). A part's manifest: its schema,
+  its tables and how they were made.
+- `forecast/<stream>`: `forecast/<stream>.tsv`, TSV (a forecast, each stream).
+  One stream's predictive or forecast bands, per time, mode and quantity.
+- `forecast_samples`: `forecast-samples.tsv`, TSV (a forecast). One row per
+  forecast sample: its draw, particle, stream, time and value.
+- `forecast_contrasts`: `forecast-contrasts.tsv`, TSV (a forecast with
+  contrasts). Each forecast contrast's samples.
+- `quantities`: `quantities.json`, JSON (when the model has quantities). A
+  part's manifest: its schema, its tables and how they were made.
+- `quantities/<quantity>`: `quantities/<quantity>.tsv`, TSV (each quantity). One
+  quantity's bands, per time.
+- `contrasts/<contrast>`: `contrasts/<contrast>.tsv`, TSV (a forecast with
+  contrasts, each contrast). One contrast's bands, per time.
+- `report`: `report.json`, JSON (always). What failed while the prediction was
+  made, and which streams were skipped.
+
+#### `score`
+
+A stored prediction scored against its outcomes.
+
+- `scored`: `scored.tsv`, TSV (always). One row per scored row or target.
+- `summary`: `summary.tsv`, TSV (always). One row per stream, mode, role and
+  lead.
+- `score`: `score.json`, JSON (always). The parameter source, the basis, the
+  conditioning and the notes.
+
+#### `pfilter`
+
+A particle filter run at one parameter point.
+
+- `loglik`: `loglik.toml`, TOML (always). `loglik`, `n_replicates` and
+  `n_particles`: the log-likelihood estimate.
+- `replicates`: `replicates.tsv`, TSV (with `--replicates` above 1). Each
+  replicate filter's log-likelihood.
+- `provenance`: `provenance.json`, JSON, provenance (always). The parameter
+  values as resolved, with where each came from.
+
+#### `trace`
+
+`--trace`, a by-product of a filter run.
+
+- `trace`: `trace.tsv`, TSV (always). Per observation, the log-likelihood
+  increment, the ESS and the one-step predictive quantiles.
+
+#### `pf_health`
+
+`--pf-health`, a by-product of a filter run.
+
+- `pf_health`: `pf_health.tsv`, TSV (always). Per observation: `time`, `ESS`,
+  `ESS_frac`, `tau2`.
+
+#### `filtering`
+
+`--save-filtering`, a by-product of a filter run.
+
+- `filtering`: `filtering.tsv`, TSV (always). Every particle's state and
+  log-weight at every step.
+
+#### `filtered_streams`
+
+`--save-filtered-streams`, a by-product of a filter run.
+
+- `filtered_streams`: `filtered_streams.tsv`, TSV (always). Each stream's
+  conditional mean, summarised over the swarm before and after each step is
+  scored.
+
+#### `final_state`
+
+`--save-final-state`, a by-product of a filter run.
+
+- `final_state`: `final_state.tsv`, TSV (always). The swarm after the last
+  observation.
+
+#### `saved_paths`
+
+`--save-paths`, a by-product of a filter run.
+
+- `paths`: `paths.tsv`, TSV (always). Sample paths from the smoothing
+  distribution, traced through the ancestry.
+
+#### `prequential`
+
+`--save-prequential`, a by-product of a filter run.
+
+- `joint`: `prequential.tsv`, TSV (always). At each observation time, the joint
+  one-step-ahead log score and the ESS.
+- `streams`: `prequential.streams.tsv`, TSV (always). At each observation time
+  and stream, the predictive quantiles and the scores.
+- `record`: `prequential.json`, JSON (always). The prequential record: the
+  scores and, unless `--no-save-samples`, each stream's predictive samples.
+
+#### `sim`
+
+One simulated cell.
+
+- `traj`: `traj.tsv`, TSV (when the engine ran). The trajectory at the output
+  times: `t`, `t_start`, `t_stop`, each compartment and each `flow_<name>`.
+- `reactive_log`: `reactive_log.tsv`, TSV (when the run kept a reactive policy's
+  firings). Each firing of a reactive policy.
+- `failure`: `failure.toml`, TOML (in place of `traj` when the engine stopped
+  with an error). The operation and the error the engine stopped with.
+- `provenance`: `provenance.json`, JSON, provenance (always). Where each
+  parameter value came from, and the notices of the resolution.
+
+#### `obs`
+
+`--obs`, a cell's simulated observations, a by-product of the cell.
+
+- `<stream>`: `<stream>.tsv`, TSV (each stream). One stream's simulated
+  observations: `time` and the stream's columns.
+- `failure`: `failure.toml`, TOML (in place of the streams when they could not
+  be drawn). The error that kept the observations from being drawn.
+
+#### `event_log`
+
+`--event-log`, a by-product of the cell.
+
+- `event_log`: `event_log.tsv`, TSV (when it was recorded). Every event of the
+  cell's run under the recorder.
+- `failure`: `failure.toml`, TOML (in its place when it could not be). The error
+  that kept the event log from being recorded.
+
+#### `sim_quantities`
+
+`--quantities-out`, a by-product of the cell.
+
+- `quantities`: `quantities.json`, JSON (when they were evaluated). The model's
+  quantities evaluated on the cell.
+- `failure`: `failure.toml`, TOML (in their place when they could not be). The
+  error that kept the quantities from being evaluated.
+
+#### `profile_point`
+
+One point of a profile.
+
+- `mle`: `mle.toml`, TOML (always). `final_loglik`, a `[focal]` table with the
+  profiled parameter's value, and an `[mle]` table with the other estimates.
+- `provenance`: `provenance.json`, JSON, provenance (always). The point's
+  settings and starts as resolved.
+
+<!-- End of the generated result-file contract. -->
+
 ---
 
 ## 3. Core Types

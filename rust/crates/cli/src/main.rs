@@ -41,6 +41,7 @@ mod predict_command; // camdl predict on the run store: a prediction from a stor
 mod score_command;   // camdl score on the run store: a stored prediction scored against its outcomes
 mod store_commands; // `camdl status`, `verify`, `clean`, `reindex`: the run store's maintenance commands
 mod camdl_store;    // camdl on the run store: ambient identity, kinds, root, content artifacts
+mod result_files;   // the files each kind of result stores, as types, and the set each run declares
 mod input_fixtures; // the second values and fixtures of the input-class checks
 mod pfilter_config; // ResolvedPfilterConfig: pfilter's one resolved configuration; identity and filter derive from it
 mod caltime_load;   // dated-data loader: column detection + date→internal-time (2026-05-22)

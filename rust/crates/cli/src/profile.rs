@@ -1567,7 +1567,7 @@ fn run_profile(
     let mut batch = store.begin_many::<crate::profile_store::ProfilePoint>(&members, &info, request.reuse())
         .unwrap_or_else(|e| out.fail(format!("error: {e}")));
     for (begun, &ji) in batch.members().zip(&distinct) {
-        match begun {
+        match crate::camdl_store::declared(begun, crate::result_files::profile::ProfilePointFile::ALL) {
             store::Begin::Reused(_) => n_stored += 1,
             store::Begin::Busy(owner) => failures.push(format!(
                 "point {} {}: {}", members[ji].1.focal, members[ji].1.start, store::Error::InProgress(owner))),

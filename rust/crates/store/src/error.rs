@@ -81,6 +81,19 @@ pub enum Error {
     /// fails a check. Nothing from the copy was placed.
     #[error("{} cannot be received: {reason}. Nothing from the copy was placed", folder.display())]
     ReceiveRefused { folder: PathBuf, reason: String },
+    /// A run finished holding other result or provenance files than it
+    /// declared with `Run::expect`: the declared files it did not write, and
+    /// the files it wrote that it did not declare.
+    #[error(
+        "the result {run_id} holds other files than it declared: {}{}{}",
+        if missing.is_empty() { String::new() } else { format!("missing {}", missing.join(", ")) },
+        if missing.is_empty() || unexpected.is_empty() { "" } else { "; " },
+        if unexpected.is_empty() { String::new() } else { format!("not declared {}", unexpected.join(", ")) }
+    )]
+    FileSetMismatch { run_id: Key, missing: Vec<String>, unexpected: Vec<String> },
+    /// A run reached `finish` without declaring its files.
+    #[error("the result {run_id} declared no file set before it finished; every run declares the files it stores")]
+    NoExpectedFiles { run_id: Key },
     #[error("the identity holds content {digest}, and no result file has that digest")]
     ContentMissing { digest: Key },
     /// An input the store reads for a project could not be parsed: a settings

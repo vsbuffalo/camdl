@@ -229,7 +229,7 @@ pub(crate) struct SyntheticOrigin {
 }
 
 /// The stored copy of a synthetic problem's true parameters file.
-const SYNTHETIC_TRUTH_FILE: &str = "synthetic/truth.toml";
+pub(crate) const SYNTHETIC_TRUTH_FILE: &str = "synthetic/truth.toml";
 
 /// The model file's stem and, in a sweep, the point's values as typed.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -615,7 +615,7 @@ struct RecoveryTruth {
 }
 
 /// A real-data problem's `[synthetic]` table, a provenance file.
-const RECOVERY_TABLE_FILE: &str = "synthetic.toml";
+pub(crate) const RECOVERY_TABLE_FILE: &str = "synthetic.toml";
 
 /// The stored problem's files.
 pub(crate) const PROBLEM_FILE: &str = "problem.toml";
@@ -623,15 +623,15 @@ pub(crate) const PARTITION_FILE: &str = "partition.json";
 /// The run's merged `[method]` and its `[estimate]` perturbation keys.
 pub(crate) const METHOD_FILE: &str = "method.toml";
 
-fn training_file(source: &str, ext: &str) -> String {
+pub(crate) fn training_file(source: &str, ext: &str) -> String {
     format!("inputs/{source}.{ext}")
 }
 
-fn table_file(name: &str, ext: &str) -> String {
+pub(crate) fn table_file(name: &str, ext: &str) -> String {
     format!("inputs/tables/{name}.{ext}")
 }
 
-fn held_out_file(stream: &str) -> String {
+pub(crate) fn held_out_file(stream: &str) -> String {
     format!("held_out/{stream}.tsv")
 }
 
@@ -1123,32 +1123,53 @@ fn problem_toml(id: &FitProblemIdentity, model: &ir::Model, source: &ModelSource
 /// files, and the model file as a provenance file. `problem.toml` is refused
 /// unless the production parser reads it back.
 pub(crate) fn write_problem(run: &mut Run<FitProblem>, problem: &ResolvedProblem) -> Result<(), String> {
+    use crate::result_files::fit::ProblemFile;
     let id = &problem.identity;
     let text = problem_toml(id, &problem.model, &problem.source)?;
     FitConfig::from_toml_str_named(&text, PROBLEM_FILE)
         .map_err(|e| format!("internal error: the problem.toml this fit would store does not parse back: {e}"))?;
-    let e = |e: store::Error| e.to_string();
-    run.result_file(PROBLEM_FILE).map_err(e)?.write_all(text.as_bytes()).map_err(e)?;
     let partition = serde_json::to_vec_pretty(&problem.partition).map_err(|e| e.to_string())?;
-    run.result_file(PARTITION_FILE).map_err(e)?.write_all(&partition).map_err(e)?;
-    for (source, f) in &id.training {
-        run.result_file(&training_file(source, &f.ext)).map_err(e)?.write_all(&f.bytes()).map_err(e)?;
+    for file in problem_files(problem) {
+        let bytes: Vec<u8> = match &file {
+            ProblemFile::Problem => text.as_bytes().to_vec(),
+            ProblemFile::Partition => partition.clone(),
+            ProblemFile::Training { source, .. } => {
+                id.training.iter().find(|(s, _)| s == source).expect("a declared training file").1.bytes()
+            }
+            ProblemFile::Table { name, .. } => id.tables[name].bytes(),
+            ProblemFile::HeldOut { stream } => id.held_out[stream].get().to_bytes(),
+            ProblemFile::SyntheticTruth => id.synthetic.as_ref().expect("a declared synthetic truth").truth.bytes(),
+            ProblemFile::RecoveryTruth => problem.recovery.as_ref().expect("a declared recovery truth").truth.clone(),
+            ProblemFile::RecoveryTable => problem.recovery.as_ref().expect("a declared recovery table").table.as_bytes().to_vec(),
+            ProblemFile::ModelSource { .. } => problem.source.bytes.clone(),
+        };
+        let e = |e: store::Error| e.to_string();
+        crate::result_files::create(run, &file).map_err(e)?.write_all(&bytes).map_err(e)?;
     }
-    for (name, f) in &id.tables {
-        run.result_file(&table_file(name, &f.ext)).map_err(e)?.write_all(&f.bytes()).map_err(e)?;
-    }
-    for (stream, dates) in &id.held_out {
-        run.result_file(&held_out_file(stream)).map_err(e)?.write_all(&dates.get().to_bytes()).map_err(e)?;
-    }
-    if let Some(origin) = &id.synthetic {
-        run.result_file(SYNTHETIC_TRUTH_FILE).map_err(e)?.write_all(&origin.truth.bytes()).map_err(e)?;
-    }
-    if let Some(r) = &problem.recovery {
-        run.provenance_file(SYNTHETIC_TRUTH_FILE).map_err(e)?.write_all(&r.truth).map_err(e)?;
-        run.provenance_file(RECOVERY_TABLE_FILE).map_err(e)?.write_all(r.table.as_bytes()).map_err(e)?;
-    }
-    run.provenance_file(problem.source.name()).map_err(e)?.write_all(&problem.source.bytes).map_err(e)?;
     Ok(())
+}
+
+/// The files a problem's run stores: `problem.toml`, `partition.json`, each
+/// training file, each table, each stream's held-out dates, a generated
+/// dataset's truth, a real-data fit's `[synthetic]` table and its truth
+/// (provenance), and the model file (provenance), in the order
+/// [`write_problem`] writes them.
+pub(crate) fn problem_files(problem: &ResolvedProblem) -> Vec<crate::result_files::fit::ProblemFile> {
+    use crate::result_files::fit::ProblemFile;
+    let id = &problem.identity;
+    let mut v = vec![ProblemFile::Problem, ProblemFile::Partition];
+    v.extend(id.training.iter().map(|(source, f)| ProblemFile::Training { source: source.clone(), ext: f.ext.clone() }));
+    v.extend(id.tables.iter().map(|(name, f)| ProblemFile::Table { name: name.clone(), ext: f.ext.clone() }));
+    v.extend(id.held_out.keys().map(|stream| ProblemFile::HeldOut { stream: stream.clone() }));
+    if id.synthetic.is_some() {
+        v.push(ProblemFile::SyntheticTruth);
+    }
+    if problem.recovery.is_some() {
+        v.push(ProblemFile::RecoveryTruth);
+        v.push(ProblemFile::RecoveryTable);
+    }
+    v.push(ProblemFile::ModelSource { camdl: problem.source.camdl });
+    v
 }
 
 /// One estimated parameter's run settings, as `method.toml` writes them.

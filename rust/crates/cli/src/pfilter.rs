@@ -1123,13 +1123,14 @@ fn run_pfilter(
             // scoring it. That time rides in the file's header, because
             // `simulate --init-state` has no other way to learn the forecast
             // origin.
+            // A run that kept no swarm stores the header alone, so the file
+            // asked for exists and says it holds no particle.
             if save_final_state_path.is_some() {
-                if let Some(states) = &result.final_states {
-                    let origin_t = observations.last().map(|o| o.time).unwrap_or(model.simulation.t_start);
-                    let columns = io::trajectories::TrajColumnSpec::from_model(model, &[]);
-                    f.final_state = Some(io::final_states_bytes(states, &columns, origin_t)
-                        .unwrap_or_else(|e| out.fail(format!("error writing final states: {}", e))));
-                }
+                let states = result.final_states.as_deref().unwrap_or(&[]);
+                let origin_t = observations.last().map(|o| o.time).unwrap_or(model.simulation.t_start);
+                let columns = io::trajectories::TrajColumnSpec::from_model(model, &[]);
+                f.final_state = Some(io::final_states_bytes(states, &columns, origin_t)
+                    .unwrap_or_else(|e| out.fail(format!("error writing final states: {}", e))));
             }
             if let Some((n_paths, _)) = &save_paths {
                 let trace = result.ancestry.as_ref().expect("record_ancestry is set when save_paths is");
@@ -1240,7 +1241,8 @@ fn run_pfilter(
         // or another process holding the run. The point is not stored, and a
         // rerun computes it.
         let not_completed = |message: String| PointResult::Failed(crate::out::CommandError::new(message));
-        let begun = match store.begin_with::<Pfilter>(&identity, &labels, &wanted, info, request.reuse()) {
+        let begun = match crate::camdl_store::begin_with::<Pfilter>(store, &identity, &labels, &wanted, info, request.reuse(),
+            crate::result_files::pfilter::PfilterFile::of(n_replicates > 1)) {
             Ok(b) => b,
             Err(e) => return not_completed(format!("error: {e}")),
         };
@@ -1288,11 +1290,22 @@ fn run_pfilter(
                     }
                     _ => false,
                 };
-                if let Err(e) = write_run(&mut run, &files) {
-                    let message = format!("error: writing the filter run: {e}");
-                    let _ = run.fail("storing", &e.to_string());
-                    break 'claimed not_completed(message);
-                }
+                let by_products_failed = match write_run(&mut run, &files) {
+                    Ok(absent) if absent.is_empty() => by_products_failed,
+                    Ok(absent) => {
+                        out.say(format_args!(
+                            "note: the filter recorded nothing for {} asked for, so no by-product of this run is \
+                             stored; a later request computes them",
+                            absent.iter().map(|k| format!("`{k}`")).collect::<Vec<_>>().join(", ")
+                        ));
+                        true
+                    }
+                    Err(e) => {
+                        let message = format!("error: writing the filter run: {e}");
+                        let _ = run.fail("storing", &e.to_string());
+                        break 'claimed not_completed(message);
+                    }
+                };
                 match run.finish() {
                     // Something new is kept unless the run was reproduced and
                     // every by-product it was reproduced for failed.
@@ -1788,49 +1801,94 @@ struct RunFiles {
 }
 
 /// Writes a run's own files and each by-product of it that was claimed.
+///
+/// A by-product asked for whose data is a table of no rows is written as its
+/// header alone: the final state of a run that kept no swarm. A by-product
+/// asked for with no bytes at all has no header-only form, so it is not
+/// stored: every by-product asked for is recorded as not computed
+/// (`Run::fail_by_products`), as for a filter that stopped with an error, and
+/// a later request recomputes them. The run itself is stored. Returns the
+/// kinds that had no bytes, for the run's note.
 #[allow(clippy::result_large_err)] // the store's error carries the paths and owners a person acts on, returned once
-fn write_run(run: &mut store::Run<crate::pfilter_store::Pfilter>, f: &RunFiles) -> store::Result<()> {
+fn write_run(run: &mut store::Run<crate::pfilter_store::Pfilter>, f: &RunFiles) -> store::Result<Vec<&'static str>> {
     use crate::pfilter_store::*;
-    run.result_file(LOGLIK_FILE)?.write_all(&f.loglik.to_bytes())?;
+    use crate::result_files::pfilter::*;
+    use crate::result_files::{create, create_by_product, declare, Files};
+    declare(run, PfilterFile::of(f.replicates.is_some()));
+    create(run, &PfilterFile::Loglik)?.write_all(&f.loglik.to_bytes())?;
     if let Some(b) = &f.replicates {
-        run.result_file(REPLICATES_FILE)?.write_all(b)?;
+        create(run, &PfilterFile::Replicates)?.write_all(b)?;
     }
-    run.provenance_file(PROVENANCE_FILE)?.write_all(&f.parameters)?;
+    create(run, &PfilterFile::Provenance)?.write_all(&f.parameters)?;
+    /// Whether `B` was asked for and has no bytes; takes its part when so.
     #[allow(clippy::result_large_err)] // the store's error carries the paths and owners a person acts on, returned once
-    fn one<B>(run: &mut store::Run<Pfilter>, files: &[(&str, &[u8])]) -> store::Result<()>
+    fn asked_without_bytes<B>(run: &mut store::Run<Pfilter>, has_bytes: bool) -> store::Result<Option<&'static str>>
     where
         B: store::ByProduct<Of = Pfilter>,
         B::Identity: Send + Sync,
     {
-        if let Some(bp) = run.also::<B>()? {
-            for (name, bytes) in files {
-                bp.result_file(name)?.write_all(bytes)?;
+        if has_bytes {
+            return Ok(None);
+        }
+        Ok(run.also::<B>()?.map(|_| B::KIND))
+    }
+    let absent: Vec<&'static str> = [
+        asked_without_bytes::<Trace>(run, f.trace.is_some())?,
+        asked_without_bytes::<PfHealth>(run, f.pf_health.is_some())?,
+        asked_without_bytes::<FinalState>(run, f.final_state.is_some())?,
+        asked_without_bytes::<SavedPaths>(run, f.paths.is_some())?,
+        asked_without_bytes::<Prequential>(run, f.prequential.is_some())?,
+        asked_without_bytes::<Filtering>(run, f.filtering.is_some())?,
+        asked_without_bytes::<FilteredStreams>(run, f.filtered_streams.is_some())?,
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if !absent.is_empty() {
+        run.fail_by_products("filtering", &format!("the filter recorded nothing for {}", absent.join(", ")));
+        return Ok(absent);
+    }
+    /// Writes `files` into the by-product `B` when it was claimed.
+    #[allow(clippy::result_large_err)] // the store's error carries the paths and owners a person acts on, returned once
+    fn one<B>(run: &mut store::Run<Pfilter>, files: Vec<(B::File, &[u8])>) -> store::Result<()>
+    where
+        B: store::ByProduct<Of = Pfilter> + Files,
+        B::Identity: Send + Sync,
+        B::File: Clone,
+    {
+        if let Some(bp) = crate::camdl_store::also::<B>(run, files.iter().map(|(file, _)| file.clone()))? {
+            for (file, bytes) in files {
+                create_by_product(&bp, &file)?.write_all(bytes)?;
             }
         }
         Ok(())
     }
     if let Some(b) = &f.trace {
-        one::<Trace>(run, &[(Trace::FILE, b)])?;
+        one::<Trace>(run, vec![(TraceFile::File, b)])?;
     }
     if let Some(b) = &f.pf_health {
-        one::<PfHealth>(run, &[(PfHealth::FILE, b)])?;
+        one::<PfHealth>(run, vec![(PfHealthFile::File, b)])?;
     }
     if let Some(b) = &f.final_state {
-        one::<FinalState>(run, &[(FinalState::FILE, b)])?;
+        one::<FinalState>(run, vec![(FinalStateFile::File, b)])?;
     }
     if let Some(b) = &f.paths {
-        one::<SavedPaths>(run, &[(SavedPaths::FILE, b)])?;
+        one::<SavedPaths>(run, vec![(SavedPathsFile::File, b)])?;
     }
     if let Some(p) = &f.prequential {
-        one::<Prequential>(run, &[(Prequential::JOINT, &p.joint), (Prequential::STREAMS, &p.streams), (Prequential::JSON, &p.json)])?;
+        one::<Prequential>(run, vec![
+            (PrequentialFile::Joint, &p.joint),
+            (PrequentialFile::Streams, &p.streams),
+            (PrequentialFile::Record, &p.json),
+        ])?;
     }
     if let Some(b) = &f.filtering {
-        one::<Filtering>(run, &[(Filtering::FILE, b)])?;
+        one::<Filtering>(run, vec![(FilteringFile::File, b)])?;
     }
     if let Some(b) = &f.filtered_streams {
-        one::<FilteredStreams>(run, &[(FilteredStreams::FILE, b)])?;
+        one::<FilteredStreams>(run, vec![(FilteredStreamsFile::File, b)])?;
     }
-    Ok(())
+    Ok(Vec::new())
 }
 
 /// The bytes of one file of the by-product of kind `kind` this invocation
@@ -3801,5 +3859,134 @@ mod tests {
         assert_ne!(c2[1], Some(ObsCell::Scalar(0.0)),
             "a coverage hole must be None, never an observed 0");
         std::fs::remove_file(&path).ok();
+    }
+
+    /// A filter run whose by-products have nothing to record is stored, not
+    /// failed: a final state of no particles is its header alone; a
+    /// by-product with no bytes at all has no header-only form, so every
+    /// by-product of the run is recorded as not computed, none is stored
+    /// holding no file, and a later request computes them.
+    #[test]
+    fn a_by_product_with_nothing_to_record_is_stored_and_the_run_completes() {
+        use crate::pfilter_store::*;
+        use store::{Begin, Given, Reuse, RunInfo, StoreRequest, Wanted};
+        let dir = tempfile::tempdir().unwrap();
+        let src = "time_unit = 'days\ncompartments { S, I }\nparameters { beta : rate }\n\
+                   transitions { infection : S --> I @ beta * S * I / (S + I) }\ninit { S = 99  I = 1 }\n\
+                   simulate { from = 0 'days  to = 5 'days }\n";
+        std::fs::write(dir.path().join("m.camdl"), src).unwrap();
+        let camdlc = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../ocaml/_build/default/bin/camdlc.exe");
+        let compiled = std::process::Command::new(&camdlc).arg(dir.path().join("m.camdl")).output().unwrap();
+        assert!(compiled.status.success(), "camdlc: {}", String::from_utf8_lossy(&compiled.stderr));
+        let envelope = ir::envelope_from_str(&String::from_utf8(compiled.stdout).unwrap()).unwrap();
+        let model = envelope.model.clone();
+        let store = store::Store::open(
+            &dir.path().join("store"),
+            crate::camdl_store::ambient(),
+            crate::camdl_store::camdl_top_level(),
+            crate::camdl_store::camdl_kinds(),
+        )
+        .unwrap();
+        let info = RunInfo::new(&Given::default(), &(), &StoreRequest::default()).unwrap();
+        let parts = crate::camdl_store::CompiledParts::split(
+            envelope,
+            "m".into(),
+            crate::camdl_store::ModelSource { bytes: src.as_bytes(), path: std::path::Path::new("m.camdl") },
+        )
+        .unwrap();
+        let model_dep = store.put::<crate::camdl_store::CompiledModel>(parts.model, &parts.labels, &parts.provenance, &info)
+            .unwrap()
+            .dep(crate::camdl_store::CompiledModel::FILE)
+            .unwrap();
+        let identity = PfilterIdentity {
+            model: model_dep,
+            config: PfilterConfig {
+                particles: 10,
+                replicates: 1,
+                dt: store::Finite::new(1.0).unwrap(),
+                data: Default::default(),
+                objective: Objective::Full,
+                allow_forcing_extrapolation: false,
+                allow_degenerate_rates: false,
+                training_rows: None,
+                binomial: Binomial::Btpe,
+            },
+            params: crate::camdl_store::ResolvedParams::new([("beta".to_string(), 0.3)]).unwrap(),
+            scenario: crate::camdl_store::ActiveInterventions::of(&model),
+            seed: crate::camdl_store::ProcessSeed { seed: 1 },
+            fit: None,
+        };
+        let header_only = io::final_states_bytes(&[], &io::trajectories::TrajColumnSpec::from_model(&model, &[]), 5.0).unwrap();
+        let files = |trace: Option<Vec<u8>>| RunFiles {
+            loglik: Loglik { loglik: Some(-1.0), n_replicates: 1, n_particles: 10, loglik_sd: None, n_failed: 0, failure: None },
+            replicates: None,
+            parameters: b"{}".to_vec(),
+            trace,
+            pf_health: None,
+            final_state: Some(header_only.clone()),
+            paths: None,
+            prequential: None,
+            filtering: None,
+            filtered_streams: None,
+        };
+        let labels = PfilterLabels { model: "m".into(), seed: 1, point: None };
+        let claim = |seed: u64, with_trace: bool, info: &RunInfo| {
+            let identity = PfilterIdentity { seed: crate::camdl_store::ProcessSeed { seed }, ..identity.clone() };
+            let filter = store::Identity::record(&identity);
+            let mut wanted = Wanted::<Pfilter>::none().with::<FinalState>(FinalStateIdentity { filter: filter.clone() }, ());
+            if with_trace {
+                wanted = wanted.with::<Trace>(TraceIdentity { filter }, ());
+            }
+            match crate::camdl_store::begin_with::<Pfilter>(
+                &store, &identity, &labels, &wanted, info, Reuse::IfCompleted,
+                crate::result_files::pfilter::PfilterFile::of(false),
+            )
+            .unwrap()
+            {
+                Begin::Claimed(run) => run,
+                _ => panic!("the run is new"),
+            }
+        };
+
+        // The header-only form: a final state of no particle.
+        let mut run = claim(1, false, &info);
+        assert!(write_run(&mut run, &files(None)).unwrap().is_empty());
+        let stored = run.finish().expect("the run is stored");
+        let final_dir = std::fs::read_dir(stored.folder().join(FinalState::KIND)).unwrap().next().unwrap().unwrap().path();
+        let bytes = std::fs::read(final_dir.join(FinalState::FILE)).unwrap();
+        assert_eq!(bytes, header_only);
+        assert_eq!(String::from_utf8(bytes).unwrap().lines().count(), 2, "the format line and the header, no particle");
+
+        // No bytes at all: the by-products are recorded as not computed, the
+        // run is stored, and no by-product holding no file is.
+        let info2 = RunInfo::new(&Given::default(), &(), &StoreRequest::default()).unwrap();
+        let mut run = claim(2, true, &info2);
+        assert_eq!(write_run(&mut run, &files(None)).unwrap(), vec![Trace::KIND], "the trace with no bytes is named");
+        let stored = run.finish().expect("the run is stored");
+        for kind in [FinalState::KIND, Trace::KIND] {
+            assert!(!stored.folder().join(kind).exists(), "no `{kind}` is stored");
+        }
+        let invocation = info2.finish(&store).unwrap();
+        let record: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(store.root().join(".invocations").join(format!("{}.json", invocation.seq()))).unwrap(),
+        )
+        .unwrap();
+        let outcomes: Vec<(String, String)> = record["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| (r["kind"].as_str().unwrap().to_string(), r["outcome"].as_str().unwrap().to_string()))
+            .collect();
+        assert_eq!(
+            outcomes,
+            [("pfilter", "computed"), ("final_state", "failed"), ("trace", "failed")].map(|(k, o)| (k.to_string(), o.to_string()))
+        );
+        // Asked for again, the run is reproduced and its by-products computed.
+        let info3 = RunInfo::new(&Given::default(), &(), &StoreRequest::default()).unwrap();
+        let mut run = claim(2, true, &info3);
+        assert!(run.reproducing());
+        assert!(write_run(&mut run, &files(Some(b"t\n".to_vec()))).unwrap().is_empty());
+        let stored = run.finish().expect("the by-products are stored");
+        assert!(stored.folder().join(Trace::KIND).is_dir() && stored.folder().join(FinalState::KIND).is_dir());
     }
 }

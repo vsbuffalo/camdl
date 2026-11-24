@@ -19,7 +19,9 @@ use std::io::Write;
 
 use store::{ByProductRun, ContentAddressed, ContentArtifact, Identity, Run};
 
-use crate::camdl_store::{ActiveInterventions, CompiledModel, ProcessSeed, ResolvedParams};
+use crate::camdl_store::{also, ActiveInterventions, CompiledModel, ProcessSeed, ResolvedParams};
+use crate::result_files::sim::{EventLogFile, ObsFile, SimFile, SimQuantitiesFile};
+use crate::result_files::{create, create_by_product, declare, declare_by_product};
 use crate::sim_config::ResolvedCell;
 use crate::sim_store::*;
 
@@ -197,7 +199,7 @@ pub(crate) fn run(ctx: StoreRun<'_>) {
     if !planned.is_empty() {
         let mut batch = store.begin_many::<Sim>(&members, &info, ctx.request.reuse()).unwrap_or_else(|e| fail(e.to_string()));
         for (begun, &i) in batch.members().zip(&distinct) {
-            match begun {
+            match crate::camdl_store::declared(begun, SimFile::planned()) {
                 store::Begin::Reused(_) => n_reused += 1,
                 store::Begin::Busy(owner) => failures.push(format!(
                     "{}: {}",
@@ -542,20 +544,22 @@ fn write_cell(run: &mut Run<Sim>, p: &Planned, ctx: &StoreRun<'_>, lone: bool) -
     });
     ctx.engine.forcing.record_in(&mut record);
     let record = serde_json::to_vec_pretty(&record).map_err(|e| e.to_string())?;
-    run.provenance_file(PROVENANCE_FILE).map_err(s)?.write_all(&record).map_err(s)?;
+    create(run, &SimFile::Provenance).map_err(s)?.write_all(&record).map_err(s)?;
+    let stream_files = || model.observations.iter().map(|o| ObsFile::Stream(o.name.clone())).collect::<Vec<_>>();
     let traj = match engine {
         Ok(t) => t,
         Err(e) => {
             let failure = Failure::new("engine", &e).to_bytes();
-            run.result_file(FAILURE_FILE).map_err(s)?.write_all(&failure).map_err(s)?;
-            if let Some(b) = run.also::<Obs>().map_err(s)? {
-                b.result_file(FAILURE_FILE).map_err(s)?.write_all(&failure).map_err(s)?;
+            declare(run, SimFile::of_outcome(false, false));
+            create(run, &SimFile::Failure).map_err(s)?.write_all(&failure).map_err(s)?;
+            if let Some(b) = also::<Obs>(run, [ObsFile::Failure]).map_err(s)? {
+                create_by_product(&b, &ObsFile::Failure).map_err(s)?.write_all(&failure).map_err(s)?;
             }
-            if let Some(b) = run.also::<EventLog>().map_err(s)? {
-                b.result_file(FAILURE_FILE).map_err(s)?.write_all(&failure).map_err(s)?;
+            if let Some(b) = also::<EventLog>(run, [EventLogFile::Failure]).map_err(s)? {
+                create_by_product(&b, &EventLogFile::Failure).map_err(s)?.write_all(&failure).map_err(s)?;
             }
-            if let Some(b) = run.also::<SimQuantities>().map_err(s)? {
-                b.result_file(FAILURE_FILE).map_err(s)?.write_all(&failure).map_err(s)?;
+            if let Some(b) = also::<SimQuantities>(run, [SimQuantitiesFile::Failure]).map_err(s)? {
+                create_by_product(&b, &SimQuantitiesFile::Failure).map_err(s)?.write_all(&failure).map_err(s)?;
             }
             return Ok(());
         }
@@ -563,44 +567,54 @@ fn write_cell(run: &mut Run<Sim>, p: &Planned, ctx: &StoreRun<'_>, lone: bool) -
     if p.spec.run_idx == 0 && !traj.transition_diagnostics.is_empty() {
         crate::write_transition_diagnostics(&traj);
     }
+    declare(run, SimFile::of_outcome(true, traj.reactive_log.is_some()));
     let cols = ctx.sim.run.view.cols(model);
-    run.result_file(TRAJ_FILE).map_err(s)?.write_all(&crate::util::traj_tsv_bytes(&traj, &cols)).map_err(s)?;
+    create(run, &SimFile::Traj).map_err(s)?.write_all(&crate::util::traj_tsv_bytes(&traj, &cols)).map_err(s)?;
     if let Some(firings) = &traj.reactive_log {
-        run.result_file(REACTIVE_LOG_FILE)
+        create(run, &SimFile::ReactiveLog)
             .map_err(s)?
             .write_all(sim::reactive::format_reactive_log(firings).as_bytes())
             .map_err(s)?;
     }
-    if let Some(b) = run.also::<Obs>().map_err(s)? {
+    if let Some(mut b) = also::<Obs>(run, stream_files()).map_err(s)? {
         match obs_files(model, &traj, p, ctx.wants.emit_every.as_ref()) {
             Ok(files) => {
                 for (name, bytes) in files {
                     b.result_file(&name).map_err(s)?.write_all(&bytes).map_err(s)?;
                 }
             }
-            Err(e) => b.result_file(FAILURE_FILE).map_err(s)?.write_all(&Failure::new("observations", &e).to_bytes()).map_err(s)?,
+            Err(e) => {
+                declare_by_product(&mut b, [ObsFile::Failure]);
+                create_by_product(&b, &ObsFile::Failure).map_err(s)?.write_all(&Failure::new("observations", &e).to_bytes()).map_err(s)?
+            }
         }
     }
-    if let Some(b) = run.also::<EventLog>().map_err(s)? {
+    if let Some(mut b) = also::<EventLog>(run, [EventLogFile::EventLog]).map_err(s)? {
         match crate::util::run_simulation_event_log(&p.spec.sim_run) {
             Ok((recorded, _, log, _exact)) => {
                 if crate::util::traj_tsv_bytes(&recorded, &cols) != crate::util::traj_tsv_bytes(&traj, &cols) {
                     return Err("internal error: the run under the event-log recorder differs from the cell's run".into());
                 }
                 let bytes = sim::lineage::event_log_io::to_tsv_bytes(&log).map_err(|e| format!("event log: {e:?}"))?;
-                b.result_file(EventLog::FILE).map_err(s)?.write_all(&bytes).map_err(s)?;
+                create_by_product(&b, &EventLogFile::EventLog).map_err(s)?.write_all(&bytes).map_err(s)?;
             }
-            Err(e) => b.result_file(FAILURE_FILE).map_err(s)?.write_all(&Failure::new("event log", &e).to_bytes()).map_err(s)?,
+            Err(e) => {
+                declare_by_product(&mut b, [EventLogFile::Failure]);
+                create_by_product(&b, &EventLogFile::Failure).map_err(s)?.write_all(&Failure::new("event log", &e).to_bytes()).map_err(s)?
+            }
         }
     }
-    if let Some(b) = run.also::<SimQuantities>().map_err(s)? {
+    if let Some(mut b) = also::<SimQuantities>(run, [SimQuantitiesFile::Quantities]).map_err(s)? {
         let quantities = match &ctx.wants.quantities {
             Some(_) => stored_quantities(run, &b),
             None => Err("internal error: quantities wanted without --quantities-out".into()),
         };
         match quantities.and_then(|q| evaluate_quantities(&q, p, &traj, ctx.wants.emit_every.as_ref())) {
-            Ok(bytes) => b.result_file(SimQuantities::FILE).map_err(s)?.write_all(&bytes).map_err(s)?,
-            Err(e) => b.result_file(FAILURE_FILE).map_err(s)?.write_all(&Failure::new("quantities", &e).to_bytes()).map_err(s)?,
+            Ok(bytes) => create_by_product(&b, &SimQuantitiesFile::Quantities).map_err(s)?.write_all(&bytes).map_err(s)?,
+            Err(e) => {
+                declare_by_product(&mut b, [SimQuantitiesFile::Failure]);
+                create_by_product(&b, &SimQuantitiesFile::Failure).map_err(s)?.write_all(&Failure::new("quantities", &e).to_bytes()).map_err(s)?
+            }
         }
     }
     Ok(())

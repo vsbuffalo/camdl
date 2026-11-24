@@ -52,9 +52,10 @@ fn fill(store: &Store) -> Remote {
     let (id, labels) = sim(1);
     let wanted = Wanted::<Sim>::none().with::<Obs>(ObsId { sim: id.record(), rate: Finite::new(0.3).unwrap() }, ());
     let Begin::Claimed(mut run) = store.begin_with(&id, &labels, &wanted, &i, Reuse::IfCompleted).unwrap() else { panic!() };
+    run.expect(files(&["traj.tsv"], &["execution.json"]));
     run.result_file("traj.tsv").unwrap().write_all(b"t\tI\n0\t1\n").unwrap();
     run.provenance_file("execution.json").unwrap().write_all(b"{\"host\":\"remote\"}").unwrap();
-    run.also::<Obs>().unwrap().unwrap().result_file("obs.tsv").unwrap().write_all(b"o").unwrap();
+    also_obs(&mut run).unwrap().result_file("obs.tsv").unwrap().write_all(b"o").unwrap();
     let s = run.finish().unwrap();
     let fit = fit_in(store, &i, b"d");
     let inv = i.finish(store).unwrap();
@@ -67,14 +68,16 @@ fn fill(store: &Store) -> Remote {
 
 fn fit_in(store: &Store, info: &RunInfo, draws: &[u8]) -> crate::Stored<Fit> {
     let fit_id = FitId { problem: "p".into(), method: "mh".into() };
-    let Begin::Claimed(run) = store.begin::<Fit>(&fit_id, &(), info, Reuse::IfCompleted).unwrap() else { panic!() };
+    let Begin::Claimed(mut run) = store.begin::<Fit>(&fit_id, &(), info, Reuse::IfCompleted).unwrap() else { panic!() };
+    run.expect(expecting(&["draws.tsv"]));
     run.result_file("draws.tsv").unwrap().write_all(draws).unwrap();
     run.finish().unwrap()
 }
 
 fn pred_in(store: &Store, info: &RunInfo, fit: &crate::Stored<Fit>) -> crate::Stored<Pred> {
     let id = PredId { fit: fit.dep("draws.tsv").unwrap(), n: 1 };
-    let Begin::Claimed(run) = store.begin::<Pred>(&id, &(), info, Reuse::IfCompleted).unwrap() else { panic!() };
+    let Begin::Claimed(mut run) = store.begin::<Pred>(&id, &(), info, Reuse::IfCompleted).unwrap() else { panic!() };
+    run.expect(expecting(&["p.tsv"]));
     run.result_file("p.tsv").unwrap().write_all(b"p").unwrap();
     run.finish().unwrap()
 }
@@ -324,7 +327,8 @@ fn receive_of_a_result_already_here_with_equal_bytes_leaves_it_in_place() {
     // its provenance file differs, its result files do not.
     let local = open_build(s.local_root.path(), "remote");
     let (id, labels) = sim(1);
-    let Begin::Claimed(run) = local.begin::<Sim>(&id, &labels, &info(), Reuse::IfCompleted).unwrap() else { panic!() };
+    let Begin::Claimed(mut run) = local.begin::<Sim>(&id, &labels, &info(), Reuse::IfCompleted).unwrap() else { panic!() };
+    run.expect(files(&["traj.tsv"], &["execution.json"]));
     run.result_file("traj.tsv").unwrap().write_all(b"t\tI\n0\t1\n").unwrap();
     run.provenance_file("execution.json").unwrap().write_all(b"{\"host\":\"here\"}").unwrap();
     let here = run.finish().unwrap();
@@ -661,7 +665,8 @@ fn a_result_whose_dependency_is_nowhere_is_refused() {
         let i = labelled("scored");
         let model = put_model(&store, &i);
         let id = ScoreId { model: model.dep("model.txt").unwrap(), n: 1 };
-        let Begin::Claimed(run) = store.begin::<Score>(&id, &(), &i, Reuse::IfCompleted).unwrap() else { panic!() };
+        let Begin::Claimed(mut run) = store.begin::<Score>(&id, &(), &i, Reuse::IfCompleted).unwrap() else { panic!() };
+        run.expect(expecting(&["score.tsv"]));
         run.result_file("score.tsv").unwrap().write_all(b"s").unwrap();
         let score = run.finish().unwrap();
         i.finish(&store).unwrap();

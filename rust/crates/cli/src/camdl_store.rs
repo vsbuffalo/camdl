@@ -7,7 +7,9 @@
 //! A command on the store opens it with [`open`] (or [`scratch`] under
 //! `--no-store`), builds one [`store::RunInfo`], stores the compiled model and
 //! its data tables with `Store::put`, and names them in its identity by a
-//! [`store::Dep`]. Its results sit under camdl's build directory,
+//! [`store::Dep`]. It begins each result through [`begin`], [`begin_with`] or
+//! [`declared`], which declare the files the run will hold from the kind's
+//! file enum ([`crate::result_files`]). Its results sit under camdl's build directory,
 //! `<root>/<version>-<12 hex of the ambient key>/` ([`camdl_top_level`]).
 //!
 //! The compiled model is split by [`CompiledParts::split`] into the part every
@@ -23,6 +25,8 @@ use store::{
     Artifact, Build, ContentAddressed, ContentArtifact, Dep, Finite, Hashed, Key, Kinds, Layout, Placed, Primary,
     Provenance, Store, StoreRequest, TopLevel, WriteMode,
 };
+
+use crate::result_files::Files;
 
 // ── Ambient identity ─────────────────────────────────────────────────────────
 
@@ -158,6 +162,65 @@ pub(crate) fn open_existing(root: &Path) -> Option<Store> {
         return None;
     }
     open(&StoreRequest::new(None, false, Some(root.to_path_buf()))).ok()
+}
+
+// ── Beginning a run ──────────────────────────────────────────────────────────
+
+/// Begins `identity` as `Store::begin` does, and declares on a claim that the
+/// run will hold `files`, its kind's files as planned before the run's
+/// outcome is known. A command whose files depend on the outcome declares
+/// them again before it finishes ([`crate::result_files::declare`]).
+#[allow(clippy::result_large_err)] // the store's error carries the paths and owners a person acts on, returned once
+pub(crate) fn begin<A: Primary + Files>(
+    store: &Store,
+    identity: &A::Identity,
+    labels: &A::Labels,
+    info: &store::RunInfo,
+    reuse: store::Reuse,
+    files: impl IntoIterator<Item = A::File>,
+) -> store::Result<store::Begin<A>> {
+    store.begin::<A>(identity, labels, info, reuse).map(|b| declared(b, files))
+}
+
+/// [`begin`], also wanting the by-products `wanted`.
+#[allow(clippy::result_large_err)] // the store's error carries the paths and owners a person acts on, returned once
+pub(crate) fn begin_with<A: Primary + Files>(
+    store: &Store,
+    identity: &A::Identity,
+    labels: &A::Labels,
+    wanted: &store::Wanted<A>,
+    info: &store::RunInfo,
+    reuse: store::Reuse,
+    files: impl IntoIterator<Item = A::File>,
+) -> store::Result<store::Begin<A>> {
+    store.begin_with::<A>(identity, labels, wanted, info, reuse).map(|b| declared(b, files))
+}
+
+/// `begun`, with `files` declared on it when it is a claim: for each member
+/// of a batch (`Store::begin_many`), as [`begin`] does for one.
+pub(crate) fn declared<A: Files>(begun: store::Begin<A>, files: impl IntoIterator<Item = A::File>) -> store::Begin<A> {
+    match begun {
+        store::Begin::Claimed(mut run) => {
+            crate::result_files::declare(&mut run, files);
+            store::Begin::Claimed(run)
+        }
+        other => other,
+    }
+}
+
+/// The by-product `B`'s part of `run`, if it was wanted and is not stored,
+/// declared to hold `files`.
+#[allow(clippy::result_large_err)] // the store's error carries the paths and owners a person acts on, returned once
+pub(crate) fn also<B: Files + store::ByProduct>(
+    run: &mut store::Run<B::Of>,
+    files: impl IntoIterator<Item = B::File>,
+) -> store::Result<Option<store::ByProductRun<B>>>
+where
+    B::Identity: Send + Sync,
+{
+    let Some(mut part) = run.also::<B>()? else { return Ok(None) };
+    crate::result_files::declare_by_product(&mut part, files);
+    Ok(Some(part))
 }
 
 /// A stored result file's bytes, read through the store, which checks them

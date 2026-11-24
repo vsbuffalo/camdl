@@ -614,6 +614,14 @@ update-diff-pairs-golden: build-ocaml
 	@$(CAMDLC) $(DIFF_PAIRS_DIR)/base.camdl --set beta=0.3 -o $(DIFF_PAIRS_DIR)/ir/base.set_beta.ir.json
 	cd rust && CAMDL_UPDATE_DIFF_EXPECTED=1 $(CARGO_WRAP) cargo test -p diff --test rendered
 
+# The run spec's result-file contract (§2.9) is rendered from the file enums
+# of rust/crates/cli/src/result_files. This writes it; the test
+# `the_contract_section_is_generated` fails when the committed section differs.
+.PHONY: update-result-file-contract
+update-result-file-contract:
+	cd rust && CAMDL_UPDATE_RESULT_FILE_CONTRACT=1 $(CARGO_WRAP) cargo test -p cli --bin camdl -- result_files::tests::the_contract_section_is_generated
+	dprint fmt docs/camdl-run-spec.md
+
 # Drift gate: each source must still compile byte-for-byte to its committed
 # file. Runs in `make test`. The text reports are checked by the Rust test.
 check-diff-pairs-golden: build-ocaml

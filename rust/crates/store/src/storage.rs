@@ -291,27 +291,32 @@ impl Store {
     }
 
     /// Begins, then reuses, refuses a busy id with [`Error::InProgress`], or
-    /// runs `compute` and finishes, or fails with its error's text under
-    /// `operation`.
+    /// runs `compute` on a claim that expects `expected` and finishes, or
+    /// fails with its error's text under `operation`.
+    #[allow(clippy::too_many_arguments)] // the begin's four inputs, the claim's file set, and the computation with its name
     pub fn run<A: Primary, E: std::fmt::Display>(
         &self,
         identity: &A::Identity,
         labels: &A::Labels,
         info: &RunInfo,
         reuse: Reuse,
+        expected: crate::run::ExpectedFiles,
         operation: &str,
         compute: impl FnOnce(&mut Run<A>) -> std::result::Result<(), E>,
     ) -> std::result::Result<Stored<A>, RunError<E>> {
         match self.begin::<A>(identity, labels, info, reuse)? {
             Begin::Reused(s) => Ok(s),
             Begin::Busy(owner) => Err(RunError::Store(Error::InProgress(owner))),
-            Begin::Claimed(mut run) => match compute(&mut run) {
-                Ok(()) => Ok(run.finish()?),
-                Err(e) => {
-                    run.fail(operation, &e.to_string())?;
-                    Err(RunError::Compute(e))
+            Begin::Claimed(mut run) => {
+                run.expect(expected);
+                match compute(&mut run) {
+                    Ok(()) => Ok(run.finish()?),
+                    Err(e) => {
+                        run.fail(operation, &e.to_string())?;
+                        Err(RunError::Compute(e))
+                    }
                 }
-            },
+            }
         }
     }
 
@@ -1452,12 +1457,17 @@ impl Inner {
             let mut run = running_record(info, info.seq(), Vec::new());
             write_json_synced(&tmp.join(IDENTITY_FILE), &ident)?;
             let table = FileTable::new(tmp.clone(), self.reserved_names());
+            table.expect(crate::run::ExpectedFiles {
+                result: [C::FILE.to_string()].into(),
+                provenance: provenance.files.keys().cloned().collect(),
+            });
             let fh = table.open(C::FILE, Role::Result)?;
             fh.write_all(&content.get().to_bytes())?;
             for (name, bytes) in &provenance.files {
                 table.open(name, Role::Provenance)?.write_all(bytes)?;
             }
-            let files = table_close(&table)?;
+            let files = table.close_all()?;
+            table.check_expected(run_id, &files)?;
             Core::check_held(&[content.digest()], &files)?;
             run.status = Status::Completed;
             run.finished = Some(crate::owner::Timestamp::now());
@@ -1483,10 +1493,6 @@ impl Inner {
 enum ByProducts<A: Artifact> {
     Done(Begin<A>),
     Again,
-}
-
-fn table_close(table: &FileTable) -> Result<BTreeMap<String, crate::record::FileEntry>> {
-    table.close_all()
 }
 
 /// The `identity.json` of `dir`, when it reads.
