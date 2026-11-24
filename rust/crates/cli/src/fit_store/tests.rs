@@ -447,6 +447,29 @@ fn a_prediction_declares_the_tables_its_manifests_list() {
         }
         other => panic!("{other:?}"),
     }
+
+    // A quantity or contrast table written with no manifest of its part is
+    // refused, never declared as written; the model's block under a chain
+    // selection reads its tables under `quantities-model-excl…/`.
+    for (manifest, table) in [("quantities-excl1.json", "contrasts/averted.tsv"), ("contrasts.json", "quantities-model/peak.tsv")] {
+        let d = tempfile::tempdir().unwrap();
+        let put = |name: &str, text: &str| {
+            let p = d.path().join(name);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, text).unwrap();
+        };
+        put(manifest, r#"{"quantities": [{"name": "size"}], "contrasts": []}"#);
+        if manifest.starts_with("quantities") {
+            put("quantities-model-excl1/size.tsv", "t\n");
+        }
+        put(table, "t\n");
+        let err = PredictionFile::of_dir(d.path()).unwrap_err();
+        assert!(err.contains(&format!("wrote `{table}` and no")), "{err}");
+    }
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("quantities-excl1.json"), r#"{"quantities": [{"name": "size"}]}"#).unwrap();
+    let declared: Vec<String> = PredictionFile::of_dir(d.path()).unwrap().iter().map(ResultFile::stored).collect();
+    assert_eq!(declared, ["quantities-excl1.json", "quantities-model-excl1/size.tsv"]);
 }
 
 /// A method's working directory holding a file its method does not store is

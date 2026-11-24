@@ -254,15 +254,19 @@ impl PredictionFile {
                 // Each entry names one quantity, whose table is `<name>.tsv`;
                 // a quantity evaluated in several design cells has an entry
                 // per cell and one table. The model's own block writes its
-                // manifest as `quantities[-<suffix>].json` and its tables
-                // under `quantities-model[-<suffix>]/` (the store keeps a
-                // kind's name, `quantities`, out of a result's top-level
-                // directories); a vocabulary's manifest carries its
-                // `vocabulary` and names its directory.
+                // manifest under `quantities_dir_name(None)` and its tables
+                // under `stored_quantities_dir_name(None)`, each followed by
+                // the chain selection's suffix (`artifact_name`); a
+                // vocabulary's manifest carries its `vocabulary`, and its
+                // tables are under the manifest's own name.
                 let table_dir = if manifest.get("vocabulary").is_some() {
                     stem.clone()
                 } else {
-                    stem.replacen("quantities", "quantities-model", 1)
+                    let manifest_base = crate::quantities_file::quantities_dir_name(None);
+                    let suffix = stem.strip_prefix(&manifest_base).ok_or_else(|| {
+                        format!("internal error: the prediction's quantities manifest `{stem}.json` is not named for the model's block")
+                    })?;
+                    format!("{}{suffix}", crate::quantities_file::stored_quantities_dir_name(None))
                 };
                 for name in manifest["quantities"].as_array().into_iter().flatten().filter_map(|q| q["name"].as_str()) {
                     listed.push(PredictionFile::Table { part: PredictionPart::Quantities, dir: table_dir.clone(), stream: name.into() });
@@ -284,6 +288,18 @@ impl PredictionFile {
         }
         for file in found {
             let unlisted_part = match &file {
+                // A quantity or contrast table is written only with its
+                // part's manifest, which lists it; without one it is refused
+                // here rather than declared as written.
+                PredictionFile::Table { part: part @ (PredictionPart::Quantities | PredictionPart::Contrasts), .. }
+                    if !listing.contains(part) =>
+                {
+                    return Err(format!(
+                        "internal error: the prediction wrote `{}` and no {} manifest lists it",
+                        file.stored(),
+                        part.name()
+                    ));
+                }
                 PredictionFile::Table { part, .. } => !listing.contains(part),
                 PredictionFile::ForecastSamples | PredictionFile::ForecastContrasts => !listing.contains(&PredictionPart::Forecast),
                 PredictionFile::Manifest { .. } => false,
