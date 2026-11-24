@@ -2,9 +2,9 @@
 
 The runtime is the Rust half of camdl: the `camdl` command, which reads the JSON
 a compiled model is written in, simulates it, fits it to data and stores every
-result under the hash of its inputs. It is one cargo workspace, `rust/`, of
-eight crates documented here. The compiler, `camdlc`, is a separate OCaml
-program that `camdl` runs as a subprocess.
+result under the hash of its inputs. It is one cargo workspace, `rust/`, of nine
+crates documented here. The compiler, `camdlc`, is a separate OCaml program that
+`camdl` runs as a subprocess.
 
 A command runs these steps:
 
@@ -40,13 +40,13 @@ so a reader of a published declared-model document needs only it.
 
 ## Run identity and output files {#identity}
 
-The `store` crate, not documented here, keys every stored result by a hash of
-its complete, typed input set and names the result's folder from it.
-`ir::model_hash` is the model's structural hash, by which `camdl` compares and
-prints models. `io` writes the trajectories that simulation and inference
-produce, in one long TSV format.
+`store` keys every stored result by a hash of its complete, typed input set,
+names the result's folder from it, and does every write and read of a stored
+file; it holds no type of camdl's own. `ir::model_hash` is the model's
+structural hash, by which `camdl` compares and prints models. `io` writes the
+trajectories that simulation and inference produce, in one long TSV format.
 
-<!-- modules: io -->
+<!-- modules: store io -->
 
 ## Numerics and scoring {#scoring}
 

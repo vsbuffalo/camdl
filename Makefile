@@ -974,7 +974,7 @@ COMPILER_ML   := $(sort $(filter-out %/ir_version_generated.ml, \
 # nothing. Without any pages it writes none and succeeds. Docs:
 # docs/dev/documentation.md, "Engineering pages".
 ENGINEERING_PAGES := docs/engineering
-RUNTIME_CRATES    := ir declared io numerics score sim diff
+RUNTIME_CRATES    := ir declared io numerics score sim diff store
 RUNTIME_OVERVIEW  := rust/docs-overview.md
 RUSTDOC_JSON      := RUSTC_BOOTSTRAP=1 cargo rustdoc --quiet
 RUSTDOC_JSON_ARGS := -- -Z unstable-options --output-format json --document-private-items \

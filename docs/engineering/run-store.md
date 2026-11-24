@@ -232,10 +232,12 @@ impl Artifact for Pfilter {
 ```
 
 Every artifact kind a project stores is registered once in a `Kinds` value
-passed to `Store::open`. The commands that read across artifact kinds use it to
-parse any record, and registering one `KIND` twice is refused when the store
-opens (`Error::KindRegisteredTwice`). camdl's list is `camdl_kinds()`
-(`camdl_store.rs:79`), nineteen artifact kinds in all:
+passed to [`Store::open`](rust:store::storage::Store::open). The commands that
+read across artifact kinds use it to parse any record, and registering one
+`KIND` twice is refused when the store opens
+([`Error::KindRegisteredTwice`](rust:store::error::Error::KindRegisteredTwice)).
+camdl's list is `camdl_kinds()` (`camdl_store.rs:79`), nineteen artifact kinds
+in all:
 
 | Module             | Primary kinds                                  | By-products                                                                                        |
 | ------------------ | ---------------------------------------------- | -------------------------------------------------------------------------------------------------- |
@@ -360,9 +362,10 @@ pub(crate) fn run_id(kind: &str, ambient: &Key, identity: &Key) -> Key {
 ```
 
 `kind` is `A::KIND`. `identity` is the key of the result's identity. `ambient`
-is the key of the ambient identity, a value the project passes to `Store::open`
-that every run id of that store includes. camdl's ambient identity is the build
-fingerprint and the environment variables that can change a result:
+is the key of the ambient identity, a value the project passes to
+[`Store::open`](rust:store::storage::Store::open) that every run id of that
+store includes. camdl's ambient identity is the build fingerprint and the
+environment variables that can change a result:
 
 ```rust
 // rust/crates/cli/src/camdl_store.rs:31
@@ -470,24 +473,26 @@ file:
 - A provenance file is in the manifest and never compared: `pfilter`'s
   `provenance.json` says where each scored value came from.
 - An attempt file describes one attempt and is outside the manifest:
-  `progress.json` and `events.jsonl`, which `Run::progress` and `Run::event`
-  write.
+  `progress.json` and `events.jsonl`, which
+  [`Run::progress`](rust:store::run::Run::progress) and
+  [`Run::event`](rust:store::run::Run::event) write.
 
 Every record carries `format`. A reader that finds another version refuses the
-file by name (`Error::OldRecord`, `record.rs:273`), and a result whose record
-has another version is treated as damaged and computed again.
+file by name ([`Error::OldRecord`](rust:store::error::Error::OldRecord),
+`record.rs:273`), and a result whose record has another version is treated as
+damaged and computed again.
 
 ### Statuses
 
 `run.json` states one of three statuses, and readers derive two more.
 
-| Status      | Written by                      | Meaning                                                                     |
-| ----------- | ------------------------------- | --------------------------------------------------------------------------- |
-| running     | the claim                       | a process holds the run id                                                  |
-| completed   | `Run::finish`                   | the manifest is written and the result is whole                             |
-| failed      | `Run::fail`, or a dropped `Run` | an in-place run stopped; the folder stays with the reason, if one was given |
-| interrupted | nobody; derived                 | the record says running and its owner is dead                               |
-| damaged     | nobody; derived                 | a completed folder whose files or records fail a check                      |
+| Status      | Written by                                                    | Meaning                                                                     |
+| ----------- | ------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| running     | the claim                                                     | a process holds the run id                                                  |
+| completed   | [`Run::finish`](rust:store::run::Run::finish)                 | the manifest is written and the result is whole                             |
+| failed      | [`Run::fail`](rust:store::run::Run::fail), or a dropped `Run` | an in-place run stopped; the folder stays with the reason, if one was given |
+| interrupted | nobody; derived                                               | the record says running and its owner is dead                               |
+| damaged     | nobody; derived                                               | a completed folder whose files or records fail a check                      |
 
 A completed result is damaged when a listed file is missing or has a different
 size, when a listed file's modification time differs and its SHA-256 differs
@@ -505,9 +510,10 @@ check found.
 Only a completed, undamaged result is ever reused or read as a result. An atomic
 result that fails leaves no folder, so it has no status of its own; its failure
 is kept in the invocation record. A reader asks for a result in any status with
-`Store::inspect`, which returns an `Entry` whose `EntryState` is one of
-`Running { owner, liveness }`, `Completed`, `Damaged { what }`,
-`Failed { operation, reason }` and `Interrupted { owner }` (`stored.rs:379`).
+[`Store::inspect`](rust:store::storage::Store::inspect), which returns an
+`Entry` whose `EntryState` is one of `Running { owner, liveness }`, `Completed`,
+`Damaged { what }`, `Failed { operation, reason }` and `Interrupted { owner }`
+(`stored.rs:379`).
 
 ## Input classes
 
@@ -891,13 +897,14 @@ ambient key is in every run id ([The run id](#the-run-id)). The store can also
 keep them in separate directories, so that everything one build made can be seen
 or removed together.
 
-`Store::open` takes a `TopLevel`, which has no default. Under
-`TopLevel::ByBuild { label }` every result placed with `in_kind` sits under a
-directory for the ambient key, `<label>-<12 hex of the ambient key>/`; under
-`TopLevel::ByKind` the artifact kinds' directories are at the root. The choice
-is recorded in `store.json` (`{"format": 1, "top_level": "by_build"}`), and
-opening an existing store the other way is refused with
-`Error::TopLevelDiffers`.
+[`Store::open`](rust:store::storage::Store::open) takes a `TopLevel`, which has
+no default. Under `TopLevel::ByBuild { label }` every result placed with
+`in_kind` sits under a directory for the ambient key,
+`<label>-<12 hex of the ambient key>/`; under `TopLevel::ByKind` the artifact
+kinds' directories are at the root. The choice is recorded in `store.json`
+(`{"format": 1, "top_level": "by_build"}`), and opening an existing store the
+other way is refused with
+[`Error::TopLevelDiffers`](rust:store::error::Error::TopLevelDiffers).
 
 camdl uses `ByBuild` with its readable version, `VERSION_SHORT`, as the label
 (`camdl_store.rs:74`): `0.1.0+<commit>` for a clean build,
@@ -909,8 +916,9 @@ worktree, another `RUSTFLAGS`) have different `ENGINE_ID`s.
 
 A `Dep`'s recorded `build` is the 64 hex digits of the ambient key it was made
 under, which is how a result made by one build can name a model stored by
-another. `Store::scratch`, which `pfilter --no-store` uses, lays a temporary
-root out by artifact kind and deletes it when the `Store` is dropped.
+another. [`Store::scratch`](rust:store::storage::Store::scratch), which
+`pfilter --no-store` uses, lays a temporary root out by artifact kind and
+deletes it when the `Store` is dropped.
 
 ### Example: the store after two pfilter runs
 
@@ -1013,12 +1021,14 @@ argument takes is decided from its spelling alone:
 | anything else                                                | `Path`                 | the result whose `identity.json` is in that folder                                     |
 
 `Store::resolve::<A>(&RunRef<A>)` returns the completed result and refuses one
-of another artifact kind (`Error::WrongKind`). A label resolves through its
-invocation: when the invocation lists exactly one distinct result of artifact
-kind `A`, that is the result; when it lists several, it is refused with
-`Error::NotOneResult`; when it lists none, with `Error::WrongKind` naming the
+of another artifact kind
+([`Error::WrongKind`](rust:store::error::Error::WrongKind)). A label resolves
+through its invocation: when the invocation lists exactly one distinct result of
+artifact kind `A`, that is the result; when it lists several, it is refused with
+[`Error::NotOneResult`](rust:store::error::Error::NotOneResult); when it lists
+none, with [`Error::WrongKind`](rust:store::error::Error::WrongKind) naming the
 artifact kinds it does list. A group directory has no record, so a path to one
-is refused with `Error::NoRecord`.
+is refused with [`Error::NoRecord`](rust:store::error::Error::NoRecord).
 
 `Store::invocation(&Handle)` returns the invocation itself, which a rendering
 needs: `camdl cat @L` on a `--sweep-file` design renders the whole design table
@@ -1073,11 +1083,12 @@ pub fn begin_with<A: Primary>(&self, identity: &A::Identity, labels: &A::Labels,
     wanted: &Wanted<A>, info: &RunInfo, reuse: Reuse) -> Result<Begin<A>>;
 ```
 
-`begin` is `begin_with` with no by-products, and `Store::run` wraps the match
-for a command that needs nothing more. `begin_many` begins several identities at
-once for a batch, claims a repeated identity once, and takes claims in run-id
-order so that two overlapping batches cannot deadlock. `plan` and `plan_with`
-report what is stored for each identity without claiming anything.
+`begin` is `begin_with` with no by-products, and
+[`Store::run`](rust:store::storage::Store::run) wraps the match for a command
+that needs nothing more. `begin_many` begins several identities at once for a
+batch, claims a repeated identity once, and takes claims in run-id order so that
+two overlapping batches cannot deadlock. `plan` and `plan_with` report what is
+stored for each identity without claiming anything.
 
 `Reuse::Force` recomputes a completed result after moving it to `.quarantine/`,
 and takes a claim whose owner is on another host and is stale or of unknown
@@ -1180,11 +1191,13 @@ A name is a relative path and may contain subdirectories. `check_name`
 `..`, a name containing `:`, `,` or `\`, the name `*`, the store's own file
 names at the folder's root, and a first component equal to a registered `KIND`,
 since by-products are placed there. A name is opened once
-(`Error::FileOpenedTwice`). A `FileHandle` can be cloned and sent to other
-threads, and each clone appends to the same file while the handle hashes the
-bytes. `finish` refuses while a buffered writer from `FileHandle::writer` is
-alive (`Error::WriterOpen`), and a write after `finish` or `fail` is refused
-(`Error::WriteAfterEnd`).
+([`Error::FileOpenedTwice`](rust:store::error::Error::FileOpenedTwice)). A
+`FileHandle` can be cloned and sent to other threads, and each clone appends to
+the same file while the handle hashes the bytes. `finish` refuses while a
+buffered writer from `FileHandle::writer` is alive
+([`Error::WriterOpen`](rust:store::error::Error::WriterOpen)), and a write after
+`finish` or `fail` is refused
+([`Error::WriteAfterEnd`](rust:store::error::Error::WriteAfterEnd)).
 
 `pfilter` writes its run and every by-product it claimed in one function:
 
@@ -1206,17 +1219,19 @@ fn write_run(run: &mut store::Run<Pfilter>, f: &RunFiles) -> store::Result<()> {
 
 `finish` (`run.rs:545`, `finish_inner`) closes every handle and builds the
 manifest. It checks that each digest the identity holds as `Hashed` content has
-a result file with that digest (`Error::ContentMissing`), and writes `run.json`
-completed. For an atomic result it then renames the staging folder into place;
-for an in-place one it replaces `run.json` through `run.json.tmp` and a rename
-and removes the lock. Each completed result appends one line to the index. If
-`finish` itself fails, the run is failed.
+a result file with that digest
+([`Error::ContentMissing`](rust:store::error::Error::ContentMissing)), and
+writes `run.json` completed. For an atomic result it then renames the staging
+folder into place; for an in-place one it replaces `run.json` through
+`run.json.tmp` and a rename and removes the lock. Each completed result appends
+one line to the index. If `finish` itself fails, the run is failed.
 
 An atomic `finish` can find a completed result of its own run id already in
 place, put there by a writer whose claim it did not see (one moved aside under
 `Force`). It then compares the result files by digest: on a match the stored
-copy is the result, and on a difference `finish` returns `Error::Divergent` and
-keeps its own files in `.quarantine/` (`run.rs:664`, `met_stored_copy`).
+copy is the result, and on a difference `finish` returns
+[`Error::Divergent`](rust:store::error::Error::Divergent) and keeps its own
+files in `.quarantine/` (`run.rs:664`, `met_stored_copy`).
 
 ### By-products
 
@@ -1264,8 +1279,9 @@ of the same name; a stored result file that was not written again, or a result
 file the stored upstream lacks, counts as a difference. On a match the
 by-products are committed and `finish` returns the stored upstream.
 
-On a difference `finish` returns `Error::Divergent`, moves `.reproduce/` to
-`.quarantine/`, and fails the by-products. A divergence means the upstream's
+On a difference `finish` returns
+[`Error::Divergent`](rust:store::error::Error::Divergent), moves `.reproduce/`
+to `.quarantine/`, and fails the by-products. A divergence means the upstream's
 result depends on something outside its identity, and the quarantined files are
 the evidence.
 
@@ -1365,7 +1381,8 @@ impl<A: Artifact> Stored<A> {
 
 `open` reads the whole file and checks it against the manifest's digest before
 returning any byte, so a file changed behind the store is refused rather than
-read, with `Error::Damaged` naming the result (`run.rs:444`, `read_checked`).
+read, with [`Error::Damaged`](rust:store::error::Error::Damaged) naming the
+result (`run.rs:444`, `read_checked`).
 [`camdl_store::read_stored`](rust:cli::camdl_store::read_stored)
 (`camdl_store.rs:139`) is camdl's helper for reading one file this way.
 
@@ -1400,7 +1417,8 @@ pub trait ByProductRendering {
 
 `Invocation::render` writes a rendering to a path and `render_to` to any writer,
 so `-o` and the terminal print the same bytes. Both refuse an invocation with a
-member that is not completed (`Error::MemberNotCompleted`). A
+member that is not completed
+([`Error::MemberNotCompleted`](rust:store::error::Error::MemberNotCompleted)). A
 `ByProductRendering` reads each member together with the by-product of one
 artifact kind the invocation asked for of it, and writes one file or a directory
 of files through an `ExportSink`; `simulate --obs-dir` and `--quantities-out`
@@ -1431,13 +1449,14 @@ info.lineage(store::Lineage::Input { field: format!("data.{name}"), digest: tabl
 
 At the command's first call to the store, the store takes the lock
 `.invocations/.lock`, refuses the `--label` if an invocation carrying it is
-still running and its owner is not known to have stopped (`Error::LabelInUse`),
-takes the next sequence number, and writes the record's first version with
-status `running` (`invocation.rs:289`, `start`). When the command ends,
-`RunInfo::finish` (or dropping the `RunInfo`) replaces it with the last version,
-status `ended`, and the record is not written again. A record whose owner died
-while it was running is closed by `camdl clean` with status `interrupted`, its
-unfinished results recorded as failed (`maintenance.rs:198`).
+still running and its owner is not known to have stopped
+([`Error::LabelInUse`](rust:store::error::Error::LabelInUse)), takes the next
+sequence number, and writes the record's first version with status `running`
+(`invocation.rs:289`, `start`). When the command ends, `RunInfo::finish` (or
+dropping the `RunInfo`) replaces it with the last version, status `ended`, and
+the record is not written again. A record whose owner died while it was running
+is closed by `camdl clean` with status `interrupted`, its unfinished results
+recorded as failed (`maintenance.rs:198`).
 
 The record holds the command line, the inputs as given, the digest of each
 configuration file read, the `--label`, counts of completed and failed results,
@@ -1509,12 +1528,13 @@ that evaluate quantities (`sim_quantities`, `prediction`) hold a
 
 ### Storing a content artifact
 
-`Store::put` stores a content artifact without a claim, because two writers of
-one content write identical bytes. It writes the folder whole in a temporary
-staging folder, renames it into place if the destination is absent, and
-otherwise removes its own copy and returns the stored one; a damaged copy in
-place is moved to quarantine first (`storage.rs:1410`, `put_inner`). It returns
-a `Stored<C>`, from which the command takes a dependency:
+[`Store::put`](rust:store::storage::Store::put) stores a content artifact
+without a claim, because two writers of one content write identical bytes. It
+writes the folder whole in a temporary staging folder, renames it into place if
+the destination is absent, and otherwise removes its own copy and returns the
+stored one; a damaged copy in place is moved to quarantine first
+(`storage.rs:1410`, `put_inner`). It returns a `Stored<C>`, from which the
+command takes a dependency:
 
 ```rust
 // rust/crates/cli/src/pfilter.rs:568-571 (error handling trimmed)
@@ -1540,11 +1560,12 @@ A `Stored` result makes each form: `Stored::dep(file)` names one file,
 A running computation reads a dependency only through one of three methods, and
 each read is listed under `reads` in `run.json`:
 
-- `Run::open`, one file or a part, checked against the digest;
-- `Run::open_in`, one file of a several-file dependency, after the dependency's
-  combined digest is checked;
-- `Run::load`, the parsed content of a content artifact, cached per process by
-  digest.
+- [`Run::open`](rust:store::run::Run::open), one file or a part, checked against
+  the digest;
+- [`Run::open_in`](rust:store::run::Run::open_in), one file of a several-file
+  dependency, after the dependency's combined digest is checked;
+- [`Run::load`](rust:store::run::Run::load), the parsed content of a content
+  artifact, cached per process by digest.
 
 A value that was used and is not hashed is recorded with `RunInfo::lineage`:
 `pfilter` records each data file's digest that way, because the compiled model
@@ -1872,9 +1893,11 @@ let model = store
 
 `begin_with` the identity, labels and `Wanted`; check that the model about to
 run is the stored compile (`require_stored_model`); write files through the
-`Run`; read stored inputs with `Run::load`, `Run::open` or `Run::open_in`; end
-with `finish` or `fail`. Decide which failures are results and which are failed
-runs, and write the rule in the code.
+`Run`; read stored inputs with [`Run::load`](rust:store::run::Run::load),
+[`Run::open`](rust:store::run::Run::open) or
+[`Run::open_in`](rust:store::run::Run::open_in); end with `finish` or `fail`.
+Decide which failures are results and which are failed runs, and write the rule
+in the code.
 
 ```rust
 match store.begin_with::<Pfilter>(&identity, &labels, &wanted, &info, request.reuse())? {
@@ -1984,8 +2007,9 @@ reads. The invocation record named by `run.json`'s `invocation` gives the
 command line and, for each result the command asked for, whether it was computed
 or reused.
 
-A result that is present and not reused is usually damaged: `Store::inspect`
-reports `EntryState::Damaged` with the reason, and the next `begin` moves it to
+A result that is present and not reused is usually damaged:
+[`Store::inspect`](rust:store::storage::Store::inspect) reports
+`EntryState::Damaged` with the reason, and the next `begin` moves it to
 `.quarantine/`, where it keeps its folder name and records. Earlier attempts of
 an in-place run are in its `.attempts/<n>/`, each with `attempt.json`. A
 divergence leaves the recomputed files in `.quarantine/`.
@@ -2008,22 +2032,24 @@ deletes no result.
 The index is a cache, so this is safe at any time.
 
 `camdl receive <copy>` brings in results computed in another store, such as a
-cloud machine's (`Store::receive`, `receive.rs`). The copy holds the other
-store's `store.json`, the result folders wanted at the paths they had there,
-with the parent folders a nested result sits in, and the invocation records that
-listed them. The copy is moved into `<root>/.staging/receive.<owner>.<n>`, and
-every result folder in it is checked as `verify` checks one, hashing every file;
-each result's dependencies (`run.json`'s `deps`) must also be in the copy or
-completed here, so no result is placed that its readers cannot open. Nothing is
-placed unless every folder passes, and a refused copy is moved back where it was
-given. Each result keeps its path relative to the root, so a result of another
-build sits under that build's directory. A run id held here with the same result
-files is left in place; one held with other result files, or a destination
-already taken, is refused with `Error::ReceivedDiffers`, naming both folders.
-Each folder is placed by a rename that never replaces what is at the destination
-(`fsutil::rename_noreplace`: `renamex_np` with `RENAME_EXCL` on macOS,
-`renameat2` with `RENAME_NOREPLACE` on Linux with glibc, a check before the
-rename elsewhere), so a concurrent receive of the same result that placed it
+cloud machine's ([`Store::receive`](rust:store::storage::Store::receive),
+`receive.rs`). The copy holds the other store's `store.json`, the result folders
+wanted at the paths they had there, with the parent folders a nested result sits
+in, and the invocation records that listed them. The copy is moved into
+`<root>/.staging/receive.<owner>.<n>`, and every result folder in it is checked
+as `verify` checks one, hashing every file; each result's dependencies
+(`run.json`'s `deps`) must also be in the copy or completed here, so no result
+is placed that its readers cannot open. Nothing is placed unless every folder
+passes, and a refused copy is moved back where it was given. Each result keeps
+its path relative to the root, so a result of another build sits under that
+build's directory. A run id held here with the same result files is left in
+place; one held with other result files, or a destination already taken, is
+refused with
+[`Error::ReceivedDiffers`](rust:store::error::Error::ReceivedDiffers), naming
+both folders. Each folder is placed by a rename that never replaces what is at
+the destination (`fsutil::rename_noreplace`: `renamex_np` with `RENAME_EXCL` on
+macOS, `renameat2` with `RENAME_NOREPLACE` on Linux with glibc, a check before
+the rename elsewhere), so a concurrent receive of the same result that placed it
 first makes it `present`. One local invocation lists every received result with
 outcome `reused` and the labels the copy's records gave it, so `camdl list` and
 `@label` find them. A receive stopped midway leaves each folder it placed whole,
@@ -2047,8 +2073,8 @@ engine code reads nothing behind the store's back.
 | [Identity inputs do change the id]{#enf-identity}                                    | Class checks, using each field's `Vary` value                                                                                                                                                              | A second value that happens to be equivalent                                                                                                                                |
 | [Only completed results are reused or read as results]{#enf-completed}               | Types: `Stored<A>` exists only for a completed result                                                                                                                                                      | A reader that opens files by a path it built                                                                                                                                |
 | [Completed records are sealed]{#enf-sealed}                                          | Types: nothing takes a completed result mutably; labels live in invocation records                                                                                                                         | A hand-built path                                                                                                                                                           |
-| [Every write goes through the store]{#enf-writes}                                    | Types: a run hands out files; its folder only as a path to show (`Run::folder`, `Stored::folder`)                                                                                                          | A hand-built path under the root                                                                                                                                            |
-| [Every upstream read is declared]{#enf-reads}                                        | Types: `Run::open` takes a `Dep`; the lint and the poisoning test below                                                                                                                                    | A plain file read on a hand-built path that a lint exemption covers; a read, while a command resolves its inputs, of a stored fit it names, which the poisoning test allows |
+| [Every write goes through the store]{#enf-writes}                                    | Types: a run hands out files; its folder only as a path to show ([`Run::folder`](rust:store::run::Run::folder), `Stored::folder`)                                                                          | A hand-built path under the root                                                                                                                                            |
+| [Every upstream read is declared]{#enf-reads}                                        | Types: [`Run::open`](rust:store::run::Run::open) takes a `Dep`; the lint and the poisoning test below                                                                                                      | A plain file read on a hand-built path that a lint exemption covers; a read, while a command resolves its inputs, of a stored fit it names, which the poisoning test allows |
 | [One id is never computed twice at once]{#enf-claim}                                 | Library: a claim in both write modes; a second request for an atomic id waits for the first, and one for an in-place id is refused. A content artifact is not claimed: two writers produce identical bytes | Filesystems without exclusive create                                                                                                                                        |
 | [A dead run is noticed]{#enf-dead}                                                   | Library: the owner check, with start time, and the beat counter                                                                                                                                            | A hung process still beats                                                                                                                                                  |
 | [Old records are never misread]{#enf-records}                                        | Library: versions in every record; a mismatch is refused by name                                                                                                                                           | Nothing                                                                                                                                                                     |
