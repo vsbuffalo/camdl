@@ -83,6 +83,9 @@ impl PfilterFile {
 /// one variant.
 macro_rules! one_file {
     ($(#[$doc:meta])* $enum:ident, $kind:ty, $logical:literal, $about:literal) => {
+        one_file!($(#[$doc])* $enum, $kind, $logical, $about, contract 1);
+    };
+    ($(#[$doc:meta])* $enum:ident, $kind:ty, $logical:literal, $about:literal, contract $version:literal) => {
         $(#[$doc])*
         #[derive(Clone, Debug, PartialEq, Eq)]
         pub(crate) enum $enum {
@@ -106,7 +109,7 @@ macro_rules! one_file {
 
         impl Files for $kind {
             type File = $enum;
-            const CONTRACT: u16 = 1;
+            const CONTRACT: u16 = $version;
         }
 
         impl ParseFile for $enum {
@@ -142,7 +145,9 @@ one_file!(
 );
 one_file!(
     /// The file of `saved_paths`: smoothed sample paths.
-    SavedPathsFile, SavedPaths, "paths", "Sample paths from the smoothing distribution, traced through the ancestry."
+    SavedPathsFile, SavedPaths, "paths",
+    "Sample paths from the smoothing distribution, traced through the ancestry: at each filter stop the compartments, each transition's flow and each overdispersed transition's rate noise over the interval since the previous stop, and each stream's projection.",
+    contract 2
 );
 
 /// The files of `prequential`: the run's one-step-ahead predictive scores.

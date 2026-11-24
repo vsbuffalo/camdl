@@ -159,7 +159,7 @@ fn hole_does_not_suppress_incidence_reset() {
         dt,
         t_start: 0.0,
         skip_first_obs_from_loglik: false,
-        record_ancestry: false,
+        record_ancestry: false, path_recording: Default::default(),
         record_prequential: false,
         record_predictions: true, // this test reads `res.predictions`
         record_stream_means: false,
@@ -232,7 +232,7 @@ fn conditioning_boundary_resets_leading_incidence() {
     let cfg = SMCConfig {
         n_particles: 4, dt, t_start: 0.0,
         skip_first_obs_from_loglik: false,
-        record_ancestry: false, record_prequential: false,
+        record_ancestry: false, path_recording: Default::default(), record_prequential: false,
         record_predictions: true, // this test reads `res.predictions`
         record_stream_means: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
@@ -285,7 +285,7 @@ fn dense_baseline_matches_predictions_at_non_hole_indices() {
     let cfg = SMCConfig {
         n_particles: 4, dt, t_start: 0.0,
         skip_first_obs_from_loglik: false,
-        record_ancestry: false, record_prequential: false,
+        record_ancestry: false, path_recording: Default::default(), record_prequential: false,
         record_predictions: true, // this test reads `res.predictions`
         record_stream_means: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,

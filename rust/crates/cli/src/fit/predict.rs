@@ -5878,7 +5878,7 @@ fn one_step_bands(
         dt,
         t_start: compiled.model.simulation.t_start,
         skip_first_obs_from_loglik: false,
-        record_ancestry: false,
+        record_ancestry: false, path_recording: Default::default(),
         record_prequential: true,
         record_predictions: false, // gh#520: one-step-ahead draws come from `.prequential`, not `.predictions`
         record_stream_means: false,

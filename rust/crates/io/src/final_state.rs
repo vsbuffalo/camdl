@@ -355,6 +355,7 @@ mod tests {
             counts: c,
             flow_accumulators: f,
             acc: vec![],
+            noise: vec![],
         };
         vec![mk(vec![90, 5, 5], vec![7, 3]), mk(vec![80, 11, 9], vec![13, 6])]
     }
@@ -526,6 +527,7 @@ mod tests {
             counts: vec![90, 5],
             flow_accumulators: vec![7, 3],
             acc: vec![],
+            noise: vec![],
         }];
         let err = write_final_states(&p, &bad, &cols(&[]), 1.0).unwrap_err();
         assert!(err.contains("2 counts"), "got: {err}");

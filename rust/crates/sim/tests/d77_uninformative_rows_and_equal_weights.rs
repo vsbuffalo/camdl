@@ -235,7 +235,7 @@ fn smc() -> SMCConfig {
         dt: DT,
         t_start: 0.0,
         skip_first_obs_from_loglik: false,
-        record_ancestry: true,
+        record_ancestry: true, path_recording: Default::default(),
         record_prequential: true,
         record_predictions: true,
         record_stream_means: false,

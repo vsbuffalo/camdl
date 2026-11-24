@@ -256,6 +256,7 @@ fn argv(inv: &PfilterInvocation) -> Vec<String> {
         save_final_state,
         save_paths,
         n_paths,
+        path_columns: crate::args::ColumnSelection { no_flows, columns },
         save_filtering,
         save_filtered_streams,
         save_prequential,
@@ -315,6 +316,9 @@ fn argv(inv: &PfilterInvocation) -> Vec<String> {
     opt("--save-final-state", save_final_state.as_deref().map(p));
     opt("--save-paths", save_paths.as_deref().map(p));
     opt("--n-paths", Some(n_paths.to_string()));
+    if !columns.is_empty() {
+        opt("--columns", Some(columns.join(",")));
+    }
     opt("--save-filtering", save_filtering.as_deref().map(p));
     opt("--save-filtered-streams", save_filtered_streams.as_deref().map(p));
     opt("--save-prequential", save_prequential.clone());
@@ -331,6 +335,7 @@ fn argv(inv: &PfilterInvocation) -> Vec<String> {
     flag(*allow_degenerate_rates, "--allow-degenerate-rates");
     flag(*allow_forcing_extrapolation, "--allow-forcing-extrapolation");
     flag(*no_save_samples, "--no-save-samples");
+    flag(*no_flows, "--no-flows");
     flag(*no_store, "--no-store");
     flag(*force, "--force");
     flag(*no_licm, "--no-licm");
@@ -502,7 +507,9 @@ impl Harness {
                 base = pfilter_from(&["sir.ir.json", "--params", "p.toml", "--fit", "fit_holdout.toml",
                     "--particles", "20", "--seed", "1"]);
             }
-            "args.n_paths" => base.args.save_paths = Some("paths.tsv".into()),
+            "args.n_paths" | "args.path_columns.no_flows" | "args.path_columns.columns" => {
+                base.args.save_paths = Some("paths.tsv".into())
+            }
             "args.score_from" | "args.no_save_samples" => base.args.save_prequential = Some("preq".into()),
             "no_licm" => base.args.model = "sir.camdl".into(),
             // A design point is stored as the single call at its values, so
@@ -1035,7 +1042,7 @@ fn the_guide_models_score_what_they_scored_before_the_move() {
             let out = camdl(cwd.path(), &store, &line(&["--save-paths", "p.tsv", "--save-prequential", "q"]), &[]);
             assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
             for (file, digest) in [
-                ("p.tsv", "84c4e24d7b569426e7849a81746b5f8dd7bc35842c2f62493c7d5834ca03ed0e"),
+                ("p.tsv", "365cac532edce80d51438c248719a257932e70b42482c6089c023d685aa9a58e"),
                 ("q.tsv", "8e96b4c7f8b8a0f611d7518632b69af731caf63ae7f6c06ee6d4f7722d8b664f"),
                 ("q.json", "e70b86853d1df0bcd9b1d7edb3a6919642895a19409d8d67402c210c05f050dc"),
             ] {

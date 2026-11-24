@@ -122,25 +122,25 @@ fn gamma_multiplier_tiny_sigma() {
 
 #[test]
 fn neg_binomial_zero_mean() {
-    assert_eq!(rng().neg_binomial(0.0, 1.0, 1.0), 0);
+    assert_eq!(rng().neg_binomial(0.0, 1.0, 1.0).0, 0);
 }
 
 #[test]
 fn neg_binomial_negative_mean() {
-    assert_eq!(rng().neg_binomial(-5.0, 1.0, 1.0), 0);
+    assert_eq!(rng().neg_binomial(-5.0, 1.0, 1.0).0, 0);
 }
 
 #[test]
 fn neg_binomial_huge_sigma() {
     // sigma_sq >> dt → shape tiny → degenerate guard → Poisson fallback
-    let v = rng().neg_binomial(100.0, 1e6, 1.0);
+    let v = rng().neg_binomial(100.0, 1e6, 1.0).0;
     assert!(v < 10000); // finite, reasonable
 }
 
 #[test]
 fn neg_binomial_zero_sigma() {
     // sigma_sq = 0 → plain Poisson
-    let v = rng().neg_binomial(100.0, 0.0, 1.0);
+    let v = rng().neg_binomial(100.0, 0.0, 1.0).0;
     assert!(v > 0);
 }
 

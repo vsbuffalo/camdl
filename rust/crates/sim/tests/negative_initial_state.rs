@@ -190,7 +190,7 @@ fn filter(m: &Arc<CompiledModel>) -> Result<f64, SimError> {
         dt: 1.0,
         t_start: 0.0,
         skip_first_obs_from_loglik: false,
-        record_ancestry: false,
+        record_ancestry: false, path_recording: Default::default(),
         record_prequential: false,
         record_predictions: false,
         record_stream_means: false,

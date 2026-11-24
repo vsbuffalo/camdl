@@ -216,16 +216,16 @@ pub fn cmd_pfilter(inv: crate::args::PfilterInvocation) {
     let (declared, execution, exports, request, given) = store::Inputs::split(inv).into_parts();
     let (declared, no_licm) = declared.into_parts();
     let crate::args::PfilterInvocationExecution { args: execution, no_ir_cache } = execution;
-    let crate::args::PfilterExecution { model_overrides: (), scenario: (), inference, stream: () } = execution;
+    let crate::args::PfilterExecution { model_overrides: (), scenario: (), inference, stream: (), path_columns: () } = execution;
     let compile = crate::util::CompileSettings::resolve(no_licm, no_ir_cache);
     let filter_execution = crate::pfilter_config::execution(&inference);
     let (exports,) = exports.into_parts();
-    let ((), (), _inference_exports, (), output, _manifest, _link_root) = exports.into_parts();
+    let ((), (), _inference_exports, (), output, (), _manifest, _link_root) = exports.into_parts();
     let (request,) = request.into_parts();
-    let ((), (), _inference_request, (), no_store, force, label, root) = request.into_parts();
+    let ((), (), _inference_request, (), (), no_store, force, label, root) = request.into_parts();
     let request = crate::camdl_store::store_request_with_fit_file(label, force, root, file_store);
     let execution_record = crate::args::PfilterInvocationExecution {
-        args: crate::args::PfilterExecution { model_overrides: (), scenario: (), inference, stream: () },
+        args: crate::args::PfilterExecution { model_overrides: (), scenario: (), inference, stream: (), path_columns: () },
         no_ir_cache,
     };
     let (config, requests, _forcing_route) = crate::pfilter_config::resolve(declared, compile, &out, fit_file, &crate::camdl_store::root_of(&request));
@@ -909,6 +909,15 @@ fn run_pfilter(
         // active. Both flags consume the same per-step snapshot data; the
         // difference is only in what we write to disk at the end.
         let need_ancestry = save_paths.is_some() || save_filtering.is_some();
+        // `--save-paths`: the columns it writes, checked against the model,
+        // and the rows they fall on. The filter records only these columns'
+        // transitions.
+        let path_columns: Option<PathColumns> = save_paths.as_ref().map(|req| {
+            let selection = crate::util::OutputColumns::resolve(&req.columns, path_column_names(&compiled.model))
+                .unwrap_or_else(|e| out.fail(format!("error: {e}")));
+            PathColumns::select(&compiled.model, &selection)
+        });
+        let path_grid = save_paths.as_ref().map(|_| path_rows(&obs_model));
         // gh#520: the PredictionDiag block is only read by the single-run
         // `--trace` writer below (`result.predictions`, ~line 660). It used to
         // compute unconditionally whenever the obs model could project a state —
@@ -922,6 +931,7 @@ fn run_pfilter(
             t_start: compiled.model.simulation.t_start,
             skip_first_obs_from_loglik: objective.skips_first_observation(),
             record_ancestry: need_ancestry,
+            path_recording: path_columns.as_ref().map(|c| c.recording.clone()).unwrap_or_default(),
             record_prequential: save_prequential.is_some(),
             record_predictions: want_predictions,
             // Single-run only: `--replicates` refuses `--save-filtered-streams`.
@@ -1138,10 +1148,10 @@ fn run_pfilter(
                 f.final_state = Some(io::final_states_bytes(states, &columns, origin_t)
                     .unwrap_or_else(|e| out.fail(format!("error writing final states: {}", e))));
             }
-            if let Some((n_paths, _)) = &save_paths {
+            if let (Some(req), Some(columns), Some(rows)) = (&save_paths, &path_columns, &path_grid) {
                 let trace = result.ancestry.as_ref().expect("record_ancestry is set when save_paths is");
-                let paths = sim::inference::ancestor_trace::sample_paths(trace, *n_paths, seed);
-                f.paths = Some(paths_bytes(&paths, model));
+                let paths = sim::inference::ancestor_trace::sample_paths(trace, req.n_paths, seed);
+                f.paths = Some(paths_bytes(&paths, columns, rows));
             }
             if save_prequential.is_some() {
                 let recorded = result.prequential.as_ref().expect("record_prequential is set when save_prequential is");
@@ -1229,8 +1239,17 @@ fn run_pfilter(
         if save_final_state_path.is_some() {
             wanted = wanted.with::<FinalState>(FinalStateIdentity { filter: filter.clone() }, ());
         }
-        if let Some((n_paths, _)) = &save_paths {
-            wanted = wanted.with::<SavedPaths>(SavedPathsIdentity { filter: filter.clone(), paths: *n_paths as u64 }, ());
+        if let Some(req) = &save_paths {
+            let mut columns = req.columns.columns.clone();
+            columns.sort();
+            columns.dedup();
+            let identity = SavedPathsIdentity {
+                filter: filter.clone(),
+                paths: req.n_paths as u64,
+                no_flows: req.columns.no_flows,
+                columns,
+            };
+            wanted = wanted.with::<SavedPaths>(identity, path_grid.clone());
         }
         if save_prequential.is_some() {
             let score_from = score_from_t.map(|t| finite("--score-from", t));
@@ -1369,7 +1388,7 @@ fn run_pfilter(
                 trace: trace_path.as_deref(),
                 pf_health: pf_health.as_deref(),
                 final_state: save_final_state_path.as_deref(),
-                paths: save_paths.as_ref().map(|(n, p)| (*n, p.as_path())),
+                paths: save_paths.as_ref().map(|r| (r.n_paths, r.path.as_path())),
                 prequential: save_prequential.as_deref(),
                 filtering: save_filtering.as_deref(),
                 filtered_streams: save_filtered_streams.as_deref(),
@@ -1977,7 +1996,7 @@ fn by_product_bytes(store: &store::Store, invocation: &store::Invocation, kind: 
     macro_rules! read {
         ($($t:ty),*) => {
             $(if kind == <$t as store::Artifact>::KIND {
-                let (id, ()) = invocation.members::<$t>().map_err(|e| e.to_string())?.into_iter().next()
+                let (id, _labels) = invocation.members::<$t>().map_err(|e| e.to_string())?.into_iter().next()
                     .ok_or_else(|| format!("the invocation lists no {kind}"))?;
                 let stored = store.get(&id).map_err(|e| e.to_string())?
                     .ok_or_else(|| format!("the {kind} {} is not stored", id.key().short12()))?;
@@ -3004,38 +3023,121 @@ fn finalize_observations(
 
 use std::io::Write;
 
+/// Every column name `--columns` may select in a saved-paths file: each
+/// integer compartment, `flow_<transition>` for every transition, and
+/// `noise_<transition>` for every overdispersed one, in model order. Selecting
+/// `noise_<transition>` writes it with its `noise_dt_<transition>`.
+fn path_column_names(model: &ir::Model) -> Vec<String> {
+    let mut names: Vec<String> = model.compartments.iter()
+        .filter(|c| c.kind == ir::model::CompartmentKind::Integer)
+        .map(|c| c.name.clone())
+        .collect();
+    names.extend(model.transitions.iter().map(|t| format!("flow_{}", t.name)));
+    names.extend(model.transitions.iter()
+        .filter(|t| matches!(t.draw_method, ir::transition::DrawMethod::Overdispersed { .. }))
+        .map(|t| format!("noise_{}", t.name)));
+    names
+}
+
+/// The data columns of a saved-paths file under a column selection: the
+/// compartments written, and the transitions whose flows and noise the filter
+/// records ([`sim::inference::ancestor_trace::PathRecording`]) and the file
+/// writes, all in model order.
+struct PathColumns {
+    /// (name, index into a recorded state) for each compartment written.
+    compartments: Vec<(String, usize)>,
+    /// The transitions recorded and written, by index into the model's
+    /// transitions.
+    recording: sim::inference::ancestor_trace::PathRecording,
+    /// The transitions' names, by the same index.
+    transition_names: Vec<String>,
+}
+
+impl PathColumns {
+    fn select(model: &ir::Model, selection: &crate::util::OutputColumns) -> Self {
+        let want = |name: &str| selection.allow.is_empty() || selection.allow.contains(name);
+        let compartments = model.compartments.iter()
+            .filter(|c| c.kind == ir::model::CompartmentKind::Integer)
+            .enumerate()
+            .filter(|(_, c)| want(&c.name))
+            .map(|(k, c)| (c.name.clone(), k))
+            .collect();
+        let flows = if selection.no_flows {
+            Vec::new()
+        } else {
+            model.transitions.iter().enumerate()
+                .filter(|(_, t)| want(&format!("flow_{}", t.name)))
+                .map(|(i, _)| i)
+                .collect()
+        };
+        let noise = model.transitions.iter().enumerate()
+            .filter(|(_, t)| matches!(t.draw_method, ir::transition::DrawMethod::Overdispersed { .. }))
+            .filter(|(_, t)| want(&format!("noise_{}", t.name)))
+            .map(|(i, _)| i)
+            .collect();
+        PathColumns {
+            compartments,
+            recording: sim::inference::ancestor_trace::PathRecording { flows, noise },
+            transition_names: model.transitions.iter().map(|t| t.name.clone()).collect(),
+        }
+    }
+}
+
+/// The rows of a saved-paths file: the streams whose observation times they
+/// are, and the stops at which no stream is observed (a declared period's
+/// opening).
+fn path_rows(obs_model: &MultiStreamObsModel) -> crate::pfilter_store::PathRows {
+    let streams = obs_model.stream_names();
+    let period_openings = (0..obs_model.obs_times().len())
+        .filter(|&u| (0..streams.len()).all(|k| {
+            matches!(obs_model.cell_state(k, u), sim::inference::obs_attempt::ObsCellState::NotScheduled)
+        }))
+        .map(|u| obs_model.obs_time(u))
+        .collect();
+    crate::pfilter_store::PathRows { streams, period_openings }
+}
+
 /// Write ancestor-traced smoothing paths as a long-format TSV.
-/// Schema matches `camdl simulate --replicates N` for pipeline reuse:
-/// columns `path`, `time`, and one column per integer compartment.
-/// Each `path ∈ 1..=N` is an equally-weighted sample from the
-/// smoothing distribution; no log_weight column needed.
+///
+/// Two comment lines, then one row per path and filter stop: `path`, `time`,
+/// `t_start`, `t_stop`, the selected compartments at `time`, then for the
+/// selected transitions `flow_<name>` (the firings over `[t_start, t_stop)`)
+/// and `noise_<name>` with `noise_dt_<name>` (the time-averaged rate
+/// multiplier over the part of the interval on which it was drawn, and that
+/// part's length), then one column per observation stream. `t_stop` equals
+/// `time`; the first row's `t_start` is the run's start. Each `path ∈ 1..=N`
+/// is an equally-weighted sample from the smoothing distribution.
 fn paths_bytes(
     paths: &[sim::inference::ancestor_trace::SampledPath],
-    model: &ir::Model,
+    columns: &PathColumns,
+    rows: &crate::pfilter_store::PathRows,
 ) -> Vec<u8> {
     let mut f: Vec<u8> = Vec::new();
 
-    write!(f, "path\ttime").unwrap();
-    let comp_names: Vec<&str> = model.compartments.iter()
-        .filter(|c| c.kind == ir::model::CompartmentKind::Integer)
-        .map(|c| c.name.as_str())
-        .collect();
-    for name in &comp_names {
+    writeln!(f, "# camdl-paths v2").unwrap();
+    let openings = match rows.period_openings.len() {
+        0 => String::new(),
+        1 => ", and 1 declared period opening".to_string(),
+        n => format!(", and {n} declared period openings"),
+    };
+    writeln!(f, "# rows: the observation times of streams {}{openings}; flow_* and noise_* cover [t_start, t_stop)",
+        rows.streams.join(", ")).unwrap();
+
+    write!(f, "path\ttime\tt_start\tt_stop").unwrap();
+    for (name, _) in &columns.compartments {
         write!(f, "\t{}", name).unwrap();
     }
-    // gh#48: emit one column per observation stream alongside the
-    // compartment columns. Carries the model's declared projection
-    // (incidence/prevalence/arithmetic) so downstream tooling doesn't
-    // have to reconstruct it by finite-differencing compartment
-    // counts — which silently breaks under event + balance
-    // interactions (the constrained compartment becomes an
-    // unfaithful tracker of its own dynamics, e.g. ΔR records fake
-    // flows on cohort-event days).
-    //
-    // Column source: `SampledPath.projections[t][stream]` (= `mean()`
-    // from the obs model at record time, walked along the ancestor
-    // chain in lockstep with states). Skipped entirely when the obs
-    // model's `mean()` returns empty (the trait default).
+    for &tr in &columns.recording.flows {
+        write!(f, "\tflow_{}", columns.transition_names[tr]).unwrap();
+    }
+    for &tr in &columns.recording.noise {
+        let name = &columns.transition_names[tr];
+        write!(f, "\tnoise_{name}\tnoise_dt_{name}").unwrap();
+    }
+    // One column per observation stream: the model's declared projection,
+    // recorded with the states, so tooling need not rebuild incidence from
+    // compartment differences. Skipped when the observation model's `mean()`
+    // returns nothing (the trait default).
     let stream_names: &[String] = paths.first()
         .map(|p| p.stream_names.as_slice())
         .unwrap_or(&[]);
@@ -3049,13 +3151,22 @@ fn paths_bytes(
     writeln!(f).unwrap();
 
     for (i, p) in paths.iter().enumerate() {
+        let mut t_start = p.t_start;
         for (t_idx, &obs_t) in p.obs_times.iter().enumerate() {
-            write!(f, "{}\t{}", i + 1, obs_t).unwrap();
-            // Only the first n_comp_names columns of the state are
-            // integer compartments; the PF records all state counts,
-            // but we present only the public compartments.
-            for k in 0..comp_names.len() {
-                write!(f, "\t{}", p.states[t_idx][k]).unwrap();
+            write!(f, "{}\t{}\t{}\t{}", i + 1, obs_t, t_start, obs_t).unwrap();
+            t_start = obs_t;
+            for (_, k) in &columns.compartments {
+                write!(f, "\t{}", p.states[t_idx][*k]).unwrap();
+            }
+            if let Some(flows) = p.flows.get(t_idx) {
+                for v in flows {
+                    write!(f, "\t{}", v).unwrap();
+                }
+            }
+            if let Some(noise) = p.noise.get(t_idx) {
+                for n in noise {
+                    write!(f, "\t{}\t{}", n.mean(), n.drawn_dt).unwrap();
+                }
             }
             if has_projections {
                 let row_projs = &p.projections[t_idx];

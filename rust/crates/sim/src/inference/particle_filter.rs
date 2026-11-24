@@ -460,6 +460,13 @@ pub fn bootstrap_filter_recording_at<P: ProcessModel<State = ParticleState>>(
     let mut history_projections: Vec<Vec<Vec<f64>>> = if config.record_ancestry {
         Vec::with_capacity(n_obs)
     } else { Vec::new() };
+    // The selected transitions' flows and rate noise over each interval,
+    // recorded at the same point as the states (`PathRecording`).
+    let recording = &config.path_recording;
+    let record_flows = config.record_ancestry && !recording.flows.is_empty();
+    let record_noise = config.record_ancestry && !recording.noise.is_empty();
+    let mut history_flows: Vec<Vec<Vec<u64>>> = Vec::new();
+    let mut history_noise: Vec<Vec<Vec<super::types::NoiseAcc>>> = Vec::new();
 
     // Stream-mean summaries (allocated only if requested).
     let mut stream_means: Vec<StreamMeanStep> = Vec::new();
@@ -790,6 +797,18 @@ pub fn bootstrap_filter_recording_at<P: ProcessModel<State = ParticleState>>(
             let step_projections: Vec<Vec<f64>> = swarm.states.iter()
                 .map(|s| obs_model.mean(s, obs_idx, params))
                 .collect();
+            // `flow_accumulators` and `noise` still hold this interval's
+            // tallies: they are reset only at the end of the iteration.
+            if record_flows {
+                history_flows.push(swarm.states.iter()
+                    .map(|s| recording.flows.iter().map(|&tr| s.flow_accumulators[tr]).collect())
+                    .collect());
+            }
+            if record_noise {
+                history_noise.push(swarm.states.iter()
+                    .map(|s| recording.noise.iter().map(|&tr| s.noise[tr]).collect())
+                    .collect());
+            }
             history_states.push(step_states);
             history_projections.push(step_projections);
             history_lw.push(swarm.log_weights.clone());
@@ -855,6 +874,7 @@ pub fn bootstrap_filter_recording_at<P: ProcessModel<State = ParticleState>>(
             for (i, &src) in indices.iter().enumerate() {
                 states_buf[i].counts.copy_from_slice(&swarm.states[src].counts);
                 states_buf[i].flow_accumulators.copy_from_slice(&swarm.states[src].flow_accumulators);
+                states_buf[i].noise.copy_from_slice(&swarm.states[src].noise);
                 // Phase 2a: the per-stream `acc` bins travel with the particle, so
                 // an ancestor swap carries the right partial bins for streams not
                 // observed at this union index.
@@ -920,6 +940,10 @@ pub fn bootstrap_filter_recording_at<P: ProcessModel<State = ParticleState>>(
             obs_times: history_times,
             projections: history_projections,
             stream_names: obs_model.stream_names(),
+            t_start: config.t_start,
+            flows: history_flows,
+            noise: history_noise,
+            recording: recording.clone(),
         })
     } else {
         None

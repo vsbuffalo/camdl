@@ -896,12 +896,13 @@ fn run_simulate(inv: args::SimulateInvocation) {
     let (allow_forcing_extrapolation,) = forcing_extrapolation.into_parts();
     let (params, param, table) = model_overrides.into_parts();
     let (backend_flag, dt_flag, integrator_flag) = backend.into_parts();
-    let (every, no_flows, columns) = output_view.into_parts();
+    let (every, column_selection) = output_view.into_parts();
+    let (no_flows, columns) = column_selection.into_parts();
     let (exports,) = exports.into_parts();
-    let ((), (), (), (), draws_out, output, stdout, design_from, projected_out, dates, format, tsv, reactive_log, manifest, link_root) =
+    let ((), (), (), _, draws_out, output, stdout, design_from, projected_out, dates, format, tsv, reactive_log, manifest, link_root) =
         exports.into_parts();
     let (request,) = request.into_parts();
-    let ((), (), (), (), store_root, force, label) = request.into_parts();
+    let ((), (), (), _, store_root, force, label) = request.into_parts();
     let args::SimulateInvocationExecution { args: args::SimulateExecution { parallel, .. }, no_ir_cache } = execution;
     let compile = util::CompileSettings::resolve(no_licm, no_ir_cache);
     // A fit file's `store` key places the simulation in that fit's store
@@ -917,7 +918,7 @@ fn run_simulate(inv: args::SimulateInvocation) {
     // A stored fit `--fit` names is read in the store this command stores in.
     crate::fit_store::set_reader_root(crate::camdl_store::root_of(&request));
     let execution_record = args::SimulateInvocationExecution {
-        args: args::SimulateExecution { forcing_extrapolation: (), model_overrides: (), backend: (), output_view: (), parallel },
+        args: args::SimulateExecution { forcing_extrapolation: (), model_overrides: (), backend: (), output_view: args::OutputViewExecution { columns: () }, parallel },
         no_ir_cache,
     };
     let a = &args::SimulateArgs {
@@ -926,7 +927,7 @@ fn run_simulate(inv: args::SimulateInvocation) {
         model_overrides: args::ModelOverrides { params, param, table },
         param_vec, scenarios, enable, disable,
         backend: args::SimBackend { backend: backend_flag, dt: dt_flag, integrator: integrator_flag },
-        output_view: args::OutputView { every, no_flows, columns },
+        output_view: args::OutputView { every, columns: args::ColumnSelection { no_flows, columns } },
         seed, seeds, replicates, draws, sweep, sweep_file, fit, n_draws, chains, exclude_chains, draws_out, output,
         stdout, emit_every, obs, obs_dir, obs_only, obs_only_dir, design_from, projected_out, dates, quantities_out,
         quantities, dry_run, store: store_root, parallel, force, label, event_log, format, tsv, reactive_log,
@@ -1031,7 +1032,7 @@ fn run_simulate(inv: args::SimulateInvocation) {
         .map_err(|e| format!("cannot read {}: {}", ir_path_compiled, e))
         .and_then(|s| ir::from_str(&s).map_err(|e| format!("IR load error: {}", e)))
         .and_then(|m| {
-            let cols = util::OutputColumns::resolve(&a.output_view, &m)?;
+            let cols = util::OutputColumns::resolve(&a.output_view.columns, util::TrajColumns::all_column_names(&m))?;
             let emit = crate::emit_every::EmitEvery::from_cli_specs(&a.emit_every)?;
             if let Some(e) = &emit {
                 e.validate(&m.observations)?;

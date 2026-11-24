@@ -214,7 +214,7 @@ fn smc(record: bool) -> SMCConfig {
         dt: DT,
         t_start: 0.0,
         skip_first_obs_from_loglik: false,
-        record_ancestry: record,
+        record_ancestry: record, path_recording: Default::default(),
         record_prequential: record,
         record_predictions: record,
         record_stream_means: false,

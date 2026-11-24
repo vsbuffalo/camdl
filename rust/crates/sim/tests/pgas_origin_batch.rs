@@ -316,7 +316,7 @@ fn an_observation_at_t_start_is_scored_after_the_origin_batch() {
 
     let config = sim::inference::SMCConfig {
         n_particles: 16, dt: DT, t_start: 0.0, skip_first_obs_from_loglik: false,
-        record_ancestry: false, record_prequential: false, record_predictions: false, record_stream_means: false,
+        record_ancestry: false, path_recording: Default::default(), record_prequential: false, record_predictions: false, record_stream_means: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
         binomial: sim::rng::BinomialAlgorithm::Btpe,
     };

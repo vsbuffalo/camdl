@@ -1753,7 +1753,7 @@ fn run_profile(
                             dt,
                             t_start: process.compiled.model.simulation.t_start,
                             skip_first_obs_from_loglik: objective.skips_first_observation(),
-                            record_ancestry: false,
+                            record_ancestry: false, path_recording: Default::default(),
                             record_prequential: false,
                             record_predictions: false, // gh#520: only `.log_likelihood` is read below
                             record_stream_means: false,

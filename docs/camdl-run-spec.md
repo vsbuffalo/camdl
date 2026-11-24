@@ -1966,10 +1966,12 @@ A particle filter run at one parameter point. Contract version 1.
 
 #### `saved_paths`
 
-`--save-paths`, a by-product of a filter run. Contract version 1.
+`--save-paths`, a by-product of a filter run. Contract version 2.
 
 - `paths`: `paths.tsv`, TSV (always). Sample paths from the smoothing
-  distribution, traced through the ancestry.
+  distribution, traced through the ancestry: at each filter stop the
+  compartments, each transition's flow and each overdispersed transition's rate
+  noise over the interval since the previous stop, and each stream's projection.
 
 #### `prequential`
 
@@ -8449,6 +8451,9 @@ camdl predict RUN            RUN: the positional run handle, same grammar as `fi
                             saves the state at their end (gh#1138)
 --save-paths FILE           smoothing-distribution trajectory samples
 --n-paths N                 how many, for --save-paths (default 1)
+--no-flows                  with --save-paths, write no flow_* column
+--columns COL,...           with --save-paths, write only these compartment,
+                            flow_<name> and noise_<name> columns
 --save-filtering FILE       per-step particle states and log-weights
 --save-filtered-streams FILE
                             per step and stream, quantiles of E[y_t | x_t, θ]
@@ -8488,6 +8493,71 @@ stored one, and stores the by-product. `-o` and the terminal show the
 log-likelihood rendered from the stored `loglik.toml` and `replicates.tsv`.
 `camdl cat`, `show` and `list` find a filter run in the store `--store` names,
 by id prefix, path or `@L`.
+
+#### The saved paths file
+
+`--save-paths FILE` writes `--n-paths` samples from the smoothing distribution
+`p(x_{1:T} | y_{1:T}, θ)`, each traced back through the filter's ancestry. A row
+is one path at one stop of the filter. The stops are the union of the
+observation times of every bound stream, together with each declared period's
+opening after the run's start, so binding another stream changes the rows. Two
+comment lines open the file and name them. For an SEIR model with an
+overdispersed infection, weekly incidence `cases` and a prevalence count every
+10 days, the stops at 5 and 7 cut the first week into periods of 5 and 2 days:
+
+```
+# camdl-paths v2
+# rows: the observation times of streams cases, prevalence; flow_* and noise_* cover [t_start, t_stop)
+path	time	t_start	t_stop	S	E	I	R	flow_infection	flow_latency	flow_recovery	noise_infection	noise_dt_infection	cases	prevalence
+1	5	0	5	974	12	7	7	16	4	7	0.7767931243130706	5	NaN	3.5
+1	7	5	7	960	15	15	10	14	11	3	1.3567173763036673	2	5	NaN
+```
+
+The columns, in order:
+
+1. `path`, from 1 to `--n-paths`. Each path is an equally weighted draw.
+2. `time`, the stop, and `t_start`, `t_stop`: the half-open period
+   `[t_start, t_stop)` that the row's `flow_*` and `noise_*` values cover.
+   `t_stop` is `time`, `t_start` is the previous row's `time`, and the first
+   row's `t_start` is the run's start.
+3. Each integer compartment, the path's state at `time`.
+4. `flow_<transition>` for every transition, in model declaration order: the
+   number of times it fired during the row's period, the same quantity as
+   `simulate`'s `flow_*` columns (§10.1). Flows add, so the flows of consecutive
+   rows sum to the flow over their union, whatever the stops. The change in a
+   compartment between two rows is the sum of its flows, plus whatever an event,
+   intervention or `balance` moved; those are not transitions and are in no
+   `flow_*` column.
+5. `noise_<transition>` and `noise_dt_<transition>` for every overdispersed
+   transition (`overdispersed(rate, σ²)`, language spec). On each substep of
+   length `dt` on which the transition can fire, a unit-mean multiplier
+   `g ~ Gamma(dt/σ², σ²/dt)` scales its rate. `noise_dt_` is the time within the
+   period on which a multiplier was drawn, and `noise_` the multipliers'
+   time-average there, `Σ g·dt / noise_dt_`. A substep on which the transition
+   cannot fire draws nothing: its source compartment is empty or its rate is
+   zero. `noise_` is then the realised environmental noise of the period,
+   without the binomial or Poisson chance of the count. It is `NaN` when nothing
+   was drawn (`noise_dt_` is 0), and exactly 1 when σ² = 0. Over several rows
+   the noise is `Σ(noise_·noise_dt_) / Σ noise_dt_`, which is exact whatever the
+   stops and whether or not the source emptied.
+6. One column per observation stream: the stream's projection along the path at
+   `time` (`E[y | x, θ]`), over that stream's own period, and `NaN` at a stop
+   where the stream is not observed.
+
+`--no-flows` drops every `flow_*` column and keeps the `noise_*` columns.
+`--columns` keeps only the named compartment, `flow_<name>` and `noise_<name>`
+columns; `noise_<name>` keeps its `noise_dt_<name>`, and the stream columns are
+always written. A name the file cannot hold is refused with the list of the ones
+it can. The filter records only the transitions the selection keeps, which
+bounds the memory the paths take: one value per particle, stop and recorded
+transition.
+
+The saved paths are stored as the `saved_paths` by-product. Its identity holds
+the filter run, `--n-paths`, `--no-flows` and the sorted `--columns`; none of
+them changes the filter run's id. The invocation record keeps the stops' streams
+and period openings as the by-product's labels,
+`{"streams": [...], "period_openings": [...]}`, which `--manifest` exports
+(§2.10).
 
 `--no-store` computes in a temporary store and changes nothing else: the
 log-likelihood is printed and every export is written. `camdl compare` passes it

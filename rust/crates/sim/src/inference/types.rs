@@ -647,6 +647,45 @@ pub struct ParticleState {
     /// Homogeneous (every stream scheduled every interval) ⇒ folded-scored-reset
     /// every interval ⇒ byte-identical to scoring the global accumulator.
     pub acc: Vec<u64>,
+    /// Per-transition rate multipliers drawn since the previous observation
+    /// stop, indexed like `flow_accumulators` and reset with it. Only an
+    /// overdispersed transition ever draws one, so every other entry stays
+    /// zero. Filled by the process model from `StepScratch::noise_drawn`.
+    pub noise: Vec<NoiseAcc>,
+}
+
+/// The rate multipliers one transition drew over an interval: their
+/// time-integral and the time over which they were drawn.
+///
+/// The multiplier of an overdispersed transition is a unit-mean Gamma white
+/// noise `g` (He et al. 2010), drawn on each substep of length `dt` on which
+/// the transition can fire. `g_dt / drawn_dt` is its time average over the
+/// interval: the realised environmental noise, free of the binomial or Poisson
+/// draw of the count. A substep on which the transition drew nothing (an empty
+/// source, a rate at or below `RATE_EPSILON`) adds to neither sum, so it does
+/// not read as noise below 1. Because each `g·dt` is Gamma with shape
+/// `dt/σ²` and scale `σ²`, independent of `dt`, the model's prior for
+/// `g_dt` at constant σ² is Gamma(`drawn_dt/σ²`, `σ²`) however the substeps
+/// were cut.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct NoiseAcc {
+    /// Σ g·dt over the substeps that drew a multiplier.
+    pub g_dt: f64,
+    /// Σ dt over the same substeps: the exposure `g_dt` is averaged over.
+    pub drawn_dt: f64,
+}
+
+impl NoiseAcc {
+    /// Adds one substep's multiplier `g`, drawn over a step of length `dt`.
+    pub fn add(&mut self, g: f64, dt: f64) {
+        self.g_dt += g * dt;
+        self.drawn_dt += dt;
+    }
+
+    /// The time-averaged multiplier, or NaN when no substep drew one.
+    pub fn mean(&self) -> f64 {
+        if self.drawn_dt > 0.0 { self.g_dt / self.drawn_dt } else { f64::NAN }
+    }
 }
 
 impl ParticleState {
@@ -661,11 +700,13 @@ impl ParticleState {
             counts: vec![0; n_compartments],
             flow_accumulators: vec![0; n_transitions],
             acc: vec![0; n_interval_streams],
+            noise: vec![NoiseAcc::default(); n_transitions],
         }
     }
 
     /// Reset flow accumulators to zero (called after each observation).
-    /// Zeroes ONLY `flow_accumulators` — the per-transition this-interval tally.
+    /// Zeroes ONLY the per-transition this-interval tallies,
+    /// `flow_accumulators` and `noise`.
     /// The per-stream `acc` is reset SEPARATELY and per-stream by the obs model
     /// (`reset_due_acc`), because it must survive a sibling stream's union-time.
     pub fn reset_flows(&mut self) {
@@ -677,6 +718,7 @@ impl ParticleState {
 impl Resettable for ParticleState {
     fn reset_accumulators(&mut self) {
         for f in &mut self.flow_accumulators { *f = 0; }
+        for n in &mut self.noise { *n = NoiseAcc::default(); }
     }
 }
 
@@ -805,6 +847,36 @@ pub fn normalize_log_weights(log_weights: &[f64]) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A row's noise rebuilt from the pieces a finer row grid cuts it into,
+    /// `Σ(mean·drawn_dt) / Σ drawn_dt`, is its noise over the whole row, with
+    /// substeps that drew nothing (an empty source) in some pieces and a piece
+    /// that drew nothing at all.
+    #[test]
+    fn noise_rebuilt_from_pieces_is_the_noise_over_their_union() {
+        // (g, dt) per substep; `None` is a substep that drew no multiplier.
+        let substeps: [Option<(f64, f64)>; 9] = [
+            Some((1.7, 1.0)), Some((0.2, 1.0)), None, Some((3.1, 0.5)), None,
+            None, Some((0.9, 1.0)), Some((1.4, 0.25)), None,
+        ];
+        let accumulate = |steps: &[Option<(f64, f64)>]| {
+            let mut a = NoiseAcc::default();
+            for &(g, dt) in steps.iter().flatten() { a.add(g, dt); }
+            a
+        };
+        let whole = accumulate(&substeps);
+        for cuts in [vec![2, 5], vec![1, 4, 6, 8], vec![4, 6]] {
+            let mut bounds = vec![0];
+            bounds.extend(&cuts);
+            bounds.push(substeps.len());
+            let pieces: Vec<NoiseAcc> = bounds.windows(2).map(|w| accumulate(&substeps[w[0]..w[1]])).collect();
+            let exposure: f64 = pieces.iter().map(|p| p.drawn_dt).sum();
+            let weighted: f64 = pieces.iter().filter(|p| p.drawn_dt > 0.0).map(|p| p.mean() * p.drawn_dt).sum();
+            assert!((exposure - whole.drawn_dt).abs() < 1e-12);
+            assert!((weighted / exposure - whole.mean()).abs() < 1e-12, "cuts {cuts:?}");
+        }
+        assert!(accumulate(&substeps[4..6]).mean().is_nan(), "a piece that drew nothing has no noise value");
+    }
 
     /// `z_restore_gaps` names exactly what `restore_z_values` recomputes: a
     /// saved z-value comes back as saved, a missing parameter's is computed

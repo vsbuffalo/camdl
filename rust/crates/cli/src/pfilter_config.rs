@@ -100,8 +100,8 @@ pub(crate) struct ByProductRequests {
     /// `--pf-health`: a path, or `-` for stdout.
     pub pf_health: Option<String>,
     pub final_state: Option<PathBuf>,
-    /// `--save-paths` with `--n-paths`.
-    pub paths: Option<(usize, PathBuf)>,
+    /// `--save-paths`, with `--n-paths` and the column selection.
+    pub paths: Option<PathsRequest>,
     pub filtering: Option<PathBuf>,
     pub filtered_streams: Option<PathBuf>,
     /// `--save-prequential`: the stem of its three files.
@@ -110,6 +110,16 @@ pub(crate) struct ByProductRequests {
     pub score_from: Option<String>,
     /// `--no-save-samples` negated.
     pub samples: bool,
+}
+
+/// `--save-paths`: how many smoothing paths, the file they are exported to,
+/// and which columns they hold.
+pub(crate) struct PathsRequest {
+    /// `--n-paths`.
+    pub n_paths: usize,
+    pub path: PathBuf,
+    /// `--no-flows` / `--columns`, not yet checked against the model.
+    pub columns: crate::args::ColumnSelection,
 }
 
 /// How the filter computes, never what.
@@ -153,6 +163,7 @@ pub(crate) fn resolve(
         save_final_state,
         save_paths,
         n_paths,
+        path_columns,
         save_filtering,
         save_filtered_streams,
         save_prequential,
@@ -238,7 +249,10 @@ pub(crate) fn resolve(
         trace,
         pf_health,
         final_state: save_final_state,
-        paths: save_paths.map(|p| (n_paths, p)),
+        paths: save_paths.map(|path| {
+            let (no_flows, columns) = path_columns.into_parts();
+            PathsRequest { n_paths, path, columns: crate::args::ColumnSelection { no_flows, columns } }
+        }),
         filtering: save_filtering,
         filtered_streams: save_filtered_streams,
         prequential: save_prequential,

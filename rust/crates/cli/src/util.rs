@@ -4388,15 +4388,16 @@ pub struct OutputColumns {
 }
 
 impl OutputColumns {
-    /// Resolve + validate `OutputView`'s column knobs against a model. Every
-    /// name in `--columns` must match a real output column (a compartment or
-    /// `flow_<name>`); an unknown name is a hard error listing the valid names.
+    /// Resolves a column selection against the columns a file can hold,
+    /// `valid` (for a `simulate` trajectory, [`TrajColumns::all_column_names`];
+    /// for `--save-paths`, `pfilter::path_column_names`). Every name in
+    /// `--columns` must be one of them; an unknown name is a hard error listing
+    /// the valid names.
     pub fn resolve(
-        view: &crate::args::OutputView,
-        model: &ir::Model,
+        view: &crate::args::ColumnSelection,
+        valid: Vec<String>,
     ) -> Result<Self, String> {
-        let valid: std::collections::BTreeSet<String> =
-            TrajColumns::all_column_names(model).into_iter().collect();
+        let valid: std::collections::BTreeSet<String> = valid.into_iter().collect();
         for name in &view.columns {
             if !valid.contains(name) {
                 return Err(format!(

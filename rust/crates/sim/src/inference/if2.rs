@@ -713,6 +713,7 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
                     for (i, &src) in indices.iter().enumerate() {
                         states_buf[i].counts.copy_from_slice(&states[src].counts);
                         states_buf[i].flow_accumulators.copy_from_slice(&states[src].flow_accumulators);
+                        states_buf[i].noise.copy_from_slice(&states[src].noise);
                         // Phase 2a: the per-stream `acc` bins travel with the particle.
                         states_buf[i].acc.copy_from_slice(&states[src].acc);
                         params_buf[i].copy_from_slice(&particle_params[src]);

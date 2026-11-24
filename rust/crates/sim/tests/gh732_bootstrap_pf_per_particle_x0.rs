@@ -155,7 +155,7 @@ fn x0_per_particle(compiled: &Arc<CompiledModel>, params: &[f64]) -> Vec<Vec<f64
         dt: 1.0,
         t_start,
         skip_first_obs_from_loglik: false,
-        record_ancestry: true,
+        record_ancestry: true, path_recording: Default::default(),
         record_prequential: false,
         record_predictions: false, // FlatObs has n_streams() == 0; nothing to predict
         record_stream_means: false,
@@ -280,7 +280,7 @@ fn a_swarm_of_one_or_zero_particles_does_not_panic() {
             dt: 1.0,
             t_start,
             skip_first_obs_from_loglik: false,
-            record_ancestry: false,
+            record_ancestry: false, path_recording: Default::default(),
             record_prequential: false,
             // ProjectingFlatObs has n_streams() == 1: this must stay `true` to
             // keep exercising the `has_predictions` empty-swarm probe this
