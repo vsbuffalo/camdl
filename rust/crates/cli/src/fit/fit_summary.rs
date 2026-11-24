@@ -1353,7 +1353,7 @@ fn posterior_point_toml(
     ];
     let header: Vec<&str> = header.iter().map(String::as_str).collect();
     crate::fit::provenance::params_file_text(&header, &point, |content_hash| {
-        crate::fit::provenance::MleProvenance {
+        crate::fit::provenance::ParamsProvenance {
             camdl_version: version::VERSION_SHORT.to_string(),
             content_hash,
             fit_hash: Some(opened.fit.problem.id().key().to_hex()),

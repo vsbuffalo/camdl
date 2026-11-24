@@ -1417,7 +1417,7 @@ fn run_simulate(inv: args::SimulateInvocation) {
     // plain overrides.
     let mut from_fit_hash: Option<String> = None;
     let mut from_fit_params_file: Option<String> = None;
-    let mut fit_provenance: Option<(String, crate::fit::provenance::MleProvenance)> = None;
+    let mut fit_provenance: Option<(String, crate::fit::provenance::ParamsProvenance)> = None;
     for pf in &params_files {
         // A malformed block is refused, not treated as no block: skipping it
         // would silently drop the backend match, the tamper check and the

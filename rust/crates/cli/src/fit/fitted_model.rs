@@ -479,7 +479,7 @@ impl FittedDynamics {
     /// `model`, the model the file is simulated on. The block records the
     /// backend and the step; a fit takes no integrator override, so its
     /// integrator is the one its model declares.
-    pub fn of_provenance(prov: &crate::fit::provenance::MleProvenance, model: &ir::Model) -> Self {
+    pub fn of_provenance(prov: &crate::fit::provenance::ParamsProvenance, model: &ir::Model) -> Self {
         FittedDynamics { backend: Some(prov.backend), dt: prov.dt, integrator: model.simulation.integrator.clone() }
     }
 

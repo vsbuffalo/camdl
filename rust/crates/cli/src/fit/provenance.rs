@@ -34,7 +34,7 @@ pub fn mle_params_tamper_hash(params: &std::collections::BTreeMap<String, f64>) 
 /// Only fields that are `Some` get serialized; legacy fit-produced
 /// files may omit any of the optional fields.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct MleProvenance {
+pub struct ParamsProvenance {
     pub camdl_version: String,
     /// Tamper-detection hash over the numeric parameter values in the
     /// file below (NOT over this `[provenance]` block). Editing a
@@ -128,7 +128,7 @@ pub struct PosteriorSummaryRecord {
 pub fn params_file_text(
     header: &[&str],
     params: &std::collections::BTreeMap<String, f64>,
-    provenance: impl FnOnce(String) -> MleProvenance,
+    provenance: impl FnOnce(String) -> ParamsProvenance,
 ) -> Result<String, String> {
     let as_written: std::collections::BTreeMap<String, f64> = params
         .iter()
@@ -151,7 +151,7 @@ pub fn params_file_text(
     text.push('\n');
     #[derive(serde::Serialize)]
     struct ProvWrapper<'a> {
-        provenance: &'a MleProvenance,
+        provenance: &'a ParamsProvenance,
     }
     let block = toml::to_string(&ProvWrapper { provenance: &prov })
         .map_err(|e| format!("cannot serialize provenance: {}", e))?;
@@ -171,7 +171,7 @@ pub fn write_mle_params(
         "camdl fit MLE — parameter values first, followed by a [provenance] block.",
         "Editing any value in this params section invalidates provenance.content_hash.",
     ];
-    let text = params_file_text(&header, all_params, |content_hash| MleProvenance {
+    let text = params_file_text(&header, all_params, |content_hash| ParamsProvenance {
         camdl_version: version::VERSION_SHORT.to_string(),
         content_hash,
         fit_hash: Some(metadata.input_hash.clone()),
@@ -198,13 +198,13 @@ pub fn write_mle_params(
 /// None if the file has no such block (legacy format or a non-fit
 /// params file); Err on malformed TOML.
 #[expect(clippy::disallowed_methods, reason = "reads a params file a command names with `--params` (declared `#[input(identity)]` on `ModelOverrides`) or `--fixed-file` (declared on `InferenceModelOverrides`), for its `[provenance]` block")]
-pub fn read_mle_provenance(path: &str) -> Result<Option<MleProvenance>, String> {
+pub fn read_mle_provenance(path: &str) -> Result<Option<ParamsProvenance>, String> {
     let contents = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read {}: {}", path, e))?;
     #[derive(serde::Deserialize)]
     struct Wrapper {
         #[serde(default)]
-        provenance: Option<MleProvenance>,
+        provenance: Option<ParamsProvenance>,
     }
     let w: Wrapper = toml::from_str(&contents)
         .map_err(|e| format!("parse error in {}: {}", path, e))?;
@@ -267,9 +267,9 @@ pub struct MleMetadata {
     /// Timestep used by the fit. Paired with `backend`.
     pub dt: f64,
     pub loglik: f64,
-    /// See [`MleProvenance::loglik_sd`].
+    /// See [`ParamsProvenance::loglik_sd`].
     pub loglik_sd: f64,
-    /// See [`MleProvenance::n_particles`].
+    /// See [`ParamsProvenance::n_particles`].
     pub n_particles: usize,
     pub ess_at_mle: Option<(f64, f64)>,
 }
@@ -458,7 +458,7 @@ mod tests {
             n_draws: 80,
             run_id: "ab".repeat(32),
         });
-        let text = params_file_text(&["a header"], &params, |content_hash| MleProvenance {
+        let text = params_file_text(&["a header"], &params, |content_hash| ParamsProvenance {
             camdl_version: "test".into(),
             content_hash,
             fit_hash: Some("cd".repeat(32)),
