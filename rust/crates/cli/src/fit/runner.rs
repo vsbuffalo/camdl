@@ -1052,13 +1052,13 @@ pub fn preflight_spread_starts(
 /// fatal, since the file is an audit artifact and not an input.
 pub fn record_chain_starts(
     out: &crate::out::Out,
-    method_dir: &std::path::Path,
+    files: &dyn super::output::RunWriter,
     config: &FitRunConfig,
     drawn: &super::chain_starts::DrawnStarts,
 ) {
     let records = drawn.records(&config.estimated_params);
     if let Err(e) = super::chain_starts::write_chain_starts_tsv(
-        method_dir, &config.estimated_params, &drawn.rule, &records,
+        files, &config.estimated_params, &drawn.rule, &records,
     ) {
         out.say(format_args!("warning: could not write chain_starts.tsv: {}", e));
     }
@@ -2435,7 +2435,7 @@ fn run_one_chain(
     config: &FitRunConfig,
     per_chain_params: Option<&[EstimatedParam]>,
     task: Option<&crate::out::progress::Task>,
-    method_dir: Option<&str>,
+    files: Option<&dyn super::output::RunWriter>,
     // The method's liveness/progress heartbeat, owned by the runner
     // (`fit::method_heartbeat`). Its step is one IF2 cooling iteration (gh#900).
     heartbeat: &io::HeartbeatGuard,
@@ -2448,7 +2448,7 @@ fn run_one_chain(
 
     let n_iter = config.if2_config.n_iterations;
 
-    // Streaming trace writer (opt-in via method_dir). Each chain writes
+    // Streaming trace writer (opt-in via `files`). Each chain writes
     // its own `chain_N/parameter_traces.tsv` from inside the IF2
     // progress callback, one row per iteration. Users can `tail -f`
     // during a long scout run to watch parameters move in real time.
@@ -2459,13 +2459,9 @@ fn run_one_chain(
     //
     // Per-chain, single-writer-per-thread: no Mutex needed. RefCell
     // lets the `Fn` closure mutate the BufWriter.
-    let trace_writer: Option<std::cell::RefCell<std::io::BufWriter<std::fs::File>>>
-        = method_dir.and_then(|dir| {
-            let chain_dir = ChainIndex(chain_id).dir_in(std::path::Path::new(dir));
-            if std::fs::create_dir_all(&chain_dir).is_err() { return None; }
-            let chain_dir = chain_dir.to_string_lossy().into_owned();
-            let path = format!("{}/parameter_traces.tsv", chain_dir);
-            std::fs::File::create(&path).ok().map(|f| {
+    let trace_writer: Option<std::cell::RefCell<std::io::BufWriter<super::output::OutFile>>>
+        = files.and_then(|files| {
+            files.create(&parameter_traces_file(ChainIndex(chain_id))).ok().map(|f| {
                 use std::io::Write;
                 let mut w = std::io::BufWriter::new(f);
                 let _ = writeln!(w, "# {}", crate::version::VERSION_SHORT);
@@ -2554,7 +2550,7 @@ pub fn run_chains_with_per_chain_params(
     config: &FitRunConfig,
     per_chain_params: Option<&[Vec<EstimatedParam>]>,
     collector: &DiagnosticCollector,
-    method_dir: Option<&str>,
+    files: Option<&dyn super::output::RunWriter>,
     heartbeat: &io::HeartbeatGuard,
 ) -> Result<ChainResults, String> {
     out.say(format_args!("running {} chains × {} particles × {} iterations, cooling={}, dt={}",
@@ -2582,7 +2578,7 @@ pub fn run_chains_with_per_chain_params(
         super::chain_fanout::run_chains(config.n_chains, |chain_id| {
             let per_chain = per_chain_params.map(|pcp| &pcp[chain_id][..]);
             match run_one_chain(
-                chain_id, config, per_chain, Some(&bars[chain_id]), method_dir, heartbeat,
+                chain_id, config, per_chain, Some(&bars[chain_id]), files, heartbeat,
             ) {
                 Ok(result) => Ok((chain_id, result)),
                 // gh#110 (IF2 follow-up): a chain whose IF2 search wandered
@@ -3441,7 +3437,7 @@ impl MethodConvergence {
 /// be the tail mean or best-in-run iter, not just `result.mle`); this
 /// is what makes scout→refine handoff consume the de-biased estimate.
 pub fn write_chain_outputs(
-    dir: &str,
+    files: &dyn super::output::RunWriter,
     results: &[(usize, IF2Result)],
     if2_params: &[EstimatedParam],
     all_param_names: &[String],
@@ -3453,9 +3449,6 @@ pub fn write_chain_outputs(
 
     for (chain_id, result) in results {
         let chain = ChainIndex(*chain_id);
-        let chain_dir = chain.dir_in(std::path::Path::new(dir)).to_string_lossy().into_owned();
-        std::fs::create_dir_all(&chain_dir)
-            .map_err(|e| format!("cannot create {}: {}", chain_dir, e))?;
 
         // Parameter traces: post-hoc write is a *fallback* now. The
         // chain-side streaming writer in `run_one_chain` writes this
@@ -3464,7 +3457,7 @@ pub fn write_chain_outputs(
         // of truth — we skip the post-hoc write to avoid clobbering
         // it. When it didn't run (e.g. an embedded test or non-CLI
         // consumer that called `run_chains_with_per_chain_params`
-        // with `method_dir = None`), fall back to the post-hoc write.
+        // with no files), fall back to the post-hoc write.
         //
         // Trade-off: the streaming version writes `NA` in the
         // `loglik` column (clean-PF re-eval is post-hoc). The
@@ -3472,10 +3465,9 @@ pub fn write_chain_outputs(
         // iteration from `IF2IterResult.loglik`. Consumers that need
         // the clean-PF values per-iteration can join with
         // `clean_eval.tsv` / `fit_state.toml` on iteration index.
-        let trace_path = format!("{}/parameter_traces.tsv", chain_dir);
-        if !std::path::Path::new(&trace_path).exists() {
-            let mut f = std::fs::File::create(&trace_path)
-                .map_err(|e| format!("cannot write {}: {}", trace_path, e))?;
+        let trace_name = parameter_traces_file(chain);
+        if !files.opened(&trace_name) {
+            let mut f: Vec<u8> = Vec::new();
             writeln!(f, "# {}", crate::version::VERSION_SHORT).unwrap();
             write!(f, "iteration\tloglik\tif2_perturbed_loglik").unwrap();
             for spec in if2_params { write!(f, "\t{}", spec.name).unwrap(); }
@@ -3486,6 +3478,7 @@ pub fn write_chain_outputs(
                 for spec in if2_params { write!(f, "\t{}", it.param_means[spec.index]).unwrap(); } // gh#266
                 writeln!(f).unwrap();
             }
+            files.put(&trace_name, &f)?;
         }
 
         // Resolve this chain's clean-eval score (if any). Falls back to
@@ -3496,9 +3489,7 @@ pub fn write_chain_outputs(
             ce.per_chain.iter().find(|s| s.chain_id == chain));
 
         // Final params TOML (all params, not just estimated).
-        let toml_path = format!("{}/final_params.toml", chain_dir);
-        let mut f = std::fs::File::create(&toml_path)
-            .map_err(|e| format!("cannot write {}: {}", toml_path, e))?;
+        let mut f: Vec<u8> = Vec::new();
         writeln!(f, "# {}", crate::version::VERSION_SHORT).unwrap();
         writeln!(f, "# Chain {} final parameters", chain).unwrap();
         let header_ll = chain_score.map(|s| s.loglik).unwrap_or(result.final_loglik);
@@ -3538,11 +3529,17 @@ pub fn write_chain_outputs(
             writeln!(f, "se = {:.6}", s.se).unwrap();
             writeln!(f, "chain = {}", chain).unwrap();
         }
+        files.put(&format!("{}/final_params.toml", chain.dir_name()), &f)?;
     }
     Ok(())
 }
 
-/// Write `<dir>/chain_evaluations.tsv` — the per-chain clean-eval
+/// The name of chain `chain`'s streamed IF2 parameter trace.
+fn parameter_traces_file(chain: ChainIndex) -> String {
+    format!("{}/parameter_traces.tsv", chain.dir_name())
+}
+
+/// Write the run's `chain_evaluations.tsv` — the per-chain clean-eval
 /// score table. Schema:
 /// `chain\tloglik\tse\tess_mean\tess_min\tess_min_step\tn_neg_inf_incr\t<param_1>\t<param_2>\t…`
 /// with one header line + N data rows (one per chain) in chain-id
@@ -3557,14 +3554,12 @@ pub fn write_chain_outputs(
 /// Used downstream by `camdl fit summary`, the gate's per-chain SE
 /// consumption, and book vignettes that report ESS-at-θ̂ diagnostics.
 pub fn write_clean_eval_tsv(
-    dir: &str,
+    files: &dyn super::output::RunWriter,
     outcome: &loglik_eval::LoglikEvalOutcome,
     if2_params: &[EstimatedParam],
 ) -> Result<(), String> {
     use std::io::Write;
-    let path = format!("{}/chain_evaluations.tsv", dir);
-    let mut f = std::fs::File::create(&path)
-        .map_err(|e| format!("cannot write {}: {}", path, e))?;
+    let mut f: Vec<u8> = Vec::new();
     writeln!(f, "# {}", crate::version::VERSION_SHORT).unwrap();
     write!(f, "chain\tloglik\tse\tess_mean\tess_min\tess_min_step\tn_neg_inf_incr").unwrap();
     for spec in if2_params { write!(f, "\t{}", spec.name).unwrap(); }
@@ -3581,14 +3576,14 @@ pub fn write_clean_eval_tsv(
         }
         writeln!(f).unwrap();
     }
-    Ok(())
+    files.put("chain_evaluations.tsv", &f)
 }
 
-/// Write `<dir>/final_params.toml` at the method root, capturing the
+/// Write the run's `final_params.toml` at the method root, capturing the
 /// overall clean-eval winner across all chains. Mirrors the per-chain
 /// TOML schema but identifies which chain produced it.
 pub fn write_run_root_final_params(
-    dir: &str,
+    files: &dyn super::output::RunWriter,
     outcome: &loglik_eval::LoglikEvalOutcome,
     if2_params: &[EstimatedParam],
     all_param_names: &[String],
@@ -3597,9 +3592,7 @@ pub fn write_run_root_final_params(
 ) -> Result<(), String> {
     use std::io::Write;
     let s = &outcome.per_chain[outcome.overall_winner_idx];
-    let path = format!("{}/final_params.toml", dir);
-    let mut f = std::fs::File::create(&path)
-        .map_err(|e| format!("cannot write {}: {}", path, e))?;
+    let mut f: Vec<u8> = Vec::new();
     writeln!(f, "# {}", crate::version::VERSION_SHORT).unwrap();
     writeln!(f, "# winner: chain={}", s.chain_id).unwrap();
     writeln!(f, "# loglik = {:.2} ± {:.2} (clean-eval re-score of IF2 final-iter mean)",
@@ -3623,7 +3616,7 @@ pub fn write_run_root_final_params(
     writeln!(f, "loglik = {:.6}", s.loglik).unwrap();
     writeln!(f, "se = {:.6}", s.se).unwrap();
     writeln!(f, "chain = {}", s.chain_id).unwrap();
-    Ok(())
+    files.put("final_params.toml", &f)
 }
 
 /// Format a parameter value with appropriate precision.
@@ -3641,11 +3634,9 @@ pub fn format_param_value(v: f64) -> String {
 
 /// Write diagnostics.tsv: per-iteration loglik for all chains. Not the
 /// method's findings, which are `fit::write_diagnostics`'s `diagnostics.json`.
-pub fn write_iteration_trace(dir: &str, results: &[(usize, IF2Result)]) -> Result<(), String> {
+pub fn write_iteration_trace(files: &dyn super::output::RunWriter, results: &[(usize, IF2Result)]) -> Result<(), String> {
     use std::io::Write;
-    let path = format!("{}/diagnostics.tsv", dir);
-    let mut f = std::fs::File::create(&path)
-        .map_err(|e| format!("cannot write {}: {}", path, e))?;
+    let mut f: Vec<u8> = Vec::new();
     writeln!(f, "# {}", crate::version::VERSION_SHORT).unwrap();
     writeln!(f, "chain\titeration\tloglik\tif2_perturbed_loglik").unwrap();
     for (chain_id, result) in results {
@@ -3654,7 +3645,7 @@ pub fn write_iteration_trace(dir: &str, results: &[(usize, IF2Result)]) -> Resul
             writeln!(f, "{}\t{}\t{}\t{:.2}", ChainIndex(*chain_id), it.iteration, loglik_str, it.if2_perturbed_loglik).unwrap();
         }
     }
-    Ok(())
+    files.put("diagnostics.tsv", &f)
 }
 
 /// Collect ALL parameter values (estimated + fixed) for MLE output.
@@ -4062,7 +4053,7 @@ mod tests {
 
         let param_names: Vec<String> = vec!["beta".into(), "gamma".into(), "N0".into()];
         write_chain_outputs(
-            dir.to_str().unwrap(), &results, &if2_params,
+            &crate::fit::output::DirWriter::new(&dir), &results, &if2_params,
             &param_names, &base_params, &compiled, None,
         ).unwrap();
 
@@ -4123,7 +4114,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        write_clean_eval_tsv(dir.to_str().unwrap(), &outcome, &if2_params).unwrap();
+        write_clean_eval_tsv(&crate::fit::output::DirWriter::new(&dir), &outcome, &if2_params).unwrap();
 
         let content = std::fs::read_to_string(dir.join("chain_evaluations.tsv")).unwrap();
         let lines: Vec<&str> = content.lines().filter(|l| !l.starts_with('#')).collect();
@@ -4214,7 +4205,7 @@ mod tests {
 
         let param_names = vec!["beta".to_string()];
         write_run_root_final_params(
-            dir.to_str().unwrap(), &outcome, &if2_params,
+            &crate::fit::output::DirWriter::new(&dir), &outcome, &if2_params,
             &param_names, &[0.0], &compiled,
         ).unwrap();
 
@@ -4320,7 +4311,7 @@ mod tests {
         let path = dir.join("final_params.toml");
 
         write_run_root_final_params(
-            dir.to_str().unwrap(), &outcome, &if2_params,
+            &crate::fit::output::DirWriter::new(&dir), &outcome, &if2_params,
             &["R0".to_string()], &[0.0], &compiled,
         ).unwrap();
 

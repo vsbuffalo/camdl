@@ -91,17 +91,16 @@ impl PmmhMethodOpts {
 
 // See pgas::run_method for the comment on this allow.
 #[allow(clippy::too_many_arguments)]
-#[expect(clippy::disallowed_methods, reason = "reads each chain's `resume_state.bin`, carried into this method's working directory from the base run through the run's `resumed_from` dependency, and the `trace.tsv` files this process wrote there")]
+#[expect(clippy::disallowed_methods, reason = "reads back from the running run's folder each chain's `resume_state.bin`, carried in from the base run through the run's `resumed_from` dependency, and the `trace.tsv` files this process wrote there")]
 pub fn run_method(
     fit: &super::config_v2::Problem,
     method: &super::config_v2::Method,
-    method_dir: &Path,
+    files: &dyn super::output::RunWriter,
     pmmh_opts: PmmhMethodOpts,
     seed: u64,
     force: bool,
     // The leaf `--resume` continues, whose chain files the dispatcher has
-    // copied into `method_dir` (`resumed_chain::copy_parent_chains`); `None`
-    // for a fresh run.
+    // carried into `files`; `None` for a fresh run.
     resume_base: Option<&Path>,
     // The leaf's resume-compatibility key (`cas::resume_guard`); see
     // `pgas::run_method`.
@@ -318,25 +317,19 @@ pub fn run_method(
     }
 
 
-    if !force && !resume {
-        let state_path = method_dir.join("fit_state.toml");
-        if state_path.exists() {
-            out.say(format_args!("{}", crate::out::paint::stderr().paint(&format!(
-                "{method_name} results already exist in {}. Use --force to re-run or --resume to continue.",
-                method_dir.display()), Style::Warn)));
-            return Ok((Vec::new(), Vec::new()));
-        }
+    if !force && !resume && files.opened(super::state::FIT_STATE_FILE) {
+        out.say(format_args!("{}", crate::out::paint::stderr().paint(&format!(
+            "{method_name} results already exist in {}. Use --force to re-run or --resume to continue.",
+            files.folder().display()), Style::Warn)));
+        return Ok((Vec::new(), Vec::new()));
     }
-
-    std::fs::create_dir_all(method_dir)
-        .map_err(|e| format!("cannot create {}: {}", method_dir.display(), e))?;
 
     // The audit sidecar, captured before any step runs so a watcher can read
     // the starts while the chains are still going, and rewritten from the
     // final record once they finish (gh#887, gh#904). The pre-run write can
     // only say `accepted` — no chain has been refused yet — so the rewrite is
     // what makes the file true, and it is unconditional.
-    super::runner::record_chain_starts(out, method_dir, &config, &drawn);
+    super::runner::record_chain_starts(out, files, &config, &drawn);
     let retry_accepted: std::sync::Mutex<Vec<Option<super::chain_starts::ChainStart>>> =
         std::sync::Mutex::new(vec![None; n_chains]);
     let retry_rejected: std::sync::Mutex<Vec<super::chain_starts::RejectedStart>> =
@@ -368,7 +361,7 @@ pub fn run_method(
         let mut states = Vec::with_capacity(n_chains);
         let mut any_failed = false;
         for chain in ChainIndex::all(n_chains) {
-            let path: PathBuf = chain.dir_in(method_dir).join("resume_state.bin");
+            let path: PathBuf = chain.dir_in(files.folder()).join("resume_state.bin");
             match std::fs::read(&path) {
                 Ok(data) => match bincode::deserialize::<PMMHResumeState>(&data) {
                     Ok(state) => {
@@ -437,13 +430,6 @@ pub fn run_method(
             .starting_at(resume_states[chain_id].as_ref().map_or(0, |s| s.completed_steps as u64))
             .recording(out.events(), chain_id))
         .collect();
-
-    // Pre-create chain directories
-    for chain in ChainIndex::all(n_chains) {
-        let chain_dir = chain.dir_in(method_dir);
-        std::fs::create_dir_all(&chain_dir)
-            .map_err(|e| format!("cannot create {}: {}", chain_dir.display(), e))?;
-    }
 
     let t0 = std::time::Instant::now();
 
@@ -705,15 +691,12 @@ pub fn run_method(
             let accepted_count = AtomicUsize::new(0);
 
             // Streaming trace: use TraceWriter with append mode when resuming
-            let chain_dir = ChainIndex(chain_id).dir_in(method_dir);
-            let _ = std::fs::create_dir_all(&chain_dir);
-            let trace_path = chain_dir.join("trace.tsv");
-            let trace_path_str = trace_path.to_string_lossy().into_owned();
+            let trace_name = format!("{}/trace.tsv", ChainIndex(chain_id).dir_name());
             let is_resuming = resume_states[chain_id].is_some();
             let param_names: Vec<String> = config.estimated_params.iter()
                 .map(|s| s.name.clone()).collect();
             let trace_writer = super::trace_writer::TraceWriter::new(
-                &trace_path_str, "step", "log_likelihood", &["accepted"],
+                files, &trace_name, "step", "log_likelihood", &["accepted"],
                 &param_names, is_resuming,
             );
 
@@ -795,7 +778,7 @@ pub fn run_method(
             }
 
             // Save resume state for future --resume
-            super::resumed_chain::write_resume_state(&chain_dir, &result.resume_state)
+            super::resumed_chain::write_resume_state(files, ChainIndex(chain_id), &result.resume_state)
                 .map_err(|e| format!("chain {}: {e}", ChainIndex(chain_id)))?;
 
             Ok(Some((chain_id, result)))
@@ -819,7 +802,7 @@ pub fn run_method(
         retry_rejected.into_inner().unwrap(),
         retry_refused.into_inner().unwrap(),
     );
-    super::runner::record_chain_starts(out, method_dir, &config, &drawn);
+    super::runner::record_chain_starts(out, files, &config, &drawn);
 
     // gh#110. Skip + continue: surface "ran K of N chains" so the
     // user knows downstream R̂/ESS exclude skipped chains. This
@@ -871,7 +854,7 @@ pub fn run_method(
                 return Ok(None);
             }
             super::resumed_chain::inherited_draws(
-                &ChainIndex(*chain_id).dir_in(method_dir).join("trace.tsv"),
+                &ChainIndex(*chain_id).dir_in(files.folder()).join("trace.tsv"),
                 "step", boundary[*chain_id], burn_in, thin, &param_names,
             ).map(Some)
         })
@@ -936,7 +919,7 @@ pub fn run_method(
     // over each chain's retained draws, and recorded in the summary for every
     // reader. A chain that differs beyond its Monte Carlo error is a finding.
     let chain_logliks = super::chain_diagnostics::recorded_chain_loglik_agreement(
-        method_dir,
+        files.folder(),
         loglik_kind,
         results.iter().zip(&inherited).map(|((c, r), base)| {
             (ChainIndex(*c), base.as_ref().map_or(0, |b| b.index.len()) + r.steps.len())
@@ -1015,7 +998,7 @@ pub fn run_method(
     } else {
         crate::run_meta::FitAlgorithm::Pmmh
     };
-    write_summary(method_dir, &results, &config, &diagnostics, withheld.as_ref(), chain_logliks.as_ref(), algo, &warmup, &plan)?;
+    write_summary(files, &results, &config, &diagnostics, withheld.as_ref(), chain_logliks.as_ref(), algo, &warmup, &plan)?;
     // The cost is wall time, a property of this execution rather than of the
     // result: it goes to the execution record (`fit::execution`), outside the
     // leaf's manifest.
@@ -1107,7 +1090,7 @@ pub fn run_method(
         optimizer_convergence: None,
         chain_loglik_agreement: None,
     };
-    state.save(&method_dir.to_string_lossy())?;
+    state.save(files)?;
 
     // Write draws.tsv: complete-M posterior draws (all params, estimated + fixed)
     // Reads the per-chain trace.tsv files (which now also carry warm-up rows),
@@ -1115,10 +1098,8 @@ pub fn run_method(
     // parameter columns.
     {
         use std::io::Write;
-        let draws_path = method_dir.join("draws.tsv");
         let mut f = std::io::BufWriter::new(
-            std::fs::File::create(&draws_path)
-                .map_err(|e| format!("cannot create {}: {}", draws_path.display(), e))?
+            files.create("draws.tsv").map_err(|e| format!("cannot create draws.tsv: {e}"))?
         );
 
         // Header: estimated params + fixed params
@@ -1145,7 +1126,7 @@ pub fn run_method(
         // Read each chain's trace.tsv and extract param columns
         let mut n_draws = 0usize;
         for chain in ChainIndex::all(n_chains) {
-            let trace_path = chain.dir_in(method_dir).join("trace.tsv");
+            let trace_path = chain.dir_in(files.folder()).join("trace.tsv");
             if let Ok(content) = std::fs::read_to_string(&trace_path) {
                 let mut lines = content.lines();
                 let header = lines.next().unwrap_or("");
@@ -1194,7 +1175,7 @@ pub fn run_method(
     // Persist the findings. The end of the run prints them once, merged,
     // with the cost of sampling and the highest-posterior draw after them
     // (`report::render`'s run-end view, from what is recorded here).
-    super::write_diagnostics(&collector, method_dir)?;
+    super::write_diagnostics(&collector, files)?;
 
     Ok((warmup, if resume { boundary } else { Vec::new() }))
 }
@@ -1306,7 +1287,7 @@ fn sampling_cost(wall_secs: f64, steps_run: &[usize]) -> SamplingCost {
 
 #[allow(clippy::too_many_arguments)]
 fn write_summary(
-    dir: &Path,
+    files: &dyn super::output::RunWriter,
     results: &[(usize, PMMHResult)],
     config: &FitRunConfig,
     diagnostics: &MethodConvergence,
@@ -1358,11 +1339,11 @@ fn write_summary(
         .extend(diagnostics.summary_fields(withheld));
     super::chain_diagnostics::insert_agreement(&mut summary, chain_logliks)?;
 
-    let path = dir.join(algo.summary_filename());
+    let name = algo.summary_filename();
     let contents = serde_json::to_string_pretty(&summary)
         .map_err(|e| format!("json error: {}", e))?;
-    std::fs::write(&path, contents)
-        .map_err(|e| format!("cannot write {}: {}", path.display(), e))
+    files.put(&name, contents.as_bytes())
+        .map_err(|e| format!("cannot write {name}: {e}"))
 }
 
 /// The run's closing stderr line: which method ran, how long it took, and how

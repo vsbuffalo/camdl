@@ -20,8 +20,7 @@
 /// The trace's file name in a method directory.
 pub(crate) const OPT_TRACE: &str = "opt_trace.tsv";
 
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use score::convergence::ChainIndex;
@@ -65,36 +64,27 @@ fn push_f64(line: &mut String, v: f64) {
 /// The leaf's `opt_trace.tsv` while the searches run: created with its
 /// header before any search starts, then appended to by every search.
 ///
-/// The file is opened for appending (`O_APPEND`), and each row is formatted
-/// in full and handed over in a single unbuffered `write_all` under the lock,
-/// so a reader tailing the file sees whole rows only, and rows from searches
-/// on different threads never interleave mid-line.
+/// Each row is formatted in full and handed over in a single unbuffered
+/// append, so a reader tailing the file sees whole rows only, and rows from
+/// searches on different threads never interleave mid-line.
 pub(super) struct OptTraceFile {
+    /// Where the file can be read while it is written.
     pub(super) path: PathBuf,
     /// How many parameter columns the header has, so a row with no best
     /// point yet still has one (empty) field per column.
     n_params: usize,
-    file: std::sync::Mutex<std::fs::File>,
+    file: super::output::OutFile,
 }
 
 impl OptTraceFile {
-    #[expect(clippy::disallowed_methods, reason = "opens the optimizer trace it has just created in this process's `fit run` working directory, to append rows; it reads nothing")]
-    pub(super) fn create(method_dir: &Path, est_names: &[String]) -> Result<Self, String> {
-        let path = method_dir.join(OPT_TRACE);
-        std::fs::write(&path, header(est_names))
-            .map_err(|e| format!("writing {}: {e}", path.display()))?;
-        let file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .map_err(|e| format!("opening {} to append: {e}", path.display()))?;
-        Ok(OptTraceFile { path, n_params: est_names.len(), file: std::sync::Mutex::new(file) })
+    pub(super) fn create(files: &dyn super::output::RunWriter, est_names: &[String]) -> Result<Self, String> {
+        let file = files.create(OPT_TRACE)?;
+        file.write_all(header(est_names).as_bytes())?;
+        Ok(OptTraceFile { path: files.folder().join(OPT_TRACE), n_params: est_names.len(), file })
     }
 
     fn append(&self, row: &str) -> std::io::Result<()> {
-        // A worker that panicked mid-append wrote a whole row or none of it
-        // (one `write_all` of a short line); the file is still usable.
-        let mut file = self.file.lock().unwrap_or_else(|p| p.into_inner());
-        file.write_all(row.as_bytes())
+        self.file.write_all(row.as_bytes()).map_err(std::io::Error::other)
     }
 }
 
@@ -226,7 +216,7 @@ mod tests {
         (0..n).map(|i| format!("p{i}")).collect()
     }
 
-    fn rows(path: &Path) -> Vec<Vec<String>> {
+    fn rows(path: &std::path::Path) -> Vec<Vec<String>> {
         std::fs::read_to_string(path)
             .unwrap()
             .lines()
@@ -238,7 +228,7 @@ mod tests {
     #[test]
     fn the_header_is_on_disk_before_any_search_writes() {
         let dir = tempfile::tempdir().unwrap();
-        let file = OptTraceFile::create(dir.path(), &names(2)).unwrap();
+        let file = OptTraceFile::create(&crate::fit::output::DirWriter::new(dir.path()), &names(2)).unwrap();
         assert_eq!(
             std::fs::read_to_string(&file.path).unwrap(),
             "chain\teval\tloglik\tbest_loglik\tp0\tp1\n"
@@ -251,7 +241,7 @@ mod tests {
     #[test]
     fn rows_reach_disk_while_the_search_runs() {
         let dir = tempfile::tempdir().unwrap();
-        let file = OptTraceFile::create(dir.path(), &names(1)).unwrap();
+        let file = OptTraceFile::create(&crate::fit::output::DirWriter::new(dir.path()), &names(1)).unwrap();
         let t0 = Instant::now();
         let mut trace = SearchTrace::new(&file, 3);
         for e in 1..=60u64 {
@@ -270,7 +260,7 @@ mod tests {
     #[test]
     fn a_search_ending_on_a_row_writes_it_once() {
         let dir = tempfile::tempdir().unwrap();
-        let file = OptTraceFile::create(dir.path(), &names(1)).unwrap();
+        let file = OptTraceFile::create(&crate::fit::output::DirWriter::new(dir.path()), &names(1)).unwrap();
         let t0 = Instant::now();
         let mut trace = SearchTrace::new(&file, 0);
         for e in 1..=26u64 {
@@ -286,7 +276,7 @@ mod tests {
     #[test]
     fn two_seconds_bring_a_row_before_25_evaluations() {
         let dir = tempfile::tempdir().unwrap();
-        let file = OptTraceFile::create(dir.path(), &names(1)).unwrap();
+        let file = OptTraceFile::create(&crate::fit::output::DirWriter::new(dir.path()), &names(1)).unwrap();
         let t0 = Instant::now();
         let mut trace = SearchTrace::new(&file, 0);
         let s = |x: f64| t0 + Duration::from_secs_f64(x);
@@ -305,7 +295,7 @@ mod tests {
     #[test]
     fn a_non_finite_start_leaves_the_best_empty_until_a_finite_value() {
         let dir = tempfile::tempdir().unwrap();
-        let file = OptTraceFile::create(dir.path(), &names(2)).unwrap();
+        let file = OptTraceFile::create(&crate::fit::output::DirWriter::new(dir.path()), &names(2)).unwrap();
         let t0 = Instant::now();
         let mut trace = SearchTrace::new(&file, 1);
         let values = [f64::NEG_INFINITY, f64::NAN, f64::INFINITY, -12.5, -20.0, -3.25];
@@ -335,7 +325,7 @@ mod tests {
     fn concurrent_searches_keep_every_row_whole() {
         let dir = tempfile::tempdir().unwrap();
         let est = names(5);
-        let file = OptTraceFile::create(dir.path(), &est).unwrap();
+        let file = OptTraceFile::create(&crate::fit::output::DirWriter::new(dir.path()), &est).unwrap();
         const SEARCHES: usize = 8;
         const EVALS: u64 = 400;
         std::thread::scope(|s| {

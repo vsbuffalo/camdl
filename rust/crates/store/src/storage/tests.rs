@@ -126,6 +126,32 @@ fn an_in_place_run_is_visible_while_it_runs_and_completes() {
 }
 
 #[test]
+fn a_replaced_file_holds_its_new_content_and_the_record_digests_it() {
+    let root = TempRoot::new("replace");
+    let store = open(root.path());
+    let mut run = claim_fit(&store, &info(), "if2");
+    run.expect(expecting(&["chain_starts.tsv"]));
+    let f = run.result_file("chain_starts.tsv").unwrap();
+    f.write_all(b"chain\tstatus\n0\taccepted\n1\taccepted\n").unwrap();
+    let dir = run.folder().unwrap().to_path_buf();
+    f.replace(b"chain\tstatus\n0\taccepted\n").unwrap();
+    assert_eq!(std::fs::read(dir.join("chain_starts.tsv")).unwrap(), b"chain\tstatus\n0\taccepted\n");
+    f.write_all(b"1\trefused\n").unwrap();
+    let stored = run.finish().unwrap();
+    let want = b"chain\tstatus\n0\taccepted\n1\trefused\n";
+    assert_eq!(std::fs::read(dir.join("chain_starts.tsv")).unwrap(), want);
+    let rec = read_run(stored.folder());
+    let entry = &rec.files["chain_starts.tsv"];
+    assert_eq!(entry.sha256, Some(crate::hash::Key::digest_bytes(want)));
+    assert_eq!(entry.bytes, Some(want.len() as u64));
+    let leftover: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".tmp"))
+        .collect();
+    assert!(leftover.is_empty(), "{leftover:?}");
+}
+
+#[test]
 fn a_failed_in_place_run_is_marked_failed_and_a_retry_keeps_the_attempt() {
     let root = TempRoot::new("retry");
     let store = open(root.path());

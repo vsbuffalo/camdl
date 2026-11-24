@@ -217,14 +217,12 @@ pub fn params_file_text(
     Ok(text)
 }
 
-/// Write an optimizer's winner, `all_params`, to `path` as `mle_params.toml`:
-/// the values, then a `[provenance]` block ([`params_file_text`]).
-pub fn write_mle_params(
-    path: &str,
+/// An optimizer's winner, `all_params`, as `mle_params.toml` holds it: the
+/// values, then a `[provenance]` block ([`params_file_text`]).
+pub fn mle_params_text(
     all_params: &std::collections::BTreeMap<String, f64>,
     metadata: &MleMetadata,
-) -> Result<(), String> {
-    use std::io::Write;
+) -> Result<String, String> {
     let header = [
         "camdl fit MLE — parameter values first, followed by a [provenance] block.",
         "Editing any value in this params section invalidates provenance.content_hash.",
@@ -247,9 +245,8 @@ pub fn write_mle_params(
             ess_min: metadata.ess_at_mle.map(|(_, mn)| mn),
         }),
     })
-    .map_err(|e| format!("cannot write {}: {}", path, e))?;
-    let mut f = std::fs::File::create(path).map_err(|e| format!("cannot write {}: {}", path, e))?;
-    f.write_all(text.as_bytes()).map_err(|e| format!("cannot write {}: {}", path, e))
+    .map_err(|e| format!("cannot write mle_params.toml: {}", e))?;
+    Ok(text)
 }
 
 /// Read the `[provenance]` block from an mle_params.toml file. Returns
@@ -280,7 +277,7 @@ pub enum ContentVerification {
 }
 
 /// Recompute the tamper hash over the file's top-level numeric parameters —
-/// the values `write_mle_params` hashed into `content_hash` — and compare it
+/// the values `mle_params_text` hashed into `content_hash` — and compare it
 /// with `declared`, the hash of the `[provenance]` block the caller has read.
 /// The scope is the parameter values only: editing a provenance field does
 /// not invalidate the hash, editing a value does. A `[provenance]` table is
@@ -361,7 +358,7 @@ mod tests {
             n_particles: 100,
             ess_at_mle: None,
         };
-        write_mle_params(&path.to_string_lossy(), &params, &meta).unwrap();
+        std::fs::write(&path, mle_params_text(&params, &meta).unwrap()).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("method = \"if2\""),
             "the block must name the method:\n{text}");
@@ -401,7 +398,7 @@ mod tests {
             let leaf = root.join(sub);
             std::fs::create_dir_all(&leaf).unwrap();
             let path = leaf.join("mle_params.toml");
-            write_mle_params(&path.to_string_lossy(), &params, &meta).unwrap();
+            std::fs::write(&path, mle_params_text(&params, &meta).unwrap()).unwrap();
             written.push(std::fs::read_to_string(&path).unwrap());
         }
         let _ = std::fs::remove_dir_all(&root);
@@ -434,7 +431,7 @@ mod tests {
             n_particles: 100,
             ess_at_mle: None,
         };
-        write_mle_params(&path_s, &params, &meta).unwrap();
+        std::fs::write(&path_s, mle_params_text(&params, &meta).unwrap()).unwrap();
         let prov = read_mle_provenance(&path_s).unwrap().unwrap();
         assert_eq!(
             verify_content_hash(&path_s, &prov.content_hash).unwrap(),
@@ -485,7 +482,7 @@ mod tests {
             n_particles: 100,
             ess_at_mle: Some((40.0, 12.5)),
         };
-        write_mle_params(&path.to_string_lossy(), &params, &meta).unwrap();
+        std::fs::write(&path, mle_params_text(&params, &meta).unwrap()).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         let expected = format!(
@@ -553,7 +550,7 @@ mod tests {
             n_particles: 100,
             ess_at_mle: None,
         };
-        write_mle_params(&winner.to_string_lossy(), &params, &meta).unwrap();
+        std::fs::write(&winner, mle_params_text(&params, &meta).unwrap()).unwrap();
         let prov = read_mle_provenance(&winner.to_string_lossy()).unwrap().unwrap();
         assert!(matches!(prov.estimate, Estimate::Winner(WinnerRecord { chain: ChainIndex(1), .. })), "{prov:?}");
         let _ = std::fs::remove_dir_all(&dir);
@@ -645,7 +642,7 @@ mod tests {
             n_particles: 100,
             ess_at_mle: None,
         };
-        write_mle_params(&path_s, &params, &meta).unwrap();
+        std::fs::write(&path_s, mle_params_text(&params, &meta).unwrap()).unwrap();
         let declared = read_mle_provenance(&path_s).unwrap().unwrap().content_hash;
         let read_back: std::collections::BTreeMap<String, f64> =
             crate::util::load_params_toml(&path_s).unwrap().into_iter().collect();

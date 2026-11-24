@@ -3599,7 +3599,7 @@ mod tests {
         // A run's folder: its files, its inputs and its provenance side by side.
         let method_dir = dir.clone();
         write_top_level_fit_run(&method_dir, &parent_hash);
-        state.save(&method_dir.to_string_lossy()).unwrap();
+        state.save(&crate::fit::output::DirWriter::new(&method_dir)).unwrap();
         write_method_run(&method_dir, &parent_hash, method, crate::run_meta::FitAlgorithm::If2);
 
         // final_params.toml + mle_params.toml carrying matching values

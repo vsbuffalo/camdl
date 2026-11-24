@@ -135,7 +135,7 @@ impl CrossChainReading {
     /// `None` when the method wrote no matrix (fewer than two chains sampled,
     /// or the matrix could not be computed or written) or the file does not
     /// parse.
-    #[expect(clippy::disallowed_methods, reason = "reads `cross_chain_compat.json` from a method directory: the working directory this process's `fit run` is writing, or a `fit_store::RunFiles` copy of a stored run read out through the store")]
+    #[expect(clippy::disallowed_methods, reason = "reads `cross_chain_compat.json` from a method directory: the folder of the run this process's `fit run` is writing, read back, or a `fit_store::RunFiles` copy of a stored run read out through the store")]
     pub fn read(method_dir: &std::path::Path) -> Option<Self> {
         let text = std::fs::read_to_string(method_dir.join(CROSS_CHAIN_COMPAT_JSON)).ok()?;
         let v: serde_json::Value = serde_json::from_str(&text).ok()?;
@@ -268,11 +268,11 @@ impl CrossChainCompat {
     /// Write the artifact. Errors are returned rather than swallowed so the
     /// caller decides — a diagnostic that silently fails to be written is a
     /// diagnostic nobody knows to look for.
-    pub fn write(&self, path: &std::path::Path) -> Result<(), String> {
+    pub fn write(&self, files: &dyn crate::fit::output::RunWriter) -> Result<(), String> {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| format!("cannot serialize cross-chain compat matrix: {e}"))?;
-        std::fs::write(path, json + "\n")
-            .map_err(|e| format!("cannot write {}: {e}", path.display()))
+        files.put(CROSS_CHAIN_COMPAT_JSON, (json + "\n").as_bytes())
+            .map_err(|e| format!("cannot write {CROSS_CHAIN_COMPAT_JSON}: {e}"))
     }
 }
 

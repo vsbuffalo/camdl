@@ -320,12 +320,25 @@ pub fn write_progress(dir: &Path, p: &Progress) -> io::Result<()> {
     Ok(())
 }
 
-/// Read and parse a run's `progress.json`.
+/// Where a heartbeat's snapshots go: a function called with each snapshot in
+/// turn, each one replacing the one before. `fit run` passes each to its
+/// run's progress record; [`progress_file`] writes each to a file.
+pub type ProgressSink = Arc<dyn Fn(&Progress) + Send + Sync>;
+
+/// The sink that writes each snapshot to `dir/progress.json`
+/// ([`write_progress`]). A write that fails is skipped: progress is a
+/// diagnostic.
+pub fn progress_file(dir: PathBuf) -> ProgressSink {
+    Arc::new(move |p: &Progress| {
+        let _ = write_progress(&dir, p);
+    })
+}
+
+/// Read and parse a `progress.json` that [`progress_file`] wrote.
 #[expect(
     clippy::disallowed_methods,
-    reason = "reads `progress.json`, the liveness diagnostic a running command writes into its \
-              own working directory; outside tests the only caller is `ProgressWriter::failed`, \
-              rereading the file it wrote, and no stored result is computed from it"
+    reason = "reads `progress.json`, the liveness diagnostic a heartbeat's file sink writes; the \
+              callers are tests of the heartbeat, and no stored result is computed from it"
 )]
 pub fn read_progress(dir: &Path) -> io::Result<Progress> {
     let bytes = fs::read(dir.join(PROGRESS_FILE))?;
@@ -335,7 +348,7 @@ pub fn read_progress(dir: &Path) -> io::Result<Progress> {
 // ── The heartbeat handle ─────────────────────────────────────────────────────
 
 struct Shared {
-    dir: PathBuf,
+    sink: ProgressSink,
     rule: PhaseRule,
     total: u64,
     step: AtomicU64, // monotonic (fetch_max) — furthest any chain has reached
@@ -381,7 +394,7 @@ impl Shared {
             self.chain_liveness(),
             self.search_progress(),
         );
-        let _ = write_progress(&self.dir, &p);
+        (self.sink)(&p);
     }
 }
 
@@ -401,14 +414,14 @@ pub struct Heartbeat {
 
 impl Heartbeat {
     fn spawn(
-        dir: PathBuf,
+        sink: ProgressSink,
         rule: PhaseRule,
         total: u64,
         interval: Duration,
         n_chains: usize,
     ) -> Heartbeat {
         let shared = Arc::new(Shared {
-            dir,
+            sink,
             rule,
             total,
             step: AtomicU64::new(0),
@@ -449,26 +462,26 @@ impl Heartbeat {
     /// indistinguishable from one that has not started (gh#751). Report each
     /// chain's state with [`chain`](Heartbeat::chain).
     pub fn mcmc(
-        dir: PathBuf,
+        sink: ProgressSink,
         burn_in: u64,
         total: u64,
         interval: Duration,
         n_chains: usize,
     ) -> Heartbeat {
-        Self::spawn(dir, PhaseRule::Mcmc { burn_in }, total, interval, n_chains)
+        Self::spawn(sink, PhaseRule::Mcmc { burn_in }, total, interval, n_chains)
     }
 
     /// Optimizer heartbeat (IF2 cooling iterations / NLopt eval loop): a single
     /// `Optimizing` phase. `total` is the iteration / max-eval budget.
-    pub fn optimizing(dir: PathBuf, total: u64, interval: Duration) -> Heartbeat {
-        Self::spawn(dir, PhaseRule::Fixed(Phase::Optimizing), total, interval, 0)
+    pub fn optimizing(sink: ProgressSink, total: u64, interval: Duration) -> Heartbeat {
+        Self::spawn(sink, PhaseRule::Fixed(Phase::Optimizing), total, interval, 0)
     }
 
     /// Profile heartbeat: a single `Profiling` phase. `total` is the number of
     /// jobs the invocation runs — grid cells × starts × seeds — and a step is
     /// one job finished, a cached one included.
-    pub fn profiling(dir: PathBuf, total: u64, interval: Duration) -> Heartbeat {
-        Self::spawn(dir, PhaseRule::Fixed(Phase::Profiling), total, interval, 0)
+    pub fn profiling(sink: ProgressSink, total: u64, interval: Duration) -> Heartbeat {
+        Self::spawn(sink, PhaseRule::Fixed(Phase::Profiling), total, interval, 0)
     }
 
     /// Report what `chain` (counted from 0, the number the artifact renders)
@@ -519,7 +532,7 @@ impl Heartbeat {
         let _w = self.shared.write.lock().unwrap_or_else(|e| e.into_inner());
         let chains = self.shared.chain_liveness();
         let searches = self.shared.search_progress();
-        let _ = write_progress(&self.shared.dir, &Progress::now(state, chains, searches));
+        (self.shared.sink)(&Progress::now(state, chains, searches));
     }
 
     fn stop_thread(&mut self) {
@@ -579,10 +592,18 @@ pub struct HeartbeatGuard {
     /// The heartbeat, taken by whichever terminal write happens first, and
     /// `None` from construction for an [`inert`](Self::inert) guard.
     hb: std::sync::Mutex<Option<Heartbeat>>,
-    /// The directory whose `progress.json` holds a `done` that the leaf's
-    /// record has not yet confirmed ([`commit`](Self::commit)); `None` before
-    /// `done`, and again once committed.
-    provisional_done: std::sync::Mutex<Option<PathBuf>>,
+    /// A `done` the leaf's record has not yet confirmed
+    /// ([`commit`](Self::commit)): the sink it went to, with the chain and
+    /// search blocks it carried. `None` before `done`, and again once
+    /// committed.
+    provisional_done: std::sync::Mutex<Option<ProvisionalDone>>,
+}
+
+/// The `done` a [`HeartbeatGuard`] wrote and a later failure may replace.
+struct ProvisionalDone {
+    sink: ProgressSink,
+    chains: Option<ChainLiveness>,
+    searches: Option<Vec<SearchProgress>>,
 }
 
 impl HeartbeatGuard {
@@ -642,17 +663,18 @@ impl HeartbeatGuard {
     }
 
     /// Record that the method finished. The `done` is provisional until
-    /// [`commit`](Self::commit). The heartbeat stops before the leaf is
-    /// finalized, which is why `done` goes down first: its temporary file
-    /// (`progress.json.<pid>.tmp`) is not a record the manifest passes over,
-    /// so one written during the manifest walk would be taken into it. A failure reported
-    /// after `done` but before `commit` replaces it
+    /// [`commit`](Self::commit): a failure reported after `done` but before
+    /// `commit`, while the leaf is still being finalized, replaces it
     /// ([`failed`](Self::failed)). A no-op once any terminal state is written.
     pub fn done(&self) {
-        let dir = self.slot().as_ref().map(|hb| hb.shared.dir.clone());
+        let shared = self.slot().as_ref().map(|hb| Arc::clone(&hb.shared));
         self.terminal(RunState::Done);
-        if let Some(dir) = dir {
-            *self.provisional_done.lock().unwrap_or_else(|e| e.into_inner()) = Some(dir);
+        if let Some(s) = shared {
+            *self.provisional_done.lock().unwrap_or_else(|e| e.into_inner()) = Some(ProvisionalDone {
+                sink: Arc::clone(&s.sink),
+                chains: s.chain_liveness(),
+                searches: s.search_progress(),
+            });
         }
     }
 
@@ -672,14 +694,8 @@ impl HeartbeatGuard {
         let reason = reason.into();
         let provisional =
             self.provisional_done.lock().unwrap_or_else(|e| e.into_inner()).take();
-        if let Some(dir) = provisional {
-            let (chains, searches) =
-                read_progress(&dir).ok().map(|p| (p.chains, p.searches)).unwrap_or_default();
-            // Best effort, like every progress write: this is a diagnostic.
-            let _ = write_progress(
-                &dir,
-                &Progress::now(RunState::Failed { reason }, chains, searches),
-            );
+        if let Some(done) = provisional {
+            (done.sink)(&Progress::now(RunState::Failed { reason }, done.chains, done.searches));
             return;
         }
         self.terminal(RunState::Failed { reason });
@@ -866,7 +882,7 @@ mod tests {
     #[test]
     fn the_heartbeat_writes_the_chain_block_and_finish_keeps_it() {
         let dir = tempfile::tempdir().unwrap();
-        let hb = Heartbeat::mcmc(dir.path().to_path_buf(), 5, 30, Duration::from_millis(20), 3);
+        let hb = Heartbeat::mcmc(progress_file(dir.path().to_path_buf()), 5, 30, Duration::from_millis(20), 3);
         hb.chain(0, ChainState::Running);
         hb.chain(2, ChainState::Refused { reason: RefusedReason::NonFiniteStart });
         std::thread::sleep(Duration::from_millis(60));
@@ -888,7 +904,7 @@ mod tests {
     #[test]
     fn an_out_of_range_chain_report_is_ignored() {
         let dir = tempfile::tempdir().unwrap();
-        let hb = Heartbeat::mcmc(dir.path().to_path_buf(), 1, 2, Duration::from_millis(20), 2);
+        let hb = Heartbeat::mcmc(progress_file(dir.path().to_path_buf()), 1, 2, Duration::from_millis(20), 2);
         hb.chain(9, ChainState::Running);
         hb.finish(RunState::Done);
         let live = read_progress(dir.path()).unwrap().chains.unwrap();
@@ -908,7 +924,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         {
             let guard = HeartbeatGuard::new(Heartbeat::mcmc(
-                dir.path().to_path_buf(), 5, 30, Duration::from_millis(20), 0,
+                progress_file(dir.path().to_path_buf()), 5, 30, Duration::from_millis(20), 0,
             ));
             guard.bump(7);
             std::thread::sleep(Duration::from_millis(50));
@@ -939,7 +955,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         {
             let guard = HeartbeatGuard::new(Heartbeat::mcmc(
-                dir.path().to_path_buf(), 1, 2, Duration::from_millis(20), 0,
+                progress_file(dir.path().to_path_buf()), 1, 2, Duration::from_millis(20), 0,
             ));
             guard.failed("all 2 chain(s) were refused at their starting point");
             guard.done(); // a later report cannot overwrite the first
@@ -959,7 +975,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         {
             let guard = HeartbeatGuard::new(Heartbeat::mcmc(
-                dir.path().to_path_buf(), 1, 4, Duration::from_millis(20), 2,
+                progress_file(dir.path().to_path_buf()), 1, 4, Duration::from_millis(20), 2,
             ));
             guard.chain(0, ChainState::Completed);
             guard.chain(1, ChainState::Refused { reason: RefusedReason::NonFiniteStart });
@@ -980,7 +996,7 @@ mod tests {
         let run = |commit: bool| {
             let dir = tempfile::tempdir().unwrap();
             let guard = HeartbeatGuard::new(Heartbeat::mcmc(
-                dir.path().to_path_buf(), 1, 4, Duration::from_millis(20), 1,
+                progress_file(dir.path().to_path_buf()), 1, 4, Duration::from_millis(20), 1,
             ));
             guard.chain(0, ChainState::Completed);
             guard.done();
@@ -1042,7 +1058,7 @@ mod tests {
     fn heartbeat_writes_then_finish_marks_terminal() {
         let dir = tempfile::tempdir().unwrap();
         // optimizing: fixed phase, step 12 of 30.
-        let hb = Heartbeat::optimizing(dir.path().to_path_buf(), 30, Duration::from_millis(20));
+        let hb = Heartbeat::optimizing(progress_file(dir.path().to_path_buf()), 30, Duration::from_millis(20));
         hb.bump(12);
         // The timer thread, not this thread, writes the step. Wait for that
         // write to be observable rather than for a fixed time to pass; the
@@ -1062,7 +1078,7 @@ mod tests {
     #[test]
     fn the_heartbeat_writes_one_row_per_search_and_finish_keeps_them() {
         let dir = tempfile::tempdir().unwrap();
-        let hb = Heartbeat::optimizing(dir.path().to_path_buf(), 100, Duration::from_millis(20));
+        let hb = Heartbeat::optimizing(progress_file(dir.path().to_path_buf()), 100, Duration::from_millis(20));
         hb.bump(40);
         hb.search(1, 12, None);
         hb.search(0, 40, Some(-48.5));

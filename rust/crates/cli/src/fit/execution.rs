@@ -119,18 +119,18 @@ impl Execution {
         self.wall_time_seconds = Some(wall_time_seconds);
     }
 
-    /// Write the record into `leaf`, atomically.
-    pub fn write(&self, leaf: &Path) -> Result<(), String> {
-        let path = leaf.join(EXECUTION_RECORD);
+    /// Write the record as the run's `execution.json`, replacing the one
+    /// written before it.
+    pub fn write(&self, files: &dyn crate::fit::output::RunWriter) -> Result<(), String> {
         let json = serde_json::to_vec_pretty(self)
-            .map_err(|e| format!("cannot encode {}: {e}", path.display()))?;
-        store::write_file_atomic(&path, &json).map_err(|e| format!("cannot write {}: {e}", path.display()))
+            .map_err(|e| format!("cannot encode {EXECUTION_RECORD}: {e}"))?;
+        files.put(EXECUTION_RECORD, &json).map_err(|e| format!("cannot write {EXECUTION_RECORD}: {e}"))
     }
 
     /// The record of the attempt that wrote `leaf`; `Ok(None)` when the leaf
     /// has none. A record that exists and cannot be read or parsed is an
     /// error, not an absence.
-    #[expect(clippy::disallowed_methods, reason = "reads `execution.json` from a method directory: the working directory this process's `fit run` is writing, or a `fit_store::RunFiles` copy of a stored run read out through the store")]
+    #[expect(clippy::disallowed_methods, reason = "reads `execution.json` from a method directory: the folder of the run this process's `fit run` is writing, read back, or a `fit_store::RunFiles` copy of a stored run read out through the store")]
     pub fn read(leaf: &Path) -> Result<Option<Self>, String> {
         let path = leaf.join(EXECUTION_RECORD);
         match std::fs::read(&path) {
@@ -213,7 +213,7 @@ mod tests {
         let mut e = Execution::begin();
         e.finish(2.0);
         e.sampling_seconds = Some(1.25);
-        e.write(&d).unwrap();
+        e.write(&crate::fit::output::DirWriter::new(&d)).unwrap();
         assert_eq!(Execution::read(&d).unwrap(), Some(e.clone()));
 
         let segs = Execution::segments_resuming(&d, "parent");
@@ -221,12 +221,5 @@ mod tests {
         std::fs::write(d.join(EXECUTION_RECORD), b"not json").unwrap();
         assert!(Execution::read(&d).is_err(), "an unparseable record is an error");
         let _ = std::fs::remove_dir_all(&d);
-    }
-
-    /// The heartbeat file is one `fit run` does not store, by the name the
-    /// heartbeat writes it under: the two crates name it apart.
-    #[test]
-    fn the_heartbeat_is_not_stored() {
-        assert!(crate::result_files::fit_run::is_attempt_channel(io::PROGRESS_FILE));
     }
 }

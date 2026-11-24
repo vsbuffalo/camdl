@@ -129,6 +129,7 @@ pub mod report;
 // measured log L-hat spread and the acceptance ceiling it implies (gh#764).
 pub mod pf_noise;
 pub mod pgas;
+pub(crate) mod output; // where a running method writes its files: the run's own, opened by name
 pub mod trace_writer;
 pub(crate) mod resumed_chain; // a resumed sampler leaf holds the whole chain, and records its segments
 pub mod synthetic;
@@ -287,11 +288,11 @@ pub(crate) const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::
 /// arm reports that error and exits, and there is no run to report progress
 /// for.
 pub(crate) fn method_heartbeat(
-    method_dir: &std::path::Path,
+    sink: io::ProgressSink,
     algorithm: &config_v2::Algorithm,
 ) -> io::HeartbeatGuard {
     use config_v2::Algorithm as A;
-    let dir = method_dir.to_path_buf();
+    let dir = sink;
     let held = io::HeartbeatGuard::new;
     match algorithm {
         A::PGAS { .. } => match pgas::PgasMethodOpts::from_algorithm(algorithm) {
@@ -315,7 +316,8 @@ pub(crate) fn method_heartbeat(
     }
 }
 
-/// Write a method's findings to `<method_dir>/diagnostics.json`.
+/// Write a method's findings to the run's `diagnostics.json`, replacing any
+/// earlier write.
 ///
 /// A failed write is the run's failure. `diagnostics.json` is the only record
 /// of the run's findings, and `fit summary` reads its count and its verdict
@@ -323,22 +325,27 @@ pub(crate) fn method_heartbeat(
 /// whose problems no later command can show.
 pub(crate) fn write_diagnostics(
     collector: &sim::inference::diagnostic::DiagnosticCollector,
-    method_dir: &std::path::Path,
+    files: &dyn output::RunWriter,
 ) -> Result<(), String> {
-    let path = method_dir.join("diagnostics.json");
-    collector.write_json(&path.to_string_lossy())
-        .map_err(|e| format!("cannot write {}: {e}", path.display()))
+    let json = serde_json::to_string_pretty(&collector.snapshot())
+        .map_err(|e| format!("cannot write diagnostics.json: {e}"))?;
+    files.append(DIAGNOSTICS_FILE)
+        .and_then(|f| f.replace(json.as_bytes()))
+        .map_err(|e| format!("cannot write diagnostics.json: {e}"))
 }
+
+/// The record of a method's findings.
+pub(crate) const DIAGNOSTICS_FILE: &str = "diagnostics.json";
 
 /// [`write_diagnostics`] on a path where the run is already failing with
 /// `reason`: the run's own error stays the message, and a failed write is
 /// added to it rather than replacing it.
 pub(crate) fn write_diagnostics_then_fail(
     collector: &sim::inference::diagnostic::DiagnosticCollector,
-    method_dir: &std::path::Path,
+    files: &dyn output::RunWriter,
     reason: String,
 ) -> String {
-    match write_diagnostics(collector, method_dir) {
+    match write_diagnostics(collector, files) {
         Ok(()) => reason,
         Err(e) => format!("{reason}\n  and its findings were not recorded: {e}"),
     }
@@ -371,8 +378,8 @@ pub(crate) fn stop_if_refused(out: &crate::out::Out) {
 }
 
 pub(crate) fn abandon_method(out: &crate::out::Out, message: String) -> ! {
-    let message = match out.method_leaf() {
-        Some(leaf) => write_diagnostics_then_fail(&out.collector(), leaf, message),
+    let message = match out.method_files() {
+        Some(files) => write_diagnostics_then_fail(&out.collector(), files.as_ref(), message),
         None => message,
     };
     if let Some(r) = out.method_record() {
@@ -388,17 +395,17 @@ pub(crate) fn abandon_method(out: &crate::out::Out, message: String) -> ! {
 }
 
 /// What one method's run needs besides the `Out` it reports through: the
-/// problem and method it runs, the directory it writes its files into, its
-/// seed and starts, the base it resumes, and the heartbeat and collector the
+/// problem and method it runs, the run's files it writes, its seed and
+/// starts, the base it resumes, and the heartbeat and collector the
 /// command began it with.
 pub(crate) struct MethodContext<'a> {
     pub problem: &'a config_v2::Problem,
     pub method: &'a config_v2::Method,
     pub model: &'a ir::Model,
-    pub method_dir: &'a std::path::Path,
+    pub files: &'a dyn output::RunWriter,
     pub seed: u64,
     pub starts: &'a chain_starts::ResolvedStarts,
-    /// The base's carried chain files are already in `method_dir`; this is
+    /// The base's carried chain files are already open in `files`; this is
     /// the scratch copy of the base's own files, read for its warm-up record.
     pub resume_base: Option<&'a std::path::Path>,
     /// The key a resumed chain's state must carry: the run's chain identity.
@@ -424,14 +431,13 @@ pub(crate) struct MethodRan {
 }
 
 /// Run `cx.method` on `cx.problem`, writing every file it makes into
-/// `cx.method_dir`. A fatal error abandons the method through
+/// `cx.files`. A fatal error abandons the method through
 /// [`abandon_method`], which ends the command.
 pub(crate) fn run_method(out: &mut crate::out::Out, cx: MethodContext<'_>) -> MethodRan {
     use config_v2::Algorithm;
-    let MethodContext { problem: sweep_config, method, model, method_dir, seed, starts: resolved_starts,
+    let MethodContext { problem: sweep_config, method, model, files, seed, starts: resolved_starts,
         resume_base, resume_guard, heartbeat, collector, .. } = cx;
     let method_name = method.algorithm.method_name();
-    let method_dir = method_dir.to_path_buf();
     let method_best_loglik: Option<f64>;
     let mut method_best_chain: Option<score::convergence::ChainIndex> = None;
     let mut method_warmup: Vec<report::ChainWarmup> = Vec::new();
@@ -464,11 +470,6 @@ pub(crate) fn run_method(out: &mut crate::out::Out, cx: MethodContext<'_>) -> Me
             run_config.loglik_eval = effective_loglik_eval.clone();
             run_config.gate = effective_gate.clone();
 
-            std::fs::create_dir_all(&method_dir).unwrap_or_else(|e| {
-                abandon_method(out, format!("error creating {}: {e}", method_dir.display()),
-                )
-            });
-
             let t0 = std::time::Instant::now();
             // Per-chain starting points, through the one seam every runner
             // draws from, under the resolved `starts` rule.
@@ -487,14 +488,13 @@ pub(crate) fn run_method(out: &mut crate::out::Out, cx: MethodContext<'_>) -> Me
             let per_chain_params: Vec<Vec<sim::inference::types::EstimatedParam>> =
                 drawn.to_estimated_params(&run_config.estimated_params);
             // The audit sidecar, captured before the first filter pass.
-            runner::record_chain_starts(out, &method_dir, &run_config, &drawn);
+            runner::record_chain_starts(out, files, &run_config, &drawn);
             let chain_init_source = drawn.rule.spelled();
             let chain_starts_kind = drawn.rule.kind();
-            let method_dir_str = method_dir.to_string_lossy();
             let chain_results = runner::run_chains_with_per_chain_params(
                 out,
                 &run_config, Some(&per_chain_params), collector,
-                Some(method_dir_str.as_ref()), heartbeat)
+                Some(files), heartbeat)
                 .unwrap_or_else(|e| abandon_method(out, format!("error: {e}")));
             let elapsed = t0.elapsed();
             // A chain skipped mid-run started from an accepted start, so
@@ -503,27 +503,27 @@ pub(crate) fn run_method(out: &mut crate::out::Out, cx: MethodContext<'_>) -> Me
             // record of what every chain did.
             if !chain_results.skipped.is_empty() {
                 let drawn = drawn.clone().with_skipped(chain_results.skipped.clone());
-                runner::record_chain_starts(out, &method_dir, &run_config, &drawn);
+                runner::record_chain_starts(out, files, &run_config, &drawn);
             }
 
             // Write outputs
             let param_names: Vec<String> = model.parameters.iter().map(|p| p.name.clone()).collect();
             runner::write_chain_outputs(
-                &method_dir.to_string_lossy(), &chain_results.results,
+                files, &chain_results.results,
                 &run_config.estimated_params, &param_names,
                 &run_config.base_params, &run_config.compiled,
                 Some(&chain_results.loglik_eval),
             ).unwrap_or_else(|e| out.say(format_args!("warning: {}", e)));
             runner::write_clean_eval_tsv(
-                &method_dir.to_string_lossy(),
+                files,
                 &chain_results.loglik_eval, &run_config.estimated_params,
             ).unwrap_or_else(|e| out.say(format_args!("warning: {}", e)));
             runner::write_run_root_final_params(
-                &method_dir.to_string_lossy(),
+                files,
                 &chain_results.loglik_eval, &run_config.estimated_params,
                 &param_names, &run_config.base_params, &run_config.compiled,
             ).unwrap_or_else(|e| out.say(format_args!("warning: {}", e)));
-            runner::write_iteration_trace(&method_dir.to_string_lossy(), &chain_results.results)
+            runner::write_iteration_trace(files, &chain_results.results)
                 .unwrap_or_else(|e| out.say(format_args!("warning: {}", e)));
 
             // Write fit_state.toml — the leaf's result record.
@@ -630,7 +630,7 @@ pub(crate) fn run_method(out: &mut crate::out::Out, cx: MethodContext<'_>) -> Me
                     &chain_results.chain_eval_ses(),
                 ),
             };
-            fit_state.save(&method_dir.to_string_lossy()).unwrap_or_else(|e| {
+            fit_state.save(files).unwrap_or_else(|e| {
                 out.say(format_args!("warning: could not save fit_state: {}", e));
             });
 
@@ -639,7 +639,6 @@ pub(crate) fn run_method(out: &mut crate::out::Out, cx: MethodContext<'_>) -> Me
                 winner_theta, &run_config.estimated_params, &run_config.model,
                 &run_config.base_params, &run_config.compiled,
             );
-            let mle_path = format!("{}/mle_params.toml", method_dir.display());
             let model_identity =
                 crate::resolve::model_identity_from_ir(&run_config.model_ir_json);
             let rescore = &chain_results.loglik_eval.per_chain
@@ -676,13 +675,14 @@ pub(crate) fn run_method(out: &mut crate::out::Out, cx: MethodContext<'_>) -> Me
                     .then_some((rescore.filter_stats.ess_mean,
                                 rescore.filter_stats.ess_min)),
             };
-            provenance::write_mle_params(&mle_path, &all_params, &metadata)
+            provenance::mle_params_text(&all_params, &metadata)
+                .and_then(|text| files.put("mle_params.toml", text.as_bytes()))
                 .unwrap_or_else(|e| out.say(format_args!("warning: {}", e)));
 
             // Recorded, as every other method's are, so `fit summary`
             // shows the findings this run printed; the end of the run
             // prints them.
-            write_diagnostics(collector, &method_dir)
+            write_diagnostics(collector, files)
                 .unwrap_or_else(|e| abandon_method(out, format!("error: {e}")));
 
             method_best_loglik = Some(chain_results.best_loglik);
@@ -699,7 +699,7 @@ pub(crate) fn run_method(out: &mut crate::out::Out, cx: MethodContext<'_>) -> Me
             resume_boundary = pgas::run_method(
                 sweep_config,
                 method,
-                &method_dir,
+                files,
                 pgas_opts,
                 seed, false,
                 resume_base,
@@ -711,7 +711,7 @@ pub(crate) fn run_method(out: &mut crate::out::Out, cx: MethodContext<'_>) -> Me
                 abandon_method(out, format!("error running pgas: {e}"))
             });
             // Bubble loglik from fit_state.toml written by PGAS runner
-            let fs = load_method_result_or_exit(out, method_name, &method_dir);
+            let fs = load_method_result_or_exit(out, method_name, files.folder());
             method_best_loglik = Some(fs.best_loglik);
             method_best_chain = Some(fs.best_chain);
         }
@@ -721,7 +721,7 @@ pub(crate) fn run_method(out: &mut crate::out::Out, cx: MethodContext<'_>) -> Me
             (method_warmup, resume_boundary) = pmmh::run_method(
                 sweep_config,
                 method,
-                &method_dir,
+                files,
                 pmmh_opts,
                 seed, false,
                 resume_base,
@@ -736,7 +736,7 @@ pub(crate) fn run_method(out: &mut crate::out::Out, cx: MethodContext<'_>) -> Me
             ).unwrap_or_else(|e| {
                 abandon_method(out, format!("error running pmmh: {e}"))
             });
-            let fs = load_method_result_or_exit(out, method_name, &method_dir);
+            let fs = load_method_result_or_exit(out, method_name, files.folder());
             method_best_loglik = Some(fs.best_loglik);
             method_best_chain = Some(fs.best_chain);
         }
@@ -761,7 +761,7 @@ pub(crate) fn run_method(out: &mut crate::out::Out, cx: MethodContext<'_>) -> Me
             (method_warmup, resume_boundary) = pmmh::run_method(
                 sweep_config,
                 method,
-                &method_dir,
+                files,
                 pmmh_opts,
                 seed, false,
                 resume_base,
@@ -775,7 +775,7 @@ pub(crate) fn run_method(out: &mut crate::out::Out, cx: MethodContext<'_>) -> Me
             ).unwrap_or_else(|e| {
                 abandon_method(out, format!("error running mh: {e}"))
             });
-            let fs = load_method_result_or_exit(out, method_name, &method_dir);
+            let fs = load_method_result_or_exit(out, method_name, files.folder());
             method_best_loglik = Some(fs.best_loglik);
             method_best_chain = Some(fs.best_chain);
         }
@@ -806,7 +806,7 @@ pub(crate) fn run_method(out: &mut crate::out::Out, cx: MethodContext<'_>) -> Me
                     out,
                     sweep_config,
                     method,
-                    &method_dir,
+                    files,
                     seed,
                     resolved_starts,
                     cx.input_hash,
@@ -822,15 +822,15 @@ pub(crate) fn run_method(out: &mut crate::out::Out, cx: MethodContext<'_>) -> Me
                 // file holds what the run pushed (possibly nothing): an
                 // empty `diagnostics.json` says the run raised no
                 // findings, where no file says only that nobody asked.
-                write_diagnostics(&out.collector(), &method_dir)
+                write_diagnostics(&out.collector(), files)
                     .unwrap_or_else(|e| abandon_method(out, format!("error: {e}")));
-                let fs = load_method_result_or_exit(out, method_name, &method_dir);
+                let fs = load_method_result_or_exit(out, method_name, files.folder());
                 method_best_loglik = Some(fs.best_loglik);
                 method_best_chain = Some(fs.best_chain);
             }
             #[cfg(not(feature = "ode"))]
             {
-                let _ = (method_name, &sweep_config, &method_dir, seed, nl_cfg, &resolved_starts);
+                let _ = (method_name, &sweep_config, files, seed, nl_cfg, &resolved_starts);
                 abandon_method(&out, format!(
                         "error: this binary was built without --features ode, \
                          which is required for algorithm = \"{}\". Rebuild \
@@ -861,11 +861,6 @@ pub(crate) fn run_method(out: &mut crate::out::Out, cx: MethodContext<'_>) -> Me
                 1, *particles, 1, 1.0, 1, seed, false,
             ).unwrap_or_else(|e| {
                 abandon_method(out, format!("error building pfilter config: {e}"))
-            });
-
-            std::fs::create_dir_all(&method_dir).unwrap_or_else(|e| {
-                abandon_method(out, format!("error creating {}: {e}", method_dir.display()),
-                )
             });
 
             // The point the filter scores: the base point, or the point a
@@ -974,12 +969,12 @@ pub(crate) fn run_method(out: &mut crate::out::Out, cx: MethodContext<'_>) -> Me
             // Write logliks.tsv
             {
                 use std::io::Write;
-                let path = format!("{}/logliks.tsv", method_dir.display());
-                let mut f = std::fs::File::create(&path).unwrap();
+                let mut f: Vec<u8> = Vec::new();
                 writeln!(f, "replicate\tloglik").unwrap();
                 for (i, ll) in logliks.iter().enumerate() {
                     writeln!(f, "{}\t{}", i + 1, crate::fit::method_result::loglik_tsv_cell(*ll)).unwrap();
                 }
+                files.put("logliks.tsv", &f).unwrap_or_else(|e| abandon_method(out, format!("error: {e}")));
             }
 
             // Write prequential trace (plug-in predictive at MLE).
@@ -988,14 +983,19 @@ pub(crate) fn run_method(out: &mut crate::out::Out, cx: MethodContext<'_>) -> Me
             // carries the same tidy/long schema as `camdl pfilter
             // --save-prequential` (gh#650).
             if let Some(ref trace) = preq_trace {
-                let stem = format!("{}/prequential", method_dir.display());
                 let calendar = ir::caltime::CalendarAxis::from_model(&run_config.model)
                     .unwrap_or_else(|e| abandon_method(out, format!("error: {e}")));
-                crate::prequential_out::write_prequential_outputs(&stem, trace, &calendar)
-                    .unwrap_or_else(|e| {
-                        abandon_method(out, format!("error writing prequential: {e}"),
-                        )
+                let written = crate::prequential_out::prequential_files(trace, &calendar)
+                    .map_err(|e| e.to_string())
+                    .and_then(|p| {
+                        files.put("prequential.streams.tsv", &p.streams)?;
+                        files.put("prequential.tsv", &p.joint)?;
+                        files.put("prequential.json", &p.json)
                     });
+                written.unwrap_or_else(|e| {
+                    abandon_method(out, format!("error writing prequential: {e}"),
+                    )
+                });
                 out.say(format_args!("  prequential: {}",
                     crate::prequential_out::summary_line(trace)));
                 out.say_raw(format_args!("{}", crate::prequential_out::surprise_table(trace, &calendar)));
@@ -1843,20 +1843,20 @@ mod tests {
         let collector = DiagnosticCollector::new("pmmh");
         collector.push(DiagnosticKind::InitialLoglikInfinite);
 
-        write_diagnostics(&collector, dir.path()).expect("a writable directory takes the file");
+        write_diagnostics(&collector, &output::DirWriter::new(dir.path())).expect("a writable directory takes the file");
         let written = std::fs::read_to_string(dir.path().join("diagnostics.json")).unwrap();
         assert!(written.contains("initial_loglik_infinite"), "{written}");
 
         // A directory where the file should go: the write fails.
         let blocked = dir.path().join("blocked");
         std::fs::create_dir_all(blocked.join("diagnostics.json")).unwrap();
-        let err = write_diagnostics(&collector, &blocked).expect_err("the path is a directory");
+        let err = write_diagnostics(&collector, &output::DirWriter::new(&blocked)).expect_err("the path is a directory");
         assert!(err.starts_with("cannot write ") && err.contains("diagnostics.json"), "{err}");
 
-        let msg = write_diagnostics_then_fail(&collector, &blocked, "all chains refused".into());
+        let msg = write_diagnostics_then_fail(&collector, &output::DirWriter::new(&blocked), "all chains refused".into());
         assert!(msg.starts_with("all chains refused\n"), "{msg}");
         assert!(msg.contains("its findings were not recorded: cannot write"), "{msg}");
-        assert_eq!(write_diagnostics_then_fail(&collector, dir.path(), "x".into()), "x");
+        assert_eq!(write_diagnostics_then_fail(&collector, &output::DirWriter::new(dir.path()), "x".into()), "x");
     }
 
     /// The `from_mle` branch of the pfilter point refusal: a stored fit (here

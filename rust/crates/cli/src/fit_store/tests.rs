@@ -472,57 +472,58 @@ fn a_prediction_declares_the_tables_its_manifests_list() {
     assert_eq!(declared, ["quantities-excl1.json", "quantities-model-excl1/size.tsv"]);
 }
 
-/// A method's working directory holding a file its method does not store is
-/// refused by name when the method completed: an MH run's output refuses IF2's
-/// `mle_params.toml` and writes nothing for it. A failing run keeps the
-/// declared files it finds, keeps the other as an attempt file and names it.
+/// A completed run that wrote a file its method does not store is refused by
+/// name: an MH run's output refuses IF2's `mle_params.toml`. A file no fit
+/// run has is opened as an attempt file, outside the manifest, and named, so
+/// a failing run can say what it kept.
 #[test]
 fn a_method_output_refuses_a_file_its_method_does_not_store() {
-    use crate::result_files::fit_run::{MethodOutput, Mh};
+    use crate::fit::output::{LiveRun, RunWriter as _};
+    use crate::result_files::fit_run::{Mh, PlannedMethod};
     let fx = fixture();
     let o = open();
     let config = fx.config(&fit_toml("file = \"wide.tsv\"", 0.02));
     let problem = store_problem(&o, &resolved(&fx, &o, &config));
     let (id, labels) = run_identity(&problem, &config);
-    let Begin::Claimed(mut run) = o.store.begin::<FitRun>(&id, &labels, &o.info, Reuse::IfCompleted).unwrap() else {
+    let Begin::Claimed(run) = o.store.begin::<FitRun>(&id, &labels, &o.info, Reuse::IfCompleted).unwrap() else {
         panic!("the run is new")
     };
-    let work = tempfile::tempdir().unwrap();
-    std::fs::write(work.path().join("draws.tsv"), "chain\tdraw\n").unwrap();
-    std::fs::write(work.path().join("mle_params.toml"), "beta = 0.4\n").unwrap();
-    let err = MethodOutput::new(&mut run, &Mh, 1, None).transfer(work.path(), true).unwrap_err();
+    let live = LiveRun::new(run);
+    live.put("draws.tsv", b"chain\tdraw\n").unwrap();
+    live.put("mle_params.toml", b"beta = 0.4\n").unwrap();
+    let err = live.declare("mh", &PlannedMethod::Mh(Mh), 1, None).unwrap_err();
     assert!(err.contains("the mh method wrote `mle_params.toml`") && err.contains("chain_0/trace"), "{err}");
-    assert!(!run.folder().unwrap().join("mle_params.toml").exists(), "the refused file is not written");
-    drop(run);
+    drop(live);
 
-    let Begin::Claimed(mut run) = o.store.begin::<FitRun>(&id, &labels, &o.info, Reuse::IfCompleted).unwrap() else {
+    let Begin::Claimed(run) = o.store.begin::<FitRun>(&id, &labels, &o.info, Reuse::IfCompleted).unwrap() else {
         panic!("a failed run is claimed again")
     };
-    let stray = MethodOutput::new(&mut run, &Mh, 1, None).transfer(work.path(), false).unwrap();
-    assert_eq!(stray, vec!["mle_params.toml".to_string()], "the kept stray file is named");
-    let folder = run.folder().unwrap().to_path_buf();
+    let live = LiveRun::new(run);
+    live.put("draws.tsv", b"chain\tdraw\n").unwrap();
+    live.put("scratch.txt", b"x\n").unwrap();
+    assert_eq!(live.stray(), vec!["scratch.txt".to_string()], "the file no fit run has is named");
+    let folder = live.folder().to_path_buf();
+    live.take().unwrap().fail("fitting", "stopped").unwrap();
     assert!(folder.join("draws.tsv").is_file());
-    assert_eq!(std::fs::read_to_string(folder.join("mle_params.toml")).unwrap(), "beta = 0.4\n", "kept as an attempt file");
-    run.fail("fitting", "stopped").unwrap();
+    assert_eq!(std::fs::read_to_string(folder.join("scratch.txt")).unwrap(), "x\n", "kept in the failed folder");
     let record: serde_json::Value = serde_json::from_slice(&std::fs::read(folder.join("run.json")).unwrap()).unwrap();
     assert_eq!(record["status"], "failed", "{record}");
 }
 
-/// The files a two-chain MH run's working directory holds: every file whose
-/// presence does not depend on the outcome, and `chain_starts.tsv` recording
-/// each chain's end.
-fn mh_work(ends: [&str; 2]) -> tempfile::TempDir {
+/// Writes into `live` every file of a two-chain MH run whose presence does
+/// not depend on the outcome, and `chain_starts.tsv` recording each chain's
+/// end.
+fn mh_files(live: &crate::fit::output::LiveRun, ends: [&str; 2]) {
+    use crate::fit::output::RunWriter as _;
     use crate::result_files::fit_run::{MethodFiles, Mh};
     use crate::result_files::ResultFile as _;
-    let work = tempfile::tempdir().unwrap();
     for f in Mh.files(2) {
-        let p = work.path().join(f.stored());
-        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-        std::fs::write(p, "x\n").unwrap();
+        if f.stored() != "chain_starts.tsv" {
+            live.put(&f.stored(), b"x\n").unwrap();
+        }
     }
     let rows: String = ends.iter().enumerate().map(|(c, e)| format!("{c}\t0\t{e}\tsingle\t0.4\t\t\n")).collect();
-    std::fs::write(work.path().join("chain_starts.tsv"), format!("# camdl chain_starts\nchain_id\tattempt\tstatus\tsource\tbeta\tess\treason\n{rows}")).unwrap();
-    work
+    live.put("chain_starts.tsv", format!("# camdl chain_starts\nchain_id\tattempt\tstatus\tsource\tbeta\tess\treason\n{rows}").as_bytes()).unwrap();
 }
 
 /// A completed run is stored only with every file its recorded outcome
@@ -532,21 +533,23 @@ fn mh_work(ends: [&str; 2]) -> tempfile::TempDir {
 /// state, and a resume state it wrote is refused.
 #[test]
 fn a_completed_run_missing_a_chains_files_is_refused() {
-    use crate::result_files::fit_run::{MethodOutput, Mh};
+    use crate::fit::output::{LiveRun, RunWriter as _};
+    use crate::result_files::fit_run::{Mh, PlannedMethod};
     let fx = fixture();
     let o = open();
     let config = fx.config(&fit_toml("file = \"wide.tsv\"", 0.02));
     let problem = store_problem(&o, &resolved(&fx, &o, &config));
     let (id, labels) = run_identity(&problem, &config);
     let claim = || match o.store.begin::<FitRun>(&id, &labels, &o.info, Reuse::IfCompleted).unwrap() {
-        Begin::Claimed(run) => run,
+        Begin::Claimed(run) => LiveRun::new(run),
         _ => panic!("the run is claimed"),
     };
+    let plan = PlannedMethod::Mh(Mh);
 
-    let work = mh_work(["accepted", "accepted"]);
-    let mut run = claim();
-    MethodOutput::new(&mut run, &Mh, 2, None).transfer(work.path(), true).unwrap();
-    match run.finish() {
+    let live = claim();
+    mh_files(&live, ["accepted", "accepted"]);
+    live.declare("mh", &plan, 2, None).unwrap();
+    match live.take().unwrap().finish() {
         Err(store::Error::FileSetMismatch { missing, unexpected, .. }) => {
             assert_eq!(missing, ["chain_0/resume_state.bin", "chain_0/trace.tsv", "chain_1/resume_state.bin", "chain_1/trace.tsv"]);
             assert!(unexpected.is_empty(), "{unexpected:?}");
@@ -554,20 +557,23 @@ fn a_completed_run_missing_a_chains_files_is_refused() {
         other => panic!("a run with no chain's trace is refused: {other:?}"),
     }
 
-    let work = mh_work(["accepted", "refused"]);
-    for f in ["chain_0/trace.tsv", "chain_0/resume_state.bin", "chain_1/trace.tsv", "chain_1/resume_state.bin"] {
-        std::fs::create_dir_all(work.path().join(f).parent().unwrap()).unwrap();
-        std::fs::write(work.path().join(f), "x\n").unwrap();
+    let chain_files = ["chain_0/trace.tsv", "chain_0/resume_state.bin", "chain_1/trace.tsv", "chain_1/resume_state.bin"];
+    let live = claim();
+    mh_files(&live, ["accepted", "refused"]);
+    for f in chain_files {
+        live.put(f, b"x\n").unwrap();
     }
-    let mut run = claim();
-    let err = MethodOutput::new(&mut run, &Mh, 2, None).transfer(work.path(), true).unwrap_err();
+    let err = live.declare("mh", &plan, 2, None).unwrap_err();
     assert!(err.contains("`chain_1/resume_state.bin`"), "a refused chain writes no resume state: {err}");
-    drop(run);
+    drop(live);
 
-    std::fs::remove_file(work.path().join("chain_1/resume_state.bin")).unwrap();
-    let mut run = claim();
-    MethodOutput::new(&mut run, &Mh, 2, None).transfer(work.path(), true).unwrap();
-    let stored = run.finish().expect("every file the outcome states is there");
+    let live = claim();
+    mh_files(&live, ["accepted", "refused"]);
+    for f in chain_files.iter().filter(|f| **f != "chain_1/resume_state.bin") {
+        live.put(f, b"x\n").unwrap();
+    }
+    live.declare("mh", &plan, 2, None).unwrap();
+    let stored = live.take().unwrap().finish().expect("every file the outcome states is there");
     assert!(stored.folder().join("chain_1/trace.tsv").is_file() && !stored.folder().join("chain_1/resume_state.bin").exists());
 }
 

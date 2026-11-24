@@ -15,7 +15,7 @@ pub mod trajectories;
 pub use final_state::{final_states_bytes, read_final_states, write_final_states, FinalStates};
 pub use progress::{
     Heartbeat, HeartbeatGuard, Phase, Progress, RunLiveness, RunState, SearchProgress, liveness,
-    read_progress, write_progress, PROGRESS_FILE,
+    progress_file, read_progress, write_progress, ProgressSink, PROGRESS_FILE,
 };
 pub use trajectories::{
     Granularity, PosteriorDraw, TrajManifest, write_trajectories_tsv,

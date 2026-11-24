@@ -163,7 +163,7 @@ impl ChainPaths {
     /// order), and every draw must span the same substeps as the first, in the
     /// same order; anything else is a corrupt record and is refused.
     /// `Ok(None)` is a file with a header and no rows.
-    #[expect(clippy::disallowed_methods, reason = "reads a chain's `trajectories.tsv` under a method directory: the working directory this process's `fit run` is writing, or a `fit_store::RunFiles` copy of a stored run read out through the store")]
+    #[expect(clippy::disallowed_methods, reason = "reads a chain's `trajectories.tsv` under a method directory: the folder of the run this process's `fit run` is writing, read back, or a `fit_store::RunFiles` copy of a stored run read out through the store")]
     pub fn from_trajectories_tsv(path: &Path) -> Result<Option<(Self, Vec<String>)>, String> {
         let txt = std::fs::read_to_string(path)
             .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
@@ -833,10 +833,9 @@ impl LatentConvergence {
     }
 
     /// The per-cell table, long form: one row per (substep, column).
-    pub fn write_tsv(&self, path: &Path) -> Result<(), String> {
+    pub fn write_tsv(&self, out: impl std::io::Write) -> Result<(), String> {
         use std::io::Write;
-        let f = std::fs::File::create(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let mut w = std::io::BufWriter::new(f);
+        let mut w = std::io::BufWriter::new(out);
         let na = |v: f64| if v.is_finite() { format!("{v:.6}") } else { "NA".to_string() };
         writeln!(
             w,
@@ -1242,7 +1241,7 @@ mod tests {
         let lc = latent_convergence(&chains, &names(2)).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join(LATENT_CONVERGENCE_TSV);
-        lc.write_tsv(&p).unwrap();
+        lc.write_tsv(std::fs::File::create(&p).unwrap()).unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 1 + 5 * 2);

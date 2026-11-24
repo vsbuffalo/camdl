@@ -126,7 +126,7 @@ pub struct SamplingCost {
 
 /// The `warmup` record a method's summary JSON holds, or empty when the file
 /// or the field is absent (a leaf written before it was recorded).
-#[expect(clippy::disallowed_methods, reason = "reads a method's summary JSON: the working directory this process's `fit run` is writing, or a `fit_store::RunFiles` copy of a stored run read out through the store")]
+#[expect(clippy::disallowed_methods, reason = "reads a method's summary JSON: the folder of the run this process's `fit run` is writing, read back, or a `fit_store::RunFiles` copy of a stored run read out through the store")]
 pub fn read_warmup(summary_path: &Path) -> Vec<ChainWarmup> {
     #[derive(Deserialize)]
     struct WithWarmup {
@@ -287,7 +287,7 @@ pub struct ReadFindings {
 /// fails to read is read as "no findings": each is named in
 /// [`ReadFindings::unreadable`], which the summary prints and its JSON
 /// carries. A file that exists and cannot be opened is an error.
-#[expect(clippy::disallowed_methods, reason = "reads `diagnostics.json` from a method directory: the working directory this process's `fit run` is writing, or a `fit_store::RunFiles` copy of a stored run read out through the store")]
+#[expect(clippy::disallowed_methods, reason = "reads `diagnostics.json` from a method directory: the folder of the run this process's `fit run` is writing, read back, or a `fit_store::RunFiles` copy of a stored run read out through the store")]
 pub fn read_findings(method_dir: &Path) -> Result<ReadFindings, String> {
     use sim::inference::diagnostic::Diagnostic;
     let path = method_dir.join("diagnostics.json");
@@ -567,7 +567,7 @@ impl ChainDetail {
     /// A PGAS leaf written before the per-cell latent table existed has the
     /// table written here, once, from its saved paths: the same bytes a re-run
     /// would leave.
-    #[expect(clippy::disallowed_methods, reason = "reads the PGAS summary JSON from a method directory: the working directory this process's `fit run` is writing, or a `fit_store::RunFiles` copy of a stored run read out through the store")]
+    #[expect(clippy::disallowed_methods, reason = "reads the PGAS summary JSON from a method directory: the folder of the run this process's `fit run` is writing, read back, or a `fit_store::RunFiles` copy of a stored run read out through the store")]
     pub fn gather(
         method_dir: &Path,
         chain_logliks: Option<crate::fit::chain_diagnostics::ChainLoglikAgreement>,
@@ -632,7 +632,11 @@ impl ChainDetail {
         if let Some(Ok(lc)) = &latent {
             let table = method_dir.join(crate::fit::latent_convergence::LATENT_CONVERGENCE_TSV);
             if !table.is_file() {
-                detail.latent_table_written = Some(lc.write_tsv(&table));
+                detail.latent_table_written = Some(
+                    std::fs::File::create(&table)
+                        .map_err(|e| format!("{}: {e}", table.display()))
+                        .and_then(|f| lc.write_tsv(f)),
+                );
             }
         }
         detail.latent = latent;

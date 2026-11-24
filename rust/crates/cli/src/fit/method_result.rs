@@ -124,7 +124,7 @@ impl PfilterRun {
         PfilterRun { ll_mean, ll_sd, n_replicates: n, n_particles }
     }
 
-    #[expect(clippy::disallowed_methods, reason = "reads a pfilter run's `logliks.tsv` from its method directory: the working directory this process's `fit run` is writing, or a `fit_store::RunFiles` copy of a stored run read out through the store")]
+    #[expect(clippy::disallowed_methods, reason = "reads a pfilter run's `logliks.tsv` from its method directory: the folder of the run this process's `fit run` is writing, read back, or a `fit_store::RunFiles` copy of a stored run read out through the store")]
     pub fn load(method_dir: &Path) -> Result<Self, MethodResultError> {
         let inputs = read_method_inputs(method_dir)?;
         let n_particles = inputs.get("algorithm").and_then(|a| a.get("particles"))
@@ -936,7 +936,7 @@ fn compute_if2_gate_verdict(state: &FitState) -> GateVerdict {
 /// across all rows), since clean-eval re-scoring is done per
 /// (chain × candidate) and the IF2's `best_chain` is the overall
 /// max. Returns `None` if the file is absent or malformed.
-#[expect(clippy::disallowed_methods, reason = "reads `chain_evaluations.tsv` from a method directory: the working directory this process's `fit run` is writing, or a `fit_store::RunFiles` copy of a stored run read out through the store")]
+#[expect(clippy::disallowed_methods, reason = "reads `chain_evaluations.tsv` from a method directory: the folder of the run this process's `fit run` is writing, read back, or a `fit_store::RunFiles` copy of a stored run read out through the store")]
 fn read_ess_at_mle(method_dir: &Path) -> Option<EssSummary> {
     let path = method_dir.join("chain_evaluations.tsv");
     let contents = std::fs::read_to_string(&path).ok()?;
@@ -1374,7 +1374,7 @@ fn read_f64_map(summary: &serde_json::Value, key: &str) -> BTreeMap<String, f64>
 /// The `schema` tag is **required** (gh#728). This is the one typed loader
 /// every `MethodResult` goes through, so refusing here is what keeps a
 /// `rhat` written under one definition from being reported under another.
-#[expect(clippy::disallowed_methods, reason = "reads a method's summary JSON from its method directory: the working directory this process's `fit run` is writing, or a `fit_store::RunFiles` copy of a stored run read out through the store")]
+#[expect(clippy::disallowed_methods, reason = "reads a method's summary JSON from its method directory: the folder of the run this process's `fit run` is writing, read back, or a `fit_store::RunFiles` copy of a stored run read out through the store")]
 fn read_summary_json(
     method_dir: &Path,
     filename: &str,
@@ -1399,7 +1399,7 @@ fn read_summary_json(
 /// stores them, and the number of draw rows. `draws.tsv` is the canonical
 /// posterior-sample table written by both PGAS and PMMH (post-burn-in,
 /// thinned, all params). An absent or empty file is no draws.
-#[expect(clippy::disallowed_methods, reason = "reads a method's `draws.tsv`: the working directory this process's `fit run` is writing, or a `fit_store::RunFiles` copy of a stored run read out through the store")]
+#[expect(clippy::disallowed_methods, reason = "reads a method's `draws.tsv`: the folder of the run this process's `fit run` is writing, read back, or a `fit_store::RunFiles` copy of a stored run read out through the store")]
 pub(crate) fn read_draw_columns(
     method_dir: &Path,
     est_names: &[String],
@@ -1614,7 +1614,7 @@ mod tests {
             [("R0".to_string(), 1.001), ("sigma".to_string(), 1.002), ("I0".to_string(), 16.5)]
                 .into_iter().collect();
         state.perturb_only_at_t0_params = vec!["I0".into()];
-        state.save(&dir.to_string_lossy()).unwrap();
+        state.save(&crate::fit::output::DirWriter::new(dir)).unwrap();
 
         let err = crate::fit::gating::check_source_converged(dir, "@t0", false)
             .expect_err("an initial-state Â failure fails the source check");
@@ -1637,7 +1637,7 @@ mod tests {
             [("R0".to_string(), 1.07), ("sigma".to_string(), f64::NAN)].into_iter().collect();
         nan.chain_eval_logliks.clear();
         nan.chain_eval_ses.clear();
-        nan.save(&dir.to_string_lossy()).unwrap();
+        nan.save(&crate::fit::output::DirWriter::new(dir)).unwrap();
         assert!(crate::fit::gating::check_source_converged(dir, "@soft_nan", false).is_err(),
             "soft band + NaN Â is refused");
         assert_eq!(If2Run::load(dir).unwrap().gate_verdict, GateVerdict::Incomplete);
@@ -1647,7 +1647,7 @@ mod tests {
         spread.tail_chain_agreement =
             [("R0".to_string(), 1.07), ("sigma".to_string(), 1.002)].into_iter().collect();
         spread.chain_eval_logliks = vec![-3800.0, -3900.0, -3810.0, -3805.0];
-        spread.save(&dir.to_string_lossy()).unwrap();
+        spread.save(&crate::fit::output::DirWriter::new(dir)).unwrap();
         assert!(crate::fit::gating::check_source_converged(dir, "@soft_db", false).is_err(),
             "soft band + failing decibans leg is refused");
         assert_eq!(If2Run::load(dir).unwrap().gate_verdict, GateVerdict::FailDb);
@@ -1676,7 +1676,7 @@ mod tests {
                 state.chain_eval_logliks.clear();
                 state.chain_eval_ses.clear();
             }
-            state.save(&dir.to_string_lossy()).unwrap();
+            state.save(&crate::fit::output::DirWriter::new(dir)).unwrap();
             let r = If2Run::load(dir).unwrap();
             assert_eq!(r.gate_verdict, GateVerdict::Incomplete,
                 "NaN Â on R0 (decibans leg present: {with_decibans}) is not a pass");
@@ -1705,7 +1705,7 @@ mod tests {
             serde_json::json!({"method": "if2", "iterations": 50}));
         let mut state = synthetic_if2_state();
         state.tail_chain_agreement.clear(); // one chain: no Â
-        state.save(&dir.to_string_lossy()).unwrap();
+        state.save(&crate::fit::output::DirWriter::new(&dir)).unwrap();
         let r = If2Run::load(&dir).unwrap();
         assert_eq!(r.theta_hat.keys().cloned().collect::<Vec<_>>(), vec!["R0", "sigma"],
             "the fixed N0 is not an estimate");
@@ -1728,7 +1728,7 @@ mod tests {
         state.tail_chain_agreement.clear();
         state.chain_eval_logliks = vec![-3804.9];
         state.chain_eval_ses = vec![1.0];
-        state.save(&dir.to_string_lossy()).unwrap();
+        state.save(&crate::fit::output::DirWriter::new(dir)).unwrap();
         let r = If2Run::load(dir).unwrap();
         assert_eq!(r.gate_verdict, GateVerdict::NotAssessed);
         assert_eq!(r.max_chain_agreement, None, "no Â, not a perfect 0.0");
@@ -1761,7 +1761,7 @@ mod tests {
         state.tail_chain_agreement.clear();
         state.chain_eval_logliks = vec![-3804.9];
         state.chain_eval_ses = vec![1.0];
-        state.save(&dir.to_string_lossy()).unwrap();
+        state.save(&crate::fit::output::DirWriter::new(dir)).unwrap();
         let r = If2Run::load(dir).unwrap();
         assert_eq!(r.gate_verdict, GateVerdict::Incomplete);
         let err = crate::fit::gating::check_source_converged(dir, "@lossy", false)
@@ -1778,14 +1778,14 @@ mod tests {
             [("beta".to_string(), 1.001), ("gamma".to_string(), 1.002)].into();
         state.chain_eval_logliks = vec![-3804.9, -3805.0];
         state.chain_eval_ses = vec![1.0, 1.0];
-        state.save(&dir.to_string_lossy()).unwrap();
+        state.save(&crate::fit::output::DirWriter::new(dir)).unwrap();
         assert_eq!(If2Run::load(dir).unwrap().gate_verdict, GateVerdict::Incomplete);
 
         // Two survivors that disagree: the failure is the verdict, and the
         // refusal also names the loss.
         state.tail_chain_agreement =
             [("beta".to_string(), 1.5), ("gamma".to_string(), 1.002)].into();
-        state.save(&dir.to_string_lossy()).unwrap();
+        state.save(&crate::fit::output::DirWriter::new(dir)).unwrap();
         assert_eq!(If2Run::load(dir).unwrap().gate_verdict, GateVerdict::FailA);
         let err = crate::fit::gating::check_source_converged(dir, "@lossy", false).unwrap_err();
         assert!(err.contains("it did not converge") && err.contains("2 of its 4 IF2 chains were lost"),
@@ -1795,7 +1795,7 @@ mod tests {
         state.n_good_chains = Some(4);
         state.tail_chain_agreement =
             [("beta".to_string(), 1.001), ("gamma".to_string(), 1.002)].into();
-        state.save(&dir.to_string_lossy()).unwrap();
+        state.save(&crate::fit::output::DirWriter::new(dir)).unwrap();
         assert_eq!(If2Run::load(dir).unwrap().gate_verdict, GateVerdict::Pass);
     }
 
@@ -1830,7 +1830,7 @@ mod tests {
             serde_json::json!({"method": "if2", "iterations": 50}),
         );
         synthetic_if2_state()
-            .save(&dir.to_string_lossy())
+            .save(&crate::fit::output::DirWriter::new(dir))
             .unwrap();
 
         let r = If2Run::load(dir).unwrap();
@@ -1865,7 +1865,7 @@ mod tests {
         let mut state = synthetic_if2_state();
         state.tail_chain_agreement.insert("R0".into(), 1.005);
         state.tail_chain_agreement.insert("sigma".into(), 1.002);
-        state.save(&dir.to_string_lossy()).unwrap();
+        state.save(&crate::fit::output::DirWriter::new(dir)).unwrap();
         let r = If2Run::load(dir).unwrap();
         assert_eq!(r.gate_verdict, GateVerdict::Pass);
     }
@@ -1881,7 +1881,7 @@ mod tests {
             serde_json::json!({"method": "if2", "iterations": 10}),
         );
         synthetic_if2_state()
-            .save(&dir.to_string_lossy())
+            .save(&crate::fit::output::DirWriter::new(dir))
             .unwrap();
         std::fs::write(
             dir.join("chain_evaluations.tsv"),
@@ -1911,7 +1911,7 @@ mod tests {
             serde_json::json!({"method": "if2", "iterations": 10}),
         );
         synthetic_if2_state()
-            .save(&dir.to_string_lossy())
+            .save(&crate::fit::output::DirWriter::new(dir))
             .unwrap();
         let r = If2Run::load(dir).unwrap();
         assert!(r.ess_at_mle.is_none());
@@ -2123,7 +2123,7 @@ mod tests {
             serde_json::json!({"method": "if2", "iterations": 5}),
         );
         synthetic_if2_state()
-            .save(&dir.to_string_lossy())
+            .save(&crate::fit::output::DirWriter::new(dir))
             .unwrap();
         let r = MethodResult::load_from(dir, "if2").unwrap();
         assert!(matches!(r, MethodResult::If2(_)));

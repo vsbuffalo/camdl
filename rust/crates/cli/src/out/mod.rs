@@ -127,13 +127,14 @@ pub struct HeldClaim {
 
 /// What `Out` keeps for the method that is running: the run's opening block,
 /// the checks it has shown, the collector its findings go to, its heartbeat,
-/// which an error marks failed, and its leaf, where its records are written.
+/// which an error marks failed, and the run's files, where its records are
+/// written.
 struct RunningMethod {
     header: crate::fit::report::RunHeader,
     checks: Vec<crate::fit::report::Check>,
     collector: Arc<DiagnosticCollector>,
     heartbeat: Arc<io::HeartbeatGuard>,
-    leaf: std::path::PathBuf,
+    files: Arc<dyn crate::fit::output::RunWriter>,
     /// What the sampler measured of its cost, for the execution record.
     sampling: Option<crate::fit::execution::Sampling>,
 }
@@ -207,8 +208,8 @@ impl Out {
         let _ = write!(std::io::stderr().lock(), "{text}");
     }
 
-    /// Start recording a method: its opening block and its heartbeat, and
-    /// its event log, `leaf/events.jsonl`, which starts with a `begin` line
+    /// Start recording a method: its opening block, its heartbeat, the run's
+    /// files its records go to, and `log`, its event log, which starts with a `begin` line
     /// carrying the healthy band of `acceptance`, the kernel behind the
     /// method's acceptance diagnostics (`None` for a method without them).
     /// Returns the collector its findings go to, for the chain workers that
@@ -216,16 +217,16 @@ impl Out {
     /// [`finding`](Self::finding). Every finding pushed is also an event.
     ///
     /// # Errors
-    /// The event log cannot be created or its first line written.
+    /// The event log's first line cannot be written.
     pub fn begin_method(
         &mut self,
         header: crate::fit::report::RunHeader,
         method: &str,
         acceptance: Option<sim::inference::diagnostic::AcceptanceKernel>,
         heartbeat: Arc<io::HeartbeatGuard>,
-        leaf: &std::path::Path,
+        files: Arc<dyn crate::fit::output::RunWriter>,
+        log: events::EventLog,
     ) -> Result<Arc<DiagnosticCollector>, String> {
-        let log = events::EventLog::create(leaf)?;
         log.record(&events::Event::Begin {
             method, header: &header, acceptance: acceptance.map(|k| k.band()),
         });
@@ -236,7 +237,7 @@ impl Out {
         });
         self.method = Some(RunningMethod {
             header, checks: Vec::new(), collector: collector.clone(), heartbeat,
-            leaf: leaf.to_path_buf(), sampling: None,
+            files, sampling: None,
         });
         self.events = Some(log);
         Ok(collector)
@@ -336,10 +337,10 @@ impl Out {
         self.method.as_ref().and_then(|m| m.sampling.clone())
     }
 
-    /// The running method's leaf, where its `diagnostics.json` and event
-    /// log go; `None` when no method is running.
-    pub fn method_leaf(&self) -> Option<&std::path::Path> {
-        self.method.as_ref().map(|m| m.leaf.as_path())
+    /// The running method's files, where its `diagnostics.json` goes;
+    /// `None` when no method is running.
+    pub fn method_files(&self) -> Option<Arc<dyn crate::fit::output::RunWriter>> {
+        self.method.as_ref().map(|m| Arc::clone(&m.files))
     }
 
     /// Record a finding, from the command's thread.
@@ -617,8 +618,8 @@ mod tests {
         assert_eq!(out.error(CommandError { code: ExitCode(2), ..e }), ExitCode(2));
     }
 
-    /// `progress.json` says `done` before the leaf is finalized (the heartbeat
-    /// stops before the manifest walk), so a finalize that then fails must
+    /// `progress.json` says `done` before the leaf is finalized, so a
+    /// finalize that then fails must
     /// turn it into `failed`, with the reason, to agree with the leaf's
     /// `run.json`. Once the leaf is committed `completed`, a later error
     /// leaves the file alone.
@@ -635,10 +636,12 @@ mod tests {
                 .join(format!("camdl_out_done_{}_{commit}", std::process::id()));
             std::fs::create_dir_all(&leaf).unwrap();
             let guard = io::HeartbeatGuard::new(io::Heartbeat::mcmc(
-                leaf.clone(), 1, 4, std::time::Duration::from_millis(20), 1));
+                io::progress_file(leaf.clone()), 1, 4, std::time::Duration::from_millis(20), 1));
             let mut out = Out::new(true);
-            out.begin_method(header.clone(), "pmmh", None, Arc::new(guard), &leaf)
-                .expect("the event log is created");
+            let files = Arc::new(crate::fit::output::DirWriter::new(&leaf));
+            let log = events::EventLog::create(&leaf).expect("the event log is created");
+            out.begin_method(header.clone(), "pmmh", None, Arc::new(guard), files, log)
+                .expect("the event log is written");
             out.method_done();
             assert_eq!(io::read_progress(&leaf).unwrap().state, io::RunState::Done);
             if commit {
@@ -669,8 +672,10 @@ mod tests {
         let mut out = Out::new(true);
         let leaf = std::env::temp_dir().join(format!("camdl_out_record_{}", std::process::id()));
         std::fs::create_dir_all(&leaf).unwrap();
-        let worker = out.begin_method(header.clone(), "pmmh", None, Arc::new(io::HeartbeatGuard::inert()), &leaf)
-            .expect("the event log is created");
+        let files = Arc::new(crate::fit::output::DirWriter::new(&leaf));
+        let log = events::EventLog::create(&leaf).expect("the event log is created");
+        let worker = out.begin_method(header.clone(), "pmmh", None, Arc::new(io::HeartbeatGuard::inert()), files, log)
+            .expect("the event log is written");
         out.check(Check::Starts { mode: "lhs".into(), params: vec!["beta".into()], note: "n".into() });
         out.finding(DiagnosticKind::InitialLoglikInfinite);
         std::thread::scope(|s| {

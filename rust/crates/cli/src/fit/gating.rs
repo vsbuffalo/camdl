@@ -1041,7 +1041,7 @@ mod tests {
         let sampler = scratch_leaf("no_summary");
         let mut st = make_state(&[], &[], &[-60.0, -61.0], -60.0);
         st.method = "pgas".into();
-        st.save(&sampler.to_string_lossy()).unwrap();
+        st.save(&crate::fit::output::DirWriter::new(&sampler)).unwrap();
         std::fs::write(sampler.join("run.json"), "{ not json").unwrap();
         let err = check_source_converged(&sampler, "@sampler", false)
             .expect_err("an unreadable run.json is refused");

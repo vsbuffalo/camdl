@@ -198,11 +198,10 @@ impl TrajManifest {
     }
 
     /// Write the manifest as pretty JSON to `path`.
-    pub fn write(&self, path: &Path) -> Result<(), String> {
-        let json = serde_json::to_string_pretty(&self.to_json())
-            .map_err(|e| format!("trajectories manifest: json error: {e}"))?;
-        std::fs::write(path, json)
-            .map_err(|e| format!("cannot write {}: {e}", path.display()))
+    /// The manifest as `trajectories.json` holds it.
+    pub fn to_text(&self) -> Result<String, String> {
+        serde_json::to_string_pretty(&self.to_json())
+            .map_err(|e| format!("trajectories manifest: json error: {e}"))
     }
 }
 
@@ -244,7 +243,7 @@ pub type DateOrigin<'a> = Option<(&'a str, &'a str)>;
 /// is a hard error — the writer never silently truncates or zero-fills.
 #[allow(clippy::too_many_arguments)]
 pub fn write_trajectories_tsv(
-    path: &Path,
+    out: impl Write,
     draws: &[PosteriorDraw],
     columns: &TrajColumnSpec,
     date_origin: DateOrigin,
@@ -252,12 +251,9 @@ pub fn write_trajectories_tsv(
     method: &str,
     granularity: Granularity,
 ) -> Result<(), String> {
-    let f = std::fs::File::create(path)
-        .map_err(|e| format!("cannot create {}: {e}", path.display()))?;
     // BufWriter: a substep-resolution national-scale path is thousands of rows ×
-    // hundreds of fields; unbuffered, each `write!` is a syscall. The simulate
-    // and (old) PGAS writers both buffer for exactly this reason.
-    let mut w = std::io::BufWriter::new(f);
+    // hundreds of fields; unbuffered, each `write!` is a write to the file.
+    let mut w = std::io::BufWriter::new(out);
     w.write_all(header_lines(columns, date_origin, model_hash, method, granularity).as_bytes())
         .map_err(|e| e.to_string())?;
     write_draw_rows(&mut w, draws, columns, date_origin)?;
@@ -265,27 +261,23 @@ pub fn write_trajectories_tsv(
     // Explicit flush: BufWriter swallows write errors on drop, which would
     // silently truncate the file if the disk filled during the final drain.
     w.flush()
-        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        .map_err(|e| format!("cannot write trajectories.tsv: {e}"))?;
     Ok(())
 }
 
-/// Append `draws` to an existing `trajectories.tsv` — the one a resumed PGAS
-/// chain copied from its parent leaf — so the file holds every saved path of
-/// the whole chain under one header.
+/// Append `draws` to an existing `trajectories.tsv`, whose bytes so far are
+/// `existing` — the one a resumed PGAS chain carried from its parent leaf —
+/// through `out`, which appends to that file, so the file holds every saved
+/// path of the whole chain under one header.
 ///
 /// The file's two header lines must be exactly the ones
 /// [`write_trajectories_tsv`] would write for these arguments: a parent whose
 /// model, method, granularity, calendar or column layout differs is refused,
 /// never appended to under a header that does not describe the new rows.
 #[allow(clippy::too_many_arguments)]
-#[expect(
-    clippy::disallowed_methods,
-    reason = "rereads the trajectories file it is about to append to, in the fit's own working \
-              directory (`fit::pgas`); on a resume that file is the base run's copy, carried in \
-              through `Run::open_in` on the declared `resumed_from` dependency"
-)]
 pub fn append_trajectories_tsv(
-    path: &Path,
+    existing: &[u8],
+    out: impl Write,
     draws: &[PosteriorDraw],
     columns: &TrajColumnSpec,
     date_origin: DateOrigin,
@@ -294,24 +286,20 @@ pub fn append_trajectories_tsv(
     granularity: Granularity,
 ) -> Result<(), String> {
     let expected = header_lines(columns, date_origin, model_hash, method, granularity);
-    let existing = std::fs::read(path)
-        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     if !existing.starts_with(expected.as_bytes()) {
         return Err(format!(
-            "{}: its header is not the one this run writes, so the new paths \
+            "trajectories.tsv: its header is not the one this run writes, so the new paths \
              cannot be appended under it (expected {:?})",
-            path.display(), expected
+            expected
         ));
     }
     if !existing.ends_with(b"\n") {
-        return Err(format!("{}: the last row is incomplete (no trailing newline)", path.display()));
+        return Err("trajectories.tsv: the last row is incomplete (no trailing newline)".to_string());
     }
-    let f = std::fs::OpenOptions::new().append(true).open(path)
-        .map_err(|e| format!("cannot open {} for append: {e}", path.display()))?;
-    let mut w = std::io::BufWriter::new(f);
+    let mut w = std::io::BufWriter::new(out);
     write_draw_rows(&mut w, draws, columns, date_origin)?;
     w.flush()
-        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        .map_err(|e| format!("cannot write trajectories.tsv: {e}"))?;
     Ok(())
 }
 
@@ -996,6 +984,25 @@ impl<'a> RowLayout<'a> {
 mod tests {
     use super::*;
     use sim::{IntState, RealState, Snapshot};
+
+    /// [`super::write_trajectories_tsv`] into the file at `path`.
+    fn write_trajectories_tsv(
+        path: &Path, draws: &[PosteriorDraw], columns: &TrajColumnSpec, date_origin: DateOrigin,
+        model_hash: &str, method: &str, granularity: Granularity,
+    ) -> Result<(), String> {
+        let f = std::fs::File::create(path).map_err(|e| e.to_string())?;
+        super::write_trajectories_tsv(f, draws, columns, date_origin, model_hash, method, granularity)
+    }
+
+    /// [`super::append_trajectories_tsv`] onto the file at `path`.
+    fn append_trajectories_tsv(
+        path: &Path, draws: &[PosteriorDraw], columns: &TrajColumnSpec, date_origin: DateOrigin,
+        model_hash: &str, method: &str, granularity: Granularity,
+    ) -> Result<(), String> {
+        let existing = std::fs::read(path).map_err(|e| e.to_string())?;
+        let f = std::fs::OpenOptions::new().append(true).open(path).map_err(|e| e.to_string())?;
+        super::append_trajectories_tsv(&existing, f, draws, columns, date_origin, model_hash, method, granularity)
+    }
 
     fn snap(t: f64, ints: Vec<i64>, flows: Vec<u64>) -> Snapshot {
         Snapshot {

@@ -11,9 +11,9 @@
 //! chain workers write to it through the handle's collector and progress
 //! tasks, so every line goes through one [`EventLog`] behind one lock. Each
 //! line is written whole with one `write`, so a reader tailing the file sees
-//! whole lines. The log is a display record: it enters no hash, and `fit
-//! run` does not store it ([`EVENT_LOG`]), because the end-of-run report is
-//! appended after the run's files are stored.
+//! whole lines. In `fit run` each line goes to the run's own event log
+//! (`store::Run::event`), an attempt record outside the manifest. The log
+//! is a display record and enters no hash.
 //!
 //! A write that fails is the run's failure, as `diagnostics.json`'s is: the
 //! first failure is kept, later events are not written, and the run reports
@@ -23,8 +23,6 @@
 //! [`Out::events_result`]: super::Out::events_result
 //! [`Out::close_events`]: super::Out::close_events
 
-use std::io::Write;
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -39,7 +37,8 @@ use sim::inference::diagnostic::{AcceptanceBand, Diagnostic};
 /// or a removed field, is a new version; a new event or a new field is not.
 pub const SCHEMA: &str = "camdl.events/v1";
 
-/// The event log's file name in a method directory.
+/// The event log's file name in a directory ([`EventLog::create`]).
+#[cfg(test)]
 pub const EVENT_LOG: &str = "events.jsonl";
 
 /// One event a running method reports.
@@ -137,49 +136,59 @@ struct Line<'a> {
 pub struct EventLog(Arc<Inner>);
 
 struct Inner {
-    path: PathBuf,
+    /// What a failed write names: the file, or the run's log.
+    target: String,
     began: Instant,
     state: Mutex<State>,
 }
 
+/// Where each line goes: the function given each line's JSON value in turn.
+pub type EventSink = Box<dyn FnMut(&serde_json::Value) -> Result<(), String> + Send>;
+
 struct State {
     /// `None` once a write has failed.
-    file: Option<std::fs::File>,
+    sink: Option<EventSink>,
     seq: u64,
     failure: Option<String>,
 }
 
 impl EventLog {
     /// Create `dir/events.jsonl`, replacing any log a previous run left.
-    pub fn create(dir: &Path) -> Result<Self, String> {
+    #[cfg(test)]
+    pub fn create(dir: &std::path::Path) -> Result<Self, String> {
+        use std::io::Write;
         let path = dir.join(EVENT_LOG);
-        let file = std::fs::File::create(&path).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-        Ok(EventLog(Arc::new(Inner {
-            path,
+        let mut file = std::fs::File::create(&path).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        let sink: EventSink = Box::new(move |v: &serde_json::Value| {
+            let mut text = v.to_string();
+            text.push('\n');
+            file.write_all(text.as_bytes()).map_err(|e| e.to_string())
+        });
+        Ok(EventLog::to(sink, path.display().to_string()))
+    }
+
+    /// A log whose lines go to `sink`, named `target` when a write fails.
+    pub fn to(sink: EventSink, target: String) -> Self {
+        EventLog(Arc::new(Inner {
+            target,
             began: Instant::now(),
-            state: Mutex::new(State { file: Some(file), seq: 0, failure: None }),
-        })))
+            state: Mutex::new(State { sink: Some(sink), seq: 0, failure: None }),
+        }))
     }
 
     /// Append `event` as one line. Numbers are kept exact: a non-finite one
     /// is the string `"NaN"`, `"inf"` or `"-inf"`, never `null`.
     pub fn record(&self, event: &Event<'_>) {
         let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
-        let State { file, seq, failure } = &mut *state;
-        let Some(f) = file.as_mut() else { return };
+        let State { sink, seq, failure } = &mut *state;
+        let Some(f) = sink.as_mut() else { return };
         let line = Line { schema: SCHEMA, seq: *seq, elapsed: self.0.began.elapsed().as_secs_f64(), event };
-        let written = crate::fit::report::exact::exact_json(&line)
-            .map_err(|e| e.to_string())
-            .and_then(|v| {
-                let mut text = v.to_string();
-                text.push('\n');
-                f.write_all(text.as_bytes()).map_err(|e| e.to_string())
-            });
+        let written = crate::fit::report::exact::exact_json(&line).map_err(|e| e.to_string()).and_then(|v| f(&v));
         match written {
             Ok(()) => *seq += 1,
             Err(e) => {
-                *failure = Some(format!("cannot write {}: {e}", self.0.path.display()));
-                *file = None;
+                *failure = Some(format!("cannot write {}: {e}", self.0.target));
+                *sink = None;
             }
         }
     }
@@ -286,11 +295,12 @@ mod tests {
         let path = dir.join("events.jsonl");
         std::fs::write(&path, "").unwrap();
         // Open for reading only, so every write fails.
-        let file = std::fs::File::open(&path).unwrap();
-        let log = EventLog(Arc::new(Inner {
-            path: path.clone(), began: Instant::now(),
-            state: Mutex::new(State { file: Some(file), seq: 0, failure: None }),
-        }));
+        let mut file = std::fs::File::open(&path).unwrap();
+        let sink: EventSink = Box::new(move |v: &serde_json::Value| {
+            use std::io::Write;
+            file.write_all(v.to_string().as_bytes()).map_err(|e| e.to_string())
+        });
+        let log = EventLog::to(sink, path.display().to_string());
         let h = header();
         log.record(&Event::Begin { method: "pmmh", header: &h, acceptance: None });
         let e = log.result().expect_err("a write to a read-only file failed");

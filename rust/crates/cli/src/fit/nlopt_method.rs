@@ -13,7 +13,6 @@
 //! module is the orchestration layer wiring it to the fit framework.
 
 use crate::out::paint::Style;
-use std::path::Path;
 use std::sync::Arc;
 
 use sim::inference::deterministic::{
@@ -38,7 +37,7 @@ pub fn run_method(
     out: &crate::out::Out,
     fit: &Problem,
     method: &Method,
-    method_dir: &Path,
+    files: &dyn super::output::RunWriter,
     seed: u64,
     starts: &super::chain_starts::ResolvedStarts,
     parent_fit_hash: &str,
@@ -140,10 +139,6 @@ pub fn run_method(
         drawn.to_param_vecs(&run_config.estimated_params, &run_config.base_params);
     let n_chains = effective_chains;
 
-    std::fs::create_dir_all(method_dir).map_err(|e| {
-        format!("creating {}: {}", method_dir.display(), e)
-    })?;
-
     let arc_config = Arc::new(run_config);
     let bounds_ref = bounds.clone();
     let est_indices_ref = est_indices.clone();
@@ -163,11 +158,11 @@ pub fn run_method(
     // did, and a run killed partway lost every result it had. The rows land
     // in completion order; the file is rewritten in chain order once every
     // chain is in (`write_per_chain_files`, below).
-    let live_results = ChainResultsFile::create(method_dir, &est_names)?;
+    let live_results = ChainResultsFile::create(files, &est_names)?;
     // `opt_trace.tsv`, the searches' running best, written while they run
     // (`super::opt_trace`). The header goes down now, before any search
     // writes a row.
-    let opt_trace = super::opt_trace::OptTraceFile::create(method_dir, &est_names)?;
+    let opt_trace = super::opt_trace::OptTraceFile::create(files, &est_names)?;
 
     let t0 = std::time::Instant::now();
     // At most one chain per worker (gh#821, `chain_fanout`).
@@ -220,7 +215,7 @@ pub fn run_method(
     // over the completion-ordered file the chains appended to. Written before
     // the refusal below, so a refused method still records what each chain
     // reached.
-    write_per_chain_files(method_dir, &chain_outcomes, &est_names)?;
+    write_per_chain_files(files, &chain_outcomes, &est_names)?;
 
     // A chain that FAILED (the gradient could not be taken, or the cell was
     // mis-configured) reports `-inf` without having scored anything, so when
@@ -240,7 +235,7 @@ pub fn run_method(
             if distinct.len() == 1 { "Every chain gave the same reason".to_string() }
             else { format!("The first chain's reason ({} distinct in all)", distinct.len()) },
             reasons[0].trim_end_matches('.'),
-            method_dir.join("chain_results.tsv").display()
+            files.folder().join(CHAIN_RESULTS_FILE).display()
         ));
     }
 
@@ -262,7 +257,7 @@ pub fn run_method(
              mean is 0 for every θ in the bounds). Also check the observation \
              model and parameter bounds. Per-chain results: {}.",
             winner.loglik,
-            method_dir.join("chain_results.tsv").display()
+            files.folder().join(CHAIN_RESULTS_FILE).display()
         ));
     }
 
@@ -373,7 +368,7 @@ pub fn run_method(
         chain_loglik_agreement: None,
     };
     fit_state
-        .save(&method_dir.to_string_lossy())
+        .save(files)
         .map_err(|e| format!("writing fit_state.toml: {e}"))?;
 
     // Write mle_params.toml — full parameter vector at the winner with
@@ -387,7 +382,6 @@ pub fn run_method(
     for (slot, name) in est_names.iter().enumerate() {
         all_params.insert(name.clone(), winner.params[slot]);
     }
-    let mle_path = method_dir.join("mle_params.toml");
     let mle_meta = provenance::MleMetadata {
         input_hash: parent_fit_hash.to_string(),
         // The leaf is `<fit folder>/<method>-<h8>/seed_<n>-<h8>`.
@@ -405,9 +399,9 @@ pub fn run_method(
         n_particles: 0,
         ess_at_mle: None,
     };
-    if let Err(e) = provenance::write_mle_params(
-        &mle_path.to_string_lossy(), &all_params, &mle_meta,
-    ) {
+    if let Err(e) = provenance::mle_params_text(&all_params, &mle_meta)
+        .and_then(|text| files.put("mle_params.toml", text.as_bytes()))
+    {
         out.say(format_args!("warning: writing mle_params.toml failed: {e}"));
     }
 
@@ -807,58 +801,44 @@ fn chain_results_row(chain_idx: usize, c: &ChainOutcome) -> String {
 /// ran it.
 ///
 /// Each row is formatted in full first and handed to the file in a single
-/// unbuffered `write_all` under the lock, so a reader tailing the file sees
+/// unbuffered append, so a reader tailing the file sees
 /// whole rows only, and a run killed between chains leaves every finished
 /// chain's row on disk. [`TraceWriter`](super::trace_writer::TraceWriter) is
 /// not used: its fixed `index, loglik, log_posterior` columns are not this
 /// table's, and it batches rows behind a `BufWriter`, which is the delay this
 /// file exists to remove.
 struct ChainResultsFile {
+    /// Where the file can be read while it is written.
     path: std::path::PathBuf,
-    file: std::sync::Mutex<std::fs::File>,
+    file: super::output::OutFile,
 }
 
 impl ChainResultsFile {
-    fn create(method_dir: &Path, est_names: &[String]) -> Result<Self, String> {
-        use std::io::Write;
-        let path = method_dir.join(CHAIN_RESULTS_FILE);
-        let mut file = std::fs::File::create(&path)
-            .map_err(|e| format!("creating {}: {e}", path.display()))?;
-        file.write_all(chain_results_header(est_names).as_bytes())
-            .map_err(|e| format!("writing {}: {e}", path.display()))?;
-        Ok(ChainResultsFile { path, file: std::sync::Mutex::new(file) })
+    fn create(files: &dyn super::output::RunWriter, est_names: &[String]) -> Result<Self, String> {
+        let file = files.create(CHAIN_RESULTS_FILE)?;
+        file.write_all(chain_results_header(est_names).as_bytes())?;
+        Ok(ChainResultsFile { path: files.folder().join(CHAIN_RESULTS_FILE), file })
     }
 
-    fn append(&self, chain_idx: usize, c: &ChainOutcome) -> std::io::Result<()> {
-        use std::io::Write;
-        let row = chain_results_row(chain_idx, c);
-        // A worker that panicked mid-append wrote a whole row or none of it
-        // (one `write_all` of a short line); the file is still usable.
-        let mut file = self.file.lock().unwrap_or_else(|p| p.into_inner());
-        file.write_all(row.as_bytes())?;
-        file.flush()
+    fn append(&self, chain_idx: usize, c: &ChainOutcome) -> Result<(), String> {
+        self.file.write_all(chain_results_row(chain_idx, c).as_bytes())
     }
 }
 
-/// The finished `chain_results.tsv`: every chain's row in chain order.
-/// Written to a sibling and renamed into place, so a viewer reading the file
+/// The finished `chain_results.tsv`: every chain's row in chain order,
+/// replacing the completion-ordered rows whole, so a viewer reading the file
 /// during the swap sees either the completion-ordered rows or the sorted ones,
 /// never a truncated file.
 fn write_per_chain_files(
-    method_dir: &Path,
+    files: &dyn super::output::RunWriter,
     chain_outcomes: &[(usize, ChainOutcome)],
     est_names: &[String],
 ) -> Result<(), String> {
-    let path = method_dir.join(CHAIN_RESULTS_FILE);
-    let tmp = method_dir.join(format!("{CHAIN_RESULTS_FILE}.tmp"));
     let mut text = chain_results_header(est_names);
     for (chain_idx, c) in chain_outcomes {
         text.push_str(&chain_results_row(*chain_idx, c));
     }
-    std::fs::write(&tmp, text).map_err(|e| format!("writing {}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, &path).map_err(|e| {
-        format!("moving {} into place at {}: {e}", tmp.display(), path.display())
-    })
+    files.put(CHAIN_RESULTS_FILE, text.as_bytes())
 }
 
 /// Two-leg convergence diagnostic for NLopt methods — generalises IF2's
@@ -1330,7 +1310,7 @@ mod tests {
     fn an_observed_search_is_bit_identical_to_an_unobserved_one() {
         let (compiled, obs_model, obs_times, _) = seir_gradient_fixture();
         let dir = tempfile::tempdir().unwrap();
-        let file = super::super::opt_trace::OptTraceFile::create(dir.path(), &names(2)).unwrap();
+        let file = super::super::opt_trace::OptTraceFile::create(&crate::fit::output::DirWriter::new(dir.path()), &names(2)).unwrap();
         for (algorithm, est, bounds, start) in traced_cells() {
             let run = |observe: Option<&mut dyn FnMut(Evaluation<'_>)>| {
                 optimize_cell(algorithm, &compiled, &obs_model, &obs_times, 1.0,
@@ -1364,7 +1344,7 @@ mod tests {
         let (compiled, obs_model, obs_times, _) = seir_gradient_fixture();
         for (algorithm, est, bounds, start) in traced_cells() {
             let dir = tempfile::tempdir().unwrap();
-            let file = super::super::opt_trace::OptTraceFile::create(dir.path(), &names(2)).unwrap();
+            let file = super::super::opt_trace::OptTraceFile::create(&crate::fit::output::DirWriter::new(dir.path()), &names(2)).unwrap();
             let path = file.path.clone();
             let mut trace = super::super::opt_trace::SearchTrace::new(&file, 2);
             // What a reader sees mid-search: at eval 2, and at eval 27 when
@@ -1656,7 +1636,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let est = names(2);
         let chains = three_chains();
-        let live = ChainResultsFile::create(dir.path(), &est).unwrap();
+        let live = ChainResultsFile::create(&crate::fit::output::DirWriter::new(dir.path()), &est).unwrap();
         let path = dir.path().join(CHAIN_RESULTS_FILE);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), chain_results_header(&est),
             "the header is on disk before any chain finishes");
@@ -1682,12 +1662,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let est = names(2);
         let chains = three_chains();
-        let live = ChainResultsFile::create(dir.path(), &est).unwrap();
+        let live = ChainResultsFile::create(&crate::fit::output::DirWriter::new(dir.path()), &est).unwrap();
         for i in [1, 2, 0] {
             live.append(i, &chains[i].1).unwrap();
         }
         drop(live);
-        write_per_chain_files(dir.path(), &chains, &est).unwrap();
+        write_per_chain_files(&crate::fit::output::DirWriter::new(dir.path()), &chains, &est).unwrap();
         let text = std::fs::read_to_string(dir.path().join(CHAIN_RESULTS_FILE)).unwrap();
         assert_eq!(text, chain_results_as_written_once(&chains, &est));
         let entries: Vec<_> = std::fs::read_dir(dir.path()).unwrap()
@@ -1702,7 +1682,7 @@ mod tests {
     fn concurrent_appends_keep_every_row_whole() {
         let dir = tempfile::tempdir().unwrap();
         let est = names(6);
-        let live = ChainResultsFile::create(dir.path(), &est).unwrap();
+        let live = ChainResultsFile::create(&crate::fit::output::DirWriter::new(dir.path()), &est).unwrap();
         const N: usize = 64;
         std::thread::scope(|s| {
             for i in 0..N {

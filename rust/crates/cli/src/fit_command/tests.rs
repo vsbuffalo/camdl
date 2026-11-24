@@ -1181,6 +1181,96 @@ fn pfilter_refuses_a_stored_fit_that_held_rows_out() {
     ok(&filter("@whole"));
 }
 
+/// A fit run is written in place: while a long PMMH fit runs, its folder in
+/// the store reads as running and its chain's `trace.tsv` already holds rows,
+/// beside the run's progress snapshot and event log. A process killed while
+/// it runs leaves the folder, which the store reads as interrupted, and the
+/// next run of the same fit claims the folder again.
+#[test]
+fn a_running_fit_shows_its_traces_growing_in_its_folder() {
+    let cwd = workdir();
+    let store_root = cwd.path().join("camdl-store");
+    let long = problem("sir.ir.json", 0.5) + &method("pmmh").replace("iterations = 20", "iterations = 200000");
+    std::fs::write(cwd.path().join("fit_long.toml"), long).unwrap();
+    let fx = fixture();
+    // Killed when dropped, so a failing assertion leaves no fit running.
+    struct Running(std::process::Child);
+    impl Drop for Running {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let spawn = || {
+        Running(Command::new(&fx.camdl)
+            .current_dir(cwd.path())
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("HOME", cwd.path().join("home"))
+            .env("CAMDL_SKIP_VERSION_CHECK", "1")
+            .env("CAMDLC", &fx.camdlc)
+            .env("CAMDL_IR_CACHE_DIR", cwd.path().join("ir-cache"))
+            .env("CAMDL_STORE", &store_root)
+            .args(["fit", "run", "fit_long.toml", "--seed", "2", "--progress", "none"])
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap())
+    };
+    // The run's folder once its record says running and its first chain's
+    // trace holds at least two rows under its header.
+    let growing = || -> Option<PathBuf> {
+        let runs = complete_folders(&store_root).ok()?;
+        let (dir, _, record) = runs.into_iter().find(|(_, id, _)| id["kind"] == "fit_run")?;
+        let rows = std::fs::read_to_string(dir.join("chain_0/trace.tsv")).ok()?.lines().count().saturating_sub(1);
+        (record["status"] == "running" && rows >= 2).then_some(dir)
+    };
+    let wait_for = |what: &str, f: &dyn Fn() -> Option<PathBuf>| -> PathBuf {
+        let started = std::time::Instant::now();
+        loop {
+            if let Some(d) = f() {
+                return d;
+            }
+            assert!(started.elapsed() < std::time::Duration::from_secs(120), "{what}");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    };
+
+    let child = spawn();
+    let dir = wait_for("the running fit's trace grows in its folder", &growing);
+    assert!(dir.join("progress.json").is_file(), "the progress snapshot is beside the trace");
+    let events = std::fs::read_to_string(dir.join("events.jsonl")).unwrap();
+    let first: serde_json::Value = serde_json::from_str(events.lines().next().unwrap()).unwrap();
+    assert_eq!(first["event"]["event"], "begin", "{events}");
+    let rows_then = std::fs::read_to_string(dir.join("chain_0/trace.tsv")).unwrap().lines().count();
+    let more = || -> Option<PathBuf> {
+        let rows = std::fs::read_to_string(dir.join("chain_0/trace.tsv")).ok()?.lines().count();
+        (rows > rows_then).then(|| dir.clone())
+    };
+    wait_for("the trace keeps growing", &more);
+    drop(child);
+
+    let store = store::Store::open(
+        &store_root,
+        crate::camdl_store::ambient(),
+        crate::camdl_store::camdl_top_level(),
+        crate::camdl_store::camdl_kinds(),
+    )
+    .unwrap();
+    let entry = store
+        .resolve_entry::<crate::fit_store::FitRun>(&store::RunRef::new(store::Handle::Path(dir.clone())))
+        .unwrap();
+    assert!(matches!(entry.state(), store::EntryState::Interrupted { .. }), "{:?}", entry.state());
+
+    let again = spawn();
+    let pid = serde_json::Value::from(again.0.id());
+    let reclaimed = || -> Option<PathBuf> {
+        let record: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("run.json")).ok()?).ok()?;
+        (record["status"] == "running" && record["owner"]["pid"] == pid && dir.join(".attempts").is_dir())
+            .then(|| dir.clone())
+    };
+    wait_for("the next run claims the interrupted folder", &reclaimed);
+}
+
 /// A label's history is the store's: an invocation whose results did not
 /// all complete (here a run killed while it ran) never held the label, so
 /// `@lab~1` names the run before it, and the history a refusal lists counts

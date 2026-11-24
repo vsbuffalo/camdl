@@ -270,22 +270,21 @@ impl PgasMethodOpts {
 }
 
 // Per-method entry point for PGAS — wide because every flag is
-// independent at the dispatch site (method_dir, opts struct, RNG seed,
+// independent at the dispatch site (the run's files, opts struct, RNG seed,
 // --resume, the resolved starts). Same pattern as
 // `main::build_simulate_cas_sink` and `main::run_simulate`, both of which
 // also carry this allow.
 #[allow(clippy::too_many_arguments)]
-#[expect(clippy::disallowed_methods, reason = "reads each chain's `resume_state.bin`, which `fit run` carried into this method's working directory from the base run through the run's `resumed_from` dependency")]
+#[expect(clippy::disallowed_methods, reason = "reads back from the running run's folder each chain's `resume_state.bin`, which `fit run` carried in from the base run through the run's `resumed_from` dependency, and the trajectories a resumed chain extends")]
 pub fn run_method(
     fit: &super::config_v2::Problem,
     method: &super::config_v2::Method,
-    method_dir: &Path,
+    files: &dyn super::output::RunWriter,
     pgas_opts: PgasMethodOpts,
     seed: u64,
     force: bool,
     // The leaf `--resume` continues, whose chain files the dispatcher has
-    // copied into `method_dir` (`resumed_chain::copy_parent_chains`); `None`
-    // for a fresh run.
+    // carried into `files`; `None` for a fresh run.
     resume_base: Option<&Path>,
     // The leaf's resume-compatibility key (`cas::resume_guard`): recorded in
     // each chain's `resume_state.bin`, and checked against the base's under
@@ -311,18 +310,12 @@ pub fn run_method(
     let use_nuts = pgas_opts.use_nuts;
     let dense_mass = pgas_opts.dense_mass;
 
-    if !force && !resume {
-        let state_path = method_dir.join("fit_state.toml");
-        if state_path.exists() {
-            out.say(format_args!("{}", crate::out::paint::stderr().paint(&format!(
-                "pgas results already exist in {}. Use --force to re-run or --resume to continue.",
-                method_dir.display()), Style::Warn)));
-            return Ok(Vec::new());
-        }
+    if !force && !resume && files.opened(super::state::FIT_STATE_FILE) {
+        out.say(format_args!("{}", crate::out::paint::stderr().paint(&format!(
+            "pgas results already exist in {}. Use --force to re-run or --resume to continue.",
+            files.folder().display()), Style::Warn)));
+        return Ok(Vec::new());
     }
-
-    std::fs::create_dir_all(method_dir)
-        .map_err(|e| format!("cannot create {}: {}", method_dir.display(), e))?;
 
     let collector = out.collector();
 
@@ -462,7 +455,7 @@ pub fn run_method(
         let mut states = Vec::with_capacity(n_chains);
         let mut any_failed = false;
         for chain in ChainIndex::all(n_chains) {
-            let path: PathBuf = chain.dir_in(method_dir).join("resume_state.bin");
+            let path: PathBuf = chain.dir_in(files.folder()).join("resume_state.bin");
             match std::fs::read(&path) {
                 Ok(data) => match bincode::deserialize::<ChainResumeState>(&data) {
                     Ok(state) => {
@@ -550,19 +543,12 @@ pub fn run_method(
         traj_plan.draw_stride.map_or("—".to_string(), |s| s.to_string()),
         traj_plan.n_draws, thin));
 
-    // Pre-create chain directories (must happen before parallel spawn)
-    for chain in ChainIndex::all(n_chains) {
-        let chain_dir = chain.dir_in(method_dir);
-        std::fs::create_dir_all(&chain_dir)
-            .map_err(|e| format!("cannot create {}: {}", chain_dir.display(), e))?;
-    }
-
     // The audit sidecar, captured before any sweep runs so a watcher can read
     // the starts while the chains are still going, and rewritten from the
     // final record once they finish (gh#887, gh#904). The pre-run write can
     // only say `accepted` — no chain has been refused yet — so the rewrite is
     // what makes the file true, and it is unconditional.
-    super::runner::record_chain_starts(out, method_dir, &config, &drawn);
+    super::runner::record_chain_starts(out, files, &config, &drawn);
     let retry_accepted: std::sync::Mutex<Vec<Option<super::chain_starts::ChainStart>>> =
         std::sync::Mutex::new(vec![None; n_chains]);
     let retry_rejected: std::sync::Mutex<Vec<super::chain_starts::RejectedStart>> =
@@ -682,7 +668,7 @@ pub fn run_method(
         super::chain_fanout::run_chains(n_chains, |chain_id| {
             let chain = ChainIndex(chain_id);
             let chain_seed = crate::util::derive_chain_seed(seed, chain_id);
-            let chain_dir = chain.dir_in(method_dir);
+            let chain_dir = chain.dir_in(files.folder());
             let task = &bars[chain_id];
             // gh#751. HERE, at the top of the closure, is the moment a worker
             // picked this chain up — a chain still queued behind the pool has
@@ -723,8 +709,7 @@ pub fn run_method(
                     .collect();
 
             // Streaming trace file — append when resuming, create when fresh
-            let trace_path = chain_dir.join("trace.tsv");
-            let trace_path_str = trace_path.to_string_lossy().into_owned();
+            let trace_name = format!("{}/trace.tsv", chain.dir_name());
             let is_resuming = resume_states[chain_id].is_some();
             let param_names: Vec<String> = config.estimated_params.iter()
                 .map(|s| s.name.clone()).collect();
@@ -838,7 +823,7 @@ pub fn run_method(
             trace_columns.extend(["tree_depth", "n_leapfrog", "step_size", "accept_stat",
                   "n_divergent", "energy"]);
             let trace_writer = super::trace_writer::TraceWriter::new(
-                &trace_path_str, "sweep", "log_complete_data_ll",
+                files, &trace_name, "sweep", "log_complete_data_ll",
                 &trace_columns,
                 &param_names, is_resuming,
             );
@@ -1175,7 +1160,7 @@ pub fn run_method(
             } };
 
             // Save resume state for future --resume
-            super::resumed_chain::write_resume_state(&chain_dir, &result.resume_state)
+            super::resumed_chain::write_resume_state(files, chain, &result.resume_state)
                 .map_err(|e| format!("pgas chain {}: {e}", chain))?;
 
             // Write this chain's posterior latent trajectories: one tidy/long
@@ -1183,6 +1168,7 @@ pub fn run_method(
             // time [date]` id columns) + a `trajectories.json` manifest. Replaces
             // the per-draw `trajectory_NNNNNN.tsv` wide files.
             let draws = saved_draws.into_inner();
+            let tsv_name = format!("{}/trajectories.tsv", chain.dir_name());
             let tsv_path = chain_dir.join("trajectories.tsv");
             // A resumed chain's file already holds its base's paths; the new
             // segment's are appended under the same header, so the file is the
@@ -1200,15 +1186,20 @@ pub fn run_method(
             let date_origin = traj_date_origin.as_ref()
                 .map(|(o, u)| (o.as_str(), u.as_str()));
             if !draws.is_empty() {
-                let write = if is_resuming && tsv_path.is_file() {
-                    io::trajectories::append_trajectories_tsv
+                let written = if is_resuming && files.opened(&tsv_name) {
+                    let existing = std::fs::read(&tsv_path)
+                        .map_err(|e| format!("cannot read {}: {e}", tsv_path.display()));
+                    existing.and_then(|existing| io::trajectories::append_trajectories_tsv(
+                        &existing, files.append(&tsv_name)?, &draws, traj_columns, date_origin,
+                        &traj_model_hash, "pgas", Granularity::Substep,
+                    ))
                 } else {
-                    write_trajectories_tsv
+                    files.create(&tsv_name).and_then(|f| write_trajectories_tsv(
+                        f, &draws, traj_columns, date_origin,
+                        &traj_model_hash, "pgas", Granularity::Substep,
+                    ))
                 };
-                write(
-                    &tsv_path, &draws, traj_columns, date_origin,
-                    &traj_model_hash, "pgas", Granularity::Substep,
-                ).map_err(|e| format!("pgas chain {}: {}", chain, e))?;
+                written.map_err(|e| format!("pgas chain {}: {}", chain, e))?;
 
                 // The writer above already validated every draw's shape, so a
                 // refusal here is a defect, not a data condition.
@@ -1216,7 +1207,7 @@ pub fn run_method(
                     .map_err(|e| format!("pgas chain {}: {}", chain, e))?;
                 chain_paths.lock().unwrap()[chain_id] = flat;
             }
-            if tsv_path.is_file() {
+            if files.opened(&tsv_name) {
                 let manifest = TrajManifest {
                     method: "pgas".to_string(),
                     granularity: Granularity::Substep,
@@ -1245,7 +1236,8 @@ pub fn run_method(
                     predictive_obs_file: None,
                     calendar: traj_calendar,
                 };
-                let _ = manifest.write(&chain_dir.join("trajectories.json"));
+                let _ = manifest.to_text()
+                    .and_then(|t| files.put(&format!("{}/trajectories.json", chain.dir_name()), t.as_bytes()));
             }
 
             let chain_elapsed = chain_start.elapsed();
@@ -1314,7 +1306,7 @@ pub fn run_method(
         retry_rejected.into_inner().unwrap(),
         retry_refused.into_inner().unwrap(),
     );
-    super::runner::record_chain_starts(out, method_dir, &config, &drawn);
+    super::runner::record_chain_starts(out, files, &config, &drawn);
 
     // gh#607. Skip + continue: surface "ran K of N chains" so the user knows
     // the downstream R̂/ESS exclude the skipped chains. This line is the
@@ -1374,7 +1366,7 @@ pub fn run_method(
                 return Ok(None);
             }
             super::resumed_chain::inherited_draws(
-                &ChainIndex(*chain_id).dir_in(method_dir).join("trace.tsv"),
+                &ChainIndex(*chain_id).dir_in(files.folder()).join("trace.tsv"),
                 "sweep", boundary[*chain_id], burn_in, thin, &param_names,
             ).map(Some)
         })
@@ -1466,7 +1458,7 @@ pub fn run_method(
     // chain's retained draws, and recorded in the summary for every reader. A
     // chain that differs beyond its Monte Carlo error is a finding.
     let chain_logliks = super::chain_diagnostics::recorded_chain_loglik_agreement(
-        method_dir,
+        files.folder(),
         LoglikType::CompleteData,
         all_results.iter().zip(&inherited).map(|((c, sweeps, _), base)| {
             (ChainIndex(*c), base.as_ref().map_or(0, |b| b.index.len()) + sweeps.len())
@@ -1512,7 +1504,7 @@ pub fn run_method(
         acc.finish()
     };
     if let Some(fe) = &filter_ess {
-        fe.write_tsv(&method_dir.join(super::filter_ess::FILTER_ESS_TSV))?;
+        fe.write_tsv(files.create(super::filter_ess::FILTER_ESS_TSV)?)?;
     }
 
     // R̂/ESS of every latent state at every substep across the chains' saved
@@ -1526,7 +1518,7 @@ pub fn run_method(
         // A resumed leaf's paths span its base's sweeps too, so they are read
         // back from the whole-chain files rather than taken from this call's.
         let blocks: Vec<super::latent_convergence::ChainPaths> = if resume {
-            super::latent_convergence::read_method_paths(method_dir)?
+            super::latent_convergence::read_method_paths(files.folder())?
                 .map(|(blocks, _)| blocks)
                 .unwrap_or_default()
         } else {
@@ -1536,7 +1528,7 @@ pub fn run_method(
             &blocks, &traj_columns.data_column_names(),
         ) {
             Ok(lc) => {
-                lc.write_tsv(&method_dir.join(super::latent_convergence::LATENT_CONVERGENCE_TSV))?;
+                lc.write_tsv(files.create(super::latent_convergence::LATENT_CONVERGENCE_TSV)?)?;
                 Some(lc)
             }
             Err(_) => None,
@@ -1664,7 +1656,7 @@ pub fn run_method(
         })
         .collect();
     let saved_paths = SavedPathCounts::measure(&retained_sweeps, &saved_sweeps);
-    write_summary(method_dir, &all_results, kernel, thin, &traj_plan, &saved_paths,
+    write_summary(files, &all_results, kernel, thin, &traj_plan, &saved_paths,
         n_trajectories, &diagnostics, withheld.as_ref(), chain_logliks.as_ref(), path_renewal.as_ref(),
         filter_ess.as_ref().map(|fe| &fe.summary), latent_convergence.as_ref())?;
     // The chains' wall time is a property of this execution, not of the
@@ -1796,16 +1788,14 @@ pub fn run_method(
         optimizer_convergence: None,
         chain_loglik_agreement: None,
     };
-    state.save(&method_dir.to_string_lossy())?;
+    state.save(files)?;
 
     // Write draws.tsv: complete-M posterior draws (all params, estimated + fixed)
     // Post-burn-in, thinned draws from all chains combined.
     {
         use std::io::Write;
-        let draws_path = method_dir.join("draws.tsv");
         let mut f = std::io::BufWriter::new(
-            std::fs::File::create(&draws_path)
-                .map_err(|e| format!("cannot create {}: {}", draws_path.display(), e))?
+            files.create("draws.tsv").map_err(|e| format!("cannot create draws.tsv: {e}"))?
         );
 
         // Header: all model parameter names (estimated first, then fixed)
@@ -1871,13 +1861,13 @@ pub fn run_method(
         // Explicit flush: BufWriter swallows write errors on drop, which would
         // silently truncate draws.tsv if the disk filled during the final drain.
         f.flush()
-            .map_err(|e| format!("cannot write {}: {}", draws_path.display(), e))?;
+            .map_err(|e| format!("cannot write draws.tsv: {e}"))?;
         drop(f);
         out.say(format_args!("  draws.tsv: {} posterior samples (all {} params)", n_draws, all_names.len()));
     }
 
     // Persist the findings; the end of the run prints them once, merged.
-    super::write_diagnostics(&collector, method_dir)?;
+    super::write_diagnostics(&collector, files)?;
 
     // gh#785. `cross_chain_compat.json`, beside `diagnostics.json`: the
     // cross-chain path/parameter compatibility matrix `M[i][j] = log p(x_j |
@@ -1887,7 +1877,7 @@ pub fn run_method(
     // every draw is written, consuming no randomness.
     write_cross_chain_compat(
         out,
-        &config, dt, &all_results, chain_final_draw.into_inner().unwrap(), method_dir);
+        &config, dt, &all_results, chain_final_draw.into_inner().unwrap(), files);
 
     // The completion line and the best sweep's log-likelihood are drawn at
     // the end of the run from the execution record's `sampling_seconds` and
@@ -2103,7 +2093,7 @@ fn write_cross_chain_compat(
     dt: f64,
     all_results: &[(usize, Vec<PGASSweep>, Vec<f64>)],
     chain_final_draw: Vec<ChainFinalDraw>,
-    method_dir: &Path,
+    files: &dyn super::output::RunWriter,
 ) {
     use super::cross_chain_compat::{ChainDraw, CrossChainCompat};
 
@@ -2155,7 +2145,7 @@ fn write_cross_chain_compat(
             return;
         }
     };
-    if let Err(e) = compat.write(&method_dir.join(super::cross_chain_compat::CROSS_CHAIN_COMPAT_JSON)) {
+    if let Err(e) = compat.write(files) {
         out.say(format_args!("warning: {e}"));
     }
 }
@@ -2300,7 +2290,7 @@ pub(crate) fn read_saved_path_counts(
 
 #[allow(clippy::too_many_arguments)]
 fn write_summary(
-    dir: &Path,
+    files: &dyn super::output::RunWriter,
     results: &[(usize, Vec<PGASSweep>, Vec<f64>)],
     kernel: sim::inference::diagnostic::AcceptanceKernel,
     thin: usize,
@@ -2384,11 +2374,11 @@ fn write_summary(
         .extend(diagnostics.summary_fields(withheld));
     super::chain_diagnostics::insert_agreement(&mut summary, chain_logliks)?;
 
-    let path = dir.join(crate::run_meta::FitAlgorithm::Pgas.summary_filename());
+    let name = crate::run_meta::FitAlgorithm::Pgas.summary_filename();
     let contents = serde_json::to_string_pretty(&summary)
         .map_err(|e| format!("json error: {}", e))?;
-    std::fs::write(&path, contents)
-        .map_err(|e| format!("cannot write {}: {}", path.display(), e))
+    files.put(&name, contents.as_bytes())
+        .map_err(|e| format!("cannot write {name}: {e}"))
 }
 
 #[cfg(test)]

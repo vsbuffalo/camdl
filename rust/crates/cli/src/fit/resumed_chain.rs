@@ -23,19 +23,21 @@ use std::path::Path;
 /// rows. `trajectories.json` is not carried: it is rewritten whole.
 pub(crate) const CARRIED_CHAIN_FILES: [&str; 3] = [RESUME_STATE_FILE, "trace.tsv", "trajectories.tsv"];
 
-/// Write a chain's `resume_state.bin` into `chain_dir`, atomically.
+/// Write chain `chain`'s `resume_state.bin`, replacing the state a resumed
+/// chain was carried with.
 ///
 /// A serialize or write failure is returned, naming the file: a completed run
 /// without its resume state would otherwise only show up later, as a
 /// `--resume` that cannot say why it fails.
 pub(crate) fn write_resume_state<T: serde::Serialize>(
-    chain_dir: &Path,
+    files: &dyn crate::fit::output::RunWriter,
+    chain: score::convergence::ChainIndex,
     state: &T,
 ) -> Result<(), String> {
-    let path = chain_dir.join(RESUME_STATE_FILE);
+    let name = format!("{}/{RESUME_STATE_FILE}", chain.dir_name());
     let encoded = bincode::serialize(state)
-        .map_err(|e| format!("cannot encode {}: {e}", path.display()))?;
-    store::write_file_atomic(&path, &encoded)
+        .map_err(|e| format!("cannot encode {name}: {e}"))?;
+    files.put(&name, &encoded)
         .map_err(|e| format!("cannot write the chain's resume state: {e}"))
 }
 
@@ -238,8 +240,10 @@ mod tests {
 
     #[test]
     fn a_resume_state_is_written_whole_and_leaves_no_temporary() {
-        let d = tmp("resume_state_ok");
-        write_resume_state(&d, &vec![1.0_f64, 2.0]).unwrap();
+        let root = tmp("resume_state_ok");
+        let chain = score::convergence::ChainIndex(0);
+        write_resume_state(&crate::fit::output::DirWriter::new(&root), chain, &vec![1.0_f64, 2.0]).unwrap();
+        let d = chain.dir_in(&root);
         let back: Vec<f64> = bincode::deserialize(&std::fs::read(d.join(RESUME_STATE_FILE)).unwrap()).unwrap();
         assert_eq!(back, vec![1.0, 2.0]);
         let names: Vec<_> = std::fs::read_dir(&d).unwrap().map(|e| e.unwrap().file_name()).collect();
@@ -250,9 +254,11 @@ mod tests {
     /// names the file, and no temporary is left behind.
     #[test]
     fn a_resume_state_that_cannot_be_written_is_an_error_naming_the_file() {
-        let d = tmp("resume_state_unwritable");
-        std::fs::create_dir(d.join(RESUME_STATE_FILE)).unwrap();
-        let e = write_resume_state(&d, &vec![1.0_f64]).unwrap_err();
+        let root = tmp("resume_state_unwritable");
+        let chain = score::convergence::ChainIndex(0);
+        let d = chain.dir_in(&root);
+        std::fs::create_dir_all(d.join(RESUME_STATE_FILE)).unwrap();
+        let e = write_resume_state(&crate::fit::output::DirWriter::new(&root), chain, &vec![1.0_f64]).unwrap_err();
         assert!(e.contains(RESUME_STATE_FILE), "names the file: {e}");
         let left: Vec<_> = std::fs::read_dir(&d).unwrap().flatten()
             .map(|e| e.file_name().to_string_lossy().into_owned())

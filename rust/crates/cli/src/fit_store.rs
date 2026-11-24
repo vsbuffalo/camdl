@@ -1446,7 +1446,7 @@ impl RunFiles {
 
 /// The inputs `dir`, a run's folder or a copy of it, records
 /// ([`RUN_INPUTS_FILE`]).
-#[expect(clippy::disallowed_methods, reason = "reads `run_inputs.json` from the directory its caller passes: a scratch copy of a stored run's files read out through the store (`RunFiles` for `--resume`, an `OpenedFit` run copy), or the working directory this process's `fit run` is writing")]
+#[expect(clippy::disallowed_methods, reason = "reads `run_inputs.json` from the directory its caller passes: a scratch copy of a stored run's files read out through the store (`RunFiles` for `--resume`, an `OpenedFit` run copy), or the folder of the run this process's `fit run` is writing, read back")]
 pub(crate) fn read_run_inputs(dir: &Path) -> Result<serde_json::Value, String> {
     let path = dir.join(RUN_INPUTS_FILE);
     let bytes = std::fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;

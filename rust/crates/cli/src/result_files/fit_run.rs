@@ -9,12 +9,12 @@
 //! A method's marker type ([`Mh`], [`Pmmh`], [`Pgas`], [`If2`], [`Nlopt`],
 //! [`PfilterMethod`]) names its own enum as [`FitMethod::Own`] and lists the
 //! files a run of it stores ([`MethodFiles::files`]), computed before the run
-//! from its `[method]` table and its number of chains. A method writes its
-//! files in a scratch working directory; [`MethodOutput`] then writes exactly
-//! the declared files into the run and refuses any other file it finds there,
-//! naming it. An MH run's output is a `MethodOutput<Mh>`, whose
-//! [`MethodOutput::create`] takes only `CommonFile` and `McmcFile` variants,
-//! so a line that writes an IF2 file there does not compile.
+//! from its `[method]` table and its number of chains, and the files its
+//! recorded outcome adds ([`MethodFiles::outcome_files`]). A method writes
+//! its files into the run as it runs (`crate::fit::output`); when it ends,
+//! the run declares exactly these files ([`PlannedMethod::declared`]), so a
+//! file the method should have written and did not fails the run, and a file
+//! outside the set is refused by name.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -772,8 +772,6 @@ pub(crate) trait FitMethod {
     /// Its own files: [`McmcFile`] for MH and PMMH, [`PgasOwn`] for PGAS,
     /// [`If2File`], [`NloptFile`], [`PfilterMethodFile`].
     type Own: ResultFile + Clone + PartialEq + Into<FitRunFile>;
-    /// The `algorithm` key.
-    fn name(&self) -> &'static str;
 }
 
 /// How one chain of a run ended, as the final row of its chain in
@@ -821,7 +819,7 @@ impl FitOutcome {
     /// of each chain) and `pgas_summary.json`. A record that is absent or
     /// does not read states nothing: every chain ran and no PGAS table was
     /// computed.
-    #[expect(clippy::disallowed_methods, reason = "reads the run's records in a method's working directory, or in a stored run's folder in a test, to know which of its files the outcome allows")]
+    #[expect(clippy::disallowed_methods, reason = "reads the run's records in the folder of the run this process's `fit run` is writing, or in a stored run's folder in a test, to know which of its files the outcome allows")]
     pub(crate) fn read(dir: &Path) -> FitOutcome {
         let mut chains = BTreeMap::new();
         if let Ok(text) = std::fs::read_to_string(dir.join(McmcFile::ChainStarts.stored())) {
@@ -941,10 +939,8 @@ pub(crate) struct Pgas {
 }
 /// `if2`.
 pub(crate) struct If2;
-/// `nl-sbplx`, `nl-bobyqa` or `nl-lbfgs`, by its `algorithm` key.
-pub(crate) struct Nlopt {
-    pub name: &'static str,
-}
+/// `nl-sbplx`, `nl-bobyqa` or `nl-lbfgs`.
+pub(crate) struct Nlopt;
 /// `pfilter` as a fit method, with whether it records its prequential scores.
 pub(crate) struct PfilterMethod {
     pub record_prequential: bool,
@@ -952,9 +948,6 @@ pub(crate) struct PfilterMethod {
 
 impl FitMethod for Mh {
     type Own = McmcFile;
-    fn name(&self) -> &'static str {
-        "mh"
-    }
 }
 
 impl MethodFiles for Mh {
@@ -970,9 +963,6 @@ impl MethodFiles for Mh {
 
 impl FitMethod for Pmmh {
     type Own = McmcFile;
-    fn name(&self) -> &'static str {
-        "pmmh"
-    }
 }
 
 impl MethodFiles for Pmmh {
@@ -988,9 +978,6 @@ impl MethodFiles for Pmmh {
 
 impl FitMethod for Pgas {
     type Own = PgasOwn;
-    fn name(&self) -> &'static str {
-        "pgas"
-    }
 }
 
 impl MethodFiles for Pgas {
@@ -1032,9 +1019,6 @@ impl MethodFiles for Pgas {
 
 impl FitMethod for If2 {
     type Own = If2File;
-    fn name(&self) -> &'static str {
-        "if2"
-    }
 }
 
 impl MethodFiles for If2 {
@@ -1073,9 +1057,6 @@ impl MethodFiles for If2 {
 
 impl FitMethod for Nlopt {
     type Own = NloptFile;
-    fn name(&self) -> &'static str {
-        self.name
-    }
 }
 
 impl MethodFiles for Nlopt {
@@ -1092,9 +1073,6 @@ impl MethodFiles for Nlopt {
 
 impl FitMethod for PfilterMethod {
     type Own = PfilterMethodFile;
-    fn name(&self) -> &'static str {
-        "pfilter"
-    }
 }
 
 impl MethodFiles for PfilterMethod {
@@ -1108,105 +1086,6 @@ impl MethodFiles for PfilterMethod {
         }
         v
     }
-}
-
-// ── Writing a run's files ────────────────────────────────────────────────────
-
-/// The run a method's files are written into, with the method and its chain
-/// count, from which the files it declares follow.
-pub(crate) struct MethodOutput<'r, M: FitMethod> {
-    run: &'r mut store::Run<FitRun>,
-    method: &'r M,
-    n_chains: u32,
-    /// The files that do not depend on the outcome, a starts file included.
-    required: Vec<MethodFileRef<M::Own>>,
-}
-
-impl<'r, M: MethodFiles> MethodOutput<'r, M> {
-    /// The output of a run of `method` on `n_chains` chains into `run`, with
-    /// `starts`, the extension of a starts file named directly.
-    pub(crate) fn new(run: &'r mut store::Run<FitRun>, method: &'r M, n_chains: u32, starts: Option<&str>) -> Self {
-        let mut required = method.files(n_chains);
-        if let Some(ext) = starts {
-            required.push(MethodFileRef::Common(CommonFile::StartsInput(ext.to_string())));
-        }
-        MethodOutput { run, method, n_chains, required }
-    }
-
-    /// Opens `file` in the run, in its role.
-    #[allow(clippy::result_large_err)] // the store's error carries the paths and owners a person acts on, returned once
-    pub(crate) fn create(&self, file: MethodFileRef<M::Own>) -> store::Result<store::FileHandle> {
-        match file.role() {
-            Role::Result => self.run.result_file(&file.stored()),
-            Role::Provenance => self.run.provenance_file(&file.stored()),
-        }
-    }
-
-    /// Writes the files of `work`, the method's working directory, into the
-    /// run, and declares that the run holds exactly its required files and
-    /// the outcome files its records in `work` state
-    /// ([`FitOutcome::read`], [`MethodFiles::outcome_files`]), so a declared
-    /// file the method did not write fails the run at `finish`.
-    ///
-    /// When `whole` (the method completed), a file the run does not declare
-    /// is refused, by name and before any file is written. For a run that is
-    /// failing, each such file is kept as an attempt file, with no digest, and
-    /// its name returned for the failure's reason. The progress snapshot and
-    /// the event log are passed to the run's own records while the method
-    /// runs, and are not files of the run.
-    #[expect(clippy::disallowed_methods, reason = "reads the files a method wrote in this process's temporary working directory, to write them into the run")]
-    pub(crate) fn transfer(&mut self, work: &Path, whole: bool) -> Result<Vec<String>, String> {
-        let mut found: Vec<String> = Vec::new();
-        let mut stack = vec![work.to_path_buf()];
-        while let Some(d) = stack.pop() {
-            for e in std::fs::read_dir(&d).map_err(|e| format!("cannot read {}: {e}", d.display()))? {
-                let p = e.map_err(|e| e.to_string())?.path();
-                if p.is_dir() {
-                    stack.push(p);
-                } else {
-                    found.push(p.strip_prefix(work).expect("under the working directory").to_string_lossy().into_owned());
-                }
-            }
-        }
-        found.sort();
-        found.retain(|name| !is_attempt_channel(name));
-        let outcome = FitOutcome::read(work);
-        let declared: Vec<MethodFileRef<M::Own>> =
-            self.required.iter().cloned().chain(self.method.outcome_files(self.n_chains, &outcome)).collect();
-        let lookup = |name: &str| declared.iter().find(|f| f.stored() == name).cloned();
-        if whole {
-            if let Some(name) = found.iter().find(|n| lookup(n).is_none()) {
-                let mut names: Vec<String> = declared.iter().map(ResultFile::logical).collect();
-                names.sort();
-                return Err(format!(
-                    "the {} method wrote `{name}`, which is not among this run's files: {}",
-                    self.method.name(),
-                    names.join(", ")
-                ));
-            }
-        }
-        let mut stray = Vec::new();
-        for name in &found {
-            let path = work.join(name);
-            let bytes = std::fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-            let e = |e: store::Error| format!("{name}: {e}");
-            match lookup(name) {
-                Some(file) => self.create(file).map_err(e)?.write_all(&bytes).map_err(e)?,
-                None => {
-                    self.run.attempt_file(name).map_err(e)?.write_all(&bytes).map_err(e)?;
-                    stray.push(name.clone());
-                }
-            }
-        }
-        self.run.expect(super::expected(declared));
-        Ok(stray)
-    }
-}
-/// Whether `name`, a file of a method's working directory, is the progress
-/// snapshot or the event log: the channels the run's own records carry
-/// while the method runs (`Run::progress`, `Run::event`).
-pub(crate) fn is_attempt_channel(name: &str) -> bool {
-    name == io::PROGRESS_FILE || name == crate::out::events::EVENT_LOG
 }
 
 /// A fit run's method, chosen by its `algorithm`, with the settings that
@@ -1228,7 +1107,7 @@ impl PlannedMethod {
             Algorithm::PGAS { n_trajectories, .. } => PlannedMethod::Pgas(Pgas { n_trajectories: *n_trajectories }),
             Algorithm::IF2 { .. } => PlannedMethod::If2(If2),
             Algorithm::NlSbplx(_) | Algorithm::NlBobyqa(_) | Algorithm::NlLbfgs(_) => {
-                PlannedMethod::Nlopt(Nlopt { name: algorithm.method_name() })
+                PlannedMethod::Nlopt(Nlopt)
             }
             Algorithm::PFilter { record_prequential, .. } => {
                 PlannedMethod::Pfilter(PfilterMethod { record_prequential: *record_prequential })
@@ -1275,43 +1154,22 @@ impl PlannedMethod {
         }
     }
 
-    /// Writes a run's files into `run`: the declared files found in `work`
-    /// ([`MethodOutput::transfer`]) and, when a starts file was named
-    /// directly, its bytes as `inputs/starts.<ext>`. Returns the names of
-    /// the undeclared files a failing run kept as attempt files.
-    pub(crate) fn write(
-        &self,
-        run: &mut store::Run<FitRun>,
-        n_chains: u32,
-        work: &Path,
-        starts: Option<(&str, &[u8])>,
-        whole: bool,
-    ) -> Result<Vec<String>, String> {
-        fn write<M: MethodFiles>(
-            m: &M,
-            run: &mut store::Run<FitRun>,
-            n_chains: u32,
-            work: &Path,
-            starts: Option<(&str, &[u8])>,
-            whole: bool,
-        ) -> Result<Vec<String>, String> {
-            let mut out = MethodOutput::new(run, m, n_chains, starts.map(|(ext, _)| ext));
-            let stray = out.transfer(work, whole)?;
-            if let Some((ext, bytes)) = starts {
-                let file = MethodFileRef::Common(CommonFile::StartsInput(ext.to_string()));
-                let name = file.stored();
-                let e = |e: store::Error| format!("{name}: {e}");
-                out.create(file).map_err(e)?.write_all(bytes).map_err(e)?;
-            }
-            Ok(stray)
+    /// Every file a run on `n_chains` chains with the recorded `outcome`
+    /// stores: [`PlannedMethod::files`] and the files its outcome adds
+    /// ([`MethodFiles::outcome_files`]). A completed run holds exactly these.
+    pub(crate) fn declared(&self, n_chains: u32, starts: Option<&str>, outcome: &FitOutcome) -> Vec<FitRunFile> {
+        fn of<M: MethodFiles>(m: &M, n_chains: u32, outcome: &FitOutcome) -> Vec<FitRunFile> {
+            m.outcome_files(n_chains, outcome).into_iter().map(FitRunFile::from).collect()
         }
-        match self {
-            PlannedMethod::Mh(m) => write(m, run, n_chains, work, starts, whole),
-            PlannedMethod::Pmmh(m) => write(m, run, n_chains, work, starts, whole),
-            PlannedMethod::Pgas(m) => write(m, run, n_chains, work, starts, whole),
-            PlannedMethod::If2(m) => write(m, run, n_chains, work, starts, whole),
-            PlannedMethod::Nlopt(m) => write(m, run, n_chains, work, starts, whole),
-            PlannedMethod::Pfilter(m) => write(m, run, n_chains, work, starts, whole),
-        }
+        let mut v = self.files(n_chains, starts);
+        v.extend(match self {
+            PlannedMethod::Mh(m) => of(m, n_chains, outcome),
+            PlannedMethod::Pmmh(m) => of(m, n_chains, outcome),
+            PlannedMethod::Pgas(m) => of(m, n_chains, outcome),
+            PlannedMethod::If2(m) => of(m, n_chains, outcome),
+            PlannedMethod::Nlopt(m) => of(m, n_chains, outcome),
+            PlannedMethod::Pfilter(m) => of(m, n_chains, outcome),
+        });
+        v
     }
 }

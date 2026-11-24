@@ -1507,16 +1507,14 @@ pub fn source_label(rule: &ChainStarts, chain: ChainIndex) -> String {
 /// use — so a refusal naming "chain 4" leads to the row describing chain 4's
 /// start with no arithmetic (gh#781, gh#990).
 pub fn write_chain_starts_tsv(
-    dir: &Path,
+    files: &dyn crate::fit::output::RunWriter,
     base: &[EstimatedParam],
     rule: &ChainStarts,
     records: &[ChainStartRecord],
-) -> std::io::Result<()> {
+) -> Result<(), String> {
     use std::io::Write as _;
-    let path = dir.join("chain_starts.tsv");
-    let tmp = path.with_extension("tsv.tmp");
-    {
-        let mut f = std::fs::File::create(&tmp)?;
+    let mut f: Vec<u8> = Vec::new();
+    (|| -> std::io::Result<()> {
         let n_chains = records.iter().map(|r| r.chain_id.0 + 1).max().unwrap_or(0);
         let n_retried = records.iter().filter(|r| r.status == "rejected").count();
         // Comment header — stable, machine-parseable.
@@ -1563,10 +1561,14 @@ pub fn write_chain_starts_tsv(
             fields.push(rec.reason.replace(['\t', '\n'], " "));
             writeln!(f, "{}", fields.join("\t"))?;
         }
-    }
-    std::fs::rename(&tmp, &path)?;
-    Ok(())
+        Ok(())
+    })()
+    .map_err(|e| e.to_string())?;
+    files.put(CHAIN_STARTS_FILE, &f)
 }
+
+/// The record of each chain's start.
+pub(crate) const CHAIN_STARTS_FILE: &str = "chain_starts.tsv";
 
 fn format_float_for_tsv(v: f64) -> String {
     if v.is_nan() { "NaN".into() }
@@ -2020,7 +2022,7 @@ mod tests {
             "camdl_chain_starts_retry_{}_{}", std::process::id(),
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         std::fs::create_dir_all(&dir).unwrap();
-        write_chain_starts_tsv(&dir, &base_specs, &drawn.rule, &rows).unwrap();
+        write_chain_starts_tsv(&crate::fit::output::DirWriter::new(&dir), &base_specs, &drawn.rule, &rows).unwrap();
         let text = std::fs::read_to_string(dir.join("chain_starts.tsv")).unwrap();
         assert!(text.starts_with("# camdl chain_starts; starts=lhs; chains=2; kind=spread; retried=1\n"), "{text}");
         let header = text.lines().find(|l| !l.starts_with('#')).unwrap();
@@ -2687,7 +2689,7 @@ mod tests {
             ess: None, reason: String::new(),
         };
         let records = vec![accepted(ChainIndex(0)), accepted(ChainIndex(1))];
-        write_chain_starts_tsv(dir.path(), &base, &rule, &records).unwrap();
+        write_chain_starts_tsv(&crate::fit::output::DirWriter::new(dir.path()), &base, &rule, &records).unwrap();
         let txt = std::fs::read_to_string(dir.path().join("chain_starts.tsv")).unwrap();
         let header = txt.lines().next().unwrap();
         assert!(header.contains("starts=from_mle @up"), "{header}");
@@ -2725,7 +2727,7 @@ mod tests {
             values: vec![0.1 * (chain_id.0 as f64 + 1.0)],
             ess: None, reason: String::new(),
         }).collect();
-        write_chain_starts_tsv(dir.path(), &base, &rule, &records).unwrap();
+        write_chain_starts_tsv(&crate::fit::output::DirWriter::new(dir.path()), &base, &rule, &records).unwrap();
         let txt = std::fs::read_to_string(dir.path().join("chain_starts.tsv")).unwrap();
 
         let rows: Vec<Vec<&str>> = txt.lines()

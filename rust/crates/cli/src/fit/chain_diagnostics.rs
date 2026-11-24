@@ -782,7 +782,7 @@ fn discover_chain_dirs(method_dir: &Path) -> Vec<(ChainIndex, std::path::PathBuf
 /// short or unparseable, which keeps the returned vectors aligned with one
 /// another (a caller reading `obs_ll` beside `transition_ll` compares the same
 /// sweeps).
-#[expect(clippy::disallowed_methods, reason = "reads a chain's `trace.tsv` under a method directory: the working directory this process's `fit run` is writing, or a `fit_store::RunFiles` copy of a stored run read out through the store")]
+#[expect(clippy::disallowed_methods, reason = "reads a chain's `trace.tsv` under a method directory: the folder of the run this process's `fit run` is writing, read back, or a `fit_store::RunFiles` copy of a stored run read out through the store")]
 fn read_trace_cols(trace_path: &Path, names: &[&str]) -> Option<Vec<Option<Vec<f64>>>> {
     let contents = std::fs::read_to_string(trace_path).ok()?;
     let mut lines = contents.lines();
@@ -899,7 +899,7 @@ pub fn read_chain_neginf(method_dir: &Path) -> Option<Vec<ChainNegInf>> {
 
 /// Read `draws.tsv` and return the per-chain kept-draw count, keyed by the
 /// `chain` column. Empty when the file is missing or has no `chain` column.
-#[expect(clippy::disallowed_methods, reason = "reads a method's `draws.tsv`: the working directory this process's `fit run` is writing, or a `fit_store::RunFiles` copy of a stored run read out through the store")]
+#[expect(clippy::disallowed_methods, reason = "reads a method's `draws.tsv`: the folder of the run this process's `fit run` is writing, read back, or a `fit_store::RunFiles` copy of a stored run read out through the store")]
 pub(crate) fn read_draw_counts(draws_path: &Path) -> BTreeMap<ChainIndex, usize> {
     let Ok(contents) = std::fs::read_to_string(draws_path) else {
         return BTreeMap::new();

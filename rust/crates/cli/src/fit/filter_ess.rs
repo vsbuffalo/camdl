@@ -45,7 +45,6 @@ use sim::inference::diagnostic::DiagnosticKind;
 
 use score::convergence::ChainIndex;
 use sim::inference::pgas::WeightCollapse;
-use std::path::Path;
 
 /// The `filter_ess` key of `pgas_summary.json`. Named next to the type so a
 /// producer and any reader cannot drift on the spelling.
@@ -291,10 +290,9 @@ impl FilterEssMethod {
     /// one of that chain's retained sweeps. Column `obs` is the observation's
     /// index in the method's observation slice, so a row joins to the data
     /// without a time match.
-    pub fn write_tsv(&self, path: &Path) -> Result<(), String> {
+    pub fn write_tsv(&self, out: impl std::io::Write) -> Result<(), String> {
         use std::io::Write;
-        let f = std::fs::File::create(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let mut w = std::io::BufWriter::new(f);
+        let mut w = std::io::BufWriter::new(out);
         writeln!(w, "chain\tobs\ttime\tess_mean\tess_min\tn_sweeps").map_err(|e| e.to_string())?;
         let mut row = |chain: &str, o: &ObsFilterEss| -> Result<(), String> {
             writeln!(
@@ -318,7 +316,7 @@ impl FilterEssMethod {
                 row(&label, o)?;
             }
         }
-        Ok(())
+        w.flush().map_err(|e| e.to_string())
     }
 }
 
@@ -567,7 +565,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(FILTER_ESS_TSV);
-        st.write_tsv(&path).unwrap();
+        st.write_tsv(std::fs::File::create(&path).unwrap()).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], "chain\tobs\ttime\tess_mean\tess_min\tn_sweeps");

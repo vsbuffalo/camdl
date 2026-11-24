@@ -31,10 +31,11 @@ pub fn streams_sibling(path: &Path) -> PathBuf {
     }
 }
 
-/// Write a `PrequentialTrace` to `{stem}.tsv` (the joint score per step),
-/// `{stem}.streams.tsv` (each stream's own scores) and `{stem}.json` (the
-/// full typed trace, serde). Downstream tools join on `stem` to avoid
-/// re-running the PF; `camdl compare` consumes the JSON.
+/// The three files of a `PrequentialTrace`, written under one stem:
+/// `{stem}.tsv` (the joint score per step), `{stem}.streams.tsv` (each
+/// stream's own scores, [`streams_sibling`]) and `{stem}.json` (the full
+/// typed trace, serde). Downstream tools join on `stem` to avoid re-running
+/// the PF; `camdl compare` consumes the JSON.
 ///
 /// `{stem}.tsv` columns: `t  log_score  ess` — one row per scored step, the
 /// log of the joint predictive density of every stream observed there (its
@@ -48,21 +49,6 @@ pub fn streams_sibling(path: &Path) -> PathBuf {
 /// cleared). A stream's `log_score` is its own; the stream rows at a step do
 /// not sum to the joint row. CRPS and PIT exist only here: across streams
 /// there is no one observed quantity to score them against.
-pub fn write_prequential_outputs(
-    stem: &str,
-    trace: &score::trace::PrequentialTrace,
-    calendar: &ir::caltime::CalendarAxis,
-) -> std::io::Result<()> {
-    let files = prequential_files(trace, calendar)?;
-    let tsv_path = format!("{}.tsv", stem);
-    std::fs::write(streams_sibling(Path::new(&tsv_path)), &files.streams)?;
-    std::fs::write(&tsv_path, &files.joint)?;
-    std::fs::write(format!("{}.json", stem), &files.json)?;
-    Ok(())
-}
-
-/// The three files of a prequential trace, as [`write_prequential_outputs`]
-/// writes them under a stem: the joint TSV, the per-stream TSV and the JSON.
 pub struct PrequentialFiles {
     pub joint: Vec<u8>,
     pub streams: Vec<u8>,
@@ -236,6 +222,15 @@ pub fn surprise_table(trace: &score::trace::PrequentialTrace, calendar: &ir::cal
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The three files of `trace` under `stem`.
+    fn write_outputs(stem: &Path, trace: &score::trace::PrequentialTrace, calendar: &ir::caltime::CalendarAxis) {
+        let files = prequential_files(trace, calendar).unwrap();
+        let tsv = stem.with_extension("tsv");
+        std::fs::write(streams_sibling(&tsv), &files.streams).unwrap();
+        std::fs::write(&tsv, &files.joint).unwrap();
+        std::fs::write(stem.with_extension("json"), &files.json).unwrap();
+    }
     use score::trace::{
         Conditioning, PredInterval, PrequentialStep, PrequentialTrace, Provenance, StreamScore,
     };
@@ -364,7 +359,7 @@ mod tests {
             step(7.0, -4.0, 100.0, &[("cases", 3.0, -2.5), ("deaths", 1.0, -1.0)]),
             step(14.0, -3.0, 80.0, &[("cases", 2.0, -3.0)]),
         ]);
-        write_prequential_outputs(&stem.to_string_lossy(), &t, &undated()).unwrap();
+        write_outputs(&stem, &t, &undated());
         let joint = std::fs::read_to_string(dir.path().join("preq.tsv")).unwrap();
         assert_eq!(joint, "t\tlog_score\tess\n7\t-4.000000\t100.00\n14\t-3.000000\t80.00\n");
         let streams = std::fs::read_to_string(dir.path().join("preq.streams.tsv")).unwrap();
@@ -389,7 +384,7 @@ mod tests {
             step(7.0, -4.0, 100.0, &[("cases", 3.0, -2.5)]),
             step(7.5, -3.0, 80.0, &[("cases", 2.0, -3.0)]),
         ]);
-        write_prequential_outputs(&stem.to_string_lossy(), &t, &dated()).unwrap();
+        write_outputs(&stem, &t, &dated());
         let joint = std::fs::read_to_string(dir.path().join("preq.tsv")).unwrap();
         assert_eq!(joint,
             "t	date	log_score	ess

@@ -1708,18 +1708,25 @@ problem, the method's settings without its length, the per-parameter `rw_sd`,
 `nl-lbfgs` on the ODE backend, the process seed and the chain starts), the
 length, and for a resume a `Dep` on the base run.
 
-The method writes its files into a working directory outside the store, because
-the runners read and write their files by path. While it runs, its progress
-snapshot and event log are passed to the run's own `progress` and `event`
-channels. When it ends, every file is written into the run by its role:
-`method.toml` and the method's outputs as result files, and the execution
-record, the optimizer trace, `fit.meta.json` and the fit file's text
-(`fit.toml`) as provenance (`fit_command.rs:1034`, `role_of`). `fit run` has no
-by-products.
+The method writes each file into the run as it produces it, through
+[`fit::output::LiveRun`](rust:cli::fit::output::LiveRun): a name that is one of
+a fit run's files is opened in that file's role (`Run::result_file`,
+`Run::provenance_file`), so the run's folder holds each chain's `trace.tsv` as
+it grows, and any other name is opened as an attempt file. A file the method
+rewrites whole as it learns more, such as `chain_starts.tsv` once a chain is
+refused, is replaced through `FileHandle::replace`. A method that reads back
+what it wrote (a chain's trace, for its diagnostics) reads it from the run's
+folder. The progress snapshot and the event log go to the run's own `progress`
+and `event` records. When the method ends, the run declares the files its
+recorded outcome calls for and is finished: `method.toml` and the method's
+outputs are result files, and the execution record, the optimizer trace,
+`fit.meta.json` and the fit file's text (`fit.toml`) are provenance. `fit run`
+has no by-products.
 
-When a method stops with an error, the run is left failed, and the next
-`fit run` computes it again. `fit run` does not distinguish a failure the
-identity determines.
+When a method stops with an error, the run's folder keeps what the method wrote
+and is marked failed with the reason; a process killed while the method runs
+leaves its folder interrupted. The next `fit run` claims the folder and computes
+the run again. `fit run` does not distinguish a failure the identity determines.
 
 ### `predict`
 

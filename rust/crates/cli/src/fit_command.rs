@@ -9,7 +9,7 @@
 //!                                            │
 //!                  per seed: FitRunIdentity ──► FitRun (in place, under `runs/`)
 //!                                            │
-//!                    fit::run_method in a working directory, ingested at the end
+//!          fit::run_method writing into the run's folder as it runs
 //! ```
 //!
 //! A fit is a problem and the runs on it. The problem holds the training rows
@@ -20,21 +20,22 @@
 //! where its chains start, and its length; a resume is a new run with a longer
 //! length whose identity holds a dependency on the base's carried chain files.
 //!
-//! The method writes its files into a working directory outside the store,
-//! because every runner writes, and reads back, its files by path. While it
-//! runs, its progress snapshot and each line of its event log are passed to
-//! the run's own progress and event channels; when it ends, every file of the
-//! working directory is written into the run, and the run is finished. A
-//! failure the run's identity determines is not distinguished from one a
-//! rerun could change: a method that stops with an error leaves the run
-//! failed, and the next run of the command computes it again.
+//! A fit run is written in place: the method opens each of its files in the
+//! run (`fit::output::LiveRun`) and writes it in the run's folder as it
+//! runs, so a reader of the store sees a chain's trace grow. Its progress
+//! snapshot and each line of its event log go to the run's own progress and
+//! event records. When the method ends, the run declares the files its
+//! outcome calls for and is finished. A failure the run's identity determines
+//! is not distinguished from one a rerun could change: a method that stops
+//! with an error leaves the run's folder marked failed with the reason, and
+//! the next run of the command computes it again.
 
 // The store's error carries the paths and owners a person acts on, and is
 // returned once per result.
 #![allow(clippy::result_large_err)]
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use store::{Begin, ContentAddressed, ContentArtifact, Identity, Reuse, Stored};
 
@@ -420,11 +421,14 @@ fn run_fit(mut out: Out, cx: FitCommand<'_>) -> Vec<String> {
     crate::fit::say_ic_free(&out, &config, &model);
 
     // ── The problems: one per dataset and sweep point ─────────────────────
-    let work_root = tempfile::Builder::new().prefix("camdl-fit-").tempdir()
-        .unwrap_or_else(|e| out.fail(format!("error: cannot make a working directory: {e}")));
+    // Generated datasets are written to a temporary directory, where the
+    // problem's resolution reads them as its data files and stores their
+    // training rows in the problem; nothing reads the directory afterwards.
+    let synthetic_root = tempfile::Builder::new().prefix("camdl-synthetic-").tempdir()
+        .unwrap_or_else(|e| out.fail(format!("error: cannot make a directory for the generated data: {e}")));
     let datasets: Vec<crate::fit::synthetic::SyntheticDataset> = match &config.problem.synthetic {
         Some(spec) if config.problem.is_synthetic_fit() => {
-            let dir = work_root.path().join("synthetic");
+            let dir = synthetic_root.path().join("synthetic");
             let datasets = crate::fit::synthetic::generate_synthetic_datasets(
                 spec,
                 config.problem.compiled_model().unwrap_or_else(|e| out.fail(format!("error: {e}"))),
@@ -660,19 +664,19 @@ fn run_fit(mut out: Out, cx: FitCommand<'_>) -> Vec<String> {
                 failures.push(format!("{method_name} seed {seed}: {e}"));
                 continue;
             }
-            let work = work_root.path().join(format!("run-{}", run.id().key().short12()));
-            std::fs::create_dir_all(&work).unwrap_or_else(|e| out.fail(format!("error: cannot create {}: {e}", work.display())));
+            let live = crate::fit::output::LiveRun::new(run);
             if let Some(b) = &base {
-                if let Err(e) = b.carry_into(&mut run, &work) {
-                    let _ = run.fail("carrying the base's chains", &e);
+                if let Err(e) = b.carry_into(&live) {
+                    if let Some(run) = live.take() {
+                        let _ = run.fail("carrying the base's chains", &e);
+                    }
                     failures.push(format!("{method_name} seed {seed}: {e}"));
                     continue;
                 }
             }
             let resume_guard = identity.chain.key().to_hex();
             let finished = compute_run(&mut out, RunCompute {
-                run,
-                work: &work,
+                live,
                 problem: &cell.problem,
                 method: &method,
                 model: &model,
@@ -787,18 +791,20 @@ impl ResumeBase {
         Ok(ResumeBase { stored, dep, files, carried })
     }
 
-    /// Write the base's carried chain files into the working directory,
-    /// read through the run's dependency on them.
-    fn carry_into(&self, run: &mut store::Run<FitRun>, work: &Path) -> Result<(), String> {
+    /// Write the base's carried chain files into the run, read through the
+    /// run's dependency on them. The resumed chains append to these files.
+    fn carry_into(&self, live: &crate::fit::output::LiveRun) -> Result<(), String> {
+        use crate::fit::output::RunWriter as _;
         for name in &self.carried {
-            let mut bytes = Vec::new();
-            std::io::Read::read_to_end(&mut run.open_in(&self.dep, name).map_err(|e| e.to_string())?, &mut bytes)
-                .map_err(|e| format!("reading the base's {name}: {e}"))?;
-            let path = work.join(name);
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
-            }
-            std::fs::write(&path, bytes).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+            let bytes = live
+                .with(|run| -> Result<Vec<u8>, String> {
+                    let mut bytes = Vec::new();
+                    std::io::Read::read_to_end(&mut run.open_in(&self.dep, name).map_err(|e| e.to_string())?, &mut bytes)
+                        .map_err(|e| format!("reading the base's {name}: {e}"))?;
+                    Ok(bytes)
+                })
+                .ok_or_else(|| "the run has already ended".to_string())??;
+            live.create(name)?.write_all(&bytes)?;
         }
         Ok(())
     }
@@ -819,8 +825,7 @@ struct RunRecord<'a> {
 
 /// One claimed run, and what computing it needs.
 struct RunCompute<'a> {
-    run: store::Run<FitRun>,
-    work: &'a Path,
+    live: Arc<crate::fit::output::LiveRun>,
     problem: &'a config_v2::Problem,
     method: &'a config_v2::Method,
     model: &'a ir::Model,
@@ -837,50 +842,34 @@ struct RunCompute<'a> {
     store_root: &'a Path,
 }
 
-/// Compute one claimed run: the method in its working directory, its files
-/// written into the run, and the run finished. A method that stops with an
-/// error ends the command through `out`, which fails the run first.
+/// Compute one claimed run: the method writing its files into the run as it
+/// runs, and the run finished. A method that stops with an error ends the
+/// command through `out`, which fails the run first.
 fn compute_run(out: &mut Out, rc: RunCompute<'_>) -> Result<(), String> {
     let RunCompute {
-        run, work, problem, method, model, seed, starts, base, resume_guard, header, acceptance_kernel,
+        live, problem, method, model, seed, starts, base, resume_guard, header, acceptance_kernel,
         data_digests, input_hash, forcing, record, store_root,
     } = rc;
     let method_name = method.algorithm.method_name();
-    let run_id = run.id().key().to_hex();
-    let held: Arc<Mutex<Option<store::Run<FitRun>>>> = Arc::new(Mutex::new(Some(run)));
-    // A run that fails keeps what its method wrote: the files, in the run's
-    // folder, and the rest of its event log, before the record is marked
-    // failed.
-    let mirrored: Arc<Mutex<Mirrored>> = Arc::default();
+    let run_id = live.with(|r| r.id().key().to_hex()).expect("the run is held until the method ends");
+    let files: Arc<dyn crate::fit::output::RunWriter> = live.clone();
+    let folder = files.folder().to_path_buf();
+    // A run that fails keeps what its method wrote, in its folder, and is
+    // marked failed with the reason.
     {
-        let held = Arc::clone(&held);
-        let mirrored = Arc::clone(&mirrored);
-        let work_dir = work.to_path_buf();
-        let failing = PlannedMethod::of(&method.algorithm);
-        let n_chains = chain_count(&method.algorithm);
+        let live = Arc::clone(&live);
         out.hold_failure(
-            Box::new(move |operation: &str, reason: &str| {
-                match held.lock().unwrap_or_else(|e| e.into_inner()).take() {
-                    Some(mut run) => {
-                        mirror_once(&run, &work_dir, &mut mirrored.lock().unwrap_or_else(|e| e.into_inner()));
-                        // What the transfer kept or could not keep is part of
-                        // why the run failed.
-                        let reason = match failing.write(&mut run, n_chains, &work_dir, None, false) {
-                            Ok(stray) if stray.is_empty() => reason.to_string(),
-                            Ok(stray) => format!("{reason} (kept as attempt files, not files of this method: {})", stray.join(", ")),
-                            Err(e) => format!("{reason} (its files could not all be kept: {e})"),
-                        };
-                        let failed = run.fail(operation, &reason).map_err(|e| e.to_string());
-                        // The process ends after this, so the command's
-                        // working directory (this run's parent) is removed
-                        // here: the run's files are now in the store.
-                        if let Some(root) = work_dir.parent() {
-                            let _ = std::fs::remove_dir_all(root);
-                        }
-                        failed
-                    }
-                    None => Ok(()),
+            Box::new(move |operation: &str, reason: &str| match live.take() {
+                Some(run) => {
+                    let stray = live.stray();
+                    let reason = if stray.is_empty() {
+                        reason.to_string()
+                    } else {
+                        format!("{reason} (kept as attempt files, not files of this method: {})", stray.join(", "))
+                    };
+                    run.fail(operation, &reason).map_err(|e| e.to_string())
                 }
+                None => Ok(()),
             }),
             forcing.clone(),
             method_name,
@@ -895,24 +884,37 @@ fn compute_run(out: &mut Out, rc: RunCompute<'_>) -> Result<(), String> {
         Vec::new()
     };
     let mut attempt = crate::fit::execution::Execution::begin();
-    attempt.write(work).unwrap_or_else(|e| out.fail(format!("error: {e}")));
+    attempt.write(files.as_ref()).unwrap_or_else(|e| out.fail(format!("error: {e}")));
     let method_t0 = std::time::Instant::now();
-    let heartbeat = Arc::new(crate::fit::method_heartbeat(work, &method.algorithm));
+    let progress: io::ProgressSink = {
+        let live = Arc::clone(&live);
+        Arc::new(move |p: &io::Progress| {
+            // Best effort, like every progress write: this is a diagnostic.
+            let _ = live.with(|run| run.progress(p));
+        })
+    };
+    let heartbeat = Arc::new(crate::fit::method_heartbeat(progress, &method.algorithm));
     // The run's header names its own folder within its store, so its report
     // and its record agree, and neither depends on where the store is.
     let header = &{
         let mut h = header.clone();
-        if let Some(dir) = held.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|r| r.folder()) {
-            h.output = relative(dir, store_root);
-        }
+        h.output = relative(&folder, store_root);
         h
     };
-    let collector = out.begin_method(header.clone(), method_name, acceptance_kernel, heartbeat.clone(), work)
+    let events = {
+        let live = Arc::clone(&live);
+        crate::out::events::EventLog::to(
+            Box::new(move |v: &serde_json::Value| {
+                live.with(|run| run.event(v).map_err(|e| e.to_string())).unwrap_or(Ok(()))
+            }),
+            "the run's event log".to_string(),
+        )
+    };
+    let collector = out.begin_method(header.clone(), method_name, acceptance_kernel, heartbeat.clone(), Arc::clone(&files), events)
         .unwrap_or_else(|e| {
             heartbeat.failed(format!("error: {e}").as_str());
             out.fail(format!("error: {e}"))
         });
-    let mirror = Mirror::start(Arc::clone(&held), work.to_path_buf(), Arc::clone(&mirrored));
 
     if !matches!(method.algorithm, Algorithm::PMMH { .. }) {
         crate::fit::methods::emit_status_banner(out, method.algorithm.method_kind(), method.algorithm.backend(), None);
@@ -935,7 +937,7 @@ fn compute_run(out: &mut Out, rc: RunCompute<'_>) -> Result<(), String> {
         problem,
         method,
         model,
-        method_dir: work,
+        files: files.as_ref(),
         seed,
         starts,
         resume_base: base.map(|b| b.files.path()),
@@ -994,10 +996,10 @@ fn compute_run(out: &mut Out, rc: RunCompute<'_>) -> Result<(), String> {
     if let Some(sampling) = out.sampling() {
         attempt.record(sampling);
     }
-    attempt.write(work).unwrap_or_else(|e| crate::fit::abandon_method(out, format!("error: {e}")));
+    attempt.write(files.as_ref()).unwrap_or_else(|e| crate::fit::abandon_method(out, format!("error: {e}")));
     let write_json = |name: &str, v: &serde_json::Value| -> Result<(), String> {
         let bytes = serde_json::to_vec_pretty(v).map_err(|e| e.to_string())?;
-        std::fs::write(work.join(name), bytes).map_err(|e| format!("cannot write {name}: {e}"))
+        files.put(name, &bytes).map_err(|e| format!("cannot write {name}: {e}"))
     };
     write_json(crate::fit_store::RUN_INPUTS_FILE, &inputs)
         .unwrap_or_else(|e| crate::fit::abandon_method(out, format!("error: {e}")));
@@ -1023,13 +1025,9 @@ fn compute_run(out: &mut Out, rc: RunCompute<'_>) -> Result<(), String> {
     }
 
     // The method is done: its report is the event log's last line, so it is
-    // written, and passed on, before the run is sealed. Then the run is taken
-    // back and every file the method made is written into it.
-    let record = out.end_method().expect("the method was begun before its dispatch");
-    let folder = held.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
-        .and_then(|r| r.folder().map(Path::to_path_buf))
-        .expect("a fit run is written in its folder");
-    match crate::fit::completed_outcome(method_name, work, &folder, record, ran.warmup,
+    // written, and passed on, before the run is sealed.
+    let method_record = out.end_method().expect("the method was begun before its dispatch");
+    match crate::fit::completed_outcome(method_name, &folder, &folder, method_record, ran.warmup,
         method_elapsed.as_secs_f64(), model)
     {
         Ok(outcome) => out.method_report(&outcome),
@@ -1037,38 +1035,32 @@ fn compute_run(out: &mut Out, rc: RunCompute<'_>) -> Result<(), String> {
     }
     // The run's summary, as `fit summary` builds it from the run's files,
     // stored with them.
-    let summary = crate::fit::fit_summary::run_entry(work, model)
+    let summary = crate::fit::fit_summary::run_entry(&folder, model)
         .map(|(report, row)| crate::fit::run_summary::stored(&report, row.as_ref()))
         .and_then(|s| {
-            std::fs::write(work.join(crate::fit::run_summary::FILE), crate::fit::run_summary::to_bytes(&s))
+            files.put(crate::fit::run_summary::FILE, &crate::fit::run_summary::to_bytes(&s))
                 .map_err(|e| format!("cannot write {}: {e}", crate::fit::run_summary::FILE))
         });
     if let Err(e) = summary {
         crate::fit::abandon_method(out, format!("error: the run's summary: {e}"));
     }
-    mirror.stop();
-    out.release_failure();
-    let mut run = held.lock().unwrap_or_else(|e| e.into_inner()).take()
-        .expect("the run is held until the method ends");
-    let starts_file = match starts.source.as_ref().map(|s| &s.input) {
-        Some(StartInput::File { file }) => Some((file.ext.clone(), file.bytes())),
+    if let Some(StartInput::File { file }) = starts.source.as_ref().map(|s| &s.input) {
+        let name = format!("inputs/starts.{}", file.ext);
+        if let Err(e) = files.put(&name, &file.bytes()) {
+            crate::fit::abandon_method(out, format!("error: {e}"));
+        }
+    }
+    let starts_ext = match starts.source.as_ref().map(|s| &s.input) {
+        Some(StartInput::File { file }) => Some(file.ext.clone()),
         _ => None,
     };
-    let written = PlannedMethod::of(&method.algorithm).write(
-        &mut run,
-        chain_count(&method.algorithm),
-        work,
-        starts_file.as_ref().map(|(ext, bytes)| (ext.as_str(), bytes.as_slice())),
-        true,
-    );
-    let stored = match written {
-        Ok(_) => run.finish().map_err(|e| e.to_string()),
-        Err(e) => {
-            let _ = run.fail("storing the run's files", &e);
-            Err(e)
-        }
-    };
-    let stored = match stored {
+    let plan = PlannedMethod::of(&method.algorithm);
+    if let Err(e) = live.declare(method_name, &plan, chain_count(&method.algorithm), starts_ext.as_deref()) {
+        crate::fit::abandon_method(out, format!("error: storing the run's files: {e}"));
+    }
+    out.release_failure();
+    let run = live.take().expect("the run is held until the method ends");
+    let stored = match run.finish().map_err(|e| e.to_string()) {
         Ok(s) => s,
         Err(e) => {
             let _ = out.close_events();
@@ -1090,73 +1082,6 @@ fn compute_run(out: &mut Out, rc: RunCompute<'_>) -> Result<(), String> {
 /// The number of chains a run of `algorithm` has, as its files are numbered.
 fn chain_count(algorithm: &Algorithm) -> u32 {
     u32::try_from(algorithm.chains()).expect("a fit has fewer than 2^32 chains")
-}
-
-/// Passes a running method's progress snapshot and each new line of its event
-/// log, both written in its working directory, to the run's own channels,
-/// every few seconds and once more when stopped.
-struct Mirror {
-    stop: Arc<std::sync::atomic::AtomicBool>,
-    thread: Option<std::thread::JoinHandle<()>>,
-}
-
-/// How far a run's progress and event log have been passed on, shared by the
-/// mirror's thread and the run's failure, which passes on the rest.
-#[derive(Default)]
-struct Mirrored {
-    sent: usize,
-    last_progress: Option<Vec<u8>>,
-}
-
-/// Passes on to `run` what `work`'s progress snapshot and event log hold
-/// beyond `state`.
-#[expect(clippy::disallowed_methods, reason = "reads the progress snapshot and event log a running method writes in this process's temporary working directory; neither is a result")]
-fn mirror_once(run: &store::Run<FitRun>, work: &Path, state: &mut Mirrored) {
-    if let Ok(bytes) = std::fs::read(work.join("progress.json")) {
-        if state.last_progress.as_deref() != Some(&bytes[..]) {
-            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                let _ = run.progress(&v);
-            }
-            state.last_progress = Some(bytes);
-        }
-    }
-    if let Ok(text) = std::fs::read_to_string(work.join("events.jsonl")) {
-        // Only whole lines: the last may be half written.
-        let whole = text.rfind('\n').map_or(0, |i| i + 1);
-        if whole > state.sent {
-            for line in text[state.sent..whole].lines() {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-                    let _ = run.event(&v);
-                }
-            }
-            state.sent = whole;
-        }
-    }
-}
-
-impl Mirror {
-    fn start(run: Arc<Mutex<Option<store::Run<FitRun>>>>, work: PathBuf, state: Arc<Mutex<Mirrored>>) -> Mirror {
-        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let flag = Arc::clone(&stop);
-        let thread = std::thread::spawn(move || loop {
-            let stopping = flag.load(std::sync::atomic::Ordering::Acquire);
-            if let Some(run) = run.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-                mirror_once(run, &work, &mut state.lock().unwrap_or_else(|e| e.into_inner()));
-            }
-            if stopping {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(500));
-        });
-        Mirror { stop, thread: Some(thread) }
-    }
-
-    fn stop(mut self) {
-        self.stop.store(true, std::sync::atomic::Ordering::Release);
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
-        }
-    }
 }
 
 #[cfg(test)]

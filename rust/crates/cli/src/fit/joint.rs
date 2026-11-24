@@ -308,7 +308,7 @@ pub fn resolve_forecast_ensemble(
 /// [`classify_joint`] and the `quantities/` conditioned read (gh#722) both fold
 /// through it, so the forkable count a command reports and the paths it can
 /// actually open cannot disagree.
-#[expect(clippy::disallowed_methods, reason = "reads each chain's `trajectories.tsv` under a method directory: the working directory this process's `fit run` is writing, or a `fit_store::RunFiles` copy of a stored run read out through the store")]
+#[expect(clippy::disallowed_methods, reason = "reads each chain's `trajectories.tsv` under a method directory: the folder of the run this process's `fit run` is writing, read back, or a `fit_store::RunFiles` copy of a stored run read out through the store")]
 pub(crate) fn trajectory_keys(method_dir: &Path) -> BTreeSet<(usize, usize)> {
     let mut keys = BTreeSet::new();
     let Ok(entries) = std::fs::read_dir(method_dir) else {

@@ -71,6 +71,30 @@ impl FileHandle {
         Ok(())
     }
 
+    /// Replaces the file's whole content with `bytes`, for a file an in-place
+    /// run rewrites as it learns more (a record of each chain's start that a
+    /// refusal later corrects). The bytes are written beside the file and
+    /// renamed over it, so a reader of the running folder sees the old
+    /// content or the new, never part of either. Later appends follow the
+    /// new content, and the digest the run records is of the content the
+    /// file holds when the run ends.
+    pub fn replace(&self, bytes: &[u8]) -> Result<()> {
+        if self.inner.ended.load(Ordering::Acquire) {
+            return Err(Error::WriteAfterEnd { name: self.inner.name.clone() });
+        }
+        let mut st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        if st.file.is_none() {
+            return Err(Error::WriteAfterEnd { name: self.inner.name.clone() });
+        }
+        crate::fsutil::write_file_atomic(&self.inner.path, bytes)?;
+        let file = OpenOptions::new().append(true).open(&self.inner.path).at("open", &self.inner.path)?;
+        st.file = Some(file);
+        st.hasher = Sha256::new();
+        st.hasher.update(bytes);
+        st.bytes = bytes.len() as u64;
+        Ok(())
+    }
+
     /// A buffered writer that appends to the file; flushed when dropped. The
     /// run cannot end while it is alive ([`Error::WriterOpen`]).
     pub fn writer(&self) -> impl Write + '_ {

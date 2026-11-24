@@ -3,8 +3,9 @@
 //! Handles header construction, append mode for `--resume`, periodic
 //! flushing, and thread-safe writing via Mutex.
 
-use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
+
+use super::output::{OutFile, RunWriter};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -37,33 +38,35 @@ pub struct TraceWriter {
 /// them behind the same `Mutex` means a flush and its timestamp update can never
 /// race across the chains sharing the writer.
 struct Inner {
-    writer: BufWriter<File>,
+    writer: BufWriter<OutFile>,
     last_flush: Instant,
 }
 
 impl TraceWriter {
-    /// Create a new trace writer.
+    /// Create a new trace writer of the run's file `name`.
     ///
-    /// - `append = false`: creates file and writes header.
-    /// - `append = true`: opens in append mode (header already exists).
-    #[expect(clippy::disallowed_methods, reason = "opens a chain's `trace.tsv` in this process's `fit run` working directory to append rows (a resumed chain's carries the base run's rows, copied in through the run's `resumed_from` dependency); it reads nothing")]
+    /// - `append = false`: creates the file and writes its header.
+    /// - `append = true`: appends to the file as `files` already holds it (a
+    ///   resumed chain's trace, carried from its base with its header), or
+    ///   creates it when `files` holds none.
     pub fn new(
-        path: &str,
+        files: &dyn RunWriter,
+        name: &str,
         index_col: &str,
         loglik_col: &str,
         extra_columns: &[&str],
         param_names: &[String],
         append: bool,
     ) -> Self {
-        let writer = if append && std::path::Path::new(path).exists() {
+        let writer = if append && files.opened(name) {
             BufWriter::new(
-                OpenOptions::new().append(true).open(path)
-                    .unwrap_or_else(|e| panic!("cannot open {} for append: {}", path, e))
+                files.append(name)
+                    .unwrap_or_else(|e| panic!("cannot open {} for append: {}", name, e))
             )
         } else {
             let mut f = BufWriter::new(
-                File::create(path)
-                    .unwrap_or_else(|e| panic!("cannot create {}: {}", path, e))
+                files.create(name)
+                    .unwrap_or_else(|e| panic!("cannot create {}: {}", name, e))
             );
             // Write header
             write!(f, "{}\t{}\tlog_posterior", index_col, loglik_col).unwrap();
@@ -140,9 +143,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("camdl_tw_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("trace.tsv");
-        let ps = path.to_string_lossy().into_owned();
         {
-            let tw = TraceWriter::new(&ps, "step", "log_likelihood", &[], &["iota".to_string()], false);
+            let tw = TraceWriter::new(&super::super::output::DirWriter::new(&dir), "trace.tsv", "step", "log_likelihood", &[], &["iota".to_string()], false);
             tw.write_row(0, -10.0, -11.0, &[], &[1e-7]);
             tw.write_row(1, -10.0, -11.0, &[], &[9.9e-8]);
         } // drop flushes the BufWriter
@@ -167,10 +169,9 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("camdl_tw_flush_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("trace.tsv");
-        let ps = path.to_string_lossy().into_owned();
 
         let tw = TraceWriter::new(
-            &ps, "step", "log_likelihood", &["accepted"], &["beta".to_string()], false,
+            &super::super::output::DirWriter::new(&dir), "trace.tsv", "step", "log_likelihood", &["accepted"], &["beta".to_string()], false,
         );
 
         // Header on disk immediately — before any row is written.
