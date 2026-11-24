@@ -80,7 +80,7 @@ impl ResultFile for ProblemFile {
             ProblemFile::SyntheticTruth => "The true parameters the dataset was generated at.",
             ProblemFile::RecoveryTruth => "The true parameters `fit recovery` compares estimates with.",
             ProblemFile::RecoveryTable => "The fit file's `[synthetic]` table.",
-            ProblemFile::ModelSource { .. } => "The model file the problem was compiled from.",
+            ProblemFile::ModelSource { .. } => "A model file that compiles to the problem's model: the one the command that first stored the problem was given. Each invocation's own model file is its model presentation's `source`.",
         }
     }
 }

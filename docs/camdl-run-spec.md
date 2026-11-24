@@ -1893,7 +1893,9 @@ A fit problem: the model, the data and the rows that train. Contract version 1.
 - `synthetic`: `synthetic.toml`, TOML, provenance (a real-data fit with a
   `[synthetic]` table). The fit file's `[synthetic]` table.
 - `model`: `model.camdl`, camdl, provenance (always; `model.ir.json` for a
-  compiled model). The model file the problem was compiled from.
+  compiled model). A model file that compiles to the problem's model: the one
+  the command that first stored the problem was given. Each invocation's own
+  model file is its model presentation's `source`.
 
 #### `prediction`
 

@@ -324,3 +324,29 @@ pub(crate) fn presentation_of(store: &Store, run_id: store::Key) -> Option<store
     }
     None
 }
+
+/// Records in this invocation that the stored compiled model `model` was
+/// run from the model file `presentation` presents: the presentation is
+/// stored, and the compiled model, read back from the store, is put again
+/// (finding itself stored) with labels that name it. For a command that runs
+/// a stored compile of a model file it names, such as a profile of a stored
+/// fit.
+pub(crate) fn link_presentation(
+    store: &Store,
+    info: &store::RunInfo,
+    model: &Dep<CompiledModel>,
+    presentation: PresentationIdentity,
+    name: &str,
+) -> Result<(), String> {
+    use store::{Content, ContentArtifact};
+    let stored: Stored<CompiledModel> = store
+        .get(model.id())
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("the compiled model {} is not stored", model.id().key().short12()))?;
+    let bytes = super::read_stored(&stored, CompiledModel::FILE)?;
+    let content = CompiledModelContent::from_bytes(&bytes).map_err(|e| e.to_string())?;
+    let labels = ModelLabels { name: name.to_string(), presentation: None };
+    put_compiled(store, info, Hashed::new(content), presentation, &labels, &Provenance::none())
+        .map(|_| ())
+        .map_err(|e| format!("storing the model's presentation: {e}"))
+}

@@ -663,3 +663,31 @@ fn a_fit_run_s_method_reaches_what_is_computed_from_it_only_through_its_id() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
+
+/// A profile of a stored fit takes a model file that differs from the one
+/// the fit was posed on only in its comments, and stores that file as its
+/// invocation's presentation. A model that differs in what the engine runs
+/// is refused.
+#[test]
+fn a_profile_of_a_stored_fit_takes_its_model_with_other_comments() {
+    let fx = &fixture();
+    let work = workdir(fx, &["store"]);
+    let store = work.path().join("store");
+    let commented = format!("#' The same model, documented.\n{}", model());
+    std::fs::write(work.path().join("commented.camdl"), &commented).unwrap();
+    let profile = |file: &str, label: &str| {
+        camdl(fx, work.path(), &store, &[
+            "profile", file, "--fit", "@fit", "--sweep", "gamma=0.2,0.3", "--particles", "20", "--iterations", "2",
+            "--n-starts", "1", "--label", label,
+        ])
+    };
+    let out = profile("commented.camdl", "commented");
+    assert!(out.status.success(), "a comment is not another model:\n{}", String::from_utf8_lossy(&out.stderr));
+    let source = camdl(fx, work.path(), &store, &["cat", "@commented", "model_presentation:source"]);
+    assert!(source.status.success(), "{}", String::from_utf8_lossy(&source.stderr));
+    assert_eq!(String::from_utf8_lossy(&source.stdout), commented, "the invocation's presentation is of its own file");
+
+    let out = profile("other.camdl", "other");
+    assert!(!out.status.success(), "another model is refused");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("is not the model the stored fit"), "{}", String::from_utf8_lossy(&out.stderr));
+}

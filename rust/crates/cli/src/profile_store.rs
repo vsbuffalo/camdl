@@ -84,6 +84,10 @@ pub(crate) struct PosedProblem {
     pub fit: crate::fit_store::FitArg,
     /// The stored compile, as an IR file.
     pub model_ir: String,
+    /// The presentation of the model file the profile names, for a profile
+    /// of a stored fit, whose problem's compile is not of that file; `None`
+    /// for a fit file's problem, compiled from the file itself.
+    pub presentation: Option<crate::camdl_store::PresentationIdentity>,
 }
 
 /// The fit problem a profile is of, stored as `camdl fit run` stores the
@@ -107,9 +111,21 @@ pub(crate) fn pose_problem(
 ) -> Result<PosedProblem, String> {
     use crate::fit_store::{FitProblem, ModelSourceFile, ProblemLabels};
     let given_model = std::fs::read(model).map_err(|e| format!("cannot read the model {model}: {e}"))?;
+    // A stored fit's problem is compiled from the model file it keeps; the
+    // file this profile names is compiled once, to refuse another model and
+    // to be this invocation's presentation.
+    let named = match &fit.stored {
+        Some(opened) => {
+            refuse_another_model(out, opened, &given_model, model, &fit.handle, compile)?;
+            Some(named_presentation(&given_model, model, compile)?)
+        }
+        None => None,
+    };
     let dep: Dep<FitProblem> = match (&fit.stored, overrides.any(&fit.config.problem)) {
         (Some(opened), false) => {
-            refuse_another_model(&given_model, opened, model, &fit.handle)?;
+            let stem = crate::hashing::path_stem_slug(model).unwrap_or_else(|| "model".to_string());
+            let shown = named.clone().expect("a stored fit's named model is compiled");
+            crate::camdl_store::presentation::link_presentation(store, info, &opened.fit.model, shown, &stem)?;
             opened.fit.problem.dep_all()
         }
         (stored, _) => {
@@ -119,7 +135,6 @@ pub(crate) fn pose_problem(
             // and source.
             let (source_ir, source_bytes, source_path) = match stored {
                 Some(opened) => {
-                    refuse_another_model(&given_model, opened, model, &fit.handle)?;
                     let src = opened.model_source()?;
                     let bytes = std::fs::read(&src).map_err(|e| format!("cannot read {}: {e}", src.display()))?;
                     (opened.model_ir.to_string_lossy().into_owned(), bytes, src.to_string_lossy().into_owned())
@@ -219,7 +234,7 @@ pub(crate) fn pose_problem(
                 problem.estimate.shift_remove(name);
             }
             let stem = crate::hashing::path_stem_slug(&source_path).unwrap_or_else(|| "model".to_string());
-            let model_dep = put_compile(store, info, &ir, &stem, &source_bytes, &source_path)?;
+            let model_dep = put_compile(store, info, &ir, &stem, &source_bytes, &source_path, named.clone())?;
             let posed = crate::fit_store::resolve_problem(
                 &problem,
                 &model_ir,
@@ -255,19 +270,23 @@ pub(crate) fn pose_problem(
         }
     }
     let model_ir = posed.stored.as_ref().map(|o| o.model_ir.to_string_lossy().into_owned()).ok_or("internal: the stored problem reopened as no stored fit")?;
-    Ok(PosedProblem { dep, fit: posed, model_ir })
+    Ok(PosedProblem { dep, fit: posed, model_ir, presentation: named })
 }
 
 /// The compile with the state Jacobian of `posed`'s model, which an
 /// `nl-lbfgs` cell runs, stored: rewritten from the problem's data as the
 /// problem's compile is, and refused unless it is the same model as
-/// `problem_ir`. Returns its IR file and its dependency.
+/// `problem_ir`. It is stored with `presentation`, the presentation of the
+/// model file the invocation names ([`PosedProblem::presentation`]), or,
+/// when that is `None`, of the model file the problem keeps. Returns its IR
+/// file and its dependency.
 #[expect(clippy::disallowed_methods, reason = "reads the stored model source copied out by `OpenedFit::model_source` and the IR camdlc compiled from it, which is stored as a `CompiledModel` dependency")]
 pub(crate) fn jacobian_compile(
     out: &crate::out::Out,
     store: &store::Store,
     info: &store::RunInfo,
     posed: &crate::fit_store::FitArg,
+    presentation: Option<crate::camdl_store::PresentationIdentity>,
     problem_ir: &str,
     compile: crate::util::CompileSettings,
 ) -> Result<(String, Dep<CompiledModel>), String> {
@@ -283,16 +302,54 @@ pub(crate) fn jacobian_compile(
         return Err("internal error: the compile with the state Jacobian is not the same model as the problem's".into());
     }
     let stem = opened.model_name();
-    let dep = put_compile(store, info, &full, &stem, &bytes, &src_str)?;
+    let dep = put_compile(store, info, &full, &stem, &bytes, &src_str, presentation)?;
     Ok((full, dep))
 }
 
+/// The presentation of the model file `model`, whose bytes are `bytes`,
+/// compiled under `compile` and rendered.
+fn named_presentation(
+    bytes: &[u8],
+    model: &str,
+    compile: crate::util::CompileSettings,
+) -> Result<crate::camdl_store::PresentationIdentity, String> {
+    let envelope = crate::util::load_model_envelope(model, compile)?;
+    let source = crate::camdl_store::ModelSource::read(bytes, std::path::Path::new(model));
+    Ok(crate::camdl_store::CompiledParts::split(envelope, String::new(), source)?.presentation)
+}
+
 /// Refuses a positional model other than the one a stored fit was posed on.
-#[expect(clippy::disallowed_methods, reason = "reads the stored model source copied out by `OpenedFit::model_source`, only to refuse a positional model that differs from it")]
-fn refuse_another_model(given: &[u8], opened: &crate::fit_store::OpenedFit, model: &str, handle: &str) -> Result<(), String> {
+/// A file with the bytes of the model file the stored problem keeps is that
+/// model. Another file is compiled under `compile` and rewritten from the
+/// problem's data as the problem's compile was, and is the same model when
+/// its structural hash, with the description left out, is the stored
+/// compile's: a comment, a `#'` docstring or the description is not another
+/// model. The kept file is never compiled, since files it reads by a
+/// relative path are not beside its copy.
+#[expect(clippy::disallowed_methods, reason = "reads the stored model source copied out by `OpenedFit::model_source`, and the stored and rewritten compiles, only to refuse a positional model that differs from them")]
+fn refuse_another_model(
+    out: &crate::out::Out,
+    opened: &crate::fit_store::OpenedFit,
+    given: &[u8],
+    model: &str,
+    handle: &str,
+    compile: crate::util::CompileSettings,
+) -> Result<(), String> {
     let src = opened.model_source()?;
-    let stored = std::fs::read(&src).map_err(|e| format!("cannot read {}: {e}", src.display()))?;
-    if stored != given {
+    let kept = std::fs::read(&src).map_err(|e| format!("cannot read {}: {e}", src.display()))?;
+    if kept == given {
+        return Ok(());
+    }
+    let problem = &opened.config.problem;
+    let (ir, _tmp) = crate::util::resolve_ir_path(model, false, None, compile)?;
+    let ir = crate::fit::resolve_anchors_into_temp_ir(Some(out), &ir, problem)?;
+    let (ir, _bound) = crate::fit::bind_tables_into_temp_ir(&ir, problem)?;
+    let structural = |path: &str| -> Result<ir::model_hash::ContentHash, String> {
+        let mut m = crate::util::load_ir(path)?.0;
+        m.description = None;
+        Ok(ir::model_hash::model_ir_hash(&m))
+    };
+    if structural(&ir)? != structural(&opened.model_ir.to_string_lossy())? {
         return Err(format!(
             "the model {model} is not the model the stored fit {handle} was posed on; a profile of a \
              stored fit is of its problem, so name the model it keeps ({})",
@@ -303,7 +360,10 @@ fn refuse_another_model(given: &[u8], opened: &crate::fit_store::OpenedFit, mode
 }
 
 /// Stores the compile at `ir`, as `fit run` stores a problem's: the model
-/// part, depended on, and its quantities, named as lineage.
+/// part, depended on, and its quantities, named as lineage. The compile is
+/// stored with `presentation` when one is given, and otherwise with the
+/// presentation of `source`, the model file at `source_path` it was
+/// compiled from.
 #[expect(clippy::disallowed_methods, reason = "reads the IR camdlc compiled, which this function stores as the `CompiledModel` the result depends on")]
 pub(crate) fn put_compile(
     store: &store::Store,
@@ -312,16 +372,19 @@ pub(crate) fn put_compile(
     stem: &str,
     source: &[u8],
     source_path: &str,
+    presentation: Option<crate::camdl_store::PresentationIdentity>,
 ) -> Result<Dep<CompiledModel>, String> {
     use store::ContentArtifact;
     let text = std::fs::read_to_string(ir).map_err(|e| format!("cannot read the compiled model {ir}: {e}"))?;
     let envelope = ir::envelope_from_str(&text).map_err(|e| format!("IR load error from {ir}: {e}"))?;
-    let parts = crate::camdl_store::CompiledParts::split(
-        envelope,
-        stem.to_string(),
-        crate::camdl_store::ModelSource::read(source, std::path::Path::new(source_path)),
-    )?;
-    let crate::camdl_store::CompiledParts { model, quantities, presentation, labels, provenance } = parts;
+    let path = std::path::Path::new(source_path);
+    let source = match presentation {
+        Some(_) => crate::camdl_store::ModelSource { bytes: source, path, rendered: crate::camdl_store::Rendered::nothing() },
+        None => crate::camdl_store::ModelSource::read(source, path),
+    };
+    let parts = crate::camdl_store::CompiledParts::split(envelope, stem.to_string(), source)?;
+    let crate::camdl_store::CompiledParts { model, quantities, presentation: of_source, labels, provenance } = parts;
+    let presentation = presentation.unwrap_or(of_source);
     let quantities = store
         .put::<crate::camdl_store::Quantities>(quantities, &labels, &store::Provenance::none(), info)
         .map_err(|e| format!("storing the quantities: {e}"))?
