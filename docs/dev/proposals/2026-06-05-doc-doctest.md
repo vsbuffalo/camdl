@@ -1,12 +1,20 @@
----
-date: 2026-06-05
-status: accepted (v1 + CI shipped)
-related: ../../ocaml/lib/compiler/doctest.ml, ../../ocaml/bin/camdlc.ml, ../../docs/camdl-language-spec.md
-forward-compatible-with: 2026-06-05-compiler-diagnostic-surface.md (gh#181; consumes collect_diagnostics, which that refactor preserves)
-implemented: camdlc doctest + make test-docs + .github/workflows/docs.yml + test_doctest self-test. Spec gates green (28 pass, 87 skip, 0 fail). A fragment can borrow a hidden preamble and inline data carried in the doc as invisible HTML comments — `<!-- camdl-doctest-preamble: LABEL … -->` (prepended source, referenced by ```camdl preamble=LABEL) and `<!-- camdl-doctest-data: PATH … -->` (materialised to a temp dir so read() resolves) — so converting a bucket-B fragment or bucket-C data block is self-contained, with nothing to drift. The per-block conversion of the spec's ~50 fragments / 11 data blocks remains incremental follow-up. Closing `-->` must be on its own line (CAMDL transitions contain `-->`).
----
-
 # Doctest the CAMDL specs: compile the spec's code blocks against the real compiler
+
+Date: 2026-06-05. Status: accepted (v1 + CI shipped). Related:
+../../ocaml/lib/compiler/doctest.ml, ../../ocaml/bin/camdlc.ml,
+../../docs/camdl-language-spec.md. Forward-compatible with:
+2026-06-05-compiler-diagnostic-surface.md (gh#181; consumes collect_diagnostics,
+which that refactor preserves). Implemented: camdlc doctest + make test-docs +
+.github/workflows/docs.yml + test_doctest self-test. Spec gates green (28 pass,
+87 skip, 0 fail). A fragment can borrow a hidden preamble and inline data
+carried in the doc as invisible HTML comments —
+`<!-- camdl-doctest-preamble: LABEL … -->` (prepended source, referenced by
+`` ```camdl preamble=LABEL ``) and `<!-- camdl-doctest-data: PATH … -->`
+(materialised to a temp dir so read() resolves) — so converting a bucket-B
+fragment or bucket-C data block is self-contained, with nothing to drift. The
+per-block conversion of the spec's ~50 fragments / 11 data blocks remains
+incremental follow-up. Closing `-->` must be on its own line (CAMDL transitions
+contain `-->`).
 
 ## Problem
 
