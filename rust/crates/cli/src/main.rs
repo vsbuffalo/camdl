@@ -532,6 +532,34 @@ fn run_check_args_mode() -> Option<i32> {
     }
 }
 
+/// The command line, parsed, or exit with clap's usage error (status 2).
+///
+/// An unknown `--output-dir` is answered with the flags that do its job,
+/// `--store DIR` and `-o`, in place of clap's nearest-spelling tip:
+/// `--output` exports one table on most commands and names no store, so the
+/// tip would send a person looking for the store's root to the wrong flag.
+fn parse_cli() -> Cli {
+    use clap::error::{ContextKind, ContextValue, ErrorKind};
+    let e = match Cli::try_parse() {
+        Ok(cli) => return cli,
+        Err(e) => e,
+    };
+    let output_dir = e.kind() == ErrorKind::UnknownArgument
+        && matches!(e.get(ContextKind::InvalidArg),
+            Some(ContextValue::String(arg)) if arg == "--output-dir" || arg.starts_with("--output-dir="));
+    if !output_dir {
+        e.exit();
+    }
+    out::Out::new(false).say(
+        "error: unexpected argument '--output-dir' found\n\n  \
+         tip: runs are stored in the run store, whose root is `--store DIR` (on `fit run`, \
+         the fit file's `store` key), else `CAMDL_STORE`, else `./camdl-store`; `-o` \
+         exports a copy of a run's output\n\n\
+         For more information, try '--help'."
+    );
+    std::process::exit(2);
+}
+
 fn main() {
     // Hidden parse-only drift check (used by `make test-cli-docs`). Returns
     // an exit code and short-circuits before any real parsing/execution.
@@ -539,7 +567,7 @@ fn main() {
         std::process::exit(code);
     }
 
-    let cli = Cli::parse();
+    let cli = parse_cli();
     // The environment is read once (`env`), and the engine is told its
     // evaluator switches before any command runs a model.
     env::install_engine_switches(&env::get().vars);
