@@ -54,14 +54,14 @@ init { S = 990  I = 10 }
 simulate { from = 0 'days  to = 30 'days }
 "#;
 
-fn fit_toml(rw_sd: f64) -> String {
+fn fit_toml(sd: f64) -> String {
     format!(r#"store = "out"
 [model]
 camdl = "m.ir.json"
 [data.observations]
 cases = "cases.tsv"
 [estimate]
-a = {{ start = 0.9, rw_sd = {rw_sd} }}
+a = {{ start = 0.9 }}
 [fixed]
 gamma = 0.3
 [method]
@@ -72,13 +72,15 @@ particles = 200
 iterations = 10
 cooling = 0.9
 starts = "single"
+[method.perturbation]
+a = {sd}
 "#)
 }
 
-/// The step that spreads the swarm across both signs of `a`: a natural-scale
-/// rw_sd of 1.0, converted once at the midpoint of `a`'s box [−3, 3], where
-/// dθ/dz = 6/4, to 1.0 / 1.5 = 0.667 in `a`'s transformed coordinate.
-const LARGE_RW_SD: f64 = 1.0;
+/// The step in z that spreads the swarm across both signs of `a`, on the
+/// interval map of its box [−3, 3]: 2/3, about 1.0 natural at the midpoint,
+/// where dθ/dz = 6/4.
+const LARGE_STEP: f64 = 2.0 / 3.0;
 
 #[test]
 fn a_feasible_start_with_too_large_a_step_names_the_perturbed_swarm() {
@@ -96,18 +98,18 @@ fn a_feasible_start_with_too_large_a_step_names_the_perturbed_swarm() {
         .current_dir(dir).env("CAMDL_SKIP_VERSION_CHECK", "1").output().unwrap();
     assert!(sim.status.success(), "simulate: {}", String::from_utf8_lossy(&sim.stderr));
 
-    let run = |rw_sd: f64| {
-        std::fs::write(dir.join("fit.toml"), fit_toml(rw_sd)).unwrap();
+    let run = |sd: f64| {
+        std::fs::write(dir.join("fit.toml"), fit_toml(sd)).unwrap();
         Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
             .args(["fit", "run", "fit.toml", "--seed", "2", "--force", "--progress", "none"])
             .current_dir(dir).env("CAMDL_SKIP_VERSION_CHECK", "1").output().unwrap()
     };
 
     // Control: a small step from the same start fits.
-    let ok = run(0.05);
+    let ok = run(0.05 / 1.5);
     assert!(ok.status.success(), "a small step must fit: {}", String::from_utf8_lossy(&ok.stderr));
 
-    let bad = run(LARGE_RW_SD);
+    let bad = run(LARGE_STEP);
     let err = String::from_utf8_lossy(&bad.stderr);
     assert!(!bad.status.success(), "every final estimate is -inf, so the fit refuses:\n{err}");
     assert!(err.contains("the start is feasible and the perturbed swarm is not"),

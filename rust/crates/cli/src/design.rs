@@ -187,13 +187,10 @@ fn resolve_estimated(
     let specs: Vec<ParamSpec> = config.estimate.iter()
         .map(|(name, spec)| ParamSpec {
             name: name.clone(),
-            rw_sd: spec.rw_sd,
-            perturb_only_at_t0: spec.perturb_only_at_t0,
             bounds: spec.bounds,
         })
         .collect();
-    let mut estimated: Vec<_> = build_if2_params_from_specs(&model, &compiled, &compiled.default_params, &specs)?
-        .into_iter().map(|(p, _)| p).collect();
+    let mut estimated: Vec<_> = build_if2_params_from_specs(&model, &compiled, &compiled.default_params, &specs)?;
     // The sampler draws parameter by parameter, so this order decides every
     // point. Name order, as `fit run` sorts, keeps the design independent of
     // the order the `[estimate]` table lists its entries in.

@@ -95,6 +95,8 @@ impl PmmhMethodOpts {
 pub fn run_method(
     fit: &super::config_v2::Problem,
     method: &super::config_v2::Method,
+    // The method's resolved proposal SDs (`fit::steps::resolve_steps`).
+    steps: &super::steps::ResolvedSteps,
     files: &dyn super::output::RunWriter,
     pmmh_opts: PmmhMethodOpts,
     seed: u64,
@@ -158,7 +160,7 @@ pub fn run_method(
     // cooling, cooling_target_iters are IF2-specific and never read
     // by PMMH — pass harmless values.
     let config = FitRunConfig::build(
-        fit, Some(&method.algorithm),
+        fit, Some(&method.algorithm), steps,
         n_chains, n_particles, 1,
         1.0, 1,
         seed, false,
@@ -223,7 +225,7 @@ pub fn run_method(
     };
 
     // Build proposal SDs
-    let proposal_sd = build_proposal_sd(&config);
+    let proposal_sd = build_proposal_sd(&config)?;
 
     // Preflight: likelihood-noise check (skipped for ODE-MH — deterministic,
     // no PF). Measures the spread that governs acceptance and reports it
@@ -1200,27 +1202,13 @@ fn scale_far_from_optimum(chain: usize, r: &PMMHResult) -> Option<DiagnosticKind
         .then_some(DiagnosticKind::ScaleFarFromOptimum { chain_id: chain, final_scale: r.final_scale })
 }
 
-/// The initial PMMH / MH proposal SD in z of each estimated parameter
-/// (proposal D8), from `[estimate]`'s `rw_sd`: the map's
-/// [`Transform::default_mh_step`] when no `rw_sd` is written, else five times
-/// the written step converted to z, since an MH proposal moves further than
-/// one IF2 perturbation; NaN when there is neither. The adaptive scheme
-/// (`adapt = true`) takes over from here.
-///
-/// [`Transform::default_mh_step`]: sim::inference::types::Transform::default_mh_step
-pub(crate) fn build_proposal_sd(config: &FitRunConfig) -> Vec<f64> {
-    config.estimated_params.iter().zip(&config.steps).map(|(p, step)| {
-        mh_initial_step(p, step)
-    }).collect()
-}
-
-/// One parameter's initial proposal SD in z; see [`build_proposal_sd`].
-pub(crate) fn mh_initial_step(p: &EstimatedParam, step: &super::runner::WrittenStep) -> f64 {
-    if step.auto {
-        p.transform.default_mh_step().unwrap_or(f64::NAN)
-    } else {
-        5.0 * step.z_sd
-    }
+/// The initial PMMH / MH proposal SD in z of each estimated parameter, in
+/// `estimated_params` order: its `[method.proposal]` entry as written, else
+/// the map's default MH step (`fit::steps::resolve_steps`). The adaptive
+/// scheme (`adapt = true`) takes over from here.
+pub(crate) fn build_proposal_sd(config: &FitRunConfig) -> Result<Vec<f64>, String> {
+    config.steps.proposal_sd(&config.estimated_params)
+        .unwrap_or_else(|| Err("internal error: a pmmh or mh run without its resolved proposal".into()))
 }
 
 /// R̂ / ESS over each chain's retained draws: a resumed chain's `inherited`

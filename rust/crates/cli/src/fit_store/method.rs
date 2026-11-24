@@ -7,7 +7,12 @@
 //! group folder is hashed from this value, so two runs whose methods differ in
 //! any field sit in two groups.
 
+use std::collections::BTreeMap;
+
+use sim::inference::types::{If2Step, PerturbAt, Perturbation, ZSd};
 use store::Finite;
+
+use crate::fit::steps::ResolvedSteps;
 
 use crate::fit::config_v2::{self, Method};
 use crate::pfilter_store::Binomial;
@@ -108,6 +113,44 @@ pub(crate) struct If2Identity {
     pub gate: GateIdentity,
     pub dt_check: DtCheckIdentity,
     pub binomial: Binomial,
+    /// Every estimated parameter's resolved perturbation, by name; a simplex
+    /// member is not here but in `simplex`.
+    pub perturbation: BTreeMap<String, PerturbationIdentity>,
+    /// One map per `[[simplex_groups]]` entry: each member's SD on the
+    /// group's log-ratio coordinate.
+    pub simplex: Vec<BTreeMap<String, Finite>>,
+}
+
+/// IF2's perturbation of one parameter: its SD in z and its timing.
+#[derive(store::Identity, Clone, Copy, Debug)]
+#[identity(tag = "fit_if2_perturbation", version = 1)]
+pub(crate) struct PerturbationIdentity {
+    pub sd: Finite,
+    pub at: PerturbAtIdentity,
+}
+
+/// When IF2 perturbs a parameter (`sim::inference::types::PerturbAt`).
+#[derive(store::Identity, Clone, Copy, Debug, PartialEq, Eq)]
+#[identity(tag = "fit_perturb_at", version = 1)]
+pub(crate) enum PerturbAtIdentity {
+    EveryObservation,
+    TimeZeroOnly,
+}
+
+impl From<PerturbAt> for PerturbAtIdentity {
+    fn from(at: PerturbAt) -> Self {
+        match at {
+            PerturbAt::EveryObservation => PerturbAtIdentity::EveryObservation,
+            PerturbAt::TimeZeroOnly => PerturbAtIdentity::TimeZeroOnly,
+        }
+    }
+}
+
+impl PerturbationIdentity {
+    /// The identity of `p`.
+    pub fn of(p: &Perturbation) -> PerturbationIdentity {
+        PerturbationIdentity { sd: z_sd(p.sd), at: p.at.into() }
+    }
 }
 
 /// A PGAS method, without its length (`sweeps`).
@@ -143,6 +186,9 @@ pub(crate) struct PmmhIdentity {
     pub adapt: bool,
     pub adapt_start: u64,
     pub binomial: Binomial,
+    /// Every estimated parameter's resolved initial proposal SD in z, by
+    /// name: the SD the sampler starts with.
+    pub proposal: BTreeMap<String, Finite>,
 }
 
 /// An MH method on the deterministic likelihood, without its length
@@ -159,6 +205,8 @@ pub(crate) struct MhIdentity {
     /// The coarse step over the unscored warm-up, as written.
     pub burnin_dt: Option<Finite>,
     pub dt_check: DtCheckIdentity,
+    /// As [`PmmhIdentity::proposal`].
+    pub proposal: BTreeMap<String, Finite>,
 }
 
 /// A `pfilter` method: the filter run at one θ.
@@ -190,20 +238,26 @@ pub(crate) struct NloptIdentity {
 
 impl MethodIdentity {
     /// The identity of `method` and its length, 0 for a method that cannot be
-    /// extended. A NaN or infinite setting is refused with a message naming
-    /// it.
+    /// extended, with `steps` its resolved per-parameter steps
+    /// ([`crate::fit::steps::resolve_steps`] of the same method). A NaN or
+    /// infinite setting is refused with a message naming it.
     ///
     /// Each `config_v2::Algorithm` variant is taken apart with no `..`, so a
     /// field added to one does not compile until it is placed in the identity
-    /// here or left out by name.
-    pub fn of(method: &Method) -> Result<(MethodIdentity, u64), String> {
+    /// here or left out by name. The written step tables are left out: the
+    /// identity holds `steps`, so a step written at its default and an
+    /// omitted one key the same.
+    pub fn of(method: &Method, steps: &ResolvedSteps) -> Result<(MethodIdentity, u64), String> {
         use config_v2::Algorithm as A;
         let Method { algorithm, starts: _ } = method;
         Ok(match algorithm {
             A::IF2 {
                 backend, chains, particles, iterations, cooling, cooling_target_iters,
-                loglik_eval, gate, dt_check, binomial,
+                loglik_eval, gate, dt_check, binomial, perturbation: _,
             } => {
+                let ResolvedSteps::If2 { params, simplex } = steps else {
+                    return Err(steps_mismatch("if2"));
+                };
                 let config_v2::LoglikEvalConfig { n_particles, n_replicates, combine } = loglik_eval;
                 let id = If2Identity {
                     backend: (*backend).into(),
@@ -220,6 +274,17 @@ impl MethodIdentity {
                     gate: GateIdentity::of(gate)?,
                     dt_check: DtCheckIdentity::of(dt_check)?,
                     binomial: (*binomial).into(),
+                    perturbation: params
+                        .iter()
+                        .filter_map(|(name, r)| match r.step {
+                            If2Step::Single(p) => Some((name.clone(), PerturbationIdentity::of(&p))),
+                            If2Step::SimplexMember => None,
+                        })
+                        .collect(),
+                    simplex: simplex
+                        .iter()
+                        .map(|g| g.iter().map(|(name, r)| (name.clone(), z_sd(r.sd))).collect())
+                        .collect(),
                 };
                 (MethodIdentity::If2(id), 0)
             }
@@ -245,7 +310,7 @@ impl MethodIdentity {
                 };
                 (MethodIdentity::Pgas(id), count(*sweeps))
             }
-            A::PMMH { backend, chains, particles, iterations, burn_in, thin, adapt, adapt_start, binomial } => {
+            A::PMMH { backend, chains, particles, iterations, burn_in, thin, adapt, adapt_start, binomial, proposal: _ } => {
                 let id = PmmhIdentity {
                     backend: (*backend).into(),
                     chains: count(*chains),
@@ -255,10 +320,11 @@ impl MethodIdentity {
                     adapt: *adapt,
                     adapt_start: count(*adapt_start),
                     binomial: (*binomial).into(),
+                    proposal: proposal_of(steps, "pmmh")?,
                 };
                 (MethodIdentity::Pmmh(id), count(*iterations))
             }
-            A::Mh { backend, chains, iterations, burn_in, thin, adapt, adapt_start, burnin_dt, dt_check } => {
+            A::Mh { backend, chains, iterations, burn_in, thin, adapt, adapt_start, burnin_dt, dt_check, proposal: _ } => {
                 let id = MhIdentity {
                     backend: (*backend).into(),
                     chains: count(*chains),
@@ -268,6 +334,7 @@ impl MethodIdentity {
                     adapt_start: count(*adapt_start),
                     burnin_dt: burnin_dt.map(|b| finite("burnin_dt", b)).transpose()?,
                     dt_check: DtCheckIdentity::of(dt_check)?,
+                    proposal: proposal_of(steps, "mh")?,
                 };
                 (MethodIdentity::Mh(id), count(*iterations))
             }
@@ -343,6 +410,23 @@ impl MethodIdentityRecord {
         }
         .as_str()
     }
+}
+
+/// The resolved proposal SDs of a PMMH or MH method, by name.
+fn proposal_of(steps: &ResolvedSteps, method: &str) -> Result<BTreeMap<String, Finite>, String> {
+    match steps {
+        ResolvedSteps::Proposal(map) => Ok(map.iter().map(|(name, r)| (name.clone(), z_sd(r.sd))).collect()),
+        _ => Err(steps_mismatch(method)),
+    }
+}
+
+fn steps_mismatch(method: &str) -> String {
+    format!("internal error: the resolved steps are not those of a `{method}` method")
+}
+
+/// A step in z as a key. A [`ZSd`] is finite by construction.
+fn z_sd(sd: ZSd) -> Finite {
+    Finite::new(sd.get()).expect("a ZSd is finite")
 }
 
 fn count(x: usize) -> u64 {

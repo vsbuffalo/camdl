@@ -207,6 +207,8 @@ fn fixture_files() -> Vec<(&'static str, String)> {
                 .into(),
         ),
         ("weekly_start.toml", "rho = 0.5\n".into()),
+        ("weekly_if2.toml", weekly_if2("")),
+        ("weekly_if2_perturbation.toml", weekly_if2("[method.perturbation]\nbeta = 0.1\ngamma = 0.2\n")),
         (
             "weekly_rho.toml",
             "[model]\ncamdl = \"weekly.camdl\"\n\n[data.observations]\nweekly_cases = \"weekly_cases.tsv\"\n\n\
@@ -216,6 +218,36 @@ fn fixture_files() -> Vec<(&'static str, String)> {
                 .into(),
         ),
     ]
+}
+
+/// `weekly_fit.toml`'s problem under an IF2 method, with `table` after it.
+fn weekly_if2(table: &str) -> String {
+    format!(
+        "[model]\ncamdl = \"weekly.camdl\"\n\n[data.observations]\nweekly_cases = \"weekly_cases.tsv\"\n\n\
+         [estimate]\nbeta = {{ bounds = [0.05, 1.0], start = 0.4 }}\ngamma = {{ bounds = [0.01, 0.5], start = 0.15 }}\n\n\
+         [fixed]\nN0 = 10000\nI0 = 10\nrho = 0.6\nk = 10.0\n\n\
+         [method]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\nchains = 1\nparticles = 20\niterations = 2\ncooling = 0.9\n{table}"
+    )
+}
+
+/// An nl-* profile perturbs nothing, so its points do not key the `--fit`
+/// config's `[method.perturbation]`: a profile of a file with the table and
+/// of the same file without it stores the same points.
+#[test]
+fn an_nl_profile_point_does_not_key_the_fits_perturbation() {
+    let ids = |fit: &str| {
+        let cwd = workdir();
+        let store = cwd.path().join("camdl-store");
+        let args: Vec<String> = ["profile", "weekly.camdl", "--fit", fit, "--sweep", "gamma=0.12,0.15",
+            "--algorithm", "nl-sbplx", "--backend", "ode", "--n-starts", "1", "--seed", "3", "--progress", "none"]
+            .iter().map(|s| s.to_string()).collect();
+        let out = camdl(cwd.path(), &store, &args, &[]);
+        assert!(out.status.success(), "{fit}: {}", String::from_utf8_lossy(&out.stderr));
+        points(&store).into_keys().collect::<Vec<_>>()
+    };
+    let (bare, with) = (ids("weekly_if2.toml"), ids("weekly_if2_perturbation.toml"));
+    assert_eq!(bare.len(), 2);
+    assert_eq!(bare, with);
 }
 
 /// The binaries under test, and the fixture directory, made once.

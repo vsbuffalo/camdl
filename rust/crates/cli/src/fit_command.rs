@@ -15,8 +15,8 @@
 //! A fit is a problem and the runs on it. The problem holds the training rows
 //! of each bound data file, the held-out rows' dates, the tables, the
 //! estimated set and the settings; it is stored once and every method run on
-//! it shares it. Each run holds the method's settings, `rw_sd`,
-//! `perturb_only_at_t0` and `start` of each estimated parameter, its seed,
+//! it shares it. Each run holds the method's settings with each estimated
+//! parameter's resolved step (`fit::steps`), the `start`s, its seed,
 //! where its chains start, and its length; a resume is a new run with a longer
 //! length whose identity holds a dependency on the base's carried chain files.
 //!
@@ -517,13 +517,19 @@ fn run_fit(mut out: Out, cx: FitCommand<'_>) -> Vec<String> {
         }
     }
     let start_input = resolved_starts.source.as_ref().map(|s| s.input.clone()).unwrap_or(StartInput::None);
-    let starts_identity = StartSource::of(&method, start_input).unwrap_or_else(|e| out.fail(format!("error: {e}")));
+    let starts_identity = StartSource::of(&method, &config.problem.estimate, start_input)
+        .unwrap_or_else(|e| out.fail(format!("error: {e}")));
+    // Every estimated parameter's step for this method, once: from the
+    // method's table and each parameter's domain, which no sweep point or
+    // dataset changes. The run is keyed by it and runs with it.
+    let steps = crate::fit::steps::resolve_for(&method.algorithm, &config.problem, &model)
+        .unwrap_or_else(|e| out.fail(format!("error: {fit_path}: {e}")));
     let starts_ext: Option<String> = match &starts_identity.input {
         StartInput::File { file } => Some(file.ext.clone()),
         _ => None,
     };
     let run_files = PlannedMethod::of(&method.algorithm).files(chain_count(&method.algorithm), starts_ext.as_deref());
-    let (method_identity, length) = MethodIdentity::of(&method).unwrap_or_else(|e| out.fail(format!("error: {e}")));
+    let (method_identity, length) = MethodIdentity::of(&method, &steps).unwrap_or_else(|e| out.fail(format!("error: {e}")));
 
     // ── The problems: each stored, then checked against the rows it trains on ──
     let mut posed: Vec<PosedCell<'_>> = Vec::new();
@@ -550,7 +556,7 @@ fn run_fit(mut out: Out, cx: FitCommand<'_>) -> Vec<String> {
         // The one place `fit run` says which rows train; the build is the one
         // each method's runner makes.
         let window = crate::fit::runner::FitRunConfig::build(
-            &cell.problem, Some(&method.algorithm), 1, 1, 1, 1.0, 1, fit_seeds[0], false,
+            &cell.problem, Some(&method.algorithm), &steps, 1, 1, 1, 1.0, 1, fit_seeds[0], false,
         ).ok();
         if let Some(w) = &window {
             w.partition_lines.say();
@@ -609,12 +615,10 @@ fn run_fit(mut out: Out, cx: FitCommand<'_>) -> Vec<String> {
             }
             None => Vec::new(),
         };
-        let (_, perturbation) = crate::fit_store::split_estimate(&cell.problem.estimate)
-            .unwrap_or_else(|e| out.fail(format!("error: {e}")));
         let data_digests = crate::fit::read_data_digests(cell.problem.data_spec().unwrap_or_else(|e| out.fail(format!("error: {e}"))), &model)
             .unwrap_or_else(|e| out.fail(format!("error: {e}")))
             .with_tables(&tables);
-        posed.push(PosedCell { cell_i, cell, stored_problem, partition, forcing_interpolation, perturbation, data_digests });
+        posed.push(PosedCell { cell_i, cell, stored_problem, partition, forcing_interpolation, data_digests });
     }
 
     // ── The runs: every (problem × seed) identity, declared before any is begun ──
@@ -626,7 +630,6 @@ fn run_fit(mut out: Out, cx: FitCommand<'_>) -> Vec<String> {
             let chain = ChainIdentity {
                 problem: p.stored_problem.dep_all(),
                 method: method_identity.clone(),
-                perturbation: p.perturbation.clone(),
                 jacobian_model: jacobian_model.clone(),
                 seed: ProcessSeed { seed },
                 starts: starts_identity.clone(),
@@ -707,6 +710,7 @@ fn run_fit(mut out: Out, cx: FitCommand<'_>) -> Vec<String> {
             live,
             problem: &p.cell.problem,
             method: &method,
+            steps: &steps,
             model: &model,
             seed,
             starts: &resolved_starts,
@@ -747,7 +751,6 @@ struct PosedCell<'a> {
     stored_problem: Stored<FitProblem>,
     partition: crate::run_meta::TrainingPartitionRecord,
     forcing_interpolation: Vec<crate::run_meta::ForcingInterpolationRecord>,
-    perturbation: crate::fit_store::PerturbationSettings,
     data_digests: crate::fit::stream_bindings::BoundDataDigests,
 }
 
@@ -796,11 +799,11 @@ impl ResumeBase {
             let why = if base.chain.problem.id().key() != chain.problem.id().key() {
                 "another problem, or the same problem fitted by another build of camdl"
             } else if base.chain.method.content_hash() != chain.method.content_hash() {
-                "other method settings"
+                "other method settings or steps"
             } else if base.chain.seed.seed != chain.seed.seed {
                 "another seed"
             } else {
-                "other starts, perturbation settings or compile"
+                "other starts or compile"
             };
             return Err(format!(
                 "{handle} is not this run continued: it was fitted with {why}. A resume keeps \
@@ -876,6 +879,8 @@ struct RunCompute<'a> {
     live: Arc<crate::fit::output::LiveRun>,
     problem: &'a config_v2::Problem,
     method: &'a config_v2::Method,
+    /// The method's resolved steps, which the run is keyed by.
+    steps: &'a crate::fit::steps::ResolvedSteps,
     model: &'a ir::Model,
     seed: u64,
     starts: &'a crate::fit::chain_starts::ResolvedStarts,
@@ -895,7 +900,7 @@ struct RunCompute<'a> {
 /// command through `out`, which fails the run first.
 fn compute_run(out: &mut Out, rc: RunCompute<'_>) -> Result<(), String> {
     let RunCompute {
-        live, problem, method, model, seed, starts, base, resume_guard, header, acceptance_kernel,
+        live, problem, method, steps, model, seed, starts, base, resume_guard, header, acceptance_kernel,
         data_digests, input_hash, forcing, record, store_root,
     } = rc;
     let method_name = method.algorithm.method_name();
@@ -984,6 +989,7 @@ fn compute_run(out: &mut Out, rc: RunCompute<'_>) -> Result<(), String> {
     let ran = crate::fit::run_method(out, crate::fit::MethodContext {
         problem,
         method,
+        steps,
         model,
         files: files.as_ref(),
         seed,
@@ -1024,6 +1030,7 @@ fn compute_run(out: &mut Out, rc: RunCompute<'_>) -> Result<(), String> {
         "unused_starts": { "rule": record.starts_rule.tag(), "params": unused_starts },
         "best_loglik": ran.best_loglik,
         "best_chain": ran.best_chain,
+        "steps": steps.record(),
     });
     // The forcing override, and the forcings it held, as the record of the
     // command that ran under it.

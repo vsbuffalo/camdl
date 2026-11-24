@@ -257,15 +257,14 @@ pub(crate) fn pose_problem(
             stored.dep_all()
         }
     };
-    // The cells read the stored problem: reopened by its id, with the
-    // method and the run settings of `[estimate]` of the fit as named.
+    // The cells read the stored problem: reopened by its id, with the fit's
+    // method as named (its `[method.perturbation]` with it) and the starts of
+    // its `[estimate]`.
     let mut posed = crate::fit_store::FitArg::read(&dep.id().key().to_hex(), Some(store))?;
     posed.handle = fit.handle.clone();
     posed.config.inference = fit.config.inference.clone();
     for (name, spec) in posed.config.problem.estimate.iter_mut() {
         if let Some(given) = fit.config.problem.estimate.get(name) {
-            spec.rw_sd = given.rw_sd;
-            spec.perturb_only_at_t0 = given.perturb_only_at_t0;
             spec.start = given.start;
         }
     }
@@ -450,10 +449,9 @@ pub(crate) enum CellSettings {
 pub(crate) struct EstimatedSetting {
     pub name: String,
     pub domain: Domain,
-    /// The IF2 step in the unconstrained scale; `None` for an nl-* cell,
-    /// which perturbs nothing.
-    pub rw_sd: Option<Finite>,
-    pub perturb_only_at_t0: bool,
+    /// The IF2 perturbation, its SD in z and its timing; `None` for an nl-*
+    /// cell, which perturbs nothing and reads no step.
+    pub perturbation: Option<crate::fit_store::PerturbationIdentity>,
 }
 
 /// An estimated parameter's domain, as the map onto it
@@ -473,12 +471,11 @@ fn finite(x: f64, what: &str) -> Result<Finite, String> {
 }
 
 impl EstimatedSetting {
-    /// The setting of `p`, whose written step is `step`; the step in z is
-    /// kept only under IF2.
+    /// The setting of `p`, whose IF2 step is `step`; `None` for a cell that
+    /// takes no step.
     pub fn of(
         p: &sim::inference::if2::EstimatedParam,
-        step: &crate::fit::runner::WrittenStep,
-        if2: bool,
+        step: Option<&crate::fit::runner::WrittenStep>,
     ) -> Result<Self, String> {
         use sim::inference::types::Transform as T;
         let what = |k: &str| format!("the {k} of `{}`", p.name);
@@ -492,8 +489,13 @@ impl EstimatedSetting {
         Ok(EstimatedSetting {
             name: p.name.clone(),
             domain,
-            rw_sd: if if2 { Some(finite(step.z_sd, &what("random-walk step"))?) } else { None },
-            perturb_only_at_t0: step.at == sim::inference::types::PerturbAt::TimeZeroOnly,
+            perturbation: match step {
+                Some(step) => Some(crate::fit_store::PerturbationIdentity {
+                    sd: finite(step.z_sd, &what("random-walk step"))?,
+                    at: step.at.into(),
+                }),
+                None => None,
+            },
         })
     }
 }

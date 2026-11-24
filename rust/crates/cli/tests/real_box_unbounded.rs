@@ -64,17 +64,25 @@ fn fit(method: &str, extra: &[&str]) -> (Output, tempfile::TempDir) {
 }
 
 /// Run `camdl <args>` in a directory holding the model, the data and a
-/// fit.toml estimating `free` (with no bounds and an explicit `rw_sd`); the
+/// fit.toml estimating `free` (with no bounds and an explicit step in its method's table); the
 /// other unbounded parameter is held.
 fn run(free: &str, method: &str, args: &[&str]) -> (Output, tempfile::TempDir) {
     let held = if free == "delta" { "eta = 0.1" } else { "delta = 0.0" };
+    // The step: 0.1 natural at the start, in z (the identity map for delta,
+    // θ = eᶻ for eta), and five times it as a PMMH proposal.
+    let z = if free == "delta" { 0.1 } else { 0.1 / 0.5 };
+    let table = if method.contains("\"if2\"") {
+        format!("[method.perturbation]\n{free} = {z}")
+    } else {
+        format!("[method.proposal]\n{free} = {}", 5.0 * z)
+    };
     let toml = format!(r#"[model]
 camdl = "model.camdl"
 [data.observations]
 weekly_cases = "weekly_cases.tsv"
 [estimate]
 beta  = {{ bounds = [0.05, 1.0], start = 0.25 }}
-{free} = {{ start = 0.5, rw_sd = 0.1 }}
+{free} = {{ start = 0.5 }}
 [fixed]
 gamma = 0.15
 N0 = 10000
@@ -82,6 +90,7 @@ I0 = 10
 {held}
 [method]
 {method}
+{table}
 "#);
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("model.camdl"), MODEL).unwrap();

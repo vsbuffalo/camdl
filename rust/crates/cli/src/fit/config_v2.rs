@@ -96,7 +96,7 @@ pub struct Problem {
     /// property*, not an algorithm knob — algorithms read it.
     ///
     /// IF2 perturbs members jointly via barycentric (log-ratio + softmax)
-    /// transform; a member's `rw_sd` is interpreted on the log-ratio
+    /// transform; a member's `[method.perturbation]` SD is on the log-ratio
     /// scale. PGAS / PMMH / PFilter currently treat members as
     /// independent and rely on the model to enforce sum = 1 indirectly
     /// — `validate()` warns when a non-IF2 method runs against a fit
@@ -433,8 +433,8 @@ impl DataSpec {
 /// the full design.
 ///
 /// CLI-side type: members are listed by name. At fit-config build time
-/// names are resolved to model param indices, and `rw_sd` is read from
-/// each member's `EstimateSpecV2.rw_sd` (or auto-derived) — the runtime
+/// names are resolved to model param indices, and each member's SD is
+/// its `[method.perturbation]` entry or the default (`fit::steps`) — the runtime
 /// `sim::inference::if2::SimplexGroup` carries indices + SDs on the
 /// log-ratio scale.
 ///
@@ -624,25 +624,65 @@ pub struct EstimateSpecV2 {
     #[serde(default)]
     pub prior: Option<EstimatePriorSpec>,
 
-    /// Perturb this parameter only at t=0, never at an observation — the
-    /// IF2 perturbation schedule for an initial-state parameter (`S0`, `I0`,
-    /// …), whose effect on the trajectory is spent before the first step.
-    /// IF2 is the only algorithm with a perturbation schedule, so declaring
-    /// this under any other algorithm is refused by [`FitConfig::validate`].
-    #[serde(default)]
-    pub perturb_only_at_t0: bool,
-
-    /// Per-parameter random walk SD for IF2. If omitted, auto-scaled from
-    /// bounds. PMMH and MH also read it: five times it, on the transformed
-    /// scale, is their initial proposal SD (`fit/pmmh.rs::build_proposal_sd`).
-    #[serde(default)]
-    pub rw_sd: Option<f64>,
-
     /// Starting value: the base point a `starts = "single"` rule puts every
     /// chain at, and the point `"uniform"` keeps for chain 1. Omitted: the
     /// model's declared value, else a transform-aware draw within the bounds.
+    /// It belongs to the run, not the problem: `fit_store::StartSource`
+    /// keys it.
     #[serde(default)]
     pub start: Option<f64>,
+}
+
+/// One `[method.perturbation]` entry: IF2's random-walk SD for one estimated
+/// parameter, in z, and whether the parameter sets only the initial state.
+///
+/// A bare number is the SD (`beta = 0.05`); a table takes `sd` and
+/// `initial_state` and nothing else (`I0 = { sd = 0.174, initial_state =
+/// true }`, `I0 = { initial_state = true }`). An entry that states neither is
+/// refused when the steps are resolved ([`crate::fit::steps::resolve_steps`]).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PerturbationSpec {
+    /// The SD in z; `None` takes the map's default IF2 step.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sd: Option<sim::inference::types::ZSd>,
+    /// The parameter sets only the initial state, so IF2 perturbs it at
+    /// t = 0 only ([`sim::inference::types::PerturbAt::TimeZeroOnly`]).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub initial_state: bool,
+}
+
+impl<'de> Deserialize<'de> for PerturbationSpec {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use sim::inference::types::ZSd;
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = PerturbationSpec;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("an SD in z (a number), or a table with `sd` and `initial_state`")
+            }
+            fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Self::Value, E> {
+                Ok(PerturbationSpec { sd: Some(ZSd::new(v).map_err(E::custom)?), initial_state: false })
+            }
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> {
+                self.visit_f64(v as f64)
+            }
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
+                self.visit_f64(v as f64)
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut out = PerturbationSpec { sd: None, initial_state: false };
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "sd" => out.sd = Some(map.next_value::<ZSd>()?),
+                        "initial_state" => out.initial_state = map.next_value::<bool>()?,
+                        other => return Err(serde::de::Error::unknown_field(other, &["sd", "initial_state"])),
+                    }
+                }
+                Ok(out)
+            }
+        }
+        d.deserialize_any(V)
+    }
 }
 
 // Prior specification for `[estimate.<name>.prior]` is `ir::parameter::PriorDist`.
@@ -1030,6 +1070,12 @@ pub enum Algorithm {
         /// when `btrs`, for the reasons on `Algorithm::PGAS.binomial`.
         #[serde(default, skip_serializing_if = "is_btpe")]
         binomial: sim::rng::BinomialAlgorithm,
+        /// `[method.perturbation]`: per estimated parameter, its random-walk
+        /// SD in z and whether it sets only the initial state. A name left
+        /// out takes the map's default IF2 step and is perturbed before
+        /// every observation (`fit::steps::resolve_steps`).
+        #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+        perturbation: IndexMap<String, PerturbationSpec>,
     },
 
     #[serde(rename = "pgas")]
@@ -1136,6 +1182,11 @@ pub enum Algorithm {
         /// when `btrs`, for the reasons on `Algorithm::PGAS.binomial`.
         #[serde(default, skip_serializing_if = "is_btpe")]
         binomial: sim::rng::BinomialAlgorithm,
+        /// `[method.proposal]`: per estimated parameter, the initial
+        /// proposal SD in z, used as written. A name left out takes the
+        /// map's default MH step (`fit::steps::resolve_steps`).
+        #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+        proposal: IndexMap<String, sim::inference::types::ZSd>,
     },
 
     /// Metropolis-Hastings on the deterministic ODE marginal likelihood
@@ -1182,6 +1233,9 @@ pub enum Algorithm {
         /// on mh methods).
         #[serde(default)]
         dt_check: DtCheckConfig,
+        /// `[method.proposal]`, as under `pmmh`.
+        #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+        proposal: IndexMap<String, sim::inference::types::ZSd>,
     },
 
     #[serde(rename = "pfilter")]
@@ -2284,6 +2338,234 @@ fn detect_removed_estimate_transform(contents: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// One `[estimate]` entry that writes a step key: the step is a setting of
+/// the method, in `[method.perturbation]` or `[method.proposal]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LegacyStepKey {
+    pub param: String,
+    /// `rw_sd` as written, a natural-scale SD.
+    pub rw_sd: Option<f64>,
+    pub perturb_only_at_t0: bool,
+    /// Whether the parameter is a member of a `[[simplex_groups]]` entry,
+    /// whose IF2 `rw_sd` was read on its log-ratio coordinate as written.
+    pub simplex_member: bool,
+}
+
+/// Every `[estimate]` entry of a fit config that writes `rw_sd` or
+/// `perturb_only_at_t0`, and the file's `[method] algorithm`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LegacyStepKeys {
+    pub algorithm: Option<String>,
+    pub entries: Vec<LegacyStepKey>,
+}
+
+/// The `[estimate]` entries of `raw` that write a step key, or `None` when
+/// none does.
+pub fn detect_legacy_step_keys(raw: &toml::Value) -> Option<LegacyStepKeys> {
+    let estimate = raw.get("estimate")?.as_table()?;
+    let members: BTreeSet<&str> = raw
+        .get("simplex_groups")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|g| g.get("params").and_then(toml::Value::as_array))
+        .flatten()
+        .filter_map(toml::Value::as_str)
+        .collect();
+    let entries: Vec<LegacyStepKey> = estimate
+        .iter()
+        .filter_map(|(name, entry)| {
+            let rw_sd = entry.get("rw_sd");
+            let flag = entry.get("perturb_only_at_t0");
+            if rw_sd.is_none() && flag.is_none() {
+                return None;
+            }
+            Some(LegacyStepKey {
+                param: name.clone(),
+                rw_sd: rw_sd.and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64))),
+                perturb_only_at_t0: flag.and_then(toml::Value::as_bool).unwrap_or(false),
+                simplex_member: members.contains(name.as_str()),
+            })
+        })
+        .collect();
+    if entries.is_empty() {
+        return None;
+    }
+    let algorithm = raw.get("method").and_then(|m| m.get("algorithm")).and_then(toml::Value::as_str).map(str::to_string);
+    Some(LegacyStepKeys { algorithm, entries })
+}
+
+impl LegacyStepKeys {
+    /// The refusal: where each key moved for this file's method, and the
+    /// formula that converts a natural-scale `rw_sd` to the SD in z each
+    /// method takes.
+    pub fn message(&self) -> String {
+        let fmt = |x: f64| x.to_string();
+        let which = match &self.algorithm {
+            Some(a) => format!("This file's method is `{a}`."),
+            None => "This file names no method.".to_string(),
+        };
+        let mut m = String::from(
+            "[estimate] sets step sizes, which are settings of the method:\n  \
+             `rw_sd` (a natural-scale step) and `perturb_only_at_t0` moved to [method],\n  \
+             in z, the coordinate each method moves in. ",
+        );
+        m.push_str(&which);
+        m.push_str("\n  Delete both keys from [estimate]");
+        let width = self.entries.iter().map(|e| e.param.len()).max().unwrap_or(0);
+        let if2_block = || -> String {
+            let mut b = String::from("    [method.perturbation]\n");
+            for e in &self.entries {
+                let value = match (e.rw_sd, e.simplex_member) {
+                    (Some(rw), true) => fmt(rw),
+                    (Some(_), false) => "<sd_z>".to_string(),
+                    (None, _) => String::new(),
+                };
+                let entry = match (e.perturb_only_at_t0, value.is_empty()) {
+                    (true, false) => format!("{{ sd = {value}, initial_state = true }}"),
+                    (true, true) => "{ initial_state = true }".to_string(),
+                    (false, false) => value,
+                    (false, true) => continue,
+                };
+                let note = match (e.rw_sd, e.simplex_member) {
+                    (Some(rw), false) => format!("# rw_sd {}", fmt(rw)),
+                    (Some(_), true) => "# a simplex member: its rw_sd was already on its log-ratio scale".to_string(),
+                    (None, _) => String::new(),
+                };
+                let line = format!("    {:width$} = {entry:<40}{note}", e.param);
+                b.push_str(line.trim_end());
+                b.push('\n');
+            }
+            b
+        };
+        let proposal_block = || -> String {
+            let mut b = String::from("    [method.proposal]\n");
+            for e in self.entries.iter().filter(|e| e.rw_sd.is_some()) {
+                b.push_str(&format!("    {:width$} = <5 × sd_z>  # rw_sd {}\n", e.param, fmt(e.rw_sd.unwrap_or_default())));
+            }
+            b
+        };
+        let any_rw = self.entries.iter().any(|e| e.rw_sd.is_some());
+        let any_flag = self.entries.iter().any(|e| e.perturb_only_at_t0);
+        let formula = "\n  where sd_z = rw_sd / |dθ/dz|, the natural-scale step divided by the slope\n  \
+            of the parameter's map at its start θ₀ (its `start`, else the model's value,\n  \
+            else the middle of its box): θ₀ − lo on [lo, ∞); (θ₀ − lo)(hi − θ₀)/(hi − lo)\n  \
+            on a probability or a box that starts at 0; θ₀·ln(θ₀/lo)·ln(hi/θ₀)/ln(hi/lo)\n  \
+            on a positive kind's box [lo, hi] with lo > 0; 1 on an unbounded real.\n  \
+            This gives the old step at the start only, since the new step is fixed in z.";
+        match self.algorithm.as_deref() {
+            Some("if2") => {
+                m.push_str(" and add:\n\n");
+                m.push_str(&if2_block());
+                if any_rw {
+                    m.push_str(formula);
+                }
+            }
+            Some("pmmh") | Some("mh") => {
+                if any_rw {
+                    m.push_str(" and add:\n\n");
+                    m.push_str(&proposal_block());
+                    m.push_str(formula);
+                    m.push_str("\n  The old initial proposal was five times that z step; the new table is\n  \
+                        the proposal SD itself.");
+                } else {
+                    m.push('.');
+                }
+                if any_flag {
+                    m.push_str("\n  `perturb_only_at_t0` is IF2's timing, which this method does not read: delete it.");
+                }
+            }
+            Some(other) => {
+                m.push_str(&format!(
+                    ".\n  `{other}` reads neither key: it takes no per-parameter step, so the lines \
+                     had no effect."));
+            }
+            None => {
+                m.push_str(", and add the table of the method that runs the file:\n\n  for `if2`:\n");
+                m.push_str(&if2_block());
+                if any_rw {
+                    m.push_str("\n  for `pmmh` or `mh`:\n");
+                    m.push_str(&proposal_block());
+                    m.push_str(formula);
+                }
+            }
+        }
+        m.push_str(
+            "\n\n  Leaving a parameter out uses the method's default step instead, which is a\n  \
+             different step. See `camdl docs fit-toml`, \"Step sizes\".",
+        );
+        m
+    }
+}
+
+/// Refuse a live fit config whose `[estimate]` writes `rw_sd` or
+/// `perturb_only_at_t0`, naming where each moved.
+fn detect_legacy_step_keys_in(contents: &str) -> Result<(), String> {
+    let Ok(raw) = toml::from_str::<toml::Value>(contents) else { return Ok(()) };
+    match detect_legacy_step_keys(&raw) {
+        Some(keys) => Err(keys.message()),
+        None => Ok(()),
+    }
+}
+
+/// Remove `rw_sd` and `perturb_only_at_t0` from every `[estimate]` entry of
+/// `raw`, a stored copy of a config written before they moved to `[method]`.
+/// Returns the notice naming what was removed, or `None` when there was
+/// nothing to remove. For readers of a stored run only: a live config with
+/// the keys is refused ([`FitConfig::from_toml_str_named`]).
+pub fn set_aside_legacy_step_keys(raw: &mut toml::Value, what: &str) -> Option<String> {
+    let keys = detect_legacy_step_keys(raw)?;
+    let estimate = raw.get_mut("estimate")?.as_table_mut()?;
+    for (_, entry) in estimate.iter_mut() {
+        if let Some(t) = entry.as_table_mut() {
+            t.remove("rw_sd");
+            t.remove("perturb_only_at_t0");
+        }
+    }
+    let removed: Vec<String> = keys
+        .entries
+        .iter()
+        .map(|e| {
+            let k: Vec<&str> = [e.rw_sd.map(|_| "rw_sd"), e.perturb_only_at_t0.then_some("perturb_only_at_t0")]
+                .into_iter()
+                .flatten()
+                .collect();
+            format!("{} ({})", e.param, k.join(", "))
+        })
+        .collect();
+    Some(format!(
+        "note: {what} was written before step sizes moved to [method]; its [estimate] keys \
+         {} are set aside, and the run is read without them.",
+        removed.join(", ")
+    ))
+}
+
+/// Refuse a step table under a method that does not read it, naming the
+/// table the method has instead. Run before the typed parse, since the
+/// `nl-*` methods' settings deny unknown fields and would otherwise refuse
+/// it without saying where it belongs.
+fn detect_misplaced_step_table(contents: &str) -> Result<(), String> {
+    let Ok(raw) = toml::from_str::<toml::Value>(contents) else { return Ok(()) };
+    let Some(method) = raw.get("method") else { return Ok(()) };
+    let Some(algorithm) = method.get("algorithm").and_then(toml::Value::as_str) else { return Ok(()) };
+    let has = |key: &str| method.get(key).is_some();
+    if has("proposal") && !matches!(algorithm, "pmmh" | "mh") {
+        return Err(format!(
+            "`[method.proposal]` is the initial proposal SD of `pmmh` and `mh`, and this \
+             file's method is `{algorithm}`. IF2's per-parameter setting is \
+             `[method.perturbation]`; `pgas`, `pfilter` and the `nl-*` optimizers have none. \
+             See `camdl docs fit-toml`."));
+    }
+    if has("perturbation") && algorithm != "if2" {
+        return Err(format!(
+            "`[method.perturbation]` is IF2's random-walk perturbation, and this file's \
+             method is `{algorithm}`. The initial proposal SD of `pmmh` and `mh` is \
+             `[method.proposal]`; `pgas`, `pfilter` and the `nl-*` optimizers have none. \
+             See `camdl docs fit-toml`."));
+    }
+    Ok(())
+}
+
 /// Refuse the removed `[config] obs_alignment` key (D43,
 /// `docs/dev/temporal-architecture.md` §4.5) before the strict parse, so the
 /// user is told the setting is gone and why, rather than a bare serde
@@ -2477,6 +2759,12 @@ fn validate_method_keys(contents: &str, method: &Method) -> Result<(), String> {
         // Serialized only off their default; still legitimate keys.
         known.insert("binomial".into());
         known.insert("ancestor_sampling".into());
+    }
+    // Each step table is serialized only when non-empty.
+    match method.algorithm {
+        Algorithm::IF2 { .. } => { known.insert("perturbation".into()); }
+        Algorithm::PMMH { .. } | Algorithm::Mh { .. } => { known.insert("proposal".into()); }
+        _ => {}
     }
     for (key, value) in raw_method {
         if known.contains(key) {
@@ -2674,6 +2962,8 @@ impl FitConfig {
         detect_relocated_config_backend(contents)?;
         detect_removed_condition_from(contents)?;
         detect_removed_estimate_transform(contents)?;
+        detect_legacy_step_keys_in(contents)?;
+        detect_misplaced_step_table(contents)?;
         detect_removed_obs_alignment(contents)?;
         detect_nuts_algorithm(contents)?;
         let wire: FitConfigWire = toml::from_str(contents)
@@ -2831,26 +3121,6 @@ impl FitConfig {
                 super::methods::validate_ic_free(algorithm.method_kind(), init_law)
             {
                 return Err(format!("[method]: {}", msg));
-            }
-        }
-
-        // `perturb_only_at_t0` is IF2's perturbation schedule, and IF2 is the
-        // only method that perturbs at all: under any other method the flag is
-        // read nowhere, so a fit declaring it would run without it and say
-        // nothing. Refused rather than ignored. (`rw_sd` is not refused: PMMH
-        // and MH read it as their initial proposal scale.)
-        if !matches!(algorithm, Algorithm::IF2 { .. }) {
-            let flagged: Vec<&str> = self.problem.estimate.iter()
-                .filter(|(_, spec)| spec.perturb_only_at_t0)
-                .map(|(name, _)| name.as_str())
-                .collect();
-            if !flagged.is_empty() {
-                return Err(format!(
-                    "[estimate]: `perturb_only_at_t0 = true` on {} — the flag is IF2's \
-                     perturbation schedule (perturb at t=0 only), and the `{}` method \
-                     does not perturb parameters, so it would be ignored. Remove the flag \
-                     for this method, or fit with `algorithm = \"if2\"`.",
-                    flagged.join(", "), algorithm.method_name()));
             }
         }
 
@@ -3733,8 +4003,6 @@ impl Problem {
     ///  - `params.len() >= 2` (single-member simplex is degenerate)
     ///  - Every member appears in `[estimate]`
     ///  - No member appears in more than one simplex group
-    ///  - No member is `perturb_only_at_t0 = true` (the simplex transform
-    ///    owns the initial perturbation; the two would conflict)
     ///  - Each member's bounds lower must be ≥ 0 (members are non-negative)
     ///
     /// The algorithm-aware warning (a non-IF2 method does not honour the
@@ -3762,16 +4030,6 @@ impl Problem {
                         "simplex_groups[{}]: parameter '{}' already \
                          appears in another simplex group. Each parameter \
                          can belong to at most one simplex.", gi, name));
-                }
-                if spec.perturb_only_at_t0 {
-                    return Err(format!(
-                        "simplex_groups[{}]: member '{}' has \
-                         perturb_only_at_t0 = true. The simplex transform \
-                         owns the initial perturbation; the two would \
-                         conflict. Drop perturb_only_at_t0 on simplex \
-                         members and rely on the simplex's barycentric \
-                         perturbation for spread.",
-                        gi, name));
                 }
                 // Skip when fit.toml omits bounds — model bounds get
                 // resolved later, and the simplex non-negativity is
@@ -3809,12 +4067,24 @@ pub(crate) fn format_dataset_dir(idx: usize) -> String {
 impl Method {
     fn identity_payload(&self) -> serde_json::Value {
         use store::Identity;
-        let (method, _) = crate::fit_store::MethodIdentity::of(self).expect("a finite method keys");
+        let (method, _) = crate::fit_store::MethodIdentity::of(self, &no_steps(&self.algorithm)).expect("a finite method keys");
         let mut v = serde_json::json!({ "method": method.record() });
         if let Ok(rule) = self.starts() {
             v["starts"] = rule.identity_value();
         }
         v
+    }
+}
+
+/// The steps of a method on no estimated parameter, for the identity tests
+/// below, which key the method alone.
+#[cfg(test)]
+fn no_steps(a: &Algorithm) -> crate::fit::steps::ResolvedSteps {
+    use crate::fit::steps::ResolvedSteps as S;
+    match a {
+        Algorithm::IF2 { .. } => S::If2 { params: IndexMap::new(), simplex: Vec::new() },
+        Algorithm::PMMH { .. } | Algorithm::Mh { .. } => S::Proposal(IndexMap::new()),
+        _ => S::None,
     }
 }
 
@@ -3824,7 +4094,7 @@ impl Method {
 impl Algorithm {
     fn run_length(&self) -> u64 {
         let m = Method { algorithm: self.clone(), starts: Some(crate::fit::starts::ChainStarts::from_prior()) };
-        crate::fit_store::MethodIdentity::of(&m).expect("a finite method keys").1
+        crate::fit_store::MethodIdentity::of(&m, &no_steps(self)).expect("a finite method keys").1
     }
 
     fn cas_n_trajectories(&self) -> usize {
@@ -4398,15 +4668,19 @@ starts     = "{starts}"
                 None => out.push(prefix.to_string()),
             }
         }
-        let key = |m: &Method| MethodIdentity::of(m).expect("a finite method keys").0.key();
+        let key = |m: &Method| MethodIdentity::of(m, &no_steps(&m.algorithm)).expect("a finite method keys").0.key();
         for algo in [F::If2, F::Pgas, F::Pmmh, F::Mh, F::Pfilter, F::NlSbplx, F::NlBobyqa, F::NlLbfgs] {
             let base = base_method_for(algo);
-            let (identity, _) = MethodIdentity::of(&base).unwrap();
+            let (identity, _) = MethodIdentity::of(&base, &no_steps(&base.algorithm)).unwrap();
             let record = serde_json::to_value(identity.record()).unwrap();
             let (variant, fields) = record.as_object().unwrap().iter().next().unwrap();
             assert_eq!(identity.record().algorithm(), algo.as_str(), "{variant}");
             let mut expected = Vec::new();
             leaves("", fields, &mut expected);
+            // The resolved steps are keyed from `fit::steps::ResolvedSteps`,
+            // not from a field of the method, and are tested with it
+            // (`fit_store/tests.rs`).
+            expected.retain(|f| !["perturbation", "simplex", "proposal"].iter().any(|s| f.starts_with(s)));
             expected.sort();
             let cases = cases(algo);
             let mut named: Vec<String> = cases.iter().map(|(n, _)| n.to_string()).collect();
@@ -6039,39 +6313,6 @@ params = ["S0_a", "S0_e"]
     }
 
     #[test]
-    fn validate_simplex_member_with_ivp_rejects() {
-        let config = parse(r#"
-[model]
-camdl = "models/sir.camdl"
-[data.observations]
-weekly_cases = "data/cases.tsv"
-[config]
-dt = 1.0
-[estimate]
-S0_y = { bounds = [0, 1], perturb_only_at_t0 = true }
-S0_a = { bounds = [0, 1] }
-S0_e = { bounds = [0, 1] }
-beta = { bounds = [0.01, 2.0] }
-[fixed]
-N0 = 1000000
-[method]
-algorithm = "if2"
-backend = "chain_binomial"
-chains = 4
-particles = 100
-iterations = 50
-cooling = 0.7
-[[simplex_groups]]
-params = ["S0_y", "S0_a", "S0_e"]
-        "#).unwrap();
-        let model_params = vec!["S0_y".into(), "S0_a".into(), "S0_e".into(),
-                                "beta".into(), "N0".into()];
-        let err = config.validate(&model_params, InitLaw::Absent).unwrap_err();
-        assert!(err.contains("perturb_only_at_t0 = true"), "got: {}", err);
-        assert!(err.contains("S0_y"), "got: {}", err);
-    }
-
-    #[test]
     fn validate_simplex_member_with_negative_bounds_rejects() {
         let config = parse(r#"
 [model]
@@ -6541,8 +6782,6 @@ cooling = 0.9
             m.insert((*name).to_string(), EstimateSpecV2 {
                 bounds: None,
                 prior: None,
-                perturb_only_at_t0: false,
-                rw_sd: None,
                 start: None,
             });
         }
@@ -7899,14 +8138,14 @@ particles = 500
         }
     }
 
-    // ── perturb_only_at_t0 ─────────────────────────────────────────────────
+    // ── initial_state ──────────────────────────────────────────────────────
     //
-    // The flag is IF2's perturbation schedule. Every other method perturbs
-    // nothing, so it would read the flag nowhere: such a config is refused at
-    // load rather than run without it.
+    // The flag is IF2's perturbation timing, in IF2's own table. Every other
+    // method perturbs nothing and has no `[method.perturbation]`: such a
+    // config is refused at load rather than run without it.
 
     fn t0_fit(algorithm: &str, method_body: &str, declare_flag: bool) -> String {
-        let flag = if declare_flag { ", perturb_only_at_t0 = true" } else { "" };
+        let flag = if declare_flag { "[method.perturbation]\nI0 = { initial_state = true }\n" } else { "" };
         format!(r#"[model]
 camdl = "models/sir.camdl"
 
@@ -7914,7 +8153,7 @@ camdl = "models/sir.camdl"
 cases = "data/cases.tsv"
 
 [estimate]
-I0 = {{ bounds = [1, 500]{flag} }}
+I0 = {{ bounds = [1, 500] }}
 
 [fixed]
 beta = 0.3
@@ -7924,7 +8163,7 @@ N0 = 1000
 [method]
 algorithm = "{algorithm}"
 {method_body}
-"#)
+{flag}"#)
     }
 
     const IF2_BODY: &str = "backend = \"chain_binomial\"\nchains = 2\nparticles = 100\n\
@@ -7933,16 +8172,16 @@ algorithm = "{algorithm}"
                              sweeps = 100\nburn_in = 10\n";
 
     #[test]
-    fn perturb_only_at_t0_with_if2_method_validates() {
+    fn initial_state_with_if2_method_validates() {
         parse(&t0_fit("if2", IF2_BODY, true)).unwrap()
             .validate(&ic_free_model_params(), InitLaw::Absent)
-            .expect("IF2 honours perturb_only_at_t0 — it is IF2's own schedule");
+            .expect("IF2 honours initial_state — it is IF2's own timing");
     }
 
-    /// Every other method refuses the flag, naming the parameter and the
-    /// method, rather than running without it.
+    /// Every other method refuses IF2's table, naming it, the method and the
+    /// table it has instead, rather than running without it.
     #[test]
-    fn perturb_only_at_t0_is_refused_for_non_if2_methods() {
+    fn a_perturbation_table_is_refused_for_non_if2_methods() {
         for (algo, body) in [
             ("pgas", PGAS_BODY),
             ("pmmh", "backend = \"chain_binomial\"\nchains = 2\nparticles = 100\n\
@@ -7950,12 +8189,37 @@ algorithm = "{algorithm}"
             ("mh", "backend = \"ode\"\nchains = 2\niterations = 2000\nburn_in = 500\n"),
             ("nl-sbplx", "backend = \"ode\"\nchains = 1\n"),
         ] {
-            let err = parse(&t0_fit(algo, body, true)).unwrap()
-                .validate(&ic_free_model_params(), InitLaw::Absent)
-                .expect_err(&format!("{algo} must refuse a perturb_only_at_t0 it does not read"));
-            assert!(err.contains("perturb_only_at_t0") && err.contains("I0")
-                && err.contains(algo), "{algo}: {err}");
+            let err = parse(&t0_fit(algo, body, true))
+                .expect_err(&format!("{algo} must refuse a [method.perturbation] it does not read"));
+            assert!(err.contains("[method.perturbation]") && err.contains(&format!("`{algo}`"))
+                && err.contains("[method.proposal]"), "{algo}: {err}");
         }
+    }
+
+    /// `[method.proposal]` under IF2 is refused with the table IF2 reads.
+    #[test]
+    fn a_proposal_table_is_refused_under_if2() {
+        let text = t0_fit("if2", IF2_BODY, false) + "[method.proposal]\nI0 = 0.3\n";
+        let err = parse(&text).expect_err("IF2 has no proposal");
+        assert!(err.contains("[method.proposal]") && err.contains("[method.perturbation]") && err.contains("`if2`"), "{err}");
+    }
+
+    /// A live config with the old `[estimate]` step keys is refused, naming
+    /// the table each moved to for its method, and the formula that converts
+    /// a natural-scale `rw_sd` to z.
+    #[test]
+    fn the_old_step_keys_are_refused_with_their_new_spelling() {
+        let old = |algorithm: &str, body: &str| t0_fit(algorithm, body, false)
+            .replace("I0 = { bounds = [1, 500] }", "I0 = { bounds = [1, 500], rw_sd = 2, perturb_only_at_t0 = true }");
+        let err = parse(&old("if2", IF2_BODY)).expect_err("rw_sd moved");
+        assert!(err.contains("[method.perturbation]") && err.contains("I0 = { sd = <sd_z>, initial_state = true }")
+            && err.contains("rw_sd / |dθ/dz|"), "{err}");
+        let pmmh = "backend = \"chain_binomial\"\nchains = 2\nparticles = 100\niterations = 2000\n";
+        let err = parse(&old("pmmh", pmmh)).expect_err("rw_sd moved");
+        assert!(err.contains("[method.proposal]") && err.contains("<5 × sd_z>")
+            && err.contains("`perturb_only_at_t0` is IF2's timing"), "{err}");
+        let err = parse(&old("pgas", PGAS_BODY)).expect_err("rw_sd moved");
+        assert!(err.contains("`pgas` reads neither key"), "{err}");
     }
 
     /// Control: the same methods validate when no `[estimate]` entry declares
@@ -8196,6 +8460,7 @@ decibans_thresh = 100.0
                 burn_in: Some(200), thin: Some(2),
                 adapt: true, adapt_start: 300,
                 binomial: sim::rng::BinomialAlgorithm::Btpe,
+                proposal: IndexMap::new(),
             },
             starts: Some(ChainStarts::uniform_unconstrained()),
         }
@@ -8416,7 +8681,7 @@ decibans_thresh = 100.0
     fn pmmh_identity_payload_byte_stable() {
         let method = make_pmmh_method(1000);
         let payload_str = serde_json::to_string(&method.identity_payload()).unwrap();
-        let expected = r#"{"method":{"Pmmh":{"adapt":true,"adapt_start":300,"backend":"ChainBinomial","binomial":"Btpe","burn_in":200,"chains":4,"particles":100,"thin":2}},"starts":"uniform_unconstrained"}"#;
+        let expected = r#"{"method":{"Pmmh":{"adapt":true,"adapt_start":300,"backend":"ChainBinomial","binomial":"Btpe","burn_in":200,"chains":4,"particles":100,"proposal":{},"thin":2}},"starts":"uniform_unconstrained"}"#;
         assert_eq!(payload_str, expected,
             "the PMMH method identity's record changed, which re-keys every \
              PMMH run; if that is intended, update this constant and say so \
@@ -8455,6 +8720,7 @@ decibans_thresh = 100.0
             gate: GateConfig::default(),
             dt_check: DtCheckConfig::default(),
             binomial: sim::rng::BinomialAlgorithm::Btpe,
+            perturbation: IndexMap::new(),
         });
         let s100 = if2_method(Algorithm::IF2 {
             backend: crate::run_meta::InferenceBackend::ChainBinomial,
@@ -8464,6 +8730,7 @@ decibans_thresh = 100.0
             gate: GateConfig::default(),
             dt_check: DtCheckConfig::default(),
             binomial: sim::rng::BinomialAlgorithm::Btpe,
+            perturbation: IndexMap::new(),
         });
         assert_ne!(s50.identity_payload(), s100.identity_payload());
 
@@ -8475,6 +8742,7 @@ decibans_thresh = 100.0
             gate: GateConfig::default(),
             dt_check: DtCheckConfig::default(),
             binomial: sim::rng::BinomialAlgorithm::Btpe,
+            perturbation: IndexMap::new(),
         });
         assert_ne!(s50.identity_payload(), s_diff_cooling.identity_payload());
 
@@ -8488,6 +8756,7 @@ decibans_thresh = 100.0
             gate: GateConfig::default(),
             dt_check: DtCheckConfig::default(),
             binomial: sim::rng::BinomialAlgorithm::Btpe,
+            perturbation: IndexMap::new(),
         });
         assert_ne!(s50.identity_payload(), s_diff_target.identity_payload());
     }

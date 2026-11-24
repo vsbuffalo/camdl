@@ -116,7 +116,7 @@ impl Fixture {
         std::fs::write(p.join("fit.toml"), "[model]\ncamdl = \"m.camdl\"\n\n\
             [data.observations]\nweekly_cases = \"cases.tsv\"\n\n\
             [estimate]\nbeta = { bounds = [0.05, 1.0], start = 0.4 }\n\
-            gamma = { bounds = [0.01, 0.5], start = 0.15, rw_sd = 0.02 }\n\
+            gamma = { bounds = [0.01, 0.5], start = 0.15 }\n\
             ce = { bounds = [0.0, 1.0], start = 0.9 }\n\n\
             [fixed]\nrho = 0.5\n")
             .unwrap();

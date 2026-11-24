@@ -9,9 +9,8 @@
 //! fixed values, the settings, the scenario selection and `ic_free`. A
 //! [`FitRun`] sits inside its problem at `runs/`, grouped by its
 //! [`MethodIdentity`] and named by the seed typed; its identity holds the
-//! method, the
-//! per-parameter perturbation (`rw_sd`, `perturb_only_at_t0`, `start`), the
-//! seed, where its chains start and its length. A [`Prediction`] from a
+//! method with each estimated parameter's resolved step, the seed, where its
+//! chains start (with `[estimate].start`) and its length. A [`Prediction`] from a
 //! posterior sits inside the run whose draws it used, at `predict/`.
 //!
 //! ```text
@@ -148,25 +147,6 @@ pub(crate) struct Estimate {
     pub parameters: Vec<Estimated>,
 }
 
-/// One estimated parameter's settings that belong to the run.
-#[derive(store::Identity, Clone, Debug)]
-#[identity(tag = "fit_perturbation_entry", version = 1)]
-pub(crate) struct Perturbation {
-    pub name: String,
-    pub rw_sd: Option<Finite>,
-    pub perturb_only_at_t0: bool,
-    pub start: Option<Finite>,
-}
-
-/// `rw_sd`, `perturb_only_at_t0` and `start` of every estimated parameter, in
-/// the order of `[estimate]`. They sit in `[estimate]` in the file and change
-/// only how a run moves, so two runs that differ only in them share a problem.
-#[derive(store::Identity, Clone, Debug)]
-#[identity(tag = "fit_perturbation", version = 1)]
-pub(crate) struct PerturbationSettings {
-    pub parameters: Vec<Perturbation>,
-}
-
 /// `[config]`, its default filled in: the step, and the two policies.
 #[derive(store::Identity, Clone, Debug)]
 #[identity(tag = "fit_settings", version = 1)]
@@ -259,7 +239,7 @@ impl Primary for FitProblem {
 // ── The fit run ──────────────────────────────────────────────────────────────
 
 mod method;
-pub(crate) use method::MethodIdentity;
+pub(crate) use method::{MethodIdentity, PerturbationIdentity};
 
 /// What a start rule reads besides the problem.
 #[derive(store::Identity, Clone, Debug)]
@@ -274,24 +254,28 @@ pub(crate) enum StartInput {
     File { file: InputFile },
 }
 
-/// Where a run's chains start: the rule, and what it reads.
+/// Where a run's chains start: the rule, what it reads, and the starts
+/// `[estimate]` writes.
 #[derive(store::Identity, Clone, Debug)]
-#[identity(tag = "fit_starts", version = 1)]
+#[identity(tag = "fit_starts", version = 2)]
 pub(crate) struct StartSource {
     /// The rule's identity value (`ChainStarts::identity_value`), as
     /// canonical JSON.
     pub rule: String,
     pub input: StartInput,
+    /// `[estimate].start`, by name: the base point the rule draws around.
+    /// It sits in `[estimate]` in the file and changes only where a run
+    /// begins, so two runs that differ only in it share a problem.
+    pub written: BTreeMap<String, Finite>,
 }
 
 /// Everything about a run except how long it is. A resume must match this
 /// exactly.
 #[derive(store::Identity, Clone, Debug)]
-#[identity(tag = "fit_chain", version = 1)]
+#[identity(tag = "fit_chain", version = 2)]
 pub(crate) struct ChainIdentity {
     pub problem: Dep<FitProblem>,
     pub method: MethodIdentity,
-    pub perturbation: PerturbationSettings,
     /// The compile with the state Jacobian; only `nl-lbfgs` on the ODE backend.
     pub jacobian_model: Option<Dep<CompiledModel>>,
     pub seed: ProcessSeed,
@@ -342,12 +326,22 @@ impl Primary for FitRun {
 }
 
 impl StartSource {
-    /// The rule `method` starts its chains under, reading `input`.
-    /// A NaN or infinite value in the method is refused.
-    pub fn of(method: &Method, input: StartInput) -> Result<StartSource, String> {
+    /// The rule `method` starts its chains under, reading `input`, around
+    /// the starts `estimate` writes. A NaN or infinite value in the method
+    /// or a start is refused.
+    pub fn of(
+        method: &Method,
+        estimate: &IndexMap<String, EstimateSpecV2>,
+        input: StartInput,
+    ) -> Result<StartSource, String> {
         crate::canonical_json::ensure_finite(method)?;
         let rule = method.starts()?.identity_value();
-        Ok(StartSource { rule: canonical_json(&rule)?, input })
+        let written = estimate
+            .iter()
+            .filter_map(|(name, spec)| spec.start.map(|s| (name, s)))
+            .map(|(name, s)| Ok((name.clone(), finite(s, &format!("[estimate.{name}] start"))?)))
+            .collect::<Result<BTreeMap<_, _>, String>>()?;
+        Ok(StartSource { rule: canonical_json(&rule)?, input, written })
     }
 }
 
@@ -788,7 +782,7 @@ pub(crate) fn resolve_problem(
     let mut fixed_cfg = fixed.clone();
     fixed_cfg.expand_from_scenario(model, estimate)?;
     let fixed = ResolvedParams::new(fixed_cfg.resolve_with_model(model)?)?;
-    let (estimate, _) = split_estimate(estimate)?;
+    let estimate = problem_estimate(estimate)?;
     let config_v2::FitBackendConfig { dt: _, allow_degenerate_rates, allow_forcing_extrapolation } = config;
 
     let identity = FitProblemIdentity {
@@ -812,14 +806,12 @@ pub(crate) fn resolve_problem(
     Ok(ResolvedProblem { identity, model: model.clone(), source, partition: record, recovery })
 }
 
-/// The problem's half of `[estimate]`, and the settings that belong to the run.
-pub(crate) fn split_estimate(
-    estimate: &IndexMap<String, EstimateSpecV2>,
-) -> Result<(Estimate, PerturbationSettings), String> {
+/// The problem's half of `[estimate]`: each parameter's bounds and prior.
+/// Its `start` is the run's ([`StartSource`]).
+pub(crate) fn problem_estimate(estimate: &IndexMap<String, EstimateSpecV2>) -> Result<Estimate, String> {
     let mut problem = Vec::new();
-    let mut run = Vec::new();
     for (name, spec) in estimate {
-        let EstimateSpecV2 { bounds, prior, perturb_only_at_t0, rw_sd, start } = spec;
+        let EstimateSpecV2 { bounds, prior, start: _ } = spec;
         let what = |key: &str| format!("[estimate.{name}] {key}");
         let bounds = match bounds {
             Some((lo, hi)) => Some((finite(*lo, &what("bounds"))?, finite(*hi, &what("bounds"))?)),
@@ -830,14 +822,8 @@ pub(crate) fn split_estimate(
             None => None,
         };
         problem.push(Estimated { name: name.clone(), bounds, prior });
-        run.push(Perturbation {
-            name: name.clone(),
-            rw_sd: rw_sd.map(|x| finite(x, &what("rw_sd"))).transpose()?,
-            perturb_only_at_t0: *perturb_only_at_t0,
-            start: start.map(|x| finite(x, &what("start"))).transpose()?,
-        });
     }
-    Ok((Estimate { parameters: problem }, PerturbationSettings { parameters: run }))
+    Ok(Estimate { parameters: problem })
 }
 
 /// The lines of `bytes`, each with its line terminator.
@@ -1138,14 +1124,10 @@ pub(crate) fn problem_files(problem: &ResolvedProblem) -> Vec<crate::result_file
     v
 }
 
-/// One estimated parameter's run settings, as `method.toml` writes them.
+/// One estimated parameter's start, as `method.toml` writes it.
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PerturbationEntry {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    rw_sd: Option<f64>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    perturb_only_at_t0: bool,
+struct StartEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     start: Option<f64>,
 }
@@ -1156,25 +1138,48 @@ struct PerturbationEntry {
 struct MethodToml {
     method: Method,
     #[serde(default)]
-    estimate: BTreeMap<String, PerturbationEntry>,
+    estimate: BTreeMap<String, StartEntry>,
 }
 
-/// The text of `method.toml`: `method`, after the flags were applied, and
-/// each estimated parameter's run settings. A sourced `starts` is written as
-/// `method` holds it, so the caller names its source as the run stores it.
-fn method_toml(method: &Method, perturbation: &PerturbationSettings) -> Result<String, String> {
-    let estimate = perturbation
-        .parameters
-        .iter()
-        .map(|p| {
-            let entry = PerturbationEntry {
-                rw_sd: p.rw_sd.map(Finite::get),
-                perturb_only_at_t0: p.perturb_only_at_t0,
-                start: p.start.map(Finite::get),
-            };
-            (p.name.clone(), entry)
-        })
-        .collect();
+/// `method` with its step table replaced by the resolved steps of `id`, every
+/// estimated parameter's value in z: `[method.perturbation]` under IF2,
+/// `[method.proposal]` under PMMH and MH.
+fn with_resolved_steps(method: &Method, id: &MethodIdentity) -> Result<Method, String> {
+    use config_v2::{Algorithm as A, PerturbationSpec};
+    use sim::inference::types::ZSd;
+    let z = |f: Finite| ZSd::new(f.get()).map_err(|e| format!("internal error: a stored step {e}"));
+    let mut out = method.clone();
+    match (&mut out.algorithm, id) {
+        (A::IF2 { perturbation, .. }, MethodIdentity::If2(i)) => {
+            let mut table = IndexMap::new();
+            for (name, p) in &i.perturbation {
+                let initial_state = p.at == method::PerturbAtIdentity::TimeZeroOnly;
+                table.insert(name.clone(), PerturbationSpec { sd: Some(z(p.sd)?), initial_state });
+            }
+            for (name, sd) in i.simplex.iter().flatten() {
+                table.insert(name.clone(), PerturbationSpec { sd: Some(z(*sd)?), initial_state: false });
+            }
+            table.sort_keys();
+            *perturbation = table;
+        }
+        (A::PMMH { proposal, .. }, MethodIdentity::Pmmh(method::PmmhIdentity { proposal: ids, .. }))
+        | (A::Mh { proposal, .. }, MethodIdentity::Mh(method::MhIdentity { proposal: ids, .. })) => {
+            *proposal = ids.iter().map(|(n, sd)| Ok((n.clone(), z(*sd)?))).collect::<Result<_, String>>()?;
+        }
+        _ => {}
+    }
+    Ok(out)
+}
+
+/// The text of `method.toml`, a function of the run's identity: `method`,
+/// after the flags were applied, with every estimated parameter's resolved
+/// step in its table, and `[estimate]` with the starts the file writes. A
+/// sourced `starts` is written as `method` holds it, so the caller names its
+/// source as the run stores it.
+fn method_toml(method: &Method, chain: &ChainIdentity) -> Result<String, String> {
+    let method = &with_resolved_steps(method, &chain.method)?;
+    let estimate =
+        chain.starts.written.iter().map(|(name, s)| (name.clone(), StartEntry { start: Some(s.get()) })).collect();
     let doc = MethodToml { method: method.clone(), estimate };
     let text = toml::to_string(&doc).map_err(|e| format!("cannot write method.toml: {e}"))?;
     let back: MethodToml =
@@ -1183,12 +1188,24 @@ fn method_toml(method: &Method, perturbation: &PerturbationSettings) -> Result<S
     if json(&back.method)? != json(method)? {
         return Err("internal error: method.toml reads back to another method".into());
     }
-    Ok(format!("# method.toml: this run's [method] and the run settings of [estimate].\n{text}"))
+    Ok(format!("# method.toml: this run's [method], with every parameter's resolved step, and the starts of [estimate].\n{text}"))
+}
+
+/// Reads `method.toml`. A run stored before step sizes moved to `[method]`
+/// writes `rw_sd` and `perturb_only_at_t0` in its `[estimate]`; they are set
+/// aside with one notice, since the run's identity was computed when it
+/// ran and reading it computes nothing.
+fn read_method_toml(text: &str) -> Result<MethodToml, String> {
+    let mut raw: toml::Value = toml::from_str(text).map_err(|e| format!("{METHOD_FILE}: {e}"))?;
+    if let Some(notice) = config_v2::set_aside_legacy_step_keys(&mut raw, &format!("this run's {METHOD_FILE}")) {
+        crate::out::detached().say(format_args!("{notice}"));
+    }
+    raw.try_into().map_err(|e| format!("{METHOD_FILE}: {e}"))
 }
 
 /// Write a claimed run's `method.toml`.
 pub(crate) fn write_method(run: &mut Run<FitRun>, method: &Method) -> Result<(), String> {
-    let text = method_toml(method, &run.identity().chain.perturbation)?;
+    let text = method_toml(method, &run.identity().chain)?;
     let e = |e: store::Error| e.to_string();
     run.result_file(METHOD_FILE).map_err(e)?.write_all(text.as_bytes()).map_err(e)
 }
@@ -1347,16 +1364,14 @@ pub(crate) fn read_fit(store: &Store, handle: &Handle) -> Result<StoredFit, Stri
     let model = record.model.clone();
     if let Some(r) = &run {
         let text = String::from_utf8(read_stored(r, METHOD_FILE)?).map_err(|e| format!("{METHOD_FILE}: {e}"))?;
-        let MethodToml { method, estimate } = toml::from_str(&text).map_err(|e| format!("{METHOD_FILE}: {e}"))?;
+        let MethodToml { method, estimate } = read_method_toml(&text)?;
         for (name, p) in estimate {
             let spec = config
                 .problem
                 .estimate
                 .get_mut(&name)
                 .ok_or_else(|| format!("{METHOD_FILE}: `{name}` is not estimated in the run's problem"))?;
-            let PerturbationEntry { rw_sd, perturb_only_at_t0, start } = p;
-            spec.rw_sd = rw_sd;
-            spec.perturb_only_at_t0 = perturb_only_at_t0;
+            let StartEntry { start } = p;
             spec.start = start;
         }
         config.inference.method = Some(method);

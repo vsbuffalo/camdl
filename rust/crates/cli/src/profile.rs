@@ -1104,32 +1104,61 @@ fn run_profile(
             &decls.inputs(&model_declared, &fit_simplex_groups), &crate::roles::PROFILE,
         ).map_err(|e| e.to_string()));
 
-    // Specs honour the fit-toml `[estimate]` block when supplied
-    // (gh#73): bounds, transform, and perturb_only_at_t0 flow through to
-    // `build_if2_params_from_specs`'s fit-toml-bounds-within-model
-    // resolver. `rw_sd` from CLI still wins when both
-    // sides declare them (CLI `--rw-sd` is the per-invocation
-    // override; fit toml's `rw_sd` is the artifact default).
+    // Specs honour the fit-toml `[estimate]` bounds when supplied (gh#73),
+    // through `build_if2_params_from_specs`'s fit-toml-bounds-within-model
+    // resolver.
     let specs: Vec<crate::fit::runner::ParamSpec> = param_names_to_estimate.iter().map(|name| {
         let from_fit = fit_estimate.get(name);
         crate::fit::runner::ParamSpec {
             name: name.clone(),
-            rw_sd: rw_sd_map_raw.get(name).and_then(|v| *v)
-                .or_else(|| from_fit.and_then(|e| e.rw_sd)),
-            perturb_only_at_t0:
-                from_fit.map(|e| e.perturb_only_at_t0).unwrap_or(false),
             bounds: from_fit.and_then(|e| e.bounds),
         }
     }).collect();
 
-    let (if2_params, written_steps): (Vec<_>, Vec<_>) = crate::fit::runner::build_if2_params_from_specs(
+    let if2_params: Vec<sim::inference::if2::EstimatedParam> = crate::fit::runner::build_if2_params_from_specs(
         &model, &compiled, &base_params, &specs,
-    ).unwrap_or_else(|e| { out.fail(format!("error: {}", e)); }).into_iter().unzip();
+    ).unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
+    // The steps an IF2 cell takes: `--rw-sd NAME=SD` (natural scale) when
+    // given, else the `--fit` config's `[method.perturbation]` SD in z when
+    // its method is IF2, else the map's default. The timing is the table's
+    // `initial_state`. An nl-* cell perturbs nothing and reads no step; a
+    // table it would ignore is said once.
+    let fit_perturbation: indexmap::IndexMap<String, crate::fit::config_v2::PerturbationSpec> =
+        match fit.as_ref().and_then(|f| f.config.inference.method.as_ref()).map(|m| &m.algorithm) {
+            Some(crate::fit::config_v2::Algorithm::IF2 { perturbation, .. }) => perturbation.clone(),
+            _ => indexmap::IndexMap::new(),
+        };
+    if !matches!(profile_algo, ProfileAlgo::If2) && !fit_perturbation.is_empty() {
+        out.say(format_args!(
+            "note: the --fit config's [method.perturbation] is IF2's, and `{}` perturbs nothing: it is not read.",
+            format!("{:?}", profile_algo).to_lowercase()));
+    }
+    let (fit_perturbation, written_steps): (indexmap::IndexMap<_, _>, Vec<crate::fit::runner::WrittenStep>) =
+        if matches!(profile_algo, ProfileAlgo::If2) {
+            let steps = if2_params.iter().map(|p| {
+                use crate::fit::runner::{WrittenSd, WrittenStep};
+                let table = fit_perturbation.get(&p.name);
+                let sd = match (rw_sd_map_raw.get(&p.name).and_then(|v| *v), table.and_then(|t| t.sd)) {
+                    (Some(natural), _) => WrittenSd::Natural(natural),
+                    (None, Some(z)) => WrittenSd::Z(z.get()),
+                    (None, None) => WrittenSd::Default,
+                };
+                let at = if table.is_some_and(|t| t.initial_state) {
+                    sim::inference::types::PerturbAt::TimeZeroOnly
+                } else {
+                    sim::inference::types::PerturbAt::EveryObservation
+                };
+                WrittenStep::of(p, sd, at)
+            }).collect();
+            (fit_perturbation, steps)
+        } else {
+            (indexmap::IndexMap::new(), Vec::new())
+        };
     // Each IF2 cell perturbs by `rw_sd`, and a derived one must be able to
     // move the parameter.
     if matches!(profile_algo, ProfileAlgo::If2) {
         if let Err(e) = crate::fit::runner::refuse_degenerate_auto_rw_sd(
-            &if2_params, &written_steps, "`--rw-sd NAME=SD`, or `rw_sd = …` in the fit config's [estimate]",
+            &if2_params, &written_steps, "`--rw-sd NAME=SD`, or `NAME = …` in the fit config's [method.perturbation]",
         ) {
             out.fail(format!("error: {e}"));
         }
@@ -1189,9 +1218,22 @@ fn run_profile(
                 honour the simplex constraint: members are optimised independently.",
                 format!("{:?}", profile_algo).to_lowercase()));
         }
-        crate::fit::runner::resolve_simplex_groups(
-            &fit_simplex_groups, &fit_estimate, &compiled.param_index, &if2_params,
-        ).unwrap_or_else(|e| { out.fail(format!("error: {e}")); })
+        // Each member's SD on the log-ratio coordinate: the `--fit` table's,
+        // else the member's default.
+        let sds: Vec<Vec<sim::inference::types::ZSd>> = fit_simplex_groups.iter().map(|g| {
+            g.params.iter().map(|name| {
+                match fit_perturbation.get(name).and_then(|t| t.sd) {
+                    Some(sd) => Ok(sd),
+                    None => {
+                        let p = if2_params.iter().find(|p| p.name == *name).expect("checked estimated above");
+                        sim::inference::types::ZSd::new(crate::fit::steps::simplex_member_default_step(&p.transform))
+                            .map_err(|e| format!("simplex member `{name}`: {e}"))
+                    }
+                }
+            }).collect::<Result<Vec<_>, String>>()
+        }).collect::<Result<Vec<_>, String>>().unwrap_or_else(|e| out.fail(format!("error: {e}")));
+        crate::fit::runner::resolve_simplex_groups(&fit_simplex_groups, &compiled.param_index, &sds)
+            .unwrap_or_else(|e| { out.fail(format!("error: {e}")); })
     };
     // IF2's step for each estimated parameter, the same in every cell. Only
     // an IF2 cell reads it.
@@ -1471,7 +1513,6 @@ fn run_profile(
 
     // How each cell is fitted.
     let algorithm = profile_algo.method_kind().as_str().to_string();
-    let is_if2 = matches!(profile_algo, ProfileAlgo::If2);
     let method_identity = crate::profile_store::ProfileMethod {
         algorithm: algorithm.clone(),
         cell: match profile_algo {
@@ -1489,8 +1530,8 @@ fn run_profile(
             },
         },
         dt: finite("dt", dt),
-        estimated: if2_params.iter().zip(&written_steps)
-            .map(|(p, step)| crate::profile_store::EstimatedSetting::of(p, step, is_if2))
+        estimated: if2_params.iter().enumerate()
+            .map(|(i, p)| crate::profile_store::EstimatedSetting::of(p, written_steps.get(i)))
             .collect::<Result<Vec<_>, String>>()
             .unwrap_or_else(|e| out.fail(format!("error: {e}"))),
         simplex_groups: simplex_names.clone(),

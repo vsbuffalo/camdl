@@ -51,13 +51,20 @@ fn wide() -> String {
 const METHOD: &str = "[method]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\nchains = 1\nparticles = 50\n\
                       iterations = 2\ncooling = 0.7\nstarts = \"from_prior\"\n";
 
-/// A fit file over `data` (the body of `[data]`), with `rw_sd` for beta.
-fn fit_toml(data: &str, rw_sd: f64) -> String {
+/// A fit file over `data` (the body of `[data]`), with IF2's perturbation SD
+/// `sd` for beta.
+fn fit_toml(data: &str, sd: f64) -> String {
+    fit_toml_with(data, "start = 0.4", &format!("beta = {sd}"))
+}
+
+/// A fit file over `data`, with `beta_extra` in beta's `[estimate]` entry and
+/// `perturbation` the body of `[method.perturbation]`.
+fn fit_toml_with(data: &str, beta_extra: &str, perturbation: &str) -> String {
     format!(
         "[model]\ncamdl = \"model.camdl\"\n[data]\n{data}\n[estimate]\n\
-         beta = {{ bounds = [0.1, 0.9], rw_sd = {rw_sd}, start = 0.4 }}\n\
+         beta = {{ bounds = [0.1, 0.9], {beta_extra} }}\n\
          gamma = {{ bounds = [0.01, 0.5], prior = {{ uniform = {{}} }} }}\n\
-         [fixed]\nN0 = 1000\nI0 = 5\nrho = 0.5\n{METHOD}"
+         [fixed]\nN0 = 1000\nI0 = 5\nrho = 0.5\n{METHOD}[method.perturbation]\n{perturbation}\n"
     )
 }
 
@@ -159,24 +166,25 @@ fn store_problem(o: &Opened, problem: &ResolvedProblem) -> Stored<FitProblem> {
     }
 }
 
-fn run_identity(problem: &Stored<FitProblem>, config: &FitConfig) -> (FitRunIdentity, RunLabels) {
+/// The run `fit run` keys for `config` on `problem`, as `fit_command` builds
+/// it: the steps resolved from `model`'s domains, then the method and starts.
+fn run_identity(model: &ir::Model, problem: &Stored<FitProblem>, config: &FitConfig) -> (FitRunIdentity, RunLabels) {
     let method = config.inference.method.as_ref().unwrap();
-    let (settings, length) = MethodIdentity::of(method).unwrap();
-    let (_, perturbation) = split_estimate(&config.problem.estimate).unwrap();
+    let steps = crate::fit::steps::resolve_for(&method.algorithm, &config.problem, model).unwrap();
+    let (settings, length) = MethodIdentity::of(method, &steps).unwrap();
     let labels = RunLabels { method: method.algorithm.method_name().to_string(), seed: 1, quantities: None };
     let chain = ChainIdentity {
         problem: problem.dep_all(),
         method: settings,
-        perturbation,
         jacobian_model: None,
         seed: ProcessSeed { seed: 1 },
-        starts: StartSource::of(method, StartInput::None).unwrap(),
+        starts: StartSource::of(method, &config.problem.estimate, StartInput::None).unwrap(),
     };
     (FitRunIdentity { chain, length, resumed_from: None }, labels)
 }
 
-fn store_run(o: &Opened, problem: &Stored<FitProblem>, config: &FitConfig) -> Stored<FitRun> {
-    let (id, labels) = run_identity(problem, config);
+fn store_run(o: &Opened, model: &ir::Model, problem: &Stored<FitProblem>, config: &FitConfig) -> Stored<FitRun> {
+    let (id, labels) = run_identity(model, problem, config);
     match crate::camdl_store::begin::<FitRun>(&o.store, &id, &labels, &o.info, Reuse::IfCompleted, [crate::result_files::fit_run::FitRunFile::Common(crate::result_files::fit_run::CommonFile::Method)]).unwrap() {
         Begin::Claimed(mut run) => {
             write_method(&mut run, config.inference.method.as_ref().unwrap()).unwrap();
@@ -366,7 +374,7 @@ fn the_tree_is_the_layout() {
     let o = open();
     let config = fx.config(&fit_toml("file = \"wide.tsv\"", 0.02));
     let problem = store_problem(&o, &resolved(&fx, &o, &config));
-    let run = store_run(&o, &problem, &config);
+    let run = store_run(&o, &fx.model, &problem, &config);
     let root = o.store.root().to_path_buf();
     let rel = |p: &Path| p.strip_prefix(&root).unwrap().components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect::<Vec<_>>();
     let named = |dir: &str, label: &str| {
@@ -456,7 +464,7 @@ fn a_prediction_declares_the_tables_its_manifests_list() {
     let o = open();
     let config = fx.config(&fit_toml("file = \"wide.tsv\"", 0.02));
     let problem = store_problem(&o, &resolved(&fx, &o, &config));
-    let run = store_run(&o, &problem, &config);
+    let run = store_run(&o, &fx.model, &problem, &config);
     let id = PredictIdentity {
         source: ParameterSource::Posterior { draws: run.dep_all(), problem: problem.dep_all() },
         data: BTreeMap::new(),
@@ -526,7 +534,7 @@ fn a_method_output_refuses_a_file_its_method_does_not_store() {
     let o = open();
     let config = fx.config(&fit_toml("file = \"wide.tsv\"", 0.02));
     let problem = store_problem(&o, &resolved(&fx, &o, &config));
-    let (id, labels) = run_identity(&problem, &config);
+    let (id, labels) = run_identity(&fx.model, &problem, &config);
     let Begin::Claimed(run) = o.store.begin::<FitRun>(&id, &labels, &o.info, Reuse::IfCompleted).unwrap() else {
         panic!("the run is new")
     };
@@ -581,7 +589,7 @@ fn a_completed_run_missing_a_chains_files_is_refused() {
     let o = open();
     let config = fx.config(&fit_toml("file = \"wide.tsv\"", 0.02));
     let problem = store_problem(&o, &resolved(&fx, &o, &config));
-    let (id, labels) = run_identity(&problem, &config);
+    let (id, labels) = run_identity(&fx.model, &problem, &config);
     let claim = || match o.store.begin::<FitRun>(&id, &labels, &o.info, Reuse::IfCompleted).unwrap() {
         Begin::Claimed(run) => LiveRun::new(run),
         _ => panic!("the run is claimed"),
@@ -635,41 +643,129 @@ fn the_fixed_point_variant_re_keys_no_posterior_prediction() {
     let o = open();
     let config = fx.config(&fit_toml("file = \"wide.tsv\"", 0.02));
     let problem = store_problem(&o, &resolved(&fx, &o, &config));
-    let run = store_run(&o, &problem, &config);
+    let run = store_run(&o, &fx.model, &problem, &config);
     let now = ParameterSource::Posterior { draws: run.dep_all(), problem: problem.dep_all() };
     let before = PosteriorOnly::Posterior { draws: run.dep_all(), problem: problem.dep_all() };
     assert_eq!(now.key(), before.key());
 }
 
-/// `rw_sd`, `perturb_only_at_t0` and `start` are the run's: two fit files
-/// that differ only in `rw_sd` pose one problem and are two runs on it, and
-/// a run read back carries its own `rw_sd` and method.
+/// The step and the start are the run's: two fit files that differ only in
+/// `[method.perturbation]` pose one problem and are two runs on it, keyed
+/// apart by the method; a run read back carries every parameter's resolved
+/// step and its start; a problem read back carries neither.
 #[test]
-fn rw_sd_belongs_to_the_run() {
+fn the_step_belongs_to_the_run() {
+    use crate::fit::config_v2::{Algorithm, PerturbationSpec};
     let fx = fixture();
     let o = open();
     let a = fx.config(&fit_toml("file = \"wide.tsv\"", 0.02));
-    let b = fx.config(&fit_toml("file = \"wide.tsv\"", 0.05));
+    let b = fx.config(&fit_toml("file = \"wide.tsv\"", 0.08));
     let (pa, pb) = (resolved(&fx, &o, &a), resolved(&fx, &o, &b));
-    assert_eq!(pa.identity.key(), pb.identity.key(), "rw_sd is not the problem's");
+    assert_eq!(pa.identity.key(), pb.identity.key(), "the step is not the problem's");
     let problem = store_problem(&o, &pa);
-    let (ra, _) = run_identity(&problem, &a);
-    let (rb, _) = run_identity(&problem, &b);
-    assert_ne!(ra.key(), rb.key(), "rw_sd is the run's");
-    assert_ne!(ra.chain.perturbation.key(), rb.chain.perturbation.key());
+    let (ra, _) = run_identity(&fx.model, &problem, &a);
+    let (rb, _) = run_identity(&fx.model, &problem, &b);
+    assert_ne!(ra.key(), rb.key(), "the step is the run's");
+    assert_ne!(ra.chain.method.key(), rb.chain.method.key(), "the step is the method's");
 
-    let run = store_run(&o, &problem, &b);
+    let run = store_run(&o, &fx.model, &problem, &b);
     let fit = read_fit(&o.store, &Handle::IdPrefix(run.id().key().to_hex())).unwrap();
     assert_eq!(fit.problem.id(), problem.id());
-    let beta = &fit.config.problem.estimate["beta"];
-    assert_eq!((beta.rw_sd, beta.start), (Some(0.05), Some(0.4)));
+    assert_eq!(fit.config.problem.estimate["beta"].start, Some(0.4));
     assert!(fit.config.problem.estimate["gamma"].prior.is_some(), "the prior is the problem's");
     let method = fit.config.inference.method.as_ref().unwrap();
-    assert_eq!(serde_json::to_value(method).unwrap(), serde_json::to_value(b.inference.method.as_ref().unwrap()).unwrap());
+    let Algorithm::IF2 { perturbation, .. } = &method.algorithm else { panic!("an IF2 run") };
+    let sd = |name: &str| perturbation.get(name).and_then(|p: &PerturbationSpec| p.sd).map(|s| s.get());
+    // beta as written; gamma, left out, at its map's default (a positive
+    // kind on [0.01, 0.5]: the log-interval default).
+    assert_eq!((sd("beta"), sd("gamma")), (Some(0.08), Some(sim::inference::types::IF2_LOG_INTERVAL_STEP)));
+    // The resolved table keys as the written one: the method read back is
+    // the same run.
+    let (again, _) = run_identity(&fx.model, &problem, &fit.config);
+    assert_eq!(again.key(), rb.key(), "method.toml reads back to the run's identity");
 
     let by_problem = read_fit(&o.store, &Handle::IdPrefix(problem.id().key().to_hex())).unwrap();
     assert!(by_problem.run.is_none() && by_problem.config.inference.method.is_none());
-    assert_eq!(by_problem.config.problem.estimate["beta"].rw_sd, None, "a problem holds no rw_sd");
+    assert_eq!(by_problem.config.problem.estimate["beta"].start, None, "a problem holds no start");
+}
+
+/// An IF2 file and a PGAS file of one problem pose one problem: the step
+/// table and the initial-state flag are the IF2 method's, not the problem's.
+#[test]
+fn an_if2_file_and_a_pgas_file_of_one_problem_share_a_problem() {
+    let fx = fixture();
+    let o = open();
+    let if2 = fx.config(&fit_toml_with("file = \"wide.tsv\"", "start = 0.4",
+        "beta = { sd = 0.05, initial_state = true }"));
+    let pgas_text = fit_toml_with("file = \"wide.tsv\"", "start = 0.4", "").replace(METHOD,
+        "[method]\nalgorithm = \"pgas\"\nbackend = \"chain_binomial\"\nchains = 1\nparticles = 50\n\
+         sweeps = 2\nstarts = \"from_prior\"\n").replace("[method.perturbation]\n", "");
+    let pgas = fx.config(&pgas_text);
+    assert_eq!(resolved(&fx, &o, &if2).identity.key(), resolved(&fx, &o, &pgas).identity.key());
+}
+
+/// A step written at its map's default and the same step left out are one
+/// run: the identity holds the resolved step, not the table as written.
+/// beta on [0.1, 0.9] is a positive kind, so its map is the log-interval
+/// one, whose default IF2 step is 1/20.
+#[test]
+fn a_step_written_at_its_default_keys_as_the_step_left_out() {
+    let fx = fixture();
+    let o = open();
+    assert_eq!(sim::inference::types::IF2_LOG_INTERVAL_STEP, 0.05);
+    let written = fx.config(&fit_toml("file = \"wide.tsv\"", 0.05));
+    let omitted = fx.config(&fit_toml_with("file = \"wide.tsv\"", "start = 0.4", ""));
+    let problem = store_problem(&o, &resolved(&fx, &o, &written));
+    let (a, _) = run_identity(&fx.model, &problem, &written);
+    let (b, _) = run_identity(&fx.model, &problem, &omitted);
+    assert_eq!(a.key(), b.key());
+}
+
+/// IF2's timing is keyed: `beta = 0.05` and `beta = { sd = 0.05,
+/// initial_state = true }` are two runs.
+#[test]
+fn an_initial_state_flag_keys_the_run() {
+    let fx = fixture();
+    let o = open();
+    let every = fx.config(&fit_toml("file = \"wide.tsv\"", 0.05));
+    let t0 = fx.config(&fit_toml_with("file = \"wide.tsv\"", "start = 0.4",
+        "beta = { sd = 0.05, initial_state = true }"));
+    let problem = store_problem(&o, &resolved(&fx, &o, &every));
+    let (a, _) = run_identity(&fx.model, &problem, &every);
+    let (b, _) = run_identity(&fx.model, &problem, &t0);
+    assert_ne!(a.key(), b.key());
+}
+
+/// `[estimate].start` is the run's: two files that differ only in beta's
+/// start pose one problem and are two runs.
+#[test]
+fn a_start_keys_the_run_and_not_the_problem() {
+    let fx = fixture();
+    let o = open();
+    let a = fx.config(&fit_toml_with("file = \"wide.tsv\"", "start = 0.4", "beta = 0.05"));
+    let b = fx.config(&fit_toml_with("file = \"wide.tsv\"", "start = 0.6", "beta = 0.05"));
+    let (pa, pb) = (resolved(&fx, &o, &a), resolved(&fx, &o, &b));
+    assert_eq!(pa.identity.key(), pb.identity.key(), "a start is not the problem's");
+    let problem = store_problem(&o, &pa);
+    let (ra, _) = run_identity(&fx.model, &problem, &a);
+    let (rb, _) = run_identity(&fx.model, &problem, &b);
+    assert_ne!(ra.key(), rb.key(), "a start is the run's");
+}
+
+/// A run stored before the steps moved to `[method]` wrote `rw_sd` and
+/// `perturb_only_at_t0` in its `method.toml`'s `[estimate]`. Reading it sets
+/// them aside and keeps the start; a live config with them is refused.
+#[test]
+fn a_stored_method_toml_with_the_old_step_keys_is_read_without_them() {
+    let old = "[method]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\nchains = 1\nparticles = 50\n\
+               iterations = 2\ncooling = 0.7\nstarts = \"from_prior\"\n\
+               [estimate.beta]\nrw_sd = 0.02\nstart = 0.4\n[estimate.I0]\nperturb_only_at_t0 = true\n";
+    let read = read_method_toml(old).expect("a stored copy reads");
+    assert_eq!(read.estimate["beta"].start, Some(0.4));
+    assert_eq!(read.estimate["I0"].start, None);
+    let live = fit_toml_with("file = \"wide.tsv\"", "start = 0.4, rw_sd = 0.02", "");
+    let err = FitConfig::from_toml_str(&live).expect_err("a live config with rw_sd is refused");
+    assert!(err.contains("[method.perturbation]") && err.contains("beta"), "{err}");
 }
 
 /// A method's length is the run's, outside its settings: a PMMH run of 200
@@ -683,8 +779,9 @@ fn a_method_length_is_outside_its_settings() {
         );
         toml::from_str(&text).unwrap()
     };
-    let (a, la) = MethodIdentity::of(&parse(200)).unwrap();
-    let (b, lb) = MethodIdentity::of(&parse(400)).unwrap();
+    let steps = crate::fit::steps::ResolvedSteps::Proposal(Default::default());
+    let (a, la) = MethodIdentity::of(&parse(200), &steps).unwrap();
+    let (b, lb) = MethodIdentity::of(&parse(400), &steps).unwrap();
     assert_eq!((la, lb), (200, 400));
     assert_eq!(a.key(), b.key());
     assert_eq!(a.record().algorithm(), "pmmh");
@@ -719,8 +816,9 @@ fn a_non_finite_method_setting_is_refused() {
              iterations = 2\ncooling = {cooling}\nstarts = \"from_prior\"\n"
         );
         let method: Method = toml::from_str(&text).unwrap();
-        assert!(MethodIdentity::of(&method).is_err(), "cooling = {cooling}");
-        assert!(StartSource::of(&method, StartInput::None).is_err(), "cooling = {cooling}");
+        let steps = crate::fit::steps::ResolvedSteps::If2 { params: Default::default(), simplex: Vec::new() };
+        assert!(MethodIdentity::of(&method, &steps).is_err(), "cooling = {cooling}");
+        assert!(StartSource::of(&method, &Default::default(), StartInput::None).is_err(), "cooling = {cooling}");
     }
 }
 

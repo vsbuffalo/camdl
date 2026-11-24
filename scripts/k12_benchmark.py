@@ -15,7 +15,7 @@ explicit log-link coefficients over [0, 168] with normal(-1.9, 1) priors.
 2. A plot of the truth β(t) against the posterior median and central 90%
    band, the window end (day 168) and the held region marked.
 3. IF2 from up to 8 prior draws at which `camdl pfilter` (200 particles) is
-   finite (one chain, 500 particles, 50 iterations, cooling 0.7, rw_sd 0.05 on
+   finite (one chain, 500 particles, 50 iterations, cooling 0.7, a step of 0.02 in z on
    the box [-8, 2]), each end point scored by `camdl pfilter` (2,000
    particles, 3 seeds), against the same score at the truth's projection onto
    the basis (least squares of log β_true on B₁..B₁₂ over the window's
@@ -175,9 +175,11 @@ def main() -> None:
             continue
         kept += 1
         try:
-            lf, _ = fit(camdl, wi, model, data, "".join(f"{nm} = {{ bounds = [-8.0, 2.0], rw_sd = 0.05 }}\n" for nm in NAMES),
+            lf, _ = fit(camdl, wi, model, data, "".join(f"{nm} = {{ bounds = [-8.0, 2.0] }}\n" for nm in NAMES),
                         '[method]\nalgorithm = "if2"\nbackend = "chain_binomial"\nchains = 1\nparticles = 500\n'
-                        'iterations = 50\ncooling = 0.7\nstarts = { from_params = "start.toml" }\n')
+                        'iterations = 50\ncooling = 0.7\nstarts = { from_params = "start.toml" }\n'
+                        # rw_sd 0.05 at the box midpoint: 0.05 / (10 / 4) in z.
+                        "[method.perturbation]\n" + "".join(f"{nm} = 0.02\n" for nm in NAMES))
         except subprocess.CalledProcessError:
             if2_rows.append({"fit": f"if2_{i:02d}", "pfilter_ll": None})
             continue

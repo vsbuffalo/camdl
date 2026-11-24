@@ -150,16 +150,22 @@ def main() -> None:
                     continue
                 kept += 1
                 if form == "explicit":
-                    est = "".join(f"{n} = {{ bounds = [-8.0, 2.0], rw_sd = 0.05 }}\n" for n in names(form))
+                    est = "".join(f"{n} = {{ bounds = [-8.0, 2.0] }}\n" for n in names(form))
+                    # rw_sd 0.05 at the box midpoint: 0.05 / (10 / 4) in z.
+                    steps = "".join(f"{n} = 0.02\n" for n in names(form))
                     fixed = d.FIXED
                 else:
                     box = {"a": "[-8.0, 2.0]", "b": "[-0.2, 0.2]", "z_m1": "[-8.0, 8.0]", "z_m2": "[-8.0, 8.0]", "z_m3": "[-8.0, 8.0]"}
-                    est = "".join(f"{n} = {{ bounds = {box[n]}, rw_sd = {0.002 if n == 'b' else 0.05} }}\n" for n in names(form))
+                    est = "".join(f"{n} = {{ bounds = {box[n]} }}\n" for n in names(form))
+                    # The natural steps (0.002 on b, 0.05 on the rest) at each box midpoint, in z.
+                    z = {"a": 0.02, "b": 0.02, "z_m1": 0.0125, "z_m2": 0.0125, "z_m3": 0.0125}
+                    steps = "".join(f"{n} = {z[n]}\n" for n in names(form))
                     fixed = {**d.FIXED, "tau": TAU_MEDIAN}
                 try:
                   leaf = run(camdl, wd, fit_toml(wd, model, data, est, fixed,
                     '[method]\nalgorithm = "if2"\nbackend = "chain_binomial"\nchains = 1\nparticles = 500\n'
-                    'iterations = 50\ncooling = 0.7\nstarts = { from_params = "start.toml" }\n'))
+                    'iterations = 50\ncooling = 0.7\nstarts = { from_params = "start.toml" }\n'
+                    "[method.perturbation]\n" + steps))
                 except subprocess.CalledProcessError:
                     continue  # an IF2 fit with no finite likelihood (see its run.log)
                 tr = pl.read_csv(leaf / "chain_0" / "parameter_traces.tsv", separator="\t", comment_prefix="#",

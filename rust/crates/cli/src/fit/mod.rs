@@ -143,6 +143,7 @@ pub mod row_convergence;    // gh#794: R̂/ESS of the value in one predictive/qu
 pub mod dt_check;
 pub mod init;
 pub mod starts;         // the `starts` rule: where a method's chains begin
+pub mod steps;          // each estimated parameter's step for the method that runs
 pub mod chain_starts;
 pub mod chain_fanout;   // gh#821: run chains so each started chain keeps advancing
 pub mod loglik_eval;
@@ -401,6 +402,8 @@ pub(crate) fn abandon_method(out: &crate::out::Out, message: String) -> ! {
 pub(crate) struct MethodContext<'a> {
     pub problem: &'a config_v2::Problem,
     pub method: &'a config_v2::Method,
+    /// The resolved steps of `method`, which the run is keyed by.
+    pub steps: &'a steps::ResolvedSteps,
     pub model: &'a ir::Model,
     pub files: &'a dyn output::RunWriter,
     pub seed: u64,
@@ -435,7 +438,7 @@ pub(crate) struct MethodRan {
 /// [`abandon_method`], which ends the command.
 pub(crate) fn run_method(out: &mut crate::out::Out, cx: MethodContext<'_>) -> MethodRan {
     use config_v2::Algorithm;
-    let MethodContext { problem: sweep_config, method, model, files, seed, starts: resolved_starts,
+    let MethodContext { problem: sweep_config, method, steps, model, files, seed, starts: resolved_starts,
         resume_base, resume_guard, heartbeat, collector, .. } = cx;
     let method_name = method.algorithm.method_name();
     let method_best_loglik: Option<f64>;
@@ -458,7 +461,7 @@ pub(crate) fn run_method(out: &mut crate::out::Out, cx: MethodContext<'_>) -> Me
 
             let mut run_config = runner::FitRunConfig::build(
                 sweep_config,
-                Some(&method.algorithm),
+                Some(&method.algorithm), steps,
                 *chains, *particles, *iterations,
                 *cooling, *cooling_target_iters,
                 // gh#506: per-chain dispersion is the starts rule's job;
@@ -585,10 +588,7 @@ pub(crate) fn run_method(out: &mut crate::out::Out, cx: MethodContext<'_>) -> Me
                 loglik_type: Some(loglik::LoglikType::If2),
                 acceptance_rate: None,
                 tail_chain_agreement: chain_results.chain_agreement.iter().map(|(k, v)| (k.clone(), *v)).collect(),
-                perturb_only_at_t0_params: run_config.estimated_params.iter()
-                    .zip(&run_config.steps)
-                    .filter(|(_, s)| s.at == sim::inference::types::PerturbAt::TimeZeroOnly)
-                    .map(|(p, _)| p.name.clone()).collect(),
+                perturb_only_at_t0_params: run_config.steps.initial_state_params(),
                 chain_logliks: chain_results.results.iter()
                     .map(|(_, r)| r.final_loglik).collect(),
                 chain_eval_logliks: chain_results.chain_eval_logliks(),
@@ -721,7 +721,7 @@ pub(crate) fn run_method(out: &mut crate::out::Out, cx: MethodContext<'_>) -> Me
                 .unwrap_or_else(|e| abandon_method(out, format!("error: {e}")));
             (method_warmup, resume_boundary) = pmmh::run_method(
                 sweep_config,
-                method,
+                method, steps,
                 files,
                 pmmh_opts,
                 seed, false,
@@ -761,7 +761,7 @@ pub(crate) fn run_method(out: &mut crate::out::Out, cx: MethodContext<'_>) -> Me
             let mh_dt_check = dt_check.clone();
             (method_warmup, resume_boundary) = pmmh::run_method(
                 sweep_config,
-                method,
+                method, steps,
                 files,
                 pmmh_opts,
                 seed, false,
@@ -858,7 +858,7 @@ pub(crate) fn run_method(out: &mut crate::out::Out, cx: MethodContext<'_>) -> Me
             // cool, so the IF2-shaped config field is never read.
             let run_config = runner::FitRunConfig::build(
                 sweep_config,
-                Some(&method.algorithm),
+                Some(&method.algorithm), steps,
                 1, *particles, 1, 1.0, 1, seed, false,
             ).unwrap_or_else(|e| {
                 abandon_method(out, format!("error building pfilter config: {e}"))
@@ -1074,10 +1074,13 @@ pub(crate) fn say_ic_free(out: &crate::out::Out, config: &config_v2::FitConfig, 
     if !config.problem.likelihood_objective().skips_first_observation() {
         return;
     }
-    let perturb_only_at_t0: Vec<&str> = config.problem.estimate.iter()
-        .filter(|(_, spec)| spec.perturb_only_at_t0)
-        .map(|(n, _)| n.as_str())
-        .collect();
+    let perturb_only_at_t0: Vec<&str> = match config.inference.method.as_ref().map(|m| &m.algorithm) {
+        Some(config_v2::Algorithm::IF2 { perturbation, .. }) => perturbation.iter()
+            .filter(|(_, spec)| spec.initial_state)
+            .map(|(n, _)| n.as_str())
+            .collect(),
+        _ => Vec::new(),
+    };
     out.say(format_args!("\n  {} conditioning on y₁",
         crate::out::paint::stderr().paint("ic-free inference:", crate::out::paint::Style::Info)));
     let mut sources: Vec<String> = Vec::new();
@@ -1089,7 +1092,7 @@ pub(crate) fn say_ic_free(out: &crate::out::Out, config: &config_v2::FitConfig, 
         sources.push(format!("`init {{ }}` laws on [{}]", drawn.join(", ")));
     }
     if !perturb_only_at_t0.is_empty() {
-        sources.push(format!("perturb_only_at_t0 params [{}] (if2 only)", perturb_only_at_t0.join(", ")));
+        sources.push(format!("initial_state params [{}] (if2 only)", perturb_only_at_t0.join(", ")));
     }
     out.say(format_args!("    - initial state spread from: {}", sources.join("; ")));
     out.say("    - log-likelihood accumulation from t = 2 (y₁ reweights and resamples only)");
@@ -1896,6 +1899,7 @@ mod tests {
             gate: config_v2::GateConfig::default(),
             dt_check: config_v2::DtCheckConfig::default(),
             binomial: sim::rng::BinomialAlgorithm::Btpe,
+            perturbation: Default::default(),
         }
     }
 
@@ -1912,6 +1916,7 @@ mod tests {
             adapt_start: 300,
             burnin_dt,
             dt_check: config_v2::DtCheckConfig::default(),
+            proposal: Default::default(),
         }
     }
 

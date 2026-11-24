@@ -322,7 +322,7 @@ pub fn run_method(
     // Build FitRunConfig (reuse existing builder). cooling_target_iters
     // is IF2-specific and never read by PGAS — pass 1 as a harmless value.
     let config = FitRunConfig::build(
-        fit, Some(&method.algorithm),
+        fit, Some(&method.algorithm), &super::steps::ResolvedSteps::None,
         n_chains, n_particles, 1,
         1.0, 1, seed, false,
     )?;

@@ -115,10 +115,10 @@ pub struct FitRunConfig {
     /// against current values. Wave 2 / #3 Gate 3a.
     pub param_names: Vec<String>,
     pub estimated_params: Vec<EstimatedParam>,
-    /// The step of each entry of `estimated_params`, in the same order, as
-    /// `[estimate]` writes it. IF2's are also in `if2_config.steps`; PMMH and
-    /// MH start their proposals from these.
-    pub steps: Vec<WrittenStep>,
+    /// The method's resolved step for each estimated parameter, by name.
+    /// IF2's are also in `if2_config.steps`; PMMH and MH start their
+    /// proposals from these.
+    pub steps: super::steps::ResolvedSteps,
     /// Canonical observation times (shared across all streams).
     pub observations: Vec<Observation>,
     /// Per-stream data. For single-stream models, len() == 1.
@@ -392,6 +392,7 @@ impl FitRunConfig {
     pub fn build(
         fit: &super::config_v2::Problem,
         algorithm: Option<&super::config_v2::Algorithm>,
+        steps: &super::steps::ResolvedSteps,
         n_chains: usize,
         n_particles: usize,
         n_iterations: usize,
@@ -431,19 +432,9 @@ impl FitRunConfig {
             }
         }
         // Build EstimatedParam specs
-        let (if2_params, steps): (Vec<EstimatedParam>, Vec<WrittenStep>) = build_if2_params(
+        let if2_params: Vec<EstimatedParam> = build_if2_params(
             &fit.estimate, &model, &compiled, &base_params, random_starts, seed,
-        )?.into_iter().unzip();
-        // IF2 perturbs by `rw_sd`; PMMH and MH start their proposals at five
-        // times it. None may run on an automatic step that cannot move.
-        if matches!(
-            algorithm,
-            Some(super::config_v2::Algorithm::IF2 { .. }
-                | super::config_v2::Algorithm::PMMH { .. }
-                | super::config_v2::Algorithm::Mh { .. })
-        ) {
-            refuse_degenerate_auto_rw_sd(&if2_params, &steps, "`rw_sd = …` in its [estimate] entry")?;
-        }
+        )?;
 
         // Load data — one or more observation streams (real-data only;
         // synthetic-data fits route through a generator before this path).
@@ -524,20 +515,18 @@ impl FitRunConfig {
 
         let ic_free = fit.likelihood_objective().skips_first_observation();
 
-        // Resolve top-level fit.simplex_groups into sim::SimplexGroup
-        // (param names → indices, rw_sds from EstimateSpecV2.rw_sd).
-        // Only IF2 currently honours these; PGAS/PMMH/PFilter consume
-        // the same FitRunConfig but ignore simplex_groups (validation
-        // emits a warning when a non-IF2 method runs against a fit
-        // with simplex groups declared).
-        let resolved_simplex_groups = resolve_simplex_groups(
-            &fit.simplex_groups, &fit.estimate, &compiled.param_index, &if2_params)?;
-        // Only an IF2 run perturbs; another method's config carries no steps,
-        // and `run_if2` refuses it.
-        let if2_steps = if matches!(algorithm, Some(super::config_v2::Algorithm::IF2 { .. })) {
-            if2_steps(&if2_params, &steps, &resolved_simplex_groups)?
-        } else {
-            Vec::new()
+        // Only an IF2 run perturbs, and only IF2 keeps the simplex groups
+        // (jointly, on their log-ratio coordinate); another method's config
+        // carries neither, and treats a group's members as independent
+        // parameters (validation warns that it does).
+        let (resolved_simplex_groups, if2_steps) = match (steps.if2_steps(&if2_params), steps.simplex_sds()) {
+            (Some(if2_steps), Some(sds)) => {
+                (resolve_simplex_groups(&fit.simplex_groups, &compiled.param_index, &sds)?, if2_steps?)
+            }
+            _ if matches!(algorithm, Some(super::config_v2::Algorithm::IF2 { .. })) => {
+                return Err("internal error: an IF2 run without its resolved steps".into());
+            }
+            _ => (Vec::new(), Vec::new()),
         };
 
         let config = IF2Config {
@@ -567,7 +556,7 @@ impl FitRunConfig {
         // at the first observation index — there is nothing to condition on, so
         // ic_free would silently degenerate to *no* initial-state conditioning
         // (a weaker estimand than requested). Checked before the
-        // perturb_only_at_t0 precondition: a missing y₁ makes ic_free
+        // initial_state precondition: a missing y₁ makes ic_free
         // impossible regardless of the parameter flags.
         if ic_free
             && !streams.is_empty()
@@ -589,7 +578,7 @@ impl FitRunConfig {
         //
         //   * a declared `init { }` law — every filter draws x₀ per particle
         //     from that particle's own stream, so the draws differ (gh#732);
-        //   * an estimated parameter marked `perturb_only_at_t0` — under IF2
+        //   * a parameter `[method.perturbation]` declares `initial_state` — under IF2
         //     the t=0 perturbation moves each particle's θ and each particle
         //     then draws its own x₀ from that θ (gh#364). This one is IF2-only:
         //     under `pfilter`/`pmmh` θ is global to the swarm. That asymmetry
@@ -601,21 +590,21 @@ impl FitRunConfig {
         // spent.
         if ic_free
             && !compiled.has_init_law
-            && !steps.iter().any(|s| s.at == PerturbAt::TimeZeroOnly)
+            && steps.initial_state_params().is_empty()
         {
             return Err(
                 "ic_free = true requires per-particle variation at t=0, and \
                  this fit has none: the model's `init { }` computes every \
-                 compartment from an expression, and no [estimate.*] entry is \
-                 marked perturb_only_at_t0. Without that variation the first \
+                 compartment from an expression, and no [method.perturbation] \
+                 entry is declared initial_state. Without that variation the first \
                  observation cannot discriminate between particles and ic_free \
                  degenerates to dropping the first data point.\n\n\
                  Either declare the initial state as a law in the model:\
                  \n\n    init { I ~ poisson(rate = I0) }\n\n\
-                 or, for an `if2` method, mark your initial-state parameter \
-                 perturb_only_at_t0:\
-                 \n\n    [estimate]\n    \
-                 I0 = { bounds = [1, 500], perturb_only_at_t0 = true }".into());
+                 or, for an `if2` method, declare your initial-state parameter \
+                 initial_state:\
+                 \n\n    [method.perturbation]\n    \
+                 I0 = { initial_state = true }".into());
         }
 
         let param_names: Vec<String> =
@@ -628,7 +617,7 @@ impl FitRunConfig {
             base_params,
             param_names,
             estimated_params: if2_params,
-            steps,
+            steps: steps.clone(),
             observations,
             streams,
             if2_config: config,
@@ -709,60 +698,26 @@ impl FitRunConfig {
 
 // load_model is now in util.rs
 
-/// Resolve top-level fit.toml `[[simplex_groups]]` entries (param
-/// names) into runtime `sim::inference::if2::SimplexGroup` (indices
-/// into the model param vector + SDs on the log-ratio scale).
-///
-/// Validation enforced here:
-/// - Each member must appear in `[estimate]` (validated upstream by
-///   `FitConfigV2::validate`, but defended again here).
-/// - Each member must resolve to a model param index.
-/// - rw_sd is the member's `EstimateSpecV2.rw_sd`, else
-///   `simplex_member_default_step` of its domain.
-///
-/// rw_sd semantics: the IF2 simplex transform perturbs members on the
-/// log-ratio scale. The user's `EstimateSpecV2.rw_sd` for a simplex
-/// member is taken as-is on that scale (matches pomp's
-/// `parameter_trans(barycentric = ...)` + `rw.sd` semantics).
+/// The `[[simplex_groups]]` entries as IF2 takes them
+/// (`sim::inference::if2::SimplexGroup`): each member's index into the model's
+/// parameter vector, and its SD on the group's log-ratio coordinate from
+/// `sds`, one list per group with its members in declaration order (the
+/// pomp `parameter_trans(barycentric = …)` and `rw.sd` reading). A member the
+/// model does not have, or a list whose length is not the group's, is
+/// refused.
 pub(crate) fn resolve_simplex_groups(
     cli_groups: &[super::config_v2::SimplexGroup],
-    estimate: &indexmap::IndexMap<String, super::config_v2::EstimateSpecV2>,
     param_index: &HashMap<String, usize>,
-    if2_params: &[EstimatedParam],
+    sds: &[Vec<ZSd>],
 ) -> Result<Vec<sim::inference::if2::SimplexGroup>, String> {
-    let mut out = Vec::with_capacity(cli_groups.len());
-    for (group_idx, group) in cli_groups.iter().enumerate() {
-        let mut indices = Vec::with_capacity(group.params.len());
-        let mut sds = Vec::with_capacity(group.params.len());
-        for name in &group.params {
-            if !estimate.contains_key(name) {
-                return Err(format!(
-                    "simplex_groups[{}]: member '{}' not in [estimate]. \
-                     Members must be free parameters.",
-                    group_idx, name));
-            }
-            let &model_idx = param_index.get(name).ok_or_else(|| format!(
-                "simplex_groups[{}]: member '{}' has no model param index \
-                 (model load + estimate parity drift?)",
-                group_idx, name))?;
-            let member = if2_params.iter()
-                .find(|p| p.name == *name)
-                .ok_or_else(|| format!(
-                    "simplex_groups[{}]: member '{}' missing from \
-                     resolved EstimatedParam list (build_if2_params drift?)",
-                    group_idx, name))?;
-            // The member's own `rw_sd`, read on the log-ratio scale, else
-            // the simplex default; not the member's step in its own z.
-            let if2_rw_sd = estimate.get(name).and_then(|e| e.rw_sd)
-                .unwrap_or_else(|| simplex_member_default_step(&member.transform));
-            let sd = ZSd::new(if2_rw_sd).map_err(|e| format!(
-                "simplex_groups[{group_idx}]: member '{name}': rw_sd {e}"))?;
-            indices.push(model_idx);
-            sds.push(sd);
-        }
-        out.push(sim::inference::if2::SimplexGroup { indices, sds });
+    if sds.len() != cli_groups.len() || cli_groups.iter().zip(sds).any(|(g, s)| g.params.len() != s.len()) {
+        return Err("internal error: the resolved simplex steps do not match the simplex groups".into());
     }
-    Ok(out)
+    cli_groups.iter().zip(sds).enumerate().map(|(group_idx, (group, sds))| {
+        let indices = group.params.iter().map(|name| param_index.get(name).copied().ok_or_else(|| format!(
+            "simplex_groups[{group_idx}]: member '{name}' has no model param index"))).collect::<Result<Vec<_>, String>>()?;
+        Ok(sim::inference::if2::SimplexGroup { indices, sds: sds.clone() })
+    }).collect()
 }
 
 /// Build EstimatedParam specs from v2 [estimate]. Uses the shared
@@ -775,15 +730,11 @@ fn build_if2_params(
     base_params: &[f64],
     random_starts: bool,
     seed: u64,
-) -> Result<Vec<(EstimatedParam, WrittenStep)>, String> {
+) -> Result<Vec<EstimatedParam>, String> {
     // Build ParamSpecs from v2 [estimate]
     let specs: Vec<ParamSpec> = estimate.iter().map(|(name, est)| {
-        // rw_sd: fit.toml explicit, else None (auto).
-        let rw_sd = est.rw_sd;
         ParamSpec {
             name: name.clone(),
-            rw_sd,
-            perturb_only_at_t0: est.perturb_only_at_t0,
             // Bounds plumbing (gh#42-followup + bounds-optional fix):
             // pass through the Option as-is. `build_if2_params_from_specs`
             // resolves fit.toml > model > unbounded fallback. None now
@@ -799,11 +750,11 @@ fn build_if2_params(
     // insertion order, but to keep param order stable across configs
     // that list the same params in different orders (and so resume's
     // z-value mapping survives) we sort by name.
-    params.sort_by(|(a, _), (b, _)| a.name.cmp(&b.name));
+    params.sort_by(|a, b| a.name.cmp(&b.name));
 
     // Fit-specific: apply start values and random starts
     let mut rng = StatefulRng::new(seed ^ 0xdeadbeef_u64);
-    for (p, _) in &mut params {
+    for p in &mut params {
         if random_starts {
             let (lower, upper) = p.bounds();
             if lower.is_finite() && upper.is_finite() {
@@ -1207,8 +1158,9 @@ pub fn print_preflight(
 ) {
     let (specs, starts_differ) =
         preflight_specs(&config.estimated_params, per_chain_params);
-    let n_auto = config.steps.iter()
-        .filter(|s| s.auto)
+    let rows = config.steps.launch_rows();
+    let n_auto = rows.values()
+        .filter(|(_, from, _)| *from == super::steps::StepFrom::Default)
         .count();
 
     if starts_differ {
@@ -1218,7 +1170,7 @@ pub fn print_preflight(
     } else {
         out.say("\ntransforms:");
     }
-    for (spec, step) in specs.iter().zip(&config.steps) {
+    for spec in specs.iter() {
         // Each map's position is its own z (`to_transformed`). A start far
         // from an interval map's midpoint (|z| > 2) sits where the map is
         // compressed: a step in z moves θ little there.
@@ -1240,32 +1192,36 @@ pub fn print_preflight(
         let pos = format!("start={:.4} z={:.2}{}", spec.initial, z, mark);
         // The step in z, the same for every chain and particle, and the
         // natural-scale step it is at the reference point (the box's
-        // midpoint, else the start), the unit an explicit rw_sd is written in.
-        let source = if step.auto {
-            crate::out::paint::stderr().paint("auto", Style::Warn)
-        } else {
-            "explicit".to_string()
+        // midpoint, else the start). A method with no step shows none.
+        let Some(&(z_sd, from, at)) = rows.get(&spec.name) else {
+            out.say(format_args!("  {:12} {}  {}", spec.name, tname, pos));
+            continue;
         };
-        let at = if matches!(spec.transform, Transform::Interval { .. } | Transform::LogInterval { .. }) {
+        let source = match from {
+            super::steps::StepFrom::Default => crate::out::paint::stderr().paint("default", Style::Warn),
+            super::steps::StepFrom::Written => "written".to_string(),
+        };
+        let reference = if matches!(spec.transform, Transform::Interval { .. } | Transform::LogInterval { .. }) {
             "midpoint"
         } else {
             "start"
         };
-        out.say(format_args!("  {:12} {}  {}  step(z)={:.3} ≈ rw_sd {} at the {at} ({})",
-            spec.name, tname, pos, step.z_sd,
-            sim::inference::diagnostic::format_start_value(step.natural_step(spec)), source));
+        let t0 = if at == Some(PerturbAt::TimeZeroOnly) { "  t0 only" } else { "" };
+        out.say(format_args!("  {:12} {}  {}  step(z)={:.3} ≈ {} natural at the {reference} ({}){t0}",
+            spec.name, tname, pos, z_sd,
+            sim::inference::diagnostic::format_start_value(spec.transform.natural_from_step(z_sd, spec.initial)),
+            source));
 
-        // Push auto rw_sd info diagnostic
-        if step.auto {
+        if from == super::steps::StepFrom::Default {
             collector.push(DiagnosticKind::AutoRwSd {
-                param: spec.name.clone(), rw_sd: step.z_sd,
+                param: spec.name.clone(), rw_sd: z_sd,
             });
         }
     }
 
     if n_auto > 0 {
         out.say(format_args!("\n  {}", crate::out::paint::stderr().paint(&format!(
-            "⚠ {}/{} parameters using auto rw_sd. Check traces and set explicit values.",
+            "⚠ {}/{} parameters use the default step. Check traces, and write a step in the method's table where it does not move.",
             n_auto, specs.len()), Style::Warn)));
     }
 
@@ -1453,22 +1409,15 @@ pub fn resolve_search_box(
 
 /// What the caller wants to estimate for one parameter.
 ///
-/// Each CLI (if2, profile, fit) builds a Vec<ParamSpec> from its own
+/// Each command (profile, fit, design) builds a Vec<ParamSpec> from its own
 /// flags or config. The shared `build_if2_params_from_specs` turns
-/// these into Vec<EstimatedParam> — the format the IF2 engine consumes.
+/// these into Vec<EstimatedParam> — the format the engines consume.
 ///
-/// Design: the caller decides WHAT to estimate (the partition).
-/// The shared function decides HOW (transform, rw_sd, bounds).
-/// This separation eliminates the DRY violations that caused
-/// three bugs in one session (profile --rw-sd auto, profile missing
-/// --fixed, transform derivation divergence).
+/// The caller decides what to estimate (the partition); the shared function
+/// decides how (the box and the map onto it). The step is the method's
+/// (`fit::steps`), not the parameter's.
 pub struct ParamSpec {
     pub name: String,
-    /// None = auto from bounds. Some(v) = explicit natural-scale rw_sd.
-    pub rw_sd: Option<f64>,
-    /// Perturb only at t=0 (the IF2 schedule for an initial-state
-    /// parameter): [`PerturbAt::TimeZeroOnly`].
-    pub perturb_only_at_t0: bool,
     /// Caller-supplied bounds override (typically from fit.toml's
     /// `[estimate].bounds`). When `Some`, replaces the model-declared
     /// `ir_param.bounds` for both the `EstimatedParam.{lower, upper}`
@@ -1520,32 +1469,46 @@ fn best_start_loglik(config: &FitRunConfig, per_chain: Option<&[Vec<EstimatedPar
 /// estimate is reported as near the bound (proposal D10).
 const NEAR_BOUND_FRACTION: f64 = 0.01;
 
-/// One estimated parameter's step settings as `[estimate]` (or `profile
-/// --rw-sd`) writes them, with the step converted to z. The same for every
-/// chain and particle.
+/// One estimated parameter's IF2 step as `profile` takes it, from `--rw-sd`
+/// or the `--fit` config's `[method.perturbation]`, converted to z. The same
+/// for every chain and particle.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WrittenStep {
     /// The step in z: IF2's perturbation SD before cooling (the IF2 schedule,
     /// `if2::CoolingSchedule`, leaves `fraction` of it after `target_iters`
-    /// iterations). An explicit natural-scale `rw_sd` is converted to it once
-    /// at the domain's reference point ([`Transform::step_from_natural`] at
-    /// the parameter's base value); otherwise it is the map's
-    /// [`Transform::default_if2_step`], or NaN for `Identity`, which IF2,
-    /// PMMH and MH refuse before they run ([`refuse_degenerate_auto_rw_sd`]).
+    /// iterations). A natural-scale `--rw-sd` is converted to it once at the
+    /// domain's reference point ([`Transform::step_from_natural`] at the
+    /// parameter's base value); a `[method.perturbation]` SD is already in z;
+    /// otherwise it is the map's [`Transform::default_if2_step`], or NaN for
+    /// `Identity`, which IF2 refuses before it runs
+    /// ([`refuse_degenerate_auto_rw_sd`]).
     pub z_sd: f64,
-    /// Whether no `rw_sd` was written, so `z_sd` is the map's default.
+    /// Whether no step was written, so `z_sd` is the map's default.
     pub auto: bool,
-    /// IF2's timing, from `perturb_only_at_t0`.
+    /// IF2's timing, from `initial_state`.
     pub at: PerturbAt,
 }
 
+/// A step as `profile` is given it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum WrittenSd {
+    /// None written: the map's default IF2 step.
+    Default,
+    /// `--rw-sd NAME=SD`: a natural-scale SD.
+    Natural(f64),
+    /// `[method.perturbation]`: an SD in z.
+    Z(f64),
+}
+
 impl WrittenStep {
-    /// The natural-scale step `z_sd` is at `p`'s reference point
-    /// ([`Transform::natural_from_step`] at `p.initial`): the unit an
-    /// explicit `rw_sd` is written in, and the scale the launch table shows
-    /// beside the z step.
-    pub fn natural_step(&self, p: &EstimatedParam) -> f64 {
-        p.transform.natural_from_step(self.z_sd, p.initial)
+    /// The step of `p` from `sd`, perturbed at `at`.
+    pub fn of(p: &EstimatedParam, sd: WrittenSd, at: PerturbAt) -> WrittenStep {
+        let z_sd = match sd {
+            WrittenSd::Default => p.transform.default_if2_step().unwrap_or(f64::NAN),
+            WrittenSd::Natural(natural) => p.transform.step_from_natural(natural, p.initial),
+            WrittenSd::Z(z) => z,
+        };
+        WrittenStep { z_sd, auto: sd == WrittenSd::Default, at }
     }
 }
 
@@ -1569,15 +1532,14 @@ pub fn if2_steps(
     }).collect()
 }
 
-/// Build EstimatedParam specs from caller-provided ParamSpecs, each with its
-/// written step. Pure mechanical work: look up indices, derive transforms,
-/// convert or default the step.
+/// Build EstimatedParam specs from caller-provided ParamSpecs. Pure
+/// mechanical work: look up indices, resolve the box, derive the map onto it.
 pub fn build_if2_params_from_specs(
     model: &ir::Model,
     compiled: &CompiledModel,
     base_params: &[f64],
     specs: &[ParamSpec],
-) -> Result<Vec<(EstimatedParam, WrittenStep)>, String> {
+) -> Result<Vec<EstimatedParam>, String> {
     let mut params = Vec::with_capacity(specs.len());
 
     for spec in specs {
@@ -1601,28 +1563,12 @@ pub fn build_if2_params_from_specs(
         let transform = derive_transform_with_bounds(estimated_kind(ir_param)?, (lo, hi))
             .map_err(|e| format!("estimate.{}: {e}", spec.name))?;
 
-        // The step in z (proposal §9.1, D8): an explicit natural-scale rw_sd
-        // converted once at the domain's reference point (the midpoint of a
-        // box, else the start), else the map's default step, else none (NaN,
-        // refused under IF2, PMMH and MH by `refuse_degenerate_auto_rw_sd`).
-        let rw_sd = match spec.rw_sd {
-            Some(natural) => transform.step_from_natural(natural, base_params[idx]),
-            None => transform.default_if2_step().unwrap_or(f64::NAN),
-        };
-
-        params.push((
-            EstimatedParam {
-                name: spec.name.clone(),
-                index: idx,
-                initial: base_params[idx],
-                transform,
-            },
-            WrittenStep {
-                z_sd: rw_sd,
-                auto: spec.rw_sd.is_none(),
-                at: if spec.perturb_only_at_t0 { PerturbAt::TimeZeroOnly } else { PerturbAt::EveryObservation },
-            },
-        ));
+        params.push(EstimatedParam {
+            name: spec.name.clone(),
+            index: idx,
+            initial: base_params[idx],
+            transform,
+        });
     }
 
     Ok(params)
@@ -1653,37 +1599,6 @@ pub fn refuse_degenerate_auto_rw_sd(
         }
     }
     Ok(())
-}
-
-/// A simplex member's default log-ratio step, kept from before support-keyed
-/// transforms so the simplex perturbation is unchanged (proposal §9.5: the
-/// simplex groups use their own log-ratio map): the natural-scale default the
-/// member's box used to give, read as is on the log-ratio scale.
-///
-/// LogInterval: ln(hi/lo)/20 converted at the geometric midpoint.
-/// LowerBounded: as LogInterval with hi = 1000·lo.
-/// Interval: (hi − lo)/6.
-/// Identity, UpperBounded: (hi − lo)/6, with ±1e6 for an infinite end.
-fn simplex_member_default_step(transform: &Transform) -> f64 {
-    let (lower, upper) = transform.bounds();
-    let log_auto = |lo: f64, hi: f64| {
-        let lo = lo.max(1e-300);
-        let hi_val = if hi.is_finite() { hi } else { lo * 1000.0 };
-        let log_range = (hi_val / lo).ln();
-        let log_sd = log_range / 20.0;
-        let midpoint = (lo * hi_val).sqrt();
-        midpoint * log_sd
-    };
-    match *transform {
-        Transform::LogInterval { lo, hi } => log_auto(lo, hi),
-        Transform::LowerBounded { lo } => log_auto(lo, f64::INFINITY),
-        Transform::Interval { lo, hi } => (hi - lo) / 6.0,
-        Transform::Identity | Transform::UpperBounded { .. } => {
-            let lo = if lower.is_finite() { lower } else { -1e6 };
-            let hi = if upper.is_finite() { upper } else { 1e6 };
-            (hi - lo) / 6.0
-        }
-    }
 }
 
 /// Load one leaf's observation rows from TSV.
@@ -2818,10 +2733,10 @@ pub fn run_chains_with_per_chain_params(
         // perturbed swarm, not the start, is what the data rule out.
         let start_loglik = best_start_loglik(config, per_chain_params);
         if start_loglik.is_finite() {
-            // The step in z each parameter took at its start: the natural
-            // rw_sd converted there.
-            let steps: Vec<String> = config.estimated_params.iter().zip(&config.steps)
-                .map(|(p, s)| format!("{}={:.3}", p.name, s.z_sd))
+            // The step in z each parameter took at its start.
+            let rows = config.steps.launch_rows();
+            let steps: Vec<String> = config.estimated_params.iter()
+                .filter_map(|p| rows.get(&p.name).map(|(z, _, _)| format!("{}={:.3}", p.name, z)))
                 .collect();
             collector.push(DiagnosticKind::PerturbedSwarmInfeasible {
                 start_loglik, steps: steps.clone(),
@@ -2830,8 +2745,8 @@ pub fn run_chains_with_per_chain_params(
                 "if2: every chain's final estimate has log-likelihood -inf (best = {best_loglik}), \
                  but a chain's start scores {start_loglik:.1}: the start is feasible and the \
                  perturbed swarm is not, so the perturbation is too large. The steps at the \
-                 start, in each parameter's transformed coordinate, were {}. Give a smaller explicit rw_sd \
-                 (`rw_sd = …` in its [estimate] entry).", steps.join(", ")));
+                 start, in each parameter's transformed coordinate, were {}. Write a smaller step in z \
+                 (`NAME = …` in [method.perturbation]).", steps.join(", ")));
         }
         collector.push(DiagnosticKind::InitialLoglikInfinite);
         return Err(format!(
@@ -4550,7 +4465,7 @@ mod tests {
                 bounds: Some((0.01, 2.0)), 
                 prior: Some(crate::fit::config_v2::EstimatePriorSpec::Dist(
                     PriorDist::Normal(NormalPrior { mean, sd }))),
-                perturb_only_at_t0: false, rw_sd: None, start: None,
+                start: None,
             });
             m
         };
@@ -4635,7 +4550,7 @@ mod tests {
             bounds: Some((0.05, 1.0)), 
             prior: Some(EstimatePriorSpec::UniformOverBounds {
                 uniform: UniformOverBoundsMarker {} }),
-            perturb_only_at_t0: false, rw_sd: None, start: None });
+            start: None });
 
         let (prior, src) = resolve_prior("beta", &est, &model);
         match prior {
@@ -4680,7 +4595,7 @@ mod tests {
         let mut est: IndexMap<String, EstimateSpecV2> = IndexMap::new();
         est.insert("kappa".into(), EstimateSpecV2 {
             bounds: Some((1e-5, 1e-2)), prior: None,
-            perturb_only_at_t0: false, rw_sd: None, start: None });
+            start: None });
 
         // A rate (→ LogInterval) and a real (→ Interval) on the prior's own
         // box are both within its support.
@@ -4728,7 +4643,7 @@ mod tests {
                 bounds: Some((blo, bhi)), 
                 prior: Some(EstimatePriorSpec::Dist(PriorDist::TruncatedNormal(
                     TruncatedNormalPrior { mean: 0.7, sd: 0.2, lower: lo, upper: hi }))),
-                perturb_only_at_t0: false, rw_sd: None, start: None });
+                start: None });
             m
         };
 
@@ -4749,6 +4664,24 @@ mod tests {
     fn ic_free_fixture(dir: &std::path::Path, ic_free: bool, perturb_t0: bool)
         -> super::super::config_v2::Problem
     {
+        ic_free_fit(dir, ic_free, perturb_t0).0
+    }
+
+    /// An IF2 config over `fit`: its resolved steps, and the build.
+    fn build_if2(
+        fit: &super::super::config_v2::Problem,
+        if2: &super::super::config_v2::Algorithm,
+    ) -> Result<FitRunConfig, String> {
+        let (model, _) = crate::util::load_ir(fit.compiled_model().unwrap()).unwrap();
+        let steps = crate::fit::steps::resolve_for(if2, fit, &model)?;
+        FitRunConfig::build(fit, Some(if2), &steps, 1, 100, 1, 0.5, 50, 1, false)
+    }
+
+    /// [`ic_free_fixture`]'s problem and its IF2 method, whose
+    /// `[method.perturbation]` declares I0 `initial_state` when `perturb_t0`.
+    fn ic_free_fit(dir: &std::path::Path, ic_free: bool, perturb_t0: bool)
+        -> (super::super::config_v2::Problem, super::super::config_v2::Algorithm)
+    {
         // Minimal v2 fit.toml against the seir_observations golden IR.
         // Toggles ic_free and whether I0 is perturb_only_at_t0-flagged independently
         // so all four combinations can be built.
@@ -4759,7 +4692,7 @@ mod tests {
         std::fs::write(&data_path,
             "time\tweekly_cases\n7\t1\n14\t2\n21\t3\n28\t4\n35\t5\n").unwrap();
         let perturb_t0_line =
-            if perturb_t0 { "perturb_only_at_t0 = true\n" } else { "" };
+            if perturb_t0 { "[method.perturbation]\nI0 = { initial_state = true }\n" } else { "" };
         let fit_toml_path = dir.join("fit.toml");
         let toml_src = format!(r#"
 store = "{}"
@@ -4774,7 +4707,7 @@ weekly_cases = "{}"
 [estimate.I0]
 bounds = [1, 1000]
 start  = 5
-{}
+
 [fixed]
 sigma    = 0.25
 gamma    = 0.3
@@ -4791,15 +4724,15 @@ chains     = 1
 particles  = 100
 iterations = 1
 cooling    = 0.5
-
+{}
 [config]
 dt = 1.0
 "#, dir.display(), ic_free, ir_path, data_path.display(), perturb_t0_line);
         std::fs::write(&fit_toml_path, toml_src).unwrap();
-        super::super::config_v2::FitConfig::load(
-            &fit_toml_path.to_string_lossy())
-            .expect("v2 fit.toml parse")
-            .problem
+        let config = super::super::config_v2::FitConfig::load(&fit_toml_path.to_string_lossy())
+            .expect("v2 fit.toml parse");
+        let algorithm = config.inference.method.expect("the fixture's method").algorithm;
+        (config.problem, algorithm)
     }
 
     /// The one dt rule (`crate::dt_rule`): a model that declares
@@ -4821,11 +4754,11 @@ dt = 1.0
         let fit = ic_free_fixture(&dir, false, false);
         let mut with_dt = fit.clone();
         with_dt.model.camdl = ir_path.to_string_lossy().into_owned();
-        let config = FitRunConfig::build(&with_dt, None, 1, 100, 1, 0.5, 50, 1, false)
+        let config = FitRunConfig::build(&with_dt, None, &crate::fit::steps::ResolvedSteps::None, 1, 100, 1, 0.5, 50, 1, false)
             .expect("builds");
         assert_eq!(config.if2_config.dt, 7.0, "the model's declared step");
         assert_eq!(config.smc_config().dt, 7.0);
-        let config = FitRunConfig::build(&fit, None, 1, 100, 1, 0.5, 50, 1, false).unwrap();
+        let config = FitRunConfig::build(&fit, None, &crate::fit::steps::ResolvedSteps::None, 1, 100, 1, 0.5, 50, 1, false).unwrap();
         assert_eq!(config.if2_config.dt, 1.0, "no declared step: the config's");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -4865,13 +4798,13 @@ dt = 1.0
     fn ic_free_true_requires_perturb_only_at_t0() {
         let dir = ic_free_test_dir("requires_ivp");
         let fit = ic_free_fixture(&dir, true, false);
-        let err = match FitRunConfig::build(&fit, None, 1, 100, 1, 0.5, 50, 1, false) {
+        let err = match FitRunConfig::build(&fit, None, &crate::fit::steps::ResolvedSteps::None, 1, 100, 1, 0.5, 50, 1, false) {
             Ok(_)  => panic!("ic_free=true + no perturb_only_at_t0 must error"),
             Err(e) => e,
         };
-        assert!(err.contains("ic_free") && err.contains("perturb_only_at_t0"),
-            "error must name both ic_free and perturb_only_at_t0: {}", err);
-        assert!(err.contains("I0 = {") || err.contains("perturb_only_at_t0 = true"),
+        assert!(err.contains("ic_free") && err.contains("initial_state"),
+            "error must name both ic_free and initial_state: {}", err);
+        assert!(err.contains("I0 = { initial_state = true }"),
             "error should include a copy-pasteable example: {}", err);
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -4881,8 +4814,8 @@ dt = 1.0
     #[test]
     fn ic_free_true_with_perturb_only_at_t0_succeeds() {
         let dir = ic_free_test_dir("with_ivp");
-        let fit = ic_free_fixture(&dir, true, true);
-        let config = FitRunConfig::build(&fit, None, 1, 100, 1, 0.5, 50, 1, false)
+        let (fit, if2) = ic_free_fit(&dir, true, true);
+        let config = build_if2(&fit, &if2)
             .expect("ic_free=true + perturb_only_at_t0 must build");
         assert!(config.ic_free, "FitRunConfig.ic_free must be true");
         // The SMCConfig view also carries the flag — that's what reaches
@@ -4904,11 +4837,13 @@ dt = 1.0
         let pmmh: super::super::config_v2::Algorithm = toml::from_str(
             "algorithm = \"pmmh\"\nbackend = \"chain_binomial\"\nchains = 1\n\
              particles = 10\niterations = 1\nbinomial = \"btrs\"\n").unwrap();
-        let config = FitRunConfig::build(&fit, Some(&pmmh), 1, 10, 1, 0.5, 50, 1, false)
+        let (model, _) = crate::util::load_ir(fit.compiled_model().unwrap()).unwrap();
+        let steps = crate::fit::steps::resolve_for(&pmmh, &fit, &model).expect("resolves");
+        let config = FitRunConfig::build(&fit, Some(&pmmh), &steps, 1, 10, 1, 0.5, 50, 1, false)
             .expect("builds");
         assert_eq!(config.smc_config().binomial, Btrs, "smc_config() must carry the method's sampler");
         assert_eq!(config.if2_config.binomial, Btrs, "if2_config must carry the method's sampler");
-        let none = FitRunConfig::build(&fit, None, 1, 10, 1, 0.5, 50, 1, false).expect("builds");
+        let none = FitRunConfig::build(&fit, None, &crate::fit::steps::ResolvedSteps::None, 1, 10, 1, 0.5, 50, 1, false).expect("builds");
         assert_eq!(none.smc_config().binomial, Btpe);
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -4925,7 +4860,7 @@ dt = 1.0
         // loads the data fresh, so it sees this holed series.
         std::fs::write(dir.join("obs.tsv"),
             "time\tweekly_cases\n7\tNA\n14\t2\n21\t3\n28\t4\n35\t5\n").unwrap();
-        let err = match FitRunConfig::build(&fit, None, 1, 100, 1, 0.5, 50, 1, false) {
+        let err = match FitRunConfig::build(&fit, None, &crate::fit::steps::ResolvedSteps::None, 1, 100, 1, 0.5, 50, 1, false) {
             Ok(_) => panic!("ic_free=true + a missing first observation must error"),
             Err(e) => e,
         };
@@ -4942,47 +4877,42 @@ dt = 1.0
     fn ic_free_default_off_does_not_require_perturb_only_at_t0() {
         let dir = ic_free_test_dir("default_off");
         let fit = ic_free_fixture(&dir, false, false);
-        let config = FitRunConfig::build(&fit, None, 1, 100, 1, 0.5, 50, 1, false)
+        let config = FitRunConfig::build(&fit, None, &crate::fit::steps::ResolvedSteps::None, 1, 100, 1, 0.5, 50, 1, false)
             .expect("ic_free=false + no perturb_only_at_t0 must build");
         assert!(!config.ic_free);
         assert!(!config.smc_config().skip_first_obs_from_loglik);
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// An explicit `rw_sd` is natural-scale, and IF2 perturbs in z: the step
-    /// an IF2 run's engine receives (`IF2Config::steps`) is the written value
-    /// converted once at the reference point, never the written value itself.
-    /// `I0` on [1, 1000] is a positive count, so its map is the log-interval
-    /// one, whose dθ/dz at the geometric midpoint is √1000·ln(1000)/4. The
-    /// timing `perturb_only_at_t0` names arrives with it.
+    /// A `[method.perturbation]` SD is in z, the coordinate IF2 perturbs in:
+    /// the step an IF2 run's engine receives (`IF2Config::steps`) is the
+    /// written value itself, with the timing `initial_state` names.
     #[test]
-    fn an_if2_run_receives_an_explicit_rw_sd_converted_to_z() {
-        let dir = ic_free_test_dir("rw_sd_to_z");
-        let mut fit = ic_free_fixture(&dir, false, true);
-        let natural = 2.0;
-        fit.estimate.get_mut("I0").expect("I0 is estimated").rw_sd = Some(natural);
-        let if2: super::super::config_v2::Algorithm = toml::from_str(
-            "algorithm = \"if2\"\nbackend = \"chain_binomial\"\nchains = 1\n\
-             particles = 10\niterations = 1\ncooling = 0.5\n").unwrap();
-        let config = FitRunConfig::build(&fit, Some(&if2), 1, 10, 1, 0.5, 50, 1, false)
-            .expect("builds");
+    fn an_if2_run_receives_its_written_perturbation_as_written() {
+        let dir = ic_free_test_dir("written_z");
+        let (fit, if2) = ic_free_fit(&dir, false, true);
+        let written = sim::inference::types::ZSd::new(0.174).unwrap();
+        let if2 = match if2 {
+            super::super::config_v2::Algorithm::IF2 { mut perturbation, backend, chains, particles, iterations,
+                cooling, cooling_target_iters, loglik_eval, gate, dt_check, binomial } => {
+                perturbation.get_mut("I0").expect("I0's entry").sd = Some(written);
+                super::super::config_v2::Algorithm::IF2 { perturbation, backend, chains, particles, iterations,
+                    cooling, cooling_target_iters, loglik_eval, gate, dt_check, binomial }
+            }
+            other => panic!("the fixture is IF2: {other:?}"),
+        };
+        let config = build_if2(&fit, &if2).expect("builds");
         let i0 = config.estimated_params.iter().position(|p| p.name == "I0").expect("I0");
-        let transform = config.estimated_params[i0].transform;
-        assert_eq!(transform, Transform::LogInterval { lo: 1.0, hi: 1000.0 });
-        let by_hand = natural / (1000.0_f64.sqrt() * 1000.0_f64.ln() / 4.0);
-        let converted = transform.step_from_natural(natural, 5.0);
-        assert!((converted - by_hand).abs() < 1e-12, "{converted} vs {by_hand}");
         let If2Step::Single(perturbation) = config.if2_config.steps[i0] else {
             panic!("I0 is in no simplex group: {:?}", config.if2_config.steps[i0])
         };
-        assert_eq!(perturbation.sd.get().to_bits(), converted.to_bits(),
-            "the engine's step for I0 is {}, not the converted {converted} (written {natural})",
-            perturbation.sd.get());
+        assert_eq!(perturbation.sd.get().to_bits(), written.get().to_bits(),
+            "the engine's step for I0 is {}, not the written {}", perturbation.sd.get(), written.get());
         assert_eq!(perturbation.at, PerturbAt::TimeZeroOnly);
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// The `perturb_only_at_t0` TOML key must reach the step's timing — what
+    /// The `initial_state` key must reach the step's timing — what
     /// IF2 reads to decide which parameters it skips at every
     /// observation (`if2.rs`, the inner perturbation loop). If the key stopped
     /// deserializing, or stopped being copied through `ParamSpec`, IF2 would
@@ -4991,26 +4921,22 @@ dt = 1.0
     #[test]
     fn perturb_only_at_t0_key_reaches_the_estimated_param() {
         let dir = ic_free_test_dir("flag_reaches_param");
-        let fit = ic_free_fixture(&dir, false, true);
-        let config = FitRunConfig::build(&fit, None, 1, 100, 1, 0.5, 50, 1, false)
-            .expect("fixture must build");
-        let i0 = config.estimated_params.iter().zip(&config.steps)
-            .find(|(p, _)| p.name == "I0")
-            .map(|(_, s)| s)
+        let (fit, if2) = ic_free_fit(&dir, false, true);
+        let config = build_if2(&fit, &if2).expect("fixture must build");
+        let i0 = config.estimated_params.iter().position(|p| p.name == "I0")
             .expect("I0 is the fixture's only estimated parameter");
-        assert_eq!(i0.at, PerturbAt::TimeZeroOnly,
-            "`perturb_only_at_t0 = true` in [estimate.I0] must set the timing \
+        assert!(matches!(config.if2_config.steps[i0], If2Step::Single(p) if p.at == PerturbAt::TimeZeroOnly),
+            "`I0 = {{ initial_state = true }}` in [method.perturbation] must set the timing \
              of the step IF2 reads");
 
         // Negative control on the same builder: without the key the flag is
         // false, so the assertion above cannot pass by the field defaulting to
         // true or by every parameter being flagged.
         let dir2 = ic_free_test_dir("flag_absent");
-        let fit2 = ic_free_fixture(&dir2, false, false);
-        let config2 = FitRunConfig::build(&fit2, None, 1, 100, 1, 0.5, 50, 1, false)
-            .expect("fixture must build");
-        assert!(!config2.steps.iter().any(|s| s.at == PerturbAt::TimeZeroOnly),
-            "no [estimate] entry declares the key, so no param may carry it");
+        let (fit2, if2) = ic_free_fit(&dir2, false, false);
+        let config2 = build_if2(&fit2, &if2).expect("fixture must build");
+        assert!(config2.steps.initial_state_params().is_empty(),
+            "no [method.perturbation] entry declares the key, so no param may carry it");
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&dir2).ok();
     }
@@ -5029,15 +4955,10 @@ dt = 1.0
         use crate::fit::state::FitState;
 
         let dir = ic_free_test_dir("scout_exempt");
-        let fit = ic_free_fixture(&dir, false, true);
-        let config = FitRunConfig::build(&fit, None, 1, 100, 1, 0.5, 50, 1, false)
-            .expect("fixture must build");
+        let (fit, if2) = ic_free_fit(&dir, false, true);
+        let config = build_if2(&fit, &if2).expect("fixture must build");
 
-        let names: Vec<String> = config.estimated_params.iter()
-            .zip(&config.steps)
-            .filter(|(_, s)| s.at == sim::inference::types::PerturbAt::TimeZeroOnly)
-            .map(|(p, _)| p.name.clone())
-            .collect();
+        let names: Vec<String> = config.steps.initial_state_params();
         assert_eq!(names, vec!["I0".to_string()],
             "the scout's fit_state must record I0 as perturb_only_at_t0");
 
@@ -5149,7 +5070,7 @@ dt = 1.0
             bounds: Some((0.01, 5.0)), 
             prior: Some(crate::fit::config_v2::EstimatePriorSpec::Dist(
                 PriorDist::Normal(NormalPrior { mean: 0.25, sd: 0.05 }))),
-            perturb_only_at_t0: false, rw_sd: None, start: None,
+            start: None,
         });
 
         let (p, src) = resolve_prior("beta", &estimate, &model);
@@ -5285,7 +5206,7 @@ dt = 1.0
             .expect("v2 fit.toml parse");
 
         let config = FitRunConfig::build(
-            &fit, None,
+            &fit, None, &crate::fit::steps::ResolvedSteps::None,
             1, 100, 1, 0.5, 50, 1, false,
         ).expect("build must succeed without explicit start (gh#34)");
 
@@ -5300,7 +5221,7 @@ dt = 1.0
         // base_params[beta] (Transform-aware uniform draw is hashed
         // from (seed, param_name) — re-runs are reproducible).
         let config2 = FitRunConfig::build(
-            &fit, None,
+            &fit, None, &crate::fit::steps::ResolvedSteps::None,
             1, 100, 1, 0.5, 50, 1, false,
         ).expect("rebuild");
         assert_eq!(config2.base_params[beta_idx], beta,
@@ -5366,15 +5287,13 @@ dt = 1.0
         let base_params = compiled.default_params.clone();
         let specs = vec![ParamSpec {
             name: "beta".into(),
-            rw_sd: None,
-            perturb_only_at_t0: false,
             bounds: Some((0.1, 0.5)),  // tightened
         }];
         let result = build_if2_params_from_specs(&model, &compiled, &base_params, &specs)
             .expect("tightened bounds within model bounds is valid");
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].0.bounds().0, 0.1, "EstimatedParam.lower must reflect fit bounds");
-        assert_eq!(result[0].0.bounds().1, 0.5, "EstimatedParam.upper must reflect fit bounds");
+        assert_eq!(result[0].bounds().0, 0.1, "EstimatedParam.lower must reflect fit bounds");
+        assert_eq!(result[0].bounds().1, 0.5, "EstimatedParam.upper must reflect fit bounds");
     }
 
     #[test]
@@ -5386,13 +5305,11 @@ dt = 1.0
         let base_params = compiled.default_params.clone();
         let specs = vec![ParamSpec {
             name: "beta".into(),
-            rw_sd: None,
-            perturb_only_at_t0: false,
             bounds: Some((1e-3, 0.5)),
         }];
         let result = build_if2_params_from_specs(&model, &compiled, &base_params, &specs)
             .expect("ok");
-        match &result[0].0.transform {
+        match &result[0].transform {
             Transform::LogInterval { lo, hi } => {
                 assert_eq!(*lo, 1e-3, "the log-interval's lo must reflect fit bounds");
                 assert_eq!(*hi, 0.5,  "the log-interval's hi must reflect fit bounds");
@@ -5408,8 +5325,6 @@ dt = 1.0
         let base_params = compiled.default_params.clone();
         let specs = vec![ParamSpec {
             name: "beta".into(),
-            rw_sd: None,
-            perturb_only_at_t0: false,
             bounds: Some((-0.5, 2.0)),  // wider than model — must reject
         }];
         let err = build_if2_params_from_specs(&model, &compiled, &base_params, &specs)
@@ -5426,14 +5341,12 @@ dt = 1.0
         let base_params = compiled.default_params.clone();
         let specs = vec![ParamSpec {
             name: "beta".into(),
-            rw_sd: None,
-            perturb_only_at_t0: false,
             bounds: None,
         }];
         let result = build_if2_params_from_specs(&model, &compiled, &base_params, &specs)
             .expect("ok");
-        assert_eq!(result[0].0.bounds().0, 0.01);
-        assert_eq!(result[0].0.bounds().1, 2.0);
+        assert_eq!(result[0].bounds().0, 0.01);
+        assert_eq!(result[0].bounds().1, 2.0);
     }
 
     #[test]
@@ -5450,20 +5363,18 @@ dt = 1.0
         let (model, compiled) = make_one_param_model("beta", 1e-6, 1.0, Some(ir::parameter::ParamKind::Rate));
         let base_params = compiled.default_params.clone();
         let wide = vec![ParamSpec {
-            name: "beta".into(), rw_sd: None, perturb_only_at_t0: false,
-            bounds: None,  // model bounds [1e-6, 1.0]
+            name: "beta".into(), bounds: None,  // model bounds [1e-6, 1.0]
         }];
         let tight = vec![ParamSpec {
-            name: "beta".into(), rw_sd: None, perturb_only_at_t0: false,
-            bounds: Some((0.1, 0.5)),
+            name: "beta".into(), bounds: Some((0.1, 0.5)),
         }];
         let r_wide  = build_if2_params_from_specs(&model, &compiled, &base_params, &wide).unwrap();
         let r_tight = build_if2_params_from_specs(&model, &compiled, &base_params, &tight).unwrap();
         // Convert each rw_sd back to log-scale by dividing by midpoint.
         let mid_wide  = (1e-6_f64 * 1.0).sqrt();
         let mid_tight = (0.1_f64 * 0.5).sqrt();
-        let log_sd_wide  = r_wide[0].1.natural_step(&r_wide[0].0)  / mid_wide;
-        let log_sd_tight = r_tight[0].1.natural_step(&r_tight[0].0) / mid_tight;
+        let log_sd_wide  = r_wide[0].transform.natural_from_step(r_wide[0].transform.default_if2_step().unwrap(), r_wide[0].initial)  / mid_wide;
+        let log_sd_tight = r_tight[0].transform.natural_from_step(r_tight[0].transform.default_if2_step().unwrap(), r_tight[0].initial) / mid_tight;
         assert!(log_sd_tight < log_sd_wide,
             "tighter bounds must yield smaller log-scale rw_sd \
              (wide_log_sd={}, tight_log_sd={})", log_sd_wide, log_sd_tight);
@@ -5490,13 +5401,11 @@ dt = 1.0
         let base_params = compiled.default_params.clone();
         let specs = vec![ParamSpec {
             name: "tau".into(),
-            rw_sd: None,
-            perturb_only_at_t0: false,
             bounds: Some((0.0, 55.0)),
         }];
         let result = build_if2_params_from_specs(&model, &compiled, &base_params, &specs)
             .expect("ok");
-        match &result[0].0.transform {
+        match &result[0].transform {
             Transform::Interval { lo, hi } => {
                 assert_eq!(*lo, 0.0, "scaled-logit lo must track fit bounds");
                 assert_eq!(*hi, 55.0, "scaled-logit hi must track fit bounds");
@@ -5518,13 +5427,11 @@ dt = 1.0
         let base_params = compiled.default_params.clone();
         let specs = vec![ParamSpec {
             name: "tau".into(),
-            rw_sd: None,
-            perturb_only_at_t0: false,
             bounds: Some((-30.0, 30.0)),
         }];
         let result = build_if2_params_from_specs(&model, &compiled, &base_params, &specs)
             .expect("ok");
-        match &result[0].0.transform {
+        match &result[0].transform {
             Transform::Interval { lo, hi } => {
                 assert_eq!(*lo, -30.0, "scaled-logit lo must track fit bounds (negative ok)");
                 assert_eq!(*hi, 30.0, "scaled-logit hi must track fit bounds");
@@ -5566,8 +5473,7 @@ dt = 1.0
 
     fn spec_for(name: &str, lo: f64, hi: f64) -> ParamSpec {
         ParamSpec {
-            name: name.into(), rw_sd: None,
-            perturb_only_at_t0: false, bounds: Some((lo, hi)),
+            name: name.into(),  bounds: Some((lo, hi)),
         }
     }
 
@@ -5580,8 +5486,8 @@ dt = 1.0
         let base = compiled.default_params.clone();
         let r = build_if2_params_from_specs(
             &model, &compiled, &base, &[spec_for("phi", -120.0, 120.0)]).expect("ok");
-        assert!(matches!(r[0].0.transform, Transform::Interval { lo, hi } if lo == -120.0 && hi == 120.0),
-            "a duration boxed to [-120, 120] must get the scaled logit, got {:?}", r[0].0.transform);
+        assert!(matches!(r[0].transform, Transform::Interval { lo, hi } if lo == -120.0 && hi == 120.0),
+            "a duration boxed to [-120, 120] must get the scaled logit, got {:?}", r[0].transform);
     }
 
     /// A `duration` box with 0 < lo keeps log geometry: the log-interval map.
@@ -5592,7 +5498,7 @@ dt = 1.0
         let base = compiled.default_params.clone();
         let r = build_if2_params_from_specs(
             &model, &compiled, &base, &[spec_for("d", 1.0, 30.0)]).expect("ok");
-        assert_eq!(r[0].0.transform, Transform::LogInterval { lo: 1.0, hi: 30.0 });
+        assert_eq!(r[0].transform, Transform::LogInterval { lo: 1.0, hi: 30.0 });
     }
 
     /// D6: a parameter whose IR records no kind has no known support (the
@@ -5639,8 +5545,7 @@ dt = 1.0
 
     fn unbounded_spec(name: &str, bounds: Option<(f64, f64)>) -> ParamSpec {
         ParamSpec {
-            name: name.into(), rw_sd: None, 
-            perturb_only_at_t0: false, bounds,
+            name: name.into(),  bounds,
         }
     }
 
@@ -5673,15 +5578,12 @@ dt = 1.0
         let base = compiled.default_params.clone();
         let out = build_if2_params_from_specs(
             &model, &compiled, &base, &[unbounded_spec("rho", None)]).expect("ok");
-        assert_eq!(out[0].0.bounds(), (0.0, 1.0),
+        assert_eq!(out[0].bounds(), (0.0, 1.0),
             "the IF2 search box must be the unit interval");
-        assert!(matches!(out[0].0.transform, Transform::Interval { lo, hi } if lo == 0.0 && hi == 1.0),
-            "search box and transform clamp must agree, got {:?}", out[0].0.transform);
-        assert!(out[0].1.z_sd.is_finite(),
-            "auto rw_sd over an infinite box is inf → NaN on the first \
-             perturbation; got {}", out[0].1.z_sd);
-        assert_eq!(out[0].1.z_sd, sim::inference::types::IF2_INTERVAL_STEP,
-            "the auto step is the interval map's default in z");
+        assert!(matches!(out[0].transform, Transform::Interval { lo, hi } if lo == 0.0 && hi == 1.0),
+            "search box and transform clamp must agree, got {:?}", out[0].transform);
+        assert_eq!(out[0].transform.default_if2_step(), Some(sim::inference::types::IF2_INTERVAL_STEP),
+            "the default step is the interval map's, finite, in z");
     }
 
     /// Consumer 3 — the fit.toml `[estimate].bounds` override path. An
@@ -5695,10 +5597,10 @@ dt = 1.0
         let base = compiled.default_params.clone();
         let out = build_if2_params_from_specs(
             &model, &compiled, &base, &[unbounded_spec("rho", Some((0.1, 0.4)))]).expect("ok");
-        assert_eq!(out[0].0.bounds(), (0.1, 0.4),
+        assert_eq!(out[0].bounds(), (0.1, 0.4),
             "fit.toml bounds must win over the type's [0, 1]");
-        assert!(matches!(out[0].0.transform, Transform::Interval { lo, hi } if lo == 0.1 && hi == 0.4),
-            "the transform must clamp to the fit.toml box, got {:?}", out[0].0.transform);
+        assert!(matches!(out[0].transform, Transform::Interval { lo, hi } if lo == 0.1 && hi == 0.4),
+            "the transform must clamp to the fit.toml box, got {:?}", out[0].transform);
     }
 
     /// The other half of the fix: no kind gains a support it did not have.
@@ -5712,11 +5614,11 @@ dt = 1.0
             let base = compiled.default_params.clone();
             let out = build_if2_params_from_specs(
                 &model, &compiled, &base, &[unbounded_spec("p", None)]).expect("ok");
-            assert_eq!(out[0].0.bounds(), (0.0, f64::INFINITY),
+            assert_eq!(out[0].bounds(), (0.0, f64::INFINITY),
                 "{kind} must keep the [0, ∞) fallback");
-            assert_eq!(out[0].0.transform, Transform::LowerBounded { lo: 0.0 },
+            assert_eq!(out[0].transform, Transform::LowerBounded { lo: 0.0 },
                 "{kind} on [0, ∞) takes θ = eᶻ");
-            assert_eq!(out[0].1.z_sd, sim::inference::types::IF2_HALF_BOUNDED_STEP,
+            assert_eq!(out[0].transform.default_if2_step(), Some(sim::inference::types::IF2_HALF_BOUNDED_STEP),
                 "{kind} on [0, ∞) takes the half-bounded default step in z");
         }
         for kind in [Real, Instant] {
@@ -5724,8 +5626,8 @@ dt = 1.0
             let base = compiled.default_params.clone();
             let out = build_if2_params_from_specs(
                 &model, &compiled, &base, &[unbounded_spec("p", None)]).expect("ok");
-            assert!(matches!(out[0].0.transform, Transform::Identity),
-                "{kind} with no finite box must stay None, got {:?}", out[0].0.transform);
+            assert!(matches!(out[0].transform, Transform::Identity),
+                "{kind} with no finite box must stay None, got {:?}", out[0].transform);
         }
     }
 
@@ -5740,7 +5642,7 @@ dt = 1.0
             bounds: None, 
             prior: Some(EstimatePriorSpec::Dist(ir::parameter::PriorDist::Beta(
                 ir::parameter::BetaPrior { alpha: 2.0, beta: 5.0 }))),
-            perturb_only_at_t0: false, rw_sd: None, start: Some(0.5),
+            start: Some(0.5),
         };
         let mut estimate = indexmap::IndexMap::new();
         estimate.insert("rho".to_string(), beta_spec());
@@ -5784,7 +5686,7 @@ dt = 1.0
         let mut m = indexmap::IndexMap::new();
         m.insert(name.to_string(), super::super::config_v2::EstimateSpecV2 {
             bounds, prior: None,
-            perturb_only_at_t0: false, rw_sd: Some(0.3), start: Some(0.4) });
+            start: Some(0.4) });
         m
     }
 
@@ -5890,8 +5792,10 @@ dt = 1.0
         let auto = |lo: f64, hi: f64| -> (Vec<EstimatedParam>, Vec<WrittenStep>) {
             let (model, compiled) = make_one_param_model("z", lo, hi, Some(Rate));
             let base = compiled.default_params.clone();
-            build_if2_params_from_specs(&model, &compiled, &base, &[spec_for("z", lo, hi)])
-                .expect("params").into_iter().unzip()
+            let p = build_if2_params_from_specs(&model, &compiled, &base, &[spec_for("z", lo, hi)])
+                .expect("params");
+            let s = p.iter().map(|p| WrittenStep::of(p, WrittenSd::Default, PerturbAt::EveryObservation)).collect();
+            (p, s)
         };
         let (zero_lo, zero_lo_steps) = auto(0.0, 2.0);
         assert_eq!(zero_lo[0].transform, Transform::Interval { lo: 0.0, hi: 2.0 });
@@ -5905,41 +5809,38 @@ dt = 1.0
         }
         let (model, compiled) = make_unbounded_param_model("r", 0.5, Real);
         let base = compiled.default_params.clone();
-        let (real, real_steps): (Vec<_>, Vec<_>) =
-            build_if2_params_from_specs(&model, &compiled, &base, &[unbounded_spec("r", None)])
-                .expect("params").into_iter().unzip();
+        let real = build_if2_params_from_specs(&model, &compiled, &base, &[unbounded_spec("r", None)])
+            .expect("params");
+        let real_steps: Vec<WrittenStep> =
+            real.iter().map(|p| WrittenStep::of(p, WrittenSd::Default, PerturbAt::EveryObservation)).collect();
         assert!(real_steps[0].z_sd.is_nan(), "an unbounded real has no default step");
         let err = refuse_degenerate_auto_rw_sd(&real, &real_steps, "rw_sd").unwrap_err();
         assert!(err.contains("`r`") && err.contains("explicit rw_sd"), "{err}");
     }
 
-    /// Proposal §9.1, series (i): an explicit natural-scale rw_sd is
-    /// converted once at the domain's reference point — the box's midpoint
-    /// for the interval maps, where dθ/dz is (hi − lo)/4, or θ·ln(hi/lo)/4 at
-    /// the geometric midpoint; the start for a half-bounded map — and is
-    /// then the same step for every chain.
+    /// `profile --rw-sd`'s natural-scale step is converted once at the
+    /// domain's reference point — the box's midpoint for the interval maps,
+    /// where dθ/dz is (hi − lo)/4, or θ·ln(hi/lo)/4 at the geometric
+    /// midpoint; the start for a half-bounded map — and is then the same
+    /// step for every chain.
     #[test]
-    fn an_explicit_rw_sd_is_converted_once_at_the_reference_point() {
+    fn a_natural_rw_sd_is_converted_once_at_the_reference_point() {
         use ir::parameter::ParamKind::Rate;
         let built = |lo: f64, hi: f64, rw: f64| {
             let (model, compiled) = make_one_param_model("z", lo, hi, Some(Rate));
             let base = compiled.default_params.clone();
-            let spec = ParamSpec { rw_sd: Some(rw), ..spec_for("z", lo, hi) };
-            build_if2_params_from_specs(&model, &compiled, &base, &[spec]).expect("params")
+            let p = build_if2_params_from_specs(&model, &compiled, &base, &[spec_for("z", lo, hi)]).expect("params");
+            let s = WrittenStep::of(&p[0], WrittenSd::Natural(rw), PerturbAt::EveryObservation);
+            (p, s)
         };
-        let p = built(0.0, 2.0, 0.1);
-        assert!((p[0].1.z_sd - 0.1 / (2.0 / 4.0)).abs() < 1e-12, "interval: {}", p[0].1.z_sd);
-        let p = built(0.05, 1.0, 0.02);
-        let (param, step) = &p[0];
+        let (_, step) = built(0.0, 2.0, 0.1);
+        assert!((step.z_sd - 0.1 / (2.0 / 4.0)).abs() < 1e-12, "interval: {}", step.z_sd);
+        let (p, step) = built(0.05, 1.0, 0.02);
         let want = 0.02 / ((0.05_f64 * 1.0).sqrt() * (1.0_f64 / 0.05).ln() / 4.0);
         assert!((step.z_sd - want).abs() < 1e-12, "log-interval: {} vs {want}", step.z_sd);
-        assert!((step.natural_step(param) - 0.02).abs() < 1e-15, "the natural step round-trips");
+        assert!((p[0].transform.natural_from_step(step.z_sd, p[0].initial) - 0.02).abs() < 1e-15,
+            "the natural step round-trips");
         assert!(!step.auto);
-        use super::super::pmmh::mh_initial_step;
-        assert!((mh_initial_step(param, step) - 5.0 * want).abs() < 1e-12, "MH starts at 5x an explicit step");
-        let auto = WrittenStep { auto: true, ..*step };
-        assert_eq!(mh_initial_step(param, &auto), sim::inference::types::MH_DEFAULT_STEP,
-            "MH starts at its own default when the step is automatic");
     }
 
     // ── Cold-cooling Â suppression (gh#45) ───────────────────────────
@@ -6968,7 +6869,7 @@ dt = 1.0
         }
 
         fn build(fit: &Problem) -> Result<FitRunConfig, String> {
-            FitRunConfig::build(fit, None, 1, 100, 1, 0.5, 50, 1, false)
+            FitRunConfig::build(fit, None, &crate::fit::steps::ResolvedSteps::None, 1, 100, 1, 0.5, 50, 1, false)
         }
 
         #[test]
@@ -7159,24 +7060,24 @@ dt = 1.0
         }
     }
 
-    /// Proposal §9.5: a simplex member's log-ratio step is its own `rw_sd`,
-    /// else the simplex default of its box — (hi − lo)/6 on the interval
-    /// map — and not the member's step in its own z.
+    /// Proposal §9.5: a simplex member's log-ratio step is its own
+    /// `[method.perturbation]` SD, else the simplex default of its box —
+    /// (hi − lo)/6 on the interval map — and not the member's step in its
+    /// own z.
     #[test]
     fn a_simplex_member_keeps_its_log_ratio_default_step() {
-        use super::super::config_v2::{EstimateSpecV2, SimplexGroup};
-        let spec = |rw_sd: Option<f64>| EstimateSpecV2 {
-            bounds: None, prior: None, perturb_only_at_t0: false, rw_sd, start: None,
-        };
-        let estimate: indexmap::IndexMap<String, EstimateSpecV2> =
-            [("p1".to_string(), spec(None)), ("p2".to_string(), spec(Some(0.3)))].into_iter().collect();
+        use super::super::config_v2::SimplexGroup;
+        let if2: super::super::config_v2::Algorithm = toml::from_str(
+            "algorithm = \"if2\"\nbackend = \"chain_binomial\"\nchains = 1\nparticles = 10\n\
+             iterations = 1\ncooling = 0.5\n[perturbation]\np2 = 0.3\n").unwrap();
+        let domains: indexmap::IndexMap<String, Transform> = [
+            ("p1".to_string(), Transform::Interval { lo: 0.0, hi: 1.0 }),
+            ("p2".to_string(), Transform::Interval { lo: 0.0, hi: 1.0 }),
+        ].into_iter().collect();
+        let group = [SimplexGroup { params: vec!["p1".into(), "p2".into()] }];
+        let steps = crate::fit::steps::resolve_steps(&if2, &domains, &group).expect("resolves");
         let index: HashMap<String, usize> = [("p1".to_string(), 0), ("p2".to_string(), 1)].into_iter().collect();
-        let members = vec![
-            domain_param("p1", Transform::Interval { lo: 0.0, hi: 1.0 }, 0.5),
-            EstimatedParam { index: 1, ..domain_param("p2", Transform::Interval { lo: 0.0, hi: 1.0 }, 0.5) },
-        ];
-        let groups = resolve_simplex_groups(
-            &[SimplexGroup { params: vec!["p1".into(), "p2".into()] }], &estimate, &index, &members)
+        let groups = resolve_simplex_groups(&group, &index, &steps.simplex_sds().expect("IF2"))
             .expect("groups");
         assert_eq!(groups[0].sds.iter().map(|sd| sd.get()).collect::<Vec<_>>(), vec![1.0 / 6.0, 0.3]);
     }

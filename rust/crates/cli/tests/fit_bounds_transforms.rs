@@ -199,7 +199,7 @@ fn a_transform_key_in_estimate_is_refused_at_load() {
         // `log` on a rate's [0, 1] box is the map the parameter gets without
         // the key; it is refused all the same, because the key is gone.
         let (out, results) = run_fit(
-            &tmp.0, &ir, "c = { bounds = [0, 1], start = 0.5, rw_sd = 0.1, transform = \"log\" }",
+            &tmp.0, &ir, "c = { bounds = [0, 1], start = 0.5, transform = \"log\" }",
             method, tag);
         let err = stderr(&out);
         assert!(!out.status.success(), "{tag}: a `transform` key must be refused; stderr=\n{err}");
@@ -230,7 +230,7 @@ fn a_kindless_estimated_parameter_is_refused() {
     }
     let tmp = tempdir("kindless");
     let ir = strip_kind(&compile(&tmp.0, "ident", &model_src(C_REAL)), "c");
-    let est = "c = { bounds = [-1, 1], start = 0.5, rw_sd = 0.1 }";
+    let est = "c = { bounds = [-1, 1], start = 0.5 }";
     for (method, tag) in [(PMMH, "pmmh"), (MH, "mh"), (IF2, "if2")] {
         let (out, results) = run_fit(&tmp.0, &ir, est, method, tag);
         let err = stderr(&out);
@@ -312,13 +312,14 @@ fn hierarchical_leaf_box_that_cuts_the_prior_is_refused() {
 
     // Control: leaves with no box (an unconstrained `real` with no bounds has
     // none enforced) run under PMMH. A box with an infinite end gives no
-    // auto `rw_sd`, so the step is explicit, and no box to spread starts in
+    // default step, so the step is explicit, and no box to spread starts in
     // (a hierarchical prior is not drawn from at init, so the default rule
     // would be `uniform_unconstrained`), so every chain starts at `start`.
     let open = "mu = { bounds = [-5, 5], start = 0.0 }\n\
-                a1 = { start = 0.5, rw_sd = 0.1 }\na2 = { start = 0.5, rw_sd = 0.1 }";
+                a1 = { start = 0.5 }\na2 = { start = 0.5 }";
     let pmmh_single = format!("{PMMH}\nstarts = \"single\"");
-    let (out, _) = run_fit(&tmp.0, &ir, open, &pmmh_single, "pmmh_open");
+    let pmmh_open = format!("{pmmh_single}\n[method.proposal]\na1 = 0.5\na2 = 0.5");
+    let (out, _) = run_fit(&tmp.0, &ir, open, &pmmh_open, "pmmh_open");
     assert!(out.status.success(), "unboxed leaves must run; stderr=\n{}", stderr(&out));
 
     // Control: a `log_normal` leaf on a `rate` keeps the half-infinite box
@@ -329,8 +330,9 @@ fn hierarchical_leaf_box_that_cuts_the_prior_is_refused() {
   r2 : rate ~ log_normal(mu = m, sigma = 1.0)";
     let rate_ir = compile(&tmp.0, "hier_rate", &model_src(rate_src));
     let rate_est = "m = { bounds = [-3, 3], start = 0.0 }\n\
-                    r1 = { start = 1.0, rw_sd = 0.1 }\nr2 = { start = 1.0, rw_sd = 0.1 }";
-    let (out, _) = run_fit(&tmp.0, &rate_ir, rate_est, &pmmh_single, "pmmh_rate");
+                    r1 = { start = 1.0 }\nr2 = { start = 1.0 }";
+    let pmmh_rate = format!("{pmmh_single}\n[method.proposal]\nr1 = 0.5\nr2 = 0.5");
+    let (out, _) = run_fit(&tmp.0, &rate_ir, rate_est, &pmmh_rate, "pmmh_rate");
     assert!(out.status.success(), "a rate leaf on [0, inf) must run; stderr=\n{}", stderr(&out));
     // The same leaf with a finite box cuts into (0, ∞) and is refused.
     let rate_boxed = "m = { bounds = [-3, 3], start = 0.0 }\nr1 = { bounds = [0.1, 5], start = 1.0 }\nr2 = { start = 1.0 }";
@@ -467,8 +469,8 @@ fn log_normal_on_a_positive_sub_box_is_the_truncated_log_normal() {
 
     let tmp = tempdir("lognormal_subbox");
     let ir = compile(&tmp.0, "ln", &model_src("  c : rate ~ log_normal(mu = -1.0, sigma = 0.5)"));
-    let mh = "algorithm = \"mh\"\nbackend = \"ode\"\nchains = 4\niterations = 12000\nburn_in = 2000";
-    let (out, results) = run_fit(&tmp.0, &ir, "c = { bounds = [0.05, 1], start = 0.3, rw_sd = 0.05 }", mh, "mh");
+    let mh = "algorithm = \"mh\"\nbackend = \"ode\"\nchains = 4\niterations = 12000\nburn_in = 2000\n[method.proposal]\nc = 1.5";
+    let (out, results) = run_fit(&tmp.0, &ir, "c = { bounds = [0.05, 1], start = 0.3 }", mh, "mh");
     assert!(out.status.success(), "stderr=\n{}", stderr(&out));
     let mut chains: Vec<Vec<f64>> = Vec::new();
     for f in find_all(&results, "draws.tsv") {

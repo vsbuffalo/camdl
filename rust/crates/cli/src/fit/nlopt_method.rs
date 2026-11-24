@@ -84,7 +84,7 @@ pub fn run_method(
     // a fallback only.
     let run_config = FitRunConfig::build(
         fit,
-        Some(&method.algorithm),
+        Some(&method.algorithm), &super::steps::ResolvedSteps::None,
         n_chains,
         /* n_particles */ 1,
         /* n_iterations */ 1,
@@ -310,13 +310,8 @@ pub fn run_method(
     for (slot, name) in est_names.iter().enumerate() {
         start_values.insert(name.clone(), winner.params[slot]);
     }
-    let perturb_only_at_t0_params: Vec<String> = arc_config
-        .estimated_params
-        .iter()
-        .zip(&arc_config.steps)
-        .filter(|(_, s)| s.at == sim::inference::types::PerturbAt::TimeZeroOnly)
-        .map(|(p, _)| p.name.clone())
-        .collect();
+    // An optimizer perturbs nothing, so it has no initial-state timing.
+    let perturb_only_at_t0_params: Vec<String> = arc_config.steps.initial_state_params();
 
     let fit_state = FitState {
         method: method_name.to_string(),

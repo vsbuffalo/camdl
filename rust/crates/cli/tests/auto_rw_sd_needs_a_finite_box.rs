@@ -5,7 +5,7 @@
 //! step under the walled log map was about 1e-148, so IF2 never moved it)
 //! both run and move. The identity map of an unbounded `real` (`delta`) has
 //! no scale to take a step from: such a fit is refused, naming the parameter
-//! and the two remedies; an explicit `rw_sd` runs.
+//! and the two remedies; a step written in `[method.perturbation]` runs.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -101,7 +101,7 @@ const PMMH: &str = "algorithm = \"pmmh\"\nbackend = \"chain_binomial\"\nchains =
 fn refused(out: &Output, name: &str) {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "expected a refusal for {name}:\n{err}");
-    assert!(err.contains(&format!("`{name}`")) && err.contains("rw_sd") && err.contains("bounds"),
+    assert!(err.contains(&format!("`{name}`")) && err.contains("step") && err.contains("bounds"),
         "the refusal names the parameter and both remedies:\n{err}");
 }
 
@@ -128,9 +128,10 @@ fn pmmh_needs_the_same_scale_for_its_first_proposal() {
 }
 
 #[test]
-fn an_explicit_rw_sd_or_finite_bounds_run() {
-    for (free, extra) in [("delta", ", rw_sd = 0.1"), ("eta", ", bounds = [0.001, 1.0]")] {
-        let out = fit(free, extra, IF2);
+fn an_explicit_step_or_finite_bounds_run() {
+    for (free, extra, method) in [("delta", "", format!("{IF2}\n[method.perturbation]\ndelta = 0.1")),
+                                  ("eta", ", bounds = [0.001, 1.0]", IF2.to_string())] {
+        let out = fit(free, extra, &method);
         assert!(out.status.success(), "{free}{extra}: {}", String::from_utf8_lossy(&out.stderr));
     }
 }
@@ -178,11 +179,11 @@ fn param_trace(dir: &Path, name: &str) -> Vec<f64> {
     lines.map(|l| l.split('\t').nth(col).unwrap().parse().unwrap()).collect()
 }
 
-/// With an explicit `rw_sd` the same box runs, and IF2 moves the parameter.
+/// With an explicit step the same box runs, and IF2 moves the parameter.
 #[test]
-fn an_explicit_rw_sd_on_a_box_from_zero_moves_it() {
+fn an_explicit_step_on_a_box_from_zero_moves_it() {
     let tmp = tempfile::tempdir().unwrap();
-    let out = run_in(tmp.path(), "zeta", ", rw_sd = 0.1", IF2, &["fit", "run", "fit.toml", "--seed", "1"]);
+    let out = run_in(tmp.path(), "zeta", "", &format!("{IF2}\n[method.perturbation]\nzeta = 0.2"), &["fit", "run", "fit.toml", "--seed", "1"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let vals = zeta_trace(tmp.path());
     assert!(vals.iter().any(|v| (v - vals[0]).abs() > 1e-6),
