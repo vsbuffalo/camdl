@@ -411,8 +411,9 @@ fn pfilter_fit_scores_under_the_fits_selection() {
 
 #[test]
 fn compare_derives_the_prequential_under_the_fits_selection() {
-    // The prequential `compare` derives from a fit is a `pfilter` at θ̂ on the
-    // fit's archived model; it must run the fit's interventions.
+    // An IF2 fit's row in `compare` is a one-step score of its winning point
+    // on the fit's stored model; it must run the fit's interventions, so it
+    // equals a `pfilter` at that point with them.
     let tmp = tempdir("compare");
     let ir = compile(tmp.path(), "m", &format!("{HEAD}{TAIL_BOTH}"));
     let if2 = "[method]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\nchains = 1\n\
@@ -432,7 +433,9 @@ fn compare_derives_the_prequential_under_the_fits_selection() {
     let data = format!("cases={}", tmp.path().join("cases.tsv").display());
     ok(run(tmp.path(), &["pfilter", archived.to_str().unwrap(), "--data", &data,
         "--params", "theta.toml", "--enable", "vax", "--save-prequential", "manual",
-        "--particles", "300", "--seed", "7"]), "manual pfilter");
+        // The seed `camdl predict --seed 7` runs its first draw's filter at
+        // (`forecast_driver::draw_seed`): 7 xor 0x9E3779B97F4A7C15.
+        "--particles", "300", "--seed", "11400714819323198482"]), "manual pfilter");
     let manual: score::trace::PrequentialTrace = serde_json::from_str(
         &std::fs::read_to_string(tmp.path().join("manual.json")).unwrap()).unwrap();
 

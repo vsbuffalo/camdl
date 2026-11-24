@@ -238,16 +238,17 @@ fn f2_two_streams_at_different_rates() {
     assert_eq!(extent(&p), 24.0, "{p}");
     ok(camdl(dir, &["fit", "run", "b.toml", "--seed", "1", "--label", "b"]), "fit run b");
 
-    // `compare` refuses to score a stored fit's held-out rows, and counts
-    // them per stream: the weekly rows labelled 28–70 (7 rows, the row
-    // labelled 28 among them) and the daily rows 24–69 (46 rows).
+    // With no outcome file, `compare` refuses to score a stored fit's
+    // held-out rows, and counts them per stream: the weekly rows labelled
+    // 28–70 (7 rows, the row labelled 28 among them) and the daily rows 24–69
+    // (46 rows).
     let out = camdl(dir, &["compare", "@a", "@b", "--baseline", "@b",
         "--format", "json", "--particles", "50", "--draws", "1", "--replicates", "1",
         "--seed", "1"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "held-out rows are not scored:\n{stderr}");
-    assert!(stderr.contains("held rows out of its training data (daily: 46, weekly: 7)")
-        && stderr.contains("step 7") && stderr.contains("--in-sample"),
+    assert!(stderr.contains("(daily: 46, weekly: 7)")
+        && stderr.contains("--data STREAM=FILE") && stderr.contains("--in-sample"),
         "the refusal counts each stream's held-out rows:\n{stderr}");
 }
 

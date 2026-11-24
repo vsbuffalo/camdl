@@ -1,67 +1,39 @@
-//! `camdl compare` — multi-model prequential comparison table.
+//! `camdl compare`: the scores of several models, differenced against a
+//! baseline, as a table, markdown or JSON.
 //!
-//! Consumes `prequential.json` artifacts written by `fit run` (PFilter
-//! method) or `camdl pfilter --save-prequential`, or derives one from a fit
-//! handle. Computes Δelpd / Δcrps
-//! with paired pointwise SEs, refuses structurally unfair comparisons
-//! (T_score mismatch by default), renders as table / markdown / JSON.
+//! Each compared input is read as a [`PrequentialTrace`] per group of rows:
+//! a stored score, prediction or fit run through [`stored`], which finds or
+//! computes the stored score and reads its rows of one mode, one group per
+//! role and, for a forecast, per lead; or a `prequential.json`, read as it is
+//! (one group). The groups of the inputs are compared in order, one table
+//! each, and no table pools rows of different roles, leads, modes, streams or
+//! bases.
 //!
-//! See docs/dev/proposals/2026-04-20-prequential-evaluation.md §8.
-//!
-//! Scope (Part I):
-//!   - baseline-centered Δelpd + paired SE
-//!   - Δcrps + PIT 90% coverage column
-//!   - T_score fairness preflight (override: --allow-mismatched-horizon)
-//!   - observation-axis and stream-set preflights (gh#570; not overridable —
-//!     a difference across unlike observations is meaningless however shown)
-//!   - bound-data preflight (gh#713; override: --allow-data-mismatch)
-//!   - changed-data preflight: a derived row's training file must still hash
-//!     to what its fit recorded (override: --allow-changed-data)
-//!   - the derive path scores each fit on its own backend (gh#729): a
-//!     `camdl pfilter` child for chain-binomial, the fit's ODE likelihood
-//!     in-process for ODE (gh#312, `compare_ode`)
-//!   - basis preflight: a filtered trace and an ODE free-forward trace are
-//!     never differenced (gh#312; no override)
-//!   - formats: table (default), md, json
-//!   - compare.toml for reproducible multi-model specs
-//!
-//! Out of scope (Part II): betting mode, CAS ref resolution, obs-model
-//! preflight, stacking, plotting.
+//! Within a table every cross-row check runs once ([`preflight`], the checks
+//! of `score::preflight`): rows predicted in different modes, of different
+//! roles or leads, forecasts of different reach or covariate statements, on
+//! different predictive bases, conditioned differently (a stored fit's
+//! verified training rows against a fixed point's declared ones), or scoring
+//! different observed values are refused, each naming the field. A table then
+//! reports per row its elpd, Δelpd against the baseline with the paired SE
+//! and an evidence label, and per stream its CRPS, WIS, PIT coverage and 50%
+//! coverage, with Δcrps and Δwis.
 
 use crate::chain_selection::ChainSelection;
-use crate::fit_store::OpenedFit as ResolvedFit;
 use crate::fit::stream_bindings::StreamBindings;
-use crate::posterior_draws::PosteriorDrawsRef;
 use serde::Deserialize;
 use score::trace::{
-    Conditioning, PredictiveBasis, PrequentialTrace, PrequentialWarning, StreamMean, ThetaSource,
-    TraceOverride,
+    Conditioning, PredictiveBasis, PrequentialTrace, PrequentialWarning, StreamMean,
 };
-use score::combine::ReplicateTotals;
 use score::evidence::{paired_delta, paired_diffs};
+
+mod stored;
 use score::preflight::{
-    self as pf, ChangedFile, CheckId, CheckOutcome, CheckResult, ConditioningMode, DataFile, Finding,
+    self as pf, CheckId, CheckOutcome, CheckResult, ConditioningMode, Finding,
     NotCheckedReason, Override, Qualification, Qualified, Refusal, SourceDigests, Unchecked, Unhashed,
     UnhashedData, Waiver,
 };
 use std::path::{Path, PathBuf};
-
-/// Default particle count for auto-deriving a prequential from a fit handle.
-/// Applied uniformly across the compared fits (see [`DeriveSettings`]).
-pub(crate) const DEFAULT_DERIVE_PARTICLES: usize = 1000;
-
-/// Default filter seed for auto-deriving a prequential from a fit handle.
-pub(crate) const DEFAULT_DERIVE_SEED: u64 = 1;
-
-/// Default mixture size for the posterior predictive (§3.6, decision 9 of
-/// the 2026-08-29 proposal): one filter pass per thinned draw. `--draws 1`
-/// is the documented cheap mode (plug-in at the posterior mean).
-pub(crate) const DEFAULT_DERIVE_DRAWS: usize = 64;
-
-/// Default replicate count for the filter-noise Monte-Carlo SE (§3.4
-/// remedy 4, decision 9). `--replicates 1` is the documented cheap mode
-/// (no replication, no MC SE).
-pub(crate) const DEFAULT_DERIVE_REPLICATES: usize = 5;
 
 /// Scored steps below which `se(Δ)`'s normal approximation is not to be leaned
 /// on. A round number, not a threshold with a derivation behind it — the
@@ -152,32 +124,6 @@ fn basis_line(trace: &PrequentialTrace) -> Option<&'static str> {
     }
 }
 
-/// Settings applied uniformly to every fit handle whose prequential is
-/// auto-derived, so T_score and the scores stay commensurable across the
-/// compared fits. An explicit `prequential.json` input ignores these (it is
-/// read as-is, at whatever particles/seed produced it).
-#[derive(Debug, Clone, Copy)]
-struct DeriveSettings {
-    particles: usize,
-    seed: u64,
-    /// `--in-sample` (gh#585): score the full series at θ̂ even for a fit
-    /// that declares a holdout, stamped `in_sample` with its caveat.
-    force_in_sample: bool,
-    /// `--draws` (§3.6): mixture size for a Bayesian fit's predictive;
-    /// 1 = plug-in at the posterior mean.
-    draws: usize,
-    /// `--replicates` (§3.4 remedy 4): filter replicates per fit at seeds
-    /// `seed..seed+R`, combined per step by log-mean-exp; the replicate
-    /// totals give the Monte-Carlo (filter-noise) SE. 1 = no replication.
-    replicates: usize,
-    /// `--allow-forcing-extrapolation`: passed to each `camdl pfilter` child,
-    /// as is a fit's own `[config] allow_forcing_extrapolation`.
-    allow_forcing_extrapolation: bool,
-    /// `--no-licm` and `--no-ir-cache`: the settings a fit's model source is
-    /// compiled under, when the fit archived no compiled model.
-    compile: crate::util::CompileSettings,
-}
-
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)] // gh#241 G3: reject typo'd compare.toml keys instead of silently dropping
 struct CompareToml {
@@ -207,12 +153,66 @@ struct Row {
     path: String,
     trace: PrequentialTrace,
     data: DataIdentity,
-    /// Whether the training files this row scored are the bytes its fit was
-    /// fitted to; empty for an explicit prequential.json.
-    freshness: DataFreshness,
     /// The observation streams this row's model declares and its fit bound,
     /// as far as the input says.
     streams: RowStreams,
+    /// What the row's scores are of besides its trace.
+    facts: ScoreFacts,
+}
+
+/// What a row's scores are of beyond its trace: the mode its rows were
+/// predicted in, their role and lead, and a forecast's reach and covariate
+/// statement. Two rows on which one of these differs are not differenced
+/// (the checks `Mode`, `Role`, `Lead`, `Reach` and `Covariates`).
+#[derive(Debug, Clone, PartialEq)]
+struct ScoreFacts {
+    /// `free_forward`, `one_step` or `forecast`.
+    mode: String,
+    /// `trained`, `held_out`, `future` or `unknown`.
+    role: String,
+    /// A forecast's lead, as `scored.tsv` writes it; `None` outside a
+    /// forecast.
+    lead: Option<String>,
+    /// A forecast's reach as written (`--horizon`); `None` outside a
+    /// forecast.
+    reach: Option<String>,
+    /// Whether a forecast read a covariate stated `realised`, observed after
+    /// its origin.
+    realised: bool,
+    /// Whether the row was read from a stored score; the facts of a
+    /// `prequential.json` are read off its trace.
+    stored: bool,
+    /// The first row end at which several streams are scored and the score
+    /// holds no joint log score of them (free-forward scores hold none): the
+    /// row's joint step scores are not defined there, and only a table of
+    /// one stream (`--streams`) compares it.
+    no_joint: Option<f64>,
+}
+
+impl ScoreFacts {
+    /// The facts of a `prequential.json`, read off its trace: a particle
+    /// filter's trace is one-step and an ODE or simulated one free-forward,
+    /// and its conditioning says its rows' role.
+    fn of_trace(trace: &PrequentialTrace) -> ScoreFacts {
+        ScoreFacts {
+            mode: match trace.basis {
+                PredictiveBasis::Filtered => "one_step",
+                PredictiveBasis::OdeFreeForward { .. } | PredictiveBasis::SimulatedFreeForward => "free_forward",
+            }
+            .to_string(),
+            role: match trace.conditioning {
+                Conditioning::InSample => "trained",
+                Conditioning::HoldOutTail { .. } | Conditioning::HoldOutDeclared { .. } => "held_out",
+                Conditioning::Unknown => "unknown",
+            }
+            .to_string(),
+            lead: None,
+            reach: None,
+            realised: false,
+            stored: false,
+            no_joint: None,
+        }
+    }
 }
 
 impl Row {
@@ -317,192 +317,34 @@ fn resolve_selection(names: &[String], rows: &[Row]) -> Result<Vec<String>, Stri
 ///
 /// Two fits bound to different data produce a Δelpd that mixes a model
 /// difference with a data difference, and neither the table nor the trace says
-/// so — the trace records scores and times, never which bytes it scored. The
-/// fit's own provenance sidecar (`fit.meta.json`, [`crate::run_meta::FitSidecar`])
-/// does: `data_hashes` and `holdout_hashes` record, per observation source, the
-/// SHA-256 of the training and `[data.holdout]` files bound to it, the digests
-/// the fit's run identity was built from. Read from there rather than
-/// re-hashing, so the check answers "were these fits bound to the same bytes?"
-/// with what each fit read when it ran.
+/// so — the trace records scores and times, never which bytes it scored. A
+/// row read from a stored score records, per observation source, the SHA-256
+/// of the rows its prediction conditioned on: a stored fit's training rows,
+/// or a fixed point's stored data table, both read through the store.
 #[derive(Clone)]
 enum DataIdentity {
-    /// What the fit's sidecar records for each source it binds.
+    /// The digests of the rows conditioned on, per source.
     Digests(RecordedData),
     /// Nothing to check, and why — an explicit `prequential.json` (a trace
-    /// records no data identity), or a fit whose sidecar is absent. The reason
-    /// is printed, because a check that silently covers half the cohort is
-    /// worse than one the reader knows the scope of.
+    /// records no data identity). The reason is printed, because a check that
+    /// silently covers half the cohort is worse than one the reader knows the
+    /// scope of.
     Unknown(String),
 }
 
-/// A fit's recorded data hashes, read per observation source through the fit's
-/// [`StreamBindings`] ([`recorded_by_source`]).
+/// A row's data digests, per observation source.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct RecordedData {
-    /// Source → the hash the fit recorded for the file bound to it.
+    /// Source → the hash of the data bound to it.
     training: std::collections::BTreeMap<String, String>,
     /// Sources bound by the fit whose hash cannot be read from its record, and
     /// why. A check involving one of these is reported as not made, never
     /// passed.
     unresolved: std::collections::BTreeMap<String, String>,
-    /// Source → the hash the fit recorded for its `[data.holdout]` file. Read
-    /// only for a row scored held out on those files.
-    holdout: std::collections::BTreeMap<String, String>,
-    /// Holdout sources the row scores whose hash the record lacks, and why.
-    holdout_unresolved: std::collections::BTreeMap<String, String>,
-}
-
-impl RecordedData {
-    /// Whether any hash this row's checks compare is shorter than a full
-    /// SHA-256: a sidecar written before full digests were recorded holds 8
-    /// characters, and every comparison involving it is made on those.
-    fn has_short_hash(&self) -> bool {
-        self.training.values().chain(self.holdout.values()).any(|h| h.len() < FULL_DIGEST_LEN)
-    }
 }
 
 /// Hex characters in a full SHA-256.
 const FULL_DIGEST_LEN: usize = 64;
-
-/// Read a sidecar's `data_hashes` per source of `bindings`, and, for a row
-/// scored held out on `[data.holdout]` files, its `holdout_hashes`.
-///
-/// A sidecar keys `data_hashes` by source. One written before that, by a fit
-/// using the one-file shorthand, keys it by leaf. Such a record is read
-/// through the bindings where it names one file unambiguously, that is when
-/// every leaf of the source records the same hash; otherwise the source is
-/// unresolved, with the reason.
-fn recorded_by_source(
-    side: &crate::run_meta::FitSidecar,
-    bindings: &StreamBindings,
-    scores_holdout_files: bool,
-) -> RecordedData {
-    let record = &side.data_hashes;
-    let mut out = RecordedData::default();
-    if scores_holdout_files {
-        for source in bindings.holdout_by_source().keys() {
-            match side.holdout_hashes.get(source) {
-                Some(h) => { out.holdout.insert(source.clone(), h.clone()); }
-                None => { out.holdout_unresolved.insert(source.clone(),
-                    "the fit recorded no hash for its holdout file (its fit.meta.json \
-                     was written before holdout files were recorded)".into()); }
-            }
-        }
-    }
-    for source in bindings.training_by_source().keys() {
-        if let Some(h) = record.get(source) {
-            out.training.insert(source.clone(), h.clone());
-            continue;
-        }
-        let leaves = bindings.leaves_of(source);
-        let per_leaf: Vec<(&str, &str)> = leaves.iter()
-            .filter_map(|l| record.get(*l).map(|h| (*l, h.as_str())))
-            .collect();
-        let distinct: std::collections::BTreeSet<&str> = per_leaf.iter().map(|(_, h)| *h).collect();
-        if !per_leaf.is_empty() && per_leaf.len() == leaves.len() && distinct.len() == 1 {
-            out.training.insert(source.clone(), per_leaf[0].1.to_string());
-        } else if per_leaf.is_empty() {
-            out.unresolved.insert(source.clone(), "the fit recorded no hash for it".into());
-        } else {
-            out.unresolved.insert(source.clone(), format!(
-                "the fit recorded hashes per leaf ({}) that do not name one file for \
-                 the leaves {}",
-                per_leaf.iter().map(|(l, h)| format!("{l} = {}", short_digest(h)))
-                    .collect::<Vec<_>>().join(", "),
-                leaves.join(", ")));
-        }
-    }
-    out
-}
-
-/// What one training file `compare` is about to score says against the hash
-/// the fit recorded for its stream when it ran.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum FileCheck {
-    /// The bytes are the ones the fit was fitted to.
-    Matches,
-    /// The file was edited after the fit ran. Short hashes, for the message.
-    Changed { recorded: String, current: String },
-    /// Nothing to compare against, and why.
-    NotChecked(String),
-}
-
-/// Compare a freshly computed full SHA-256 of a file's bytes with the hash a
-/// fit recorded for it. The record is the full 64-character digest, or its
-/// first 8 characters in a sidecar written before full digests were recorded
-/// ([`data_prefix_note`] says which rows), so the comparison is by prefix, and
-/// an empty or absent record is not a match.
-fn check_file_against_record(current_sha256: &str, recorded: Option<&str>) -> FileCheck {
-    match recorded {
-        None => FileCheck::NotChecked("the fit recorded no hash for it".into()),
-        Some("") =>
-            FileCheck::NotChecked("the fit recorded an empty hash for it".into()),
-        Some(r) if current_sha256.starts_with(&r.to_ascii_lowercase()) => FileCheck::Matches,
-        Some(r) => FileCheck::Changed {
-            recorded: short_digest(r),
-            current: short_digest(current_sha256),
-        },
-    }
-}
-
-/// One file of a derived row that could not be shown to be the one the fit
-/// was fitted to: either it changed, or there was nothing to check it against.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct FileFinding {
-    stream: String,
-    path: String,
-    check: FileCheck,
-}
-
-/// Whether the files a derived row scores are the bytes its fit was fitted
-/// to, computed once when the row is loaded and read by the refusal and
-/// every renderer.
-///
-/// `compare` re-reads each training file from its path. The shared-data
-/// check ([`check_shared_data`]) reads only the hashes recorded at fit time,
-/// so a file edited in place after the fit would be scored at a θ̂ fitted to
-/// other bytes, with nothing said. An explicit `prequential.json` row
-/// re-reads nothing, so it has nothing to check here (and is already named
-/// by [`data_unchecked_note`]).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct DataFreshness {
-    /// Every file that changed or could not be checked; files that match are
-    /// not listed.
-    findings: Vec<FileFinding>,
-    /// The whole row could not be checked, and why (no sidecar, or a sidecar
-    /// with no data hashes).
-    row_unchecked: Option<String>,
-}
-
-/// Hash every training file a derived row is about to score (`streams`,
-/// source → path, [`StreamBindings::training_by_source`]) and compare each
-/// with the sidecar's record for its source (see [`DataFreshness`]).
-#[expect(clippy::disallowed_methods, reason = "hashes each data file a derived row is about to score, to compare it with the hash the stored fit recorded; `compare` stores no result")]
-fn check_training_freshness(
-    streams: &indexmap::IndexMap<String, String>,
-    recorded: &DataIdentity,
-) -> DataFreshness {
-    let record = match recorded {
-        DataIdentity::Digests(m) => m,
-        DataIdentity::Unknown(why) => return DataFreshness {
-            findings: Vec::new(),
-            row_unchecked: Some(why.clone()),
-        },
-    };
-    let findings = streams.iter().filter_map(|(stream, path)| {
-        let check = match (record.unresolved.get(stream), std::fs::read(path)) {
-            (Some(why), _) => FileCheck::NotChecked(why.clone()),
-            (None, Ok(bytes)) => check_file_against_record(
-                &crate::hashing::sha256_hex(&bytes),
-                record.training.get(stream).map(|s| s.as_str())),
-            (None, Err(e)) => FileCheck::NotChecked(format!("it could not be read: {e}")),
-        };
-        (check != FileCheck::Matches).then(|| FileFinding {
-            stream: stream.to_string(), path: path.to_string(), check,
-        })
-    }).collect();
-    DataFreshness { findings, row_unchecked: None }
-}
 
 /// Row names for positional inputs: the file basename, extended leftward with
 /// parent directory components until every name is distinct (gh#806).
@@ -561,7 +403,7 @@ fn positional_model_names(paths: &[String]) -> Vec<String> {
     (0..paths.len()).map(|i| name_at(i, depth[i])).collect()
 }
 
-#[expect(clippy::disallowed_methods, reason = "reads the `--config` compare.toml that lists the rows to compare; `compare` prints a table and stores no result")]
+#[expect(clippy::disallowed_methods, reason = "reads the `--config` compare.toml that lists the rows to compare; what compare stores is the predictions and scores of those rows, whose identities hold their own inputs")]
 pub(crate) fn cmd_compare(a: &crate::args::CompareArgs, compile: crate::util::CompileSettings) {
     // The forcing-extrapolation policy this command's evaluations run under,
     // installed for the rest of the command.
@@ -586,13 +428,18 @@ pub(crate) fn cmd_compare(a: &crate::args::CompareArgs, compile: crate::util::Co
     let config_path: Option<String> = a.config.clone();
     let baseline: Option<String> = a.baseline.clone();
     let positional: Vec<String> = a.paths.clone();
-    let derive = DeriveSettings {
+    let request = stored::Request {
+        mode: a.mode,
+        horizon: a.horizon.as_deref(),
+        draws: a.draws,
         particles: a.particles,
         seed: a.seed,
-        force_in_sample: a.in_sample,
-        draws: a.draws.max(1),
-        replicates: a.replicates.max(1),
+        replicates: a.replicates,
+        in_sample: a.in_sample,
+        data: &a.data,
+        data_held_out: &a.data_held_out,
         allow_forcing_extrapolation: a.forcing_extrapolation.allow_forcing_extrapolation,
+        allow_mismatched_filter_settings: a.allow_mismatched_filter_settings,
         compile,
     };
     let metrics_cli: Option<Vec<String>> = a.metrics.as_ref().map(|s|
@@ -629,7 +476,8 @@ pub(crate) fn cmd_compare(a: &crate::args::CompareArgs, compile: crate::util::Co
         }).collect();
         (models, None, None, None, None)
     } else {
-        out.fail("error: compare requires either --config FILE or ≥2 stored fit runs (@label, run id or folder)");
+        out.fail("error: compare requires either --config FILE or ≥2 stored scores, predictions or fit runs \
+                  (@label, run id or folder)");
     };
 
     if models.len() < 2 {
@@ -638,25 +486,42 @@ pub(crate) fn cmd_compare(a: &crate::args::CompareArgs, compile: crate::util::Co
 
     // gh#417/gh#418: chain exclusion resolved PER FIT, bound to each model's
     // name. `@a:4` targets one fit; bare `3,4` is cohort-wide (every fit). Parsed
-    // and name-validated at the boundary, before any derivation runs. A fit with
-    // no posterior cloud (an optimizer fit, or an explicit prequential.json) has
-    // nothing to filter, so the selection is inert there.
+    // and name-validated at the boundary, before anything is predicted. An
+    // input that is not a fit run has no posterior cloud to filter, so the
+    // selection is inert there.
     let model_names: Vec<String> = models.iter().map(|m| m.name.clone()).collect();
     let cohort = parse_cohort_selection(&a.chains, &a.exclude_chains, &model_names).unwrap_or_else(|e| {
         out.fail(format!("error: {e}"));
     });
     cohort.warn(&out);
 
-    // Load traces, each filtered by its own fit's selection (if any). Each
-    // input is loaded once, however many streams `--streams` selects.
-    let rows: Vec<Row> = models.into_iter().map(|m| {
-        let selection = cohort.for_fit(&m.name);
-        let Loaded { trace, data, freshness, streams } =
-            load_trace(&out, &m.path, derive, selection).unwrap_or_else(|e| {
-                out.fail(format!("error loading trace for '{}' at '{}': {}", m.name, m.path, e));
-            });
-        Row { name: m.name, path: m.path, trace, data, freshness, streams }
+    // Each input resolved, and the inputs checked together, before anything
+    // is predicted or scored.
+    let inputs: Vec<(CompareModelEntry, Input)> = models.into_iter().map(|m| {
+        let input = resolve_input(&m.path, &request).unwrap_or_else(|e| {
+            out.fail(format!("error loading the scores of '{}' at '{}': {}", m.name, m.path, e));
+        });
+        (m, input)
     }).collect();
+    let prepared: Vec<(&str, &stored::Prepared)> = inputs.iter().filter_map(|(m, i)| match i {
+        Input::Stored(p) => Some((m.name.as_str(), p)),
+        Input::Explicit(_) => None,
+    }).collect();
+    stored::preflight(&prepared, &request).unwrap_or_else(|e| refuse(&out, format!("error: {e}")));
+    // Each input's groups of rows, each input loaded once however many
+    // streams `--streams` selects.
+    let loaded: Vec<(CompareModelEntry, Vec<Loaded>)> = inputs.into_iter().map(|(m, input)| {
+        let selection = cohort.for_fit(&m.name);
+        let groups = match input {
+            Input::Explicit(groups) => Ok(groups),
+            Input::Stored(p) => stored::load(&out, p, &request, selection),
+        };
+        let groups = groups.unwrap_or_else(|e| {
+            out.fail(format!("error loading the scores of '{}' at '{}': {}", m.name, m.path, e));
+        });
+        (m, groups)
+    }).collect();
+    let groups = grouped(loaded).unwrap_or_else(|e| refuse(&out, e));
 
     // #295 Ask 1 — the optimism caveat, the miscalibration flags and the trace
     // warnings are emitted by the RENDERERS (`warning_lines`), not here, so they
@@ -665,8 +530,9 @@ pub(crate) fn cmd_compare(a: &crate::args::CompareArgs, compile: crate::util::Co
 
     let waivers = Waivers::from_args(a);
     let baseline = baseline.or(cfg_baseline);
-    let metrics_chosen = metrics_cli.or(cfg_metrics)
-        .unwrap_or_else(|| vec!["elpd".into(), "crps".into(), "pit_cov90".into()]);
+    let metrics_chosen = metrics_cli.or(cfg_metrics).unwrap_or_else(|| {
+        ["elpd", "crps", "wis", "pit_cov90", "cov50"].map(String::from).to_vec()
+    });
     let fmt_final = cfg_format.unwrap_or(format);
     let render = |t: &Table| match fmt_final {
         Format::Json  => render_json(&t.rows, t.base_idx, &metrics_chosen, &t.checks),
@@ -678,9 +544,25 @@ pub(crate) fn cmd_compare(a: &crate::args::CompareArgs, compile: crate::util::Co
         .map(|s| s.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect())
         .or(cfg_streams);
     let Some(names) = selected else {
-        let t = prepare_table(&out, rows, &waivers, baseline.as_deref())
-            .unwrap_or_else(|e| refuse(&out, e.join("\n")));
+        // One joint table per group of rows.
+        let mut refusals: Vec<String> = Vec::new();
+        let tables: Vec<Table> = groups.into_iter().filter_map(|rows| {
+            if let Some(e) = no_joint_refusal(&rows) {
+                refusals.push(e);
+                return None;
+            }
+            prepare_table(&out, rows, &waivers, baseline.as_deref())
+                .map_err(|e| refusals.extend(e)).ok()
+        }).collect();
+        if !refusals.is_empty() {
+            refuse(&out, refusals.join("\n"));
+        }
         if let Some(path) = &a.pointwise {
+            let [t] = tables.as_slice() else {
+                out.fail(format!(
+                    "error: --pointwise writes the rows of one table, and this comparison has {} (one per lead); \
+                     compare one lead's scores, or read each score's scored.tsv", tables.len()));
+            };
             match write_pointwise(&t.rows, t.base_idx, path) {
                 Ok(PointwiseWritten { joint: (jp, nj), streams: (sp, ns) }) => out.say(format_args!(
                     "wrote {nj} joint pointwise rows to {} and {ns} per-stream rows to {}",
@@ -690,18 +572,38 @@ pub(crate) fn cmd_compare(a: &crate::args::CompareArgs, compile: crate::util::Co
                 }
             }
         }
-        out.report_raw(render(&t));
+        let rendered = match (fmt_final, tables.as_slice()) {
+            (Format::Json, [one]) => render(one),
+            (Format::Json, _) => render_json_tables(&tables, None, &metrics_chosen),
+            (Format::Md | Format::Table, _) => tables.iter().map(render).collect::<Vec<_>>().join("\n"),
+        };
+        out.report_raw(rendered);
         return;
     };
 
-    // `--streams`: one table per selected leaf, every row re-scored on that
-    // leaf alone. A refusal for any leaf refuses the command; every table's
-    // refusals are printed, each naming its leaf.
-    let leaves = resolve_selection(&names, &rows).unwrap_or_else(|e| {
-        out.fail(format!("error: {e}"));
-    });
-    let tables = stream_tables(&out, &rows, &leaves, &waivers, baseline.as_deref())
-        .unwrap_or_else(|e| refuse(&out, e.join("\n")));
+    // `--streams`: one table per group and selected leaf, every row re-scored
+    // on that leaf alone. A refusal for any leaf refuses the command; every
+    // table's refusals are printed, each naming its leaf.
+    let mut leaves: Vec<String> = Vec::new();
+    let mut tables: Vec<Table> = Vec::new();
+    let mut refusals: Vec<String> = Vec::new();
+    for rows in &groups {
+        let mine = resolve_selection(&names, rows).unwrap_or_else(|e| {
+            out.fail(format!("error: {e}"));
+        });
+        match stream_tables(&out, rows, &mine, &waivers, baseline.as_deref()) {
+            Ok(t) => tables.extend(t),
+            Err(e) => refusals.extend(e),
+        }
+        for l in mine {
+            if !leaves.contains(&l) {
+                leaves.push(l);
+            }
+        }
+    }
+    if !refusals.is_empty() {
+        refuse(&out, refusals.join("\n"));
+    }
     if let Some(path) = &a.pointwise {
         match write_pointwise_streams(&tables, &leaves, path) {
             Ok((sp, ns)) => out.say(format_args!(
@@ -714,10 +616,54 @@ pub(crate) fn cmd_compare(a: &crate::args::CompareArgs, compile: crate::util::Co
     }
     // One table per stream, and nothing that combines them.
     let rendered = match fmt_final {
-        Format::Json => render_json_tables(&tables, &leaves, &metrics_chosen),
+        Format::Json => render_json_tables(&tables, Some(&leaves), &metrics_chosen),
         Format::Md | Format::Table => tables.iter().map(render).collect::<Vec<_>>().join("\n"),
     };
     out.report_raw(rendered);
+}
+
+/// The inputs' groups of rows as one list of rows per table: the `k`-th group
+/// of every input in table `k`. Every input must hold the same number of
+/// groups; when they do not, the refusal names each input's leads (a
+/// forecast's groups are its leads).
+fn grouped(loaded: Vec<(CompareModelEntry, Vec<Loaded>)>) -> Result<Vec<Vec<Row>>, String> {
+    let counts: Vec<usize> = loaded.iter().map(|(_, g)| g.len()).collect();
+    if counts.windows(2).any(|w| w[0] != w[1]) {
+        let each: Vec<String> = loaded.iter().map(|(m, g)| {
+            let leads: Vec<String> = g.iter().map(|l| l.facts.lead.clone().unwrap_or_else(|| "—".into())).collect();
+            format!("'{}' at {}", m.name, leads.join(", "))
+        }).collect();
+        return Err(format!(
+            "error: the compared scores hold rows at different leads: {}.\n       A forecast's rows at one lead \
+             are compared only with rows at that lead; forecast every model to the same --horizon.",
+            each.join("; ")));
+    }
+    let n = counts.first().copied().unwrap_or(0);
+    let mut tables: Vec<Vec<Row>> = (0..n).map(|_| Vec::new()).collect();
+    for (m, groups) in loaded {
+        for (k, Loaded { trace, data, streams, facts }) in groups.into_iter().enumerate() {
+            tables[k].push(Row { name: m.name.clone(), path: m.path.clone(), trace, data, streams, facts });
+        }
+    }
+    Ok(tables)
+}
+
+/// The refusal of a joint table whose rows hold no joint log score at some
+/// time (a free-forward score of several streams observed together), or
+/// `None`.
+fn no_joint_refusal(rows: &[Row]) -> Option<String> {
+    let missing: Vec<String> = rows.iter()
+        .filter_map(|r| r.facts.no_joint.map(|t| format!("'{}' at t = {t}", r.name)))
+        .collect();
+    (!missing.is_empty()).then(|| {
+        let mut streams: Vec<&str> = rows.iter().flat_map(|r| r.trace.streams()).collect();
+        streams.sort();
+        streams.dedup();
+        format!(
+            "error: a joint score of the streams observed together is not defined for {}: a {} score holds each \
+             stream's own score and no joint one there.\n       Compare one stream at a time with --streams {}.",
+            missing.join(", "), rows[0].facts.mode, streams.join(","))
+    })
 }
 
 /// One comparison table, checked and ready to render: its rows, the
@@ -732,7 +678,7 @@ struct Table {
 /// every refusal, in check order, when any check fails and is not waived.
 fn prepare_table(
     out: &crate::out::Out,
-    mut rows: Vec<Row>,
+    rows: Vec<Row>,
     waivers: &Waivers,
     baseline: Option<&str>,
 ) -> Result<Table, Vec<String>> {
@@ -743,18 +689,6 @@ fn prepare_table(
     let refusals = checks.refusals();
     if !refusals.is_empty() {
         return Err(refusals.iter().map(|r| refusal_message(r, &rows)).collect());
-    }
-
-    // Rendered under `--allow-changed-data`: each trace scored on a changed
-    // file records which streams' files it was.
-    for r in &mut rows {
-        let streams: Vec<String> = r.freshness.findings.iter()
-            .filter(|f| matches!(f.check, FileCheck::Changed { .. }))
-            .map(|f| f.stream.clone())
-            .collect();
-        if let (false, Some(d)) = (streams.is_empty(), r.trace.derivation.as_mut()) {
-            d.overrides.push(TraceOverride::ChangedData { streams });
-        }
     }
 
     // Baseline: explicit > cfg > argmax elpd.
@@ -839,7 +773,6 @@ struct Waivers {
     mismatched_horizon: bool,
     mixed_provenance: bool,
     data_mismatch: bool,
-    changed_data: bool,
     mismatched_filter_settings: bool,
     in_sample_ablation: bool,
 }
@@ -850,7 +783,6 @@ impl Waivers {
             mismatched_horizon: a.allow_mismatched_horizon,
             mixed_provenance: a.allow_mixed_provenance,
             data_mismatch: a.allow_data_mismatch,
-            changed_data: a.allow_changed_data,
             mismatched_filter_settings: a.allow_mismatched_filter_settings,
             in_sample_ablation: a.allow_in_sample_ablation,
         }
@@ -861,7 +793,6 @@ impl Waivers {
             Waiver::MismatchedHorizon => self.mismatched_horizon,
             Waiver::MixedProvenance => self.mixed_provenance,
             Waiver::DataMismatch => self.data_mismatch,
-            Waiver::ChangedData => self.changed_data,
             Waiver::MismatchedFilterSettings => self.mismatched_filter_settings,
             Waiver::InSampleAblation => self.in_sample_ablation,
         }
@@ -1065,9 +996,59 @@ fn evaluate(check: CheckId, rows: &[Row], earlier: &[CheckResult]) -> CheckResul
             check_pairing(rows, horizons_differ)
         }
         CheckId::SharedData => check_shared_data(rows),
-        CheckId::ChangedData => check_changed_data(rows),
         CheckId::FilterSettings => check_filter_settings(rows),
+        CheckId::Mode => fact_check(CheckId::Mode, rows, |f| f.mode.clone(), |groups| Finding::ModeDiffers { groups }),
+        CheckId::Role => fact_check(CheckId::Role, rows, |f| f.role.clone(), |groups| Finding::RoleDiffers { groups }),
+        CheckId::Lead => fact_check(CheckId::Lead, rows, |f| f.lead.clone(), |groups| Finding::LeadDiffers { groups }),
+        CheckId::Reach => fact_check(CheckId::Reach, rows, |f| f.reach.clone(), |groups| Finding::ReachDiffers { groups }),
+        CheckId::Covariates =>
+            fact_check(CheckId::Covariates, rows, |f| f.realised, |groups| Finding::CovariatesDiffer { groups }),
+        CheckId::ScoredRows => check_scored_rows(rows),
     }
+}
+
+/// A check of one [`ScoreFacts`] field: the rows partitioned by its value,
+/// failed when they take more than one.
+fn fact_check<V: Clone + Ord>(
+    check: CheckId,
+    rows: &[Row],
+    value: impl Fn(&ScoreFacts) -> V,
+    finding: impl Fn(pf::Groups<V>) -> Finding,
+) -> CheckResult {
+    let groups = pf::partition(by_row(rows, |r| value(&r.facts)), |a, b| a.cmp(b), |a, b| a == b);
+    let failure = (groups.len() > 1).then(|| finding(groups));
+    simple_result(check, failure, rows.len() >= 2)
+}
+
+/// The rows scored the same observed value of each stream at each time two
+/// or more of them scored it: a score's outcomes are its own, so two rows
+/// whose outcome files differ in a held-out row pair by time and stream and
+/// differ only here. The first time and stream at which they differ is the
+/// finding.
+fn check_scored_rows(rows: &[Row]) -> CheckResult {
+    let mut times: Vec<f64> = rows.iter().flat_map(|r| r.trace.steps.iter().map(|s| s.t)).collect();
+    times.sort_by(f64::total_cmp);
+    times.dedup();
+    let mut failure = None;
+    'times: for t in times {
+        let at: Vec<(&Row, &score::trace::PrequentialStep)> = rows.iter()
+            .filter_map(|r| r.trace.steps.iter().find(|s| s.t == t).map(|s| (r, s)))
+            .collect();
+        let mut streams: Vec<&str> = at.iter().flat_map(|(_, s)| s.per_stream.iter().map(|x| x.stream.as_str())).collect();
+        streams.sort();
+        streams.dedup();
+        for stream in streams {
+            let items: Vec<(f64, String)> = at.iter().filter_map(|(r, s)| {
+                s.per_stream.iter().find(|x| x.stream == stream).map(|x| (x.y_obs, r.name.clone()))
+            }).collect();
+            let groups = pf::partition(items, |a, b| a.total_cmp(b), |a, b| a.total_cmp(b).is_eq());
+            if groups.len() > 1 {
+                failure = Some(Finding::ScoredValuesDiffer { t, stream: stream.to_string(), groups });
+                break 'times;
+            }
+        }
+    }
+    simple_result(CheckId::ScoredRows, failure, rows.len() >= 2)
 }
 
 /// A result with nothing not checked or qualified: failed on `failure`,
@@ -1376,11 +1357,7 @@ fn check_shared_data(rows: &[Row]) -> CheckResult {
             DataIdentity::Digests(rec) => {
                 for (source, why) in &rec.unresolved {
                     not_checked.push(unchecked(NotCheckedReason::SourceUnresolved {
-                        source: source.clone(), file: DataFile::Training, why: why.clone() }));
-                }
-                for (source, why) in &rec.holdout_unresolved {
-                    not_checked.push(unchecked(NotCheckedReason::SourceUnresolved {
-                        source: source.clone(), file: DataFile::Holdout, why: why.clone() }));
+                        source: source.clone(), why: why.clone() }));
                 }
             }
             DataIdentity::Unknown(why) =>
@@ -1395,27 +1372,17 @@ fn check_shared_data(rows: &[Row]) -> CheckResult {
     }).collect();
     let mut sources: Vec<SourceDigests> = Vec::new();
     let mut prefix_only: Vec<String> = Vec::new();
-    for file in [DataFile::Training, DataFile::Holdout] {
-        type Hashes = std::collections::BTreeMap<String, String>;
-        fn of(rec: &RecordedData, file: DataFile) -> (&Hashes, &Hashes) {
-            match file {
-                DataFile::Training => (&rec.training, &rec.unresolved),
-                DataFile::Holdout => (&rec.holdout, &rec.holdout_unresolved),
-            }
-        }
-        let all: std::collections::BTreeSet<&String> =
-            known.iter().flat_map(|(_, rec)| of(rec, file).0.keys()).collect();
-        for source in all {
-            let taking_part: Vec<(Option<String>, String)> = known.iter()
-                .filter(|(_, rec)| !of(rec, file).1.contains_key(source))
-                .map(|(name, rec)| (of(rec, file).0.get(source).map(|h| h.to_ascii_lowercase()),
-                    name.to_string()))
-                .collect();
-            let (groups, short) = hash_groups(taking_part);
-            prefix_only.extend(short);
-            if groups.len() > 1 {
-                sources.push(SourceDigests { source: source.clone(), file, groups });
-            }
+    let all: std::collections::BTreeSet<&String> =
+        known.iter().flat_map(|(_, rec)| rec.training.keys()).collect();
+    for source in all {
+        let taking_part: Vec<(Option<String>, String)> = known.iter()
+            .filter(|(_, rec)| !rec.unresolved.contains_key(source))
+            .map(|(name, rec)| (rec.training.get(source).map(|h| h.to_ascii_lowercase()), name.to_string()))
+            .collect();
+        let (groups, short) = hash_groups(taking_part);
+        prefix_only.extend(short);
+        if groups.len() > 1 {
+            sources.push(SourceDigests { source: source.clone(), groups });
         }
     }
     let failure = (!sources.is_empty() || !unhashed.is_empty())
@@ -1480,59 +1447,6 @@ fn hash_groups(items: Vec<(Option<String>, String)>) -> (pf::Groups<Option<Strin
     }).collect();
     let groups = pf::partition(keyed, |a, b| a.cmp(b), |a, b| a == b && a.as_deref() != Some(""));
     (groups, short)
-}
-
-/// The rows whose recorded data hashes are shorter than a full SHA-256, so
-/// the changed-data check compared them on that prefix: a difference beyond
-/// the prefix is not detected.
-fn hash_prefix_rows(rows: &[Row]) -> Vec<Qualified> {
-    let mut out: Vec<Qualified> = rows.iter()
-        .filter(|r| matches!(&r.data, DataIdentity::Digests(rec) if rec.has_short_hash()))
-        .map(|r| Qualified { member: r.name.clone(), how: Qualification::HashPrefixOnly })
-        .collect();
-    pf::sort_by_member(&mut out, |q| &q.member);
-    out
-}
-
-/// A derived row's training file edited after its fit ran is scored at a θ̂
-/// fitted to other bytes. The same class as the shared-data refusal, and
-/// overridable for the same reason. A check of each row against its own
-/// record: it passes when no file changed. Every derived file, or derived
-/// row, that could not be compared with a recorded hash is listed as not
-/// checked.
-fn check_changed_data(rows: &[Row]) -> CheckResult {
-    let mut files: Vec<ChangedFile> = Vec::new();
-    let mut not_checked: Vec<Unchecked> = Vec::new();
-    for r in rows {
-        if let Some(why) = &r.freshness.row_unchecked {
-            not_checked.push(Unchecked { member: r.name.clone(),
-                reason: NotCheckedReason::NoDataIdentity { why: why.clone() } });
-        }
-        for f in &r.freshness.findings {
-            match &f.check {
-                FileCheck::Changed { recorded, current } => files.push(ChangedFile {
-                    member: r.name.clone(), stream: f.stream.clone(), path: f.path.clone(),
-                    recorded: recorded.clone(), current: current.clone(),
-                }),
-                FileCheck::NotChecked(why) => not_checked.push(Unchecked {
-                    member: r.name.clone(),
-                    reason: NotCheckedReason::FileNotChecked {
-                        stream: f.stream.clone(), path: f.path.clone(), why: why.clone() },
-                }),
-                FileCheck::Matches => {}
-            }
-        }
-    }
-    pf::sort_by_member(&mut files, |f| &f.member);
-    pf::sort_by_member(&mut not_checked, |u| &u.member);
-    let failure = (!files.is_empty()).then_some(Finding::DataChanged { files });
-    CheckResult {
-        check: CheckId::ChangedData,
-        outcome: outcome(failure, true),
-        not_checked,
-        qualified: hash_prefix_rows(rows),
-        waiver: CheckId::ChangedData.waiver(),
-    }
 }
 
 /// Two rows scored at different particle or replicate counts differ partly
@@ -1733,11 +1647,6 @@ fn finding_text(f: &Finding) -> String {
                 (None, None) => String::new(),
             }
         }
-        Finding::DataChanged { files } => format!("data changed after the fit ran: {}",
-            files.iter().map(|f| format!(
-                "'{}' stream '{}' ({}): the fit recorded {}, the file now hashes to {}",
-                f.member, f.stream, f.path, f.recorded, f.current))
-                .collect::<Vec<_>>().join("; ")),
         Finding::FilterSettingsDiffer { particles, replicates } => {
             let dimension = |label: &str, g: &[(usize, Vec<String>)]| (g.len() > 1).then(|| {
                 g.iter().map(|(v, m)| format!("{label} {v} in {}", quoted_and(m)))
@@ -1747,16 +1656,31 @@ fn finding_text(f: &Finding) -> String {
                 [dimension("particles", particles), dimension("replicates", replicates)]
                     .into_iter().flatten().collect::<Vec<_>>().join("; "))
         }
+        Finding::ModeDiffers { groups } => format!("the compared scores' rows were predicted in different modes \
+            (mode): {}", groups.iter().map(|(m, n)| format!("{} {m}", quoted_and(n))).collect::<Vec<_>>().join("; ")),
+        Finding::RoleDiffers { groups } => format!("the compared scores' rows have different roles (role): {}",
+            groups.iter().map(|(r, n)| format!("{} {r}", quoted_and(n))).collect::<Vec<_>>().join("; ")),
+        Finding::LeadDiffers { groups } => format!("the compared scores' rows are at different leads (lead): {}",
+            groups.iter().map(|(l, n)| format!("{} {}", quoted_and(n), l.as_deref().unwrap_or("none")))
+                .collect::<Vec<_>>().join("; ")),
+        Finding::ReachDiffers { groups } => format!("the compared forecasts reach different distances past their \
+            origin (reach): {}", groups.iter().map(|(r, n)| format!("{} {}", quoted_and(n),
+                r.as_deref().map_or("none (not a forecast)".to_string(), |r| format!("{r:?}"))))
+                .collect::<Vec<_>>().join("; ")),
+        Finding::CovariatesDiffer { groups } => format!("the compared forecasts state their covariates after the \
+            origin differently (covariates): {}", groups.iter().map(|(realised, n)| format!("{} {}", quoted_and(n),
+                if *realised { "read covariates observed after the origin (realised)" }
+                else { "read no covariate stated realised" }))
+                .collect::<Vec<_>>().join("; ")),
+        Finding::ScoredValuesDiffer { t, stream, groups } => format!("the compared scores scored different observed \
+            values (scored rows): '{stream}' at t = {t} is {}",
+            groups.iter().map(|(y, n)| format!("{y} in {}", quoted_and(n))).collect::<Vec<_>>().join(" and ")),
     }
 }
 
 /// One source of a data mismatch: `'cases' (aaaaaaaa in 'a', bbbbbbbb in
 /// 'b')`, or `'east' (bound by 'b' only)`.
 fn source_digests_text(s: &SourceDigests) -> String {
-    let kind = match s.file {
-        DataFile::Training => "",
-        DataFile::Holdout => " holdout",
-    };
     let bound: Vec<&(Option<String>, Vec<String>)> =
         s.groups.iter().filter(|(h, _)| h.is_some()).collect();
     let unbound: Vec<String> =
@@ -1770,7 +1694,7 @@ fn source_digests_text(s: &SourceDigests) -> String {
             if unbound.is_empty() { hashes } else { format!("{hashes}; not bound by {}", quoted_and(&unbound)) }
         }
     };
-    format!("'{}'{kind} ({detail})", s.source)
+    format!("'{}' ({detail})", s.source)
 }
 
 /// The finding and its consequence as one statement.
@@ -1817,8 +1741,9 @@ fn refusal_message(r: &Refusal, rows: &[Row]) -> String {
                    same holdout_after in every compared fit, so the rows are scored held-out, \
                    or pass --allow-in-sample-ablation to render anyway.",
             finding_text(&r.finding), Waiver::InSampleAblation.consequence()),
-        Finding::ProvenanceDiffers { groups } => format!("{}\n       {}\n       Pass --draws 1 \
-                   to score every fit plug-in, or --allow-mixed-provenance to render anyway.",
+        Finding::ProvenanceDiffers { groups } => format!("{}\n       {}\n       Compare \
+                   posteriors with posteriors and single points with single points, or pass \
+                   --allow-mixed-provenance to render anyway.",
             lines("the compared traces mix provenance kinds", groups.iter()
                 .map(|(p, m)| format!("{}: {}", plain(m), provenance_kind(p))).collect()),
             Waiver::MixedProvenance.consequence()),
@@ -1831,13 +1756,30 @@ fn refusal_message(r: &Refusal, rows: &[Row]) -> String {
         | Finding::CoverageDiffers { .. } =>
             format!("error: {}{first_step}", finding_text(&r.finding)),
         Finding::DataDiffers { .. } => format!("error: {}", shared_data_statement(&r.finding)),
-        Finding::DataChanged { .. } => format!("error: {}\n       Re-run the fit on the current \
-                   file, restore the file the fit read, or pass --allow-changed-data to render \
-                   anyway.", finding_note(&r.finding, Waiver::ChangedData)),
-        Finding::FilterSettingsDiffer { .. } => format!("error: {}\n       Re-derive every row \
-                   with the same --particles and --replicates, or pass \
+        Finding::FilterSettingsDiffer { .. } => format!("error: {}\n       Pass compare the \
+                   --particles and --replicates of the rows it reads as written (a prequential.json), \
+                   so every prediction it makes matches them, or pass \
                    --allow-mismatched-filter-settings to render anyway.",
             finding_note(&r.finding, Waiver::MismatchedFilterSettings)),
+        Finding::ModeDiffers { .. } => format!("error: {}.\n       A free-forward, a one-step and a \
+                   forecast score answer different questions; compare scores of one mode (--mode).",
+            finding_text(&r.finding)),
+        Finding::RoleDiffers { .. } => format!("error: {}.\n       Scores of rows the parameters were \
+                   fitted to and of rows they were not are never differenced; compare the same rows of \
+                   every model (--in-sample for the training rows, or the same held-out rows).",
+            finding_text(&r.finding)),
+        Finding::LeadDiffers { .. } => format!("error: {}.\n       A score at one lead and one at \
+                   another are different measurements; forecast every model to the same --horizon.",
+            finding_text(&r.finding)),
+        Finding::ReachDiffers { .. } => format!("error: {}.\n       Forecast every model to the same \
+                   --horizon.", finding_text(&r.finding)),
+        Finding::CovariatesDiffer { .. } => format!("error: {}.\n       A forecast that read covariates \
+                   observed after its origin is an after-the-fact evaluation, and its scores flatter the \
+                   model; state the covariates of every forecast alike (`camdl predict --covariate`).",
+            finding_text(&r.finding)),
+        Finding::ScoredValuesDiffer { .. } => format!("error: {}.\n       {}\n       Score every model \
+                   against the same outcome files (--data), or pass --allow-data-mismatch to render the \
+                   comparison as confounded.", finding_text(&r.finding), Waiver::DataMismatch.consequence()),
     }
 }
 
@@ -1877,10 +1819,8 @@ fn data_unchecked_note(checks: &Preflight, rows: &[Row]) -> Option<String> {
     let skipped: Vec<String> = not_checked(checks, CheckId::SharedData, rows).into_iter()
         .map(|u| match &u.reason {
             NotCheckedReason::NoDataIdentity { why } => format!("'{}' ({why})", u.member),
-            NotCheckedReason::SourceUnresolved { source, file: DataFile::Training, why } =>
+            NotCheckedReason::SourceUnresolved { source, why } =>
                 format!("'{}' stream '{source}' ({why})", u.member),
-            NotCheckedReason::SourceUnresolved { source, file: DataFile::Holdout, why } =>
-                format!("'{}' holdout '{source}' ({why})", u.member),
             other => format!("'{}' ({other:?})", u.member),
         }).collect();
     (!skipped.is_empty()).then(|| format!(
@@ -1891,36 +1831,20 @@ fn data_unchecked_note(checks: &Preflight, rows: &[Row]) -> Option<String> {
     ))
 }
 
-/// The scope of the changed-data check: every derived file, or derived row,
-/// that could not be compared with a recorded hash, and why. `None` when
-/// every scored file was checked.
-fn data_change_unchecked_note(checks: &Preflight, rows: &[Row]) -> Option<String> {
-    let skipped: Vec<String> = not_checked(checks, CheckId::ChangedData, rows).into_iter()
-        .map(|u| match &u.reason {
-            NotCheckedReason::NoDataIdentity { why } => format!("'{}' ({why})", u.member),
-            NotCheckedReason::FileNotChecked { stream, path, why } =>
-                format!("'{}' stream '{stream}' ({path}): {why}", u.member),
-            other => format!("'{}' ({other:?})", u.member),
-        }).collect();
-    (!skipped.is_empty()).then(|| format!(
-        "not checked for changes since the fit ran: {}.", skipped.join("; ")))
-}
-
-/// The rows whose data the shared-data and changed-data checks compared on
-/// an 8-character prefix, or `None`. Every renderer states it: a difference
-/// beyond the prefix is not detected.
+/// The rows whose data the shared-data check compared on an 8-character
+/// prefix, or `None`. Every renderer states it: a difference beyond the
+/// prefix is not detected.
 fn data_prefix_note(checks: &Preflight, rows: &[Row]) -> Option<String> {
-    let qualified: Vec<Qualified> = [CheckId::SharedData, CheckId::ChangedData].iter()
-        .filter_map(|c| checks.result(*c))
-        .flat_map(|r| r.qualified.iter().cloned())
-        .collect();
+    let qualified: Vec<Qualified> = checks.result(CheckId::SharedData)
+        .map(|r| r.qualified.clone())
+        .unwrap_or_default();
     let mut names: Vec<String> = in_row_order(&qualified, |q| &q.member, rows).into_iter()
         .map(|q| q.member.clone()).collect();
     names.dedup();
     (!names.is_empty()).then(|| format!(
         "data compared on 8 characters of the SHA-256 for {}: its fit.meta.json was \
-         written before full digests were recorded, so the shared-data and \
-         changed-data checks for that row compare the first 8 characters only.",
+         written before full digests were recorded, so the shared-data check \
+         for that row compares the first 8 characters only.",
         quoted(&names)))
 }
 
@@ -2029,15 +1953,9 @@ fn data_for_streams(r: &Row, leaves: &[String]) -> (DataIdentity, Vec<Unhashed>)
         }
     };
     split(&rec.training, &mut out.training, &mut out.unresolved);
-    split(&rec.holdout, &mut out.holdout, &mut out.holdout_unresolved);
     for (source, why) in &rec.unresolved {
         if sources.contains(&source.as_str()) {
             out.unresolved.insert(source.clone(), why.clone());
-        }
-    }
-    for (source, why) in &rec.holdout_unresolved {
-        if sources.contains(&source.as_str()) {
-            out.holdout_unresolved.insert(source.clone(), why.clone());
         }
     }
     // Refused by the caller, and set aside here so the pairwise comparison
@@ -2260,243 +2178,38 @@ fn write_pointwise_streams(tables: &[Table], leaves: &[String], path: &Path)
     Ok((streams_path, rows.len()))
 }
 
-/// One compared input, loaded: what [`Row`] carries besides its name.
+/// One group of rows of one compared input: what [`Row`] carries besides its
+/// name.
 struct Loaded {
     trace: PrequentialTrace,
     data: DataIdentity,
-    freshness: DataFreshness,
     streams: RowStreams,
+    facts: ScoreFacts,
 }
 
-/// What [`derive_prequential`] produced for one fit.
-struct Derived {
-    trace: PrequentialTrace,
-    data: DataIdentity,
-    freshness: DataFreshness,
-    streams: RowStreams,
+/// One comparison input, resolved.
+enum Input {
+    /// A `prequential.json` (a `.json` file, or a directory holding
+    /// `prequential.json`), read as it is, as one group.
+    Explicit(Vec<Loaded>),
+    /// A stored score, prediction or fit run, read through [`stored::load`].
+    Stored(stored::Prepared),
 }
 
-/// Resolve a single comparison input to a `PrequentialTrace`. Two paths:
-///
-/// 1. **Explicit prequential** (kept, tried first): a `.json` file that exists,
-///    or a directory holding `prequential.json` — read+parsed as-is. Preserves
-///    `pfilter --save-prequential` and method-dir inputs; the derive settings do
-///    not touch it.
-/// 2. **Fit handle** (Phase 2a): `@label` / hash prefix / run dir / `fit.toml`.
-///    The prequential is DERIVED at the fit's sealed θ̂: for a chain-binomial
-///    fit by invoking the canonical `camdl pfilter` — never by reimplementing
-///    the filter (the obs-model assembly is already triplicated; a fourth copy
-///    is forbidden) — and for an ODE fit by the fit's own likelihood, rebuilt
-///    through `FitRunConfig::build` (gh#312, `compare_ode`).
-fn load_trace(
-    out: &crate::out::Out,
-    path: &str,
-    derive: DeriveSettings,
-    selection: Option<&ChainSelection>,
-) -> Result<Loaded, String> {
+fn resolve_input(path: &str, request: &stored::Request) -> Result<Input, String> {
     if let Some(trace) = try_load_explicit_prequential(path)? {
         // A trace records scores and times, never which observations produced
         // them — so this row cannot take part in the data-identity check, and
-        // carries no replicate-derived filter-noise SE. It re-reads no data
-        // file, so there is nothing to check for changes since a fit.
-        return Ok(Loaded {
+        // re-reads no data file.
+        let facts = ScoreFacts::of_trace(&trace);
+        return Ok(Input::Explicit(vec![Loaded {
             trace,
-            data: DataIdentity::Unknown(
-                "read as an explicit prequential.json, which records no bound data".into()),
-            freshness: DataFreshness::default(),
+            data: DataIdentity::Unknown("read as an explicit prequential.json, which records no bound data".into()),
             streams: RowStreams::Explicit,
-        });
+            facts,
+        }]));
     }
-    // Not an explicit prequential → treat as a fit handle and derive.
-    match crate::fit_store::opened_run(path) {
-        Ok(resolved) => derive_prequential(out, &resolved, derive, selection)
-            .map(|d| Loaded {
-                trace: d.trace, data: d.data, freshness: d.freshness, streams: d.streams,
-            }),
-        Err(resolve_err) => Err(format!(
-            "'{path}' is neither a prequential trace nor a resolvable fit handle.\n  \
-             - as a fit handle: {resolve_err}\n  \
-             - as a prequential path: no prequential.json at '{path}' (or \
-             '{path}/prequential.json') — run `camdl pfilter --save-prequential` \
-             or `camdl fit run` with a pfilter method to generate one."
-        )),
-    }
-}
-
-/// A resolved fit's sealed holdout, checked for the `HoldOutTail` stamp
-/// (gh#585; §3.7.3 of the 2026-08-29 honest-predictive-evaluation
-/// proposal). Detection enforces (a) and (b) of the non-leakage gate:
-///
-/// - (a) the fit's sealed config — hashed into its identity — declares a
-///   holdout (`holdout_after` or `[data.holdout]`);
-/// - (b) `fit.meta.json` carries the training partition, the positive proof
-///   written by the engine that decided which rows trained. A version
-///   predicate cannot serve here (the recorded `camdl_version`'s git-hash
-///   suffix is unordered); the record can — a fit recorded before the
-///   partition existed is refused with the re-run fix.
-///
-/// (c) — no scored value is a training row — is checked on the derived
-/// trace before stamping ([`check_no_training_row_scored`]).
-struct SealedHoldout {
-    /// Which rows the fit trained on, as it recorded them.
-    partition: crate::run_meta::TrainingPartitionRecord,
-    /// source → holdout file path for explicit `[data.holdout]` fits; the
-    /// scored series is training ∪ holdout, merged per source. Empty for
-    /// temporal `holdout_after` fits, whose training files already carry
-    /// the full series (truncation happened at fit load, not in the file).
-    holdout_files: Vec<(String, String)>,
-}
-
-impl SealedHoldout {
-    /// The training extent: the latest end among the fit's training rows.
-    fn train_end(&self) -> f64 {
-        self.partition.extent.t
-    }
-}
-
-fn detect_sealed_holdout(
-    resolved: &ResolvedFit,
-    bindings: &StreamBindings,
-) -> Result<Option<SealedHoldout>, String> {
-    let data = resolved.config.problem.data.as_ref();
-    let declares = data
-        .map(|d| d.holdout_after.is_some() || d.holdout.is_some())
-        .unwrap_or(false);
-    if !declares {
-        return Ok(None);
-    }
-    let partition = crate::run_meta::read_fit_sidecar(&resolved.segment)?
-        .and_then(|s| s.training_partition);
-    let Some(partition) = partition else {
-        return Err(format!(
-            "the fit at {} declares a holdout, but its fit.meta.json carries \
-             no training partition: there is no record proving which \
-             observations its θ̂ was fitted to, so `compare` cannot certify a \
-             score of the rows past the boundary as held out.\n  Re-run the fit \
-             with `camdl fit run`, which records the partition, or pass \
-             --in-sample to score it in-sample.",
-            resolved.segment.display()));
-    };
-    let holdout_files = bindings.holdout_by_source().iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-    Ok(Some(SealedHoldout { partition, holdout_files }))
-}
-
-/// Leaf name → the end of the last row the fit trained on for that leaf.
-/// Every bound leaf has an entry. Built by [`training_scoring_ends`].
-type TrainingScoringEnds = std::collections::BTreeMap<String, Option<f64>>;
-
-/// Read each bound leaf's training file through the fit's own loader and
-/// return, per leaf, the end of the last row the fit trained on (gh#1062):
-/// row `rows − 1` of the prefix the fit recorded. A row is scored at its end
-/// ([`crate::pfilter::stream_times_of_rows`]), which for a period-start
-/// label (`day(time)`, `starting_on`, `ending_on`) is after the label.
-///
-/// Refuses the `HoldOutTail` stamp when the leading rows of a training file
-/// no longer digest to the prefix the fit recorded (an edited fitted row is
-/// changed data, so the fit's θ̂ was not fitted to it), and, for an explicit
-/// `[data.holdout]` fit, when a training file has rows past the prefix: such
-/// rows lie inside the window `compare` scores as held out although they sit
-/// in the file the fit trains on.
-fn training_scoring_ends(
-    h: &SealedHoldout,
-    bindings: &StreamBindings,
-    model: &ir::Model,
-    dt: f64,
-    segment: &Path,
-) -> Result<TrainingScoringEnds, String> {
-    let time_opts = crate::caltime_load::TimeOpts {
-        origin: model.origin.as_deref(),
-        time_unit: &model.time_unit,
-        dt,
-        t_start: model.simulation.t_start,
-        format: crate::caltime_load::TimeFormat::Auto,
-    };
-    let mut late: Vec<String> = Vec::new();
-    let mut ends = TrainingScoringEnds::new();
-    for (leaf, source) in bindings.leaves() {
-        let path = &bindings.training_by_source()[source];
-        let Some(obs) = model.observations.iter().find(|o| o.name == leaf) else { continue };
-        let siblings: Vec<&ir::observation::ObservationModel> = model.observations.iter()
-            .filter(|o| o.source == obs.source)
-            .collect();
-        let rows = crate::fit::runner::load_observations(path, obs, &siblings, &time_opts)?;
-        let Some(prefix) = h.partition.prefix(&obs.name) else {
-            return Err(format!(
-                "the fit at {} binds stream '{}', but its training partition records no \
-                 rows for it, so which of its rows trained cannot be checked.\n  Re-run \
-                 the fit, or pass --in-sample.", segment.display(), obs.name));
-        };
-        let unchanged = rows.len() >= prefix.rows
-            && crate::fit::training_partition::row_digest(&rows[..prefix.rows])?.to_hex()
-                == prefix.digest;
-        if !unchanged {
-            return Err(format!(
-                "the fit at {} trained on the first {} row(s) of stream '{}', but those \
-                 rows of {} are not the rows it trained on (their row digest differs): \
-                 the data changed after the fit, so its θ̂ was not fitted to them.\n  \
-                 Re-run the fit on the current data, or pass --in-sample.",
-                segment.display(), prefix.rows, obs.name, path));
-        }
-        if !h.holdout_files.is_empty() && rows.len() > prefix.rows {
-            let entry = format!("'{}' (training data runs to t = {})", obs.source,
-                rows.last().map_or(f64::NAN, |r| r.measures.end()));
-            if !late.contains(&entry) {
-                late.push(entry);
-            }
-        }
-        ends.insert(obs.name.clone(),
-            prefix.rows.checked_sub(1).map(|i| rows[i].measures.end()));
-    }
-    if !late.is_empty() {
-        return Err(format!(
-            "the fit at {} trained on data inside the window `compare` would \
-             score as held out: its training rows end at t = {}, but stream {} \
-             has training observations after them. Scoring it would present \
-             in-sample scores as held-out.\n  Re-run the fit (it requires every \
-             held-out row to end after the training data of every stream), or \
-             pass --in-sample to score it as the in-sample trace it is.",
-            segment.display(), h.train_end(), late.join(", ")));
-    }
-    Ok(ends)
-}
-
-/// The `HoldOutTail` stamp's non-leakage check on the derived trace
-/// (§3.7.3(c), gh#1062): no scored value of any leaf is one of that leaf's
-/// training rows. Checked per stream entry of each step, against that
-/// leaf's own last training scoring time — rows of a leaf are scored in
-/// time order, so a scored time after it is a held-out row. An entry for a
-/// stream that is not a bound leaf is an error rather than unchecked.
-fn check_no_training_row_scored(
-    trace: &PrequentialTrace,
-    ends: &TrainingScoringEnds,
-    train_end: f64,
-    segment: &Path,
-) -> Result<(), String> {
-    let eps = crate::fit::runner::TIME_TIE_EPS;
-    for step in &trace.steps {
-        for ss in &step.per_stream {
-            let Some(end) = ends.get(&ss.stream) else {
-                return Err(format!(
-                    "fit at {}: refusing the hold_out_tail stamp — the derived trace \
-                     scores stream '{}' at t = {}, which is not a stream the fit \
-                     binds, so whether it is a training row cannot be checked.",
-                    segment.display(), ss.stream, step.t));
-            };
-            if let Some(end) = *end {
-                if step.t <= end + eps {
-                    return Err(format!(
-                        "fit at {}: refusing the hold_out_tail stamp — stream '{}' \
-                         is scored at t = {}, but its last training row (the fit trained through \
-                         t = {}) is scored at t = {}, so this scored \
-                         value is a row the fit trained on.",
-                        segment.display(), ss.stream, step.t, train_end, end));
-                }
-            }
-        }
-    }
-    Ok(())
+    stored::prepare(path, request).map(Input::Stored)
 }
 
 /// A row's filter-noise Monte-Carlo SE of its elpd, as its trace records it
@@ -2543,51 +2256,12 @@ fn filter_noise_unassessed_note(rows: &[Row], base_idx: usize) -> Option<String>
     ))
 }
 
-/// The data digests a resolved fit recorded when it ran, read per source of its
-/// `bindings` from its provenance sidecar (`fit.meta.json`): training files
-/// always, `[data.holdout]` files when the row scores them
-/// (`scores_holdout_files`). Not re-hashed here: the files may have moved or
-/// changed since, and the question is what the FIT was bound to.
-///
-/// The sidecar records the very digests the fit's run identity folded
-/// ([`crate::fit::stream_bindings::StreamBindings::digests`]); a sidecar
-/// written before that holds 8-character training hashes and no holdout
-/// hashes, which [`recorded_by_source`] and [`data_prefix_note`] account for. A fit without one (a
-/// hand-assembled directory), or whose sidecar cannot be read, is reported as
-/// unchecked rather than refused.
-fn fit_data_identity(
-    resolved: &ResolvedFit,
-    bindings: &StreamBindings,
-    scores_holdout_files: bool,
-) -> DataIdentity {
-    // A stored fit's data is the training files it stores, read through the
-    // store and checked: their digests are what it trained on, and the copies
-    // compare reads are written from them. The sidecar's hashes are of the
-    // source files, which hold rows the problem held out.
-    if !resolved.fit.training.is_empty() {
-        let mut recorded = RecordedData::default();
-        for (source, input) in &resolved.fit.training {
-            recorded.training.insert(source.clone(), crate::hashing::sha256_hex(&input.bytes));
-        }
-        return DataIdentity::Digests(recorded);
-    }
-    match crate::run_meta::read_fit_sidecar(&resolved.segment) {
-        Ok(Some(s)) if !s.data_hashes.is_empty() =>
-            DataIdentity::Digests(recorded_by_source(&s, bindings, scores_holdout_files)),
-        Ok(Some(_)) => DataIdentity::Unknown(
-            "its fit.meta.json records no data hashes".into()),
-        Ok(None) => DataIdentity::Unknown(format!(
-            "no fit.meta.json under {}", resolved.segment.display())),
-        Err(e) => DataIdentity::Unknown(e),
-    }
-}
-
 /// Try to read `path` as an explicit prequential artifact. Returns `Ok(None)`
-/// (fall through to fit-handle derivation) when it is not one: a non-existent
+/// (the input is then a stored result) when it is not one: a non-existent
 /// path, a `@label` / hash prefix, a `.toml`, or a directory with no
 /// `prequential.json`. Only a `.json` file or a `<dir>/prequential.json` is
 /// read — so a `fit.toml` handle is never mis-parsed as a trace.
-#[expect(clippy::disallowed_methods, reason = "reads a prequential.json the user names as a row; `compare` prints a table and stores no result")]
+#[expect(clippy::disallowed_methods, reason = "reads a prequential.json the user names as a row, which compare reads as it is and stores nothing from")]
 fn try_load_explicit_prequential(path: &str) -> Result<Option<PrequentialTrace>, String> {
     let p = Path::new(path);
     let json_path = if p.is_dir() {
@@ -2624,530 +2298,6 @@ fn try_load_explicit_prequential(path: &str) -> Result<Option<PrequentialTrace>,
     Ok(Some(trace))
 }
 
-/// Why one `camdl pfilter` pass of [`derive_prequential`] failed.
-enum PassError {
-    /// The filter ran and failed at this θ ([`crate::pfilter::FILTER_FAILED`]):
-    /// a statement about the draw.
-    FilterRejected(String),
-    /// Anything else (the fit's inputs, the temp files, the child process):
-    /// it would fail at every θ, so it says nothing about the draw.
-    Other(String),
-}
-
-/// Derive a prequential trace from a sealed fit by invoking the canonical
-/// `camdl pfilter` at the fit's winning θ̂. This routes through the one
-/// production filter + obs-model assembly rather than rebuilding it, so a
-/// derived trace can never silently diverge from a hand-run `pfilter`.
-///
-/// Steps: (a) θ̂ from the winning method as a flat params TOML; (b) the model
-/// (archived IR if present, else the loose source the config names); (c) the
-/// fit's data, as `--data LEAF=PATH` for every leaf it binds; (d) run `pfilter
-/// --save-prequential` to a temp stem; (e) read back the `{stem}.json` trace.
-/// All temp files live in the system temp dir and are best-effort cleaned up.
-/// Refuses to score a stored fit that held rows out. A stored fit keeps its
-/// held-out rows' dates and not their values (`held_out/`), so no held-out
-/// score can be computed from it; scores on held-out rows arrive with the
-/// scores of step 7 of the run-store work. Scoring such a fit's training rows
-/// in sample is `--in-sample`, which is never chosen for the caller.
-fn refuse_held_out_scoring(resolved: &ResolvedFit) -> Result<(), String> {
-    let held = resolved.fit.held_out_rows();
-    if held.is_empty() {
-        return Ok(());
-    }
-    let rows: Vec<String> = held.iter().map(|(s, n)| format!("{s}: {n}")).collect();
-    Err(format!(
-        "{} held rows out of its training data ({}), and a stored fit keeps those rows' dates, \
-         not their values, so compare cannot score them. Held-out scores arrive with the \
-         run store's scores (step 7). To compare the fits on their training rows, pass \
-         --in-sample.",
-        crate::fit::report::display_path(&resolved.segment),
-        rows.join(", ")
-    ))
-}
-
-#[expect(clippy::disallowed_methods, reason = "hashes the held-out files against the stored fit's record and reads back the trace a `camdl pfilter --no-store` child wrote to a temporary path; `compare` stores no result")]
-fn derive_prequential(
-    out: &crate::out::Out,
-    resolved: &ResolvedFit,
-    derive: DeriveSettings,
-    selection: Option<&ChainSelection>,
-) -> Result<Derived, String> {
-    let segment = &resolved.segment;
-    // The run θ̂ comes from: the leaf the handle named, else the folder's.
-    let run_dir = resolved.run_dir().unwrap_or(&resolved.segment);
-    let config = &resolved.config.problem;
-    if !derive.force_in_sample {
-        refuse_held_out_scoring(resolved)?;
-    }
-
-    // gh#729 / gh#312: the score must come from the forward process the fit
-    // ran on. The θ̂ below comes from the fit's method leaf (both
-    // `resolve_posterior_draws` and `winner_params_toml` pick it), so that
-    // method's backend chooses the scorer: a `camdl pfilter` child (a
-    // chain-binomial bootstrap filter) for a chain-binomial fit, the fit's own
-    // ODE likelihood in-process for an ODE fit (`compare_ode`). A named run's
-    // backend is its own record's; the archived config describes the folder's
-    // latest run, which may not be it (gh#896).
-    let backend = match &resolved.leaf {
-        Some(leaf) => crate::fit::fit_view::FitView::read(leaf)
-            .and_then(|v| v.methods.first().map(|s| s.backend)),
-        None => resolved.config.inference.method.as_ref().map(|m| m.algorithm.backend()),
-    };
-    let is_ode = backend == Some(crate::run_meta::InferenceBackend::Ode);
-
-    // (a) θ — what the prequential is scored at. With `--draws M ≥ 2` and a
-    // posterior cloud, the honest choice: M thinned draws, one filter pass
-    // each, densities mixed and samples pooled downstream (§3.6, Stage 4.1).
-    // `--draws 1`, or an optimizer fit (no cloud), falls back to the plug-in
-    // point — routed through the draws-cloud authority
-    // (`resolve_posterior_draws`), NOT a per-method point-estimate file: a
-    // Bayesian fit (PGAS/PMMH/MH) writes no `final_params.toml` — its θ̂ is
-    // the posterior MEAN over `draws.tsv`; only an optimizer fit (IF2/NLopt)
-    // has a single winner file.
-    let point = |run_dir| -> Result<(Vec<ScoredTheta>, ThetaSource), String> {
-        let (theta, source) = point_estimate_params_toml(run_dir, selection)?;
-        Ok((vec![theta], source))
-    };
-    let (thetas, theta_source): (Vec<ScoredTheta>, ThetaSource) = if derive.draws >= 2 {
-        match thinned_draws_params_tomls(run_dir, selection, derive.draws)? {
-            Some(thinned) => thinned,
-            None => point(run_dir)?,
-        }
-    } else {
-        point(run_dir)?
-    };
-    let is_mixture = thetas.len() >= 2;
-
-    // (b) model — prefer the self-contained archived IR (Phase 1a), else the
-    // loose source the config names, compiled here once under compare's
-    // compile settings, so both scorers (the in-process ODE scorer and the
-    // `camdl pfilter` child) read one compiled model. config.model.camdl is
-    // already absolute (resolved against the fit.toml dir at load).
-    let archived = segment.join("model.ir.json");
-    let (model_path, _model_tmp): (PathBuf, Option<PathBuf>) = if archived.is_file() {
-        (archived, None)
-    } else {
-        let (ir, tmp) = crate::util::resolve_ir_path(&config.model.camdl, false, None, derive.compile)?;
-        (PathBuf::from(ir), tmp)
-    };
-
-    // The fit's own intervention selection: the filter scores the fitted
-    // model, so it runs the interventions `fit run` ran. Passed as the
-    // resolved `--enable`/`--disable` lists rather than `--scenario`, which
-    // `pfilter` refuses beside the `--params` θ̂ (gh#194); the lists are the
-    // whole of a fit scenario's effect (`util::FitBase`).
-    let fit_base = crate::util::FitBase::of(config)?;
-    let (model, _) = crate::util::load_ir(&model_path.to_string_lossy())?;
-    // The step the fit ran at: the filter re-scores the data through the
-    // fitted process, so it integrates at the fit's dt — not the model's
-    // declared step or 1.0, which is all `pfilter` would see without it.
-    let fitted = crate::fit::fitted_model::stored_fit_simulator(resolved, &model)?;
-    let fitted_dt = fitted.dt;
-    // The settings the fit is scored under: its own `[config]`
-    // `allow_degenerate_rates` and `allow_forcing_extrapolation`, which `fit
-    // run` applied to it, with compare's `--allow-forcing-extrapolation` folded
-    // in (compare has no degenerate-rate flag). Each fit is scored under its
-    // own; both scorers read this one value: the `camdl pfilter` child is
-    // passed it as flags, and the in-process ODE scorer runs under it
-    // (gh#1235).
-    let settings = fitted.settings.with_flags(false, derive.allow_forcing_extrapolation);
-    // When compare's flag turned the setting on, it is said here and recorded
-    // in the trace's derivation (`TraceOverride::ForcingExtrapolationAllowed`).
-    let flag_turned_on_forcing = settings.allow_forcing_extrapolation && !fitted.settings.allow_forcing_extrapolation;
-    if let Some(note) = fitted.settings.turned_on_note(settings, &segment.display().to_string(), "compare scores it") {
-        out.say(format_args!("{note}"));
-    }
-    let (base_enable, base_disable): (Vec<String>, Vec<String>) = if fit_base.is_empty() {
-        (Vec::new(), Vec::new())
-    } else {
-        fit_base.lists(&model).map_err(|e| e.to_string())?
-    };
-
-    // (c) data — source → absolute path, and the leaves each source binds.
-    // The config's data paths were made absolute (relative to the original
-    // fit.toml) at load, so they pass to the child unchanged.
-    let data = config.data.as_ref().ok_or_else(|| format!(
-        "fit at {} has no [data] block — there are no observations to score, so a \
-         prequential trace cannot be derived.\n  Provide an explicit \
-         prequential.json, or compare fits that bind data.",
-        segment.display()))?;
-    let bindings = StreamBindings::resolve(&model, data)?;
-    let mut streams = bindings.training_by_source().clone();
-    if streams.is_empty() {
-        return Err(format!(
-            "fit at {} has a [data] block with no observation streams.",
-            segment.display()));
-    }
-    // gh#585 (Stage 3.4): a fit that declares a holdout is scored held-out
-    // by default — the filter runs over the FULL series at the sealed θ̂
-    // and scores only past the training boundary. `--in-sample` opts out.
-    let holdout = if derive.force_in_sample {
-        None
-    } else {
-        detect_sealed_holdout(resolved, &bindings)?
-    };
-    let scores_holdout_files = holdout.as_ref().is_some_and(|h| !h.holdout_files.is_empty());
-    let recorded_data = fit_data_identity(resolved, &bindings, scores_holdout_files);
-    // The files about to be scored, against the hashes the fit recorded for
-    // them — read before the holdout merge below replaces any path with a
-    // temp file.
-    let mut freshness = check_training_freshness(&streams, &recorded_data);
-    if let (Some(h), DataIdentity::Digests(rec)) = (&holdout, &recorded_data) {
-        for (source, path) in &h.holdout_files {
-            let check = match (rec.holdout_unresolved.get(source), std::fs::read(path)) {
-                (Some(why), _) => FileCheck::NotChecked(why.clone()),
-                (None, Ok(bytes)) => check_file_against_record(
-                    &crate::hashing::sha256_hex(&bytes),
-                    rec.holdout.get(source).map(String::as_str)),
-                (None, Err(e)) => FileCheck::NotChecked(format!("it could not be read: {e}")),
-            };
-            if check != FileCheck::Matches {
-                freshness.findings.push(FileFinding {
-                    stream: format!("{source} (holdout)"), path: path.clone(), check,
-                });
-            }
-        }
-    }
-
-    // Temp files: unique per process + fit segment so concurrent compares don't
-    // collide. STEM has no `.` so pfilter's `{stem}.json` / `{stem}.tsv` are
-    // unambiguous.
-    let seg_slug = segment
-        .file_name()
-        .map(|s| s.to_string_lossy().replace(|c: char| !c.is_ascii_alphanumeric(), "_"))
-        .unwrap_or_else(|| "fit".into());
-    let base = std::env::temp_dir()
-        .join(format!("camdl_compare_{}_{}", std::process::id(), seg_slug));
-
-    // D38: a held-out score scores every row that did not train and ends
-    // after the training extent, the latest end among the fit's training
-    // rows; `pfilter --score-from` assimilates every step at or before it
-    // without scoring it. Each leaf's own last training end is kept for the
-    // non-leakage check on the derived trace.
-    let training_ends = match &holdout {
-        Some(h) => Some(training_scoring_ends(h, &bindings, &model, fitted_dt, segment)?),
-        None => None,
-    };
-    let score_from = holdout.as_ref().map(SealedHoldout::train_end);
-
-    // Explicit `[data.holdout]` fits: the scored series is training ∪
-    // holdout, merged per stream into a temp file (temporal `holdout_after`
-    // fits need no merge — their training files already carry the full
-    // series; the fit truncated at load, not in the file).
-    let mut merged_paths: Vec<PathBuf> = Vec::new();
-    if let Some(h) = &holdout {
-        for (source, holdout_path) in &h.holdout_files {
-            // `StreamBindings::resolve` refused a holdout source with no
-            // training file.
-            let train_path = streams[source].clone();
-            let merged = base.with_extension(format!("{source}.merged.tsv"));
-            merge_holdout_file(&train_path, holdout_path, &merged)?;
-            streams.insert(source.clone(), merged.to_string_lossy().into_owned());
-            merged_paths.push(merged);
-        }
-    }
-
-    // (d) run the canonical filter — once per θ per replicate. Within a
-    // replicate every pass shares the filter seed and score window, so
-    // mixture components differ ONLY in θ; replicates differ ONLY in seed
-    // (common random numbers across draws and across compared fits).
-    let exe = std::env::current_exe()
-        .map_err(|e| format!("cannot locate the running camdl binary: {e}"))?;
-    let run_pass = |pass: usize, params_toml: &str, seed: u64| -> Result<PrequentialTrace, PassError> {
-        let other = PassError::Other;
-        let theta_path = base.with_extension(format!("theta{pass}.toml"));
-        let preq_stem = format!("{}_preq{pass}", base.to_string_lossy());
-        let preq_json = format!("{preq_stem}.json");
-        let preq_tsv = format!("{preq_stem}.tsv");
-        let cleanup = || {
-            let _ = std::fs::remove_file(&theta_path);
-            let _ = std::fs::remove_file(&preq_json);
-            let _ = std::fs::remove_file(&preq_tsv);
-        };
-        if let Err(e) = std::fs::write(&theta_path, params_toml) {
-            cleanup();
-            return Err(other(format!("writing temp params {}: {}", theta_path.display(), e)));
-        }
-        let mut cmd = std::process::Command::new(&exe);
-        cmd.arg("pfilter")
-            .arg(&model_path)
-            .arg("--params").arg(&theta_path)
-            .arg("--save-prequential").arg(&preq_stem)
-            .arg("--particles").arg(derive.particles.to_string())
-            .arg("--seed").arg(seed.to_string())
-            .arg("--dt").arg(fitted_dt.to_string())
-            // The trace is the product; a stored log-likelihood leaf under
-            // the caller's output root is not.
-            .arg("--no-store")
-            .env("CAMDL_SKIP_VERSION_CHECK", "1");
-        // `pfilter --data NAME=PATH` binds NAME as a leaf name (or the
-        // prefix of a family of leaf names), not as a source, so every leaf
-        // of a source is named with its source's file.
-        for (source, abs_path) in &streams {
-            for leaf in bindings.leaves_of(source) {
-                cmd.arg("--data").arg(format!("{leaf}={abs_path}"));
-            }
-        }
-        for name in &base_enable {
-            cmd.arg("--enable").arg(name);
-        }
-        for name in &base_disable {
-            cmd.arg("--disable").arg(name);
-        }
-        // The child is a separate process and runs under its own flags.
-        if settings.allow_degenerate_rates {
-            cmd.arg("--allow-degenerate-rates");
-        }
-        if settings.allow_forcing_extrapolation {
-            cmd.arg("--allow-forcing-extrapolation");
-        }
-        // gh#585 (Stage 3.4): score only past the sealed training boundary,
-        // the training extent (D38).
-        if let Some(t) = score_from {
-            cmd.arg("--score-from").arg(t.to_string());
-        }
-        let output = match cmd.output() {
-            Ok(o) => o,
-            Err(e) => { cleanup(); return Err(other(format!("spawning `camdl pfilter`: {e}"))); }
-        };
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let code = output.status.code()
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| "signal".into());
-            cleanup();
-            let message = format!(
-                "deriving prequential via `camdl pfilter` failed (exit {code}) for fit {}:\n{}",
-                segment.display(),
-                stderr.trim());
-            // Only a filter that ran and failed at θ says anything about the
-            // draw; a missing data file or a version mismatch fails every θ.
-            return Err(if output.status.code() == Some(crate::pfilter::FILTER_FAILED.0) {
-                PassError::FilterRejected(message)
-            } else {
-                PassError::Other(message)
-            });
-        }
-        // (e) read back the trace.
-        let text = match std::fs::read_to_string(&preq_json) {
-            Ok(t) => t,
-            Err(e) => { cleanup(); return Err(other(format!(
-                "`camdl pfilter` succeeded but its prequential output {preq_json} could not be read: {e}"))); }
-        };
-        let trace = serde_json::from_str::<PrequentialTrace>(&text)
-            .map_err(|e| other(format!("parsing derived prequential {preq_json}: {e}")));
-        cleanup();
-        trace
-    };
-
-    let mut replicate_traces: Vec<PrequentialTrace> =
-        Vec::with_capacity(derive.replicates);
-    let n_theta = thetas.len();
-    if is_ode {
-        // gh#312: no filter. Each θ is scored by the fit's own ODE likelihood,
-        // exactly; the observation-model draws feed only CRPS, PIT and the
-        // interval, and a seed changes nothing else, so there are no replicates.
-        if is_mixture {
-            out.say(format_args!(
-                "compare: {}: ODE free-forward scores at {} posterior draw(s), {} \
-                 observation-model draws each (deterministic — no filter, so \
-                 --replicates does not apply; --draws 1 for the plug-in mode)",
-                seg_slug, n_theta, derive.particles));
-        }
-        let scored = derive_ode_trace(resolved, &model_path, &streams, &fitted, settings,
-            score_from, &thetas, derive, &base_enable, &base_disable);
-        for p in &merged_paths { let _ = std::fs::remove_file(p); }
-        replicate_traces.push(scored?);
-    } else if is_mixture || derive.replicates >= 2 {
-        out.say(format_args!(
-            "compare: {}: {} filter passes ({} draw(s) × {} replicate(s), \
-             {} particles each; --draws 1 / --replicates 1 for the cheap modes)",
-            crate::fit::report::display_path(segment), n_theta * derive.replicates, n_theta, derive.replicates,
-            derive.particles));
-    }
-    // The filter passes; none for an ODE fit, scored above.
-    let filter_replicates = if is_ode { 0 } else { derive.replicates };
-    for rep in 0..filter_replicates {
-        // §3.4 remedy 4: replicate r reruns everything at seed + r.
-        let seed_r = derive.seed + rep as u64;
-        let mut component_traces = Vec::with_capacity(n_theta);
-        for (i, theta) in thetas.iter().enumerate() {
-            let r = run_pass(rep * n_theta + i, &theta.toml, seed_r).map_err(|e| match e {
-                PassError::FilterRejected(e) if is_mixture => {
-                    // A degenerate mixture component is informative, not
-                    // repairable: dropping it would bias the mixture toward
-                    // well-behaved θ, misrepresenting the predictive.
-                    format!(
-                        "mixture component {} of {} (a retained posterior draw) \
-                         could not be scored — the posterior holds θ the filter \
-                         cannot track through this data.\n  If a stuck/divergent \
-                         chain put it there, drop that chain with \
-                         --exclude-chains; --draws 1 scores the plug-in posterior \
-                         mean instead.\n  {}",
-                        i + 1, n_theta, e)
-                }
-                PassError::FilterRejected(e) | PassError::Other(e) => e,
-            });
-            if r.is_err() {
-                for p in &merged_paths { let _ = std::fs::remove_file(p); }
-            }
-            component_traces.push(r?);
-        }
-        let t = if is_mixture {
-            combine_mixture(component_traces, seed_r)?
-        } else {
-            component_traces.into_iter().next().expect("one pass ran")
-        };
-        replicate_traces.push(t);
-    }
-    for p in &merged_paths { let _ = std::fs::remove_file(p); }
-
-    // The filter-noise MC SE, from the replicate TOTAL elpds combined by
-    // log-mean-exp with its delta-method SE (pomp practice; the PF
-    // likelihood estimator is unbiased on the natural scale). The headline
-    // elpd below is the SUM of per-step log-mean-exp values — the
-    // pointwise-consistent aggregate (its steps sum to it, and the paired
-    // Δ machinery reads the steps); the two aggregates agree in
-    // expectation to O(per-step variance), and the SE measures the same
-    // filter-noise scale either way.
-    let totals = ReplicateTotals::of(&replicate_traces);
-    let n_replicates = replicate_traces.len();
-    let mut trace = if replicate_traces.len() >= 2 {
-        combine_scored_traces(replicate_traces, derive.seed)?
-    } else {
-        replicate_traces.into_iter().next().expect("one replicate ran")
-    };
-    // Schema 5: each pass recorded its own single run; the trace as combined
-    // is what this derivation did. The excluded chains are recorded only
-    // where they applied — a θ drawn from a posterior cloud.
-    let excluded_chains = match theta_source {
-        ThetaSource::PosteriorMean { .. } | ThetaSource::PosteriorDraws { .. } =>
-            match selection {
-                Some(s) => dropped_chains(run_dir, s)?,
-                None => Vec::new(),
-            },
-        ThetaSource::Supplied | ThetaSource::OptimizerWinner => Vec::new(),
-    };
-    let derivation = trace.derivation.as_mut().ok_or_else(|| format!(
-        "internal error: `camdl pfilter` wrote a trace for {} with no derivation \
-         block", segment.display()))?;
-    // The replicates that ran: one for an ODE fit, which has no filter noise.
-    derivation.replicates = n_replicates;
-    derivation.theta = theta_source;
-    derivation.excluded_chains = excluded_chains;
-    derivation.replicate_elpd = totals.elpd;
-    derivation.replicate_elpd_by_stream = totals.by_stream;
-    derivation.mc_se_elpd = totals.mc_se;
-    // `--in-sample` waived this fit's sealed holdout: the trace says so.
-    let declares_holdout = config.data.as_ref()
-        .is_some_and(|d| d.holdout_after.is_some() || d.holdout.is_some());
-    if derive.force_in_sample && declares_holdout {
-        derivation.overrides.push(TraceOverride::InSampleForced);
-    }
-    // compare's `--allow-forcing-extrapolation` turned the setting on for a fit
-    // made without it: the trace says so.
-    if flag_turned_on_forcing {
-        derivation.overrides.push(TraceOverride::ForcingExtrapolationAllowed);
-    }
-
-    // gh#585 (Stage 3.5): §3.7.3(c) — the `HoldOutTail` stamp is granted
-    // only after checking, on the derived trace itself, that no scored
-    // value is a training row (gh#1062: per leaf, on the scoring axis).
-    // (a) and (b) were established by `detect_sealed_holdout`. The
-    // guarantee is precisely "no data leakage into θ": it cannot certify
-    // that the modeler chose the model family without seeing the full curve.
-    if let (Some(h), Some(ends)) = (holdout, &training_ends) {
-        if trace.steps.is_empty() {
-            return Err(format!(
-                "fit at {}: the held-out window (t > {}) contains no scored \
-                 observations — nothing lies past the training boundary in \
-                 the bound data.",
-                segment.display(), h.train_end()));
-        }
-        check_no_training_row_scored(&trace, ends, h.train_end(), segment)?;
-        // The stamp records the fit's training extent.
-        trace.conditioning = Conditioning::HoldOutTail {
-            train_end: h.train_end(),
-            // The fit's folder in the store, never the copy read here.
-            theta_source: crate::fit::report::display_path(segment),
-        };
-    }
-    let streams = RowStreams::Derived {
-        declared: model.observations.iter().map(|o| (o.name.clone(), o.source.clone())).collect(),
-        bindings,
-    };
-    Ok(Derived { trace, data: recorded_data, freshness, streams })
-}
-
-/// An ODE fit's trace (gh#312): each θ scored in-process by the fit's own
-/// ODE likelihood over the full series (`compare_ode::OdeScorer`), then — for
-/// several posterior draws — combined into the posterior mixture by the same
-/// [`combine_mixture`] the filter path uses, so the step score is
-/// `log (1/M) Σ_m p(y_t | x_t(θ_m))`, the log of the mixture density and not
-/// the mean of the per-draw logs.
-///
-/// Every draw is scored with the same observation-sample seed and the same
-/// window, so components differ only in θ, as the filter path's do. A held-out
-/// fit is scored past `score_from`, the scoring-axis boundary the filter path
-/// passes to `camdl pfilter --score-from` (the training extent, D38;
-/// gh#1062), by the index rule `--score-from` applies
-/// ([`crate::fit::runner::first_scored_index`]), and the trace records that
-/// boundary as the filter's does; the caller verifies and stamps the window
-/// as for any derived trace.
-#[allow(clippy::too_many_arguments)]
-fn derive_ode_trace(
-    resolved: &ResolvedFit,
-    model_path: &Path,
-    streams: &indexmap::IndexMap<String, String>,
-    fitted: &crate::fit::fitted_model::FittedSimulator,
-    settings: crate::fit::fitted_model::FittedSettings,
-    score_from: Option<f64>,
-    thetas: &[ScoredTheta],
-    derive: DeriveSettings,
-    enabled: &[String],
-    disabled: &[String],
-) -> Result<PrequentialTrace, String> {
-    // This fit's forcing policy, for its scoring only: the guard puts back
-    // compare's own policy when it drops. What it held goes into the trace.
-    // Recording only: the holds are printed on the fit's rows, as a
-    // `camdl pfilter` child's are, not also as a warning when met. Installed
-    // before the scorer below compiles the fit's model, so that model reports
-    // to this policy (`forcing_extrapolation`'s module doc).
-    let forcing = crate::forcing_extrapolation::ForcingPolicy::recording(settings.allow_forcing_extrapolation);
-    let _forcing_route = forcing.install();
-    let scorer = crate::compare_ode::OdeScorer::build(resolved, model_path, streams, fitted, settings)?;
-    let t0 = score_from
-        .map_or(0, |t| crate::fit::runner::first_scored_index(scorer.obs_times(), t));
-    let n = thetas.len();
-    let mut components = Vec::with_capacity(n);
-    for (i, theta) in thetas.iter().enumerate() {
-        let trace = scorer.score(&theta.values, derive.particles, derive.seed, t0,
-            score_from, enabled.to_vec(), disabled.to_vec())
-            .map_err(|e| {
-                let which = if n >= 2 {
-                    format!("mixture component {} of {n} (a retained posterior draw)", i + 1)
-                } else {
-                    "the point estimate".to_string()
-                };
-                let horizon = if score_from.is_some() {
-                    "\n  A held-out score integrates the ODE through the held-out \
-                     observations, so the model's horizon (`simulate { to }`) and \
-                     output schedule must reach them."
-                } else { "" };
-                format!("fit at {}: {which} could not be scored: {e}{horizon}",
-                    resolved.segment.display())
-            })?;
-        components.push(trace);
-    }
-    let mut trace = if n >= 2 {
-        combine_mixture(components, derive.seed)?
-    } else {
-        components.pop().expect("one θ was scored")
-    };
-    trace.warnings.extend(forcing.trace_warnings());
-    Ok(trace)
-}
-
 /// A row's line for a forcing held while its trace was scored
 /// ([`PrequentialWarning::ForcingHeld`]), in the words of the run's own warning
 /// (`OutsideRange`'s `Display`); `None` for any other warning.
@@ -3171,215 +2321,6 @@ fn held_forcing_line(row: &str, w: &PrequentialWarning) -> Option<String> {
         // The clause the run's own warning adds (`OutsideRange::lag_clause`).
         if *lagged == Some(true) { "; the forcing has a lag, so these are times of its argument, t − lag" } else { "" },
     ))
-}
-
-/// Combine per-draw filter traces into the posterior-mixture predictive
-/// (§3.6 of the 2026-08-29 proposal; Stage 4.1).
-///
-/// The honest Bayesian predictive is the mixture over draws
-/// `p̂(y_t|·) = (1/M) Σ_m p̂(y_t|·,θ_m)`, so per-step log scores combine
-/// as `logsumexp_m − log M` over the per-draw *densities* — averaging the
-/// per-draw log scores instead is a different, strictly lower number
-/// (Jensen) that scores each θ separately rather than the model's actual
-/// predictive. Stamped `Provenance::Posterior { n_draws }`.
-fn combine_mixture(
-    traces: Vec<PrequentialTrace>,
-    pit_seed: u64,
-) -> Result<PrequentialTrace, String> {
-    use score::trace::Provenance;
-    let m = traces.len();
-    let mut trace = combine_scored_traces(traces, pit_seed)?;
-    trace.provenance = Provenance::Posterior { n_draws: m };
-    Ok(trace)
-}
-
-/// The shared per-step combination behind [`combine_mixture`] (per-draw
-/// predictives, Stage 4.1) and replicate derives (per-seed re-estimates
-/// of ONE predictive, Stage 4.2). The arithmetic is the same log-mean-exp
-/// either way; the meaning differs — a mixture density over draws vs the
-/// unbiased-on-the-natural-scale combination of replicate PF density
-/// estimates (pomp practice) — and the caller stamps the provenance
-/// accordingly.
-///
-/// Per step: the joint log score = log-mean-exp over components; per
-/// stream, the log score likewise, and the stream's predictive samples
-/// pooled (the pooled cloud is a draw from the combined predictive), so its
-/// fair CRPS, randomized PIT (fresh seeded draws) and interval are computed
-/// on the pool; ESS is the MIN across components (the weakest effective
-/// support); warnings deduplicated by kind.
-///
-/// Every component ran with the same data and scoring boundary, so the
-/// step axes must be identical — anything else is a derive bug, not a
-/// user error.
-fn combine_scored_traces(
-    traces: Vec<PrequentialTrace>,
-    pit_seed: u64,
-) -> Result<PrequentialTrace, String> {
-    use score::trace::{
-        crps_sample_fair, pit_sample_randomized, PredInterval, PrequentialStep,
-        StreamScore,
-    };
-    use sim::inference::prequential::PIT_RNG_STREAM;
-    let m = traces.len();
-    assert!(m >= 2, "combine_scored_traces needs >= 2 components");
-    let first = &traces[0];
-    for t in &traces[1..] {
-        let same_axis = t.basis == first.basis
-            && t.steps.len() == first.steps.len()
-            && t.steps.iter().zip(&first.steps).all(|(a, b)| {
-                a.t == b.t
-                    && a.per_stream.len() == b.per_stream.len()
-                    && a.per_stream.iter().zip(&b.per_stream)
-                        .all(|(x, y)| x.stream == y.stream && x.coverage == y.coverage)
-            });
-        if !same_axis {
-            return Err(
-                "internal error: mixture components scored different \
-                 observation axes — same data, seed and boundary must give \
-                 identical steps".into());
-        }
-    }
-
-    // Fresh randomized-PIT draws for the pooled predictives, consumed in
-    // build_trace's order (step by step, one per stream) for consistency.
-    let mut pit_rng = sim::rng::StatefulRng::new_stream(pit_seed, PIT_RNG_STREAM);
-
-    let mut steps = Vec::with_capacity(first.steps.len());
-    for si in 0..first.steps.len() {
-        let ls: Vec<f64> = traces.iter().map(|t| t.steps[si].log_score).collect();
-        let (log_score, _) = numerics::logmeanexp_with_se(&ls);
-        let ess = traces.iter().map(|t| t.steps[si].ess)
-            .fold(f64::INFINITY, f64::min);
-
-        let mut per_stream = Vec::with_capacity(first.steps[si].per_stream.len());
-        for pi in 0..first.steps[si].per_stream.len() {
-            let ss0 = &first.steps[si].per_stream[pi];
-            let ls_s: Vec<f64> = traces.iter()
-                .map(|t| t.steps[si].per_stream[pi].log_score).collect();
-            let (log_score_s, _) = numerics::logmeanexp_with_se(&ls_s);
-            let mut pooled_s: Vec<f64> = Vec::new();
-            for t in &traces {
-                pooled_s.extend_from_slice(&t.steps[si].per_stream[pi].y_pred_samples);
-            }
-            per_stream.push(StreamScore {
-                stream: ss0.stream.clone(),
-                y_obs: ss0.y_obs,
-                log_score: log_score_s,
-                crps: crps_sample_fair(&pooled_s, ss0.y_obs),
-                pit: pit_sample_randomized(&pooled_s, ss0.y_obs, pit_rng.uniform()),
-                interval: PredInterval::from_samples(&pooled_s),
-                y_pred_samples: pooled_s,
-                coverage: ss0.coverage,
-            });
-        }
-
-        steps.push(PrequentialStep {
-            t: first.steps[si].t,
-            log_score, ess,
-            per_stream,
-        });
-    }
-
-    // Union of warnings, one per kind (the counts differ per component;
-    // the first instance is representative), and one per forcing and side
-    // for a held forcing (`PrequentialWarning::same_as`).
-    let mut warnings: Vec<PrequentialWarning> = Vec::new();
-    for t in &traces {
-        for w in &t.warnings {
-            if !warnings.iter().any(|have| have.same_as(w)) {
-                warnings.push(w.clone());
-            }
-        }
-    }
-
-    Ok(PrequentialTrace {
-        schema_version: first.schema_version,
-        t0: first.t0,
-        provenance: first.provenance,
-        conditioning: first.conditioning.clone(),
-        basis: first.basis,
-        steps,
-        warnings,
-        score_from: first.score_from,
-        pit_randomization_seed: Some(pit_seed),
-        derivation: first.derivation.clone(),
-        scored_streams: first.scored_streams.clone(),
-    })
-}
-
-/// Up to `m` evenly thinned posterior draws as flat params TOMLs — the
-/// mixture components of §3.6. `Ok(None)` when the fit has no posterior
-/// cloud (an optimizer fit: a mixture is impossible, the plug-in winner
-/// is the fallback). Thinning is an even stride over the retained
-/// (chain-filtered) rows in file order; fewer rows than `m` uses them
-/// all. Reads through the shared draws authority so `--exclude-chains`
-/// applies once, at the same seam every other consumer uses.
-fn thinned_draws_params_tomls(
-    segment: &Path,
-    selection: Option<&ChainSelection>,
-    m: usize,
-) -> Result<Option<(Vec<ScoredTheta>, ThetaSource)>, String> {
-    let pdraws = match crate::posterior_draws::resolve_posterior_draws(
-        &segment.to_string_lossy(), None,
-    ) {
-        Ok(p) => p.with_selection(selection.cloned()),
-        // No cloud: the caller scores the point estimate instead. Any other
-        // failure (a leaf refused for its chain numbering, gh#990) is an error,
-        // not a fallback.
-        Err(crate::posterior_draws::PosteriorDrawsError::NoPosterior(_)) => return Ok(None),
-        Err(e) => return Err(e.into()),
-    };
-    let (rows, _info) = pdraws.load_params_with_info()?;
-    let n = rows.len();
-    if n == 0 {
-        return Err(format!("no posterior draws in {}", pdraws.draws_path.display()));
-    }
-    let m_eff = m.min(n);
-    let mut out = Vec::with_capacity(m_eff);
-    for i in 0..m_eff {
-        let row = &rows[i * n / m_eff];
-        let values: std::collections::BTreeMap<String, f64> =
-            row.iter().map(|(k, v)| (k.clone(), *v)).collect();
-        let mut s = String::new();
-        s.push_str("# camdl compare: thinned posterior draw (mixture component)\n\n");
-        for (name, v) in &values {
-            s.push_str(&format!(
-                "{} = {}\n", name,
-                crate::fit::runner::format_param_value(*v)));
-        }
-        out.push(ScoredTheta { toml: s, values });
-    }
-    Ok(Some((out, ThetaSource::PosteriorDraws { n_used: m_eff, n_available: n })))
-}
-
-/// Merge a training file and its held-out tail into one scored series
-/// (gh#585): compare's held-out derivation filters over training ∪
-/// holdout. The two files must share a header line (the holdout file is
-/// the same schema by declaration); holdout rows are strictly after the
-/// training tail (validated when the fit ran), so appending preserves
-/// time order.
-#[expect(clippy::disallowed_methods, reason = "reads a training file and its held-out file, named by the stored fit's config, into a temporary scored series; `compare` stores no result")]
-fn merge_holdout_file(train: &str, holdout: &str, out: &Path) -> Result<(), String> {
-    let t = std::fs::read_to_string(train)
-        .map_err(|e| format!("reading training data {train}: {e}"))?;
-    let h = std::fs::read_to_string(holdout)
-        .map_err(|e| format!("reading holdout data {holdout}: {e}"))?;
-    let t_header = t.lines().next().unwrap_or("");
-    let h_header = h.lines().next().unwrap_or("");
-    if t_header != h_header {
-        return Err(format!(
-            "[data.holdout] file {holdout} has a different header than its \
-             training file {train}:\n  training: {t_header}\n  holdout:  {h_header}"));
-    }
-    let mut merged = String::with_capacity(t.len() + h.len());
-    merged.push_str(t.trim_end());
-    merged.push('\n');
-    for line in h.lines().skip(1) {
-        merged.push_str(line);
-        merged.push('\n');
-    }
-    std::fs::write(out, merged)
-        .map_err(|e| format!("writing merged series {}: {e}", out.display()))
 }
 
 /// Chain exclusion for the compared cohort, resolved per fit by name. A fit
@@ -3526,110 +2467,6 @@ fn parse_cohort_selection(
     Ok(CohortChainSelection { per_fit, cohort_wide: false })
 }
 
-/// The chain ids a selection drops from the run at `run_dir`, by resolving it
-/// against the run's draws: the record a derived prequential carries, which
-/// names dropped chains whichever flag selected them.
-fn dropped_chains(run_dir: &Path, sel: &ChainSelection) -> Result<Vec<usize>, String> {
-    let pdraws = crate::posterior_draws::resolve_posterior_draws(&run_dir.to_string_lossy(), None)
-        .map_err(|e| -> String { e.into() })?;
-    let present = crate::chain_selection::chains_in_draws(&pdraws.draws_path)?;
-    Ok(sel.resolve(&present)?.excluded.iter().map(|c| c.0).collect())
-}
-
-/// θ̂ for the prequential as a flat params TOML, routed through the draws-cloud
-/// authority. A Bayesian fit (its terminal method wrote a `draws.tsv`) plugs in
-/// the posterior MEAN over the cloud; an optimizer fit (no cloud) plugs in its
-/// winner file (`final_params.toml`, via `winner_params_toml`). This is the
-/// "resolve by artifact, not by method name" rule — the headline `compare
-/// @pgas_a @pgas_b` Bayesian comparison was previously dead-ending on the
-/// IF2-only `final_params.toml`.
-///
-/// A `--exclude-chains` selection (gh#417) is attached to the resolved draws
-/// ref, so the posterior mean is taken over the RETAINED cloud — the same
-/// filter `camdl predict`/`fit summary` apply. An optimizer fit has no cloud, so
-/// the selection has nothing to filter there.
-fn point_estimate_params_toml(
-    segment: &Path,
-    selection: Option<&ChainSelection>,
-) -> Result<(ScoredTheta, ThetaSource), String> {
-    match crate::posterior_draws::resolve_posterior_draws(&segment.to_string_lossy(), None) {
-        Ok(pdraws) => posterior_mean_params_toml(&pdraws.with_selection(selection.cloned()))
-            .map(|(theta, n_draws)| (theta, ThetaSource::PosteriorMean { n_draws })),
-        // No posterior cloud → an optimizer fit; its θ̂ is the single winner,
-        // whose values are the winner file's as written.
-        Err(crate::posterior_draws::PosteriorDrawsError::NoPosterior(_)) => {
-            let toml = crate::fit::fit_summary::winner_params_toml(segment)?;
-            let values = flat_params_of(&toml)
-                .map_err(|e| format!("reading the winning parameters of {}: {e}",
-                    segment.display()))?;
-            Ok((ScoredTheta { toml, values }, ThetaSource::OptimizerWinner))
-        }
-        // Anything else — a leaf refused for counting its chains from 1
-        // (gh#990) — must not be scored at a winner instead.
-        Err(e) => Err(e.into()),
-    }
-}
-
-/// The posterior MEAN of every parameter column in a fit's draws cloud as a flat
-/// params TOML — the plug-in point a prequential is scored at for a Bayesian
-/// fit. Every model parameter is a column (estimated + fixed); a fixed column is
-/// constant, so its mean is the fixed value. Columns are emitted in sorted order
-/// for determinism.
-///
-/// Reads through the shared draws authority ([`PosteriorDrawsRef`]) so an
-/// attached `--exclude-chains` selection is applied ONCE, here, before the mean
-/// — the same seam `camdl predict`/`fit summary` use, rather than a second raw
-/// draws reader. The `(chain, draw)` key columns are dropped by the keyed
-/// loader, never emitted as parameters (gh#322).
-fn posterior_mean_params_toml(pref: &PosteriorDrawsRef) -> Result<(ScoredTheta, usize), String> {
-    let (rows, _info) = pref.load_params_with_info()?;
-    let n = rows.len();
-    if n == 0 {
-        return Err(format!("no posterior draws in {}", pref.draws_path.display()));
-    }
-    // Sum each parameter over the retained rows in file order — one accumulator
-    // per name, so the intra-row (HashMap) order is irrelevant; the BTreeMap
-    // keeps the emit order sorted and deterministic.
-    let mut sums: std::collections::BTreeMap<String, f64> = std::collections::BTreeMap::new();
-    for row in &rows {
-        for (name, v) in row {
-            *sums.entry(name.clone()).or_insert(0.0) += *v;
-        }
-    }
-    let mut out = String::new();
-    out.push_str("# camdl compare: posterior-mean point estimate (θ̂) for the prequential\n");
-    out.push_str(&format!("# source: {} ({n} draws)\n\n", pref.draws_path.display()));
-    let values: std::collections::BTreeMap<String, f64> =
-        sums.into_iter().map(|(name, sum)| (name, sum / n as f64)).collect();
-    for (name, v) in &values {
-        out.push_str(&format!(
-            "{} = {}\n",
-            name,
-            crate::fit::runner::format_param_value(*v)
-        ));
-    }
-    Ok((ScoredTheta { toml: out, values }, n))
-}
-
-/// One θ a derived trace is scored at, in the two forms its two scorers read:
-/// the flat params TOML handed to a `camdl pfilter` child, and the values
-/// themselves, which the in-process ODE scorer uses so that it scores the
-/// draw at full precision rather than at the TOML's printed digits.
-struct ScoredTheta {
-    toml: String,
-    values: std::collections::BTreeMap<String, f64>,
-}
-
-/// The `name = value` entries of a flat params TOML (a fit's winner file).
-fn flat_params_of(toml_text: &str) -> Result<std::collections::BTreeMap<String, f64>, String> {
-    let table: toml::Table = toml_text.parse().map_err(|e| format!("{e}"))?;
-    table.iter().map(|(k, v)| match v {
-        toml::Value::Float(f) => Ok((k.clone(), *f)),
-        toml::Value::Integer(i) => Ok((k.clone(), *i as f64)),
-        other => Err(format!("'{k}' is not a number: {other}")),
-    }).collect()
-}
-
 /// The reason a row has no CRPS or calibration figure when its trace scored
 /// steps but carries no per-stream breakdown.
 const NO_STREAM_BREAKDOWN: &str = "trace predates the per-stream breakdown";
@@ -3648,6 +2485,44 @@ struct StreamAccuracy {
     delta_mean_crps: Option<f64>,
     /// The share of the stream's PIT values inside the central 90%.
     pit_cov90: StreamMean,
+    /// The mean weighted interval score, and its paired difference against
+    /// the baseline as for `delta_mean_crps`; `None` for a trace that records
+    /// no WIS (a prequential.json).
+    mean_wis: Option<StreamMean>,
+    delta_mean_wis: Option<f64>,
+    /// The share of the stream's observations inside the central 50%
+    /// interval; `None` for a trace that records no interval membership.
+    cov50: Option<StreamMean>,
+}
+
+/// The accuracy columns a rendering shows: those the metrics ask for, and,
+/// of WIS and the 50% coverage, only those some row records.
+#[derive(Debug, Clone, Copy)]
+struct Want {
+    crps: bool,
+    wis: bool,
+    pit: bool,
+    cov50: bool,
+}
+
+impl Want {
+    fn of(metrics: &[String], accuracy: &[Accuracy]) -> Want {
+        let asked = |names: &[&str]| metrics.iter().any(|m| names.contains(&m.as_str()));
+        let recorded = |f: fn(&StreamAccuracy) -> bool| accuracy.iter().any(|a| match a {
+            Accuracy::PerStream(v) => v.iter().any(f),
+            Accuracy::Unavailable(_) => false,
+        });
+        Want {
+            crps: asked(&["crps"]),
+            wis: asked(&["wis"]) && recorded(|s| s.mean_wis.is_some()),
+            pit: asked(&["pit_cov90", "pit"]),
+            cov50: asked(&["cov50"]) && recorded(|s| s.cov50.is_some()),
+        }
+    }
+
+    fn any(self) -> bool {
+        self.crps || self.wis || self.pit || self.cov50
+    }
 }
 
 /// What a row can say about accuracy and calibration: per stream, or nothing
@@ -3670,23 +2545,30 @@ fn row_accuracy(row: &Row, base: &Row) -> Accuracy {
         });
     }
     let is_base = std::ptr::eq(row, base);
+    // The mean paired difference of one per-observation figure against the
+    // baseline, over the observations both scored at the same times.
+    let delta = |stream: &str, of: fn(&score::trace::StreamScore) -> Option<f64>| -> Option<f64> {
+        if is_base {
+            return None;
+        }
+        let a: Vec<(f64, Option<f64>)> = row.trace.stream_scores(stream).map(|(t, s)| (t, of(s))).collect();
+        let b: Vec<(f64, Option<f64>)> = base.trace.stream_scores(stream).map(|(t, s)| (t, of(s))).collect();
+        let same_times = a.len() == b.len() && a.iter().zip(&b).all(|(x, y)| x.0 == y.0);
+        let diffs: Vec<f64> = a.iter().zip(&b)
+            .filter_map(|(x, y)| Some(x.1? - y.1?))
+            .filter(|d| d.is_finite())
+            .collect();
+        (same_times && !diffs.is_empty()).then(|| diffs.iter().sum::<f64>() / diffs.len() as f64)
+    };
     Accuracy::PerStream(streams.into_iter().map(|stream| {
-        let delta_mean_crps = (!is_base).then(|| {
-            let a: Vec<(f64, f64)> = row.trace.stream_scores(stream).map(|(t, s)| (t, s.crps)).collect();
-            let b: Vec<(f64, f64)> = base.trace.stream_scores(stream).map(|(t, s)| (t, s.crps)).collect();
-            let same_times = a.len() == b.len() && a.iter().zip(&b).all(|(x, y)| x.0 == y.0);
-            let diffs: Vec<f64> = a.iter().zip(&b)
-                .map(|(x, y)| x.1 - y.1)
-                .filter(|d| d.is_finite())
-                .collect();
-            (same_times && !diffs.is_empty())
-                .then(|| diffs.iter().sum::<f64>() / diffs.len() as f64)
-        }).flatten();
         StreamAccuracy {
             stream: stream.to_string(),
             mean_crps: row.trace.mean_crps(stream),
-            delta_mean_crps,
+            delta_mean_crps: delta(stream, |s| Some(s.crps)),
             pit_cov90: row.trace.pit_coverage(stream, 0.90),
+            mean_wis: row.trace.mean_wis(stream),
+            delta_mean_wis: delta(stream, |s| s.wis),
+            cov50: row.trace.coverage_50(stream),
         }
     }).collect())
 }
@@ -3756,26 +2638,43 @@ fn render_order(rows: &[Row], base_idx: usize, t_mismatch: bool) -> Vec<usize> {
 /// The cells of one stream × row line, in the per-stream block's column
 /// order (`n`, then the wanted metrics), or the shared columns of the
 /// single-stream table (`want_n = false`).
-fn accuracy_cells(sa: &StreamAccuracy, want_n: bool, want_crps: bool, want_pit: bool,
-                  delta_shown: bool) -> Vec<String> {
+fn accuracy_cells(sa: &StreamAccuracy, want_n: bool, want: Want, delta_shown: bool) -> Vec<String> {
     let mut cells = Vec::new();
+    let delta = |d: Option<f64>| match (delta_shown, d) {
+        (true, Some(d)) => format!("{:+.3}", d),
+        _ => "—".into(),
+    };
     if want_n { cells.push(sa.mean_crps.n.to_string()); }
-    if want_crps {
+    if want.crps {
         cells.push(format!("{:.3}", sa.mean_crps.value));
-        cells.push(match (delta_shown, sa.delta_mean_crps) {
-            (true, Some(d)) => format!("{:+.3}", d),
-            _ => "—".into(),
-        });
+        cells.push(delta(sa.delta_mean_crps));
     }
-    if want_pit { cells.push(format!("{:.2}", sa.pit_cov90.value)); }
+    if want.wis {
+        cells.push(sa.mean_wis.map_or("—".into(), |m| format!("{:.3}", m.value)));
+        cells.push(delta(sa.delta_mean_wis));
+    }
+    if want.pit { cells.push(format!("{:.2}", sa.pit_cov90.value)); }
+    if want.cov50 { cells.push(sa.cov50.map_or("—".into(), |m| format!("{:.2}", m.value))); }
     cells
 }
 
+/// The accuracy columns of the single-stream table's header.
+fn accuracy_columns(want: Want) -> Vec<String> {
+    let mut h: Vec<String> = Vec::new();
+    if want.crps { h.push("crps".into()); h.push("Δcrps".into()); }
+    if want.wis { h.push("wis".into()); h.push("Δwis".into()); }
+    if want.pit { h.push("PIT_cov90".into()); }
+    if want.cov50 { h.push("cov50".into()); }
+    h
+}
+
 /// The per-stream block's header, with the wanted metric columns.
-fn accuracy_header(want_crps: bool, want_pit: bool) -> Vec<String> {
+fn accuracy_header(want: Want) -> Vec<String> {
     let mut h: Vec<String> = vec!["stream".into(), "model".into(), "n".into()];
-    if want_crps { h.push("mean CRPS".into()); h.push("Δ mean CRPS".into()); }
-    if want_pit { h.push("PIT_cov90".into()); }
+    if want.crps { h.push("mean CRPS".into()); h.push("Δ mean CRPS".into()); }
+    if want.wis { h.push("mean WIS".into()); h.push("Δ mean WIS".into()); }
+    if want.pit { h.push("PIT_cov90".into()); }
+    if want.cov50 { h.push("cov50".into()); }
     h
 }
 
@@ -3783,8 +2682,8 @@ fn accuracy_header(want_crps: bool, want_pit: bool) -> Vec<String> {
 /// order, `None` when there is nothing to show (no wanted metric, or no row
 /// with a per-stream breakdown).
 fn accuracy_block(rows: &[Row], order: &[usize], accuracy: &[Accuracy],
-                  want_crps: bool, want_pit: bool, t_mismatch: bool) -> Option<Vec<Vec<String>>> {
-    if !(want_crps || want_pit) { return None; }
+                  want: Want, t_mismatch: bool) -> Option<Vec<Vec<String>>> {
+    if !want.any() { return None; }
     let streams = accuracy_streams(accuracy);
     if streams.is_empty() { return None; }
     let mut body = Vec::new();
@@ -3793,11 +2692,29 @@ fn accuracy_block(rows: &[Row], order: &[usize], accuracy: &[Accuracy],
             let Accuracy::PerStream(v) = &accuracy[i] else { continue };
             let Some(sa) = v.iter().find(|s| s.stream == stream) else { continue };
             let mut line = vec![stream.to_string(), rows[i].name.clone()];
-            line.extend(accuracy_cells(sa, true, want_crps, want_pit, !t_mismatch));
+            line.extend(accuracy_cells(sa, true, want, !t_mismatch));
             body.push(line);
         }
     }
     Some(body)
+}
+
+/// The columns after `Model` that say what a table's rows are of: `role`
+/// when its rows were read from stored scores, and `lead` when they are a
+/// forecast's. Every row of one table shares them (the `Role` and `Lead`
+/// checks).
+fn fact_columns(rows: &[Row]) -> Vec<String> {
+    let mut h = Vec::new();
+    if rows.iter().any(|r| r.facts.stored) { h.push("role".to_string()); }
+    if rows.iter().any(|r| r.facts.lead.is_some()) { h.push("lead".to_string()); }
+    h
+}
+
+fn fact_cells(rows: &[Row], r: &Row) -> Vec<String> {
+    let mut c = Vec::new();
+    if rows.iter().any(|r| r.facts.stored) { c.push(r.facts.role.clone()); }
+    if rows.iter().any(|r| r.facts.lead.is_some()) { c.push(r.facts.lead.clone().unwrap_or_else(|| "—".into())); }
+    c
 }
 
 /// The `⚠` line for one stream of a row whose 90% predictive interval covers
@@ -3818,6 +2735,24 @@ fn nonfinite_note(row: &str, sa: &StreamAccuracy) -> Option<String> {
     (c + p > 0).then(|| format!(
         "'{row}' stream '{}': {c} non-finite CRPS and {p} non-finite PIT value(s) of {} \
          left out of its per-stream figures.", sa.stream, sa.mean_crps.n))
+}
+
+/// The evidence cell of `row` against `base`, as [`score::evidence::evidence_cell`]
+/// gives it, and for two rows read from stored filtered scores of which one
+/// carries no filter-noise MC SE (`--replicates 1`), a verdict outside the
+/// se(Δ) band says the filter noise was not measured: the within-filter-noise
+/// gate did not run, so the tier is not checked against it.
+fn evidence_text(row: &Row, base: &Row, d: f64, se: f64) -> String {
+    let mc = mc_se_delta(row, base);
+    let cell = score::evidence::evidence_cell(d, se, mc);
+    let unmeasured = mc.is_none()
+        && row.facts.stored && base.facts.stored
+        && row.trace.basis == PredictiveBasis::Filtered
+        && score::evidence::evidence_label(d, se, mc) != "within_noise";
+    match unmeasured {
+        true => format!("{cell}, filter noise not measured"),
+        false => cell,
+    }
 }
 
 /// Format the likelihood ratio `exp(Δelpd)` for display: the candidate's
@@ -3847,20 +2782,19 @@ fn fmt_lr(lr: f64) -> String {
 /// reader sees — footers, caveats, warnings — is assertable in a unit test.
 fn render_table(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Preflight) -> String {
     let t_mismatch = checks.horizons_differ();
-    let want_crps = metrics.iter().any(|m| m == "crps");
-    let want_pit  = metrics.iter().any(|m| m == "pit_cov90" || m == "pit");
     let (accuracy, single) = accuracy_view(rows, base_idx);
+    let want = Want::of(metrics, &accuracy);
 
     // Δelpd (nats) is the primary machine-readable column; "evidence"
     // (decibans + Jeffreys label) is the human-interpretable alongside —
     // see docs/dev/proposals/2026-04-23-evidence-in-decibans.md §Scope.
     // CRPS and PIT columns only when every row scored the same one stream;
     // otherwise they are per stream, in the block below the table.
-    let mut header = vec!["Model".to_string(), "T_score".into(), "elpd".into(),
-        "Δelpd".into(), "LR".into(), "se(Δ)".into(), "evidence".into()];
+    let mut header = vec!["Model".to_string()];
+    header.extend(fact_columns(rows));
+    header.extend(["T_score", "elpd", "Δelpd", "LR", "se(Δ)", "evidence"].map(String::from));
     if single.is_some() {
-        if want_crps { header.push("crps".into()); header.push("Δcrps".into()); }
-        if want_pit  { header.push("PIT_cov90".into()); }
+        header.extend(accuracy_columns(want));
     }
 
     let base = &rows[base_idx].trace;
@@ -3869,11 +2803,9 @@ fn render_table(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Pref
     for &i in &order {
         let r = &rows[i];
         let elpd = r.trace.elpd();
-        let mut row = vec![
-            r.name.clone(),
-            format!("{}", r.trace.n_scored()),
-            format!("{:.2}", elpd),
-        ];
+        let mut row = vec![r.name.clone()];
+        row.extend(fact_cells(rows, r));
+        row.extend([format!("{}", r.trace.n_scored()), format!("{:.2}", elpd)]);
         if i == base_idx || t_mismatch {
             row.push("—".into());   // Δelpd
             row.push("—".into());   // LR
@@ -3884,11 +2816,10 @@ fn render_table(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Pref
             row.push(format!("{:+.2}", d));
             row.push(fmt_lr(d.exp()));
             row.push(format!("{:.2}", se));
-            row.push(score::evidence::evidence_cell(d, se, mc_se_delta(r, &rows[base_idx])));
+            row.push(evidence_text(r, &rows[base_idx], d, se));
         }
         if let (Some(_), Accuracy::PerStream(v)) = (&single, &accuracy[i]) {
-            row.extend(accuracy_cells(&v[0], false, want_crps, want_pit,
-                i != base_idx && !t_mismatch));
+            row.extend(accuracy_cells(&v[0], false, want, i != base_idx && !t_mismatch));
         }
         body.push(row);
     }
@@ -3899,9 +2830,9 @@ fn render_table(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Pref
     }
     push_aligned(&mut out, &header, &body);
     if single.is_none() {
-        if let Some(block) = accuracy_block(rows, &order, &accuracy, want_crps, want_pit, t_mismatch) {
+        if let Some(block) = accuracy_block(rows, &order, &accuracy, want, t_mismatch) {
             out.push_str("\nPer-stream accuracy and calibration:\n");
-            push_aligned(&mut out, &accuracy_header(want_crps, want_pit), &block);
+            push_aligned(&mut out, &accuracy_header(want), &block);
         }
     }
 
@@ -3974,8 +2905,8 @@ fn warning_lines(rows: &[Row], base_idx: usize, checks: &Preflight, accuracy: &[
     // granted it is not where the table is read a week later.
     let mut lines: Vec<String> = checks.overrides().iter().map(override_line).collect();
     // What the checks could not cover.
-    for note in [data_unchecked_note(checks, rows), data_change_unchecked_note(checks, rows),
-                 data_prefix_note(checks, rows), filter_settings_unchecked_note(checks, rows)]
+    for note in [data_unchecked_note(checks, rows), data_prefix_note(checks, rows),
+                 filter_settings_unchecked_note(checks, rows)]
         .into_iter().flatten()
     {
         lines.push(format!("ⓘ {note}"));
@@ -4079,9 +3010,8 @@ fn fmt_table_row(cells: &[String], widths: &[usize]) -> String {
 /// printing it, for the same reason [`render_table`] does.
 fn render_md(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Preflight) -> String {
     let t_mismatch = checks.horizons_differ();
-    let want_crps = metrics.iter().any(|m| m == "crps");
-    let want_pit  = metrics.iter().any(|m| m == "pit_cov90" || m == "pit");
     let (accuracy, single) = accuracy_view(rows, base_idx);
+    let want = Want::of(metrics, &accuracy);
     let md_table = |out: &mut String, header: &[String], body: &[Vec<String>]| {
         out.push_str(&format!("| {} |\n", header.join(" | ")));
         out.push_str(&format!("|{}|\n",
@@ -4091,11 +3021,11 @@ fn render_md(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Preflig
         }
     };
 
-    let mut header: Vec<String> = ["Model", "T_score", "elpd", "Δelpd", "LR", "se(Δ)", "evidence"]
-        .iter().map(|h| h.to_string()).collect();
+    let mut header: Vec<String> = vec!["Model".to_string()];
+    header.extend(fact_columns(rows));
+    header.extend(["T_score", "elpd", "Δelpd", "LR", "se(Δ)", "evidence"].map(String::from));
     if single.is_some() {
-        if want_crps { header.push("crps".into()); header.push("Δcrps".into()); }
-        if want_pit  { header.push("PIT_cov90".into()); }
+        header.extend(accuracy_columns(want));
     }
 
     let base = &rows[base_idx].trace;
@@ -4104,11 +3034,9 @@ fn render_md(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Preflig
     let mut body: Vec<Vec<String>> = Vec::with_capacity(rows.len());
     for &i in &order {
         let r = &rows[i];
-        let mut cells: Vec<String> = vec![
-            r.name.clone(),
-            format!("{}", r.trace.n_scored()),
-            format!("{:.2}", r.trace.elpd()),
-        ];
+        let mut cells: Vec<String> = vec![r.name.clone()];
+        cells.extend(fact_cells(rows, r));
+        cells.extend([format!("{}", r.trace.n_scored()), format!("{:.2}", r.trace.elpd())]);
         if i == base_idx || t_mismatch {
             cells.push("—".into());  // Δelpd
             cells.push("—".into());  // LR
@@ -4119,11 +3047,10 @@ fn render_md(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Preflig
             cells.push(format!("{:+.2}", d));
             cells.push(fmt_lr(d.exp()));
             cells.push(format!("{:.2}", se));
-            cells.push(score::evidence::evidence_cell(d, se, mc_se_delta(r, &rows[base_idx])));
+            cells.push(evidence_text(r, &rows[base_idx], d, se));
         }
         if let (Some(_), Accuracy::PerStream(v)) = (&single, &accuracy[i]) {
-            cells.extend(accuracy_cells(&v[0], false, want_crps, want_pit,
-                i != base_idx && !t_mismatch));
+            cells.extend(accuracy_cells(&v[0], false, want, i != base_idx && !t_mismatch));
         }
         body.push(cells);
     }
@@ -4133,9 +3060,9 @@ fn render_md(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Preflig
     }
     md_table(&mut out, &header, &body);
     if single.is_none() {
-        if let Some(block) = accuracy_block(rows, &order, &accuracy, want_crps, want_pit, t_mismatch) {
+        if let Some(block) = accuracy_block(rows, &order, &accuracy, want, t_mismatch) {
             out.push_str("\n**Per-stream accuracy and calibration**\n\n");
-            md_table(&mut out, &accuracy_header(want_crps, want_pit), &block);
+            md_table(&mut out, &accuracy_header(want), &block);
         }
     }
     // Same footer as the text table (gh#806), in markdown: the sort order,
@@ -4173,16 +3100,18 @@ fn render_json(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Prefl
         .unwrap())
 }
 
-/// The `--streams` JSON document: the selected streams in order, and one
-/// [`json_document`] per stream, each naming its stream. Nothing else: no
-/// field combines streams.
-fn render_json_tables(tables: &[Table], leaves: &[String], metrics: &[String]) -> String {
-    let out = serde_json::json!({
-        "streams_scored": leaves,
+/// The JSON document of several tables: one [`json_document`] per table, in
+/// order, and under `--streams` the selected streams in order, each table
+/// naming its stream. Nothing else: no field combines tables.
+fn render_json_tables(tables: &[Table], leaves: Option<&[String]>, metrics: &[String]) -> String {
+    let mut out = serde_json::json!({
         "tables": tables.iter()
             .map(|t| json_document(&t.rows, t.base_idx, metrics, &t.checks))
             .collect::<Vec<_>>(),
     });
+    if let Some(leaves) = leaves {
+        out["streams_scored"] = serde_json::json!(leaves);
+    }
     format!("{}\n", serde_json::to_string_pretty(&out).unwrap())
 }
 
@@ -4202,17 +3131,29 @@ fn json_document(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Pre
             else { paired_delta(&r.trace, base) };
         // Each stream's accuracy and calibration; the Δ is suppressed under
         // mismatched horizons, as the table's is.
-        let stream_json = |sa: &StreamAccuracy| json!({
-            "stream": sa.stream,
-            "n": sa.mean_crps.n,
-            "mean_crps": option_finite(sa.mean_crps.value),
-            "crps_nonfinite": sa.mean_crps.n_nonfinite,
-            "delta_mean_crps": sa.delta_mean_crps.filter(|_| !t_mismatch)
-                .map_or(serde_json::Value::Null, option_finite),
-            "pit_cov90": option_finite(sa.pit_cov90.value),
-            "pit_nonfinite": sa.pit_cov90.n_nonfinite,
-            "pit_cov90_warning": pit_coverage_warning(&r.name, sa),
-        });
+        let stream_json = |sa: &StreamAccuracy| {
+            let mut j = json!({
+                "stream": sa.stream,
+                "n": sa.mean_crps.n,
+                "mean_crps": option_finite(sa.mean_crps.value),
+                "crps_nonfinite": sa.mean_crps.n_nonfinite,
+                "delta_mean_crps": sa.delta_mean_crps.filter(|_| !t_mismatch)
+                    .map_or(serde_json::Value::Null, option_finite),
+                "pit_cov90": option_finite(sa.pit_cov90.value),
+                "pit_nonfinite": sa.pit_cov90.n_nonfinite,
+                "pit_cov90_warning": pit_coverage_warning(&r.name, sa),
+            });
+            // A stored score's figures, absent from a prequential.json's row.
+            if let Some(w) = sa.mean_wis {
+                j["mean_wis"] = option_finite(w.value);
+                j["delta_mean_wis"] = sa.delta_mean_wis.filter(|_| !t_mismatch)
+                    .map_or(serde_json::Value::Null, option_finite);
+            }
+            if let Some(c) = sa.cov50 {
+                j["cov50"] = option_finite(c.value);
+            }
+            j
+        };
         let (per_stream, unavailable): (Vec<serde_json::Value>, Option<&str>) = match &accuracy[i] {
             Accuracy::PerStream(v) => (v.iter().map(stream_json).collect(), None),
             Accuracy::Unavailable(why) => (Vec::new(), Some(why)),
@@ -4294,6 +3235,21 @@ fn json_document(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Pre
         if scored.is_some() {
             entry["streams_assimilated"] = json!(r.assimilated());
         }
+        // What a stored score's rows are of; a prequential.json's row says it
+        // through `basis` and `conditioning`.
+        if r.facts.stored {
+            entry["mode"] = json!(r.facts.mode);
+            entry["role"] = json!(r.facts.role);
+            entry["lead"] = json!(r.facts.lead);
+            entry["reach"] = json!(r.facts.reach);
+            entry["covariates_realised"] = json!(r.facts.realised);
+            // Whether the evidence label was checked against filter noise:
+            // both rows of the pair carry an MC SE (`--replicates` ≥ 2).
+            entry["filter_noise_measured"] = match i == base_idx {
+                true => serde_json::Value::Null,
+                false => json!(mc_se_delta(r, &rows[base_idx]).is_some()),
+            };
+        }
         entry
     }).collect();
     let any_evidence = rows.iter().enumerate().any(|(i, r)| {
@@ -4316,13 +3272,8 @@ fn json_document(rows: &[Row], base_idx: usize, metrics: &[String], checks: &Pre
         // --allow-data-mismatch, and the rows the check could not cover.
         "data_mismatch": checks.waived_finding(CheckId::SharedData).map(shared_data_statement),
         "data_unchecked": data_unchecked_note(checks, rows),
-        // A training file edited after its fit ran (present only under
-        // --allow-changed-data), and the files that could not be checked.
-        "data_changed": checks.waived_finding(CheckId::ChangedData)
-            .map(|f| finding_note(f, Waiver::ChangedData)),
-        "data_change_unchecked": data_change_unchecked_note(checks, rows),
         // Rows whose recorded hashes are 8 characters (an older fit.meta.json):
-        // both data checks compared them on that prefix.
+        // the shared-data check compared them on that prefix.
         "data_compared_on_prefix": data_prefix_note(checks, rows),
         // Particle-filter settings that differ across rows (present only under
         // --allow-mismatched-filter-settings), and the rows that record none.
@@ -4412,108 +3363,6 @@ mod tests {
     /// The pairing check over rows of differing horizons, joined by time.
     fn shared_times(rows: &[Row]) -> Result<(), String> {
         pairing_finding(rows, true).map_or(Ok(()), |f| Err(finding_text(&f)))
-    }
-
-    /// §3.6 (Stage 4.1): the mixture combines per-draw *densities*, pools
-    /// each stream's samples, takes the min ESS, and stamps
-    /// `Posterior { n_draws }`.
-    #[test]
-    fn combine_mixture_averages_densities_and_pools_samples() {
-        use score::trace::{
-            crps_sample_fair, PredInterval, PrequentialStep, PrequentialTrace,
-            PrequentialWarning, Provenance, StreamScore,
-        };
-        let component = |ls: f64, samples: Vec<f64>, ess: f64| PrequentialTrace {
-            schema_version: 3,
-            t0: 0,
-            provenance: Provenance::PlugIn,
-            basis: score::trace::PredictiveBasis::Filtered,
-            conditioning: Conditioning::InSample,
-            steps: vec![PrequentialStep {
-                t: 7.0,
-                log_score: ls,
-                ess,
-                per_stream: vec![StreamScore {
-                    stream: "cases".into(),
-                    y_obs: 3.0,
-                    interval: PredInterval::from_samples(&samples),
-                    y_pred_samples: samples,
-                    log_score: ls,
-                    crps: 0.0,
-                    pit: 0.0,
-                    coverage: Default::default(),
-                }],
-            }],
-            warnings: vec![PrequentialWarning::StartsAtPrior],
-            score_from: None,
-            pit_randomization_seed: Some(1),
-            derivation: None, scored_streams: None,
-        };
-        let a = component(0.2_f64.ln(), vec![1.0, 2.0], 40.0);
-        let b = component(0.4_f64.ln(), vec![3.0, 4.0], 25.0);
-        let mixed = combine_mixture(vec![a, b], 9).expect("same axis combines");
-
-        // Density average, NOT mean of logs: log((0.2 + 0.4)/2) = log(0.3).
-        let got = mixed.steps[0].log_score;
-        let want = 0.3_f64.ln();
-        assert!((got - want).abs() < 1e-12,
-            "mixture log score must be log-mean-density: {got} vs {want}");
-        let mean_of_logs = (0.2_f64.ln() + 0.4_f64.ln()) / 2.0;
-        assert!(got > mean_of_logs,
-            "Jensen: the mixture score is strictly above the mean of logs");
-        assert!((mixed.steps[0].per_stream[0].log_score - want).abs() < 1e-12,
-            "and so is the stream's own");
-
-        // Pooled cloud, min ESS, CRPS over the pool.
-        let s = &mixed.steps[0].per_stream[0];
-        assert_eq!(s.y_pred_samples, vec![1.0, 2.0, 3.0, 4.0]);
-        assert_eq!(mixed.steps[0].ess, 25.0);
-        let want_crps = crps_sample_fair(&[1.0, 2.0, 3.0, 4.0], 3.0);
-        assert!((s.crps - want_crps).abs() < 1e-12);
-
-        // Stamps and carried metadata.
-        assert_eq!(mixed.provenance, Provenance::Posterior { n_draws: 2 });
-        assert_eq!(mixed.conditioning, Conditioning::InSample);
-        assert_eq!(mixed.pit_randomization_seed, Some(9));
-        assert_eq!(mixed.warnings.len(), 1, "duplicate warnings deduped by kind");
-    }
-
-    #[test]
-    fn combine_mixture_refuses_mismatched_axes() {
-        use score::trace::{PrequentialStep, PrequentialTrace, Provenance};
-        let trace_at = |t: f64| PrequentialTrace {
-            schema_version: 3,
-            t0: 0,
-            provenance: Provenance::PlugIn,
-            basis: score::trace::PredictiveBasis::Filtered,
-            conditioning: Conditioning::InSample,
-            steps: vec![PrequentialStep {
-                t,
-                log_score: -1.0,
-                ess: 10.0,
-                per_stream: vec![],
-            }],
-            warnings: vec![],
-            score_from: None,
-            pit_randomization_seed: None,
-            derivation: None, scored_streams: None,
-        };
-        let err = combine_mixture(vec![trace_at(7.0), trace_at(14.0)], 1)
-            .expect_err("different step times must refuse");
-        assert!(err.contains("different observation axes"), "{err}");
-
-        // gh#312: an ODE component and a filtered one are not two draws of one
-        // predictive; the mixture of ODE components keeps the ODE stamp.
-        let ode = |t: f64| PrequentialTrace {
-            basis: PredictiveBasis::OdeFreeForward { samples_per_draw: 10 },
-            ..trace_at(t)
-        };
-        let err = combine_mixture(vec![trace_at(7.0), ode(7.0)], 1)
-            .expect_err("components on different bases must refuse");
-        assert!(err.contains("different observation axes"), "{err}");
-        let mixed = combine_mixture(vec![ode(7.0), ode(7.0)], 1).expect("ODE draws combine");
-        assert_eq!(mixed.basis, PredictiveBasis::OdeFreeForward { samples_per_draw: 10 });
-        assert_eq!(mixed.provenance, Provenance::Posterior { n_draws: 2 });
     }
 
     /// gh#312: a particle filter's log score is a Monte-Carlo estimate biased
@@ -4912,7 +3761,7 @@ mod tests {
             // The full hashes differ, so `c` (a prefix of both) is shown on
             // its own value, which sorts first.
             let want = Finding::DataDiffers {
-                sources: vec![SourceDigests { source: "cases".into(), file: DataFile::Training,
+                sources: vec![SourceDigests { source: "cases".into(),
                     groups: vec![(Some("aaaaaaaa".into()), vec!["c".into()]),
                                  (Some(a.clone()), vec!["a".into()]),
                                  (Some(b.clone()), vec!["b".into()])] }],
@@ -5080,97 +3929,6 @@ mod tests {
         assert!(table.contains("Δ columns suppressed"), "{table}");
     }
 
-    /// A training file's fresh full SHA-256 against the hash its fit
-    /// recorded: equal bytes match whether the record is 8 or 64 hex
-    /// characters, different bytes are a change naming both short hashes,
-    /// and no record is "not checked", never a silent pass.
-    #[test]
-    fn a_training_file_is_checked_against_its_recorded_hash_by_prefix() {
-        let fresh = crate::hashing::sha256_hex(b"time\tcases\n1\t2\n");
-        let other = crate::hashing::sha256_hex(b"time\tcases\n1\t3\n");
-
-        assert_eq!(check_file_against_record(&fresh, Some(&fresh)), FileCheck::Matches,
-            "a 64-character record of the same bytes matches");
-        assert_eq!(check_file_against_record(&fresh, Some(&fresh[..8])), FileCheck::Matches,
-            "an 8-character record (today's sidecar) matches by prefix");
-        assert_eq!(check_file_against_record(&fresh, Some(&fresh[..8].to_uppercase())),
-            FileCheck::Matches, "hex case is not a difference");
-
-        for recorded in [&other[..], &other[..8]] {
-            assert_eq!(check_file_against_record(&fresh, Some(recorded)),
-                FileCheck::Changed { recorded: other[..8].to_string(),
-                                     current: fresh[..8].to_string() },
-                "different bytes are a change, at either record length");
-        }
-
-        assert!(matches!(check_file_against_record(&fresh, None),
-            FileCheck::NotChecked(why) if why.contains("recorded no hash")));
-        assert!(matches!(check_file_against_record(&fresh, Some("")),
-            FileCheck::NotChecked(_)), "an empty record is not a match");
-    }
-
-    /// The freshness of a derived row, end to end over real files: the
-    /// keys are sources, a source the sidecar lacks is
-    /// "not checked", a row with no sidecar hashes is not checked as a
-    /// whole, and the notes say each in every format.
-    #[test]
-    fn training_freshness_names_changed_and_unchecked_files_in_every_format() {
-        let dir = tempfile::tempdir().unwrap();
-        let north = dir.path().join("north.tsv");
-        let south = dir.path().join("south.tsv");
-        std::fs::write(&north, "time\tcases\n1\t2\n").unwrap();
-        std::fs::write(&south, "time\tcases\n1\t5\n").unwrap();
-        let streams: indexmap::IndexMap<String, String> = [
-            ("north".to_string(), north.to_string_lossy().into_owned()),
-            ("south".to_string(), south.to_string_lossy().into_owned()),
-        ].into_iter().collect();
-
-        // Both recorded and unchanged: nothing to say.
-        let south_hash = crate::hashing::sha256_hex(b"time\tcases\n1\t5\n");
-        let north_hash = crate::hashing::sha256_hex(b"time\tcases\n1\t2\n");
-        let clean = check_training_freshness(&streams,
-            &digests(&[("north", &north_hash[..8]), ("south", &south_hash[..8])]));
-        assert_eq!(clean, DataFreshness::default());
-
-        // `south` edited since the fit; `north` has no record.
-        let fresh = check_training_freshness(&streams,
-            &digests(&[("south", "deadbeef")]));
-        assert_eq!(fresh.findings.len(), 2, "{fresh:?}");
-        let mut rows = vec![
-            row_at("a", &[7.0, 14.0, 21.0], &[-6.0, -6.0, -6.0]),
-            row_at("b", &[7.0, 14.0, 21.0], &[-5.0, -6.0, -6.0]),
-        ];
-        rows[0].freshness = fresh;
-        rows[1].freshness = check_training_freshness(&streams,
-            &DataIdentity::Unknown("its fit.meta.json records no data hashes".into()));
-
-        let changed = waived_note(&check_changed_data(&rows)).expect("south changed");
-        assert!(changed.contains("'a' stream 'south'") && changed.contains("deadbeef")
-                && changed.contains(&south_hash[..8]) && !changed.contains("north"),
-            "{changed}");
-        let unchecked = data_change_unchecked_note(
-            &Preflight { results: vec![check_changed_data(&rows)] }, &rows)
-            .expect("north and b unchecked");
-        assert!(unchecked.contains("'a' stream 'north'")
-                && unchecked.contains("recorded no hash")
-                && unchecked.contains("'b' (its fit.meta.json records no data hashes)"),
-            "{unchecked}");
-
-        let metrics = vec!["elpd".to_string()];
-        for (fmt, text) in [("table", render_table(&rows, 0, &metrics, &checked(&rows))),
-                            ("md", render_md(&rows, 0, &metrics, &checked(&rows)))] {
-            assert!(text.contains("changed after the fit ran")
-                    && text.contains("--allow-changed-data was set"),
-                "the {fmt} rendering states the change:\n{text}");
-            assert!(text.contains("not checked for changes since the fit ran"),
-                "and what was not checked:\n{text}");
-        }
-        let v: serde_json::Value =
-            serde_json::from_str(&render_json(&rows, 0, &metrics, &checked(&rows))).unwrap();
-        assert!(v["data_changed"].as_str().is_some_and(|s| s.contains("south")), "{v}");
-        assert!(v["data_change_unchecked"].as_str().is_some_and(|s| s.contains("north")), "{v}");
-    }
-
     fn derivation(particles: usize, replicates: usize)
         -> score::trace::Derivation
     {
@@ -5197,7 +3955,7 @@ mod tests {
         a.steps[0].log_score = -4.0;
         b.steps[2].per_stream[1].log_score = -5.0;
 
-        let totals = ReplicateTotals::of(&[a.clone(), b.clone()]);
+        let totals = score::combine::ReplicateTotals::of(&[a.clone(), b.clone()]);
         assert_eq!(totals.elpd, vec![a.elpd(), b.elpd()]);
         assert_eq!(totals.elpd, vec![-16.0, -18.0]);
         assert_eq!(totals.by_stream["north"], vec![-9.0, -9.0]);
@@ -5207,7 +3965,7 @@ mod tests {
             "the SE is the log-mean-exp SE of the stored totals");
         assert!(totals.mc_se.is_some_and(|se| se > 0.0));
 
-        let one = ReplicateTotals::of(&[a]);
+        let one = score::combine::ReplicateTotals::of(&[a]);
         assert_eq!(one.elpd.len(), 1);
         assert_eq!(one.by_stream["north"].len(), 1);
         assert_eq!(one.mc_se, None, "a single replicate has no filter-noise SE");
@@ -5510,7 +4268,7 @@ mod tests {
     fn every_waiver() -> Waivers {
         Waivers {
             mismatched_horizon: true, mixed_provenance: true, data_mismatch: true,
-            changed_data: true, mismatched_filter_settings: true, in_sample_ablation: true,
+            mismatched_filter_settings: true, in_sample_ablation: true,
         }
     }
 
@@ -5534,10 +4292,6 @@ mod tests {
                 rows[0].data = digests(&[("cases", "aaaaaaaa11")]);
                 rows[1].data = digests(&[("cases", "bbbbbbbb22")]);
             }
-            Waiver::ChangedData => rows[1].freshness.findings.push(FileFinding {
-                stream: "cases".into(), path: "cases.tsv".into(),
-                check: FileCheck::Changed { recorded: "aaaaaaaa".into(), current: "bbbbbbbb".into() },
-            }),
             Waiver::MismatchedFilterSettings => {
                 rows[0].trace.derivation = Some(derivation(1000, 5));
                 rows[1].trace.derivation = Some(derivation(200, 5));
@@ -5552,9 +4306,9 @@ mod tests {
         rows
     }
 
-    const ALL_WAIVERS: [Waiver; 6] = [
+    const ALL_WAIVERS: [Waiver; 5] = [
         Waiver::MismatchedHorizon, Waiver::MixedProvenance, Waiver::DataMismatch,
-        Waiver::ChangedData, Waiver::MismatchedFilterSettings, Waiver::InSampleAblation,
+        Waiver::MismatchedFilterSettings, Waiver::InSampleAblation,
     ];
 
     /// D13: a comparison that renders only because a flag waived a failed
@@ -5657,9 +4411,9 @@ mod tests {
                 "steps": [{}], "warnings": []}}"#, steps.join(","))).unwrap()
         };
         let row = |name: &str, trace: PrequentialTrace| Row {
-            name: name.into(), path: name.into(), trace,
+            name: name.into(), path: name.into(),
+            facts: ScoreFacts::of_trace(&trace), trace,
             data: DataIdentity::Unknown("a test fixture".into()),
-            freshness: DataFreshness::default(),
             streams: RowStreams::Explicit,
         };
         vec![
@@ -5874,24 +4628,25 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
             ess: 900.0,
             per_stream: Vec::new(),
         }).collect();
+        let trace = PrequentialTrace {
+            schema_version: 1,
+            t0: 1,
+            provenance: Provenance::PlugIn,
+            basis: score::trace::PredictiveBasis::Filtered,
+            conditioning: Conditioning::InSample,
+            steps,
+            warnings: Vec::new(),
+            score_from: None,
+            pit_randomization_seed: None,
+            derivation: None, scored_streams: None,
+        };
         Row {
             name: name.to_string(),
             path: name.to_string(),
-            freshness: DataFreshness::default(),
             streams: RowStreams::Explicit,
             data: DataIdentity::Unknown("a test fixture, built from scores alone".into()),
-            trace: PrequentialTrace {
-                schema_version: 1,
-                t0: 1,
-                provenance: Provenance::PlugIn,
-                basis: score::trace::PredictiveBasis::Filtered,
-                conditioning: Conditioning::InSample,
-                steps,
-                warnings: Vec::new(),
-                score_from: None,
-                pit_randomization_seed: None,
-                derivation: None, scored_streams: None,
-            },
+            facts: ScoreFacts::of_trace(&trace),
+            trace,
         }
     }
 
@@ -5910,6 +4665,8 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
                 pit: 0.5,
                 interval: Default::default(),
                 coverage: Default::default(),
+                wis: None,
+                in_50: None,
             }).collect();
         }
         row
@@ -5929,44 +4686,6 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
             step.per_stream[0].coverage = *c;
         }
         row
-    }
-
-    /// gh#1062. The held-out check is per leaf: a scored value is refused
-    /// when its time is at or before ITS OWN leaf's last training scoring
-    /// time, and not because another leaf's training ran later. Here `cases`
-    /// (a `day(time)` stream) last trained at t = 11 and `deaths` (a
-    /// `closing_at` stream) at t = 10.
-    #[test]
-    fn heldout_check_compares_each_stream_with_its_own_training_end() {
-        let seg = Path::new("fit_seg");
-        let ends: TrainingScoringEnds = [
-            ("cases".to_string(), Some(11.0)),
-            ("deaths".to_string(), Some(10.0)),
-            ("late".to_string(), None),
-        ].into_iter().collect();
-
-        // `deaths` scored at t = 11 is its held-out row 11: allowed, though
-        // `cases` trained up to t = 11. A leaf with no training row is
-        // never refused.
-        let ok = row_with_streams("a", &[11.0, 12.0], &["deaths", "late"]);
-        assert!(check_no_training_row_scored(&ok.trace, &ends, 10.0, seg).is_ok());
-
-        // `cases` scored at t = 11 is its training row 10: refused, naming
-        // the stream and both times.
-        let leak = row_with_streams("a", &[11.0, 12.0], &["cases"]);
-        let err = check_no_training_row_scored(&leak.trace, &ends, 10.0, seg).unwrap_err();
-        assert!(err.contains("'cases'") && err.contains("t = 11") && err.contains("fit_seg"),
-            "{err}");
-
-        // `deaths` at its last training time t = 10: refused.
-        let leak = row_with_streams("a", &[10.0], &["deaths"]);
-        assert!(check_no_training_row_scored(&leak.trace, &ends, 10.0, seg)
-            .unwrap_err().contains("'deaths'"));
-
-        // A stream the fit does not bind cannot be checked: refused.
-        let unknown = row_with_streams("a", &[12.0], &["other"]);
-        assert!(check_no_training_row_scored(&unknown.trace, &ends, 10.0, seg)
-            .unwrap_err().contains("'other'"));
     }
 
     /// gh#833. Equal times and equal stream sets still permit two traces to
@@ -6041,67 +4760,6 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
         assert!(
             toml::from_str::<CompareToml>(bad_model).is_err(),
             "an unknown [[model]] key must be rejected"
-        );
-    }
-
-    /// gh#417: `compare --exclude-chains` must drop the named chains from the
-    /// posterior cloud BEFORE deriving θ̂ — the plug-in point the prequential is
-    /// scored at. A stuck chain shifts the posterior mean, so the subset θ̂ must
-    /// differ from the all-chain θ̂ and equal the mean over the retained chains
-    /// (θ̂ changes ⇒ elpd/CRPS change: a correctness knob, not cosmetic).
-    #[test]
-    fn posterior_mean_excludes_selected_chains() {
-        use crate::chain_selection::ChainSelection;
-        use crate::posterior_draws::PosteriorDrawsRef;
-
-        // Two chains in draws.tsv (`chain` is 0-based on disk). Chain id 1 is
-        // mixed at beta = 1.0; chain id 2 is stuck at beta = 9.0 (never moved,
-        // 0% acceptance).
-        let dir = tempfile::tempdir().unwrap();
-        let draws_path = dir.path().join("draws.tsv");
-        let mut s = String::from("chain\tdraw\tbeta\n");
-        for d in 0..4 {
-            s.push_str(&format!("0\t{d}\t1.0\n"));
-        }
-        for d in 0..4 {
-            s.push_str(&format!("1\t{d}\t9.0\n"));
-        }
-        std::fs::write(&draws_path, s).unwrap();
-
-        let pref = PosteriorDrawsRef {
-            name: "pgas".into(),
-            draws_path,
-            method: None,
-            backend: None,
-            chain_selection: None,
-        };
-
-        let beta_of = |toml_text: &str| -> f64 {
-            toml_text
-                .lines()
-                .find_map(|l| l.strip_prefix("beta = "))
-                .and_then(|v| v.trim().parse::<f64>().ok())
-                .unwrap_or_else(|| panic!("no beta in θ̂:\n{toml_text}"))
-        };
-
-        // All chains: mean beta = (1.0·4 + 9.0·4)/8 = 5.0 — the stuck chain
-        // drags θ̂ up.
-        let (all, n_all) = posterior_mean_params_toml(&pref).unwrap();
-        let all = all.toml;
-        assert_eq!(beta_of(&all), 5.0, "all-chain θ̂ pools both chains");
-        assert_eq!(n_all, 8, "the mean is over all 8 draws");
-
-        // Drop the stuck chain 1 → mean beta = 1.0 over the retained chain.
-        let sel = ChainSelection::parse_exclude("1").unwrap();
-        let (sub, n_sub) =
-            posterior_mean_params_toml(&pref.clone().with_selection(Some(sel))).unwrap();
-        let sub = sub.toml;
-        assert_eq!(beta_of(&sub), 1.0, "subset θ̂ is the mean over the retained chain");
-        assert_eq!(n_sub, 4, "and over the 4 retained draws");
-        assert_ne!(
-            beta_of(&all),
-            beta_of(&sub),
-            "excluding a stuck chain must change θ̂ (hence the prequential score)"
         );
     }
 
@@ -6384,9 +5042,9 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
                 }
                 tr
             }).collect();
-        // What derive_prequential records on the combined trace.
-        let totals = ReplicateTotals::of(&reps);
-        let mut combined = combine_scored_traces(reps.clone(), 1).unwrap();
+        // What a replicated compare records on the combined trace.
+        let totals = score::combine::ReplicateTotals::of(&reps);
+        let mut combined = stored::combine_replicates(&reps).unwrap();
         let mut d = derivation(100, reps.len());
         d.replicate_elpd = totals.elpd.clone();
         d.replicate_elpd_by_stream = totals.by_stream.clone();
@@ -6580,8 +5238,6 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
     /// stay byte for byte what it was.
     const TWO_STREAM_JSON: &str = r#"{
   "baseline": "a",
-  "data_change_unchecked": null,
-  "data_changed": null,
   "data_compared_on_prefix": null,
   "data_mismatch": null,
   "data_unchecked": "not checked for a shared observation set: 'a' (a test fixture, built from scores alone); 'b' (a test fixture, built from scores alone). A difference against such a row may be a data difference, not a model difference.",
@@ -6759,7 +5415,7 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
         // The command's document: the selection, and one table per stream, and
         // nothing beside them.
         let whole: serde_json::Value = serde_json::from_str(
-            &render_json_tables(&[ablation_table(), ablation_table()], &["cases".into(), "deaths".into()], &metrics)).unwrap();
+            &render_json_tables(&[ablation_table(), ablation_table()], Some(&["cases".into(), "deaths".into()]), &metrics)).unwrap();
         let keys: Vec<&String> = whole.as_object().unwrap().keys().collect();
         assert_eq!(keys, ["streams_scored", "tables"], "{whole}");
         assert_eq!(whole["streams_scored"], serde_json::json!(["cases", "deaths"]));
@@ -7027,7 +5683,7 @@ Scored steps: 3 (t0=1).  Baseline: a.
 Sorted by Δelpd ascending — best-supported model at the bottom.
 Conditioning: in-sample — θ fit to all scored data; Δelpd favors the more flexible model.
 ⚠ --allow-data-mismatch was set for 'a', 'b': 'a' and 'b' were fit to different observed data: 'cases' (aaaaaaaa in 'a', bbbbbbbb in 'b'). Δelpd across them is part model difference and part data difference, and the table cannot separate the two.
-ⓘ data compared on 8 characters of the SHA-256 for 'a', 'b': its fit.meta.json was written before full digests were recorded, so the shared-data and changed-data checks for that row compare the first 8 characters only.
+ⓘ data compared on 8 characters of the SHA-256 for 'a', 'b': its fit.meta.json was written before full digests were recorded, so the shared-data check for that row compares the first 8 characters only.
 ⓘ filter settings not recorded for 'a' (trace older than schema 5); not checked; filter settings not recorded for 'b' (trace older than schema 5); not checked
 ⓘ CRPS and PIT calibration not available for 'a' (trace predates the per-stream breakdown), 'b' (trace predates the per-stream breakdown).
 note: lag-1 autocorrelation of the per-step Δelpd vs baseline: b -0.17
@@ -7044,41 +5700,7 @@ _Sorted by Δelpd ascending — best-supported model at the bottom._
 _Conditioning: in-sample — θ fit to all scored data; Δelpd favors the more flexible model._
 
 - ⚠ --allow-data-mismatch was set for 'a', 'b': 'a' and 'b' were fit to different observed data: 'cases' (aaaaaaaa in 'a', bbbbbbbb in 'b'). Δelpd across them is part model difference and part data difference, and the table cannot separate the two.
-- ⓘ data compared on 8 characters of the SHA-256 for 'a', 'b': its fit.meta.json was written before full digests were recorded, so the shared-data and changed-data checks for that row compare the first 8 characters only.
-- ⓘ filter settings not recorded for 'a' (trace older than schema 5); not checked; filter settings not recorded for 'b' (trace older than schema 5); not checked
-- ⓘ CRPS and PIT calibration not available for 'a' (trace predates the per-stream breakdown), 'b' (trace predates the per-stream breakdown).
-- note: lag-1 autocorrelation of the per-step Δelpd vs baseline: b -0.17
-- note: scores are plug-in (scored at a single θ, dropping parameter uncertainty → under-dispersed); and in-sample (θ fit to all the data → optimistic in absolute level, by roughly the effective number of parameters fit, which does not cancel in a Δelpd and so biases differences toward the more flexible model) — not a leave-future-out forecast score. See LFO (#295).
-
-_Definitions and caveats: `camdl compare --explain` (or `camdl docs model-comparison`)._
-"#;
-    const WAIVED_CHANGED_DATA_TABLE: &str = r#"Model   T_score     elpd   Δelpd      LR   se(Δ)                evidence
-────────────────────────────────────────────────────────────────────────
-a             3   -18.00       —       —       —                       —
-b             3   -17.00   +1.00   2.718    0.91   +4.3 dB, within noise
-
-Scored steps: 3 (t0=1).  Baseline: a.
-Sorted by Δelpd ascending — best-supported model at the bottom.
-Conditioning: in-sample — θ fit to all scored data; Δelpd favors the more flexible model.
-⚠ --allow-changed-data was set for 'b': data changed after the fit ran: 'b' stream 'cases' (cases.tsv): the fit recorded aaaaaaaa, the file now hashes to bbbbbbbb. `compare` re-reads these files, so the row is scored on data its θ̂ was not fitted to.
-ⓘ not checked for a shared observation set: 'a' (a test fixture, built from scores alone); 'b' (a test fixture, built from scores alone). A difference against such a row may be a data difference, not a model difference.
-ⓘ filter settings not recorded for 'a' (trace older than schema 5); not checked; filter settings not recorded for 'b' (trace older than schema 5); not checked
-ⓘ CRPS and PIT calibration not available for 'a' (trace predates the per-stream breakdown), 'b' (trace predates the per-stream breakdown).
-note: lag-1 autocorrelation of the per-step Δelpd vs baseline: b -0.17
-note: scores are plug-in (scored at a single θ, dropping parameter uncertainty → under-dispersed); and in-sample (θ fit to all the data → optimistic in absolute level, by roughly the effective number of parameters fit, which does not cancel in a Δelpd and so biases differences toward the more flexible model) — not a leave-future-out forecast score. See LFO (#295).
-Definitions and caveats: `camdl compare --explain` (or `camdl docs model-comparison`).
-"#;
-    const WAIVED_CHANGED_DATA_MD: &str = r#"| Model | T_score | elpd | Δelpd | LR | se(Δ) | evidence |
-|---|---|---|---|---|---|---|
-| a | 3 | -18.00 | — | — | — | — |
-| b | 3 | -17.00 | +1.00 | 2.718 | 0.91 | +4.3 dB, within noise |
-
-_Sorted by Δelpd ascending — best-supported model at the bottom._
-
-_Conditioning: in-sample — θ fit to all scored data; Δelpd favors the more flexible model._
-
-- ⚠ --allow-changed-data was set for 'b': data changed after the fit ran: 'b' stream 'cases' (cases.tsv): the fit recorded aaaaaaaa, the file now hashes to bbbbbbbb. `compare` re-reads these files, so the row is scored on data its θ̂ was not fitted to.
-- ⓘ not checked for a shared observation set: 'a' (a test fixture, built from scores alone); 'b' (a test fixture, built from scores alone). A difference against such a row may be a data difference, not a model difference.
+- ⓘ data compared on 8 characters of the SHA-256 for 'a', 'b': its fit.meta.json was written before full digests were recorded, so the shared-data check for that row compares the first 8 characters only.
 - ⓘ filter settings not recorded for 'a' (trace older than schema 5); not checked; filter settings not recorded for 'b' (trace older than schema 5); not checked
 - ⓘ CRPS and PIT calibration not available for 'a' (trace predates the per-stream breakdown), 'b' (trace predates the per-stream breakdown).
 - note: lag-1 autocorrelation of the per-step Δelpd vs baseline: b -0.17
@@ -7191,7 +5813,6 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
             (Waiver::MismatchedHorizon, WAIVED_MISMATCHED_HORIZON_TABLE, WAIVED_MISMATCHED_HORIZON_MD),
             (Waiver::MixedProvenance, WAIVED_MIXED_PROVENANCE_TABLE, WAIVED_MIXED_PROVENANCE_MD),
             (Waiver::DataMismatch, WAIVED_DATA_MISMATCH_TABLE, WAIVED_DATA_MISMATCH_MD),
-            (Waiver::ChangedData, WAIVED_CHANGED_DATA_TABLE, WAIVED_CHANGED_DATA_MD),
             (Waiver::MismatchedFilterSettings, WAIVED_MISMATCHED_FILTER_SETTINGS_TABLE,
              WAIVED_MISMATCHED_FILTER_SETTINGS_MD),
             (Waiver::InSampleAblation, WAIVED_IN_SAMPLE_ABLATION_TABLE, WAIVED_IN_SAMPLE_ABLATION_MD),
@@ -7294,10 +5915,15 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
             CheckId::ScoredSteps => 5,
             CheckId::Pairing => 6,
             CheckId::SharedData => 7,
-            CheckId::ChangedData => 8,
-            CheckId::FilterSettings => 9,
+            CheckId::FilterSettings => 8,
+            CheckId::Mode => 9,
+            CheckId::Role => 10,
+            CheckId::Lead => 11,
+            CheckId::Reach => 12,
+            CheckId::Covariates => 13,
+            CheckId::ScoredRows => 14,
         };
-        let declared: Vec<usize> = (0..10).collect();
+        let declared: Vec<usize> = (0..15).collect();
         for (name, rows) in fixtures() {
             for waivers in [Waivers::default(), every_waiver()] {
                 let got: Vec<usize> =
@@ -7375,8 +6001,8 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
     /// Guarantee 3 and test 20: a row lacking the fact a check reads is
     /// listed as not checked whatever the outcome over the other rows. Two
     /// rows that differ and one that carries nothing: a failure over the two,
-    /// and the third not checked; for the bound-data, changed-data and
-    /// filter-settings checks.
+    /// and the third not checked; for the bound-data and filter-settings
+    /// checks.
     #[test]
     fn a_failed_check_still_lists_the_rows_it_could_not_check() {
         let mut rows = vec![
@@ -7387,16 +6013,6 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
         rows[0].data = digests(&[("cases", "aaaaaaaa")]);
         rows[1].data = digests(&[("cases", "bbbbbbbb")]);
         let r = check_shared_data(&rows);
-        assert!(matches!(r.outcome, CheckOutcome::Failed { .. }), "{r:?}");
-        assert_eq!(unchecked_members(&r), ["c"]);
-
-        // Changed data: `a` changed, `b` checked and unchanged, `c` with no record.
-        rows[0].freshness.findings.push(FileFinding {
-            stream: "cases".into(), path: "cases.tsv".into(),
-            check: FileCheck::Changed { recorded: "aaaaaaaa".into(), current: "cccccccc".into() },
-        });
-        rows[2].freshness.row_unchecked = Some("its fit.meta.json records no data hashes".into());
-        let r = check_changed_data(&rows);
         assert!(matches!(r.outcome, CheckOutcome::Failed { .. }), "{r:?}");
         assert_eq!(unchecked_members(&r), ["c"]);
 
@@ -7411,8 +6027,7 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
         // Every format still states the rows not checked when the checks
         // fail and are waived.
         let checks = checked(&rows);
-        for note in [data_unchecked_note(&checks, &rows), data_change_unchecked_note(&checks, &rows),
-                     filter_settings_unchecked_note(&checks, &rows)] {
+        for note in [data_unchecked_note(&checks, &rows), filter_settings_unchecked_note(&checks, &rows)] {
             assert!(note.as_deref().is_some_and(|n| n.contains("'c'")), "{note:?}");
         }
     }
@@ -7442,7 +6057,6 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
             Waiver::MismatchedHorizon => Waivers { mismatched_horizon: true, ..none },
             Waiver::MixedProvenance => Waivers { mixed_provenance: true, ..none },
             Waiver::DataMismatch => Waivers { data_mismatch: true, ..none },
-            Waiver::ChangedData => Waivers { changed_data: true, ..none },
             Waiver::MismatchedFilterSettings => Waivers { mismatched_filter_settings: true, ..none },
             Waiver::InSampleAblation => Waivers { in_sample_ablation: true, ..none },
         }
@@ -7573,5 +6187,112 @@ _Definitions and caveats: `camdl compare --explain` (or `camdl docs model-compar
                 assert_eq!(preflight(&permuted, &every_waiver()), want, "{name}, reversed");
             }
         }
+    }
+
+    /// Two rows differing in one fact of their scores are refused, the
+    /// refusal naming the field: the mode, the role, the lead, the reach and
+    /// the covariate statement, whatever is waived; a held-out score of a
+    /// stored fit's verified training rows against a fixed point's declared
+    /// ones; and different observed values at one time and stream, which
+    /// only `--allow-data-mismatch` lets through.
+    #[test]
+    fn each_score_fact_that_differs_is_refused_naming_the_field() {
+        let t = [7.0, 14.0, 21.0];
+        let stored = |name: &str| {
+            let mut r = row_with_streams(name, &t, &["cases"]);
+            r.facts = ScoreFacts { stored: true, ..r.facts.clone() };
+            r
+        };
+        let base = || vec![stored("a"), stored("b")];
+        assert!(outcome_of(&base(), &Waivers::default()).is_ok(), "two equal rows compare");
+        type Change = Box<dyn Fn(&mut ScoreFacts)>;
+        let cases: Vec<(&str, Change)> = vec![
+            ("(mode)", Box::new(|f| f.mode = "free_forward".into())),
+            ("(role)", Box::new(|f| f.role = "held_out".into())),
+            ("(lead)", Box::new(|f| f.lead = Some("7".into()))),
+            ("(reach)", Box::new(|f| f.reach = Some("2 weeks".into()))),
+            ("(covariates)", Box::new(|f| f.realised = true)),
+        ];
+        for (field, change) in &cases {
+            let mut rows = base();
+            change(&mut rows[1].facts);
+            for waivers in [Waivers::default(), every_waiver()] {
+                let err = outcome_of(&rows, &waivers).expect_err(field);
+                assert!(err.contains(field) && err.contains("'a'") && err.contains("'b'"), "{field}: {err}");
+            }
+        }
+
+        let mut rows = base();
+        rows[0].trace.conditioning = Conditioning::HoldOutTail { train_end: 3.0, theta_source: "f".into() };
+        rows[1].trace.conditioning = Conditioning::HoldOutDeclared { trained_through: 3.0 };
+        let err = outcome_of(&rows, &every_waiver()).expect_err("verified against declared");
+        assert!(err.contains("hold_out_tail") && err.contains("hold_out_declared"), "{err}");
+
+        let mut rows = base();
+        rows[1].trace.steps[1].per_stream[0].y_obs = 6.0;
+        let err = outcome_of(&rows, &Waivers::default()).expect_err("other observed values");
+        assert!(err.contains("(scored rows)") && err.contains("'cases' at t = 14") && err.contains("6 in 'b'"), "{err}");
+        let waived = Waivers { data_mismatch: true, ..Waivers::default() };
+        assert!(outcome_of(&rows, &waived).is_ok(), "--allow-data-mismatch renders it");
+    }
+
+    /// A stored score's row shows its role, and a forecast's its lead, beside
+    /// the model, and its WIS and 50% coverage beside the CRPS and PIT; a
+    /// prequential.json's row shows none of them.
+    #[test]
+    fn a_stored_scores_table_has_role_lead_wis_and_cov50() {
+        let t = [7.0, 14.0, 21.0];
+        let mut rows = vec![row_with_streams("a", &t, &["cases"]), row_with_streams("b", &t, &["cases"])];
+        let metrics: Vec<String> = ["elpd", "crps", "wis", "pit_cov90", "cov50"].map(String::from).to_vec();
+        let plain = render_table(&rows, 0, &metrics, &checked(&rows));
+        assert!(!plain.contains("role") && !plain.contains("wis") && !plain.contains("cov50"), "{plain}");
+        for (k, r) in rows.iter_mut().enumerate() {
+            r.facts = ScoreFacts {
+                mode: "forecast".into(), role: "future".into(), lead: Some("7".into()),
+                reach: Some("1 weeks".into()), stored: true, ..r.facts.clone()
+            };
+            for s in &mut r.trace.steps {
+                s.per_stream[0].wis = Some(1.0 + k as f64);
+                s.per_stream[0].in_50 = Some(k == 0);
+            }
+        }
+        let table = render_table(&rows, 0, &metrics, &checked(&rows));
+        let header = table.lines().next().unwrap();
+        let cols: Vec<&str> = header.split_whitespace().collect();
+        assert_eq!(cols, ["Model", "role", "lead", "T_score", "elpd", "Δelpd", "LR", "se(Δ)", "evidence",
+            "crps", "Δcrps", "wis", "Δwis", "PIT_cov90", "cov50"], "{table}");
+        let b = table.lines().find(|l| l.starts_with("b ")).unwrap();
+        assert!(b.contains("future") && b.contains(" 7 ") && b.contains("+1.000") && b.contains("0.00"), "{table}");
+        let md = render_md(&rows, 0, &metrics, &checked(&rows));
+        assert!(md.contains("| Model | role | lead | T_score"), "{md}");
+        let v: serde_json::Value = serde_json::from_str(&render_json(&rows, 0, &metrics, &checked(&rows))).unwrap();
+        assert_eq!(v["rows"][1]["per_stream"][0]["delta_mean_wis"], serde_json::json!(1.0), "{v}");
+        assert_eq!(v["rows"][1]["role"], "future");
+        assert_eq!(v["rows"][1]["lead"], "7");
+    }
+
+    /// Between two rows of stored filtered scores, a verdict outside the
+    /// se(Δ) band says the filter noise was not measured when a row carries
+    /// no filter-noise SE (`--replicates 1`), and carries no such note when
+    /// both do; a prequential.json's row is rendered as before.
+    #[test]
+    fn an_unmeasured_filter_noise_is_said_in_the_evidence_cell() {
+        let t = [7.0, 14.0, 21.0];
+        let mut rows = vec![row_at("a", &t, &[-6.0, -6.0, -6.0]), row_at("b", &t, &[-1.0, -1.5, -0.5])];
+        let metrics = vec!["elpd".to_string()];
+        let plain = render_table(&rows, 0, &metrics, &checked(&rows));
+        assert!(!plain.contains("filter noise not measured"), "{plain}");
+        for r in &mut rows {
+            r.facts.stored = true;
+        }
+        let table = render_table(&rows, 0, &metrics, &checked(&rows));
+        assert!(table.contains("overwhelming for, filter noise not measured"), "{table}");
+        let v: serde_json::Value = serde_json::from_str(&render_json(&rows, 0, &metrics, &checked(&rows))).unwrap();
+        assert_eq!(v["rows"][1]["filter_noise_measured"], false, "{v}");
+        for r in &mut rows {
+            set_mc_se(r, Some(0.01));
+        }
+        let table = render_table(&rows, 0, &metrics, &checked(&rows));
+        assert!(!table.contains("filter noise not measured"), "{table}");
     }
 }

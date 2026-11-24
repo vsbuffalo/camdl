@@ -1,22 +1,14 @@
-//! End-to-end acceptance for `camdl compare` auto-deriving a prequential trace
-//! from a sealed fit handle (Phase 2a) — no pre-run `pfilter --save-prequential`
-//! needed. Two tests:
-//!
-//!  (a) two fit handles → a comparison table, both fits scored on the same data
-//!      so their T_score agrees;
-//!  (b) the CORRECTNESS GATE: the trace `compare` derives from a handle is
-//!      numerically identical to a hand-run `camdl pfilter` at the same θ̂ /
-//!      particles / seed — proof the derive path reuses the canonical filter
-//!      rather than reimplementing it.
-//!
-//! Phase 2a of
-//! docs/dev/proposals/2026-06-27-sealed-fit-packets-handles-and-override-algebra.md
-//! (handle-aware `compare`; the prequential scoring is
-//! docs/dev/proposals/2026-04-20-prequential-evaluation.md §8).
+//! End-to-end acceptance for `camdl compare` on stored fit handles: each fit
+//! run is predicted and scored by compare itself, so no pre-run
+//! `pfilter --save-prequential` or `camdl score` is needed. Two fit handles
+//! give a comparison table, both fits scored on the same data so their
+//! T_score agrees; a sampler's fit is scored on its posterior draws, over the
+//! default 5 replicates; and a per-fit chain exclusion moves only the named
+//! fit. That a one-step score equals `pfilter`'s log-likelihood at the same
+//! point and seed is `camdl score`'s own test.
 
 mod fit_store_support;
 
-use score::trace::PrequentialTrace;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -215,12 +207,8 @@ thin = 1
 
 #[test]
 fn compare_auto_derives_prequential_from_two_pgas_fits() {
-    // gh#322 review (Blocker 2): the HEADLINE Bayesian comparison. A PGAS fit
-    // writes `fit_state.toml` + `draws.tsv` but NO `final_params.toml`, so the
-    // old derive (winner_params_toml → final_params.toml) dead-ended
-    // file-not-found — `compare @pgas_a @pgas_b`, the whole point of Phase 2a,
-    // failed. Routed through the draws-cloud authority (θ̂ = posterior mean over
-    // draws.tsv), it succeeds.
+    // The headline Bayesian comparison: two PGAS fits, each predicted from
+    // its posterior draws.
     let bin = skip_if_missing_binary();
     let tmp = std::env::temp_dir().join(format!("camdl_compare_pgas_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
@@ -246,8 +234,7 @@ fn compare_auto_derives_prequential_from_two_pgas_fits() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         out.status.success(),
-        "compare @a @b on two PGAS fits must succeed (θ̂ = posterior mean, not a \
-         missing final_params.toml):\nstdout={stdout}\nstderr={stderr}"
+        "compare @a @b on two PGAS fits must succeed:\nstdout={stdout}\nstderr={stderr}"
     );
     assert!(stdout.contains("elpd"), "comparison table has an elpd column:\n{stdout}");
     assert!(
@@ -267,9 +254,8 @@ fn compare_auto_derives_prequential_from_two_pgas_fits() {
         assert_eq!(row["provenance"]["posterior"]["n_draws"],
             serde_json::json!(3),
             "a Bayesian fit's row must be stamped posterior: {row}");
-        // Schema 5: the trace records what the derivation did — 3 draws
-        // thinned from the retained cloud, combined over the default 5
-        // replicates.
+        // The row records what was predicted: 3 draws of the retained cloud,
+        // over the default 5 replicates.
         let d = &row["derivation"];
         assert_eq!(d["theta"]["posterior_draws"]["n_used"], 3, "{row}");
         assert!(d["theta"]["posterior_draws"]["n_available"].as_u64().is_some_and(|n| n >= 3),
@@ -287,9 +273,8 @@ fn compare_auto_derives_prequential_from_two_pgas_fits() {
         String::from_utf8_lossy(&out.stderr));
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     for row in v["rows"].as_array().unwrap() {
-        assert!(row["derivation"]["theta"]["posterior_mean"]["n_draws"].as_u64()
-                .is_some_and(|n| n > 0),
-            "--draws 1 scores the posterior mean, and the trace says over how many draws: {row}");
+        assert_eq!(row["derivation"]["theta"]["posterior_draws"]["n_used"], 1,
+            "--draws 1 scores one posterior draw: {row}");
         assert_eq!(row["derivation"]["replicates"], 2, "{row}");
         let mc = row["mc_se_elpd"].as_f64()
             .unwrap_or_else(|| panic!("replicates must attach mc_se_elpd: {row}"));
@@ -309,15 +294,11 @@ fn compare_auto_derives_prequential_from_two_pgas_fits() {
     assert!(v["rows"][0]["mc_se_elpd"].is_null(),
         "--replicates 1 must attach no MC SE");
 
-    // --draws 1 is the documented cheap mode: plug-in at the posterior mean.
-    let out = run(&bin, &tmp, &["compare", "@a", "@b", "--particles", "300",
-        "--seed", "1", "--draws", "1", "--format", "json"]);
-    assert!(out.status.success(), "--draws 1 compare failed:\nstderr={}",
-        String::from_utf8_lossy(&out.stderr));
+    // --draws 1 is one posterior draw, still a posterior; the posterior-mean
+    // plug-in is a fixed point (`fit summary --params-only`).
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     for row in v["rows"].as_array().unwrap() {
-        assert_eq!(row["provenance"], serde_json::json!("plug_in"),
-            "--draws 1 must fall back to the plug-in point: {row}");
+        assert_eq!(row["provenance"], serde_json::json!({"posterior": {"n_draws": 1}}), "{row}");
     }
 
     // Provenance preflight: a posterior-mixture row against a plug-in row
@@ -348,13 +329,13 @@ fn compare_auto_derives_prequential_from_two_pgas_fits() {
 
 #[test]
 fn compare_auto_derives_prequential_from_two_fit_handles() {
-    // (a) `camdl compare @a @b` with NO pre-existing prequential.json: both
-    // traces are auto-derived at θ̂ via the canonical pfilter, and the table
-    // renders with both rows and an elpd column, both fits' T_score equal.
+    // `camdl compare @a @b` of two IF2 runs with nothing stored beforehand:
+    // each is predicted at its winning point and scored, and the table renders
+    // with both rows and an elpd column, both fits' T_score equal.
     let bin = skip_if_missing_binary();
     let tmp = setup_two_fits(&bin, "table");
 
-    // Low particle count keeps the test fast; correctness is gated by test (b).
+    // Low particle count keeps the test fast.
     let out = run(&bin, &tmp, &["compare", "@a", "@b", "--particles", "300", "--seed", "1"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -375,9 +356,9 @@ fn compare_auto_derives_prequential_from_two_fit_handles() {
         .unwrap_or_else(|| panic!("no @b row in the table:\n{stdout}"));
 
     // Both fits scored the same data at the same particles/seed → identical
-    // T_score (column 2 of each row, after the left-aligned model name).
-    let t_a = row_a.split_whitespace().nth(1).expect("@a T_score cell");
-    let t_b = row_b.split_whitespace().nth(1).expect("@b T_score cell");
+    // T_score (column 3 of each row, after the model name and its role).
+    let t_a = row_a.split_whitespace().nth(2).expect("@a T_score cell");
+    let t_b = row_b.split_whitespace().nth(2).expect("@b T_score cell");
     assert_eq!(
         t_a, t_b,
         "uniform derive settings → commensurable T_score; rows:\n{row_a}\n{row_b}"
@@ -386,104 +367,6 @@ fn compare_auto_derives_prequential_from_two_fit_handles() {
     assert!(
         t_a.parse::<usize>().map(|n| n > 0).unwrap_or(false),
         "T_score is a positive count, got {t_a:?}"
-    );
-
-    let _ = std::fs::remove_dir_all(&tmp);
-}
-
-#[test]
-fn compare_derived_trace_equals_manual_pfilter() {
-    // (b) CORRECTNESS GATE. For fit `@a`, the trace `compare` derives must be
-    // numerically identical to a hand-run `camdl pfilter` at the same θ̂ /
-    // particles / seed — proof the derive path routes through the one canonical
-    // filter rather than a divergent reimplementation.
-    let bin = skip_if_missing_binary();
-    let tmp = setup_two_fits(&bin, "gate");
-    let results = tmp.join("results");
-
-    const PARTICLES: &str = "500";
-    const SEED: &str = "7";
-
-    // θ̂ for @a — exactly what `winner_params_toml` feeds the derive path.
-    let out = run(&bin, &tmp, &["fit", "summary", "@a", "--params-only"]);
-    assert!(
-        out.status.success(),
-        "fit summary @a --params-only failed:\nstderr={}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    std::fs::write(tmp.join("theta.toml"), &out.stdout).unwrap();
-
-    // Manual: run the canonical pfilter at θ̂ on the model @a's problem
-    // stored (the model the derive path uses), at the same particles + seed.
-    let model_a = fit_store_support::problem_of(&run_with_label(&results, "a")).join("model.camdl");
-    assert!(model_a.is_file(), "the stored model.camdl must exist for @a");
-    let data_abs = tmp.join("weekly_cases.tsv");
-    let data_arg = format!("weekly_cases={}", data_abs.display());
-    let out = run(
-        &bin,
-        &tmp,
-        &[
-            "pfilter",
-            &model_a.to_string_lossy(),
-            "--data",
-            &data_arg,
-            "--params",
-            "theta.toml",
-            "--save-prequential",
-            "manual",
-            "--particles",
-            PARTICLES,
-            "--seed",
-            SEED,
-        ],
-    );
-    assert!(
-        out.status.success(),
-        "manual pfilter failed:\nstdout={}\nstderr={}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let manual: PrequentialTrace =
-        serde_json::from_str(&std::fs::read_to_string(tmp.join("manual.json")).unwrap())
-            .expect("manual prequential.json parses");
-
-    // Auto: compare derives @a's trace at the SAME particles + seed. Read the
-    // JSON and pull @a's row.
-    let out = run(
-        &bin,
-        &tmp,
-        &["compare", "@a", "@b", "--particles", PARTICLES, "--seed", SEED,
-          // the cheap modes: this test pins single-pass path equivalence
-          "--replicates", "1", "--draws", "1", "--format", "json"],
-    );
-    assert!(
-        out.status.success(),
-        "compare --format json failed:\nstdout={}\nstderr={}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let v: serde_json::Value =
-        serde_json::from_slice(&out.stdout).expect("compare --format json emits valid JSON");
-    let rows = v["rows"].as_array().expect("rows array");
-    let row_a = rows
-        .iter()
-        .find(|r| r["path"] == "@a")
-        .expect("@a row in compare JSON");
-    let derived_t = row_a["t_score"].as_u64().expect("t_score is an integer") as usize;
-    let derived_elpd = row_a["elpd"].as_f64().expect("elpd is a number");
-
-    // Same code path, same inputs, same seed ⇒ identical. T_score / n_scored
-    // exact; elpd bit-identical (tight tolerance flags any real divergence).
-    assert_eq!(
-        derived_t,
-        manual.n_scored(),
-        "derived T_score must equal the manual pfilter's n_scored"
-    );
-    assert!(
-        (derived_elpd - manual.elpd()).abs() < 1e-9,
-        "derived elpd must equal manual elpd (same θ̂/particles/seed via the same \
-         canonical filter): derived={derived_elpd} manual={}",
-        manual.elpd()
     );
 
     let _ = std::fs::remove_dir_all(&tmp);
@@ -522,12 +405,10 @@ fn elpd_of(json_stdout: &str, name: &str) -> f64 {
 #[test]
 fn compare_per_fit_exclude_chains_rescores_only_the_named_fit() {
     // gh#417/gh#418: `--exclude-chains @a:1` must drop chain 1 from @a's posterior
-    // BEFORE deriving its plug-in θ̂ — scoring the SAME subset a `predict` would
-    // band (predict/summary already do — gh#409) — while leaving every OTHER fit
-    // whole. Excluding a chain moves @a's posterior mean (hence prequential
-    // elpd), and @b (unnamed) must be byte-identical to the all-chains run. If
-    // the token bound cohort-wide, @b would move too; if it were ignored, @a
-    // would not move.
+    // before @a is predicted — the subset `predict` bands — while leaving every
+    // other fit whole. Excluding a chain moves @a's draws (hence its elpd), and
+    // @b (unnamed) must be identical to the all-chains run. If the token bound
+    // cohort-wide, @b would move too; if it were ignored, @a would not move.
     let bin = skip_if_missing_binary();
     let tmp = std::env::temp_dir().join(format!("camdl_compare_excl_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
@@ -556,10 +437,9 @@ fn compare_per_fit_exclude_chains_rescores_only_the_named_fit() {
     assert!(chain0_draws > 0, "@a's chain 0 holds draws:\n{draws_a}");
 
     // Baseline pinned to @b so neither row's absolute elpd depends on which is
-    // baseline; JSON reports each row's own elpd. `--draws 1` (plug-in):
-    // this test is about chain EXCLUSION moving θ̂.
+    // baseline; JSON reports each row's own elpd.
     let common = ["compare", "@a", "@b", "--baseline", "@b", "--format", "json",
-                  "--particles", "300", "--seed", "1", "--draws", "1", "--replicates", "1"];
+                  "--particles", "300", "--seed", "1", "--draws", "4", "--replicates", "1"];
     let all = run(&bin, &tmp, &common);
     assert!(
         all.status.success(),
@@ -580,22 +460,22 @@ fn compare_per_fit_exclude_chains_rescores_only_the_named_fit() {
     );
     let sub_out = String::from_utf8_lossy(&sub.stdout);
     let (e_a_sub, e_b_sub) = (elpd_of(&sub_out, "@a"), elpd_of(&sub_out, "@b"));
-    // The derived trace records the exclusion and the mean it led to: the
-    // retained draws of chain 0.
+    // The row records the exclusion and the cloud it left: the retained draws
+    // of chain 0.
     let v: serde_json::Value = serde_json::from_str(&sub_out).unwrap();
     let row = |name: &str| v["rows"].as_array().unwrap().iter()
         .find(|r| r["name"] == name).unwrap().clone();
     assert_eq!(row("@a")["derivation"]["excluded_chains"], serde_json::json!([1]),
         "@a's trace records the dropped chain: {v}");
     assert_eq!(row("@a")["derivation"]["theta"],
-        serde_json::json!({"posterior_mean": {"n_draws": chain0_draws}}), "{v}");
+        serde_json::json!({"posterior_draws": {"n_used": 4, "n_available": chain0_draws}}), "{v}");
     assert_eq!(row("@b")["derivation"]["excluded_chains"], serde_json::json!([]),
         "@b dropped nothing: {v}");
 
-    // @a's θ̂ moves to chain 0's mean → its elpd changes.
+    // @a's draws come from chain 0 alone → its elpd changes.
     assert!(
         (e_a_all - e_a_sub).abs() > 1e-6,
-        "excluding @a's chain 1 must change @a's elpd (θ̂ over the retained \
+        "excluding @a's chain 1 must change @a's elpd (draws from the retained \
          subset): all={e_a_all}, subset={e_a_sub}"
     );
     // @b was not named → byte-identical: the token bound per-fit, not cohort-wide.

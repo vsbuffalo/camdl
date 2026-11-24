@@ -39,7 +39,7 @@ pub(crate) fn cmd_score(inv: crate::args::ScoreInvocation) {
     let out = crate::out::Out::new(false);
     let (declared, execution, exports, request, given) = store::Inputs::split(inv).into_parts();
     let (args,) = declared.into_parts();
-    let (prediction, data) = args.into_parts();
+    let (prediction, data, held_out) = args.into_parts();
     let (exports,) = exports.into_parts();
     let (output,) = exports.into_parts();
     let (request,) = request.into_parts();
@@ -56,7 +56,7 @@ pub(crate) fn cmd_score(inv: crate::args::ScoreInvocation) {
     let store = crate::camdl_store::open_existing(&root)
         .unwrap_or_else(|| out.fail(format!("error: {prediction} names a stored prediction, and there is no run store at {}", root.display())));
     let info = store::RunInfo::new(&given, &execution, &request).unwrap_or_else(|e| out.fail(format!("error: {e}")));
-    match score(&out, &store, &prediction, &data, &info, &request) {
+    match score(&out, &store, &prediction, &data, &held_out, &info, &request) {
         Ok(stored) => {
             info.finish(&store).unwrap_or_else(|e| out.fail(format!("error: {e}")));
             if let Some(dir) = &output {
@@ -76,15 +76,82 @@ fn score(
     store: &store::Store,
     handle: &str,
     data: &[String],
+    held_out: &[String],
     info: &store::RunInfo,
     request: &store::StoreRequest,
 ) -> Result<store::Stored<crate::fit_store::Score>, String> {
-    use crate::fit_store::{Prediction, Score, ScoreIdentity, ScoreSettings};
     let parsed: store::Handle = handle.parse().map_err(|e: store::Error| e.to_string())?;
-    let prediction: store::Stored<Prediction> =
+    let prediction: store::Stored<crate::fit_store::Prediction> =
         store.resolve(&store::RunRef::new(parsed)).map_err(|e| format!("{handle}: {e}"))?;
+    let outcomes = Outcomes::Files { specs: data, held_out, skip_unbound: false, shown: &BTreeMap::new() };
+    score_prediction(out, store, &prediction, outcomes, info, request)
+}
+
+/// Where a score's outcomes come from.
+#[derive(Clone, Copy)]
+pub(crate) enum Outcomes<'a> {
+    /// Outcome files, `STREAM=FILE`: `specs` whole files, beginning with the
+    /// rows the prediction conditioned on (`--data`), and `held_out` files of
+    /// the rows after them alone (`--data-held-out`). With `skip_unbound`, a
+    /// file of a stream the prediction does not bind is left out rather than
+    /// refused, for a set of files given once for several predictions.
+    /// `shown` maps a file's path to the path the outcome table's labels
+    /// record for it, where that is not the path itself.
+    Files { specs: &'a [String], held_out: &'a [String], skip_unbound: bool, shown: &'a BTreeMap<String, String> },
+    /// The rows the prediction conditioned on and no other: a score of the
+    /// conditioning rows alone, which reads no file.
+    Conditioned,
+}
+
+/// The score of `prediction`, stored in `store`, against `outcomes`: reused
+/// when stored, computed otherwise. `info` records the invocation and
+/// `request` is the store request a fixed point's inputs are stored under.
+#[allow(clippy::result_large_err)] // the store's error carries the paths a person acts on, returned once
+pub(crate) fn score_prediction(
+    out: &crate::out::Out,
+    store: &store::Store,
+    prediction: &store::Stored<crate::fit_store::Prediction>,
+    outcomes: Outcomes,
+    info: &store::RunInfo,
+    request: &store::StoreRequest,
+) -> Result<store::Stored<crate::fit_store::Score>, String> {
+    use crate::fit_store::{Score, ScoreIdentity, ScoreSettings};
+    let no_labels = BTreeMap::new();
+    let (whole, held_out, skip_unbound, shown): (&[String], &[String], bool, &BTreeMap<String, String>) = match outcomes {
+        Outcomes::Files { specs, held_out, skip_unbound, shown } => (specs, held_out, skip_unbound, shown),
+        Outcomes::Conditioned => (&[], &[], false, &no_labels),
+    };
+    // A held-out file is read as the whole file it completes: the stored rows
+    // the prediction conditioned on, then its rows. The two spellings of one
+    // outcome so give one file, and one score.
+    let merged_dir = tempfile::Builder::new()
+        .prefix("camdl-score-held-out-")
+        .tempdir()
+        .map_err(|e| format!("cannot make a scratch directory: {e}"))?;
+    let mut completed: Vec<String> = whole.to_vec();
+    // The path each outcome table's labels record: the file the user named,
+    // never the scratch file a held-out file is completed into.
+    let mut recorded: BTreeMap<String, String> = shown.clone();
+    if !held_out.is_empty() {
+        let posed = crate::fit::predict::repose(out, store, prediction, info, request, &BTreeMap::new(), &|_, _, _| Ok(()))?;
+        let (model_ir, _) = posed.model_and_problem();
+        for (spec, given) in complete_held_out(
+            model_ir,
+            posed.config_dt,
+            &posed.conditioned,
+            whole,
+            held_out,
+            skip_unbound,
+            merged_dir.path(),
+        )? {
+            let path = spec.split_once('=').map(|(_, p)| p.to_string()).unwrap_or_default();
+            recorded.insert(path, shown.get(&given).cloned().unwrap_or(given));
+            completed.push(spec);
+        }
+    }
+    let given: &[String] = &completed;
     let mut files = BTreeMap::new();
-    for spec in data {
+    for spec in given {
         let (name, path) = spec.split_once('=').ok_or_else(|| format!("--data {spec:?}: expected STREAM=FILE"))?;
         if files.insert(name.to_string(), path.to_string()).is_some() {
             return Err(format!("--data names stream `{name}` twice"));
@@ -93,11 +160,17 @@ fn score(
     // The outcome files are checked against the stored conditioned lines
     // before the prediction is posed again: a fixed point binds them there.
     let check = |model: &Path, dt: f64, conditioned: &BTreeMap<String, String>| {
-        bind_outcomes(model, dt, conditioned, data, None).map(|_| ())
+        let data = bound_specs(model, conditioned, given, skip_unbound)?;
+        bind_outcomes(model, dt, conditioned, &data, None, &recorded).map(|_| ())
     };
-    let reposed = crate::fit::predict::repose(out, store, &prediction, info, request, &files, &check)?;
+    let reposed = crate::fit::predict::repose(out, store, prediction, info, request, &files, &check)?;
+    let model_ir = reposed.model_and_problem().0;
+    let data: Vec<String> = match outcomes {
+        Outcomes::Files { .. } => bound_specs(model_ir, &reposed.conditioned, given, skip_unbound)?,
+        Outcomes::Conditioned => reposed.conditioned.iter().map(|(source, path)| format!("{source}={path}")).collect(),
+    };
     let (binding, outcomes) =
-        bind_outcomes(reposed.model_and_problem().0, reposed.config_dt, &reposed.conditioned, data, Some((store, info)))?;
+        bind_outcomes(model_ir, reposed.config_dt, &reposed.conditioned, &data, Some((store, info)), &recorded)?;
     let settings: serde_json::Value = serde_json::from_str(&prediction.identity().options.settings).map_err(|e| e.to_string())?;
     let pit_seed = settings["seed"].as_u64().ok_or("internal error: the prediction's options hold no seed")?;
     let finite = |x: f64| store::Finite::new(x).map_err(|e| e.to_string());
@@ -115,7 +188,7 @@ fn score(
         store::Begin::Claimed(run) => run,
     };
     let mut recomputed = crate::fit::predict::recompute(out, &reposed, info, &binding)?;
-    check_recomputed(&prediction, &recomputed)?;
+    check_recomputed(prediction, &recomputed)?;
     // A stream the prediction failed to compute has no row to score; its
     // report names it, and so does the score.
     for (name, bytes) in &recomputed.files {
@@ -130,8 +203,8 @@ fn score(
     let calendar = ir::caltime::CalendarAxis::from_model(&model).map_err(|e| e.to_string())?;
     let rules = ScoreRules { intervals: INTERVALS, pit_seed };
     let last_scored_end = recomputed.scored.cells.iter().map(|c| c.stop).fold(f64::NEG_INFINITY, f64::max);
-    let labels = Labels::of(&prediction, &settings, &recomputed.files, last_scored_end)?;
-    let rendered = render(&recomputed.scored, &rules, &labels, &calendar)?;
+    let labels = Labels::of(prediction, &settings, &recomputed.files, last_scored_end, recomputed.scored.plug_in)?;
+    let rendered = render(&recomputed.scored, &rules, &labels, &calendar, &recomputed.forcings_held)?;
     for (name, bytes) in [
         ("scored.tsv", rendered.scored.into_bytes()),
         ("summary.tsv", rendered.summary.into_bytes()),
@@ -143,6 +216,14 @@ fn score(
     out.say(format_args!("score: {} row(s) scored, stored at {}", rendered.n_rows, stored.folder().display()));
     for note in &recomputed.scored.notes {
         out.say(format_args!("score: {note}"));
+    }
+    for w in &recomputed.forcings_held {
+        if let score::trace::PrequentialWarning::ForcingHeld { forcing, held_value_at, .. } = w {
+            out.say(format_args!(
+                "score: forcing `{forcing}` was held outside its range, at its value at t = {held_value_at} \
+                 (allow_forcing_extrapolation)"
+            ));
+        }
     }
     Ok(stored)
 }
@@ -212,11 +293,147 @@ fn first_difference(a: &serde_json::Value, b: &serde_json::Value, at: String) ->
     }
 }
 
+/// Each held-out file `held_out` (`STREAM=FILE`, `--data-held-out`) of a
+/// source the prediction binds, written into `dir` as the whole file it
+/// completes and returned as a `STREAM=FILE` of that file: the stored lines the
+/// prediction conditioned on (`conditioned`, by source), then the held-out
+/// file's lines after its header, beside the path of the held-out file it
+/// completes. Refused: a stream named by both `--data`
+/// (`whole`) and `--data-held-out`; a header that differs from the conditioned
+/// file's; and a held-out row of a stream that ends at or before that
+/// stream's last conditioning row, naming the first.
+#[expect(clippy::disallowed_methods, reason = "reads each `--data-held-out` file, declared `#[input(identity)]` on `ScoreArgs` and on compare's arguments, and the copy of the stored conditioned lines `repose` wrote, to complete it into the whole outcome file whose lines after the conditioning rows the score's identity holds")]
+fn complete_held_out(
+    model_ir: &Path,
+    config_dt: f64,
+    conditioned: &BTreeMap<String, String>,
+    whole: &[String],
+    held_out: &[String],
+    skip_unbound: bool,
+    dir: &Path,
+) -> Result<Vec<(String, String)>, String> {
+    let (model, _) = crate::util::load_ir(&model_ir.to_string_lossy())?;
+    let dt = crate::dt_rule::resolved_dt(model.simulation.dt, config_dt);
+    let opts = crate::caltime_load::TimeOpts {
+        origin: model.origin.as_deref(),
+        time_unit: &model.time_unit,
+        dt,
+        t_start: model.simulation.t_start,
+        format: crate::caltime_load::TimeFormat::Auto,
+    };
+    let source_of = |name: &str| -> Option<String> {
+        if conditioned.contains_key(name) {
+            return Some(name.to_string());
+        }
+        model.observations.iter().find(|o| o.name == name).map(|o| o.source.clone()).filter(|s| conditioned.contains_key(s))
+    };
+    let whole_sources: Vec<String> =
+        whole.iter().filter_map(|spec| spec.split_once('=').and_then(|(n, _)| source_of(n))).collect();
+    let mut out = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    for spec in held_out {
+        let (name, path) =
+            spec.split_once('=').ok_or_else(|| format!("--data-held-out {spec:?}: expected STREAM=FILE"))?;
+        let Some(source) = source_of(name) else {
+            if skip_unbound {
+                continue;
+            }
+            return Err(format!(
+                "--data-held-out {name}=…: the prediction binds no stream source `{name}`; it binds {}",
+                conditioned.keys().map(|s| format!("`{s}`")).collect::<Vec<_>>().join(", ")
+            ));
+        };
+        if whole_sources.contains(&source) {
+            return Err(format!(
+                "--data and --data-held-out both give the outcomes of stream `{source}`: --data is a whole file, \
+                 beginning with the rows the prediction conditioned on, and --data-held-out the rows after them \
+                 alone; give one"
+            ));
+        }
+        if seen.contains(&source) {
+            return Err(format!("--data-held-out names stream `{source}` twice"));
+        }
+        seen.push(source.clone());
+        let held = std::fs::read(path).map_err(|e| format!("--data-held-out {spec}: cannot read {path}: {e}"))?;
+        let base = std::fs::read(&conditioned[&source]).map_err(|e| format!("the conditioned rows of `{source}`: {e}"))?;
+        let header = |b: &[u8]| -> Vec<u8> {
+            b.split(|c| *c == b'\n').next().unwrap_or_default().strip_suffix(b"\r").map(<[u8]>::to_vec).unwrap_or_else(|| b.split(|c| *c == b'\n').next().unwrap_or_default().to_vec())
+        };
+        if header(&held) != header(&base) {
+            return Err(format!(
+                "--data-held-out {spec}: its header is `{}`, and the file the prediction conditioned on has `{}`; \
+                 a held-out file has the columns of the stream's data file",
+                String::from_utf8_lossy(&header(&held)),
+                String::from_utf8_lossy(&header(&base))
+            ));
+        }
+        // Every held-out row ends after the stream's last conditioning row.
+        for o in model.observations.iter().filter(|o| o.source == source) {
+            let siblings: Vec<&ir::observation::ObservationModel> =
+                model.observations.iter().filter(|x| x.source == o.source).collect();
+            let before = crate::fit::runner::load_observations(&conditioned[&source], o, &siblings, &opts)?;
+            let after = crate::fit::runner::load_observations(path, o, &siblings, &opts)
+                .map_err(|e| format!("--data-held-out {spec}: {e}"))?;
+            let Some(last) = before.last().map(|r| r.measures.end()) else { continue };
+            if let Some((i, r)) =
+                after.iter().enumerate().find(|(_, r)| r.measures.end() <= last + crate::fit::runner::TIME_TIE_EPS)
+            {
+                return Err(format!(
+                    "--data-held-out {spec}: row {} of '{}' (time {}) ends at t = {}, at or before the last row the \
+                     prediction conditioned on (t = {}); a held-out file holds only the rows after them",
+                    i + 1,
+                    o.name,
+                    fmt_time(r.label),
+                    fmt_time(r.measures.end()),
+                    fmt_time(last)
+                ));
+            }
+        }
+        let mut bytes = base.clone();
+        if !bytes.ends_with(b"\n") {
+            bytes.push(b'\n');
+        }
+        let body = held.splitn(2, |c| *c == b'\n').nth(1).unwrap_or_default();
+        bytes.extend_from_slice(body);
+        let ext = Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or("tsv");
+        let completed = dir.join(format!("{source}.{ext}"));
+        std::fs::write(&completed, bytes).map_err(|e| format!("cannot write {}: {e}", completed.display()))?;
+        out.push((format!("{source}={}", completed.display()), path.to_string()));
+    }
+    Ok(out)
+}
+
+/// The outcome files `given` (`STREAM=FILE`) the prediction binds: with
+/// `skip_unbound`, the files of the streams the model at `model_ir` does not
+/// read from a source of `conditioned` are left out; without it every file is
+/// kept, and [`bind_outcomes`] refuses one it cannot bind.
+fn bound_specs(
+    model_ir: &Path,
+    conditioned: &BTreeMap<String, String>,
+    given: &[String],
+    skip_unbound: bool,
+) -> Result<Vec<String>, String> {
+    if !skip_unbound {
+        return Ok(given.to_vec());
+    }
+    let (model, _) = crate::util::load_ir(&model_ir.to_string_lossy())?;
+    Ok(given
+        .iter()
+        .filter(|spec| {
+            let name = spec.split_once('=').map_or(spec.as_str(), |(n, _)| n);
+            conditioned.contains_key(name)
+                || model.observations.iter().any(|o| o.name == name && conditioned.contains_key(&o.source))
+        })
+        .cloned()
+        .collect())
+}
+
 /// Read each outcome file for the stream source it names, and check that it
 /// holds every row the prediction conditioned on (`conditioned`, the stored
 /// conditioned lines by source, read under the model at `model_ir` and the
 /// written step `config_dt`). With a store, also store the lines after them
-/// as the score's outcome tables.
+/// as the score's outcome tables, each labelled with the path `recorded`
+/// gives for its file, or the file's own.
 #[expect(clippy::disallowed_methods, reason = "reads each `--data` outcome file, declared `#[input(identity)]` on `ScoreArgs`, whose lines after the conditioning rows are stored as the `DataTable` the score's identity holds")]
 #[allow(clippy::type_complexity, clippy::result_large_err)]
 fn bind_outcomes(
@@ -225,6 +442,7 @@ fn bind_outcomes(
     conditioned: &BTreeMap<String, String>,
     data: &[String],
     store: Option<(&store::Store, &store::RunInfo)>,
+    recorded: &BTreeMap<String, String>,
 ) -> Result<(OutcomeBinding, BTreeMap<String, store::Dep<crate::camdl_store::DataTable>>), String> {
     let (model, _) = crate::util::load_ir(&model_ir.to_string_lossy())?;
     let dt = crate::dt_rule::resolved_dt(model.simulation.dt, config_dt);
@@ -279,7 +497,8 @@ fn bind_outcomes(
         let ext = Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or("tsv").to_string();
         let after = crate::fit_store::lines_after_conditioning(&bytes, &ext, &source, &leaves, &counts, &load)?;
         let table = store::Hashed::new(<crate::camdl_store::Table as store::Content>::from_bytes(&after).map_err(|e| e.to_string())?);
-        let labels = crate::camdl_store::TableLabels { stream: source.clone(), path: path.to_string() };
+        let shown = recorded.get(path).map_or(path, String::as_str);
+        let labels = crate::camdl_store::TableLabels { stream: source.clone(), path: shown.to_string() };
         let dep = store
             .put::<crate::camdl_store::DataTable>(table, &labels, &store::Provenance::none(), info)
             .and_then(|s| s.dep(<crate::camdl_store::DataTable as store::ContentArtifact>::FILE))
@@ -344,7 +563,8 @@ fn export(out: &crate::out::Out, stored: &store::Stored<crate::fit_store::Score>
 /// What every row of a score is labelled with, read off the prediction.
 struct Labels {
     prediction: String,
-    /// `posterior` or `fixed_point`.
+    /// `posterior`, `winner` (an optimizer run's winning point, with
+    /// verified conditioning) or `fixed_point` (a point given by a file).
     parameters: &'static str,
     conditioning: score::trace::Conditioning,
     /// The statements of the table forcings a forecast read after its origin.
@@ -358,6 +578,7 @@ impl Labels {
         settings: &serde_json::Value,
         files: &BTreeMap<String, Vec<u8>>,
         last_scored_end: f64,
+        plug_in: bool,
     ) -> Result<Labels, String> {
         use crate::fit_store::ParameterSourceRecord;
         let id = prediction.identity();
@@ -375,8 +596,11 @@ impl Labels {
         let (parameters, conditioning) = match &id.source {
             // A fit that held nothing out still scores held out the outcome
             // rows past its data: the parameters saw none of them.
+            // An optimizer run's winner is one point, `winner`; its training
+            // rows are the run's, so its conditioning is verified as a
+            // sampler's is.
             ParameterSourceRecord::Posterior { draws, .. } => (
-                "posterior",
+                if plug_in { "winner" } else { "posterior" },
                 match partition {
                     Some((held, train_end))
                         if held || last_scored_end > train_end + crate::fit::runner::TIME_TIE_EPS =>
@@ -458,7 +682,13 @@ struct Sums {
     inside: (usize, usize),
 }
 
-fn render(scored: &Scored, rules: &ScoreRules, labels: &Labels, calendar: &ir::caltime::CalendarAxis) -> Result<Rendered, String> {
+fn render(
+    scored: &Scored,
+    rules: &ScoreRules,
+    labels: &Labels,
+    calendar: &ir::caltime::CalendarAxis,
+    forcings_held: &[score::trace::PrequentialWarning],
+) -> Result<Rendered, String> {
     use sim::inference::prequential::PIT_RNG_STREAM;
     let mut pit_rng = sim::rng::StatefulRng::new_stream(rules.pit_seed, PIT_RNG_STREAM);
     let mut lines: Vec<Line> = Vec::new();
@@ -670,14 +900,20 @@ fn render(scored: &Scored, rules: &ScoreRules, labels: &Labels, calendar: &ir::c
         summary += &(row.join("\t") + "\n");
     }
 
-    let manifest = manifest(scored, labels, rules, &lines)?;
+    let manifest = manifest(scored, labels, rules, &lines, forcings_held)?;
     Ok(Rendered { scored: scored_tsv, summary, manifest, n_rows: scored.cells.len() })
 }
 
 /// `score.json`: the parameter source, each mode's basis, the conditioning,
 /// the reach and particle count, the rules' settings, each stream's scored
 /// rows and their digest, and the notes.
-fn manifest(scored: &Scored, labels: &Labels, rules: &ScoreRules, lines: &[Line]) -> Result<String, String> {
+fn manifest(
+    scored: &Scored,
+    labels: &Labels,
+    rules: &ScoreRules,
+    lines: &[Line],
+    forcings_held: &[score::trace::PrequentialWarning],
+) -> Result<String, String> {
     let s = &labels.settings;
     let particles = s["particles"].as_u64().map(|n| n as usize);
     let posterior = labels.parameters == "posterior";
@@ -769,6 +1005,9 @@ fn manifest(scored: &Scored, labels: &Labels, rules: &ScoreRules, lines: &[Line]
         })).collect::<Vec<_>>(),
         "joint_streams": joint_streams,
         "notes": notes,
+        // Each forcing held outside its range while the prediction was
+        // computed again (`allow_forcing_extrapolation`).
+        "forcings_held": forcings_held,
     });
     crate::fit::predict::stamp_engine(&mut doc);
     serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())

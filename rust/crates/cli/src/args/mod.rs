@@ -1953,9 +1953,18 @@ pub struct ScoreArgs {
     /// for a fixed point, the file the prediction was given, extended past
     /// `--holdout-after`. A stream with no outcome file is scored on the rows
     /// the prediction conditioned on only.
-    #[arg(long = "data", value_name = "STREAM=FILE", required = true)]
+    #[arg(long = "data", value_name = "STREAM=FILE", required_unless_present = "data_held_out")]
     #[input(identity)]
     pub data: Vec<String>,
+
+    /// A file of a stream's held-out rows alone, `STREAM=FILE` (repeatable):
+    /// every row ends after the rows the prediction conditioned on, which are
+    /// read from the store, and the file has the columns of the stream's data
+    /// file. It gives the score the prediction would have against the whole
+    /// file, and one stream is given by `--data` or by this, not both.
+    #[arg(long = "data-held-out", value_name = "STREAM=FILE")]
+    #[input(identity)]
+    pub data_held_out: Vec<String>,
 
     /// Export a copy of the score's result files into DIR. DIR is made when
     /// its parent exists.
@@ -2479,9 +2488,8 @@ pub struct PfilterArgs {
 
     /// With --save-prequential, score the trace only at observations
     /// strictly after TIME: earlier observations are still assimilated (the
-    /// filter reweights on them) but excluded from the trace. This is the
-    /// held-out-tail scoring mode `camdl compare` derives with (TIME = the
-    /// fit's `holdout_after`). Accepts the shared time grammar: a model-time
+    /// filter reweights on them) but excluded from the trace. Accepts the
+    /// shared time grammar: a model-time
     /// number, a date under a calendar-anchored model, or
     /// `last_obs - N weeks`. The total log-likelihood output is unchanged;
     /// only the trace is windowed, and it records the boundary
@@ -2498,8 +2506,7 @@ pub struct PfilterArgs {
 
     /// Compute in a temporary store, deleted when the command ends: the
     /// log-likelihood is printed and every export is written, and nothing is
-    /// kept in the run store. `camdl compare` passes it to the filter runs it
-    /// derives a trace from.
+    /// kept in the run store.
     #[arg(long)]
     #[input(store)]
     pub no_store: bool,
@@ -3308,15 +3315,20 @@ pub struct CatArgs {
 
 // ─── compare ──────────────────────────────────────────────────────────────────
 
-/// `camdl compare` — multi-model prequential comparison table.
+/// `camdl compare` — the stored scores of several models, differenced
+/// against a baseline.
 ///
-/// Takes ≥2 prequential.json files / method dirs (or fit handles, whose
-/// prequential is auto-derived) or a compare.toml, and renders a
-/// baseline-centered comparison.
-/// See docs/dev/proposals/2026-04-20-prequential-evaluation.md §8.
+/// Takes ≥2 stored scores, predictions or fit runs (or prequential.json
+/// files), or a compare.toml, and renders a baseline-centered comparison of
+/// their scores in one mode, one table per role and lead.
 #[derive(Args)]
 #[command(after_help = colored_help!("\
 Columns:
+  role       Which rows are scored, against the rows the parameters were
+             fitted to: trained, held_out, future (a forecast's targets) or
+             unknown (a fixed point with no --holdout-after).
+  lead       A forecast's lead: the time from its origin to the end of the
+             scored rows. One table per lead; forecast only.
   T_score    Number of scored observations (after the t0 burn-in).
              Differs across fits if they were evaluated on different data
              horizons — Δ columns are suppressed in that case unless
@@ -3345,46 +3357,74 @@ Columns:
              steps. Lower = sharper predictive, correctly calibrated.
   Δcrps      Mean CRPS difference (this − baseline). Negative = this
              model's predictive is sharper-at-the-observation.
+  wis        Mean weighted interval score of the predictive quantiles, on
+             the forecast hubs' quantile set. Lower = better.
+  Δwis       Mean WIS difference (this − baseline).
   PIT_cov90  Fraction of observations whose probability integral
              transform fell in the central 90% predictive interval.
              Nominal 0.90 under correct calibration. < 0.70 triggers
              an overconfidence warning below the table.
+  cov50      Fraction of observations inside the central 50% interval of
+             the predictive samples. Nominal 0.50.
 
 Examples:
-  # Compare two fits by prequential scores (table output)
-  camdl compare fits/det/pfilter fits/stoch/pfilter --baseline det
+  # Compare two fits on their held-out rows, one-step ahead: each fit is
+  # predicted and scored (or its stored score reused) and the stored
+  # scores are differenced
+  camdl compare @sir @seir --data cases=london.tsv
 
-  # Three-way, markdown output for pasting into a paper
-  camdl compare fits/a/pf fits/b/pf fits/c/pf --format md
+  # The same fits on their training rows
+  camdl compare @sir @seir --in-sample
+
+  # Two stored scores, as `camdl score` stored them
+  camdl compare @sir_score @seir_score
+
+  # Forecasts from the end of each fit's training rows, one table per lead
+  camdl compare @sir @seir --mode forecast --horizon \"4 weeks\" --data cases=london.tsv
+
+  # Two prequential.json files, read as they are
+  camdl compare fits/a/pf fits/b/pf --format md
 
   # Reproducible preset via compare.toml
   camdl compare --config compare.toml
-
-  # Compare two sealed fits by handle — the prequential is auto-derived
-  # at θ̂ via `camdl pfilter` (same particles/seed for both, so the
-  # scores are commensurable). No pre-run pfilter needed.
-  camdl compare @baseline @candidate --particles 2000 --seed 7
-
-  # Compare two ODE fits (`mh` or NLopt on backend = \"ode\"): each is
-  # scored by its own ODE likelihood, exactly — no filter (gh#312)
-  camdl compare @m0 @m1
-
-  # Render despite different T_score across fits (Δ columns → '—')
-  camdl compare fits/a/pf fits/b/pf --allow-mismatched-horizon
 "))]
 pub struct CompareArgs {
-    /// Models to compare — need ≥2 when --config is not used. Each is
-    /// either a prequential.json (or a method dir holding one), read
-    /// as-is, OR a stored fit run (its @label, a run-id prefix or its folder),
-    /// whose prequential is auto-derived from its sealed θ̂ + data: by a
-    /// particle filter for a chain-binomial fit, and for an ODE fit by the
-    /// fit's own ODE likelihood, the exact density of each observation at the
-    /// trajectory run from t_start at θ (basis `ode_free_forward`, gh#312).
-    /// A filtered row and an ODE row are never differenced.
+    /// Models to compare — need ≥2 when --config is not used. Each is a
+    /// stored score (the @label of a `camdl score`, a run-id prefix or its
+    /// folder), a stored prediction, or a stored fit run, or a
+    /// prequential.json (or a directory holding one), read as it is. A
+    /// prediction is scored, and a fit run predicted and scored, in the
+    /// mode `--mode` asks for; each is reused when stored and stored when
+    /// computed.
     pub paths: Vec<String>,
 
-    // Also on for a fit whose own config set it, when this command derives
-    // its prequential.
+    /// The mode of prediction whose scores are compared: `one_step`,
+    /// `free_forward` or `forecast` (which needs --horizon). Default: one-step
+    /// on a backend that runs a particle filter, free-forward otherwise; for a
+    /// stored score or prediction, the first of those it holds, else forecast.
+    #[arg(long, value_enum)]
+    pub mode: Option<crate::args::types::PredictModeArg>,
+
+    /// A forecast's reach past its origin, the end of each fit's training
+    /// rows (e.g. "4 weeks"): the `--horizon` of the `camdl predict` it
+    /// stands for. Needs --mode forecast, or sets it.
+    #[arg(long, value_name = "DURATION")]
+    pub horizon: Option<String>,
+
+    /// An outcome file, `STREAM=FILE` for each stream source (repeatable),
+    /// read by every compared prediction that binds the stream: the files the
+    /// fits were given, held-out rows included. Needed to score the held-out
+    /// rows of a fit, or a forecast's targets, unless their score is stored.
+    #[arg(long = "data", value_name = "STREAM=FILE")]
+    pub data: Vec<String>,
+
+    /// A file of a stream's held-out rows alone, `STREAM=FILE` (repeatable),
+    /// read by every compared prediction that binds the stream: `camdl score
+    /// --data-held-out`. One stream is given by --data or by this, not both.
+    #[arg(long = "data-held-out", value_name = "STREAM=FILE")]
+    pub data_held_out: Vec<String>,
+
+    // The `--allow-forcing-extrapolation` of the predictions compare makes.
     #[command(flatten)]
     pub forcing_extrapolation: ForcingExtrapolationArg,
 
@@ -3406,7 +3446,8 @@ pub struct CompareArgs {
     #[arg(long)]
     pub baseline: Option<String>,
 
-    /// Metrics to display (comma-separated: elpd, crps, pit_cov90)
+    /// Metrics to display (comma-separated: elpd, crps, wis, pit_cov90,
+    /// cov50). wis and cov50 are shown for rows read from stored scores.
     #[arg(long = "metric", alias = "metrics")]
     pub metrics: Option<String>,
 
@@ -3441,15 +3482,6 @@ pub struct CompareArgs {
     #[arg(long)]
     pub allow_data_mismatch: bool,
 
-    /// Render even if a derived row's training data file changed after its
-    /// fit ran. `compare` re-reads each fit's data files and checks each
-    /// against the hash the fit recorded in `fit.meta.json`; a file edited
-    /// in place since would be scored at a θ̂ fitted to other bytes, so by
-    /// default that is refused. With this flag the comparison renders and
-    /// every format states which files changed.
-    #[arg(long)]
-    pub allow_changed_data: bool,
-
     /// Render even if the compared traces were scored with different
     /// particle-filter settings (particle count or replicate count), as each
     /// trace records them. The log of a particle-filter likelihood estimate
@@ -3471,29 +3503,30 @@ pub struct CompareArgs {
     #[arg(long)]
     pub allow_in_sample_ablation: bool,
 
-    /// Mixture size for a Bayesian fit's derived predictive (§3.6 of the
-    /// 2026-08-29 proposal): one filter pass (for an ODE fit, one ODE
-    /// solve) per thinned posterior draw;
-    /// per-step predictive densities are averaged over the draws and the
-    /// predictive samples pooled, so scores and intervals carry parameter
-    /// uncertainty (provenance `posterior`). `--draws 1` is the documented
-    /// cheap mode — the plug-in predictive at the posterior mean, as
-    /// before. An optimizer fit (no posterior cloud) always scores
-    /// plug-in at its winner. Applied uniformly across derived fits.
-    #[arg(long, default_value_t = crate::compare::DEFAULT_DERIVE_DRAWS)]
-    pub draws: usize,
+    /// The posterior draws each sampler's fit run is predicted from: the
+    /// `--n-draws` of the `camdl predict` compare runs for it (default:
+    /// predict's). Each row's density is averaged over the draws, never its
+    /// log, so scores and intervals carry parameter uncertainty (provenance
+    /// `posterior`). An optimizer run (IF2, NLopt) is predicted at its
+    /// winning point, once, whatever `--draws` is.
+    #[arg(long)]
+    pub draws: Option<usize>,
 
-    /// Filter replicates per derived fit (§3.4 of the 2026-08-29
-    /// proposal): the whole derivation reruns at seeds seed..seed+R,
-    /// per-step scores combine by log-mean-exp, and the replicate totals
-    /// give each row a filter-noise Monte-Carlo SE (`mc_se_elpd`). The
-    /// evidence verdict is suppressed ("within filter noise") when |Δelpd|
-    /// sits inside twice the pair's combined MC SE — at that scale the Δ
-    /// measures the particle filters, not the models. `--replicates 1` is
-    /// the documented cheap mode (no replication, no MC SE). Not applied
-    /// to an ODE fit, whose scores are exact and have no filter noise.
-    #[arg(long, default_value_t = crate::compare::DEFAULT_DERIVE_REPLICATES)]
-    pub replicates: usize,
+    /// Predictions per input at the seeds seed, seed+1, …, seed+R−1, each
+    /// scored and stored (default 5): a fit run's from compare's seed, a
+    /// stored prediction's or score's from its prediction's seed, posed again
+    /// with its other options. Every replicate is scored against the outcome
+    /// rows of the first. An ODE free-forward score does not depend on the
+    /// seed, and is predicted once. Each row's log score is the
+    /// log-mean-exp of its replicates', and the replicate totals give each row
+    /// a filter-noise Monte-Carlo SE (`mc_se_elpd`); the evidence verdict is
+    /// suppressed ("within filter noise") when |Δelpd| sits inside twice the
+    /// pair's combined MC SE. The sample rules (CRPS, WIS, PIT, coverage) are
+    /// the first replicate's: a score keeps no predictive samples to pool.
+    /// `--replicates 1` is the cheap mode: one prediction, no MC SE, and an
+    /// evidence cell that says the filter noise was not measured.
+    #[arg(long)]
+    pub replicates: Option<usize>,
 
     /// Render rows whose provenance kinds differ (plug-in vs posterior
     /// mixture) instead of refusing: the Δ then compares an
@@ -3503,34 +3536,31 @@ pub struct CompareArgs {
     #[arg(long)]
     pub allow_mixed_provenance: bool,
 
-    /// Force in-sample derivation even when every compared fit declares a
-    /// holdout (gh#585): the traces score the full series at θ̂ as before
-    /// this flag existed, stamped `in_sample` and carrying the in-sample
-    /// optimism caveat. Without it, holdout-declaring fits are scored
-    /// held-out (`--score-from` at the sealed training boundary) and
-    /// stamped `hold_out_tail` after the non-leakage verification.
+    /// Compare the training rows (role `trained`), stamped `in_sample` and
+    /// carrying the in-sample optimism caveat, even for fits that held rows
+    /// out. Without it, a score's held-out rows are compared when it has
+    /// any, and its training rows otherwise.
     #[arg(long)]
     pub in_sample: bool,
 
-    /// Particle count for any fit handle whose prequential is
-    /// auto-derived. Applied uniformly to every derived fit so T_score
-    /// and scores stay commensurable. Ignored for an explicit
-    /// prequential.json path (read as-is). An ODE fit runs no filter: for
-    /// it this is the number of observation-model draws per θ behind CRPS,
-    /// PIT and the predictive interval, and the log score does not depend
-    /// on it.
-    #[arg(long, default_value_t = crate::compare::DEFAULT_DERIVE_PARTICLES)]
-    pub particles: usize,
+    /// The particle count of the one-step and forecast filters of every
+    /// prediction compare makes: the `--particles` of the `camdl predict`
+    /// compare runs (default 1000). A stored prediction or score read in a
+    /// filtered mode must have run its filters at this count when it is given
+    /// or compare predicts a fit run, and stored inputs alone at one count;
+    /// otherwise they are refused before anything is computed. Not used under --mode
+    /// free_forward, which runs no filter.
+    #[arg(long)]
+    pub particles: Option<usize>,
 
-    /// Filter seed for any fit handle whose prequential is auto-derived.
-    /// Applied uniformly across derived fits. Ignored for an explicit
-    /// prequential.json path (read as-is).
-    #[arg(long, default_value_t = crate::compare::DEFAULT_DERIVE_SEED)]
-    pub seed: u64,
+    /// The seed of each fit run's prediction: the `--seed` of the `camdl
+    /// predict` compare runs (default: predict's). Applied uniformly across
+    /// the fit runs compared.
+    #[arg(long)]
+    pub seed: Option<u64>,
 
-    /// Drop MCMC chains from a fit's posterior cloud before deriving its plug-in
-    /// θ̂, so a comparison scores the SAME subset `camdl predict`/`fit summary`
-    /// would band. PER-FIT (repeat the flag): `--exclude-chains @a:4` drops
+    /// Drop MCMC chains from a fit's posterior cloud before predicting from
+    /// it: the `--exclude-chains` of the `camdl predict` compare runs. PER-FIT (repeat the flag): `--exclude-chains @a:4` drops
     /// chain 4 from the fit named `@a` only, leaving the others whole. The fit
     /// name is matched VERBATIM against the name shown in the table (and matched
     /// by `--baseline`): a fit given by run-store handle is `@a`, one given by
@@ -3548,7 +3578,7 @@ pub struct CompareArgs {
     pub exclude_chains: Vec<String>,
 
     /// Keep ONLY the named MCMC chains of a fit's posterior cloud before
-    /// deriving its plug-in θ̂: the complement of `--exclude-chains`, with the
+    /// predicting from it: the complement of `--exclude-chains`, with the
     /// same forms. PER-FIT (repeat the flag): `--chains @a:0,1` keeps chains 0
     /// and 1 of the fit named `@a`. The two flags may name different fits in
     /// one invocation (`--chains @a:0,1 --exclude-chains @b:4`); naming one

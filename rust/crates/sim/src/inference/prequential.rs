@@ -126,6 +126,8 @@ pub fn build_trace(
                 // and a scheduled row always has a coverage.
                 coverage: per_stream_coverage[idx][si].expect(
                     "a stream with an observed value at this step is scheduled at it"),
+                wis: None,
+                in_50: None,
             });
         }
 

@@ -222,10 +222,10 @@ fn the_mode_and_horizon_flags_are_checked() {
     assert!(stderr(&out).contains("--mode one_step"), "{}", stderr(&out));
 }
 
-/// The capability matrix's refused cells for a fit that exists here: an
-/// optimizer (IF2) has no posterior, and a per-chain band has no forecast yet.
+/// An optimizer (IF2) forecasts from its one winning point, labelled
+/// `plug_in`; a per-chain band has no forecast yet, and is refused.
 #[test]
-fn single_estimate_fits_and_per_chain_bands_are_refused_a_forecast() {
+fn an_optimizer_fit_forecasts_its_winner_and_a_per_chain_band_is_refused() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     fit(dir, r#"[method]
@@ -236,8 +236,10 @@ particles = 100
 iterations = 3
 cooling = 0.7"#, "");
     let out = run(dir, &["predict", "@fit", "--horizon", "2 weeks"]);
-    assert!(!out.status.success());
-    assert!(stderr(&out).contains("single"), "IF2 is a single estimate: {}", stderr(&out));
+    assert!(out.status.success(), "{}", stderr(&out));
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(forecast_dir(dir).join("forecast.json")).unwrap()).unwrap();
+    assert_eq!(manifest["treatment"], "plug_in", "{manifest:#}");
 
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();

@@ -48,15 +48,30 @@ pub enum CheckId {
     Pairing,
     /// The members' fits were bound to the same observations.
     SharedData,
-    /// The files a member scores are the bytes its fit was fitted to.
-    ChangedData,
     /// The members were scored with the same particle and replicate counts.
     FilterSettings,
+    /// The members' rows were predicted in one mode: free-forward, one-step
+    /// or forecast.
+    Mode,
+    /// The members' rows have one role against their training rows:
+    /// trained, held out, future or unknown.
+    Role,
+    /// The members' forecast rows are at one lead from the origin.
+    Lead,
+    /// The members' forecasts reach equally far past their origin.
+    Reach,
+    /// The members' forecasts were made under the same statement of the
+    /// covariates after their origin: read as observed there (`realised`),
+    /// or not.
+    Covariates,
+    /// The members scored the same observed value of each stream at each
+    /// paired row.
+    ScoredRows,
 }
 
 impl CheckId {
     /// Every check, in declaration order.
-    pub const ALL: [CheckId; 10] = [
+    pub const ALL: [CheckId; 15] = [
         CheckId::Basis,
         CheckId::Conditioning,
         CheckId::TrainingBoundary,
@@ -65,8 +80,13 @@ impl CheckId {
         CheckId::ScoredSteps,
         CheckId::Pairing,
         CheckId::SharedData,
-        CheckId::ChangedData,
         CheckId::FilterSettings,
+        CheckId::Mode,
+        CheckId::Role,
+        CheckId::Lead,
+        CheckId::Reach,
+        CheckId::Covariates,
+        CheckId::ScoredRows,
     ];
 
     /// The flag that can waive this check, if any.
@@ -75,12 +95,16 @@ impl CheckId {
             CheckId::Basis
             | CheckId::Conditioning
             | CheckId::TrainingBoundary
-            | CheckId::Pairing => None,
+            | CheckId::Pairing
+            | CheckId::Mode
+            | CheckId::Role
+            | CheckId::Lead
+            | CheckId::Reach
+            | CheckId::Covariates => None,
             CheckId::InSampleAblation => Some(Waiver::InSampleAblation),
             CheckId::Provenance => Some(Waiver::MixedProvenance),
             CheckId::ScoredSteps => Some(Waiver::MismatchedHorizon),
-            CheckId::SharedData => Some(Waiver::DataMismatch),
-            CheckId::ChangedData => Some(Waiver::ChangedData),
+            CheckId::SharedData | CheckId::ScoredRows => Some(Waiver::DataMismatch),
             CheckId::FilterSettings => Some(Waiver::MismatchedFilterSettings),
         }
     }
@@ -93,7 +117,6 @@ pub enum Waiver {
     MismatchedHorizon,
     MixedProvenance,
     DataMismatch,
-    ChangedData,
     MismatchedFilterSettings,
     InSampleAblation,
 }
@@ -104,7 +127,6 @@ impl Waiver {
             Waiver::MismatchedHorizon => "--allow-mismatched-horizon",
             Waiver::MixedProvenance => "--allow-mixed-provenance",
             Waiver::DataMismatch => "--allow-data-mismatch",
-            Waiver::ChangedData => "--allow-changed-data",
             Waiver::MismatchedFilterSettings => "--allow-mismatched-filter-settings",
             Waiver::InSampleAblation => "--allow-in-sample-ablation",
         }
@@ -124,9 +146,6 @@ impl Waiver {
             Waiver::DataMismatch =>
                 "Δelpd across them is part model difference and part data difference, \
                  and the table cannot separate the two.",
-            Waiver::ChangedData =>
-                "`compare` re-reads these files, so the row is scored on data its θ̂ \
-                 was not fitted to.",
             Waiver::MismatchedFilterSettings =>
                 "The log of a particle-filter likelihood estimate is biased downward, \
                  and by more at fewer particles (and fewer replicates combined), so \
@@ -219,23 +238,11 @@ pub enum NotCheckedReason {
     /// The member records no data identity at all.
     NoDataIdentity { why: String },
     /// The member's record has no usable hash for one source it binds.
-    SourceUnresolved { source: String, file: DataFile, why: String },
-    /// One file the member scores could not be compared with its record.
-    FileNotChecked { stream: String, path: String, why: String },
+    SourceUnresolved { source: String, why: String },
     /// The trace is older than schema 5, which first recorded filter settings.
     TraceBeforeSchema5,
     /// The trace's producer wrote no derivation block.
     NoDerivationBlock,
-}
-
-/// Which of a fit's bound files a data hash is of.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DataFile {
-    /// A training file.
-    Training,
-    /// A `[data.holdout]` file.
-    Holdout,
 }
 
 /// A member a check covered on weaker evidence.
@@ -311,11 +318,25 @@ pub enum Finding {
     /// shortest; and the members that record no hash for the data the table
     /// scores.
     DataDiffers { sources: Vec<SourceDigests>, unhashed: Vec<UnhashedData> },
-    /// `ChangedData`: the files whose bytes changed after their fit ran.
-    DataChanged { files: Vec<ChangedFile> },
     /// `FilterSettings`: the particle and replicate counts of the members that
     /// record them. A dimension in which the members agree has one group.
     FilterSettingsDiffer { particles: Groups<usize>, replicates: Groups<usize> },
+    /// `Mode`: the mode each member's rows were predicted in.
+    ModeDiffers { groups: Groups<String> },
+    /// `Role`: the role of each member's rows.
+    RoleDiffers { groups: Groups<String> },
+    /// `Lead`: the lead of each member's forecast rows; `None` for rows that
+    /// are not a forecast's.
+    LeadDiffers { groups: Groups<Option<String>> },
+    /// `Reach`: each member's forecast reach as written (`--horizon`); `None`
+    /// for a member that is not a forecast.
+    ReachDiffers { groups: Groups<Option<String>> },
+    /// `Covariates`: whether each member's forecast read covariates stated
+    /// `realised`.
+    CovariatesDiffer { groups: Groups<bool> },
+    /// `ScoredRows`: the value of `stream` observed at time `t`, the first
+    /// row at which the members' values differ.
+    ScoredValuesDiffer { t: f64, stream: String, groups: Groups<f64> },
 }
 
 /// A member's conditioning mode, as the conditioning check compares it.
@@ -334,7 +355,6 @@ pub enum ConditioningMode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceDigests {
     pub source: String,
-    pub file: DataFile,
     /// The members grouped by recorded hash, or under `None` where a member
     /// does not bind the source. A short hash that is the prefix of one
     /// group's hash is in that group; one that is the prefix of several is
@@ -358,18 +378,6 @@ pub enum Unhashed {
     NoHashForSource { source: String },
 }
 
-/// One file scored on bytes other than those its fit read.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ChangedFile {
-    pub member: String,
-    pub stream: String,
-    pub path: String,
-    /// The hash the fit recorded, abbreviated.
-    pub recorded: String,
-    /// The hash of the file now, abbreviated.
-    pub current: String,
-}
-
 impl Finding {
     /// Every member the finding names, sorted and without repeats.
     pub fn members(&self) -> Vec<String> {
@@ -391,9 +399,12 @@ impl Finding {
                 .flat_map(|s| of(&s.groups).cloned())
                 .chain(unhashed.iter().map(|u| u.member.clone()))
                 .collect(),
-            Finding::DataChanged { files } => files.iter().map(|f| f.member.clone()).collect(),
             Finding::FilterSettingsDiffer { particles, replicates } =>
                 of(particles).chain(of(replicates)).cloned().collect(),
+            Finding::ModeDiffers { groups } | Finding::RoleDiffers { groups } => of(groups).cloned().collect(),
+            Finding::LeadDiffers { groups } | Finding::ReachDiffers { groups } => of(groups).cloned().collect(),
+            Finding::CovariatesDiffer { groups } => of(groups).cloned().collect(),
+            Finding::ScoredValuesDiffer { groups, .. } => of(groups).cloned().collect(),
         };
         out.sort();
         out.dedup();
@@ -445,8 +456,13 @@ mod tests {
             CheckId::ScoredSteps => 5,
             CheckId::Pairing => 6,
             CheckId::SharedData => 7,
-            CheckId::ChangedData => 8,
-            CheckId::FilterSettings => 9,
+            CheckId::FilterSettings => 8,
+            CheckId::Mode => 9,
+            CheckId::Role => 10,
+            CheckId::Lead => 11,
+            CheckId::Reach => 12,
+            CheckId::Covariates => 13,
+            CheckId::ScoredRows => 14,
         };
         for (i, c) in CheckId::ALL.iter().enumerate() {
             assert_eq!(position(*c), i, "{c:?}");
@@ -499,16 +515,21 @@ mod tests {
                 (Coverage::Unrecorded, names(&["a"])), (Coverage::Instant, names(&["b"])),
                 (Coverage::Interval { start: 4.0, stop: 6.0 }, names(&["c"]))] },
             Finding::DataDiffers {
-                sources: vec![SourceDigests { source: "cases".into(), file: DataFile::Holdout,
+                sources: vec![SourceDigests { source: "cases".into(),
                     groups: vec![(None, names(&["c"])), (Some("aaaaaaaa".into()), names(&["a"]))] }],
                 unhashed: vec![
                     UnhashedData { member: "b".into(), what: Unhashed::StreamNotBound { stream: "deaths".into() } },
                     UnhashedData { member: "c".into(), what: Unhashed::NoHashForSource { source: "cases".into() } }],
             },
-            Finding::DataChanged { files: vec![ChangedFile { member: "b".into(), stream: "cases".into(),
-                path: "cases.tsv".into(), recorded: "aaaaaaaa".into(), current: "bbbbbbbb".into() }] },
             Finding::FilterSettingsDiffer { particles: vec![(200, names(&["b"])), (1000, names(&["a"]))],
                 replicates: vec![(5, names(&["a", "b"]))] },
+            Finding::ModeDiffers { groups: vec![("forecast".into(), names(&["a"])), ("one_step".into(), names(&["b"]))] },
+            Finding::RoleDiffers { groups: vec![("held_out".into(), names(&["a"])), ("trained".into(), names(&["b"]))] },
+            Finding::LeadDiffers { groups: vec![(None, names(&["a"])), (Some("7".into()), names(&["b"]))] },
+            Finding::ReachDiffers { groups: vec![(Some("2 weeks".into()), names(&["a"])), (Some("4 weeks".into()), names(&["b"]))] },
+            Finding::CovariatesDiffer { groups: vec![(false, names(&["a"])), (true, names(&["b"]))] },
+            Finding::ScoredValuesDiffer { t: 28.0, stream: "cases".into(),
+                groups: vec![(3.0, names(&["a"])), (4.0, names(&["b"]))] },
         ];
         let mut results: Vec<CheckResult> = findings.iter().enumerate().map(|(i, f)| CheckResult {
             check: CheckId::ALL[i % CheckId::ALL.len()],
@@ -523,10 +544,8 @@ mod tests {
         }).collect();
         let reasons = vec![
             NotCheckedReason::NoDataIdentity { why: "no sidecar".into() },
-            NotCheckedReason::SourceUnresolved { source: "cases".into(), file: DataFile::Training,
+            NotCheckedReason::SourceUnresolved { source: "cases".into(),
                 why: "the fit recorded no hash for it".into() },
-            NotCheckedReason::FileNotChecked { stream: "cases".into(), path: "cases.tsv".into(),
-                why: "it could not be read".into() },
             NotCheckedReason::TraceBeforeSchema5,
             NotCheckedReason::NoDerivationBlock,
         ];

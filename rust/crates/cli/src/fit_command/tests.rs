@@ -952,13 +952,14 @@ const LINUX: Pins = &[
     ]),
 ];
 
-/// `compare` refuses, before computing, to score the held-out rows of a
-/// stored fit, which keeps their dates and not their values: a
-/// `holdout_after` fit and a fit whose `[data.holdout]` holds one of its two
-/// streams' rows out are both refused, naming the scores that will compute
-/// them. `--in-sample` scores the training rows and runs.
+/// A stored fit keeps its held-out rows' dates and not their values, so
+/// `compare` of two IF2 runs that held rows out refuses with no outcome file,
+/// scores the held-out rows from the files the fit was given (a
+/// `holdout_after` fit's whole file by `--data`, a `[data.holdout]` file by
+/// `--data-held-out`), and scores the training rows with `--in-sample`, with
+/// any `--draws`.
 #[test]
-fn compare_refuses_to_score_held_out_rows_of_a_stored_fit() {
+fn compare_scores_held_out_rows_of_a_stored_fit_from_their_outcome_files() {
     let cwd = workdir();
     let store = cwd.path().join("camdl-store");
     let fit = std::fs::read_to_string(cwd.path().join("fit.toml")).unwrap();
@@ -984,12 +985,33 @@ fn compare_refuses_to_score_held_out_rows_of_a_stored_fit() {
     for (config, label) in [("fit_after.toml", "after"), ("fit_partial.toml", "partial")] {
         ok(&run(&["fit", "run", config, "--label", label, "--progress", "none"]));
         ok(&run(&["fit", "run", config, "--seed", "2", "--label", &format!("{label}2"), "--progress", "none"]));
-        let refused = run(&["compare", &format!("@{label}"), &format!("@{label}2")]);
+        let (a, b) = (format!("@{label}"), format!("@{label}2"));
+        let base = ["compare", a.as_str(), b.as_str(), "--replicates", "1", "--format", "json"];
+        let refused = run(&base);
         let err = String::from_utf8_lossy(&refused.stderr);
-        assert!(!refused.status.success(), "{label}: a held-out comparison of a stored fit is refused:\n{err}");
-        assert!(err.contains("held rows out") && err.contains("step 7") && err.contains("--in-sample"), "{label}: {err}");
-        assert!(!err.contains("in_sample (θ saw"), "{label}: nothing is scored in sample in its place:\n{err}");
-        ok(&run(&["compare", &format!("@{label}"), &format!("@{label}2"), "--in-sample"]));
+        assert_eq!(refused.status.code(), Some(1), "{label}:\n{err}");
+        assert!(err.contains("the held-out rows lie past") && err.contains("--in-sample"), "{label}: {err}");
+        let outcomes: &[&str] = match label {
+            "after" => &["--data", "cases=cases.tsv"],
+            _ => &["--data", "cases=cases15.tsv", "--data-held-out", "prevalent=prev_held.tsv"],
+        };
+        for (extra, role) in [(outcomes, "held_out"), (&["--in-sample"][..], "trained")] {
+            let out = run(&[&base[..], extra].concat());
+            ok(&out);
+            let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+            for row in v["rows"].as_array().unwrap() {
+                assert_eq!(row["role"], role, "{label}: {row}");
+                assert_eq!(row["derivation"]["theta"], "optimizer_winner", "{label}: {row}");
+            }
+        }
+        // `--draws` reaches only a posterior: an optimizer run is predicted
+        // at its winner whatever it is.
+        let out = run(&[&base[..], &["--in-sample", "--draws", "20"]].concat());
+        ok(&out);
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        for row in v["rows"].as_array().unwrap() {
+            assert_eq!(row["derivation"]["theta"], "optimizer_winner", "{label}: {row}");
+        }
     }
 }
 

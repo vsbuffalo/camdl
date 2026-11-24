@@ -247,13 +247,13 @@ fail	stderr	line	error running pmmh:	all 2 chains failed init-eval with PFDegene
 fail	events	line	"type":"bad_init"	"severity":"error"
 fail	events	line	"event":"method_report"	"outcome":"failed"
 fail	events	line	"event":"method_report"	all 2 chains failed init-eval
-compare	stdout	line	@converged	14   -44.24   -0.03   0.967    0.34   -0.1 dB, within noise   3.583   +0.061        1.00
-compare	stdout	line	@if2	14   -44.20       —       —       —                       —   3.521        —        0.93
-compare	stdout	line	Scored steps:	14 (t0=0).  Baseline: @if2.
-compare	stdout	line	filter-noise MC SE of elpd:	@if2 ±0.03, @converged ±0.03
-compare	stdout	line	lag-1 autocorrelation	@converged +0.14
-compare	stderr	line	/runs/if2-	5 filter passes (1 draw(s) × 5 replicate(s), 1000 particles each
-compare	stderr	line	/runs/pmmh-	5 filter passes (1 draw(s) × 5 replicate(s), 1000 particles each
+compare	stdout	line	@if2	trained        14   -44.21   -0.01   0.993    0.22   -0.0 dB, within noise   3.480   -0.013   3.117   -0.019        0.93    0.64
+compare	stdout	line	@converged	trained        14   -44.20       —       —       —                       —   3.493        —   3.137        —        0.93    0.64
+compare	stdout	line	Scored steps:	14 (t0=0).  Baseline: @converged.
+compare	stdout	line	filter-noise MC SE of elpd:	@if2 ±0.02, @converged ±0.04
+compare	stdout	line	lag-1 autocorrelation	@if2 +0.17
+compare	stderr	line	compare: '@if2':	5 replicate scores
+compare	stderr	line	compare: '@converged':	5 replicate scores
 pfilter	stdout	line	-44.0696	-44.0696
 pfilter	stderr	line	pfilter: objective:	full likelihood (if2.toml does not set ic_free = true)
 pfilter	stderr	line	pfilter: bound streams:	cases(poisson)
@@ -367,7 +367,7 @@ profile.cached	stderr	line	profile:	6 of 6 points already stored
 profile.cached	stderr	line	profile:	3 cells (6 points) stored under
 profile.cached	stdout	line	loglik_spread_starts	starts_n_completed
 profile.refused	stderr	line	error:	--particles is required for an if2 profile
-compare.refused	stderr	line	error:	compare requires either --config FILE or ≥2 stored fit runs (@label, run id or folder)
+compare.refused	stderr	line	error:	compare requires either --config FILE or ≥2 stored scores, predictions or fit runs
 predict	stderr	line	predict: free_forward mode	subsampling 5 of 400 posterior draws (raise with --n-draws)
 predict	stderr	line	predict: mode=free_forward	treatment=posterior, 1 scenario(s) [fitted], 1 stream(s), 400 draws from pmmh method 'pmmh'
 predict	stderr	line	wrote	/predictive/cases.tsv

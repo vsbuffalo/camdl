@@ -30,10 +30,11 @@
 //! `sim::forcing_range`), shared by every clone of the model. A model that
 //! already held a forcing under one policy does not report it again under the
 //! next. So a command installs its policy before it compiles the models it
-//! runs under it, and a command that runs under several policies in turn
-//! (`compare`, one per in-process fit) compiles a model for each after
-//! installing it. Each policy says a forcing once however many of its models
-//! report it.
+//! runs under it, and a part of a command that runs under another policy (a
+//! prediction of a fit made under the override, or a score's computation,
+//! which records its holds) compiles its models after installing that
+//! policy. Each policy says a forcing once however many of its models report
+//! it.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -57,7 +58,8 @@ struct State {
     /// Under the override, a held forcing is recorded but not said as it is
     /// met: the command reports it itself, from [`ForcingPolicy::trace_warnings`].
     quiet: bool,
-    held: Mutex<Vec<OutsideRange>>,
+    /// Shared with each policy [`ForcingPolicy::allowing`] makes of this one.
+    held: Arc<Mutex<Vec<OutsideRange>>>,
     /// The command holds a store claim and fails it itself on a refusal.
     deferred: AtomicBool,
     /// A refusal was kept for the claim-holding command ([`ForcingPolicy::refused`]);
@@ -79,10 +81,10 @@ impl ForcingPolicy {
     }
 
     /// A policy that, under the override, records each held forcing without
-    /// saying it as it is met; the command reports what it held itself.
-    /// `compare` scores each in-process fit under one and prints the holds on
-    /// the fit's rows, as it does for a fit its `camdl pfilter` child scores.
-    /// A refusal is said as under [`ForcingPolicy::new`].
+    /// saying it as it is met; the command reports what it held itself. A
+    /// score's computation runs under one and records the holds in the score
+    /// (`score.json` `forcings_held`), which `compare` prints on the score's
+    /// row. A refusal is said as under [`ForcingPolicy::new`].
     pub fn recording(allowed: bool) -> Self {
         Self::with_quiet(allowed, true)
     }
@@ -91,7 +93,7 @@ impl ForcingPolicy {
         ForcingPolicy(Arc::new(State {
             allowed,
             quiet,
-            held: Mutex::new(Vec::new()),
+            held: Arc::new(Mutex::new(Vec::new())),
             deferred: AtomicBool::new(false),
             refused: AtomicBool::new(false),
             refusal: Mutex::new(None),
@@ -127,6 +129,28 @@ impl ForcingPolicy {
                 lagged: Some(o.lagged),
             })
             .collect()
+    }
+
+    /// This policy under the override: it holds a forcing where this one
+    /// would refuse it, says a hold as this one says it, and records it among
+    /// this one's holds, so a command that turns the override on for part of
+    /// its work (a prediction of a fit made under it) reports what that part
+    /// held with the rest.
+    pub fn allowing(&self) -> Self {
+        let s = &self.0;
+        ForcingPolicy(Arc::new(State {
+            allowed: true,
+            quiet: s.quiet,
+            held: Arc::clone(&s.held),
+            deferred: AtomicBool::new(false),
+            refused: AtomicBool::new(false),
+            refusal: Mutex::new(None),
+        }))
+    }
+
+    /// The policy installed now, if any.
+    pub fn installed() -> Option<Self> {
+        ROUTE.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Route the engine's forcing notes into this policy until the returned
@@ -354,7 +378,7 @@ mod tests {
     }
 
     /// Two policies installed one after the other in one process (as
-    /// `compare` installs one per fit), each with a model compiled after it
+    /// `compare` installs one per score), each with a model compiled after it
     /// was installed and evaluated past its forcing's range: each is told of
     /// the forcing through the engine's run notes, and says it once however
     /// often its runs met it.

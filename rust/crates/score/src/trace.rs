@@ -177,6 +177,16 @@ pub struct StreamScore {
     /// rather than as agreeing.
     #[serde(default)]
     pub coverage: Coverage,
+    /// The weighted interval score of the stream's predictive quantiles at
+    /// `y_obs` (`crate::interval`), in the units of `y_obs`. Recorded by a
+    /// stored score; `None` in a trace a filter wrote, and then omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wis: Option<f64>,
+    /// Whether `y_obs` lies in the central 50% interval of the predictive
+    /// samples, ends included. Recorded by a stored score; `None` in a trace
+    /// a filter wrote, and then omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_50: Option<bool>,
 }
 
 /// A single step's record: the joint log score, the filter's ESS, and each
@@ -448,9 +458,6 @@ pub enum TraceOverride {
     /// `compare --in-sample` scored a fit that declares a holdout, so the
     /// trace is in-sample although the fit sealed a training window.
     InSampleForced,
-    /// Derived under `compare --allow-changed-data`: these streams' training
-    /// files no longer matched the hashes the fit recorded.
-    ChangedData { streams: Vec<String> },
     /// Derived under `compare --allow-forcing-extrapolation` from a fit made
     /// without it: a forcing evaluated outside its range was held rather than
     /// refused, as the fit itself would not have done.
@@ -564,6 +571,23 @@ impl PrequentialTrace {
     /// something anyone observed.
     pub fn mean_crps(&self, stream: &str) -> StreamMean {
         StreamMean::of(self.stream_scores(stream).map(|(_, ss)| ss.crps))
+    }
+
+    /// `stream`'s mean weighted interval score over the steps that scored it,
+    /// or `None` when no step records one (a trace a filter wrote). Per
+    /// stream only, as [`Self::mean_crps`] is.
+    pub fn mean_wis(&self, stream: &str) -> Option<StreamMean> {
+        let values: Vec<f64> = self.stream_scores(stream).filter_map(|(_, ss)| ss.wis).collect();
+        (!values.is_empty()).then(|| StreamMean::of(values.into_iter()))
+    }
+
+    /// The share of `stream`'s observations inside the central 50% interval
+    /// of its predictive samples, or `None` when no step records it (a trace
+    /// a filter wrote).
+    pub fn coverage_50(&self, stream: &str) -> Option<StreamMean> {
+        let values: Vec<f64> =
+            self.stream_scores(stream).filter_map(|(_, ss)| ss.in_50.map(|b| f64::from(u8::from(b)))).collect();
+        (!values.is_empty()).then(|| StreamMean::of(values.into_iter()))
     }
 
     /// The share of `stream`'s observations whose PIT fell inside the central
@@ -1006,15 +1030,14 @@ mod tests {
             replicate_elpd_by_stream: [("cases".to_string(), vec![-4.0, -4.1, -3.9, -4.0, -4.2])]
                 .into_iter().collect(),
             mc_se_elpd: Some(0.12),
-            overrides: vec![TraceOverride::InSampleForced,
-                            TraceOverride::ChangedData { streams: vec!["cases".into()] }],
+            overrides: vec![TraceOverride::InSampleForced, TraceOverride::ForcingExtrapolationAllowed],
         };
         let json = serde_json::to_value(&block).unwrap();
         assert_eq!(json["theta"],
             serde_json::json!({"posterior_draws": {"n_used": 3, "n_available": 80}}));
         assert_eq!(json["excluded_chains"], serde_json::json!([1, 3]));
         assert_eq!(json["overrides"],
-            serde_json::json!(["in_sample_forced", {"changed_data": {"streams": ["cases"]}}]));
+            serde_json::json!(["in_sample_forced", "forcing_extrapolation_allowed"]));
         let back: Derivation = serde_json::from_value(json).unwrap();
         assert_eq!(back, block);
         for (theta, tag) in [(ThetaSource::Supplied, serde_json::json!("supplied")),
@@ -1043,6 +1066,7 @@ mod tests {
         let score = |stream: &str, ls: f64| StreamScore {
             stream: stream.into(), y_obs: 1.0, y_pred_samples: vec![], log_score: ls,
             crps: 0.0, pit: 0.5, interval: PredInterval::default(), coverage: Coverage::Instant,
+            wis: None, in_50: None,
         };
         let step = |t: f64, ls: f64, per: Vec<StreamScore>| PrequentialStep {
             t, log_score: ls, ess: 10.0, per_stream: per,
@@ -1262,7 +1286,7 @@ mod tests {
             per_stream: streams.iter().map(|(name, ls)| StreamScore {
                 stream: name.to_string(), y_obs: 0.0, y_pred_samples: vec![],
                 log_score: *ls, crps: 0.0, pit: 0.5, interval: PredInterval::default(),
-                coverage: Coverage::Unrecorded,
+                coverage: Coverage::Unrecorded, wis: None, in_50: None,
             }).collect(),
         }
     }
@@ -1443,7 +1467,7 @@ mod tests {
                 StreamScore {
                     stream: name.to_string(), y_obs: 0.0, y_pred_samples: vec![],
                     log_score: -1.0, crps, pit, interval: PredInterval::default(),
-                    coverage: Coverage::Unrecorded,
+                    coverage: Coverage::Unrecorded, wis: None, in_50: None,
                 }
             })).collect();
             step
@@ -1540,6 +1564,8 @@ mod tests {
             log_score: -1.0 - k, crps: 0.25 + k, pit: 0.3,
             interval: PredInterval { q05: k, q25: k + 1.0, q50: k + 2.0, q75: k + 3.0, q95: k + 4.0 },
             coverage: Coverage::Interval { start: k, stop: k + 7.0 },
+            wis: None,
+            in_50: None,
         }
     }
 

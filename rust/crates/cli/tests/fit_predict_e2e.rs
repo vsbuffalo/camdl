@@ -1087,8 +1087,10 @@ thin = 1
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// An optimizer run is predicted at its one winning point, labelled
+/// `plug_in`, never as a posterior band; more than one copy is refused.
 #[test]
-fn fit_predict_refuses_an_optimizer_fit() {
+fn fit_predict_of_an_optimizer_fit_is_its_winning_point() {
     let bin = skip_if_missing_binary();
     let tmp = std::env::temp_dir().join(format!("camdl_predict_refuse_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
@@ -1109,21 +1111,21 @@ cooling = 0.7
     let out = run(&bin, &tmp, &["fit", "run", "fit.toml", "--seed", "1", "--label", "fit"]);
     assert!(out.status.success(), "if2 fit run failed");
 
-    let out = run(&bin, &tmp, &["predict", "@fit"]);
-    assert!(
-        !out.status.success(),
-        "predict must refuse an optimizer fit (no posterior cloud), not exit 0"
-    );
+    let out = run(&bin, &tmp, &["predict", "@fit", "--n-draws", "2"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("optimizer fit") && stderr.contains("--params-only"),
-        "refusal must be actionable, got: {stderr}"
-    );
-    // And it must NOT have written a band.
-    assert!(
-        find_artifact(&tmp.join("results"), "predictive", "weekly_cases").is_none(),
-        "no predictive artifact for a point-estimate fit"
-    );
+    assert!(!out.status.success(), "an optimizer fit has one point: {stderr}");
+    assert!(stderr.contains("--n-draws 2") && stderr.contains("optimizer fit"), "{stderr}");
+
+    let out = run(&bin, &tmp, &["predict", "@fit"]);
+    assert!(out.status.success(), "predict of an optimizer fit: {}", String::from_utf8_lossy(&out.stderr));
+    let band = find_artifact(&tmp.join("results"), "predictive", "weekly_cases")
+        .expect("a predictive band of the winning point");
+    let text = std::fs::read_to_string(&band).unwrap();
+    let mut lines = text.lines().filter(|l| !l.starts_with('#'));
+    let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
+    let c = header.iter().position(|h| *h == "treatment").expect("a treatment column");
+    let rows: Vec<&str> = lines.filter(|l| !l.is_empty()).map(|l| l.split('\t').nth(c).unwrap()).collect();
+    assert!(!rows.is_empty() && rows.iter().all(|t| *t == "plug_in"), "labelled plug_in, not posterior: {rows:?}");
 
     let _ = std::fs::remove_dir_all(&tmp);
 }

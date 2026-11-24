@@ -39,17 +39,17 @@ performs a pure utility transform. A few commands delegate to the compiler.
 
 ### Read, display, compare
 
-| Command                                            | Does                                                                                                                                                                                  |
-| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `list`                                             | Browse cached runs as a table; fits one row per fit run.                                                                                                                              |
-| `show`                                             | Full metadata for one cached run; `--format json` writes it as JSON.                                                                                                                  |
-| `cat`                                              | Emit a cached run's trajectory or observations as TSV; `--stream draws.tsv --chains IDS` (or `--exclude-chains IDS`) prints only the selected chains' rows.                           |
-| `compare`                                          | Paired prequential comparison (elpd, CRPS, PIT) across fits. Scores are plug-in + in-sample-optimistic (the caveat is printed with the table); not a leave-future-out forecast score. |
-| `diff`                                             | What differs between two model files, declaration by declaration, with whether the two compile to the same model. Exit 0 identical, 1 different, 2 no report.                         |
-| `label`                                            | Refuses every handle: a stored result is sealed. A result is named when it runs, with `--label`.                                                                                      |
-| `fit {run,summary,predict,diff,table,new,methods}` | Run a fit; inspect, summarize, predict-vs-observe, and aggregate fits; scaffold new `fit.toml`s.                                                                                      |
-| `dev eval`                                         | Evaluate model expressions (parameters, forcings) on a time grid — pure inspection, no simulation.                                                                                    |
-| `lineage {realize,tree,sojourn,cohort}`            | Offline projections over an event log — transmission tree, dwell times, cohort incidence.                                                                                             |
+| Command                                            | Does                                                                                                                                                                                      |
+| -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `list`                                             | Browse cached runs as a table; fits one row per fit run.                                                                                                                                  |
+| `show`                                             | Full metadata for one cached run; `--format json` writes it as JSON.                                                                                                                      |
+| `cat`                                              | Emit a cached run's trajectory or observations as TSV; `--stream draws.tsv --chains IDS` (or `--exclude-chains IDS`) prints only the selected chains' rows.                               |
+| `compare`                                          | Paired comparison of stored scores (elpd, CRPS, WIS, PIT) across fits, one table per role and lead; computes and stores any score it needs. In-sample scores carry their optimism caveat. |
+| `diff`                                             | What differs between two model files, declaration by declaration, with whether the two compile to the same model. Exit 0 identical, 1 different, 2 no report.                             |
+| `label`                                            | Refuses every handle: a stored result is sealed. A result is named when it runs, with `--label`.                                                                                          |
+| `fit {run,summary,predict,diff,table,new,methods}` | Run a fit; inspect, summarize, predict-vs-observe, and aggregate fits; scaffold new `fit.toml`s.                                                                                          |
+| `dev eval`                                         | Evaluate model expressions (parameters, forcings) on a time grid — pure inspection, no simulation.                                                                                        |
+| `lineage {realize,tree,sojourn,cohort}`            | Offline projections over an event log — transmission tree, dwell times, cohort incidence.                                                                                                 |
 
 **Listing fit runs.** `camdl list` prints fits in a `fits` table, one row per
 fit run: when it was created, its run id, its problem's id (`FIT_ID`), the label
@@ -533,86 +533,102 @@ ranges. To estimate parameters from data, use `fit`.
 ### Model comparison
 
 ```bash
+camdl compare @sir @seir --data cases=london.tsv     # held-out rows, one-step
+camdl compare @sir @seir --in-sample                 # training rows
+camdl compare @sir_score @seir_score                 # two stored scores
 camdl compare a/prequential.json b/prequential.json --baseline a
-camdl compare @baseline @candidate
 camdl compare @baseline @candidate --pointwise pointwise.tsv
 ```
 
-`compare` renders a baseline-centered table of prequential scores (the joint
-per-step log score, and each stream's CRPS and PIT coverage — in the table for a
-single-stream comparison, in a per-stream block below it otherwise; no figure
-combines streams). Each argument is either an explicit prequential artifact — a
-`prequential.json` (or a method directory holding one), written by a `pfilter`
-method or by `camdl pfilter --save-prequential`, and read **as-is** — **or** a
-fit handle (`@label`, a run-id prefix or a run's folder; a `fit.toml` is
-refused), whose prequential is **auto-derived** by re-filtering at the fit's
-sealed θ̂. `--particles` and `--seed` set the filter used for any auto-derived
-handle and are applied **uniformly** across all derived fits, so `T_score` and
-the scores stay commensurable; they are ignored for an explicit
-`prequential.json` (read as-is). An explicit trace below schema 7, written by an
-older build before held forcings were recorded, is refused: it cannot say
-whether a forcing was held outside its range while it was scored. Re-run the fit
-or the `pfilter --save-prequential` that wrote it. The scores are **plug-in and
-in-sample-optimistic** — computed at a single θ fit to the whole series — so
-they are not a leave-future-out forecast score. The optimism does not cancel
-when two models are differenced, either: it grows with the effective number of
-parameters each model was free to tune against the same observations, so Δelpd
-tilts toward the more flexible model. Read a comparison as indicative, alongside
-`se(Δ)` and the caveats.
+`compare` renders a baseline-centered table of stored scores: per row its elpd
+(the sum of the joint per-step log scores), and per stream its CRPS, WIS and
+coverage — in the table for a single-stream comparison, in a per-stream block
+below it otherwise; no figure combines streams. Each argument is a stored score
+(the `@label` of a `camdl score`, a run-id prefix or its folder), a stored
+prediction, which is scored, or a stored fit run, which is predicted and scored;
+or a `prequential.json` (or a directory holding one), written by a `pfilter`
+method or by `camdl pfilter --save-prequential` and read **as-is**. A prediction
+`compare` makes from a fit run is `camdl predict RUN --mode MODE` with the
+`--particles` (default 1000) and `--seed` given to `compare`, the same for every
+fit run compared; it and its score are computed in the process and stored, and
+found again by the next `compare` or by `camdl predict` with the same options.
+`--draws` reaches only a sampler's run, which is predicted from that many
+posterior draws, of which `--draws 1` is one draw; an optimizer run (IF2, NLopt)
+is predicted once, at its winning point, labelled plug-in, whatever `--draws`
+is. A stored prediction or score read in a filtered mode must have run its
+filters at compare's particle count when `--particles` is given or a fit run is
+predicted, and stored inputs alone at one count; otherwise they are refused
+before anything is computed. Each input is predicted `--replicates` times
+(default 5) at successive seeds (a stored prediction's from its own seed, with
+its other options), each replicate scored against the outcome rows of the first,
+which gives each row a filter-noise SE; with `--replicates 1` the evidence
+column says the filter noise was not measured. An ODE free-forward score does
+not depend on the seed, and is predicted once, with no SE. `--mode` picks the
+mode compared, one-step by default where the backend runs a particle filter and
+free-forward otherwise; `--mode forecast` needs `--horizon`, and compares each
+lead in a table of its own.
+
+A score needs the outcomes of the rows it scores. A stored fit run keeps its
+held-out rows' dates and not their values, so its held-out rows are compared
+from `--data STREAM=FILE` (the files the fit was given, each read by every fit
+that binds the stream), from `--data-held-out STREAM=FILE` (a file of the
+held-out rows alone, such as a `[data.holdout]` file), or from a score of the
+prediction already stored; without any, `compare` refuses and says which. The
+two flags give one score for one outcome, and one stream takes one of them.
+`camdl score` takes both flags too. `--in-sample` compares the training rows
+(role `trained`), which need no file, as does a fit that held nothing out. Every
+row shows its `role`, and a forecast's its `lead`.
+
+An explicit trace below schema 7, written by an older build before held forcings
+were recorded, is refused: it cannot say whether a forcing was held outside its
+range while it was scored. Re-run the fit or the `pfilter --save-prequential`
+that wrote it. In-sample scores are **optimistic**: the parameters were fitted
+to the scored rows, so they are not a forecast score. The optimism does not
+cancel when two models are differenced, either: it grows with the effective
+number of parameters each model was free to tune against the same observations,
+so Δelpd tilts toward the more flexible model. Read a comparison as indicative,
+alongside `se(Δ)` and the caveats.
 
 The evidence column is gated on that standard error: when `|Δelpd| < 2·se(Δ)`
 the cell reads `within noise` and carries no Jeffreys tier, because the tier
 would name a magnitude the data cannot resolve. The `LR` column is `exp(Δelpd)`
-— the candidate's in-sample predictive likelihood over the baseline's on the
-same scored observations.
+— the candidate's predictive likelihood over the baseline's on the same scored
+observations.
 
 The footer under the table states what is specific to that comparison: the
 scored window and baseline, the conditioning the rows were scored under
 (in-sample, or a held-out tail with the sealed `train_end`), the optimism
 caveat, any miscalibration flag, and the numbers the noise gates read — the
-filter-noise MC SE per row and the lag-1 autocorrelation of the per-step Δelpd.
-What those quantities are, and their citations and caveats, is
-`camdl compare --explain` (the same guide as `camdl docs model-comparison`).
+filter-noise MC SE per row (with `--replicates`) and the lag-1 autocorrelation
+of the per-step Δelpd. What those quantities are, and their citations and
+caveats, is `camdl compare --explain` (the same guide as
+`camdl docs model-comparison`).
 
-A stored fit run that held rows out of training (`holdout_after`, or a
-`[data.holdout]` table, whole or partial) is refused before anything is
-computed: its problem keeps the held-out rows' dates and not their values, so
-`compare` cannot score them. The refusal names the run store's scores, which
-this camdl does not write, and `--in-sample`, which compares the fits on their
-training rows.
-
-`compare` refuses, rather than renders, these unlike-for-unlike comparisons: a
-differing `T_score` (override: `--allow-mismatched-horizon`, which suppresses
-the Δ columns and waives only the times one row scored and the other did not —
-at every time both scored, the stream and window checks below still apply),
-traces scored at different observation times, traces that scored different
-observation streams at the same time (gh#570 — the step's log score is the joint
-score over those streams), traces that scored the same stream at the same time
-over different _windows_ (gh#833 — a gapped reading of a file against a merged
-one, or a stream read as an instant against the same name read as a flow,
-produce different likelihoods at identical times; each per-stream score records
-what its value covered, and an older trace with no such record is refused as
-unverifiable rather than passed as agreeing), fits bound to different observed
-data (gh#713; override: `--allow-data-mismatch`, which renders the Δ as
-confounded), a fit whose training data file no longer hashes to what the fit
-recorded when it ran (`compare` re-reads the file, so the row would be scored at
-a θ̂ fitted to other bytes; override: `--allow-changed-data`), and traces scored
-with different particle or replicate counts, as each trace records them (the log
-of a particle-filter likelihood estimate is biased downward, by more at fewer
-particles, so part of the Δ would measure the filters; override:
+`compare` refuses, rather than renders, these unlike-for-unlike comparisons,
+naming the field that differs, with no override: scores of rows predicted in
+different modes, of different roles (training rows against held-out ones), at
+different forecast leads, of forecasts whose reach is written differently, or
+whose covariates after the origin are stated differently (`realised` against
+not); a stored fit's verified held-out rows against a fixed point's declared
+ones; and rows on different predictive bases (a filter's log-likelihood estimate
+is biased downward and an ODE score is exact). It also refuses a differing
+`T_score` (override: `--allow-mismatched-horizon`, which suppresses the Δ
+columns and waives only the times one row scored and the other did not — at
+every time both scored, the stream and window checks below still apply), traces
+scored at different observation times, traces that scored different observation
+streams at the same time (gh#570 — the step's log score is the joint score over
+those streams), traces that scored the same stream at the same time over
+different _windows_ (gh#833 — a gapped reading of a file against a merged one,
+or a stream read as an instant against the same name read as a flow, produce
+different likelihoods at identical times), rows conditioned on different
+observed data or scoring different observed values (override:
+`--allow-data-mismatch`, which renders the Δ as confounded), and traces scored
+with different particle or replicate counts (override:
 `--allow-mismatched-filter-settings`). Provenance kinds that differ (plug-in
 against a posterior mixture) are refused too (override:
 `--allow-mixed-provenance`). Under each override that was needed, every format
 states it once — the flag, the rows it concerned and what it does to the reading
-— as a line under the table and an entry of the JSON's `overrides` array. A
-derived row is scored on the backend its fit ran on: a chain-binomial fit by a
-`camdl pfilter` child, an ODE fit (`mh` or NLopt on `backend = "ode"`) by its
-own ODE likelihood, which gives each observation's exact density at the
-trajectory run from the start at θ, averaged over the posterior draws (gh#312;
-`basis` in the JSON, and a "Predictive: ODE free-forward" line under the table
-of an ODE cohort). A filtered row and an ODE row are refused as a pair, with no
-override: the filter's log-likelihood estimate is biased downward and the ODE
-score is exact, so their Δ would carry that bias.
+— as a line under the table and an entry of the JSON's `overrides` array.
 
 `--pointwise PATH` writes the per-observation difference the table already
 computes in order to form `se(Δelpd)`, as two TSV files. `PATH` holds one row
@@ -660,14 +676,13 @@ in §7 of `camdl docs model-comparison`.
   `interpolated` forcing before its first or after its last data point, or a
   `bspline` outside its window, is refused by every command that runs a model
   (`simulate`, `fit run`, `camdl predict`, `pfilter`, `profile`, `compare` when
-  it derives a prequential, `dev eval`). The error names the forcing, its range
-  and the side it was evaluated on. `--allow-forcing-extrapolation` on any of
-  them (in a fit config, `[config] allow_forcing_extrapolation = true`) holds
-  the forcing's end value instead, prints one warning per forcing naming its
-  range and the span held, and records the override in each `run.json` the
-  command writes. The override is part of the run's identity, so a run under it
-  and the same run without it are two runs: neither is served the other's stored
-  result.
+  it predicts, `dev eval`). The error names the forcing, its range and the side
+  it was evaluated on. `--allow-forcing-extrapolation` on any of them (in a fit
+  config, `[config] allow_forcing_extrapolation = true`) holds the forcing's end
+  value instead, prints one warning per forcing naming its range and the span
+  held, and records the override in each `run.json` the command writes. The
+  override is part of the run's identity, so a run under it and the same run
+  without it are two runs: neither is served the other's stored result.
 
 - **`simulate` goes forward; `fit` goes backward.** Simulation maps parameters →
   data; fitting maps data → parameters. A sweep is many forward runs, never an

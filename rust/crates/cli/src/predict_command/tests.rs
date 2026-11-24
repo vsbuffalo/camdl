@@ -1004,10 +1004,13 @@ fn a_folder_handle_predicts_into_the_store_holding_it() {
     assert!(!elsewhere.exists(), "the store CAMDL_STORE names is not made");
 }
 
-/// A prediction from an optimizer's run is refused, naming the estimate
-/// `fit summary --params-only` prints and the `--params` that takes it.
+/// A prediction from an optimizer's run (IF2) is a prediction of its winning
+/// point, once, labelled `plug_in` as a params file's is; its score's
+/// conditioning is verified from the run's stored training rows
+/// (`hold_out_tail` at the training extent, day 24), as a sampler's is, not
+/// declared or unknown. `--n-draws` above one is refused: there is one point.
 #[test]
-fn an_optimizer_run_is_refused_with_its_point_estimate() {
+fn an_optimizer_run_is_predicted_at_its_winner_with_verified_conditioning() {
     let fresh = tempfile::tempdir().unwrap();
     let root = fresh.path().join("camdl-store");
     let cwd = workdir(&root);
@@ -1017,10 +1020,26 @@ fn an_optimizer_run_is_refused_with_its_point_estimate() {
     let run = |args: &[&str]| camdl(cwd.path(), &root, &args.iter().map(|s| s.to_string()).collect::<Vec<_>>(), &[]);
     let fitted = run(&["fit", "run", "fit_if2.toml", "--label", "scout", "--progress", "none"]);
     assert!(fitted.status.success(), "{}", String::from_utf8_lossy(&fitted.stderr));
-    let out = run(&["predict", "@scout", "--mode", "free_forward", "--n-draws", "4"]);
+    let out = run(&["predict", "@scout", "--mode", "one_step", "--n-draws", "2"]);
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success(), "an IF2 run was predicted from:\n{err}");
-    assert!(err.contains("camdl fit summary @scout --params-only") && err.contains("--params"), "{err}");
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(err.contains("--n-draws 2") && err.contains("optimizer fit"), "{err}");
+
+    let out = run(&["predict", "@scout", "--mode", "one_step", "--particles", "20", "--label", "point"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let (folder, _) = predictions(&root).into_iter().next().expect("a prediction");
+    let band = tsv_rows(&std::fs::read_to_string(folder.join("predictive/daily_cases.tsv")).unwrap());
+    assert!(!band.is_empty() && band.iter().all(|r| r["treatment"] == "plug_in"), "{band:?}");
+    let out = run(&[
+        "score", "@point", "--data", "daily_cases=daily_cases.tsv", "--data", "weekly_cases=weekly_cases.tsv",
+        "--data", "survey=survey.tsv",
+    ]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let score = folders(&root).into_iter().find(|(_, id, _)| id["kind"] == crate::fit_store::Score::KIND).unwrap().0;
+    let manifest: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(score.join("score.json")).unwrap()).unwrap();
+    assert_eq!(manifest["parameters"], "winner", "{manifest:#}");
+    assert_eq!(manifest["modes"]["one_step"]["provenance"], "plug_in", "{manifest:#}");
+    assert_eq!(manifest["conditioning"]["hold_out_tail"]["train_end"], serde_json::json!(24.0), "{manifest:#}");
 }
 
 /// The bytes each prediction computes, as `camdl fit predict` computed them
@@ -1719,3 +1738,5 @@ fn no_licm_changes_no_posterior_prediction() {
 
 #[path = "score_tests.rs"]
 mod score;
+#[path = "compare_tests.rs"]
+mod compare;

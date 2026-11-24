@@ -1,10 +1,10 @@
-//! What `camdl compare` does around a derived row: the filter runs it shells
-//! out to, and what it checks about the inputs it re-reads.
+//! What `camdl compare` does around a row it predicts and scores itself: what
+//! the row records of how it was computed, and which data it scores.
 //!
 //! Every test fits two small IF2 fits of the committed SEIR golden (no
 //! `camdlc` needed), stores them in the store `fits/` labelled `a` and `b`,
-//! and compares them by label, so the prequential traces are derived by
-//! `camdl pfilter` children.
+//! and compares them by label, so each row is a prediction of the fit's
+//! winning point, scored.
 
 mod fit_store_support;
 
@@ -117,8 +117,6 @@ fn a_training_file_edited_after_the_fit_does_not_change_what_compare_scores() {
     let scores = |out: &Output| -> Vec<(String, f64)> {
         assert!(out.status.success(), "compare failed:\n{}", String::from_utf8_lossy(&out.stderr));
         let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
-        assert!(v["data_changed"].is_null(), "nothing changed:\n{v}");
-        assert!(v["data_change_unchecked"].is_null(), "every file was checked:\n{v}");
         v["rows"].as_array().unwrap().iter()
             .map(|r| (r["name"].as_str().unwrap().to_string(), r["elpd"].as_f64().unwrap()))
             .collect()
@@ -135,9 +133,9 @@ fn a_training_file_edited_after_the_fit_does_not_change_what_compare_scores() {
 }
 
 /// A trace records how it was computed (schema 5): `pfilter
-/// --save-prequential` writes its own single pass, and a trace `compare`
-/// derives records what the derivation did — the replicates it combined and
-/// where θ came from. Two rows scored at different particle or replicate
+/// --save-prequential` writes its own single pass, and a row `compare`
+/// predicts records what it did — the replicates it combined and where θ came
+/// from. Two rows scored at different particle or replicate
 /// counts are refused (exit 2) and render, stating it, under
 /// `--allow-mismatched-filter-settings`.
 #[test]
@@ -234,23 +232,4 @@ fn the_trace_records_its_filter_settings_and_compare_checks_them() {
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
     assert!(v["filter_settings_mismatch"].as_str().is_some_and(|s| s.contains("particles 200")),
         "{v}");
-}
-
-/// `compare` derives each row by running `camdl pfilter` once per draw per
-/// replicate, with `--no-store`: none of those runs writes a run store in the
-/// directory `compare` was run from, or a filter run into the store the fits
-/// are read from.
-#[test]
-fn deriving_a_trace_writes_no_pfilter_leaf() {
-    let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path();
-    fit(dir, "a", 0.10);
-    fit(dir, "b", 0.15);
-
-    let out = compare(dir, &[]);
-    assert!(out.status.success(), "compare failed:\n{}", String::from_utf8_lossy(&out.stderr));
-    assert!(!dir.join("camdl-store").exists(),
-        "compare's filter runs must not write a run store under {}", dir.display());
-    assert!(fit_store_support::folders_of(&dir.join("fits"), "pfilter").is_empty(),
-        "compare's filter runs must not store a filter run in the fits' store");
 }

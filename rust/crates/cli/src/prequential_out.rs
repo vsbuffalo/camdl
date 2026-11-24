@@ -250,6 +250,8 @@ mod tests {
                 crps: 0.25, pit: 0.5,
                 interval: PredInterval { q05: 10.0, q25: 0.0, q50: 0.0, q75: 0.0, q95: 20.0 },
                 coverage: Default::default(),
+                wis: None,
+                in_50: None,
             }).collect(),
         }
     }

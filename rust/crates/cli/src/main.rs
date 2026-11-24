@@ -48,7 +48,6 @@ mod design;         // `camdl design lhs`: a Latin-hypercube design as a `--swee
 mod docs;           // `camdl docs <topic>` — embedded, version-locked usage docs
 mod fit;
 mod compare;
-mod compare_ode;     // gh#312: the ODE fit's trace, scored in-process
 mod model_diff;     // `camdl diff A B`: gathers two models' inputs for the `diff` crate and prints its report
 mod if2;
 mod profile;

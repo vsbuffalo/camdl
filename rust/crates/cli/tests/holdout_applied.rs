@@ -168,11 +168,13 @@ dt = 1.0
         "must name the damaged run and the edited file:\n{stderr}");
 }
 
-/// The refusal `compare` gives a stored fit that held rows out.
+/// The refusal `compare` gives a stored fit that held rows out, compared
+/// with no outcome file: it says the held-out rows' values are not stored,
+/// how to give them, and the in-sample alternative.
 fn assert_held_out_refusal(stderr: &str) {
-    assert!(stderr.contains("held rows out of its training data") && stderr.contains("step 7")
-        && stderr.contains("--in-sample"),
-        "the refusal says rows were held out, when held-out scores arrive, and the \
+    assert!(stderr.contains("the held-out rows lie past") && stderr.contains("--data STREAM=FILE")
+        && stderr.contains("--data-held-out") && stderr.contains("--in-sample"),
+        "the refusal says rows were held out, how to give their outcomes, and the \
          in-sample alternative:\n{stderr}");
 }
 

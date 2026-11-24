@@ -6,14 +6,13 @@ camdl labels them, the scoring rules, the uncertainty attached to a difference,
 the held-out evaluation mode, and how fits on the ODE backend are scored. This
 is the page the table's footer points at.
 
-**Authoritative code:** the scoring kernels live in
-`rust/crates/sim/src/inference/prequential.rs`, the evidence formatting in
-`rust/crates/cli/src/evidence.rs`, and the comparison logic (preflights,
-derivation, rendering) in `rust/crates/cli/src/compare.rs`. An ODE fit's
-per-observation record is `ode_prequential_recorded` in
-`rust/crates/sim/src/inference/ode_loglik.rs`, built from the fit by
-`rust/crates/cli/src/compare_ode.rs`. The design record is
-`docs/dev/proposals/2026-08-29-honest-predictive-evaluation.md`.
+**Authoritative code:** the scoring rules a stored score applies live in
+`rust/crates/cli/src/fit/scoring.rs` and the `score` crate, the evidence
+formatting in `rust/crates/score/src/evidence.rs`, the reading of stored scores
+in `rust/crates/cli/src/compare/stored.rs`, and the comparison logic
+(preflights, rendering) in `rust/crates/cli/src/compare.rs`. The design records
+are `docs/dev/proposals/2026-08-29-honest-predictive-evaluation.md` and
+`docs/dev/proposals/2026-11-23-prediction-and-scores.md`.
 
 ---
 
@@ -103,10 +102,10 @@ The axes are independent: a posterior-mixture score can still be in-sample, and
 a held-out score can still be plug-in. `compare` refuses to difference rows
 whose conditioning differs — the two quantities answer different questions —
 refuses rows whose basis differs (§8.2), and mixing provenance requires an
-explicit flag. It also refuses a fit whose training data file has changed since
-the fit ran (override: `--allow-changed-data`): `compare` re-scores the file as
-it is now, so the row would be scored at a $\hat\theta$ fitted to different
-observations.
+explicit flag. It also refuses rows predicted in different modes (free-forward,
+one-step or forecast), rows of different roles (training rows against held-out
+ones), and forecast rows at different leads: each pair answers a different
+question, so no flag waives the refusal.
 
 ## 3. Reading the table, column by column
 
@@ -237,12 +236,13 @@ $$\mathrm{se}(\Delta) \;=\; \sqrt{T \cdot \widehat{\mathrm{Var}}_t(d_t)}$$
 - **Filter noise.** Each elpd is itself a Monte Carlo estimate from a particle
   filter, and its bias is model-dependent (the log of an unbiased estimate is
   biased downward, by more for models whose filters have higher weight variance;
-  Bérard, Del Moral & Doucet 2014). camdl therefore derives each score as $R$
-  replicate filter runs combined by log-mean-exp — the practice pomp established
-  (King, Nguyen & Ionides 2016) — and prints the resulting MC standard error. A
-  Δelpd within twice the filter noise is labelled as such. Because the bias
-  grows as the particle count falls, `compare` refuses two rows whose traces
-  record different particle or replicate counts (override:
+  Bérard, Del Moral & Doucet 2014). With `--replicates R` (default 5), `compare`
+  predicts and scores each input $R$ times at successive seeds and combines the
+  per-step log scores by log-mean-exp — the practice pomp established (King,
+  Nguyen & Ionides 2016) — and prints the resulting MC standard error. A Δelpd
+  within twice the filter noise is labelled as such. Because the bias grows as
+  the particle count falls, `compare` refuses two rows whose traces record
+  different particle or replicate counts (override:
   `--allow-mismatched-filter-settings`): part of their Δelpd would measure the
   filters rather than the models.
 - **The limitation:** all of this rests on a normal approximation that is
@@ -305,12 +305,14 @@ distribution, while the mean of logs scores each parameter value separately.
 Predictive samples are pooled across the $M$ filters, so CRPS, PIT, and the
 intervals all inherit parameter uncertainty too.
 
-`compare` uses the mixture automatically for fits with a posterior draws cloud
-(`--draws`, default 64, controls $M$; `--draws 1` falls back to the
-posterior-mean plug-in). For a fit on the ODE backend each component is one ODE
-solve rather than one filter, and is exact (§8). Chain selections (`--chains` or
-`--exclude-chains`) apply to the cloud before drawing. The per-fit cost is
-$M \times R$ filter passes and is printed before the derivation runs.
+A score of a prediction from a stored fit is this mixture: the prediction runs
+one filter per posterior draw, and `camdl score` averages the densities over
+every particle of every draw (`--draws` sets $M$, as `camdl predict --n-draws`
+does; a fixed point's copies are plug-in). For a fit on the ODE backend each
+component is one ODE solve rather than one filter, and is exact (§8). Chain
+selections (`--chains` or `--exclude-chains`) apply to the cloud before drawing.
+A score costs about what its prediction cost, and is stored, so the next
+`compare` of the same fits reads it.
 
 ## 6. Held-out evaluation
 
@@ -344,13 +346,15 @@ different semantics, and camdl will not silently blur the two.
 
 ### 6.2 What gets scored
 
-When every compared fit declares a holdout, `compare` scores each model over the
-full series at that model's sealed parameters, counting only the observations
-past the boundary. Scoring is one-step-ahead with assimilation: the filter
-forecasts a held-out week, is scored on it, and then updates its state on that
-week before forecasting the next. Errors do not compound; each scored term is a
-genuine forecast of an observation the parameters never saw. `--in-sample`
-forces the old full-series in-sample comparison, clearly stamped.
+When every compared fit declares a holdout, `compare` compares each model's
+one-step score of the rows past the boundary, at that model's sealed parameters.
+A stored fit keeps the held-out rows' dates and not their values, so the score
+reads them from the outcome files (`--data`, the files the fits were given).
+Scoring is one-step-ahead with assimilation: the filter forecasts a held-out
+week, is scored on it, and then updates its state on that week before
+forecasting the next. Errors do not compound; each scored term is a genuine
+forecast of an observation the parameters never saw. `--in-sample` compares the
+training rows instead, clearly stamped.
 
 The boundary is drawn on the end of what each row measures, not on its label. A
 row that counts events over a period ends, and is scored, when the period
@@ -360,9 +364,9 @@ at t = 11. A row trains if it ends at or before the cutoff, so with
 row labelled 10 is held out and scored. A `closing_at` stream ends at its
 labels, so for it the row labelled 10 trains. The fit records, per stream, how
 many leading rows trained and their row digest, and the training extent, the
-latest end among them. `compare` scores every row that did not train and ends
-after the training extent; under `holdout_after` that is every row that did not
-train. Under `[data.holdout]` the fit refuses a held-out row that ends at or
+latest end among them. A held-out score holds every row that did not train and
+ends after the training extent; under `holdout_after` that is every row that did
+not train. Under `[data.holdout]` the fit refuses a held-out row that ends at or
 before the training extent, so there too every held-out row is scored. A
 held-out score never includes a training row.
 
@@ -370,17 +374,14 @@ held-out score never includes a training row.
 
 "Held out" is verified, not asserted. A fit's identity seals the training data
 (by content digest) and the holdout declaration; applying the split writes the
-training partition into the fit's metadata at the moment the rows are withheld.
-`compare` refuses the `hold_out_tail` label unless the fit carries that
-partition record, each stream's leading rows still digest to the rows the fit
-recorded, and no scored observation is a row the fit trained on, checked stream
-by stream on the time each row is scored at. A fit that carries no record — one
-produced before camdl enforced the split, or a PMMH, PGAS, MH or NLopt fit
-stored before those methods recorded it — is refused the label, since nothing
-proves which observations its θ was fitted to. Re-running it with
-`camdl fit run` writes the record (a fit that predates enforcement re-trains;
-one whose method only failed to record it is reused from the cache and gains the
-record).
+training partition into the fit's metadata at the moment the rows are withheld,
+and the stored fit keeps only its training rows. A prediction from it conditions
+on those rows alone, and `camdl score` refuses an outcome file whose leading
+rows are not those rows, by row digest, naming the first that differs; the rows
+after them are the held-out rows, scored with the role `held_out` and stamped
+`hold_out_tail`. A fixed point declared fitted through `--holdout-after` is
+stamped `hold_out_declared` instead, since nothing records its fit, and
+`compare` never differences the two.
 
 The guarantee is exactly "no data leakage into $\theta$." It cannot certify that
 the _modeler_ chose the model family without having seen the full curve — that
@@ -481,21 +482,17 @@ one-step-ahead predictive is the observation density at that path,
 
 $$p(y_t \mid y_{1:t-1}, \theta) \;=\; p(y_t \mid x_t(\theta), \theta).$$
 
-`compare` evaluates this density exactly, through the fit's own likelihood — the
-model the fit archived, its data binding, its integration step and its
-observation model, the same terms the fit's sampler or optimizer summed — and
-runs no particle filter. For a posterior fit with $M$ thinned draws the step
-score is
+A free-forward score evaluates this density exactly at each draw's trajectory —
+the model the fit stored, its data binding, its integration step and its
+observation model — and runs no particle filter. For a posterior fit with $M$
+draws the step score is
 
 $$\log \frac{1}{M}\sum_{m=1}^{M} p\big(y_t \mid x_t(\theta_m), \theta_m\big),$$
 
-the log of the mixture density (§5), not the mean of the per-draw logs. The
-draws are thinned as for a filtered fit, and `--draws 1` scores the posterior
-mean plug-in. For a held-out fit (§6) the draws come from the sealed training
-posterior, the trajectory is integrated from the start through the held-out
-rows, and only the rows scored after the boundary of §6.2 (the latest scoring
-time of any training row, the same boundary a filtered fit is scored after) are
-scored, at the same index rule `camdl pfilter --score-from` uses.
+the log of the mixture density (§5), not the mean of the per-draw logs. For a
+held-out fit (§6) the draws come from the sealed training posterior, the
+trajectory is integrated from the start through the held-out rows, and the rows
+compared are those after the boundary of §6.2.
 
 What a held-out ODE score measures differs in one respect from a filtered one:
 the ODE state is never updated on the held-out weeks it scores, so each is a
@@ -504,15 +501,12 @@ whereas a stochastic model's filter assimilates each held-out week before
 forecasting the next. That is a property of the deterministic model, and the
 score reflects it rather than correcting for it.
 
-The predictive samples behind CRPS, PIT and the intervals are draws from the
-observation model at $x_t(\theta)$, `--particles` of them per $\theta$, pooled
-across draws; the log score does not depend on them. There is no filter noise,
-so `--replicates` does not apply, the row carries no filter-noise SE, and its
-trace records `particles = 0`, `replicates = 1` and an ESS of 1 at every step
-(the single state support point). The trace is stamped
-`basis = ode_free_forward`; the JSON states every row's `basis`, and the table
-and markdown footers of an ODE cohort read "Predictive: ODE free-forward" (a
-filtered cohort's footer is unchanged).
+The predictive samples behind CRPS, WIS, PIT and the intervals are draws from
+the observation model at $x_t(\theta)$, one per draw; the log score does not
+depend on them. There is no filter noise, and the row records `particles = 0`.
+The row is stamped `basis = ode_free_forward`; the JSON states every row's
+`basis`, and the table and markdown footers of an ODE cohort read "Predictive:
+ODE free-forward" (a filtered cohort's footer is unchanged).
 
 ### 8.2 Why an ODE row is not differenced against a filtered row
 

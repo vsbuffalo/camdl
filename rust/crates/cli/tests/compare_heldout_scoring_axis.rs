@@ -17,15 +17,15 @@
 //! training rows in `inputs/<stream>.tsv`, the held-out rows' periods in
 //! `held_out/<stream>.tsv` and the training extent in `partition.json`. A
 //! stored fit keeps its held-out rows' periods and not their values, so
-//! `compare` refuses to score them and names the held-out rows per stream;
-//! the test checks that refusal. It then reads which rows
-//! `compare --in-sample` scored: the scored times come from
+//! `compare` scores them from the outcome files: the full file under
+//! `holdout_after` (`--data`), the holdout file under `[data.holdout]`
+//! (`--data-held-out`). The test reads which rows `compare` scored held out,
+//! and which `compare --in-sample` scored: the scored times come from
 //! `compare --pointwise`, and the observed value at each scored time from a
 //! full-series `camdl pfilter --save-prequential` of the same data (the
 //! observed value at a step is the data, independent of θ). Most fits run
-//! IF2 on the chain-binomial backend, so `compare` derives their trace with
-//! `camdl pfilter`; the `ode_` tests run MH on the `ode` backend, whose trace
-//! `compare` scores in-process.
+//! IF2 on the chain-binomial backend, predicted one-step at their winner; the
+//! `ode_` tests run MH on the `ode` backend, predicted free-forward.
 
 mod fit_store_support;
 
@@ -74,9 +74,9 @@ enum Form {
     HoldoutFiles,
 }
 
-/// How a fit is run: the particle-filter path (`compare` derives its trace
-/// with `camdl pfilter`) or the ODE path (`compare` scores it in-process by
-/// the fit's own ODE likelihood).
+/// How a fit is run: on the chain-binomial backend, which `compare` predicts
+/// one-step through a particle filter, or on the ODE backend, predicted
+/// free-forward.
 #[derive(Clone, Copy, PartialEq)]
 enum Backend {
     /// IF2 on the chain-binomial backend.
@@ -221,8 +221,8 @@ fn camdl(bin: &Path, dir: &Path, args: &[&str]) -> std::process::Output {
 
 /// What the first fit stored and what `compare` did with it: the training
 /// rows and held-out rows its stored problem holds, the training extent its
-/// `partition.json` records, `compare`'s refusal to score it held out, and
-/// what `compare --in-sample` scored.
+/// `partition.json` records, and what `compare` scored held out and
+/// `--in-sample`.
 struct Scored {
     /// Per stream, the observed values of the rows in `inputs/<stream>.tsv`.
     training: BTreeMap<String, Vec<u64>>,
@@ -230,8 +230,11 @@ struct Scored {
     held_out: BTreeMap<String, Vec<u64>>,
     /// `partition.json`'s `extent.t`.
     extent: f64,
-    /// `compare`'s stderr when asked for a held-out score.
-    refusal: String,
+    /// The held-out row's `t_score`, and its stamped training end.
+    held_t_score: u64,
+    held_train_end: f64,
+    /// Per stream, the observed values `compare` scored held out.
+    held_values: BTreeMap<String, Vec<u64>>,
     /// The `--in-sample` row's `t_score`.
     t_score: u64,
     /// Per stream, the observed values `compare --in-sample` scored, in time
@@ -318,23 +321,38 @@ fn heldout_scored(slug: &str, streams: &[Stream], form: Form, backend: Backend) 
     let extent = fit_store_support::json(&problem.join("partition.json"))["extent"]["t"]
         .as_f64().expect("partition.json extent.t");
 
-    let compare = ["compare", "@a", "@b", "--baseline", "@b",
-        "--format", "json", "--particles", "100", "--draws", "1", "--replicates", "1",
-        "--seed", "1", "--pointwise", "pw.tsv"];
-    let out = run_camdl(&bin, dir, &compare);
-    assert!(!out.status.success(), "a held-out score of a stored fit is refused:\n{}",
-        String::from_utf8_lossy(&out.stderr));
-    assert!(out.stdout.is_empty(), "no table is written");
-    let refusal = String::from_utf8_lossy(&out.stderr).into_owned();
+    // An ODE fit is predicted free-forward, which runs no filter.
+    let mut compare: Vec<String> = ["compare", "@a", "@b", "--baseline", "@b",
+        "--format", "json", "--draws", "1", "--replicates", "1", "--seed", "1"]
+        .iter().map(|s| s.to_string()).collect();
+    if backend == Backend::Filter {
+        compare.extend(["--particles".to_string(), "100".to_string()]);
+    }
+    let row_of = |extra: &[String]| -> serde_json::Value {
+        let line: Vec<&str> = compare.iter().chain(extra).map(String::as_str).collect();
+        let out = camdl(&bin, dir, &line);
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("compare json");
+        v["rows"].as_array().unwrap().iter()
+            .find(|r| r["name"] == "@a")
+            .unwrap_or_else(|| panic!("no @a row:\n{v}"))
+            .clone()
+    };
+    // The held-out rows' outcomes: the full files, or the holdout files alone.
+    let mut held: Vec<String> = Vec::new();
+    for st in streams {
+        match form {
+            Form::HoldoutAfter => held.extend(["--data".to_string(), format!("{0}={0}.tsv", st.name)]),
+            Form::HoldoutFiles => held.extend(["--data-held-out".to_string(), format!("{0}={0}_holdout.tsv", st.name)]),
+        }
+    }
+    held.extend(["--pointwise".to_string(), "pw_held.tsv".to_string()]);
+    let row = row_of(&held);
+    assert_eq!(row["role"], "held_out", "{row}");
+    let held_t_score = row["t_score"].as_u64().expect("t_score");
+    let held_train_end = row["conditioning"]["hold_out_tail"]["train_end"].as_f64()
+        .unwrap_or_else(|| panic!("a held-out row is stamped hold_out_tail: {row}"));
 
-    let mut in_sample = compare.to_vec();
-    in_sample.push("--in-sample");
-    let out = camdl(&bin, dir, &in_sample);
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("compare json");
-    let row = v["rows"].as_array().unwrap().iter()
-        .find(|r| r["name"] == "@a")
-        .unwrap_or_else(|| panic!("no @a row:\n{v}"))
-        .clone();
+    let row = row_of(&["--in-sample".to_string(), "--pointwise".to_string(), "pw.tsv".to_string()]);
     assert_eq!(row["conditioning"], "in_sample", "{row}");
     let t_score = row["t_score"].as_u64().expect("t_score");
 
@@ -361,40 +379,35 @@ fn heldout_scored(slug: &str, streams: &[Stream], form: Form, backend: Backend) 
     }
 
     // The scored (time, stream) pairs of fit a, from --pointwise.
-    let pw = std::fs::read_to_string(dir.join("pw.streams.tsv")).unwrap();
-    let mut lines = pw.lines().filter(|l| !l.starts_with('#'));
-    let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
-    let col = |name: &str| header.iter().position(|h| *h == name).unwrap();
-    let (c_model, c_t, c_stream, c_score) = (col("model"), col("t"), col("stream"), col("log_score"));
-    let mut values: BTreeMap<String, Vec<u64>> = BTreeMap::new();
-    for line in lines {
-        let f: Vec<&str> = line.split('\t').collect();
-        if f[c_model] != "@a" || f[c_score].is_empty() {
-            continue;
+    let scored_values = |file: &str| -> BTreeMap<String, Vec<u64>> {
+        let pw = std::fs::read_to_string(dir.join(file)).unwrap();
+        let mut lines = pw.lines().filter(|l| !l.starts_with('#'));
+        let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
+        let col = |name: &str| header.iter().position(|h| *h == name).unwrap();
+        let (c_model, c_t, c_stream, c_score) = (col("model"), col("t"), col("stream"), col("log_score"));
+        let mut values: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+        for line in lines {
+            let f: Vec<&str> = line.split('\t').collect();
+            if f[c_model] != "@a" || f[c_score].is_empty() {
+                continue;
+            }
+            let t: f64 = f[c_t].parse().unwrap();
+            let key = (f[c_stream].to_string(), serde_json::json!(t).to_string());
+            let y = *y_at.get(&key)
+                .unwrap_or_else(|| panic!("no observed value for {key:?} in the full trace"));
+            values.entry(f[c_stream].to_string()).or_default().push(y);
         }
-        let t: f64 = f[c_t].parse().unwrap();
-        let key = (f[c_stream].to_string(), serde_json::json!(t).to_string());
-        let y = *y_at.get(&key)
-            .unwrap_or_else(|| panic!("no observed value for {key:?} in the full trace"));
-        values.entry(f[c_stream].to_string()).or_default().push(y);
-    }
-    Scored { training, held_out, extent, refusal, t_score, values }
-}
-
-/// The refusal names the stored fit's held-out rows per stream and the way
-/// to score its training rows instead.
-fn assert_refused(refusal: &str, held: &[(&str, usize)]) {
-    let counts: Vec<String> = held.iter().map(|(s, n)| format!("{s}: {n}")).collect();
-    assert!(refusal.contains("held rows out of its training data")
-            && refusal.contains(&format!("({})", counts.join(", ")))
-            && refusal.contains("step 7") && refusal.contains("--in-sample"),
-        "the refusal names the held-out rows {counts:?}:\n{refusal}");
+        values
+    };
+    let values = scored_values("pw.streams.tsv");
+    let held_values = scored_values("pw_held.streams.tsv");
+    Scored { training, held_out, extent, held_t_score, held_train_end, held_values, t_score, values }
 }
 
 /// The one-stream assertions: the stored problem trains on exactly the rows
-/// before the first withheld one and holds out the rest; `compare` refuses
-/// to score the held-out rows; `compare --in-sample` scores exactly the
-/// training rows.
+/// before the first withheld one and holds out the rest; `compare` scores
+/// exactly the held-out rows, stamped at the training extent; `compare
+/// --in-sample` scores exactly the training rows.
 fn assert_scores_only_the_withheld_rows(covers: &'static str, form: Form, slug: &str) {
     assert_backend_scores_only_the_withheld_rows(covers, form, Backend::Filter, slug);
 }
@@ -414,7 +427,10 @@ fn assert_backend_scores_only_the_withheld_rows(
         "covers = {covers}: the stored training rows end at the last training row");
     assert_eq!(got.held_out["cases"], withheld_labels,
         "covers = {covers}: the stored held-out rows start at the first withheld row");
-    assert_refused(&got.refusal, &[("cases", withheld_labels.len())]);
+    assert_eq!(got.held_values["cases"], CASES[first..].to_vec(),
+        "covers = {covers}: the held-out score scores every held-out row and no training row");
+    assert_eq!(got.held_t_score, withheld_labels.len() as u64, "covers = {covers}");
+    assert_eq!(got.held_train_end, got.extent, "covers = {covers}: stamped at the training extent");
     let scored = &got.values["cases"];
     assert_eq!(got.t_score, trained.len() as u64,
         "covers = {covers}: one in-sample step per training row; scored values {scored:?}");
@@ -461,7 +477,7 @@ fn window_columns_holdout_after_scores_only_withheld_rows() {
 /// Two streams under one `holdout_after = 10`: `cases` by `day(time)` (row
 /// labelled D ends at D + 1) and `deaths` by `closing_at` (row labelled D
 /// ends at D). `cases` trains rows 1–9 and `deaths` rows 1–10; both end by
-/// t = 10, the training extent. The refusal counts each stream's own
+/// t = 10, the training extent. The held-out score scores each stream's own
 /// held-out rows (`cases` labels 10–16, `deaths` labels 11–16), and
 /// `compare --in-sample` scores each stream's training rows and no held-out
 /// row of either.
@@ -474,12 +490,12 @@ fn two_streams_score_no_training_row_of_either() {
     ];
     let got = heldout_scored("two", &streams, Form::HoldoutAfter, Backend::Filter);
     assert_eq!(got.extent, TAU as f64, "partition.json records the training extent");
-    assert_refused(&got.refusal, &[("cases", 7), ("deaths", 6)]);
     for (name, values, first) in [("cases", &CASES, TAU as usize - 1), ("deaths", &DEATHS, TAU as usize)] {
         assert_eq!(got.training[name], values[..first].to_vec(),
             "{name}: the stored training rows");
         assert_eq!(got.held_out[name], (first as u64 + 1..=16).collect::<Vec<_>>(),
             "{name}: the stored held-out rows");
+        assert_eq!(got.held_values[name], values[first..].to_vec(), "{name}: the held-out rows scored");
         let scored = &got.values[name];
         for withheld in &values[first..] {
             assert!(!scored.contains(withheld),

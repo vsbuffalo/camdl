@@ -209,7 +209,7 @@ fn every_recorded_fact_is_shown() {
     runs.push(("pfilter_fit", run(&fit("pfilter.toml", "1", &[]))));
     let pfilter_fit = leaf(&work, "pfilter.toml");
     runs.push(("pfilter_fit.summary", run(&a(&["fit", "summary", pfilter_fit.to_str().unwrap()]))));
-    runs.push(("compare", run(&a(&["compare", "@if2", "@converged", "--draws", "1"]))));
+    runs.push(("compare", run(&a(&["compare", "@if2", "@converged", "--draws", "1", "--allow-mixed-provenance"]))));
     let mle = leaf(&work, "if2.toml").join("mle_params.toml");
     runs.push(("pfilter", run(&a(&[
         "pfilter", "sir.camdl", "--fit", "if2.toml", "--params", mle.to_str().unwrap(),

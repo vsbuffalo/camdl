@@ -773,6 +773,16 @@ a JSON manifest for each that records the run's full `run_id`. Two runs of one
 problem keep separate predictions, and each file is attributable to the run it
 replays.
 
+A run of an optimizer (IF2, or an NLopt method) has one best-fit point and no
+posterior, and is predicted from that point once: its winner, as
+`fit summary --params-only` prints it, labelled `plug_in` as a fixed point's
+bands are. `--n-draws` above one is refused for it, since there is one point.
+Its training rows are the run's problem's, so its scores are conditioned as a
+sampler's are: `in_sample`, or `hold_out_tail` from the training extent when
+scored rows end after it (§2.2.4); never declared or unknown. Its score records
+`parameters = "winner"`, which a fixed point's `fixed_point` does not share. A
+sampler run whose draws are not yet written is refused, naming its method.
+
 `camdl predict MODEL`, with a `.camdl` or `.ir.json` model file in place of the
 handle, predicts at one point: the model's values, each `--params` file, then
 each `--param` (§1.3, without a fit config's tier). `--data` is required and
@@ -823,23 +833,24 @@ identity: they change no prediction (D79). The data are the problem's stored
 training files, so an edit to the user's data file after the fit does not reach
 a prediction. A forecast from a stored fit reads its targets from the problem's
 `held_out/` files, computes no held-out score, and refuses `--realised-design`,
-whose design values are held-out values; no command scores the held-out rows of
-a stored fit (`compare` refuses them, Appendix A, `camdl compare`). A rerun of
-`camdl predict` with the same inputs is served from the store, without computing
-the prediction again for every mode but a forecast, whose identity holds the
-target set it computes. `predictive.json`, `observed.json` and `forecast.json`
-record the key under `address_key` and the options under `options`. Every
-manifest of a prediction (`predictive.json`, `observed.json`, the quantities
-manifest, `report.json`, `forecast.json`) records the engine that made it as
-`run.json` does: `engine_version`, the build fingerprint, and `engine_switches`,
-absent when no switch was on. `fit table --quantity` reads the address its own
-free-forward derivation writes. Inside the directory, `--exclude-chains` and
-`--quantities` also name the files (`predictive-excl3/`, `quantities-<key8>/`),
-so a chain-subset or other-vocabulary table says so in its name. A forecast's
-files carry no such suffix (D86): `forecast.json`, `forecast-samples.tsv`,
-`forecast/` and `report.json` keep their names, the directory alone is keyed by
-the selection, and `forecast.json` states `options.excluded_chains` (`[]` for
-the full cloud).
+whose design values are held-out values; the held-out rows of a stored fit are
+scored only by `camdl score` against outcome files (§2.2.4), and compared by
+`camdl compare` (Appendix A, `camdl compare`). A rerun of `camdl predict` with
+the same inputs is served from the store, without computing the prediction again
+for every mode but a forecast, whose identity holds the target set it computes.
+`predictive.json`, `observed.json` and `forecast.json` record the key under
+`address_key` and the options under `options`. Every manifest of a prediction
+(`predictive.json`, `observed.json`, the quantities manifest, `report.json`,
+`forecast.json`) records the engine that made it as `run.json` does:
+`engine_version`, the build fingerprint, and `engine_switches`, absent when no
+switch was on. `fit table --quantity` reads the address its own free-forward
+derivation writes. Inside the directory, `--exclude-chains` and `--quantities`
+also name the files (`predictive-excl3/`, `quantities-<key8>/`), so a
+chain-subset or other-vocabulary table says so in its name. A forecast's files
+carry no such suffix (D86): `forecast.json`, `forecast-samples.tsv`, `forecast/`
+and `report.json` keep their names, the directory alone is keyed by the
+selection, and `forecast.json` states `options.excluded_chains` (`[]` for the
+full cloud).
 
 **Forcings read after the origin.** A forcing read from a data table is an input
 at every time, and after a forecast's origin its values may have been fixed in
@@ -1427,9 +1438,17 @@ The positional argument is the prediction's handle (`@label`, a run-id prefix or
 its folder). `--data STREAM=FILE` gives one outcome file per stream source: for
 a stored fit, the file the fit was given, held-out rows included; for a fixed
 point, the file the prediction was given, extended past `--holdout-after`.
-`score` takes no flag for the prediction: its parameter source, mode, reach,
-particles, seed and scenarios are in its identity. `--store`, `--label`,
-`--force` and `-o DIR` mean what they mean for `camdl predict`.
+`--data-held-out STREAM=FILE` gives instead a file of a stream's held-out rows
+alone, with the columns of its data file: every row must end after the last row
+the prediction conditioned on for that stream, which `score` reads from the
+store, or the file is refused, naming the first row that does not. The rows are
+read as the whole file they complete (the stored conditioning rows, then these),
+so one outcome stated by `--data` or by `--data-held-out` is one score; a stream
+named by both is refused. The flag suits any prediction, and is the natural
+spelling for a fit whose held-out rows are a `[data.holdout]` file. `score`
+takes no flag for the prediction: its parameter source, mode, reach, particles,
+seed and scenarios are in its identity. `--store`, `--label`, `--force` and
+`-o DIR` mean what they mean for `camdl predict`.
 
 **The outcome files must agree with the prediction.** Each file is read by the
 loader the prediction read its data with, and every row the prediction
@@ -1518,20 +1537,24 @@ with `lead` empty. Only the log score is computed for a `joint` row.
   `n n_unscored log_score_sum log_score_mean crps_mean
   wis_mean coverage_50 coverage_90`.
   Rows of different streams, modes, roles or leads are never pooled.
-- `score.json`: the prediction's run id; `parameters` (`posterior` or
-  `fixed_point`); `conditioning`, what the parameters were fitted to
-  (`hold_out_tail`, from the end of the fit's last training row, for a fit with
-  held-out rows or a score of outcome rows past the fit's data; `in_sample`
-  otherwise; `hold_out_declared` for a fixed point's `--holdout-after`,
-  `unknown` without one); per mode the provenance, the basis (`filtered`,
-  `ode_free_forward`, `simulated_free_forward`) and the draws and samples per
-  draw; the reach, the particle count and the seed; the rules' settings; the
-  forecast's covariate statements; `labels`
+- `score.json`: the prediction's run id; `parameters` (`posterior`; `winner`, an
+  optimizer run's winning point, whose conditioning is verified from the run's
+  training rows; or `fixed_point`, a point given by a file); `conditioning`,
+  what the parameters were fitted to (`hold_out_tail`, from the end of the fit's
+  last training row, for a fit with held-out rows or a score of outcome rows
+  past the fit's data; `in_sample` otherwise; `hold_out_declared` for a fixed
+  point's `--holdout-after`, `unknown` without one); per mode the provenance,
+  the basis (`filtered`, `ode_free_forward`, `simulated_free_forward`) and the
+  draws and samples per draw; the reach, the particle count and the seed; the
+  rules' settings; the forecast's covariate statements; `labels`
   (`conditional on covariates observed after the origin` under
   `--covariate NAME=realised`, `held out as declared, not verified` for a fixed
   point's held-out rows); per stream and mode the rows scored and their digest;
-  the sets of streams the `joint` rows are of; and the notes. `rules.not_scored`
-  records that a prediction made with `--quantities` cannot be scored.
+  the sets of streams the `joint` rows are of; the notes; and `forcings_held`,
+  each forcing the computation held outside its range under
+  `--allow-forcing-extrapolation`, which `score` also prints on stderr.
+  `rules.not_scored` records that a prediction made with `--quantities` cannot
+  be scored.
 
 The identity of a score is the prediction, each stream's outcome lines after the
 prediction's conditioning rows (stored as a data table), and the interval levels
@@ -2058,8 +2081,8 @@ command's own (said on stderr, with the backend and step it used).
 The store path names the simulator a cell ran on (`<backend>-dt<dt>-…`), so a
 replay lands under the fit's backend and step. A cell stored at another backend
 or step keeps its own key and stays valid there; passing that `--backend` /
-`--dt` explicitly finds it again. `compare` derives a fit's prequential on the
-same reading: its filter runs at the fit's dt.
+`--dt` explicitly finds it again. A prediction from a stored fit, and so each
+prediction `compare` makes, runs at the fit's dt.
 
 `--draws-out PATH` writes the resolved rows back out in the same
 one-row-per-draw, one-column-per-parameter format `--draws PATH` reads, so a
@@ -3538,14 +3561,15 @@ A holdout declaration is applied when the fit loads its data
 partition (`fit/training_partition.rs`). `profile --fit` applies it to its bound
 data through the same function; the training rows a cutoff leaves each stream
 enter the profile's base identity, omitted without one. `pfilter` sees the full
-series, and `compare` refuses the held-out rows of a stored fit (Appendix A,
-`camdl compare`). The one exception is `pfilter --save-final-state` under
-`holdout_after`: it binds only the training rows, cut by the training rule below
-(`cutoff_prefix`, `fit/training_partition.rs`), and saves the state at their
-end, since a state filtered through held-out rows would be a forecast origin
-that has seen the data its forecast is scored against (gh#1138). Every per-run
-output of that run then covers the training rows only: the log-likelihood,
-`--trace`, `--save-prequential`, `--save-paths`, `--save-filtering`,
+series, and a stored fit's held-out rows are scored from outcome files by
+`camdl score` and `camdl compare` (Appendix A, `camdl compare`). The one
+exception is `pfilter --save-final-state` under `holdout_after`: it binds only
+the training rows, cut by the training rule below (`cutoff_prefix`,
+`fit/training_partition.rs`), and saves the state at their end, since a state
+filtered through held-out rows would be a forecast origin that has seen the data
+its forecast is scored against (gh#1138). Every per-run output of that run then
+covers the training rows only: the log-likelihood, `--trace`,
+`--save-prequential`, `--save-paths`, `--save-filtering`,
 `--save-filtered-streams` and `--pf-health`. `--score-from` is refused beside a
 cut that dropped rows, since every row it could score trained. When the cut
 drops a row, the training rows it kept enter the run's `config` level; a cut
@@ -3575,11 +3599,11 @@ The fit prints the rows it trained on, the training extent and what was withheld
 observation row(s) ending after t = 10 withheld from training`,
 followed by a note that `camdl compare` scores them out of sample), and the
 first held-out row of each stream as the file writes it, and records the
-partition in `fit.meta.json` (`training_partition`). `camdl compare` scores such
-a fit out of sample on every row that did not train and ends after the training
-extent (stamped `held-out tail`, with `train_end` the extent), after checking
-that each training file's leading rows still digest to the recorded prefix; a
-fit without a holdout is scored in-sample.
+partition in `fit.meta.json` (`training_partition`). `camdl score` scores such a
+fit's held-out rows from an outcome file whose leading rows equal its training
+rows by row digest (§2.2.4), and `camdl compare` compares those rows, stamped
+`held-out tail` with `train_end` the training extent; a fit without a holdout is
+compared on its training rows, in-sample.
 
 A model anchor (`simulate { to = last_obs + … }`, a `piecewise` breakpoint) and
 `camdl predict`'s `value_at(…, last_obs)` resolve over the training rows only,
@@ -5149,16 +5173,12 @@ cooling = 0.7
 
 The fit prints the rows it trained on and the first held-out row of each stream
 (§6.2) and records its training partition in `fit.meta.json`. The stored problem
-keeps the withheld rows' dates and not their values, so `camdl compare` refuses
-to score them (scores of held-out rows arrive with the run store's scores);
-`--in-sample` compares the training rows. To score them by hand, write θ̂ with
-`camdl fit summary FIT --params-only` and run `camdl pfilter` over the full file
-with `--score-from` (`docs/inference.md`, "Out-of-sample validation").
-
-`camdl predict` plus `camdl compare` answers a different question, replaying the
-fitted trajectory forward into the held-out window rather than re-filtering it;
-reach for that when you want a predictive score rather than a filter
-log-likelihood.
+keeps the withheld rows' dates and not their values, so their scores need the
+file they came from: `camdl predict FIT` and
+`camdl score PREDICTION --data
+STREAM=FILE` score them (§2.2.4), and
+`camdl compare FIT … --data STREAM=FILE` compares them; `--in-sample` compares
+the training rows.
 
 A held-out file that already exists on its own, with rows that all end after the
 training data, is bound with `[data.holdout]` instead (§6.2).
@@ -7732,16 +7752,29 @@ part of the leaf's identity, and the full objective leaves the key unchanged.
 ### `camdl compare [PATHS…]`
 
 ```
-PATHS                       ≥2 when --config is absent. Each is a prequential.json
-                            (or a method leaf holding one), read as-is, OR a fit
-                            handle whose prequential is auto-derived from its θ̂
+PATHS                       ≥2 when --config is absent. Each is a stored score,
+                            prediction or fit run (its @label, a run-id prefix or
+                            its folder), or a prequential.json (or a directory
+                            holding one), read as it is
+--mode one_step|free_forward|forecast
+                            the mode whose scores are compared (default one-step
+                            on the chain-binomial backend, free-forward on the
+                            others; for a stored score or prediction, the first
+                            of those it holds, else forecast)
+--horizon DURATION          a forecast's reach past its origin; sets --mode
+                            forecast, which needs it
+--data STREAM=FILE          an outcome file per stream source (repeatable), read
+                            by every compared prediction that binds the stream
+--data-held-out STREAM=FILE a file of a stream's held-out rows alone (repeatable),
+                            as `camdl score --data-held-out` reads it; one stream
+                            by --data or by this, not both
 --explain                   print the model-comparison methods guide and exit
                             (the same text as `camdl docs model-comparison`);
                             takes no PATHS
 --config compare.toml       [[model]] entries; can also carry baseline/metrics/format/
                             streams
 --baseline NAME             reference for Δ columns (default: argmax elpd)
---metric elpd,crps,pit_cov90
+--metric elpd,crps,wis,pit_cov90,cov50
 --format table|md|json      (default table)
 --streams NAME[,NAME...]    one table per observation stream (a leaf, or a source
                             for all its leaves), every row scored on that stream
@@ -7751,29 +7784,35 @@ PATHS                       ≥2 when --config is absent. Each is a prequential.
 --allow-mismatched-horizon  render even if T_score differs (Δ columns → '—');
                             waives only the times one row scored and the other
                             did not
---allow-data-mismatch       render even if the compared fits were bound to
-                            different observed data; the Δ is then confounded
---allow-changed-data        render even if a derived row's training file no
-                            longer hashes to what its fit recorded
+--allow-data-mismatch       render even if the compared rows were bound to
+                            different observed data, or scored different observed
+                            values; the Δ is then confounded
 --allow-mismatched-filter-settings
                             render even if the traces record different particle
                             or replicate counts
---draws N                   mixture size for a Bayesian fit's predictive: one
-                            filter pass per posterior draw, densities averaged
-                            (default 64; 1 = plug-in at the posterior mean)
---replicates N              filter replicates per derived fit, combined by
-                            log-mean-exp; their totals give each row's MC SE
-                            (default 5; 1 = no replication and no MC SE)
+--draws N                   the posterior draws each sampler's fit run is
+                            predicted from (`camdl predict --n-draws`; default
+                            predict's); 1 is one posterior draw; an optimizer
+                            run is predicted at its winner whatever N is
+--replicates N              predictions per input at seeds seed..seed+N−1, each
+                            scored against the first's outcome rows; log scores
+                            combined by log-mean-exp, their totals give each
+                            row's MC SE (default 5; 1 = one prediction, no MC
+                            SE); an ODE free-forward score is predicted once
 --allow-mixed-provenance    render rows whose provenance kinds differ
                             (plug-in vs posterior mixture) rather than refusing
---in-sample                 score every fit in-sample even when it declares a
-                            holdout; stamped in_sample, with the optimism caveat.
-                            A stored fit that held rows out is refused without
-                            it (below)
---particles N               for derived prequentials (default 1000, applied uniformly)
---seed N                    for derived prequentials (default 1)
-                            (a derived prequential filters at the fit's own dt,
-                            read as `simulate --draws posterior --fit` reads it, §3.4)
+--in-sample                 compare the training rows (role trained), stamped
+                            in_sample, with the optimism caveat
+--particles N               the filters' particle count of every prediction
+                            compare makes (`camdl predict --particles`; default
+                            1000); a stored prediction or score read in a
+                            filtered mode at another count is refused before
+                            anything is computed (stored inputs alone must
+                            share one count); not under --mode free_forward
+--seed N                    the seed of each fit run's prediction (default
+                            predict's)
+--allow-forcing-extrapolation
+                            the `--allow-forcing-extrapolation` of each prediction
 --exclude-chains [@FIT:]IDS per-fit (`@a:4`) or cohort-wide (`3,4`); mixing the two
                             forms is rejected. Always warns
 --chains [@FIT:]IDS         keep only these chains, same forms; may name other fits
@@ -7781,31 +7820,96 @@ PATHS                       ≥2 when --config is absent. Each is a prequential.
 --pointwise PATH            write the per-observation Δelpd vector: joint scores
                             to PATH, per-stream scores to PATH with .streams
                             before its extension (under --streams: only the
-                            .streams file, for the selected streams)
+                            .streams file, for the selected streams); refused for
+                            a comparison of more than one table
 ```
 
-A stored fit run that held rows out of its training data (`holdout_after`, or
-`[data.holdout]`, whole or partial) is refused before anything is computed: its
-problem keeps the held-out rows' dates and not their values, so they cannot be
-scored. The refusal names the run store's scores (step 7 of
-`docs/dev/proposals/2026-11-20-run-store-api.md`), which this camdl does not
-write, and `--in-sample`, which compares the fits on their training rows. An
-explicit `prequential.json` is read as-is.
+`compare` differences stored scores (§2.2.4). A stored score is read as it is. A
+stored prediction is scored, and a stored fit run is first predicted, in the
+mode `--mode` asks for, with `--particles` (default 1000) and `--seed` as the
+`camdl predict` of that run would be given them, and `--draws` for a sampler's
+run; an optimizer run is predicted at its winner whatever `--draws` is. Every
+input is checked before anything is computed: a `--data` or `--data-held-out`
+stream that no compared prediction binds is refused, naming it, and so is a
+stored prediction or score read in a filtered mode whose filters ran at another
+particle count than compare's (`--particles`, or its default when a fit run is
+predicted; with neither, the stored inputs must share one count), naming each
+input's count (unless `--allow-mismatched-filter-settings`). The prediction and
+its score are computed in the process, by `predict` and `score`'s own
+computations, and stored. Each is reused when stored, so a second `compare` of
+the same runs computes nothing, and a prediction made with `camdl predict` and
+the same options is the one `compare` finds.
 
-Columns: `T_score`, `elpd`, `Δelpd`, `LR` (= exp(Δelpd), the in-sample
-likelihood ratio against the baseline on the same scored observations — not an
-e-value: nothing here establishes a null expectation ≤ 1, so it carries no
-anytime-valid reading), `se(Δ)` (paired standard error over pointwise
-differences), `evidence` (decibans plus a Jeffreys tier, or `within noise` when
-`|Δelpd| < 2·se(Δ)`), `crps`, `Δcrps`, `PIT_cov90` (nominal 0.90; below 0.70
-triggers an overconfidence warning). The last three are per stream: they stay in
-the main table only when every row scored exactly one stream, the same one;
-otherwise they move to a block headed "Per-stream accuracy and calibration", one
-line per stream × model with `n` (scored observations), `mean CRPS`,
-`Δ mean CRPS` (only when both rows scored the stream at the same times) and
-`PIT_cov90`, and the overconfidence warning names the stream. No figure combines
-streams. A trace with no per-stream breakdown (schema 1) reports CRPS and
-calibration as not available.
+A score's outcomes are, in order: the `--data` and `--data-held-out` files, each
+given to every prediction that binds its stream (and left out of one that does
+not), and a score of them that holds no row past the conditioning rows is
+refused, naming `--in-sample`; when only the rows a prediction conditioned on
+are compared (a fit that held nothing out, or `--in-sample`), those rows, which
+need no file; otherwise the one stored score of the prediction that holds rows
+past them. A stored fit keeps its held-out rows' dates and not their values
+(§2.2.4), so a held-out comparison of a fit with no stored score and no outcome
+file is refused, naming `--data`, `--data-held-out`, `camdl score` and
+`--in-sample`; so is one whose prediction has several such scores, which names
+them. A forecast's targets need outcomes in the same way.
+
+The rows compared are a score's rows of the chosen mode, of one role: with
+`--in-sample`, `trained`; otherwise `held_out` when the score has any, `unknown`
+for a fixed point with no `--holdout-after`, and `trained` for the rest. A
+forecast's rows are `future`, and each lead is its own table, in lead order; a
+fit run's forecast's origin is the end of its training rows. Each row end is one
+scored step: its log score is the score's `joint` row there, or the one stream's
+own when one stream is scored there. A free-forward score holds no joint row, so
+a joint table of a free-forward score of several streams observed at one time is
+refused, naming `--streams`. Every number is the score's: no predictive sample
+is read and no rule is recomputed. Every input is predicted `--replicates` times
+(default 5), at the seeds `seed`, `seed+1`, …: a fit run from `--seed`, a stored
+prediction or score from its prediction's seed, posed again with its other
+options. Each prediction is stored and scored against the outcome rows of the
+first score; each step's log score, and each stream's, is the log-mean-exp of
+the replicates', the replicate totals give the row's filter-noise SE, and the
+CRPS, WIS, PIT and coverage are the first replicate's. An ODE free-forward score
+does not depend on the seed: it is predicted once, its `replicates` is 1 and it
+has no SE. Under `--replicates 1` no filter-noise SE is measured: an evidence
+cell of two filtered rows outside the se(Δ) band then ends
+`filter noise not measured`, and the JSON row's `filter_noise_measured` is
+`false`. `--draws 1` is one posterior draw, still provenance `posterior`. A
+plug-in score at the posterior mean, or any one point, is a fixed point's: write
+the point to a params file (for an optimizer run `fit summary --params-only`
+prints its winner; it prints no point for a sampler run), predict it with
+`camdl predict MODEL --params`, score it, and compare the score. Each note of a
+score (a stream not scored, a draw whose filter degenerated) is printed on
+stderr, prefixed by its row, and each forcing its computation held is a line
+under the table on its row.
+
+Two scores are differenced only when they agree on what they are of. A table
+whose rows differ in any of these is refused (exit 2), the refusal naming the
+field, and no flag waives it: the mode (`mode`), the role (`role`), a forecast's
+lead (`lead`) and its reach as written (`reach`), whether a forecast read a
+covariate stated `realised` (`covariates`), the predictive basis, and the
+conditioning, so a stored fit's verified held-out rows (`hold_out_tail`) are not
+differenced against a fixed point's declared ones (`hold_out_declared`). Inputs
+holding different numbers of leads are refused, naming each input's leads. Rows
+that scored different observed values of a stream at one time are refused
+(`scored rows`) unless `--allow-data-mismatch` is given.
+
+Columns: `role` and, for a forecast, `lead`, for rows read from stored scores;
+`T_score`, `elpd`, `Δelpd`, `LR` (= exp(Δelpd), the likelihood ratio against the
+baseline on the same scored observations — not an e-value: nothing here
+establishes a null expectation ≤ 1, so it carries no anytime-valid reading),
+`se(Δ)` (paired standard error over pointwise differences), `evidence` (decibans
+plus a Jeffreys tier, or `within noise` when `|Δelpd| < 2·se(Δ)`), `crps`,
+`Δcrps`, `wis`, `Δwis` (the weighted interval score), `PIT_cov90` (nominal 0.90;
+below 0.70 triggers an overconfidence warning) and `cov50` (the share of
+observations in the central 50% interval). `wis`, `Δwis` and `cov50` are shown
+when a row records them, which a stored score does and a prequential.json does
+not. The accuracy columns are per stream: they stay in the main table only when
+every row scored exactly one stream, the same one; otherwise they move to a
+block headed "Per-stream accuracy and calibration", one line per stream × model
+with `n` (scored observations), `mean CRPS`, `Δ mean CRPS`, `mean WIS`,
+`Δ mean WIS` (each Δ only when both rows scored the stream at the same times),
+`PIT_cov90` and `cov50`, and the overconfidence warning names the stream. No
+figure combines streams. A trace with no per-stream breakdown (schema 1) reports
+CRPS and calibration as not available.
 
 The `table` and `md` renderings carry the same footer, and it states only what
 is specific to that comparison: the scored window and baseline, the conditioning
@@ -7829,32 +7933,27 @@ format states that one outcome.
 
 The JSON keeps every field: `overrides`, `optimism_caveat`,
 `evidence_scale_note`, `se_caveat` (populated below 100 scored steps),
-`data_mismatch` and `data_unchecked`, `data_changed` and
-`data_change_unchecked`, `data_compared_on_prefix`, `filter_settings_mismatch`
-and `filter_settings_unchecked`, and `filter_noise_unassessed`, plus per-row
-`provenance`, `conditioning`, `derivation`, `lag1_autocorr_delta_elpd`,
-`mc_se_elpd`, `warnings` and `pit_cov90_warning`, and per-row `per_stream` (one
-entry per stream: `stream`, `n`, `mean_crps`, `crps_nonfinite`,
-`delta_mean_crps`, `pit_cov90`, `pit_nonfinite`, `pit_cov90_warning`) with
-`per_stream_unavailable` naming why it is empty. The row-level `mean_crps`,
+`data_mismatch` and `data_unchecked`, `data_compared_on_prefix`,
+`filter_settings_mismatch` and `filter_settings_unchecked`, and
+`filter_noise_unassessed`, plus per-row `provenance`, `conditioning`,
+`derivation`, `lag1_autocorr_delta_elpd`, `mc_se_elpd`, `warnings` and
+`pit_cov90_warning`, a row read from a stored score adds `mode`, `role`, `lead`,
+`reach` and `covariates_realised`, and per-row `per_stream` (one entry per
+stream: `stream`, `n`, `mean_crps`, `crps_nonfinite`, `delta_mean_crps`,
+`pit_cov90`, `pit_nonfinite`, `pit_cov90_warning`, and from a stored score
+`mean_wis`, `delta_mean_wis` and `cov50`) with `per_stream_unavailable` naming
+why it is empty. A comparison of more than one table (a forecast's leads) is
+`{ "tables": [...] }`, each table the document above. The row-level `mean_crps`,
 `delta_mean_crps`, `pit_cov90` and `pit_cov90_warning` are the single-stream
 case's values and `null` otherwise. It is the machine surface and loses nothing
 by repeating itself.
 
-Two further refusals are overridable. A derived row re-reads its fit's training
-files, and its `[data.holdout]` files when it is scored held out on them, and
-each file is hashed and checked against the hash the fit recorded in
-`fit.meta.json`: a file edited in place since the fit ran would be scored at a θ̂
-fitted to other bytes, so it is refused (exit 2) unless `--allow-changed-data`
-is given. A file that cannot be checked — a source with no recorded hash, a fit
-with no sidecar, a holdout file in a sidecar that records none — is named in
-`data_change_unchecked`. The shared-data check compares the holdout files of
-rows scored held out on them as well as the training files. A sidecar that
-records 8-character hashes is compared on those 8 characters, by both checks,
-and `data_compared_on_prefix` (and a line under the table) names the row; one
-that keys a shorthand fit by leaf is read per source where every leaf records
-the same hash, and that source is otherwise named as not checked. And two rows
-whose traces record different particle or replicate counts are refused unless
+Two further refusals are overridable. A row read from a stored score records the
+SHA-256 of the rows its prediction conditioned on, per source (a stored fit's
+training rows, or a fixed point's data table), and rows whose digests differ are
+refused unless `--allow-data-mismatch` is given; a prequential.json records none
+and is named in `data_unchecked`. And two rows whose traces record different
+particle or replicate counts are refused unless
 `--allow-mismatched-filter-settings` is given, because the log of a
 particle-filter likelihood estimate is biased downward by more at fewer
 particles; a trace that records no settings (older than schema 5) is named in
@@ -7876,9 +7975,13 @@ Each trace (schema 5) records how it was computed, as its `derivation` block:
 `disabled`, the replicate totals `replicate_elpd` and
 `replicate_elpd_by_stream`, `mc_se_elpd` (the filter-noise SE, absent for one
 pass), and `overrides` — the waivers applied to that one trace
-(`in_sample_forced`, `changed_data`), omitted when there are none. A row's
-filter-noise SE is read from this block, so an explicit `prequential.json` that
-carries one takes part in the filter-noise gate.
+(`in_sample_forced`, `forcing_extrapolation_allowed`), omitted when there are
+none. A row read from a stored score fills it from the score and its prediction:
+`particles` (0 for a free-forward score), `replicates`, `seed`, `theta`
+(`posterior_draws`, or `supplied` for a fixed point), the chains and
+interventions of the prediction, and `dt` null. A row's filter-noise SE is read
+from this block, so an explicit `prequential.json` that carries one takes part
+in the filter-noise gate.
 
 Under `--streams`, each selected stream (leaf) gets its own table, and each
 row's trace is re-scored on that leaf: a step that did not score it is dropped,

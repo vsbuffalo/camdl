@@ -184,9 +184,10 @@ fn compare_derives_a_prequential_for_a_fit_with_relative_data_paths() {
             .lines()
             .find(|l| l.trim_start().starts_with(name))
             .unwrap_or_else(|| panic!("no row for {name}:\n{stdout}"));
+        // The cells after the name: its role, then T_score.
         let t: usize = row
             .split_whitespace()
-            .nth(1)
+            .nth(2)
             .and_then(|c| c.parse().ok())
             .unwrap_or_else(|| panic!("no T_score cell in row {row:?}"));
         assert!(t > 0, "{name} scored a positive number of observations; row: {row}");

@@ -136,6 +136,9 @@ pub(crate) struct Scored {
     /// Whether the prediction ran on the ODE backend, whose free-forward
     /// density along a draw's trajectory is exact.
     pub ode: bool,
+    /// Whether the prediction's parameters were one point (a fixed point, or
+    /// an optimizer run's winner) rather than a posterior.
+    pub plug_in: bool,
 }
 
 impl Scored {
@@ -144,6 +147,7 @@ impl Scored {
         self.joints.extend(other.joints);
         self.notes.extend(other.notes);
         self.ode |= other.ode;
+        self.plug_in |= other.plug_in;
     }
 }
 

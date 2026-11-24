@@ -1181,11 +1181,9 @@ fn load_method_facts(
     })
 }
 
-/// The run's point estimate (θ̂) as a flat params TOML — the same payload
-/// `fit summary --params-only` prints. A `pub(crate)` seam over
-/// [`discover_methods`] + [`dump_params_only`] so `compare` can derive a
-/// prequential at θ̂ from a sealed fit without touching the private
-/// `ResolvedMethod` type. `run_dir` must hold one completed run.
+/// An optimizer run's winning point (θ̂) as a flat params TOML — the same
+/// payload `fit summary --params-only` prints, and the point `camdl predict`
+/// predicts for an optimizer run. `run_dir` must hold one completed run.
 pub(crate) fn winner_params_toml(run_dir: &Path) -> Result<String, String> {
     let dir = run_dir.to_string_lossy();
     let completed: Vec<ResolvedMethod> = discover_methods(run_dir)

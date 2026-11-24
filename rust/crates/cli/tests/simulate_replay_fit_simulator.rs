@@ -185,14 +185,16 @@ fn a_chain_binomial_fit_replays_at_its_own_dt_and_records_it() {
         "the notice must name both simulators:\n{err}"
     );
 
-    // `compare`'s derived prequential re-filters the data at the fit's step.
-    // The child `pfilter` names its step on stderr, which `compare` relays
-    // only when the child fails, so it is made to: one particle has an
-    // effective sample size of 1 and collapses at the first observation.
+    // `compare` predicts the fit at the fit's step, and each row records it.
     let path = f.segment.to_string_lossy().into_owned();
-    let out = run(&f.dir, &["compare", &path, &path, "--draws", "1", "--replicates", "1", "--particles", "1"]);
+    let out = run(&f.dir, &["compare", &path, &path, "--draws", "1", "--replicates", "1", "--particles", "50",
+        "--format", "json"]);
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("1 particles, dt=0.5,"), "compare must filter at the fit's dt:\n{err}");
+    assert!(out.status.success(), "{err}");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    for row in v["rows"].as_array().unwrap() {
+        assert_eq!(row["derivation"]["dt"], 0.5, "compare must predict at the fit's dt: {row}");
+    }
     let _ = std::fs::remove_dir_all(&f.dir);
 }
 

@@ -231,8 +231,17 @@ pub enum ParamTreatment {
     /// Average over the whole posterior cloud — the band carries full
     /// parameter uncertainty.
     Posterior(PosteriorDraws),
-    /// A fit run with a single best-guess parameter and no draws cloud; the
-    /// variant carries the method and the name the refusal gives.
+    /// An optimizer run's winning point (IF2, NLopt): predicted once, as a
+    /// fixed point is, labelled `plug_in`. Its training rows are the run's
+    /// problem's, so its held-out rows are as verified as a sampler's.
+    Winner {
+        method: FitAlgorithm,
+        name: String,
+        backend: crate::args::types::ForwardBackend,
+    },
+    /// A fit run with no draws cloud that is not an optimizer's (a sampler
+    /// whose draws are not written yet); the variant carries the method and
+    /// the name the refusal gives.
     PlugIn {
         method: Option<FitAlgorithm>,
         name: String,
@@ -584,6 +593,8 @@ pub enum FitResult {
     PointEstimate {
         method: Option<FitAlgorithm>,
         name: String,
+        /// The backend the run's method ran on, when its view records it.
+        backend: Option<crate::args::types::ForwardBackend>,
     },
 }
 
@@ -595,9 +606,12 @@ impl FitResult {
     pub fn into_treatment(self) -> ParamTreatment {
         match self {
             FitResult::Posterior(pd) => ParamTreatment::Posterior(pd),
-            FitResult::PointEstimate { method, name } => {
-                ParamTreatment::PlugIn { method, name }
-            }
+            FitResult::PointEstimate { method: Some(m), name, backend } if m.is_optimizer() => ParamTreatment::Winner {
+                method: m,
+                name,
+                backend: backend.unwrap_or(crate::args::types::ForwardBackend::ChainBinomial),
+            },
+            FitResult::PointEstimate { method, name, .. } => ParamTreatment::PlugIn { method, name },
         }
     }
 }
@@ -980,6 +994,7 @@ impl FitResult {
                             return Ok(FitResult::PointEstimate {
                                 method: Some(s.method),
                                 name: s.method.as_str().to_string(),
+                                backend: Some(crate::args::types::ForwardBackend::from(s.backend)),
                             })
                         }
                         [] => {}
@@ -1805,8 +1820,10 @@ pub(crate) fn predict(
             }
         }
         Ok(Outcome::Computed(outcome)) => {
-            let stored = store_prediction(&outcome.stored, info, request.reuse())
+            let stored = store_prediction(&outcome.stored, &info, request.reuse())
                 .unwrap_or_else(|e| out.fail(format!("error: {e}")));
+            let store = outcome.stored.source.store().unwrap_or_else(|e| out.fail(format!("error: {e}")));
+            info.finish(&store).unwrap_or_else(|e| out.fail(format!("error: {e}")));
             let folder = stored.folder().to_path_buf();
             export(&out, &stored, output);
             // What it wrote is the command's account of itself, not data:
@@ -1981,14 +1998,14 @@ fn resolve_source(
 #[expect(clippy::disallowed_methods, reason = "reads each `--design` file, declared `#[input(identity)]` on `PredictFlags`, to store it as a `DataTable` the prediction's identity depends on, and the files this process wrote in its scratch directory, to store them as the prediction's result files")]
 fn store_prediction(
     p: &ToStore,
-    info: store::RunInfo,
+    info: &store::RunInfo,
     reuse: store::Reuse,
 ) -> Result<store::Stored<crate::fit_store::Prediction>, String> {
     use crate::fit_store::Prediction;
     let store = p.source.store()?;
-    let design = design_deps(&store, &p.design, &info)?;
+    let design = design_deps(&store, &p.design, info)?;
     let (identity, labels) = p.source.identity(&p.options, design)?;
-    let stored = match store.begin::<Prediction>(&identity, &labels, &info, reuse)
+    let stored = match store.begin::<Prediction>(&identity, &labels, info, reuse)
         .map_err(|e| e.to_string())?
     {
         store::Begin::Reused(stored) => stored,
@@ -2011,7 +2028,53 @@ fn store_prediction(
             run.finish().map_err(|e| e.to_string())?
         }
     };
-    info.finish(&store).map_err(|e| e.to_string())?;
+    Ok(stored)
+}
+
+/// The prediction `args` asks for from the stored fit run `fit`, reused when
+/// stored and computed and stored otherwise, under `info`, which the caller
+/// finishes. A prediction that computed with a deterministic failure is
+/// stored, as `camdl predict` stores it, and refused here, naming what
+/// failed: a score of it would leave those objects out.
+pub(crate) fn prediction_of_run(
+    out: &crate::out::Out,
+    args: &crate::args::PredictArgs,
+    fit: std::sync::Arc<crate::fit_store::OpenedFit>,
+    compile: crate::util::CompileSettings,
+    info: &store::RunInfo,
+) -> Result<store::Stored<crate::fit_store::Prediction>, String> {
+    prediction_of(out, args, PredictSource::Posterior(fit), compile, info)
+}
+
+/// The prediction `args` asks for from `source`, a fit run or a fixed point,
+/// as [`prediction_of_run`] makes it of a fit run.
+pub(crate) fn prediction_of(
+    out: &crate::out::Out,
+    args: &crate::args::PredictArgs,
+    source: PredictSource,
+    compile: crate::util::CompileSettings,
+    info: &store::RunInfo,
+) -> Result<store::Stored<crate::fit_store::Prediction>, String> {
+    // What a forcing held is reported by the score of the prediction, which
+    // computes it again.
+    let forcing = crate::forcing_extrapolation::ForcingPolicy::recording(
+        args.flags.forcing_extrapolation.allow_forcing_extrapolation,
+    );
+    let _forcing_route = forcing.install();
+    let stored = match run_predict(out, args, compile, source, info, store::Reuse::IfCompleted, None)? {
+        Outcome::Reused { stored, .. } => stored,
+        Outcome::Computed(o) => store_prediction(&o.stored, info, store::Reuse::IfCompleted)?,
+    };
+    let (failures, _) = stored_report(&stored)?;
+    if let Some(f) = failures.first() {
+        return Err(format!(
+            "the prediction {} did not compute every object ({} failure(s); the first: {}), so its score \
+             would leave them out",
+            stored.folder().display(),
+            failures.len(),
+            f.describe()
+        ));
+    }
     Ok(stored)
 }
 
@@ -2288,6 +2351,9 @@ pub(crate) struct Recomputed {
     /// Every file it wrote, by its path in the prediction's folder.
     pub files: BTreeMap<String, Vec<u8>>,
     pub scored: crate::fit::scoring::Scored,
+    /// Each forcing the computation held outside its range, under
+    /// `--allow-forcing-extrapolation`.
+    pub forcings_held: Vec<score::trace::PrequentialWarning>,
 }
 
 /// Compute the prediction `reposed` poses again with `binding` bound, into a
@@ -2299,8 +2365,10 @@ pub(crate) fn recompute(
     info: &store::RunInfo,
     binding: &crate::fit::scoring::OutcomeBinding,
 ) -> Result<Recomputed, String> {
-    let forcing =
-        crate::forcing_extrapolation::ForcingPolicy::new(reposed.args.flags.forcing_extrapolation.allow_forcing_extrapolation);
+    // A forcing held is recorded in the score, not said as it is met.
+    let forcing = crate::forcing_extrapolation::ForcingPolicy::recording(
+        reposed.args.flags.forcing_extrapolation.allow_forcing_extrapolation,
+    );
     let _forcing_route = forcing.install();
     let compile = crate::util::CompileSettings::resolve(false, false);
     let outcome = run_predict(out, &reposed.args, compile, reposed.source.clone(), info, store::Reuse::Force, Some(binding))?;
@@ -2332,6 +2400,7 @@ pub(crate) fn recompute(
         record: serde_json::to_value(store::Identity::record(&identity)).map_err(|e| e.to_string())?,
         files,
         scored: o.scored,
+        forcings_held: forcing.trace_warnings(),
     })
 }
 
@@ -2562,6 +2631,7 @@ impl SourceReads {
         let fit_result = FitResult::resolve(out, &segment, &run_dir, selection.clone())?;
         let posterior = match fit_result.into_treatment() {
             ParamTreatment::Posterior(pd) => pd,
+            ParamTreatment::Winner { method, name, backend } => winner_point(args, &run_dir, method, name, backend)?,
             ParamTreatment::PlugIn { method, name } => {
                 return Err(plugin_refusal(method, &name, args.source.as_deref().unwrap_or("<run>")))
             }
@@ -2607,6 +2677,39 @@ impl SourceReads {
     }
 }
 
+/// The one point an optimizer run (`method`, on `backend`) predicts from: its
+/// winner, read as `fit summary --params-only` prints it, as one copy
+/// labelled `plug_in`. `--n-draws` above one is refused: there is one point.
+fn winner_point(
+    args: &crate::args::PredictArgs,
+    run_dir: &Path,
+    method: FitAlgorithm,
+    name: String,
+    backend: crate::args::types::ForwardBackend,
+) -> Result<PosteriorDraws, String> {
+    if let Some(n) = args.flags.n_draws.filter(|n| *n > 1) {
+        return Err(format!(
+            "--n-draws {n}: the '{name}' run is an optimizer fit ({method}), which returns one best-fit point and \
+             no posterior, so it is predicted from that one point, once; omit --n-draws or pass --n-draws 1"
+        ));
+    }
+    let text = crate::fit::fit_summary::winner_params_toml(run_dir)?;
+    let table: toml::Table = text.parse().map_err(|e| format!("the winning point of the '{name}' run: {e}"))?;
+    let mut point = IndexMap::new();
+    for (k, v) in &table {
+        let x = match v {
+            toml::Value::Float(f) => *f,
+            toml::Value::Integer(i) => *i as f64,
+            other => return Err(format!("the winning point of the '{name}' run: '{k}' is not a number: {other}")),
+        };
+        point.insert(k.clone(), x);
+    }
+    let mut pd = PosteriorDraws::plug_in(point, 1, backend)?;
+    pd.name = name;
+    pd.method = Some(method);
+    Ok(pd)
+}
+
 /// The prediction `args` pose from `source`, computed into a scratch
 /// directory, or found stored under `info` when `reuse` allows it.
 ///
@@ -2641,6 +2744,18 @@ fn run_predict(
         held_out,
         schema,
     } = SourceReads::of(out, args, compile, &source)?;
+    // An optimizer run's winner is one copy: its options record one draw.
+    let one_point: crate::args::PredictArgs;
+    let args = match (&source, posterior.treatment()) {
+        (PredictSource::Posterior(_), TreatmentKind::PlugIn) => {
+            one_point = crate::args::PredictArgs {
+                flags: crate::args::PredictFlags { n_draws: Some(1), ..args.flags.clone() },
+                ..args.clone()
+            };
+            &one_point
+        }
+        _ => args,
+    };
     let no_overlay = source.no_overlay();
     // Every file is written into a scratch directory, then stored as one
     // prediction.
@@ -2798,7 +2913,12 @@ fn run_predict(
     // differs.
     let _fit_forcing_route = (config.config.allow_forcing_extrapolation
         && !args.flags.forcing_extrapolation.allow_forcing_extrapolation)
-        .then(|| crate::forcing_extrapolation::ForcingPolicy::new(true).install());
+        .then(|| {
+            crate::forcing_extrapolation::ForcingPolicy::installed()
+                .map(|p| p.allowing())
+                .unwrap_or_else(|| crate::forcing_extrapolation::ForcingPolicy::new(true))
+                .install()
+        });
     // …and under its `allow_degenerate_rates`: a rate that collapsed to 0 in
     // the fit collapses to 0 in every replay of it (the one-step filters, the
     // free-forward replay, the forecast, the contrast forks), rather than
@@ -3044,7 +3164,7 @@ fn run_predict(
         return Ok(Outcome::Computed(PredictOutcome {
             written, failures, skipped,
             stored: ToStore { source: source.clone(), dir: scratch, options: forecast_options, design: args.flags.design.clone() },
-            scored,
+            scored: crate::fit::scoring::Scored { plug_in: treatment_kind == TreatmentKind::PlugIn, ..scored },
         }));
     }
 
@@ -4405,6 +4525,7 @@ fn run_predict(
         stored: ToStore { source, dir: scratch, options, design: args.flags.design.clone() },
         scored: crate::fit::scoring::Scored {
             ode: posterior.backend == crate::args::types::ForwardBackend::Ode,
+            plug_in: treatment_kind == TreatmentKind::PlugIn,
             ..scored
         },
     }))
@@ -7536,14 +7657,17 @@ mod tests {
     fn point_estimate_fit_maps_to_plugin_treatment() {
         // The safety property, behaviourally: an optimizer fit can only ever
         // become a PlugIn treatment — never Posterior.
-        let fit = FitResult::PointEstimate { method: Some(FitAlgorithm::If2), name: "scout".into() };
+        let fit = FitResult::PointEstimate { method: Some(FitAlgorithm::If2), name: "scout".into(), backend: None };
         match fit.into_treatment() {
-            ParamTreatment::PlugIn { method, name } => {
-                assert_eq!(method, Some(FitAlgorithm::If2));
+            ParamTreatment::Winner { method, name, .. } => {
+                assert_eq!(method, FitAlgorithm::If2);
                 assert_eq!(name, "scout");
             }
-            ParamTreatment::Posterior(_) => panic!("a point estimate must not become a posterior band"),
+            other => panic!("an optimizer's point must become its winner, not {other:?}"),
         }
+        // A sampler with no draws yet stays refused.
+        let fit = FitResult::PointEstimate { method: Some(FitAlgorithm::Pgas), name: "pgas".into(), backend: None };
+        assert!(matches!(fit.into_treatment(), ParamTreatment::PlugIn { .. }));
     }
 
     #[test]
@@ -7555,7 +7679,7 @@ mod tests {
         ).unwrap();
         match FitResult::Posterior(pd).into_treatment() {
             ParamTreatment::Posterior(d) => assert_eq!(d.n_draws(), 1),
-            ParamTreatment::PlugIn { .. } => panic!("a posterior fit must keep its cloud"),
+            ParamTreatment::PlugIn { .. } | ParamTreatment::Winner { .. } => panic!("a posterior fit must keep its cloud"),
         }
     }
 

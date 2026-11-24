@@ -12,6 +12,8 @@
 //! Spec: docs/dev/temporal-architecture.md §4.6 (D44, D48); proposal
 //! docs/dev/proposals/2026-11-15-temporal-architecture-migration.md Stage 0(f).
 
+mod fit_store_support;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -632,10 +634,9 @@ fn held_lines(o: &Output) -> Vec<String> {
 }
 
 /// `compare` reports, per row, every forcing held while that row was
-/// scored. A chain-binomial fit is scored by a `camdl pfilter` child, which
-/// records what it held in the trace it writes; a fit made under the
-/// override on data past the forcing's range holds the forcing on the days
-/// after 50 (gh#1235).
+/// scored. The score of a fit's prediction records what its computation held
+/// (`score.json` `forcings_held`); a fit made under the override on data past
+/// the forcing's range holds the forcing on the days after 50 (gh#1235).
 #[test]
 fn compare_reports_a_hold_made_while_scoring_each_row() {
     let tmp = tempfile::tempdir().unwrap();
@@ -643,6 +644,39 @@ fn compare_reports_a_hold_made_while_scoring_each_row() {
     let o = camdl(tmp.path(), &["compare", &leaf, &leaf]);
     assert!(o.status.success(), "{}", stderr(&o));
     assert_eq!(held_lines(&o).len(), 2, "one line per row:\n{}\n{}", String::from_utf8_lossy(&o.stdout), stderr(&o));
+}
+
+/// The forcings a score records as held (`score.json` `forcings_held`) are
+/// the same whether `compare` computed the score in its own process, under
+/// its policy, or `camdl score` computed it in a new one: the fit's store is
+/// copied before `compare` runs, and the copy's prediction, made with
+/// compare's options and scored by `camdl score`, records the same holds.
+#[test]
+fn a_score_records_the_same_holds_inside_compare_and_in_camdl_score() {
+    let tmp = tempfile::tempdir().unwrap();
+    let leaf = compared_fit(tmp.path(), "allow_forcing_extrapolation = true\n", false, false);
+    let copy = tempfile::tempdir().unwrap();
+    let copied = Command::new("cp").arg("-Rp").arg(tmp.path().join("cas")).arg(copy.path().join("cas")).output().unwrap();
+    assert!(copied.status.success(), "{}", String::from_utf8_lossy(&copied.stderr));
+    let o = camdl(tmp.path(), &["compare", &leaf, &leaf, "--replicates", "1"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let held = |dir: &Path| -> Vec<serde_json::Value> {
+        let scores = fit_store_support::folders_of(&store_of(dir), "score");
+        assert_eq!(scores.len(), 1, "{scores:?}");
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(scores[0].join("score.json")).unwrap()).unwrap();
+        doc["forcings_held"].as_array().cloned().unwrap_or_default()
+    };
+    let in_compare = held(tmp.path());
+    assert!(!in_compare.is_empty(), "the fit's prediction holds `mult` past day 50");
+
+    let leaf2 = leaf.replacen(&tmp.path().to_string_lossy().into_owned(), &copy.path().to_string_lossy(), 1);
+    let o = camdl(copy.path(), &["predict", &leaf2, "--mode", "one_step", "--particles", "1000", "--label", "p"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let data = tmp.path().join("cases.tsv");
+    let o = camdl(copy.path(), &["score", "@p", "--data", &format!("cases={}", data.display())]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(held(copy.path()), in_compare, "the same holds in a new process");
 }
 
 /// A fit whose method is `pfilter` writes its prequential trace in its
@@ -694,9 +728,9 @@ fn compare_says_when_its_flag_scores_a_fit_under_the_override() {
     assert_eq!(text.matches("\"forcing_extrapolation_allowed\"").count(), 2, "one per row: {v:#}");
 }
 
-/// A fit that held rows out is refused by `compare` before anything is
-/// scored: its held-out score is not computed from a stored fit, and the
-/// refusal points at `--in-sample`.
+/// A fit that held rows out, compared with no outcome file, is refused: a
+/// stored fit keeps its held-out rows' dates and not their values, and the
+/// refusal points at `--data` and `--in-sample`.
 #[test]
 fn compare_refuses_a_fit_that_held_rows_out() {
     let tmp = tempfile::tempdir().unwrap();
@@ -704,13 +738,14 @@ fn compare_refuses_a_fit_that_held_rows_out() {
     let o = camdl(tmp.path(), &["compare", &leaf, &leaf]);
     let err = stderr(&o);
     assert!(!o.status.success(), "{err}");
-    assert!(err.contains("held rows out of its training data") && err.contains("--in-sample"), "{err}");
+    assert!(err.contains("the held-out rows lie past") && err.contains("--data STREAM=FILE")
+            && err.contains("--in-sample"), "{err}");
     assert!(held_lines(&o).is_empty(), "nothing is scored:\n{err}");
 }
 
 /// Two ODE fits, each made under the override on data past the forcing's
-/// range and each holding the forcing when scored in compare's process: each
-/// row reports its own hold.
+/// range and each holding the forcing when scored: each row reports its own
+/// hold.
 #[test]
 fn compare_reports_each_ode_fits_hold() {
     let tmp = tempfile::tempdir().unwrap();
@@ -724,8 +759,8 @@ fn compare_reports_each_ode_fits_hold() {
     let lines = held_lines(&o);
     assert_eq!(lines.len(), 2, "{lines:?}\n{}\n{}", String::from_utf8_lossy(&o.stdout), stderr(&o));
     assert_ne!(lines[0].split(':').next(), lines[1].split(':').next(), "each names its own row: {lines:?}");
-    // Reported on the rows only, as for a fit a `camdl pfilter` child
-    // scores: not also as an anonymous warning when each fit met it.
+    // Reported on the rows only: not also as an anonymous warning when each
+    // fit's computation met it.
     assert!(!stderr(&o).contains("the run evaluated it"), "{}", stderr(&o));
 }
 

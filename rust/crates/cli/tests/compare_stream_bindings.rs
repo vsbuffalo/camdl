@@ -142,9 +142,10 @@ fn a_shorthand_fit_whose_block_expands_to_leaves_is_scored_and_checked() {
 
 /// The shorthand with an explicit `[data.holdout]`, which is keyed by source:
 /// the holdout reaches both leaves of the block. A stored fit keeps its
-/// held-out rows' periods and not their values, so `compare` refuses to
-/// score them and counts each leaf's held-out rows; with `--in-sample` it
-/// scores both leaves' training rows and checks their data.
+/// held-out rows' periods and not their values, so with no outcome file
+/// `compare` refuses, counting each leaf's held-out rows; given the holdout
+/// file (`--data-held-out`) it scores both leaves' held-out rows; and with
+/// `--in-sample` it scores both leaves' training rows and checks their data.
 #[test]
 fn a_shorthand_holdout_fit_whose_block_expands_to_leaves_holds_out_both_leaves() {
     let tmp = tempfile::tempdir().unwrap();
@@ -155,9 +156,17 @@ fn a_shorthand_holdout_fit_whose_block_expands_to_leaves_holds_out_both_leaves()
     two_patch_fit(dir, "b", data, 0.06, &files);
     let out = compare(dir, &["--format", "json"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success(), "a held-out score is refused:\n{stderr}");
-    assert!(stderr.contains("held rows out of its training data (cases_rural: 2, cases_urban: 2)")
-            && stderr.contains("--in-sample"), "{stderr}");
+    assert!(!out.status.success(), "a held-out score with no outcomes is refused:\n{stderr}");
+    assert!(stderr.contains("(cases_rural: 2, cases_urban: 2)")
+            && stderr.contains("--data-held-out") && stderr.contains("--in-sample"), "{stderr}");
+    let v = json(&compare(dir, &["--format", "json", "--data-held-out", "cases=a/holdout.tsv"]));
+    for row in v["rows"].as_array().unwrap() {
+        assert_eq!(row["role"], "held_out", "{row}");
+        assert!(row["conditioning"]["hold_out_tail"].is_object(), "{row}");
+        let streams: Vec<&str> = row["per_stream"].as_array().unwrap().iter()
+            .map(|s| s["stream"].as_str().unwrap()).collect();
+        assert_eq!(streams, ["cases_rural", "cases_urban"], "both leaves' held-out rows: {row}");
+    }
     let v = json(&compare(dir, &["--format", "json", "--in-sample"]));
     assert_scored_and_checked(&v);
     for row in v["rows"].as_array().unwrap() {
