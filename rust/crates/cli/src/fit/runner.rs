@@ -690,7 +690,7 @@ impl FitRunConfig {
             dt: self.if2_config.dt,
             t_start: self.compiled.model.simulation.t_start,
             skip_first_obs_from_loglik: self.ic_free,
-            record_ancestry: false,
+            record_ancestry: false, path_recording: Default::default(),
             record_prequential: false,
             // gh#520: nothing downstream of this shared default reads
             // `.predictions` — PMMH's uncorrelated per-step `eval_loglik`

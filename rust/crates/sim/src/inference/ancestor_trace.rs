@@ -18,7 +18,22 @@
 //! `docs/dev/proposals/2026-04-19-pf-latent-trajectories.md`.
 
 use crate::rng::StatefulRng;
-use super::types::normalize_log_weights;
+use super::types::{normalize_log_weights, NoiseAcc};
+
+/// The transitions whose per-interval flows and rate noise an ancestry
+/// records beside the states, as indices into the model's transitions in
+/// ascending order. The default records neither.
+///
+/// The selection exists because each recorded transition costs one value per
+/// particle per observation stop, the same order of memory as a compartment.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PathRecording {
+    /// Transitions whose count over each interval is recorded.
+    pub flows: Vec<usize>,
+    /// Overdispersed transitions whose rate multipliers over each interval
+    /// are recorded ([`NoiseAcc`]).
+    pub noise: Vec<usize>,
+}
 
 /// Per-step ancestry + states recorded during a bootstrap-filter run.
 ///
@@ -62,6 +77,20 @@ pub struct AncestorTrace {
     /// n_streams()`. Read from `obs_model.stream_names()` at record
     /// time; passed through to `SampledPath` for TSV column headers.
     pub stream_names: Vec<String>,
+    /// The run's start, where the first step's interval opens. Step `t`'s
+    /// interval is `[obs_times[t-1], obs_times[t])`, and step 0's is
+    /// `[t_start, obs_times[0])`.
+    pub t_start: f64,
+    /// `flows[t][i][k]` = the number of firings of transition
+    /// `recording.flows[k]` over step `t`'s interval, on the particle that
+    /// ends it as pre-resample particle `i`. Empty when nothing is recorded.
+    pub flows: Vec<Vec<Vec<u64>>>,
+    /// `noise[t][i][k]` = the rate multipliers transition `recording.noise[k]`
+    /// drew over step `t`'s interval, on the same particle. Empty when
+    /// nothing is recorded.
+    pub noise: Vec<Vec<Vec<NoiseAcc>>>,
+    /// The transitions `flows` and `noise` hold.
+    pub recording: PathRecording,
 }
 
 /// One ancestor-traced sample path from the smoothing distribution.
@@ -80,6 +109,15 @@ pub struct SampledPath {
     /// Stream names corresponding to the inner index of `projections`.
     /// Cloned from the source trace.
     pub stream_names: Vec<String>,
+    /// Where the first step's interval opens ([`AncestorTrace::t_start`]).
+    pub t_start: f64,
+    /// `flows[t][k]`: the trace's flows walked along this path's ancestor
+    /// chain, so they are the firings that carried `states[t-1]` to
+    /// `states[t]`. Empty when the trace recorded none.
+    pub flows: Vec<Vec<u64>>,
+    /// `noise[t][k]`: the trace's rate multipliers walked along the same
+    /// chain. Empty when the trace recorded none.
+    pub noise: Vec<Vec<NoiseAcc>>,
 }
 
 /// Sample `n` trajectory paths from the smoothing distribution
@@ -132,32 +170,36 @@ pub fn sample_paths(
         // Walk back. states[t] is pre-resample; ancestors[t] points
         // into states[t]'s indices and IS the parent of position i
         // at step t+1.
-        let mut states = vec![Vec::new(); n_obs];
-        let mut projections = if has_projections {
-            vec![Vec::new(); n_obs]
+        // `lineage[t]` is the step-`t` particle this path reads every
+        // per-step record from.
+        let mut lineage = vec![j_final; n_obs];
+        for t in (0..n_obs - 1).rev() {
+            lineage[t] = trace.ancestors[t][lineage[t + 1]];
+        }
+        let states = (0..n_obs).map(|t| trace.states[t][lineage[t]].clone()).collect();
+        let projections = if has_projections {
+            (0..n_obs).map(|t| trace.projections[t][lineage[t]].clone()).collect()
         } else {
             Vec::new()
         };
-        let mut j = j_final;
-        states[n_obs - 1] = trace.states[n_obs - 1][j].clone();
-        if has_projections {
-            projections[n_obs - 1] = trace.projections[n_obs - 1][j].clone();
-        }
-        for t in (0..n_obs - 1).rev() {
-            j = trace.ancestors[t][j];
-            states[t] = trace.states[t][j].clone();
-            if has_projections {
-                projections[t] = trace.projections[t][j].clone();
-            }
-        }
         paths.push(SampledPath {
             states,
             obs_times: trace.obs_times.clone(),
             projections,
             stream_names: trace.stream_names.clone(),
+            t_start: trace.t_start,
+            flows: walk_lineage(&trace.flows, &lineage),
+            noise: walk_lineage(&trace.noise, &lineage),
         });
     }
     paths
+}
+
+/// One per-step, per-particle record read along a lineage: `per_step[t]
+/// [lineage[t]]` for each step, or empty when the trace recorded none.
+fn walk_lineage<T: Clone>(per_step: &[Vec<Vec<T>>], lineage: &[usize]) -> Vec<Vec<T>> {
+    if per_step.len() != lineage.len() { return Vec::new(); }
+    per_step.iter().zip(lineage).map(|(step, &j)| step[j].clone()).collect()
 }
 
 #[cfg(test)]
@@ -196,6 +238,10 @@ mod tests {
             obs_times,
             projections: Vec::new(),
             stream_names: Vec::new(),
+            t_start: 0.0,
+            flows: Vec::new(),
+            noise: Vec::new(),
+            recording: PathRecording::default(),
         }
     }
 
@@ -255,6 +301,10 @@ mod tests {
             obs_times: vec![],
             projections: vec![],
             stream_names: vec![],
+            t_start: 0.0,
+            flows: vec![],
+            noise: vec![],
+            recording: PathRecording::default(),
         };
         assert!(sample_paths(&trace, 10, 0).is_empty());
     }

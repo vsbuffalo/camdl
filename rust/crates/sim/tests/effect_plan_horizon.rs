@@ -58,7 +58,7 @@ fn increments(m: &Arc<CompiledModel>, times: &[f64]) -> Vec<f64> {
     let obs = PoissonI { y: times.iter().map(|_| 11.0).collect(), times: times.to_vec() };
     let config = SMCConfig {
         n_particles: 8, dt: 1.0, t_start: 0.0,
-        skip_first_obs_from_loglik: false, record_ancestry: false,
+        skip_first_obs_from_loglik: false, record_ancestry: false, path_recording: Default::default(),
         record_prequential: false, record_predictions: false, record_stream_means: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
         binomial: sim::rng::BinomialAlgorithm::Btpe,
@@ -121,7 +121,7 @@ fn filter(m: &Arc<CompiledModel>, times: &[f64]) -> Result<f64, String> {
     let obs = PoissonI { y: times.iter().map(|_| 11.0).collect(), times: times.to_vec() };
     let config = SMCConfig {
         n_particles: 8, dt: 1.0, t_start: 0.0,
-        skip_first_obs_from_loglik: false, record_ancestry: false,
+        skip_first_obs_from_loglik: false, record_ancestry: false, path_recording: Default::default(),
         record_prequential: false, record_predictions: false, record_stream_means: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
         binomial: sim::rng::BinomialAlgorithm::Btpe,

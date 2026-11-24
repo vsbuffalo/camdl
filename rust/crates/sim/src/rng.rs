@@ -547,10 +547,15 @@ impl StatefulRng {
     /// Poisson(mean × G).  E[count] = mean, Var[count] = mean + mean²·σ²/dt.
     /// The dt scaling ensures aggregate noise is invariant to step size:
     /// halving dt halves per-step noise but doubles the number of steps.
-    pub fn neg_binomial(&mut self, mean: f64, sigma_sq: f64, dt: f64) -> u64 {
+    ///
+    /// Returns the count and the multiplier G it was drawn with; G is 1 on
+    /// each path that draws no Gamma (σ² ≤ 0, a degenerate shape, an invalid
+    /// Gamma). The multiplier is the realised environmental noise that
+    /// `pfilter --save-paths` reports per row.
+    pub fn neg_binomial(&mut self, mean: f64, sigma_sq: f64, dt: f64) -> (u64, f64) {
         if mean <= 0.0 || sigma_sq <= 0.0 {
             crate::eval_stats::inc_neg_binomial_pois();
-            return self.poisson(mean);
+            return (self.poisson(mean), 1.0);
         }
         let shape = dt / sigma_sq;
         // shape < 1e-6 means sigma_sq >> dt: the Gamma is degenerate
@@ -560,14 +565,14 @@ impl StatefulRng {
         // these extreme values via low likelihood.
         if shape < 1e-6 {
             crate::eval_stats::inc_neg_binomial_pois();
-            return self.poisson(mean);
+            return (self.poisson(mean), 1.0);
         }
         let scale = sigma_sq / dt;
         let g = match Gamma::new(shape, scale) {
             Ok(g) => g.sample(&mut self.inner),
             Err(_) => 1.0, // fallback: no overdispersion
         };
-        self.poisson(mean * g)
+        (self.poisson(mean * g), g)
     }
 
     /// NB2 draw with the observation parameterization: mean `mu`, dispersion

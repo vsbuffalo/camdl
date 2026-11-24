@@ -483,7 +483,11 @@ conflating them produces quietly-wrong plots:
 
 For **"does this fit match the data?" plots**, use `--save-paths`. Its quantile
 ribbon over `N` paths estimates the smoothing marginal at each `t` — what the
-model believes the latent trajectory was given all the data.
+model believes the latent trajectory was given all the data. Each row also holds
+every transition's flow since the previous row and, for an overdispersed
+transition, the realised rate noise, so incidence and noise can be summed into
+any calendar period without differencing compartments (run spec, "The saved
+paths file").
 
 For **PF diagnostics** (particle degeneracy, ESS decay, obs-model sanity checks,
 filter-implementation debugging), use `--save-filtering`. The per-step

@@ -260,7 +260,7 @@ fn argv(inv: &SimulateInvocation) -> Vec<String> {
         enable,
         disable,
         backend: crate::args::SimBackend { backend, dt, integrator },
-        output_view: crate::args::OutputView { every, no_flows, columns },
+        output_view: crate::args::OutputView { every, columns: crate::args::ColumnSelection { no_flows, columns } },
         seed,
         seeds,
         replicates,

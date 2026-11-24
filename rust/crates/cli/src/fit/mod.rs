@@ -895,7 +895,7 @@ pub(crate) fn run_method(out: &mut crate::out::Out, cx: MethodContext<'_>) -> Me
                 let record_preq = want_prequential && r == 0;
                 let smc_config = sim::inference::traits::SMCConfig {
                     record_prequential: record_preq,
-                    record_ancestry,
+                    record_ancestry, path_recording: Default::default(),
                     ..run_config.smc_config()
                 };
                 let result = sim::inference::bootstrap_filter(

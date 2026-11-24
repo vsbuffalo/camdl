@@ -147,7 +147,7 @@ fn run_loglik(record_prequential: bool) -> f64 {
     let cfg = SMCConfig {
         n_particles: 64, dt: 1.0, t_start: 0.0,
         skip_first_obs_from_loglik: false,
-        record_ancestry: false,
+        record_ancestry: false, path_recording: Default::default(),
         record_prequential,
         record_predictions: false,
         record_stream_means: false,
@@ -196,7 +196,7 @@ fn record_prequential_does_not_perturb_loglik() {
     let cfg = SMCConfig {
         n_particles: 64, dt: 1.0, t_start: 0.0,
         skip_first_obs_from_loglik: false,
-        record_ancestry: false, record_prequential: true,
+        record_ancestry: false, path_recording: Default::default(), record_prequential: true,
         record_predictions: false,
         record_stream_means: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,

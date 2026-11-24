@@ -240,11 +240,29 @@ run_by_product!(
 pub(crate) struct SavedPaths;
 
 #[derive(store::Identity, Clone, Debug)]
-#[identity(tag = "saved_paths", version = 1)]
+#[identity(tag = "saved_paths", version = 2)]
 pub(crate) struct SavedPathsIdentity {
     pub filter: PfilterIdentityRecord,
     /// `--n-paths`.
     pub paths: u64,
+    /// `--no-flows`: the file holds no `flow_*` column.
+    pub no_flows: bool,
+    /// `--columns`, sorted: the file holds only these data columns. Empty
+    /// keeps every column.
+    pub columns: Vec<String>,
+}
+
+/// What the rows of a saved-paths file are: the filter's stops, which are the
+/// union of every bound stream's observation times and every declared
+/// period's opening after the run's start. Recorded beside the stored file so
+/// a script can check the grid it reads.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct PathRows {
+    /// The streams whose observation times are rows, in the observation
+    /// model's order.
+    pub streams: Vec<String>,
+    /// The rows at which no stream is observed: a declared period opening.
+    pub period_openings: Vec<f64>,
 }
 
 impl SavedPaths {
@@ -255,7 +273,8 @@ impl Artifact for SavedPaths {
     const KIND: &'static str = "saved_paths";
     const WRITE: WriteMode = WriteMode::Atomic;
     type Identity = SavedPathsIdentity;
-    type Labels = ();
+    /// `None` in an invocation record that holds no grid.
+    type Labels = Option<PathRows>;
 }
 
 impl ByProduct for SavedPaths {
@@ -263,7 +282,7 @@ impl ByProduct for SavedPaths {
     fn upstream(id: &SavedPathsIdentity) -> &PfilterIdentityRecord {
         &id.filter
     }
-    fn label(_id: &SavedPathsIdentity, _labels: &()) -> String {
+    fn label(_id: &SavedPathsIdentity, _labels: &Option<PathRows>) -> String {
         "paths".into()
     }
 }

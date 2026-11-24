@@ -204,14 +204,14 @@ pub struct SimBackend {
 
 /// `--output-every` / `--no-flows` / `--columns` — the trajectory output view
 /// (cadence + which columns are written), flattened into `SimulateArgs`. Only
-/// `simulate` writes trajectories, so the view applies there; `fit.toml` has
-/// no trajectory output.
+/// `simulate` writes trajectories on a cadence, so the view applies there;
+/// `fit.toml` has no trajectory output.
 ///
 /// `every` overrides the model's `output { every }` schedule, so it rides the
-/// model digest and re-keys only runs that use it. `no_flows` / `columns`
-/// change which columns are written to the content-addressed leaf, so they ride
-/// identity of a simulation cell's settings: a non-default view
-/// is a distinct, reproducible artifact.
+/// model digest and re-keys only runs that use it. The column selection changes
+/// which columns are written to the content-addressed leaf, so it rides the
+/// identity of a simulation cell's settings: a non-default view is a distinct,
+/// reproducible artifact.
 #[derive(Args, Clone, Debug, Default, store::Inputs)]
 pub struct OutputView {
     /// Emit one trajectory row every N time-units, overriding the model's
@@ -221,15 +221,31 @@ pub struct OutputView {
     #[input(identity, vary = crate::input_fixtures::other_every)]
     pub every: Option<f64>,
 
-    /// Drop every `flow_*` column from the trajectory output — most useful for
+    /// Which trajectory columns are written.
+    #[command(flatten)]
+    #[input(group)]
+    pub columns: ColumnSelection,
+}
+
+/// `--no-flows` / `--columns`: which columns of a trajectory-shaped file are
+/// written. Shared by `simulate`'s trajectories and `pfilter --save-paths`;
+/// each command checks the names against the columns its file can hold
+/// ([`crate::util::OutputColumns::resolve`]). A command's stored file differs
+/// with the selection, so it enters that file's identity: a simulation cell's
+/// settings, or the saved paths' by-product identity.
+#[derive(Args, Clone, Debug, Default, store::Inputs)]
+pub struct ColumnSelection {
+    /// Drop every `flow_*` column from the output — most useful for
     /// stratified/spatial models where inter-stratum flow columns dominate.
+    /// A `noise_*` column of `--save-paths` is not a flow and stays.
     #[arg(long = "no-flows", default_value_t = false)]
     #[input(identity)]
     pub no_flows: bool,
 
-    /// Restrict trajectory columns to this comma-separated allow-list of output
-    /// column names (compartments and/or `flow_<name>`). Empty = all columns;
-    /// emitted order follows the model, not this list.
+    /// Restrict the output's data columns to this comma-separated allow-list
+    /// of column names (compartments, `flow_<name>`, and for `--save-paths`
+    /// `noise_<name>`, which keeps its `noise_dt_<name>`). Empty = all
+    /// columns; emitted order follows the model, not this list.
     #[arg(long = "columns", value_delimiter = ',', value_name = "COL,...")]
     #[input(identity, vary = crate::input_fixtures::other_columns)]
     pub columns: Vec<String>,
@@ -2619,6 +2635,13 @@ pub struct PfilterArgs {
     #[arg(long, default_value_t = 1)]
     #[input(identity)]
     pub n_paths: usize,
+
+    /// Which columns of `--save-paths` are written: `--no-flows` drops the
+    /// `flow_*` columns, `--columns` keeps only the named ones. The filter
+    /// records only the transitions the selection keeps.
+    #[command(flatten)]
+    #[input(group)]
+    pub path_columns: ColumnSelection,
 
     /// Export per-step particle states and log-weights, a by-product of the
     /// run, to this TSV

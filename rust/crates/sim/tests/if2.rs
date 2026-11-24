@@ -568,7 +568,7 @@ fn sir_pf_loglik(binomial: sim::rng::BinomialAlgorithm) -> f64 {
     let obs_model = NegBinFlowObs { observations, obs_times, flow_index: 1 };
     let config = sim::inference::traits::SMCConfig {
         n_particles: 200, dt: 1.0, t_start: 0.0, skip_first_obs_from_loglik: false,
-        record_ancestry: false, record_prequential: false, record_predictions: false, record_stream_means: false,
+        record_ancestry: false, path_recording: Default::default(), record_prequential: false, record_predictions: false, record_stream_means: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET, binomial,
     };
     sim::inference::particle_filter::bootstrap_filter(&process, &obs_model, &params, &config, 7)

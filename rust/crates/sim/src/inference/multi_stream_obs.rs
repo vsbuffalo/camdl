@@ -4011,6 +4011,7 @@ mod hole_scoring_tests {
             counts: counts.clone(),
             flow_accumulators: flows.clone(),
             acc: flows.clone(),
+            noise: Vec::new(),
         };
         for idx in 0..3 {
             let flat = m.log_likelihood_from_flows_and_counts(&flows, &counts, idx, &params);
@@ -4057,6 +4058,7 @@ mod hole_scoring_tests {
             counts: counts.clone(),
             flow_accumulators: vec![100u64],
             acc: acc.clone(),
+            noise: Vec::new(),
         };
 
         for idx in 0..times.len() {

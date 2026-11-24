@@ -101,7 +101,11 @@ impl ProcessModel for ChainBinomialProcess {
             // (or `None` ⇒ on-demand). Threaded, NOT staged here (per-substep
             // staging would defeat the hoist).
             params, t, dt, per_eval, rng, scratch,
-        )
+        )?;
+        for &(tr, g) in &scratch.noise_drawn {
+            state.noise[tr].add(g, dt);
+        }
+        Ok(())
     }
 
     fn new_scratch(&self) -> StepScratch {

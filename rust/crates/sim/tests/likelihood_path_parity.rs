@@ -160,6 +160,7 @@ fn pf_and_pgas_likelihood_paths_agree() {
         counts: counts.clone(),
         flow_accumulators: flows.clone(),
         acc: vec![],
+        noise: vec![],
     };
 
     for obs_idx in 0..2 {

@@ -187,7 +187,7 @@ fn bootstrap_filter_bails_on_ess_collapse() {
     let config = SMCConfig {
         n_particles: 200, dt: 1.0, t_start: 0.0,
         skip_first_obs_from_loglik: false,
-        record_ancestry: false, record_prequential: false,
+        record_ancestry: false, path_recording: Default::default(), record_prequential: false,
         record_predictions: false,
         record_stream_means: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
@@ -594,7 +594,7 @@ fn bootstrap_filter_iteration_budget_aborts_pre_window() {
     let config = SMCConfig {
         n_particles, dt, t_start: 0.0,
         skip_first_obs_from_loglik: false,
-        record_ancestry: false, record_prequential: false,
+        record_ancestry: false, path_recording: Default::default(), record_prequential: false,
         record_predictions: false,
         record_stream_means: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
@@ -690,7 +690,7 @@ fn an_empty_swarm_does_not_panic_the_bootstrap_filter() {
         dt: 1.0,
         t_start: 0.0,
         skip_first_obs_from_loglik: false,
-        record_ancestry: false,
+        record_ancestry: false, path_recording: Default::default(),
         record_prequential: false,
         record_predictions: false, // TimeGridObs has n_streams() == 0
         record_stream_means: false,

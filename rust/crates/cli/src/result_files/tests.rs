@@ -132,7 +132,7 @@ fn every_contract_version_is_pinned_to_its_files() {
         ("filtering", 1, "6feabcf765fa6960"),
         ("filtered_streams", 1, "bfa5007afd1eca58"),
         ("final_state", 1, "540e45de2abcd932"),
-        ("saved_paths", 1, "db7b52705e4c11fe"),
+        ("saved_paths", 2, "db7b52705e4c11fe"),
         ("prequential", 1, "e2fbc4e24518b585"),
         ("sim", 1, "8f7955f955526563"),
         ("obs", 1, "35903996fb59dba8"),

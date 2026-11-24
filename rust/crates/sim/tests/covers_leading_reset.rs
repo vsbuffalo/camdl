@@ -271,7 +271,7 @@ fn ic_free_skips_the_first_observation_not_union_index_zero() {
         dt: 1.0,
         t_start: 0.0,
         skip_first_obs_from_loglik: true,
-        record_ancestry: false,
+        record_ancestry: false, path_recording: Default::default(),
         record_prequential: false,
         record_predictions: false,
         record_stream_means: false,

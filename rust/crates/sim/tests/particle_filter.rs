@@ -132,7 +132,7 @@ fn run_pf(n_particles: usize, seed: u64) -> f64 {
     let process = ChainBinomialProcess::new(compiled.clone());
     let obs_model = pure_death_obs();
 
-    let config = SMCConfig { n_particles, dt: 1.0, t_start: 0.0, skip_first_obs_from_loglik: false, record_ancestry: false, record_prequential: false, record_predictions: false, record_stream_means: false, max_substeps: sim::inference::degeneracy::ITER_BUDGET, binomial: sim::rng::BinomialAlgorithm::Btpe };
+    let config = SMCConfig { n_particles, dt: 1.0, t_start: 0.0, skip_first_obs_from_loglik: false, record_ancestry: false, path_recording: Default::default(), record_prequential: false, record_predictions: false, record_stream_means: false, max_substeps: sim::inference::degeneracy::ITER_BUDGET, binomial: sim::rng::BinomialAlgorithm::Btpe };
 
     let result = bootstrap_filter(
         &process, &obs_model, &params, &config, seed,
@@ -194,7 +194,7 @@ fn test_pf_ess_reasonable() {
     let process = ChainBinomialProcess::new(compiled.clone());
     let obs_model = pure_death_obs();
 
-    let config = SMCConfig { n_particles: 500, dt: 1.0, t_start: 0.0, skip_first_obs_from_loglik: false, record_ancestry: false, record_prequential: false, record_predictions: false, record_stream_means: false, max_substeps: sim::inference::degeneracy::ITER_BUDGET, binomial: sim::rng::BinomialAlgorithm::Btpe };
+    let config = SMCConfig { n_particles: 500, dt: 1.0, t_start: 0.0, skip_first_obs_from_loglik: false, record_ancestry: false, path_recording: Default::default(), record_prequential: false, record_predictions: false, record_stream_means: false, max_substeps: sim::inference::degeneracy::ITER_BUDGET, binomial: sim::rng::BinomialAlgorithm::Btpe };
 
     let result = bootstrap_filter(
         &process, &obs_model, &params, &config, 42,
@@ -234,7 +234,7 @@ fn run_pf_full(
     let config = SMCConfig {
         n_particles, dt: 1.0, t_start: 0.0,
         skip_first_obs_from_loglik: skip_first,
-        record_ancestry: false,
+        record_ancestry: false, path_recording: Default::default(),
         record_prequential: false,
         record_predictions: false,
         record_stream_means: false,

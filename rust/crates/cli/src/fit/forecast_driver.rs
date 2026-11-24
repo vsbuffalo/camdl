@@ -372,7 +372,7 @@ pub(crate) fn fixed_origin_forecast(
         dt: config.dt,
         t_start,
         skip_first_obs_from_loglik: false,
-        record_ancestry: config.record_expected,
+        record_ancestry: config.record_expected, path_recording: Default::default(),
         record_prequential: true,
         record_predictions: false,
         record_stream_means: false,

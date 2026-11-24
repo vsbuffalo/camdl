@@ -166,6 +166,14 @@ pub struct StepScratch {
     /// callers may read it after the call to retrieve the draws from the
     /// most recent step. Pre-clearing by the caller is redundant but harmless.
     pub gamma_used: Vec<f64>,
+    /// Every rate multiplier drawn during the most recent `step_one`, as
+    /// `(transition index, multiplier)`: one entry per overdispersed
+    /// transition that drew one, whether it has a source compartment (the
+    /// multiplier of its per-capita rate) or none (the Gamma of its
+    /// Gamma-Poisson count). A transition with an empty source or a rate at
+    /// or below `RATE_EPSILON` draws none that step and has no entry. Cleared
+    /// at the start of every `step_one`; consumes no randomness.
+    pub noise_drawn: Vec<(usize, f64)>,
     /// Reusable buffer for the resolved deltas of one event phase
     /// ([`crate::effects::apply_event_phases`]). Cleared per phase.
     event_deltas: crate::effects::EffectDeltas,
@@ -201,6 +209,7 @@ impl StepScratch {
             pending_deltas: Vec::with_capacity(n_tr * 2),
             handled: vec![false; n_tr],
             gamma_used: Vec::new(),
+            noise_drawn: Vec::new(),
             event_deltas: crate::effects::EffectDeltas::default(),
             effect_batch: crate::schedule::EffectBatch::default(),
             probs: Vec::with_capacity(n_tr),
@@ -775,6 +784,7 @@ pub fn step_one(
     // entire life of the scratch — an unbounded leak in IF2/PF/PMMH which
     // reuse a single scratch across iterations. See issue #10.
     scratch.gamma_used.clear();
+    scratch.noise_drawn.clear();
 
     eval_propensities(model, &scratch.int_s, &scratch.real_s, params, t, dt,
                       per_eval, &mut scratch.propensities)?;
@@ -884,6 +894,7 @@ pub fn step_one(
                 ResolvedDraw::Overdispersed(sigma_sq) => {
                     let g = rng.gamma_multiplier(*sigma_sq, dt);
                     scratch.gamma_used.push(g);
+                    scratch.noise_drawn.push((tr_idx, g));
                     per_capita * g
                 }
                 _ => per_capita,
@@ -952,7 +963,11 @@ pub fn step_one(
         let count = match &scratch.draws[i] {
             ResolvedDraw::Poisson => rng.poisson(mean),
             ResolvedDraw::Deterministic => mean.round() as u64,
-            ResolvedDraw::Overdispersed(sigma_sq) => rng.neg_binomial(mean, *sigma_sq, dt),
+            ResolvedDraw::Overdispersed(sigma_sq) => {
+                let (count, g) = rng.neg_binomial(mean, *sigma_sq, dt);
+                scratch.noise_drawn.push((i, g));
+                count
+            }
         };
         for &(local, delta) in &model.transition_stoich[i] {
             scratch.pending_deltas.push((local, delta * count as i64));

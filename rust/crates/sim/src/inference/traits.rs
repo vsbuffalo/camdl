@@ -374,6 +374,10 @@ pub struct SMCConfig {
     /// for why this is gated.
     #[doc(alias = "save_trajectories")]
     pub record_ancestry: bool,
+    /// The transitions whose per-interval flows and rate noise the ancestry
+    /// records beside the states, for `--save-paths`. Read only when
+    /// `record_ancestry` is set; it draws nothing and changes no weight.
+    pub path_recording: super::ancestor_trace::PathRecording,
     /// Record the per-step per-particle predictive samples and
     /// log-likelihoods needed to build a `PrequentialTrace` (log
     /// score, CRPS, PIT). Roughly N × T f64 per step; cheap
