@@ -1,7 +1,7 @@
 //! A small project on the store, for the store's own tests: a simulation
 //! (atomic, grouped by model), its observations (a by-product), a fit (in
-//! place), a prediction placed inside a fit, and a model (a content
-//! artifact).
+//! place), a prediction placed inside a fit, a model (a content artifact of
+//! one file) and a model's presentation (a content artifact of several).
 
 pub(crate) use std::path::{Path, PathBuf};
 
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 // Re-exported so each module's tests take the fixtures and these with one glob.
 pub(crate) use crate::{
-    Artifact, Build, ByProduct, Content, ContentArtifact, Dep, Finite, Given, Hashed, Identity, Kinds, Layout, Placed,
+    Artifact, Build, ByProduct, Content, ContentArtifact, ContentFiles, Dep, Finite, Given, Hashed, Identity, Kinds, Layout, Placed,
     Primary, RunInfo, Store, StoreRequest, TopLevel, WriteMode,
 };
 
@@ -166,8 +166,44 @@ impl ContentArtifact for Model {
     const FILE: &'static str = "model.txt";
 }
 
+/// A model's text and, when it has one, its picture: two files, each held
+/// in the identity by its digest.
+#[derive(Identity, Clone, Debug)]
+#[identity(tag = "presentation", version = 1)]
+pub(crate) struct PresentationId {
+    pub text: Hashed<ModelText>,
+    pub picture: Option<Hashed<ModelText>>,
+}
+
+pub(crate) struct Presentation;
+impl Artifact for Presentation {
+    const KIND: &'static str = "presentation";
+    const WRITE: WriteMode = WriteMode::Atomic;
+    type Identity = PresentationId;
+    type Labels = ModelLabels;
+}
+impl Primary for Presentation {
+    fn layout(_: &PresentationId, labels: &ModelLabels) -> Placed {
+        Layout::in_kind().result(&labels.name)
+    }
+}
+impl ContentFiles for Presentation {
+    fn files(id: &PresentationId) -> Vec<(String, Vec<u8>)> {
+        let mut v = vec![("text.txt".to_string(), id.text.get().to_bytes())];
+        v.extend(id.picture.iter().map(|p| ("picture.txt".to_string(), p.get().to_bytes())));
+        v
+    }
+}
+
 pub(crate) fn kinds() -> Kinds {
-    Kinds::new().register::<Sim>().register::<Obs>().register::<Fit>().register::<Trace>().register::<Pred>().register::<Model>()
+    Kinds::new()
+        .register::<Sim>()
+        .register::<Obs>()
+        .register::<Fit>()
+        .register::<Trace>()
+        .register::<Pred>()
+        .register::<Model>()
+        .register::<Presentation>()
 }
 
 /// A fresh, empty directory under the system's temporary directory, removed

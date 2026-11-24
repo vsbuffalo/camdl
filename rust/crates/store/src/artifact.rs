@@ -44,12 +44,30 @@ pub trait ByProduct: Artifact {
     fn label(identity: &Self::Identity, labels: &Self::Labels) -> String;
 }
 
-/// An artifact whose identity is its content: the digest of its one result
-/// file, `FILE`. Stored with [`crate::Store::put`].
+/// An artifact whose identity is its content: one or more result files, each
+/// held in the identity by its digest. Stored with [`crate::Store::put`],
+/// which takes no claim, since two writers of one identity write the same
+/// bytes.
+pub trait ContentFiles: Primary {
+    /// Each result file's name and bytes. The digests of the bytes are
+    /// exactly the identity's [`Identity::held_content`]: `put` refuses a
+    /// file whose digest the identity does not hold, and an identity holding
+    /// a digest that no file has.
+    fn files(identity: &Self::Identity) -> Vec<(String, Vec<u8>)>;
+}
+
+/// A content artifact of one result file, `FILE`, whose identity is the
+/// digest of that file.
 pub trait ContentArtifact: Primary<Identity = Hashed<Self::Content>> {
     type Content: Content + Send + Sync + 'static;
     /// Such as `"model.ir.json"`.
     const FILE: &'static str;
+}
+
+impl<C: ContentArtifact> ContentFiles for C {
+    fn files(identity: &Hashed<C::Content>) -> Vec<(String, Vec<u8>)> {
+        vec![(C::FILE.to_string(), identity.get().to_bytes())]
+    }
 }
 
 /// How a result's files reach its folder.

@@ -96,6 +96,8 @@ pub enum Error {
     NoExpectedFiles { run_id: Key },
     #[error("the identity holds content {digest}, and no result file has that digest")]
     ContentMissing { digest: Key },
+    #[error("the content file {file} has a digest its identity does not hold")]
+    ContentUnheld { file: String },
     /// An input the store reads for a project could not be parsed: a settings
     /// file, an environment variable, or a content's bytes.
     #[error("cannot read {what}: {why}")]

@@ -38,7 +38,7 @@ mod stored;
 #[cfg(test)]
 mod tests;
 
-pub use artifact::{Artifact, Build, ByProduct, ContentArtifact, Id, Kinds, Primary, TopLevel, WriteMode};
+pub use artifact::{Artifact, Build, ByProduct, ContentArtifact, ContentFiles, Id, Kinds, Primary, TopLevel, WriteMode};
 pub use commands::{StoreCommand, Verdict};
 pub use error::{Error, Result, RunError};
 pub use handle::{Handle, RunRef};

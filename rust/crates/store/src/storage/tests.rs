@@ -1090,3 +1090,64 @@ fn a_by_product_is_held_to_its_declared_files() {
     }
     assert!(result_folders(root.path()).is_empty());
 }
+
+/// A content artifact of several files writes each, keyed by its digest in
+/// the identity, and a second writer of the same identity reuses the first.
+/// An optional file absent from the identity is absent from the folder.
+#[test]
+fn a_content_artifact_of_several_files_is_stored_once() {
+    let root = TempRoot::new("put-files");
+    let store = open(root.path());
+    let id = PresentationId {
+        text: Hashed::new(ModelText("S -> I".into())),
+        picture: Some(Hashed::new(ModelText("[S]->[I]".into()))),
+    };
+    let labels = ModelLabels { name: "sir".into() };
+    let info1 = info();
+    let a = store.put::<Presentation>(id.clone(), &labels, &Provenance::none(), &info1).unwrap();
+    assert_eq!(a.open("text.txt").unwrap().into_inner(), b"S -> I");
+    assert_eq!(a.open("picture.txt").unwrap().into_inner(), b"[S]->[I]");
+    let b = store.put::<Presentation>(id.clone(), &labels, &Provenance::none(), &info()).unwrap();
+    assert_eq!(a.folder(), b.folder());
+    assert_eq!(info1.finish(&store).unwrap().file.results[0].outcome, Outcome::Computed);
+
+    let bare = PresentationId { text: id.text.clone(), picture: None };
+    let c = store.put::<Presentation>(bare, &labels, &Provenance::none(), &info()).unwrap();
+    assert_ne!(c.folder(), a.folder(), "a missing file is a different content");
+    assert!(c.open("picture.txt").is_err());
+}
+
+/// A file whose digest the identity does not hold is refused, and nothing is
+/// stored.
+#[test]
+fn a_content_file_the_identity_does_not_hold_is_refused() {
+    struct Unheld;
+    impl Artifact for Unheld {
+        const KIND: &'static str = "unheld";
+        const WRITE: WriteMode = WriteMode::Atomic;
+        type Identity = Hashed<ModelText>;
+        type Labels = ModelLabels;
+    }
+    impl Primary for Unheld {
+        fn layout(_: &Hashed<ModelText>, labels: &ModelLabels) -> Placed {
+            Layout::in_kind().result(&labels.name)
+        }
+    }
+    impl ContentFiles for Unheld {
+        fn files(id: &Hashed<ModelText>) -> Vec<(String, Vec<u8>)> {
+            vec![("text.txt".into(), id.get().to_bytes()), ("extra.txt".into(), b"not held".to_vec())]
+        }
+    }
+    let root = TempRoot::new("put-unheld");
+    let store = Store::open(
+        root.path(),
+        Build::Known(Engine { build: "b1".into() }),
+        TopLevel::ByBuild { label: "0.1.0".into() },
+        kinds().register::<Unheld>(),
+    )
+    .unwrap();
+    let content = Hashed::new(ModelText("S -> I".into()));
+    let e = store.put::<Unheld>(content.clone(), &ModelLabels { name: "sir".into() }, &Provenance::none(), &info()).err().unwrap();
+    assert!(matches!(e, Error::ContentUnheld { ref file } if file == "extra.txt"), "{e}");
+    assert!(store.get_content::<Unheld>(&content).unwrap().is_none());
+}

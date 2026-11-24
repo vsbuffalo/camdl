@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::artifact::{record_key, Artifact, Build, ByProduct, ContentArtifact, Id, Kinds, Primary, RecordCheck, TopLevel, WriteMode};
+use crate::artifact::{record_key, Artifact, Build, ByProduct, ContentFiles, Id, Kinds, Primary, RecordCheck, TopLevel, WriteMode};
 use crate::check::damage;
 use crate::error::{json_err, At, Error, Result, RunError};
 use crate::fsutil::{
@@ -23,7 +23,7 @@ use crate::fsutil::{
     write_file_synced, write_json_synced, LockAttempt, LockGuard,
 };
 use crate::hash::{ContentAddressed, Key, HASH_VERSION};
-use crate::identity::{Content, Identity};
+use crate::identity::Identity;
 use crate::index::Index;
 use crate::invocation::{all_invocations, all_completed, config_digests, encode_labels, Invocation, RunInfo, Shared};
 use crate::layout::{dir_name, Base, Placed};
@@ -342,9 +342,9 @@ impl Store {
     /// Stores the content if it is not there yet, and returns it as a result
     /// to depend on. The labels and the provenance are the first writer's; the
     /// labels name the folder. Takes no claim.
-    pub fn put<C: ContentArtifact>(
+    pub fn put<C: ContentFiles>(
         &self,
-        content: crate::Hashed<C::Content>,
+        content: C::Identity,
         labels: &C::Labels,
         provenance: &Provenance,
         info: &RunInfo,
@@ -361,7 +361,7 @@ impl Store {
 
     /// Read-only: the content artifact holding `content`, when it is stored.
     /// Nothing is written, so a command that only plans can name it.
-    pub fn get_content<C: ContentArtifact>(&self, content: &crate::Hashed<C::Content>) -> Result<Option<Stored<C>>> {
+    pub fn get_content<C: ContentFiles>(&self, content: &C::Identity) -> Result<Option<Stored<C>>> {
         self.get(&Id::<C>::of(&self.inner.ambient_key, content))
     }
 
@@ -1483,9 +1483,9 @@ impl Inner {
 
     /// Writes a content artifact if it is not stored, and returns it with
     /// whether this call wrote it.
-    fn put_inner<C: ContentArtifact>(
+    fn put_inner<C: ContentFiles>(
         self: &Arc<Self>,
-        content: &crate::Hashed<C::Content>,
+        content: &C::Identity,
         labels: &C::Labels,
         provenance: &Provenance,
         info: &Arc<Shared>,
@@ -1516,18 +1516,25 @@ impl Inner {
             let mut run = running_record(info, info.seq(), Vec::new());
             write_json_synced(&tmp.join(IDENTITY_FILE), &ident)?;
             let table = FileTable::new(tmp.clone(), self.reserved_names());
+            let held = content.held_content();
+            let results = C::files(content);
+            if let Some((name, _)) = results.iter().find(|(_, bytes)| !held.contains(&Key::digest_bytes(bytes))) {
+                remove_all(&tmp)?;
+                return Err(Error::ContentUnheld { file: name.clone() });
+            }
             table.expect(crate::run::ExpectedFiles {
-                result: [C::FILE.to_string()].into(),
+                result: results.iter().map(|(name, _)| name.clone()).collect(),
                 provenance: provenance.files.keys().cloned().collect(),
             });
-            let fh = table.open(C::FILE, Role::Result)?;
-            fh.write_all(&content.get().to_bytes())?;
+            for (name, bytes) in &results {
+                table.open(name, Role::Result)?.write_all(bytes)?;
+            }
             for (name, bytes) in &provenance.files {
                 table.open(name, Role::Provenance)?.write_all(bytes)?;
             }
             let files = table.close_all()?;
             table.check_expected(run_id, &files)?;
-            Core::check_held(&[content.digest()], &files)?;
+            Core::check_held(&held, &files)?;
             run.status = Status::Completed;
             run.finished = Some(crate::owner::Timestamp::now());
             run.files = files;

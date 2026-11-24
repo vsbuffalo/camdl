@@ -213,8 +213,8 @@ An artifact kind is one of two sorts. A `Primary` kind is the main output of its
 own computation, and its own `layout` places it. A `ByProduct` kind is a second
 output of another artifact kind's computation, such as the trace of a filter
 run, and the library places it inside the upstream result's folder. Only a
-`Primary` kind can be begun on its own. A third trait, `ContentArtifact`, marks
-a primary kind whose identity is the content of its one file
+`Primary` kind can be begun on its own. A third trait, `ContentFiles`, marks a
+primary kind whose identity is its content: the digests of its result files
 ([Content artifacts and dependencies](#content-artifacts-and-dependencies)).
 
 camdl's filter run is a primary kind written in place:
@@ -1506,19 +1506,30 @@ depend on one stored compiled model, stored once. Each result names it with a
 `Dep`, so the result records exactly which model bytes it ran, and the model
 itself appears in the store once rather than inside every result.
 
-### The content-artifact trait
+### The content-artifact traits
 
 ```rust
-// rust/crates/store/src/artifact.rs:49
+// rust/crates/store/src/artifact.rs
+pub trait ContentFiles: Primary {
+    /// Each result file's name and bytes; their digests are exactly the
+    /// identity's held_content().
+    fn files(identity: &Self::Identity) -> Vec<(String, Vec<u8>)>;
+}
+
 pub trait ContentArtifact: Primary<Identity = Hashed<Self::Content>> {
     type Content: Content + Send + Sync + 'static;
     const FILE: &'static str;           // "model.ir.json", "quantities.json", "table.tsv"
 }
+// Every ContentArtifact is ContentFiles, with the one file FILE.
 ```
 
 `Content` is a typed value with a byte form (`to_bytes`, `from_bytes`), and
 `Hashed<T>` holds a value with the SHA-256 of its bytes, computed in its only
-constructor. camdl has three content artifacts (`camdl_store.rs:481-566`):
+constructor. A content artifact of one file implements `ContentArtifact`, and
+its identity is that file's `Hashed<T>`; a result that depends on it reads the
+typed value with `run.load(&dep)`. A content artifact of several files
+implements `ContentFiles` directly, with an identity that holds a `Hashed<T>`
+for each file. camdl has three content artifacts of one file (`camdl_store.rs`):
 
 - `CompiledModel`, whose file is the part of the compiled model the engine runs;
 - `Quantities`, whose file is the model's `quantities` and `contrasts` blocks;
@@ -1551,11 +1562,13 @@ that evaluate quantities (`sim_quantities`, `prediction`) hold a
 
 [`Store::put`](rust:store::storage::Store::put) stores a content artifact
 without a claim, because two writers of one content write identical bytes. It
-writes the folder whole in a temporary staging folder, renames it into place if
-the destination is absent, and otherwise removes its own copy and returns the
-stored one; a damaged copy in place is moved to quarantine first
-(`storage.rs:1410`, `put_inner`). It returns a `Stored<C>`, from which the
-command takes a dependency:
+refuses a file whose digest the identity does not hold (`Error::ContentUnheld`)
+and an identity holding a digest that no file has (`Error::ContentMissing`), so
+the run id is the digest of exactly the stored files. It writes the folder whole
+in a temporary staging folder, renames it into place if the destination is
+absent, and otherwise removes its own copy and returns the stored one; a damaged
+copy in place is moved to quarantine first (`storage.rs`, `put_inner`). It
+returns a `Stored<C>`, from which the command takes a dependency:
 
 ```rust
 // rust/crates/cli/src/pfilter.rs:568-571 (error handling trimmed)
@@ -2199,8 +2212,9 @@ poisoning test, for the commands and options its cases run.
 
 The library, `rust/crates/store/src`:
 
-- `artifact.rs`: `Artifact`, `Primary`, `ByProduct`, `ContentArtifact`,
-  `WriteMode`, `Id`, `Kinds`, `TopLevel`, `Build`, and `run_id`.
+- `artifact.rs`: `Artifact`, `Primary`, `ByProduct`, `ContentFiles`,
+  `ContentArtifact`, `WriteMode`, `Id`, `Kinds`, `TopLevel`, `Build`, and
+  `run_id`.
 - `hash.rs`, `identity.rs`: `Key`, `CanonicalHasher`, `ContentAddressed`,
   `HASH_VERSION`; `Identity`, `Finite`, `Hashed`, `Content`.
 - `inputs.rs`, `harness.rs`: the input classes, the `Inputs` trait and `Vary`;
