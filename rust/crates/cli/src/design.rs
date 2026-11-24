@@ -120,8 +120,23 @@ fn resolve_estimated(
     let config = &fit.config.problem;
     let (mut model, _ir_json) = crate::util::load_model(model_path, compile)?;
     // The step the anchor reader checks observation times against is the
-    // fit's, by the one rule.
-    let dt = crate::dt_rule::resolved_dt(model.simulation.dt, config.config.dt);
+    // fit's, under the fitting rule: a `[config] dt` the file writes must
+    // agree with the model's declared step, as `fit run` requires.
+    let backend = fit
+        .config
+        .inference
+        .method
+        .as_ref()
+        .map_or(crate::args::types::ForwardBackend::ChainBinomial, |m| m.algorithm.backend().into());
+    let (simulator, _) = crate::simulator::Simulator::resolve(
+        crate::simulator::ModelSimulate::of(&model.simulation),
+        crate::simulator::WrittenSimulator {
+            config_dt: crate::fit::config_v2::written_config_dt(fit.config_text()),
+            ..Default::default()
+        },
+        crate::simulator::Basis::Fitting { backend, run: "this design", file: crate::dt_rule::FIT_FLAG_FILE },
+    )?;
+    let dt = simulator.dt().get();
     crate::obs_anchor::resolve_from_config(out, &mut model, config, dt)?;
 
     // Every parameter needs a value before the resolver runs; an `[estimate]`

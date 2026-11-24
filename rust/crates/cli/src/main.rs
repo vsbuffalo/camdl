@@ -1048,11 +1048,6 @@ fn run_simulate(inv: args::SimulateInvocation) {
     };
     // Default is chain_binomial so `simulate` and `fit` agree at the
     // same MLE params (see docs/dev/incidents/2026-04-19-backend-default-mismatch.md).
-    // The step the observed window is read at, before the run's simulator is
-    // resolved (`simulator::Simulator::resolve`, below): `--dt`, else the
-    // model's own `simulate { dt = … }`, else 1.0.
-    let model_dt: Option<f64> = util::peek_simulation_dt(&ir_path_compiled);
-    let anchor_dt = a.backend.dt.or(model_dt).unwrap_or(crate::dt_rule::DEFAULT_DT);
     let seed             = a.seed;
     // The engine's Rayon branch runs on the global pool, which defaults to
     // every core, so the pool is capped here (mirrors fit/pfilter/profile);
@@ -1225,6 +1220,9 @@ fn run_simulate(inv: args::SimulateInvocation) {
                      resolves against."
                 ));
             };
+            let anchor_dt = simulate_anchor_dt(&model_raw, fit_ref, a.backend.dt).unwrap_or_else(|e| {
+                out.fail(format!("error: {e}"));
+            });
             let (first, last) = resolve_simulate_obs_anchors(
                 &crate::obs_anchor::window_model(&model_raw, start_override.as_ref()), fit_ref, anchor_dt)
                 .unwrap_or_else(|e| {
@@ -2851,6 +2849,31 @@ fn simulate_on_bound_design(
 /// config's `holdout_after` leaves, and rows whose value is `NA` count
 /// toward neither anchor (D40).
 fn o_source(o: &ir::observation::ObservationModel) -> String { o.source.clone() }
+
+/// The step `simulate` reads the observed window of `--fit` at: `--dt` when
+/// given, else the fit's step under the fitting rule (run spec §1.3.1), the
+/// model's declared step, which a fit file's written `[config] dt` must agree
+/// with, else that `[config] dt`, else 1.0. A stored fit's step was checked
+/// when it ran, so only a fit file's is read.
+#[expect(clippy::disallowed_methods, reason = "reads the fit file `--fit` names (declared `#[input(identity)]` on `SimulateArgs`) for its written `[config] dt`, the step the observed window, which each cell's identity holds, is read at")]
+fn simulate_anchor_dt(model: &ir::Model, fit_ref: &std::path::Path, flag_dt: Option<f64>) -> Result<f64, String> {
+    let config_dt = if crate::fit_store::is_config_file(&fit_ref.to_string_lossy()) {
+        let text = std::fs::read_to_string(fit_ref).map_err(|e| format!("cannot read {}: {e}", fit_ref.display()))?;
+        crate::fit::config_v2::written_config_dt(&text)
+    } else {
+        None
+    };
+    let (simulator, _) = crate::simulator::Simulator::resolve(
+        crate::simulator::ModelSimulate::of(&model.simulation),
+        crate::simulator::WrittenSimulator { config_dt, ..Default::default() },
+        crate::simulator::Basis::Fitting {
+            backend: crate::args::types::ForwardBackend::ChainBinomial,
+            run: "this simulation",
+            file: crate::dt_rule::FIT_FLAG_FILE,
+        },
+    )?;
+    Ok(flag_dt.unwrap_or(simulator.dt().get()))
+}
 
 fn resolve_simulate_obs_anchors(
     model: &ir::Model,

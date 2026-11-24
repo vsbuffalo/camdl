@@ -265,6 +265,14 @@ error: --dt 0.25 and the --fit file's `[config] dt = 0.5` disagree; drop one.
 error: fit.toml: --dt 0.25 and `[config] dt = 0.5` disagree; drop one.
 ```
 
+Two commands read a fit file's observed window without fitting:
+`camdl design
+lhs --fit` and `simulate --fit` with an anchored `--to` or an
+anchored model. Each reads the window at the fit's step by this rule, so a fit
+file whose written `[config] dt` disagrees with the model's step is refused
+there with the third message above. `simulate --dt`, when given, is the step the
+window is read at.
+
 The integrator on these commands is the model's. `camdl predict MODEL` takes
 `--integrator`, which replaces the method and keeps the model's `rk45`
 tolerances; `fit run`, `profile` and `pfilter` take no integrator flag. A fit

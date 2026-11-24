@@ -64,9 +64,14 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        Fixture::of(MODEL)
+    }
+
+    /// The fixture over the model source `src`.
+    fn of(src: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let model = dir.path().join("sir.camdl");
-        std::fs::write(&model, MODEL).unwrap();
+        std::fs::write(&model, src).unwrap();
         let out = Command::new(camdlc_bin()).env_remove("CLICOLOR_FORCE").arg(&model).output().unwrap();
         assert!(out.status.success(), "camdlc failed: {}", String::from_utf8_lossy(&out.stderr));
         let ir = dir.path().join("sir.ir.json");
@@ -293,4 +298,26 @@ fn an_estimated_parameter_without_a_finite_box_is_refused_by_name() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("these parameters have no finite one: `mu` [0, inf]"), "{stderr}");
     assert!(stderr.contains("bounds = [lo, hi]"), "{stderr}");
+}
+
+/// The fit file writes `[config] dt = 1.0` and the model declares
+/// `simulate { dt = 0.5 'days }`. The design reads the fit's observation
+/// window at the fit's step, which is the model's, so the written step that
+/// disagrees with it is refused, as `fit run` refuses it, rather than set
+/// aside.
+#[test]
+fn a_fit_file_step_that_disagrees_with_the_models_is_refused() {
+    let fx = Fixture::of(&MODEL.replace("to = 6 'days }", "to = 6 'days  dt = 0.5 'days }"));
+    let fit = fx.bounded_fit();
+    let before = fx.listing();
+    let out = fx.design(&fit, &["--n", "10", "--seed", "1"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "a disagreeing [config] dt must be refused:\n{stderr}");
+    assert!(out.stdout.is_empty(), "a refused design writes no rows");
+    assert!(
+        stderr.contains("the --fit file's [config] dt = 1 is not the integration step")
+            && stderr.contains("simulate { dt = 0.5 }"),
+        "{stderr}"
+    );
+    assert_eq!(fx.listing(), before, "a refused design writes nothing");
 }

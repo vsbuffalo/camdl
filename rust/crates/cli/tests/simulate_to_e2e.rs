@@ -329,3 +329,47 @@ fn extending_to_with_at_list_emit_schedule_is_refused() {
     assert!(stderr.contains("fixed list") && stderr.contains("42"),
         "the refusal must name the stream's list end:\n{stderr}");
 }
+
+/// An anchored `--to` reads the fit's observed window at the fit's step. The
+/// model here declares `simulate { dt = 0.5 }` and the fit file writes
+/// `[config] dt = 1.0`, so the step the window would be read at is refused,
+/// as `fit run` refuses that file, rather than replaced by the model's.
+#[test]
+fn anchored_to_refuses_a_fit_file_step_that_disagrees_with_the_models() {
+    let bin = skip_if_missing_binary();
+    let tmp = tempfile::tempdir().unwrap();
+    let data = tmp.path().join("cases_long.tsv");
+    write_obs_data(&data);
+    let toml = write_fit_toml(tmp.path(), &data);
+    let mut envelope: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(golden("sir_two_patch_long_obs.ir.json")).unwrap(),
+    )
+    .unwrap();
+    envelope["model"]["simulation"]["dt"] = serde_json::json!(0.5);
+    let model = tmp.path().join("stepped.ir.json");
+    write(&model, &envelope.to_string());
+
+    let mut args: Vec<String> = vec![
+        "simulate".into(),
+        model.to_string_lossy().into_owned(),
+        "--to".into(), "last_obs + 2 weeks".into(),
+        "--fit".into(), toml.to_string_lossy().into_owned(),
+        "--output".into(), tmp.path().join("traj.tsv").to_string_lossy().into_owned(),
+        "--seed".into(), "1".into(),
+    ];
+    args.extend(PARAMS.iter().map(|s| s.to_string()));
+    let o = Command::new(&bin).env_remove("CLICOLOR_FORCE")
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("CAMDL_STORE", tmp.path().join("cas"))
+        .args(&args)
+        .output()
+        .expect("spawn simulate");
+    let stderr = String::from_utf8_lossy(&o.stderr);
+    assert!(!o.status.success(), "a disagreeing [config] dt must be refused:\n{stderr}");
+    assert!(
+        stderr.contains("the --fit file's [config] dt = 1 is not the integration step")
+            && stderr.contains("simulate { dt = 0.5 }"),
+        "{stderr}"
+    );
+    assert!(!tmp.path().join("traj.tsv").exists(), "a refused run writes no trajectory");
+}

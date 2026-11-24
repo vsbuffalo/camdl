@@ -1315,20 +1315,6 @@ pub(crate) fn resolve_ir_path(
     Ok((tmp.to_string_lossy().into_owned(), Some(tmp)))
 }
 
-/// Read the model's `simulate { dt = … }` step from a resolved IR path,
-/// without running full validation. Used to seed the simulate `dt` default
-/// (gh#161): the model knob is the default, `--dt` overrides it. Returns
-/// `None` on any read/parse error — the authoritative `load_model` runs later
-/// and surfaces a real diagnostic, so a peek failure must not abort or mislead.
-#[expect(clippy::disallowed_methods, reason = "reads the model's default step from the compiled IR `resolve_ir_path` produced; the resolved step is hashed into each run's identity")]
-pub fn peek_simulation_dt(path: &str) -> Option<f64> {
-    // `path` is already a resolved `.ir.json` (resolve_ir_path ran upstream),
-    // so this is a plain read, never a camdlc invocation.
-    let json = std::fs::read_to_string(path).ok()?;
-    let model: ir::Model = ir::from_str(&json).ok()?;
-    model.simulation.dt
-}
-
 /// The IR JSON text of the model at `path`, the one read every loader below
 /// shares. With `Some(compile)` a `.camdl` is compiled under the command's
 /// settings and a `.ir.json` read; with `None` the path must already be
