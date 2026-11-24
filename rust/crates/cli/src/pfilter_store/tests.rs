@@ -265,6 +265,7 @@ fn argv(inv: &PfilterInvocation) -> Vec<String> {
         force,
         label,
         store,
+        manifest,
     } = args;
     let p = |p: &Path| p.to_string_lossy().into_owned();
     let mut v: Vec<String> = vec!["pfilter".into(), p(model)];
@@ -317,6 +318,7 @@ fn argv(inv: &PfilterInvocation) -> Vec<String> {
     opt("--save-filtered-streams", save_filtered_streams.as_deref().map(p));
     opt("--save-prequential", save_prequential.clone());
     opt("--score-from", score_from.clone());
+    opt("--manifest", manifest.as_deref().map(p));
     opt("--label", label.clone());
     opt("--store", store.as_deref().map(p));
     let mut flag = |set: bool, name: &str| {
@@ -425,6 +427,10 @@ fn run(inv: &PfilterInvocation, store: Option<&Path>) -> store::Result<Observed>
         let bytes = std::fs::read(cwd.path().join(&path)).unwrap_or_default();
         exports.insert(PathBuf::from(path), Key::digest_bytes(&bytes));
     }
+    if let Some(path) = &a.manifest {
+        let bytes = std::fs::read(cwd.path().join(path)).unwrap_or_default();
+        exports.insert(path.clone(), Key::digest_bytes(&bytes));
+    }
     let mut effects = crate::test_support::recorded_execution(&root, crate::pfilter_store::Pfilter::KIND);
     effects.extend(used(&String::from_utf8_lossy(&out.stderr), &cwd.path().join("ir-cache")));
     Ok(Observed { results: observe(&root), exports, effects, ..Observed::default() })
@@ -525,6 +531,7 @@ impl InputHarness for Harness {
             ("args.trace", _) => a.trace = Some("trace.tsv".into()),
             ("args.pf_health", _) => a.pf_health = Some("health.tsv".into()),
             ("args.output", _) => a.output = Some("ll.txt".into()),
+            ("args.manifest", _) => a.manifest = Some("m.json".into()),
             ("args.sweep_file", Class::Expands) => a.sweep_file = Some("design3.tsv".into()),
             (name, Class::Identity | Class::Render) => return self.base.varied(name),
             (name, class) => panic!("no second value for {name} ({class:?})"),

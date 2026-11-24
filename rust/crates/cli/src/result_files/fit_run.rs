@@ -672,6 +672,57 @@ impl ResultFile for FitRunFile {
 
 impl super::Files for FitRun {
     type File = FitRunFile;
+    const CONTRACT: u16 = 1;
+}
+
+impl super::ParseFile for FitRunFile {
+    /// A file several families write is returned as one family's variant,
+    /// and a chain's trace as an MH trace: each shares its logical name with
+    /// the variants it stands for.
+    fn of_stored(stored: &str) -> Option<Self> {
+        if let Some(ext) = stored.strip_prefix("inputs/starts.").filter(|e| !e.is_empty() && !e.contains('/')) {
+            return Some(FitRunFile::Common(CommonFile::StartsInput(ext.into())));
+        }
+        let chain = stored
+            .split_once('/')
+            .and_then(|(dir, _)| dir.strip_prefix("chain_")?.parse::<u32>().ok().filter(|c| chain_dir(*c) == dir))
+            .unwrap_or(0);
+        let candidates = [
+            FitRunFile::Common(CommonFile::Method),
+            FitRunFile::Common(CommonFile::Summary),
+            FitRunFile::Common(CommonFile::FitConfig),
+            FitRunFile::Common(CommonFile::RunInputs),
+            FitRunFile::Common(CommonFile::FitMeta),
+            FitRunFile::Common(CommonFile::Execution),
+            FitRunFile::Mcmc(McmcFile::Draws),
+            FitRunFile::Mcmc(McmcFile::ChainTrace(Sampler::Mh, chain)),
+            FitRunFile::Mcmc(McmcFile::ResumeState(chain)),
+            FitRunFile::Mcmc(McmcFile::SamplerSummary(Sampler::Mh)),
+            FitRunFile::Mcmc(McmcFile::SamplerSummary(Sampler::Pmmh)),
+            FitRunFile::Mcmc(McmcFile::SamplerSummary(Sampler::Pgas)),
+            FitRunFile::Mcmc(McmcFile::ChainStarts),
+            FitRunFile::Mcmc(McmcFile::Diagnostics),
+            FitRunFile::Mcmc(McmcFile::FitState),
+            FitRunFile::Pgas(PgasFile::Trajectories(chain)),
+            FitRunFile::Pgas(PgasFile::TrajectoriesMeta(chain)),
+            FitRunFile::Pgas(PgasFile::CrossChainCompat),
+            FitRunFile::Pgas(PgasFile::FilterEss),
+            FitRunFile::Pgas(PgasFile::LatentConvergence),
+            FitRunFile::If2(If2File::ParameterTraces(chain)),
+            FitRunFile::If2(If2File::ChainFinalParams(chain)),
+            FitRunFile::If2(If2File::FinalParams),
+            FitRunFile::If2(If2File::MleParams),
+            FitRunFile::If2(If2File::ChainEvaluations),
+            FitRunFile::If2(If2File::IterationDiagnostics),
+            FitRunFile::Nlopt(NloptFile::ChainResults),
+            FitRunFile::Nlopt(NloptFile::OptTrace),
+            FitRunFile::Pfilter(PfilterMethodFile::Logliks),
+            FitRunFile::Pfilter(PfilterMethodFile::PrequentialJoint),
+            FitRunFile::Pfilter(PfilterMethodFile::PrequentialStreams),
+            FitRunFile::Pfilter(PfilterMethodFile::PrequentialRecord),
+        ];
+        super::find(candidates, stored)
+    }
 }
 
 impl From<McmcFile> for FitRunFile {

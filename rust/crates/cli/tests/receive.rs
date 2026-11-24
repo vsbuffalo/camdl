@@ -270,6 +270,37 @@ fn receive_refuses_a_copy_without_its_compiled_model() {
     assert!(fit_folders(&p.local()).is_empty(), "nothing is placed");
 }
 
+/// `receive --manifest` lists every result it placed, each as the remote
+/// command's own manifest lists it; receiving the results again, now
+/// present, writes the same entries.
+#[test]
+fn receive_writes_the_manifest_of_what_it_placed_or_found() {
+    let p = Project::new();
+    p.ok(&p.remote(), &[OTHER_BUILD], &["fit", "run", "fit.toml", "--seed", "1", "--label", "m4w", "--manifest", "remote.json"]);
+    p.pull();
+    p.ok(&p.local(), &[], &["receive", "pull-staging", "--label", "m4w_cloud", "--manifest", "local.json"]);
+    let read = |name: &str| -> serde_json::Value { serde_json::from_slice(&std::fs::read(p.dir().join(name)).unwrap()).unwrap() };
+    let (remote, local) = (read("remote.json"), read("local.json"));
+    assert_eq!(local["label"], "m4w_cloud");
+    assert_ne!(local["camdl"]["ambient_key"], remote["camdl"]["ambient_key"], "premise: the copy was made under another build");
+    let entries = |m: &serde_json::Value| -> std::collections::BTreeMap<String, serde_json::Value> {
+        m["results"].as_array().unwrap().iter().map(|r| (r["run_id"].as_str().unwrap().to_string(), r.clone())).collect()
+    };
+    let (remote_entries, local_entries) = (entries(&remote), entries(&local));
+    assert_eq!(local_entries, remote_entries, "the received results, each as the remote manifest lists it");
+    let kinds: Vec<&str> = local["results"].as_array().unwrap().iter().map(|r| r["kind"].as_str().unwrap()).collect();
+    assert!(kinds.contains(&"fit_run") && kinds.contains(&"fit"), "{kinds:?}");
+    // Parents first: the fit problem before the run that sits inside it.
+    let at = |k: &str| kinds.iter().position(|x| *x == k).unwrap();
+    assert!(at("fit") < at("fit_run"), "the problem is listed before its run: {kinds:?}");
+
+    // The results are now here: a second receive of the same copy finds
+    // every one present and lists the same entries.
+    p.pull();
+    p.ok(&p.local(), &[], &["receive", "pull-staging", "--label", "m4w_cloud", "--manifest", "again.json"]);
+    assert_eq!(entries(&read("again.json")), local_entries);
+}
+
 #[test]
 fn receive_of_results_already_here_leaves_them_in_place() {
     let p = Project::new();

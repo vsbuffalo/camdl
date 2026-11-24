@@ -129,6 +129,13 @@ pub(super) struct Prepared {
     optimizer: bool,
 }
 
+impl Prepared {
+    /// The root of the run store the input is read from and stored in.
+    pub(super) fn root(&self) -> &Path {
+        &self.root
+    }
+}
+
 /// Resolve the input `text` names, reading nothing it does not need to check
 /// the inputs together.
 pub(super) fn prepare(text: &str, req: &Request) -> Result<Prepared, String> {
@@ -225,7 +232,7 @@ pub(super) fn load(
     prepared: Prepared,
     req: &Request,
     selection: Option<&ChainSelection>,
-) -> Result<Vec<Loaded>, String> {
+) -> Result<(Vec<Loaded>, Vec<store::Key>), String> {
     let Prepared { text, store, root, input, mode, optimizer, .. } = prepared;
     let text = text.as_str();
     let request = crate::camdl_store::store_request(None, false, Some(root.clone()));
@@ -282,6 +289,12 @@ pub(super) fn load(
     drop(again);
     drop(info);
     let replicated = scores.len() >= 2;
+    // The results the comparison read, each prediction before its score.
+    let mut read = Vec::with_capacity(2 * scores.len());
+    for s in &scores {
+        read.push(s.identity().prediction.id().key());
+        read.push(s.id().key());
+    }
     let prediction = prediction_of(&store, &scores[0], text)?;
     let context = Context::of(&store, &prediction)?;
     let mut replicate_groups: Vec<Vec<Group>> = Vec::new();
@@ -322,7 +335,7 @@ pub(super) fn load(
             scores.len()
         ));
     }
-    Ok(loaded)
+    Ok((loaded, read))
 }
 
 /// The predictions of the stored prediction `p` at the seeds after its own:

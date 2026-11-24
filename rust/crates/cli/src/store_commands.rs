@@ -37,7 +37,9 @@ pub(crate) fn cmd_store(command: store::StoreCommand, root: Option<PathBuf>) {
 pub(crate) fn cmd_receive(args: crate::args::ReceiveArgs) {
     let out = crate::out::Out::new(false);
     let copy = args.copy.clone();
-    let (_, _, _, request, given) = store::Inputs::split(args).into_parts();
+    let (_, _, exports, request, given) = store::Inputs::split(args).into_parts();
+    let (manifest,) = exports.into_parts();
+    let manifest = crate::output_manifest::claim(&out, manifest.as_deref());
     let (label, root) = request.into_parts();
     let request = crate::camdl_store::store_request(label, false, root);
     let store = crate::camdl_store::open(&request).unwrap_or_else(|e| out.fail(format!("error: {e}")));
@@ -71,4 +73,5 @@ pub(crate) fn cmd_receive(args: crate::args::ReceiveArgs) {
     if let (Some(label), Some(before)) = (invocation.label(), invocation.took_label_from()) {
         out.say(format_args!("receive: @{label} now names invocation {}, which held it from invocation {before}", invocation.seq()));
     }
+    crate::output_manifest::write(&out, manifest.as_ref(), &store, &invocation);
 }

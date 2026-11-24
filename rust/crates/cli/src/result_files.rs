@@ -113,9 +113,103 @@ pub(crate) fn header_matches(columns: &[Column], header: &[&str]) -> bool {
     columns[first_each..=last_each].iter().filter_map(name).all(|c| rest.any(|h| *h == c))
 }
 
+/// A file enum whose variant can be read back from a stored file's name.
+pub(crate) trait ParseFile: ResultFile + Sized {
+    /// The variant whose stored name is `stored`, or `None` for a name no
+    /// result of the kind stores. Where several variants share a stored name
+    /// (the same file written by several methods), any of them is returned:
+    /// they share the logical name too.
+    fn of_stored(stored: &str) -> Option<Self>;
+}
+
+/// The variant among `candidates` whose stored name is `stored`.
+fn find<F: ResultFile>(candidates: impl IntoIterator<Item = F>, stored: &str) -> Option<F> {
+    candidates.into_iter().find(|f| f.stored() == stored)
+}
+
 /// A kind camdl stores through a claim, with the enum of its files.
 pub(crate) trait Files: store::Artifact {
-    type File: ResultFile;
+    type File: ParseFile;
+    /// The version of the kind's file contract: which files it stores, under
+    /// which names, with which columns. It is bumped when a file is added,
+    /// removed or renamed, or a column changes. The test
+    /// `every_contract_version_is_pinned_to_its_files` pins each version to a
+    /// digest of the kind's contract rows, so a change to the enum fails it
+    /// until the version is bumped and the pin updated.
+    const CONTRACT: u16;
+}
+
+/// The contract version of each content artifact (`compiled_model`,
+/// `quantities`, `data_table`), whose one file is its
+/// [`store::ContentArtifact::FILE`]. Pinned, with each kind's, by
+/// `every_contract_version_is_pinned_to_its_files`.
+const CONTENT_CONTRACT: u16 = 1;
+
+/// A kind's file contract as a reader outside camdl relies on it: its
+/// version and the logical name of each file it stores.
+#[derive(Clone, Copy)]
+pub(crate) struct KindContract {
+    pub version: u16,
+    logical: fn(&str) -> Option<String>,
+}
+
+impl KindContract {
+    /// The logical name of the stored file `stored`, or `None` for a name the
+    /// kind's contract does not hold.
+    pub(crate) fn logical(&self, stored: &str) -> Option<String> {
+        (self.logical)(stored)
+    }
+}
+
+fn logical_of<F: ParseFile>(stored: &str) -> Option<String> {
+    F::of_stored(stored).map(|f| f.logical())
+}
+
+/// A content artifact's one file is named in the contract by its stored name
+/// up to the first `.`: `model` for `model.ir.json`.
+fn content_logical<C: store::ContentArtifact>(stored: &str) -> Option<String> {
+    (stored == C::FILE).then(|| C::FILE.split_once('.').map_or(C::FILE, |(stem, _)| stem).to_string())
+}
+
+fn claimed<A: Files>() -> (&'static str, KindContract) {
+    (A::KIND, KindContract { version: A::CONTRACT, logical: logical_of::<A::File> })
+}
+
+fn content<C: store::ContentArtifact>() -> (&'static str, KindContract) {
+    (C::KIND, KindContract { version: CONTENT_CONTRACT, logical: content_logical::<C> })
+}
+
+/// The file contract of every kind camdl stores, by kind name.
+fn contracts() -> [(&'static str, KindContract); 20] {
+    use crate::{camdl_store as cs, fit_store as fs, pfilter_store as ps, profile_store as pr, sim_store as ss};
+    [
+        content::<cs::CompiledModel>(),
+        content::<cs::Quantities>(),
+        content::<cs::DataTable>(),
+        claimed::<fs::FitProblem>(),
+        claimed::<fs::FitRun>(),
+        claimed::<fs::Prediction>(),
+        claimed::<fs::Score>(),
+        claimed::<ps::Pfilter>(),
+        claimed::<ps::Trace>(),
+        claimed::<ps::PfHealth>(),
+        claimed::<ps::Filtering>(),
+        claimed::<ps::FilteredStreams>(),
+        claimed::<ps::FinalState>(),
+        claimed::<ps::SavedPaths>(),
+        claimed::<ps::Prequential>(),
+        claimed::<ss::Sim>(),
+        claimed::<ss::Obs>(),
+        claimed::<ss::EventLog>(),
+        claimed::<ss::SimQuantities>(),
+        claimed::<pr::ProfilePoint>(),
+    ]
+}
+
+/// The file contract of the kind named `kind`, or `None` for a kind camdl
+/// does not store.
+pub(crate) fn contract(kind: &str) -> Option<KindContract> {
+    contracts().into_iter().find(|(k, _)| *k == kind).map(|(_, c)| c)
 }
 
 /// The expected set of a run that will hold exactly `files`.

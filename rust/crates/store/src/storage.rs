@@ -269,6 +269,12 @@ impl Store {
         &self.inner.root
     }
 
+    /// The ambient key this store was opened with: the hash of the build and
+    /// the environment switches that every run id it computes holds.
+    pub fn ambient_key(&self) -> Key {
+        self.inner.ambient_key
+    }
+
     /// Begins `identity`: reuses a completed result, refuses a busy one, or
     /// claims the run id. Writes the labels into the invocation record's entry
     /// for this result, whatever it returns.

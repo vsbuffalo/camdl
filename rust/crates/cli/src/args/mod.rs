@@ -828,6 +828,15 @@ pub struct SimulateArgs {
           conflicts_with_all = ["seeds", "replicates", "draws", "sweep", "sweep_file"])]
     #[input(export)]
     pub reactive_log: Option<PathBuf>,
+
+    /// Write the output manifest to PATH once the command has succeeded: a
+    /// JSON file naming every result it stored or reused, each result file
+    /// by logical name with its SHA-256 and size, for a workflow tool to
+    /// depend on (run spec §2.10). Any file at PATH is removed when the
+    /// command starts, so a failed command leaves none.
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["dry_run", "design_from"])]
+    #[input(export)]
+    pub manifest: Option<PathBuf>,
 }
 
 /// One `camdl simulate` as its inputs reach the store: the command's
@@ -965,6 +974,15 @@ pub struct FitRunArgs {
     #[arg(long, value_name = "DIR")]
     #[input(store)]
     pub store: Option<PathBuf>,
+
+    /// Write the output manifest to PATH once the command has succeeded: a
+    /// JSON file naming every result it stored or reused, each result file
+    /// by logical name with its SHA-256 and size, for a workflow tool to
+    /// depend on (run spec §2.10). Any file at PATH is removed when the
+    /// command starts, so a failed command leaves none.
+    #[arg(long, value_name = "PATH")]
+    #[input(export)]
+    pub manifest: Option<PathBuf>,
 
     // ── Removed-flag traps ───────────────────────────────────────────
     //
@@ -1666,6 +1684,15 @@ pub struct PredictFlags {
     #[input(export)]
     pub output: Option<PathBuf>,
 
+    /// Write the output manifest to PATH once the command has succeeded: a
+    /// JSON file naming every result it stored or reused, each result file
+    /// by logical name with its SHA-256 and size, for a workflow tool to
+    /// depend on (run spec §2.10). Any file at PATH is removed when the
+    /// command starts, so a failed command leaves none.
+    #[arg(long, value_name = "PATH")]
+    #[input(export)]
+    pub manifest: Option<PathBuf>,
+
     /// Compute the prediction again even when it is stored; the stored
     /// prediction moves to the store's `.quarantine/` first. A prediction
     /// held by an owner not known to be stopped is refused.
@@ -1971,6 +1998,15 @@ pub struct ScoreArgs {
     #[arg(short, long, value_name = "DIR")]
     #[input(export)]
     pub output: Option<PathBuf>,
+
+    /// Write the output manifest to PATH once the command has succeeded: a
+    /// JSON file naming every result it stored or reused, each result file
+    /// by logical name with its SHA-256 and size, for a workflow tool to
+    /// depend on (run spec §2.10). Any file at PATH is removed when the
+    /// command starts, so a failed command leaves none.
+    #[arg(long, value_name = "PATH")]
+    #[input(export)]
+    pub manifest: Option<PathBuf>,
 
     /// Compute the score again even when it is stored; the stored score
     /// moves to the store's `.quarantine/` first.
@@ -2533,6 +2569,15 @@ pub struct PfilterArgs {
     #[arg(long, value_name = "DIR")]
     #[input(store)]
     pub store: Option<PathBuf>,
+
+    /// Write the output manifest to PATH once the command has succeeded: a
+    /// JSON file naming every result it stored or reused, each result file
+    /// by logical name with its SHA-256 and size, for a workflow tool to
+    /// depend on (run spec §2.10). Any file at PATH is removed when the
+    /// command starts, so a failed command leaves none.
+    #[arg(long, value_name = "PATH", conflicts_with = "no_store")]
+    #[input(export)]
+    pub manifest: Option<PathBuf>,
 }
 
 /// One `camdl pfilter` as its inputs reach the store: the command's
@@ -2855,6 +2900,15 @@ pub struct ProfileArgs {
     #[arg(long, value_name = "DIR")]
     #[input(store)]
     pub store: Option<PathBuf>,
+
+    /// Write the output manifest to PATH once the command has succeeded: a
+    /// JSON file naming every result it stored or reused, each result file
+    /// by logical name with its SHA-256 and size, for a workflow tool to
+    /// depend on (run spec §2.10). Any file at PATH is removed when the
+    /// command starts, so a failed command leaves none.
+    #[arg(long, value_name = "PATH")]
+    #[input(export)]
+    pub manifest: Option<PathBuf>,
 
     /// Per-cell inference algorithm. When omitted the per-cell runner
     /// uses `if2` on `chain_binomial` (the historical default). Pass an
@@ -3605,6 +3659,15 @@ pub struct CompareArgs {
     /// bias in the PIT estimator) is fixed.
     #[arg(long, value_name = "PATH")]
     pub pointwise: Option<PathBuf>,
+
+    /// Write the output manifest to PATH once the comparison has succeeded:
+    /// a JSON file naming every stored prediction and score compare read or
+    /// stored, each result file by logical name with its SHA-256 and size
+    /// (run spec §2.10). Refused when the compared results sit in more than
+    /// one run store. Any manifest at PATH is removed when the command
+    /// starts.
+    #[arg(long, value_name = "PATH")]
+    pub manifest: Option<PathBuf>,
 }
 
 // ─── mre (minimal-reproducible-example bundles) ──────────────────────────────

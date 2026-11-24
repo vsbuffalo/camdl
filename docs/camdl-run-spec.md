@@ -1703,11 +1703,17 @@ file is recorded with its digest and not compared when a result is computed
 again. `chain_N` stands for each chain, numbered from 0. A run that holds any
 other file, or lacks one it declared, is not stored.
 
+Each kind's contract version, which an output manifest records with each result
+(§2.10), is given with its files; it is bumped when a file is added, removed or
+renamed, or a column changes. The three content artifacts are at contract
+version 1, and the logical name of each one's file is its stored name up to the
+first `.`: `model`, `quantities` and `table`.
+
 #### `fit_run`
 
 One fit run of a problem. Its files depend on its method and on how each chain
 ended, as `chain_starts.tsv` records it: `accepted` (ran to the end), `skipped`
-(ran and was dropped, IF2) or `refused` (never ran).
+(ran and was dropped, IF2) or `refused` (never ran). Contract version 1.
 
 - `method`: `method.toml`, TOML (every method). The run's `[method]` table as
   merged, with its perturbation keys.
@@ -1809,7 +1815,7 @@ ended, as `chain_starts.tsv` records it: `accepted` (ran to the end), `skipped`
 
 #### `fit`
 
-A fit problem: the model, the data and the rows that train.
+A fit problem: the model, the data and the rows that train. Contract version 1.
 
 - `problem`: `problem.toml`, TOML (always). The problem in fit-file syntax: the
   model, the data, the estimated and fixed parameters.
@@ -1834,7 +1840,8 @@ A fit problem: the model, the data and the rows that train.
 #### `prediction`
 
 A prediction from a fit run's posterior or from a fixed point. A name carries a
-suffix when chains were excluded or a quantities vocabulary was read.
+suffix when chains were excluded or a quantities vocabulary was read. Contract
+version 1.
 
 - `predictive`: `predictive.json`, JSON (always). A part's manifest: its schema,
   its tables and how they were made.
@@ -1863,7 +1870,7 @@ suffix when chains were excluded or a quantities vocabulary was read.
 
 #### `score`
 
-A stored prediction scored against its outcomes.
+A stored prediction scored against its outcomes. Contract version 1.
 
 - `scored`: `scored.tsv`, TSV (always). One row per scored row or target.
 - `summary`: `summary.tsv`, TSV (always). One row per stream, mode, role and
@@ -1873,7 +1880,7 @@ A stored prediction scored against its outcomes.
 
 #### `pfilter`
 
-A particle filter run at one parameter point.
+A particle filter run at one parameter point. Contract version 1.
 
 - `loglik`: `loglik.toml`, TOML (always). `loglik`, `n_replicates` and
   `n_particles`: the log-likelihood estimate.
@@ -1884,28 +1891,28 @@ A particle filter run at one parameter point.
 
 #### `trace`
 
-`--trace`, a by-product of a filter run.
+`--trace`, a by-product of a filter run. Contract version 1.
 
 - `trace`: `trace.tsv`, TSV (always). Per observation, the log-likelihood
   increment, the ESS and the one-step predictive quantiles.
 
 #### `pf_health`
 
-`--pf-health`, a by-product of a filter run.
+`--pf-health`, a by-product of a filter run. Contract version 1.
 
 - `pf_health`: `pf_health.tsv`, TSV (always). Per observation: `time`, `ESS`,
   `ESS_frac`, `tau2`.
 
 #### `filtering`
 
-`--save-filtering`, a by-product of a filter run.
+`--save-filtering`, a by-product of a filter run. Contract version 1.
 
 - `filtering`: `filtering.tsv`, TSV (always). Every particle's state and
   log-weight at every step.
 
 #### `filtered_streams`
 
-`--save-filtered-streams`, a by-product of a filter run.
+`--save-filtered-streams`, a by-product of a filter run. Contract version 1.
 
 - `filtered_streams`: `filtered_streams.tsv`, TSV (always). Each stream's
   conditional mean, summarised over the swarm before and after each step is
@@ -1913,21 +1920,21 @@ A particle filter run at one parameter point.
 
 #### `final_state`
 
-`--save-final-state`, a by-product of a filter run.
+`--save-final-state`, a by-product of a filter run. Contract version 1.
 
 - `final_state`: `final_state.tsv`, TSV (always). The swarm after the last
   observation.
 
 #### `saved_paths`
 
-`--save-paths`, a by-product of a filter run.
+`--save-paths`, a by-product of a filter run. Contract version 1.
 
 - `paths`: `paths.tsv`, TSV (always). Sample paths from the smoothing
   distribution, traced through the ancestry.
 
 #### `prequential`
 
-`--save-prequential`, a by-product of a filter run.
+`--save-prequential`, a by-product of a filter run. Contract version 1.
 
 - `joint`: `prequential.tsv`, TSV (always). At each observation time, the joint
   one-step-ahead log score and the ESS.
@@ -1938,7 +1945,7 @@ A particle filter run at one parameter point.
 
 #### `sim`
 
-One simulated cell.
+One simulated cell. Contract version 1.
 
 - `traj`: `traj.tsv`, TSV (when the engine ran). The trajectory at the output
   times: `t`, `t_start`, `t_stop`, each compartment and each `flow_<name>`.
@@ -1951,7 +1958,8 @@ One simulated cell.
 
 #### `obs`
 
-`--obs`, a cell's simulated observations, a by-product of the cell.
+`--obs`, a cell's simulated observations, a by-product of the cell. Contract
+version 1.
 
 - `<stream>`: `<stream>.tsv`, TSV (each stream). One stream's simulated
   observations: `time` and the stream's columns.
@@ -1960,7 +1968,7 @@ One simulated cell.
 
 #### `event_log`
 
-`--event-log`, a by-product of the cell.
+`--event-log`, a by-product of the cell. Contract version 1.
 
 - `event_log`: `event_log.tsv`, TSV (when it was recorded). Every event of the
   cell's run under the recorder.
@@ -1969,7 +1977,7 @@ One simulated cell.
 
 #### `sim_quantities`
 
-`--quantities-out`, a by-product of the cell.
+`--quantities-out`, a by-product of the cell. Contract version 1.
 
 - `quantities`: `quantities.json`, JSON (when they were evaluated). The model's
   quantities evaluated on the cell.
@@ -1978,7 +1986,7 @@ One simulated cell.
 
 #### `profile_point`
 
-One point of a profile.
+One point of a profile. Contract version 1.
 
 - `mle`: `mle.toml`, TOML (always). `final_loglik`, a `[focal]` table with the
   profiled parameter's value, and an `[mle]` table with the other estimates.
@@ -1986,6 +1994,196 @@ One point of a profile.
   settings and starts as resolved.
 
 <!-- End of the generated result-file contract. -->
+
+### 2.10 The output manifest
+
+`--manifest PATH` makes a command that stores results also write a small JSON
+file at PATH, the output manifest, listing the run id of every result it
+produced or reused and each result file under its logical name (§2.9) with its
+SHA-256 and size. A store result's folder is named by a hash, so a workflow tool
+such as make or Snakemake cannot name it before the command runs; a rule
+declares the manifest as its output instead, and a later step reads run ids and
+file names from it. The design is
+`docs/dev/proposals/2026-11-23-workflow-bindings.md`.
+
+`simulate`, `fit run`, `pfilter`, `profile`, `predict`, `score`, `receive` and
+`compare` take it:
+
+```bash
+camdl fit run fits/m4w_mh.toml --label m4w_mh --manifest build/fits/m4w_mh.json
+camdl receive pull-staging/ --label m4w_mh_cloud --manifest build/fits/m4w_mh.json
+```
+
+`pfilter` refuses it with `--no-store`, and `simulate` with `--dry-run` or
+`--design-from`, since none of them keeps a result in the store; clap exits 2.
+`compare` reads and stores its predictions and scores in the stores of its
+inputs, and a manifest names results in one store, so `compare --manifest` is
+refused with exit 1, naming the stores, when the compared results sit in more
+than one, or when no input is a stored result.
+
+#### When it is written
+
+After its arguments have parsed and before its first call to the store, the
+command removes an earlier manifest at PATH: an empty file, or a JSON file whose
+`schema` begins `camdl.output-manifest/`. A PATH that is a directory, whose
+directory does not exist, or that holds any other file is refused there with
+exit 1, before anything is stored, and the file is left as it is
+(`PATH holds a file that is not an output manifest`). When the command succeeds,
+the manifest is written to a temporary file in PATH's directory and renamed over
+PATH, so a reader finds no manifest or a whole one. A process killed between the
+two leaves that temporary file beside PATH, named `.NAME.<pid>.<n>.<nanos>.tmp`
+for PATH's file name NAME; its leading `.` keeps it out of a glob such as
+`build/*.json`, and it can be deleted. A command that fails leaves no manifest,
+whether it was refused, a computation failed, a member of a batch failed or was
+held by another process, or the process was killed. A command whose results are
+all reused from the store writes the manifest again: the same bytes, with a new
+modification time.
+
+A manifest lists only completed results. When a by-product the command asked for
+was recorded as not computed while the command otherwise succeeded, such as the
+by-products of a filter run with nothing to record, the command exits 1 and
+writes no manifest; the message names each result that was not stored, by kind
+and run id, and the results that were, the run among them, so the missing ones
+can be asked for again.
+
+#### What it holds
+
+This is the manifest of a filter run with `--pf-health`:
+
+```json
+{
+  "schema": "camdl.output-manifest/v1",
+  "camdl": {
+    "version": "0.1.0+…",
+    "engine_id": "b2db5d07e20c55a614ec69081df9a208",
+    "ambient_key": "2f46cd4cfe5f40f5352b877ece67b92817d0afc452e0bf91be9d021b506bac51"
+  },
+  "label": "sir_filter",
+  "results": [
+    {
+      "kind": "compiled_model",
+      "run_id": "664a6ba33a01573b5de431ee988f0e11ac48c03a41070c44403223b27049656e",
+      "upstream": null,
+      "contract": 1,
+      "labels": {
+        "name": "sir"
+      },
+      "files": {
+        "model": {
+          "file": "model.ir.json",
+          "sha256": "7ddca3972d177486c9336c8b495c175d97a805e4495901374a93d6e735d5bf63",
+          "bytes": 3028
+        }
+      }
+    },
+    {
+      "kind": "data_table",
+      "run_id": "3e233c9ebdd2e1471d1be1619fdfa288821cd218dd21ac0de1fa4554edea35ba",
+      "upstream": null,
+      "contract": 1,
+      "labels": {
+        "stream": "cases"
+      },
+      "files": {
+        "table": {
+          "file": "table.tsv",
+          "sha256": "39ac9f3c3d89837dddda6f50d50c898919526afc11ff917eb9c2d536a0eeb179",
+          "bytes": 35
+        }
+      }
+    },
+    {
+      "kind": "pfilter",
+      "run_id": "acb4f246b0f49f4958f176ecd12c7ac0dc7c8d80a9411febdb4fd9890e3c27f8",
+      "upstream": null,
+      "contract": 1,
+      "labels": {
+        "model": "sir",
+        "seed": 1
+      },
+      "files": {
+        "loglik": {
+          "file": "loglik.toml",
+          "sha256": "3a3ebd0bab8e78ea7b008ece180c4b4781115da70afe9eca45a63a7483cca53f",
+          "bytes": 63
+        }
+      }
+    },
+    {
+      "kind": "pf_health",
+      "run_id": "f44636410d73febf43177fca1795c9e94cc40918597bc10741ba3ec8f93ca32f",
+      "upstream": "acb4f246b0f49f4958f176ecd12c7ac0dc7c8d80a9411febdb4fd9890e3c27f8",
+      "contract": 1,
+      "labels": null,
+      "files": {
+        "pf_health": {
+          "file": "pf_health.tsv",
+          "sha256": "467f4f38a71d7372683eacd314aae1c4d86271b319e9d457f72fc01fd4331bdb",
+          "bytes": 155
+        }
+      }
+    }
+  ]
+}
+```
+
+- `schema` is `camdl.output-manifest/v1`. A change to the fields below changes
+  the version.
+- `camdl` is the build that wrote the manifest: `version` as `camdl --version`
+  prints it (elided in the example above), `engine_id`, the 32-hex build
+  fingerprint, and `ambient_key`, the 64-hex hash of the build and the
+  environment switches that this build's run ids hold. They describe the writing
+  build only. A result computed by another build, such as one placed by
+  `receive`, keeps its own run id, which holds that build's ambient key, not
+  this one.
+- `label` is the command's `--label`, or `null`. It is recorded and never read
+  back as a reference: a manifest names its results by run id.
+- `results` lists each distinct result the command's invocation record lists, in
+  the order it first lists it. Each entry has the result's `kind`, its `run_id`
+  (64 hex digits), `upstream`, the run id of the result it is a by-product of,
+  or `null` for any other result, `contract`, its kind's contract version
+  (§2.9), which changes whenever a file of the kind is added, removed or renamed
+  or a column changes (a test pins each version to the kind's files), `labels`,
+  the labels the invocation record gives it, and `files`. A `data_table`'s
+  labels leave out the `--data` path as typed, which would make `cases.tsv` and
+  `./cases.tsv` give two manifests; they keep its `stream`.
+- `files` maps each result file's logical name (§2.9) to `file`, its stored
+  name, `sha256` and `bytes`, the digest and size the result's `run.json`
+  records. Provenance and attempt files are not listed, so a recomputation under
+  `--force` that changes only `execution.json` writes the same manifest.
+
+The manifest holds no path: no store root, no result folder, and `file` is the
+name inside the result's folder. A reader opens the run store as every reading
+command does (§2.1) and finds each result by its run id, for example
+`camdl cat <run_id> --stream <file>`; a manifest read against another store
+fails on its first run id. The same command against two store roots therefore
+writes the same manifest. It holds no time, invocation number or outcome either,
+so a cache hit writes the bytes the computation wrote.
+
+#### Which results each command lists
+
+- `simulate`: the compiled model, then each cell (`sim`), each followed by the
+  by-products asked for: `obs`, `event_log`, `sim_quantities`. With
+  `--quantities-out`, the model's `quantities` follow the compiled model.
+- `pfilter`: the compiled model, each bound data table, then each filter run
+  (one, or one per design point) with the by-products its flags asked for.
+- `fit run`: per problem, its `quantities`, compiled model and fit problem
+  (`fit`), then the `fit_run`; a `--sweep` lists every problem and run.
+- `profile`: the `quantities`, compiled model and fit problem, then every
+  `profile_point`.
+- `predict`: the inputs it stores, then the `prediction`. A fixed-point
+  prediction stores its `quantities`, compiled model and data tables, and a
+  forecast each `--design` file as a data table. The fit run a prediction reads
+  from is a dependency, not a result of the command, and is not listed.
+- `score`: the outcome data tables, then the `score`.
+- `compare`: for each input in order, each replicate's `prediction` and then its
+  `score`, whether compare read them from the store or stored them. Each has the
+  labels of the latest invocation record that lists it, and the manifest's
+  `label` is `null`.
+- `receive`: every result placed or found already stored, parents first, each
+  with the labels the copy's invocation records gave it (§4.5). A result's entry
+  is the one the command that computed it wrote, apart from `camdl` and `label`,
+  which are the receiving build's and the receive's own.
 
 ---
 
@@ -3133,9 +3331,9 @@ placed whole, and the rest of the copy in `.staging/`, which `clean` deletes
 once the process has stopped. The copy must then be pulled again; receiving it
 again finds the results already placed `present`.
 
-`receive` takes no `--manifest` or `--link-root` yet. It gains them with the
-output manifest and the link tree, when the other commands that store results
-do.
+`--manifest PATH` writes the output manifest of the received results, placed and
+present alike (§2.10), so a workflow rule can declare a pull's manifest as its
+output. `receive` takes no `--link-root`.
 
 ### 4.6 Synthetic Observations
 
@@ -7759,6 +7957,8 @@ Store
                               quarantine first
   --label TEXT                name this invocation, found again as `@TEXT`; never
                               names a cell
+  --manifest PATH             write the output manifest once the command succeeds
+                              (§2.10); refused with --dry-run and --design-from
   --dry-run                   print the resolved plan and, for a multi-cell run,
                               which cells the store holds; writes nothing
 ```
@@ -7783,6 +7983,8 @@ of a fit (§7.3).
   --label TEXT                name this invocation, found again as `@TEXT`
   --store DIR                 the run store's root, over the fit file's `store`
                               key (§2.1)
+  --manifest PATH             write the output manifest once the command succeeds
+                              (§2.10)
   --emit-every N | NAME=N     override a `[synthetic]` fit's observation emission
                               cadence (same grammar as `simulate --emit-every`);
                               refused on a fit with no `[synthetic]` block; the
@@ -7926,6 +8128,8 @@ camdl predict RUN            RUN: the positional run handle, same grammar as `fi
 --label L                   name this invocation, found again as `@L`
 --store DIR                 the run store's root, over a --fit file's `store`
                             key (§2.1)
+--manifest PATH             write the output manifest once the command succeeds
+                            (§2.10); refused with --no-store
 ```
 
 `camdl pfilter` stores its result in the run store (§2.1). The store's layout
@@ -8048,6 +8252,8 @@ part of the leaf's identity, and the full objective leaves the key unchanged.
                             starts_n_completed, n_starts, the best run_id
 --format tsv|json           the table's format (default tsv)
 --label TEXT
+--manifest PATH             write the output manifest once the command succeeds
+                            (§2.10)
 ```
 
 ### `camdl compare [PATHS…]`
@@ -8123,6 +8329,9 @@ PATHS                       ≥2 when --config is absent. Each is a stored score
                             before its extension (under --streams: only the
                             .streams file, for the selected streams); refused for
                             a comparison of more than one table
+--manifest PATH             write the output manifest of the predictions and
+                            scores compared (§2.10); refused when they sit in
+                            more than one run store
 ```
 
 `compare` differences stored scores (§2.2.4). A stored score is read as it is. A

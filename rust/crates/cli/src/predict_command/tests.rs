@@ -311,6 +311,7 @@ fn argv(inv: &PredictInvocation) -> Vec<String> {
                 particles,
                 seed,
                 output,
+                manifest,
                 force,
                 label,
                 store,
@@ -389,6 +390,7 @@ fn argv(inv: &PredictInvocation) -> Vec<String> {
     opt("-o", output.as_ref().map(|p| p.to_string_lossy().into_owned()));
     opt("--label", label.clone());
     opt("--store", store.as_ref().map(|p| p.to_string_lossy().into_owned()));
+    opt("--manifest", manifest.as_ref().map(|p| p.to_string_lossy().into_owned()));
     opt("--holdout-after", holdout_after.clone());
     opt("--backend", backend.map(|b| b.as_str().to_string()));
     opt("--dt", dt.map(|x| x.to_string()));
@@ -549,6 +551,11 @@ impl InputHarness for Harness {
                 inv.args.flags.output = Some("exported".into());
                 inv
             }
+            Class::Export if field.name == "args.flags.manifest" => {
+                let mut inv = self.base.clone();
+                inv.args.flags.manifest = Some("m.json".into());
+                inv
+            }
             class => panic!("no second value for {} ({class:?})", field.name),
         }
     }
@@ -612,6 +619,10 @@ impl InputHarness for Harness {
                     copies.insert(rel, store::StoredFile { run_id: prediction, file });
                 }
             }
+        }
+        if let Some(path) = &invocation.args.flags.manifest {
+            let bytes = std::fs::read(cwd.path().join(path)).unwrap_or_default();
+            exports.insert(path.clone(), Key::digest_bytes(&bytes));
         }
         Ok(Observed { results, exports, copies, effects })
     }

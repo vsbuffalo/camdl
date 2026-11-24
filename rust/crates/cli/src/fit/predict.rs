@@ -1781,6 +1781,7 @@ pub(crate) fn predict(
     info: store::RunInfo,
     request: &store::StoreRequest,
     output: Option<&Path>,
+    manifest: Option<&crate::output_manifest::ManifestPath>,
 ) {
     // The forcing-extrapolation policy this command's evaluations run under,
     // installed for the rest of the command.
@@ -1794,7 +1795,7 @@ pub(crate) fn predict(
     match run_predict(&out, args, compile, source, &info, request.reuse(), None) {
         Ok(Outcome::Reused { stored, source }) => {
             let store = source.store().unwrap_or_else(|e| out.fail(format!("error: {e}")));
-            info.finish(&store).unwrap_or_else(|e| out.fail(format!("error: {e}")));
+            let invocation = info.finish(&store).unwrap_or_else(|e| out.fail(format!("error: {e}")));
             out.say(format_args!("predict: reused the stored prediction {}", stored.folder().display()));
             export(&out, &stored, output);
             // A stored prediction is as complete as when it was computed: the
@@ -1818,12 +1819,13 @@ pub(crate) fn predict(
                     stored.result_files().len()
                 ));
             }
+            crate::output_manifest::write(&out, manifest, &store, &invocation);
         }
         Ok(Outcome::Computed(outcome)) => {
             let stored = store_prediction(&outcome.stored, &info, request.reuse())
                 .unwrap_or_else(|e| out.fail(format!("error: {e}")));
             let store = outcome.stored.source.store().unwrap_or_else(|e| out.fail(format!("error: {e}")));
-            info.finish(&store).unwrap_or_else(|e| out.fail(format!("error: {e}")));
+            let invocation = info.finish(&store).unwrap_or_else(|e| out.fail(format!("error: {e}")));
             let folder = stored.folder().to_path_buf();
             export(&out, &stored, output);
             // What it wrote is the command's account of itself, not data:
@@ -1854,6 +1856,7 @@ pub(crate) fn predict(
                     outcome.written.len()
                 ));
             }
+            crate::output_manifest::write(&out, manifest, &store, &invocation);
         }
         Err(e) => {
             out.fail(format!("error: {e}"));

@@ -1,6 +1,6 @@
 //! The files of a profile point.
 
-use super::{Files, Format, ResultFile, Role};
+use super::{find, Files, Format, ParseFile, ResultFile, Role};
 use crate::profile_store::{ProfilePoint, MLE_FILE, PROVENANCE_FILE};
 
 /// The files of a profile point (`profile_point`).
@@ -54,4 +54,11 @@ impl ResultFile for ProfilePointFile {
 
 impl Files for ProfilePoint {
     type File = ProfilePointFile;
+    const CONTRACT: u16 = 1;
+}
+
+impl ParseFile for ProfilePointFile {
+    fn of_stored(stored: &str) -> Option<Self> {
+        find(ProfilePointFile::ALL, stored)
+    }
 }

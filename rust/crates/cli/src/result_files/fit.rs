@@ -1,7 +1,7 @@
 //! The files of a fit problem, a prediction and a score. A fit run's files
 //! are [`super::fit_run`]'s.
 
-use super::{Files, Format, ResultFile, Role};
+use super::{find, Files, Format, ParseFile, ResultFile, Role};
 use crate::fit_store::{FitProblem, Prediction, Score};
 
 /// The files of a fit problem (`fit`).
@@ -87,6 +87,32 @@ impl ResultFile for ProblemFile {
 
 impl Files for FitProblem {
     type File = ProblemFile;
+    const CONTRACT: u16 = 1;
+}
+
+impl ParseFile for ProblemFile {
+    fn of_stored(stored: &str) -> Option<Self> {
+        let fixed = [
+            ProblemFile::Problem,
+            ProblemFile::Partition,
+            ProblemFile::SyntheticTruth,
+            ProblemFile::RecoveryTable,
+            ProblemFile::ModelSource { camdl: true },
+            ProblemFile::ModelSource { camdl: false },
+        ];
+        if let Some(f) = find(fixed, stored) {
+            return Some(f);
+        }
+        let named = |rest: &str| rest.rsplit_once('.').filter(|(n, e)| !n.is_empty() && !e.is_empty()).map(|(n, e)| (n.to_string(), e.to_string()));
+        if let Some((name, ext)) = stored.strip_prefix("inputs/tables/").and_then(named) {
+            return Some(ProblemFile::Table { name, ext });
+        }
+        if let Some((source, ext)) = stored.strip_prefix("inputs/").filter(|r| !r.contains('/')).and_then(named) {
+            return Some(ProblemFile::Training { source, ext });
+        }
+        let stream = stored.strip_prefix("held_out/")?.strip_suffix(".tsv").filter(|s| !s.is_empty() && !s.contains('/'))?;
+        Some(ProblemFile::HeldOut { stream: stream.into() })
+    }
 }
 
 /// Which part of a prediction a file belongs to.
@@ -305,6 +331,13 @@ impl ResultFile for PredictionFile {
 
 impl Files for Prediction {
     type File = PredictionFile;
+    const CONTRACT: u16 = 1;
+}
+
+impl ParseFile for PredictionFile {
+    fn of_stored(stored: &str) -> Option<Self> {
+        PredictionFile::parse(stored)
+    }
 }
 
 /// The files of a score (`score`).
@@ -357,4 +390,11 @@ impl ResultFile for ScoreFile {
 
 impl Files for Score {
     type File = ScoreFile;
+    const CONTRACT: u16 = 1;
+}
+
+impl ParseFile for ScoreFile {
+    fn of_stored(stored: &str) -> Option<Self> {
+        find(ScoreFile::ALL, stored)
+    }
 }

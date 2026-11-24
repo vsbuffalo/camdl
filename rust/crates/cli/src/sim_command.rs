@@ -74,6 +74,8 @@ pub(crate) struct Exports {
     pub event_log_tsv: bool,
     pub event_log_format: Option<String>,
     pub reactive_log: Option<std::path::PathBuf>,
+    /// `--manifest`, claimed before the store was opened.
+    pub manifest: Option<crate::output_manifest::ManifestPath>,
 }
 
 /// A cell planned for the batch: its spec, its resolution, its identity and
@@ -340,6 +342,7 @@ pub(crate) fn run(ctx: StoreRun<'_>) {
             }
         }
     }
+    crate::output_manifest::write(out, ctx.exports.manifest.as_ref(), &store, &invocation);
 }
 
 /// Says, once, that the cells reused were stored from a model file of another

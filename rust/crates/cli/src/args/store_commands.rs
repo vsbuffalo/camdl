@@ -113,6 +113,7 @@ is moved back where it was given; a received one is gone.
 Examples:
   camdl receive pull-staging/ --label m4w_mh_cloud
   camdl receive pull-staging/ --store /data/camdl-store
+  camdl receive pull-staging/ --label m4w_mh_cloud --manifest build/fits/m4w_mh.json
 "))]
 pub struct ReceiveArgs {
     /// The copy of another run store to receive from
@@ -130,6 +131,13 @@ pub struct ReceiveArgs {
     #[arg(long, value_name = "DIR")]
     #[input(store)]
     pub store: Option<PathBuf>,
+    /// Write the output manifest to PATH once the receive has succeeded: a
+    /// JSON file naming every result placed or found already stored, each
+    /// result file by logical name with its SHA-256 and size (run spec
+    /// §2.10). Any file at PATH is removed when the command starts.
+    #[arg(long, value_name = "PATH")]
+    #[input(export)]
+    pub manifest: Option<PathBuf>,
 }
 
 #[derive(Args, Debug, Clone)]

@@ -417,6 +417,22 @@ impl Invocation {
             .collect()
     }
 
+    /// Each entry this invocation listed, as its kind, run id and whether it
+    /// ended `computed` or `reused`, in listed order.
+    pub fn entries(&self) -> Vec<(&str, Key, bool)> {
+        self.file
+            .results
+            .iter()
+            .map(|r| (r.kind.as_str(), r.run_id, matches!(r.outcome, Outcome::Computed | Outcome::Reused)))
+            .collect()
+    }
+
+    /// The labels this invocation gave the result `run_id` of kind `kind`,
+    /// or `None` when it did not list it.
+    pub fn labels_of(&self, kind: &str, run_id: Key) -> Option<serde_json::Value> {
+        self.file.results.iter().find(|r| r.kind == kind && r.run_id == run_id).map(|r| r.labels.clone())
+    }
+
     /// Each distinct (kind, run id) this invocation listed, in first-listed
     /// order, read from the results' records alone. Refused with
     /// [`Error::MemberNotCompleted`], naming each, when any entry did not end

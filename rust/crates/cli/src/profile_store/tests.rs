@@ -331,6 +331,7 @@ fn argv(inv: &ProfileInvocation) -> Vec<String> {
         label,
         force,
         store,
+        manifest,
         algorithm,
         backend,
     } = args;
@@ -407,6 +408,7 @@ fn argv(inv: &ProfileInvocation) -> Vec<String> {
     opt("--seeds", seeds.as_ref().map(|s| s.expand().iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",")));
     opt("--label", label.clone());
     opt("--store", store.as_deref().map(p));
+    opt("--manifest", manifest.as_deref().map(p));
     opt("--algorithm", algorithm.clone());
     opt("--backend", backend.clone());
     let mut flag = |set: bool, name: &str| {
@@ -494,6 +496,10 @@ fn run(inv: &ProfileInvocation, store: Option<&Path>) -> store::Result<Observed>
     // stored file, so no export is named in `copies`.
     let mut exports = BTreeMap::new();
     if let Some(path) = inv.args.output.as_ref() {
+        let bytes = std::fs::read(cwd.path().join(path)).unwrap_or_default();
+        exports.insert(path.clone(), Key::digest_bytes(&bytes));
+    }
+    if let Some(path) = &inv.args.manifest {
         let bytes = std::fs::read(cwd.path().join(path)).unwrap_or_default();
         exports.insert(path.clone(), Key::digest_bytes(&bytes));
     }
@@ -607,6 +613,7 @@ impl InputHarness for Harness {
             ("args.sweep", Class::Expands) => a.sweep = vec!["beta_a=0.3,0.4,0.5".parse().unwrap()],
             ("args.seeds", Class::Expands) => a.seeds = Some("1,2".parse().unwrap()),
             ("args.output", _) => a.output = Some("table.tsv".into()),
+            ("args.manifest", _) => a.manifest = Some("m.json".into()),
             (name, Class::Identity | Class::Render) => return self.base.varied(name),
             (name, class) => panic!("no second value for {name} ({class:?})"),
         }

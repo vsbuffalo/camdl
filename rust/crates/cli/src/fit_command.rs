@@ -59,7 +59,9 @@ pub(crate) fn cmd_fit_run(inv: crate::args::FitRunInvocation) {
     // Removed flags fail before any work, each naming its replacement.
     crate::fit::run_config::refuse_removed_flags(&inv.args, &out);
     let removed = RemovedFlags::of(&inv.args);
-    let (declared, execution, _exports, request, given) = store::Inputs::split(inv).into_parts();
+    let (declared, execution, exports, request, given) = store::Inputs::split(inv).into_parts();
+    let (exports,) = exports.into_parts();
+    let (_problem_exports, (), (), manifest) = exports.into_parts();
     let (declared, no_licm) = declared.into_parts();
     let (config, problem, run, method) = declared.into_parts();
     let (forcing_extrapolation, emit_every, sweep) = problem.into_parts();
@@ -122,8 +124,10 @@ pub(crate) fn cmd_fit_run(inv: crate::args::FitRunInvocation) {
         parallel: run_execution.parallel,
         force,
         label: label.clone(),
+        manifest: manifest.clone(),
         ..removed.into_args()
     };
+    let manifest = crate::output_manifest::claim(&out, manifest.as_deref());
 
     // gh#162: a fit nests Rayon parallelism (chains × particle filter) on the
     // global pool; `--parallel` / CAMDL_PARALLEL caps it (0 = all cores).
@@ -156,19 +160,16 @@ pub(crate) fn cmd_fit_run(inv: crate::args::FitRunInvocation) {
     let fit_path = config.to_string_lossy().into_owned();
     let failures = run_fit(out, FitCommand { fit_path, source, resolved, store: &store, info: &info, reuse: request.reuse() });
     let out = Out::new(false);
-    match info.finish(&store) {
-        Ok(invocation) => {
-            if let (Some(label), Some(before)) = (invocation.label(), invocation.took_label_from()) {
-                out.say(format_args!("note: @{label} now names run(s) of invocation {}, which took it from invocation {before}",
-                    invocation.seq()));
-            }
-        }
-        Err(e) => out.fail(format!("error: recording the invocation: {e}")),
+    let invocation = info.finish(&store).unwrap_or_else(|e| out.fail(format!("error: recording the invocation: {e}")));
+    if let (Some(label), Some(before)) = (invocation.label(), invocation.took_label_from()) {
+        out.say(format_args!("note: @{label} now names run(s) of invocation {}, which took it from invocation {before}",
+            invocation.seq()));
     }
     if !failures.is_empty() {
         out.fail(format!("error: {} of this invocation's problems and runs did not complete:\n  {}",
             failures.len(), failures.join("\n  ")));
     }
+    crate::output_manifest::write(&out, manifest.as_ref(), &store, &invocation);
 }
 
 /// The skipped removed-flag fields, which the split does not carry; the
@@ -191,6 +192,7 @@ impl RemovedFlags {
             force: false,
             label: None,
             store: None,
+            manifest: None,
             _removed_stage: None,
             _removed_init: None,
             _removed_posterior: None,

@@ -199,6 +199,7 @@ pub fn cmd_pfilter(inv: crate::args::PfilterInvocation) {
             }
         }
     }
+    let manifest = crate::output_manifest::claim(&out, inv.args.manifest.as_deref());
     // A fit file is read once, here, before the store is chosen: its `store`
     // key places the filter run in that fit's store (run spec §2.1). A stored
     // fit's handle is read in the store, below.
@@ -216,7 +217,7 @@ pub fn cmd_pfilter(inv: crate::args::PfilterInvocation) {
     let compile = crate::util::CompileSettings::resolve(no_licm, no_ir_cache);
     let filter_execution = crate::pfilter_config::execution(&inference);
     let (exports,) = exports.into_parts();
-    let ((), (), _inference_exports, (), output) = exports.into_parts();
+    let ((), (), _inference_exports, (), output, _manifest) = exports.into_parts();
     let (request,) = request.into_parts();
     let ((), (), _inference_request, (), no_store, force, label, root) = request.into_parts();
     let request = crate::camdl_store::store_request_with_fit_file(label, force, root, file_store);
@@ -226,7 +227,7 @@ pub fn cmd_pfilter(inv: crate::args::PfilterInvocation) {
     };
     let (config, requests, _forcing_route) = crate::pfilter_config::resolve(declared, compile, &out, fit_file, &crate::camdl_store::root_of(&request));
     let store = StoreSide { request, no_store, given, execution: execution_record };
-    run_pfilter(&out, config, requests, RunExports { output }, filter_execution, store);
+    run_pfilter(&out, config, requests, RunExports { output, manifest }, filter_execution, store);
 }
 
 /// The store-class inputs of one `pfilter`, and what its records hold.
@@ -242,6 +243,8 @@ struct StoreSide {
 struct RunExports {
     /// `-o`: the log-likelihood table, rendered from the stored result.
     output: Option<std::path::PathBuf>,
+    /// `--manifest`, claimed before the store was opened.
+    manifest: Option<crate::output_manifest::ManifestPath>,
 }
 
 /// The particle filter of one resolved `pfilter`, and its stored result.
@@ -284,7 +287,7 @@ fn run_pfilter(
         score_from,
         samples: save_samples,
     } = requests;
-    let RunExports { output: output_path } = exports;
+    let RunExports { output: output_path, manifest } = exports;
     let crate::pfilter_config::FilterExecution { parallel, time_format, max_substeps } = execution;
     let fit_problem: Option<&crate::fit::config_v2::Problem> = fit.as_ref().map(|f| &f.config.problem);
 
@@ -600,9 +603,9 @@ fn run_pfilter(
     // model at them, bind the data, and run the filter under the point's
     // claim. The single call and every design point are this one closure, so
     // a design row is the single call at its values by construction.
-    let score_point = |overrides: &[(String, f64)], role: PointRole| -> PointResult {
+    let score_point = |overrides: &[(String, f64)], role: PointRole, gate: Gate<'_>| -> PointResult {
         // The lines every point of a call would print alike.
-        let announce = role.announces();
+        let announce = role.announces() && !gate.posing();
         let resolved = resolve_parameters(ParameterInputs {
             model: &model_in,
             scenario: scenario_name.as_deref(),
@@ -784,13 +787,13 @@ fn run_pfilter(
                              save the state in a separate run.", cut.at));
                     }
                 }
-                out.say(format_args!(
+                if !gate.posing() { out.say(format_args!(
                     "pfilter: --save-final-state under holdout_after = \"{raw}\" (t = {}): \
                      state saved at t = {}, the end of the training rows (holdout_after); \
                      the log-likelihood shown covers training rows only, as does every \
                      other output of this run (--trace, --save-prequential, --save-paths, \
                      --save-filtering, --save-filtered-streams, --pf-health)",
-                    cut.at, cut.extent));
+                    cut.at, cut.extent)); }
                 training_cut = Some(cut);
             }
         }
@@ -934,7 +937,7 @@ fn run_pfilter(
         // because the failure mode — plotting filtering marginals as if
         // they were smoothing paths — is silent. See
         // docs/dev/proposals/2026-04-19-pf-latent-trajectories.md.
-        if save_filtering.is_some() {
+        if save_filtering.is_some() && !gate.posing() {
             out.say(format_args!("[info] --save-filtering emits filtering marginals \
                        p(x_t | y_{{1..t}}), not smoothing paths. Joining \
                        particles across time by index does NOT yield \
@@ -1241,8 +1244,20 @@ fn run_pfilter(
         // or another process holding the run. The point is not stored, and a
         // rerun computes it.
         let not_completed = |message: String| PointResult::Failed(crate::out::CommandError::new(message));
-        let begun = match crate::camdl_store::begin_with::<Pfilter>(store, &identity, &labels, &wanted, info, request.reuse(),
-            crate::result_files::pfilter::PfilterFile::of(n_replicates > 1)) {
+        let begun = match gate {
+            Gate::Here => crate::camdl_store::begin_with::<Pfilter>(store, &identity, &labels, &wanted, info, request.reuse(),
+                crate::result_files::pfilter::PfilterFile::of(n_replicates > 1)),
+            Gate::Pose(slot) => {
+                *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(PosedPoint { identity, labels, wanted });
+                return not_completed("internal: a posed point is not computed".into());
+            }
+            Gate::Begun(slot) => match slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                Some((key, begun)) if key == store::Identity::key(&identity) => begun,
+                Some(_) => return not_completed("internal: the point resolved to another run than it was begun as".into()),
+                None => return not_completed("internal: the point was not begun".into()),
+            },
+        };
+        let begun = match begun {
             Ok(b) => b,
             Err(e) => return not_completed(format!("error: {e}")),
         };
@@ -1325,14 +1340,25 @@ fn run_pfilter(
 
     match design {
         Some(points) => {
-            let results = score_design(out, &points, &pf_pool, &score_point);
+            // Each point's run is begun in row order, so the invocation
+            // records the design's points, and an output manifest lists
+            // them, in file order whatever the threads' schedule.
+            let begin_posed = |posed: PosedPoint| -> (store::Key, store::Result<store::Begin<crate::pfilter_store::Pfilter>>) {
+                let Prepared { store, info, .. } = prepared.get().expect("a posed point has opened the store");
+                let key = store::Identity::key(&posed.identity);
+                let begun = crate::camdl_store::begin_with::<crate::pfilter_store::Pfilter>(
+                    store, &posed.identity, &posed.labels, &posed.wanted, info, request.reuse(),
+                    crate::result_files::pfilter::PfilterFile::of(n_replicates > 1));
+                (key, begun)
+            };
+            let results = score_design(out, &points, &pf_pool, &score_point, &begin_posed);
             let Some(Prepared { store, info, .. }) = prepared.into_inner() else {
                 unreachable!("a point that returns has opened the store")
             };
-            report_design(out, &points, results, store, info, output_path.as_deref(), no_store);
+            report_design(out, &points, results, store, info, output_path.as_deref(), manifest.as_ref(), no_store);
         }
         None => {
-            let result = score_point(&[], PointRole::Single);
+            let result = score_point(&[], PointRole::Single, Gate::Here);
             let Some(Prepared { store, info, .. }) = prepared.into_inner() else {
                 unreachable!("a point that returns has opened the store")
             };
@@ -1345,7 +1371,7 @@ fn run_pfilter(
                 filtering: save_filtering.as_deref(),
                 filtered_streams: save_filtered_streams.as_deref(),
             };
-            report_single(out, result, store, info, &paths, output_path.as_deref(), no_store, &model_in);
+            report_single(out, result, store, info, &paths, output_path.as_deref(), manifest.as_ref(), no_store, &model_in);
         }
     }
 }
@@ -1357,6 +1383,36 @@ struct Prepared {
     info: store::RunInfo,
     model: store::Dep<crate::camdl_store::CompiledModel>,
     data: std::collections::BTreeMap<String, store::Dep<crate::camdl_store::DataTable>>,
+}
+
+/// What a design point resolves to before its run is begun: the run's
+/// identity and labels and the by-products wanted of it.
+struct PosedPoint {
+    identity: crate::pfilter_store::PfilterIdentity,
+    labels: crate::pfilter_store::PfilterLabels,
+    wanted: store::Wanted<crate::pfilter_store::Pfilter>,
+}
+
+/// A design point's begin, made in row order: the run id's identity key it
+/// was begun for, and what the store returned.
+type BegunPoint = (store::Key, store::Result<store::Begin<crate::pfilter_store::Pfilter>>);
+
+/// Where an evaluation's run is begun on the store.
+#[derive(Clone, Copy)]
+enum Gate<'g> {
+    /// At the point, as the single call does.
+    Here,
+    /// Nowhere: the point is resolved, what it would begin is left in the
+    /// slot, and nothing is printed or computed.
+    Pose(&'g std::sync::Mutex<Option<PosedPoint>>),
+    /// Already, in row order: the point takes its begin from the slot.
+    Begun(&'g std::sync::Mutex<Option<BegunPoint>>),
+}
+
+impl Gate<'_> {
+    fn posing(self) -> bool {
+        matches!(self, Gate::Pose(_))
+    }
 }
 
 /// Which evaluation a point is.
@@ -1509,21 +1565,37 @@ fn refuse_design_overrides(
     Ok(())
 }
 
-/// Score every point of a `--sweep-file` design, in file order. The first
-/// point runs alone, prints the lines every point would print alike and opens
-/// the store; the rest run concurrently on the call's pool.
+/// Score every point of a `--sweep-file` design, in file order, in three
+/// passes. Each point is first resolved to the run it names (`Gate::Pose`),
+/// concurrently after the first, which opens the store. Each run is then
+/// begun with `begin`, one at a time in row order, so the invocation record
+/// lists the points in file order. Last, each point is resolved again and
+/// computed under its begin (`Gate::Begun`): the first alone, printing the
+/// lines every point would print alike, and the rest concurrently on the
+/// call's pool.
 fn score_design(
     out: &crate::out::Out,
     points: &[(usize, crate::sweep::DesignPoint)],
     pool: &Option<rayon::ThreadPool>,
-    score_point: &(dyn Fn(&[(String, f64)], PointRole) -> PointResult + Sync),
+    score_point: &(dyn Fn(&[(String, f64)], PointRole, Gate<'_>) -> PointResult + Sync),
+    begin: &(dyn Fn(PosedPoint) -> BegunPoint + Sync),
 ) -> Vec<PointResult> {
     let n_points = points.len();
     out.say(format_args!("pfilter: {n_points} design points from --sweep-file"));
+    let role = |i: usize| PointRole::Design { row: i, point_id: points[i].0, first: i == 0 };
+    let posed: Vec<std::sync::Mutex<Option<PosedPoint>>> = (0..n_points).map(|_| std::sync::Mutex::new(None)).collect();
+    let pose_at = |i: usize| {
+        score_point(&points[i].1, role(i), Gate::Pose(&posed[i]));
+    };
+    pose_at(0);
+    run_pooled(pool, || (1..n_points).into_par_iter().for_each(pose_at));
+    let begun: Vec<std::sync::Mutex<Option<BegunPoint>>> = posed
+        .into_iter()
+        .map(|slot| std::sync::Mutex::new(slot.into_inner().unwrap_or_else(|e| e.into_inner()).map(begin)))
+        .collect();
     let bar = crate::out::progress::Reporter::new().task(n_points as u64, "pfilter", "points");
     let score_at = |i: usize| -> PointResult {
-        let (point_id, point) = &points[i];
-        let result = score_point(point, PointRole::Design { row: i, point_id: *point_id, first: i == 0 });
+        let result = score_point(&points[i].1, role(i), Gate::Begun(&begun[i]));
         bar.inc(1);
         result
     };
@@ -1546,6 +1618,7 @@ fn report_design(
     store: store::Store,
     info: store::RunInfo,
     output: Option<&std::path::Path>,
+    manifest: Option<&crate::output_manifest::ManifestPath>,
     no_store: bool,
 ) {
     use crate::pfilter_store::*;
@@ -1607,6 +1680,7 @@ fn report_design(
              or stopped with an error), so they have no log-likelihood; the first: {message}",
             every_failed.len()));
     }
+    crate::output_manifest::write(out, manifest, &store, &invocation);
 }
 
 /// End the single call's invocation, export the by-products asked for from
@@ -1620,6 +1694,7 @@ fn report_single(
     info: store::RunInfo,
     paths: &ExportPaths<'_>,
     output_path: Option<&std::path::Path>,
+    manifest: Option<&crate::output_manifest::ManifestPath>,
     no_store: bool,
     model: &ir::Model,
 ) {
@@ -1774,6 +1849,7 @@ fn report_single(
         }
     }
     milestone();
+    crate::output_manifest::write(out, manifest, &store, &invocation);
 }
 
 /// The filter's outcome: one run, an error the filter stopped with, or each
@@ -3981,6 +4057,13 @@ mod tests {
             outcomes,
             [("pfilter", "computed"), ("final_state", "failed"), ("trace", "failed")].map(|(k, o)| (k.to_string(), o.to_string()))
         );
+        // An output manifest of this invocation is refused, naming the
+        // by-products that were not stored and the run that was.
+        let e = crate::output_manifest::OutputManifest::of(&store, &invocation).unwrap_err();
+        let run_id = stored.id().key().short12();
+        assert!(e.contains("2 result(s) the command asked for were not stored"), "{e}");
+        assert!(e.contains("final_state ") && e.contains("trace "), "the failed by-products are named: {e}");
+        assert!(e.contains(&format!("The rest are stored: pfilter {run_id}")), "the run is named as stored: {e}");
         // Asked for again, the run is reproduced and its by-products computed.
         let info3 = RunInfo::new(&Given::default(), &(), &StoreRequest::default()).unwrap();
         let mut run = claim(2, true, &info3);

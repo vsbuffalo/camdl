@@ -6,7 +6,7 @@
 //! by-product stores its own files, or `failure.toml` when it could not be
 //! written from the cell.
 
-use super::{Files, Format, ResultFile, Role};
+use super::{find, Files, Format, ParseFile, ResultFile, Role};
 use crate::sim_store::{EventLog, Obs, Sim, SimQuantities, FAILURE_FILE, PROVENANCE_FILE, REACTIVE_LOG_FILE, TRAJ_FILE};
 
 /// The files of a simulated cell (`sim`).
@@ -67,6 +67,13 @@ impl ResultFile for SimFile {
 
 impl Files for Sim {
     type File = SimFile;
+    const CONTRACT: u16 = 1;
+}
+
+impl ParseFile for SimFile {
+    fn of_stored(stored: &str) -> Option<Self> {
+        find([SimFile::Traj, SimFile::ReactiveLog, SimFile::Failure, SimFile::Provenance], stored)
+    }
 }
 
 impl SimFile {
@@ -127,6 +134,16 @@ impl ResultFile for ObsFile {
 
 impl Files for Obs {
     type File = ObsFile;
+    const CONTRACT: u16 = 1;
+}
+
+impl ParseFile for ObsFile {
+    fn of_stored(stored: &str) -> Option<Self> {
+        find([ObsFile::Failure], stored).or_else(|| {
+            let stream = stored.strip_suffix(".tsv").filter(|s| !s.is_empty() && !s.contains('/'))?;
+            Some(ObsFile::Stream(stream.into()))
+        })
+    }
 }
 
 /// The files of a cell's event log (`event_log`).
@@ -168,6 +185,13 @@ impl ResultFile for EventLogFile {
 
 impl Files for EventLog {
     type File = EventLogFile;
+    const CONTRACT: u16 = 1;
+}
+
+impl ParseFile for EventLogFile {
+    fn of_stored(stored: &str) -> Option<Self> {
+        find([EventLogFile::EventLog, EventLogFile::Failure], stored)
+    }
 }
 
 /// The files of a cell's generated quantities (`sim_quantities`).
@@ -209,4 +233,11 @@ impl ResultFile for SimQuantitiesFile {
 
 impl Files for SimQuantities {
     type File = SimQuantitiesFile;
+    const CONTRACT: u16 = 1;
+}
+
+impl ParseFile for SimQuantitiesFile {
+    fn of_stored(stored: &str) -> Option<Self> {
+        find([SimQuantitiesFile::Quantities, SimQuantitiesFile::Failure], stored)
+    }
 }

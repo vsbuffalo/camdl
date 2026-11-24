@@ -28,12 +28,12 @@ rust/crates/cli/src/result_files; run `make update-result-file-contract` after c
 pub(crate) const END: &str = "<!-- End of the generated result-file contract. -->";
 
 /// One file of a kind, with when a result holds it.
-struct Row {
-    logical: String,
-    stored: String,
+pub(super) struct Row {
+    pub(super) logical: String,
+    pub(super) stored: String,
     role: Role,
-    format: &'static str,
-    columns: &'static [Column],
+    pub(super) format: &'static str,
+    pub(super) columns: &'static [Column],
     commented: bool,
     about: &'static str,
     when: &'static str,
@@ -58,7 +58,7 @@ fn stream() -> String {
 }
 
 /// Each kind: its name, a sentence on what it is, and its files.
-fn kinds() -> Vec<(&'static str, &'static str, Vec<Row>)> {
+pub(super) fn kinds() -> Vec<(&'static str, &'static str, Vec<Row>)> {
     use CommonFile as C;
     let every = "every method";
     let mcmc = "mh, pmmh, pgas";
@@ -206,8 +206,16 @@ pub(crate) fn render() -> String {
          and not compared when a result is computed again. `chain_N` stands for each chain, numbered \
          from 0. A run that holds any other file, or lacks one it declared, is not stored.\n",
     );
+    s.push_str(&format!(
+        "\nEach kind's contract version, which an output manifest records with each result (§2.10), is \
+         given with its files; it is bumped when a file is added, removed or renamed, or a column changes. \
+         The three content artifacts are at contract version {}, and the logical name of each one's file \
+         is its stored name up to the first `.`: `model`, `quantities` and `table`.\n",
+        super::CONTENT_CONTRACT
+    ));
     for (kind, what, rows) in kinds() {
-        s.push_str(&format!("\n#### `{kind}`\n\n{what}\n\n"));
+        let version = super::contract(kind).expect("every kind in the contract has a version").version;
+        s.push_str(&format!("\n#### `{kind}`\n\n{what} Contract version {version}.\n\n"));
         for r in rows {
             let role = if r.role == Role::Provenance { ", provenance" } else { "" };
             s.push_str(&format!("- `{}`: `{}`, {}{} ({}). {}", r.logical, r.stored, r.format, role, r.when, r.about));

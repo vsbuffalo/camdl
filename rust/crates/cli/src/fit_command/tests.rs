@@ -239,6 +239,7 @@ fn argv(inv: &FitRunInvocation) -> Vec<String> {
         force,
         label,
         store,
+        manifest,
         ..
     } = args;
     let mut v: Vec<String> = vec!["fit".into(), "run".into(), config.to_string_lossy().into_owned()];
@@ -281,6 +282,7 @@ fn argv(inv: &FitRunInvocation) -> Vec<String> {
     opt("--parallel", Some(parallel.to_string()));
     opt("--label", label.clone());
     opt("--store", store.as_ref().map(|p| p.to_string_lossy().into_owned()));
+    opt("--manifest", manifest.as_ref().map(|p| p.to_string_lossy().into_owned()));
     let mut flag = |set: bool, name: &str| {
         if set {
             v.push(name.into());
@@ -455,6 +457,7 @@ impl InputHarness for Harness {
             ("args.method.csmc_sweeps_per_nuts", _) => m.csmc_sweeps_per_nuts = Some(2),
             ("args.method.n_trajectories", _) => m.n_trajectories = Some(2),
             ("args.method.adapt_start", _) => m.adapt_start = Some(3),
+            ("args.manifest", Class::Export) => inv.args.manifest = Some("m.json".into()),
             (name, Class::Identity) => return self.base.varied(name),
             (name, class) => panic!("no second value for {name} ({class:?})"),
         }
@@ -500,7 +503,12 @@ impl InputHarness for Harness {
         }
         let mut effects = crate::test_support::recorded_execution(&root, crate::fit_store::FitRun::KIND);
         effects.extend(used(&String::from_utf8_lossy(&out.stderr), &cwd.path().join("ir-cache")));
-        Ok(Observed { results: observe(&root), effects, ..Observed::default() })
+        let mut exports = BTreeMap::new();
+        if let Some(path) = &invocation.args.manifest {
+            let bytes = std::fs::read(cwd.path().join(path)).unwrap_or_default();
+            exports.insert(path.clone(), Key::digest_bytes(&bytes));
+        }
+        Ok(Observed { results: observe(&root), exports, effects, ..Observed::default() })
     }
 }
 

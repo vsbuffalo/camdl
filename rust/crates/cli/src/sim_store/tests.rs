@@ -293,6 +293,7 @@ fn argv(inv: &SimulateInvocation) -> Vec<String> {
         format,
         tsv,
         reactive_log,
+        manifest,
     } = args;
     let p = |p: &Path| p.to_string_lossy().into_owned();
     let mut v: Vec<String> = vec!["simulate".into(), p(model)];
@@ -373,6 +374,7 @@ fn argv(inv: &SimulateInvocation) -> Vec<String> {
     opt("--label", label.clone());
     opt("--format", format.clone());
     opt("--reactive-log", reactive_log.as_deref().map(p));
+    opt("--manifest", manifest.as_deref().map(p));
     if let Some(e) = event_log {
         if e.as_os_str() == "auto" {
             v.push("--event-log".into());
@@ -473,7 +475,7 @@ fn run(inv: &SimulateInvocation, store: Option<&Path>) -> store::Result<Observed
     }
     let mut exports = BTreeMap::new();
     let a = &inv.args;
-    for path in [&a.output, &a.draws_out, &a.obs_only_dir, &a.projected_out, &a.reactive_log, &a.quantities_out, &a.obs, &a.obs_dir]
+    for path in [&a.output, &a.draws_out, &a.obs_only_dir, &a.projected_out, &a.reactive_log, &a.quantities_out, &a.obs, &a.obs_dir, &a.manifest]
         .into_iter()
         .flatten()
     {
@@ -599,6 +601,7 @@ impl InputHarness for Harness {
             ("args.design_from", _) => a.design_from = Some("fit.toml".into()),
             ("args.projected_out", _) => a.projected_out = Some("proj".into()),
             ("args.reactive_log", _) => a.reactive_log = Some("rl.tsv".into()),
+            ("args.manifest", _) => a.manifest = Some("m.json".into()),
             ("args.dates", _) => a.dates = true,
             ("args.format", _) => a.format = Some("tsv".into()),
             ("args.tsv", _) => a.tsv = true,

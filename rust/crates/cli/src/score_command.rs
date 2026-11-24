@@ -41,7 +41,7 @@ pub(crate) fn cmd_score(inv: crate::args::ScoreInvocation) {
     let (args,) = declared.into_parts();
     let (prediction, data, held_out) = args.into_parts();
     let (exports,) = exports.into_parts();
-    let (output,) = exports.into_parts();
+    let (output, manifest) = exports.into_parts();
     let (request,) = request.into_parts();
     let (force, label, root_flag) = request.into_parts();
     let request = crate::camdl_store::store_request(label, force, root_flag);
@@ -50,6 +50,7 @@ pub(crate) fn cmd_score(inv: crate::args::ScoreInvocation) {
             out.fail(format!("error: {e}"));
         }
     }
+    let manifest = crate::output_manifest::claim(&out, manifest.as_deref());
     // A prediction named by its folder is in the store holding the folder.
     let root = crate::fit_store::store_holding(Path::new(&prediction)).unwrap_or_else(|| crate::camdl_store::root_of(&request));
     crate::fit_store::set_reader_root(root.clone());
@@ -58,10 +59,11 @@ pub(crate) fn cmd_score(inv: crate::args::ScoreInvocation) {
     let info = store::RunInfo::new(&given, &execution, &request).unwrap_or_else(|e| out.fail(format!("error: {e}")));
     match score(&out, &store, &prediction, &data, &held_out, &info, &request) {
         Ok(stored) => {
-            info.finish(&store).unwrap_or_else(|e| out.fail(format!("error: {e}")));
+            let invocation = info.finish(&store).unwrap_or_else(|e| out.fail(format!("error: {e}")));
             if let Some(dir) = &output {
                 export(&out, &stored, dir);
             }
+            crate::output_manifest::write(&out, manifest.as_ref(), &store, &invocation);
         }
         Err(e) => out.fail(format!("error: {e}")),
     }

@@ -31,12 +31,13 @@ or through a link tree under `--link-root`. A manifest exists only when every
 result it lists completed. Every file it names then exists whole and has the
 recorded digest, because the store computes each file's digest as it is written,
 records it in `run.json`, and makes the result visible as completed in one
-atomic step. A command removes any earlier manifest at its path when it starts,
-so a failure leaves none. The run spec gains a result-file contract, generated
-from typed file enums, that names each kind's files, formats and columns; the
-store refuses to finish a run whose files differ from its declared set; every
-fit run stores its summary; and `camdl receive` checks and places results pulled
-from another store.
+atomic step. A command removes an earlier manifest at its path when it starts,
+so a failure leaves none; a file there that is not a manifest is refused and
+kept. The run spec gains a result-file contract, generated from typed file
+enums, that names each kind's files, formats and columns; the store refuses to
+finish a run whose files differ from its declared set; every fit run stores its
+summary; and `camdl receive` checks and places results pulled from another
+store.
 
 ## Motivation
 
@@ -478,10 +479,12 @@ manifest read against another store fails on its first run id.
 ### Which commands take `--manifest`, and what each lists
 
 Every command that stores results takes it: `simulate`, `pfilter`, `fit run`,
-`predict`, `profile`, and `score` once it exists. Each lists every distinct
-result its invocation record lists, in order, each by-product as an entry of its
-own with its `upstream`. From the invocation records of a scratch store
-(_verified_):
+`predict`, `profile`, `score`, `receive`, and `compare`, which stores the
+predictions and scores it differences. Each lists every distinct result its
+invocation record lists, in order, each by-product as an entry of its own with
+its `upstream`; `compare` lists each prediction and score it read or stored,
+each prediction before its score, and takes `--manifest` only when they all sit
+in one run store. From the invocation records of a scratch store (_verified_):
 
 - `simulate` lists the compiled model, then each cell (`sim`) followed by its
   `obs`, `event_log` and `sim_quantities` when asked for.
@@ -498,7 +501,9 @@ By-products are listed because files a consumer wants live in them:
 `filtered_streams.tsv` and `pf_health.tsv` belong to by-products of the filter
 run, not to the run (_verified_: `run_by_product!`, `pfilter_store.rs`). A
 simulated cell that stores `failure.toml`, a run that stopped for a reason the
-model defines (`sim_command.rs:553`), is a completed result and is listed.
+model defines, is a completed result, but `simulate` exits 1 when any cell
+stored one, so that command writes no manifest. A later command that reuses the
+cell lists it only if it succeeds.
 
 ### When the manifest is written and removed
 
@@ -513,10 +518,14 @@ file and a rename (`run.rs:778-782`). Either way a reader sees a result as
 completed only after all its files are whole, and the manifest is written after
 the invocation ends with every entry `computed` or `reused`.
 
-The command removes any file at the manifest path as soon as its arguments have
-parsed, before its first call to the store. A failed command, a batch with a
-failed or busy result, and a killed process therefore leave no manifest. A usage
-error caught by argument parsing (exit 2) leaves the path as it was.
+As soon as its arguments have parsed, before its first call to the store, the
+command removes an earlier manifest at the manifest path: an empty file, or a
+JSON file whose `schema` begins `camdl.output-manifest/`. A file of any other
+content is refused with exit 1, "PATH holds a file that is not an output
+manifest", and left as it is, so a mistyped `--manifest data.tsv` deletes
+nothing. A failed command, a batch with a failed or busy result, and a killed
+process therefore leave no manifest. A usage error caught by argument parsing
+(exit 2) leaves the path as it was.
 
 On success the manifest is always written, a cache hit included, through the
 atomic rename. With Snakemake this is required: Snakemake removes a job's
@@ -1358,7 +1367,10 @@ similar ways.
 ## What is refused
 
 - `--manifest` or `--link-root` on a command that stores nothing (`compile`,
-  `fit summary`, `compare`): clap refuses the flag.
+  `fit summary`): clap refuses the flag.
+- `compare --manifest` when the predictions and scores compare reads or stores
+  sit in more than one run store: refused with exit 1, naming the stores, since
+  a manifest names results in one store.
 - `--manifest` or `--link-root` with `--no-store`: the results would be deleted
   with the scratch store. Refused at argument parsing.
 - A manifest path that is a directory, or whose parent does not exist: refused

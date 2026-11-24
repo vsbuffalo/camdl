@@ -74,6 +74,7 @@ pub(crate) fn cmd_predict(inv: PredictInvocation) {
     // The export and the store request, read before the split hands them to
     // their own parts.
     let output = inv.args.flags.output.clone();
+    let manifest = crate::output_manifest::claim(&out, inv.args.flags.manifest.as_deref());
     let request = crate::camdl_store::store_request(
         inv.args.flags.label.clone(),
         inv.args.flags.force,
@@ -125,6 +126,7 @@ pub(crate) fn cmd_predict(inv: PredictInvocation) {
             particles,
             seed,
             output: None,
+            manifest: None,
             force: false,
             label: None,
             store: None,
@@ -155,7 +157,7 @@ pub(crate) fn cmd_predict(inv: PredictInvocation) {
     // handle names its own.
     crate::fit_store::set_reader_root(crate::camdl_store::root_of(&request));
     let info = store::RunInfo::new(&given, &execution, &request).unwrap_or_else(|e| out.fail(format!("error: {e}")));
-    crate::fit::predict::predict(&args, compile, info, &request, output.as_deref());
+    crate::fit::predict::predict(&args, compile, info, &request, output.as_deref(), manifest.as_ref());
 }
 
 #[cfg(test)]

@@ -425,6 +425,7 @@ pub(crate) fn cmd_compare(a: &crate::args::CompareArgs, compile: crate::util::Co
         return;
     }
 
+    let manifest = crate::output_manifest::claim(&out, a.manifest.as_deref());
     let config_path: Option<String> = a.config.clone();
     let baseline: Option<String> = a.baseline.clone();
     let positional: Vec<String> = a.paths.clone();
@@ -508,19 +509,44 @@ pub(crate) fn cmd_compare(a: &crate::args::CompareArgs, compile: crate::util::Co
         Input::Explicit(_) => None,
     }).collect();
     stored::preflight(&prepared, &request).unwrap_or_else(|e| refuse(&out, format!("error: {e}")));
+    // A manifest names results by run id in one store, so every result the
+    // comparison reads or stores must sit in one.
+    let manifest_root = manifest.as_ref().map(|_| {
+        let roots = distinct_roots(prepared.iter().map(|(_, p)| p.root()));
+        match roots.as_slice() {
+            [one] => one.clone(),
+            [] => out.fail("error: --manifest: no compared input is a stored result, so there is nothing to list"),
+            _ => out.fail(format!(
+                "error: --manifest: the compared results sit in {} run stores ({}), and a manifest names results \
+                 in one; compare results of one store, or drop --manifest",
+                roots.len(),
+                roots.iter().map(|r| r.display().to_string()).collect::<Vec<_>>().join(", ")
+            )),
+        }
+    });
+    let mut read: Vec<store::Key> = Vec::new();
     // Each input's groups of rows, each input loaded once however many
     // streams `--streams` selects.
     let loaded: Vec<(CompareModelEntry, Vec<Loaded>)> = inputs.into_iter().map(|(m, input)| {
         let selection = cohort.for_fit(&m.name);
         let groups = match input {
             Input::Explicit(groups) => Ok(groups),
-            Input::Stored(p) => stored::load(&out, p, &request, selection),
+            Input::Stored(p) => stored::load(&out, p, &request, selection).map(|(groups, used)| {
+                read.extend(used);
+                groups
+            }),
         };
         let groups = groups.unwrap_or_else(|e| {
             out.fail(format!("error loading the scores of '{}' at '{}': {}", m.name, m.path, e));
         });
         (m, groups)
     }).collect();
+    let write_manifest = || {
+        let (Some(m), Some(root)) = (&manifest, &manifest_root) else { return };
+        let store = crate::camdl_store::open_existing(root)
+            .unwrap_or_else(|| out.fail(format!("error: --manifest: no run store at {}", root.display())));
+        m.write_results(&store, &read).unwrap_or_else(|e| out.fail(format!("error: {e}")));
+    };
     let groups = grouped(loaded).unwrap_or_else(|e| refuse(&out, e));
 
     // #295 Ask 1 — the optimism caveat, the miscalibration flags and the trace
@@ -577,6 +603,7 @@ pub(crate) fn cmd_compare(a: &crate::args::CompareArgs, compile: crate::util::Co
             (Format::Json, _) => render_json_tables(&tables, None, &metrics_chosen),
             (Format::Md | Format::Table, _) => tables.iter().map(render).collect::<Vec<_>>().join("\n"),
         };
+        write_manifest();
         out.report_raw(rendered);
         return;
     };
@@ -619,7 +646,21 @@ pub(crate) fn cmd_compare(a: &crate::args::CompareArgs, compile: crate::util::Co
         Format::Json => render_json_tables(&tables, Some(&leaves), &metrics_chosen),
         Format::Md | Format::Table => tables.iter().map(render).collect::<Vec<_>>().join("\n"),
     };
+    write_manifest();
     out.report_raw(rendered);
+}
+
+/// The distinct store roots among `roots`, in first-seen order, two
+/// spellings of one directory counted once.
+fn distinct_roots<'a>(roots: impl Iterator<Item = &'a std::path::Path>) -> Vec<std::path::PathBuf> {
+    let mut seen: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
+    for r in roots {
+        let canonical = r.canonicalize().unwrap_or_else(|_| r.to_path_buf());
+        if !seen.iter().any(|(c, _)| *c == canonical) {
+            seen.push((canonical, r.to_path_buf()));
+        }
+    }
+    seen.into_iter().map(|(_, r)| r).collect()
 }
 
 /// The inputs' groups of rows as one list of rows per table: the `k`-th group

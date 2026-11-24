@@ -1,6 +1,6 @@
 //! The files of a filter run and of its by-products.
 
-use super::{Files, Format, ResultFile, Role};
+use super::{find, Files, Format, ParseFile, ResultFile, Role};
 use crate::pfilter_store::{
     FilteredStreams, Filtering, FinalState, Pfilter, PfHealth, Prequential, SavedPaths, Trace, LOGLIK_FILE,
     PROVENANCE_FILE, REPLICATES_FILE,
@@ -59,6 +59,13 @@ impl ResultFile for PfilterFile {
 
 impl Files for Pfilter {
     type File = PfilterFile;
+    const CONTRACT: u16 = 1;
+}
+
+impl ParseFile for PfilterFile {
+    fn of_stored(stored: &str) -> Option<Self> {
+        find([PfilterFile::Loglik, PfilterFile::Replicates, PfilterFile::Provenance], stored)
+    }
 }
 
 impl PfilterFile {
@@ -99,6 +106,13 @@ macro_rules! one_file {
 
         impl Files for $kind {
             type File = $enum;
+            const CONTRACT: u16 = 1;
+        }
+
+        impl ParseFile for $enum {
+            fn of_stored(stored: &str) -> Option<Self> {
+                find([$enum::File], stored)
+            }
         }
     };
 }
@@ -173,4 +187,11 @@ impl ResultFile for PrequentialFile {
 
 impl Files for Prequential {
     type File = PrequentialFile;
+    const CONTRACT: u16 = 1;
+}
+
+impl ParseFile for PrequentialFile {
+    fn of_stored(stored: &str) -> Option<Self> {
+        find([PrequentialFile::Joint, PrequentialFile::Streams, PrequentialFile::Record], stored)
+    }
 }
