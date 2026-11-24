@@ -2186,9 +2186,9 @@ fn run_simulate(inv: args::SimulateInvocation) {
     use crate::sim_job::{ParamSource, ScenarioRef, Seeds, SimulateJob};
     // The ad-hoc arm's label, derived from what the flags resolved to
     // (`sim_job::adhoc_arm_label`), is the name its `ScenarioRef::Inline`
-    // carries. The store labels every inline arm `(none)`, whatever its name
-    // (`sim_command::plan_cell`). A label is not identity: the arm's identity
-    // is the interventions it keeps and the values it runs.
+    // carries, and labels its cells in the store, the listings and the
+    // combined table. A label is not identity: the arm's identity is the
+    // interventions it keeps and the values it runs.
     let adhoc_label = crate::sim_job::adhoc_arm_label(
         &base_sim_run.adhoc_enable,
         &base_sim_run.adhoc_disable,
@@ -2258,7 +2258,6 @@ fn run_simulate(inv: args::SimulateInvocation) {
             &base_sim_run,
             &ir_path,
             &scenario_names,
-            &adhoc_label,
             SimConfigFlags {
                 backend,
                 dt,
@@ -2356,7 +2355,7 @@ fn run_simulate(inv: args::SimulateInvocation) {
             print_dry_run(&out,
                 &ir_path, &ir_path_compiled, engine_settings.backend, engine_settings.dt, seed,
                 &base_sim_run.params_files, &base_sim_run.overrides,
-                &scenario_list, &seeds, &draws_path,
+                &scenario_list, &adhoc_label, &seeds, &draws_path,
                 n_draws, replicates, total_runs,
                 &obs_path, &obs_dir, &obs_only,
                 design.as_ref().map(|(_, d)| d),
@@ -2385,7 +2384,7 @@ fn run_simulate(inv: args::SimulateInvocation) {
         print_dry_run(&out,
             &ir_path, &ir_path_compiled, engine_settings.backend, engine_settings.dt, seed,
             &base_sim_run.params_files, &base_sim_run.overrides,
-            &scenario_list, &seeds, &draws_path,
+            &scenario_list, &adhoc_label, &seeds, &draws_path,
             n_draws, replicates, total_runs,
             &obs_path, &obs_dir, &obs_only,
             design.as_ref().map(|(_, d)| d),
@@ -2606,10 +2605,6 @@ fn resolve_sim_config(
     // model's real name so leaves land under `sims/sir-<hash>/…`.
     display_path: &str,
     scenario_names: &[String],
-    // The derived label of the ad-hoc arm (`sim_job::adhoc_arm_label`), used
-    // when `scenario_names` is empty; the same string the job's
-    // `ScenarioRef::Inline` carries, so the sink finds the cell's entry.
-    adhoc_label: &str,
     flags: SimConfigFlags,
 ) -> Result<crate::sim_config::ResolvedSimConfig, String> {
     // A required output time adds a recorded snapshot, and can raise the
@@ -2665,7 +2660,6 @@ fn resolve_sim_config(
                 if available.is_empty() { "(none)".into() } else { available.join(", ") }));
         }
     }
-    let _ = adhoc_label;
 
     let SimConfigFlags { backend, dt, allow_degenerate_rates, allow_forcing_extrapolation, view } = flags;
     let run_config = crate::sim_config::RunConfig { backend, dt, allow_degenerate_rates, allow_forcing_extrapolation, view };
@@ -4225,6 +4219,8 @@ fn print_dry_run(
     params_files: &[String],
     cli_overrides: &HashMap<String, f64>,
     scenario_list: &[Option<String>],
+    // The label of the ad-hoc arm a run without `--scenario` has.
+    adhoc_label: &str,
     seeds: &[u64],
     draws_path: &Option<String>,
     n_draws: usize,
@@ -4282,7 +4278,7 @@ fn print_dry_run(
         out.say(format_args!("  {} {}", d("replicates:"), replicates));
     }
 
-    let implicit = crate::sim_job::IMPLICIT_ARM_LABEL;
+    let implicit = adhoc_label;
     let scenarios: Vec<&str> = scenario_list.iter()
         .map(|s| s.as_deref().unwrap_or(implicit))
         .collect();

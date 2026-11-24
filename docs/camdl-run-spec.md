@@ -1583,10 +1583,13 @@ interventions its scenario keeps, and its process seed. Each folder name is a
 label followed by 12 hex digits of that group's key; the label is not part of
 the identity. The params label is `base`, or a sweep point's or draw row's
 `name=value` pairs joined by `_`, or `draws` when that text exceeds 96 bytes.
-The scenario label is the scenario's name, or `(none)` for the implicit arm of a
-run without `--scenario`, which a folder name writes `_none_`. The seed label is
-the seed typed: `--seed 7 --replicates 3` stores `seed_7`, `seed_7-r1` and
-`seed_7-r2`, and each value of `--seeds` is its own `seed_<n>`.
+The scenario label is the scenario's name, or for the ad-hoc arm of a run
+without `--scenario` the label its flags derive (§5.5): `(none)` with no
+`--enable`, `--disable` or `--param`, which a folder name writes `_none_`, and
+`(none)+vaccination` under `--enable vaccination`, written `_none__vaccination`
+(every character outside `a-z`, `0-9`, `_`, `-` and `.` becomes `_`). The seed
+label is the seed typed: `--seed 7 --replicates 3` stores `seed_7`, `seed_7-r1`
+and `seed_7-r2`, and each value of `--seeds` is its own `seed_<n>`.
 
 Observations, the event log and generated quantities are by-products stored
 inside the cell folder, each with its own `identity.json` and `run.json`; the
@@ -2142,8 +2145,9 @@ through the preset path, an `Inline` arm through the ad-hoc path:
    `--scenario baseline` then means that scenario; on a model that declares
    none, it is refused like any other undeclared name.
 3. `Inline` → `Adhoc`, carrying its patch. The CLI builds these for the arm a
-   run has without `--scenario`: `simulate`'s `(none)` and `camdl predict`'s
-   `fitted`, each the empty patch unless `--enable`/`--disable` were given.
+   run has without `--scenario`: `simulate`'s, labelled `(none)` or the label
+   its flags derive (§5.5), and `camdl predict`'s `fitted`, each the empty patch
+   unless `--enable`/`--disable` were given.
 4. `Inline` whose name is a declared scenario → **error**. A scenario reference
    is either a model preset or an ad-hoc patch, never both; the model scenario
    is the source of truth.
@@ -2496,8 +2500,9 @@ replicate	scenario	seed	t	t_start	t_stop	S	E	I	R	V	flow_infection	flow_progressi
 ```
 
 `replicate` is the cell's 0-based position in the invocation, not its seed.
-`scenario` is the scenario's name, `(none)` for the implicit arm. `point_id` and
-one `sweep:<param>` column per swept parameter appear under `--sweep` /
+`scenario` is the arm's label (§2.4): the scenario's name, or for an ad-hoc arm
+`(none)` or the form its flags derive, such as `(none)+vaccination`. `point_id`
+and one `sweep:<param>` column per swept parameter appear under `--sweep` /
 `--sweep-file` (§5.5), and `draw`, the 0-based draw index, under `--draws`.
 `seed` is the process seed the cell ran under: passed back to `--seeds`, it
 reproduces that cell. The date columns appear under `--dates`. A cell's stored
@@ -5575,9 +5580,10 @@ replicate	scenario	seed	t	t_start	t_stop	date	date_start	date_stop	S	I	R	V	flow_
   the same draw and the same replicate within that draw share a process seed
   (§3.1, the scenario index is absent from the mix), and those are the pairs to
   difference: join on `draw` (or, for a sweep, `point_id`) and `seed` and `t`.
-- `scenario` is the scenario's name, `(none)` for the implicit arm. `seed` is
-  the process seed the cell ran under; passed back to `--seeds` it reproduces
-  the cell.
+- `scenario` is the arm's label (§2.4): the scenario's name, or for an ad-hoc
+  arm `(none)` or the form its flags derive, such as `(none)+vaccination`.
+  `seed` is the process seed the cell ran under; passed back to `--seeds` it
+  reproduces the cell.
 - `date`, `date_start`, `date_stop` appear only under `--dates`, which requires
   the model to declare an `origin`; each is its numeric twin (`t`, `t_start`,
   `t_stop`) rendered via `ir::caltime::internal_to_date_hires`.

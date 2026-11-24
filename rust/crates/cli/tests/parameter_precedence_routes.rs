@@ -241,7 +241,8 @@ struct RouteRun {
 /// Strip the leading coordinate columns every simulate table carries
 /// (`replicate`, `scenario`, and for a sweep `point_id` and `sweep:beta`, for a
 /// draws file `draw`, then `seed`), after checking they say what the route
-/// asked for: replicate 0, the route's scenario arm (`(none)` without one),
+/// asked for: replicate 0, the route's scenario arm (its derived label without
+/// one),
 /// point 0, beta 0.3, draw 0, seed 7.
 fn strip_design_columns(table: &str, arm: &str) -> String {
     let mut out = String::new();
@@ -289,10 +290,23 @@ fn simulate_route(dir: &Path, name: &str, args: &[&str]) -> RouteRun {
         "--seed", "7", "--store", &store, "-o", &traj, "--obs", &obs];
     argv.extend_from_slice(args);
     let stderr = ok(&camdl(dir, &argv), &format!("simulate route {name} {args:?}"));
-    // The scenario coordinate names the arm: the scenario's name, or `(none)`
-    // without one, whatever `--param` the run applies over it.
-    let arm = args.iter().position(|a| *a == "--scenario")
-        .map_or("(none)".to_string(), |i| args[i + 1].to_string());
+    // The scenario coordinate names the arm: the scenario's name, whatever
+    // `--param` the run applies over it; without one, the label the flags
+    // derive, `(none)` followed by `;name=value` per `--param`, by name.
+    let arm = args.iter().position(|a| *a == "--scenario").map_or_else(
+        || {
+            let mut params: Vec<(&str, f64)> = args.windows(2)
+                .filter(|w| w[0] == "--param")
+                .map(|w| {
+                    let (name, value) = w[1].split_once('=').unwrap();
+                    (name, value.parse::<f64>().unwrap())
+                })
+                .collect();
+            params.sort_by(|a, b| a.0.cmp(b.0));
+            params.iter().fold("(none)".to_string(), |s, (n, v)| format!("{s};{n}={v}"))
+        },
+        |i| args[i + 1].to_string(),
+    );
     let t = strip_design_columns(&read(&dir.join(&traj)), &arm);
     let o = strip_design_columns(&read(&dir.join(&obs)), &arm);
     RouteRun {

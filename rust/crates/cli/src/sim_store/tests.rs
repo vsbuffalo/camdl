@@ -1080,10 +1080,11 @@ fn a_table_over_a_stored_failure_names_its_failure_file() {
 }
 
 /// Two scenarios with the same effect are one stored cell, and the run says
-/// one cell; a run with no scenario is labelled `(none)` whatever `--param`
-/// it carries.
+/// one cell; a run with no scenario is labelled from its flags, so
+/// `--param beta_a=0.45` is `(none);beta_a=0.45`, `_none__beta_a_0.45` in the
+/// folder name.
 #[test]
-fn the_banner_counts_stored_cells_and_the_implicit_arm_is_labelled_none() {
+fn the_banner_counts_stored_cells_and_the_ad_hoc_arm_is_labelled_from_its_flags() {
     let cwd = workdir();
     let store = cwd.path().join("camdl-store");
     let (results, err, out) = run_in(&store, cwd.path(), &["sir.ir.json", "--params", "p.toml", "--scenario", "with_sia", "--scenario", "with_sia_too"]);
@@ -1096,7 +1097,7 @@ fn the_banner_counts_stored_cells_and_the_implicit_arm_is_labelled_none() {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let mut tree = Vec::new();
     shape(&store, 0, &mut tree);
-    assert!(tree.iter().any(|l| l.trim() == "_none_-*"), "{}", tree.join("\n"));
+    assert!(tree.iter().any(|l| l.trim() == "_none__beta_a_0.45-*"), "{}", tree.join("\n"));
 }
 
 /// An export path in a directory that does not exist is refused before any

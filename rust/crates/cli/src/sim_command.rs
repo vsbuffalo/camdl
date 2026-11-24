@@ -380,12 +380,9 @@ fn write_export(out: &crate::out::Out, to: &std::path::Path, files: &store::Expo
 /// wanted of it. Refused, with the cell's name, when the cell does not
 /// resolve or runs on settings its identity does not hold.
 fn plan_cell(ctx: &StoreRun<'_>, shared: &Shared, spec: crate::engine::CellSpec) -> Result<Planned, (String, String)> {
-    // A named scenario is labelled by its name; every other arm, with or
-    // without `--enable`/`--disable`/`--param`, is the implicit arm.
-    let scenario = match &spec.scenario {
-        crate::sim_job::ScenarioRef::Named(n) => n.clone(),
-        crate::sim_job::ScenarioRef::Inline { .. } => crate::sim_job::IMPLICIT_ARM_LABEL.to_string(),
-    };
+    // A named scenario is labelled by its name, an ad-hoc arm by the label its
+    // flags derive (`sim_job::adhoc_arm_label`), which its `Inline` carries.
+    let scenario = spec.scenario.name().to_string();
     let rep = spec.run_idx % ctx.job.source.replicates().max(1);
     let (seed, seed_replicate) = match &ctx.job.seeds {
         crate::sim_job::Seeds::Explicit(_) => (spec.process_seed, 0),

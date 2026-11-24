@@ -292,8 +292,12 @@ pub enum ScenarioRef {
     },
 }
 
-/// The derived label of `simulate`'s ad-hoc arm — the one arm a run without
-/// `--scenario` has (proposal 2026-10-24-batch-to-simulate §3 "Arm labels").
+/// The label of the implicit arm `simulate` runs when it is given no scenario
+/// flags: the model as written, no scenario applied.
+pub const IMPLICIT_ARM_LABEL: &str = "(none)";
+
+/// The derived label of `simulate`'s ad-hoc arm, the one arm a run without
+/// `--scenario` has (run spec §5.5, "Labels and records").
 ///
 /// [`IMPLICIT_ARM_LABEL`] (`(none)`) when nothing is overridden; otherwise
 /// `(none)` followed by `+name` for each enabled intervention, `-name` for each
@@ -302,14 +306,13 @@ pub enum ScenarioRef {
 /// pure function of the resolved arm and `beta=.3` and `beta=0.3` give one
 /// label: `(none)+vaccination`, `(none)-sia`, `(none);beta=0.3`. Scenario names
 /// are identifiers (`[A-Za-z_][A-Za-z0-9_]*`), so a parenthesised label can
-/// never collide with a declared scenario — including one the model calls
-/// `baseline` — and no scenario name is reserved.
-/// The label is provenance — it names the leaf's path segment, its `run.json`
-/// level and the listings — never identity, which the resolved delta hashes.
-/// The label of the implicit arm `simulate` runs when it is given no scenario
-/// flags: the model as written, no scenario applied.
-pub const IMPLICIT_ARM_LABEL: &str = "(none)";
-
+/// never collide with a declared scenario, including one the model calls
+/// `baseline`, and no scenario name is reserved.
+///
+/// The label names the cell's scenario folder (sanitised by
+/// `store::path_label`, so `(none)+vaccination` is `_none__vaccination`), its
+/// `run.json` level and the listings. It is not identity: the interventions
+/// the arm keeps and the values it runs are.
 pub fn adhoc_arm_label(enable: &[String], disable: &[String], params: &[(String, f64)]) -> String {
     let mut label = String::from(IMPLICIT_ARM_LABEL);
     let mut enable: Vec<&String> = enable.iter().collect();

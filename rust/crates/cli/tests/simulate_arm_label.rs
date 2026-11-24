@@ -1,7 +1,7 @@
 //! The label of `simulate`'s scenario folder. A named scenario is labelled by
-//! its name; every other arm, whatever `--enable`, `--disable` or `--param`
-//! built it, is the implicit arm, labelled `(none)` (proposal
-//! `docs/dev/proposals/2026-11-20-run-store-api.md`, "One simulation"). A
+//! its name; every other arm is labelled from the `--enable`, `--disable` and
+//! `--param` that built it (run spec §5.5, "Labels and records"): `(none)` for a
+//! plain run, `(none)+vaccination` for `--enable vaccination`. A
 //! label is never part of a cell's identity: the arm's identity is the
 //! interventions it keeps and the values it runs, so a preset-named arm with
 //! the same effect is the same cell, and a cell stored under another label is
@@ -134,30 +134,38 @@ fn simulated(out: &Output) -> Option<usize> {
         .map(|l| l.rsplit("simulated ").next().unwrap().trim().parse().unwrap())
 }
 
-/// Every arm without a named scenario is the implicit arm, labelled `(none)`
-/// (`_none_` in the folder name, where the path sanitizer maps `(` and `)` to
-/// `_`): `--enable vaccination`, `--param beta=0.3` and a plain run alike.
-/// `--param beta=0.3` and `--param beta=.3` are one cell.
+/// An arm without a named scenario is labelled from its flags: `(none)` for a
+/// plain run, `(none)+vaccination` for `--enable vaccination`,
+/// `(none);beta=0.3` for `--param beta=0.3`. The folder name is the label
+/// through the path sanitizer, which maps every character outside
+/// `[a-z0-9_.-]` to `_`. `--param beta=0.3` and `--param beta=.3` are one
+/// label and one cell.
 #[test]
-fn ad_hoc_arms_are_the_implicit_arm() {
+fn ad_hoc_arms_are_labelled_from_their_flags() {
     let fx = Fixture::new();
     assert_ok(&fx.simulate(&["--enable", "vaccination", "--replicates", "2"]), "--enable");
+    // A dry run over the stored cells names each one by its arm and seed.
+    let run = fx.simulate(&["--enable", "vaccination", "--replicates", "2", "--dry-run"]);
+    assert_ok(&run, "--enable --dry-run");
+    let dry = stderr(&run);
+    assert!(dry.contains("scenario: (none)+vaccination"), "the dry run's header:\n{dry}");
+    assert!(dry.contains("[hit ] scenario=(none)+vaccination seed_3 "), "the dry run's cells:\n{dry}");
     let leaves = fx.leaves();
     assert_eq!(leaves.len(), 2);
     for (dir, _, label) in &leaves {
-        assert_eq!(label, "_none_", "path segment: {}", dir.display());
+        assert_eq!(label, "_none__vaccination", "path segment: {}", dir.display());
     }
     let listing = fx.listing();
-    assert!(listing.contains("(none)"), "the listing shows `(none)`:\n{listing}");
+    assert!(listing.contains("(none)+vaccination"), "the listing shows the derived label:\n{listing}");
 
     let fx = Fixture::new();
     assert_ok(&fx.simulate(&["--param", "beta=0.3"]), "--param beta=0.3");
     assert_ok(&fx.simulate(&["--param", "beta=.3"]), "--param beta=.3");
     let leaves = fx.leaves();
     assert_eq!(leaves.len(), 1, "`beta=.3` is `beta=0.3`: one label, one cell: {leaves:?}");
-    assert_eq!(leaves[0].2, "_none_");
+    assert_eq!(leaves[0].2, "_none__beta_0.3");
     let listing = fx.listing();
-    assert!(listing.contains("(none)"), "the listing shows `(none)`:\n{listing}");
+    assert!(listing.contains("(none);beta=0.3"), "the listing shows the derived label:\n{listing}");
 
     let fx = Fixture::new();
     assert_ok(&fx.simulate(&[]), "plain");
@@ -165,6 +173,32 @@ fn ad_hoc_arms_are_the_implicit_arm() {
     assert_eq!(leaves[0].2, "_none_");
     let listing = fx.listing();
     assert!(listing.contains("(none)"), "the listing shows `(none)`:\n{listing}");
+}
+
+/// Two arms that differ only by `--enable` carry different labels in the
+/// combined table's `scenario` column and in `camdl list`.
+#[test]
+fn arms_differing_by_enable_are_told_apart_in_the_table_and_the_listing() {
+    let fx = Fixture::new();
+    assert_ok(&fx.simulate(&["-o", "plain.tsv"]), "plain");
+    assert_ok(&fx.simulate(&["--enable", "vaccination", "-o", "vax.tsv"]), "--enable");
+    let scenarios = |file: &str| -> Vec<String> {
+        let text = std::fs::read_to_string(fx.path(file)).unwrap();
+        // The table opens with a `# <camdl version>` comment line.
+        let mut lines = text.lines().filter(|l| !l.starts_with('#'));
+        let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
+        let col = header.iter().position(|h| *h == "scenario").expect("a scenario column");
+        let mut v: Vec<String> = lines.map(|l| l.split('\t').nth(col).unwrap().to_string()).collect();
+        v.dedup();
+        v
+    };
+    assert_eq!(scenarios("plain.tsv"), vec!["(none)".to_string()]);
+    assert_eq!(scenarios("vax.tsv"), vec!["(none)+vaccination".to_string()]);
+    let listing = fx.listing();
+    let rows: Vec<&str> = listing.lines().filter(|l| l.contains("seed_3")).collect();
+    assert_eq!(rows.len(), 2, "one row per arm:\n{listing}");
+    assert!(rows.iter().any(|r| r.contains("(none)+vaccination")), "{listing}");
+    assert!(rows.iter().any(|r| r.contains("(none)") && !r.contains("(none)+")), "{listing}");
 }
 
 /// Test 10 / test 3 — the label is not identity: the preset `vax` and
@@ -192,7 +226,7 @@ fn a_preset_and_the_flags_that_spell_it_share_leaves() {
         preset_leaves.iter().map(|l| &l.1).collect::<Vec<_>>(),
         "the cell identities are the resolved delta's, unchanged by the label"
     );
-    assert!(flag_leaves.iter().all(|(_, _, l)| l == "_none_"));
+    assert!(flag_leaves.iter().all(|(_, _, l)| l == "_none__vaccination"));
 }
 
 /// Test 10 — a cell stored under a scenario folder with another label
