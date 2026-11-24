@@ -41,8 +41,8 @@ pub(crate) struct FixedPoint {
     /// The point, every model parameter's value.
     pub point: IndexMap<String, f64>,
     pub numerics: Numerics,
-    pub backend: crate::args::types::ForwardBackend,
-    pub binomial: sim::rng::BinomialAlgorithm,
+    /// The simulator the prediction runs on, resolved under the fitting rule.
+    pub simulator: crate::simulator::Simulator,
     pub trained_through: Option<Finite>,
     /// Each bound stream's conditioned lines, by the source they are bound
     /// to.
@@ -99,8 +99,6 @@ pub(crate) fn resolve(
     if !Path::new(model_path).is_file() {
         return Err(format!("cannot read the model {model_path}: it does not exist"));
     }
-    let backend = flags.backend.unwrap_or(ForwardBackend::ChainBinomial);
-    let binomial = flags.binomial.unwrap_or_default();
     let scratch = tempfile::Builder::new()
         .prefix("camdl-predict-point-")
         .tempdir()
@@ -112,7 +110,22 @@ pub(crate) fn resolve(
     let leaf_names: Vec<String> = model_in.observations.iter().map(|o| o.name.clone()).collect();
     let bound = crate::util::resolve_data_specs(&flags.data, &leaf_names, flags.obs.as_deref())?;
     let observations = bind_by_source(&model_in, &bound)?;
-    let dt = crate::dt_rule::effective_dt_for_command(flags.dt, None, model_in.simulation.dt, crate::dt_rule::FIT_FLAG_FILE)?;
+    let (simulator, _) = crate::simulator::Simulator::resolve(
+        crate::simulator::ModelSimulate::of(&model_in.simulation),
+        crate::simulator::WrittenSimulator {
+            backend: flags.backend,
+            dt: flags.dt,
+            config_dt: None,
+            integrator: flags.integrator,
+            binomial: flags.binomial,
+        },
+        crate::simulator::Basis::Fitting {
+            backend: ForwardBackend::ChainBinomial,
+            run: "this prediction",
+            file: crate::dt_rule::FIT_FLAG_FILE,
+        },
+    )?;
+    let dt = simulator.dt().get();
 
     let holdout_after = flags.holdout_after.as_deref().map(|raw| match raw.trim().parse::<f64>() {
         Ok(v) => TimeSpecToml::Num(v),
@@ -147,14 +160,14 @@ pub(crate) fn resolve(
     }
     check_time_format(&model_in, &bound, dt, flags.time_format)?;
 
-    // The model rewritten from the data, as `fit run` rewrites it, then
-    // `--integrator`, as `simulate` applies it: the compile the identity
-    // holds and the engine runs.
+    // The model rewritten from the data, as `fit run` rewrites it, then given
+    // the simulator's integrator, as `simulate` gives it: the compile the
+    // identity holds and the engine runs.
     let ir_path = crate::fit::resolve_anchors_into_temp_ir(Some(out), &ir_path, &problem)?;
     let (ir_path, _tables) = crate::fit::bind_tables_into_temp_ir(&ir_path, &problem)
         .map_err(|e| format!("--table: {e}"))?;
     let mut envelope = crate::util::load_ir_envelope(&ir_path)?;
-    crate::util::apply_integrator_override(&mut envelope.model, flags.integrator);
+    simulator.apply_to(&mut envelope.model);
     let model = envelope.model.clone();
     let model_ir = scratch.path().join("model.ir.json");
     std::fs::write(&model_ir, serde_json::to_string(&envelope).map_err(|e| e.to_string())?)
@@ -226,9 +239,9 @@ pub(crate) fn resolve(
     d.holdout_after = None;
 
     let numerics = Numerics {
-        backend: crate::sim_store::Backend::of(backend),
-        dt: Finite::new(dt).map_err(|e| format!("--dt: {e}"))?,
-        binomial: binomial.into(),
+        backend: crate::sim_store::Backend::of(simulator.backend()),
+        dt: simulator.dt(),
+        binomial: simulator.binomial().into(),
         allow_degenerate_rates: flags.allow_degenerate_rates,
     };
     Ok(FixedPoint {
@@ -238,8 +251,7 @@ pub(crate) fn resolve(
         params,
         point,
         numerics,
-        backend,
-        binomial,
+        simulator,
         trained_through,
         data,
         problem: posed,

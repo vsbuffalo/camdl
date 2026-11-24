@@ -1866,10 +1866,10 @@ pub(crate) fn predict(
 
 /// The refusals of a fixed-point prediction that its flags alone decide, made
 /// before anything is compiled or stored: a mode the backend cannot run,
-/// `--particles` where no filter runs, `--design` outside a forecast,
-/// `--binomial` on a backend that draws no binomials, and `--integrator` on a
-/// backend other than ODE. The predictor makes the
-/// same checks again on the cloud, for both sources.
+/// `--particles` where no filter runs and `--design` outside a forecast. The
+/// predictor makes the same checks again on the cloud, for both sources.
+/// `--binomial` and `--integrator` on a backend that has no use for them are
+/// refused by the simulator's resolution (`crate::simulator`).
 fn refuse_fixed_point_flags(args: &crate::args::PredictArgs) -> Result<(), String> {
     use crate::args::types::{ForwardBackend, PredictModeArg};
     let mode = predict_mode(args)?;
@@ -1905,14 +1905,7 @@ fn refuse_fixed_point_flags(args: &crate::args::PredictArgs) -> Result<(), Strin
                     forecast; pass --horizon DURATION (--mode forecast)."
             .to_string());
     }
-    refuse_covariate_outside_forecast(args, mode)?;
-    if args.fixed_point.binomial.is_some() && !filterable {
-        return Err(format!(
-            "--binomial sets the sampler of the chain-binomial draws, and this prediction runs on the {backend} \
-             backend, which draws none."
-        ));
-    }
-    crate::simulator::refuse_integrator_off_ode(args.fixed_point.integrator, backend, "this prediction")
+    refuse_covariate_outside_forecast(args, mode)
 }
 
 /// Refuse `--covariate` on a prediction that is not a forecast: only a
@@ -2590,12 +2583,12 @@ impl SourceReads {
                 let point = PosteriorDraws::plug_in(
                     p.point.clone(),
                     args.flags.n_draws.unwrap_or(DEFAULT_PREDICT_DRAWS),
-                    p.backend,
+                    p.simulator.backend(),
                 )?;
                 let (identity, _) = source.identity(&PredictOptions::defaults(), BTreeMap::new())?;
                 return Ok(SourceReads {
                     config: p.problem.clone(),
-                    binomial: p.binomial,
+                    binomial: p.simulator.binomial(),
                     // The point, its model, its numerics and its data: the
                     // prediction's identity without its options.
                     run_id: store::Identity::key(&(identity.source, identity.data)).to_hex(),
@@ -2941,15 +2934,35 @@ fn run_predict(
     // One calendar block for every sidecar manifest this run writes
     // (predictive / observed / quantities), read once off the model.
     let calendar = ir::caltime::CalendarAxis::from_model(&model).map_err(|e| e.to_string())?;
-    // The step this command walks, for both horizons: the step the FIT ran
-    // at, by the one dt rule (`crate::dt_rule`) — the model's declared dt, else
-    // the fit's `[config] dt`. The one-step band re-filters the observed
-    // series through the fitted model, and the free-forward replay runs the
-    // fitted model forward; either one on another step would be a different
-    // process than the posterior describes (gh#708). The two grids used to be
-    // separate and could disagree; under the rule they are one, so the notice
-    // that named the difference is gone.
-    let (dt, one_step_dt) = predict_step_grids(model.simulation.dt, config.config.dt);
+    // The simulator every run of this command integrates with: a fixed
+    // point's, resolved from its flags under the fitting rule, or the fit's
+    // own — its recorded backend and sampler, the step it ran at (the model's
+    // declared dt, else the fit's `[config] dt`) and its model's integrator —
+    // replayed with no flag over it. The one-step band re-filters the
+    // observed series through the fitted model and the free-forward replay
+    // runs it forward, both on this step: another step would be a different
+    // process than the posterior describes (gh#708).
+    let simulator = match &source {
+        PredictSource::FixedPoint(p) => p.simulator.clone(),
+        PredictSource::Posterior(_) => {
+            let fitted = crate::simulator::StoredSimulator {
+                name: run_id.clone(),
+                backend: Some(posterior.backend),
+                dt: crate::dt_rule::resolved_dt(model.simulation.dt, config.config.dt),
+                integrator: model.simulation.integrator.clone(),
+                binomial: Some(binomial),
+                settings: None,
+            };
+            crate::simulator::Simulator::resolve(
+                crate::simulator::ModelSimulate::of(&model.simulation),
+                crate::simulator::WrittenSimulator::default(),
+                crate::simulator::Basis::Replay(&fitted),
+            )?
+            .0
+        }
+    };
+    let dt = simulator.dt().get();
+    let binomial = simulator.binomial();
 
     // 3b. Parse the prospective scenario overlay (reusing simulate's ScenarioRef
     // surface). No `--scenario` → a single `fitted` row (the fitted model, no
@@ -3154,7 +3167,7 @@ fn run_predict(
                 options: &options,
                 calendar: &calendar,
                 schema: schema.as_ref(),
-                dt: one_step_dt,
+                dt,
                 seed: args.flags.seed.unwrap_or(1),
                 binomial,
                 selection: &streams_in,
@@ -3798,21 +3811,6 @@ fn run_predict(
             // so default to the machine width; `RAYON_NUM_THREADS` still caps the
             // global pool.
             let ff_parallel = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-            // The replay runs on the fit's simulator: its backend, step, integrator
-            // and binomial sampler, with no flag over them.
-            let fitted_simulator = crate::simulator::StoredSimulator {
-                name: "the fit".to_string(),
-                backend: Some(posterior.backend),
-                dt,
-                integrator: model.simulation.integrator.clone(),
-                binomial: Some(binomial),
-                settings: None,
-            };
-            let (ff_simulator, _) = crate::simulator::Simulator::resolve(
-                crate::simulator::ModelSimulate::of(&model.simulation),
-                crate::simulator::WrittenSimulator::default(),
-                crate::simulator::Basis::Replay(&fitted_simulator),
-            )?;
 
             // A swept value is written into each draw row (below), so the
             // resolver sees one draw/sweep-tier value and records no override:
@@ -3884,7 +3882,7 @@ fn run_predict(
                         // Replay on the SAME forward simulator the fit used
                         // (chain_binomial / ode), resolved from the method — never a
                         // hardcoded default; the sampler the fit ran (D78).
-                        simulator: ff_simulator.clone(),
+                        simulator: simulator.clone(),
                         eval,
                         // Generated posterior draws (not a user-authored file), so
                         // the engine's collision guard does not check them: a scenario
@@ -4068,7 +4066,7 @@ fn run_predict(
             // fitted model; under `chain_binomial` the step sets the transition
             // probability `1 - exp(-rate·dt)`, so another dt would be a
             // different process plotted against the data.
-            one_step_dt,
+            dt,
             &streams_in,
             binomial,
             fit,
@@ -4484,7 +4482,7 @@ fn run_predict(
             selection.as_ref(),
             &model,
             &fit_base,
-            posterior.backend,
+            simulator.backend(),
             seed,
             quantity_obs_anchors,
             config.config.dt,
@@ -4564,7 +4562,7 @@ fn run_predict(
         written, failures, skipped: streams_in.skipped,
         stored: ToStore { source, dir: scratch, options, design: args.flags.design.clone() },
         scored: crate::fit::scoring::Scored {
-            ode: posterior.backend == crate::args::types::ForwardBackend::Ode,
+            ode: simulator.backend() == crate::args::types::ForwardBackend::Ode,
             plug_in: treatment_kind == TreatmentKind::PlugIn,
             ..scored
         },
@@ -5679,15 +5677,6 @@ fn pool_one_step_draws(
 /// rows carry no convergence cells for the same reason the free-forward ones do
 /// not -- a between-chain statistic has nothing to compare one chain against.)
 #[allow(clippy::too_many_arguments)]
-/// `camdl predict`'s step grids, `(free_forward, one_step)`: both the step
-/// the fit ran at (`dt_rule::resolved_dt`), so neither horizon replays a
-/// different process than the fit. Kept as a pair so the two call sites
-/// still name which grid they walk.
-fn predict_step_grids(model_dt: Option<f64>, config_dt: f64) -> (f64, f64) {
-    let fitted = crate::dt_rule::resolved_dt(model_dt, config_dt);
-    (fitted, fitted)
-}
-
 /// `model`, its run extent raised to the end of the last outcome row
 /// `binding` holds, so a score's one-step pass admits every row it predicts.
 /// Nothing else is extended; without a binding, or when the model already
@@ -6606,17 +6595,6 @@ mod tests {
             "both leaves' observed series are read");
     }
 
-    /// The one-step band walks the step the fit ran at: under the one dt rule
-    /// that is the model's declared dt whenever it has one — the fit's
-    /// `[config] dt` (a default 1.0 here) used to win.
-    #[test]
-    fn the_one_step_band_walks_the_models_dt() {
-        assert_eq!(predict_step_grids(Some(0.5), 1.0), (0.5, 0.5));
-        assert_eq!(predict_step_grids(None, 0.25), (0.25, 0.25));
-        // No model dt, `[config] dt = 7`: the fit ran at 7, so the free-forward
-        // replay steps at 7 too, not at 1.0.
-        assert_eq!(predict_step_grids(None, 7.0).0, 7.0, "free-forward at the fitted step");
-    }
     use crate::fit::row_convergence::ChainOfDraw;
 
     #[test]

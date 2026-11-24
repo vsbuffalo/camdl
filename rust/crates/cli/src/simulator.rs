@@ -155,7 +155,7 @@ fn describe(backend: Option<ForwardBackend>, dt: f64, integrator: &Integrator) -
 
 /// The refusal of `--integrator` on a run whose backend has no integrator.
 /// `what` names the run ("this replay of @r0", "this simulation").
-pub(crate) fn refuse_integrator_off_ode(integrator: Option<IntegratorArg>, backend: ForwardBackend, what: &str) -> Result<(), String> {
+fn refuse_integrator_off_ode(integrator: Option<IntegratorArg>, backend: ForwardBackend, what: &str) -> Result<(), String> {
     if integrator.is_some() && backend != ForwardBackend::Ode {
         return Err(format!(
             "--integrator selects the ODE integrator, but {what} runs on {}, which has none.\n  \
