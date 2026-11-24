@@ -390,6 +390,24 @@ impl ResolvedSource {
         }
     }
 
+    /// The text the starts are read from. For a loose file, the bytes the
+    /// run's identity holds, so a file rewritten after it was keyed does not
+    /// change the starts; for a stored run, the copy of its file in `file`.
+    #[expect(clippy::disallowed_methods, reason = "reads `draws.tsv` in a `fit_store::RunFiles` copy of the source run, which the identity names as a `Dep`")]
+    fn text(&self) -> Result<String, InitError> {
+        let bytes = match &self.input {
+            crate::fit_store::StartInput::File { file } => file.bytes(),
+            _ => {
+                if !self.file.is_file() {
+                    return Err(InitError::UnknownSource { path: self.file.clone() });
+                }
+                std::fs::read(&self.file)
+                    .map_err(|e| InitError::Io { path: self.file.clone(), msg: e.to_string() })?
+            }
+        };
+        String::from_utf8(bytes)
+            .map_err(|e| InitError::Io { path: self.file.clone(), msg: e.to_string() })
+    }
 }
 
 /// A starts rule with its source, if any, resolved.
@@ -691,11 +709,10 @@ fn draw_chain_starts_once(
     if n_chains == 0 {
         return Ok(DrawnStarts::fresh(Vec::new(), rule));
     }
-    let source_file = || -> Result<&Path, InitError> {
+    let source = || -> Result<&ResolvedSource, InitError> {
         starts
             .source
             .as_ref()
-            .map(|s| s.file.as_path())
             .ok_or_else(|| InitError::Unresolved { rule: rule.spelled() })
     };
     if n_chains >= 2
@@ -746,13 +763,15 @@ fn draw_chain_starts_once(
             draw_from_prior(ctx.resolved, ctx.base_specs, ctx.priors, n_chains, seed)?
         }
         ChainStarts::Spread(Spread::FromPosterior { chains, .. }) => {
-            draw_from_posterior(ctx.resolved, source_file()?, chains.as_ref(), n_chains, seed)?
+            let source = source()?;
+            draw_from_posterior(ctx.resolved, &source.file, &source.text()?, chains.as_ref(), n_chains, seed)?
         }
         ChainStarts::Point(Point::FromMle { .. }) => {
-            draw_from_mle(ctx.resolved, source_file()?, n_chains)?
+            draw_from_mle(ctx.resolved, &source()?.file, n_chains)?
         }
         ChainStarts::Point(Point::FromParams { .. }) => {
-            draw_from_params(ctx.resolved, source_file()?, n_chains)?
+            let source = source()?;
+            draw_from_params(ctx.resolved, &source.file, &source.text()?, n_chains)?
         }
     };
     Ok(DrawnStarts::fresh(drawn, rule))
@@ -1043,15 +1062,13 @@ fn sample_gamma_shape_rate(rng: &mut StatefulRng, shape: f64, rate: f64) -> f64 
 fn draw_from_posterior(
     resolved: &ResolvedParameters,
     path: &Path,
+    text: &str,
     chains: Option<&crate::chain_selection::ChainSelection>,
     n_chains: usize,
     seed: u64,
 ) -> Result<Vec<ChainStart>, InitError> {
     let path = path.to_path_buf();
-    if !path.is_file() {
-        return Err(InitError::UnknownSource { path });
-    }
-    let (header, rows) = read_tsv(&path)?;
+    let (header, rows) = parse_tsv(&path, text)?;
     if rows.is_empty() {
         return Err(InitError::SchemaMismatch {
             path: path.clone(),
@@ -1227,21 +1244,19 @@ fn draw_from_mle(
         |path| InitSource::MlePoint { path })
 }
 
-/// `from_params`: all chains at a hand-written flat params TOML.
-#[expect(clippy::disallowed_methods, reason = "reads again the `from_params` file whose bytes `ResolvedStarts::from_file` read and the run's identity holds as `StartInput::File`; a file changed between the two reads is not detected")]
+/// `from_params`: all chains at a hand-written flat params TOML, whose text
+/// is `text`, read from `path`.
 fn draw_from_params(
     resolved: &ResolvedParameters,
     path: &Path,
+    text: &str,
     n_chains: usize,
 ) -> Result<Vec<ChainStart>, InitError> {
     // Reject files that look like fit-output (have `[focal]` or
     // `[mle]` sections, or a `final_loglik` scalar) — the actionable
     // hint redirects the user to `from_mle`.
     let path_buf: PathBuf = path.to_path_buf();
-    let raw = std::fs::read_to_string(path).map_err(|e| InitError::Io {
-        path: path_buf.clone(), msg: e.to_string(),
-    })?;
-    let table: toml::Table = raw.parse().map_err(|e: toml::de::Error| {
+    let table: toml::Table = text.parse().map_err(|e: toml::de::Error| {
         InitError::SchemaMismatch {
             path: path_buf.clone(),
             expected: "flat params TOML (top-level keys = parameter names)",
@@ -1263,7 +1278,7 @@ fn draw_from_params(
     // The values come from the params-TOML reader every `--params` consumer
     // uses, so a fit's own `mle_params.toml` reads here as it does there: its
     // `[provenance]` table is fit metadata, not parameters, and is skipped.
-    let values_in_file = crate::util::load_params_toml(&path.to_string_lossy())
+    let values_in_file = crate::util::parse_params_text(&path.to_string_lossy(), text)
         .map_err(|msg| InitError::SchemaMismatch {
             path: path_buf.clone(),
             expected: "flat params TOML (top-level keys = parameter names)",
@@ -1360,12 +1375,18 @@ pub(crate) fn read_draws_tsv(path: &Path) -> Result<(Vec<String>, Vec<Vec<String
     read_tsv(path).map_err(|e| e.to_string())
 }
 
-#[expect(clippy::disallowed_methods, reason = "reads a `from_posterior` draws file: one whose bytes the run's identity holds as `StartInput::File`, or `draws.tsv` in a `fit_store::RunFiles` copy of the source run, which the identity names as a `Dep`")]
+#[expect(clippy::disallowed_methods, reason = "reads a `from_posterior` draws file for the chain-subset convergence check: a loose file the run's identity holds as `StartInput::File`, or `draws.tsv` in a `fit_store::RunFiles` copy of the source run, which the identity names as a `Dep`")]
 fn read_tsv(path: &Path) -> Result<(Vec<String>, Vec<Vec<String>>), InitError> {
-    let path_buf: PathBuf = path.to_path_buf();
     let raw = std::fs::read_to_string(path).map_err(|e| InitError::Io {
-        path: path_buf.clone(), msg: e.to_string(),
+        path: path.to_path_buf(), msg: e.to_string(),
     })?;
+    parse_tsv(path, &raw)
+}
+
+/// A TSV's header and data rows, from its text; `path` names it in errors.
+/// Empty lines and lines starting with `#` are skipped.
+fn parse_tsv(path: &Path, raw: &str) -> Result<(Vec<String>, Vec<Vec<String>>), InitError> {
+    let path_buf: PathBuf = path.to_path_buf();
     let mut lines = raw.lines().filter(|l| !l.trim_start().starts_with('#'));
     let header_line = lines.next().ok_or_else(|| InitError::SchemaMismatch {
         path: path_buf.clone(),
@@ -1750,6 +1771,34 @@ mod tests {
             assert!(err.contains("from_posterior") && err.contains(method), "{err}");
         }
         refuse_sampler_as_mle_source("if2", "@scout").expect("an optimizer's estimate is a start");
+    }
+
+    /// A loose start file is read once: the starts come from the bytes the
+    /// run's identity holds, so a file rewritten after it was keyed cannot
+    /// start chains from values the run id does not describe.
+    #[test]
+    fn a_loose_start_file_rewritten_after_keying_starts_from_the_keyed_bytes() {
+        let resolved = mk_resolved(
+            vec![mk_param("beta", 0.3, None, Some((0.0, 1.0)))],
+            &["beta"],
+        );
+        let params = write_tmp("keyed_params", "beta = 0.42\n");
+        let params_starts = from_params(&params);
+        std::fs::write(&params, "beta = 0.77\n").unwrap();
+        let drawn = draw(&resolved, &params_starts, 2, 1).unwrap();
+        for cs in &drawn.starts {
+            assert_eq!(cs.values["beta"], 0.42, "from_params must read the keyed bytes");
+        }
+        std::fs::remove_file(&params).ok();
+
+        let draws = write_tmp("keyed_draws", "beta\n0.10\n0.20\n");
+        let post_starts = from_posterior(&draws);
+        std::fs::write(&draws, "beta\n0.90\n0.95\n").unwrap();
+        let drawn = draw(&resolved, &post_starts, 2, 1).unwrap();
+        let mut got: Vec<f64> = drawn.starts.iter().map(|cs| cs.values["beta"]).collect();
+        got.sort_by(f64::total_cmp);
+        assert_eq!(got, vec![0.10, 0.20], "from_posterior must read the keyed bytes");
+        std::fs::remove_file(&draws).ok();
     }
 
     // ─── `from_params` ────────────────────────────────────────────────

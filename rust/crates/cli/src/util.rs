@@ -2437,8 +2437,17 @@ pub fn parse_table_text(content: &str, path: &std::path::Path) -> Result<Vec<ir:
 }
 
 /// Load parameter overrides from a TOML file.
-#[expect(clippy::disallowed_methods, reason = "parses the params file its caller names: `--params` and `--fixed-file` (declared `#[input(identity)]`) in `params_resolver` and `profile`, a `from_params` start, a `[synthetic]` truth file, a stored run's files copied out through the store, or the `--dry-run` listing, which stores nothing")]
+#[expect(clippy::disallowed_methods, reason = "parses the params file its caller names: `--params` and `--fixed-file` (declared `#[input(identity)]`) in `params_resolver` and `profile`, a `[synthetic]` truth file, a stored run's files copied out through the store, or the `--dry-run` listing, which stores nothing")]
 pub fn load_params_toml(path: &str) -> Result<HashMap<String, f64>, String> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("{}: {}", path, e))?;
+    parse_params_text(path, &content)
+}
+
+/// Parameter values from the text of a params file, read as
+/// [`load_params_toml`] reads the file at `path`; `path` chooses the format
+/// by its extension and names the file in errors.
+pub fn parse_params_text(path: &str, content: &str) -> Result<HashMap<String, f64>, String> {
     // gh#637 (ebola item 9): a `.tsv` params file is the column-per-parameter
     // format `simulate --draws FILE` reads and `--draws-out` writes — accept
     // it here (ONE data row; a multi-row cloud is ambiguous as a fixed-θ) so
@@ -2447,10 +2456,8 @@ pub fn load_params_toml(path: &str) -> Result<HashMap<String, f64>, String> {
     if std::path::Path::new(path).extension()
         .map(|e| e.eq_ignore_ascii_case("tsv")).unwrap_or(false)
     {
-        return load_params_single_row_tsv(path);
+        return parse_params_single_row_tsv(path, content);
     }
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| format!("{}: {}", path, e))?;
     let table: toml::Table = content.parse()
         .map_err(|e| format!("TOML parse error in {}: {}", path, e))?;
     let mut out = HashMap::new();
@@ -2487,10 +2494,7 @@ pub fn load_params_toml(path: &str) -> Result<HashMap<String, f64>, String> {
 /// One-row column-per-parameter TSV → parameter map (gh#637). Bookkeeping
 /// columns (`chain`, `draw`, `replicate`, `seed`, `scenario`) are skipped so
 /// a row cut from `draws.tsv` or written by `--draws-out` reads back as-is.
-#[expect(clippy::disallowed_methods, reason = "parses a one-row params TSV whose path `load_params_toml` passes on from its caller")]
-fn load_params_single_row_tsv(path: &str) -> Result<HashMap<String, f64>, String> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| format!("{}: {}", path, e))?;
+fn parse_params_single_row_tsv(path: &str, content: &str) -> Result<HashMap<String, f64>, String> {
     let mut lines = content.lines()
         .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'));
     let header = lines.next().ok_or_else(|| format!("{path}: empty params TSV"))?;
