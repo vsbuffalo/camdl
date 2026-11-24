@@ -358,12 +358,22 @@ fn run_pfilter(
     }
     // The filter's simulator, under the fitting rule: chain-binomial, the
     // model's declared step (a `--dt` or `--fit` `[config] dt` that differs is
-    // refused; 1.0 when nothing declares one), and `--binomial`, else BTPE.
+    // refused; 1.0 when nothing declares one), and `--binomial`, else the
+    // `--fit` method's sampler, else BTPE: a fit's estimate is scored on the
+    // binomial draws it was estimated on.
     let fit_written_dt: Option<f64> =
         fit.as_ref().and_then(|f| crate::fit::config_v2::written_config_dt(f.config_text()));
+    let fit_binomial = fit.as_ref().map(|f| f.binomial()).transpose().unwrap_or_else(|e| {
+        out.fail(format!("error: --fit: {e}"));
+    });
     let (simulator, _) = crate::simulator::Simulator::resolve(
         crate::simulator::ModelSimulate::of(&model_in.simulation),
-        crate::simulator::WrittenSimulator { dt: dt_flag, config_dt: fit_written_dt, binomial, ..Default::default() },
+        crate::simulator::WrittenSimulator {
+            dt: dt_flag,
+            config_dt: fit_written_dt,
+            binomial: binomial.or(fit_binomial.flatten()),
+            ..Default::default()
+        },
         crate::simulator::Basis::Fitting {
             backend: crate::args::types::ForwardBackend::ChainBinomial,
             run: "this filter",

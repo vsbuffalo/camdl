@@ -553,15 +553,29 @@ fn run_profile(
 
     // The simulator every cell integrates with, under the fitting rule: the
     // method's backend, the model's declared step (a `--dt` or `--fit` file's
-    // written `[config] dt` that differs is refused), and `--binomial`, else
-    // BTPE. The cells' own configurations take plain numbers.
+    // written `[config] dt` that differs is refused), and, on chain-binomial,
+    // `--binomial`, else the `--fit` method's sampler, else BTPE: a fit's
+    // estimate is profiled on the binomial draws it was estimated on. The
+    // cells' own configurations take plain numbers.
     let fit_written_dt: Option<f64> =
         fit.as_ref().and_then(|f| crate::fit::config_v2::written_config_dt(f.config_text()));
+    let backend = crate::args::types::ForwardBackend::from(method.backend);
+    let fit_binomial = match (&fit, backend) {
+        (Some(f), crate::args::types::ForwardBackend::ChainBinomial) => {
+            f.binomial().unwrap_or_else(|e| { out.fail(format!("error: --fit: {e}")); })
+        }
+        _ => None,
+    };
     let (simulator, _) = crate::simulator::Simulator::resolve(
         crate::simulator::ModelSimulate::of(&model_pre.simulation),
-        crate::simulator::WrittenSimulator { dt: dt_flag, config_dt: fit_written_dt, binomial, ..Default::default() },
+        crate::simulator::WrittenSimulator {
+            dt: dt_flag,
+            config_dt: fit_written_dt,
+            binomial: binomial.or(fit_binomial),
+            ..Default::default()
+        },
         crate::simulator::Basis::Fitting {
-            backend: crate::args::types::ForwardBackend::from(method.backend),
+            backend,
             run: "this profile",
             file: crate::dt_rule::FIT_FLAG_FILE,
         },

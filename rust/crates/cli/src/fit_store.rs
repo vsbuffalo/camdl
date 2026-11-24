@@ -1835,6 +1835,24 @@ impl FitArg {
     pub fn problem_dep(&self) -> Option<Dep<FitProblem>> {
         self.stored.as_ref().map(|o| o.fit.problem.dep_all())
     }
+
+    /// The binomial sampler the fit's method draws its chain-binomial
+    /// binomials with: a stored run's recorded sampler, else its method's
+    /// `[method] binomial`. `None` when the fit names no method, or its
+    /// method runs on another backend, which draws no binomials.
+    pub fn binomial(&self) -> Result<Option<sim::rng::BinomialAlgorithm>, String> {
+        let Some(method) = self.config.inference.method.as_ref() else { return Ok(None) };
+        if crate::args::types::ForwardBackend::from(method.algorithm.backend())
+            != crate::args::types::ForwardBackend::ChainBinomial
+        {
+            return Ok(None);
+        }
+        let configured = method.algorithm.binomial();
+        match self.stored.as_ref().and_then(|o| o.run_dir()) {
+            Some(run) => crate::fit::forecast_output::fit_binomial(run, Some(configured)).map(Some),
+            None => Ok(Some(configured)),
+        }
+    }
 }
 
 /// The handle a reader was given, parsed. A configuration file is never a

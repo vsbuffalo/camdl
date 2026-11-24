@@ -8483,8 +8483,9 @@ camdl predict RUN            RUN: the positional run handle, same grammar as `fi
                             allow_degenerate_rates (on if it or the flag is)
 --time-format auto|numeric|date
 --pf-max-substeps N         deterministic per-call compute budget
---binomial btpe|btrs        chain-binomial sampler (default btpe); btrs is
-                            faster, draws different values, and keys identity
+--binomial btpe|btrs        chain-binomial sampler (default: the --fit
+                            method's, else btpe); btrs is faster, draws
+                            different values, and keys identity
 --replicates N              independent filter runs (default 1)
 -o, --output FILE           default stdout
 --trace FILE                per-observation diagnostics TSV ("-" for stdout)
@@ -8693,7 +8694,8 @@ part of the leaf's identity, and the full objective leaves the key unchanged.
                             different --dt or --fit [config] dt is refused
 --data / --obs / --time-format / --seed / --parallel / --scenario /
 --enable / --disable / --table / --allow-degenerate-rates /
---pf-max-substeps / --binomial (if2 only)
+--pf-max-substeps / --binomial (if2 only; --binomial defaults to the --fit
+method's sampler, else btpe)
 -o, --output FILE           where the collected table goes (default stdout): one
                             row per grid cell, rendered from the stored points
                             (§2.8): swept values, best loglik over seeds and

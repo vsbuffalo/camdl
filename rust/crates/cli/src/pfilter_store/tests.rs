@@ -150,6 +150,7 @@ fn fixture_files() -> Vec<(&'static str, String)> {
         ("both.tsv", (1..=20).fold("time\tcases\tprevalent\n".to_string(), |s, t| s + &format!("{t}\t{}\t{}\n", 3 + t, 10 + 2 * t))),
         ("patch_cases.tsv", (1..=10).fold("time\tcases\n".to_string(), |s, t| s + &format!("{t}\t{}\n", 2 + t))),
         ("fit_plain.toml", fit_toml("")),
+        ("fit_btrs.toml", fit_toml("").replace("cooling = 0.9\n", "cooling = 0.9\nbinomial = \"btrs\"\n")),
         ("fit_adr.toml", fit_toml("[config]\nallow_degenerate_rates = true\n")),
         ("fit_holdout.toml", fit_toml("[data]\nholdout_after = 15.0\n")),
         ("design2.tsv", "beta_a\n0.4\n0.5\n".into()),
@@ -1160,4 +1161,21 @@ fn an_export_into_a_missing_directory_is_refused_before_the_filter_runs() {
         assert!(err.contains("sub") && err.contains("does not exist"), "{flag}: {err}");
         assert!(!observe(&store).iter().any(|r| r.kind == "pfilter"), "{flag}: nothing is stored");
     }
+}
+
+/// `--fit` names a fit whose method drew its chain-binomial binomials with
+/// `btrs`. The filter scores on the sampler the fit ran, so the run is the
+/// one `--binomial btrs` names, not the default `btpe` one.
+#[test]
+fn a_fit_files_binomial_sampler_is_the_filters() {
+    let id = |extra: &[&str]| -> Vec<Key> {
+        let cwd = workdir();
+        let store = cwd.path().join("camdl-store");
+        let (results, _) = run_in(&store, cwd.path(), extra);
+        results.into_iter().filter(|r| r.kind == crate::pfilter_store::Pfilter::KIND).map(|r| r.run_id).collect()
+    };
+    let from_fit = id(&["--fit", "fit_btrs.toml"]);
+    assert_eq!(from_fit.len(), 1, "{from_fit:?}");
+    assert_eq!(from_fit, id(&["--fit", "fit_btrs.toml", "--binomial", "btrs"]), "the fit's sampler, btrs");
+    assert_ne!(from_fit, id(&["--fit", "fit_plain.toml"]), "not the default sampler");
 }

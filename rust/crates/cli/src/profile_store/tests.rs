@@ -179,6 +179,7 @@ fn fixture_files() -> Vec<(&'static str, String)> {
         ("w1.tsv", "1.0\n0.5\n".into()),
         ("w2.tsv", "1.0\n0.7\n".into()),
         ("fit.toml", fit_toml("beta_b = 0.2\ngamma = 0.2\n")),
+        ("fit_btrs.toml", fit_toml("beta_b = 0.2\ngamma = 0.2\n").replace("cooling = 0.9\n", "cooling = 0.9\nbinomial = \"btrs\"\n")),
         ("fit2.toml", fit_toml("beta_b = 0.25\ngamma = 0.2\n")),
         ("fit_scenario.toml", fit_toml("beta_b = 0.2\n")),
         ("fit_other_model.toml", fit_toml("beta_b = 0.2\ngamma = 0.2\n").replace("sir.ir.json", "sir_other.ir.json")),
@@ -1230,4 +1231,25 @@ fn list_show_and_cat_read_the_stored_profile() {
     let id = listed[0]["points"][0].as_str().unwrap()[..12].to_string();
     assert!(read(&["show", &id]).contains("final_loglik"));
     assert!(read(&["cat", &id]).starts_with("# Per-start MLE"));
+}
+
+/// `--fit` names a fit whose method drew its chain-binomial binomials with
+/// `btrs`. Each IF2 cell runs on the sampler the fit ran, so the points are
+/// the ones `--binomial btrs` names, not the default `btpe` ones.
+#[test]
+fn a_fit_files_binomial_sampler_is_the_profiles() {
+    let ids = |fit: &str, extra: &[&str]| -> Vec<Key> {
+        let cwd = workdir();
+        let store = cwd.path().join("camdl-store");
+        let mut line = vec!["sir.ir.json", "--fit", fit, "--sweep", "beta_a=0.3", "--particles", "20",
+            "--iterations", "2", "--n-starts", "1", "--seeds", "1"];
+        line.extend_from_slice(extra);
+        let out = camdl(cwd.path(), &store, &argv(&profile_from(&line)), &[]);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        points(&store).into_keys().collect()
+    };
+    let from_fit = ids("fit_btrs.toml", &[]);
+    assert_eq!(from_fit.len(), 1, "{from_fit:?}");
+    assert_eq!(from_fit, ids("fit_btrs.toml", &["--binomial", "btrs"]), "the fit's sampler, btrs");
+    assert_ne!(from_fit, ids("fit.toml", &[]), "not the default sampler");
 }

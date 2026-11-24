@@ -323,9 +323,10 @@ pub struct ProfileCore {
     #[input(identity)]
     pub pf_max_substeps: Option<u64>,
 
-    /// Binomial sampler for the chain-binomial draws: `btpe` (default) or
-    /// `btrs` (Hörmann 1993; faster). The two are not bit-compatible, so a
-    /// `btrs` point is a result of its own. Refused for an nl-* cell.
+    /// Binomial sampler for the chain-binomial draws: `btpe` or `btrs`
+    /// (Hörmann 1993; faster). Default: the `--fit` method's sampler, else
+    /// `btpe`. The two are not bit-compatible, so a `btrs` point is a result
+    /// of its own. Refused for an nl-* cell.
     #[arg(long, value_name = "SAMPLER",
           value_parser = |v: &str| v.parse::<sim::rng::BinomialAlgorithm>())]
     #[input(identity, vary = crate::input_fixtures::other_binomial)]
@@ -400,9 +401,10 @@ pub struct PfilterCore {
     #[input(execution, exercised_by = crate::input_fixtures::pfilter_max_substeps)]
     pub pf_max_substeps: Option<u64>,
 
-    /// Binomial sampler for the chain-binomial draws: `btpe` (default) or
-    /// `btrs` (Hörmann 1993; faster). The two are not bit-compatible, so a
-    /// `btrs` run is a result of its own.
+    /// Binomial sampler for the chain-binomial draws: `btpe` or `btrs`
+    /// (Hörmann 1993; faster). Default: the `--fit` method's sampler, else
+    /// `btpe`. The two are not bit-compatible, so a `btrs` run is a result of
+    /// its own.
     #[arg(long, value_name = "SAMPLER",
           value_parser = |v: &str| v.parse::<sim::rng::BinomialAlgorithm>())]
     #[input(identity, vary = crate::input_fixtures::other_binomial)]
