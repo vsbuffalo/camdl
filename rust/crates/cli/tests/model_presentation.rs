@@ -121,3 +121,39 @@ fn a_compiled_model_has_no_render_and_says_so() {
     assert!(!found[0].join("model.render.json").exists());
     assert!(!found[0].join("model.graph.json").exists());
 }
+
+/// A reader that names the simulation by its folder, as camdl-scope does,
+/// is given the presentation of the model the simulation ran.
+#[test]
+fn a_result_folder_names_its_model_presentation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let model = tmp.path().join("sir.camdl");
+    std::fs::write(&model, MODEL).unwrap();
+    let store = tmp.path().join("store");
+    simulate(&model, &store);
+    let presentation = &presentations(&store)[0];
+
+    let mut stack = vec![store.clone()];
+    let mut cell = None;
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if path.join("traj.tsv").exists() {
+                    cell = Some(path.clone());
+                }
+                stack.push(path);
+            }
+        }
+    }
+    let cell = cell.expect("a simulated cell");
+    let out = camdl(&["path", &cell.to_string_lossy(), "model_presentation:render", "--store", &store.to_string_lossy()]);
+    assert!(out.status.success(), "path: {}", String::from_utf8_lossy(&out.stderr));
+    let printed = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    assert_eq!(
+        std::fs::canonicalize(&printed).unwrap(),
+        std::fs::canonicalize(presentation.join("model.render.json")).unwrap()
+    );
+    let traj = camdl(&["path", &cell.to_string_lossy(), "traj", "--store", &store.to_string_lossy()]);
+    assert!(traj.status.success(), "the cell's own files are found as before: {}", String::from_utf8_lossy(&traj.stderr));
+}

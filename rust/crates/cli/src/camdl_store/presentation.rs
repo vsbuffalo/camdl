@@ -295,3 +295,32 @@ pub(crate) fn present(store: &Store, handle: &Handle, model: &Dep<CompiledModel>
         }),
     }
 }
+
+/// The presentation of the model the stored result `run_id` ran: the one the
+/// compiled-model entries name in the latest invocation that listed the
+/// result and whose compiled-model entries name exactly one; otherwise, the
+/// same for the result's upstream (a prediction from a stored fit compiles
+/// nothing itself). `None` when no such invocation exists.
+pub(crate) fn presentation_of(store: &Store, run_id: store::Key) -> Option<store::Key> {
+    let invocations = store.invocations();
+    let mut at = Some(run_id);
+    while let Some(id) = at {
+        let named = invocations.iter().rev().filter(|inv| inv.entries().iter().any(|(_, k, _)| *k == id)).find_map(|inv| {
+            let shown: std::collections::BTreeSet<String> = inv
+                .members::<CompiledModel>()
+                .ok()?
+                .into_iter()
+                .filter_map(|(_, labels)| labels.presentation)
+                .collect();
+            match shown.len() {
+                1 => shown.into_iter().next(),
+                _ => None,
+            }
+        });
+        if let Some(hex) = named {
+            return store::Key::from_hex(&hex).ok();
+        }
+        at = store.upstream_of(id).ok().flatten();
+    }
+    None
+}

@@ -8,7 +8,9 @@
 //! A [`Source`] names the candidate results ([`candidates`]): for an output
 //! manifest, each entry in the manifest's order; for a label, each completed
 //! result its invocation listed, in that order; for a run id, a prefix or a
-//! folder, the one result and then the by-products stored for it. [`Narrow`]
+//! folder, the one result and then the by-products stored for it, and, for a
+//! name qualified by `model_presentation`, the presentation of the model the
+//! result ran ([`with_presentation`]). [`Narrow`]
 //! keeps those of one kind or whose run id begins with a prefix. A name is
 //! looked up among them by rules tried in order: a name qualified by a kind
 //! (`fit_run:draws`) among that kind's results, a logical name (run spec
@@ -526,10 +528,33 @@ fn is_primary(located: &Located) -> bool {
         && located.kind() != <crate::fit_store::FitProblem as store::Artifact>::KIND
 }
 
+/// For a run id, a prefix or a folder and a name qualified by
+/// `model_presentation` (`model_presentation:render`), `cands` with the
+/// presentation of the model the result ran added last
+/// ([`crate::camdl_store::presentation::presentation_of`]). A label and a
+/// manifest list the presentation among their results already, and an
+/// unqualified name is looked up among the result and its by-products alone.
+fn with_presentation(store: &Store, source: &Source, name: &str, mut cands: Candidates) -> Result<Candidates, FileRefusal> {
+    let kind = <crate::camdl_store::ModelPresentation as store::Artifact>::KIND;
+    let qualified = name.split_once(':').is_some_and(|(k, _)| k == kind);
+    let Source::Handle(handle) = source else { return Ok(cands) };
+    if !qualified || matches!(handle, Handle::Label { .. }) {
+        return Ok(cands);
+    }
+    let Some(id) = store.locate_handle(handle).ok().map(|l| l.run_id()) else { return Ok(cands) };
+    if let Some(key) = crate::camdl_store::presentation::presentation_of(store, id) {
+        match store.locate(key) {
+            Ok(located) => cands.found.push(Candidate::new(located, serde_json::Value::Null, None)?),
+            Err(e) => cands.unavailable.push(Unavailable { kind: kind.to_string(), run_id: key, why: e.to_string() }),
+        }
+    }
+    Ok(cands)
+}
+
 /// The stored file `name` names among the results `source` and `narrow`
 /// select. A name more than one of them holds is refused with the holders.
 pub(crate) fn resolve_file(store: &Store, source: &Source, narrow: &Narrow, name: &str) -> Result<ResolvedFile, FileRefusal> {
-    let cands = candidates(store, source, narrow)?;
+    let cands = with_presentation(store, source, name, candidates(store, source, narrow)?)?;
     let mut found = lookup(store, source, &cands, name)?;
     if found.len() == 1 {
         return Ok(found.remove(0));
@@ -545,7 +570,7 @@ pub(crate) fn resolve_file(store: &Store, source: &Source, narrow: &Narrow, name
 /// Every result among those `source` and `narrow` select that holds `name`,
 /// in the source's order, with the file it holds under that name.
 pub(crate) fn resolve_each(store: &Store, source: &Source, narrow: &Narrow, name: &str) -> Result<Vec<ResolvedFile>, FileRefusal> {
-    let cands = candidates(store, source, narrow)?;
+    let cands = with_presentation(store, source, name, candidates(store, source, narrow)?)?;
     lookup(store, source, &cands, name)
 }
 
