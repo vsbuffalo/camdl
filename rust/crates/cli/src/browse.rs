@@ -370,7 +370,7 @@ impl StoredFitResult {
             }
             let id = s.identity();
             field("problem", &id.chain.problem.id().key().to_hex());
-            field("method", &id.chain.method.algorithm);
+            field("method", &id.chain.method.algorithm());
             field("seed", &id.chain.seed.seed);
             field("length", &id.length);
             if let Some(base) = &id.resumed_from {

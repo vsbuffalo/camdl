@@ -41,7 +41,7 @@ use store::{Begin, ContentAddressed, ContentArtifact, Identity, Reuse, Stored};
 use crate::camdl_store::{CompiledModel, ProcessSeed};
 use crate::fit::config_v2::{self, Algorithm};
 use crate::fit_store::{
-    ChainIdentity, FitProblem, FitRun, FitRunIdentity, MethodSettings, ModelSourceFile, ProblemLabels,
+    ChainIdentity, FitProblem, FitRun, FitRunIdentity, MethodIdentity, ModelSourceFile, ProblemLabels,
     RunLabels, StartInput, StartSource,
 };
 use crate::out::Out;
@@ -520,7 +520,7 @@ fn run_fit(mut out: Out, cx: FitCommand<'_>) -> Vec<String> {
         _ => None,
     };
     let run_files = PlannedMethod::of(&method.algorithm).files(chain_count(&method.algorithm), starts_ext.as_deref());
-    let (method_settings, length) = MethodSettings::of(&method).unwrap_or_else(|e| out.fail(format!("error: {e}")));
+    let (method_identity, length) = MethodIdentity::of(&method).unwrap_or_else(|e| out.fail(format!("error: {e}")));
 
     // ── Each problem, and the runs on it ──────────────────────────────────
     for (cell_i, cell) in cells.iter().enumerate() {
@@ -618,7 +618,7 @@ fn run_fit(mut out: Out, cx: FitCommand<'_>) -> Vec<String> {
             out.say(format_args!("\n── method: {method_name} ──"));
             let chain = ChainIdentity {
                 problem: stored_problem.dep_all(),
-                method: method_settings.clone(),
+                method: method_identity.clone(),
                 perturbation: perturbation.clone(),
                 jacobian_model: jacobian_model.clone(),
                 seed: ProcessSeed { seed },

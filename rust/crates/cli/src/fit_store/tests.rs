@@ -161,9 +161,9 @@ fn store_problem(o: &Opened, problem: &ResolvedProblem) -> Stored<FitProblem> {
 
 fn run_identity(problem: &Stored<FitProblem>, config: &FitConfig) -> (FitRunIdentity, RunLabels) {
     let method = config.inference.method.as_ref().unwrap();
-    let (settings, length) = MethodSettings::of(method).unwrap();
+    let (settings, length) = MethodIdentity::of(method).unwrap();
     let (_, perturbation) = split_estimate(&config.problem.estimate).unwrap();
-    let labels = RunLabels { method: settings.algorithm.clone(), seed: 1, quantities: None };
+    let labels = RunLabels { method: method.algorithm.method_name().to_string(), seed: 1, quantities: None };
     let chain = ChainIdentity {
         problem: problem.dep_all(),
         method: settings,
@@ -635,11 +635,11 @@ fn a_method_length_is_outside_its_settings() {
         );
         toml::from_str(&text).unwrap()
     };
-    let (a, la) = MethodSettings::of(&parse(200)).unwrap();
-    let (b, lb) = MethodSettings::of(&parse(400)).unwrap();
+    let (a, la) = MethodIdentity::of(&parse(200)).unwrap();
+    let (b, lb) = MethodIdentity::of(&parse(400)).unwrap();
     assert_eq!((la, lb), (200, 400));
     assert_eq!(a.key(), b.key());
-    assert_eq!(a.algorithm, "pmmh");
+    assert_eq!(a.record().algorithm(), "pmmh");
 }
 
 /// `[estimate]` keeps the file's order through the stored problem, which
@@ -671,7 +671,7 @@ fn a_non_finite_method_setting_is_refused() {
              iterations = 2\ncooling = {cooling}\nstarts = \"from_prior\"\n"
         );
         let method: Method = toml::from_str(&text).unwrap();
-        assert!(MethodSettings::of(&method).is_err(), "cooling = {cooling}");
+        assert!(MethodIdentity::of(&method).is_err(), "cooling = {cooling}");
         assert!(StartSource::of(&method, StartInput::None).is_err(), "cooling = {cooling}");
     }
 }

@@ -1041,30 +1041,18 @@ pub enum Algorithm {
         /// gh#747: which binomial sampler the chain-binomial draws use.
         /// `btpe` (default) or `btrs`.
         ///
-        /// Selecting `btrs` CHANGES DRAWS — a different rejection scheme
-        /// accepts different values from the same stream — so this field is
-        /// deliberately part of the method's identity. `identity_payload` is
-        /// subtractive, so it is hashed by being here; two runs differing only
-        /// in this field get different addresses and cannot be served from one
-        /// another's leaf. That is why it is a typed field and not an
-        /// environment variable (gh#241 removed the last of those rather than
-        /// hash it).
+        /// Selecting `btrs` changes the draws (a different rejection scheme
+        /// accepts different values from the same stream), so this field is
+        /// part of the method's identity (`fit_store::MethodIdentity`): two
+        /// runs differing only in it are two runs. That is why it is a typed
+        /// field and not an environment variable.
         ///
-        /// `serde(default)` is load-bearing: without it every existing
-        /// `fit.toml` that predates this field fails to deserialize.
-        ///
-        /// `skip_serializing_if` keeps a `btpe` method's payload BYTE-IDENTICAL
-        /// to what it was before this field existed, so adding the field
-        /// orphans no stored leaf and breaks no in-flight `--resume`. Only a
-        /// `btrs` method serialises it, and so only a `btrs` method gets a new
-        /// address — which is the only place the guarantee is needed.
-        ///
-        /// The predicate tests `== Btpe`, NOT `== default()`, and the
-        /// difference bites exactly once: if the default ever becomes `Btrs`
-        /// (gh#761), a default-tracking predicate would silently make ABSENCE
-        /// mean `btrs`, retroactively changing what every already-stored
-        /// address asserts. Absence must mean BTPE forever, because that is
-        /// what every run predating this field actually used.
+        /// `serde(default)` lets a `fit.toml` that does not write the field
+        /// parse, as `btpe`. `skip_serializing_if` writes it only for `btrs`,
+        /// so a written method (`method.toml`) names it only then. The
+        /// predicate tests `== Btpe`, not `== default()`: if the default
+        /// became `btrs`, a default-tracking predicate would make an absent
+        /// field in an already-written method mean `btrs`.
         #[serde(default, skip_serializing_if = "is_btpe")]
         binomial: sim::rng::BinomialAlgorithm,
         #[serde(default)]
@@ -1089,8 +1077,8 @@ pub enum Algorithm {
         /// Posterior trajectory samples saved to disk (evenly spaced
         /// post-burn-in). It changes the stored trajectories, not the
         /// chain's draws, and like every `[method]` key but the length and
-        /// `starts` it is part of the run's method settings
-        /// (`fit_store::MethodSettings`), so a different count is a
+        /// `starts` it is part of the run's method identity
+        /// (`fit_store::MethodIdentity`), so a different count is a
         /// different run. Default: 200.
         #[serde(default = "default_n_trajectories")]
         n_trajectories: usize,
@@ -1112,14 +1100,11 @@ pub enum Algorithm {
         /// Spelled `ancestor_sampling = false` in the `[method]` table or
         /// `--no-ancestor-sampling` on the CLI. Default: true.
         ///
-        /// Identity: disabling AS changes the sampled draws, so `false` must
-        /// re-key — and it does, by serializing into the payload.
-        /// `skip_serializing_if` keeps the default's payload byte-identical to
-        /// the pre-field format, so adding the field orphans no stored leaf
-        /// and breaks no in-flight `--resume`. The predicate tests `== true`
-        /// literally, not `== default()`: absence must mean AS-on permanently,
-        /// because that is what every run predating the field did (the same
-        /// reasoning as `binomial`'s absence-means-btpe).
+        /// Disabling AS changes the sampled draws, so the field is part of the
+        /// method's identity. `skip_serializing_if` writes it only when
+        /// `false`; the predicate tests `== true` literally, not
+        /// `== default()`, so an absent field in a written method means AS on
+        /// whatever the default becomes (as for `binomial`).
         #[serde(default = "default_ancestor_sampling",
                 skip_serializing_if = "ancestor_sampling_is_on")]
         ancestor_sampling: bool,
@@ -1547,33 +1532,15 @@ impl Algorithm {
         }
     }
 
-    /// The `[method]` key that holds the method's length, for a method a
-    /// resume can extend: PGAS `sweeps`, PMMH and MH `iterations`. A resumed
-    /// run shares every other key with its base, so the length is left out of
-    /// the method's identity and keyed on its own.
-    pub(crate) fn extension_key(&self) -> Option<&'static str> {
-        match self {
-            Algorithm::PGAS { .. } => Some("sweeps"),
-            Algorithm::PMMH { .. } | Algorithm::Mh { .. } => Some("iterations"),
-            Algorithm::IF2 { .. }
-            | Algorithm::PFilter { .. }
-            | Algorithm::NlSbplx(_)
-            | Algorithm::NlBobyqa(_)
-            | Algorithm::NlLbfgs(_) => None,
-        }
-    }
-
     /// Overwrite this method's sampler and output knobs from the CLI.
     ///
-    /// gh#514 / gh#540: these are keyed fields — `Method::identity_payload`
-    /// folds every one of them into the method hash — but the CLI overrides
-    /// used to be applied at the *dispatch* site, well after the CAS claim, so
-    /// two runs differing only in a flag shared a `run_id` and the second was
-    /// served the first's result. Writing them into the in-memory method
-    /// BEFORE the claim makes a different flag a different artifact, exactly
-    /// as a different toml value already is. Any CLI override of a keyed field
-    /// must write into the config before `cas::fit_level_hash` for the same
-    /// reason. `--starts` takes the same route through `Method::starts`.
+    /// Every field these flags set is part of the run's method identity
+    /// (`fit_store::MethodIdentity`), so they are written into the in-memory
+    /// method before that identity is taken: a different flag is then a
+    /// different run, as a different toml value is. A flag applied after the
+    /// identity was taken would let two runs that differ in it share a run id,
+    /// and the second be served the first's result. `--starts` takes the same
+    /// route through `Method::starts`.
     ///
     /// A `None` argument leaves the field as the toml declared it, so a run
     /// with no CLI overrides keys identically to a bare `fit run` of the same
@@ -3834,30 +3801,30 @@ pub(crate) fn format_dataset_dir(idx: usize) -> String {
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 
-/// What a run's identity keys of a method, for the tests below: the settings
-/// `MethodSettings::of` keys (every key but the length and `starts`), with
-/// the algorithm and the starts rule `StartSource::of` keys beside them.
+/// What a run's identity keys of a method, for the tests below: the record of
+/// its `MethodIdentity` under `method`, and the starts rule `StartSource::of`
+/// keys under `starts`. Two methods key the same exactly when their payloads
+/// are equal, since a record hashes as its identity.
 #[cfg(test)]
 impl Method {
     fn identity_payload(&self) -> serde_json::Value {
-        let (settings, _) = crate::fit_store::MethodSettings::of(self).expect("a finite method keys");
-        let mut v: serde_json::Value = serde_json::from_str(&settings.settings).expect("the settings are JSON");
-        let o = v.as_object_mut().expect("the settings are an object");
-        o.insert("algorithm".into(), serde_json::Value::String(settings.algorithm));
+        use store::Identity;
+        let (method, _) = crate::fit_store::MethodIdentity::of(self).expect("a finite method keys");
+        let mut v = serde_json::json!({ "method": method.record() });
         if let Ok(rule) = self.starts() {
-            o.insert("starts".into(), rule.identity_value());
+            v["starts"] = rule.identity_value();
         }
         v
     }
 }
 
-/// The length a run's identity holds apart from its settings, and the
-/// trajectory count its settings hold, for the tests below.
+/// The length a run's identity holds apart from its method, and the
+/// trajectory count its method holds, for the tests below.
 #[cfg(test)]
 impl Algorithm {
-    fn cas_target_length(&self) -> u64 {
+    fn run_length(&self) -> u64 {
         let m = Method { algorithm: self.clone(), starts: Some(crate::fit::starts::ChainStarts::from_prior()) };
-        crate::fit_store::MethodSettings::of(&m).expect("a finite method keys").1
+        crate::fit_store::MethodIdentity::of(&m).expect("a finite method keys").1
     }
 
     fn cas_n_trajectories(&self) -> usize {
@@ -4271,42 +4238,201 @@ starts     = "{starts}"
             "{err}");
     }
 
-    /// The subtractive payload is include-by-default: every method field is in
-    /// the identity unless deliberately subtracted. The enumerated arms it
-    /// replaced swallowed anything they forgot to list, which is the shape
-    /// behind gh#514, gh#540 and the 2026-08-23 batch.
+    /// Every field of every `MethodIdentity` variant is reached from its
+    /// `[method]` key: changing the key, and only it, changes the method's key.
+    /// The cases are checked against the record's own fields, so a field added
+    /// to an identity struct fails here until it has a case. The method's
+    /// length and `starts` are the `[method]` keys outside the method's key.
     #[test]
-    fn identity_payload_includes_every_field_but_the_named_exclusions() {
-        let mut with_starts = pgas_method();
-        with_starts.starts = Some(ChainStarts::from_prior());
-        let payload = with_starts.identity_payload();
-        let obj = payload.as_object().expect("payload is an object");
-        // The extension dimension and the separately-folded output count are
-        // the ONLY omissions.
-        assert!(!obj.contains_key("sweeps"),
-            "the extension dimension stays out (folded by cas_target_length)");
-        assert!(obj.contains_key("n_trajectories"),
-            "the trajectory count is one of the method's settings");
-        // Everything else the method carries is present, under its TOML spelling.
-        for key in ["algorithm", "backend", "chains", "particles", "burn_in", "thin",
-                    "use_nuts", "dense_mass", "max_tree_depth",
-                    "starts", "trajectory_warmup", "csmc_sweeps_per_nuts"] {
-            assert!(obj.contains_key(key),
-                "'{key}' must be in the method identity; present keys: {:?}",
-                obj.keys().collect::<Vec<_>>());
+    fn each_method_identity_field_changes_the_method_key() {
+        use crate::fit_store::MethodIdentity;
+        use crate::run_meta::FitAlgorithm as F;
+        use store::Identity;
+        type Case = (&'static str, Box<dyn Fn(&mut Algorithm)>);
+
+        fn bump(x: &mut usize) { *x += 1 }
+        fn bump_opt(x: &mut Option<usize>) { *x = Some(x.unwrap_or(0) + 1) }
+        fn nudge(x: &mut f64) { *x = *x * 0.5 + 0.01 }
+        fn nudge_opt(x: &mut Option<f64>) { *x = Some(x.unwrap_or(1.0) + 1.0) }
+        fn not(x: &mut bool) { *x = !*x }
+        fn other_backend(b: &mut crate::run_meta::InferenceBackend) {
+            use crate::run_meta::InferenceBackend as B;
+            *b = match b { B::ChainBinomial => B::Ode, B::Ode => B::ChainBinomial };
         }
-        // And the point of the change: a knob the enumerated arm never listed
-        // now re-keys. `loglik_eval` decides how the method's stored MLE is
-        // re-scored, and IF2 hashed it only because that arm full-serialized.
-        let mut hot = scout_method("single");
-        if let Algorithm::IF2 { loglik_eval, .. } = &mut hot.algorithm { loglik_eval.n_particles += 1; }
-        assert_ne!(scout_method("single").identity_payload(), hot.identity_payload(),
-            "a clean-eval knob that changes the stored loglik must re-key");
+        fn other_binomial(b: &mut sim::rng::BinomialAlgorithm) {
+            use sim::rng::BinomialAlgorithm as B;
+            *b = match b { B::Btpe => B::Btrs, B::Btrs => B::Btpe };
+        }
+        fn other_combine(c: &mut CombineMode) {
+            *c = match c { CombineMode::LogMeanExp => CombineMode::Mean, CombineMode::Mean => CombineMode::LogMeanExp };
+        }
+        fn other_combine_opt(c: &mut Option<CombineMode>) {
+            *c = Some(match c { Some(CombineMode::LogMeanExp) => CombineMode::Mean, _ => CombineMode::LogMeanExp });
+        }
+        // One case per field of a variant, reached through `$get`, a function
+        // from the method to the variant's field.
+        macro_rules! case {
+            ($name:literal, $get:expr, $change:expr) => {
+                ($name, Box::new(move |a: &mut Algorithm| $change($get(a))) as Box<dyn Fn(&mut Algorithm)>)
+            };
+        }
+        fn gate_cases(get: fn(&mut Algorithm) -> &mut GateConfig) -> Vec<Case> {
+            vec![
+                case!("gate.a_thresh", get, |g: &mut GateConfig| nudge(&mut g.a_thresh)),
+                case!("gate.decibans_thresh", get, |g: &mut GateConfig| nudge(&mut g.decibans_thresh)),
+            ]
+        }
+        fn dt_check_cases(get: fn(&mut Algorithm) -> &mut DtCheckConfig) -> Vec<Case> {
+            vec![
+                case!("dt_check.enabled", get, |d: &mut DtCheckConfig| not(&mut d.enabled)),
+                case!("dt_check.n_halvings", get, |d: &mut DtCheckConfig| bump(&mut d.n_halvings)),
+                case!("dt_check.n_particles", get, |d: &mut DtCheckConfig| bump_opt(&mut d.n_particles)),
+                case!("dt_check.n_replicates", get, |d: &mut DtCheckConfig| bump_opt(&mut d.n_replicates)),
+                case!("dt_check.threshold_nats", get, |d: &mut DtCheckConfig| nudge_opt(&mut d.threshold_nats)),
+                case!("dt_check.combine", get, |d: &mut DtCheckConfig| other_combine_opt(&mut d.combine)),
+            ]
+        }
+        // Gives a closure that returns a borrow of its argument the signature
+        // `for<'a> Fn(&'a mut Algorithm) -> &'a mut T`.
+        fn reach<T, G: Fn(&mut Algorithm) -> &mut T>(g: G) -> G { g }
+        // `$v` is the variant pattern, `$f` the field it binds.
+        macro_rules! field {
+            ($v:path, $f:ident) => {
+                reach(|a: &mut Algorithm| match a { $v { $f, .. } => $f, _ => unreachable!() })
+            };
+        }
+        fn nlopt(a: &mut Algorithm) -> &mut NloptConfig {
+            match a {
+                Algorithm::NlSbplx(c) | Algorithm::NlBobyqa(c) | Algorithm::NlLbfgs(c) => c,
+                _ => unreachable!(),
+            }
+        }
+        let cases = |algo: F| -> Vec<Case> {
+            match algo {
+                F::If2 => {
+                    let mut v = vec![
+                        case!("backend", field!(Algorithm::IF2, backend), other_backend),
+                        case!("chains", field!(Algorithm::IF2, chains), bump),
+                        case!("particles", field!(Algorithm::IF2, particles), bump),
+                        case!("iterations", field!(Algorithm::IF2, iterations), bump),
+                        case!("cooling", field!(Algorithm::IF2, cooling), nudge),
+                        case!("cooling_target_iters", field!(Algorithm::IF2, cooling_target_iters), bump),
+                        case!("loglik_eval.n_particles", field!(Algorithm::IF2, loglik_eval),
+                              |l: &mut LoglikEvalConfig| bump(&mut l.n_particles)),
+                        case!("loglik_eval.n_replicates", field!(Algorithm::IF2, loglik_eval),
+                              |l: &mut LoglikEvalConfig| bump(&mut l.n_replicates)),
+                        case!("loglik_eval.combine", field!(Algorithm::IF2, loglik_eval),
+                              |l: &mut LoglikEvalConfig| other_combine(&mut l.combine)),
+                        case!("binomial", field!(Algorithm::IF2, binomial), other_binomial),
+                    ];
+                    v.extend(gate_cases(field!(Algorithm::IF2, gate)));
+                    v.extend(dt_check_cases(field!(Algorithm::IF2, dt_check)));
+                    v
+                }
+                F::Pgas => vec![
+                    case!("backend", field!(Algorithm::PGAS, backend), other_backend),
+                    case!("chains", field!(Algorithm::PGAS, chains), bump),
+                    case!("particles", field!(Algorithm::PGAS, particles), bump),
+                    case!("binomial", field!(Algorithm::PGAS, binomial), other_binomial),
+                    case!("burn_in", field!(Algorithm::PGAS, burn_in), bump_opt),
+                    case!("thin", field!(Algorithm::PGAS, thin), bump_opt),
+                    case!("max_tree_depth", field!(Algorithm::PGAS, max_tree_depth), bump),
+                    case!("trajectory_warmup", field!(Algorithm::PGAS, trajectory_warmup), bump),
+                    case!("csmc_sweeps_per_nuts", field!(Algorithm::PGAS, csmc_sweeps_per_nuts), bump),
+                    case!("n_trajectories", field!(Algorithm::PGAS, n_trajectories), bump),
+                    case!("dense_mass", field!(Algorithm::PGAS, dense_mass), not),
+                    case!("use_nuts", field!(Algorithm::PGAS, use_nuts), not),
+                    case!("ancestor_sampling", field!(Algorithm::PGAS, ancestor_sampling), not),
+                ],
+                F::Pmmh => vec![
+                    case!("backend", field!(Algorithm::PMMH, backend), other_backend),
+                    case!("chains", field!(Algorithm::PMMH, chains), bump),
+                    case!("particles", field!(Algorithm::PMMH, particles), bump),
+                    case!("burn_in", field!(Algorithm::PMMH, burn_in), bump_opt),
+                    case!("thin", field!(Algorithm::PMMH, thin), bump_opt),
+                    case!("adapt", field!(Algorithm::PMMH, adapt), not),
+                    case!("adapt_start", field!(Algorithm::PMMH, adapt_start), bump),
+                    case!("binomial", field!(Algorithm::PMMH, binomial), other_binomial),
+                ],
+                F::Mh => {
+                    let mut v = vec![
+                        case!("backend", field!(Algorithm::Mh, backend), other_backend),
+                        case!("chains", field!(Algorithm::Mh, chains), bump),
+                        case!("burn_in", field!(Algorithm::Mh, burn_in), bump_opt),
+                        case!("thin", field!(Algorithm::Mh, thin), bump_opt),
+                        case!("adapt", field!(Algorithm::Mh, adapt), not),
+                        case!("adapt_start", field!(Algorithm::Mh, adapt_start), bump),
+                        case!("burnin_dt", field!(Algorithm::Mh, burnin_dt), nudge_opt),
+                    ];
+                    v.extend(dt_check_cases(field!(Algorithm::Mh, dt_check)));
+                    v
+                }
+                F::Pfilter => vec![
+                    case!("backend", field!(Algorithm::PFilter, backend), other_backend),
+                    case!("particles", field!(Algorithm::PFilter, particles), bump),
+                    case!("replicates", field!(Algorithm::PFilter, replicates), bump_opt),
+                    case!("record_ancestry", field!(Algorithm::PFilter, record_ancestry), not),
+                    case!("record_prequential", field!(Algorithm::PFilter, record_prequential), not),
+                    case!("binomial", field!(Algorithm::PFilter, binomial), other_binomial),
+                ],
+                F::NlSbplx | F::NlBobyqa | F::NlLbfgs => {
+                    let mut v = vec![
+                        case!("backend", nlopt, |c: &mut NloptConfig| other_backend(&mut c.backend)),
+                        case!("chains", nlopt, |c: &mut NloptConfig| bump(&mut c.chains)),
+                        case!("tolerance", nlopt, |c: &mut NloptConfig| nudge(&mut c.tolerance)),
+                        case!("max_evals", nlopt, |c: &mut NloptConfig| bump(&mut c.max_evals)),
+                    ];
+                    v.extend(gate_cases(reach(|a: &mut Algorithm| &mut nlopt(a).gate)));
+                    v.extend(dt_check_cases(reach(|a: &mut Algorithm| &mut nlopt(a).dt_check)));
+                    v
+                }
+            }
+        };
+        // The record's fields, nested structs as dotted paths.
+        fn leaves(prefix: &str, v: &serde_json::Value, out: &mut Vec<String>) {
+            match v.as_object() {
+                Some(o) => for (k, x) in o {
+                    let name = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
+                    leaves(&name, x, out);
+                },
+                None => out.push(prefix.to_string()),
+            }
+        }
+        let key = |m: &Method| MethodIdentity::of(m).expect("a finite method keys").0.key();
+        for algo in [F::If2, F::Pgas, F::Pmmh, F::Mh, F::Pfilter, F::NlSbplx, F::NlBobyqa, F::NlLbfgs] {
+            let base = base_method_for(algo);
+            let (identity, _) = MethodIdentity::of(&base).unwrap();
+            let record = serde_json::to_value(identity.record()).unwrap();
+            let (variant, fields) = record.as_object().unwrap().iter().next().unwrap();
+            assert_eq!(identity.record().algorithm(), algo.as_str(), "{variant}");
+            let mut expected = Vec::new();
+            leaves("", fields, &mut expected);
+            expected.sort();
+            let cases = cases(algo);
+            let mut named: Vec<String> = cases.iter().map(|(n, _)| n.to_string()).collect();
+            named.sort();
+            assert_eq!(named, expected, "{}: one case per field of the identity", algo.as_str());
+            for (name, change) in &cases {
+                let mut changed = base.clone();
+                change(&mut changed.algorithm);
+                assert_ne!(key(&base), key(&changed), "{}: `{name}` must change the method's key", algo.as_str());
+            }
+            // The other two `[method]` keys: the length and the start rule.
+            let mut outside = base.clone();
+            outside.starts = Some(ChainStarts::Spread(Spread::Lhs));
+            match &mut outside.algorithm {
+                Algorithm::PGAS { sweeps: n, .. }
+                | Algorithm::PMMH { iterations: n, .. }
+                | Algorithm::Mh { iterations: n, .. } => *n += 1,
+                _ => {}
+            }
+            assert_eq!(key(&base), key(&outside), "{}: the length and `starts` are outside the method's key", algo.as_str());
+        }
     }
 
     /// The extension dimension must stay OUT: a resumed run extends a base
     /// run, so the two share a prefix identity by design — the length reaches
-    /// identity through `cas_target_length` instead.
+    /// identity through `run_length` instead.
     #[test]
     fn extension_dimension_stays_out_of_the_payload() {
         let base = pmmh_method();
@@ -4315,8 +4441,8 @@ starts     = "{starts}"
         assert_eq!(base.identity_payload(), longer.identity_payload(),
             "iterations is PMMH's extension dimension — it must not re-key the \
              payload, or --resume could never share a prefix identity");
-        assert_ne!(base.algorithm.cas_target_length(), longer.algorithm.cas_target_length(),
-            "…but it MUST reach identity through cas_target_length");
+        assert_ne!(base.algorithm.run_length(), longer.algorithm.run_length(),
+            "…but it MUST reach identity through run_length");
     }
 
     /// `--n-trajectories` is the sharpest case, because `cas.rs` documents it
@@ -4335,12 +4461,9 @@ starts     = "{starts}"
         assert_eq!(more.algorithm.cas_n_trajectories(), 500);
     }
 
-    /// AS-off changes the draws, so it is count-in-the-key; AS-on (the
-    /// default) keeps the pre-field payload bytes, so nothing re-keys.
+    /// AS-off changes the draws, so it is in the method's identity.
     #[test]
     fn ancestor_sampling_off_is_in_the_method_identity() {
-        // Disabling AS changes the sampled draws, so it must re-key
-        // (count-in-the-key discipline)…
         let on = pgas_method();
         let mut off = pgas_method();
         if let Algorithm::PGAS { ref mut ancestor_sampling, .. } = off.algorithm {
@@ -4348,16 +4471,6 @@ starts     = "{starts}"
         }
         assert_ne!(on.identity_payload(), off.identity_payload(),
             "an AS-off fit must not be served from (or stored over) an AS-on leaf");
-        // …while the DEFAULT serializes to the pre-field bytes, so no stored
-        // leaf is orphaned and no in-flight --resume breaks. The byte golden
-        // (`identity_payload_is_byte_stable_against_recompiles`) is the other
-        // half of this assertion.
-        assert!(!on.identity_payload().as_object().unwrap()
-                    .contains_key("ancestor_sampling"),
-            "the default must keep the payload byte-identical to the pre-field format");
-        assert!(off.identity_payload().as_object().unwrap()
-                    .contains_key("ancestor_sampling"),
-            "the non-default must serialize, or it could not re-key");
     }
 
     /// `ancestor_sampling = false` is the TOML spelling; absent means on.
@@ -8203,10 +8316,8 @@ decibans_thresh = 100.0
 
     /// gh#747: the two samplers must not collide in the store.
     ///
-    /// This is the assertion the whole design turns on, and it is deliberately
-    /// written against the PAYLOAD rather than the attribute: it survives any
-    /// future serde mistake in either direction — a `skip_serializing_if` that
-    /// starts skipping `btrs`, or one that stops skipping `btpe`.
+    /// Written against the payload, the record of the method's identity, so it
+    /// checks the value the run is keyed by.
     #[test]
     fn binomial_sampler_is_in_the_method_identity() {
         let mut btpe = make_pgas_method(1000);
@@ -8225,15 +8336,10 @@ decibans_thresh = 100.0
              would be served from the other's leaf. That is the exact failure \
              an environment variable would have caused, and the reason this is \
              a typed field.");
-        assert!(b.contains(r#""binomial":"btrs""#),
-            "a btrs method's payload must NAME the sampler; got {b}");
-        // NOTE the key form, not the bare substring: `"backend":"chain_binomial"`
-        // contains "binomial" and made the naive check fail.
-        assert!(!a.contains(r#""binomial":"#),
-            "a btpe method's payload must stay byte-identical to the pre-field \
-             format, so adding this field orphans no stored leaf. Absence means \
-             BTPE — permanently, and NOT 'whatever the default is'. If the \
-             default ever flips (gh#761), `is_btpe` must not follow it. Got {a}");
+        assert!(b.contains(r#""binomial":"Btrs""#),
+            "a btrs method's payload must name the sampler; got {b}");
+        assert!(a.contains(r#""binomial":"Btpe""#),
+            "a btpe method's payload must name the sampler; got {a}");
     }
 
     /// gh#747: the TOML spelling round-trips, and an absent field is BTPE.
@@ -8261,8 +8367,8 @@ decibans_thresh = 100.0
 
     /// gh#747, extended past PGAS: every particle-filter method parses
     /// `binomial = "btrs"`, an absent field is BTPE, a BTRS method gets a
-    /// distinct identity that names the sampler, and a BTPE one keeps the
-    /// payload it had before the field existed. One body for the three methods,
+    /// distinct identity that names the sampler, and a BTPE one names its own.
+    /// One body for the three methods,
     /// so a method added to the field later cannot skip half the checks.
     #[test]
     fn binomial_sampler_parses_and_keys_on_every_particle_method() {
@@ -8285,52 +8391,36 @@ decibans_thresh = 100.0
             let a = serde_json::to_string(&absent.identity_payload()).unwrap();
             let b = serde_json::to_string(&btrs.identity_payload()).unwrap();
             assert_ne!(a, b, "{head}: btpe and btrs share one identity payload");
-            assert!(b.contains(r#""binomial":"btrs""#), "{head}: btrs payload must name it; got {b}");
-            assert!(!a.contains(r#""binomial":"#),
-                "{head}: a btpe payload must stay byte-identical to the pre-field format; got {a}");
+            assert!(b.contains(r#""binomial":"Btrs""#), "{head}: btrs payload must name it; got {b}");
+            assert!(a.contains(r#""binomial":"Btpe""#), "{head}: btpe payload must name it; got {a}");
         }
     }
 
+    /// The record of a fixed PGAS method's identity, as `identity.json` holds
+    /// it, with the starts rule: what a run's chain identity holds of its
+    /// method, and what a resumed run's base must match. A change here re-keys
+    /// every PGAS run.
     #[test]
     fn identity_payload_is_byte_stable_against_recompiles() {
-        // Golden bytes for a fixed PGAS method. Locks the
-        // serialization order so a recompile that silently changes
-        // serde_json's key ordering would invalidate every
-        // resume_state.bin in the wild — we'd rather fail this test
-        // than have users discover the breakage later.
-        //
-        // serde_json::to_vec on serde_json::json!{} preserves the
-        // declaration order of keys in the Value tree (BTreeMap-
-        // like behavior is opt-in via `preserve_order` feature, off
-        // by default; default Map sorts lexically). Either way the
-        // result is deterministic, so a golden constant catches drift.
         let method = make_pgas_method(1000);
-        let payload_bytes = serde_json::to_vec(&method.identity_payload()).unwrap();
-        let payload_str = String::from_utf8(payload_bytes).unwrap();
-        // The method's own serialization less its length, with the starts
-        // rule: what a run's chain identity holds of its method, and what a
-        // resumed chain's state must match.
-        let expected = r#"{"algorithm":"pgas","backend":"chain_binomial","burn_in":200,"chains":4,"csmc_sweeps_per_nuts":1,"dense_mass":true,"max_tree_depth":10,"n_trajectories":200,"particles":100,"starts":"uniform_unconstrained","thin":2,"trajectory_warmup":0,"use_nuts":true}"#;
+        let payload_str = serde_json::to_string(&method.identity_payload()).unwrap();
+        let expected = r#"{"method":{"Pgas":{"ancestor_sampling":true,"backend":"ChainBinomial","binomial":"Btpe","burn_in":200,"chains":4,"csmc_sweeps_per_nuts":1,"dense_mass":true,"max_tree_depth":10,"n_trajectories":200,"particles":100,"thin":2,"trajectory_warmup":0,"use_nuts":true}},"starts":"uniform_unconstrained"}"#;
         assert_eq!(payload_str, expected,
-            "identity_payload byte format drifted — every existing \
-             resume_state.bin would be invalidated. If this change is \
-             intentional, update the golden constant AND ship a note \
-             to users that --resume against pre-change chains will \
-             reject.");
+            "the PGAS method identity's record changed, which re-keys every \
+             PGAS run; if that is intended, update this constant and say so \
+             in the commit");
     }
 
+    /// As [`identity_payload_is_byte_stable_against_recompiles`], for PMMH.
     #[test]
     fn pmmh_identity_payload_byte_stable() {
         let method = make_pmmh_method(1000);
         let payload_str = serde_json::to_string(&method.identity_payload()).unwrap();
-        // Updated with the `[stages]` → `[method]` split — see the PGAS golden
-        // above for the reason. Moved again when correlated pseudo-marginal
-        // PMMH was removed: the `rho` key left the payload, so every PMMH
-        // leaf re-keys — the release notes' Run-identity entry.
-        let expected = r#"{"adapt":true,"adapt_start":300,"algorithm":"pmmh","backend":"chain_binomial","burn_in":200,"chains":4,"particles":100,"starts":"uniform_unconstrained","thin":2}"#;
+        let expected = r#"{"method":{"Pmmh":{"adapt":true,"adapt_start":300,"backend":"ChainBinomial","binomial":"Btpe","burn_in":200,"chains":4,"particles":100,"thin":2}},"starts":"uniform_unconstrained"}"#;
         assert_eq!(payload_str, expected,
-            "PMMH identity_payload byte format drifted — see \
-             pgas_identity_payload_byte_stable for context.");
+            "the PMMH method identity's record changed, which re-keys every \
+             PMMH run; if that is intended, update this constant and say so \
+             in the commit");
     }
 
     #[test]

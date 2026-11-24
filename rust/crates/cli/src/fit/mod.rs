@@ -440,8 +440,8 @@ pub(crate) fn run_method(out: &mut crate::out::Out, cx: MethodContext<'_>) -> Me
     match &method.algorithm {
         Algorithm::IF2 { backend, chains, particles, iterations, cooling, cooling_target_iters, loglik_eval, gate, dt_check, .. } => {
             // clean_eval comes straight from the `[method]` table — it is part
-            // of the fit's identity (folded into the IF2 method's
-            // whole-serialize identity_payload), so it has no CLI override
+            // of the run's identity (`If2Identity::loglik_eval`), so it has
+            // no CLI override
             // (gh#189: a CLI override bypassed the run_id and silently
             // re-scored under the same key). The gate's `--decibans-thresh`
             // override is applied through `apply_cli_overrides` BEFORE the
@@ -755,7 +755,7 @@ pub(crate) fn run_method(out: &mut crate::out::Out, cx: MethodContext<'_>) -> Me
             // (--no-dt-check / --dt-check-halvings / --dt-check-strict).
             // gh#726: the method's dt_check field — CLI overrides were
             // applied through `apply_cli_overrides` BEFORE the identity
-            // was taken, and the field is in Mh's identity_payload (the
+            // was taken, and the field is in `MhIdentity` (the
             // result is stored in fit_state.toml.dt_check).
             let mh_dt_check = dt_check.clone();
             (method_warmup, resume_boundary) = pmmh::run_method(

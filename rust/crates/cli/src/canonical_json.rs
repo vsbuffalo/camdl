@@ -22,62 +22,6 @@ pub(crate) fn canonical(v: &serde_json::Value) -> serde_json::Value {
     }
 }
 
-/// Serialize `value` whole, then remove each `exclude`d key: a top-level key
-/// (`output_dir`), or a dotted path to a nested one (`data.tables`), which is
-/// removed where the path exists and is nothing to remove where it does not
-/// (a config with no `[data]`).
-/// A table left empty by the removal is removed too. A field added to the
-/// value's type is in the result unless it is named here, so an omission is
-/// written down where a reviewer sees it. Finiteness is not checked here;
-/// a caller that keys the result calls [`ensure_finite`] on `value` first.
-pub(crate) fn serialize_minus<T: serde::Serialize>(
-    value: &T,
-    exclude: &[&str],
-) -> Result<serde_json::Value, String> {
-    let mut v = serde_json::to_value(value)
-        .map_err(|e| format!("cannot serialize identity level for hashing: {e}"))?;
-    if !exclude.is_empty() {
-        match v {
-            serde_json::Value::Object(ref mut m) => {
-                for key in exclude {
-                    let mut parts: Vec<&str> = key.split('.').collect();
-                    let last = parts.pop().expect("split yields at least one part");
-                    let mut obj = Some(&mut *m);
-                    for p in parts {
-                        obj = obj.and_then(|o| o.get_mut(p)).and_then(|v| v.as_object_mut());
-                    }
-                    if let Some(o) = obj {
-                        o.remove(last);
-                    }
-                    // A table left empty by the subtraction goes too: a config
-                    // whose `[simulate]` held only `from` must key like one
-                    // with no `[simulate]` at all.
-                    if let Some((parent, _)) = key.rsplit_once('.') {
-                        let mut parts: Vec<&str> = parent.split('.').collect();
-                        let leaf = parts.pop().expect("rsplit_once left a parent");
-                        let mut obj = Some(&mut *m);
-                        for p in parts {
-                            obj = obj.and_then(|o| o.get_mut(p)).and_then(|v| v.as_object_mut());
-                        }
-                        if let Some(o) = obj {
-                            if o.get(leaf).and_then(|v| v.as_object()).is_some_and(|t| t.is_empty()) {
-                                o.remove(leaf);
-                            }
-                        }
-                    }
-                }
-            }
-            // `exclude` on a non-object is a programming error, not a data
-            // one: the caller asked to subtract a key from something that has
-            // none, so the subtraction silently did nothing.
-            _ => return Err(
-                "serialize_minus: `exclude` given for a value that does not \
-                 serialize to a JSON object".to_string()),
-        }
-    }
-    Ok(v)
-}
-
 // ── Non-finite finiteness gate ───────────────────────────────────────────────
 //
 // serde_json 1.0.150 serializes a non-finite f64/f32 (NaN / ±Inf) as `null`

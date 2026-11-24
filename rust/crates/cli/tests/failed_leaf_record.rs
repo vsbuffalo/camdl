@@ -140,10 +140,9 @@ fn a_leaf_that_fails_at_chain_init_records_failed_and_why_in_its_run_json() {
     assert!(progress["snapshot"]["state"].get("failed").is_some(), "progress.json: {progress}");
     let ident = json(&leaf.join("identity.json"));
     let chain = &ident["identity"]["chain"];
-    let settings: serde_json::Value =
-        serde_json::from_str(chain["method"]["settings"].as_str().unwrap()).unwrap();
-    assert_eq!((&settings["algorithm"], &settings["backend"], &settings["chains"], &chain["seed"]["seed"]),
-        (&"pmmh".into(), &"chain_binomial".into(), &2.into(), &1.into()), "{ident}");
+    let pmmh = &chain["method"]["Pmmh"];
+    assert_eq!((&pmmh["backend"], &pmmh["chains"], &chain["seed"]["seed"]),
+        (&"ChainBinomial".into(), &2.into(), &1.into()), "{ident}");
     assert!(!leaf.join("run_inputs.json").exists(),
         "a run that did not finish records nothing it would have computed (best log-likelihood, wall time)");
 }

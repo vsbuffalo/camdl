@@ -7,8 +7,9 @@
 //! each bound data file, the dates of the held-out rows (never their values),
 //! the external tables, the estimated set with its bounds and priors, the
 //! fixed values, the settings, the scenario selection and `ic_free`. A
-//! [`FitRun`] sits inside its problem at `runs/`, grouped by the method's
-//! settings and named by the seed typed; its identity holds the method, the
+//! [`FitRun`] sits inside its problem at `runs/`, grouped by its
+//! [`MethodIdentity`] and named by the seed typed; its identity holds the
+//! method, the
 //! per-parameter perturbation (`rw_sd`, `perturb_only_at_t0`, `start`), the
 //! seed, where its chains start and its length. A [`Prediction`] from a
 //! posterior sits inside the run whose draws it used, at `predict/`.
@@ -257,16 +258,8 @@ impl Primary for FitProblem {
 
 // ── The fit run ──────────────────────────────────────────────────────────────
 
-/// The method's settings without its length (PGAS `sweeps`, PMMH and MH
-/// `iterations`) and without `starts`, which [`StartSource`] holds.
-#[derive(store::Identity, Clone, Debug)]
-#[identity(tag = "fit_method", version = 1)]
-pub(crate) struct MethodSettings {
-    /// The `algorithm` key.
-    pub algorithm: String,
-    /// The rest of `[method]`, as canonical JSON of its parsed form.
-    pub settings: String,
-}
+mod method;
+pub(crate) use method::MethodIdentity;
 
 /// What a start rule reads besides the problem.
 #[derive(store::Identity, Clone, Debug)]
@@ -297,7 +290,7 @@ pub(crate) struct StartSource {
 #[identity(tag = "fit_chain", version = 1)]
 pub(crate) struct ChainIdentity {
     pub problem: Dep<FitProblem>,
-    pub method: MethodSettings,
+    pub method: MethodIdentity,
     pub perturbation: PerturbationSettings,
     /// The compile with the state Jacobian; only `nl-lbfgs` on the ODE backend.
     pub jacobian_model: Option<Dep<CompiledModel>>,
@@ -348,36 +341,9 @@ impl Primary for FitRun {
     }
 }
 
-impl MethodSettings {
-    /// The settings of `method` and its length. Its `starts` must be resolved,
-    /// and a value that is NaN or infinite is refused: JSON writes either as
-    /// `null`, so two such methods would otherwise share a key.
-    pub fn of(method: &Method) -> Result<(MethodSettings, u64), String> {
-        crate::canonical_json::ensure_finite(method)?;
-        let whole = serde_json::to_value(method).map_err(|e| format!("cannot encode [method]: {e}"))?;
-        let algorithm = whole
-            .get("algorithm")
-            .and_then(|a| a.as_str())
-            .ok_or("internal error: [method] encodes without its algorithm")?
-            .to_string();
-        let length = match method.algorithm.extension_key() {
-            Some(key) => whole
-                .get(key)
-                .and_then(|v| v.as_u64())
-                .ok_or_else(|| format!("internal error: [method] encodes without `{key}`"))?,
-            None => 0,
-        };
-        let mut exclude = vec!["starts"];
-        exclude.extend(method.algorithm.extension_key());
-        let rest = crate::canonical_json::serialize_minus(method, &exclude)?;
-        Ok((MethodSettings { algorithm, settings: canonical_json(&rest)? }, length))
-    }
-}
-
 impl StartSource {
     /// The rule `method` starts its chains under, reading `input`.
-    /// A NaN or infinite value in the method is refused, as for
-    /// [`MethodSettings::of`].
+    /// A NaN or infinite value in the method is refused.
     pub fn of(method: &Method, input: StartInput) -> Result<StartSource, String> {
         crate::canonical_json::ensure_finite(method)?;
         let rule = method.starts()?.identity_value();

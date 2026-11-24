@@ -332,7 +332,7 @@ impl fmt::Display for FileRefusal {
 fn shown_result(store: &Store, located: &Located) -> String {
     if located.kind() == <crate::fit_store::FitRun as store::Artifact>::KIND {
         if let Ok(run) = store.stored_as::<crate::fit_store::FitRun>(located) {
-            return format!("{} run {}", run.identity().chain.method.algorithm, located.run_id().short12());
+            return format!("{} run {}", run.identity().chain.method.algorithm(), located.run_id().short12());
         }
     }
     format!("{} {}", located.kind(), located.run_id().short12())
