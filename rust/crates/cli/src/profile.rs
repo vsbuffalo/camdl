@@ -1564,8 +1564,9 @@ fn run_profile(
             };
             (identity, labels, store::Wanted::none())
         }).collect();
-    // `begin_many` begins each distinct identity once, in the order first
-    // asked for: a seed listed twice in `--seeds` names its points once.
+    // `begin_all` begins each distinct identity once, and answers in the
+    // order first asked for: a seed listed twice in `--seeds` names its
+    // points once.
     let mut distinct: Vec<usize> = Vec::new();
     {
         let mut seen = std::collections::BTreeSet::new();
@@ -1578,9 +1579,10 @@ fn run_profile(
     let mut failures: Vec<String> = Vec::new();
     let mut claimed: Vec<(store::Run<crate::profile_store::ProfilePoint>, usize)> = Vec::new();
     let mut n_stored = 0usize;
-    let mut batch = store.begin_many::<crate::profile_store::ProfilePoint>(&members, &info, request.reuse())
+    let mut batch = store.declare::<crate::profile_store::ProfilePoint>(&members, &info, request.reuse())
         .unwrap_or_else(|e| out.fail(format!("error: {e}")));
-    for (begun, &ji) in batch.members().zip(&distinct) {
+    let begun_all = batch.begin_all().unwrap_or_else(|e| out.fail(format!("error: {e}")));
+    for (begun, &ji) in begun_all.into_iter().zip(&distinct) {
         match crate::camdl_store::declared(begun, crate::result_files::profile::ProfilePointFile::ALL) {
             store::Begin::Reused(_) => n_stored += 1,
             store::Begin::Busy(owner) => failures.push(format!(

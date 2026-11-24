@@ -59,7 +59,7 @@ pub use receive::Received;
 pub use record::{Lineage, Status, MAX_PRESERVED_ATTEMPTS, RECORD_FORMAT, STORE_FORMAT};
 pub use run::{ByProductRun, ExpectedFiles, FileHandle, Run};
 pub use fsutil::write_file_atomic;
-pub use storage::{Batch, Begin, PlanState, Planned, Reuse, Store, Wanted};
+pub use storage::{Begin, Declared, PlanState, Planned, Reuse, Store, Wanted};
 pub use stored::{Dep, Entry, EntryState, Located, Stored};
 pub use store_derive::{EnvInputs, FileInputs, Identity, Inputs};
 

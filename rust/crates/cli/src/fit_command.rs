@@ -526,7 +526,8 @@ fn run_fit(mut out: Out, cx: FitCommand<'_>) -> Vec<String> {
     let run_files = PlannedMethod::of(&method.algorithm).files(chain_count(&method.algorithm), starts_ext.as_deref());
     let (method_identity, length) = MethodIdentity::of(&method).unwrap_or_else(|e| out.fail(format!("error: {e}")));
 
-    // ── Each problem, and the runs on it ──────────────────────────────────
+    // ── The problems: each stored, then checked against the rows it trains on ──
+    let mut posed: Vec<PosedCell<'_>> = Vec::new();
     for (cell_i, cell) in cells.iter().enumerate() {
         if has_sweep || cells.len() > 1 {
             let slug = point_slug(&cell.sweep_point);
@@ -614,16 +615,19 @@ fn run_fit(mut out: Out, cx: FitCommand<'_>) -> Vec<String> {
         let data_digests = crate::fit::read_data_digests(cell.problem.data_spec().unwrap_or_else(|e| out.fail(format!("error: {e}"))), &model)
             .unwrap_or_else(|e| out.fail(format!("error: {e}")))
             .with_tables(&tables);
+        posed.push(PosedCell { cell_i, cell, stored_problem, partition, forcing_interpolation, perturbation, data_digests });
+    }
 
+    // ── The runs: every (problem × seed) identity, declared before any is begun ──
+    // A resume's base is resolved here, for every seed, so a base that does
+    // not match is refused before any run is claimed.
+    let mut planned: Vec<PlannedRun> = Vec::new();
+    for (posed_i, p) in posed.iter().enumerate() {
         for &seed in &fit_seeds {
-            if fit_seeds.len() > 1 {
-                out.say(format_args!("\n━━━ fit_seed={seed} ━━━"));
-            }
-            out.say(format_args!("\n── method: {method_name} ──"));
             let chain = ChainIdentity {
-                problem: stored_problem.dep_all(),
+                problem: p.stored_problem.dep_all(),
                 method: method_identity.clone(),
-                perturbation: perturbation.clone(),
+                perturbation: p.perturbation.clone(),
                 jacobian_model: jacobian_model.clone(),
                 seed: ProcessSeed { seed },
                 starts: starts_identity.clone(),
@@ -639,78 +643,123 @@ fn run_fit(mut out: Out, cx: FitCommand<'_>) -> Vec<String> {
                 length,
                 resumed_from: base.as_ref().map(|b| b.dep.clone()),
             };
-            let run_labels = RunLabels { method: method_name.to_string(), seed, quantities: run_quantities.borrow().clone() };
-            let mut run = match crate::camdl_store::begin::<FitRun>(store, &identity, &run_labels, info, reuse, run_files.clone()) {
-                Ok(Begin::Reused(stored)) => {
-                    out.say(format_args!("  {}", crate::out::paint::stderr().paint(
-                        &format!("cache hit — reusing {}", relative(stored.folder(), store.root())),
-                        crate::out::paint::Style::Warn)));
-                    continue;
+            let labels = RunLabels { method: method_name.to_string(), seed, quantities: run_quantities.borrow().clone() };
+            planned.push(PlannedRun { posed: posed_i, seed, identity, labels, base });
+        }
+    }
+    let members: Vec<(FitRunIdentity, RunLabels, store::Wanted<FitRun>)> =
+        planned.iter().map(|r| (r.identity.clone(), r.labels.clone(), store::Wanted::none())).collect();
+    let mut declared = store.declare::<FitRun>(&members, info, reuse)
+        .unwrap_or_else(|e| out.fail(format!("error: declaring the runs: {e}")));
+
+    // ── Each run, claimed only when it is computed ──────────────────────────
+    let mut shown_problem: Option<usize> = None;
+    for (i, r) in planned.iter().enumerate() {
+        let p = &posed[r.posed];
+        let seed = r.seed;
+        if posed.len() > 1 && shown_problem != Some(r.posed) {
+            out.say(format_args!("\n═══ runs of problem {}/{} ═══", p.cell_i + 1, cells.len()));
+            shown_problem = Some(r.posed);
+        }
+        if fit_seeds.len() > 1 {
+            out.say(format_args!("\n━━━ fit_seed={seed} ━━━"));
+        }
+        out.say(format_args!("\n── method: {method_name} ──"));
+        let begun = declared.begin(i).unwrap_or_else(|e| out.fail(format!("error: claiming the run: {e}")));
+        let mut run = match begun.map(|b| crate::camdl_store::declared(b, run_files.clone())) {
+            None => {
+                out.say(format_args!("  seed {seed} is listed again; its run is computed once"));
+                continue;
+            }
+            Some(Begin::Reused(stored)) => {
+                out.say(format_args!("  {}", crate::out::paint::stderr().paint(
+                    &format!("cache hit — reusing {}", relative(stored.folder(), store.root())),
+                    crate::out::paint::Style::Warn)));
+                continue;
+            }
+            Some(Begin::Busy(owner)) => {
+                failures.push(format!("{method_name} seed {seed}: {}", store::Error::InProgress(owner)));
+                continue;
+            }
+            Some(Begin::Claimed(run)) => run,
+        };
+        let ran = (|| -> Result<(), String> {
+            let e = |e: store::Error| e.to_string();
+            run.provenance_file(crate::fit_store::FIT_TOML_FILE).map_err(e)?.write_all(source.bytes()).map_err(e)?;
+            crate::fit_store::write_method(&mut run, &method)
+        })();
+        if let Err(e) = ran {
+            let _ = run.fail("writing the run's settings", &e);
+            failures.push(format!("{method_name} seed {seed}: {e}"));
+            continue;
+        }
+        let live = crate::fit::output::LiveRun::new(run);
+        if let Some(b) = &r.base {
+            if let Err(e) = b.carry_into(&live) {
+                if let Some(run) = live.take() {
+                    let _ = run.fail("carrying the base's chains", &e);
                 }
-                Ok(Begin::Busy(owner)) => {
-                    failures.push(format!("{method_name} seed {seed}: {}", store::Error::InProgress(owner)));
-                    continue;
-                }
-                Ok(Begin::Claimed(run)) => run,
-                Err(e) => out.fail(format!("error: claiming the run: {e}")),
-            };
-            let ran = (|| -> Result<(), String> {
-                let e = |e: store::Error| e.to_string();
-                run.provenance_file(crate::fit_store::FIT_TOML_FILE).map_err(e)?.write_all(source.bytes()).map_err(e)?;
-                crate::fit_store::write_method(&mut run, &method)
-            })();
-            if let Err(e) = ran {
-                let _ = run.fail("writing the run's settings", &e);
                 failures.push(format!("{method_name} seed {seed}: {e}"));
                 continue;
             }
-            let live = crate::fit::output::LiveRun::new(run);
-            if let Some(b) = &base {
-                if let Err(e) = b.carry_into(&live) {
-                    if let Some(run) = live.take() {
-                        let _ = run.fail("carrying the base's chains", &e);
-                    }
-                    failures.push(format!("{method_name} seed {seed}: {e}"));
-                    continue;
-                }
-            }
-            let resume_guard = identity.chain.key().to_hex();
-            let finished = compute_run(&mut out, RunCompute {
-                live,
-                problem: &cell.problem,
-                method: &method,
+        }
+        let resume_guard = r.identity.chain.key().to_hex();
+        let finished = compute_run(&mut out, RunCompute {
+            live,
+            problem: &p.cell.problem,
+            method: &method,
+            model: &model,
+            seed,
+            starts: &resolved_starts,
+            base: r.base.as_ref(),
+            resume_guard: &resume_guard,
+            header: &run_header,
+            acceptance_kernel,
+            data_digests: &p.data_digests,
+            input_hash: &p.stored_problem.id().key().to_hex(),
+            forcing: &forcing,
+            record: RunRecord {
+                starts_rule: &starts_rule,
+                starts_source: &starts_source_record,
+                config: &config,
+                config_text: &config_text,
                 model: &model,
-                seed,
-                starts: &resolved_starts,
-                base: base.as_ref(),
-                resume_guard: &resume_guard,
-                header: &run_header,
-                acceptance_kernel,
-                data_digests: &data_digests,
-                input_hash: &stored_problem.id().key().to_hex(),
-                forcing: &forcing,
-                record: RunRecord {
-                    starts_rule: &starts_rule,
-                    starts_source: &starts_source_record,
-                    config: &config,
-                    config_text: &config_text,
-                    model: &model,
-                    roles: &fit_roles,
-                    sweep_point: &cell.sweep_point,
-                    partition: &partition,
-                    forcing_interpolation: &forcing_interpolation,
-                },
-                store_root: store.root(),
-            });
-            if let Err(e) = finished {
-                failures.push(format!("{method_name} seed {seed}: {e}"));
-            }
+                roles: &fit_roles,
+                sweep_point: &p.cell.sweep_point,
+                partition: &p.partition,
+                forcing_interpolation: &p.forcing_interpolation,
+            },
+            store_root: store.root(),
+        });
+        if let Err(e) = finished {
+            failures.push(format!("{method_name} seed {seed}: {e}"));
         }
     }
     if cells.len() > 1 || config.problem.is_synthetic_fit() {
         out.say("note: grid summary / coverage are derived views — owed by `fit recovery` (gh#150 / gh#154)");
     }
     failures
+}
+
+/// A problem of the fit, stored, with what each of its runs records of it.
+struct PosedCell<'a> {
+    cell_i: usize,
+    cell: &'a ProblemCell,
+    stored_problem: Stored<FitProblem>,
+    partition: crate::run_meta::TrainingPartitionRecord,
+    forcing_interpolation: Vec<crate::run_meta::ForcingInterpolationRecord>,
+    perturbation: crate::fit_store::PerturbationSettings,
+    data_digests: crate::fit::stream_bindings::BoundDataDigests,
+}
+
+/// One run the fit will compute: its problem (an index into the posed
+/// problems), its seed, its identity and labels, and the base it resumes.
+struct PlannedRun {
+    posed: usize,
+    seed: u64,
+    identity: FitRunIdentity,
+    labels: RunLabels,
+    base: Option<ResumeBase>,
 }
 
 /// `name_value__name_value`, the way a sweep point is printed and labelled.

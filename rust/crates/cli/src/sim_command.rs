@@ -185,8 +185,8 @@ pub(crate) fn run(ctx: StoreRun<'_>) {
     }
     let members: Vec<(SimIdentity, CellLabels, store::Wanted<Sim>)> =
         planned.iter().map(|p| (p.identity.clone(), p.labels.clone(), p.wanted.clone())).collect();
-    // `begin_many` begins each distinct identity once, in the order first
-    // asked for.
+    // `begin_all` begins each distinct identity once, and answers in the
+    // order first asked for.
     let mut distinct: Vec<usize> = Vec::new();
     let mut seen: BTreeSet<store::Key> = BTreeSet::new();
     for (i, p) in planned.iter().enumerate() {
@@ -199,8 +199,9 @@ pub(crate) fn run(ctx: StoreRun<'_>) {
     let mut claimed: Vec<(Run<Sim>, usize)> = Vec::new();
     let mut n_reused = 0usize;
     if !planned.is_empty() {
-        let mut batch = store.begin_many::<Sim>(&members, &info, ctx.request.reuse()).unwrap_or_else(|e| fail(e.to_string()));
-        for (begun, &i) in batch.members().zip(&distinct) {
+        let mut batch = store.declare::<Sim>(&members, &info, ctx.request.reuse()).unwrap_or_else(|e| fail(e.to_string()));
+        let begun_all = batch.begin_all().unwrap_or_else(|e| fail(e.to_string()));
+        for (begun, &i) in begun_all.into_iter().zip(&distinct) {
             match crate::camdl_store::declared(begun, SimFile::planned()) {
                 store::Begin::Reused(_) => n_reused += 1,
                 store::Begin::Busy(owner) => failures.push(format!(

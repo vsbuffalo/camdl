@@ -665,6 +665,43 @@ fn a_plan_with_by_products_names_a_result_that_lacks_one() {
     assert_eq!(states, vec![crate::PlanState::ByProductsMissing, crate::PlanState::Completed, crate::PlanState::Absent]);
 }
 
+/// A declared batch is listed in the running invocation record, every member
+/// planned, before any is claimed; beginning one member claims only that one;
+/// and a member never begun is failed when the command ends.
+#[test]
+fn declared_members_are_listed_before_any_is_claimed() {
+    let root = TempRoot::new("declare");
+    let store = open(root.path());
+    let info = info();
+    let members: Vec<(SimId, SimLabels, Wanted<Sim>)> =
+        [5u64, 6, 7].iter().map(|s| { let (i, l) = sim(*s); (i, l, Wanted::none()) }).collect();
+    let mut declared = store.declare::<Sim>(&members, &info, Reuse::IfCompleted).unwrap();
+    let path = root.path().join(".invocations/1.json");
+    let running: InvocationFile = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(running.status, crate::record::InvocationStatus::Running);
+    let seeds: Vec<serde_json::Value> = running.results.iter().map(|r| r.labels["seed"].clone()).collect();
+    assert_eq!(seeds, vec![serde_json::json!(5), serde_json::json!(6), serde_json::json!(7)]);
+    assert!(running.results.iter().all(|r| r.outcome == Outcome::Planned), "{:?}", running.results);
+    assert!(root.path().join(".staging").read_dir().map_or(true, |mut d| d.next().is_none()), "nothing is claimed");
+
+    let Some(Begin::Claimed(mut run)) = declared.begin(1).unwrap() else { panic!("seed 6 is claimed") };
+    assert_eq!(run.identity().seed, 6);
+    assert!(declared.begin(1).unwrap().is_none(), "a member is begun once");
+    run.expect(expecting(&["traj.tsv"]));
+    run.result_file("traj.tsv").unwrap().write_all(b"x").unwrap();
+    run.finish().unwrap();
+    let Some(Begin::Claimed(mut run)) = declared.begin(0).unwrap() else { panic!("seed 5 is claimed") };
+    run.expect(expecting(&["traj.tsv"]));
+    run.result_file("traj.tsv").unwrap().write_all(b"x").unwrap();
+    run.finish().unwrap();
+    drop(declared);
+
+    let inv = info.finish(&store).unwrap();
+    let outcomes: Vec<Outcome> = inv.file.results.iter().map(|r| r.outcome).collect();
+    assert_eq!(outcomes, vec![Outcome::Computed, Outcome::Computed, Outcome::Failed]);
+    assert!(store.get(&sim_id(&store, 7)).unwrap().is_none(), "the member never begun was not computed");
+}
+
 #[test]
 fn a_batch_claims_a_repeated_identity_once_and_answers_in_the_order_asked() {
     let root = TempRoot::new("batch");
@@ -676,9 +713,9 @@ fn a_batch_claims_a_repeated_identity_once_and_answers_in_the_order_asked() {
     let plan = store.plan::<Sim>(&members.iter().map(|(i, l, _)| (i.clone(), l.clone())).collect::<Vec<_>>()).unwrap();
     let states: Vec<crate::PlanState> = plan.into_iter().map(|p| p.state).collect();
     assert_eq!(states, vec![crate::PlanState::Absent, crate::PlanState::Completed, crate::PlanState::Absent, crate::PlanState::Absent]);
-    let mut batch = store.begin_many::<Sim>(&members, &info, Reuse::IfCompleted).unwrap();
+    let mut batch = store.declare::<Sim>(&members, &info, Reuse::IfCompleted).unwrap();
     let mut seen = Vec::new();
-    for b in batch.members() {
+    for b in batch.begin_all().unwrap() {
         match b {
             Begin::Claimed(mut run) => {
                 run.expect(expecting(&["traj.tsv"]));

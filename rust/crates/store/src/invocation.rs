@@ -164,6 +164,19 @@ impl Shared {
         Ok(idx)
     }
 
+    /// Rewrites the running record with every entry registered so far: for
+    /// a command that declared its members, so the record lists them while
+    /// they are computed.
+    pub(crate) fn write_running(&self) -> Result<()> {
+        let st = self.lock();
+        let Some(s) = st.started.as_ref() else { return Ok(()) };
+        if st.ended {
+            return Ok(());
+        }
+        let file = st.file(InvocationStatus::Running);
+        write_json_atomic(&invocation_path(&s.root, s.seq), &file)
+    }
+
     pub(crate) fn set(&self, idx: &[usize], outcome: Outcome, failure: Option<Failure>) {
         let mut st = self.lock();
         for &i in idx {

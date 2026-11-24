@@ -1271,6 +1271,69 @@ fn a_running_fit_shows_its_traces_growing_in_its_folder() {
     wait_for("the next run claims the interrupted folder", &reclaimed);
 }
 
+/// A fit with several seeds declares every run before it begins any: while
+/// the first seed's long PMMH runs, the command's invocation record already
+/// lists the three runs, in seed order, each planned, and only the first
+/// seed's run has a folder.
+#[test]
+fn a_running_fit_lists_every_planned_run_in_its_invocation_record() {
+    let cwd = workdir();
+    let store_root = cwd.path().join("camdl-store");
+    let long = "fit_seeds = [1, 2, 3]\n".to_string()
+        + &problem("sir.ir.json", 0.5)
+        + &method("pmmh").replace("iterations = 20", "iterations = 200000");
+    std::fs::write(cwd.path().join("fit_seeds.toml"), long).unwrap();
+    let fx = fixture();
+    // Killed when dropped, so a failing assertion leaves no fit running.
+    struct Running(std::process::Child);
+    impl Drop for Running {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let _child = Running(Command::new(&fx.camdl)
+        .current_dir(cwd.path())
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", cwd.path().join("home"))
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("CAMDLC", &fx.camdlc)
+        .env("CAMDL_IR_CACHE_DIR", cwd.path().join("ir-cache"))
+        .env("CAMDL_STORE", &store_root)
+        .args(["fit", "run", "fit_seeds.toml", "--progress", "none"])
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap());
+    // The command's running record, once it lists a fit run.
+    let record = || -> Option<serde_json::Value> {
+        let dir = store_root.join(".invocations");
+        for e in std::fs::read_dir(&dir).ok()?.flatten() {
+            let Ok(bytes) = std::fs::read(e.path()) else { continue };
+            let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) else { continue };
+            let lists_a_run = v["results"].as_array().is_some_and(|r| r.iter().any(|r| r["kind"] == "fit_run"));
+            if v["status"] == "running" && lists_a_run {
+                return Some(v);
+            }
+        }
+        None
+    };
+    let run_folders_now = || complete_folders(&store_root).ok().map_or(0, |f| f.iter().filter(|(_, id, _)| id["kind"] == "fit_run").count());
+    let started = std::time::Instant::now();
+    let v = loop {
+        if let (Some(v), 1) = (record(), run_folders_now()) {
+            break v;
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(120), "the fit's first run started");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let runs: Vec<&serde_json::Value> = v["results"].as_array().unwrap().iter().filter(|r| r["kind"] == "fit_run").collect();
+    let seeds: Vec<&serde_json::Value> = runs.iter().map(|r| &r["labels"]["seed"]).collect();
+    assert_eq!(seeds, [&serde_json::json!(1), &serde_json::json!(2), &serde_json::json!(3)], "{v:#}");
+    assert!(runs.iter().all(|r| r["outcome"] == "planned"), "{v:#}");
+    assert_eq!(run_folders_now(), 1, "only the run being computed holds a folder");
+}
+
 /// A label's history is the store's: an invocation whose results did not
 /// all complete (here a run killed while it ran) never held the label, so
 /// `@lab~1` names the run before it, and the history a refusal lists counts

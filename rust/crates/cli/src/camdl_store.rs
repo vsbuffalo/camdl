@@ -197,7 +197,7 @@ pub(crate) fn begin_with<A: Primary + Files>(
 }
 
 /// `begun`, with `files` declared on it when it is a claim: for each member
-/// of a batch (`Store::begin_many`), as [`begin`] does for one.
+/// of a batch (`Declared::begin_all`), as [`begin`] does for one.
 pub(crate) fn declared<A: Files>(begun: store::Begin<A>, files: impl IntoIterator<Item = A::File>) -> store::Begin<A> {
     match begun {
         store::Begin::Claimed(mut run) => {

@@ -412,43 +412,48 @@ impl Store {
         Ok(out)
     }
 
-    /// Opens a batch and claims its members in one pass, each with its labels
-    /// and the by-products wanted of it. Repeated identities are claimed once;
-    /// claims are taken in run-id order, so two overlapping batches cannot
-    /// deadlock. An atomic id a live owner holds is waited for; an in-place
-    /// one comes back as `Busy`.
-    pub fn begin_many<A: Primary>(
+    /// Declares the members a command will compute, each with its labels and
+    /// the by-products wanted of it, in the order it asks for them: each is
+    /// registered in the invocation record as planned, the running record is
+    /// written with all of them, and none is claimed. A repeated identity is
+    /// listed once per time it is asked for and claimed once.
+    pub fn declare<A: Primary>(
         &self,
         members: &[(A::Identity, A::Labels, Wanted<A>)],
         info: &RunInfo,
         reuse: Reuse,
-    ) -> Result<Batch<A>> {
-        let mut order: Vec<Key> = Vec::new();
-        let mut by_id: BTreeMap<Key, (usize, Entries)> = BTreeMap::new();
-        for (i, (identity, labels, wanted)) in members.iter().enumerate() {
+    ) -> Result<Declared<A>> {
+        let mut slots: Vec<Slot<A>> = Vec::new();
+        let mut position = Vec::with_capacity(members.len());
+        let mut by_id: BTreeMap<Key, usize> = BTreeMap::new();
+        for (identity, labels, wanted) in members {
             let id = Id::<A>::of(&self.inner.ambient_key, identity);
             let e = self.register(info, id.key(), identity.key(), A::KIND, labels, wanted, reuse)?;
-            match by_id.get_mut(&id.key()) {
-                Some((_, all)) => {
+            match by_id.get(&id.key()) {
+                Some(&s) => {
+                    let all = &mut slots[s].entries;
                     all.upstream.extend(e.upstream);
                     for (a, b) in all.by_products.iter_mut().zip(e.by_products) {
                         a.extend(b);
                     }
+                    position.push(s);
                 }
                 None => {
-                    order.push(id.key());
-                    by_id.insert(id.key(), (i, e));
+                    by_id.insert(id.key(), slots.len());
+                    position.push(slots.len());
+                    slots.push(Slot {
+                        key: id.key(),
+                        identity: identity.clone(),
+                        labels: labels.clone(),
+                        wanted: wanted.clone(),
+                        entries: e,
+                        begun: false,
+                    });
                 }
             }
         }
-        let mut begun: BTreeMap<Key, Begin<A>> = BTreeMap::new();
-        for (key, (i, entries)) in &by_id {
-            let (identity, labels, wanted) = &members[*i];
-            let b = self.inner.begin_inner(identity, labels, wanted, &info.shared, reuse, entries)?;
-            begun.insert(*key, b);
-        }
-        let members = order.iter().map(|k| begun.remove(k)).collect();
-        Ok(Batch { members, info: Arc::clone(&info.shared) })
+        info.shared.write_running()?;
+        Ok(Declared { inner: Arc::clone(&self.inner), info: Arc::clone(&info.shared), reuse, slots, position })
     }
 
     /// Whether `owner` is alive, waiting up to `wait` for an owner on another
@@ -527,19 +532,67 @@ pub enum PlanState {
     Interrupted,
 }
 
-/// Several claims opened together, under one invocation.
-pub struct Batch<A: Artifact> {
-    members: Vec<Option<Begin<A>>>,
+/// The members a command declared ([`Store::declare`]): listed in its
+/// invocation record as planned, and claimed one at a time through
+/// [`Declared::begin`], or all together through [`Declared::begin_all`]. A
+/// member never begun is recorded as failed when the command ends.
+pub struct Declared<A: Primary> {
+    inner: Arc<Inner>,
     info: Arc<Shared>,
+    reuse: Reuse,
+    /// One per distinct identity, in the order first asked for.
+    slots: Vec<Slot<A>>,
+    /// The slot of each member as the command listed it.
+    position: Vec<usize>,
 }
 
-impl<A: Artifact> Batch<A> {
-    /// One `Begin` per distinct identity, in the order first asked for.
-    pub fn members(&mut self) -> impl Iterator<Item = Begin<A>> + '_ {
-        self.members.iter_mut().filter_map(Option::take)
+struct Slot<A: Primary> {
+    key: Key,
+    identity: A::Identity,
+    labels: A::Labels,
+    wanted: Wanted<A>,
+    /// Its rows in the invocation record.
+    entries: Entries,
+    begun: bool,
+}
+
+impl<A: Primary> Declared<A> {
+    /// Claims member `i`, in the order the members were declared, and no
+    /// other: reused, busy or claimed, as [`Store::begin`] answers. `None`
+    /// when its identity was begun already, under this index or another
+    /// that names the same identity.
+    pub fn begin(&mut self, i: usize) -> Result<Option<Begin<A>>> {
+        let s = self.position[i];
+        let slot = &mut self.slots[s];
+        if slot.begun {
+            return Ok(None);
+        }
+        slot.begun = true;
+        let slot = &self.slots[s];
+        self.inner
+            .begin_inner(&slot.identity, &slot.labels, &slot.wanted, &self.info, self.reuse, &slot.entries)
+            .map(Some)
     }
 
-    /// Replaces the batch's progress snapshot, beside its invocation record.
+    /// Claims every member not yet begun, in run-id order, so two commands
+    /// declaring overlapping members cannot deadlock: an atomic id a live
+    /// owner holds is waited for; an in-place one comes back as `Busy`.
+    /// Returns one `Begin` per distinct identity claimed here, in the order
+    /// first asked for.
+    pub fn begin_all(&mut self) -> Result<Vec<Begin<A>>> {
+        let mut order: Vec<usize> = (0..self.slots.len()).filter(|&s| !self.slots[s].begun).collect();
+        order.sort_by_key(|&s| self.slots[s].key);
+        let mut begun: BTreeMap<usize, Begin<A>> = BTreeMap::new();
+        for s in order {
+            self.slots[s].begun = true;
+            let slot = &self.slots[s];
+            let b = self.inner.begin_inner(&slot.identity, &slot.labels, &slot.wanted, &self.info, self.reuse, &slot.entries)?;
+            begun.insert(s, b);
+        }
+        Ok(begun.into_values().collect())
+    }
+
+    /// Replaces the command's progress snapshot, beside its invocation record.
     pub fn progress(&self, snapshot: &impl serde::Serialize) -> Result<()> {
         let v = serde_json::to_value(snapshot).map_err(|e| Error::Parse { what: "a progress snapshot".into(), why: e.to_string() })?;
         self.info.progress(v)

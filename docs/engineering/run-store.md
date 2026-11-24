@@ -1051,7 +1051,7 @@ In `pfilter`, and in the other commands, the steps are:
 2. `put` each content artifact the result depends on (the compiled model, its
    quantities, each data table) and take a `Dep` on it.
 3. Build the identity and labels, and `begin` it (or `begin_with` its wanted
-   by-products, or `begin_many` for a batch).
+   by-products, or `declare` a batch and begin its members through it).
 4. On `Claimed`, compute under the claim, write files through the `Run`, and end
    with `finish` or `fail`. On `Reused`, take the stored result. On `Busy`,
    report the owner.
@@ -1085,10 +1085,15 @@ pub fn begin_with<A: Primary>(&self, identity: &A::Identity, labels: &A::Labels,
 
 `begin` is `begin_with` with no by-products, and
 [`Store::run`](rust:store::storage::Store::run) wraps the match for a command
-that needs nothing more. `begin_many` begins several identities at once for a
-batch, claims a repeated identity once, and takes claims in run-id order so that
-two overlapping batches cannot deadlock. `plan` and `plan_with` report what is
-stored for each identity without claiming anything.
+that needs nothing more. `declare` registers a batch's members in the invocation
+record as planned, in the order the command asks for them, writes the running
+record with all of them, and claims none; it returns a
+[`Declared`](rust:store::storage::Declared) handle. `Declared::begin` claims one
+member, for a command that computes its members one at a time; `begin_all`
+claims every member not yet begun, in run-id order so that two overlapping
+batches cannot deadlock. A repeated identity is listed once per time it is asked
+for and claimed once. `plan` and `plan_with` report what is stored for each
+identity without claiming or registering anything.
 
 `Reuse::Force` recomputes a completed result after moving it to `.quarantine/`,
 and takes a claim whose owner is on another host and is stale or of unknown
@@ -1454,7 +1459,7 @@ the invocation record's job. Every command run that calls the store writes one,
 what a `--label` names, and what a rendering of several results reads.
 
 The record is owned by the `RunInfo` the command builds once and passes to every
-`begin`, `begin_with`, `begin_many` and `put`:
+`begin`, `begin_with`, `declare` and `put`:
 
 ```rust
 // rust/crates/cli/src/pfilter.rs:544-554
@@ -1467,11 +1472,12 @@ At the command's first call to the store, the store takes the lock
 still running and its owner is not known to have stopped
 ([`Error::LabelInUse`](rust:store::error::Error::LabelInUse)), takes the next
 sequence number, and writes the record's first version with status `running`
-(`invocation.rs:289`, `start`). When the command ends, `RunInfo::finish` (or
-dropping the `RunInfo`) replaces it with the last version, status `ended`, and
-the record is not written again. A record whose owner died while it was running
-is closed by `camdl clean` with status `interrupted`, its unfinished results
-recorded as failed (`maintenance.rs:198`).
+(`start`). A `declare` rewrites the running record once, so that it lists every
+member the batch declared. When the command ends, `RunInfo::finish` (or dropping
+the `RunInfo`) replaces it with the last version, status `ended`, and the record
+is not written again. A record whose owner died while it was running is closed
+by `camdl clean` with status `interrupted`, its unfinished results recorded as
+failed (`maintenance.rs:198`).
 
 The record holds the command line, the inputs as given, the digest of each
 configuration file read, the `--label`, counts of completed and failed results,
@@ -1620,8 +1626,8 @@ model; `SimConfig` (the backend, `dt`, the cell's window, a restored
 `--init-state` row, the two evaluator policies and the column view); the
 parameter values; the active interventions; and the process seed. Its folder
 holds `traj.tsv`, `reactive_log.tsv` when a reactive policy was active, and the
-provenance file `provenance.json`. Cells are atomic, and `simulate` claims all
-its cells with one `begin_many` (`sim_command.rs:198`).
+provenance file `provenance.json`. Cells are atomic, and `simulate` declares its
+cells and claims them all with one `begin_all`.
 
 The cells are nested in that order, so that cells sharing a model, settings,
 parameters and scenario sit side by side and differ only in seed:
@@ -1723,6 +1729,12 @@ outputs are result files, and the execution record, the optimizer trace,
 `fit.meta.json` and the fit file's text (`fit.toml`) are provenance. `fit run`
 has no by-products.
 
+`fit run` stores every problem first, then builds the identity of every run
+(each problem with each seed, a `--resume` base resolved for each), declares
+them, and claims each run only when it computes it. While the first seed of a
+20-seed fit runs, its invocation record lists all 20 runs as planned, and only
+the run being computed has a folder.
+
 When a method stops with an error, the run's folder keeps what the method wrote
 and is marked failed with the reason; a process killed while the method runs
 leaves its folder interrupted. The next `fit run` claims the folder and computes
@@ -1785,8 +1797,8 @@ seed and start:
 profile_point/<model>-…/<focal>-…/<method>-…/seed_<n>-start_<i>-…/
 ```
 
-`profile` claims all its points with one `begin_many` (`profile.rs:1567`), and
-has no by-products. The profile table is the rendering `ProfileTableRendering`
+`profile` declares its points and claims them all with one `begin_all`, and has
+no by-products. The profile table is the rendering `ProfileTableRendering`
 (`profile_store.rs:549`) of the points the invocation lists.
 
 A point whose log-likelihood is not finite, including an IF2 cell that hit the
