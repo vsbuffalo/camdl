@@ -156,13 +156,10 @@ fn i0_spec(compiled: &CompiledModel) -> Vec<EstimatedParam> {
         name: "I0".into(),
         index: idx,
         initial: 550.0,
-        rw_sd: 0.02,
         transform: Transform::Identity,
-        rw_sd_auto: false,
         // NOT declared `perturb_only_at_t0` — the downstream fit configs
         // carry no such key for `I0`. The detector enters the IVP path
         // regardless.
-        perturb_only_at_t0: false,
     }]
 }
 
@@ -333,10 +330,7 @@ fn fraction_spec(compiled: &CompiledModel) -> Vec<EstimatedParam> {
         name: "I0".into(),
         index: idx,
         initial: 0.001,
-        rw_sd: 0.02,
         transform: Transform::Identity,
-        rw_sd_auto: false,
-        perturb_only_at_t0: false,
     }]
 }
 

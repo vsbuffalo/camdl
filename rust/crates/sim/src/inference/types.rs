@@ -374,11 +374,13 @@ impl Transform {
 }
 
 /// One estimated parameter: its name, position in the full model parameter
-/// vector, effective domain (as its transform) and per-algorithm adaptation
-/// state.
+/// vector, start and effective domain (as its transform).
 ///
-/// Shared by IF2, PGAS, and PMMH. Constructed by the CLI from the fit config
-/// and passed into algorithm entry points.
+/// Shared by IF2, PGAS and PMMH. Constructed by the CLI from the fit config
+/// and passed into algorithm entry points. A method's step for the parameter
+/// is a setting of that method, not of the parameter, and travels beside it:
+/// IF2's in [`crate::inference::if2::IF2Config::steps`], PMMH's and MH's in
+/// `PMMHConfig::proposal_sd`.
 #[derive(Clone, Debug)]
 pub struct EstimatedParam {
     /// Parameter name (for reporting and gradient lookup).
@@ -387,26 +389,9 @@ pub struct EstimatedParam {
     pub index: usize,
     /// Starting value for IF2 (or the current value on resume).
     pub initial: f64,
-    /// The step in z: IF2's perturbation SD before cooling (the IF2 schedule,
-    /// `if2::CoolingSchedule`, leaves `fraction` of it after `target_iters`
-    /// iterations), the same for every chain and
-    /// particle. An explicit natural-scale `rw_sd` is converted to it once
-    /// ([`Transform::step_from_natural`]); otherwise it is the map's
-    /// [`Transform::default_if2_step`], or NaN for `Identity`, which IF2,
-    /// PMMH and MH refuse before they run.
-    pub rw_sd: f64,
     /// The effective domain, as the map onto it; the bounds are
     /// [`EstimatedParam::bounds`].
     pub transform: Transform,
-    /// Whether `rw_sd` was auto-computed from the data (for preflight reporting).
-    pub rw_sd_auto: bool,
-    /// If true, this parameter is perturbed only at t=0, not at every
-    /// observation — the IF2 perturbation schedule for an initial-state
-    /// parameter (S₀, E₀, I₀ …), whose whole effect on the trajectory is
-    /// spent before the first step. Only IF2 has a perturbation schedule,
-    /// so the flag is meaningless (and rejected at config load) under every
-    /// other algorithm. Corresponds to pomp's `ivp()` marker in `rw.sd`.
-    pub perturb_only_at_t0: bool,
 }
 
 impl EstimatedParam {
@@ -446,24 +431,88 @@ impl EstimatedParam {
     pub fn prior_point(&self, z: f64) -> PriorPoint {
         self.transform.prior_point(z)
     }
+}
 
-    /// The natural-scale step `rw_sd` is at the domain's reference point
-    /// ([`Transform::natural_from_step`]): the unit an explicit `rw_sd` is
-    /// written in, and the scale the launch table shows beside the z step.
-    pub fn natural_step(&self) -> f64 {
-        self.transform.natural_from_step(self.rw_sd, self.initial)
+// ── Method steps ──────────────────────────────────────────────────────────────
+
+/// A standard deviation in z, the coordinate a method moves in (θ = g(z),
+/// [`Transform`]; a simplex member's log-ratio coordinate). Finite and > 0 by
+/// construction.
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd, serde::Serialize)]
+#[serde(transparent)]
+pub struct ZSd(f64);
+
+/// A value that is not a [`ZSd`]: NaN, ±∞, or ≤ 0.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NotAZSd(pub f64);
+
+impl std::fmt::Display for NotAZSd {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} is not a step: a standard deviation in z must be finite and greater than 0", self.0)
+    }
+}
+
+impl std::error::Error for NotAZSd {}
+
+impl ZSd {
+    /// `sd` as a step in z; refused when it is NaN, infinite or ≤ 0.
+    pub fn new(sd: f64) -> Result<Self, NotAZSd> {
+        if sd.is_finite() && sd > 0.0 { Ok(ZSd(sd)) } else { Err(NotAZSd(sd)) }
     }
 
-    /// The initial PMMH / MH proposal SD in z (proposal D8): the map's
-    /// [`Transform::default_mh_step`] when the step is automatic, else five
-    /// times the explicit step, since an MH proposal moves further than one
-    /// IF2 perturbation. NaN when there is neither.
-    pub fn mh_initial_step(&self) -> f64 {
-        if self.rw_sd_auto {
-            self.transform.default_mh_step().unwrap_or(f64::NAN)
-        } else {
-            5.0 * self.rw_sd
-        }
+    /// The standard deviation, in z.
+    pub fn get(self) -> f64 {
+        self.0
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ZSd {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let sd = <f64 as serde::Deserialize>::deserialize(d)?;
+        ZSd::new(sd).map_err(serde::de::Error::custom)
+    }
+}
+
+/// When IF2 perturbs a parameter: IF2's timing, distinct from the model
+/// property `initial_state` that selects it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PerturbAt {
+    /// At t = 0 and before every observation.
+    EveryObservation,
+    /// At t = 0 only: the timing for an initial-state parameter (S₀, E₀,
+    /// I₀ …), whose whole effect on the trajectory is spent before the first
+    /// step. pomp's `ivp()` marker in `rw.sd`.
+    TimeZeroOnly,
+}
+
+/// IF2's random-walk perturbation of one estimated parameter: each
+/// perturbation adds a normal draw of SD `sd` times the cooling multiplier to
+/// the parameter's z, at the times `at` names.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Perturbation {
+    pub sd: ZSd,
+    pub at: PerturbAt,
+}
+
+/// IF2's step for one entry of `if2_params`. A simplex member has none of its
+/// own: its SD is in its [`crate::inference::if2::SimplexGroup`], which
+/// perturbs the members jointly at t = 0.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum If2Step {
+    Single(Perturbation),
+    SimplexMember,
+}
+
+impl If2Step {
+    /// A perturbation of SD `sd` in z at t = 0 and before every observation.
+    pub fn every_observation(sd: ZSd) -> Self {
+        If2Step::Single(Perturbation { sd, at: PerturbAt::EveryObservation })
+    }
+
+    /// A perturbation of SD `sd` in z at t = 0 only.
+    pub fn time_zero_only(sd: ZSd) -> Self {
+        If2Step::Single(Perturbation { sd, at: PerturbAt::TimeZeroOnly })
     }
 }
 
@@ -812,8 +861,8 @@ mod tests {
     #[test]
     fn z_restore_gaps_names_what_restore_recomputes() {
         let param = |name: &str, index: usize| EstimatedParam {
-            name: name.to_string(), index, initial: 1.0, rw_sd: 0.1,
-            transform: Transform::Identity, rw_sd_auto: false, perturb_only_at_t0: false,
+            name: name.to_string(), index, initial: 1.0,
+            transform: Transform::Identity,
         };
         let specs = [param("beta", 0), param("gamma", 1)];
         let current = [0.5, 0.25];

@@ -695,14 +695,12 @@ mod tests {
         use sim::inference::types::Transform;
         let specs = vec![
             EstimatedParam {
-                name: "beta".into(), index: 0, initial: 0.4, rw_sd: 0.02,
-                transform: Transform::for_domain(0.001, 5.0, true).expect("domain"), rw_sd_auto: false,
-                perturb_only_at_t0: false,
+                name: "beta".into(), index: 0, initial: 0.4,
+                transform: Transform::for_domain(0.001, 5.0, true).expect("domain"),
             },
             EstimatedParam {
-                name: "gamma".into(), index: 1, initial: 0.2, rw_sd: 0.01,
-                transform: Transform::for_domain(0.01, 1.0, true).expect("domain"), rw_sd_auto: false,
-                perturb_only_at_t0: false,
+                name: "gamma".into(), index: 1, initial: 0.2,
+                transform: Transform::for_domain(0.01, 1.0, true).expect("domain"),
             },
         ];
         let base = vec![0.4, 0.2, 999.0];

@@ -53,6 +53,7 @@
 //! `R` is chosen so the skew is negligible at these particle counts, and the
 //! printed `sd(w)` is small (≈ 0.1–0.3).
 
+use sim::inference::if2::{If2Step, ZSd};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -1321,10 +1322,11 @@ fn recording_flags_do_not_move_the_likelihood() {
 // ─── IF2 against the same exact marginal ────────────────────────────────────
 
 /// IF2 drives its own filter loop (`run_if2`), not `bootstrap_filter`, so it
-/// gets its own harness against the same oracle. With every perturbation
-/// zero (one estimated parameter, `rw_sd = 0`, which no rate reads through a
-/// perturbation since it never moves) each IF2 iteration is a bootstrap
-/// filter at θ on its own RNG streams, and its in-run log-likelihood
+/// gets its own harness against the same oracle. With every perturbation too
+/// small to move θ (one estimated parameter with a step of `f64::MIN_POSITIVE`
+/// in z: a step must be positive, and z + ε·N(0, 1) rounds to z) each IF2
+/// iteration is a bootstrap filter at θ on its own RNG streams, and its in-run
+/// log-likelihood
 /// `if2_perturbed_loglik` is an unbiased estimate of `p(y | θ)` like the PF's.
 /// The iterations are the replicates.
 fn if2_lls(cfg: &Config, n_particles: usize, reps: usize, seed: u64) -> Vec<f64> {
@@ -1336,10 +1338,7 @@ fn if2_lls(cfg: &Config, n_particles: usize, reps: usize, seed: u64) -> Vec<f64>
         name: "beta".into(),
         index: beta,
         initial: params[beta],
-        rw_sd: 0.0,
         transform: Transform::Identity,
-        rw_sd_auto: false,
-        perturb_only_at_t0: false,
     }];
     let config = IF2Config {
         n_particles,
@@ -1348,6 +1347,7 @@ fn if2_lls(cfg: &Config, n_particles: usize, reps: usize, seed: u64) -> Vec<f64>
         dt: cfg.dt,
         t_start: cfg.t_start,
         simplex_groups: vec![],
+        steps: vec![If2Step::every_observation(ZSd::new(f64::MIN_POSITIVE).unwrap())],
         skip_first_obs_from_loglik: cfg.skip_first,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
         binomial: sim::rng::BinomialAlgorithm::Btpe,

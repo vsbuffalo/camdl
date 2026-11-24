@@ -19,6 +19,7 @@
 //! `events { founders_arrive : add(I, n_seed) at [tau] }`. A periodic-spline
 //! variant reaches the amount through a forcing coefficient instead.
 
+use sim::inference::if2::{If2Step, ZSd};
 use std::sync::Arc;
 
 use serde_json::{json, Value};
@@ -108,10 +109,7 @@ fn run_if2_refuses_an_estimated_event_time() {
         name: "tau".into(),
         index: tau,
         initial: 2.0,
-        rw_sd: 0.1,
         transform: Transform::Identity,
-        rw_sd_auto: false,
-        perturb_only_at_t0: false,
     }];
     let config = IF2Config {
         n_particles: 4,
@@ -120,6 +118,7 @@ fn run_if2_refuses_an_estimated_event_time() {
         dt: 1.0,
         t_start: 0.0,
         simplex_groups: vec![],
+        steps: vec![If2Step::every_observation(ZSd::new(0.1).unwrap())],
         skip_first_obs_from_loglik: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
         binomial: sim::rng::BinomialAlgorithm::Btpe,
@@ -145,10 +144,7 @@ fn run_pgas_estimating(model: &Arc<CompiledModel>, estimated: &[&str]) -> Result
                 name: (*n).into(),
                 index,
                 initial: model.default_params[index],
-                rw_sd: 0.1,
                 transform: Transform::Identity,
-                rw_sd_auto: false,
-                perturb_only_at_t0: false,
             }
         })
         .collect();

@@ -84,8 +84,7 @@ fn observed(model: &Arc<CompiledModel>, times: &[f64], counts: &[f64]) -> MultiS
 fn problem(model: &CompiledModel, smooth: bool) -> (Vec<EstimatedParam>, Vec<Prior>) {
     let inf = f64::INFINITY;
     let ep = |name: &str, transform: Transform, _lo: f64, _hi: f64, initial: f64| EstimatedParam {
-        name: name.into(), index: model.param_index[name], initial, rw_sd: 0.05, transform,
-        rw_sd_auto: false, perturb_only_at_t0: false,
+        name: name.into(), index: model.param_index[name], initial, transform,
     };
     let normal = |mean: f64, sd: f64| Prior::Fixed(Density::Normal { mean, sd });
     if !smooth {

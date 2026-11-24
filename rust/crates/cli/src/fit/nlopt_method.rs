@@ -313,8 +313,9 @@ pub fn run_method(
     let perturb_only_at_t0_params: Vec<String> = arc_config
         .estimated_params
         .iter()
-        .filter(|p| p.perturb_only_at_t0)
-        .map(|p| p.name.clone())
+        .zip(&arc_config.steps)
+        .filter(|(_, s)| s.at == sim::inference::types::PerturbAt::TimeZeroOnly)
+        .map(|(p, _)| p.name.clone())
         .collect();
 
     let fit_state = FitState {

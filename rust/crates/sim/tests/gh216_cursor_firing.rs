@@ -32,6 +32,7 @@
 //! `M`). The bootstrap-PF marginal likelihood then collapses to the exact sum of
 //! per-observation Poisson log-PMFs over the deterministic `M` trajectory.
 
+use sim::inference::if2::{If2Step, ZSd};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -305,12 +306,14 @@ fn if2_firing_invariant_to_offgrid_obs_stream() {
     let (obs, data) = obs_on_m(&off_grid_times);
     let if2_params = vec![EstimatedParam {
         name: "dummy".into(), index: compiled.param_index["dummy"],
-        initial: 1.0, rw_sd: 0.1,
-        transform: Transform::for_domain(1e-3, 10.0, true).expect("domain"), rw_sd_auto: false, perturb_only_at_t0: false,
+        initial: 1.0,
+        transform: Transform::for_domain(1e-3, 10.0, true).expect("domain"),
     }];
     let config = IF2Config {
         n_particles: 64, n_iterations: 1, cooling: sim::inference::if2::CoolingSchedule { fraction: 0.5, target_iters: 50 }, dt: 1.0, t_start: 0.0,
-        simplex_groups: vec![], skip_first_obs_from_loglik: false,
+        simplex_groups: vec![],
+        steps: vec![If2Step::every_observation(ZSd::new(0.1).unwrap())],
+        skip_first_obs_from_loglik: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
         binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
@@ -346,12 +349,14 @@ fn if2_event_firing_invariant_to_offgrid_obs_stream() {
     let (obs, data) = obs_on_m(&off_grid_times);
     let if2_params = vec![EstimatedParam {
         name: "dummy".into(), index: compiled.param_index["dummy"],
-        initial: 1.0, rw_sd: 0.1,
-        transform: Transform::for_domain(1e-3, 10.0, true).expect("domain"), rw_sd_auto: false, perturb_only_at_t0: false,
+        initial: 1.0,
+        transform: Transform::for_domain(1e-3, 10.0, true).expect("domain"),
     }];
     let config = IF2Config {
         n_particles: 64, n_iterations: 1, cooling: sim::inference::if2::CoolingSchedule { fraction: 0.5, target_iters: 50 }, dt: 1.0, t_start: 0.0,
-        simplex_groups: vec![], skip_first_obs_from_loglik: false,
+        simplex_groups: vec![],
+        steps: vec![If2Step::every_observation(ZSd::new(0.1).unwrap())],
+        skip_first_obs_from_loglik: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
         binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
@@ -516,12 +521,14 @@ fn if2_rejects_at_times_expr_under_exact() {
     let (obs, _) = obs_on_m(&[2.0, 6.0]);
     let if2_params = vec![EstimatedParam {
         name: "dummy".into(), index: compiled.param_index["dummy"],
-        initial: 4.0, rw_sd: 0.1,
-        transform: Transform::for_domain(1.0, 8.0, true).expect("domain"), rw_sd_auto: false, perturb_only_at_t0: false,
+        initial: 4.0,
+        transform: Transform::for_domain(1.0, 8.0, true).expect("domain"),
     }];
     let config = IF2Config {
         n_particles: 16, n_iterations: 1, cooling: sim::inference::if2::CoolingSchedule { fraction: 0.5, target_iters: 50 }, dt: 1.0, t_start: 0.0,
-        simplex_groups: vec![], skip_first_obs_from_loglik: false,
+        simplex_groups: vec![],
+        steps: vec![If2Step::every_observation(ZSd::new(0.1).unwrap())],
+        skip_first_obs_from_loglik: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
         binomial: sim::rng::BinomialAlgorithm::Btpe,
     };
@@ -579,8 +586,8 @@ fn run_pgas_exact(compiled: &Arc<CompiledModel>, obs_times: &[f64], run_id: &str
     let params = compiled.default_params.clone();
     let if2_params = vec![EstimatedParam {
         name: "dummy".into(), index: compiled.param_index["dummy"],
-        initial: 1.0, rw_sd: 0.1,
-        transform: Transform::for_domain(1e-3, 10.0, true).expect("domain"), rw_sd_auto: false, perturb_only_at_t0: false,
+        initial: 1.0,
+        transform: Transform::for_domain(1e-3, 10.0, true).expect("domain"),
     }];
     let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];
     let obs_model = pgas_obs_model(compiled, obs_times);

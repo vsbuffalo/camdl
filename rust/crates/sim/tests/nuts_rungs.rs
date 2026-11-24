@@ -158,8 +158,7 @@ fn rung3_target_values_reaching_nuts() {
     // log density of the coordinate z: for an identity normal, log N(z); for
     // τ on the log scale, z − λeᶻ.
     let ep = |transform: Transform| EstimatedParam {
-        name: "p".into(), index: 0, initial: 0.0, rw_sd: 0.1, transform,
-        rw_sd_auto: false, perturb_only_at_t0: false,
+        name: "p".into(), index: 0, initial: 0.0, transform,
     };
     let cases: Vec<(&str, Prior, EstimatedParam, Box<dyn Fn(f64) -> f64>, Vec<f64>)> = vec![
         ("normal(-1, 0.6), identity", Prior::Fixed(Density::Normal { mean: -1.0, sd: 0.6 }),
@@ -216,9 +215,8 @@ fn pgas_rung(label: &str, fixture: &str, fixed: &[(&str, f64)], data: Option<(&s
         let (lo, hi) = bounds.unwrap_or(if positive { (0.0, inf) } else { (-inf, inf) });
         let initial = if n == "tau" { 0.2 } else if n == "a" { -1.5 } else { 0.0 };
         EstimatedParam {
-            name: n.clone(), index: model.param_index[n.as_str()], initial, rw_sd: 0.05,
+            name: n.clone(), index: model.param_index[n.as_str()], initial,
             transform: Transform::for_domain(lo, hi, positive).unwrap(),
-            rw_sd_auto: false, perturb_only_at_t0: false,
         }
     }).collect();
     let priors: Vec<Prior> = priors_ir.into_iter().map(|(p, _, _)| p).collect();

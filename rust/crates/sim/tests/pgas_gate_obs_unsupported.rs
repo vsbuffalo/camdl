@@ -161,10 +161,7 @@ fn attempt_nuts_fit_with(
         name: param.into(),
         index: compiled.param_index[param],
         initial: param_init,
-        rw_sd: 0.02,
         transform: Transform::for_domain(0.01, 100.0, true).expect("domain"),
-        rw_sd_auto: false,
-        perturb_only_at_t0: false,
     }];
     let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];
 

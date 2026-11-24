@@ -126,10 +126,7 @@ fn run_once() -> PGASResult {
         name: "beta".into(),
         index: compiled.param_index["beta"],
         initial: 0.3,
-        rw_sd: 0.02,
         transform: Transform::for_domain(0.01, 2.0, true).expect("domain"),
-        rw_sd_auto: false,
-        perturb_only_at_t0: false,
     }];
     let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];
 

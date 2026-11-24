@@ -89,10 +89,7 @@ fn ep(transform: Transform) -> EstimatedParam {
         name: "p".into(),
         index: 0,
         initial: 0.0,
-        rw_sd: 0.1,
         transform,
-        rw_sd_auto: false,
-        perturb_only_at_t0: false,
     }
 }
 
@@ -779,9 +776,9 @@ fn pmmh_without_a_likelihood_draws_the_truncated_priors() {
 // ── PGAS's MH-within-Gibbs scale does not read rw_sd ───────────────────────
 
 /// PGAS's MH-within-Gibbs starts each parameter's proposal at its own default
-/// step in z (`PGAS_MWG_DEFAULT_STEP`), whatever `rw_sd` says:
-/// `rw_sd` is IF2's, PMMH's and MH's knob. Zero sweeps, so the resume state's
-/// scale is the initial one.
+/// step in z (`PGAS_MWG_DEFAULT_STEP`): `rw_sd` is IF2's, PMMH's and MH's
+/// knob, and the `EstimatedParam` PGAS takes carries no step. Zero sweeps, so
+/// the resume state's scale is the initial one.
 #[test]
 fn pgas_mh_within_gibbs_starts_at_the_sampler_default_not_rw_sd() {
     let model = prior_only_model();
@@ -789,8 +786,6 @@ fn pgas_mh_within_gibbs_starts_at_the_sampler_default_not_rw_sd() {
     tau.name = "tau".into();
     tau.index = TAU_IDX;
     tau.initial = 0.5;
-    tau.rw_sd = 0.1;
-    tau.rw_sd_auto = false;
     let mut base = model.default_params.clone();
     base[TAU_IDX] = 0.5;
     let times: Vec<f64> = (1..=PRIOR_T_END as usize).map(|t| t as f64).collect();

@@ -4,6 +4,7 @@
 //! Test 2: Parameters stay within bounds (scaled logit enforcement).
 //! Test 3: No-cooling mode explores without contracting.
 
+use sim::inference::if2::{If2Step, ZSd};
 use std::collections::HashMap;
 use std::sync::Arc;
 use ir::{
@@ -190,16 +191,12 @@ fn test_if2_converges_from_dispersed_start() {
 
     let if2_params = vec![
         EstimatedParam {
-            // Steps in z: natural 0.05 and 0.01 converted once at each box's
-            // midpoint, as `build_if2_params_from_specs` converts them.
             name: "beta".into(), index: 0, initial: 0.8,
-            rw_sd: Transform::Interval { lo: 0.01, hi: 2.0 }.step_from_natural(0.05, 0.8),
-            transform: Transform::Interval { lo: 0.01, hi: 2.0 }, perturb_only_at_t0: false, rw_sd_auto: false,
+            transform: Transform::Interval { lo: 0.01, hi: 2.0 },
         },
         EstimatedParam {
             name: "gamma".into(), index: 1, initial: 0.3,
-            rw_sd: Transform::Interval { lo: 0.01, hi: 1.0 }.step_from_natural(0.01, 0.3),
-            transform: Transform::Interval { lo: 0.01, hi: 1.0 }, perturb_only_at_t0: false, rw_sd_auto: false,
+            transform: Transform::Interval { lo: 0.01, hi: 1.0 },
         },
     ];
 
@@ -207,6 +204,12 @@ fn test_if2_converges_from_dispersed_start() {
         n_particles: 200,
         n_iterations: 30,
         cooling: sim::inference::if2::CoolingSchedule { fraction: 0.90, target_iters: 50 }, simplex_groups: vec![],
+        // Steps in z: natural 0.05 and 0.01 converted once at each box's
+        // midpoint, as `build_if2_params_from_specs` converts them.
+        steps: vec![
+            If2Step::every_observation(ZSd::new(Transform::Interval { lo: 0.01, hi: 2.0 }.step_from_natural(0.05, 0.8)).unwrap()),
+            If2Step::every_observation(ZSd::new(Transform::Interval { lo: 0.01, hi: 1.0 }.step_from_natural(0.01, 0.3)).unwrap()),
+        ],
         dt: 1.0,
         t_start: 0.0,
         skip_first_obs_from_loglik: false,
@@ -265,13 +268,11 @@ fn test_if2_respects_bounds() {
     let if2_params = vec![
         EstimatedParam {
             name: "beta".into(), index: 0, initial: 0.3,
-            rw_sd: 0.1, // aggressive — would escape without bounds
-            transform: Transform::Interval { lo: 0.1, hi: 0.5 }, perturb_only_at_t0: false, rw_sd_auto: false,
+            transform: Transform::Interval { lo: 0.1, hi: 0.5 },
         },
         EstimatedParam {
             name: "gamma".into(), index: 1, initial: 0.1,
-            rw_sd: 0.03,
-            transform: Transform::Interval { lo: 0.05, hi: 0.2 }, perturb_only_at_t0: false, rw_sd_auto: false,
+            transform: Transform::Interval { lo: 0.05, hi: 0.2 },
         },
     ];
 
@@ -279,6 +280,11 @@ fn test_if2_respects_bounds() {
         n_particles: 100,
         n_iterations: 20,
         cooling: sim::inference::if2::CoolingSchedule { fraction: 0.95, target_iters: 50 }, simplex_groups: vec![],
+        steps: vec![
+            // 0.1 is aggressive: beta would escape without bounds.
+            If2Step::every_observation(ZSd::new(0.1).unwrap()),
+            If2Step::every_observation(ZSd::new(0.03).unwrap()),
+        ],
         dt: 1.0,
         t_start: 0.0,
         skip_first_obs_from_loglik: false,
@@ -317,7 +323,7 @@ fn test_if2_no_cooling_explores() {
     let if2_params = vec![
         EstimatedParam {
             name: "beta".into(), index: 0, initial: 0.3,
-            rw_sd: 0.02, transform: Transform::Interval { lo: 0.01, hi: 2.0 }, perturb_only_at_t0: false, rw_sd_auto: false,
+            transform: Transform::Interval { lo: 0.01, hi: 2.0 },
         },
     ];
 
@@ -326,6 +332,7 @@ fn test_if2_no_cooling_explores() {
         n_particles: 100,
         n_iterations: 15,
         cooling: sim::inference::if2::CoolingSchedule { fraction: 1.0, target_iters: 50 }, simplex_groups: vec![],
+        steps: vec![If2Step::every_observation(ZSd::new(0.02).unwrap())],
         dt: 1.0,
         t_start: 0.0,
         skip_first_obs_from_loglik: false,
@@ -374,13 +381,14 @@ fn the_if2_step_is_fixed_in_z_near_an_end() {
     let process = ChainBinomialProcess::new(compiled.clone());
     let obs_model = FlatObs { obs_times: (1..=10).map(|t| t as f64).collect() };
     let if2_params = vec![EstimatedParam {
-        name: "beta".into(), index: 0, initial: 0.999, rw_sd: 0.1,
-        transform: Transform::Interval { lo: 0.0, hi: 1.0 }, perturb_only_at_t0: false, rw_sd_auto: false,
+        name: "beta".into(), index: 0, initial: 0.999,
+        transform: Transform::Interval { lo: 0.0, hi: 1.0 },
     }];
     let config = IF2Config {
         n_particles: 200,
         n_iterations: 1,
         cooling: sim::inference::if2::CoolingSchedule { fraction: 1.0, target_iters: 50 }, simplex_groups: vec![],
+        steps: vec![If2Step::every_observation(ZSd::new(0.1).unwrap())],
         dt: 1.0,
         t_start: 0.0,
         skip_first_obs_from_loglik: false,
@@ -397,8 +405,8 @@ fn the_if2_step_is_fixed_in_z_near_an_end() {
 #[test]
 fn log_transform_clamps_to_bounds() {
     let param = EstimatedParam {
-        name: "test".into(), index: 0, initial: 1.0, rw_sd: 0.1,
-        transform: Transform::for_domain(0.01, 100.0, true).expect("domain"), perturb_only_at_t0: false, rw_sd_auto: false,
+        name: "test".into(), index: 0, initial: 1.0,
+        transform: Transform::for_domain(0.01, 100.0, true).expect("domain"),
     };
     // Extreme positive z → exp(z) → clamped to hi
     assert_eq!(param.from_transformed(1000.0), 100.0);
@@ -412,8 +420,8 @@ fn log_transform_clamps_to_bounds() {
 #[test]
 fn logit_transform_enforces_bounds() {
     let param = EstimatedParam {
-        name: "test".into(), index: 0, initial: 0.5, rw_sd: 0.1,
-        transform: Transform::Interval { lo: 0.0, hi: 1.0 }, perturb_only_at_t0: false, rw_sd_auto: false,
+        name: "test".into(), index: 0, initial: 0.5,
+        transform: Transform::Interval { lo: 0.0, hi: 1.0 },
     };
     // Any z → result in [lo, hi] (saturates at bounds for extreme z)
     let v1 = param.from_transformed(100.0);
@@ -430,8 +438,8 @@ fn logit_transform_enforces_bounds() {
 #[test]
 fn log_round_trip_within_bounds() {
     let param = EstimatedParam {
-        name: "test".into(), index: 0, initial: 5.0, rw_sd: 0.1,
-        transform: Transform::for_domain(0.001, 1000.0, true).expect("domain"), perturb_only_at_t0: false, rw_sd_auto: false,
+        name: "test".into(), index: 0, initial: 5.0,
+        transform: Transform::for_domain(0.001, 1000.0, true).expect("domain"),
     };
     for &x in &[0.0011, 0.01, 1.0, 10.0, 100.0, 999.0] {
         let z = param.to_transformed(x);
@@ -449,8 +457,8 @@ fn log_round_trip_within_bounds() {
 #[test]
 fn logit_round_trip() {
     let param = EstimatedParam {
-        name: "test".into(), index: 0, initial: 0.5, rw_sd: 0.1,
-        transform: Transform::Interval { lo: 0.0, hi: 1.0 }, perturb_only_at_t0: false, rw_sd_auto: false,
+        name: "test".into(), index: 0, initial: 0.5,
+        transform: Transform::Interval { lo: 0.0, hi: 1.0 },
     };
     for &x in &[0.01, 0.1, 0.3, 0.5, 0.7, 0.9, 0.99] {
         let z = param.to_transformed(x);
@@ -463,8 +471,8 @@ fn logit_round_trip() {
 fn scaled_logit_round_trip() {
     // Logit on [0.01, 0.10] — the s0 case
     let param = EstimatedParam {
-        name: "s0".into(), index: 0, initial: 0.03, rw_sd: 0.005,
-        transform: Transform::Interval { lo: 0.01, hi: 0.10 }, perturb_only_at_t0: true, rw_sd_auto: false,
+        name: "s0".into(), index: 0, initial: 0.03,
+        transform: Transform::Interval { lo: 0.01, hi: 0.10 },
     };
     for &x in &[0.015, 0.03, 0.05, 0.08, 0.095] {
         let z = param.to_transformed(x);
@@ -585,13 +593,13 @@ fn sir_if2_final_loglik(binomial: sim::rng::BinomialAlgorithm) -> f64 {
     let obs_model = NegBinFlowObs { observations, obs_times, flow_index: 1 };
     let if2_params = vec![EstimatedParam {
         name: "beta".into(), index: 0, initial: params[0],
-        rw_sd: Transform::Interval { lo: 0.01, hi: 2.0 }.step_from_natural(0.02, params[0]),
-        transform: Transform::Interval { lo: 0.01, hi: 2.0 }, perturb_only_at_t0: false, rw_sd_auto: false,
+        transform: Transform::Interval { lo: 0.01, hi: 2.0 },
     }];
     let config = IF2Config {
         n_particles: 100, n_iterations: 2,
         cooling: sim::inference::if2::CoolingSchedule { fraction: 0.9, target_iters: 50 },
-        simplex_groups: vec![], dt: 1.0, t_start: 0.0, skip_first_obs_from_loglik: false,
+        simplex_groups: vec![],
+        steps: vec![If2Step::every_observation(ZSd::new(Transform::Interval { lo: 0.01, hi: 2.0 }.step_from_natural(0.02, params[0])).unwrap())], dt: 1.0, t_start: 0.0, skip_first_obs_from_loglik: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET, binomial,
     };
     run_if2(&process, &obs_model, &params, &if2_params, &config, 7).unwrap().final_loglik

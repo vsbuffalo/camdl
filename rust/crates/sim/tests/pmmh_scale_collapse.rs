@@ -54,10 +54,7 @@ fn params() -> Vec<EstimatedParam> {
             name: format!("p{i}"),
             index: i,
             initial: 0.0,
-            rw_sd: 1.0,
             transform: Transform::Identity,
-            rw_sd_auto: false,
-            perturb_only_at_t0: false,
         })
         .collect()
 }

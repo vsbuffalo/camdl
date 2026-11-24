@@ -84,8 +84,7 @@ fn one(model: &Arc<CompiledModel>, sim_id: usize) -> Vec<usize> {
     let observations: Vec<Observation> = times.iter().map(|&t| Observation { time: t, value: 0.0 }).collect();
     let inf = f64::INFINITY;
     let ep = |name: &str, transform: Transform, _lo: f64, _hi: f64, initial: f64| EstimatedParam {
-        name: name.into(), index: model.param_index[name], initial, rw_sd: 0.05, transform,
-        rw_sd_auto: false, perturb_only_at_t0: false,
+        name: name.into(), index: model.param_index[name], initial, transform,
     };
     let mut est = vec![
         ep("a", Transform::Identity, -inf, inf, -3.0),

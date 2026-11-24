@@ -192,7 +192,8 @@ fn resolve_estimated(
             bounds: spec.bounds,
         })
         .collect();
-    let mut estimated = build_if2_params_from_specs(&model, &compiled, &compiled.default_params, &specs)?;
+    let mut estimated: Vec<_> = build_if2_params_from_specs(&model, &compiled, &compiled.default_params, &specs)?
+        .into_iter().map(|(p, _)| p).collect();
     // The sampler draws parameter by parameter, so this order decides every
     // point. Name order, as `fit run` sorts, keeps the design independent of
     // the order the `[estimate]` table lists its entries in.
@@ -246,10 +247,7 @@ mod tests {
             name: name.into(),
             index,
             initial: 1.0,
-            rw_sd: 0.1,
             transform,
-            rw_sd_auto: false,
-            perturb_only_at_t0: false,
         }
     }
 

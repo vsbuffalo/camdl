@@ -586,8 +586,9 @@ pub(crate) fn run_method(out: &mut crate::out::Out, cx: MethodContext<'_>) -> Me
                 acceptance_rate: None,
                 tail_chain_agreement: chain_results.chain_agreement.iter().map(|(k, v)| (k.clone(), *v)).collect(),
                 perturb_only_at_t0_params: run_config.estimated_params.iter()
-                    .filter(|p| p.perturb_only_at_t0)
-                    .map(|p| p.name.clone()).collect(),
+                    .zip(&run_config.steps)
+                    .filter(|(_, s)| s.at == sim::inference::types::PerturbAt::TimeZeroOnly)
+                    .map(|(p, _)| p.name.clone()).collect(),
                 chain_logliks: chain_results.results.iter()
                     .map(|(_, r)| r.final_loglik).collect(),
                 chain_eval_logliks: chain_results.chain_eval_logliks(),

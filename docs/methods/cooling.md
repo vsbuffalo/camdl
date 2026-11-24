@@ -73,7 +73,7 @@ swarm itself is carried whole from one iteration to the next — each particle
 keeps its own θ (Ionides et al. 2015, Algorithm 1; gh#646) — so the swarm's
 spread at any point is the accumulated result of every earlier perturbation and
 every resampling, not the current perturbation SD alone. The per-iteration
-diagnostics report both: `effective_rw_sd` (the cooled perturbation) and
+diagnostics report both: `effective_sd` (the cooled perturbation, in z) and
 `q_ratio`, its ratio to the swarm's actual spread.
 
 ## References

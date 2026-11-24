@@ -3,10 +3,13 @@
 //! Verifies: softmax round-trip, sum-to-1 invariant, numerical stability,
 //! perturbation preserves simplex, edge cases (zero/tiny fractions).
 
+use sim::inference::if2::ZSd;
 use sim::inference::if2::SimplexGroup;
 use sim::rng::StatefulRng;
 
 fn rng() -> StatefulRng { StatefulRng::new(42) }
+
+fn sds(v: &[f64]) -> Vec<ZSd> { v.iter().map(|&s| ZSd::new(s).unwrap()).collect() }
 
 fn assert_sums_to_one(fracs: &[f64], msg: &str) {
     let sum: f64 = fracs.iter().sum();
@@ -27,7 +30,7 @@ fn log_barycentric_of_uniform() {
     // Equal fractions → all log-ratios should be equal (= -ln(n))
     let group = SimplexGroup {
         indices: vec![0, 1, 2],
-        rw_sds: vec![0.1, 0.1, 0.1],
+        sds: sds(&[0.1, 0.1, 0.1]),
     };
     let params = vec![1.0/3.0, 1.0/3.0, 1.0/3.0];
     let z = group.to_log_barycentric(&params);
@@ -43,7 +46,7 @@ fn log_barycentric_of_he2010_fractions() {
     // He et al. initial fractions: s0=0.0297, e0=5.17e-5, i0=5.14e-5, r0=0.97
     let group = SimplexGroup {
         indices: vec![0, 1, 2, 3],
-        rw_sds: vec![0.1, 0.1, 0.1, 0.1],
+        sds: sds(&[0.1, 0.1, 0.1, 0.1]),
     };
     let mut params = vec![0.0297, 5.17e-5, 5.14e-5, 0.9703];
     // Normalize to exactly sum to 1 (avoids round-trip normalization mismatch)
@@ -140,7 +143,7 @@ fn softmax_many_elements() {
 fn round_trip_preserves_fractions() {
     let group = SimplexGroup {
         indices: vec![0, 1, 2],
-        rw_sds: vec![0.1, 0.1, 0.1],
+        sds: sds(&[0.1, 0.1, 0.1]),
     };
     // Various fraction vectors that sum to 1
     let test_cases = vec![
@@ -165,7 +168,7 @@ fn round_trip_non_unit_sum() {
     // Fractions that don't sum to 1 → round-trip normalizes them
     let group = SimplexGroup {
         indices: vec![0, 1, 2],
-        rw_sds: vec![0.1, 0.1, 0.1],
+        sds: sds(&[0.1, 0.1, 0.1]),
     };
     let params = vec![2.0, 3.0, 5.0]; // sum = 10
     let z = group.to_log_barycentric(&params);
@@ -183,7 +186,7 @@ fn round_trip_non_unit_sum() {
 fn perturb_preserves_sum_to_one() {
     let group = SimplexGroup {
         indices: vec![0, 1, 2, 3],
-        rw_sds: vec![0.1, 0.1, 0.1, 0.1],
+        sds: sds(&[0.1, 0.1, 0.1, 0.1]),
     };
     let mut params = vec![0.25, 0.25, 0.25, 0.25];
     let mut rng = rng();
@@ -202,7 +205,7 @@ fn perturb_preserves_sum_to_one() {
 fn perturb_with_cooling() {
     let group = SimplexGroup {
         indices: vec![0, 1, 2],
-        rw_sds: vec![0.5, 0.5, 0.5], // large rw_sd
+        sds: sds(&[0.5, 0.5, 0.5]), // large rw_sd
     };
 
     // Run with cooling = 0.01 (almost frozen) — fractions should barely change
@@ -228,7 +231,7 @@ fn perturb_extreme_fractions() {
     // One fraction near 1, others near 0 — should not panic
     let group = SimplexGroup {
         indices: vec![0, 1, 2],
-        rw_sds: vec![0.1, 0.1, 0.1],
+        sds: sds(&[0.1, 0.1, 0.1]),
     };
     let mut params = vec![0.999, 0.0005, 0.0005];
     let mut rng = rng();
@@ -245,7 +248,7 @@ fn perturb_very_tiny_fractions() {
     // Fractions at 1e-6 scale — should not produce NaN
     let group = SimplexGroup {
         indices: vec![0, 1, 2, 3],
-        rw_sds: vec![0.01, 0.01, 0.01, 0.01],
+        sds: sds(&[0.01, 0.01, 0.01, 0.01]),
     };
     let mut params = vec![0.97, 0.02, 1e-6, 1e-6];
     // Normalize to sum to 1
@@ -270,7 +273,7 @@ fn perturb_different_rw_sds() {
     // Different rw_sd per member — larger rw_sd should cause more movement
     let group = SimplexGroup {
         indices: vec![0, 1, 2],
-        rw_sds: vec![1.0, 0.01, 0.01], // first member moves a lot
+        sds: sds(&[1.0, 0.01, 0.01]), // first member moves a lot
     };
     let start = vec![1.0/3.0, 1.0/3.0, 1.0/3.0];
     let mut rng = rng();
@@ -301,7 +304,7 @@ fn perturb_different_rw_sds() {
 fn perturb_deterministic_with_seed() {
     let group = SimplexGroup {
         indices: vec![0, 1, 2],
-        rw_sds: vec![0.1, 0.1, 0.1],
+        sds: sds(&[0.1, 0.1, 0.1]),
     };
 
     let mut params1 = vec![0.5, 0.3, 0.2];
@@ -325,7 +328,7 @@ fn perturb_single_element_group() {
     // Degenerate: single-element simplex → always 1.0
     let group = SimplexGroup {
         indices: vec![0],
-        rw_sds: vec![0.1],
+        sds: sds(&[0.1]),
     };
     let mut params = vec![1.0];
     let mut rng = rng();
@@ -338,7 +341,7 @@ fn perturb_with_extra_params() {
     // Simplex group is indices [1,2,3], but params vector has index 0 and 4 too
     let group = SimplexGroup {
         indices: vec![1, 2, 3],
-        rw_sds: vec![0.1, 0.1, 0.1],
+        sds: sds(&[0.1, 0.1, 0.1]),
     };
     let mut params = vec![100.0, 0.5, 0.3, 0.2, 999.0];
     let mut rng = rng();

@@ -435,7 +435,7 @@ impl DataSpec {
 /// CLI-side type: members are listed by name. At fit-config build time
 /// names are resolved to model param indices, and `rw_sd` is read from
 /// each member's `EstimateSpecV2.rw_sd` (or auto-derived) — the runtime
-/// `sim::inference::if2::SimplexGroup` carries indices + rw_sds on the
+/// `sim::inference::if2::SimplexGroup` carries indices + SDs on the
 /// log-ratio scale.
 ///
 /// Schema is forward-compatible with a future `prior:

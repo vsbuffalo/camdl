@@ -24,6 +24,7 @@
 //! identically, so its weights are equal; and a binomial prevalence survey of
 //! `I` with a per-row denominator `tested` read from the data (`survey`).
 
+use sim::inference::if2::{If2Step, ZSd};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -288,13 +289,11 @@ fn if2(compiled: &Arc<CompiledModel>, obs: &MultiStreamObsModel, seed: u64,
     let params = vec![
         EstimatedParam {
             name: "beta".into(), index: 0, initial: 0.5,
-            rw_sd: beta.step_from_natural(0.02, 0.5), transform: beta,
-            perturb_only_at_t0: only_at_t0, rw_sd_auto: false,
+            transform: beta,
         },
         EstimatedParam {
             name: "gamma".into(), index: 1, initial: 0.2,
-            rw_sd: gamma.step_from_natural(0.01, 0.2), transform: gamma,
-            perturb_only_at_t0: only_at_t0, rw_sd_auto: false,
+            transform: gamma,
         },
     ];
     let config = IF2Config {
@@ -302,6 +301,10 @@ fn if2(compiled: &Arc<CompiledModel>, obs: &MultiStreamObsModel, seed: u64,
         n_iterations,
         cooling: CoolingSchedule { fraction: 0.5, target_iters: 50 },
         simplex_groups: vec![],
+        steps: [beta.step_from_natural(0.02, 0.5), gamma.step_from_natural(0.01, 0.2)].into_iter()
+            .map(|sd| ZSd::new(sd).unwrap())
+            .map(if only_at_t0 { If2Step::time_zero_only } else { If2Step::every_observation })
+            .collect(),
         dt: DT,
         t_start: 0.0,
         skip_first_obs_from_loglik: false,

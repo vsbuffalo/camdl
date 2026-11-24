@@ -246,10 +246,7 @@ mod tests {
             name: name.into(),
             index: 0,
             initial,
-            rw_sd: 0.1,
             transform: domain_of(transform, lower, upper),
-            rw_sd_auto: false,
-            perturb_only_at_t0: false,
         }
     }
 
@@ -506,10 +503,7 @@ mod tests {
             name: name.into(),
             index,
             initial,
-            rw_sd: 0.1,
             transform: domain_of(transform, lower, upper),
-            rw_sd_auto: false,
-            perturb_only_at_t0: false,
         }
     }
 }

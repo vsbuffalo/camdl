@@ -18,6 +18,7 @@
 //! incidence scored under a negative binomial, plus a second incidence stream,
 //! `aux`, whose rows are all `NA`. Binding `aux` adds stops and nothing else.
 
+use sim::inference::if2::{If2Step, ZSd};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -488,13 +489,11 @@ fn if2(compiled: &Arc<CompiledModel>, obs: &MultiStreamObsModel, seed: u64) -> I
     let params = vec![
         EstimatedParam {
             name: "beta".into(), index: 0, initial: 0.5,
-            rw_sd: beta.step_from_natural(0.02, 0.5), transform: beta,
-            perturb_only_at_t0: false, rw_sd_auto: false,
+            transform: beta,
         },
         EstimatedParam {
             name: "gamma".into(), index: 1, initial: 0.2,
-            rw_sd: gamma.step_from_natural(0.01, 0.2), transform: gamma,
-            perturb_only_at_t0: false, rw_sd_auto: false,
+            transform: gamma,
         },
     ];
     let config = IF2Config {
@@ -502,6 +501,7 @@ fn if2(compiled: &Arc<CompiledModel>, obs: &MultiStreamObsModel, seed: u64) -> I
         n_iterations: 4,
         cooling: CoolingSchedule { fraction: 0.5, target_iters: 50 },
         simplex_groups: vec![],
+        steps: vec![If2Step::every_observation(ZSd::new(beta.step_from_natural(0.02, 0.5)).unwrap()), If2Step::every_observation(ZSd::new(gamma.step_from_natural(0.01, 0.2)).unwrap())],
         dt: DT,
         t_start: 0.0,
         skip_first_obs_from_loglik: false,
@@ -535,7 +535,7 @@ fn if2_parameter_evolution_ignores_skipped_stops() {
             for (da, db) in ia.param_diag.iter().zip(&ib.param_diag) {
                 assert_eq!(db.weighted_var_ratio.to_bits(), da.weighted_var_ratio.to_bits());
                 assert_eq!(db.q_ratio.to_bits(), da.q_ratio.to_bits());
-                assert_eq!(db.effective_rw_sd.to_bits(), da.effective_rw_sd.to_bits());
+                assert_eq!(db.effective_sd.to_bits(), da.effective_sd.to_bits());
             }
         }
     }

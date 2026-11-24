@@ -5067,17 +5067,15 @@ mod prior_grad_tests {
 
     fn log_param(lo: f64, hi: f64) -> EstimatedParam {
         EstimatedParam {
-            name: "p".into(), index: 0, initial: 1.0, rw_sd: 0.1,
+            name: "p".into(), index: 0, initial: 1.0,
             transform: Transform::for_domain(lo, hi, true).expect("domain"),
-            rw_sd_auto: false, perturb_only_at_t0: false,
         }
     }
 
     fn identity_param() -> EstimatedParam {
         EstimatedParam {
-            name: "p".into(), index: 0, initial: 0.0, rw_sd: 0.1,
+            name: "p".into(), index: 0, initial: 0.0,
             transform: Transform::Identity,
-            rw_sd_auto: false, perturb_only_at_t0: false,
         }
     }
 
@@ -5115,8 +5113,7 @@ mod prior_grad_tests {
     #[test]
     fn log_family_priors_grad_matches_fd_on_the_bounded_maps() {
         let on = |transform: Transform| EstimatedParam {
-            name: "p".into(), index: 0, initial: 0.5, rw_sd: 0.1, transform,
-            rw_sd_auto: false, perturb_only_at_t0: false,
+            name: "p".into(), index: 0, initial: 0.5, transform,
         };
         let zs = [-4.0, -1.5, 0.0, 0.7, 3.0];
         let unit = [Transform::Interval { lo: 0.1, hi: 0.9 }, Transform::Interval { lo: 0.0, hi: 1.0 },
@@ -5181,8 +5178,8 @@ mod prior_grad_tests {
             &ip, &[0.4, 0.7, 0.95]);
         // Logit transform onto [0.3, 1.0] — bounds equal truncation support.
         let lp = EstimatedParam {
-            name: "p".into(), index: 0, initial: 0.7, rw_sd: 0.1,
-            transform: Transform::Interval { lo: 0.3, hi: 1.0 }, rw_sd_auto: false, perturb_only_at_t0: false,
+            name: "p".into(), index: 0, initial: 0.7,
+            transform: Transform::Interval { lo: 0.3, hi: 1.0 },
         };
         assert_grad_matches_fd(
             &Prior::Fixed(Density::TruncatedNormal { mean: 0.7, sd: 0.2, lower: 0.3, upper: 1.0 }),

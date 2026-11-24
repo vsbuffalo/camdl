@@ -86,9 +86,8 @@ fn run(fixture: &str) -> Option<(Vec<String>, Vec<Chain>)> {
         let (lo, hi) = bounds.unwrap_or(if positive { (0.0, inf) } else { (-inf, inf) });
         EstimatedParam {
             name: n.clone(), index: model.param_index[n.as_str()],
-            initial: if n == "tau" { 0.2 } else { 0.0 }, rw_sd: 0.05,
+            initial: if n == "tau" { 0.2 } else { 0.0 },
             transform: Transform::for_domain(lo, hi, positive).unwrap(),
-            rw_sd_auto: false, perturb_only_at_t0: false,
         }
     }).collect();
     let priors: Vec<Prior> = priors_ir.into_iter().map(|(p, _, _)| p).collect();

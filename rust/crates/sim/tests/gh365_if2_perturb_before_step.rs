@@ -40,6 +40,7 @@
 //! mismatch is also visible as a log-likelihood penalty, which is the harm
 //! a shared process/measurement parameter actually suffers.
 
+use sim::inference::if2::{If2Step, ZSd};
 use std::sync::Mutex;
 
 use sim::{
@@ -142,10 +143,7 @@ fn if2_weights_the_same_theta_that_drove_the_step() {
         initial: 0.5,
         // Big enough that a stale θ is unmistakable, small enough that the
         // Log transform never reaches its clamp (bounds are 3 orders wide).
-        rw_sd: 0.2,
         transform: Transform::for_domain(0.01, 10.0, true).expect("domain"),
-        perturb_only_at_t0: false,
-        rw_sd_auto: false,
     }];
 
     let config = IF2Config {
@@ -155,6 +153,7 @@ fn if2_weights_the_same_theta_that_drove_the_step() {
         dt: 1.0,
         t_start: 0.0,
         simplex_groups: vec![],
+        steps: vec![If2Step::every_observation(ZSd::new(0.2).unwrap())],
         skip_first_obs_from_loglik: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
         binomial: sim::rng::BinomialAlgorithm::Btpe,

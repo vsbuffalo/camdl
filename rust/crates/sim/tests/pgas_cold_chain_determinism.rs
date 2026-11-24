@@ -107,10 +107,7 @@ fn mu_param() -> EstimatedParam {
         name: "mu".into(),
         index: 0,
         initial: 0.01,
-        rw_sd: 0.002,
         transform: Transform::for_domain(1e-6, 1.0, true).expect("domain"),
-        rw_sd_auto: false,
-        perturb_only_at_t0: false,
     }
 }
 

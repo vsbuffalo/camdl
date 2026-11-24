@@ -95,8 +95,7 @@ impl Fit {
         let obs_model = observed(&model, times, counts);
         let observations = times.iter().map(|&t| Observation { time: t, value: 0.0 }).collect();
         let p = |name: &str, _lo: f64, _hi: f64, transform: Transform, initial: f64| EstimatedParam {
-            name: name.into(), index: model.param_index[name], initial, rw_sd: 0.05, transform,
-            rw_sd_auto: false, perturb_only_at_t0: false,
+            name: name.into(), index: model.param_index[name], initial, transform,
         };
         let mut est = vec![
             p("a", f64::NEG_INFINITY, f64::INFINITY, Transform::Identity, -1.5),
@@ -122,10 +121,7 @@ impl Fit {
             name: (*n).into(),
             index: model.param_index[*n],
             initial: start,
-            rw_sd: 0.05,
             transform: Transform::Identity,
-            rw_sd_auto: false,
-            perturb_only_at_t0: false,
         }).collect::<Vec<_>>();
         let priors = vec![Prior::Fixed(Density::Normal { mean: -1.5, sd: 1.0 }); est.len()];
         Fit { model, obs_model, observations, est, priors }

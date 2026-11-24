@@ -19,6 +19,7 @@
 //! differing ONLY in `.initial` must produce different output; identical
 //! `.initial` must reproduce bit-for-bit.
 
+use sim::inference::if2::{If2Step, ZSd};
 use std::sync::Mutex;
 
 use sim::{
@@ -92,6 +93,7 @@ fn config() -> IF2Config {
         dt: 1.0,
         t_start: 0.0,
         simplex_groups: vec![],
+        steps: vec![If2Step::every_observation(ZSd::new(0.05).unwrap())],
         skip_first_obs_from_loglik: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
         binomial: sim::rng::BinomialAlgorithm::Btpe,
@@ -103,10 +105,7 @@ fn spec(initial: f64) -> Vec<EstimatedParam> {
         name: "theta".into(),
         index: THETA_IDX,
         initial,
-        rw_sd: 0.05,
         transform: Transform::for_domain(0.01, 10.0, true).expect("domain"),
-        perturb_only_at_t0: false,
-        rw_sd_auto: false,
     }]
 }
 

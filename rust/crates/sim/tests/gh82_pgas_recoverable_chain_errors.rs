@@ -267,10 +267,7 @@ fn k_param() -> EstimatedParam {
         name: "k".into(),
         index: K_IDX,
         initial: K0,
-        rw_sd: 1.0,
         transform: Transform::Interval { lo: 0.0, hi: 10.0 },
-        rw_sd_auto: false,
-        perturb_only_at_t0: false,
     }
 }
 
@@ -282,10 +279,7 @@ fn mu_param() -> EstimatedParam {
         name: "mu".into(),
         index: MU_IDX,
         initial: MU0,
-        rw_sd: 0.0015,
         transform: Transform::Interval { lo: 0.005, hi: 0.02 },
-        rw_sd_auto: false,
-        perturb_only_at_t0: false,
     }
 }
 

@@ -56,7 +56,7 @@ use super::resampling::{log_weights_all_equal, systematic_resample};
 // `Transform` and `EstimatedParam` are defined in `types.rs` (shared by all
 // inference algorithms). Re-exported here so existing import paths via
 // `inference::if2::EstimatedParam` continue to work.
-pub use super::types::{Transform, EstimatedParam};
+pub use super::types::{Transform, EstimatedParam, ZSd, PerturbAt, Perturbation, If2Step};
 
 /// A group of parameters with a joint simplex constraint (sum to 1).
 /// Uses barycentric (log-ratio + softmax) transform, matching pomp's
@@ -66,8 +66,9 @@ pub use super::types::{Transform, EstimatedParam};
 pub struct SimplexGroup {
     /// Indices into the params array for each member.
     pub indices: Vec<usize>,
-    /// Per-member rw_sd on the log-ratio scale.
-    pub rw_sds: Vec<f64>,
+    /// Each member's perturbation SD on the log-ratio scale, in the order of
+    /// `indices`.
+    pub sds: Vec<ZSd>,
 }
 
 impl SimplexGroup {
@@ -100,8 +101,8 @@ impl SimplexGroup {
     ) {
         let log_ratios = self.to_log_barycentric(particle_params);
         let perturbed: Vec<f64> = log_ratios.iter()
-            .zip(&self.rw_sds)
-            .map(|(&z, &sd)| z + rng.normal() * sd * cooling_now)
+            .zip(&self.sds)
+            .map(|(&z, &sd)| z + rng.normal() * sd.get() * cooling_now)
             .collect();
         let fracs = Self::from_log_barycentric(&perturbed);
         for (j, &idx) in self.indices.iter().enumerate() {
@@ -124,11 +125,17 @@ pub struct IF2Config {
     /// Simplex parameter groups (barycentric transform). Members are
     /// perturbed jointly in log-ratio space with softmax inverse.
     pub simplex_groups: Vec<SimplexGroup>,
+    /// The step of each entry of `if2_params`, in the same order: an entry a
+    /// simplex group contains is [`If2Step::SimplexMember`], every other entry
+    /// is [`If2Step::Single`]. [`run_if2`] refuses a config that breaks either
+    /// rule, or whose length differs from `if2_params`'s, with
+    /// [`SimError::Validation`].
+    pub steps: Vec<If2Step>,
     /// IC-free inference: still weight and resample at the first
     /// observation (pinning x₀ given y₁) but don't accumulate that
     /// step's log-sum-exp into the returned log-likelihood. Requires
-    /// per-particle spread at t=0, typically from a `perturb_only_at_t0`
-    /// estimated parameter: the t=0 perturbation moves each particle's θ and each
+    /// per-particle spread at t=0, typically from a parameter perturbed at
+    /// [`PerturbAt::TimeZeroOnly`]: the t=0 perturbation moves each particle's θ and each
     /// particle then draws its own x₀ from that θ (gh#364), so the
     /// first reweight has something to discriminate between. Without
     /// such a parameter the first reweight is a no-op and ic-free
@@ -225,12 +232,13 @@ pub struct ParamIterDiag {
     pub param_index: usize,
     /// Weighted-variance selection ratio, averaged across observations.
     pub weighted_var_ratio: f64,
-    /// Perturbation-to-cloud ratio: rw_sd_effective / sd(θ_k before perturbation).
+    /// Perturbation-to-cloud ratio: effective SD / sd(θ_k before perturbation).
     /// q ≪ 1 = perturbation too timid (late cooling).
     /// q ≫ 1 = perturbation dominates cloud (reinitializing).
     pub q_ratio: f64,
-    /// Effective rw_sd at this iteration (after cooling).
-    pub effective_rw_sd: f64,
+    /// The perturbation SD at the end of this iteration (after cooling), in
+    /// z; for a simplex member, its group's SD on the log-ratio scale.
+    pub effective_sd: f64,
 }
 
 /// Result of the full IF2 run.
@@ -282,6 +290,35 @@ pub fn run_if2<P: ProcessModel<State = ParticleState>>(
         seed, None)
 }
 
+/// Each entry's perturbation SD before cooling, in `if2_params` order: its
+/// own for [`If2Step::Single`], its group's for a simplex member. Refuses, as
+/// [`SimError::Validation`], `config.steps` of a length other than
+/// `if2_params`'s, a [`If2Step::SimplexMember`] for an entry no group
+/// contains, and an [`If2Step::Single`] for one a group does, since the group
+/// already perturbs it.
+fn step_sds(if2_params: &[EstimatedParam], config: &IF2Config) -> Result<Vec<f64>, SimError> {
+    if config.steps.len() != if2_params.len() {
+        return Err(SimError::Validation(format!(
+            "IF2 has {} steps for {} estimated parameters", config.steps.len(), if2_params.len())));
+    }
+    if2_params.iter().zip(&config.steps).map(|(spec, step)| {
+        let group_sd = config.simplex_groups.iter().find_map(|g| {
+            g.indices.iter().position(|&i| i == spec.index).map(|j| g.sds.get(j).copied())
+        });
+        match (step, group_sd) {
+            (If2Step::Single(p), None) => Ok(p.sd.get()),
+            (If2Step::SimplexMember, Some(Some(sd))) => Ok(sd.get()),
+            (If2Step::SimplexMember, Some(None)) => Err(SimError::Validation(format!(
+                "IF2: the simplex group containing `{}` has no SD for it", spec.name))),
+            (If2Step::SimplexMember, None) => Err(SimError::Validation(format!(
+                "IF2: `{}` has a simplex member's step, but no simplex group contains it", spec.name))),
+            (If2Step::Single(_), Some(_)) => Err(SimError::Validation(format!(
+                "IF2: `{}` is in a simplex group, which perturbs it, and also has a step of its own",
+                spec.name))),
+        }
+    }).collect()
+}
+
 pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
     process: &P,
     obs_model: &(dyn ObservationModel<ParticleState> + Sync),
@@ -291,6 +328,8 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
     seed: u64,
     on_iteration: ProgressCallback,
 ) -> Result<IF2Result, SimError> {
+    // The SD each entry's diagnostics report, before cooling.
+    let diag_sds = step_sds(if2_params, config)?;
     let n = config.n_particles;
     let n_int = process.n_compartments();
     let n_tr = process.n_transitions();
@@ -429,11 +468,6 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
         let mut q_k_accum = vec![0.0_f64; n_if2_params];
         let mut diag_count = vec![0_usize; n_if2_params];
 
-        // Build set of simplex member indices (perturbed jointly, skip in per-param loop)
-        let simplex_member_indices: std::collections::HashSet<usize> = config.simplex_groups.iter()
-            .flat_map(|g| g.indices.iter().copied())
-            .collect();
-
         // Initial parameter perturbation (at t=0)
         {
             let cooling_now = per_step_cooling.powf(global_step as f64);
@@ -445,11 +479,12 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
                 }
             }
 
+            // Simplex members are perturbed by their group, above.
             for i in 0..n {
-                for spec in if2_params {
-                    if simplex_member_indices.contains(&spec.index) { continue; }
+                for (spec, step) in if2_params.iter().zip(&config.steps) {
+                    let If2Step::Single(perturbation) = step else { continue };
                     let current = particle_params[i][spec.index];
-                    let sd = spec.rw_sd * cooling_now;
+                    let sd = perturbation.sd.get() * cooling_now;
                     let z = spec.to_transformed(current);
                     let new_val = spec.from_transformed(z + rngs[i].normal() * sd);
                     particle_params[i][spec.index] = new_val;
@@ -538,10 +573,10 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
             // 6.4.0.2): `randwalk_perturbation` → `rprocess` → `dmeasure`,
             // all three on one `tparams`.
             //
-            // `perturb_only_at_t0` params and simplex members are skipped —
-            // the former are perturbed at t=0 only (pomp's `ivp()` in
-            // `rw.sd`), simplex members perturbed jointly at t=0 only (they
-            // are always initial-state parameters).
+            // Only `PerturbAt::EveryObservation` steps perturb here. A
+            // `TimeZeroOnly` parameter is perturbed at t=0 only (pomp's `ivp()`
+            // in `rw.sd`), and simplex members are perturbed jointly at t=0
+            // only (they are always initial-state parameters).
             //
             // `cooling_now` is also read by the per-parameter diagnostics
             // after the weighting; the `global_step` accounting is one t=0
@@ -551,10 +586,11 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
             if opens_interval[obs_idx] {
                 cooling_now = per_step_cooling.powf(global_step as f64);
                 for i in 0..n {
-                    for spec in if2_params {
-                        if spec.perturb_only_at_t0 || simplex_member_indices.contains(&spec.index) { continue; }
+                    for (spec, step) in if2_params.iter().zip(&config.steps) {
+                        let If2Step::Single(Perturbation { sd: step_sd, at: PerturbAt::EveryObservation }) = step
+                        else { continue };
                         let current = particle_params[i][spec.index];
-                        let sd = spec.rw_sd * cooling_now;
+                        let sd = step_sd.get() * cooling_now;
                         let z = spec.to_transformed(current);
                         let new_val = spec.from_transformed(z + rngs[i].normal() * sd);
                         particle_params[i][spec.index] = new_val;
@@ -637,7 +673,7 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
                 //   where Var_w uses normalized importance weights.
                 //   Measures selection pressure without resampling noise.
                 //
-                // q_k: rw_sd_effective / sd(θ_k before perturbation)
+                // q_k: effective SD / sd(θ_k before perturbation)
                 //   Perturbation-to-cloud width ratio.
                 {
                     let weights = normalize_log_weights(&log_weights);
@@ -661,7 +697,7 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
 
                         // q_k: effective perturbation / cloud width
                         let sd_u = var_u.sqrt();
-                        let eff_sd = spec.rw_sd * cooling_now;
+                        let eff_sd = diag_sds[pi] * cooling_now;
                         let q = if sd_u > 1e-30 { eff_sd / sd_u } else { 0.0 };
                         q_k_accum[pi] += q;
 
@@ -752,7 +788,7 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
                 param_index: spec.index,
                 weighted_var_ratio: wvr_accum[pi] / cnt,
                 q_ratio: q_k_accum[pi] / cnt,
-                effective_rw_sd: spec.rw_sd * cooling_at_iter,
+                effective_sd: diag_sds[pi] * cooling_at_iter,
             }
         }).collect();
 

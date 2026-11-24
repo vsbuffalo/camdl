@@ -209,10 +209,7 @@ fn gh76_pgas_runs_betabinomial_routed_param_with_nuts() {
             name: "alpha_obs".into(),
             index: compiled.param_index["alpha_obs"],
             initial: 2.0,
-            rw_sd: 0.02,
             transform: Transform::for_domain(0.01, 100.0, true).expect("domain"),
-            rw_sd_auto: false,
-            perturb_only_at_t0: false,
         },
     ];
     let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];
@@ -314,10 +311,7 @@ fn gh180_pgas_admits_parametric_derived_projection_param() {
             name: "scale_obs".into(),
             index: compiled.param_index["scale_obs"],
             initial: 1.0,
-            rw_sd: 0.02,
             transform: Transform::for_domain(0.1, 10.0, true).expect("domain"),
-            rw_sd_auto: false,
-            perturb_only_at_t0: false,
         },
     ];
     let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];

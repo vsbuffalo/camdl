@@ -410,11 +410,8 @@ fn test_nuts_target_gradient_on_z_scale() {
             index: i,
             name: p.name.clone(),
             initial: p.value.resolved_value().unwrap_or(0.5),
-            rw_sd: 0.02,
             // A box that holds every parameter's value (N0 = 1000).
             transform: Transform::for_domain(0.001, 1e5, true).expect("domain"),
-            rw_sd_auto: false,
-            perturb_only_at_t0: false,
         })
         .collect();
 

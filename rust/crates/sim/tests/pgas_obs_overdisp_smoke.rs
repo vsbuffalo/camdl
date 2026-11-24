@@ -137,10 +137,7 @@ fn smoke_pgas_nuts_estimates_sigma_se() {
             name: "sigma_se".into(),
             index: compiled.param_index["sigma_se"],
             initial: 0.1,
-            rw_sd: 0.02,
             transform: Transform::for_domain(0.001, 2.0, true).expect("domain"),
-            rw_sd_auto: false,
-            perturb_only_at_t0: false,
         },
     ];
     let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];
@@ -261,10 +258,7 @@ fn smoke_pgas_nuts_estimates_rho() {
             name: "rho".into(),
             index: compiled.param_index["rho"],
             initial: 0.5,
-            rw_sd: 0.02,
             transform: Transform::Interval { lo: 0.001, hi: 0.999 },
-            rw_sd_auto: false,
-            perturb_only_at_t0: false,
         },
     ];
     let priors = vec![Prior::Fixed(sim::inference::prior::Density::Flat)];

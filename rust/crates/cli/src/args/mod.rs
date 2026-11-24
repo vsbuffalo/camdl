@@ -3998,7 +3998,7 @@ mod tests {
         let a = try_parse_profile(&["--iterations", "10", "--cooling", "0.5"]).unwrap();
         let config = crate::profile::profile_if2_config(
             100, a.iterations.unwrap(), crate::profile::profile_cooling_schedule(a.cooling, a.cooling_target_iters), None,
-            Default::default(), 1.0, 0.0, vec![], false);
+            Default::default(), 1.0, 0.0, vec![], vec![], false);
         assert_eq!(config.n_iterations, 10);
         assert_eq!(config.cooling,
             sim::inference::if2::CoolingSchedule { fraction: 0.5, target_iters: 50 });

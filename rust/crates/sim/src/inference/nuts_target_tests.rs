@@ -43,8 +43,7 @@ const HALF_LN_2PI: f64 = 0.918_938_533_204_672_8;
 
 fn param(transform: Transform) -> EstimatedParam {
     EstimatedParam {
-        name: "p".into(), index: 0, initial: 0.0, rw_sd: 0.1, transform,
-        rw_sd_auto: false, perturb_only_at_t0: false,
+        name: "p".into(), index: 0, initial: 0.0, transform,
     }
 }
 

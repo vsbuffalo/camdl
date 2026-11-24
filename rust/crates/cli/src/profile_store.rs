@@ -413,8 +413,13 @@ fn finite(x: f64, what: &str) -> Result<Finite, String> {
 }
 
 impl EstimatedSetting {
-    /// The setting of `p`; its step is kept only under IF2.
-    pub fn of(p: &sim::inference::if2::EstimatedParam, if2: bool) -> Result<Self, String> {
+    /// The setting of `p`, whose written step is `step`; the step in z is
+    /// kept only under IF2.
+    pub fn of(
+        p: &sim::inference::if2::EstimatedParam,
+        step: &crate::fit::runner::WrittenStep,
+        if2: bool,
+    ) -> Result<Self, String> {
         use sim::inference::types::Transform as T;
         let what = |k: &str| format!("the {k} of `{}`", p.name);
         let domain = match p.transform {
@@ -427,8 +432,8 @@ impl EstimatedSetting {
         Ok(EstimatedSetting {
             name: p.name.clone(),
             domain,
-            rw_sd: if if2 { Some(finite(p.rw_sd, &what("random-walk step"))?) } else { None },
-            perturb_only_at_t0: p.perturb_only_at_t0,
+            rw_sd: if if2 { Some(finite(step.z_sd, &what("random-walk step"))?) } else { None },
+            perturb_only_at_t0: step.at == sim::inference::types::PerturbAt::TimeZeroOnly,
         })
     }
 }

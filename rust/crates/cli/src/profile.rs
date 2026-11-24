@@ -244,6 +244,7 @@ pub(crate) fn profile_if2_config(
     dt: f64,
     t_start: f64,
     simplex_groups: Vec<sim::inference::if2::SimplexGroup>,
+    steps: Vec<sim::inference::if2::If2Step>,
     skip_first_obs_from_loglik: bool,
 ) -> IF2Config {
     IF2Config {
@@ -253,6 +254,7 @@ pub(crate) fn profile_if2_config(
         dt,
         t_start,
         simplex_groups,
+        steps,
         skip_first_obs_from_loglik,
         max_substeps: pf_max_substeps.unwrap_or(sim::inference::degeneracy::ITER_BUDGET), // gh#241
         binomial, // gh#747
@@ -1120,14 +1122,14 @@ fn run_profile(
         }
     }).collect();
 
-    let if2_params = crate::fit::runner::build_if2_params_from_specs(
+    let (if2_params, written_steps): (Vec<_>, Vec<_>) = crate::fit::runner::build_if2_params_from_specs(
         &model, &compiled, &base_params, &specs,
-    ).unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
+    ).unwrap_or_else(|e| { out.fail(format!("error: {}", e)); }).into_iter().unzip();
     // Each IF2 cell perturbs by `rw_sd`, and a derived one must be able to
     // move the parameter.
     if matches!(profile_algo, ProfileAlgo::If2) {
         if let Err(e) = crate::fit::runner::refuse_degenerate_auto_rw_sd(
-            &if2_params, "`--rw-sd NAME=SD`, or `rw_sd = …` in the fit config's [estimate]",
+            &if2_params, &written_steps, "`--rw-sd NAME=SD`, or `rw_sd = …` in the fit config's [estimate]",
         ) {
             out.fail(format!("error: {e}"));
         }
@@ -1190,6 +1192,14 @@ fn run_profile(
         crate::fit::runner::resolve_simplex_groups(
             &fit_simplex_groups, &fit_estimate, &compiled.param_index, &if2_params,
         ).unwrap_or_else(|e| { out.fail(format!("error: {e}")); })
+    };
+    // IF2's step for each estimated parameter, the same in every cell. Only
+    // an IF2 cell reads it.
+    let if2_steps: Vec<sim::inference::if2::If2Step> = if matches!(profile_algo, ProfileAlgo::If2) {
+        crate::fit::runner::if2_steps(&if2_params, &written_steps, &simplex_groups)
+            .unwrap_or_else(|e| out.fail(format!("error: {e}")))
+    } else {
+        Vec::new()
     };
     // Member names per group, in order, for the method identity.
     let simplex_names: Vec<Vec<String>> =
@@ -1479,8 +1489,8 @@ fn run_profile(
             },
         },
         dt: finite("dt", dt),
-        estimated: if2_params.iter()
-            .map(|p| crate::profile_store::EstimatedSetting::of(p, is_if2))
+        estimated: if2_params.iter().zip(&written_steps)
+            .map(|(p, step)| crate::profile_store::EstimatedSetting::of(p, step, is_if2))
             .collect::<Result<Vec<_>, String>>()
             .unwrap_or_else(|e| out.fail(format!("error: {e}"))),
         simplex_groups: simplex_names.clone(),
@@ -1721,6 +1731,7 @@ fn run_profile(
                     n_particles, n_iterations, cooling_schedule, pf_max_substeps, binomial, dt,
                     process.compiled.model.simulation.t_start,
                     simplex_groups.clone(),
+                    if2_steps.clone(),
                     objective.skips_first_observation(),
                 );
                 let result = run_if2(
@@ -1789,10 +1800,9 @@ fn run_profile(
                         diag.completed = true_ll.is_finite();
                         diag.iterations_used = last_iter.map(|it| it.iteration + 1);
                         // cooling_final: mean across estimated params
-                        // of the final iter's effective_rw_sd (the
+                        // of the final iter's effective_sd (the
                         // *actual* ending perturbation SD per
-                        // ParamIterDiag.effective_rw_sd at
-                        // if2.rs:147). Scalar summary of "how cool
+                        // ParamIterDiag.effective_sd, in z). Scalar summary of "how cool
                         // the perturbation got." Mean-across-params
                         // is fine — a model with a heterogeneous
                         // rw_sd has each param cooled by the same
@@ -1803,7 +1813,7 @@ fn run_profile(
                             if it.param_diag.is_empty() { None }
                             else {
                                 let s: f64 = it.param_diag.iter()
-                                    .map(|p| p.effective_rw_sd).sum();
+                                    .map(|p| p.effective_sd).sum();
                                 Some(s / it.param_diag.len() as f64)
                             }
                         });
@@ -2345,9 +2355,8 @@ mod tests {
     fn estimated_param(name: &str, index: usize) -> sim::inference::if2::EstimatedParam {
         sim::inference::if2::EstimatedParam {
             name: name.into(), index,
-            initial: 0.5, rw_sd: 0.1,
+            initial: 0.5,
             transform: sim::inference::types::Transform::Interval { lo: 0.0, hi: 1.0 },
-            perturb_only_at_t0: false, rw_sd_auto: false,
         }
     }
 

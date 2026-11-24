@@ -450,8 +450,7 @@ fn r3_prior_only_run_draws_the_smooth_prior() {
     let breakpoints = [0.0, 20.0, 40.0, 60.0]; // window [0, 60], K = 6, cubic
 
     let est_p = |name: &str, transform: Transform, _lo: f64, _hi: f64, init: f64| EstimatedParam {
-        name: name.into(), index: model.param_index[name], initial: init, rw_sd: 0.05, transform,
-        rw_sd_auto: false, perturb_only_at_t0: false,
+        name: name.into(), index: model.param_index[name], initial: init, transform,
     };
     let inf = f64::INFINITY;
     let mut est = vec![
@@ -641,8 +640,8 @@ fn r3_prior_only_run_draws_the_explicit_prior() {
     let model = Arc::new(CompiledModel::new(ir_m).unwrap());
     let names: Vec<String> = (1..=6).map(|i| format!("b{i}")).collect();
     let est: Vec<EstimatedParam> = names.iter().map(|n| EstimatedParam {
-        name: n.clone(), index: model.param_index[n.as_str()], initial: -1.5, rw_sd: 0.05,
-        transform: Transform::Identity, rw_sd_auto: false, perturb_only_at_t0: false,
+        name: n.clone(), index: model.param_index[n.as_str()], initial: -1.5,
+        transform: Transform::Identity,
     }).collect();
     let priors = vec![Prior::Fixed(Density::Normal { mean: -1.5, sd: 1.0 }); 6];
     let times: Vec<f64> = (1..=60).map(|t| t as f64).collect();

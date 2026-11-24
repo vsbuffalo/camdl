@@ -286,10 +286,7 @@ fn mu_param() -> EstimatedParam {
         name: "mu".into(),
         index: MU_IDX,
         initial: MU0,
-        rw_sd: 0.0015,
         transform: Transform::Identity,
-        rw_sd_auto: false,
-        perturb_only_at_t0: false,
     }
 }
 

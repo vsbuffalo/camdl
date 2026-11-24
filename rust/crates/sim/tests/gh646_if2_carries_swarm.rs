@@ -14,6 +14,7 @@
 //! restarts the spread from zero every iteration, so it stays at one
 //! iteration's worth no matter how many iterations run.
 
+use sim::inference::if2::{If2Step, ZSd};
 use std::sync::Mutex;
 
 use sim::{
@@ -73,13 +74,15 @@ fn spec(name: &str, index: usize) -> EstimatedParam {
         name: name.into(),
         index,
         initial: 1.0,
-        // The step in z that moves ln θ by RW_SD at θ = 1, the box's geometric
-        // midpoint, where the map's d ln θ / dz is ln(1e8)/4.
-        rw_sd: Transform::for_domain(1e-4, 1e4, true).expect("domain").step_from_natural(RW_SD, 1.0),
         transform: Transform::for_domain(1e-4, 1e4, true).expect("domain"),
-        perturb_only_at_t0: false,
-        rw_sd_auto: false,
     }
+}
+
+/// The step in z that moves ln θ by RW_SD at θ = 1, the box's geometric
+/// midpoint, where the map's d ln θ / dz is ln(1e8)/4.
+fn step() -> If2Step {
+    let sd = Transform::for_domain(1e-4, 1e4, true).expect("domain").step_from_natural(RW_SD, 1.0);
+    If2Step::every_observation(ZSd::new(sd).unwrap())
 }
 
 /// SD of (log θ₁ − log θ₂) over the θ's handed to the observation model at the
@@ -93,6 +96,7 @@ fn ridge_spread(n_iterations: usize, seed: u64) -> f64 {
         dt: 1.0,
         t_start: 0.0,
         simplex_groups: vec![],
+        steps: vec![step(), step()],
         skip_first_obs_from_loglik: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
         binomial: sim::rng::BinomialAlgorithm::Btpe,

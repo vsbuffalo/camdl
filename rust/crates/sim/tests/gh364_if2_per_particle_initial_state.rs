@@ -35,6 +35,7 @@
 //!      recover it, and the weights must exert selection pressure on it
 //!      (weighted-variance ratio < 1).
 
+use sim::inference::if2::{If2Step, ZSd};
 use std::sync::{Arc, Mutex};
 
 use ir::{
@@ -144,13 +145,7 @@ fn if2_initial_state_uses_each_particles_own_theta() {
         name: "i0".into(),
         index: IVP_IDX,
         initial: 0.05,
-        rw_sd: 0.3,
         transform: Transform::Interval { lo: 0.001, hi: 0.5 },
-        // Pure initial-condition parameter: perturbed at t=0 only, exactly
-        // like pomp's `ivp()` entry in `rw.sd`. camdl spells the flag
-        // `perturb_only_at_t0` — it is a perturbation schedule, nothing more.
-        perturb_only_at_t0: true,
-        rw_sd_auto: false,
     }];
 
     let config = IF2Config {
@@ -160,6 +155,10 @@ fn if2_initial_state_uses_each_particles_own_theta() {
         dt: 1.0,
         t_start: 0.0,
         simplex_groups: vec![],
+        // Pure initial-condition parameter: perturbed at t=0 only, exactly
+        // like pomp's `ivp()` entry in `rw.sd`. camdl spells the flag
+        // `perturb_only_at_t0` — it is a perturbation schedule, nothing more.
+        steps: vec![If2Step::time_zero_only(ZSd::new(0.3).unwrap())],
         skip_first_obs_from_loglik: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
         binomial: sim::rng::BinomialAlgorithm::Btpe,
@@ -450,12 +449,7 @@ fn pure_ic_ivp_param_is_identified() {
         name: "i0".into(),
         index: 2,
         initial: START_I0,
-        // The step in z: ±0.003 in i0 at the box's midpoint, i.e. ±30
-        // initial infectious out of N = 10 000.
-        rw_sd: Transform::Interval { lo: 0.0005, hi: 0.05 }.step_from_natural(0.003, START_I0),
         transform: Transform::Interval { lo: 0.0005, hi: 0.05 },
-        perturb_only_at_t0: true,
-        rw_sd_auto: false,
     }];
 
     let config = IF2Config {
@@ -465,6 +459,10 @@ fn pure_ic_ivp_param_is_identified() {
         dt: 1.0,
         t_start: 0.0,
         simplex_groups: vec![],
+        // The step in z: ±0.003 in i0 at the box's midpoint, i.e. ±30
+        // initial infectious out of N = 10 000; at t = 0 only.
+        steps: vec![If2Step::time_zero_only(ZSd::new(
+            Transform::Interval { lo: 0.0005, hi: 0.05 }.step_from_natural(0.003, START_I0)).unwrap())],
         skip_first_obs_from_loglik: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
         binomial: sim::rng::BinomialAlgorithm::Btpe,

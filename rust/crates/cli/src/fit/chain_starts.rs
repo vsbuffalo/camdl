@@ -1683,10 +1683,7 @@ mod tests {
                 name: name.clone(),
                 index: i,
                 initial: p.value.resolved_value().unwrap(),
-                rw_sd: 0.1,
                 transform: Transform::for_domain(lower, upper, false).expect("domain"),
-                rw_sd_auto: false,
-                perturb_only_at_t0: false,
             }
         }).collect()
     }
@@ -2324,7 +2321,7 @@ mod tests {
         let transform = crate::fit::runner::derive_transform_with_bounds(kind, (lower, upper)).unwrap();
         let resolved = mk_resolved(vec![p], &["shift"]);
         let spec = EstimatedParam {
-            name: "shift".into(), index: 0, initial: 0.5, rw_sd: 0.1, transform, rw_sd_auto: false, perturb_only_at_t0: false,
+            name: "shift".into(), index: 0, initial: 0.5, transform,
         };
         (resolved, vec![spec])
     }
@@ -2675,9 +2672,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let base = vec![
             EstimatedParam {
-                name: "beta".into(), index: 0, initial: 0.3, rw_sd: 0.1,
+                name: "beta".into(), index: 0, initial: 0.3,
                 transform: Transform::Identity,
-                rw_sd_auto: false, perturb_only_at_t0: false,
             },
         ];
         let rule = ChainStarts::Point(Point::FromMle {
@@ -2715,9 +2711,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let base = vec![
             EstimatedParam {
-                name: "beta".into(), index: 0, initial: 0.3, rw_sd: 0.1,
+                name: "beta".into(), index: 0, initial: 0.3,
                 transform: Transform::Identity,
-                rw_sd_auto: false, perturb_only_at_t0: false,
             },
         ];
         let rule = ChainStarts::uniform_unconstrained();

@@ -10,6 +10,7 @@
 //! The acceptance criterion on gh#110 is explicit: this kind of
 //! pathology must surface within ~5 seconds, not 30+ minutes.
 
+use sim::inference::if2::{If2Step, ZSd};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -257,12 +258,7 @@ fn if2_bails_on_ess_collapse() {
         index: beta_idx,
         name: "beta".into(),
         initial: 5.0,
-        // The step in z: a natural-scale 0.1 converted once at the box's
-        // geometric midpoint, as `build_if2_params_from_specs` converts one.
-        rw_sd: Transform::for_domain(0.01, 100.0, true).expect("domain").step_from_natural(0.1, 5.0),
-        rw_sd_auto: false,
         transform: Transform::for_domain(0.01, 100.0, true).expect("domain"),
-        perturb_only_at_t0: false,
     }];
 
     let config = IF2Config {
@@ -272,6 +268,10 @@ fn if2_bails_on_ess_collapse() {
         dt: 1.0,
         t_start: 0.0,
         simplex_groups: vec![],
+        // The step in z: a natural-scale 0.1 converted once at the box's
+        // geometric midpoint, as `build_if2_params_from_specs` converts one.
+        steps: vec![If2Step::every_observation(ZSd::new(
+            Transform::for_domain(0.01, 100.0, true).expect("domain").step_from_natural(0.1, 5.0)).unwrap())],
         skip_first_obs_from_loglik: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
         binomial: sim::rng::BinomialAlgorithm::Btpe,
@@ -428,10 +428,7 @@ fn if2_theta_hat_is_identical_across_thread_counts() {
         index: beta_idx,
         name: "beta".into(),
         initial: 0.5,
-        rw_sd: 0.05,
-        rw_sd_auto: false,
         transform: Transform::for_domain(0.01, 5.0, true).expect("domain"),
-        perturb_only_at_t0: false,
     }];
     let config = IF2Config {
         n_particles: 100,
@@ -440,6 +437,7 @@ fn if2_theta_hat_is_identical_across_thread_counts() {
         dt: 1.0,
         t_start: 0.0,
         simplex_groups: vec![],
+        steps: vec![If2Step::every_observation(ZSd::new(0.05).unwrap())],
         skip_first_obs_from_loglik: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
         binomial: sim::rng::BinomialAlgorithm::Btpe,
@@ -641,10 +639,7 @@ fn if2_iteration_budget_aborts_pre_window() {
         index: 0,
         name: "p".into(),
         initial: 1.0,
-        rw_sd: 0.1,
-        rw_sd_auto: false,
         transform: Transform::for_domain(0.01, 100.0, true).expect("domain"),
-        perturb_only_at_t0: false,
     }];
     let config = IF2Config {
         n_particles,
@@ -653,6 +648,7 @@ fn if2_iteration_budget_aborts_pre_window() {
         dt,
         t_start: 0.0,
         simplex_groups: vec![],
+        steps: vec![If2Step::every_observation(ZSd::new(0.1).unwrap())],
         skip_first_obs_from_loglik: false,
         max_substeps: sim::inference::degeneracy::ITER_BUDGET,
         binomial: sim::rng::BinomialAlgorithm::Btpe,

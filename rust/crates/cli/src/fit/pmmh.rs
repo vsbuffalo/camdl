@@ -1200,14 +1200,27 @@ fn scale_far_from_optimum(chain: usize, r: &PMMHResult) -> Option<DiagnosticKind
         .then_some(DiagnosticKind::ScaleFarFromOptimum { chain_id: chain, final_scale: r.final_scale })
 }
 
-/// Build proposal SDs on the transformed scale from `[estimate]`'s
-/// `rw_sd`, scaled up for MH jumps: IF2's `rw_sd` is per-perturbation-step,
-/// PMMH needs per-proposal (larger). The adaptive scheme (`adapt = true`)
-/// takes over from here.
-fn build_proposal_sd(config: &FitRunConfig) -> Vec<f64> {
-    config.estimated_params.iter().map(|p| {
-        p.mh_initial_step()
+/// The initial PMMH / MH proposal SD in z of each estimated parameter
+/// (proposal D8), from `[estimate]`'s `rw_sd`: the map's
+/// [`Transform::default_mh_step`] when no `rw_sd` is written, else five times
+/// the written step converted to z, since an MH proposal moves further than
+/// one IF2 perturbation; NaN when there is neither. The adaptive scheme
+/// (`adapt = true`) takes over from here.
+///
+/// [`Transform::default_mh_step`]: sim::inference::types::Transform::default_mh_step
+pub(crate) fn build_proposal_sd(config: &FitRunConfig) -> Vec<f64> {
+    config.estimated_params.iter().zip(&config.steps).map(|(p, step)| {
+        mh_initial_step(p, step)
     }).collect()
+}
+
+/// One parameter's initial proposal SD in z; see [`build_proposal_sd`].
+pub(crate) fn mh_initial_step(p: &EstimatedParam, step: &super::runner::WrittenStep) -> f64 {
+    if step.auto {
+        p.transform.default_mh_step().unwrap_or(f64::NAN)
+    } else {
+        5.0 * step.z_sd
+    }
 }
 
 /// R̂ / ESS over each chain's retained draws: a resumed chain's `inherited`
@@ -1435,9 +1448,8 @@ mod tests {
         };
         let priors = vec![Prior::from_hierarchical_ir(&hp)];
         let specs = vec![EstimatedParam {
-            name: "gamma".into(), index: 0, initial: 0.15, rw_sd: 0.1,
+            name: "gamma".into(), index: 0, initial: 0.15,
             transform: Transform::LowerBounded { lo: 0.0 },
-            rw_sd_auto: false, perturb_only_at_t0: false,
         }];
         let names = vec!["gamma".to_string(), "s_h".to_string()];
         let err = start_prior_is_finite(&specs, &priors, &names, &[0.15, -1.0])
