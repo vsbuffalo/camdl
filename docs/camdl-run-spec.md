@@ -1867,7 +1867,8 @@ version 2.
 - `observed`: `observed.json`, JSON (when observations are bound). A part's
   manifest: its schema, its tables and how they were made.
 - `observed/<stream>`: `observed/<stream>.tsv`, TSV (each stream observed). One
-  stream's observed values: `time` and `value`.
+  stream's observed values: `time`, a column per dimension of the stream, and
+  `value`.
 - `forecast`: `forecast.json`, JSON (a forecast). A part's manifest: its schema,
   its tables and how they were made.
 - `forecast/<stream>`: `forecast/<stream>.tsv`, TSV (a forecast, each stream).

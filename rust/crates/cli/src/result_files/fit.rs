@@ -342,7 +342,7 @@ impl ResultFile for PredictionFile {
             (PredictionFile::Manifest { .. }, _) => "A part's manifest: its schema, its tables and how they were made.",
             (PredictionFile::Table { .. }, Some(PredictionPart::Contrasts)) => "One contrast's bands, per time.",
             (PredictionFile::Table { .. }, Some(PredictionPart::Quantities)) => "One quantity's bands, per time.",
-            (PredictionFile::Table { .. }, Some(PredictionPart::Observed)) => "One stream's observed values: `time` and `value`.",
+            (PredictionFile::Table { .. }, Some(PredictionPart::Observed)) => "One stream's observed values: `time`, a column per dimension of the stream, and `value`.",
             (PredictionFile::Table { .. }, _) => "One stream's predictive or forecast bands, per time, mode and quantity.",
             (PredictionFile::ForecastSamples, _) => "One row per forecast sample: its draw, particle, stream, time and value.",
             (PredictionFile::ForecastContrasts, _) => "Each forecast contrast's samples.",
