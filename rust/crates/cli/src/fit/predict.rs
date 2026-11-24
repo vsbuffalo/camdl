@@ -3798,6 +3798,21 @@ fn run_predict(
             // so default to the machine width; `RAYON_NUM_THREADS` still caps the
             // global pool.
             let ff_parallel = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+            // The replay runs on the fit's simulator: its backend, step, integrator
+            // and binomial sampler, with no flag over them.
+            let fitted_simulator = crate::simulator::StoredSimulator {
+                name: "the fit".to_string(),
+                backend: Some(posterior.backend),
+                dt,
+                integrator: model.simulation.integrator.clone(),
+                binomial: Some(binomial),
+                settings: None,
+            };
+            let (ff_simulator, _) = crate::simulator::Simulator::resolve(
+                crate::simulator::ModelSimulate::of(&model.simulation),
+                crate::simulator::WrittenSimulator::default(),
+                crate::simulator::Basis::Replay(&fitted_simulator),
+            )?;
 
             // A swept value is written into each draw row (below), so the
             // resolver sees one draw/sweep-tier value and records no override:
@@ -3868,13 +3883,9 @@ fn run_predict(
                         params_files: vec![],
                         // Replay on the SAME forward simulator the fit used
                         // (chain_binomial / ode), resolved from the method — never a
-                        // hardcoded default.
-                        backend: posterior.backend,
-                        dt,
-                        // D78: the sampler the fit ran.
-                        binomial,
+                        // hardcoded default; the sampler the fit ran (D78).
+                        simulator: ff_simulator.clone(),
                         eval,
-                        integrator: None,
                         // Generated posterior draws (not a user-authored file), so
                         // the engine's collision guard does not check them: a scenario
                         // over posterior draws is the counterfactual predict runs. The

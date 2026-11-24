@@ -1677,8 +1677,6 @@ fn run_simulate(inv: args::SimulateInvocation) {
         }
     }
     let backend = simulator.backend();
-    let dt = simulator.dt().get();
-    let integrator = a.backend.integrator;
 
     let mut base_sim_run = util::SimRun {
         // The already-compiled IR: every engine cell loads this directly, so
@@ -1712,11 +1710,8 @@ fn run_simulate(inv: args::SimulateInvocation) {
         // Set below only by `--draws posterior --fit` (the fit's own
         // scenario / enable / disable).
         fit_base: util::FitBase::default(),
-        backend,
-        dt,
+        simulator: simulator.clone(),
         seed, // overridden per-replicate below
-        integrator, // gh#166: --integrator, checked by the simulator's resolution above
-        binomial: simulator.binomial(),
         // Replaced, like `backend` and `dt`, from the resolved configuration's
         // engine settings once it exists.
         eval: sim::EvalSettings::default(),
@@ -2295,8 +2290,7 @@ fn run_simulate(inv: args::SimulateInvocation) {
             &ir_path,
             &scenario_names,
             SimConfigFlags {
-                backend,
-                dt,
+                simulator: simulator.clone(),
                 allow_degenerate_rates: eval_settings.allow_degenerate_rates,
                 allow_forcing_extrapolation: eval_settings.allow_forcing_extrapolation,
                 view: output_cols,
@@ -2311,8 +2305,7 @@ fn run_simulate(inv: args::SimulateInvocation) {
     // What runs is what is keyed: from here on the backend and `dt` are read
     // from `engine_settings` and nowhere else; the precedence locals they
     // were resolved from are not read again.
-    base_sim_run.backend = engine_settings.backend;
-    base_sim_run.dt = engine_settings.dt;
+    base_sim_run.simulator = engine_settings.simulator.clone();
     base_sim_run.eval = engine_settings.eval;
 
     let job = SimulateJob {
@@ -2320,11 +2313,8 @@ fn run_simulate(inv: args::SimulateInvocation) {
         // per-cell camdlc — see the resolve-once at the top of the function).
         model: ir_path_compiled.clone(),
         params_files: base_sim_run.params_files.clone(),
-        backend: engine_settings.backend,
-        dt: engine_settings.dt,
-        binomial: base_sim_run.binomial,
+        simulator: engine_settings.simulator.clone(),
         eval: engine_settings.eval,
-        integrator, // gh#166: --integrator, checked against the replayed fit above
         source,
         scenarios,
         t_end_override,
@@ -2389,7 +2379,7 @@ fn run_simulate(inv: args::SimulateInvocation) {
     if let Some(ref design_toml) = a.design_from {
         if dry_run {
             print_dry_run(&out,
-                &ir_path, &ir_path_compiled, engine_settings.backend, engine_settings.dt, seed,
+                &ir_path, &ir_path_compiled, engine_settings.simulator.backend(), engine_settings.simulator.dt().get(), seed,
                 &base_sim_run.params_files, &base_sim_run.overrides,
                 &scenario_list, &adhoc_label, &seeds, &draws_path,
                 n_draws, replicates, total_runs,
@@ -2408,7 +2398,7 @@ fn run_simulate(inv: args::SimulateInvocation) {
         if let Err(e) = simulate_on_bound_design(&out,
             design_toml, &base_sim_run, &draws, draws_path.is_some(),
             obs_dir.as_ref().map(std::path::Path::new),
-            a.projected_out.as_deref(), engine_settings.dt,
+            a.projected_out.as_deref(), engine_settings.simulator.dt().get(),
         ) {
             out.fail(format!("error: {e}"));
         }
@@ -2418,7 +2408,7 @@ fn run_simulate(inv: args::SimulateInvocation) {
     // ── Dry run ─────────────────────────────────────────────────────────────
     if dry_run {
         print_dry_run(&out,
-            &ir_path, &ir_path_compiled, engine_settings.backend, engine_settings.dt, seed,
+            &ir_path, &ir_path_compiled, engine_settings.simulator.backend(), engine_settings.simulator.dt().get(), seed,
             &base_sim_run.params_files, &base_sim_run.overrides,
             &scenario_list, &adhoc_label, &seeds, &draws_path,
             n_draws, replicates, total_runs,
@@ -2664,12 +2654,12 @@ fn resolve_sim_config(
     // The binomial sampler changes every chain-binomial draw and is not in the
     // run identity, for the same reason: only `camdl predict` sets one other
     // than BTPE (D78), and its replay writes no leaf.
-    if run.binomial != sim::rng::BinomialAlgorithm::Btpe {
+    if run.simulator.binomial() != sim::rng::BinomialAlgorithm::Btpe {
         return Err(format!(
             "internal: a content-addressed simulate cannot draw with the {} binomial \
              sampler — it changes the trajectory but not the run identity. Fold it \
              into the config level before routing a CAS-writing path through it.",
-            run.binomial));
+            run.simulator.binomial()));
     }
     // The model the engine starts every cell from — the one load
     // `resolve_run_model` also takes (`util::load_run_model`), so the model
@@ -2698,8 +2688,8 @@ fn resolve_sim_config(
         }
     }
 
-    let SimConfigFlags { backend, dt, allow_degenerate_rates, allow_forcing_extrapolation, view } = flags;
-    let run_config = crate::sim_config::RunConfig { backend, dt, allow_degenerate_rates, allow_forcing_extrapolation, view };
+    let SimConfigFlags { simulator, allow_degenerate_rates, allow_forcing_extrapolation, view } = flags;
+    let run_config = crate::sim_config::RunConfig { simulator, allow_degenerate_rates, allow_forcing_extrapolation, view };
     let model = crate::sim_config::ResolvedModel::new(base_model, display_path);
     Ok(crate::sim_config::ResolvedSimConfig { model, run: run_config })
 }
@@ -2708,8 +2698,7 @@ fn resolve_sim_config(
 /// explicit flag, a fit's provenance, a replayed fit's simulator, the model's
 /// own default), handed to [`resolve_sim_config`] as one value.
 struct SimConfigFlags {
-    backend: args::types::ForwardBackend,
-    dt: f64,
+    simulator: crate::simulator::Simulator,
     allow_degenerate_rates: bool,
     allow_forcing_extrapolation: bool,
     view: crate::util::OutputColumns,

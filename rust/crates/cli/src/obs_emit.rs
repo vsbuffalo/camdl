@@ -1148,14 +1148,14 @@ mod tests {
             ("beta", 0.6), ("gamma", 0.2), ("lambda", 2.0), ("w", 3.0),
             ("N0", 5000.0), ("rho", 0.5), ("k", 20.0), ("tau", 2.0),
         ].into_iter().map(|(k, v)| (k.to_string(), v)).collect();
-        crate::util::SimRun {
-            ir_path: ir.to_string_lossy().into_owned(),
-            overrides,
-            backend: crate::args::types::ForwardBackend::ChainBinomial,
-            dt: 1.0,
-            seed,
-            ..Default::default()
-        }
+        let ir_path = ir.to_string_lossy().into_owned();
+        let (model, _) = crate::util::load_ir(&ir_path).expect("the test model");
+        let simulator = crate::simulator::Simulator::for_test(
+            &model.simulation,
+            crate::args::types::ForwardBackend::ChainBinomial,
+            1.0,
+        );
+        crate::util::SimRun { overrides, seed, ..crate::util::SimRun::new(ir_path, simulator) }
     }
 
     /// The `source -> file` map a fit config's `[data.observations]` resolves
@@ -1175,7 +1175,7 @@ mod tests {
         let opts = crate::caltime_load::TimeOpts {
             origin: model.origin.as_deref(),
             time_unit: &model.time_unit,
-            dt: run.dt,
+            dt: run.simulator.dt().get(),
             t_start: compiled.model.simulation.t_start,
             format: crate::caltime_load::TimeFormat::Auto,
         };
@@ -1195,7 +1195,7 @@ mod tests {
         let opts = crate::caltime_load::TimeOpts {
             origin: model.origin.as_deref(),
             time_unit: &model.time_unit,
-            dt: run.dt,
+            dt: run.simulator.dt().get(),
             t_start: compiled.model.simulation.t_start,
             format: crate::caltime_load::TimeFormat::Auto,
         };
@@ -1278,7 +1278,7 @@ mod tests {
         let opts = crate::caltime_load::TimeOpts {
             origin: model.origin.as_deref(),
             time_unit: &model.time_unit,
-            dt: run.dt,
+            dt: run.simulator.dt().get(),
             t_start: compiled.model.simulation.t_start,
             format: crate::caltime_load::TimeFormat::Auto,
         };
@@ -1406,14 +1406,11 @@ mod tests {
             ("beta", 0.5), ("gamma", 0.1), ("eta", 0.15), ("delta", 0.1),
             ("mu_c", 0.05), ("mu_f", 0.1), ("phi", 200.0), ("N0", 100000.0), ("I0", 10.0),
         ].into_iter().map(|(k, v)| (k.to_string(), v)).collect();
-        let run = crate::util::SimRun {
-            ir_path: ir.to_string_lossy().into_owned(),
-            overrides,
-            backend: crate::args::types::ForwardBackend::Ode,
-            dt: 0.25,
-            seed: 1,
-            ..Default::default()
-        };
+        let ir_path = ir.to_string_lossy().into_owned();
+        let (model, _) = crate::util::load_ir(&ir_path).expect("the test model");
+        let simulator =
+            crate::simulator::Simulator::for_test(&model.simulation, crate::args::types::ForwardBackend::Ode, 0.25);
+        let run = crate::util::SimRun { overrides, ..crate::util::SimRun::new(ir_path, simulator) };
         let (traj, model) = crate::util::run_simulation(&run).unwrap();
         let stream = |name: &str| model.observations.iter().find(|o| o.name == name).unwrap();
 

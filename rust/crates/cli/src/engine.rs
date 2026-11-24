@@ -306,7 +306,7 @@ fn run_one_cell_with_progress(spec: CellSpec) -> Result<CellResult, String> {
     let cell = crate::sim_config::ResolvedCell::resolve(util::load_run_model(&spec.sim_run)?, &spec.sim_run)?;
     let compiled = cell.compile()?;
 
-    let backend = match cell.backend {
+    let backend = match cell.simulator.backend() {
         ForwardBackend::Gillespie => "gillespie",
         ForwardBackend::ChainBinomial => "chain_binomial",
         ForwardBackend::Ode => "ode",
@@ -555,11 +555,8 @@ pub fn build_cell_sim_run(
         scenario_inline_set,
         scenario_inline_scale: Vec::new(),
         fit_base: job.fit_base.clone(),
-        backend: job.backend,
-        dt: job.dt,
+        simulator: job.simulator.clone(),
         seed: process_seed,
-        integrator: job.integrator, // gh#166: CLI --integrator override
-        binomial: job.binomial,
         eval: job.eval,
     }
 }

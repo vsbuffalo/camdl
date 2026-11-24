@@ -31,7 +31,6 @@
 //! exports (`-o`, `--obs`, `--dates`, …) are renderings of stored files; none
 //! is a field of this configuration, so none can reach the engine through it.
 
-use crate::args::types::ForwardBackend;
 use crate::util::OutputColumns;
 
 /// The resolved configuration of one `simulate` invocation.
@@ -59,8 +58,7 @@ impl ResolvedModel {
 /// Every resolved setting that is the same for every cell of the invocation.
 #[derive(Debug, Clone)]
 pub(crate) struct RunConfig {
-    pub backend: ForwardBackend,
-    pub dt: f64,
+    pub simulator: crate::simulator::Simulator,
     /// `--allow-degenerate-rates`: a collapsed rate is zero instead of an error.
     pub allow_degenerate_rates: bool,
     /// `--allow-forcing-extrapolation`: hold a forcing's end value outside its
@@ -76,8 +74,7 @@ pub(crate) struct RunConfig {
 /// held.
 #[derive(Debug, Clone)]
 pub(crate) struct EngineSettings {
-    pub backend: ForwardBackend,
-    pub dt: f64,
+    pub simulator: crate::simulator::Simulator,
     /// The evaluator settings every cell's compiled model carries
     /// (`SimRun::eval`, `CompiledModel::with_eval_settings`).
     pub eval: sim::EvalSettings,
@@ -98,10 +95,9 @@ impl ResolvedSimConfig {
     /// The engine's settings: the one conversion from the resolved
     /// configuration to what runs.
     pub fn engine_settings(&self) -> EngineSettings {
-        let RunConfig { backend, dt, allow_degenerate_rates, allow_forcing_extrapolation, view: _ } = &self.run;
+        let RunConfig { simulator, allow_degenerate_rates, allow_forcing_extrapolation, view: _ } = &self.run;
         EngineSettings {
-            backend: *backend,
-            dt: *dt,
+            simulator: simulator.clone(),
             eval: crate::env::eval_settings(*allow_degenerate_rates),
             forcing: crate::forcing_extrapolation::ForcingPolicy::new(*allow_forcing_extrapolation),
         }
@@ -134,9 +130,7 @@ pub(crate) struct ResolvedCell {
     /// model's own start as it stood before the restart moved `run.model`'s
     /// (gh#1081). `None` for a cell that does not restart.
     pub restart: Option<crate::obs_emit::Restart>,
-    pub backend: ForwardBackend,
-    pub dt: f64,
-    pub binomial: sim::rng::BinomialAlgorithm,
+    pub simulator: crate::simulator::Simulator,
     /// The evaluator settings the compiled model carries ([`ResolvedCell::compile`]).
     pub eval: sim::EvalSettings,
     /// Snapshot times the run must record beyond the model's own schedule
@@ -156,7 +150,6 @@ impl ResolvedCell {
             // parameter values and window from the resolved model.
             ir_path: _,
             obs_anchors: _,
-            integrator: _,
             params_files: _,
             overrides: _,
             point_overrides: _,
@@ -176,10 +169,8 @@ impl ResolvedCell {
             // Fields of the resolved cell.
             table_files: _,
             init_state,
-            backend,
-            dt,
+            simulator,
             seed,
-            binomial,
             eval,
             required_output_times,
         } = run;
@@ -195,9 +186,7 @@ impl ResolvedCell {
             seed: *seed,
             init_state: init_state.clone(),
             restart,
-            backend: *backend,
-            dt: *dt,
-            binomial: *binomial,
+            simulator: simulator.clone(),
             eval: *eval,
             required_output_times: required_output_times.clone(),
         })
@@ -233,16 +222,14 @@ mod tests {
     #[test]
     fn engine_settings_come_from_the_run_config() {
         let run = RunConfig {
-            backend: ForwardBackend::Ode,
-            dt: 0.25,
+            simulator: crate::simulator::Simulator::for_test(&crate::resolve::tiny_model().simulation, crate::args::types::ForwardBackend::Ode, 0.25),
             allow_degenerate_rates: true,
             allow_forcing_extrapolation: true,
             view: view(false, &[]),
         };
         let cfg = ResolvedSimConfig { model: ResolvedModel::new(crate::resolve::tiny_model(), "sir.camdl"), run };
-        let EngineSettings { backend, dt, eval, forcing } = cfg.engine_settings();
-        assert_eq!(backend, ForwardBackend::Ode);
-        assert_eq!(dt, 0.25);
+        let EngineSettings { simulator, eval, forcing } = cfg.engine_settings();
+        assert_eq!(simulator, crate::simulator::Simulator::for_test(&crate::resolve::tiny_model().simulation, crate::args::types::ForwardBackend::Ode, 0.25));
         assert_eq!(eval, crate::env::eval_settings(true));
         assert!(forcing.allowed());
     }

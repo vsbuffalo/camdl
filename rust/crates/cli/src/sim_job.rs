@@ -15,7 +15,6 @@ use std::path::PathBuf;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
-use crate::args::types::ForwardBackend;
 
 // ─── SimulateJob (run-spec §3.1) ──────────────────────────────────────────────
 
@@ -33,19 +32,13 @@ pub struct SimulateJob {
     pub model: String,
     /// `--params` files, applied in order.
     pub params_files: Vec<String>,
-    pub backend: ForwardBackend,
-    pub dt: f64,
-    /// The chain-binomial binomial sampler, copied to every cell's
-    /// `SimRun::binomial`: BTPE, except for `camdl predict`, which replays a fit
-    /// on the sampler the fit ran (D78).
-    pub binomial: sim::rng::BinomialAlgorithm,
+    /// The simulator every cell integrates with, copied to each cell's
+    /// `SimRun::simulator`.
+    pub simulator: crate::simulator::Simulator,
     /// How the evaluators treat a collapsed expression, copied to every cell's
     /// `SimRun::eval`: `simulate`'s resolved `--allow-degenerate-rates`, or
     /// the replayed fit's `[config] allow_degenerate_rates` for `camdl predict`.
     pub eval: sim::EvalSettings,
-    /// gh#166: optional CLI `--integrator` override (method only); `None` → the
-    /// model's declared integrator.
-    pub integrator: Option<crate::args::types::IntegratorArg>,
     /// Where parameter vectors come from (the central dispatch).
     pub source: ParamSource,
     /// σ layer — which scenarios to run. Empty ⇒ the single implicit arm,

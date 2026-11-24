@@ -2864,17 +2864,11 @@ pub struct SimRun {
     /// base the cell's own scenario is overlaid on ([`FitBase::overlay`]).
     /// Empty everywhere else, and then a no-op.
     pub fit_base: FitBase,
-    pub backend: crate::args::types::ForwardBackend,
-    pub dt: f64,
+    /// The backend, step, integrator and binomial sampler the run integrates
+    /// with. Its integrator is written into the model the run loads
+    /// ([`load_run_model`]).
+    pub simulator: crate::simulator::Simulator,
     pub seed: u64,
-    /// gh#166: optional CLI override of the ODE integrator method (rk4/rk45),
-    /// applied to the model's simulation config before compile. `None` → use the
-    /// model's declared integrator.
-    pub integrator: Option<crate::args::types::IntegratorArg>,
-    /// The chain-binomial backend's binomial sampler (gh#747). BTPE everywhere
-    /// except a replay of a fit (`camdl predict`), which draws with the sampler
-    /// the fit ran (D78).
-    pub binomial: sim::rng::BinomialAlgorithm,
     /// How the evaluators treat a collapsed expression
     /// (`--allow-degenerate-rates`), set on the model this run compiles
     /// ([`resolve_run_model`]). Strict by default.
@@ -3562,10 +3556,12 @@ pub fn refuse_scenario_horizon(
     ))
 }
 
-impl Default for SimRun {
-    fn default() -> Self {
+impl SimRun {
+    /// A run of the compiled model at `ir_path` on `simulator`, at seed 1, with
+    /// nothing else set.
+    pub fn new(ir_path: String, simulator: crate::simulator::Simulator) -> Self {
         SimRun {
-            ir_path: String::new(),
+            ir_path,
             params_files: Vec::new(),
             overrides: HashMap::new(),
             overrides_label: None,
@@ -3585,11 +3581,8 @@ impl Default for SimRun {
             scenario_inline_set: Vec::new(),
             scenario_inline_scale: Vec::new(),
             fit_base: FitBase::default(),
-            backend: crate::args::types::ForwardBackend::ChainBinomial,
-            dt: 1.0,
+            simulator,
             seed: 1,
-            integrator: None,
-            binomial: sim::rng::BinomialAlgorithm::Btpe,
             eval: sim::EvalSettings::default(),
         }
     }
@@ -3597,7 +3590,8 @@ impl Default for SimRun {
 
 /// The model a simulate cell starts from, before its horizon, its start time
 /// and its parameter values are resolved: the IR at `run.ir_path`, with the
-/// run's observation anchors substituted and its `--integrator` applied.
+/// run's observation anchors substituted and its simulator's integrator
+/// written in.
 ///
 /// The one load both sides of a run take: [`resolve_run_model`] builds the
 /// model that RUNS from it, and `build_simulate_cas_sink` builds the model the
@@ -3625,8 +3619,9 @@ pub fn load_run_model(run: &SimRun) -> Result<ir::Model, String> {
     if let Some(w) = run.obs_anchors {
         crate::obs_anchor::substitute(&mut model, w)?;
     }
-    // gh#166: CLI `--integrator` override (method only), before validate/compile.
-    apply_integrator_override(&mut model, run.integrator);
+    // The run's integrator (the model's, or `--integrator`'s method over it),
+    // before validate/compile.
+    run.simulator.apply_to(&mut model);
     Ok(model)
 }
 
@@ -3937,15 +3932,13 @@ pub fn simulate_compiled(
         init_state,
         // For the observation emitters; the run itself starts from `init_state`.
         restart: _,
-        backend,
-        dt,
-        binomial,
+        simulator,
         // Carried on `compiled` (`ResolvedCell::compile`).
         eval: _,
         // Applied to `model` (`resolve_loaded_run`).
         required_output_times: _,
     } = cell;
-    let (seed, backend, dt, binomial) = (*seed, *backend, *dt, *binomial);
+    let (seed, backend, dt, binomial) = (*seed, simulator.backend(), simulator.dt().get(), simulator.binomial());
     let params  = compiled.default_params.clone();
     let t_start = model.simulation.t_start;
     let t_end   = model.simulation.t_end;
@@ -4159,7 +4152,7 @@ pub fn event_log_refusal(run: &SimRun, model: &ir::Model) -> Option<String> {
         );
     }
 
-    if matches!(run.backend, crate::args::types::ForwardBackend::Ode) {
+    if matches!(run.simulator.backend(), crate::args::types::ForwardBackend::Ode) {
         return Some(
             "the event log is incompatible with the ODE backend: ODE \
              tracks continuous densities, not individuals. Use \
@@ -4206,7 +4199,7 @@ pub fn run_simulation_event_log(
     // Event-log recording is meaningful only for backends with the LINEAGES
     // capability. ODE is the lone incompatible backend (continuous densities,
     // no individuals).
-    let backend: &dyn Simulate = match run.backend {
+    let backend: &dyn Simulate = match run.simulator.backend() {
         ForwardBackend::Gillespie => &GillespieSim,
         ForwardBackend::ChainBinomial => &ChainBinomialSim,
         ForwardBackend::Ode => return Err("internal error: the event log on the ODE backend".to_string()),
@@ -4246,8 +4239,8 @@ pub fn run_simulation_event_log(
     // t_start snapshot and fails loudly if the two ever diverge.
     // Chain-binomial draws it with the run's binomial sampler; Gillespie with
     // the default one.
-    let init_binomial = match cell.backend {
-        ForwardBackend::ChainBinomial => cell.binomial,
+    let init_binomial = match cell.simulator.backend() {
+        ForwardBackend::ChainBinomial => cell.simulator.binomial(),
         _ => sim::rng::BinomialAlgorithm::default(),
     };
     let mut init_rng = sim::rng::StatefulRng::new(cell.seed).with_binomial(init_binomial);
@@ -4257,7 +4250,7 @@ pub fn run_simulation_event_log(
     let mut recorder = EventRecorder::new(&compiled, &initial_int)
         .map_err(|e| format!("event recorder init error: {:?}", e))?;
 
-    let traj = match cell.backend {
+    let traj = match cell.simulator.backend() {
         ForwardBackend::Gillespie => {
             let cfg = GillespieConfig { t_start, t_end, output_dt: None };
             sim::gillespie::run_gillespie_with_observer(
@@ -4265,7 +4258,7 @@ pub fn run_simulation_event_log(
             )
         }
         ForwardBackend::ChainBinomial => {
-            let cfg = ChainBinomialConfig { t_start, t_end, dt: cell.dt, binomial: cell.binomial };
+            let cfg = ChainBinomialConfig { t_start, t_end, dt: cell.simulator.dt().get(), binomial: cell.simulator.binomial() };
             sim::chain_binomial::run_chain_binomial_with_observer(
                 &compiled, &params, cell.seed, &cfg, Some(&mut recorder), None,
                 sim::chain_binomial::Resume::default(),
@@ -4291,7 +4284,7 @@ pub fn run_simulation_event_log(
         }
     }
 
-    let exact = matches!(cell.backend, ForwardBackend::Gillespie);
+    let exact = matches!(cell.simulator.backend(), ForwardBackend::Gillespie);
     let event_log = recorder.into_event_log();
     Ok((traj, cell, event_log, exact))
 }
@@ -5011,13 +5004,14 @@ mod tests {
     }
 
     fn base_sim_run(ir_path: &str) -> SimRun {
-        SimRun {
-            ir_path: ir_path.to_string(),
-            backend: crate::args::types::ForwardBackend::ChainBinomial,
-            dt: 1.0,
-            seed: 1,
-            ..Default::default()
-        }
+        // Read without the loaders' checks, which a test of them must reach.
+        let model = ir::from_str(&std::fs::read_to_string(ir_path).unwrap()).expect("the test model");
+        let simulator = crate::simulator::Simulator::for_test(
+            &model.simulation,
+            crate::args::types::ForwardBackend::ChainBinomial,
+            1.0,
+        );
+        SimRun::new(ir_path.to_string(), simulator)
     }
 
     /// Extract final param values from a successful simulation.

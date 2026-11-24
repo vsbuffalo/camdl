@@ -396,14 +396,14 @@ fn plan_cell(ctx: &StoreRun<'_>, shared: &Shared, spec: crate::engine::CellSpec)
     let err = |e: String| (name.clone(), e);
     let cell = ResolvedCell::resolve(ctx.sim.model.ir.clone(), &spec.sim_run).map_err(err)?;
     let e = ctx.engine;
-    if cell.backend != e.backend || cell.dt.to_bits() != e.dt.to_bits() || cell.eval != e.eval {
+    if cell.simulator != e.simulator || cell.eval != e.eval {
         return Err(err(format!(
-            "internal error: a cell runs on backend {:?} at dt = {} with {:?}, but the run is keyed on backend {:?} at dt = {} with {:?}",
-            cell.backend, cell.dt, cell.eval, e.backend, e.dt, e.eval
+            "internal error: a cell runs on {} with {:?}, but the run is keyed on {} with {:?}",
+            cell.simulator.describe(), cell.eval, e.simulator.describe(), e.eval
         )));
     }
-    if cell.binomial != sim::rng::BinomialAlgorithm::Btpe {
-        return Err(err(format!("internal error: a cell runs the {:?} binomial sampler, which has no identity", cell.binomial)));
+    if cell.simulator.binomial() != sim::rng::BinomialAlgorithm::Btpe {
+        return Err(err(format!("internal error: a cell runs the {:?} binomial sampler, which has no identity", cell.simulator.binomial())));
     }
     if !cell.required_output_times.is_empty() {
         return Err(err("internal error: a cell records snapshots beyond the model's schedule, which have no identity".into()));
@@ -415,8 +415,8 @@ fn plan_cell(ctx: &StoreRun<'_>, shared: &Shared, spec: crate::engine::CellSpec)
     let identity = SimIdentity {
         model: shared.model.clone(),
         config: SimConfig {
-            backend: Backend::of(cell.backend),
-            dt: finite("dt", cell.dt)?,
+            backend: Backend::of(cell.simulator.backend()),
+            dt: cell.simulator.dt(),
             t_start: finite("the start", model.simulation.t_start)?,
             t_end: finite("the end", model.simulation.t_end)?,
             init_state: cell.init_state.as_ref().map(|i| {
@@ -687,7 +687,7 @@ fn simulate_with_progress(compiled: &sim::CompiledModel, cell: &ResolvedCell, lo
     if !lone || crate::out::progress::is_none() {
         return crate::util::simulate_compiled(compiled, cell, None);
     }
-    let backend = cell.backend.as_str();
+    let backend = cell.simulator.backend().as_str();
     let pb = indicatif::ProgressBar::with_draw_target(Some(1000), crate::out::progress::draw_target());
     pb.set_style(
         indicatif::ProgressStyle::with_template("simulate \u{b7} {prefix}  {bar:24.cyan/blue} ETA {eta}")
@@ -853,7 +853,7 @@ fn export_event_log(ctx: &StoreRun<'_>, store: &store::Store, invocation: &store
     let file = stored.folder().join(EventLog::FILE);
     let log = sim::lineage::event_log_io::from_tsv_bytes(&bytes)
         .unwrap_or_else(|e| fail(format!("reading the stored event log: {e:?}")));
-    let exact = matches!(ctx.engine.backend, crate::args::types::ForwardBackend::Gillespie);
+    let exact = matches!(ctx.engine.simulator.backend(), crate::args::types::ForwardBackend::Gillespie);
     crate::lineage::finish_event_log(
         out,
         ctx.exports.event_log.as_deref(),

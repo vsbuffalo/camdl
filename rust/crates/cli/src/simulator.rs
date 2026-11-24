@@ -106,7 +106,6 @@ pub(crate) enum Basis<'a> {
     /// `--backend` is written; `run` names the run in a refusal ("this
     /// prediction"), and `file` the fit file in a step error
     /// (`dt_rule::effective_dt_for_command`).
-    #[cfg_attr(not(test), expect(dead_code, reason = "the fitting commands resolve their simulator through `Simulator::resolve` in the next step of docs/dev/proposals/2026-11-24-simulator-resolver.md"))]
     Fitting { backend: ForwardBackend, run: &'static str, file: &'static str },
     /// A stored fit or a params file's provenance: the fit's simulator, and a
     /// flag that differs runs with a note.
@@ -309,6 +308,22 @@ impl Simulator {
 
     pub fn binomial(&self) -> BinomialAlgorithm {
         self.binomial
+    }
+
+    /// Writes the integrator into the model.
+    pub fn apply_to(&self, model: &mut ir::Model) {
+        model.simulation.integrator = self.integrator.clone();
+    }
+
+    /// A simulator on `backend` at `dt`, resolved as an exploratory run of a
+    /// model whose `simulate {}` block is `simulation`, for tests that build a
+    /// run by hand.
+    #[cfg(test)]
+    pub fn for_test(simulation: &ir::model::SimulationConfig, backend: ForwardBackend, dt: f64) -> Simulator {
+        let written = WrittenSimulator { backend: Some(backend), dt: Some(dt), ..Default::default() };
+        Simulator::resolve(ModelSimulate::of(simulation), written, Basis::Exploratory)
+            .expect("a finite step")
+            .0
     }
 
     /// The backend at the step, with the integrator on ODE, and the settings

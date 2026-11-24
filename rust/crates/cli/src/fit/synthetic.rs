@@ -92,8 +92,15 @@ pub fn generate_synthetic_datasets(
             format!("-emit{}", &h[..8])
         })
         .unwrap_or_default();
+    // The fit resolved `dt` from this model's step and its `[config] dt`, so
+    // resolving it again as the written step agrees.
+    let (simulator, _) = crate::simulator::Simulator::resolve(
+        crate::simulator::ModelSimulate::of(&model.simulation),
+        crate::simulator::WrittenSimulator { backend: Some(spec.backend), config_dt: Some(dt), ..Default::default() },
+        crate::simulator::Basis::Fitting { backend: spec.backend, run: "this synthetic dataset", file: "" },
+    )?;
     let runs: Vec<crate::util::SimRun> = seeds.iter()
-        .map(|&sim_seed| synthetic_sim_run(spec, model_path, sim_seed, dt, eval))
+        .map(|&sim_seed| synthetic_sim_run(spec, model_path, sim_seed, &simulator, eval))
         .collect::<Result<_, _>>()?;
     crate::util::emit_run_notices(&crate::out::detached(), &runs.iter().collect::<Vec<_>>());
     let mut out = Vec::with_capacity(seeds.len());
@@ -122,7 +129,7 @@ fn synthetic_sim_run(
     spec: &SyntheticSpec,
     model_path: &str,
     sim_seed: u64,
-    dt: f64,
+    simulator: &crate::simulator::Simulator,
     eval: sim::EvalSettings,
 ) -> Result<SimRun, String> {
     let truth_overrides = load_params_toml(&spec.true_params)
@@ -142,14 +149,11 @@ fn synthetic_sim_run(
         t_start_override: None, // the compiled IR carries the fit's resolved start
         required_output_times: Vec::new(), // no forecast rows to close
         init_state: None,     // synthetic data-gen starts from the model's init {}
-        integrator: None,     // and uses the model's declared integrator
-        backend: spec.backend,
-        dt,
         seed: sim_seed,
         // The fit's `[config] allow_degenerate_rates`: the data are drawn
         // under the setting the fit then scores them under.
         eval,
-        ..SimRun::default()
+        ..SimRun::new(model_path.to_string(), simulator.clone())
     })
 }
 
