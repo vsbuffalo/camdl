@@ -65,6 +65,51 @@ fn a_by_product_is_located_with_its_upstream_and_a_nested_result_without_one() {
     assert_eq!(store.locate(fit.id().key()).unwrap().parent(), None);
 }
 
+/// A completed fit run of `method`, writing `draws.tsv`.
+fn finished_fit(store: &Store, method: &str) -> crate::Stored<Fit> {
+    let fit_id = FitId { problem: "p".into(), method: method.into() };
+    let Begin::Claimed(mut fit) = store.begin::<Fit>(&fit_id, &(), &info(), Reuse::IfCompleted).unwrap() else { panic!() };
+    fit.expect(expecting(&["draws.tsv"]));
+    fit.result_file("draws.tsv").unwrap().write_all(b"d").unwrap();
+    fit.finish().unwrap()
+}
+
+/// Begins the prediction `n` inside `fit`, writing `p.tsv`.
+fn begin_pred(store: &Store, fit: &crate::Stored<Fit>, n: u64) -> crate::Run<Pred> {
+    let id = PredId { fit: fit.dep("draws.tsv").unwrap(), n };
+    let Begin::Claimed(mut run) = store.begin::<Pred>(&id, &(), &info(), Reuse::IfCompleted).unwrap() else { panic!() };
+    run.expect(expecting(&["p.tsv"]));
+    run.result_file("p.tsv").unwrap().write_all(format!("p{n}").as_bytes()).unwrap();
+    run
+}
+
+#[test]
+fn the_children_of_a_result_are_its_completed_results_of_one_kind_in_folder_order() {
+    let root = TempRoot::new("children");
+    let store = open(root.path());
+    let fit = finished_fit(&store, "mh");
+    let other = finished_fit(&store, "pmmh");
+    // Finished out of folder order: n4 before n1.
+    let n4 = begin_pred(&store, &fit, 4).finish().unwrap();
+    let n1 = begin_pred(&store, &fit, 1).finish().unwrap();
+    let damaged = begin_pred(&store, &fit, 2).finish().unwrap();
+    std::fs::write(damaged.folder().join("p.tsv"), b"edited").unwrap();
+    drop(begin_pred(&store, &fit, 3));
+    let running = begin_pred(&store, &fit, 5);
+    begin_pred(&store, &other, 6).finish().unwrap();
+
+    let children = store.children_of::<Pred, Fit>(&fit).unwrap();
+    let keys: Vec<Key> = children.iter().map(|c| c.id().key()).collect();
+    assert_eq!(keys, vec![n1.id().key(), n4.id().key()], "completed only, damaged and failed excluded, in folder order");
+    assert_eq!(store.children_of::<Pred, Fit>(&other).unwrap().len(), 1, "another parent's children are its own");
+    drop(running);
+
+    // A by-product is a child of its upstream, of its own kind only.
+    let s = sim_with_obs(&store, &info(), 7);
+    assert_eq!(store.children_of::<Obs, Sim>(&s).unwrap().len(), 1);
+    assert!(store.children_of::<Pred, Sim>(&s).unwrap().is_empty());
+}
+
 #[test]
 fn an_absent_running_or_damaged_result_is_not_located() {
     let root = TempRoot::new("locate-not");

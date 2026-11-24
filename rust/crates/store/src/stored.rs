@@ -253,6 +253,28 @@ impl Store {
     pub fn stored_as<A: Artifact>(&self, located: &Located) -> Result<Stored<A>> {
         Stored::open_at(&self.inner, located.run_id, &located.dir)
     }
+
+    /// Every completed result of kind `A` whose identity names `parent` as
+    /// the result it sits in: a result placed inside it, or a by-product of
+    /// it. Ordered by folder path. A child that is running, failed or damaged
+    /// is left out, as [`Store::get`] leaves it out, and so is a folder whose
+    /// `identity.json` does not read.
+    pub fn children_of<A: Artifact, P: Artifact>(&self, parent: &Stored<P>) -> Result<Vec<Stored<A>>> {
+        let parent_key = parent.id().key();
+        let mut found = Vec::new();
+        crate::maintenance::visit(parent.folder(), &mut found);
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut children = Vec::new();
+        for (dir, ident) in found {
+            if ident.kind != A::KIND || ident.parent.as_ref().map(|p| p.run_id) != Some(parent_key) {
+                continue;
+            }
+            if let crate::storage::State::Completed { .. } = crate::storage::folder_state(&dir, &ident.run_id, &self.inner.kinds) {
+                children.push(Stored::open_at(&self.inner, ident.run_id, &dir)?);
+            }
+        }
+        Ok(children)
+    }
 }
 
 impl Located {

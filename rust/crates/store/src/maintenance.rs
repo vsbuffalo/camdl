@@ -28,7 +28,7 @@ pub(crate) fn walk(inner: &Inner) -> Vec<(PathBuf, IdentityFile)> {
     out
 }
 
-fn visit(dir: &Path, out: &mut Vec<(PathBuf, IdentityFile)>) {
+pub(crate) fn visit(dir: &Path, out: &mut Vec<(PathBuf, IdentityFile)>) {
     for child in visible_dirs(dir) {
         if let Some(f) = identity_of(&child) {
             out.push((child.clone(), f));

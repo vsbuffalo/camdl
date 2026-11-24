@@ -656,19 +656,7 @@ fn fit_of(store: &store::Store, p: &store::Stored<Prediction>) -> Result<Option<
 
 /// Every completed score stored inside the prediction `p`.
 fn stored_scores(store: &store::Store, p: &store::Stored<Prediction>) -> Result<Vec<store::Stored<Score>>, String> {
-    let dir = p.folder().join("scores");
-    let Ok(entries) = std::fs::read_dir(&dir) else { return Ok(Vec::new()) };
-    let mut folders: Vec<std::path::PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
-    folders.sort();
-    let mut found = Vec::new();
-    for f in folders {
-        match store.resolve::<Score>(&store::RunRef::new(store::Handle::Path(f))) {
-            Ok(s) => found.push(s),
-            Err(store::Error::NotFound { .. }) => {}
-            Err(e) => return Err(e.to_string()),
-        }
-    }
-    Ok(found)
+    store.children_of::<Score, Prediction>(p).map_err(|e| e.to_string())
 }
 
 type Line = BTreeMap<String, String>;
