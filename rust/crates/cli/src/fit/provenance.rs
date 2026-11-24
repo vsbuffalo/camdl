@@ -25,11 +25,11 @@ pub fn mle_params_tamper_hash(params: &std::collections::BTreeMap<String, f64>) 
     hex::encode(&h.finalize()[..4]) // 8 hex chars
 }
 
-/// Structured provenance for an `mle_params.toml` file, serialized
-/// as a `[provenance]` TOML block. Downstream tools (particularly
-/// `camdl simulate --params`) read these fields to close the
-/// backend-provenance loop — see
-/// `docs/dev/proposals/2026-04-19-backend-provenance-guardrail.md`.
+/// The `[provenance]` block of a params file a fit wrote: an optimizer's
+/// `mle_params.toml`, or what `fit summary --point` prints for a sampler run.
+/// `camdl simulate --params` reads `backend` and `dt` back and replays the
+/// values on that simulator
+/// (`docs/dev/proposals/2026-04-19-backend-provenance-guardrail.md`).
 ///
 /// Only fields that are `Some` get serialized; legacy fit-produced
 /// files may omit any of the optional fields.
@@ -55,9 +55,31 @@ pub struct MleProvenance {
     pub model_identity: String,
     pub seed: u64,
     /// The method that produced this estimate, by the label of its `method`
-    /// store level (`if2`, `nl-sbplx`, …) — the same word the config, the
-    /// store path and the CLI use (gh#890).
+    /// store level (`if2`, `nl-sbplx`, `pmmh`, …) — the same word the config,
+    /// the store path and the CLI use (gh#890).
     pub method: String,
+    /// What the values are: one point the method found, or a statistic of its
+    /// posterior draws. Written as the variant's fields, at this level.
+    #[serde(flatten)]
+    pub estimate: Estimate,
+}
+
+/// What the parameter values of a fit-written params file are. The block
+/// carries no tag: a winner's fields begin with `chain`, a posterior
+/// summary's with `statistic`, and a reader tries the winner first.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+pub enum Estimate {
+    /// An optimizer's best point (IF2, NLopt).
+    Winner(WinnerRecord),
+    /// A statistic of a sampler's posterior draws (MH, PMMH, PGAS), taken per
+    /// parameter on its natural scale.
+    PosteriorSummary(PosteriorSummaryRecord),
+}
+
+/// The point an optimizer run found, with the log-likelihood it was scored at.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct WinnerRecord {
     /// The chain whose estimate this is — the number of its `chain_N/`
     /// directory and of `fit_state.toml`'s `best_chain` (gh#990).
     pub chain: ChainIndex,
@@ -75,85 +97,101 @@ pub struct MleProvenance {
     pub ess_min: Option<f64>,
 }
 
-/// Wrapper type for the full mle_params.toml file: a `[provenance]`
-/// block plus a flat params table (rendered as top-level `name = value`
-/// lines in the output, not nested under any key).
+/// A per-parameter statistic of a sampler run's posterior draws. Each
+/// estimated parameter's value is the statistic of its column of the run's
+/// `draws.tsv`; each fixed parameter's is the value the fit held it at. The
+/// values are not a point any chain visited, and no log-likelihood was
+/// computed at them.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PosteriorSummaryRecord {
+    pub statistic: crate::args::PointStatistic,
+    /// The posterior draws the statistic was taken over: every row of the
+    /// run's `draws.tsv`, all chains pooled.
+    pub n_draws: usize,
+    /// The fit run whose draws these are, by its full run id.
+    pub run_id: String,
+}
+
+/// The text of a fit-written params file: `header` as comment lines, the
+/// parameter values as top-level `name = value` lines in name order, then the
+/// `[provenance]` block `provenance` builds from the file's `content_hash`.
 ///
-/// We serialize the provenance block via toml::to_string and the
-/// params section manually, rather than nesting params under a
-/// `[params]` table, to keep the file's "numeric params at the top
-/// level" invariant that downstream scripts (and the unified
-/// `params_resolver`'s `--fixed-file` loader, which uses
-/// `util::load_params_toml`) already rely on. The structured
-/// provenance is an additive change.
+/// The hash covers the values as the file holds them. `format_param_value`
+/// writes ten decimals, so a hash over the unrounded `f64` would declare a
+/// value no reader of the file can recompute, and a check against it would
+/// call every real fit's file edited.
 ///
-/// Write mle_params.toml with a structured `[provenance]` block.
+/// The values come before the block: a bare `key = value` line that follows
+/// a `[table]` header parses as a field of that table, so values written
+/// after `[provenance]` would be read as fields of it by
+/// `util::load_params_toml` and by any other TOML reader.
+pub fn params_file_text(
+    header: &[&str],
+    params: &std::collections::BTreeMap<String, f64>,
+    provenance: impl FnOnce(String) -> MleProvenance,
+) -> Result<String, String> {
+    let as_written: std::collections::BTreeMap<String, f64> = params
+        .iter()
+        .map(|(k, v)| {
+            let written = crate::fit::runner::format_param_value(*v);
+            written
+                .parse::<f64>()
+                .map(|read_back| (k.clone(), read_back))
+                .map_err(|_| format!("`{}` formats to {:?}, which is not a number", k, written))
+        })
+        .collect::<Result<_, String>>()?;
+    let prov = provenance(mle_params_tamper_hash(&as_written));
+    let mut text = String::new();
+    for line in header {
+        text.push_str(&format!("# {line}\n"));
+    }
+    for (name, value) in params {
+        text.push_str(&format!("{} = {}\n", name, crate::fit::runner::format_param_value(*value)));
+    }
+    text.push('\n');
+    #[derive(serde::Serialize)]
+    struct ProvWrapper<'a> {
+        provenance: &'a MleProvenance,
+    }
+    let block = toml::to_string(&ProvWrapper { provenance: &prov })
+        .map_err(|e| format!("cannot serialize provenance: {}", e))?;
+    text.push_str(&block);
+    Ok(text)
+}
+
+/// Write an optimizer's winner, `all_params`, to `path` as `mle_params.toml`:
+/// the values, then a `[provenance]` block ([`params_file_text`]).
 pub fn write_mle_params(
     path: &str,
     all_params: &std::collections::BTreeMap<String, f64>,
     metadata: &MleMetadata,
 ) -> Result<(), String> {
     use std::io::Write;
-    // The hash covers the values as the file holds them. `format_param_value`
-    // writes ten decimals, so a hash over the unrounded `f64` would declare a
-    // value no reader of the file can recompute, and a check against it
-    // would call every real fit's file edited.
-    let as_written: std::collections::BTreeMap<String, f64> = all_params
-        .iter()
-        .map(|(k, v)| {
-            let written = crate::fit::runner::format_param_value(*v);
-            written.parse::<f64>().map(|read_back| (k.clone(), read_back)).map_err(|_| {
-                format!("cannot write {}: `{}` formats to {:?}, which is not a number", path, k, written)
-            })
-        })
-        .collect::<Result<_, String>>()?;
-    let content_hash = mle_params_tamper_hash(&as_written);
-    let mut f = std::fs::File::create(path)
-        .map_err(|e| format!("cannot write {}: {}", path, e))?;
-
-    let prov = MleProvenance {
+    let header = [
+        "camdl fit MLE — parameter values first, followed by a [provenance] block.",
+        "Editing any value in this params section invalidates provenance.content_hash.",
+    ];
+    let text = params_file_text(&header, all_params, |content_hash| MleProvenance {
         camdl_version: version::VERSION_SHORT.to_string(),
-        content_hash: content_hash.clone(),
+        content_hash,
         fit_hash: Some(metadata.input_hash.clone()),
         backend: metadata.backend,
         dt: metadata.dt,
         model_identity: metadata.model_identity.clone(),
         seed: metadata.seed,
         method: metadata.method.clone(),
-        chain: metadata.best_chain,
-        log_likelihood: metadata.loglik,
-        loglik_sd: metadata.loglik_sd,
-        n_particles: metadata.n_particles,
-        ess_mean: metadata.ess_at_mle.map(|(m, _)| m),
-        ess_min: metadata.ess_at_mle.map(|(_, mn)| mn),
-    };
-
-    // TOML file order: top-level scalars FIRST, then [provenance]
-    // section. A bare `key = value` line that follows a `[table]`
-    // header parses as a field of that table, not as a top-level
-    // scalar — so putting params after [provenance] would silently
-    // re-scope them and break every downstream reader. Writing
-    // params first keeps `util::load_params_toml` (used by the
-    // `params_resolver`'s `--fixed-file` loader) and any third-party
-    // toml reader picking them up at the top level, unchanged.
-    writeln!(f, "# camdl fit MLE — parameter values first, followed by a \
-                 [provenance] block.").unwrap();
-    writeln!(f, "# Editing any value in this params section invalidates \
-                 provenance.content_hash.").unwrap();
-    let mut pairs: Vec<(&String, &f64)> = all_params.iter().collect();
-    pairs.sort_by_key(|(k, _)| k.as_str());
-    for (name, value) in pairs {
-        writeln!(f, "{} = {}", name, crate::fit::runner::format_param_value(*value)).unwrap();
-    }
-    writeln!(f).unwrap();
-
-    // Now the [provenance] block.
-    #[derive(serde::Serialize)]
-    struct ProvWrapper<'a> { provenance: &'a MleProvenance }
-    let prov_toml = toml::to_string(&ProvWrapper { provenance: &prov })
-        .map_err(|e| format!("cannot serialize provenance: {}", e))?;
-    f.write_all(prov_toml.as_bytes()).unwrap();
-    Ok(())
+        estimate: Estimate::Winner(WinnerRecord {
+            chain: metadata.best_chain,
+            log_likelihood: metadata.loglik,
+            loglik_sd: metadata.loglik_sd,
+            n_particles: metadata.n_particles,
+            ess_mean: metadata.ess_at_mle.map(|(m, _)| m),
+            ess_min: metadata.ess_at_mle.map(|(_, mn)| mn),
+        }),
+    })
+    .map_err(|e| format!("cannot write {}: {}", path, e))?;
+    let mut f = std::fs::File::create(path).map_err(|e| format!("cannot write {}: {}", path, e))?;
+    f.write_all(text.as_bytes()).map_err(|e| format!("cannot write {}: {}", path, e))
 }
 
 /// Read the `[provenance]` block from an mle_params.toml file. Returns
@@ -363,6 +401,101 @@ mod tests {
         assert!(text.contains("model_identity = \"f00d\""), "{text}");
         std::fs::write(&path, text.replace("model_identity = \"f00d\"", "model_identity = \"beef\"")).unwrap();
         assert_eq!(verify_content_hash(&path_s, &prov.content_hash).unwrap(), ContentVerification::Valid);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The bytes an optimizer's `mle_params.toml` holds. The file is a result
+    /// file of the fit run, so its bytes are a function of the run's identity:
+    /// a change to how the block is written changes every stored fit's file.
+    #[test]
+    fn a_winner_block_is_written_as_pinned() {
+        let dir = crate::test_support::unique_temp_dir("mle_params_pinned");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mle_params.toml");
+        let params: std::collections::BTreeMap<String, f64> =
+            [("beta".to_string(), 0.3), ("gamma".to_string(), 0.1)].into();
+        let meta = MleMetadata {
+            input_hash: "deadbeef".into(),
+            model_identity: "f00d".into(),
+            seed: 7,
+            method: "if2".into(),
+            best_chain: ChainIndex(2),
+            backend: crate::args::types::ForwardBackend::ChainBinomial,
+            dt: 0.5,
+            loglik: -12.5,
+            loglik_sd: 0.25,
+            n_particles: 100,
+            ess_at_mle: Some((40.0, 12.5)),
+        };
+        write_mle_params(&path.to_string_lossy(), &params, &meta).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let expected = format!(
+            "# camdl fit MLE — parameter values first, followed by a [provenance] block.\n\
+             # Editing any value in this params section invalidates provenance.content_hash.\n\
+             beta = 0.3\ngamma = 0.1\n\n\
+             [provenance]\ncamdl_version = \"{}\"\ncontent_hash = \"88849be8\"\nfit_hash = \"deadbeef\"\n\
+             backend = \"chain_binomial\"\ndt = 0.5\nmodel_identity = \"f00d\"\nseed = 7\nmethod = \"if2\"\n\
+             chain = 2\nlog_likelihood = -12.5\nloglik_sd = 0.25\nn_particles = 100\n\
+             ess_mean = 40.0\ness_min = 12.5\n",
+            version::VERSION_SHORT
+        );
+        assert_eq!(text, expected);
+    }
+
+    /// A posterior summary's block reads back as one, a winner's as a winner,
+    /// and the summary's values verify against the hash it declares.
+    #[test]
+    fn a_posterior_summary_block_round_trips() {
+        let dir = crate::test_support::unique_temp_dir("posterior_summary_block");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mean.toml");
+        let path_s = path.to_string_lossy().into_owned();
+        let params: std::collections::BTreeMap<String, f64> =
+            [("beta".to_string(), 0.31234567891234), ("gamma".to_string(), 0.1)].into();
+        let summary = Estimate::PosteriorSummary(PosteriorSummaryRecord {
+            statistic: crate::args::PointStatistic::PosteriorMean,
+            n_draws: 80,
+            run_id: "ab".repeat(32),
+        });
+        let text = params_file_text(&["a header"], &params, |content_hash| MleProvenance {
+            camdl_version: "test".into(),
+            content_hash,
+            fit_hash: Some("cd".repeat(32)),
+            backend: crate::args::types::ForwardBackend::Ode,
+            dt: 0.25,
+            model_identity: "f00d".into(),
+            seed: 3,
+            method: "pmmh".into(),
+            estimate: summary.clone(),
+        })
+        .unwrap();
+        assert!(text.starts_with("# a header\nbeta = 0.3123456789\ngamma = 0.1\n\n[provenance]\n"), "{text}");
+        assert!(text.contains("statistic = \"posterior_mean\"\nn_draws = 80\n"), "{text}");
+        assert!(!text.contains("chain ="), "a summary names no chain:\n{text}");
+        std::fs::write(&path, &text).unwrap();
+        let prov = read_mle_provenance(&path_s).unwrap().unwrap();
+        assert_eq!(prov.estimate, summary);
+        assert_eq!((prov.backend, prov.dt), (crate::args::types::ForwardBackend::Ode, 0.25));
+        assert_eq!(verify_content_hash(&path_s, &prov.content_hash).unwrap(), ContentVerification::Valid);
+
+        let winner = dir.join("mle_params.toml");
+        let meta = MleMetadata {
+            input_hash: "deadbeef".into(),
+            model_identity: "f00d".into(),
+            seed: 1,
+            method: "if2".into(),
+            best_chain: ChainIndex(1),
+            backend: crate::args::types::ForwardBackend::ChainBinomial,
+            dt: 1.0,
+            loglik: -12.5,
+            loglik_sd: 0.0,
+            n_particles: 100,
+            ess_at_mle: None,
+        };
+        write_mle_params(&winner.to_string_lossy(), &params, &meta).unwrap();
+        let prov = read_mle_provenance(&winner.to_string_lossy()).unwrap().unwrap();
+        assert!(matches!(prov.estimate, Estimate::Winner(WinnerRecord { chain: ChainIndex(1), .. })), "{prov:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

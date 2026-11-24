@@ -1299,6 +1299,38 @@ pub enum FitSummaryFormat {
     Latex,
 }
 
+/// A per-parameter statistic of a sampler run's posterior draws, for
+/// `fit summary --point`. Recorded as `statistic` in the `[provenance]`
+/// block of the file it prints, spelled `posterior_mean` or
+/// `posterior_median`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PointStatistic {
+    /// The arithmetic mean of each parameter's draws.
+    PosteriorMean,
+    /// The median of each parameter's draws, interpolated between the two
+    /// middle draws when their number is even.
+    PosteriorMedian,
+}
+
+impl PointStatistic {
+    /// The statistic as `--point` spells it.
+    pub fn flag_value(self) -> &'static str {
+        match self {
+            PointStatistic::PosteriorMean => "posterior-mean",
+            PointStatistic::PosteriorMedian => "posterior-median",
+        }
+    }
+
+    /// The statistic of `xs`, which must be non-empty.
+    pub fn of(self, xs: &[f64]) -> f64 {
+        match self {
+            PointStatistic::PosteriorMean => xs.iter().sum::<f64>() / xs.len() as f64,
+            PointStatistic::PosteriorMedian => crate::quantile::quantile(xs, 0.5),
+        }
+    }
+}
+
 #[derive(Args)]
 #[command(after_help = colored_help!("\
 Examples:
@@ -1315,6 +1347,10 @@ Examples:
   # `camdl pfilter --params`:
   camdl fit summary fit/he2010 --params-only \\
     | camdl pfilter --params /dev/stdin model.camdl --data cases.tsv
+
+  # A sampler run's posterior mean, replayed on the fit's simulator
+  camdl fit summary @post --point posterior-mean > mean.toml
+  camdl simulate model.camdl --params mean.toml
 
   # Disable colour (useful for redirecting to a file)
   camdl fit summary fit/he2010 --no-color
@@ -1359,6 +1395,28 @@ pub struct FitSummaryArgs {
     /// --params <(camdl fit summary --params-only ...)`).
     #[arg(long, conflicts_with = "format")]
     pub params_only: bool,
+
+    /// Print a summary of a sampler run's posterior (MH, PMMH, PGAS) as a
+    /// params TOML: each estimated parameter's posterior mean or median over
+    /// the run's `draws.tsv`, all chains pooled, and each fixed parameter's
+    /// value, followed by a `[provenance]` block naming the run, the
+    /// statistic and the number of draws, and the backend and dt the fit ran
+    /// on. `camdl simulate --params` replays the file on that simulator, and
+    /// `camdl predict MODEL --params` predicts at it (treatment `plug_in`).
+    ///
+    /// The statistic is taken on each parameter's natural scale, the scale
+    /// `draws.tsv` holds. A mean on a transformed scale differs: the mean of
+    /// log β, exponentiated, is the geometric mean, which is below the
+    /// arithmetic mean unless every draw is equal. A median is the same on
+    /// either scale under a monotone transform, up to the interpolation
+    /// between the two middle draws when their number is even. Neither point
+    /// is one the sampler visited, and neither was scored.
+    ///
+    /// An optimizer run (IF2, NLopt) is refused: it has one winning point,
+    /// which `--params-only` prints.
+    #[arg(long, value_enum, value_name = "STATISTIC",
+          conflicts_with_all = ["params_only", "format", "exclude_chains", "chains", "parameters", "explain"])]
+    pub point: Option<PointStatistic>,
 
     /// Disable ANSI colour even on a TTY. Honours `NO_COLOR` env var
     /// regardless of this flag.

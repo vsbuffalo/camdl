@@ -251,6 +251,15 @@ pub(crate) fn cmd_fit_summary(args: &FitSummaryArgs, compile: crate::util::Compi
             Err(e) => out.error(CommandError::new(format!("error: {e}"))).exit(),
         }
     }
+    if let Some(statistic) = args.point {
+        match posterior_point_toml(&args.fit, &opened, &dir, &completed, statistic, compile) {
+            Ok(s) => {
+                write_data(&mut out, &s);
+                return;
+            }
+            Err(e) => out.error(CommandError::new(format!("error: {e}"))).exit(),
+        }
+    }
 
     let selected: Vec<ResolvedMethod> = discovered.clone();
 
@@ -1204,19 +1213,7 @@ fn dump_params_only(
     dir: &str,
     completed: &[ResolvedMethod],
 ) -> Result<String, String> {
-    let target = match completed {
-        [] => return Err(format!("no completed method leaves found in {}", dir)),
-        [one] => one.clone(),
-        several => {
-            let mut msg = format!(
-                "{dir} holds {} completed runs and --params-only prints one; pass the run's \
-                 directory (or its @label or run-id prefix):", several.len());
-            for m in several {
-                msg.push_str(&format!("\n  {} {}", m.method, m.method_dir.display()));
-            }
-            return Err(msg);
-        }
-    };
+    let target = the_one_run(dir, completed, "--params-only")?;
     let target_method = target.name.clone();
     let method_path = target.method_dir.clone();
     // The winner θ̂: IF2 writes it to `final_params.toml` (and the same values
@@ -1250,6 +1247,130 @@ fn dump_params_only(
         out.push_str(&format!("{} = {}\n", k, crate::fit::runner::format_param_value(v)));
     }
     Ok(out)
+}
+
+/// The one completed run in `completed`, which `flag` prints. A folder holding
+/// several (an IF2 run beside an NLopt one) is refused with them listed, since
+/// printing one would choose it for the reader (gh#896).
+fn the_one_run(dir: &str, completed: &[ResolvedMethod], flag: &str) -> Result<ResolvedMethod, String> {
+    match completed {
+        [] => Err(format!("no completed method leaves found in {}", dir)),
+        [one] => Ok(one.clone()),
+        several => {
+            let mut msg = format!(
+                "{dir} holds {} completed runs and {flag} prints one; pass the run's \
+                 directory (or its @label or run-id prefix):", several.len());
+            for m in several {
+                msg.push_str(&format!("\n  {} {}", m.method, m.method_dir.display()));
+            }
+            Err(msg)
+        }
+    }
+}
+
+/// What `fit summary --point` prints: a sampler run's posterior summarised by
+/// `statistic`, as a params file with a `[provenance]` block
+/// ([`crate::fit::provenance::params_file_text`]).
+///
+/// Each estimated parameter (the problem's `[estimate]`) takes the statistic
+/// of its column of the run's `draws.tsv`, every chain pooled, on the scale
+/// the column holds, the parameter's natural scale. Every other column of
+/// `draws.tsv` is a parameter the fit held fixed and holds one value, which is
+/// written as it is. The block records the fit's backend and dt, as
+/// [`crate::fit::fitted_model::stored_fit_simulator`] reads them, so a
+/// replay of the file runs on the simulator the draws came from.
+///
+/// An optimizer run is refused: its point is the winner `--params-only`
+/// prints.
+fn posterior_point_toml(
+    handle: &str,
+    opened: &crate::fit_store::OpenedFit,
+    dir: &str,
+    completed: &[ResolvedMethod],
+    statistic: crate::args::PointStatistic,
+    compile: crate::util::CompileSettings,
+) -> Result<String, String> {
+    let flag = format!("--point {}", statistic.flag_value());
+    let target = the_one_run(dir, completed, &flag)?;
+    if !target.algorithm.is_posterior_sampler() {
+        return Err(format!(
+            "{flag} summarises a sampler run's posterior draws, and the '{}' run is an optimizer \
+             fit ({}), which returns one best-fit point and no posterior. Print that point with\n  \
+             camdl fit summary {handle} --params-only",
+            target.name, target.method
+        ));
+    }
+    let draws = crate::posterior_draws::resolve_posterior_draws(dir, None).map_err(String::from)?;
+    let (rows, _) = draws.load_params_with_info()?;
+    let shown = crate::fit::report::display_path(&draws.draws_path);
+    let Some(first) = rows.first() else {
+        return Err(format!("{shown} holds no posterior draws, so there is nothing to summarise"));
+    };
+    let estimated: Vec<&String> = opened.config.problem.estimate.keys().collect();
+    if let Some(missing) = estimated.iter().find(|p| !first.contains_key(p.as_str())) {
+        return Err(format!("{shown} has no column for the estimated parameter `{missing}`"));
+    }
+    let mut point: BTreeMap<String, f64> = BTreeMap::new();
+    for name in first.keys() {
+        let column: Vec<f64> = rows
+            .iter()
+            .map(|r| r.get(name).copied().ok_or_else(|| format!("{shown}: a draw has no value of `{name}`")))
+            .collect::<Result<_, _>>()?;
+        let value = if estimated.contains(&name) {
+            statistic.of(&column)
+        } else if column.iter().all(|x| *x == column[0]) {
+            column[0]
+        } else {
+            return Err(format!(
+                "{shown}: `{name}` is not estimated by the fit, yet its draws differ; a fixed \
+                 parameter holds one value"
+            ));
+        };
+        point.insert(name.clone(), value);
+    }
+
+    let model = crate::fit::fitted_model::stored_fit_model(opened, compile)?;
+    let simulator = crate::fit::fitted_model::stored_fit_simulator(opened, &model)?;
+    let backend = simulator
+        .backend
+        .ok_or_else(|| format!("the '{}' run records no backend to replay its posterior on", target.name))?;
+    let model_identity = crate::run_meta::read_fit_sidecar(&opened.segment)?
+        .map(|s| s.model_identity)
+        .unwrap_or_default();
+    let run = opened.fit.run.as_ref().ok_or("the handle names a fit problem, not a run")?;
+    let n_draws = rows.len();
+    let header = [
+        format!("camdl fit summary {flag} ({})", target.name),
+        format!(
+            "Each estimated parameter's {} over {n_draws} posterior draws, on its natural scale;",
+            match statistic {
+                crate::args::PointStatistic::PosteriorMean => "mean",
+                crate::args::PointStatistic::PosteriorMedian => "median",
+            }
+        ),
+        "each fixed parameter at the value the fit held it. No chain visited this point.".to_string(),
+        format!("camdl: {}", version::VERSION_SHORT),
+    ];
+    let header: Vec<&str> = header.iter().map(String::as_str).collect();
+    crate::fit::provenance::params_file_text(&header, &point, |content_hash| {
+        crate::fit::provenance::MleProvenance {
+            camdl_version: version::VERSION_SHORT.to_string(),
+            content_hash,
+            fit_hash: Some(opened.fit.problem.id().key().to_hex()),
+            backend,
+            dt: simulator.dt,
+            model_identity,
+            seed: run.identity().chain.seed.seed,
+            method: target.method.clone(),
+            estimate: crate::fit::provenance::Estimate::PosteriorSummary(
+                crate::fit::provenance::PosteriorSummaryRecord {
+                    statistic,
+                    n_draws,
+                    run_id: run.id().key().to_hex(),
+                },
+            ),
+        }
+    })
 }
 
 #[cfg(test)]

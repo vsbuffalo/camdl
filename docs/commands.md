@@ -439,8 +439,23 @@ actually began.
 
 `camdl predict` takes a model file in place of a run handle to predict at one
 point given on the command line: an estimate made elsewhere, an optimizer fit's
-estimate (`camdl fit summary <run> --params-only`), or values from the
-literature.
+estimate (`camdl fit summary <run> --params-only`), a sampler fit's posterior
+mean or median (`camdl fit summary <run> --point posterior-mean`), or values
+from the literature.
+
+```bash
+camdl fit summary @post --point posterior-mean > mean.toml
+camdl predict seir.camdl --params mean.toml --data cases=cases.tsv
+```
+
+`--point` takes each estimated parameter's mean (or median) over the run's
+posterior draws, every chain pooled, on the parameter's natural scale; a mean
+taken on the log or logit scale is a different number. The file's `[provenance]`
+block records the run, the statistic, the number of draws, and the backend and
+`dt` the fit ran on, which `camdl simulate --params mean.toml` replays on. The
+point is one no chain visited: a band predicted at it carries process and
+observation noise only, labelled `plug_in`, and leaves out the parameter
+uncertainty the posterior predictive of `camdl predict @post` carries.
 
 ```bash
 camdl predict seir.camdl --params mle.toml --data cases=cases.tsv \

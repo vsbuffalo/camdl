@@ -631,6 +631,23 @@ longer hash to `content_hash` (they were edited after the fit), naming the file:
 re-run the fit, or remove the `[provenance]` block to run the edited values as a
 plain params file.
 
+`camdl fit summary RUN --point posterior-mean` (or `posterior-median`) prints a
+file of the same form for a sampler run (MH, PMMH, PGAS). Each estimated
+parameter's value is the arithmetic mean (or the median, interpolated between
+the two middle draws when their number is even) of its column of the run's
+`draws.tsv`, every chain pooled, and each fixed parameter's is the value the fit
+held it at. The statistic is taken on the natural scale `draws.tsv` holds; a
+mean taken on a transformed scale differs (the exponentiated mean of log β is
+the geometric mean, below the arithmetic mean unless every draw is equal). The
+point is not one a chain visited and was not scored. Its `[provenance]` block
+holds `camdl_version`, `content_hash`, `fit_hash` (the problem's id), `backend`,
+`dt`, `model_identity`, `seed` and `method` as above, then `statistic`
+(`posterior_mean` or `posterior_median`), `n_draws` and `run_id` (the fit run's
+full id) in place of `chain` and the log-likelihood fields. `simulate --params`
+replays it on `backend`/`dt` and checks `content_hash` as it does an optimizer's
+file, and `camdl predict MODEL --params` predicts at it (§4). An optimizer run
+is refused, naming `--params-only`, which prints its winner.
+
 #### 2.2.1 `fit.meta.json` — the run's record of its problem
 
 Each fit run holds a `fit.meta.json`, a provenance file recording the problem as
@@ -8323,6 +8340,9 @@ camdl fit summary FIT
   a fit.toml is refused with the runs it made listed
   --format text|json|md|latex (default text)
   --params-only               print only θ̂ as a flat params TOML (pipeable)
+  --point posterior-mean|posterior-median
+                              print a sampler run's posterior mean or median as a
+                              params TOML with a [provenance] block (§2.2)
   --no-color                  disable ANSI colour (NO_COLOR is honoured regardless)
   --strict                    exit non-zero on provenance mismatch; auto-on when CI=true
   --exclude-chains IDS        recompute diagnostics over a chain subset (view only;
