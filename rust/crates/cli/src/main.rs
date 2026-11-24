@@ -896,7 +896,16 @@ fn run_simulate(inv: args::SimulateInvocation) {
     let ((), (), (), (), store_root, force, label) = request.into_parts();
     let args::SimulateInvocationExecution { args: args::SimulateExecution { parallel, .. }, no_ir_cache } = execution;
     let compile = util::CompileSettings::resolve(no_licm, no_ir_cache);
-    let request = crate::camdl_store::store_request(label.clone(), force, store_root.clone());
+    // A fit file's `store` key places the simulation in that fit's store
+    // (run spec §2.1). A file that cannot be read names no store here; each
+    // purpose of `--fit` reads the file again and reports its own error.
+    let file_store = fit.as_deref()
+        .map(|p| p.to_string_lossy().into_owned())
+        .filter(|text| crate::fit_store::is_config_file(text))
+        .and_then(|text| crate::fit::config_v2::FitConfig::load(&text).ok())
+        .and_then(|c| c.problem.store)
+        .map(std::path::PathBuf::from);
+    let request = crate::camdl_store::store_request_with_fit_file(label.clone(), force, store_root.clone(), file_store);
     // A stored fit `--fit` names is read in the store this command stores in.
     crate::fit_store::set_reader_root(crate::camdl_store::root_of(&request));
     let execution_record = args::SimulateInvocationExecution {

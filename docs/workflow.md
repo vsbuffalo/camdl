@@ -248,7 +248,8 @@ while `@baseline~1` names the one before (`camdl compare @baseline~1 @baseline`
 compares them). Reverting the edit and rerunning is a cache hit that points
 `@baseline` back at the first run. A script that must pin one run uses its run
 id. The fit is stored in the run store, `camdl-store/` in the working directory
-unless the fit file's `store` key or `CAMDL_STORE` names another root.
+unless `--store`, the fit file's `store` key or `CAMDL_STORE` names another
+root.
 
 ## 5. Read the diagnostics
 

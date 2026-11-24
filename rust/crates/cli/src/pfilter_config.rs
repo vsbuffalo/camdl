@@ -11,9 +11,10 @@
 //! [`resolve`] takes the declared inputs of `pfilter` (`crate::args::PfilterArgs`,
 //! split by its `#[derive(Inputs)]`) apart in full, so an input added to the
 //! command does not compile until it is placed here. The `--fit` argument is
-//! resolved here, once ([`crate::fit_store::FitArg::read`]: a fit file names
-//! the problem it states, read in process; a handle names a stored fit's
-//! problem, read through the run store), and its
+//! read once ([`crate::fit_store::FitArg::read`]: a fit file names the problem
+//! it states, read in process by the caller before the run store is chosen,
+//! since its `store` key chooses it; a handle names a stored fit's problem,
+//! read here through the run store), and its
 //! `[config] allow_degenerate_rates` and `allow_forcing_extrapolation` are
 //! folded with the flags into [`ResolvedPfilterConfig::eval`] and
 //! [`ResolvedPfilterConfig::forcing`]. What reaches the filter run's identity
@@ -125,12 +126,15 @@ pub(crate) struct FilterExecution {
 
 /// Resolves `pfilter`'s configuration from its declared inputs, the `--fit`
 /// handle's problem and the defaults; refuses (through `out`) a combination
-/// that cannot run. Returns the configuration, the by-products asked for and
-/// the forcing policy's installation, held for the command.
+/// that cannot run. `fit_file` is the fit file `--fit` names, already read;
+/// a stored fit is read in the run store at `store_root`. Returns the
+/// configuration, the by-products asked for and the forcing policy's
+/// installation, held for the command.
 pub(crate) fn resolve(
     declared: crate::args::PfilterDeclared,
     compile: crate::util::CompileSettings,
     out: &crate::out::Out,
+    fit_file: Option<FitArg>,
     store_root: &std::path::Path,
 ) -> (ResolvedPfilterConfig, ByProductRequests, crate::forcing_extrapolation::Installed) {
     let (
@@ -162,15 +166,15 @@ pub(crate) fn resolve(
     let (obs,) = stream.into_parts();
     let path = |p: &PathBuf| p.to_string_lossy().into_owned();
 
-    // The fit `--fit` names: read once, here.
-    // A stored fit is read in the store this filter run is stored in.
+    // The fit `--fit` names: a fit file as the caller read it, else a stored
+    // fit, read here in the store this filter run is stored in.
     crate::fit_store::set_reader_root(store_root.to_path_buf());
     let fit_store = crate::camdl_store::open_existing(store_root);
-    let fit: Option<FitArg> = fit.as_ref().map(|handle| {
+    let fit: Option<FitArg> = fit_file.or_else(|| fit.as_ref().map(|handle| {
         FitArg::read(&handle.to_string_lossy(), fit_store.as_ref()).unwrap_or_else(|e| {
             out.fail(format!("error: --fit {}: {e}", handle.display()));
         })
-    });
+    }));
     // A stored problem keeps its training lines only: filtering it would score
     // fewer rows than the same problem named by its fit file. Under
     // `--save-final-state` the filter binds the training rows alone either

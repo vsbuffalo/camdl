@@ -231,7 +231,8 @@ fn two_data_vintages_do_not_share_a_run_id() {
     let data = tmp.path().join("cases.tsv");
     let toml = write_fit_toml(tmp.path(), &model, &data);
     let params = params_file(tmp.path());
-    let cas = tmp.path().join("cas");
+    // The fit file's `store` key names the store the runs land in.
+    let cas = tmp.path().join("results");
 
     let run = |label: &str| -> String {
         let o = Command::new(&bin).env_remove("CLICOLOR_FORCE").env("CAMDL_STORE", isolated_store())
@@ -243,7 +244,6 @@ fn two_data_vintages_do_not_share_a_run_id() {
             .args(["-o", tmp.path().join(format!("{label}.tsv")).to_str().unwrap()])
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
-            .env("CAMDL_STORE", std::path::Path::new(&&cas).join("camdl-store"))
             .output()
             .expect("spawn simulate");
         let stderr = String::from_utf8_lossy(&o.stderr).into_owned();
@@ -295,7 +295,8 @@ fn the_same_data_twice_keeps_one_run_id() {
     let data = tmp.path().join("cases.tsv");
     let toml = write_fit_toml(tmp.path(), &model, &data);
     let params = params_file(tmp.path());
-    let cas = tmp.path().join("cas");
+    // The fit file's `store` key names the store the runs land in.
+    let cas = tmp.path().join("results");
     write_data(&data, 4);
 
     for label in ["a", "b"] {
@@ -308,7 +309,6 @@ fn the_same_data_twice_keeps_one_run_id() {
             .args(["-o", tmp.path().join(format!("{label}.tsv")).to_str().unwrap()])
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .env("CAMDL_IR_CACHE_DIR", tmp.path().join("irc"))
-            .env("CAMDL_STORE", std::path::Path::new(&&cas).join("camdl-store"))
             .output()
             .expect("spawn simulate");
         assert!(

@@ -90,16 +90,18 @@ fn setup(dir: &Path) {
     std::fs::write(dir.join("rows_n0.tsv"), "beta\tN0\n0.2\t1500\n0.4\t1500\n").unwrap();
 }
 
-/// `camdl simulate m.ir.json <args>` in `dir/<cwd>`; returns the N0 every cell
-/// resolved to (one value, asserted), from each cell's identity record.
+/// `camdl simulate m.ir.json <args>` in `dir/<cwd>`, stored in
+/// `dir/<cwd>/camdl-store`; returns the N0 every cell resolved to (one value,
+/// asserted), from each cell's identity record. `--store` names the store,
+/// since the fit file's `store` key would put every call's cells in one.
 fn simulate_n0(dir: &Path, cwd: &str, args: &[&str]) -> f64 {
     let work = dir.join(cwd);
     std::fs::create_dir_all(&work).unwrap();
     let out: Output = Command::new(camdl_bin()).env_remove("CLICOLOR_FORCE")
         .env("CAMDL_SKIP_VERSION_CHECK", "1")
         .current_dir(&work)
-        .env("CAMDL_STORE", work.join("camdl-store"))
         .args(["simulate", &dir.join("m.ir.json").to_string_lossy()])
+        .arg("--store").arg(work.join("camdl-store"))
         .args(args)
         .arg("--seed").arg("1")
         .output()

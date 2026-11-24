@@ -84,8 +84,11 @@ pub(crate) fn camdl_kinds() -> Kinds {
 
 // ── The store root and the request ───────────────────────────────────────────
 
-/// The store-class inputs of a command: its `--label`, its `--force`, and its
-/// `--store` root, over `CAMDL_STORE`, over the default `./camdl-store`.
+/// The store-class inputs of a command: its `--label`, its `--force`, and the
+/// root of its run store, chosen as `docs/camdl-run-spec.md` §2.1 states:
+/// `flag` (`--store`), else `fit_file_store` (the `store` key of the fit file
+/// the command reads, already anchored at the file), else `CAMDL_STORE`, else
+/// [`DEFAULT_ROOT`]. A command that reads no fit file calls [`store_request`].
 ///
 /// `force` asks the store to compute each result again (`Reuse::Force`): a
 /// completed result moves to the quarantine and is claimed anew. A claim held
@@ -94,9 +97,32 @@ pub(crate) fn camdl_kinds() -> Kinds {
 /// another host with a beat that changes. An owner on another host whose beat
 /// file is stale or cannot be read is taken, though it may still be running:
 /// `force` asserts that it has stopped.
+pub(crate) fn store_request_with_fit_file(
+    label: Option<String>,
+    force: bool,
+    flag: Option<PathBuf>,
+    fit_file_store: Option<PathBuf>,
+) -> StoreRequest {
+    request_from(label, force, flag, fit_file_store, crate::env::get().vars.store.clone())
+}
+
+/// [`store_request_with_fit_file`] for a command that reads no fit file: the
+/// root is `root` (`--store`), else `CAMDL_STORE`, else [`DEFAULT_ROOT`].
 pub(crate) fn store_request(label: Option<String>, force: bool, root: Option<PathBuf>) -> StoreRequest {
-    let env = StoreRequest::new(None, false, crate::env::get().vars.store.clone());
-    StoreRequest::new(label, force, root).merge(env)
+    store_request_with_fit_file(label, force, root, None)
+}
+
+/// The request [`store_request_with_fit_file`] builds, given the value of
+/// `CAMDL_STORE`.
+fn request_from(
+    label: Option<String>,
+    force: bool,
+    flag: Option<PathBuf>,
+    fit_file_store: Option<PathBuf>,
+    env_store: Option<PathBuf>,
+) -> StoreRequest {
+    let env = StoreRequest::new(None, false, env_store);
+    StoreRequest::new(label, force, flag.or(fit_file_store)).merge(env)
 }
 
 /// camdl's run store root when no input names one.

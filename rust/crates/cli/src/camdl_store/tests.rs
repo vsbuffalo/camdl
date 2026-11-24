@@ -115,6 +115,18 @@ fn the_root_is_the_flag_then_the_environment_then_the_default() {
     assert_eq!(root_of(&StoreRequest::new(None, false, None)), PathBuf::from("camdl-store"));
 }
 
+/// The root is `--store`, then the fit file's `store` key, then
+/// `CAMDL_STORE`, then `./camdl-store`.
+#[test]
+fn a_fit_files_store_key_comes_between_the_flag_and_the_environment() {
+    let p = |s: &str| Some(PathBuf::from(s));
+    let root = |flag, key, env| root_of(&request_from(None, false, flag, key, env));
+    assert_eq!(root(p("flag"), p("key"), p("env")), PathBuf::from("flag"));
+    assert_eq!(root(None, p("key"), p("env")), PathBuf::from("key"));
+    assert_eq!(root(None, None, p("env")), PathBuf::from("env"));
+    assert_eq!(root(None, None, None), PathBuf::from("camdl-store"));
+}
+
 /// Every parameter value is finite before it is keyed.
 #[test]
 fn a_non_finite_parameter_is_refused() {

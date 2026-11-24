@@ -366,6 +366,10 @@ cases = "../data/build/camdl/cases.tsv" # <repo>/data/build/camdl/cases.tsv
 `fit run` prints the resolved output location as an **absolute** path at start,
 so you can confirm where the run tree is going before it is written.
 
+The `store` key is the run store of every command given this file: `fit run`,
+and `simulate`, `pfilter` and `profile` with `--fit`. A `--store DIR` on the
+command line comes above it, and `CAMDL_STORE` below it (run spec §2.1).
+
 ## Where a chain starts
 
 `starts`, under `[method]`, is one key for one concept: where the chains begin.

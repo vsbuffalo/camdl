@@ -8,10 +8,10 @@ which commands chain into which, and where the boundaries are.
 
 The organizing distinction is **artifact-producing** vs **read/display**. The
 first group runs a computation and stores a content-addressed run: `simulate`,
-`pfilter` and `fit run` in the run store (`./camdl-store` unless `--store`,
-`CAMDL_STORE` or a fit file's `store` key names another root), and `profile`
-there too. The second group reads those runs back or performs a pure utility
-transform. A few commands delegate to the compiler.
+`pfilter` and `fit run` in the run store (`./camdl-store` unless `--store`, a
+fit file's `store` key or `CAMDL_STORE` names another root, in that order; run
+spec §2.1), and `profile` there too. The second group reads those runs back or
+performs a pure utility transform. A few commands delegate to the compiler.
 
 ## The command map
 

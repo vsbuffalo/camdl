@@ -199,6 +199,16 @@ pub fn cmd_pfilter(inv: crate::args::PfilterInvocation) {
             }
         }
     }
+    // A fit file is read once, here, before the store is chosen: its `store`
+    // key places the filter run in that fit's store (run spec §2.1). A stored
+    // fit's handle is read in the store, below.
+    let fit_file: Option<crate::fit_store::FitArg> = inv.args.fit.as_deref()
+        .map(|p| p.to_string_lossy().into_owned())
+        .filter(|text| crate::fit_store::is_config_file(text))
+        .map(|text| crate::fit_store::FitArg::read(&text, None).unwrap_or_else(|e| {
+            out.fail(format!("error: --fit {text}: {e}"));
+        }));
+    let file_store = fit_file.as_ref().and_then(|f| f.config.problem.store.as_ref()).map(std::path::PathBuf::from);
     let (declared, execution, exports, request, given) = store::Inputs::split(inv).into_parts();
     let (declared, no_licm) = declared.into_parts();
     let crate::args::PfilterInvocationExecution { args: execution, no_ir_cache } = execution;
@@ -209,12 +219,12 @@ pub fn cmd_pfilter(inv: crate::args::PfilterInvocation) {
     let ((), (), _inference_exports, (), output) = exports.into_parts();
     let (request,) = request.into_parts();
     let ((), (), _inference_request, (), no_store, force, label, root) = request.into_parts();
-    let request = crate::camdl_store::store_request(label, force, root);
+    let request = crate::camdl_store::store_request_with_fit_file(label, force, root, file_store);
     let execution_record = crate::args::PfilterInvocationExecution {
         args: crate::args::PfilterExecution { model_overrides: (), scenario: (), inference, stream: () },
         no_ir_cache,
     };
-    let (config, requests, _forcing_route) = crate::pfilter_config::resolve(declared, compile, &out, &crate::camdl_store::root_of(&request));
+    let (config, requests, _forcing_route) = crate::pfilter_config::resolve(declared, compile, &out, fit_file, &crate::camdl_store::root_of(&request));
     let store = StoreSide { request, no_store, given, execution: execution_record };
     run_pfilter(&out, config, requests, RunExports { output }, filter_execution, store);
 }

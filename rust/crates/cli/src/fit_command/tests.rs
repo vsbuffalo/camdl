@@ -238,6 +238,7 @@ fn argv(inv: &FitRunInvocation) -> Vec<String> {
         parallel,
         force,
         label,
+        store,
         ..
     } = args;
     let mut v: Vec<String> = vec!["fit".into(), "run".into(), config.to_string_lossy().into_owned()];
@@ -279,6 +280,7 @@ fn argv(inv: &FitRunInvocation) -> Vec<String> {
     opt("--adapt-start", adapt_start.map(|x| x.to_string()));
     opt("--parallel", Some(parallel.to_string()));
     opt("--label", label.clone());
+    opt("--store", store.as_ref().map(|p| p.to_string_lossy().into_owned()));
     let mut flag = |set: bool, name: &str| {
         if set {
             v.push(name.into());

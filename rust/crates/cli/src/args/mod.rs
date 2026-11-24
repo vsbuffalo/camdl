@@ -768,7 +768,8 @@ pub struct SimulateArgs {
     #[input(skip)]
     pub dry_run: bool,
 
-    /// The run store's root (default `$CAMDL_STORE`, else `./camdl-store`).
+    /// The run store's root, over the `store` key of a `--fit` file (default
+    /// `$CAMDL_STORE`, else `./camdl-store`; run spec §2.1).
     #[arg(long, value_name = "DIR")]
     #[input(store)]
     pub store: Option<PathBuf>,
@@ -883,8 +884,8 @@ Notes:
   - PGAS/PMMH fits can resume a partial run with `--resume`.
   - The problem is stored under `<store>/<build>/fit/<model>-<hash>/`, and
     each run inside it under `runs/<method>-<hash>/seed_<n>-<hash>/`. The
-    store is the file's `store` key, else `$CAMDL_STORE`, else
-    `./camdl-store`.
+    store is `--store`, else the file's `store` key, else `$CAMDL_STORE`,
+    else `./camdl-store`.
 
 Priors (Bayesian methods: PGAS, PMMH):
   Each estimated parameter must have a prior available from one of
@@ -958,6 +959,12 @@ pub struct FitRunArgs {
     #[arg(long, value_name = "TEXT")]
     #[input(store)]
     pub label: Option<String>,
+
+    /// The run store's root, over the fit file's `store` key (default
+    /// `$CAMDL_STORE`, else `./camdl-store`; run spec §2.1).
+    #[arg(long, value_name = "DIR")]
+    #[input(store)]
+    pub store: Option<PathBuf>,
 
     // ── Removed-flag traps ───────────────────────────────────────────
     //
@@ -2514,7 +2521,8 @@ pub struct PfilterArgs {
     #[input(store)]
     pub label: Option<String>,
 
-    /// The run store's root (default `$CAMDL_STORE`, else `./camdl-store`).
+    /// The run store's root, over the `store` key of a `--fit` file (default
+    /// `$CAMDL_STORE`, else `./camdl-store`; run spec §2.1).
     #[arg(long, value_name = "DIR")]
     #[input(store)]
     pub store: Option<PathBuf>,
@@ -2835,7 +2843,8 @@ pub struct ProfileArgs {
     #[input(store)]
     pub force: bool,
 
-    /// The run store's root (default `$CAMDL_STORE`, else `./camdl-store`).
+    /// The run store's root, over the `store` key of a `--fit` file (default
+    /// `$CAMDL_STORE`, else `./camdl-store`; run spec §2.1).
     #[arg(long, value_name = "DIR")]
     #[input(store)]
     pub store: Option<PathBuf>,

@@ -79,8 +79,9 @@ pub(crate) struct ResolvedFitConfig {
     /// through the run's length and its dependency on the base's carried
     /// chain files.
     pub resume: Option<String>,
-    /// The run store's root the file names (its `store` key); `CAMDL_STORE`
-    /// and the default `./camdl-store` come after it.
+    /// The run store's root the file names (its `store` key, anchored at the
+    /// file); `--store` comes above it, and `CAMDL_STORE` and the default
+    /// `./camdl-store` below it.
     pub store_root: Option<std::path::PathBuf>,
     /// The compile without the state Jacobian, rewritten from the data, when
     /// `config.problem.compiled_ir` is the compile with it (`nl-lbfgs` on the
@@ -471,8 +472,6 @@ pub(crate) fn resolve(
         None       => vec![base_seed],
     };
 
-    // The run store's root the file names, anchored at the file; the
-    // environment and the default come after it.
     let store_root = config.problem.store.as_ref().map(std::path::PathBuf::from);
     let nuts_tuning_flags: Vec<&'static str> =
         [(a.method.max_tree_depth.is_some(), "--max-tree-depth"), (a.method.diagonal_mass, "--diagonal-mass")]

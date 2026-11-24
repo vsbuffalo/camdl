@@ -212,12 +212,14 @@ thin       = 1
     toml
 }
 
-/// Run `camdl simulate` with `extra` arguments; returns (success, stderr, CAS
-/// root).
+/// Run `camdl simulate` with `extra` arguments; returns (success, stderr, the
+/// run store's root). With `fit`, the root is the fit file's `store` key,
+/// `dir/results`; without, `CAMDL_STORE`.
 fn simulate(dir: &Path, model: &Path, fit: Option<&Path>, extra: &[&str]) -> (bool, String, PathBuf) {
     let params = dir.join("params.toml");
     std::fs::write(&params, "beta = 0.12\ngamma = 0.1\nrho = 0.6\n").unwrap();
     let cas = dir.join("cas");
+    let root = if fit.is_some() { dir.join("results") } else { cas.join("camdl-store") };
     let mut cmd = Command::new(bin());
     cmd.env_remove("CLICOLOR_FORCE");
     cmd.arg("simulate")
@@ -232,7 +234,7 @@ fn simulate(dir: &Path, model: &Path, fit: Option<&Path>, extra: &[&str]) -> (bo
         cmd.args(["--fit", f.to_str().unwrap()]);
     }
     let o = cmd.output().expect("spawn simulate");
-    (o.status.success(), String::from_utf8_lossy(&o.stderr).into_owned(), cas)
+    (o.status.success(), String::from_utf8_lossy(&o.stderr).into_owned(), root)
 }
 
 /// The forcings every committed run.json under `cas` records as held.

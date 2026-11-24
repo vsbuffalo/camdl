@@ -389,11 +389,22 @@ project/
 ```
 
 Only `camdl-store/` has meaning to camdl. `camdl simulate`, `camdl pfilter`,
-`camdl fit run` and `camdl profile` store their results in the run store, whose
-root is `--store DIR` (`simulate`, `pfilter`, `profile`), the fit file's `store`
-key (`fit run`, §6.2), else `CAMDL_STORE`, else `./camdl-store`; its layout is
-in §4.4, for fits §2.2 and for profiles §2.8. `camdl list`, `show` and `cat`
-read the same root (§4.5).
+`camdl fit run` and `camdl profile` store their results in the run store, and
+`camdl list`, `show` and `cat` read it (§4.5). The store's layout is in §4.4,
+for fits §2.2 and for profiles §2.8.
+
+### 2.1 The run store's root
+
+Every command finds the run store's root by one rule: `--store DIR`, else the
+`store` key of the fit file the command reads (`fit run FIT.toml`, or
+`--fit FIT.toml` on `simulate`, `pfilter` and `profile`; relative to the fit
+file, §6.2), else `CAMDL_STORE`, else `./camdl-store`. A command that reads no
+fit file, or is given a stored fit's handle rather than a file, skips the second
+step. So a fit file's runs, and the results of every command given that file
+with `--fit`, are in one store.
+
+The root is not part of any identity: the same inputs stored under two roots
+have the same run id.
 
 ### 2.2 Fit Result Layout
 
@@ -1614,20 +1625,18 @@ grows"):
 The problem is a fit problem (§2.2) in the same store. `--fit @RUN` names a
 stored fit run, and its problem is the profile's. `--fit FIT.toml` names a fit
 file, whose problem is resolved and stored as `camdl fit run` stores it, so a
-profile and a fit of one file share one stored problem. The store is
-`--store DIR`, else the fit file's `store` key (relative to the file), else
-`CAMDL_STORE`, else `./camdl-store`, so the problem is stored where `fit run`
-would store it (§6.2). `--fixed`, `--fixed-file`, `--table`, the scenario flags,
-the two policies and `--dt` are written into the problem that is stored:
-`--fixed NAME=VALUE` holds `NAME` and takes it out of `[estimate]`, a
-conditional problem of its own, and so does each name a `--fixed-file` gives
-other than a swept one. Each value they replace, and each parameter they take
-out of `[estimate]`, is reported at info and recorded in every point's
-`provenance.json` (§1.3). The cells compute from the stored problem: its
-compile, its training rows and its values. A profile without `--fit`, and
-`--data` or `--obs` beside it, are refused (gh#1354). A `--starts from_params`
-value for a parameter the problem neither estimates nor fixes is refused, naming
-it.
+profile and a fit of one file share one stored problem. The store is found as
+§2.1 states, so the problem is stored where `fit run` of the same file stores
+it. `--fixed`, `--fixed-file`, `--table`, the scenario flags, the two policies
+and `--dt` are written into the problem that is stored: `--fixed NAME=VALUE`
+holds `NAME` and takes it out of `[estimate]`, a conditional problem of its own,
+and so does each name a `--fixed-file` gives other than a swept one. Each value
+they replace, and each parameter they take out of `[estimate]`, is reported at
+info and recorded in every point's `provenance.json` (§1.3). The cells compute
+from the stored problem: its compile, its training rows and its values. A
+profile without `--fit`, and `--data` or `--obs` beside it, are refused
+(gh#1354). A `--starts from_params` value for a parameter the problem neither
+estimates nor fixes is refused, naming it.
 
 A point's identity holds the problem, the focal values, the method (the
 algorithm with its settings, `dt`, each estimated parameter's domain and IF2
@@ -2424,10 +2433,10 @@ error: --dates requires the model to declare an `origin` (e.g. `origin = date("2
 
 ### 4.4 Output destinations — the run store by default
 
-`camdl simulate` stores every cell in the run store, whose root is
-`--store DIR`, else `CAMDL_STORE`, else `./camdl-store`, and reports the folder
-plus the `camdl cat` that reads it back. Both lines go to **stderr**, so a
-`--stdout` pipeline stays clean. Storing is not opt-in.
+`camdl simulate` stores every cell in the run store, whose root is found as §2.1
+states, and reports the folder plus the `camdl cat` that reads it back. Both
+lines go to **stderr**, so a `--stdout` pipeline stays clean. Storing is not
+opt-in.
 
 ```bash
 # Default: store the cell, print where it went.
@@ -3486,7 +3495,7 @@ with the serde list quoted in §6.9.
 | `[fixed]`        | table           | **yes**   | —                      | The held-constant parameters. See §6.4.                                                                                                                                                                                                                                                                                                                                                                              |
 | `[method]`       | table           | `fit run` | —                      | One algorithm, its settings, and the chains' `starts`. Absent, the file is a complete problem for every other reader and `fit run` refuses it. See §6.5.                                                                                                                                                                                                                                                             |
 | `[config]`       | table           | no        | `{ dt = 1.0 }`         | Fit-wide simulator settings. See the sub-table below.                                                                                                                                                                                                                                                                                                                                                                |
-| `store`          | string          | no        | `camdl-store`          | The run store's root (§2.2). Anchored at the `fit.toml`. Overrides `CAMDL_STORE`. Not part of any identity.                                                                                                                                                                                                                                                                                                          |
+| `store`          | string          | no        | `camdl-store`          | The run store's root for every command that reads this file, below `--store` and above `CAMDL_STORE` (§2.1). Anchored at the `fit.toml`. Not part of any identity.                                                                                                                                                                                                                                                   |
 | `fit_seeds`      | list of ints    | no        | `[--seed]` (CLI, or 1) | One fit per listed seed. Duplicates rejected.                                                                                                                                                                                                                                                                                                                                                                        |
 | `simplex_groups` | array of tables | no        | `[]`                   | `[[simplex_groups]] params = ["a","b",…]` — members must form a probability simplex. Honored by IF2 only; other algorithms warn.                                                                                                                                                                                                                                                                                     |
 | `scenario`       | string          | no        | none                   | Named scenario from the model; applies its enable/disable lists and param overrides before inference. Exclusive with `enable`/`disable`.                                                                                                                                                                                                                                                                             |
@@ -4019,8 +4028,7 @@ rows and `cross_chain_compat.json`'s `chains`. `simulate`'s `replicate`, `draw`
 and `point_id` count from 0 too. Joining any two of these takes no arithmetic,
 and no artifact carries a second base to convert from.
 
-- **`<root>`** is the `fit.toml`'s `store` key (anchored at the `fit.toml`),
-  else `$CAMDL_STORE`, else `./camdl-store`. `fit run` has no `--store` flag.
+- **`<root>`** is the run store's root (§2.1).
 - **The problem** is labelled by the model file's stem; its 12 hex digits are of
   the problem's identity (§2.2). Two files that pose one problem and differ in
   `[method]` share it.
@@ -4393,15 +4401,18 @@ pub struct FitRunArgs {
     /// Display label, 1–64 chars of `[A-Za-z0-9 ,._-]`.
     #[arg(long, value_name = "TEXT")]
     pub label: Option<String>,
+
+    /// The run store's root, over the fit file's `store` key (§2.1).
+    #[arg(long, value_name = "DIR")]
+    pub store: Option<PathBuf>,
 }
 ```
 
 Note the shapes. `--resume` carries a **base reference**, not a boolean;
-`--parallel` is a plain `usize` with a `0` default meaning "all cores"; there is
-**no `--store`** (the run store's root is the `fit.toml`'s `store` key, or
-`CAMDL_STORE`, or `./camdl-store`) and **no `--skip-chains`** (chain exclusion
-is a read-side view: `fit summary --exclude-chains`,
-`camdl predict --exclude-chains`, `fit table --exclude-chains`).
+`--parallel` is a plain `usize` with a `0` default meaning "all cores"; and
+there is **no `--skip-chains`** (chain exclusion is a read-side view:
+`fit summary --exclude-chains`, `camdl predict --exclude-chains`,
+`fit table --exclude-chains`).
 
 `--force` on `fit run` recomputes a run that already exists: the stored run, its
 predictions included, is moved to `<root>/.quarantine/` (never deleted) and the
@@ -7415,8 +7426,8 @@ Other artifacts
                               a reactive policy was active). Single-run only
 
 Store
-  --store DIR                 the run store's root (default $CAMDL_STORE, else
-                              ./camdl-store)
+  --store DIR                 the run store's root, over a --fit file's `store`
+                              key (§2.1)
   --force                     recompute every cell; the stored cell is moved to
                               quarantine first
   --label TEXT                name this invocation, found again as `@TEXT`; never
@@ -7443,6 +7454,8 @@ of a fit (§7.3).
   --sweep NAME=SPEC           Cartesian sweep over a fixed parameter (repeatable).
                               SPEC = V1,V2,... | lin(min,max,n) | log10(min,max,n)
   --label TEXT                name this invocation, found again as `@TEXT`
+  --store DIR                 the run store's root, over the fit file's `store`
+                              key (§2.1)
   --emit-every N | NAME=N     override a `[synthetic]` fit's observation emission
                               cadence (same grammar as `simulate --emit-every`);
                               refused on a fit with no `[synthetic]` block; the
@@ -7486,8 +7499,7 @@ Per-algorithm overrides
 `--stage`, `--init`, `--posterior`, `--mle`, `--params`, `--survey-path`,
 `--survey-top-k`, `--allow-nonconverged-scout`, `--starts-from` and
 `--init-method` are parsed only to be refused, each naming its replacement
-(§7.1). `fit run` has no `--store`: the run store's root is the fit file's
-`store` key, else `CAMDL_STORE`, else `./camdl-store`.
+(§7.1).
 
 ### `camdl fit` — the other subcommands
 
@@ -7585,14 +7597,13 @@ camdl predict RUN            RUN: the positional run handle, same grammar as `fi
 --no-save-samples           with --save-prequential, drop per-particle samples
 --no-store                  compute in a temporary store, deleted at the end
 --label L                   name this invocation, found again as `@L`
---store DIR                 the run store's root (default $CAMDL_STORE, else
-                            ./camdl-store)
+--store DIR                 the run store's root, over a --fit file's `store`
+                            key (§2.1)
 ```
 
-`camdl pfilter` stores its result in the run store (`camdl-store/` by default).
-The store's layout and records are those of
-`docs/dev/proposals/2026-11-20-run-store-api.md`. A filter run is one result,
-written in place, under
+`camdl pfilter` stores its result in the run store (§2.1). The store's layout
+and records are those of `docs/dev/proposals/2026-11-20-run-store-api.md`. A
+filter run is one result, written in place, under
 `<build>/pfilter/<model>/<settings>/params/seed_<seed>/`: its `loglik.toml`,
 each replicate's log-likelihood in `replicates.tsv` under `--replicates N`, and
 in `provenance.json` where each scored value came from and, under

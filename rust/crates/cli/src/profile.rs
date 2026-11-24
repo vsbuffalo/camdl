@@ -267,9 +267,9 @@ pub fn cmd_profile(inv: crate::args::ProfileInvocation) {
     // whether each stream is a terminal.
     let out = crate::out::Out::new(false);
     crate::profile_config::refuse_removed(&inv.args, &out);
-    // A fit file is read once, here: its `store` key comes below `--store`
-    // and above `CAMDL_STORE`, as `fit run` reads it, so the profile's problem
-    // is stored where that fit's is.
+    // A fit file is read once, here, before the store is chosen: its `store`
+    // key places the profile, and the fit problem it stores, in that fit's
+    // store (run spec §2.1).
     let fit_file = crate::profile_config::read_fit_file(inv.args.fit.as_deref()).unwrap_or_else(|e| {
         out.fail(format!("error: --fit {}: {e}", inv.args.fit.as_deref().unwrap_or(std::path::Path::new("")).display()))
     });
@@ -289,7 +289,7 @@ pub fn cmd_profile(inv: crate::args::ProfileInvocation) {
     let ((), (), _inference_exports, output, format) = exports.into_parts();
     let (request,) = request.into_parts();
     let ((), (), _inference_request, label, force, root) = request.into_parts();
-    let request = crate::camdl_store::store_request(label, force, root.or(file_store));
+    let request = crate::camdl_store::store_request_with_fit_file(label, force, root, file_store);
     let execution_record = crate::args::ProfileInvocationExecution {
         args: crate::args::ProfileExecution {
             model_overrides: (),

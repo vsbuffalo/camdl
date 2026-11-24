@@ -86,7 +86,7 @@ pub(crate) fn cmd_fit_run(inv: crate::args::FitRunInvocation) {
     let crate::args::FitRunInvocationExecution { args: run_execution, no_ir_cache } = &execution;
     let compile = crate::util::CompileSettings::resolve(no_licm, *no_ir_cache);
     let (request,) = request.into_parts();
-    let (_problem_request, _run_request, _method_request, force, label) = request.into_parts();
+    let (_problem_request, _run_request, _method_request, force, label, store_flag) = request.into_parts();
 
     // The resolution reads the arguments reassembled, every declared input
     // placed back in the struct it reads.
@@ -145,10 +145,7 @@ pub(crate) fn cmd_fit_run(inv: crate::args::FitRunInvocation) {
     let (resolved, _forcing_route) = crate::fit::run_config::resolve(&a, text, compile, &out);
     refuse_before_storing(&out, &resolved, &config.to_string_lossy());
 
-    // The run store: the file's `store` key, then `CAMDL_STORE`, then the
-    // default.
-    let env = store::StoreRequest::new(None, false, crate::env::get().vars.store.clone());
-    let request = store::StoreRequest::new(label, force, resolved.store_root.clone()).merge(env);
+    let request = crate::camdl_store::store_request_with_fit_file(label, force, store_flag, resolved.store_root.clone());
     let store = crate::camdl_store::open(&request).unwrap_or_else(|e| {
         out.fail(format!("error: the run store at {}: {e}", crate::camdl_store::root_of(&request).display()))
     });
@@ -192,6 +189,7 @@ impl RemovedFlags {
             parallel: 0,
             force: false,
             label: None,
+            store: None,
             _removed_stage: None,
             _removed_init: None,
             _removed_posterior: None,
