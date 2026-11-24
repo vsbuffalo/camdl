@@ -267,16 +267,21 @@ The integrator on these commands is the model's. `camdl predict MODEL` takes
 tolerances; `fit run`, `profile` and `pfilter` take no integrator flag. A fit
 records the step it ran at in `fit.meta.json` (`dt`, §2.2.1).
 
-**Replaying a stored fit** (`simulate --draws posterior|prior|<file> --fit`).
-The replay runs on the fit's backend, step and integrator (§3.4). A `--backend`,
-`--dt` or `--integrator` that differs from the fit's runs, with one stderr note
-naming both simulators:
+**Replaying a fit** (`simulate --draws posterior|prior|<file> --fit`, and
+`simulate --params` with a file carrying a fit's `[provenance]` block). The
+replay runs on the fit's backend, step and integrator (§3.4). A params file's
+block records the backend and the step; the integrator is the model's, since a
+fit takes no integrator flag. A `--backend` or `--dt` equal to the fit's changes
+nothing. A `--backend`, `--dt` or `--integrator` that differs from the fit's
+runs, with one stderr note naming both simulators, and a `--backend` change
+keeps the fit's step:
 
 ```
 note: @r0 was fitted on chain_binomial at dt = 0.1; this replay runs on chain_binomial at dt = 0.5 (--dt as given), so the parameters drive a different simulator from the one they were estimated on
 ```
 
-`--integrator` on a replay whose backend is not `ode` is refused:
+For a params file the note names the file in place of `@r0`. `--integrator` on a
+replay whose backend is not `ode` is refused:
 
 ```
 error: --integrator selects the ODE integrator, but this replay of @r0 runs on chain_binomial, which has none.
@@ -291,10 +296,20 @@ run handle with any of them is refused, naming the flags given.
 
 **Exploratory simulation** (`simulate` without a fit). The step is `--dt`, else
 the model's `simulate { dt }`, else 1.0; `--dt` replaces the model's step
-without a refusal. A `--params` file carrying a fit's `[provenance]` block sets
-the backend to the fit's when `--backend` is not given, and the step to the
-fit's when `--dt` is not given either, said on stderr. `--integrator` replaces
-the model's method on any backend, and is inert off `ode`.
+without a refusal. A `--params` file carrying a fit's `[provenance]` block makes
+the run a replay of that fit (above). `--integrator` replaces the model's method
+and keeps its `rk45` tolerances.
+
+`--integrator` is refused on a backend other than `ode` by every command that
+takes it (`simulate`, `camdl predict MODEL`), since it would select nothing yet
+change the run's identity:
+
+```
+error: --integrator selects the ODE integrator, but this simulation runs on chain_binomial, which has none.
+  Fix: drop --integrator, or pass --backend ode.
+```
+
+`camdl predict MODEL` says "this prediction" in place of "this simulation".
 
 ### 1.4 Core Design Rules
 
@@ -599,11 +614,11 @@ standard error (the `±` on the stderr line), `n_particles` its particles per
 replicate (not the IF2 swarm's size), and `ess_mean`/`ess_min` its effective
 sample size; an ODE-backend NLopt fit has no particle filter and records
 `loglik_sd = 0` and `n_particles = 0`. `camdl simulate --params` reads
-`backend`/`dt` back to warn when a downstream simulation would run under
-different dynamics than the fit, and refuses the file when its parameter values
-no longer hash to `content_hash` (they were edited after the fit), naming the
-file: re-run the fit, or remove the `[provenance]` block to run the edited
-values as a plain params file.
+`backend`/`dt` back and replays the fit on them, with a note when a flag moves
+the run off them (§1.3.1), and refuses the file when its parameter values no
+longer hash to `content_hash` (they were edited after the fit), naming the file:
+re-run the fit, or remove the `[provenance]` block to run the edited values as a
+plain params file.
 
 #### 2.2.1 `fit.meta.json` — the run's record of its problem
 
@@ -2237,7 +2252,7 @@ editing it produces a new leaf. `pfilter`, `profile` and `simulate --fit` take
 ```bash
 --backend {gillespie|chain_binomial|ode}   # default chain_binomial
 --dt N                                     # step size for discrete-time backends (default: the model's dt, else 1.0)
---integrator {rk4|rk45}                    # ODE method override; tolerances live in the model
+--integrator {rk4|rk45}                    # ODE method override, refused off ode; tolerances live in the model
 ```
 
 **Trajectory column view.** These change the emitted columns _and_ the run
@@ -5267,9 +5282,9 @@ grid from its flags and reports, per cell, whether the store already holds it.
 
 Two flags are easy to misjudge, and neither is a gap.
 
-- **`--integrator rk4|rk45` (`simulate`)** changes the trajectory and changes
-  the cell's compiled model: the override is part of the compiled model the cell
-  depends on (§3.7). Two integrators are two cells.
+- **`--integrator rk4|rk45` (`simulate --backend ode`)** changes the trajectory
+  and changes the cell's compiled model: the override is part of the compiled
+  model the cell depends on (§3.7). Two integrators are two cells.
 - **`--dates` (`simulate`)** changes only how the combined table is rendered. A
   stored `traj.tsv` never carries date columns; they appear in the `-o`,
   `--stdout` and observation exports only (§10.2). The flag is therefore not
@@ -7103,7 +7118,8 @@ Engine
   --backend gillespie|chain_binomial|ode        (default chain_binomial)
   --dt DT                     step for discrete-time backends (default: the
                               model's dt, else 1.0; replaces the model's)
-  --integrator rk4|rk45       ODE method override; tolerances live in the model's
+  --integrator rk4|rk45       ODE method override, refused off ode; tolerances
+                              live in the model's
                               `simulate { integrator = rk45 { atol, rtol } }`
   --allow-degenerate-rates    restore legacy silent-zero on numerical collapse
 
