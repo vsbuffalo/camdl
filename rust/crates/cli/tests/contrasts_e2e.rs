@@ -286,6 +286,13 @@ fn fit_predict_emits_deaths_averted_contrast_with_positive_median() {
         );
     }
 
+    // (3) the contrasts manifest lists each table written, which the
+    // prediction's stored file set is declared from.
+    let manifest = fit_store_support::json(&averted.parent().unwrap().parent().unwrap().join("contrasts.json"));
+    let mut files: Vec<&str> = manifest["contrasts"].as_array().unwrap().iter().map(|c| c["file"].as_str().unwrap()).collect();
+    files.sort();
+    assert_eq!(files, ["contrasts/averted.tsv", "contrasts/crn_zero.tsv"], "{manifest}");
+
     let _ = std::fs::remove_dir_all(&tmp);
 }
 

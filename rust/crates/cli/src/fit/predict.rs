@@ -4472,7 +4472,24 @@ fn run_predict(
             binomial,
             eval,
         )?;
+        // The manifest of the contrast tables written, which the store's
+        // file set for the prediction is declared from: one entry per
+        // contrast that forked, none for one skipped with a note.
+        let entries: Vec<serde_json::Value> = paths
+            .iter()
+            .map(|p| {
+                let name = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                let file = p.strip_prefix(&out_dir).unwrap_or(p).to_string_lossy().into_owned();
+                serde_json::json!({ "name": name, "file": file })
+            })
+            .collect();
+        let manifest = serde_json::json!({ "schema": "camdl.contrasts/v1", "contrasts": entries });
+        let manifest_name = crate::chain_selection::artifact_name("contrasts", posterior.selection());
+        let path = out_dir.join(format!("{manifest_name}.json"));
+        std::fs::write(&path, serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?)
+            .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
         written.extend(paths);
+        written.push(path);
     }
     // `report.json`: what this run computed and what refused, beside the
     // predictive it describes. Keyed by the chain selection for the same reason

@@ -1858,7 +1858,7 @@ A fit problem: the model, the data and the rows that train. Contract version 1.
 
 A prediction from a fit run's posterior or from a fixed point. A name carries a
 suffix when chains were excluded or a quantities vocabulary was read. Contract
-version 1.
+version 2.
 
 - `predictive`: `predictive.json`, JSON (always). A part's manifest: its schema,
   its tables and how they were made.
@@ -1878,10 +1878,13 @@ version 1.
   contrasts). Each forecast contrast's samples.
 - `quantities`: `quantities.json`, JSON (when the model has quantities). A
   part's manifest: its schema, its tables and how they were made.
-- `quantities/<quantity>`: `quantities/<quantity>.tsv`, TSV (each quantity). One
-  quantity's bands, per time.
-- `contrasts/<contrast>`: `contrasts/<contrast>.tsv`, TSV (a forecast with
-  contrasts, each contrast). One contrast's bands, per time.
+- `quantities-model/<quantity>`: `quantities-model/<quantity>.tsv`, TSV (each
+  quantity of the model's own block; a vocabulary's are under the name of its
+  manifest, `quantities-<key8>/`). One quantity's bands, per time.
+- `contrasts`: `contrasts.json`, JSON (a fit run's prediction when the model has
+  contrasts). A part's manifest: its schema, its tables and how they were made.
+- `contrasts/<contrast>`: `contrasts/<contrast>.tsv`, TSV (each contrast
+  forked). One contrast's bands, per time.
 - `report`: `report.json`, JSON (always). What failed while the prediction was
   made, and which streams were skipped.
 
@@ -7332,6 +7335,9 @@ state at the fork and the per-draw seed, then desync by design after it. Results
 are banded over the forkable draws into `contrasts/<name>.tsv`. A contrast with
 no toggled intervention (a parameter-only scenario) or one toggled by a
 parametric or reactive fire time is skipped with a note, never silently.
+`contrasts.json` lists each table written (`contrasts[].name` and
+`contrasts[].file`), and none for a contrast skipped; a table it does not list,
+or one it lists that was not written, is refused when the prediction is stored.
 
 **A chain selection reaches the contrast.** `camdl predict --exclude-chains`
 narrows the forkable set to the retained chains before the fork, so a contrast

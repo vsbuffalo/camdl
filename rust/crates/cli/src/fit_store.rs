@@ -466,7 +466,7 @@ pub(crate) enum ParameterSource {
 
 /// One prediction.
 #[derive(store::Identity, Clone, Debug)]
-#[identity(tag = "prediction", version = 2)]
+#[identity(tag = "prediction", version = 3)]
 pub(crate) struct PredictIdentity {
     pub source: ParameterSource,
     /// The data the filter conditions on, by stream; never held-out outcomes.

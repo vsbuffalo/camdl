@@ -209,12 +209,13 @@ impl PredictionFile {
     /// the manifests list. The predictive and observed manifests list each
     /// stream's table (`streams[].file`), and a stream they skip has none;
     /// the forecast manifest lists its samples and contrasts files and
-    /// names the streams it produced, each with its table under `forecast/`.
-    /// A table of those three parts that no manifest lists is left out, so
+    /// names the streams it produced, each with its table under `forecast/`;
+    /// the quantities manifest names each quantity, whose table is
+    /// `<name>.tsv`; the contrasts manifest lists each contrast's table
+    /// (`contrasts[].file`). A table that no manifest lists is left out, so
     /// the store refuses it, and a listed table never written is in the set,
-    /// so the store refuses the run as missing it. The quantity and contrast
-    /// tables, which no manifest lists, are the ones written. A file no
-    /// prediction stores is refused by name.
+    /// so the store refuses the run as missing it. A file no prediction
+    /// stores is refused by name.
     #[expect(clippy::disallowed_methods, reason = "reads the manifests `camdl predict` wrote in its scratch directory, before they are written into the run, to declare the tables they list")]
     pub(crate) fn of_dir(dir: &std::path::Path) -> Result<Vec<PredictionFile>, String> {
         let mut names = Vec::new();
@@ -238,9 +239,9 @@ impl PredictionFile {
         // The parts whose manifest lists every table it holds.
         let mut listing: Vec<PredictionPart> = Vec::new();
         for file in &found {
-            let PredictionFile::Manifest { part, .. } = file else { continue };
+            let PredictionFile::Manifest { part, stem } = file else { continue };
             declared.push(file.clone());
-            if !matches!(part, PredictionPart::Predictive | PredictionPart::Observed | PredictionPart::Forecast) {
+            if *part == PredictionPart::Report {
                 continue;
             }
             listing.push(*part);
@@ -249,6 +250,26 @@ impl PredictionFile {
             let manifest: serde_json::Value =
                 serde_json::from_slice(&text).map_err(|e| format!("internal error: the prediction's {}: {e}", file.stored()))?;
             let mut listed = Vec::new();
+            if *part == PredictionPart::Quantities {
+                // Each entry names one quantity, whose table is `<name>.tsv`;
+                // a quantity evaluated in several design cells has an entry
+                // per cell and one table. The model's own block writes its
+                // manifest as `quantities[-<suffix>].json` and its tables
+                // under `quantities-model[-<suffix>]/` (the store keeps a
+                // kind's name, `quantities`, out of a result's top-level
+                // directories); a vocabulary's manifest carries its
+                // `vocabulary` and names its directory.
+                let table_dir = if manifest.get("vocabulary").is_some() {
+                    stem.clone()
+                } else {
+                    stem.replacen("quantities", "quantities-model", 1)
+                };
+                for name in manifest["quantities"].as_array().into_iter().flatten().filter_map(|q| q["name"].as_str()) {
+                    listed.push(PredictionFile::Table { part: PredictionPart::Quantities, dir: table_dir.clone(), stream: name.into() });
+                }
+                declared.extend(listed);
+                continue;
+            }
             listed_files(&manifest, &mut listed);
             if *part == PredictionPart::Forecast {
                 for s in manifest["produced"].as_array().into_iter().flatten().filter_map(|s| s.as_str()) {
@@ -331,7 +352,7 @@ impl ResultFile for PredictionFile {
 
 impl Files for Prediction {
     type File = PredictionFile;
-    const CONTRACT: u16 = 1;
+    const CONTRACT: u16 = 2;
 }
 
 impl ParseFile for PredictionFile {

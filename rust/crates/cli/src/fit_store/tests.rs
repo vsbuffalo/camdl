@@ -369,8 +369,11 @@ fn the_tree_is_the_layout() {
 /// predictive manifest lists and `camdl predict` never wrote is refused as
 /// missing when the prediction is stored; a predictive table no manifest
 /// lists is left out of the set, and so refused; the forecast's produced
-/// streams and its samples file are declared, and a contrast table, which no
-/// manifest lists, is declared as written.
+/// streams and its samples file are declared. The quantities manifest lists
+/// one table per quantity it names, under `quantities-model/` for the model's
+/// own block and under the manifest's own name for a vocabulary's; the
+/// contrasts manifest lists its files. A quantity or contrast table no
+/// manifest lists is refused, and one listed and never written is missing.
 #[test]
 fn a_prediction_declares_the_tables_its_manifests_list() {
     use crate::result_files::fit::PredictionFile;
@@ -387,14 +390,23 @@ fn a_prediction_declares_the_tables_its_manifests_list() {
     write("forecast.json", r#"{"produced": ["cases"], "samples": {"file": "forecast-samples.tsv"}}"#);
     write("forecast/cases.tsv", "t\n");
     write("forecast-samples.tsv", "t\n");
+    write("contrasts.json", r#"{"contrasts": [{"name": "averted", "file": "contrasts/averted.tsv"}]}"#);
     write("contrasts/averted.tsv", "t\n");
+    write("contrasts/stray.tsv", "t\n");
+    write("quantities.json", r#"{"quantities": [{"name": "peak", "scenario": "a"}, {"name": "peak", "scenario": "b"}, {"name": "onset"}]}"#);
+    write("quantities-model/peak.tsv", "t\n");
+    write("quantities-model/stray.tsv", "t\n");
+    write("quantities-ab12cd34.json", r#"{"quantities": [{"name": "size"}], "vocabulary": {"file": "v.toml"}}"#);
+    write("quantities-ab12cd34/size.tsv", "t\n");
     write("report.json", "{}");
     let declared: Vec<String> = PredictionFile::of_dir(scratch.path()).unwrap().iter().map(ResultFile::stored).collect();
     assert_eq!(
         declared,
         [
-            "contrasts/averted.tsv", "forecast-samples.tsv", "forecast.json", "forecast/cases.tsv", "predictive.json",
-            "predictive/cases.tsv", "predictive/deaths.tsv", "report.json",
+            "contrasts.json", "contrasts/averted.tsv", "forecast-samples.tsv", "forecast.json", "forecast/cases.tsv",
+            "predictive.json", "predictive/cases.tsv", "predictive/deaths.tsv", "quantities-ab12cd34.json",
+            "quantities-ab12cd34/size.tsv", "quantities-model/onset.tsv", "quantities-model/peak.tsv",
+            "quantities.json", "report.json",
         ]
     );
 
@@ -417,13 +429,21 @@ fn a_prediction_declares_the_tables_its_manifests_list() {
         panic!("the prediction is new")
     };
     for name in ["predictive.json", "predictive/cases.tsv", "predictive/hosp.tsv", "forecast.json", "forecast/cases.tsv",
-                 "forecast-samples.tsv", "contrasts/averted.tsv", "report.json"] {
+                 "forecast-samples.tsv", "contrasts.json", "contrasts/averted.tsv", "contrasts/stray.tsv",
+                 "quantities.json", "quantities-model/peak.tsv", "quantities-model/stray.tsv",
+                 "quantities-ab12cd34.json", "quantities-ab12cd34/size.tsv", "report.json"] {
         prediction.result_file(name).unwrap().write_all(b"x").unwrap();
     }
     match prediction.finish() {
-        Err(store::Error::FileSetMismatch { missing, unexpected, .. }) => {
-            assert_eq!(missing, ["predictive/deaths.tsv"], "a listed stream's table never written");
-            assert_eq!(unexpected, ["predictive/hosp.tsv"], "a skipped stream's table no manifest lists");
+        Err(store::Error::FileSetMismatch { mut missing, mut unexpected, .. }) => {
+            missing.sort();
+            unexpected.sort();
+            assert_eq!(missing, ["predictive/deaths.tsv", "quantities-model/onset.tsv"], "a listed table never written");
+            assert_eq!(
+                unexpected,
+                ["contrasts/stray.tsv", "predictive/hosp.tsv", "quantities-model/stray.tsv"],
+                "a table no manifest lists"
+            );
         }
         other => panic!("{other:?}"),
     }
