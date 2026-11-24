@@ -418,11 +418,11 @@ fn two_exclusions_are_two_addresses_and_neither_is_the_pooled_one() {
         }
     }
 
-    // …and the name `show` prints is a name `cat --stream` takes, so the
+    // …and the name `show` prints is a name `cat` takes, so the
     // discovery loop closes: no keyed artifact is listed but unreachable.
     let excl3 = excl3_dir.to_string_lossy().into_owned();
-    let out = run(&bin, &f.tmp, &["cat", &excl3, "--stream", "predictive-excl3/weekly_cases.tsv"]);
-    assert_ok(&out, "camdl cat --stream predictive-excl3/weekly_cases.tsv");
+    let out = run(&bin, &f.tmp, &["cat", &excl3, "predictive-excl3/weekly_cases.tsv"]);
+    assert_ok(&out, "camdl cat <prediction> predictive-excl3/weekly_cases.tsv");
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
         excl3_tsv,
@@ -567,19 +567,19 @@ fn cat_selects_the_rows_of_draws_tsv_by_chain() {
     let draws = find_draws_tsv(&f.seg).unwrap();
     let leaf = draws.parent().unwrap().to_string_lossy().into_owned();
 
-    let out = run(&bin, &f.tmp, &["cat", &leaf, "--stream", "draws.tsv", "--chains", "3"]);
+    let out = run(&bin, &f.tmp, &["cat", &leaf, "draws.tsv", "--chains", "3"]);
     assert_ok(&out, "cat --chains 3");
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
     let want = chain_rows(&std::fs::read_to_string(&draws).unwrap(), "3");
     assert_eq!(text, want, "the header and chain 3's rows, byte for byte");
     assert!(String::from_utf8_lossy(&out.stderr).contains("--chains: keeping only chain(s) 3"));
 
-    let out = run(&bin, &f.tmp, &["cat", &leaf, "--stream", "draws.tsv", "--exclude-chains", "3"]);
+    let out = run(&bin, &f.tmp, &["cat", &leaf, "draws.tsv", "--exclude-chains", "3"]);
     assert_ok(&out, "cat --exclude-chains 3");
     let n_rows = String::from_utf8_lossy(&out.stdout).lines().count() - 1;
     assert_eq!(n_rows, 3 * DRAWS_PER_CHAIN);
 
-    let out = run(&bin, &f.tmp, &["cat", &leaf, "--stream", "fit_state.toml", "--chains", "0"]);
+    let out = run(&bin, &f.tmp, &["cat", &leaf, "fit_state.toml", "--chains", "0"]);
     assert!(!out.status.success(), "a stream without a chain column is refused");
     let e = String::from_utf8_lossy(&out.stderr);
     assert!(e.contains("--chains selects rows by chain") && e.contains("draws.tsv"),

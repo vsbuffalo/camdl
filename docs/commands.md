@@ -39,17 +39,18 @@ performs a pure utility transform. A few commands delegate to the compiler.
 
 ### Read, display, compare
 
-| Command                                            | Does                                                                                                                                                                                      |
-| -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `list`                                             | Browse cached runs as a table; fits one row per fit run.                                                                                                                                  |
-| `show`                                             | Full metadata for one cached run; `--format json` writes it as JSON.                                                                                                                      |
-| `cat`                                              | Emit a cached run's trajectory or observations as TSV; `--stream draws.tsv --chains IDS` (or `--exclude-chains IDS`) prints only the selected chains' rows.                               |
-| `compare`                                          | Paired comparison of stored scores (elpd, CRPS, WIS, PIT) across fits, one table per role and lead; computes and stores any score it needs. In-sample scores carry their optimism caveat. |
-| `diff`                                             | What differs between two model files, declaration by declaration, with whether the two compile to the same model. Exit 0 identical, 1 different, 2 no report.                             |
-| `label`                                            | Refuses every handle: a stored result is sealed. A result is named when it runs, with `--label`.                                                                                          |
-| `fit {run,summary,predict,diff,table,new,methods}` | Run a fit; inspect, summarize, predict-vs-observe, and aggregate fits; scaffold new `fit.toml`s.                                                                                          |
-| `dev eval`                                         | Evaluate model expressions (parameters, forcings) on a time grid — pure inspection, no simulation.                                                                                        |
-| `lineage {realize,tree,sojourn,cohort}`            | Offline projections over an event log — transmission tree, dwell times, cohort incidence.                                                                                                 |
+| Command                                            | Does                                                                                                                                                                                                |
+| -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `list`                                             | Browse cached runs as a table; fits one row per fit run.                                                                                                                                            |
+| `show`                                             | Full metadata for one cached run; `--format json` writes it as JSON.                                                                                                                                |
+| `cat`                                              | Print a stored file of a result named by a handle or an output manifest (`camdl cat @m0 draws`); `--each` prints one TSV file of every result a manifest or label lists, each row after its labels. |
+| `path`                                             | Print the path of a stored file of a result named by a handle or an output manifest; `--all` lists every file, `--each` one row per result with its run id and labels.                              |
+| `compare`                                          | Paired comparison of stored scores (elpd, CRPS, WIS, PIT) across fits, one table per role and lead; computes and stores any score it needs. In-sample scores carry their optimism caveat.           |
+| `diff`                                             | What differs between two model files, declaration by declaration, with whether the two compile to the same model. Exit 0 identical, 1 different, 2 no report.                                       |
+| `label`                                            | Refuses every handle: a stored result is sealed. A result is named when it runs, with `--label`.                                                                                                    |
+| `fit {run,summary,predict,diff,table,new,methods}` | Run a fit; inspect, summarize, predict-vs-observe, and aggregate fits; scaffold new `fit.toml`s.                                                                                                    |
+| `dev eval`                                         | Evaluate model expressions (parameters, forcings) on a time grid — pure inspection, no simulation.                                                                                                  |
+| `lineage {realize,tree,sojourn,cohort}`            | Offline projections over an event log — transmission tree, dwell times, cohort incidence.                                                                                                           |
 
 **Listing fit runs.** `camdl list` prints fits in a `fits` table, one row per
 fit run: when it was created, its run id, its problem's id (`FIT_ID`), the label
@@ -60,21 +61,31 @@ its folder. `--format json` writes one object per run:
 **Run handles and problem handles.** A stored fit is named by `@label` (the
 invocation `fit run --label` named), a run-id or problem-id prefix, or its
 folder. `camdl show @m0` describes that run (its path, kind, run id, problem,
-method, seed, length and files), and `camdl cat @m0 --stream draws.tsv` reads
-one of the run's files; without `--stream`, `cat` on a run prints its
-`fit_state.toml`. A command that reads one run refuses a problem handle and
-refuses a `fit.toml`, which never names a run, listing the runs the file made. A
-`camdl predict` output is stored inside its run, at `predict/<mode>-<12 hex>/`.
+method, seed, length and files), and `camdl cat @m0 draws` reads one of the
+run's files, by its logical name (`draws`) or its stored name (`draws.tsv`);
+without a name, `cat` on a run prints its `fit_state.toml`. A command that reads
+one run refuses a problem handle and refuses a `fit.toml`, which never names a
+run, listing the runs the file made. A `camdl predict` output is stored inside
+its run, at `predict/<mode>-<12 hex>/`.
+
+**Reading a stored file from a workflow.** A command run with
+`--manifest build/fit.json` writes an output manifest naming every result it
+stored by run id (run spec §2.10). A later step finds a file through it:
+`camdl path --manifest build/fit.json draws` prints the file's absolute path,
+after checking that the store holds the bytes the manifest records, and
+`camdl cat --manifest build/fit.json draws` prints them. Over a sweep,
+`camdl path --manifest build/sweep.json traj --each` prints one row per cell:
+its run id, its labels and the path. The lookup rules are run spec §4.5.
 
 **Selecting chains.** Every reader of a posterior cloud takes `--chains IDS`
 (keep only those chains) or `--exclude-chains IDS` (drop those), never both:
 `fit summary`, `camdl predict`, `fit table --quantity`,
-`simulate --draws posterior` and `cat --stream draws.tsv`. `compare` takes
-either per fit (`--chains @a:0,1`, `--exclude-chains @b:4`) or cohort-wide (bare
-ids); one fit named in both flags, or a cohort-wide value beside a per-fit one,
-is refused. Chain ids count from 0. A list that is empty, repeats an id or names
-an id the fit lacks is refused, as is a selection that keeps every chain or
-none. A selection is a view and never re-keys a run; on a six-chain fit
+`simulate --draws posterior` and `cat <run> draws`. `compare` takes either per
+fit (`--chains @a:0,1`, `--exclude-chains @b:4`) or cohort-wide (bare ids); one
+fit named in both flags, or a cohort-wide value beside a per-fit one, is
+refused. Chain ids count from 0. A list that is empty, repeats an id or names an
+id the fit lacks is refused, as is a selection that keeps every chain or none. A
+selection is a view and never re-keys a run; on a six-chain fit
 `--chains 0,1,2,4` and `--exclude-chains 3,5` are one selection, with one stored
 prediction.
 

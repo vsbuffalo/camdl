@@ -128,6 +128,21 @@ pub(crate) struct PfilterLabels {
     pub point: Option<DesignPointLabel>,
 }
 
+impl PfilterLabels {
+    /// The labels as the columns of a `--each` table (run spec §4.5): the
+    /// model and the seed, then for a design point its `row`, its
+    /// `point_id` and one column per design column.
+    pub(crate) fn columns(&self) -> Vec<(String, String)> {
+        let mut c: Vec<(String, String)> = vec![("model".into(), self.model.clone()), ("seed".into(), self.seed.to_string())];
+        if let Some(p) = &self.point {
+            c.push(("row".into(), p.row.to_string()));
+            c.push(("point_id".into(), p.point_id.to_string()));
+            crate::resolve_file::push_swept(&mut c, &p.values);
+        }
+        c
+    }
+}
+
 /// A design point as its row of the design table shows it: the row's
 /// position in the design file, its id, and the value of each design column,
 /// sorted by name.

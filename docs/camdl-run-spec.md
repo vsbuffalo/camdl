@@ -1326,12 +1326,12 @@ replace that, leaving only a stamp inside the file that had already been
 overwritten. `observed/` is not keyed — it is the recorded data, identical under
 any selection. A prediction is a result of its own: `camdl show <prediction>`
 (its id prefix or folder, which `camdl predict` prints) lists its files, and
-`camdl cat <prediction> --stream predictive/<stream>.tsv` reads one.
-`camdl show` and `camdl cat` on the fit run list and read only the run's own
-files. `--chains` keeps the named chains instead of dropping them, and is
-addressed by the chains it drops: on a six-chain fit `--chains 0,1,2,4` and
-`--exclude-chains 3,5` both write `predictive-excl3_5/`. A `--chains` list that
-names every chain of the fit selects nothing and is refused.
+`camdl cat <prediction> predictive/<stream>` reads one. `camdl show` and
+`camdl cat` on the fit run list and read only the run's own files. `--chains`
+keeps the named chains instead of dropping them, and is addressed by the chains
+it drops: on a six-chain fit `--chains 0,1,2,4` and `--exclude-chains 3,5` both
+write `predictive-excl3_5/`. A `--chains` list that names every chain of the fit
+selects nothing and is refused.
 
 **Calendar semantics travel with the artifact.** `predictive.json`,
 `observed.json`, `quantities.json`, the per-chain `trajectories.json`, every
@@ -2154,11 +2154,12 @@ This is the manifest of a filter run with `--pf-health`:
 
 The manifest holds no path: no store root, no result folder, and `file` is the
 name inside the result's folder. A reader opens the run store as every reading
-command does (§2.1) and finds each result by its run id, for example
-`camdl cat <run_id> --stream <file>`; a manifest read against another store
-fails on its first run id. The same command against two store roots therefore
-writes the same manifest. It holds no time, invocation number or outcome either,
-so a cache hit writes the bytes the computation wrote.
+command does (§2.1) and finds each result by its run id; `camdl path` and
+`camdl cat` take the manifest itself (`--manifest PATH`, §4.5) and check each
+file they name against it. A manifest read against another store fails on its
+first run id. The same command against two store roots therefore writes the same
+manifest. It holds no time, invocation number or outcome either, so a cache hit
+writes the bytes the computation wrote.
 
 #### Which results each command lists
 
@@ -3113,7 +3114,7 @@ camdl simulate seir_vaccine.camdl --params params.toml --scenario baseline,with_
           camdl list
 ```
 
-### 4.5 `camdl list` / `show` / `cat` / `label` — the primary access path
+### 4.5 `camdl list` / `show` / `cat` / `path` / `label` — the primary access path
 
 Because output goes to the store by default, these are **the** way you reach
 results. They read one root, the run store (`--store DIR`, else `CAMDL_STORE`,
@@ -3137,12 +3138,16 @@ camdl show e81f5a0c
 
 # Emit the trajectory, or a named file of the cell or of its by-products
 camdl cat e81f5a0c
-camdl cat e81f5a0c --stream cases_urban.tsv
-camdl cat e81f5a0c --stream event_log.tsv
-camdl cat e81f5a0c --stream quantities.json
+camdl cat e81f5a0c cases_urban
+camdl cat e81f5a0c event_log.tsv
+camdl cat e81f5a0c sim_quantities:quantities
 
 # The combined table of the invocation labelled `baseline`
 camdl cat @baseline
+
+# The path of a stored file, and one row per cell of a manifest
+camdl path e81f5a0c traj
+camdl path --manifest build/baseline.json traj --each
 ```
 
 `camdl list` shows the stored cells in a `sims` table, one row per cell:
@@ -3157,18 +3162,14 @@ sims
 `LABEL` is the label of an invocation that holds the cell. `SEED` is the cell's
 seed label (§2.4). `camdl show` on a cell prints its path, kind, model, config,
 scenario, seed label and process seed, full `run_id`, parameters, files and
-creation time. `camdl cat` on a cell prints its `traj.tsv`; `--stream NAME`
-prints a named file of the cell or of one of its by-products, by its file name:
-an observation stream (`cases.tsv`), `event_log.tsv`, `quantities.json` or
-`reactive_log.tsv`. A name the cell does not hold is refused with the list of
-the files it does hold. `camdl cat` on a filter run prints its `loglik.toml`;
-`--stream NAME` prints a file of the run or of one of the by-products its
-`--trace`, `--pf-health` and `--save-*` flags stored: `trace.tsv`,
-`pf_health.tsv`, `filtering.tsv`, `filtered_streams.tsv`, `final_state.tsv`,
-`paths.tsv`, `prequential.tsv`, `prequential.streams.tsv` or `prequential.json`.
-For a cell and a filter run alike, a name without an extension stands for
-`<name>.tsv`. `camdl cat @L` renders the combined table of the invocation
-labelled `L` (§4.4). `--limit` defaults to 50; `--all` removes the cap.
+creation time. `camdl cat` on a cell prints its `traj.tsv`, and
+`camdl cat <cell> NAME` a file of the cell or of one of its by-products, such as
+an observation stream (`cases`), `event_log` or `reactive_log`; on a filter run
+it prints `loglik.toml`, and with a name a file of the run or of a by-product
+its `--trace`, `--pf-health` and `--save-*` flags stored. Names are looked up as
+the next section states. `camdl cat @L` renders the combined table of the
+invocation labelled `L` (§4.4). `--limit` defaults to 50; `--all` removes the
+cap.
 
 Fits are listed one row per fit run, in a `fits` table:
 
@@ -3200,8 +3201,8 @@ error: `3` matches 3 results: 35f6c644d453, 3766108b8da9, 3e4f1379e077
 ```
 
 A fit run shown by `camdl show` prints its path, kind, full `run_id`, problem
-id, method, seed, length and files; `camdl cat <run> --stream NAME` prints one
-of its files (`camdl cat @r0 --stream draws.tsv`).
+id, method, seed, length and files; `camdl cat <run> NAME` prints one of its
+files (`camdl cat @r0 draws`).
 
 `--format json` emits the sim, fit, profile and pfilter sections as JSON Lines
 (one object per line). The stream is therefore not a single JSON document; parse
@@ -3215,6 +3216,137 @@ it per line or filter with `--kind`. A fit row is one run:
 sealed, and a result is named when it runs, with `--label` (§6.8). Running the
 same command again with `--label L` reuses its stored results and names them
 `@L`.
+
+#### Looking up a stored file: `path` and `cat`
+
+`camdl path` prints where a stored file is, for a program that reads it, and
+`camdl cat` prints its bytes. Both find the file by the rules below, from a
+handle or from an output manifest (§2.10) and the file's name, and differ only
+in what they print. A workflow step reads a path at once, from the manifest its
+rule declares as an input, and does not record it:
+
+```bash
+camdl path --manifest build/fit.json draws            # one absolute path
+camdl path @scout chain_0/trace chain_1/trace         # one path per name, in order
+camdl path --manifest build/fit.json --kind fit_run --all
+camdl path --manifest build/sweep.json traj --each    # one row per result
+camdl cat  --manifest build/fit.json draws
+camdl cat  --manifest build/sweep.json traj --each
+```
+
+A lookup is among the candidate results its source names:
+
+- an output manifest (`--manifest M`): each entry, in the manifest's order;
+- a label, `@L` or `@L~n`: each completed result its invocation's record lists,
+  in that order;
+- a run id, a prefix of one, or a result's folder: that result, then each
+  by-product stored for it (the results whose `upstream` it is, §2.10), so a
+  cell's handle reads its observation streams. Every rule below is tried on the
+  result itself before its by-products, so `run.json` names the cell's record,
+  and `obs:run.json` its observations'.
+
+`--kind KIND` keeps the candidates of one kind, and `--run PREFIX` the one whose
+run id begins with `PREFIX`. A name is resolved by the first of these rules that
+any candidate answers:
+
+1. `KIND:NAME` names `NAME` among that kind's candidates: `obs:cases`,
+   `fit_run:draws`.
+2. A logical name (§2.9): `draws`, `chain_0/trace`, `cases`.
+3. A stored name: `draws.tsv`. `identity.json` and `run.json` name the result's
+   records; provenance files are named by both their names.
+4. With a handle, a path through a result stored inside a candidate's folder,
+   such as a prediction inside its fit run:
+   `predict/forecast-<12 hex>/forecast/cases`. Each folder of the path is a
+   plain name, never `..`, `.`, empty or absolute, and the nested result's
+   identity must name the candidate as its parent or an ancestor. A manifest
+   names only its own entries, so this rule is not tried through one.
+
+A `KIND:NAME` whose kind no candidate is, is refused with the kinds there are. A
+listed result the store holds but cannot read, damaged or unfinished, is passed
+over unless it could answer the name: a lookup whose holders include a result of
+its kind is refused naming it, since the answer could leave it out, and so is a
+name nothing else answers.
+
+A name more than one candidate answers is refused with the candidates, unless
+`--each` is given:
+
+```
+error: 3 results of build/grid.json have `traj`: sim d71f50cbcf6c, sim 0bf1c2f2fb5a, sim 7e8f0d6c1a2b; pass --kind or --run for one, or --each for all
+```
+
+A name no candidate answers is refused with each candidate's files, by logical
+name, and for a run id or a folder with each by-product of the result that is
+stored but damaged or unfinished, which is not read, and the flag that stores it
+again with `--force`:
+
+```
+error: the pgas run 4197734faa1d has no `mle_params`; its files are chain_0/resume_state, chain_0/trace, …
+```
+
+Through a manifest, a file's digest and size in the store's `run.json` must be
+the ones the manifest records before its path is printed or its bytes are read,
+or the lookup is refused, naming the file and both digests:
+
+```
+error: build/fit.json does not describe the stored file `draws` of the pgas run 4197734faa1d: the store records sha256 … and 9312 bytes, and the manifest sha256 … and 9312 bytes; run the command that wrote the manifest again
+```
+
+`cat` also checks the bytes it reads against the digest `run.json` records, and
+refuses a file that differs as damaged. Given a label, both commands name on
+stderr the kind and run id the label resolved to, a fit run as `run`:
+`@scout → run 4197a3 (<folder>)`, `@pred → prediction 263942 (<folder>)`.
+`cat HANDLE --stream NAME` is refused, saying to write `cat HANDLE NAME`.
+
+`path --all` prints every result file of one result, as its logical name, a tab
+and its path, in name order. Through a label, the one result is the one that is
+not a content artifact, a fit problem or a by-product, when the invocation has
+exactly one such: the fit run of a `fit run`. Otherwise `--kind` or `--run`
+selects it.
+
+`--each` takes a manifest or a label and one name, and acts on every candidate
+that holds the name, in the source's order. `path --each` prints a TSV whose
+columns are `run_id` (all 64 hex digits, a handle camdl reads back), one column
+per label key, then `path`. The label columns are the union of the candidates'
+label keys, in the order first seen, with an empty cell where a result lacks
+one. A cell's labels give `model`, `params`, `scenario`, `replicate`, `seed`,
+`seed_replicate` and `process_seed`, then for a sweep point `point_id` and one
+column per swept parameter, in the sweep's order, and for a draw `draw`. A
+filter run's give `model` and `seed`, then for a design point `row`, `point_id`
+and one column per design column. Any other kind's labels give one column per
+field, a value that is not a number, a string or a boolean written as compact
+JSON. A swept parameter named like another label column is written
+`param.<name>`, and a label named `run_id` or `path` is written `label.<name>`.
+Over a three-point sweep:
+
+```text
+run_id	model	params	scenario	replicate	seed	seed_replicate	process_seed	point_id	beta	path
+f24a8397841f…	sir	beta=0.2	(none)	0	1	0	1	0	0.2	/…/seed_1-f24a8397841f/traj.tsv
+800fb0554c4a…	sir	beta=0.3	(none)	1	1	0	1	1	0.3	/…/seed_1-800fb0554c4a/traj.tsv
+a0d44ecd5f61…	sir	beta=0.4	(none)	2	1	0	1	2	0.4	/…/seed_1-a0d44ecd5f61/traj.tsv
+```
+
+`cat --each` prints the rows of every such file as one TSV: the same label
+columns, then the file's own columns, under one header, so each row keeps its
+result's coordinates. Leading `#` comment lines are dropped, and a label column
+named like a column of the file is written `label.<name>`. A file that is not a
+TSV file is refused, naming its format, and so is a file whose header differs
+from the first file's, naming it and both headers, before any row is printed.
+Each file is read and checked as `cat` reads one.
+
+`cat` given no name prints the result's summary file: a cell's `traj.tsv`, a
+filter run's `loglik.toml`, a fit run's `fit_state.toml`, a fit problem's
+`problem.toml`, a prediction's `report.json`, a score's `summary.tsv`, a profile
+point's `mle.toml`, and the one result file of any other kind. `--chains IDS`
+and `--exclude-chains IDS` keep the rows of the named chains of a fit run's
+`draws`, and are refused for any other file.
+
+Both commands exit 0 when every name resolved and 1 on a refusal: a handle that
+names nothing (`no run matches 'X' in the run store <root>`), a manifest's
+result the store does not hold, a name no candidate or several candidates hold,
+a manifest that differs from the store, `--each` given a run id or a folder,
+which name one result, and a `--kind` camdl does not store. `--each` with
+several names and `--all` with a name are usage errors, exit 2. An attempt file
+such as `progress.json` has no digest and is not looked up.
 
 #### Maintaining the run store: `status`, `verify`, `clean`, `reindex`
 
@@ -3490,9 +3622,9 @@ cell still stores `traj.tsv`. In every mode the sampled observations are an
 `obs` by-product of each cell, stored inside it at
 `obs/<stream names joined by _>-<12 hex>/<stream>.tsv` with its own
 `identity.json` and `run.json`, so they are reachable with
-`camdl cat <id> --stream <stream>.tsv` without keeping the exported files. A
-cell already stored without them is simulated again to draw them, and its
-trajectory is checked against the stored one.
+`camdl cat <id> <stream>` without keeping the exported files. A cell already
+stored without them is simulated again to draw them, and its trajectory is
+checked against the stored one.
 
 These writers — `--obs`, `--obs-dir`, the stored `obs` by-product, and a
 generated quantity that reduces `observations.<stream>` — draw every stream from
@@ -4615,7 +4747,7 @@ and refuses a `fit.toml` path with the runs it made listed (§2.2.1). A command
 that needs only the problem (`pfilter --fit`, `design`, `profile --fit`) accepts
 either kind of handle or a `fit.toml`. `camdl show` and `camdl cat` resolve
 through the run store's handles (§4.5): `show` on a fit run prints its record,
-and `cat --stream <name>` prints one of its files.
+and `cat <run> <name>` prints one of its files.
 
 **Labels.** `fit run --label L` names the invocation, as every command on the
 run store does (`docs/dev/proposals/2026-11-20-run-store-api.md`, "Labels"); no
@@ -7454,7 +7586,7 @@ There is no `camdl summarize`. Four commands cover the ground:
 | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
 | `camdl list`                   | What runs exist? Filter by `--kind sim\|fit\|profile\|pfilter`, `--model`, `--scenario`, `--since 1h`. `--format json`. |
 | `camdl show <TARGET>`          | Full metadata for one run, by short hash prefix or path.                                                                |
-| `camdl cat <TARGET>`           | The run's trajectory TSV; `--stream <NAME>` selects an observation stream or the event log (`event_log.tsv`).           |
+| `camdl cat <TARGET> [NAME]`    | A stored file of the result; without a name, its summary file (a cell's trajectory TSV).                                |
 | `camdl label <HANDLE> <LABEL>` | Refuses every handle: a stored result is sealed. Name a result when it runs, with `--label`.                            |
 
 Per-scenario summary statistics over a trajectory tree (peak, time-of-peak,
@@ -8531,7 +8663,11 @@ camdl list
   --format human|json
 
 camdl show TARGET             --store DIR   --format human|json
-camdl cat TARGET              --store DIR   --stream NAME
+camdl cat HANDLE [NAME]       --store DIR   --kind KIND   --run RUN_ID
+camdl cat --manifest M NAME   --store DIR   --kind KIND   --run RUN_ID   --each
+  --chains IDS | --exclude-chains IDS        rows of a fit run's draws
+camdl path HANDLE NAME...     --store DIR   --kind KIND   --run RUN_ID   --all | --each
+camdl path --manifest M NAME...
 camdl label HANDLE LABEL      refuses every handle: a stored result is sealed
 ```
 

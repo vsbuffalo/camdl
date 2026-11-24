@@ -724,18 +724,6 @@ pub(crate) fn invocation_table(root: &std::path::Path, target: &str) -> Option<R
     Some(invocation.render_to::<ProfileTableRendering>(&store, &options, &mut table).map(|()| table).map_err(|e| e.to_string()))
 }
 
-/// The profile point a handle names in the run store at `root`: `None` when
-/// the handle names no profile point there.
-pub(crate) fn resolve_point(root: &std::path::Path, key: &str) -> Option<Result<store::Stored<ProfilePoint>, String>> {
-    let store = crate::camdl_store::open_existing(root)?;
-    let handle: store::RunRef<ProfilePoint> = key.parse().ok()?;
-    match store.resolve(&handle) {
-        Ok(s) => Some(Ok(s)),
-        Err(store::Error::NotFound { .. } | store::Error::WrongKind { .. } | store::Error::NoRecord { .. }) => None,
-        Err(e) => Some(Err(e.to_string())),
-    }
-}
-
 /// `camdl show` of a profile point: where it is, its focal values, its
 /// method, its seed and start, and its log-likelihood and estimates.
 pub(crate) fn show_point(out: &crate::out::Out, point: &store::Stored<ProfilePoint>, rel_path: &str) {

@@ -616,15 +616,34 @@ extension.
 
 ### Names
 
-A name is resolved in four steps.
+The candidates are, with a manifest, every entry, and with a label, every
+completed result its invocation lists, each narrowed by `--kind` and `--run`.
+With a run id, a prefix or a folder, the candidate is the result the handle
+names, and then the by-products stored for it: a cell's handle reads its
+observation streams, as `cat` does today. Every step below is tried on the named
+result before any by-product, so a name the result holds is never ambiguous with
+one of theirs.
+
+A name is resolved in five steps, the first that any candidate answers deciding.
 
 1. A qualified name, `fit_run:draws`, names that kind's file.
 2. A bare logical name, `draws`, names the one candidate result that has it.
-   With a handle the candidate is the result the handle names; with a manifest
-   it is every entry, narrowed by `--kind` and `--run`.
 3. An exact stored name, `draws.tsv`, is accepted wherever a logical name is,
    and `identity.json` and `run.json` name the records.
-4. Anything else is refused.
+4. With a handle, a path through a result nested in a candidate's folder,
+   `predict/forecast-<id>/forecast/cases`, names a file of that result, so the
+   names `show` lists for a fit run's predictions are names `cat` takes. Each
+   folder of the path is a plain name (no `..`, `.`, empty or absolute
+   component), and the nested result's identity must name the candidate as its
+   parent or an ancestor; the folder layout alone never admits a result. A
+   manifest names only its own entries, so the step is not taken through one: a
+   prediction made after the manifest was written is not reached through it.
+5. Anything else is refused.
+
+A listed result the store holds but cannot read, damaged or unfinished, fails a
+lookup only when it could answer the name: when it is of the kind of a result
+that does, so that an answer without it could leave it out, or when nothing else
+answers.
 
 When more than one manifest entry has the name, the command refuses and lists
 the candidates:
@@ -643,9 +662,12 @@ the store holds is refused. `cat` hashes the bytes it prints as well.
 
 ### One row per result: `--each`
 
-`--each` takes a manifest and one name, and acts on every entry that holds the
-name, narrowed by `--kind` and `--run`, in manifest order. It is refused with a
-handle, which names one result, and with more than one name.
+`--each` takes a manifest or a label and one name, and acts on every entry that
+holds the name, narrowed by `--kind` and `--run`, in the manifest's or the
+invocation record's order. A label lists results as a manifest does, for a
+person at a terminal; a workflow reads through manifests. `--each` is refused
+with a run id, a prefix or a folder, which name one result, and with more than
+one name.
 
 `camdl path --each` prints a TSV with one row per such result:
 

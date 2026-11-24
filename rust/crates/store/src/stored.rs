@@ -184,6 +184,7 @@ pub struct Located {
     kind: String,
     dir: PathBuf,
     upstream: Option<Key>,
+    parent: Option<Key>,
     files: BTreeMap<String, FileEntry>,
 }
 
@@ -201,9 +202,10 @@ impl Store {
             return Err(Error::UnknownKind { kind: ident.kind });
         }
         let upstream = ident.parent.as_ref().filter(|p| p.relation == Relation::Upstream).map(|p| p.run_id);
+        let parent = ident.parent.as_ref().map(|p| p.run_id);
         match crate::storage::folder_state(&dir, &run_id, &self.inner.kinds) {
             crate::storage::State::Completed { dir, run } => {
-                Ok(Located { run_id, kind: ident.kind, dir, upstream, files: run.files })
+                Ok(Located { run_id, kind: ident.kind, dir, upstream, parent, files: run.files })
             }
             crate::storage::State::Damaged { what, .. } => Err(Error::Damaged { run_id, what }),
             crate::storage::State::Failed { .. } => Err(Error::NotCompleted { run_id, status: "failed" }),
@@ -230,6 +232,27 @@ impl Store {
         };
         self.locate(key)
     }
+
+    /// The result a by-product's identity names as its upstream, read from
+    /// its `identity.json` in whatever state the result is: `None` for a
+    /// result that is not a by-product, and [`Error::NotFound`] when no
+    /// folder holds `run_id`. For a reader that must say which result a
+    /// damaged or unfinished by-product belongs to, which [`Store::locate`]
+    /// refuses.
+    pub fn upstream_of(&self, run_id: Key) -> Result<Option<Key>> {
+        let Some((_, ident)) = self.inner.find_any_kind(&run_id)? else {
+            return Err(Error::NotFound { handle: run_id.to_hex() });
+        };
+        Ok(ident.parent.filter(|p| p.relation == Relation::Upstream).map(|p| p.run_id))
+    }
+
+    /// The located result as a completed result of kind `A`, with its typed
+    /// identity: for a reader that found a result by run id and needs what
+    /// only its kind records. Refused with [`Error::WrongKind`] when the
+    /// result is of another kind.
+    pub fn stored_as<A: Artifact>(&self, located: &Located) -> Result<Stored<A>> {
+        Stored::open_at(&self.inner, located.run_id, &located.dir)
+    }
 }
 
 impl Located {
@@ -252,12 +275,34 @@ impl Located {
         self.upstream
     }
 
+    /// The result whose folder this one sits in, as its identity records it:
+    /// the upstream of a by-product, or the parent a result is placed inside
+    /// (a prediction inside its fit run); `None` for a top-level result.
+    pub fn parent(&self) -> Option<Key> {
+        self.parent
+    }
+
     /// Every result file, by stored name, with its digest and size.
     pub fn result_files(&self) -> BTreeMap<&str, (Key, u64)> {
         self.files
             .iter()
             .filter(|(_, e)| e.role == Role::Result)
             .map(|(n, e)| (n.as_str(), (e.sha256.expect("a result file has a digest"), e.bytes.unwrap_or(0))))
+            .collect()
+    }
+
+    /// Every provenance file, by stored name, with its digest: files
+    /// recorded with a digest that a recompute does not compare. A
+    /// provenance entry of `run.json` without a digest is refused with
+    /// [`Error::Damaged`].
+    pub fn provenance_files(&self) -> Result<BTreeMap<&str, Key>> {
+        self.files
+            .iter()
+            .filter(|(_, e)| e.role == Role::Provenance)
+            .map(|(n, e)| match e.sha256 {
+                Some(d) => Ok((n.as_str(), d)),
+                None => Err(Error::Damaged { run_id: self.run_id, what: format!("run.json records the provenance file `{n}` without a digest") }),
+            })
             .collect()
     }
 

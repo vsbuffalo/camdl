@@ -185,6 +185,26 @@ impl OutputManifest {
         })
     }
 
+    /// Reads the manifest at `path`. A file that is not JSON, a JSON file
+    /// whose `schema` is not an output manifest's, and a manifest of a
+    /// version other than [`SCHEMA`]'s are refused, each saying what was
+    /// found.
+    #[expect(clippy::disallowed_methods, reason = "reads a manifest a command wrote, which names stored results and is not an input of a computation")]
+    pub(crate) fn read(path: &Path) -> Result<OutputManifest, String> {
+        let shown = path.display();
+        let bytes = std::fs::read(path).map_err(|e| format!("--manifest {shown}: {e}"))?;
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|e| format!("--manifest {shown}: not an output manifest: {e}"))?;
+        let schema = value.get("schema").and_then(|s| s.as_str()).unwrap_or("");
+        if !schema.starts_with("camdl.output-manifest/") {
+            return Err(format!("--manifest {shown}: not an output manifest (its `schema` is {})", value.get("schema").map_or("absent".to_string(), |s| s.to_string())));
+        }
+        if schema != SCHEMA {
+            return Err(format!("--manifest {shown}: an output manifest of version `{schema}`; this camdl reads `{SCHEMA}`"));
+        }
+        serde_json::from_value(value).map_err(|e| format!("--manifest {shown}: a malformed output manifest: {e}"))
+    }
+
     /// The manifest as written: pretty JSON with a final newline.
     pub(crate) fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = serde_json::to_vec_pretty(self).expect("a manifest serializes");
@@ -198,7 +218,7 @@ impl OutputManifest {
 /// `--data` argument, which names one file differently from another working
 /// directory, so the manifest keeps only its `stream`. Every other kind's
 /// labels hold names and values, no path.
-fn manifest_labels(kind: &str, mut labels: serde_json::Value) -> serde_json::Value {
+pub(crate) fn manifest_labels(kind: &str, mut labels: serde_json::Value) -> serde_json::Value {
     if kind == <crate::camdl_store::DataTable as store::Artifact>::KIND {
         if let Some(map) = labels.as_object_mut() {
             map.remove("path");

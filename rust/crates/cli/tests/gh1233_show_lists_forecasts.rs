@@ -124,7 +124,7 @@ fn show_lists_each_forecast_with_its_origin_horizon_chains_and_particles() {
               "--exclude-chains", "1", "--particles", "50"]);
     let (full, subset) = forecast_dirs(&run);
 
-    // The folder view: every forecast file is a listed output `cat --stream`
+    // The folder view: every forecast file is a listed output `cat`
     // takes, and each forecast has its own entry.
     let shown = ok(dir, &["show", &seg]);
     let outputs = block(&shown, "outputs");
@@ -134,7 +134,7 @@ fn show_lists_each_forecast_with_its_origin_horizon_chains_and_particles() {
             assert!(outputs.contains(&want.as_str()), "{want} listed under outputs:\n{shown}");
         }
     }
-    let cat = ok(dir, &["cat", &seg, "--stream", &format!("{full}forecast/weekly_cases.tsv")]);
+    let cat = ok(dir, &["cat", &seg, &format!("{full}forecast/weekly_cases.tsv")]);
     assert!(cat.starts_with("scenario\t"), "a listed forecast path is one cat takes:\n{cat}");
 
     let forecasts = block(&shown, "forecasts");

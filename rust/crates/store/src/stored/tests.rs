@@ -60,6 +60,9 @@ fn a_by_product_is_located_with_its_upstream_and_a_nested_result_without_one() {
     run.result_file("p.tsv").unwrap().write_all(b"p").unwrap();
     let pred = run.finish().unwrap();
     assert_eq!(store.locate(pred.id().key()).unwrap().upstream(), None);
+    assert_eq!(store.locate(pred.id().key()).unwrap().parent(), Some(fit.id().key()), "a nested result names its parent");
+    assert_eq!(located.parent(), Some(s.id().key()), "a by-product's parent is its upstream");
+    assert_eq!(store.locate(fit.id().key()).unwrap().parent(), None);
 }
 
 #[test]
@@ -133,4 +136,35 @@ fn outputs_refuse_an_invocation_with_a_result_that_did_not_complete() {
         }
         other => panic!("a failed member is refused: {other:?}"),
     }
+}
+
+#[test]
+fn a_located_result_lists_its_provenance_files_and_opens_as_its_kind() {
+    let root = TempRoot::new("locate-typed");
+    let store = open(root.path());
+    let s = sim_with_obs(&store, &info(), 11);
+    let located = store.locate(s.id().key()).unwrap();
+    assert_eq!(located.provenance_files().unwrap().into_iter().collect::<Vec<_>>(), vec![("execution.json", Key::digest_bytes(b"{}"))]);
+    let typed = store.stored_as::<Sim>(&located).unwrap();
+    assert_eq!(typed.id().key(), s.id().key());
+    assert_eq!(typed.folder(), s.folder());
+    assert!(matches!(store.stored_as::<Fit>(&located), Err(Error::WrongKind { .. })), "a sim does not open as a fit");
+}
+
+#[test]
+fn a_damaged_by_product_still_names_its_upstream() {
+    let root = TempRoot::new("upstream-of");
+    let store = open(root.path());
+    let i = info();
+    let s = sim_with_obs(&store, &i, 12);
+    let inv = i.finish(&store).unwrap();
+    let obs = inv.file.results.iter().find(|r| r.kind == "obs").unwrap().run_id;
+    let folder = store.locate(obs).unwrap().folder().to_path_buf();
+    std::fs::write(folder.join("obs.tsv"), b"other").unwrap();
+    assert!(store.locate(obs).is_err() || store.locate(obs).unwrap().read("obs.tsv").is_err(), "the by-product is damaged");
+    std::fs::remove_file(folder.join("run.json")).unwrap();
+    assert!(store.locate(obs).is_err(), "a by-product without its record does not locate");
+    assert_eq!(store.upstream_of(obs).unwrap(), Some(s.id().key()));
+    assert_eq!(store.upstream_of(s.id().key()).unwrap(), None, "a cell is no by-product");
+    assert!(matches!(store.upstream_of(Key::digest_bytes(b"none")), Err(Error::NotFound { .. })));
 }

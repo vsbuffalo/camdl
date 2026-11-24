@@ -644,9 +644,11 @@ camdl show <run>                  # full metadata for one run
 camdl show @label --format json   # one result as JSON
 camdl show @label~1               # the result the label named before
 camdl cat  <run>                  # emit a simulated cell's trajectory
-camdl cat  <run> --stream cases.tsv    # one file of a cell or of its by-products
+camdl cat  <run> cases            # one file of a cell or of its by-products, by its name
 camdl cat  @label                 # a simulate run's combined table, rendered from its cells
-camdl cat  @label --stream draws.tsv   # one file of a fit run
+camdl cat  @label draws           # one file of a fit run
+camdl path @label draws           # that file's path in the store
+camdl path --manifest m.json traj --each  # one row per result the manifest lists: run_id, labels, path
 camdl fit summary @label          # convergence, gate verdict, MLE table for a fit run
 camdl fit summary @label --explain      # ... plus what each column means
 camdl fit summary @label --parameters   # ... plus the model's parameter legend

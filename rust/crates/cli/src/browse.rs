@@ -1,7 +1,8 @@
-//! `camdl list`, `camdl show`, `camdl cat`: browse the run store's results.
-//! Each reads one store root: `--store`, else `CAMDL_STORE`, else
-//! `./camdl-store`; `show` and `cat` given a result's folder read the store
-//! that folder lies in.
+//! `camdl list`, `camdl show`, `camdl cat`, `camdl path`: browse the run
+//! store's results. Each reads one store root: `--store`, else
+//! `CAMDL_STORE`, else `./camdl-store`; `show`, `cat` and `path` given a
+//! result's folder read the store that folder lies in. `show`, `cat` and
+//! `path` find a result and its files through [`crate::resolve_file`].
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -81,20 +82,6 @@ fn discover_pfilter_rows(root: &Path) -> Vec<PfilterRow> {
     rows.into_values().collect()
 }
 
-/// The filter run a handle names on the run store: `None` when the handle
-/// names no filter run there, so the caller looks in the old store.
-fn resolve_stored_pfilter(root: &Path, key: &str) -> Option<Result<PfilterRow, String>> {
-    let store = crate::camdl_store::open_existing(root)?;
-    let handle: store::RunRef<crate::pfilter_store::Pfilter> = key.parse().ok()?;
-    let stored = match store.resolve(&handle) {
-        Ok(s) => s,
-        Err(store::Error::NotFound { .. } | store::Error::WrongKind { .. } | store::Error::NoRecord { .. }) => return None,
-        Err(e) => return Some(Err(e.to_string())),
-    };
-    let row = discover_pfilter_rows(root).into_iter().find(|r| r.stored.id() == stored.id());
-    Some(row.ok_or_else(|| format!("{key} names a filter run no invocation record lists")))
-}
-
 /// The design table of the invocation a label names, when that invocation is
 /// a `pfilter --sweep-file` design on the run store: `None` for any other
 /// handle or invocation, so the caller resolves it as a single result.
@@ -116,71 +103,6 @@ fn stored_design_table(root: &Path, target: &str) -> Option<Result<Vec<u8>, Stri
             .map(|()| table)
             .map_err(|e| e.to_string()),
     )
-}
-
-/// A file of a stored filter run, or of one of its by-products: the trace,
-/// the health table, the filtering and filtered-stream tables, the final
-/// state, the saved paths or the prequential scores. A name without an
-/// extension also stands for `<name>.tsv`. A by-product is found through the
-/// invocation records, by the filter run its identity holds.
-fn stored_pfilter_file(root: &Path, row: &PfilterRow, name: &str) -> Result<Vec<u8>, String> {
-    match stored_pfilter_file_named(root, row, name) {
-        Err(_) if !name.contains('.') => stored_pfilter_file_named(root, row, &format!("{name}.tsv")),
-        r => r,
-    }
-}
-
-fn stored_pfilter_file_named(root: &Path, row: &PfilterRow, name: &str) -> Result<Vec<u8>, String> {
-    use store::ContentAddressed;
-    use crate::pfilter_store as pf;
-    if row.stored.result_files().contains(&name) {
-        return crate::camdl_store::read_stored(&row.stored, name);
-    }
-    let store = crate::camdl_store::open_existing(root).ok_or("no run store")?;
-    let run = row.stored.identity().content_hash();
-    let mut names: Vec<String> = row.stored.result_files().iter().map(|s| s.to_string()).collect();
-    for inv in store.invocations().iter().rev() {
-        macro_rules! look {
-            ($t:ty, $flag:literal) => {
-                for (id, ()) in inv.members::<$t>().unwrap_or_default() {
-                    let Ok(Some(s)) = store.get(&id) else {
-                        // A by-product of this run that is stored but fails its
-                        // manifest check is not served; say which, and how to
-                        // make it again.
-                        if let Ok(Some(e)) = store.inspect(&id) {
-                            if e.identity().filter.content_hash() == run {
-                                if let store::EntryState::Damaged { what } = e.state() {
-                                    return Err(format!(
-                                        "the filter run's {} is damaged ({what}), so it is not read; run the \
-                                         pfilter again with {} and --force to store it again",
-                                        <$t as store::Artifact>::KIND, $flag
-                                    ));
-                                }
-                            }
-                        }
-                        continue;
-                    };
-                    if s.identity().filter.content_hash() != run {
-                        continue;
-                    }
-                    if s.result_files().contains(&name) {
-                        return crate::camdl_store::read_stored(&s, name);
-                    }
-                    names.extend(s.result_files().iter().map(|f| f.to_string()));
-                }
-            };
-        }
-        look!(pf::Trace, "--trace");
-        look!(pf::PfHealth, "--pf-health");
-        look!(pf::Filtering, "--save-filtering");
-        look!(pf::FilteredStreams, "--save-filtered-streams");
-        look!(pf::FinalState, "--save-final-state");
-        look!(pf::SavedPaths, "--save-paths");
-        look!(pf::Prequential, "--save-prequential");
-    }
-    names.sort();
-    names.dedup();
-    Err(format!("the filter run holds no file `{name}`; its files and its by-products' files: {}", names.join(", ")))
 }
 
 /// `camdl show` of a filter run on the run store.
@@ -371,11 +293,6 @@ impl RunExtras {
         predictions.sort_by(|a, b| a.0.cmp(&b.0));
         RunExtras { label, predictions }
     }
-
-    /// The prediction file `name` (`predict/<mode>-<id>/<file>`) names.
-    fn prediction_file<'a>(&'a self, name: &'a str) -> Option<(&'a store::Stored<crate::fit_store::Prediction>, &'a str)> {
-        self.predictions.iter().find_map(|(dir, p)| name.strip_prefix(dir.as_str()).map(|f| (p, f)))
-    }
 }
 
 impl StoredFitResult {
@@ -424,15 +341,6 @@ impl StoredFitResult {
             StoredFitResult::Score(s) => serde_json::to_value(s.identity()),
         }
         .unwrap_or(serde_json::Value::Null)
-    }
-
-    fn read(&self, name: &str) -> Result<Vec<u8>, String> {
-        match self {
-            StoredFitResult::Run(s, _) => crate::camdl_store::read_stored(s, name),
-            StoredFitResult::Problem(s) => crate::camdl_store::read_stored(s, name),
-            StoredFitResult::Prediction(s) => crate::camdl_store::read_stored(s, name),
-            StoredFitResult::Score(s) => crate::camdl_store::read_stored(s, name),
-        }
     }
 
     fn json(&self) -> serde_json::Value {
@@ -500,7 +408,7 @@ impl StoredFitResult {
         if extras.predictions.is_empty() {
             return;
         }
-        // Each prediction's files, by the path `cat --stream` takes.
+        // Each prediction's files, by the path `cat <run> NAME` takes.
         out.report_line(format_args!("{}", style::stdout().paint("outputs", Style::Dim)));
         for (dir, p) in &extras.predictions {
             for f in p.result_files() {
@@ -533,89 +441,6 @@ impl StoredFitResult {
                 Err(e) => out.report_line(format_args!("    {}", style::stdout().paint(&e, Style::Dim))),
             }
         }
-    }
-
-    /// `camdl cat`: the named result file, else the result's summary file;
-    /// a chain selection keeps the rows of the chains it names.
-    fn cat(
-        &self,
-        stream: Option<&str>,
-        selection: Option<&crate::chain_selection::ChainSelection>,
-        out: &crate::out::Out,
-    ) -> Result<Vec<u8>, String> {
-        let default = match self {
-            StoredFitResult::Run(..) => "fit_state.toml",
-            StoredFitResult::Problem(_) => crate::fit_store::PROBLEM_FILE,
-            StoredFitResult::Prediction(_) => "report.json",
-            StoredFitResult::Score(_) => "summary.tsv",
-        };
-        let files = self.result_files();
-        let name = stream.unwrap_or(default);
-        // A run's prediction file, by the path `show` lists it under.
-        if let (StoredFitResult::Run(_, extras), Some(stream)) = (self, stream) {
-            if let Some((p, file)) = extras.prediction_file(stream) {
-                return crate::camdl_store::read_stored(p, file);
-            }
-        }
-        // An extensionless name also matches its `.tsv` sibling.
-        let found = if files.iter().any(|f| f == name) {
-            name.to_string()
-        } else if Path::new(name).extension().is_none() && files.iter().any(|f| *f == format!("{name}.tsv")) {
-            format!("{name}.tsv")
-        } else {
-            return Err(format!("{} holds no file `{name}`; its files: {}", self.run_id(), files.join(", ")));
-        };
-        let bytes = self.read(&found)?;
-        match selection {
-            None => Ok(bytes),
-            Some(sel) => {
-                if !matches!(self, StoredFitResult::Run(..)) || found != "draws.tsv" {
-                    return Err(format!(
-                        "{} selects rows by chain, and applies to a fit run's draws.tsv",
-                        sel.flag()
-                    ));
-                }
-                select_chain_rows(out, &found, sel, &bytes).map(String::into_bytes)
-            }
-        }
-    }
-}
-
-/// The fit run, problem or prediction a handle names on the run store:
-/// `None` when it names none there, so the caller looks in the old store.
-fn resolve_stored_fit(root: &Path, key: &str) -> Option<Result<StoredFitResult, String>> {
-    let store = crate::camdl_store::open_existing(root)?;
-    let handle: store::Handle = key.parse().ok()?;
-    let not_here = |e: &store::Error| {
-        matches!(e, store::Error::NotFound { .. } | store::Error::WrongKind { .. } | store::Error::NoRecord { .. })
-    };
-    match store.resolve::<crate::fit_store::FitRun>(&store::RunRef::new(handle.clone())) {
-        Ok(s) => {
-            if key.starts_with('@') {
-                crate::out::detached().say(format_args!("{key} → run {} ({})",
-                    &s.id().key().to_hex()[..6], crate::fit::report::display_path(s.folder())));
-            }
-            let extras = RunExtras::of(&store, &s);
-            return Some(Ok(StoredFitResult::Run(s, extras)));
-        }
-        Err(e) if not_here(&e) => {}
-        Err(e) => return Some(Err(e.to_string())),
-    }
-    match store.resolve::<crate::fit_store::FitProblem>(&store::RunRef::new(handle.clone())) {
-        Ok(s) => return Some(Ok(StoredFitResult::Problem(s))),
-        Err(e) if not_here(&e) => {}
-        Err(e) => return Some(Err(e.to_string())),
-    }
-    match store.resolve::<crate::fit_store::Prediction>(&store::RunRef::new(handle.clone())) {
-        Ok(s) => return Some(Ok(StoredFitResult::Prediction(s))),
-        Err(e) if not_here(&e) => {}
-        Err(e) => return Some(Err(e.to_string())),
-    }
-    match store.resolve::<crate::fit_store::Score>(&store::RunRef::new(handle)) {
-        Ok(s) => Some(Ok(StoredFitResult::Score(s))),
-        // A fit result the store holds in another state is refused with it.
-        Err(e) if not_here(&e) => crate::fit_store::not_completed(&store, key).map(Err),
-        Err(e) => Some(Err(e.to_string())),
     }
 }
 
@@ -668,37 +493,6 @@ fn discover_stored_sim_rows(root: &Path) -> Vec<StoredSimRow> {
     rows.into_values().collect()
 }
 
-/// The simulation cell a handle names on the run store: `None` when the
-/// handle names no cell there.
-fn resolve_stored_sim(root: &Path, key: &str) -> Option<Result<StoredSimRow, String>> {
-    let store = crate::camdl_store::open_existing(root)?;
-    // A label names an invocation: it names a cell only when that invocation
-    // asked for exactly one, and nothing here when it asked for none.
-    if let Ok(h @ store::Handle::Label { .. }) = key.parse::<store::Handle>() {
-        let invocation = store.invocation(&h).ok()?;
-        let members = invocation.members::<crate::sim_store::Sim>().ok()?;
-        return match members.as_slice() {
-            [] => None,
-            [(id, _)] => {
-                let row = discover_stored_sim_rows(root).into_iter().find(|r| r.stored.id() == id);
-                Some(row.ok_or_else(|| format!("{key} names a cell that is not stored")))
-            }
-            many => Some(Err(format!(
-                "{key} names {} cells, where one is needed; `camdl cat {key}` renders their table",
-                many.len()
-            ))),
-        };
-    }
-    let handle: store::RunRef<crate::sim_store::Sim> = key.parse().ok()?;
-    let stored = match store.resolve(&handle) {
-        Ok(s) => s,
-        Err(store::Error::NotFound { .. } | store::Error::WrongKind { .. } | store::Error::NoRecord { .. }) => return None,
-        Err(e) => return Some(Err(e.to_string())),
-    };
-    let row = discover_stored_sim_rows(root).into_iter().find(|r| r.stored.id() == stored.id());
-    Some(row.ok_or_else(|| format!("{key} names a simulation cell no invocation record lists")))
-}
-
 /// The combined table of the `simulate` invocation a label names, rendered
 /// from its stored cells: `None` for any other handle or invocation.
 fn stored_sim_table(root: &Path, target: &str) -> Option<Result<Vec<u8>, String>> {
@@ -719,65 +513,6 @@ fn stored_sim_table(root: &Path, target: &str) -> Option<Result<Vec<u8>, String>
             .map(|()| table)
             .map_err(|e| e.to_string()),
     )
-}
-
-/// A file of a stored cell, or of one of its by-products: the event log, an
-/// observation stream's `<stream>.tsv` (or the stream's name), the quantities. A by-product is found
-/// through the invocation records, by the record of the cell its identity
-/// holds.
-fn stored_sim_file(root: &Path, row: &StoredSimRow, name: &str) -> Result<Vec<u8>, String> {
-    match stored_sim_file_named(root, row, name) {
-        Err(_) if !name.contains('.') => stored_sim_file_named(root, row, &format!("{name}.tsv")),
-        r => r,
-    }
-}
-
-fn stored_sim_file_named(root: &Path, row: &StoredSimRow, name: &str) -> Result<Vec<u8>, String> {
-    use store::ContentAddressed;
-    if row.stored.result_files().contains(&name) {
-        return crate::camdl_store::read_stored(&row.stored, name);
-    }
-    let store = crate::camdl_store::open_existing(root).ok_or("no run store")?;
-    let cell = row.stored.identity().content_hash();
-    let mut names: Vec<String> = row.stored.result_files().iter().map(|s| s.to_string()).collect();
-    for inv in store.invocations().iter().rev() {
-        macro_rules! look {
-            ($t:ty, $flag:literal) => {
-                for (id, ()) in inv.members::<$t>().unwrap_or_default() {
-                    let Ok(Some(s)) = store.get(&id) else {
-                        // A by-product of this cell that is stored but fails
-                        // its manifest check is not served; say which, and how
-                        // to make it again.
-                        if let Ok(Some(e)) = store.inspect(&id) {
-                            if e.identity().sim.content_hash() == cell {
-                                if let store::EntryState::Damaged { what } = e.state() {
-                                    return Err(format!(
-                                        "the cell's {} is damaged ({what}), so it is not read; run the \
-                                         simulate again with {} and --force to store it again",
-                                        <$t as store::Artifact>::KIND, $flag
-                                    ));
-                                }
-                            }
-                        }
-                        continue;
-                    };
-                    if s.identity().sim.content_hash() != cell {
-                        continue;
-                    }
-                    if s.result_files().contains(&name) {
-                        return crate::camdl_store::read_stored(&s, name);
-                    }
-                    names.extend(s.result_files().iter().map(|f| f.to_string()));
-                }
-            };
-        }
-        look!(crate::sim_store::EventLog, "--event-log");
-        look!(crate::sim_store::Obs, "--obs");
-        look!(crate::sim_store::SimQuantities, "--quantities-out");
-    }
-    names.sort();
-    names.dedup();
-    Err(format!("the cell holds no file `{name}`; its files and its by-products' files: {}", names.join(", ")))
 }
 
 /// `camdl show` of a simulation cell on the run store.
@@ -964,152 +699,361 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
     }
 }
 
+// ── The lookup `show`, `cat` and `path` share ────────────────────────────────
+
+/// What a reading command names: a handle, or an output manifest.
+enum Target {
+    Handle(store::Handle),
+    Manifest { path: PathBuf, manifest: crate::output_manifest::OutputManifest },
+}
+
+/// A reading command's store, the results it names and the file names it
+/// asks for.
+struct Lookup {
+    store: store::Store,
+    target: Target,
+    narrow: crate::resolve_file::Narrow,
+    names: Vec<String>,
+}
+
+impl Lookup {
+    /// `args` as a handle then names, or with `manifest`, names alone; the
+    /// store a handle's folder lies in, else `--store`'s.
+    fn open(
+        out: &crate::out::Out,
+        store_flag: Option<&Path>,
+        manifest: Option<&Path>,
+        narrow: crate::resolve_file::Narrow,
+        args: &[String],
+    ) -> Lookup {
+        if let Some(k) = &narrow.kind {
+            if crate::result_files::contract(k).is_none() {
+                out.fail(format!("error: --kind {k}: not a kind of result camdl stores"));
+            }
+        }
+        let (target, names, root, shown) = match manifest {
+            Some(m) => {
+                let read = crate::output_manifest::OutputManifest::read(m).unwrap_or_else(|e| out.fail(format!("error: {e}")));
+                let root = store_root(store_flag);
+                (Target::Manifest { path: m.to_path_buf(), manifest: read }, args.to_vec(), root, m.display().to_string())
+            }
+            None => {
+                let text = &args[0];
+                let handle: store::Handle = text
+                    .parse()
+                    .unwrap_or_else(|_| out.fail(format!("error: `{text}` is not a handle: a run id or a prefix of one, @LABEL, @LABEL~N or a result's folder")));
+                (Target::Handle(handle), args[1..].to_vec(), store_root_for(store_flag, text), text.clone())
+            }
+        };
+        let store = crate::camdl_store::open_existing(&root).unwrap_or_else(|| match &target {
+            Target::Handle(_) => out.fail(format!("error: no run matches '{shown}' in the run store {}", root.display())),
+            Target::Manifest { .. } => out.fail(format!(
+                "error: --manifest {shown}: no run store at {}, where the manifest's results are looked up; pass --store \
+                 or set CAMDL_STORE",
+                root.display()
+            )),
+        });
+        Lookup { store, target, narrow, names }
+    }
+
+    fn source(&self) -> crate::resolve_file::Source<'_> {
+        match &self.target {
+            Target::Handle(h) => crate::resolve_file::Source::Handle(h),
+            Target::Manifest { path, manifest } => crate::resolve_file::Source::Manifest { manifest, path },
+        }
+    }
+
+    fn label(&self) -> Option<&store::Handle> {
+        match &self.target {
+            Target::Handle(h @ store::Handle::Label { .. }) => Some(h),
+            _ => None,
+        }
+    }
+
+    /// For a label, the line on stderr saying which result it named:
+    /// `@pred → prediction 263942 (<folder>)`. A fit run is a `run`, as every
+    /// reader of a fit run says it (`fit_store::say_resolution`).
+    fn say_resolution(&self, located: &store::Located) {
+        if let Some(h) = self.label() {
+            let kind = match located.kind() {
+                k if k == <crate::fit_store::FitRun as store::Artifact>::KIND => "run",
+                k => k,
+            };
+            crate::out::detached().say(format_args!(
+                "{h} → {kind} {} ({})",
+                &located.run_id().to_hex()[..6],
+                crate::fit::report::display_path(located.folder())
+            ));
+        }
+    }
+
+    /// A refusal, as the command's error: a handle that names nothing in the
+    /// store is `no run matches`.
+    fn fail(&self, out: &crate::out::Out, e: crate::resolve_file::FileRefusal) -> ! {
+        if let (crate::resolve_file::FileRefusal::NoMatch, Target::Handle(h)) = (&e, &self.target) {
+            out.fail(format!("error: no run matches '{h}' in the run store {}", self.store.root().display()));
+        }
+        out.fail(format!("error: {e}"))
+    }
+}
+
+/// A usage error that argument parsing cannot express, with clap's exit
+/// status 2.
+fn usage(message: &str) -> ! {
+    clap::Error::raw(clap::error::ErrorKind::ArgumentConflict, format!("{message}\n")).exit()
+}
+
+/// The label the latest invocation that lists `run_id` and has a label gave
+/// it.
+fn latest_label(store: &store::Store, run_id: store::Key) -> Option<String> {
+    store
+        .invocations()
+        .iter()
+        .rev()
+        .find(|inv| inv.label().is_some() && inv.entries().iter().any(|(_, id, _)| *id == run_id))
+        .and_then(|inv| inv.label().map(str::to_string))
+}
+
 // ── cmd_show ─────────────────────────────────────────────────────────────────
 
 pub fn cmd_show(a: &crate::args::ShowArgs) {
     let out = crate::out::Out::new(false);
     let json = show_json(&out, a.format.as_deref());
-    if let Some(row) = resolve_stored_pfilter(&store_root_for(a.store.as_deref(), &a.target), &a.target) {
-        let row = row.unwrap_or_else(|e| out.fail(format!("error: {e}")));
-        if json {
-            out.report_line(format_args!("{}", serde_json::to_string_pretty(&row.json()).unwrap_or_default()));
-        } else {
-            show_stored_pfilter(&out, &row);
+    let lookup = Lookup::open(&out, a.store.as_deref(), None, Default::default(), std::slice::from_ref(&a.target));
+    let c = crate::resolve_file::resolve_result(&lookup.store, &lookup.source(), &lookup.narrow)
+        .unwrap_or_else(|e| lookup.fail(&out, e));
+    lookup.say_resolution(&c.located);
+    show_result(&out, &lookup.store, &c, json);
+}
+
+/// `camdl show` of one located result: its kind's own fields, and its files.
+fn show_result(out: &crate::out::Out, store: &store::Store, c: &crate::resolve_file::Candidate, json: bool) {
+    use store::Artifact;
+    use crate::{fit_store as fs, pfilter_store as ps, profile_store as pr, sim_store as ss};
+    let located = &c.located;
+    let fail = |e: store::Error| -> ! { out.fail(format!("error: {e}")) };
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let rel_path = pathdiff_str(located.folder(), &cwd);
+    let created = std::fs::metadata(located.folder()).and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
+    let label = || latest_label(store, located.run_id());
+    let labels_as = |what: &str| -> serde_json::Value {
+        if c.labels.is_null() {
+            out.fail(format!("error: no invocation record gives the {what} {} its labels", located.run_id().short12()));
         }
+        c.labels.clone()
+    };
+    match located.kind() {
+        k if k == ps::Pfilter::KIND => {
+            let stored = store.stored_as::<ps::Pfilter>(located).unwrap_or_else(|e| fail(e));
+            let labels = serde_json::from_value(labels_as("filter run")).unwrap_or_else(|e| out.fail(format!("error: {e}")));
+            let row = PfilterRow { stored, labels, label: label(), rel_path, created };
+            if json {
+                out.report_line(format_args!("{}", serde_json::to_string_pretty(&row.json()).unwrap_or_default()));
+            } else {
+                show_stored_pfilter(out, &row);
+            }
+        }
+        k if k == ss::Sim::KIND => {
+            let stored = store.stored_as::<ss::Sim>(located).unwrap_or_else(|e| fail(e));
+            let labels = serde_json::from_value(labels_as("cell")).unwrap_or_else(|e| out.fail(format!("error: {e}")));
+            let row = StoredSimRow { stored, labels, label: label(), rel_path, created };
+            if json {
+                out.report_line(format_args!("{}", serde_json::to_string_pretty(&row.json()).unwrap_or_default()));
+            } else {
+                show_stored_sim(out, &row);
+            }
+        }
+        k if k == pr::ProfilePoint::KIND => {
+            let point = store.stored_as::<pr::ProfilePoint>(located).unwrap_or_else(|e| fail(e));
+            if json {
+                let value = serde_json::json!({
+                    "kind": pr::ProfilePoint::KIND,
+                    "run_id": point.id().key().to_hex(),
+                    "path": rel_path,
+                    "identity": point.identity(),
+                });
+                out.report_line(format_args!("{}", serde_json::to_string_pretty(&value).unwrap_or_default()));
+            } else {
+                pr::show_point(out, &point, &rel_path);
+            }
+        }
+        k if [fs::FitRun::KIND, fs::FitProblem::KIND, fs::Prediction::KIND, fs::Score::KIND].contains(&k) => {
+            let found = match k {
+                k if k == fs::FitRun::KIND => {
+                    let s = store.stored_as::<fs::FitRun>(located).unwrap_or_else(|e| fail(e));
+                    let extras = RunExtras::of(store, &s);
+                    StoredFitResult::Run(s, extras)
+                }
+                k if k == fs::FitProblem::KIND => StoredFitResult::Problem(store.stored_as(located).unwrap_or_else(|e| fail(e))),
+                k if k == fs::Prediction::KIND => StoredFitResult::Prediction(store.stored_as(located).unwrap_or_else(|e| fail(e))),
+                _ => StoredFitResult::Score(store.stored_as(located).unwrap_or_else(|e| fail(e))),
+            };
+            if json {
+                out.report_line(format_args!("{}", serde_json::to_string_pretty(&found.json()).unwrap_or_default()));
+            } else {
+                found.show(out);
+            }
+        }
+        _ => show_any(out, c, &rel_path, json),
+    }
+}
+
+/// `camdl show` of a result of a kind with no fields of its own to show,
+/// such as a content artifact or a by-product: where it is, what it is a
+/// by-product of, and its files by logical and stored name.
+fn show_any(out: &crate::out::Out, c: &crate::resolve_file::Candidate, rel_path: &str, json: bool) {
+    let located = &c.located;
+    let files = c.file_names();
+    if json {
+        let value = serde_json::json!({
+            "kind": located.kind(),
+            "run_id": located.run_id().to_hex(),
+            "upstream": located.upstream().map(|k| k.to_hex()),
+            "path": rel_path,
+            "labels": c.labels,
+            "files": files.iter().map(|(l, s)| serde_json::json!({ "name": l, "file": s })).collect::<Vec<_>>(),
+        });
+        out.report_line(format_args!("{}", serde_json::to_string_pretty(&value).unwrap_or_default()));
         return;
     }
-    if let Some(point) = crate::profile_store::resolve_point(&store_root_for(a.store.as_deref(), &a.target), &a.target) {
-        let point = point.unwrap_or_else(|e| out.fail(format!("error: {e}")));
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let rel_path = pathdiff_str(point.folder(), &cwd);
-        if json {
-            let value = serde_json::json!({
-                "kind": <crate::profile_store::ProfilePoint as store::Artifact>::KIND,
-                "run_id": point.id().key().to_hex(),
-                "path": rel_path,
-                "identity": point.identity(),
-            });
-            out.report_line(format_args!("{}", serde_json::to_string_pretty(&value).unwrap_or_default()));
-        } else {
-            crate::profile_store::show_point(&out, &point, &rel_path);
-        }
-        return;
+    let field = |name: &str, value: &dyn std::fmt::Display| {
+        out.report_line(format_args!("{}", style::stdout().paint(name, Style::Dim)));
+        out.report_line(format_args!("  {value}"));
+    };
+    field("path", &style::stdout().paint(rel_path, Style::Code));
+    field("kind", &located.kind());
+    field("run_id", &style::stdout().paint(&located.run_id().to_hex(), Style::Dim));
+    if let Some(up) = located.upstream() {
+        field("by-product of", &up.to_hex());
     }
-    if let Some(row) = resolve_stored_sim(&store_root_for(a.store.as_deref(), &a.target), &a.target) {
-        let row = row.unwrap_or_else(|e| out.fail(format!("error: {e}")));
-        if json {
-            out.report_line(format_args!("{}", serde_json::to_string_pretty(&row.json()).unwrap_or_default()));
-        } else {
-            show_stored_sim(&out, &row);
-        }
-        return;
+    out.report_line(format_args!("{}", style::stdout().paint("files", Style::Dim)));
+    for (logical, stored) in files {
+        out.report_line(format_args!("  {logical:<24} {stored}"));
     }
-    if let Some(found) = resolve_stored_fit(&store_root_for(a.store.as_deref(), &a.target), &a.target) {
-        let found = found.unwrap_or_else(|e| out.fail(format!("error: {e}")));
-        if json {
-            out.report_line(format_args!("{}", serde_json::to_string_pretty(&found.json()).unwrap_or_default()));
-        } else {
-            found.show(&out);
-        }
-        return;
-    }
-    out.fail(format!("error: no run matches '{}' in the run store {}",
-        a.target, store_root_for(a.store.as_deref(), &a.target).display()));
 }
 
 // ── cmd_cat ──────────────────────────────────────────────────────────────────
 
 pub fn cmd_cat(a: &crate::args::CatArgs) {
-    let out = crate::out::Out::new(false);
-    let selection = crate::chain_selection::ChainSelection::from_flags(
-        a.chains.as_deref(),
-        a.exclude_chains.as_deref(),
-    )
-    .unwrap_or_else(|e| {
-        out.fail(format!("error: {e}"));
-    });
+    use crate::resolve_file as rf;
     use std::io::Write as _;
-
-    // A label naming a `pfilter --sweep-file` invocation: its design table,
-    // rendered from the stored points.
-    if a.stream.is_none() && selection.is_none() {
-        if let Some(table) = stored_design_table(&store_root_for(a.store.as_deref(), &a.target), &a.target) {
+    let out = crate::out::Out::new(false);
+    if let Some(name) = &a._removed_stream {
+        out.fail(format!("error: `cat --stream` is not accepted; write `camdl cat HANDLE {name}`, with the file's name after the handle"));
+    }
+    let selection = crate::chain_selection::ChainSelection::from_flags(a.chains.as_deref(), a.exclude_chains.as_deref())
+        .unwrap_or_else(|e| out.fail(format!("error: {e}")));
+    let narrow = rf::Narrow { kind: a.kind.clone(), run: a.run.clone() };
+    let lookup = Lookup::open(&out, a.store.as_deref(), a.manifest.as_deref(), narrow, &a.args);
+    if lookup.names.len() > 1 {
+        usage("`camdl cat --manifest FILE` takes one NAME");
+    }
+    let name = lookup.names.first();
+    let source = lookup.source();
+    if a.each {
+        let Some(name) = name else { usage("--each takes the NAME of the file to print from each result") };
+        if !source.lists_results() {
+            out.fail(format!(
+                "error: --each takes a manifest or a label, which list several results; `{}` names one result",
+                a.args[0]
+            ));
+        }
+        let table = rf::resolve_each(&lookup.store, &source, &lookup.narrow, name)
+            .and_then(|files| rf::cat_table(&files))
+            .unwrap_or_else(|e| lookup.fail(&out, e));
+        let _ = out.data().write_all(&table);
+        return;
+    }
+    if let Some(sel) = &selection {
+        if name.is_none() {
+            out.fail(format!("error: {} selects rows of a fit run's draws; name the file, `draws`", sel.flag()));
+        }
+    }
+    // A label named alone: the table its invocation renders, for a
+    // `pfilter --sweep-file` design, a profile or a `simulate`.
+    if let (Some(label), None, None, true) = (lookup.label(), name, &selection, lookup.narrow.kind.is_none() && lookup.narrow.run.is_none()) {
+        let root = lookup.store.root().to_path_buf();
+        let text = label.to_string();
+        let table = stored_design_table(&root, &text)
+            .or_else(|| crate::profile_store::invocation_table(&root, &text))
+            .or_else(|| stored_sim_table(&root, &text));
+        if let Some(table) = table {
             let table = table.unwrap_or_else(|e| out.fail(format!("error: {e}")));
             let _ = out.data().write_all(&table);
             return;
         }
     }
-
-    // A `profile` invocation on the run store, by its label: the profile
-    // table, rendered from its stored points.
-    if a.stream.is_none() && selection.is_none() {
-        if let Some(table) = crate::profile_store::invocation_table(&store_root_for(a.store.as_deref(), &a.target), &a.target) {
-            let table = table.unwrap_or_else(|e| out.fail(format!("error: {e}")));
-            let _ = out.data().write_all(&table);
-            return;
-        }
+    let file = match name {
+        Some(n) => rf::resolve_file(&lookup.store, &source, &lookup.narrow, n),
+        None => rf::default_file(&lookup.store, &source, &lookup.narrow),
     }
-
-    // A profile point on the run store: `mle.toml`, or a named result file.
-    if let Some(point) = crate::profile_store::resolve_point(&store_root_for(a.store.as_deref(), &a.target), &a.target) {
-        let point = point.unwrap_or_else(|e| out.fail(format!("error: {e}")));
-        if let Some(sel) = &selection {
-            out.fail(format!("error: {} selects rows of a fit run's chain-keyed stream; `{}` names a profile point",
-                sel.flag(), a.target));
+    .unwrap_or_else(|e| lookup.fail(&out, e));
+    lookup.say_resolution(&file.located);
+    let bytes = file.read().unwrap_or_else(|e| lookup.fail(&out, e));
+    let bytes = match &selection {
+        None => bytes,
+        Some(sel) => {
+            if file.located.kind() != <crate::fit_store::FitRun as store::Artifact>::KIND || file.stored != "draws.tsv" {
+                out.fail(format!("error: {} selects rows by chain, and applies to a fit run's draws.tsv", sel.flag()));
+            }
+            select_chain_rows(&out, &file.stored, sel, &bytes).unwrap_or_else(|e| out.fail(format!("error: {e}"))).into_bytes()
         }
-        let name = a.stream.as_deref().unwrap_or(crate::profile_store::MLE_FILE);
-        let bytes = crate::camdl_store::read_stored(&point, name).unwrap_or_else(|e| out.fail(format!("error: {e}")));
-        let _ = out.data().write_all(&bytes);
+    };
+    let _ = out.data().write_all(&bytes);
+}
+
+// ── cmd_path ─────────────────────────────────────────────────────────────────
+
+pub fn cmd_path(a: &crate::args::PathArgs) {
+    use crate::resolve_file as rf;
+    let out = crate::out::Out::new(false);
+    let narrow = rf::Narrow { kind: a.kind.clone(), run: a.run.clone() };
+    let lookup = Lookup::open(&out, a.store.as_deref(), a.manifest.as_deref(), narrow, &a.args);
+    let source = lookup.source();
+    if a.all {
+        if !lookup.names.is_empty() {
+            usage("--all prints every file of one result, and takes no NAME");
+        }
+        let files = rf::every_file(&lookup.store, &source, &lookup.narrow).unwrap_or_else(|e| lookup.fail(&out, e));
+        if let Some(f) = files.first() {
+            lookup.say_resolution(&f.located);
+        }
+        for f in files {
+            out.data_line(format_args!("{}\t{}", f.logical, f.path.display()));
+        }
         return;
     }
-
-    // A `simulate` invocation on the run store, by its label: the combined
-    // table, rendered from its stored cells.
-    if a.stream.is_none() && selection.is_none() {
-        if let Some(table) = stored_sim_table(&store_root_for(a.store.as_deref(), &a.target), &a.target) {
-            let table = table.unwrap_or_else(|e| out.fail(format!("error: {e}")));
-            let _ = out.data().write_all(&table);
-            return;
-        }
+    if lookup.names.is_empty() {
+        usage("name the file to print the path of, or pass --all");
     }
-
-    // A simulation cell on the run store: `traj.tsv`, or a named file of the
-    // cell or of one of its by-products.
-    if let Some(row) = resolve_stored_sim(&store_root_for(a.store.as_deref(), &a.target), &a.target) {
-        let row = row.unwrap_or_else(|e| out.fail(format!("error: {e}")));
-        if let Some(sel) = &selection {
-            out.fail(format!("error: {} selects rows of a fit run's chain-keyed stream; `{}` names a simulation cell",
-                sel.flag(), a.target));
+    if a.each {
+        let [name] = &lookup.names[..] else { usage("--each takes one NAME") };
+        if !source.lists_results() {
+            out.fail(format!(
+                "error: --each takes a manifest or a label, which list several results; `{}` names one result",
+                a.args[0]
+            ));
         }
-        let name = a.stream.as_deref().unwrap_or(crate::sim_store::TRAJ_FILE);
-        let bytes = stored_sim_file(&store_root(a.store.as_deref()), &row, name).unwrap_or_else(|e| out.fail(format!("error: {e}")));
-        let _ = out.data().write_all(&bytes);
+        let table = rf::resolve_each(&lookup.store, &source, &lookup.narrow, name)
+            .and_then(|files| rf::path_table(&files))
+            .unwrap_or_else(|e| lookup.fail(&out, e));
+        out.data_raw(table);
         return;
     }
-
-    // A filter run on the run store: `loglik.toml`, or a named result file.
-    if let Some(row) = resolve_stored_pfilter(&store_root_for(a.store.as_deref(), &a.target), &a.target) {
-        let row = row.unwrap_or_else(|e| out.fail(format!("error: {e}")));
-        if let Some(sel) = &selection {
-            out.fail(format!("error: {} selects rows of a fit run's chain-keyed stream; `{}` names a filter run",
-                sel.flag(), a.target));
+    let files: Vec<rf::ResolvedFile> = lookup
+        .names
+        .iter()
+        .map(|n| rf::resolve_file(&lookup.store, &source, &lookup.narrow, n).unwrap_or_else(|e| lookup.fail(&out, e)))
+        .collect();
+    let mut said = std::collections::BTreeSet::new();
+    for f in &files {
+        if said.insert(f.located.run_id()) {
+            lookup.say_resolution(&f.located);
         }
-        let name = a.stream.as_deref().unwrap_or(crate::pfilter_store::LOGLIK_FILE);
-        let bytes = stored_pfilter_file(&store_root(a.store.as_deref()), &row, name)
-            .unwrap_or_else(|e| out.fail(format!("error: {e}")));
-        let _ = out.data().write_all(&bytes);
-        return;
     }
-    // A fit run, a fit problem or a prediction on the run store: a named
-    // result file, `fit_state.toml` for a run, `problem.toml` for a problem.
-    if let Some(found) = resolve_stored_fit(&store_root_for(a.store.as_deref(), &a.target), &a.target) {
-        let found = found.unwrap_or_else(|e| out.fail(format!("error: {e}")));
-        let bytes = found.cat(a.stream.as_deref(), selection.as_ref(), &out).unwrap_or_else(|e| out.fail(format!("error: {e}")));
-        let _ = out.data().write_all(&bytes);
-        return;
+    for f in files {
+        out.data_line(f.path.display());
     }
-    out.fail(format!("error: no run matches '{}' in the run store {}",
-        a.target, store_root_for(a.store.as_deref(), &a.target).display()));
 }
 
 /// The rows of a fit run's `draws.tsv` that a chain selection keeps

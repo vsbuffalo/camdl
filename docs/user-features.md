@@ -368,12 +368,11 @@ Forward simulation on the **chain-binomial** backend executes the agenda: the
 policy fires when its trigger crosses, `after` the lag elapses, honouring
 `once`/`cooldown`. Every firing is recorded in the run's `reactive_log.tsv`
 artifact (`trigger_time`, `policy`, `trigger_value`, `threshold`, `fire_time`,
-`action`); `camdl cat <id> --stream reactive_log.tsv` reads it, and
-`--reactive-log PATH` mirrors it. Inference (IF2/PGAS/PMMH) and the
-Gillespie/ODE forward backends do not yet run reactive policies — an active
-reactive policy there stops with a clear capability error rather than silently
-ignoring the policy. See the spec (`camdl docs language`, §13.9) for the full
-surface.
+`action`); `camdl cat <id> reactive_log` reads it, and `--reactive-log PATH`
+mirrors it. Inference (IF2/PGAS/PMMH) and the Gillespie/ODE forward backends do
+not yet run reactive policies — an active reactive policy there stops with a
+clear capability error rather than silently ignoring the policy. See the spec
+(`camdl docs language`, §13.9) for the full surface.
 
 ---
 

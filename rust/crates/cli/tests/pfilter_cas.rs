@@ -246,8 +246,12 @@ fn label_works_on_pfilter_runs() {
     let listed = camdl_read(&bin, &out_root, &["list", "--kind", "pfilter"]);
     assert!(listed.contains("baseline-pfilter"),
         "list --kind pfilter must surface the label. Got:\n{}", listed);
+    // A label also names, on stderr, the run it resolved to.
     let by_label = camdl_read(&bin, &out_root, &["cat", "@baseline-pfilter"]);
-    assert_eq!(by_label, camdl_read(&bin, &out_root, &["cat", &rid[..12]]), "@L names the run");
+    let said = format!("@baseline-pfilter → pfilter {}", &rid[..6]);
+    assert!(by_label.contains(&said), "{by_label}");
+    let printed: String = by_label.lines().filter(|l| !l.starts_with(&said)).map(|l| format!("{l}\n")).collect();
+    assert_eq!(printed, camdl_read(&bin, &out_root, &["cat", &rid[..12]]), "@L names the run");
 }
 
 /// `--no-store` evaluates without writing the run store, on both the
@@ -332,10 +336,10 @@ fn label_refuses_a_sealed_pfilter_run() {
     assert!(stderr.contains("sealed") && stderr.contains("--label"), "{stderr}");
 }
 
-/// `camdl cat <run> --stream NAME` reads a file of the filter run or of one of
-/// its by-products, as it does for a simulation cell; the stream's name alone
-/// stands for `<name>.tsv`, and a name none of them holds is refused with
-/// every file the run and its by-products hold.
+/// `camdl cat <run> NAME` reads a file of the filter run or of one of
+/// its by-products, as it does for a simulation cell, by its stored name or
+/// its logical name (run spec §2.9), and a name none of them holds is refused
+/// with the logical name of every file the run and its by-products hold.
 #[test]
 fn cat_reads_a_filter_runs_by_products() {
     let bin = camdl_bin();
@@ -358,19 +362,19 @@ fn cat_reads_a_filter_runs_by_products() {
             .env("CAMDL_STORE", &out_root)
             .env("CAMDL_SKIP_VERSION_CHECK", "1")
             .current_dir(tmp.path())
-            .args(["cat", &rid[..12], "--stream", stream])
+            .args(["cat", &rid[..12], stream])
             .output().expect("spawn camdl cat")
     };
     for (stream, kind, file) in [("trace.tsv", "trace", "trace.tsv"), ("trace", "trace", "trace.tsv"),
                                  ("pf_health.tsv", "pf_health", "pf_health.tsv")] {
         let out = cat(stream);
-        assert!(out.status.success(), "cat --stream {stream}: {}", String::from_utf8_lossy(&out.stderr));
-        assert_eq!(out.stdout, stored(kind, file), "cat --stream {stream} prints the stored {file}");
+        assert!(out.status.success(), "cat {stream}: {}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(out.stdout, stored(kind, file), "cat {stream} prints the stored {file}");
     }
     let out = cat("paths.tsv");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "{stderr}");
-    for name in ["loglik.toml", "trace.tsv", "pf_health.tsv"] {
+    for name in ["loglik", "trace", "pf_health"] {
         assert!(stderr.contains(name), "the refusal lists {name}: {stderr}");
     }
 }

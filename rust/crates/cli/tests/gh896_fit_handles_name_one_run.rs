@@ -386,7 +386,7 @@ fn every_resolving_verb_prints_the_resolution_line() {
         vec!["fit", "summary", "@post"],
         vec!["predict", "@post", "--mode", "free_forward", "--n-draws", "2"],
         vec!["show", "@post", "--store", &root],
-        vec!["cat", "@post", "--stream", "draws.tsv", "--store", &root],
+        vec!["cat", "@post", "draws.tsv", "--store", &root],
     ] {
         let out = p.run(&args);
         assert!(out.status.success(), "{args:?}: {}", text(&out));
@@ -736,7 +736,7 @@ fn fit_table_filters_select_runs() {
 }
 
 /// A prediction is a result of its own inside its run
-/// (`<run>/predict/<mode>-<id12>/`): `cat <run> --stream predictive/…` names
+/// (`<run>/predict/<mode>-<id12>/`): `cat <run> predictive/…` names
 /// nothing in the run, and the prediction's own folder shows and reads its
 /// files.
 #[test]
@@ -747,7 +747,7 @@ fn a_prediction_is_read_through_its_own_folder() {
     p.ok(&["predict", "@post", "--mode", "free_forward", "--n-draws", "3"]);
     let root = p.store().to_string_lossy().into_owned();
 
-    let out = p.run(&["cat", "@post", "--stream", "predictive/weekly_cases.tsv", "--store", &root]);
+    let out = p.run(&["cat", "@post", "predictive/weekly_cases.tsv", "--store", &root]);
     assert!(!out.status.success(),
         "the run holds no predictive file of its own:\n{}", text(&out));
     let leaf = p.leaves().remove(0);
@@ -757,7 +757,7 @@ fn a_prediction_is_read_through_its_own_folder() {
     let show = p.ok(&["show", &pred]);
     assert!(show.contains("prediction") && show.contains("predictive/weekly_cases.tsv"),
         "the prediction lists its files:\n{show}");
-    let out = p.run(&["cat", &pred, "--stream", "predictive/weekly_cases.tsv"]);
+    let out = p.run(&["cat", &pred, "predictive/weekly_cases.tsv"]);
     assert!(out.status.success(), "{}", text(&out));
     assert_eq!(out.stdout, std::fs::read(preds[0].join("predictive/weekly_cases.tsv")).unwrap());
 }
@@ -832,7 +832,7 @@ fn show_format_json_on_a_run_and_on_a_folder() {
     assert!(!out.status.success(), "an unknown format is refused:\n{}", text(&out));
 }
 
-/// `cat @L --stream draws.tsv` reads the run's own draws; a problem folder
+/// `cat @L draws.tsv` reads the run's own draws; a problem folder
 /// holds the problem's files, not a run's, so its `draws.tsv` is refused with
 /// the files it does hold.
 #[test]
@@ -841,19 +841,19 @@ fn cat_of_a_label_reads_the_runs_draws_and_a_folder_reads_its_problem() {
     let (short, long) = two_labelled_posteriors(&p);
     let root = p.store().to_string_lossy().into_owned();
 
-    let out = p.run(&["cat", "@long", "--stream", "draws.tsv", "--store", &root]);
+    let out = p.run(&["cat", "@long", "draws.tsv", "--store", &root]);
     assert!(out.status.success(), "{}", text(&out));
     assert_eq!(out.stdout, std::fs::read(long.join("draws.tsv")).unwrap(),
         "the bytes of @long's draws.tsv");
 
     let seg = segment_of(&short).to_string_lossy().into_owned();
-    let out = p.run(&["cat", &seg, "--stream", "draws.tsv"]);
+    let out = p.run(&["cat", &seg, "draws.tsv"]);
     let all = text(&out);
     assert!(!out.status.success(), "a problem folder holds no draws:\n{all}");
-    assert!(all.contains("problem.toml"), "the refusal lists the problem's files:\n{all}");
+    assert!(all.contains("has no `draws.tsv`") && all.contains("problem"), "the refusal lists the problem's files:\n{all}");
 
     // A path the folder itself holds still reads.
-    p.ok(&["cat", &seg, "--stream", "problem.toml"]);
+    p.ok(&["cat", &seg, "problem.toml"]);
 }
 
 /// The data rows of `camdl list --kind fit` (stdout lines under the table

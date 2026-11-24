@@ -799,7 +799,7 @@ pub struct SimulateArgs {
     /// backend that declares the LINEAGES capability (Gillespie /
     /// chain-binomial). The event log is a by-product of the cell, stored
     /// inside it, so asking for it never changes the cell's id (read it with
-    /// `camdl cat <id> --stream event_log.tsv`); realize it into a line list
+    /// `camdl cat <id> event_log`); realize it into a line list
     /// with `camdl lineage realize`. Pass a PATH to also export the log to
     /// that file (format from --tsv/--format/extension); bare `--event-log`
     /// (or `auto`) only stores it. Single-run only: conflicts with --seeds /
@@ -822,8 +822,8 @@ pub struct SimulateArgs {
 
     /// Export the reactive firing log to this file: a copy of the cell's
     /// stored `reactive_log.tsv`, which a cell holds whenever a reactive
-    /// policy was active (read it with `camdl cat <id> --stream
-    /// reactive_log.tsv`). Single-run only.
+    /// policy was active (read it with `camdl cat <id>
+    /// reactive_log`). Single-run only.
     #[arg(long, value_name = "PATH",
           conflicts_with_all = ["seeds", "replicates", "draws", "sweep", "sweep_file"])]
     #[input(export)]
@@ -3329,41 +3329,122 @@ pub struct ShowArgs {
 }
 
 #[derive(Args)]
-#[command(after_help = colored_help!("\
+#[command(
+    override_usage = "camdl cat [OPTIONS] <HANDLE> [NAME]\n       camdl cat [OPTIONS] --manifest <FILE> <NAME>",
+    after_help = colored_help!("\
 Examples:
-  # Emit the trajectory for a cached run
+  # A cell's trajectory, and a file of the cell or of its by-products
   camdl cat abc1234
+  camdl cat abc1234 weekly_cases
 
-  # Select a particular observation stream
-  camdl cat abc1234 --stream weekly_cases
+  # A fit run's draws, by its label and by the manifest its command wrote
+  camdl cat @scout draws
+  camdl cat --manifest build/scout.json draws
+
+  # Every cell's trajectory of a sweep, as one table with each cell's labels
+  camdl cat --manifest build/sweep.json traj --each
 "))]
 pub struct CatArgs {
-    /// Short hash prefix or path to run directory
-    pub target: String,
+    /// The result, as a run id or a prefix of one, `@LABEL`, `@LABEL~N` or
+    /// the result's folder, then the file to print by its logical name
+    /// (`draws`), its stored name (`draws.tsv`) or `KIND:NAME`. With
+    /// `--manifest`, the file's name alone. Without a name, the result's
+    /// summary file: a cell's `traj.tsv`, a filter run's `loglik.toml`, a fit
+    /// run's `fit_state.toml`
+    #[arg(value_name = "HANDLE|NAME", required = true, num_args = 1..=2)]
+    pub args: Vec<String>,
 
     /// The run store's root (default `$CAMDL_STORE`, else `./camdl-store`)
     #[arg(long, value_name = "DIR")]
     pub store: Option<PathBuf>,
 
-    /// Print a named stream instead of the run's default output: for a
-    /// simulation, an observation stream (`cases`) or the event log
-    /// (`event_log.tsv`); for a filter run, a file it or one of its saved
-    /// files holds (`trace.tsv`, `paths.tsv`); for a fit or another run, a
-    /// file it wrote (`draws.tsv`)
-    #[arg(long)]
-    pub stream: Option<String>,
+    /// Look the file up among the results of this output manifest (run spec
+    /// §2.10), checked against the digests it records
+    #[arg(long, value_name = "FILE")]
+    pub manifest: Option<PathBuf>,
+
+    /// Look the file up among the results of this kind only (`fit_run`, `sim`, …)
+    #[arg(long, value_name = "KIND")]
+    pub kind: Option<String>,
+
+    /// Look the file up in the result whose run id begins with this prefix
+    #[arg(long, value_name = "RUN_ID")]
+    pub run: Option<String>,
+
+    /// Print the named TSV file of every result of the manifest or label that
+    /// holds it, as one table: each row after its result's label columns
+    #[arg(long, conflicts_with_all = ["chains", "exclude_chains"])]
+    pub each: bool,
 
     /// Print only the rows of the named chains (comma-separated chain ids
-    /// counted from 0) — for a fit stream whose recorded `output_schema` has a
-    /// `chain` column, in practice `draws.tsv`; refused for any other stream.
+    /// counted from 0) of a fit run's `draws`; refused for any other file.
     /// Cannot be given with `--exclude-chains`. Always warns on stderr.
-    #[arg(long, value_name = "IDS", requires = "stream", conflicts_with = "exclude_chains")]
+    #[arg(long, value_name = "IDS", conflicts_with = "exclude_chains")]
     pub chains: Option<String>,
 
     /// Print the rows of every chain except the named ones — the complement
     /// of `--chains`, under the same rules.
-    #[arg(long, value_name = "IDS", requires = "stream")]
+    #[arg(long, value_name = "IDS")]
     pub exclude_chains: Option<String>,
+
+    // `--stream NAME` took the file's name before it became the positional
+    // NAME. The trap is never accepted: it exists so the refusal says what
+    // to write, where clap's tip would offer `--store`.
+    #[arg(long = "stream", value_name = "NAME", hide = true)]
+    pub _removed_stream: Option<String>,
+}
+
+#[derive(Args)]
+#[command(
+    override_usage = "camdl path [OPTIONS] <HANDLE> <NAME>...\n       camdl path [OPTIONS] --manifest <FILE> <NAME>...",
+    after_help = colored_help!("\
+Examples:
+  # The path of a fit run's draws, by the manifest its command wrote
+  camdl path --manifest build/scout.json draws
+
+  # Two files, one path per line, in the order named
+  camdl path @scout chain_0/trace chain_1/trace
+
+  # Every result file of the manifest's fit run: the logical name, a tab, the path
+  camdl path --manifest build/scout.json --kind fit_run --all
+
+  # One row per cell of a sweep: run_id, the cell's labels, path
+  camdl path --manifest build/sweep.json traj --each
+"))]
+pub struct PathArgs {
+    /// The result, as a run id or a prefix of one, `@LABEL`, `@LABEL~N` or
+    /// the result's folder, then each file by its logical name (`draws`), its
+    /// stored name (`draws.tsv`) or `KIND:NAME`. With `--manifest`, the
+    /// files' names alone
+    #[arg(value_name = "HANDLE|NAME", required_unless_present_all = ["manifest", "all"])]
+    pub args: Vec<String>,
+
+    /// The run store's root (default `$CAMDL_STORE`, else `./camdl-store`)
+    #[arg(long, value_name = "DIR")]
+    pub store: Option<PathBuf>,
+
+    /// Look the files up among the results of this output manifest (run spec
+    /// §2.10), checked against the digests it records
+    #[arg(long, value_name = "FILE")]
+    pub manifest: Option<PathBuf>,
+
+    /// Look the files up among the results of this kind only (`fit_run`, `sim`, …)
+    #[arg(long, value_name = "KIND")]
+    pub kind: Option<String>,
+
+    /// Look the files up in the result whose run id begins with this prefix
+    #[arg(long, value_name = "RUN_ID")]
+    pub run: Option<String>,
+
+    /// Print every result file of the one result named: its logical name, a
+    /// tab and its path, one per line in name order
+    #[arg(long, conflicts_with = "each")]
+    pub all: bool,
+
+    /// Print a TSV with one row per result of the manifest or label that
+    /// holds the named file: `run_id`, the result's labels, `path`
+    #[arg(long)]
+    pub each: bool,
 }
 
 

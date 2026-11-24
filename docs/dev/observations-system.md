@@ -184,9 +184,7 @@ stored trajectory; a cell stored without the observations asked for is simulated
 again, and its trajectory is checked against the stored one. `--obs FILE` and
 `--obs-dir DIR` export tables rendered from the stored per-cell files, with the
 coordinate columns `replicate`, `scenario`, the point columns and `seed` before
-the time column. `camdl cat <id> --stream
-weekly_cases.tsv` prints one stored
-stream file.
+the time column. `camdl cat <id> weekly_cases` prints one stored stream file.
 
 ## 7. Data-TSV format
 

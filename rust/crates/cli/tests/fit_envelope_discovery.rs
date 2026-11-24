@@ -2,8 +2,8 @@
 //! the prediction stored inside it. After `fit run --label foo` and
 //! `camdl predict @foo`, `camdl show @foo` lists the run's result files,
 //! `camdl show <prediction folder>` lists the prediction's, and
-//! `camdl cat <handle> --stream <rel>` streams one of them (an extensionless
-//! stream resolves its `.tsv`).
+//! `camdl cat <handle> <name>` prints one of them, by its logical name
+//! (`predictive/weekly_cases`) or its stored name.
 
 mod fit_store_support;
 
@@ -206,12 +206,12 @@ thin = 1
         "show must list the predictive's report.json beside it; got:\n{show_pred}"
     );
 
-    // ── (3) `camdl cat <prediction> --stream predictive/weekly_cases` → TSV
-    // with q50; an extensionless stream resolves the `.tsv` sibling ──
+    // ── (3) `camdl cat <prediction> predictive/weekly_cases` → TSV
+    // with q50, named by its logical name ──
     let out = run(
         &bin,
         &tmp,
-        &["cat", &prediction, "--stream", "predictive/weekly_cases", "--store", "results"],
+        &["cat", &prediction, "predictive/weekly_cases", "--store", "results"],
     );
     assert!(
         out.status.success(),
@@ -226,12 +226,12 @@ thin = 1
         "predictive TSV header carries the q50 band column; got header: {header:?}"
     );
 
-    // ── (4) `camdl cat <prediction> --stream quantities-model/peak.tsv` →
+    // ── (4) `camdl cat <prediction> quantities-model/peak.tsv` →
     // non-empty ──
     let out = run(
         &bin,
         &tmp,
-        &["cat", &prediction, "--stream", "quantities-model/peak.tsv", "--store", "results"],
+        &["cat", &prediction, "quantities-model/peak.tsv", "--store", "results"],
     );
     assert!(
         out.status.success(),
@@ -241,7 +241,7 @@ thin = 1
     );
     assert!(!out.stdout.is_empty(), "quantities-model/peak.tsv must be non-empty");
 
-    // ── (5) `@foo` names a run: no `--stream` gives its `fit_state.toml` ──
+    // ── (5) `@foo` names a run: no name gives its `fit_state.toml` ──
     let out = run(&bin, &tmp, &["cat", "@foo", "--store", "results"]);
     assert!(
         out.status.success(),
@@ -255,12 +255,12 @@ thin = 1
     let out = run(
         &bin,
         &tmp,
-        &["cat", "@foo", "--stream", "predictive/nope", "--store", "results"],
+        &["cat", "@foo", "predictive/nope", "--store", "results"],
     );
     assert!(!out.status.success(), "a missing stream must error, not exit 0");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("holds no file `predictive/nope`") && stderr.contains("fit_state.toml"),
+        stderr.contains("has `predictive/nope`") && stderr.contains("fit_state"),
         "the refusal lists the files there are; got: {stderr}"
     );
 

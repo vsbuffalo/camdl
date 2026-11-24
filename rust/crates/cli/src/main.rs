@@ -43,6 +43,7 @@ mod store_commands; // `camdl status`, `verify`, `clean`, `reindex`: the run sto
 mod camdl_store;    // camdl on the run store: ambient identity, kinds, root, content artifacts
 mod result_files;   // the files each kind of result stores, as types, and the set each run declares
 mod output_manifest; // --manifest: the JSON file listing what a command stored, for a workflow tool
+mod resolve_file;    // a stored file from a handle or a manifest and a name: what `path`, `cat` and `show` share
 mod input_fixtures; // the second values and fixtures of the input-class checks
 mod pfilter_config; // ResolvedPfilterConfig: pfilter's one resolved configuration; identity and filter derive from it
 mod caltime_load;   // dated-data loader: column detection + date→internal-time (2026-05-22)
@@ -206,8 +207,11 @@ pub(crate) enum Command {
     /// Show full metadata for a cached run
     Show(args::ShowArgs),
 
-    /// Emit trajectory or observation output from a cached run
+    /// Print a stored file of a result, named by a handle or an output manifest
     Cat(args::CatArgs),
+
+    /// Print the path of a stored file of a result, named by a handle or an output manifest
+    Path(args::PathArgs),
 
     /// Compare fits by prequential scores (elpd, CRPS, PIT)
     Compare(args::CompareArgs),
@@ -656,6 +660,7 @@ fn main() {
         Command::List(a)                => browse::cmd_list(&a),
         Command::Show(a)                => browse::cmd_show(&a),
         Command::Cat(a)                 => browse::cmd_cat(&a),
+        Command::Path(a)                => browse::cmd_path(&a),
         Command::Compare(a)             => compare::cmd_compare(&a, compile),
         Command::Diff(a)                => model_diff::cmd_diff(&a, compile),
         Command::Check(a)               => delegate("check", &a.args, compile),

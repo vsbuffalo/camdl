@@ -203,10 +203,10 @@ impl Lineage {
         run(&self.camdl, &args)
     }
 
-    /// `camdl cat <cell run id> --stream event_log.tsv`.
+    /// `camdl cat <cell run id> event_log.tsv`.
     fn cat_event_log(&self, leaf: &Path) -> std::process::Output {
         let id = run_id_of(leaf);
-        run(&self.camdl, &["cat", &id, "--store", &self.store, "--stream", "event_log.tsv"])
+        run(&self.camdl, &["cat", &id, "event_log.tsv", "--store", &self.store])
     }
 
     /// The store's one sim leaf.
@@ -236,7 +236,7 @@ fn stdout_and_event_log_are_refused_together() {
     assert!(!ev.exists());
 }
 
-/// `camdl cat --stream event_log.tsv` reads the by-product only when it is
+/// `camdl cat <cell> event_log.tsv` reads the by-product only when it is
 /// complete: its record (`run.json`) present and its file the one the record
 /// names. A by-product without its record, or whose file differs from it, is
 /// a clear error that names the remedy, never a partial log on stdout.
@@ -250,7 +250,7 @@ fn cat_reads_only_a_complete_event_log_child() {
     let rec = by_product.join("run.json");
     let full = std::fs::read(&file).unwrap();
     let o = fx.cat_event_log(&leaf);
-    ok(&o, "cat --stream event_log.tsv");
+    ok(&o, "cat <cell> event_log.tsv");
     assert_eq!(o.stdout, full, "cat prints the by-product's bytes");
 
     let refused = |what: &str| {

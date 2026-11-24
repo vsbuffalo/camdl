@@ -205,6 +205,30 @@ impl CellLabels {
             n => format!("seed_{}-r{n}", self.seed),
         }
     }
+
+    /// The labels as the columns of a `--each` table (run spec §4.5): each
+    /// field under its name, then for a draw its `draw`, and for a sweep
+    /// point its `point_id` and one column per swept parameter.
+    pub(crate) fn columns(&self) -> Vec<(String, String)> {
+        let mut c: Vec<(String, String)> = vec![
+            ("model".into(), self.model.clone()),
+            ("params".into(), self.params.clone()),
+            ("scenario".into(), self.scenario.clone()),
+            ("replicate".into(), self.replicate.to_string()),
+            ("seed".into(), self.seed.to_string()),
+            ("seed_replicate".into(), self.seed_replicate.to_string()),
+            ("process_seed".into(), self.process_seed.to_string()),
+        ];
+        match &self.point {
+            PointLabel::None => {}
+            PointLabel::Draw { index } => c.push(("draw".into(), index.to_string())),
+            PointLabel::Sweep { point_id, values } => {
+                c.push(("point_id".into(), point_id.to_string()));
+                crate::resolve_file::push_swept(&mut c, values);
+            }
+        }
+        c
+    }
 }
 
 /// One simulation cell, written atomically.

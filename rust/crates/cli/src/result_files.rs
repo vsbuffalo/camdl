@@ -151,6 +151,7 @@ const CONTENT_CONTRACT: u16 = 1;
 pub(crate) struct KindContract {
     pub version: u16,
     logical: fn(&str) -> Option<String>,
+    format: fn(&str) -> Option<Format>,
 }
 
 impl KindContract {
@@ -159,10 +160,20 @@ impl KindContract {
     pub(crate) fn logical(&self, stored: &str) -> Option<String> {
         (self.logical)(stored)
     }
+
+    /// The format of the stored file `stored`, or `None` for a name the
+    /// kind's contract does not hold.
+    pub(crate) fn format(&self, stored: &str) -> Option<Format> {
+        (self.format)(stored)
+    }
 }
 
 fn logical_of<F: ParseFile>(stored: &str) -> Option<String> {
     F::of_stored(stored).map(|f| f.logical())
+}
+
+fn format_of<F: ParseFile>(stored: &str) -> Option<Format> {
+    F::of_stored(stored).map(|f| f.format())
 }
 
 /// A content artifact's one file is named in the contract by its stored name
@@ -171,12 +182,18 @@ fn content_logical<C: store::ContentArtifact>(stored: &str) -> Option<String> {
     (stored == C::FILE).then(|| C::FILE.split_once('.').map_or(C::FILE, |(stem, _)| stem).to_string())
 }
 
+/// A content artifact's one file is a table when its name ends `.tsv`, and
+/// JSON otherwise: `table.tsv`, `model.ir.json`, `quantities.json`.
+fn content_format<C: store::ContentArtifact>(stored: &str) -> Option<Format> {
+    (stored == C::FILE).then(|| if C::FILE.ends_with(".tsv") { Format::Tsv } else { Format::Json })
+}
+
 fn claimed<A: Files>() -> (&'static str, KindContract) {
-    (A::KIND, KindContract { version: A::CONTRACT, logical: logical_of::<A::File> })
+    (A::KIND, KindContract { version: A::CONTRACT, logical: logical_of::<A::File>, format: format_of::<A::File> })
 }
 
 fn content<C: store::ContentArtifact>() -> (&'static str, KindContract) {
-    (C::KIND, KindContract { version: CONTENT_CONTRACT, logical: content_logical::<C> })
+    (C::KIND, KindContract { version: CONTENT_CONTRACT, logical: content_logical::<C>, format: content_format::<C> })
 }
 
 /// The file contract of every kind camdl stores, by kind name.
@@ -210,6 +227,15 @@ fn contracts() -> [(&'static str, KindContract); 20] {
 /// does not store.
 pub(crate) fn contract(kind: &str) -> Option<KindContract> {
     contracts().into_iter().find(|(k, _)| *k == kind).map(|(_, c)| c)
+}
+
+/// Whether `kind` is a content artifact (`compiled_model`, `quantities`,
+/// `data_table`): a result named by its content, which a command stores as an
+/// input of the results it computes.
+pub(crate) fn is_content(kind: &str) -> bool {
+    use crate::camdl_store as cs;
+    use store::Artifact;
+    [cs::CompiledModel::KIND, cs::Quantities::KIND, cs::DataTable::KIND].contains(&kind)
 }
 
 /// The expected set of a run that will hold exactly `files`.

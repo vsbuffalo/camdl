@@ -6358,7 +6358,7 @@ camdl simulate MODEL --params P.toml --sweep PARAM=GRID [--sweep PARAM=GRID …]
 camdl simulate MODEL --params P.toml --sweep-file DESIGN.tsv [--replicates N]
 camdl list              [RESULTS_DIR]          # browse cached runs
 camdl show  <short-hash>
-camdl cat   <short-hash> [--stream NAME]
+camdl cat   <short-hash> [NAME]
 ```
 
 `--sweep` runs a deterministic grid over parameters (the design axis),

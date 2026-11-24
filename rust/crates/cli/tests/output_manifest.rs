@@ -237,7 +237,7 @@ fn a_workflow_reads_a_file_named_by_the_manifest() {
     let sim = results(&m).iter().find(|r| r["kind"] == "sim").expect("a sim entry");
     let id = sim["run_id"].as_str().unwrap();
     let traj = &sim["files"]["traj"];
-    let out = p.run(&["cat", id, "--stream", traj["file"].as_str().unwrap()]);
+    let out = p.run(&["cat", id, traj["file"].as_str().unwrap()]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(sha256_hex(&out.stdout), traj["sha256"].as_str().unwrap());
     assert_eq!(out.stdout.len() as u64, traj["bytes"].as_u64().unwrap());
