@@ -1,4 +1,5 @@
-//! gh#110/gh#147. Shared particle-filter watchdogs — both **deterministic**.
+//! The particle-filter watchdogs shared by `bootstrap_filter` and IF2's inner
+//! filter, each a deterministic function of its inputs.
 //!
 //! `bootstrap_filter` and IF2's inner per-iteration PF loop both advance
 //! particles, reweight, and resample at each observation window. Both have
@@ -8,9 +9,8 @@
 //! collapses to ~1, and under a misconfiguration (e.g. a sub-microsecond `dt`)
 //! where the substep count explodes.
 //!
-//! Two watchdogs, each a **pure function of inputs** — no clock, no thread
-//! state — so a content-addressed fit's log-likelihood is reproducible across
-//! machines:
+//! Two watchdogs, each a pure function of its inputs (no clock, no thread
+//! state), so a stored fit's log-likelihood is the same on every machine:
 //!
 //!   1. [`check_pf_degeneracy`] — the statistical pathologies (ESS collapse,
 //!      all-particles-dead), read from the swarm state.
@@ -21,18 +21,14 @@
 //! The module also owns [`DeathMask`] — the per-particle recovery policy the
 //! `dead_count` those watchdogs read is derived from. It lives here rather than
 //! in either filter because both filters must apply the *same* policy; see its
-//! own docs (gh#367).
+//! own docs.
 //!
-//! gh#241: this module previously also carried a **wall-clock** timeout
-//! (`CAMDL_PF_WALLCLOCK_TIMEOUT_S` + a `--pf-wallclock-timeout` flag that set
-//! that env var). A wall-clock budget made the log-likelihood depend on
-//! machine speed — two runs with identical inputs could diverge (one
-//! completes, one aborts) — which is fatal to content addressing and was an
-//! un-typed input channel outside the CLI/TOML surface. It is **removed**: the
-//! deterministic substep budget (2) already covered its only real job
-//! (compute blow-up), aborting at the same point on every machine. The budget
-//! is now a typed input (`--pf-max-substeps` / `SMCConfig::max_substeps`),
-//! not an env var.
+//! There is no wall-clock limit. A limit on elapsed time would make the
+//! log-likelihood depend on machine speed: two runs with identical inputs could
+//! diverge, one completing and one aborting, and a stored result would no
+//! longer be a function of its inputs. The substep budget (2) bounds compute
+//! instead, and aborts at the same point on every machine. It is a typed input
+//! (`--pf-max-substeps`, `SMCConfig::max_substeps`).
 //!
 //! `ESS_FLOOR = 2.0` over `ESS_COLLAPSE_WINDOWS = 3` consecutive obs windows
 //! on a 200-obs SEIR fit means we bail only if the filter is producing one
@@ -41,21 +37,21 @@
 
 use crate::error::{PFDegenerateKind, SimError};
 
-/// gh#110. Effective sample size below this value at an observation
+/// Effective sample size below this value at an observation
 /// window counts as "collapsed" for that window. Floor of 1.0 is
 /// "literally one particle dominates"; 2.0 gives a small margin and
 /// matches conventional resampling triggers.
 pub const ESS_FLOOR: f64 = 2.0;
 
-/// gh#110. Number of *consecutive* obs windows below `ESS_FLOOR`
+/// Number of *consecutive* obs windows below `ESS_FLOOR`
 /// required to bail. Single-window dips are normal at epidemic
 /// peaks; sustained collapse is the pathology this watchdog catches.
 pub const ESS_COLLAPSE_WINDOWS: usize = 3;
 
-/// gh#147 (M3.1). Default budget on the cumulative number of
-/// *particle-substeps* a single particle-filter evaluation may execute — the
-/// content-addressing-safe compute-blowup guard, and the deterministic
-/// replacement for the removed wall-clock watchdog (gh#241).
+/// Default budget on the cumulative number of *particle-substeps* a single
+/// particle-filter evaluation may execute: the guard against compute blow-up,
+/// counted in substeps rather than time so that it trips at the same point on
+/// every machine.
 ///
 /// A particle filter never θ-wedges (it requires the chain-binomial backend,
 /// whose per-window substep count `ceil(Δt/dt)` is deterministic and whose
@@ -80,7 +76,7 @@ pub const ESS_COLLAPSE_WINDOWS: usize = 3;
 /// derived from core count, wall-clock, or any machine state.
 pub const ITER_BUDGET: u64 = 10_000_000_000; // 1e10 particle-substeps
 
-/// gh#audit-C5/C6, gh#367. The per-particle **death mask** — the single
+/// The per-particle **death mask** — the single
 /// definition of "one bad particle must not kill the whole evaluation" for the
 /// bootstrap particle filter ([`super::particle_filter::bootstrap_filter`]).
 ///
@@ -101,7 +97,7 @@ pub const ITER_BUDGET: u64 = 10_000_000_000; // 1e10 particle-substeps
 /// [`DeathMask::count`] feeds [`check_pf_degeneracy`]'s `AllParticlesDead`
 /// branch: the limit case where the mask has nothing left to absorb.
 ///
-/// gh#367: a filter without the mask propagates any particle's error out of
+/// A filter without the mask propagates any particle's error out of
 /// the whole evaluation, which the PMMH driver maps to a `−∞` log-likelihood
 /// for that θ (`fit/pmmh.rs`: `Err(e) if e.is_structural() => Err(e),
 /// Err(_) => Ok(f64::NEG_INFINITY)`). One particle's recoverable excursion
@@ -180,7 +176,7 @@ impl DeathMask {
     }
 }
 
-/// gh#110. Return the statistical degeneracy mode if the filter has bailed at
+/// Return the statistical degeneracy mode if the filter has bailed at
 /// this observation window, otherwise `None`. Pure: a function of the swarm
 /// state only (no clock, no env, no thread state).
 ///
@@ -223,11 +219,11 @@ pub fn check_pf_degeneracy(
     None
 }
 
-/// gh#147 (M3.1). The deterministic substep cost of propagating one
+/// The deterministic substep cost of propagating one
 /// observation window: `n_particles · ceil((obs_time − t)/dt)`.
 ///
 /// This is a closed-form scalar over values already in scope at the top of the
-/// per-window loop — NOT a per-particle reduction — so it is identical
+/// per-window loop, not a per-particle reduction, so it is identical
 /// regardless of thread count (`--parallel`-invariant by construction). The
 /// `ceil` matches the per-particle substep loop in `bootstrap_filter`/`run_if2`
 /// (`while t_local < obs_time − ε`, last step clamped), so accumulating this
@@ -265,7 +261,7 @@ pub fn window_substep_cost(n_particles: usize, t: f64, obs_time: f64, dt: f64) -
     (n_particles as u64).saturating_mul(substeps)
 }
 
-/// gh#147 (M3.1). Deterministic cumulative-substep budget check. Given the
+/// Deterministic cumulative-substep budget check. Given the
 /// substeps already executed (`iters`) and the projected `cost` of the next
 /// window (from [`window_substep_cost`]), return
 /// `Some(IterationBudgetExceeded)` iff propagating that window would push the
@@ -284,7 +280,7 @@ pub fn check_iteration_budget(iters: u64, cost: u64, budget: u64) -> Option<PFDe
     }
 }
 
-/// gh#147. Map a watchdog bail (the `kind` from [`check_pf_degeneracy`] or
+/// Map a watchdog bail (the `kind` from [`check_pf_degeneracy`] or
 /// [`check_iteration_budget`]) to the right `SimError`.
 /// `IterationBudgetExceeded` is a *resource* limit and gets its own error type
 /// ([`SimError::PFIterationBudget`]), distinct from the statistical

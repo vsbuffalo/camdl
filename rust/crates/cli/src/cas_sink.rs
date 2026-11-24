@@ -2,20 +2,15 @@
 //! ([`obs_subtree_hash`]), which `simulate` folds into each `Obs`
 //! by-product's identity.
 
-/// The obs subtree's identity component.
+/// The digest of a cell's observation blocks, which an `Obs` by-product's
+/// identity holds (`sim_store::ObsIdentity::observation`).
 ///
-/// A hash of the resolved observation blocks (run-spec: changing a reporting
-/// parameter re-samples obs without invalidating the cached trajectory), plus
-/// any `--emit-every` override (gh#656) — which changes WHICH times the subtree
-/// carries, so two cadences must not address the same directory (the
-/// count-in-the-key rule).
-///
-/// One function, because the hash is computed twice for every cell — once to
-/// declare the `obs` child in `run.json`, once to name the subtree directory —
-/// and a disagreement between the two would declare one child while writing
-/// another. Byte-identical to the historical `sha256(json(observations))`
-/// whenever no override is in play, so an unflagged run addresses exactly the
-/// subtree it always did.
+/// It hashes the resolved observation blocks, which are not part of the
+/// cell's own identity: a change to a reporting parameter draws new
+/// observations from the stored trajectory without recomputing it. It also
+/// hashes any `--emit-every` override, which changes the times observations
+/// are drawn at, so two cadences are two by-products, and [`OBS_FILE_FORMAT`],
+/// so bytes that change for an unchanged model are stored under a new key.
 pub(crate) fn obs_subtree_hash(
     observations: &[ir::observation::ObservationModel],
     emit: Option<&crate::emit_every::EmitEvery>,
@@ -25,7 +20,7 @@ pub(crate) fn obs_subtree_hash(
     if let Some(e) = emit {
         buf.push_str(&e.identity_repr());
     }
-    // The file FORMAT is part of what the subtree holds (gh#833): the header
+    // The file format is part of what the by-product holds: the header
     // names the declared columns, a windowed stream carries two boundaries,
     // and a row outside the run is not written. Bytes that change under an
     // unchanged key would be a stored artifact the key no longer describes,
@@ -34,7 +29,7 @@ pub(crate) fn obs_subtree_hash(
     Ok(crate::hashing::sha256_hex(buf.as_bytes()))
 }
 
-/// The obs-file format the CAS subtree is written in — bumped whenever the
+/// The format the observation files are written in — bumped whenever the
 /// bytes written for an unchanged model would change (the count-in-the-key
 /// rule).
 ///
@@ -42,5 +37,5 @@ pub(crate) fn obs_subtree_hash(
 /// the row is scored (its instant, or its period's stop), not at its label.
 /// For a stream whose label is not its scoring time (`day`, `starting_on`,
 /// `ending_on`) whose likelihood reads the state or `t`, the stored draws
-/// change, so a subtree written before must not answer for one written now.
+/// change, so files written before must not answer for files written now.
 const OBS_FILE_FORMAT: &str = "\nobs-file-format:3";

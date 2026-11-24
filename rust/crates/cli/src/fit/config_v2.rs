@@ -1087,8 +1087,11 @@ pub enum Algorithm {
         #[serde(default = "default_csmc_sweeps_per_nuts")]
         csmc_sweeps_per_nuts: usize,
         /// Posterior trajectory samples saved to disk (evenly spaced
-        /// post-burn-in). Output-side knob, not algorithmic — does
-        /// NOT affect the chain hash. Default: 200.
+        /// post-burn-in). It changes the stored trajectories, not the
+        /// chain's draws, and like every `[method]` key but the length and
+        /// `starts` it is part of the run's method settings
+        /// (`fit_store::MethodSettings`), so a different count is a
+        /// different run. Default: 200.
         #[serde(default = "default_n_trajectories")]
         n_trajectories: usize,
         /// NUTS mass matrix shape. `true` = full covariance (handles
@@ -4161,12 +4164,11 @@ starts     = "{starts}"
     /// is conspicuous. A per-flag test would let the fourteenth flag slip in
     /// silently, which is exactly how the thirteen got here.
     ///
-    /// `--n-trajectories` is deliberately NOT in this table:
-    /// `identity_payload` omits it on purpose (see
-    /// `pgas_identity_payload_omits_n_trajectories`) because it shapes output
-    /// rather than the statistical fit, and it reaches the key by the separate
-    /// `cas_n_trajectories` route that `MethodConfig` folds in. It gets its own
-    /// test below rather than a row here that would assert the wrong thing.
+    /// `--n-trajectories` is not in this table: it is in the method's
+    /// settings like every other key (`pgas_identity_payload_omits_n_trajectories`
+    /// asserts that two counts key differently), and its own test,
+    /// `n_trajectories_is_count_in_the_key`, checks that the flag reaches the
+    /// method.
     /// `--starts` is not a `CliMethodOverrides` field at all — it writes
     /// `Method::starts` directly; `cli_starts_override_changes_the_method_identity`
     /// pins it.
@@ -8103,11 +8105,8 @@ decibans_thresh = 100.0
 
     #[test]
     fn pgas_identity_payload_omits_n_trajectories() {
-        // n_trajectories is an output-side knob (how many posterior
-        // samples to save). It MUST NOT be in identity — saving more
-        // or fewer samples doesn't change chain dynamics, so resume
-        // should accept a different n_trajectories without
-        // re-running.
+        // n_trajectories does not change the chain's draws, but it changes
+        // the trajectories the run stores, so it is in the method's settings.
         let mut s_few = make_pgas_method(1000);
         let mut s_many = make_pgas_method(1000);
         if let Algorithm::PGAS { ref mut n_trajectories, .. } = s_few.algorithm { *n_trajectories = 100; }

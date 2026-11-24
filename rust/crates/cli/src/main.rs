@@ -2175,12 +2175,11 @@ fn run_simulate(inv: args::SimulateInvocation) {
     //     --enable/--disable (or empty), so the baseline path keeps
     //     `scenario_name = None` exactly as before.
     use crate::sim_job::{ParamSource, ScenarioRef, Seeds, SimulateJob};
-    // The ad-hoc arm's label is derived from what the flags resolved to
-    // (`sim_job::adhoc_arm_label`), at this site and at the sink's
-    // `ResolvedEntry` alike, so two different ad-hoc arms are told apart in
-    // the leaf path, `run.json` and the listings. Provenance only: the arm's
-    // identity is its resolved delta, and a leaf written under an earlier
-    // label is found by hash.
+    // The ad-hoc arm's label, derived from what the flags resolved to
+    // (`sim_job::adhoc_arm_label`), is the name its `ScenarioRef::Inline`
+    // carries. The store labels every inline arm `(none)`, whatever its name
+    // (`sim_command::plan_cell`). A label is not identity: the arm's identity
+    // is the interventions it keeps and the values it runs.
     let adhoc_label = crate::sim_job::adhoc_arm_label(
         &base_sim_run.adhoc_enable,
         &base_sim_run.adhoc_disable,
@@ -2577,21 +2576,19 @@ fn materialize_obs_for_quantities(
     Ok(sim::quantity::ObsSeriesSet { streams: out })
 }
 
-/// Resolve `simulate`'s configuration once: the base model and its `model`
-/// level, the run-wide `config` level, and the scenario arms. Both the run
-/// identity of every cell (`sim_store::SimIdentity`) and the
-/// engine's settings (`ResolvedSimConfig::engine_settings`) are derived from
-/// the value this returns.
+/// Resolves `simulate`'s configuration once: the base model every cell starts
+/// from, and the settings that are the same for every cell. A `--scenario`
+/// the model does not declare is refused. The engine's settings
+/// (`ResolvedSimConfig::engine_settings`) and the run-wide part of each
+/// cell's `config` in its identity (`sim_store::SimIdentity`) are derived
+/// from the value this returns.
 ///
-/// The identity inputs:
-///   - the base model is the model as `util::load_run_model` loads it for the
-///     engine (observation anchors substituted, `--integrator` applied; params
-///     NOT applied), so the model level digest is constant across the grid
-///     and carries no param values — those live in the `params` level, which
-///     `sim_config::ResolvedCell::resolve` resolves per cell from the cell's own
-///     `SimRun`.
-///   - each arm carries the hash-relevant enable/disable/params delta (a model
-///     preset's own fields, or the CLI ad-hoc patch).
+/// The base model is the model as `util::load_run_model` loads it for the
+/// engine (observation anchors substituted, `--integrator` applied), with no
+/// parameter values applied, so it is the same for every cell. A cell's
+/// parameter values (its identity's `params`) and the interventions its
+/// scenario keeps (its `scenario`) are resolved per cell, from the cell's
+/// own `SimRun`, by `sim_config::ResolvedCell::resolve`.
 fn resolve_sim_config(
     run: &util::SimRun,
     // The original source path (e.g. `sir.camdl`) for the human-readable store
