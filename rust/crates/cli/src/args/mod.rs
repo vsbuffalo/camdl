@@ -1921,6 +1921,69 @@ pub struct PredictInvocation {
     pub no_progress: bool,
 }
 
+/// `camdl score PREDICTION --data STREAM=FILE ...`: score a stored prediction
+/// against the observed outcomes of the rows it predicted.
+#[derive(Args, Clone, Default, store::Inputs)]
+#[command(after_help = "\
+A score is stored inside the prediction it scores, at scores/score-<id>/:
+scored.tsv (one row per scored row or target), summary.tsv (one row per
+stream, mode, role and lead) and score.json. Everything about the prediction
+(its parameter source, mode, reach, particles, seed and scenarios) is in its
+identity, so `score` takes no flag for it. The outcome files must hold every
+row the prediction conditioned on, unchanged.
+
+  camdl predict @sir --mode forecast --horizon \"8 weeks\" --label sir_fc
+  camdl score @sir_fc --data cases=london.tsv")]
+pub struct ScoreArgs {
+    /// The stored prediction: the @label of the `camdl predict` that made it,
+    /// a run-id prefix or its folder.
+    #[arg(value_name = "PREDICTION")]
+    #[input(identity)]
+    pub prediction: String,
+
+    /// An outcome file, `STREAM=FILE` for each stream source (repeatable):
+    /// for a stored fit, the file the fit was given, held-out rows included;
+    /// for a fixed point, the file the prediction was given, extended past
+    /// `--holdout-after`. A stream with no outcome file is scored on the rows
+    /// the prediction conditioned on only.
+    #[arg(long = "data", value_name = "STREAM=FILE", required = true)]
+    #[input(identity)]
+    pub data: Vec<String>,
+
+    /// Export a copy of the score's result files into DIR. DIR is made when
+    /// its parent exists.
+    #[arg(short, long, value_name = "DIR")]
+    #[input(export)]
+    pub output: Option<PathBuf>,
+
+    /// Compute the score again even when it is stored; the stored score
+    /// moves to the store's `.quarantine/` first.
+    #[arg(long)]
+    #[input(store)]
+    pub force: bool,
+
+    /// A name for this invocation, found again as `@LABEL`.
+    #[arg(long, value_name = "TEXT")]
+    #[input(store)]
+    pub label: Option<String>,
+
+    /// The run store's root (default `$CAMDL_STORE`, else `./camdl-store`):
+    /// where the prediction is looked up. A prediction named by its folder is
+    /// scored in the store that holds the folder.
+    #[arg(long, value_name = "DIR")]
+    #[input(store)]
+    pub store: Option<PathBuf>,
+}
+
+/// One `camdl score` as its inputs reach the store.
+#[derive(Clone, store::Inputs)]
+pub struct ScoreInvocation {
+    #[input(group)]
+    pub args: ScoreArgs,
+    #[input(skip)]
+    pub verbosity: Option<log::LevelFilter>,
+}
+
 /// `camdl fit predict` is removed: a prediction is `camdl predict RUN`. This
 /// catch-all accepts any arguments so an old command line is answered with
 /// the one that replaces it rather than a clap parse error.

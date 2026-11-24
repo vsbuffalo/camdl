@@ -38,6 +38,7 @@ mod pfilter_store;  // camdl pfilter on the run store: its identity, result and 
 mod fit_store;      // a fit on the run store: the problem, its runs and their predictions
 mod fit_command;    // camdl fit run on the run store: the problems, the runs on each, the method under each claim
 mod predict_command; // camdl predict on the run store: a prediction from a stored fit run's posterior
+mod score_command;   // camdl score on the run store: a stored prediction scored against its outcomes
 mod store_commands; // `camdl status`, `verify`, `clean`, `reindex`: the run store's maintenance commands
 mod camdl_store;    // camdl on the run store: ambient identity, kinds, root, content artifacts
 mod input_fixtures; // the second values and fixtures of the input-class checks
@@ -176,6 +177,10 @@ pub(crate) enum Command {
     /// Predict from a stored fit run's posterior, or from one point given
     /// with a model file: the free-forward and one-step bands, or a forecast
     Predict(args::PredictArgs),
+
+    /// Score a stored prediction against the observed outcomes of the rows
+    /// it predicted: log score, CRPS, WIS, PIT and interval coverage
+    Score(args::ScoreArgs),
 
     /// Standalone bootstrap particle filter at fixed parameters
     Pfilter(args::PfilterArgs),
@@ -590,6 +595,10 @@ fn main() {
             verbosity: cli.global.verbosity,
             progress: cli.global.progress,
             no_progress: cli.global.no_progress,
+        }),
+        Command::Score(a)               => score_command::cmd_score(args::ScoreInvocation {
+            args: a,
+            verbosity: cli.global.verbosity,
         }),
         Command::Fit(FitCmd::Methods)   => fit::cmd_fit_methods(),
         Command::Label(a)               => fit::cmd_label(&a),

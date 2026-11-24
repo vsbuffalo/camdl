@@ -1,0 +1,655 @@
+//! `camdl score` on the predictions of this module's fixture, checked by
+//! running the release binary: the one-step score against `pfilter`'s
+//! log-likelihood, the ODE score against the observation density computed
+//! from `simulate`'s trajectory, the outcomes kept out of the prediction, the
+//! refusal of an outcome file that disagrees with the prediction, the
+//! recomputed prediction against the stored one, and the labels a score
+//! carries.
+
+use super::*;
+
+/// `camdl score` in `cwd`, as a line of words.
+fn score_in(cwd: &Path, root: &Path, line: &[&str]) -> Output {
+    let args: Vec<String> = std::iter::once("score").chain(line.iter().copied()).map(str::to_string).collect();
+    camdl(cwd, root, &args, &[])
+}
+
+/// Every stored score under `root`: its folder and identity record.
+fn scores(root: &Path) -> Vec<(PathBuf, serde_json::Value)> {
+    folders(root).into_iter().filter(|(_, id, _)| id["kind"] == crate::fit_store::Score::KIND).map(|(p, id, _)| (p, id)).collect()
+}
+
+/// The one score under `root`.
+fn the_score(root: &Path) -> PathBuf {
+    let found = scores(root);
+    assert_eq!(found.len(), 1, "{found:#?}");
+    found[0].0.clone()
+}
+
+fn read(folder: &Path, file: &str) -> String {
+    std::fs::read_to_string(folder.join(file)).unwrap_or_else(|e| panic!("{}: {e}", folder.join(file).display()))
+}
+
+fn ok(out: &Output, what: &str) -> String {
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "{what}:\n{err}");
+    err
+}
+
+/// The seed `camdl predict` runs draw 0's filter at, for base seed `seed`
+/// (`forecast_driver::draw_seed`), written out so a change to it fails here.
+fn draw_zero_seed(seed: u64) -> u64 {
+    seed ^ 0x9E37_79B9_7F4A_7C15
+}
+
+/// At a fixed point on the chain-binomial backend, with one copy of the
+/// point, the per-row one-step log scores over every row sum to `pfilter`'s
+/// log-likelihood at the same particles and seed: each row's score is the
+/// log of the filter's incremental likelihood at that row (pomp's
+/// `cond_logLik`), and they are computed from the same particles.
+#[test]
+fn the_one_step_score_sums_to_the_pfilter_log_likelihood() {
+    let fresh = tempfile::tempdir().unwrap();
+    let root = fresh.path().join("camdl-store");
+    let cwd = workdir(&root);
+    ok(
+        &predict_in(cwd.path(), &root, &[
+            "predict", "model.camdl", "--params", "point.toml", "--data", "daily_cases=daily_cases.tsv", "--mode",
+            "one_step", "--n-draws", "1", "--particles", "200", "--seed", "7", "--label", "os",
+        ]),
+        "predict",
+    );
+    ok(&score_in(cwd.path(), &root, &["@os", "--data", "daily_cases=daily_cases.tsv"]), "score");
+    let folder = the_score(&root);
+    let rows = tsv_rows(&read(&folder, "scored.tsv"));
+    let sum = |stream: &str| -> (usize, f64) {
+        let r: Vec<&BTreeMap<String, String>> = rows.iter().filter(|r| r["stream"] == stream).collect();
+        (r.len(), r.iter().map(|r| r["log_score"].parse::<f64>().unwrap()).sum())
+    };
+    let (n, per_stream) = sum("daily_cases");
+    let (n_joint, joint) = sum("joint");
+    assert_eq!((n, n_joint), (63, 63), "every row of the one stream, and one joint row per row");
+
+    let seed = draw_zero_seed(7).to_string();
+    ok(
+        &predict_in(cwd.path(), &root, &[
+            "pfilter", "model.camdl", "--params", "point.toml", "--data", "daily_cases=daily_cases.tsv", "--particles",
+            "200", "--seed", &seed,
+        ]),
+        "pfilter",
+    );
+    let pf = folders(&root).into_iter().find(|(_, id, _)| id["kind"] == "pfilter").expect("a stored pfilter run").0;
+    let loglik: f64 = toml::from_str::<toml::Table>(&read(&pf, "loglik.toml")).unwrap()["loglik"].as_float().unwrap();
+    assert!((per_stream - loglik).abs() <= 1e-9 * loglik.abs(), "per-stream sum {per_stream} vs pfilter {loglik}");
+    assert!((joint - loglik).abs() <= 1e-9 * loglik.abs(), "joint sum {joint} vs pfilter {loglik}");
+}
+
+/// The natural log of `y!`, for a small count.
+fn ln_factorial(y: u64) -> f64 {
+    (2..=y).map(|k| (k as f64).ln()).sum()
+}
+
+/// On the ODE backend at a fixed point, the free-forward score of each row is
+/// the observation density at the deterministic trajectory: here the Poisson
+/// log mass of the observed count at `rho` times the day's infections, read
+/// from `simulate`'s trajectory (four decimals) and computed here.
+#[test]
+fn the_ode_score_is_the_observation_density_at_the_trajectory() {
+    let fresh = tempfile::tempdir().unwrap();
+    let root = fresh.path().join("camdl-store");
+    let cwd = workdir(&root);
+    ok(
+        &predict_in(cwd.path(), &root, &[
+            "predict", "model.camdl", "--params", "point.toml", "--data", "daily_cases=daily_cases.tsv", "--backend",
+            "ode", "--n-draws", "1", "--label", "ode_point",
+        ]),
+        "predict",
+    );
+    ok(&score_in(cwd.path(), &root, &["@ode_point", "--data", "daily_cases=daily_cases.tsv"]), "score");
+    let folder = the_score(&root);
+    let manifest: serde_json::Value = serde_json::from_str(&read(&folder, "score.json")).unwrap();
+    assert_eq!(manifest["modes"]["free_forward"]["basis"], serde_json::json!({"ode_free_forward": {"samples_per_draw": 1}}));
+    let rows = tsv_rows(&read(&folder, "scored.tsv"));
+
+    let sim = predict_in(cwd.path(), &root, &["simulate", "model.camdl", "--params", "point.toml", "--backend", "ode", "-o", "traj.tsv"]);
+    ok(&sim, "simulate");
+    let traj = tsv_rows(&std::fs::read_to_string(cwd.path().join("traj.tsv")).unwrap());
+    let flow_at = |t: f64| -> f64 {
+        traj.iter().find(|r| r["t"].parse::<f64>().unwrap() == t).map(|r| r["flow_infection"].parse().unwrap()).unwrap()
+    };
+    let rho = 0.5;
+    let mut n = 0;
+    for r in rows.iter().filter(|r| r["stream"] == "daily_cases") {
+        let t: f64 = r["t_stop"].parse().unwrap();
+        let y: u64 = r["observed"].parse().unwrap();
+        let rate = rho * flow_at(t);
+        let expected = y as f64 * rate.ln() - rate - ln_factorial(y);
+        let got: f64 = r["log_score"].parse().unwrap();
+        assert!((got - expected).abs() < 1e-3, "t = {t}: score {got} vs density {expected}");
+        n += 1;
+    }
+    assert_eq!(n, 63);
+}
+
+/// The outcomes enter the score and never the prediction: an edited held-out
+/// outcome makes another score of the same prediction, and the prediction's
+/// files are the same bytes before and after it is scored.
+#[test]
+fn a_held_out_outcome_changes_the_score_and_never_the_prediction() {
+    let fresh = tempfile::tempdir().unwrap();
+    let root = fresh.path().join("camdl-store");
+    let cwd = workdir(&root);
+    ok(
+        &predict_in(cwd.path(), &root, &[
+            "predict", "model.camdl", "--params", "point.toml", "--data", "daily_cases=daily_cases.tsv", "--mode",
+            "one_step", "--n-draws", "2", "--particles", "40", "--holdout-after", "20", "--label", "held",
+        ]),
+        "predict",
+    );
+    let found = predictions(&root);
+    assert_eq!(found.len(), 1);
+    let (prediction, before_id) = found[0].clone();
+    let before = files_under(&prediction);
+    ok(&score_in(cwd.path(), &root, &["@held", "--data", "daily_cases=daily_cases.tsv"]), "score");
+    let daily = std::fs::read_to_string(cwd.path().join("daily_cases.tsv")).unwrap();
+    let edited: String = daily
+        .lines()
+        .map(|l| match l.split_once('\t') {
+            Some(("40", _)) => "40\t99\n".to_string(),
+            _ => format!("{l}\n"),
+        })
+        .collect();
+    assert_ne!(edited, daily);
+    std::fs::write(cwd.path().join("edited.tsv"), &edited).unwrap();
+    ok(&score_in(cwd.path(), &root, &["@held", "--data", "daily_cases=edited.tsv"]), "score of the edited outcome");
+    let ids: Vec<String> = scores(&root).iter().map(|(_, id)| id["run_id"].as_str().unwrap().to_string()).collect();
+    assert_eq!(ids.len(), 2, "the edited outcome is another score: {ids:?}");
+    assert_ne!(ids[0], ids[1]);
+    let after = predictions(&root);
+    assert_eq!(after.len(), 1, "no prediction is added");
+    assert_eq!(after[0].1, before_id, "the prediction's identity is unchanged");
+    let mut now = files_under(&prediction);
+    now.retain(|name, _| !name.starts_with("scores/"));
+    assert_eq!(now, before, "the prediction's files are the same bytes with and without its scores");
+    // The rows before the edited one score identically: the pass that
+    // predicts them has assimilated nothing of it.
+    let by_time = |folder: &Path| -> BTreeMap<String, String> {
+        tsv_rows(&read(folder, "scored.tsv"))
+            .into_iter()
+            .filter(|r| r["stream"] == "daily_cases")
+            .map(|r| (r["t_stop"].clone(), r["log_score"].clone()))
+            .collect()
+    };
+    let found = scores(&root);
+    let (a, b) = (by_time(&found[0].0), by_time(&found[1].0));
+    let mut differ: Vec<f64> = a.iter().filter(|(t, s)| b.get(*t) != Some(s)).map(|(t, _)| t.parse().unwrap()).collect();
+    differ.sort_by(f64::total_cmp);
+    assert_eq!(differ.first(), Some(&40.0), "the first row whose score moves is the edited one: {differ:?}");
+}
+
+/// An outcome file whose rows differ from the ones the prediction conditioned
+/// on, in one row, is refused, naming the stream and the row.
+#[test]
+fn an_outcome_file_that_disagrees_with_the_prediction_is_refused() {
+    let fresh = tempfile::tempdir().unwrap();
+    let root = fresh.path().join("camdl-store");
+    let cwd = workdir(&root);
+    ok(
+        &predict_in(cwd.path(), &root, &[
+            "predict", "model.camdl", "--params", "point.toml", "--data", "daily_cases=daily_cases.tsv", "--mode",
+            "free_forward", "--n-draws", "2", "--holdout-after", "20", "--label", "ff",
+        ]),
+        "predict",
+    );
+    let daily = std::fs::read_to_string(cwd.path().join("daily_cases.tsv")).unwrap();
+    let edited: String = daily
+        .lines()
+        .map(|l| match l.split_once('\t') {
+            Some(("10", _)) => "10\t77\n".to_string(),
+            _ => format!("{l}\n"),
+        })
+        .collect();
+    std::fs::write(cwd.path().join("edited.tsv"), edited).unwrap();
+    let out = score_in(cwd.path(), &root, &["@ff", "--data", "daily_cases=edited.tsv"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(err.contains("row 10 of 'daily_cases'") && err.contains("77"), "names the stream, the row and its value: {err}");
+    assert!(scores(&root).is_empty(), "nothing is stored");
+    // A file that lacks a conditioning row is refused too.
+    let short: String = daily.lines().take(5).map(|l| format!("{l}\n")).collect();
+    std::fs::write(cwd.path().join("short.tsv"), short).unwrap();
+    let out = score_in(cwd.path(), &root, &["@ff", "--data", "daily_cases=short.tsv"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(err.contains("row 5 (time 5) is missing"), "{err}");
+}
+
+/// Every mode each backend has, from both parameter sources, is scored: the
+/// score computes the prediction again with its outcomes bound, and writes a
+/// score only when the run id and every file it computes equal the stored
+/// prediction's byte for byte. `summary.tsv` then has one row per (stream,
+/// mode, role, lead), each the count of `scored.tsv` rows with that key.
+#[test]
+fn the_score_recomputes_every_prediction_and_pools_nothing() {
+    let fresh = tempfile::tempdir().unwrap();
+    let root = fresh.path().join("camdl-store");
+    let cwd = workdir(&root);
+    let data = ["--data", "daily_cases=daily_cases.tsv", "--data", "weekly_cases=weekly_cases.tsv", "--data", "survey=survey.tsv"];
+    let lines: Vec<(&str, Vec<&str>, Vec<&str>)> = vec![
+        ("posterior, both modes", vec!["predict", "@fit", "--n-draws", "6", "--particles", "20"], data.to_vec()),
+        ("posterior forecast", vec!["predict", "@fit", "--horizon", "2 weeks", "--stream", "daily_cases", "--stream", "weekly_cases", "--n-draws", "6", "--particles", "20"], data.to_vec()),
+        ("ODE posterior", vec!["predict", "@ode", "--n-draws", "4"], data.to_vec()),
+        ("fixed point, both modes", vec!["predict", "model.camdl", "--params", "point.toml", "--data", "daily_cases=daily_cases.tsv", "--n-draws", "3", "--particles", "20", "--holdout-after", "24"], vec!["--data", "daily_cases=daily_cases.tsv"]),
+        ("fixed-point forecast", vec!["predict", "model.camdl", "--params", "point.toml", "--data", "daily_cases=daily_cases.tsv", "--horizon", "10 days", "--n-draws", "3", "--particles", "20", "--holdout-after", "24"], vec!["--data", "daily_cases=daily_cases.tsv"]),
+    ];
+    for (i, (what, predict, outcomes)) in lines.iter().enumerate() {
+        let label = format!("p{i}");
+        let line = [predict.as_slice(), &["--label", &label]].concat();
+        ok(&predict_in(cwd.path(), &root, &line), what);
+        let handle = format!("@{label}");
+        let err = ok(&score_in(cwd.path(), &root, &[[handle.as_str()].as_slice(), outcomes.as_slice()].concat()), what);
+        assert!(err.contains("row(s) scored"), "{what}: {err}");
+    }
+    let found = scores(&root);
+    assert_eq!(found.len(), lines.len(), "{found:#?}");
+    for (folder, _) in &found {
+        let rows = tsv_rows(&read(folder, "scored.tsv"));
+        let summary = tsv_rows(&read(folder, "summary.tsv"));
+        assert!(!rows.is_empty() && !summary.is_empty(), "{}", folder.display());
+        let key = |r: &BTreeMap<String, String>| (r["scenario"].clone(), r["stream"].clone(), r["mode"].clone(), r["role"].clone(), r["lead"].clone());
+        let mut counted: BTreeMap<_, usize> = BTreeMap::new();
+        for r in &rows {
+            *counted.entry(key(r)).or_default() += 1;
+        }
+        let keys: Vec<_> = summary.iter().map(key).collect();
+        let distinct: std::collections::BTreeSet<_> = keys.iter().cloned().collect();
+        assert_eq!(keys.len(), distinct.len(), "one summary row per key: {}", folder.display());
+        for s in &summary {
+            assert_eq!(s["n"].parse::<usize>().unwrap(), counted[&key(s)], "{s:?}");
+        }
+        assert_eq!(counted.len(), summary.len(), "every key of scored.tsv is summarized");
+    }
+    // The posterior's scores keep its trained and held-out rows apart, and
+    // a forecast's targets apart by lead.
+    let all = tsv_rows(&read(&found.iter().find(|(p, _)| p.to_string_lossy().contains("/predict/all-")).unwrap().0, "summary.tsv"));
+    assert!(all.iter().any(|r| r["role"] == "trained") && all.iter().any(|r| r["role"] == "held_out"), "{all:?}");
+    let fc = tsv_rows(&read(&found.iter().find(|(p, _)| p.to_string_lossy().contains("/predict/forecast-")).unwrap().0, "summary.tsv"));
+    let leads: std::collections::BTreeSet<&str> = fc.iter().filter(|r| r["stream"] == "daily_cases").map(|r| r["lead"].as_str()).collect();
+    assert!(leads.len() > 1, "one summary row per lead: {fc:?}");
+}
+
+/// A fixed point's rows after `--holdout-after` are held out as declared,
+/// which the score records and labels as not verified; without
+/// `--holdout-after` its conditioning is unknown.
+#[test]
+fn a_fixed_points_held_out_rows_are_labelled_as_declared() {
+    let fresh = tempfile::tempdir().unwrap();
+    let root = fresh.path().join("camdl-store");
+    let cwd = workdir(&root);
+    let base = ["predict", "model.camdl", "--params", "point.toml", "--data", "daily_cases=daily_cases.tsv", "--mode", "one_step", "--n-draws", "2", "--particles", "30"];
+    ok(&predict_in(cwd.path(), &root, &[base.as_slice(), &["--holdout-after", "20", "--label", "declared"]].concat()), "predict");
+    ok(&score_in(cwd.path(), &root, &["@declared", "--data", "daily_cases=daily_cases.tsv"]), "score");
+    let folder = the_score(&root);
+    let manifest: serde_json::Value = serde_json::from_str(&read(&folder, "score.json")).unwrap();
+    assert_eq!(manifest["conditioning"], serde_json::json!({"hold_out_declared": {"trained_through": 20.0}}), "{manifest:#}");
+    assert!(manifest["labels"].as_array().unwrap().contains(&serde_json::json!("held out as declared, not verified")), "{manifest:#}");
+    let rows = tsv_rows(&read(&folder, "scored.tsv"));
+    let role_at = |t: f64| rows.iter().find(|r| r["stream"] == "daily_cases" && r["t_stop"].parse::<f64>().unwrap() == t).unwrap()["role"].clone();
+    assert_eq!(role_at(20.0), "trained");
+    assert_eq!(role_at(21.0), "held_out");
+
+    let fresh = tempfile::tempdir().unwrap();
+    let root = fresh.path().join("camdl-store");
+    let cwd = workdir(&root);
+    ok(&predict_in(cwd.path(), &root, &[base.as_slice(), &["--label", "unknown"]].concat()), "predict");
+    ok(&score_in(cwd.path(), &root, &["@unknown", "--data", "daily_cases=daily_cases.tsv"]), "score");
+    let folder = the_score(&root);
+    let manifest: serde_json::Value = serde_json::from_str(&read(&folder, "score.json")).unwrap();
+    assert_eq!(manifest["conditioning"], serde_json::json!("unknown"), "{manifest:#}");
+    assert!(tsv_rows(&read(&folder, "scored.tsv")).iter().all(|r| r["role"] == "unknown"));
+}
+
+/// A forecast read under `--covariate pop=realised` is labelled conditional
+/// on covariates observed after the origin, and so is its score.
+#[test]
+fn a_realised_covariate_labels_the_score() {
+    let fresh = tempfile::tempdir().unwrap();
+    let root = fresh.path().join("camdl-store");
+    let cwd = workdir(&root);
+    let line = [&["predict"][..], &forced_forecast(&["--covariate", "pop=realised", "--label", "realised"])].concat();
+    ok(&predict_in(cwd.path(), &root, &line), "predict");
+    ok(&score_in(cwd.path(), &root, &["@realised", "--data", "daily_cases=daily_cases.tsv"]), "score");
+    let folder = the_score(&root);
+    let manifest: serde_json::Value = serde_json::from_str(&read(&folder, "score.json")).unwrap();
+    assert_eq!(manifest["covariates"], serde_json::json!({"pop": "realised"}), "{manifest:#}");
+    assert!(
+        manifest["labels"].as_array().unwrap().contains(&serde_json::json!("conditional on covariates observed after the origin")),
+        "{manifest:#}"
+    );
+    // The same forecast stated prospective carries no such label.
+    let line = [&["predict"][..], &forced_forecast(&["--covariate", "pop=prospective", "--label", "prospective"])].concat();
+    ok(&predict_in(cwd.path(), &root, &line), "predict");
+    ok(&score_in(cwd.path(), &root, &["@prospective", "--data", "daily_cases=daily_cases.tsv"]), "score");
+    let other = scores(&root).into_iter().find(|(p, _)| *p != folder).unwrap().0;
+    let manifest: serde_json::Value = serde_json::from_str(&read(&other, "score.json")).unwrap();
+    assert!(manifest["labels"].as_array().unwrap().is_empty(), "{manifest:#}");
+}
+
+/// `camdl show` and `camdl cat` read a score: `show` names the prediction it
+/// scores, and `cat` prints its summary by default.
+#[test]
+fn show_and_cat_read_a_score() {
+    let fresh = tempfile::tempdir().unwrap();
+    let root = fresh.path().join("camdl-store");
+    let cwd = workdir(&root);
+    ok(&predict_in(cwd.path(), &root, &[FIXED, &["--label", "ff"]].concat()), "predict");
+    ok(&score_in(cwd.path(), &root, &["@ff", "--data", "daily_cases=daily_cases.tsv", "--label", "sc"]), "score");
+    let folder = the_score(&root);
+    let show = camdl(cwd.path(), &root, &["show".into(), "@sc".into()], &[]);
+    let text = String::from_utf8_lossy(&show.stdout);
+    assert!(show.status.success(), "{}", String::from_utf8_lossy(&show.stderr));
+    assert!(text.contains("score") && text.contains("summary.tsv"), "{text}");
+    let cat = camdl(cwd.path(), &root, &["cat".into(), folder.to_string_lossy().into_owned()], &[]);
+    assert!(cat.status.success(), "{}", String::from_utf8_lossy(&cat.stderr));
+    assert_eq!(String::from_utf8_lossy(&cat.stdout), read(&folder, "summary.tsv"));
+}
+
+/// Two observation blocks that read one data source through `from surv`.
+const SHARED: &str = r#"
+time_unit = 'days
+compartments { S, I, R }
+let N = S + I + R
+parameters {
+  beta  : rate        in [0.001, 2.0]
+  gamma : rate        in [0.001, 1.0]
+  rho   : probability in [0.0,   1.0]
+  N0    : count       in [100,   100000]
+  I0    : count       in [1,     1000]
+  k     : real        in [0.1,   100.0]
+}
+transitions {
+  infection : S --> I  @ beta * S * (I / N)
+  recovery  : I --> R  @ gamma * I
+}
+observations {
+  weekly from surv {
+    columns       { time : time, cases : count }
+    covers        = closing_at(time, 7 'days)
+    projected     = incidence(infection)
+    emit_schedule = every 7 'days
+    cases         ~ neg_binomial(mean = rho * projected, r = k)
+  }
+  recovered from surv {
+    columns       { time : time, recs : count }
+    covers        = closing_at(time, 7 'days)
+    projected     = incidence(recovery)
+    emit_schedule = every 7 'days
+    recs          ~ neg_binomial(mean = rho * projected, r = k)
+  }
+}
+init {
+  S = N0 - I0
+  I = I0
+}
+simulate { from = 0 'days  to = 63 'days }
+"#;
+
+/// Two blocks that read one source are two streams: each keeps its own name
+/// in `scored.tsv`, beside the source, and its own rows in `summary.tsv`. A
+/// fixed point bound through the blocks of a shared source is scored.
+#[test]
+fn two_streams_reading_one_source_are_scored_apart() {
+    let fresh = tempfile::tempdir().unwrap();
+    let root = fresh.path().join("camdl-store");
+    let cwd = workdir(&root);
+    let surv = (1..=8).fold("time\tcases\trecs\n".to_string(), |s, w| s + &format!("{}\t{}\t{}\n", 7 * w, 3 + 2 * w, w));
+    std::fs::write(cwd.path().join("shared.camdl"), SHARED).unwrap();
+    std::fs::write(cwd.path().join("surv.tsv"), surv).unwrap();
+    std::fs::write(cwd.path().join("shared.toml"), "beta = 0.5\ngamma = 0.25\nrho = 0.5\nN0 = 1000\nI0 = 5\nk = 5.0\n").unwrap();
+    ok(
+        &predict_in(cwd.path(), &root, &[
+            "predict", "shared.camdl", "--params", "shared.toml", "--data", "weekly=surv.tsv", "--data", "recovered=surv.tsv",
+            "--mode", "one_step", "--n-draws", "2", "--particles", "30", "--holdout-after", "28", "--label", "shared",
+        ]),
+        "predict",
+    );
+    ok(&score_in(cwd.path(), &root, &["@shared", "--data", "surv=surv.tsv"]), "score");
+    let folder = the_score(&root);
+    let rows = tsv_rows(&read(&folder, "scored.tsv"));
+    for stream in ["weekly", "recovered"] {
+        let mine: Vec<_> = rows.iter().filter(|r| r["stream"] == stream).collect();
+        assert_eq!(mine.len(), 8, "{stream}: {rows:?}");
+        assert!(mine.iter().all(|r| r["source"] == "surv"));
+    }
+    let summary = tsv_rows(&read(&folder, "summary.tsv"));
+    for stream in ["weekly", "recovered"] {
+        for (role, n) in [("trained", "4"), ("held_out", "4")] {
+            let r: Vec<_> = summary.iter().filter(|r| r["stream"] == stream && r["role"] == role).collect();
+            assert_eq!(r.len(), 1, "{stream} {role}: {summary:?}");
+            assert_eq!(r[0]["n"], n, "never pooled across the blocks of one source: {summary:?}");
+        }
+    }
+}
+
+/// A fit with no holdout scores in sample on its own rows, and the outcome
+/// rows past its data are held out, so a score that reads them is labelled
+/// held out from the end of the fit's last row.
+#[test]
+fn a_fit_with_no_holdout_is_labelled_held_out_past_its_data() {
+    let fresh = tempfile::tempdir().unwrap();
+    let root = fresh.path().join("camdl-store");
+    let cwd = workdir(&root);
+    let daily = std::fs::read_to_string(cwd.path().join("daily_cases.tsv")).unwrap();
+    let cut: String = daily.lines().take(25).map(|l| format!("{l}\n")).collect();
+    std::fs::write(cwd.path().join("daily24.tsv"), cut).unwrap();
+    let fit = super::FIT.replace("holdout_after = 24.0\n", "").replace(
+        "daily_cases = \"daily_cases.tsv\"\nweekly_cases = \"weekly_cases.tsv\"\nsurvey = \"survey.tsv\"",
+        "daily_cases = \"daily24.tsv\"",
+    );
+    assert!(!fit.contains("holdout_after") && fit.contains("daily24.tsv"), "the fixture's fit moved");
+    std::fs::write(cwd.path().join("fit_all.toml"), fit).unwrap();
+    ok(&predict_in(cwd.path(), &root, &["fit", "run", "fit_all.toml", "--label", "all"]), "fit");
+    ok(
+        &predict_in(cwd.path(), &root, &["predict", "@all", "--mode", "one_step", "--n-draws", "3", "--particles", "20", "--label", "os_all"]),
+        "predict",
+    );
+    ok(&score_in(cwd.path(), &root, &["@os_all", "--data", "daily_cases=daily24.tsv"]), "score on its own rows");
+    ok(&score_in(cwd.path(), &root, &["@os_all", "--data", "daily_cases=daily_cases.tsv"]), "score past its rows");
+    let found = scores(&root);
+    assert_eq!(found.len(), 2);
+    let mut seen = Vec::new();
+    for (folder, _) in &found {
+        let m: serde_json::Value = serde_json::from_str(&read(folder, "score.json")).unwrap();
+        let roles: Vec<String> = tsv_rows(&read(folder, "scored.tsv")).into_iter().map(|r| r["role"].clone()).collect();
+        seen.push((m["conditioning"].clone(), roles.iter().any(|r| r == "held_out")));
+    }
+    assert!(seen.contains(&(serde_json::json!("in_sample"), false)), "{seen:?}");
+    assert!(seen.iter().any(|(c, held)| *held && c["hold_out_tail"]["train_end"] == serde_json::json!(24.0)), "{seen:?}");
+}
+
+/// Under `--holdout-after`, a fixed point's one-step score of the whole file
+/// sums over every row to `pfilter`'s log-likelihood of the whole file: the
+/// pass through the held-out rows is the filter run over them.
+#[test]
+fn the_onward_pass_ties_with_the_pfilter_on_the_whole_file() {
+    let fresh = tempfile::tempdir().unwrap();
+    let root = fresh.path().join("camdl-store");
+    let cwd = workdir(&root);
+    ok(
+        &predict_in(cwd.path(), &root, &[
+            "predict", "model.camdl", "--params", "point.toml", "--data", "daily_cases=daily_cases.tsv", "--mode",
+            "one_step", "--n-draws", "1", "--particles", "200", "--seed", "7", "--holdout-after", "20", "--label", "held",
+        ]),
+        "predict",
+    );
+    ok(&score_in(cwd.path(), &root, &["@held", "--data", "daily_cases=daily_cases.tsv"]), "score");
+    let rows = tsv_rows(&read(&the_score(&root), "scored.tsv"));
+    let rows: Vec<_> = rows.iter().filter(|r| r["stream"] == "daily_cases").collect();
+    assert_eq!(rows.len(), 63);
+    assert!(rows.iter().any(|r| r["role"] == "held_out"));
+    let sum: f64 = rows.iter().map(|r| r["log_score"].parse::<f64>().unwrap()).sum();
+    let seed = draw_zero_seed(7).to_string();
+    ok(
+        &predict_in(cwd.path(), &root, &[
+            "pfilter", "model.camdl", "--params", "point.toml", "--data", "daily_cases=daily_cases.tsv", "--particles",
+            "200", "--seed", &seed,
+        ]),
+        "pfilter",
+    );
+    let pf = folders(&root).into_iter().find(|(_, id, _)| id["kind"] == "pfilter").unwrap().0;
+    let loglik: f64 = toml::from_str::<toml::Table>(&read(&pf, "loglik.toml")).unwrap()["loglik"].as_float().unwrap();
+    assert!((sum - loglik).abs() <= 1e-9 * loglik.abs(), "score sum {sum} vs pfilter {loglik}");
+}
+
+/// The one-step prediction at `--seed SEED` of two copies of the point at 3
+/// particles, the rows after day 20 held out, and its score's folder.
+fn degenerating(seed: &str) -> (tempfile::TempDir, tempfile::TempDir, PathBuf) {
+    let fresh = tempfile::tempdir().unwrap();
+    let root = fresh.path().join("camdl-store");
+    let cwd = workdir(&root);
+    ok(
+        &predict_in(cwd.path(), &root, &[
+            "predict", "model.camdl", "--params", "point.toml", "--data", "daily_cases=daily_cases.tsv", "--mode",
+            "one_step", "--n-draws", "2", "--particles", "3", "--seed", seed, "--holdout-after", "20", "--label", "deg",
+        ]),
+        "predict",
+    );
+    ok(&score_in(cwd.path(), &root, &["@deg", "--data", "daily_cases=daily_cases.tsv"]), "score");
+    let folder = the_score(&root);
+    (fresh, cwd, folder)
+}
+
+/// A draw whose one-step filter degenerates on a held-out row has density
+/// zero there and scores no later row. At seed 4, draw 0 of two degenerates
+/// at t = 29: the row's score stays finite, the draw's later rows are named
+/// unscored for it, and the later rows take their samples from draw 1 alone.
+#[test]
+fn one_draw_degenerating_on_a_held_out_row_leaves_the_row_scored() {
+    let (_fresh, _cwd, folder) = degenerating("4");
+    let manifest: serde_json::Value = serde_json::from_str(&read(&folder, "score.json")).unwrap();
+    let notes: Vec<String> = manifest["notes"].as_array().unwrap().iter().map(|n| n.as_str().unwrap().to_string()).collect();
+    assert!(notes.iter().any(|n| n.contains("draw 0 degenerated at t = 29")), "{notes:#?}");
+    assert!(notes.iter().any(|n| n.contains("ending at t = 30 is unscored for draw 0")), "{notes:#?}");
+    assert!(notes.iter().any(|n| n.contains("fewer than all draws")), "{notes:#?}");
+    let rows = tsv_rows(&read(&folder, "scored.tsv"));
+    let at = |stream: &str, t: &str| {
+        rows.iter().find(|r| r["stream"] == stream && r["t_stop"] == t).unwrap()["log_score"].parse::<f64>().unwrap()
+    };
+    assert!(at("daily_cases", "29").is_finite() && at("joint", "29").is_finite());
+    assert!(at("daily_cases", "63").is_finite());
+    let summary = tsv_rows(&read(&folder, "summary.tsv"));
+    assert!(summary.iter().all(|r| r["n_unscored"] == "0"), "{summary:?}");
+}
+
+/// When every draw that reached a held-out row degenerates there, the row's
+/// score is −∞, written `-inf`, and the rows after it, which no draw reached,
+/// are counted unscored in `summary.tsv`. At seed 2 draw 1 of two
+/// degenerates in the conditioning rows, as it did in the prediction, and
+/// draw 0 at t = 30.
+#[test]
+fn every_draw_degenerating_on_a_row_scores_it_minus_infinity() {
+    let (_fresh, _cwd, folder) = degenerating("2");
+    let rows = tsv_rows(&read(&folder, "scored.tsv"));
+    let row = |t: &str| rows.iter().find(|r| r["stream"] == "daily_cases" && r["t_stop"] == t).cloned();
+    assert_eq!(row("30").unwrap()["log_score"], "-inf");
+    assert!(row("31").is_none(), "no draw reached t = 31");
+    let summary = tsv_rows(&read(&folder, "summary.tsv"));
+    let held = summary.iter().find(|r| r["stream"] == "daily_cases" && r["role"] == "held_out").unwrap();
+    assert_eq!((held["n"].as_str(), held["n_unscored"].as_str(), held["log_score_sum"].as_str()), ("10", "33", "-inf"));
+}
+
+/// The refusals of `--data`, of the outcome rows and of a prediction made
+/// with `--quantities`.
+#[test]
+fn the_outcome_refusals() {
+    let fresh = tempfile::tempdir().unwrap();
+    let root = fresh.path().join("camdl-store");
+    let cwd = workdir(&root);
+    ok(
+        &predict_in(cwd.path(), &root, &[
+            "predict", "model.camdl", "--params", "point.toml", "--data", "daily_cases=daily_cases.tsv", "--horizon",
+            "5 days", "--n-draws", "2", "--particles", "10", "--holdout-after", "20", "--label", "fc",
+        ]),
+        "predict",
+    );
+    let refused = |line: &[&str], says: &str| {
+        let out = score_in(cwd.path(), &root, line);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{line:?}: {err}");
+        assert!(err.contains(says), "{line:?}: {err}");
+    };
+    refused(&["@fc", "--data", "survey=survey.tsv"], "binds no stream source `survey`");
+    refused(&["@fc", "--data", "daily_cases=daily_cases.tsv", "--data", "daily_cases=daily_cases.tsv"], "names stream `daily_cases` twice");
+    refused(&["@fc", "--data", "daily_cases=absent.tsv"], "absent.tsv: it does not exist");
+    let daily = std::fs::read_to_string(cwd.path().join("daily_cases.tsv")).unwrap();
+    let dup: String =
+        daily.lines().flat_map(|l| if l.starts_with("22\t") { vec![l, l] } else { vec![l] }).map(|l| format!("{l}\n")).collect();
+    std::fs::write(cwd.path().join("dup.tsv"), dup).unwrap();
+    refused(&["@fc", "--data", "daily_cases=dup.tsv"], "both measure the target ending at 22");
+    assert!(scores(&root).is_empty(), "nothing is stored");
+    ok(
+        &predict_in(cwd.path(), &root, &["predict", "@fit", "--mode", "free_forward", "--n-draws", "4", "--quantities", "vocab.camdl", "--label", "vocab"]),
+        "predict",
+    );
+    refused(&["@vocab", "--data", "daily_cases=daily_cases.tsv"], "--quantities");
+}
+
+/// A stored prediction file edited by hand is refused before anything is
+/// scored: the store finds the file's digest changed, with its size and
+/// modification time kept.
+#[test]
+fn a_hand_edited_prediction_is_refused() {
+    let fresh = tempfile::tempdir().unwrap();
+    let root = fresh.path().join("camdl-store");
+    let cwd = workdir(&root);
+    ok(&predict_in(cwd.path(), &root, &[FIXED, &["--label", "ff"]].concat()), "predict");
+    let (folder, _) = predictions(&root).into_iter().next().unwrap();
+    let file = folder.join("predictive/daily_cases.tsv");
+    let mut bytes = std::fs::read(&file).unwrap();
+    let last = bytes.len() - 2;
+    bytes[last] = if bytes[last] == b'1' { b'2' } else { b'1' };
+    let mtime = std::fs::metadata(&file).unwrap().modified().unwrap();
+    let mut perms = std::fs::metadata(&file).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    perms.set_readonly(false);
+    std::fs::set_permissions(&file, perms).unwrap();
+    std::fs::write(&file, bytes).unwrap();
+    std::fs::File::options().write(true).open(&file).unwrap().set_modified(mtime).unwrap();
+    let out = score_in(cwd.path(), &root, &["@ff", "--data", "daily_cases=daily_cases.tsv"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(err.contains("damaged") && err.contains("predictive/daily_cases.tsv"), "{err}");
+    assert!(scores(&root).is_empty());
+}
+
+/// An outcome row after the conditioning rows that ends before the last of
+/// them is refused: the one-step pass would assimilate it before rows the
+/// prediction predicted. The data loader refuses such a file, whose rows are
+/// out of time order, before the pass is posed; a stored fit and a fixed
+/// point's `--holdout-after` both cut by a row's end, so their held-out rows
+/// all end after their conditioning rows.
+#[test]
+fn an_outcome_row_before_the_last_conditioning_row_is_refused() {
+    let fresh = tempfile::tempdir().unwrap();
+    let root = fresh.path().join("camdl-store");
+    let cwd = workdir(&root);
+    ok(
+        &predict_in(cwd.path(), &root, &[
+            "predict", "model.camdl", "--params", "point.toml", "--data", "daily_cases=daily_cases.tsv", "--mode",
+            "one_step", "--n-draws", "2", "--particles", "10", "--holdout-after", "20", "--label", "os",
+        ]),
+        "predict",
+    );
+    let daily = std::fs::read_to_string(cwd.path().join("daily_cases.tsv")).unwrap();
+    let early: String = daily
+        .lines()
+        .flat_map(|l| if l.starts_with("20\t") { vec![l.to_string(), "15\t3".to_string()] } else { vec![l.to_string()] })
+        .map(|l| l + "\n")
+        .collect();
+    std::fs::write(cwd.path().join("early.tsv"), early).unwrap();
+    let out = score_in(cwd.path(), &root, &["@os", "--data", "daily_cases=early.tsv"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(err.contains("not in chronological order"), "{err}");
+    assert!(scores(&root).is_empty());
+}

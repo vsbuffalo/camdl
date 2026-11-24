@@ -1716,3 +1716,6 @@ fn no_licm_changes_no_posterior_prediction() {
     assert!(!a.results.is_empty());
     assert_eq!(ids(&a), ids(&b), "--no-licm moved a posterior prediction");
 }
+
+#[path = "score_tests.rs"]
+mod score;

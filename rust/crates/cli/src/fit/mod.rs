@@ -109,6 +109,7 @@ pub(crate) mod forecast_contrast; // the difference of two arms' predictive mean
 pub(crate) mod forecast_output; // `camdl predict --mode forecast`: the plan, the driver, the artifact
 pub(crate) mod fixed_point; // `camdl predict MODEL`: the point, its data and its numerics, stored before the prediction
 pub(crate) mod forecast_score; // the marginal and joint log scores of a forecast against held-out values (D79)
+pub(crate) mod scoring; // `camdl score`'s rows: the cells a recomputed prediction hands back, and the rules
 pub mod runner;
 pub mod priors_precedence;  // gh#75: shared prior-resolution chain for fit run + profile
 pub mod fit_tree;

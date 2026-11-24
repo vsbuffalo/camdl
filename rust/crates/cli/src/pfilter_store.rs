@@ -257,7 +257,7 @@ impl ByProduct for SavedPaths {
 pub(crate) struct Prequential;
 
 #[derive(store::Identity, Clone, Debug)]
-#[identity(tag = "prequential", version = 1)]
+#[identity(tag = "prequential", version = 2)]
 pub(crate) struct PrequentialIdentity {
     pub filter: PfilterIdentityRecord,
     /// `--score-from`, resolved to model time: the trace scores only the

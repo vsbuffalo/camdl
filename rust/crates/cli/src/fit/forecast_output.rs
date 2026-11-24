@@ -267,6 +267,22 @@ pub(crate) struct ForecastJob<'a> {
     /// The name of the arm with no overlay: `fitted`, or `(none)` for a
     /// fixed point.
     pub baseline: &'a str,
+    /// The outcomes `camdl score` binds: each target's value is bound as a
+    /// held-out cell, which only the filter's scoring likelihood reads.
+    /// `None` for `camdl predict`, which binds none.
+    pub binding: Option<&'a crate::fit::scoring::OutcomeBinding>,
+}
+
+/// What [`run_forecast`] computed: the directory and the files written, the
+/// streams that failed and were skipped, the options the forecast is keyed
+/// by, and, when outcomes were bound, the scored targets.
+pub(crate) struct ForecastRun {
+    pub out_dir: PathBuf,
+    pub written: Vec<PathBuf>,
+    pub failures: Vec<DeterministicFailure>,
+    pub skipped: Vec<SkippedStream>,
+    pub options: crate::fit::predict::PredictOptions,
+    pub scored: crate::fit::scoring::Scored,
 }
 
 /// The held-out rows of one stream, from the stored problem's
@@ -370,11 +386,7 @@ pub(crate) fn forecast_options(
 /// files written, the streams that failed (asked for and unbound, or refused a
 /// forecast) and the streams skipped; the caller records the last two in
 /// `report.json`.
-#[allow(clippy::type_complexity)]
-pub(crate) fn run_forecast(
-    out: &crate::out::Out,
-    job: ForecastJob,
-) -> Result<(PathBuf, Vec<PathBuf>, Vec<DeterministicFailure>, Vec<SkippedStream>, crate::fit::predict::PredictOptions), String> {
+pub(crate) fn run_forecast(out: &crate::out::Out, job: ForecastJob) -> Result<ForecastRun, String> {
     let model = job.model;
     let raw = job.args.flags.horizon.as_deref().expect("forecast mode carries --horizon");
     let reach = parse_reach(raw, &model.time_unit, model.origin.as_deref())?;
@@ -408,7 +420,7 @@ pub(crate) fn run_forecast(
         };
         held_out.insert(s.name.clone(), rows);
     }
-    if held_out.values().any(|r| !r.is_empty()) {
+    if job.binding.is_none() && held_out.values().any(|r| !r.is_empty()) {
         out.say("predict: a forecast from a stored fit computes no held-out score: the fit holds its \
                  held-out rows' dates and not their values, which enter only a score (step 7 of the \
                  run-store proposal)");
@@ -479,7 +491,10 @@ pub(crate) fn run_forecast(
     // Each target's held-out value (D79), bound as a held-out cell: the
     // filter's scoring likelihood evaluates it and nothing else reads it, so
     // the predictions below do not depend on it.
-    let held_out_values = HeldOutValues::from_rows(&plan, &held_out, model)?;
+    let held_out_values = match job.binding {
+        Some(b) => HeldOutValues::from_outcomes(&plan, b, model)?,
+        None => HeldOutValues::from_rows(&plan, &held_out, model)?,
+    };
     // The address (D81, D86): the options with the design inputs that
     // determine the predictions. The held-out outcomes are not among them.
     let options = forecast_options(job.options, &plan, &covariates);
@@ -622,7 +637,98 @@ pub(crate) fn run_forecast(
          target(s) on {} stream(s), {} draws × {} particles, {} arm(s)",
         fc.plan.origin(), fc.plan.origin() + fc.plan.horizon(), fc.plan.targets().len(),
         fc.plan.sources().len(), fc.n_draws, fc.n_particles, forecasts.len()));
-    Ok((out_dir, written, failures, skipped, options))
+    let scored = match job.binding {
+        Some(_) => scored_targets(&forecasts, &held_out_values, model),
+        None => crate::fit::scoring::Scored::default(),
+    };
+    Ok(ForecastRun { out_dir, written, failures, skipped, options, scored })
+}
+
+/// Each arm's targets that hold an outcome, as scored cells: every sample's
+/// draw and its log density of the outcome, which the driver recorded at the
+/// target's end before anything could be assimilated there. Beside them, per
+/// arm, the joint log density of the targets ending at each time, and of
+/// every scored target of the forecast together: one sample is one particle's
+/// trajectory across every target (D54), so each joint sums its log densities
+/// over the targets before the samples are averaged.
+fn scored_targets(arms: &[ArmForecast], values: &HeldOutValues, model: &ir::Model) -> crate::fit::scoring::Scored {
+    use crate::fit::scoring::{JointCell, ScoreMode, ScoredCell, Scored};
+    let mut scored = Scored::default();
+    let fc0 = &arms[0].fc;
+    for (k, t) in fc0.plan.targets().iter().enumerate() {
+        match (values.at(k), values.not_scored(k)) {
+            (Some(_), _) => {}
+            (None, Some(why)) => scored.notes.push(format!(
+                "the target of '{}' ending at {} is not scored: {why}", t.stream, fmt_time(t.measures.end()))),
+            (None, None) => scored.notes.push(format!(
+                "the target of '{}' ending at {} is not scored: no outcome row measures its period",
+                t.stream, fmt_time(t.measures.end()))),
+        }
+    }
+    let origin = fc0.plan.origin();
+    for arm in arms {
+        let fc = &arm.fc;
+        let n = fc.n_draws * fc.n_particles;
+        let joint = |ks: &[usize], start: f64, stop: f64, horizon: Option<i64>, lead: Option<f64>| {
+            let mut sum = vec![0.0_f64; n];
+            for &k in ks {
+                if let Some(ll) = &fc.held_out_log_liks[k] {
+                    sum.iter_mut().zip(ll).for_each(|(s, l)| *s += l);
+                }
+            }
+            JointCell {
+                scenario: arm.label.scenario.clone(),
+                sweep: arm.label.sweep.clone(),
+                mode: ScoreMode::Forecast,
+                origin: Some(origin),
+                horizon,
+                lead,
+                start,
+                stop,
+                role: crate::fit::predict::RowRole::Future,
+                streams: ks.iter().map(|&k| fc.plan.targets()[k].stream.clone()).collect(),
+                log_liks: sum,
+            }
+        };
+        let mut by_end: Vec<(f64, Vec<usize>)> = Vec::new();
+        for (k, t) in fc.plan.targets().iter().enumerate() {
+            let (Some(y), Some(ll)) = (values.at(k), &fc.held_out_log_liks[k]) else { continue };
+            let o = leaf(model, &t.stream);
+            scored.cells.push(ScoredCell {
+                scenario: arm.label.scenario.clone(),
+                sweep: arm.label.sweep.clone(),
+                leaf: t.stream.clone(),
+                source: o.source.clone(),
+                stratum: stratum_of(o),
+                start: t.measures.start(),
+                stop: t.measures.end(),
+                mode: ScoreMode::Forecast,
+                origin: Some(origin),
+                horizon: Some(t.horizon),
+                lead: Some(t.lead),
+                role: crate::fit::predict::RowRole::Future,
+                observed: y,
+                samples: fc.draws[k].clone(),
+                log_liks: ll.clone(),
+            });
+            match by_end.last_mut() {
+                Some((end, ks)) if (*end - t.measures.end()).abs() <= crate::fit::runner::TIME_TIE_EPS => ks.push(k),
+                _ => by_end.push((t.measures.end(), vec![k])),
+            }
+        }
+        for (end, ks) in &by_end {
+            // The targets ending at one time share their lead; a horizon is a
+            // position within one stream and is left out of the joint.
+            let lead = fc.plan.targets()[ks[0]].lead;
+            let start = ks.iter().map(|&k| fc.plan.targets()[k].measures.start()).fold(f64::INFINITY, f64::min);
+            scored.joints.push(joint(ks, start, *end, None, Some(lead)));
+        }
+        let all: Vec<usize> = by_end.iter().flat_map(|(_, ks)| ks.iter().copied()).collect();
+        if let Some((last, _)) = by_end.last() {
+            scored.joints.push(joint(&all, origin, *last, None, None));
+        }
+    }
+    scored
 }
 
 /// One arm's forecast.

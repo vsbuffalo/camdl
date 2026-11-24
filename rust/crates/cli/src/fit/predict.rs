@@ -1150,6 +1150,19 @@ struct ScenarioAccum {
     /// denominator an in-window `value_at` band is actually over (gh#722). The
     /// forkable subset is REPORTED, never silently substituted.
     n_conditioned: usize,
+    /// `log_liks[leaf][time_idx]`: under a score, each draw's observation log
+    /// density of the row's observed value at the state its `y_rep` was drawn
+    /// from, aligned with `samples`; empty where no value is scored.
+    log_liks: Vec<Vec<Vec<f64>>>,
+}
+
+/// What a score binds into the free-forward sink: per leaf (in
+/// `model.observations` order), per emitted time, the observed value scored
+/// there and the auxiliary columns its density reads; `None` where no
+/// outcome is known.
+#[derive(Clone)]
+struct FreeForwardOutcomes {
+    observed: Vec<Vec<Option<(f64, Vec<(String, f64)>)>>>,
 }
 
 /// Does this design cell read its in-window `value_at` quantities off the
@@ -1314,6 +1327,9 @@ struct PredictiveSink {
     /// `scenario → point → rep` order, scenario outermost) is preserved so the
     /// rendered files list scenarios in CLI order.
     by_scenario: IndexMap<String, ScenarioAccum>,
+    /// A score's outcomes; `None` for `camdl predict`. Reading them draws no
+    /// random number, so the `y_rep` draws are the same with or without.
+    outcomes: Option<FreeForwardOutcomes>,
 }
 
 impl PredictiveSink {
@@ -1328,6 +1344,7 @@ impl PredictiveSink {
             quant_draws: Vec::new(),
             quant_times: Vec::new(),
             n_conditioned: 0,
+            log_liks: leaf_times.iter().map(|ts| vec![Vec::new(); ts.len()]).collect(),
         })
     }
 }
@@ -1374,6 +1391,8 @@ impl crate::engine::RunSink for PredictiveSink {
         // observation noise (gh#794). Accumulated beside `leaf_y` so the two are
         // the same draw at the same time with the same resolved parameters.
         let mut leaf_mean: Vec<Vec<f64>> = vec![Vec::new(); model.observations.len()];
+        // Under a score: `(time index, log density)` of each scored row.
+        let mut leaf_ll: Vec<Vec<(usize, f64)>> = vec![Vec::new(); model.observations.len()];
         for (si, obs_ir) in model.observations.iter().enumerate() {
             let times = &self.leaf_times[si];
             if times.is_empty() {
@@ -1409,6 +1428,15 @@ impl crate::engine::RunSink for PredictiveSink {
                     | score::trace::Coverage::Unrecorded => t,
                 })
                 .collect();
+            // The density of a scored row's value, by the likelihood the
+            // sampler draws from, at the same state and parameters.
+            let density = match &self.outcomes {
+                Some(o) if o.observed[si].iter().any(Option::is_some) => Some(
+                    sim::inference::obs_model::compile_obs_loglik_pf(obs_ir, self.compiled.clone(), &params)
+                        .map_err(|e| e.to_string())?,
+                ),
+                _ => None,
+            };
             let mut stream_vals: Vec<f64> = Vec::with_capacity(times.len());
             let mut stream_means: Vec<f64> = Vec::with_capacity(times.len());
             for (ti, &at) in scored_at.iter().enumerate() {
@@ -1420,6 +1448,11 @@ impl crate::engine::RunSink for PredictiveSink {
                 let y = sampler(projected[ti], at, &snap.int_state.counts, aux, &mut obs_rng);
                 stream_vals.push(y);
                 stream_means.push(meaner(projected[ti], at, &snap.int_state.counts, aux));
+                if let (Some(density), Some(o)) = (&density, &self.outcomes) {
+                    if let Some((y_obs, y_aux)) = &o.observed[si][ti] {
+                        leaf_ll[si].push((ti, density(*y_obs, projected[ti], at, &snap.int_state.counts, y_aux)));
+                    }
+                }
             }
             if want_obs {
                 // Key by the stream's declared `name` — what `observations.<name>`
@@ -1538,6 +1571,11 @@ impl crate::engine::RunSink for PredictiveSink {
                 acc.means[si][ti].push(m);
             }
         }
+        for (si, lls) in leaf_ll.into_iter().enumerate() {
+            for (ti, l) in lls {
+                acc.log_liks[si][ti].push(l);
+            }
+        }
         if let Some(results) = quant_results {
             if acc.quant_times.is_empty() {
                 acc.quant_times = snapshot_times;
@@ -1610,6 +1648,9 @@ struct PredictOutcome {
     skipped: Vec<SkippedStream>,
     /// Where the files were written, to be stored as the prediction.
     stored: ToStore,
+    /// The rows whose outcomes `camdl score` bound, as the computation saw
+    /// them; empty for `camdl predict`, which binds none.
+    scored: crate::fit::scoring::Scored,
 }
 
 /// Where `camdl predict` takes a prediction's parameters from: the
@@ -1735,7 +1776,7 @@ pub(crate) fn predict(
     // and whether each stream is a terminal.
     let out = crate::out::Out::new(false);
     let source = resolve_source(&out, args, compile, &info, request).unwrap_or_else(|e| out.fail(format!("error: {e}")));
-    match run_predict(&out, args, compile, source, &info, request.reuse()) {
+    match run_predict(&out, args, compile, source, &info, request.reuse(), None) {
         Ok(Outcome::Reused { stored, source }) => {
             let store = source.store().unwrap_or_else(|e| out.fail(format!("error: {e}")));
             info.finish(&store).unwrap_or_else(|e| out.fail(format!("error: {e}")));
@@ -1945,21 +1986,7 @@ fn store_prediction(
 ) -> Result<store::Stored<crate::fit_store::Prediction>, String> {
     use crate::fit_store::Prediction;
     let store = p.source.store()?;
-    // Each design file, stored as a data table the prediction depends on.
-    let mut design = std::collections::BTreeMap::new();
-    for spec in &p.design {
-        let (source, path) = spec.split_once('=').ok_or_else(|| format!("--design {spec:?}: expected SOURCE=FILE"))?;
-        let bytes = std::fs::read(path).map_err(|e| format!("--design {spec:?}: cannot read {path}: {e}"))?;
-        let table = store::Hashed::new(
-            <crate::camdl_store::Table as store::Content>::from_bytes(&bytes).map_err(|e| e.to_string())?,
-        );
-        let labels = crate::camdl_store::TableLabels { stream: source.to_string(), path: path.to_string() };
-        let dep = store
-            .put::<crate::camdl_store::DataTable>(table, &labels, &store::Provenance::none(), &info)
-            .and_then(|s| s.dep(<crate::camdl_store::DataTable as store::ContentArtifact>::FILE))
-            .map_err(|e| format!("storing the design file of `{source}`: {e}"))?;
-        design.insert(source.to_string(), dep);
-    }
+    let design = design_deps(&store, &p.design, &info)?;
     let (identity, labels) = p.source.identity(&p.options, design)?;
     let stored = match store.begin::<Prediction>(&identity, &labels, &info, reuse)
         .map_err(|e| e.to_string())?
@@ -1986,6 +2013,326 @@ fn store_prediction(
     };
     info.finish(&store).map_err(|e| e.to_string())?;
     Ok(stored)
+}
+
+/// Each `--design SOURCE=FILE` file, stored in `store` under `info` as a data
+/// table the prediction's identity depends on, by stream source.
+#[expect(clippy::disallowed_methods, reason = "reads each `--design` file, declared `#[input(identity)]` on `PredictFlags`, to store it as a `DataTable` the prediction's identity depends on")]
+#[allow(clippy::result_large_err)] // the store's error carries the paths a person acts on, returned once
+fn design_deps(
+    store: &store::Store,
+    specs: &[String],
+    info: &store::RunInfo,
+) -> Result<BTreeMap<String, store::Dep<crate::camdl_store::DataTable>>, String> {
+    let mut design = BTreeMap::new();
+    for spec in specs {
+        let (source, path) = spec.split_once('=').ok_or_else(|| format!("--design {spec:?}: expected SOURCE=FILE"))?;
+        let bytes = std::fs::read(path).map_err(|e| format!("--design {spec:?}: cannot read {path}: {e}"))?;
+        let table = store::Hashed::new(
+            <crate::camdl_store::Table as store::Content>::from_bytes(&bytes).map_err(|e| e.to_string())?,
+        );
+        let labels = crate::camdl_store::TableLabels { stream: source.to_string(), path: path.to_string() };
+        let dep = store
+            .put::<crate::camdl_store::DataTable>(table, &labels, &store::Provenance::none(), info)
+            .and_then(|s| s.dep(<crate::camdl_store::DataTable as store::ContentArtifact>::FILE))
+            .map_err(|e| format!("storing the design file of `{source}`: {e}"))?;
+        design.insert(source.to_string(), dep);
+    }
+    Ok(design)
+}
+
+/// A stored prediction posed again from its identity alone: the arguments
+/// and the parameter source that compute it. The files the arguments name
+/// (a fixed point's model, point and data, and any design file) are copies
+/// of the stored ones, in `scratch`.
+pub(crate) struct Reposed {
+    pub args: crate::args::PredictArgs,
+    pub source: PredictSource,
+    /// Per stream source, a copy of the stored lines the prediction
+    /// conditions on: a stored fit problem's training lines, or a fixed
+    /// point's stored data table.
+    pub conditioned: BTreeMap<String, String>,
+    /// The step the problem writes (`[config] dt`, a fixed point's `--dt`),
+    /// which the dt rule resolves against the model's own.
+    pub config_dt: f64,
+    _scratch: tempfile::TempDir,
+}
+
+impl Reposed {
+    /// The compiled model the prediction runs, as an IR file, and the
+    /// problem whose `[data]` binds its streams.
+    pub(crate) fn model_and_problem(&self) -> (&Path, &crate::fit::config_v2::Problem) {
+        match &self.source {
+            PredictSource::Posterior(fit) => (fit.model_ir.as_path(), &fit.config.problem),
+            PredictSource::FixedPoint(p) => (p.model_ir.as_path(), &p.problem),
+        }
+    }
+}
+
+/// Pose the prediction `stored` again from its identity, its options and its
+/// stored inputs, for `camdl score`. Its run store is `store`; a fixed
+/// point's inputs are stored again under `info` in the store `request`
+/// names, where they are already stored. A fixed point declared fitted
+/// through `--holdout-after` binds the outcome file `outcomes` gives for a
+/// stream source in place of its stored data, which holds no row after the
+/// declaration and so cannot be cut by it; the conditioned lines it yields
+/// must be the stored ones, which the prediction's run id then checks. A
+/// prediction made with a `--quantities` vocabulary is refused: its identity
+/// keeps the vocabulary's digest, not the file.
+pub(crate) fn repose(
+    out: &crate::out::Out,
+    store: &store::Store,
+    stored: &store::Stored<crate::fit_store::Prediction>,
+    info: &store::RunInfo,
+    request: &store::StoreRequest,
+    outcomes: &BTreeMap<String, String>,
+    check: &dyn Fn(&Path, f64, &BTreeMap<String, String>) -> Result<(), String>,
+) -> Result<Reposed, String> {
+    use crate::args::types::{CovariateSpec, ForwardBackend, Grid, PredictModeArg, SweepSpec};
+    let mut conditioned: BTreeMap<String, String> = BTreeMap::new();
+    let id = stored.identity();
+    let settings: serde_json::Value =
+        serde_json::from_str(&id.options.settings).map_err(|e| format!("the prediction's options: {e}"))?;
+    let bad = |what: &str| format!("internal error: the prediction's options hold no valid `{what}`");
+    if settings.get("quantities").is_some_and(|q| !q.is_null()) {
+        return Err("this prediction evaluated a `--quantities` vocabulary, and its identity keeps the \
+                    vocabulary's digest, not the file, so `score` cannot compute it again. Predict \
+                    without --quantities and score that prediction."
+            .into());
+    }
+    let strings = |v: &serde_json::Value| -> Vec<String> {
+        match v {
+            serde_json::Value::String(s) => vec![s.clone()],
+            serde_json::Value::Array(a) => a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect(),
+            _ => Vec::new(),
+        }
+    };
+    let scratch = tempfile::Builder::new()
+        .prefix("camdl-score-")
+        .tempdir()
+        .map_err(|e| format!("cannot make a scratch directory: {e}"))?;
+    let write = |rel: &str, bytes: &[u8]| -> Result<String, String> {
+        let path = scratch.path().join(rel);
+        std::fs::create_dir_all(path.parent().expect("a file in the scratch directory")).map_err(|e| e.to_string())?;
+        std::fs::write(&path, bytes).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        Ok(path.to_string_lossy().into_owned())
+    };
+    let table_bytes = |dep: &store::Dep<crate::camdl_store::DataTable>| -> Result<Vec<u8>, String> {
+        let t: store::Stored<crate::camdl_store::DataTable> = store
+            .get(dep.id())
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("the data table {} the prediction names is not stored", dep.id().key().short12()))?;
+        crate::camdl_store::read_stored(&t, <crate::camdl_store::DataTable as store::ContentArtifact>::FILE)
+    };
+
+    let mut flags = crate::args::PredictFlags {
+        mode: match settings["mode"].as_str() {
+            Some("all") => None,
+            Some("free_forward") => Some(PredictModeArg::FreeForward),
+            Some("one_step") => Some(PredictModeArg::OneStep),
+            Some("forecast") => Some(PredictModeArg::Forecast),
+            _ => return Err(bad("mode")),
+        },
+        horizon: settings["reach"].as_str().map(str::to_string),
+        n_draws: Some(settings["n_draws"].as_u64().ok_or_else(|| bad("n_draws"))? as usize),
+        seed: Some(settings["seed"].as_u64().ok_or_else(|| bad("seed"))?),
+        stream: strings(&settings["stream"]),
+        scenarios: strings(&settings["scenarios"]),
+        enable: strings(&settings["enable"]),
+        disable: strings(&settings["disable"]),
+        particles: settings["particles"].as_u64().map(|n| n as usize),
+        ..Default::default()
+    };
+    flags.forcing_extrapolation.allow_forcing_extrapolation =
+        settings["allow_forcing_extrapolation"].as_bool().ok_or_else(|| bad("allow_forcing_extrapolation"))?;
+    for s in settings["sweep"].as_array().ok_or_else(|| bad("sweep"))? {
+        let name = s[0].as_str().ok_or_else(|| bad("sweep"))?.to_string();
+        let values: Vec<f64> = s[1].as_array().ok_or_else(|| bad("sweep"))?.iter().filter_map(|v| v.as_f64()).collect();
+        flags.sweep.push(SweepSpec { name, grid: Grid::List(values) });
+    }
+    if let Some(cov) = settings["forecast"]["covariates"].as_object() {
+        for (forcing, statement) in cov {
+            let statement = statement.as_str().ok_or_else(|| bad("forecast.covariates"))?;
+            flags.covariate.push(format!("{forcing}={statement}").parse::<CovariateSpec>()?);
+        }
+    }
+    for (source, dep) in &id.options.design {
+        let path = write(&format!("design/{source}.tsv"), &table_bytes(dep)?)?;
+        flags.design.push(format!("{source}={path}"));
+    }
+    let posterior = crate::args::PosteriorFlags {
+        by_chain: settings["by_chain"].as_bool().unwrap_or(false),
+        exclude_chains: settings["excluded_chains"].as_array().map(|ids| {
+            ids.iter().filter_map(|c| c.as_u64().map(|c| c.to_string())).collect::<Vec<_>>().join(",")
+        }),
+        chains: None,
+        realised_design: settings["forecast"]["design_mode"].as_str() == Some("ex_post"),
+    };
+
+    let (text, source, fixed_point) = match &id.source {
+        crate::fit_store::ParameterSourceRecord::Posterior { draws, .. } => {
+            let run: store::Stored<crate::fit_store::FitRun> = store
+                .get(draws.id())
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("the fit run {} the prediction's draws came from is not stored", draws.id().key().short12()))?;
+            let text = run.folder().to_string_lossy().into_owned();
+            let fit = crate::fit_store::opened_run(&text)?;
+            let spec = fit.config.problem.data_spec().map_err(|e| format!("the fit binds no data: {e}"))?;
+            let (model, _) = crate::util::load_ir(&fit.model_ir.to_string_lossy())?;
+            conditioned = crate::fit::stream_bindings::StreamBindings::resolve(&model, spec)?
+                .training_by_source()
+                .iter()
+                .map(|(s, p)| (s.clone(), p.clone()))
+                .collect();
+            check(&fit.model_ir, fit.config.problem.config.dt, &conditioned)?;
+            (text, PredictSource::Posterior(fit), crate::args::FixedPointFlags::default())
+        }
+        crate::fit_store::ParameterSourceRecord::FixedPoint { model, trained_through, .. } => {
+            let record = serde_json::to_value(&id.source).map_err(|e| e.to_string())?;
+            let point = &record["FixedPoint"];
+            let name = store
+                .invocation(&store::Handle::IdPrefix(stored.id().key().to_hex()))
+                .ok()
+                .and_then(|inv| inv.members::<crate::fit_store::Prediction>().ok())
+                .and_then(|m| m.into_iter().find(|(i, _)| i == stored.id()).map(|(_, l)| l.model))
+                .unwrap_or_else(|| "model".to_string());
+            let mut envelope = crate::fit_store::stored_envelope(store, model, &name)?;
+            if let Some(q) = &id.quantities {
+                let qs: store::Stored<crate::camdl_store::Quantities> = store
+                    .get(q.id())
+                    .map_err(|e| e.to_string())?
+                    .ok_or("the prediction's quantities are not stored")?;
+                let bytes = crate::camdl_store::read_stored(&qs, <crate::camdl_store::Quantities as store::ContentArtifact>::FILE)?;
+                let content = <crate::camdl_store::QuantitiesContent as store::Content>::from_bytes(&bytes).map_err(|e| e.to_string())?;
+                envelope.model.quantities = content.quantities()?;
+                envelope.model.contrasts = content.contrasts()?;
+            }
+            let model_path = write(
+                &format!("{name}.ir.json"),
+                serde_json::to_string(&envelope).map_err(|e| e.to_string())?.as_bytes(),
+            )?;
+            let mut values = toml::Table::new();
+            for (p, v) in point["params"]["values"].as_object().ok_or_else(|| bad("params"))? {
+                values.insert(p.clone(), toml::Value::Float(v.as_f64().ok_or_else(|| bad("params"))?));
+            }
+            let params = write("point.toml", toml::to_string(&values).map_err(|e| e.to_string())?.as_bytes())?;
+            let numerics = &point["numerics"];
+            let backend = match numerics["backend"].as_str() {
+                Some("ChainBinomial") => ForwardBackend::ChainBinomial,
+                Some("Gillespie") => ForwardBackend::Gillespie,
+                Some("Ode") => ForwardBackend::Ode,
+                _ => return Err(bad("numerics.backend")),
+            };
+            let binomial = match numerics["binomial"].as_str() {
+                Some("Btpe") => sim::rng::BinomialAlgorithm::Btpe,
+                Some("Btrs") => sim::rng::BinomialAlgorithm::Btrs,
+                _ => return Err(bad("numerics.binomial")),
+            };
+            let mut data = Vec::new();
+            for (source, dep) in &id.data {
+                let path = write(&format!("data/{source}.tsv"), &table_bytes(dep)?)?;
+                conditioned.insert(source.clone(), path.clone());
+                // The outcome file, named by the source or by a block of it.
+                let outcome = outcomes.get(source).or_else(|| {
+                    envelope.model.observations.iter().filter(|o| &o.source == source).find_map(|o| outcomes.get(&o.name))
+                });
+                let bound = match (trained_through, outcome) {
+                    (Some(_), Some(file)) => file.clone(),
+                    _ => path,
+                };
+                // `--data` binds leaves: every block reading the source, to
+                // its one file, as the prediction's own `--data` did.
+                for o in envelope.model.observations.iter().filter(|o| &o.source == source) {
+                    data.push(crate::args::types::DataSpec::Named { name: o.name.clone(), path: PathBuf::from(&bound) });
+                }
+            }
+            check(Path::new(&model_path), numerics["dt"].as_f64().ok_or_else(|| bad("numerics.dt"))?, &conditioned)?;
+            let fixed_point = crate::args::FixedPointFlags {
+                params: vec![PathBuf::from(params)],
+                data,
+                holdout_after: trained_through.map(|t| format!("{:?}", t.get())),
+                backend: Some(backend),
+                dt: Some(numerics["dt"].as_f64().ok_or_else(|| bad("numerics.dt"))?),
+                binomial: (backend == ForwardBackend::ChainBinomial).then_some(binomial),
+                allow_degenerate_rates: numerics["allow_degenerate_rates"].as_bool().ok_or_else(|| bad("numerics"))?,
+                ..Default::default()
+            };
+            let point = crate::fit::fixed_point::resolve(
+                out,
+                &model_path,
+                &fixed_point,
+                flags.forcing_extrapolation.allow_forcing_extrapolation,
+                crate::util::CompileSettings::resolve(false, false),
+                info,
+                request,
+            )?;
+            (model_path, PredictSource::FixedPoint(std::sync::Arc::new(point)), fixed_point)
+        }
+    };
+    let args = crate::args::PredictArgs { source: Some(text), flags, posterior, fixed_point, _removed_fit: None };
+    let config_dt = match &source {
+        PredictSource::Posterior(fit) => fit.config.problem.config.dt,
+        PredictSource::FixedPoint(p) => p.problem.config.dt,
+    };
+    Ok(Reposed { args, source, conditioned, config_dt, _scratch: scratch })
+}
+
+/// A stored prediction computed again with outcomes bound.
+pub(crate) struct Recomputed {
+    /// The run id of the prediction computed: the stored one's, when it was
+    /// posed again faithfully.
+    pub id: store::Key,
+    /// Its identity's record form, to name where it departs from the stored
+    /// prediction's.
+    pub record: serde_json::Value,
+    /// Every file it wrote, by its path in the prediction's folder.
+    pub files: BTreeMap<String, Vec<u8>>,
+    pub scored: crate::fit::scoring::Scored,
+}
+
+/// Compute the prediction `reposed` poses again with `binding` bound, into a
+/// scratch directory, under `info`.
+#[expect(clippy::disallowed_methods, reason = "reads back the files this process wrote in its scratch directory, which `camdl score` compares with the stored prediction's")]
+pub(crate) fn recompute(
+    out: &crate::out::Out,
+    reposed: &Reposed,
+    info: &store::RunInfo,
+    binding: &crate::fit::scoring::OutcomeBinding,
+) -> Result<Recomputed, String> {
+    let forcing =
+        crate::forcing_extrapolation::ForcingPolicy::new(reposed.args.flags.forcing_extrapolation.allow_forcing_extrapolation);
+    let _forcing_route = forcing.install();
+    let compile = crate::util::CompileSettings::resolve(false, false);
+    let outcome = run_predict(out, &reposed.args, compile, reposed.source.clone(), info, store::Reuse::Force, Some(binding))?;
+    let Outcome::Computed(o) = outcome else {
+        return Err("internal error: a score's prediction was reused rather than computed".into());
+    };
+    let store = o.stored.source.store()?;
+    let design = design_deps(&store, &o.stored.design, info)?;
+    let (identity, labels) = o.stored.source.identity(&o.stored.options, design)?;
+    let planned = store
+        .plan::<crate::fit_store::Prediction>(&[(identity.clone(), labels)])
+        .map_err(|e| e.to_string())?;
+    let id = planned.first().ok_or("internal error: the store planned no prediction")?.id.key();
+    let mut files = BTreeMap::new();
+    let mut stack = vec![o.stored.dir.path().to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).map_err(|e| format!("cannot read {}: {e}", d.display()))? {
+            let path = e.map_err(|e| e.to_string())?.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                let name = path.strip_prefix(o.stored.dir.path()).expect("under the scratch directory").to_string_lossy().into_owned();
+                files.insert(name, std::fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?);
+            }
+        }
+    }
+    Ok(Recomputed {
+        id,
+        record: serde_json::to_value(store::Identity::record(&identity)).map_err(|e| e.to_string())?,
+        files,
+        scored: o.scored,
+    })
 }
 
 /// The identity and labels of the prediction of the run `fit` names under
@@ -2260,6 +2607,16 @@ impl SourceReads {
     }
 }
 
+/// The prediction `args` pose from `source`, computed into a scratch
+/// directory, or found stored under `info` when `reuse` allows it.
+///
+/// `binding` is `camdl score`'s: the outcomes of the rows the prediction
+/// predicts. Bound, they change no weight and draw no random number, so the
+/// files written are the prediction's own; the rows they score come back in
+/// [`PredictOutcome::scored`]. A one-step pass then continues through the
+/// rows after the conditioning ones, predicting and assimilating each
+/// (chain-binomial only), and its bands for those rows are returned there and
+/// written to no file.
 fn run_predict(
     out: &crate::out::Out,
     args: &crate::args::PredictArgs,
@@ -2267,6 +2624,7 @@ fn run_predict(
     source: PredictSource,
     info: &store::RunInfo,
     reuse: store::Reuse,
+    binding: Option<&crate::fit::scoring::OutcomeBinding>,
 ) -> Result<Outcome, String> {
     let SourceReads {
         config,
@@ -2645,7 +3003,9 @@ fn run_predict(
 
     // The forecast mode: the fixed-origin forecast and nothing else.
     if mode == Some(PredictModeArg::Forecast) {
-        let (out_dir, mut written, failures, skipped, forecast_options) = crate::fit::forecast_output::run_forecast(
+        let crate::fit::forecast_output::ForecastRun {
+            out_dir, mut written, failures, skipped, options: forecast_options, scored,
+        } = crate::fit::forecast_output::run_forecast(
             out,
             crate::fit::forecast_output::ForecastJob {
                 args,
@@ -2670,6 +3030,7 @@ fn run_predict(
                 sweep_points: if args.flags.sweep.is_empty() { &[] } else { &sweep_points },
                 particles,
                 baseline: no_overlay,
+                binding,
             },
         )?;
         written.push(crate::fit::failures::write_report(
@@ -2683,12 +3044,14 @@ fn run_predict(
         return Ok(Outcome::Computed(PredictOutcome {
             written, failures, skipped,
             stored: ToStore { source: source.clone(), dir: scratch, options: forecast_options, design: args.flags.design.clone() },
+            scored,
         }));
     }
 
     // A prediction already stored is reused, before anything is computed:
-    // every option that keys it is resolved here.
-    if reuse == store::Reuse::IfCompleted {
+    // every option that keys it is resolved here. A score computes the
+    // prediction again whether or not it is stored.
+    if reuse == store::Reuse::IfCompleted && binding.is_none() {
         if let Some(stored) = source.reuse(&options, info)? {
             return Ok(Outcome::Reused { stored, source });
         }
@@ -2779,6 +3142,8 @@ fn run_predict(
     // Empty when the horizon was not requested or the cloud carries no chain
     // keys.
     let mut ff_draws_per_chain: BTreeMap<usize, usize> = BTreeMap::new();
+    // Under a score, the free-forward rows whose outcome is known.
+    let mut ff_scored = crate::fit::scoring::Scored::default();
 
     // ── Free-forward horizon: replay the posterior forward under each scenario.
     //
@@ -3067,6 +3432,53 @@ fn run_predict(
             // cut by `quantity_t_end`.)
             let extra_snapshot_times: Vec<f64> = required_output_times.clone();
 
+            // A score's outcomes at the emitted rows: a data row's own value,
+            // and the outcome row past the data that measures a tail row's
+            // period or instant. An outcome row the grid emits no row for is
+            // not scored, and is named.
+            let ff_outcomes: Option<FreeForwardOutcomes> = match binding {
+                None => None,
+                Some(b) => {
+                    let mut observed: Vec<Vec<Option<(f64, Vec<(String, f64)>)>>> = Vec::new();
+                    for (si, o) in model.observations.iter().enumerate() {
+                        let n_obs = leaf_times[si].len();
+                        let leaf = leaves.iter().find(|l| leaf_matches(o, l));
+                        let mut cells: Vec<Option<(f64, Vec<(String, f64)>)>> = (0..ff_emit_times[si].len())
+                            .map(|ti| match (ti < n_obs, leaf) {
+                                (true, Some(l)) => l.observed[ti].map(|y| (y, leaf_aux[si].get(ti).cloned().unwrap_or_default())),
+                                _ => None,
+                            })
+                            .collect();
+                        let mut unmatched = 0usize;
+                        for r in b.after_conditioning(&o.name) {
+                            let Some(sim::inference::ObsCell::Scalar(y)) = r.cell else { continue };
+                            let hit = (n_obs..ff_emit_times[si].len()).find(|&ti| match (leaf_coverages[si][ti].1, r.measures) {
+                                (score::trace::Coverage::Interval { start, stop }, crate::fit::observed_rows::Measures::Period(p)) => {
+                                    (start - p.start()).abs() <= crate::OBS_SNAP_EPS && (stop - p.stop()).abs() <= crate::OBS_SNAP_EPS
+                                }
+                                (score::trace::Coverage::Instant, crate::fit::observed_rows::Measures::Instant(t)) => {
+                                    (ff_emit_times[si][ti] - t).abs() <= crate::OBS_SNAP_EPS
+                                }
+                                _ => false,
+                            });
+                            match hit {
+                                Some(ti) => cells[ti] = Some((y, r.aux.clone())),
+                                None => unmatched += 1,
+                            }
+                        }
+                        if unmatched > 0 {
+                            ff_scored.notes.push(format!(
+                                "{unmatched} outcome row(s) of '{}' past the prediction's data are not scored in \
+                                 free_forward mode: the prediction emitted no row measuring their period",
+                                o.name
+                            ));
+                        }
+                        observed.push(cells);
+                    }
+                    Some(FreeForwardOutcomes { observed })
+                }
+            };
+
             // The free-forward cells (one per sweep-point × scenario, engine canonical
             // order), plus the stacked quantity files — accumulated across the whole
             // sweep grid, since one design cell is a (sweep point, scenario) pair and
@@ -3297,6 +3709,7 @@ fn run_predict(
                     chain_of_point: ff_chain_of_point.clone(),
                     binomial,
                     by_scenario: IndexMap::new(),
+                    outcomes: ff_outcomes.clone(),
                 };
 
                 for sref in &scenario_refs {
@@ -3431,6 +3844,12 @@ fn run_predict(
                             schema.as_ref(), args.posterior.by_chain,
                         )?,
                     });
+                    if let Some(o) = &ff_outcomes {
+                        ff_scored.cells.extend(free_forward_scored(
+                            &model, accum, o, &ff_emit_times, &leaf_coverages, &leaf_times, &parameter_set,
+                            scenario_name, sweep_pt,
+                        ));
+                    }
                 }
             }
 
@@ -3479,6 +3898,10 @@ fn run_predict(
             quantity_manifest = None;
             ff_n_draws = 0;
             ff_draws_per_chain.clear();
+            ff_scored = crate::fit::scoring::Scored::default();
+            if binding.is_some() {
+                ff_scored.notes.push("the free-forward tail refused, so no free_forward row is scored".into());
+            }
         }
     }
 
@@ -3491,7 +3914,10 @@ fn run_predict(
             // The fitted model — the fit's intervention selection applied —
             // not `compiled`, which carries every declared intervention so
             // the free-forward sink can read any arm's trajectory.
-            fitted_compiled(&model_for_one_step, &fit_base, eval)?,
+            //
+            // A score's pass continues through the outcome rows past the
+            // conditioning ones, so its run reaches the last of them.
+            fitted_compiled(&extended_to(&model_for_one_step, binding), &fit_base, eval)?,
             &model,
             &config,
             // gh#708: the step the fit's likelihood walked (the one dt rule).
@@ -3509,9 +3935,21 @@ fn run_predict(
             schema.as_ref(),
             args.posterior.by_chain,
             &parameter_set,
+            binding,
         )?),
         None => None,
     };
+    let mut scored = ff_scored;
+    if let Some(o) = &one_step {
+        let mut s = o.scored.clone();
+        for c in &mut s.cells {
+            c.scenario = no_overlay.to_string();
+        }
+        for j in &mut s.joints {
+            j.scenario = no_overlay.to_string();
+        }
+        scored.extend(s);
+    }
 
     // 6. Write the predictive artifact — every scenario's free-forward rows plus
     // the one-step rows stacked into one file per logical stream (the leading
@@ -3965,7 +4403,65 @@ fn run_predict(
     Ok(Outcome::Computed(PredictOutcome {
         written, failures, skipped: streams_in.skipped,
         stored: ToStore { source, dir: scratch, options, design: args.flags.design.clone() },
+        scored: crate::fit::scoring::Scored {
+            ode: posterior.backend == crate::args::types::ForwardBackend::Ode,
+            ..scored
+        },
     }))
+}
+
+/// One free-forward design cell's rows whose outcome is known, as scored
+/// cells: each draw's `y_rep` there and its log density of the outcome at
+/// the same state. A data row keeps its role; a row past the data is held
+/// out, or of unknown role for a fixed point with no `--holdout-after`.
+#[allow(clippy::too_many_arguments)]
+fn free_forward_scored(
+    model: &ir::Model,
+    accum: &ScenarioAccum,
+    outcomes: &FreeForwardOutcomes,
+    emit_times: &[Vec<f64>],
+    coverages: &[Vec<(f64, score::trace::Coverage)>],
+    leaf_times: &[Vec<f64>],
+    parameter_set: &ParameterSet,
+    scenario: &str,
+    sweep: &[(String, f64)],
+) -> Vec<crate::fit::scoring::ScoredCell> {
+    use crate::fit::scoring::{ScoreMode, ScoredCell};
+    let mut cells = Vec::new();
+    for (si, o) in model.observations.iter().enumerate() {
+        for (ti, cell) in outcomes.observed[si].iter().enumerate() {
+            let Some((y, _)) = cell else { continue };
+            let (start, stop) = match coverages[si][ti].1 {
+                score::trace::Coverage::Interval { start, stop } => (start, stop),
+                score::trace::Coverage::Instant | score::trace::Coverage::Unrecorded => (emit_times[si][ti], emit_times[si][ti]),
+            };
+            let role = if ti < leaf_times[si].len() {
+                parameter_set.role(&o.name, ti)
+            } else if parameter_set.training_unknown {
+                RowRole::Unknown
+            } else {
+                RowRole::HeldOut
+            };
+            cells.push(ScoredCell {
+                scenario: scenario.to_string(),
+                sweep: sweep.to_vec(),
+                leaf: o.name.clone(),
+                source: o.source.clone(),
+                stratum: o.stratum.iter().map(|k| (k.dim.clone(), k.level.clone())).collect(),
+                start,
+                stop,
+                mode: ScoreMode::FreeForward,
+                origin: None,
+                horizon: None,
+                lead: None,
+                role,
+                observed: *y,
+                samples: accum.samples[si][ti].clone(),
+                log_liks: accum.log_liks[si][ti].clone(),
+            });
+        }
+    }
+    cells
 }
 
 /// Compile `vocabulary` against the fit's model SOURCE and return the quantity
@@ -4821,6 +5317,22 @@ struct OneStepBands {
     /// The state set: per leaf stream, sorted by name, the rows every band's
     /// filter walked and how many of them the fit held out.
     filtered: Vec<FilteredStream>,
+    /// With outcomes bound, every row the pass predicted whose outcome is
+    /// known, the rows after the conditioning ones included; empty otherwise.
+    scored: crate::fit::scoring::Scored,
+}
+
+/// One draw's one-step record that a score reads, `[stop][stream][particle]`:
+/// the predictive draws, and the per-stream and joint log densities of the
+/// observed values at the particles they were drawn from.
+struct DrawRecord {
+    samples: Vec<Vec<Vec<f64>>>,
+    log_liks: Vec<Vec<Vec<f64>>>,
+    joint: Vec<Vec<f64>>,
+    /// The stop at which the draw's filter degenerated, after the
+    /// conditioning rows; `None` when it ran to the end. Its record at that
+    /// stop and after is not read.
+    degenerated: Option<usize>,
 }
 
 /// Filter every posterior draw and pool the per-(stream, time) one-step
@@ -5015,6 +5527,21 @@ fn predict_step_grids(model_dt: Option<f64>, config_dt: f64) -> (f64, f64) {
     (fitted, fitted)
 }
 
+/// `model`, its run extent raised to the end of the last outcome row
+/// `binding` holds, so a score's one-step pass admits every row it predicts.
+/// Nothing else is extended; without a binding, or when the model already
+/// reaches the rows, `model` as it is.
+fn extended_to(model: &ir::Model, binding: Option<&crate::fit::scoring::OutcomeBinding>) -> ir::Model {
+    let mut m = model.clone();
+    let end = binding
+        .map(|b| b.rows.values().flatten().map(|r| r.measures.end()).fold(f64::NEG_INFINITY, f64::max))
+        .unwrap_or(f64::NEG_INFINITY);
+    if end > m.simulation.t_end {
+        m.simulation.t_end = end;
+    }
+    m
+}
+
 /// The fitted model compiled for the one-step filter: `model` (parameters
 /// already seeded) with the fit's intervention selection applied. The filter
 /// re-scores the observed series, so it must run the interventions the fit's
@@ -5049,6 +5576,7 @@ fn one_step_bands(
     schema: Option<&ObsSchema>,
     by_chain: bool,
     parameter_set: &ParameterSet,
+    binding: Option<&crate::fit::scoring::OutcomeBinding>,
 ) -> Result<OneStepBands, String> {
     use sim::inference::{
         bootstrap_filter, multi_stream_obs::StreamProjection,
@@ -5081,15 +5609,34 @@ fn one_step_bands(
     // into the obs model's `stream_names()`) maps back to its IR leaf here.
     let mut bound_leaves: Vec<&ir::observation::ObservationModel> = Vec::new();
     let mut obs_streams: Vec<ObsStream> = Vec::new();
+    // Per leaf, how many of its rows the prediction conditions on: every row
+    // unless a score bound outcomes, whose rows past these the pass goes on
+    // to predict and assimilate.
+    let mut n_conditioning: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for obs_model in &model.observations {
         if !selection.includes(&obs_model.name) {
             continue; // not eligible: skipped or failed, and named by the caller (D76)
         }
-        let data_path = bound_path(effective, obs_model)?;
+        let mut data_path = bound_path(effective, obs_model)?;
         let siblings: Vec<&ir::observation::ObservationModel> =
             model.observations.iter().filter(|o| o.source == obs_model.source).collect();
-        let rows =
+        let mut rows =
             crate::fit::runner::load_observations(data_path, obs_model, &siblings, &time_opts)?;
+        n_conditioning.insert(obs_model.name.clone(), rows.len());
+        if let Some((all, file)) = binding.and_then(|b| Some((b.rows.get(&obs_model.name)?, b.files.get(&obs_model.source)?))) {
+            // The outcome file's first rows are these, by row digest: the
+            // score checked that before binding it.
+            let n = rows.len();
+            if all.len() < n
+                || crate::fit::training_partition::row_digest(&all[..n])? != crate::fit::training_partition::row_digest(&rows)?
+            {
+                return Err(format!(
+                    "internal error: the outcome rows of '{}' do not begin with the {n} rows the prediction \
+                     conditions on", obs_model.name));
+            }
+            rows = all.clone();
+            data_path = file;
+        }
         let projection = StreamProjection::from_ir(&obs_model.projection, &compiled, &obs_model.name)?;
         let times = crate::pfilter::stream_times_of_rows(obs_model, &rows, data_path, &time_opts)?;
         let (obs, cells, aux) = crate::fit::runner::observation_columns(&rows);
@@ -5116,14 +5663,17 @@ fn one_step_bands(
     // stream here, the held-out ones included, so that is what each band's
     // state was conditioned on. And where each row's value is assimilated
     // (the end of what it measures), to find a filter stop's row again.
+    // A band is written for the conditioning rows alone, so the state set is
+    // theirs whether or not a score continued the pass past them.
     let mut filtered: Vec<FilteredStream> = obs_streams
         .iter()
         .map(|s| {
+            let rows = &s.rows[..n_conditioning[&s.name]];
             Ok(FilteredStream {
                 stream: s.name.clone(),
-                rows: s.rows.len(),
-                held_out_rows: s.rows.len().saturating_sub(parameter_set.partition.rows(&s.name)),
-                digest: crate::fit::training_partition::row_digest(&s.rows)?.to_hex(),
+                rows: rows.len(),
+                held_out_rows: rows.len().saturating_sub(parameter_set.partition.rows(&s.name)),
+                digest: crate::fit::training_partition::row_digest(rows)?.to_hex(),
             })
         })
         .collect::<Result<_, String>>()?;
@@ -5213,8 +5763,76 @@ fn one_step_bands(
         })
         .collect();
 
-    let pool = pool_one_step_draws(out, &param_sets, &chain_of_draw, base_seed, |_, params, seed| {
-        bootstrap_filter(&process, &obs_model, params, &smc_config, seed)
+    // The latest end among the conditioning rows: a score's pass assimilates
+    // every row up to it exactly as the prediction did, and goes on past it.
+    let conditioning_end = obs_streams
+        .iter()
+        .flat_map(|s| s.rows[..n_conditioning[&s.name]].iter().map(|r| r.measures.end()))
+        .fold(f64::NEG_INFINITY, f64::max);
+    if let Some(s) = obs_streams.iter().find(|s| {
+        s.rows[n_conditioning[&s.name]..].iter().any(|r| r.measures.end() <= conditioning_end + crate::OBS_SNAP_EPS)
+    }) {
+        // A stored fit and `--holdout-after` cut a stream by a row's end, and
+        // the loader refuses rows out of time order, so this is not reached
+        // from a file.
+        return Err(format!(
+            "internal error: a row of '{}' after the ones the prediction conditions on ends at or before \
+             t = {conditioning_end}, the end of the last conditioning row: the one-step pass would assimilate \
+             it before rows the prediction predicted, and so change their bands",
+            s.name
+        ));
+    }
+    // Each draw's record, kept for a score; `None` for a draw the filter
+    // skipped, which is left out of the pool and the score alike.
+    let mut records: Vec<Option<DrawRecord>> = (0..param_sets.len()).map(|_| None).collect();
+    let pool = pool_one_step_draws(out, &param_sets, &chain_of_draw, base_seed, |d, params, seed| {
+        let mut result = bootstrap_filter(&process, &obs_model, params, &smc_config, seed);
+        if binding.is_none() {
+            return result;
+        }
+        let mut degenerated = None;
+        // A draw that degenerates before the end of the conditioning rows
+        // degenerated in the prediction too, and is skipped by both. One that
+        // degenerates at a stop `w` after it was pooled by the prediction: its
+        // filter is run again with every outcome from `w` on a hole, which
+        // leaves every stop in place and assimilates nothing from `w`, so its
+        // record before `w` is the first run's and the prediction's bands are
+        // unchanged. The score reads that record before `w` only.
+        if let Err(sim::SimError::PFDegenerate { obs_window, .. }) = &result {
+            let w = *obs_window;
+            let t_w = obs_model.obs_time(w);
+            if t_w > conditioning_end + crate::OBS_SNAP_EPS {
+                let mut holed = obs_streams.clone();
+                for s in &mut holed {
+                    let n = n_conditioning[&s.name];
+                    for i in n..s.rows.len() {
+                        if s.rows[i].measures.end() >= t_w - crate::OBS_SNAP_EPS {
+                            s.rows[i].cell = None;
+                            s.rows[i].aux.clear();
+                            s.cells[i] = None;
+                            s.aux[i].clear();
+                        }
+                    }
+                }
+                let specs = crate::fit::runner::stream_specs_from_obs_streams(&holed);
+                let (bound, _) = BoundObs::bind(compiled.model.simulation.t_start, specs)
+                    .map_err(|r| sim::SimError::Validation(r.render()))?;
+                let holed_model = MultiStreamObsModel::new(bound, compiled.clone())?;
+                result = bootstrap_filter(&process, &holed_model, params, &smc_config, seed);
+                degenerated = Some(w);
+            }
+        }
+        if let Ok(r) = &mut result {
+            if let Some(p) = r.prequential.as_mut() {
+                records[d] = Some(DrawRecord {
+                    samples: p.per_stream_samples.clone(),
+                    log_liks: std::mem::take(&mut p.per_stream_log_liks),
+                    joint: std::mem::take(&mut p.log_liks),
+                    degenerated,
+                });
+            }
+        }
+        result
     })?;
     let PooledOneStep { stream_names, obs_times, n_pooled, .. } = &pool;
     let (stream_names, obs_times, n_pooled) = (stream_names.clone(), obs_times.clone(), *n_pooled);
@@ -5271,8 +5889,6 @@ fn one_step_bands(
                     // there is no row to plot against (gh#702, gh#833).
                     continue;
                 }
-                let quantiles = band(&cell)
-                    .map_err(|e| format!("stream '{source}' (one_step) at t={t}: {e}"))?;
                 // The row this stop assimilates, by its position in the
                 // stream: the filter stops for a row at the end of what the
                 // row measures, and a stream's ends strictly increase.
@@ -5284,6 +5900,13 @@ fn one_step_bands(
                          where none of its {} rows ends, so the row's role cannot be read; \
                          please report this with the stream name and the time",
                         stream_names[si], row_ends[stream_names[si].as_str()].len()))?;
+                // A row past the conditioning ones is predicted only by a
+                // score's pass, whose bands are the score's.
+                if position >= n_conditioning[stream_names[si].as_str()] {
+                    continue;
+                }
+                let quantiles = band(&cell)
+                    .map_err(|e| format!("stream '{source}' (one_step) at t={t}: {e}"))?;
                 let role = parameter_set.role(&stream_names[si], position);
                 // No per-row R̂ on the one-step horizon (gh#794). Its cell is a
                 // pool over (posterior draws × filter particles), so the
@@ -5332,7 +5955,163 @@ fn one_step_bands(
         });
     }
 
-    Ok(OneStepBands { streams, n_pooled, n_pooled_by_chain, filtered })
+    let scored = match binding {
+        Some(_) => one_step_scored(&obs_streams, &leaf_of_name, &stream_names, &obs_times, &records, parameter_set)?,
+        None => crate::fit::scoring::Scored::default(),
+    };
+    Ok(OneStepBands { streams, n_pooled, n_pooled_by_chain, filtered, scored })
+}
+
+/// Every row the one-step pass predicted whose value is observed, as a scored
+/// cell over the draws the pool kept, and per stop the joint log density of
+/// every stream observed there, which is the log of the filter's incremental
+/// likelihood at that stop for each particle.
+fn one_step_scored(
+    obs_streams: &[crate::fit::runner::ObsStream],
+    leaf_of_name: &std::collections::HashMap<&str, &ir::observation::ObservationModel>,
+    stream_names: &[String],
+    obs_times: &[f64],
+    records: &[Option<DrawRecord>],
+    parameter_set: &ParameterSet,
+) -> Result<crate::fit::scoring::Scored, String> {
+    use crate::fit::scoring::{JointCell, ScoreMode, ScoredCell, Scored};
+    use crate::quantile::fmt_time;
+    // The draws the pool kept, by their index among the draws offered.
+    let kept: Vec<(usize, &DrawRecord)> = records.iter().enumerate().filter_map(|(d, r)| r.as_ref().map(|r| (d, r))).collect();
+    let mut scored = Scored::default();
+    for (d, r) in &kept {
+        if let Some(w) = r.degenerated {
+            scored.notes.push(format!(
+                "the one-step filter of draw {d} degenerated at t = {}, after the conditioning rows: its density of \
+                 each row ending there is zero, and it scores no row after",
+                fmt_time(obs_times[w])
+            ));
+        }
+    }
+    let contribution = draw_contribution;
+    // Per stop: the cells scored there, by index into `scored.cells`.
+    let mut at_stop: Vec<Vec<usize>> = vec![Vec::new(); obs_times.len()];
+    for (si, name) in stream_names.iter().enumerate() {
+        let leaf = leaf_of_name[name.as_str()];
+        let rows = &obs_streams.iter().find(|s| &s.name == name).expect("a filter stream is a bound stream").rows;
+        let mut holes = 0usize;
+        let mut fewer_rows = 0usize;
+        for (position, row) in rows.iter().enumerate() {
+            let end = row.measures.end();
+            let Some(ti) = obs_times.iter().position(|t| (t - end).abs() <= crate::OBS_SNAP_EPS) else {
+                return Err(format!("internal error: no stop of the one-step filter at the end of row {} of '{name}'", position + 1));
+            };
+            let y = match row.cell {
+                Some(sim::inference::ObsCell::Scalar(v)) => v,
+                _ => {
+                    holes += 1;
+                    continue;
+                }
+            };
+            let mut samples = Vec::new();
+            let mut log_liks = Vec::new();
+            let mut fewer = false;
+            for (d, r) in &kept {
+                match contribution(r, ti, Some(si)) {
+                    Some((ll, ys)) => {
+                        fewer |= ys.is_empty();
+                        log_liks.extend(ll);
+                        samples.extend(ys);
+                    }
+                    None => {
+                        fewer = true;
+                        scored.notes.push(format!("the row of '{name}' ending at t = {} is unscored for draw {d}", fmt_time(end)));
+                    }
+                }
+            }
+            if fewer {
+                fewer_rows += 1;
+            }
+            let lead = match row.measures {
+                crate::fit::observed_rows::Measures::Period(p) => Some(p.stop() - p.start()),
+                crate::fit::observed_rows::Measures::Instant(t) => position.checked_sub(1).map(|p| t - rows[p].measures.end()),
+            };
+            at_stop[ti].push(scored.cells.len());
+            scored.cells.push(ScoredCell {
+                scenario: String::new(),
+                sweep: Vec::new(),
+                leaf: name.clone(),
+                source: leaf.source.clone(),
+                stratum: leaf.stratum.iter().map(|k| (k.dim.clone(), k.level.clone())).collect(),
+                start: row.measures.start(),
+                stop: end,
+                mode: ScoreMode::OneStep,
+                origin: None,
+                horizon: None,
+                lead,
+                role: parameter_set.role(name, position),
+                observed: y,
+                samples,
+                log_liks,
+            });
+        }
+        if holes > 0 {
+            scored.notes.push(format!("{holes} row(s) of '{name}' hold no observed value (NA) and are not scored in one_step mode"));
+        }
+        if fewer_rows > 0 {
+            scored.notes.push(format!(
+                "{fewer_rows} one_step row(s) of '{name}' take their CRPS, WIS, PIT and coverage from the samples of \
+                 fewer than all draws: a draw whose filter degenerated, or a particle the filter killed, has none"
+            ));
+        }
+    }
+    for (ti, cells) in at_stop.iter().enumerate() {
+        let Some(&first) = cells.first() else { continue };
+        let role = scored.cells[first].role;
+        if cells.iter().any(|&c| scored.cells[c].role != role) {
+            scored.notes.push(format!(
+                "no joint one-step log score at t = {}: the streams observed there have different roles",
+                crate::quantile::fmt_time(obs_times[ti])
+            ));
+            continue;
+        }
+        let lead = scored.cells[first].lead;
+        let leads_agree = cells.iter().all(|&c| scored.cells[c].lead == lead);
+        scored.joints.push(JointCell {
+            scenario: String::new(),
+            sweep: Vec::new(),
+            mode: ScoreMode::OneStep,
+            origin: None,
+            horizon: None,
+            lead: if leads_agree { lead } else { None },
+            start: cells.iter().map(|&c| scored.cells[c].start).fold(f64::INFINITY, f64::min),
+            stop: obs_times[ti],
+            role,
+            streams: cells.iter().map(|&c| scored.cells[c].leaf.clone()).collect(),
+            log_liks: kept.iter().filter_map(|(_, r)| contribution(r, ti, None)).flat_map(|(ll, _)| ll).collect(),
+        });
+    }
+    Ok(scored)
+}
+
+/// What one draw's one-step record contributes at stop `ti` to the row of
+/// stream `si` (`Some`) or to the joint (`None`): the log density of the
+/// outcome at each particle, and the predictive samples. A particle the
+/// filter killed has density zero and no sample. At the stop where the
+/// draw's filter degenerated every particle has density zero and no sample,
+/// and after it the draw contributes nothing (`None`).
+fn draw_contribution(r: &DrawRecord, ti: usize, si: Option<usize>) -> Option<(Vec<f64>, Vec<f64>)> {
+    match r.degenerated {
+        Some(w) if ti > w => return None,
+        Some(w) if ti == w => return Some((vec![f64::NEG_INFINITY; r.joint[ti].len()], Vec::new())),
+        _ => {}
+    }
+    let dead = sim::inference::prequential::dead_particles(&r.joint[ti], &r.log_liks[ti]);
+    let ll: Vec<f64> = match si {
+        Some(si) => r.log_liks[ti][si].clone(),
+        None => r.joint[ti].clone(),
+    };
+    let ll = ll.into_iter().zip(&dead).map(|(l, &x)| if x { f64::NEG_INFINITY } else { l }).collect();
+    let samples = match si {
+        Some(si) => r.samples[ti][si].iter().zip(&dead).filter(|(_, &x)| !x).map(|(&y, _)| y).collect(),
+        None => Vec::new(),
+    };
+    Some((ll, samples))
 }
 
 /// Group the observed leaves into `(source, index_dims, rows)` for the observed
@@ -5475,6 +6254,51 @@ mod tests {
     const FREE_FORWARD_KEY: &str = "c3d82086913c29f5a729e920a61aff64";
     const SCENARIOS_AB_KEY: &str = "efe665fc26e51684ba9ac7f8f2e5a688";
     const STREAM_ONSET_KEY: &str = "0fd2a1e70cb0f7a22152c0f284e4d821";
+
+    /// One draw's record of one stream over two stops: three particles, the
+    /// second killed by the filter at stop 0 (joint weight −∞, its
+    /// per-stream term read off its dead state and finite).
+    fn record(degenerated: Option<usize>) -> super::DrawRecord {
+        super::DrawRecord {
+            samples: vec![vec![vec![3.0, 100.0, 4.0]], vec![vec![5.0, 6.0, 7.0]]],
+            log_liks: vec![vec![vec![-1.0, -0.5, -2.0]], vec![vec![-1.5, -1.5, -1.5]]],
+            joint: vec![vec![-1.0, f64::NEG_INFINITY, -2.0], vec![-1.5, -1.5, -1.5]],
+            degenerated,
+        }
+    }
+
+    /// A particle the filter killed has density zero in its stream as in the
+    /// joint, so with one stream the stream's log score is the joint one, and
+    /// its draw is no sample.
+    #[test]
+    fn a_dead_particle_scores_as_the_joint_does() {
+        let r = record(None);
+        let (stream, samples) = super::draw_contribution(&r, 0, Some(0)).unwrap();
+        let (joint, _) = super::draw_contribution(&r, 0, None).unwrap();
+        assert_eq!(stream, joint);
+        assert_eq!(samples, vec![3.0, 4.0]);
+        let lme = crate::fit::scoring::log_mean_exp;
+        assert_eq!(lme(&stream).unwrap(), lme(&joint).unwrap());
+    }
+
+    /// A draw whose filter degenerated at a stop has density zero at every
+    /// particle there and no sample, and contributes nothing after; the
+    /// row's score over two draws stays finite while the other draw gives the
+    /// outcome positive density, and is −∞ when both degenerated.
+    #[test]
+    fn a_degenerated_draw_has_density_zero_at_its_stop_and_nothing_after() {
+        let (ll, samples) = super::draw_contribution(&record(Some(0)), 0, Some(0)).unwrap();
+        assert_eq!(ll, vec![f64::NEG_INFINITY; 3]);
+        assert!(samples.is_empty());
+        assert!(super::draw_contribution(&record(Some(0)), 1, Some(0)).is_none());
+        let lme = crate::fit::scoring::log_mean_exp;
+        let other = super::draw_contribution(&record(None), 0, Some(0)).unwrap().0;
+        let both: Vec<f64> = other.iter().chain(&ll).copied().collect();
+        let s = lme(&both).unwrap();
+        assert!(s.is_finite(), "one of two draws degenerated: {s}");
+        assert!((s - (lme(&other).unwrap() - 2.0_f64.ln())).abs() < 1e-12, "the mean over all six particles");
+        assert_eq!(lme(&[ll.clone(), ll].concat()).unwrap(), f64::NEG_INFINITY);
+    }
 
     /// gh#896: a predict's address key is pinned. It names stored outputs, so a
     /// change to it — a reordered or renamed field of `PredictOptions`, a new

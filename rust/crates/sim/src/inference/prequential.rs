@@ -95,20 +95,33 @@ pub fn build_trace(
         // no term at this step. Each scored stream uses the SAME kernels on its
         // own predictive sample + observed value.
         let mut per_stream: Vec<StreamScore> = Vec::new();
+        // A particle the filter killed has density zero in every stream, and
+        // its draw is no sample of the predictive.
+        let dead = dead_particles(log_liks, &recorded.per_stream_log_liks[idx]);
         for si in 0..recorded.stream_names.len() {
             let y_s = per_stream_observed[idx][si];
             if !y_s.is_finite() { continue; }
-            let ll_s = &recorded.per_stream_log_liks[idx][si];
-            let samp_s = &recorded.per_stream_samples[idx][si];
+            let ll_s: Vec<f64> = recorded.per_stream_log_liks[idx][si].iter().zip(&dead)
+                .map(|(&l, &d)| if d { f64::NEG_INFINITY } else { l })
+                .collect();
+            // A particle's draw is left out only where the record holds one
+            // draw per particle (a swarm). The ODE skeleton's record has one
+            // support point and many draws from it, and no particle to kill.
+            let raw = &recorded.per_stream_samples[idx][si];
+            let samp_s: Vec<f64> = if raw.len() == dead.len() {
+                raw.iter().zip(&dead).filter(|(_, &d)| !d).map(|(&y, _)| y).collect()
+            } else {
+                raw.clone()
+            };
             let n_s = ll_s.len() as f64;
             per_stream.push(StreamScore {
                 stream: recorded.stream_names[si].clone(),
                 y_obs: y_s,
                 y_pred_samples: samp_s.clone(),
-                log_score: numerics::log_sum_exp(ll_s) - n_s.ln(),
-                crps: crps_sample_fair(samp_s, y_s),
-                pit: pit_sample_randomized(samp_s, y_s, pit_rng.uniform()),
-                interval: PredInterval::from_samples(samp_s),
+                log_score: numerics::log_sum_exp(&ll_s) - n_s.ln(),
+                crps: crps_sample_fair(&samp_s, y_s),
+                pit: pit_sample_randomized(&samp_s, y_s, pit_rng.uniform()),
+                interval: PredInterval::from_samples(&samp_s),
                 // A finite observed value means the stream is scheduled here,
                 // and a scheduled row always has a coverage.
                 coverage: per_stream_coverage[idx][si].expect(
@@ -165,6 +178,27 @@ pub fn build_trace(
     }
 }
 
+/// Which particles of one stop of a prequential record the filter had
+/// killed, from the stop's joint log weights `joint[particle]` and its
+/// per-stream log-likelihoods `per_stream[stream][particle]`.
+///
+/// The filter sets a dead particle's joint log weight to −∞ and still
+/// evaluates its per-stream log-likelihoods on its dead state, where they are
+/// finite. For a live particle the per-stream terms sum to the joint one, so
+/// a live particle with weight −∞ has a −∞ term in some stream. A particle is
+/// dead when its joint weight is −∞ and its per-stream terms (a NaN, which an
+/// unscheduled stream holds, left out) do not sum to −∞. Its density of every
+/// stream's value is zero, and its predictive draw is no sample of the
+/// predictive.
+pub fn dead_particles(joint: &[f64], per_stream: &[Vec<f64>]) -> Vec<bool> {
+    (0..joint.len())
+        .map(|i| {
+            let sum: f64 = per_stream.iter().filter_map(|s| s.get(i)).filter(|v| !v.is_nan()).sum();
+            joint[i] == f64::NEG_INFINITY && sum != f64::NEG_INFINITY
+        })
+        .collect()
+}
+
 /// RNG stream for the randomized-PIT draws. Disjoint from the filter's
 /// per-particle streams (low indices) and `RESAMPLE_RNG_STREAM` (1<<48),
 /// so passing the filter seed to `build_trace` cannot correlate the PIT
@@ -219,6 +253,29 @@ mod tests {
     }
     use super::*;
     use score::trace::crps_sample;
+
+    /// A particle the filter killed has a joint log weight of −∞, while its
+    /// per-stream log-likelihoods and its predictive draw are read off its
+    /// dead state and are finite. It has density zero: with one stream, the
+    /// stream's score equals the joint one, and its draw is not a sample.
+    /// A live particle whose density of a value is zero is not dead.
+    #[test]
+    fn a_dead_particle_has_density_zero_in_every_stream() {
+        let recorded = super::super::particle_filter::PrequentialRecorded {
+            obs_times: vec![7.0],
+            log_liks: vec![vec![-1.0, f64::NEG_INFINITY, f64::NEG_INFINITY]],
+            stream_names: vec!["a".into()],
+            per_stream_held_out_log_liks: Vec::new(),
+            per_stream_log_liks: vec![vec![vec![-1.0, -0.5, f64::NEG_INFINITY]]],
+            per_stream_samples: vec![vec![vec![3.0, 100.0, 4.0]]],
+        };
+        assert_eq!(dead_particles(&recorded.log_liks[0], &recorded.per_stream_log_liks[0]), vec![false, true, false]);
+        let trace = build_trace(&recorded, &[vec![3.0]], &interval_coverage(&recorded.obs_times, 1), &[1.0], 0, 7, true, None);
+        let step = &trace.steps[0];
+        assert_eq!(step.per_stream[0].log_score, step.log_score, "one stream: its score is the joint one");
+        assert!((step.log_score - ((-1.0_f64).exp() / 3.0).ln()).abs() < 1e-12);
+        assert_eq!(step.per_stream[0].y_pred_samples, vec![3.0, 4.0], "the dead particle's draw is not a sample");
+    }
 
     fn approx_eq(a: f64, b: f64, tol: f64) -> bool { (a - b).abs() < tol }
 

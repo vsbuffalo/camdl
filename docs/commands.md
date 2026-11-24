@@ -35,6 +35,7 @@ transform. A few commands delegate to the compiler.
 | `pfilter` | A log-likelihood at _fixed_ parameters via a bootstrap particle filter (no estimation); with `--sweep-file`, one per row of a design file — see [Evaluate the model over a parameter design](#evaluate-the-model-over-a-parameter-design).                    |
 | `profile` | A profile-likelihood curve over a grid of one or more focal parameters — per-cell IF2 (`chain_binomial`) or an `nl-*` optimizer (`ode`).                                                                                                                      |
 | `predict` | Bands of a stored fit run's posterior (`camdl predict @run`), or of one point given with a model file (`camdl predict MODEL --params FILE --data ...`): free-forward, one-step or a forecast — see [Predict from a fixed point](#predict-from-a-fixed-point). |
+| `score`   | A stored prediction scored against the observed outcomes of the rows it predicted: log score, CRPS, WIS, PIT and interval coverage per row, and their means per stream, mode, role and lead — see [Score a prediction](#score-a-prediction).                  |
 
 ### Read, display, compare
 
@@ -450,6 +451,33 @@ fixed point are refused with a run handle, whose problem holds its model, data
 and numerics. The other refusals are those of a posterior prediction: one-step
 on ODE or Gillespie, a forecast on Gillespie, `--particles` where no filter
 runs, `--design` and `--covariate` outside a forecast.
+
+### Score a prediction
+
+`camdl score` scores a stored prediction against the outcomes of the rows it
+predicted. It takes the prediction's handle and one outcome file per stream
+source, and nothing else: the prediction's parameter source, mode, reach,
+particles and seed are in its identity.
+
+```bash
+camdl predict @sir --mode forecast --horizon "8 weeks" --label sir_fc
+camdl score @sir_fc --data cases=london.tsv
+```
+
+For a stored fit the outcome file is the file the fit was given, held-out rows
+included; for a fixed point it is the file the prediction was given, extended
+past `--holdout-after`. Every row the prediction conditioned on must be in it
+unchanged, or the score is refused naming the first row that differs. The score
+computes the prediction again with the outcomes bound and checks that it writes
+the stored prediction's files byte for byte before storing anything, so a score
+costs about what its prediction cost.
+
+The score is stored inside the prediction, at `scores/score-<12 hex>/`:
+`scored.tsv` (one row per scored row or target), `summary.tsv` (one row per
+stream, mode, role and lead; a `joint` stream holds the log score of every
+stream observed at one time) and `score.json`. A one-step score continues the
+filter through the held-out rows, predicting each from the rows before it. The
+files and the rules are in the run specification, §2.2.4.
 
 ### Sweeps and scenario grids: `simulate --sweep`
 

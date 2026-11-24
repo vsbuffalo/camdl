@@ -331,6 +331,7 @@ enum StoredFitResult {
     Run(store::Stored<crate::fit_store::FitRun>, RunExtras),
     Problem(store::Stored<crate::fit_store::FitProblem>),
     Prediction(store::Stored<crate::fit_store::Prediction>),
+    Score(store::Stored<crate::fit_store::Score>),
 }
 
 /// What the store records of a fit run beside its own files: the label of
@@ -383,6 +384,7 @@ impl StoredFitResult {
             StoredFitResult::Run(..) => "fit_run",
             StoredFitResult::Problem(_) => "fit",
             StoredFitResult::Prediction(_) => "prediction",
+            StoredFitResult::Score(_) => "score",
         }
     }
 
@@ -391,6 +393,7 @@ impl StoredFitResult {
             StoredFitResult::Run(s, _) => s.folder(),
             StoredFitResult::Problem(s) => s.folder(),
             StoredFitResult::Prediction(s) => s.folder(),
+            StoredFitResult::Score(s) => s.folder(),
         }
     }
 
@@ -399,6 +402,7 @@ impl StoredFitResult {
             StoredFitResult::Run(s, _) => s.id().key().to_hex(),
             StoredFitResult::Problem(s) => s.id().key().to_hex(),
             StoredFitResult::Prediction(s) => s.id().key().to_hex(),
+            StoredFitResult::Score(s) => s.id().key().to_hex(),
         }
     }
 
@@ -407,6 +411,7 @@ impl StoredFitResult {
             StoredFitResult::Run(s, _) => s.result_files(),
             StoredFitResult::Problem(s) => s.result_files(),
             StoredFitResult::Prediction(s) => s.result_files(),
+            StoredFitResult::Score(s) => s.result_files(),
         };
         names.into_iter().map(str::to_string).collect()
     }
@@ -416,6 +421,7 @@ impl StoredFitResult {
             StoredFitResult::Run(s, _) => serde_json::to_value(s.identity()),
             StoredFitResult::Problem(s) => serde_json::to_value(s.identity()),
             StoredFitResult::Prediction(s) => serde_json::to_value(s.identity()),
+            StoredFitResult::Score(s) => serde_json::to_value(s.identity()),
         }
         .unwrap_or(serde_json::Value::Null)
     }
@@ -425,6 +431,7 @@ impl StoredFitResult {
             StoredFitResult::Run(s, _) => crate::camdl_store::read_stored(s, name),
             StoredFitResult::Problem(s) => crate::camdl_store::read_stored(s, name),
             StoredFitResult::Prediction(s) => crate::camdl_store::read_stored(s, name),
+            StoredFitResult::Score(s) => crate::camdl_store::read_stored(s, name),
         }
     }
 
@@ -479,6 +486,11 @@ impl StoredFitResult {
                     }
                 }
             }
+        }
+        if let StoredFitResult::Score(s) = self {
+            field("prediction", &s.identity().prediction.id().key().to_hex());
+            let outcomes: Vec<&String> = s.identity().outcomes.keys().collect();
+            field("outcomes of", &outcomes.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "));
         }
         out.report_line(format_args!("{}", style::stdout().paint("files", Style::Dim)));
         for f in self.result_files() {
@@ -535,6 +547,7 @@ impl StoredFitResult {
             StoredFitResult::Run(..) => "fit_state.toml",
             StoredFitResult::Problem(_) => crate::fit_store::PROBLEM_FILE,
             StoredFitResult::Prediction(_) => "report.json",
+            StoredFitResult::Score(_) => "summary.tsv",
         };
         let files = self.result_files();
         let name = stream.unwrap_or(default);
@@ -593,8 +606,13 @@ fn resolve_stored_fit(root: &Path, key: &str) -> Option<Result<StoredFitResult, 
         Err(e) if not_here(&e) => {}
         Err(e) => return Some(Err(e.to_string())),
     }
-    match store.resolve::<crate::fit_store::Prediction>(&store::RunRef::new(handle)) {
-        Ok(s) => Some(Ok(StoredFitResult::Prediction(s))),
+    match store.resolve::<crate::fit_store::Prediction>(&store::RunRef::new(handle.clone())) {
+        Ok(s) => return Some(Ok(StoredFitResult::Prediction(s))),
+        Err(e) if not_here(&e) => {}
+        Err(e) => return Some(Err(e.to_string())),
+    }
+    match store.resolve::<crate::fit_store::Score>(&store::RunRef::new(handle)) {
+        Ok(s) => Some(Ok(StoredFitResult::Score(s))),
         // A fit result the store holds in another state is refused with it.
         Err(e) if not_here(&e) => crate::fit_store::not_completed(&store, key).map(Err),
         Err(e) => Some(Err(e.to_string())),

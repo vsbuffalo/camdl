@@ -324,6 +324,10 @@ pub enum Finding {
 pub enum ConditioningMode {
     InSample,
     HoldOutTail { train_end: f64 },
+    /// A fixed point with no statement of its training rows.
+    Unknown,
+    /// A fixed point's rows after its declared `--holdout-after`.
+    HoldOutDeclared { trained_through: f64 },
 }
 
 /// One source's recorded hashes across the members that bind it or could.

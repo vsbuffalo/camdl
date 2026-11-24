@@ -828,6 +828,34 @@ pub fn compile_obs_mean_pf(
     }))
 }
 
+/// The density companion of [`compile_obs_sample_pf`]: `(y, projected, t,
+/// counts, aux) → log p(y | x_t, θ)`, the observation model's log density of
+/// the value `y`, by the same likelihood the particle filter weights with.
+/// Takes no RNG, so it consumes none.
+pub type ObsLogLikFn = Box<dyn Fn(f64, f64, f64, &[i64], &[(String, f64)]) -> f64>;
+
+/// Build the log-density companion of [`compile_obs_sample_pf`] (fixed
+/// params), with the same arguments, resolution and state contract. A score
+/// reads it at each free-forward draw's state to score an observed value.
+pub fn compile_obs_loglik_pf(
+    obs_model: &ObservationModel,
+    compiled: Arc<CompiledModel>,
+    params: &[f64],
+) -> Result<ObsLogLikFn, crate::error::SimError> {
+    let resolved =
+        resolve_likelihood_from_model(&obs_model.likelihood, &compiled, &obs_model.name)?;
+    let params = params.to_vec();
+    let real_s = RealState::new(compiled.real_local_to_global.len());
+    let n_int = compiled.int_local_to_global.len();
+
+    Ok(Box::new(move |y: f64, projected: f64, t: f64, counts: &[i64], aux: &[(String, f64)]| {
+        assert_eq!(counts.len(), n_int,
+            "compile_obs_loglik_pf: counts length {} != expected {}", counts.len(), n_int);
+        let int_s = IntState::from_vec(counts.to_vec());
+        eval_likelihood_resolved(&resolved, t, projected, y, aux, &params, &compiled, &int_s, &real_s)
+    }))
+}
+
 /// True iff any likelihood argument is NaN — typically `0/0` from a
 /// collapsed-compartment denominator in a degenerate prior draw (gh#619).
 /// Such a draw has no defined value; every arm of [`sample_obs_resolved`]

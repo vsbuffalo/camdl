@@ -92,11 +92,11 @@ const BASE: &[&[&str]] = &[
         "--save-final-state", "base-final.tsv", "--save-paths", "base-paths.tsv", "--save-prequential",
         "base-prequential",
     ],
-    &["predict", "@fit", "--n-draws", "10", "--particles", "30", "--seed", "99", "--progress", "none"],
+    &["predict", "@fit", "--n-draws", "10", "--particles", "30", "--seed", "99", "--label", "pred", "--progress", "none"],
     &[
         "predict", "model.camdl", "--params", "truth.params.toml", "--data", "daily_cases=daily_cases.tsv",
         "--data", "weekly_cases=weekly_cases.tsv", "--n-draws", "10", "--particles", "30", "--seed", "99",
-        "--progress", "none",
+        "--holdout-after", "28", "--label", "point_pred", "--progress", "none",
     ],
     &[
         "profile", "model.camdl", "--fit", "@fit", "--sweep", "gamma=0.25", "--particles", "20", "--iterations",
@@ -155,6 +155,18 @@ const CASES: &[Case] = &[
             "--data", "weekly_cases=weekly_cases.tsv", "--n-draws", "10", "--particles", "30", "--seed", "3",
             "--progress", "none",
         ],
+        named: None,
+    },
+    // The score opens the fit run the prediction's draws came from, as
+    // `predict @fit` does.
+    Case {
+        name: "score of a stored prediction",
+        command: &["score", "@pred", "--data", "daily_cases=daily_cases.tsv", "--data", "weekly_cases=weekly_cases.tsv"],
+        named: Some("fit"),
+    },
+    Case {
+        name: "score of a stored fixed-point prediction",
+        command: &["score", "@point_pred", "--data", "daily_cases=daily_cases.tsv", "--data", "weekly_cases=weekly_cases.tsv"],
         named: None,
     },
     Case {

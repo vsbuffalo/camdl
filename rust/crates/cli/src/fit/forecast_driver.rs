@@ -226,14 +226,10 @@ impl HeldOutValues {
         held_out: &std::collections::BTreeMap<String, Vec<super::forecast_plan::HeldOut>>,
         model: &ir::Model,
     ) -> Result<Self, String> {
-        use super::forecast_plan::DesignMode;
-        use sim::inference::ObsCell;
-        let mut values = Vec::with_capacity(plan.targets().len());
-        let mut not_scored = Vec::with_capacity(plan.targets().len());
+        let mut rows = Vec::with_capacity(plan.targets().len());
         for t in plan.targets() {
             let Some(at) = t.observed else {
-                values.push(None);
-                not_scored.push(None);
+                rows.push(None);
                 continue;
             };
             let row = held_out.get(&t.stream).and_then(|rows| rows.iter()
@@ -241,14 +237,63 @@ impl HeldOutValues {
                 .ok_or_else(|| format!(
                     "internal error: target of '{}' ending at {} names its {}, which was not read",
                     t.stream, t.measures.end(), at.describe()))?;
+            rows.push(Some((row.row.clone(), at.describe())));
+        }
+        Self::screened(plan, rows, model)
+    }
+
+    /// The values of the outcome rows that measure each target's period or
+    /// instant, read from `outcomes` (each leaf's rows after the ones the
+    /// prediction conditioned on), screened as [`Self::from_rows`] screens
+    /// them. Two rows measuring one target are refused.
+    pub(crate) fn from_outcomes(
+        plan: &ForecastPlan,
+        outcomes: &crate::fit::scoring::OutcomeBinding,
+        model: &ir::Model,
+    ) -> Result<Self, String> {
+        let mut rows = Vec::with_capacity(plan.targets().len());
+        for t in plan.targets() {
+            let matching: Vec<&super::observed_rows::ObservedRow> = outcomes
+                .after_conditioning(&t.stream)
+                .iter()
+                .filter(|r| super::forecast_plan::same_span(&r.measures, &t.measures))
+                .collect();
+            match matching[..] {
+                [] => rows.push(None),
+                [r] => rows.push(Some((r.clone(), format!("outcome row {} of '{}'", r.position + 1, t.stream)))),
+                [a, b, ..] => return Err(format!(
+                    "the outcome rows {} and {} of '{}' both measure the target ending at {}; each \
+                     target is scored against one row",
+                    a.position + 1, b.position + 1, t.stream, t.measures.end())),
+            }
+        }
+        Self::screened(plan, rows, model)
+    }
+
+    /// Each target's row, as `(row, how a message names it)`, screened.
+    fn screened(
+        plan: &ForecastPlan,
+        rows: Vec<Option<(super::observed_rows::ObservedRow, String)>>,
+        model: &ir::Model,
+    ) -> Result<Self, String> {
+        use super::forecast_plan::DesignMode;
+        use sim::inference::ObsCell;
+        let mut values = Vec::with_capacity(plan.targets().len());
+        let mut not_scored = Vec::with_capacity(plan.targets().len());
+        for (t, row) in plan.targets().iter().zip(rows) {
+            let Some((row, named)) = row else {
+                values.push(None);
+                not_scored.push(None);
+                continue;
+            };
             let obs = model.observations.iter().find(|o| o.name == t.stream)
                 .ok_or_else(|| format!("internal error: no observation block '{}'", t.stream))?;
             let reads_design = !crate::pfilter::stream_aux_columns(obs).is_empty();
-            let screened: Result<f64, String> = match row.row.cell {
-                None => Err(format!("its {} is NA", at.describe())),
+            let screened: Result<f64, String> = match row.cell {
+                None => Err(format!("its {named} is NA")),
                 Some(ObsCell::HeldOut(_)) => return Err(format!(
-                    "internal error: the {} of '{}' was read as a held-out cell; a row read \
-                     from a file holds an observed value or NA", at.describe(), t.stream)),
+                    "internal error: the {named} of '{}' was read as a held-out cell; a row read \
+                     from a file holds an observed value or NA", t.stream)),
                 Some(ObsCell::Scalar(_)) if reads_design && plan.design_mode() == Some(DesignMode::Prospective) =>
                     Err("a prospective forecast is not scored: the held-out value was realised \
                          under its own design, not the design supplied at the origin; score this \
@@ -257,7 +302,7 @@ impl HeldOutValues {
                     obs, t.measures.end(), v, &t.design)
                 {
                     None => Ok(v),
-                    Some(why) => Err(format!("its {} cannot be scored: {why}", at.describe())),
+                    Some(why) => Err(format!("its {named} cannot be scored: {why}")),
                 },
             };
             match screened {
@@ -271,6 +316,11 @@ impl HeldOutValues {
     /// The value bound at target `k`, when it is scored.
     pub(crate) fn at(&self, k: usize) -> Option<f64> {
         self.values[k]
+    }
+
+    /// Why target `k`'s row is not scored, when it names one that is not.
+    pub(crate) fn not_scored(&self, k: usize) -> Option<&str> {
+        self.not_scored[k].as_deref()
     }
 
     fn len(&self) -> usize {

@@ -792,7 +792,7 @@ fn overlaps(a: &Measures, b: &Measures) -> bool {
     }
 }
 
-fn same_span(a: &Measures, b: &Measures) -> bool {
+pub(crate) fn same_span(a: &Measures, b: &Measures) -> bool {
     (a.start() - b.start()).abs() <= TIME_TIE_EPS && (a.end() - b.end()).abs() <= TIME_TIE_EPS
 }
 

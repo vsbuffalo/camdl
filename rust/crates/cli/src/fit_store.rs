@@ -307,7 +307,7 @@ pub(crate) struct ChainIdentity {
 
 /// One run on a problem.
 #[derive(store::Identity, Clone, Debug)]
-#[identity(tag = "fit_run", version = 2)]
+#[identity(tag = "fit_run", version = 3)]
 pub(crate) struct FitRunIdentity {
     pub chain: ChainIdentity,
     /// Sweeps or iterations, for a method that can be extended; 0 otherwise.
@@ -506,9 +506,55 @@ impl Primary for Prediction {
     }
 }
 
+// ── Scores ───────────────────────────────────────────────────────────────────
+
+/// The settings of a score that its rules do not fix: the levels of the two
+/// central intervals whose coverage it reports, and the seed of the uniform
+/// draws that randomize the PIT within a count's jump. Which rules are
+/// computed is fixed by the score's identity version.
+#[derive(store::Identity, Clone, Debug)]
+#[identity(tag = "score_settings", version = 1)]
+pub(crate) struct ScoreSettings {
+    /// The central interval levels, 0.5 and 0.9.
+    pub intervals: (Finite, Finite),
+    pub pit_seed: u64,
+}
+
+/// One score: a stored prediction scored against the outcomes of the rows it
+/// predicted. The outcomes enter here and nowhere in the prediction, so a
+/// prediction scored with two sets of outcomes is one prediction with two
+/// scores.
+#[derive(store::Identity, Clone, Debug)]
+#[identity(tag = "score", version = 1)]
+pub(crate) struct ScoreIdentity {
+    /// The prediction scored; its identity holds the parameter source, the
+    /// mode, the reach and everything the prediction read.
+    pub prediction: Dep<Prediction>,
+    /// Per stream source, the outcome rows scored: the lines of the bound
+    /// file after the prediction's conditioning rows, as a stored data table.
+    pub outcomes: BTreeMap<String, Dep<DataTable>>,
+    pub settings: ScoreSettings,
+}
+
+/// One score, written once, inside the prediction it scores.
+pub(crate) struct Score;
+
+impl Artifact for Score {
+    const KIND: &'static str = "score";
+    const WRITE: WriteMode = WriteMode::Atomic;
+    type Identity = ScoreIdentity;
+    type Labels = ();
+}
+
+impl Primary for Score {
+    fn layout(id: &ScoreIdentity, _labels: &()) -> Placed {
+        Layout::inside(id.prediction.id(), "scores").result("score")
+    }
+}
+
 /// Adds every kind of this module to `kinds`.
 pub(crate) fn register(kinds: Kinds) -> Kinds {
-    kinds.register::<FitProblem>().register::<FitRun>().register::<Prediction>()
+    kinds.register::<FitProblem>().register::<FitRun>().register::<Prediction>().register::<Score>()
 }
 
 // ── Resolving a problem ──────────────────────────────────────────────────────
@@ -873,40 +919,14 @@ fn cut_to_training(
     if wanted.iter().all(|(leaf, (n, _))| *n == rows[*leaf].len()) {
         return Ok(bytes.to_vec());
     }
+    let names: Vec<&str> = wanted.iter().map(|(leaf, _)| *leaf).collect();
+    let kept = cut_lines(bytes, ext, source, &names, &|i, seen| seen < wanted[i].1 .0, load)?;
     let dir = tempfile::tempdir().map_err(|e| format!("cannot make a temporary directory: {e}"))?;
     let path = dir.path().join(format!("cut.{ext}"));
     let path_text = path.to_string_lossy().into_owned();
-    let bind = |content: &[u8]| -> Result<Vec<Vec<ObservedRow>>, String> {
-        std::fs::write(&path, content).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-        wanted.iter().map(|(leaf, _)| load(&path_text, leaf)).collect()
-    };
-    let lines = lines_of(bytes);
-    // The lines before the first data line: the fewest leading lines the
-    // loader reads as a file, which give no stream a row.
-    let head = (0..lines.len())
-        .find(|&h| bind(&lines[..=h].concat()).is_ok_and(|got| got.iter().all(Vec::is_empty)))
-        .ok_or_else(|| format!("data file '{source}' has no header the loader reads"))?;
-    let mut kept: Vec<u8> = lines[..=head].concat();
-    let mut seen = vec![0usize; wanted.len()];
-    for line in &lines[head + 1..] {
-        let mut probe = lines[..=head].concat();
-        probe.extend_from_slice(line);
-        let got = bind(&probe)?;
-        let mut keep = got.iter().all(Vec::is_empty);
-        for (i, g) in got.iter().enumerate() {
-            if g.len() > 1 {
-                return Err(format!("internal error: one line of data file '{source}' gave {} rows of one stream", g.len()));
-            }
-            if g.len() == 1 {
-                keep |= seen[i] < wanted[i].1 .0;
-                seen[i] += 1;
-            }
-        }
-        if keep {
-            kept.extend_from_slice(line);
-        }
-    }
-    for (g, (leaf, (n, digest))) in bind(&kept)?.iter().zip(&wanted) {
+    std::fs::write(&path, &kept).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    let bound: Vec<Vec<ObservedRow>> = wanted.iter().map(|(leaf, _)| load(&path_text, leaf)).collect::<Result<_, _>>()?;
+    for (g, (leaf, (n, digest))) in bound.iter().zip(&wanted) {
         if g.len() != *n || row_digest(g)?.to_hex() != *digest {
             return Err(format!(
                 "the streams that read data file '{source}' train on different numbers of its lines ('{leaf}' \
@@ -917,6 +937,73 @@ fn cut_to_training(
         }
     }
     Ok(kept)
+}
+
+/// `bytes`, a data file read by the streams `leaves`, with its header, every
+/// line that gives no stream a row, and each line that gives stream `i` its
+/// `seen`-th row (counted from 0) when `keep(i, seen)` holds.
+///
+/// Which stream a line gives a row to is read by the loader itself: each data
+/// line is bound alone, under the lines that precede the first data line, and
+/// the rows each stream reads from it are counted.
+fn cut_lines(
+    bytes: &[u8],
+    ext: &str,
+    source: &str,
+    leaves: &[&str],
+    keep: &dyn Fn(usize, usize) -> bool,
+    load: &dyn Fn(&str, &str) -> Result<Vec<ObservedRow>, String>,
+) -> Result<Vec<u8>, String> {
+    let dir = tempfile::tempdir().map_err(|e| format!("cannot make a temporary directory: {e}"))?;
+    let path = dir.path().join(format!("cut.{ext}"));
+    let path_text = path.to_string_lossy().into_owned();
+    let bind = |content: &[u8]| -> Result<Vec<Vec<ObservedRow>>, String> {
+        std::fs::write(&path, content).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        leaves.iter().map(|leaf| load(&path_text, leaf)).collect()
+    };
+    let lines = lines_of(bytes);
+    // The lines before the first data line: the fewest leading lines the
+    // loader reads as a file, which give no stream a row.
+    let head = (0..lines.len())
+        .find(|&h| bind(&lines[..=h].concat()).is_ok_and(|got| got.iter().all(Vec::is_empty)))
+        .ok_or_else(|| format!("data file '{source}' has no header the loader reads"))?;
+    let mut kept: Vec<u8> = lines[..=head].concat();
+    let mut seen = vec![0usize; leaves.len()];
+    for line in &lines[head + 1..] {
+        let mut probe = lines[..=head].concat();
+        probe.extend_from_slice(line);
+        let got = bind(&probe)?;
+        let mut keep_line = got.iter().all(Vec::is_empty);
+        for (i, g) in got.iter().enumerate() {
+            if g.len() > 1 {
+                return Err(format!("internal error: one line of data file '{source}' gave {} rows of one stream", g.len()));
+            }
+            if g.len() == 1 {
+                keep_line |= keep(i, seen[i]);
+                seen[i] += 1;
+            }
+        }
+        if keep_line {
+            kept.extend_from_slice(line);
+        }
+    }
+    Ok(kept)
+}
+
+/// `bytes`, the outcome file of the stream source `source` read by `leaves`,
+/// with its header and the lines after each leaf's first `conditioning[leaf]`
+/// rows: the outcomes a score reads beyond what its prediction conditioned on.
+/// `load(path, leaf)` reads one leaf's rows of a file.
+pub(crate) fn lines_after_conditioning(
+    bytes: &[u8],
+    ext: &str,
+    source: &str,
+    leaves: &[&str],
+    conditioning: &BTreeMap<String, usize>,
+    load: &dyn Fn(&str, &str) -> Result<Vec<ObservedRow>, String>,
+) -> Result<Vec<u8>, String> {
+    let n: Vec<usize> = leaves.iter().map(|l| conditioning.get(*l).copied().unwrap_or(0)).collect();
+    cut_lines(bytes, ext, source, leaves, &|i, seen| seen >= n[i], load)
 }
 
 // ── The stored files ─────────────────────────────────────────────────────────
@@ -1451,7 +1538,7 @@ impl OpenedFit {
 /// The compiled model a stored problem names, as an IR envelope: the model
 /// part with the name, the description and the documentation the compile's
 /// provenance records restored.
-fn stored_envelope(store: &Store, dep: &Dep<CompiledModel>, name: &str) -> Result<ir::IrEnvelope, String> {
+pub(crate) fn stored_envelope(store: &Store, dep: &Dep<CompiledModel>, name: &str) -> Result<ir::IrEnvelope, String> {
     let stored: Stored<CompiledModel> = store
         .get(dep.id())
         .map_err(|e| e.to_string())?

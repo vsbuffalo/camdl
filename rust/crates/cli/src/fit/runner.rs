@@ -28,6 +28,7 @@ use std::sync::Arc;
 
 /// Everything needed to run IF2 chains, built from fit.toml + optional prior state.
 /// One observation data stream with its projection and likelihood.
+#[derive(Clone)]
 pub struct ObsStream {
     pub name: String,
     /// Resolved projection (incidence / prevalence / snapshot expression)

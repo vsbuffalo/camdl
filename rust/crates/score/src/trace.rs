@@ -87,6 +87,11 @@ pub enum PredictiveBasis {
     /// draws at `x_t(θ)` per θ; the step's `ess` is 1, the single state
     /// support point.
     OdeFreeForward { samples_per_draw: usize },
+    /// The model simulated forward from `t_start` at θ on a stochastic
+    /// backend, one trajectory per θ, never re-anchored to data: the score at
+    /// a row is the observation density at that trajectory's state, a
+    /// one-sample Monte-Carlo estimate of the free-forward predictive at θ.
+    SimulatedFreeForward,
 }
 
 /// How the parameters were conditioned on the data when scoring — the **second**
@@ -119,6 +124,15 @@ pub enum Conditioning {
     /// Honest in θ — the only leak channel the stamp certifies.
     /// `theta_source` names the sealed fit the parameters came from.
     HoldOutTail { train_end: f64, theta_source: String },
+    /// θ is a fixed point given with no statement of the rows it was fitted
+    /// to: whether any scored row trained it is not known.
+    Unknown,
+    /// θ is a fixed point declared fitted to the rows ending at or before
+    /// `trained_through` (`--holdout-after`); the scored rows after it are
+    /// held out as declared. Nothing records the fit, so the declaration is
+    /// not verified, which is what distinguishes this from
+    /// [`Conditioning::HoldOutTail`].
+    HoldOutDeclared { trained_through: f64 },
 }
 
 /// One stream's (district's) score at a single step (gh#269).
@@ -496,12 +510,16 @@ impl PrequentialTrace {
     pub fn optimism_caveat(&self) -> Option<String> {
         let plug_in = self.provenance == Provenance::PlugIn;
         let in_sample = self.conditioning == Conditioning::InSample;
-        if !plug_in && !in_sample {
+        let unknown = self.conditioning == Conditioning::Unknown;
+        if !plug_in && !in_sample && !unknown {
             return None;
         }
         let mut why: Vec<&str> = Vec::new();
         if plug_in {
             why.push("plug-in (scored at a single θ, dropping parameter uncertainty → under-dispersed)");
+        }
+        if unknown {
+            why.push("of unknown conditioning (nothing records which rows θ was fitted to, so any scored row may have trained it)");
         }
         if in_sample {
             why.push(

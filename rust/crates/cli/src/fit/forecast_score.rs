@@ -25,10 +25,12 @@
 //!   density of the targets' values together; it is not the sum of their
 //!   marginal scores.
 //!
-//! Nothing here is written to an artifact yet: the score artifact that will
-//! carry these (gh#808) is Stage 6's.
+//! `camdl score` computes both from the forecast's per-particle records
+//! through [`log_mean_exp`] ([`crate::fit::scoring`]); [`marginal_log_scores`]
+//! and [`joint_log_score`] state the same rule over one [`Forecast`], which
+//! the driver's tests read.
 
-#![cfg_attr(not(test), allow(dead_code))] // read by Stage 6's score artifact
+#![cfg_attr(not(test), allow(dead_code))] // the forecast-level functions are read by tests
 
 use super::forecast_driver::Forecast;
 

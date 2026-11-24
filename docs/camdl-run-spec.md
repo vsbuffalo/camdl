@@ -1397,6 +1397,141 @@ Three consequences a reader has to know:
 - **A fit that saved no paths reports the quantity as fully censored**, with a
   named note on stderr, rather than falling back to the replay.
 
+#### 2.2.4 `camdl score` score artifact
+
+`camdl score` scores a stored prediction against the observed outcomes of the
+rows it predicted. The outcomes change the score and never the prediction: a
+forecast made today and scored next month is one stored prediction with one
+score.
+
+```bash
+camdl predict @sir --mode forecast --horizon "8 weeks" --label sir_fc
+camdl score @sir_fc --data cases=london.tsv
+camdl predict measles.camdl --params he2010.toml --data cases=london.tsv \
+    --mode one_step --holdout-after 1960-12-31 --label he
+camdl score @he --data cases=london.tsv
+```
+
+The positional argument is the prediction's handle (`@label`, a run-id prefix or
+its folder). `--data STREAM=FILE` gives one outcome file per stream source: for
+a stored fit, the file the fit was given, held-out rows included; for a fixed
+point, the file the prediction was given, extended past `--holdout-after`.
+`score` takes no flag for the prediction: its parameter source, mode, reach,
+particles, seed and scenarios are in its identity. `--store`, `--label`,
+`--force` and `-o DIR` mean what they mean for `camdl predict`.
+
+**The outcome files must agree with the prediction.** Each file is read by the
+loader the prediction read its data with, and every row the prediction
+conditioned on must be in it, equal by row digest, before the rows after them. A
+file that lacks one or differs in one is refused, naming the stream, the row and
+its value: its held-out rows would belong to another series. A stream with no
+`--data` file is scored on the rows the prediction conditioned on only.
+
+**The score computes the prediction again.** The stored files keep summaries,
+and a forecast keeps 5 particles per draw, so the score runs the prediction's
+own computation with each draw's own seed and the outcomes bound. A bound
+outcome is a held-out value that no filter weight reads and that draws no random
+number, so the prediction computed has the stored prediction's run id and writes
+its files byte for byte; a difference is refused as an internal error and no
+score is written. A prediction made with `--quantities` is refused: its identity
+keeps the vocabulary's digest, not the file.
+
+What is scored, by mode:
+
+- **Free-forward.** Every bound row the prediction emitted a band for: each
+  draw's observation density of the outcome at that draw's simulated state. On
+  the ODE backend this is the exact density along each draw's trajectory. An
+  outcome row past the prediction's data that no emitted row measures (a stream
+  whose likelihood reads a data column stops at its data) is not scored, and is
+  named in `score.json`'s notes.
+- **One-step** (chain-binomial). The filter runs on past the prediction's last
+  conditioning row through the outcome rows after it, predicting each row from
+  the particles before it and then assimilating it. Its bands for those rows are
+  the score's and are written to no prediction file. A particle the filter
+  killed has density zero in every stream, as in the joint, and its draw is no
+  sample. A draw whose filter degenerates on a row after the conditioning rows
+  has density zero at every particle there, and its pass stops: it scores no
+  later row, and `score.json`'s notes name the draw and each row it leaves
+  unscored. A row's score is then the log of the mean density over the particles
+  of every draw that reached it, finite while some draw gave the outcome
+  positive density and `-inf` when none did; its other rules use the samples of
+  the draws that reached it alive. A row no draw reached is counted in
+  `summary.tsv`'s `n_unscored` and written to no other file.
+- **Forecast.** Each target whose period an outcome row measures: the
+  observation density at each particle at the target's end, recorded before
+  anything could be assimilated there.
+
+**Rules.** For one row, with `S = M·N` samples (`M` draws, `N` particles per
+draw; `N = 1` for free-forward):
+
+- `log_score`: `logsumexp_s ℓ_s − log S`, `ℓ_s` the log density of the outcome
+  at sample `s`'s state: the log of the mean density, never the mean of per-draw
+  logs. At a fixed point with `--n-draws 1` under one-step, each row's score is
+  the log of the filter's incremental likelihood at that row (pomp's
+  `cond_logLik`, King, Nguyen & Ionides 2016), and their sum is `pfilter`'s
+  log-likelihood with the same particle count and the seed the prediction ran
+  that copy's filter with.
+- `crps`: the fair sample estimator (Ferro 2014).
+- `wis`, `wis_dispersion`, `wis_over`, `wis_under`: the weighted interval score
+  of Bracher et al. (2021) and its parts, from the samples' quantiles at the 23
+  levels of the US COVID-19 Forecast Hub (0.01, 0.025, 0.05, 0.1, …, 0.9, 0.95,
+  0.975, 0.99).
+- `pit`: the randomized probability integral transform, its uniform draws from
+  the prediction's seed.
+- `in_50`, `in_90`: 1 when the outcome lies in the central 50% or 90% interval
+  of the samples, ends included.
+
+A score that is `-inf` is written `-inf`, and so is a sum that includes one.
+When a row has one sample (a free-forward prediction at a fixed point with
+`--n-draws 1`), its CRPS, WIS, PIT and coverage come from that single sample,
+and `score.json`'s notes say so.
+
+Under one-step and forecast prediction a row with `stream` `joint` holds the log
+score of every stream observed at one time together, from each sample's summed
+log densities; a forecast also has one `joint` row over every scored target,
+with `lead` empty. Only the log score is computed for a `joint` row.
+
+**Files.** The score is stored inside the prediction, at
+`scores/score-<12 hex>/`:
+
+- `scored.tsv`: one row per scored row or target, with the columns
+  `scenario [sweep:<p>] stream source <dims> t_start t_stop [date_start date_stop] mode origin horizon lead role parameters quantity mean q05 q25 q50 q75 q95 observed log_score crps wis wis_dispersion wis_over wis_under pit in_50 in_90`.
+  `stream` is the observation block, and `source` the data source it reads: two
+  blocks reading one source (`weekly from surv`, `recovered from surv`) are two
+  streams. `role` is `trained`, `held_out`, `future` (every forecast target) or
+  `unknown` (a fixed point with no `--holdout-after`). `lead` is a forecast
+  target's time from the origin, or a one-step row's period (for an instant row,
+  the time since its stream's previous row); it is empty for free-forward rows.
+- `summary.tsv`: one row per (scenario, sweep point, stream, stratum, mode,
+  role, lead), with
+  `n n_unscored log_score_sum log_score_mean crps_mean
+  wis_mean coverage_50 coverage_90`.
+  Rows of different streams, modes, roles or leads are never pooled.
+- `score.json`: the prediction's run id; `parameters` (`posterior` or
+  `fixed_point`); `conditioning`, what the parameters were fitted to
+  (`hold_out_tail`, from the end of the fit's last training row, for a fit with
+  held-out rows or a score of outcome rows past the fit's data; `in_sample`
+  otherwise; `hold_out_declared` for a fixed point's `--holdout-after`,
+  `unknown` without one); per mode the provenance, the basis (`filtered`,
+  `ode_free_forward`, `simulated_free_forward`) and the draws and samples per
+  draw; the reach, the particle count and the seed; the rules' settings; the
+  forecast's covariate statements; `labels`
+  (`conditional on covariates observed after the origin` under
+  `--covariate NAME=realised`, `held out as declared, not verified` for a fixed
+  point's held-out rows); per stream and mode the rows scored and their digest;
+  the sets of streams the `joint` rows are of; and the notes. `rules.not_scored`
+  records that a prediction made with `--quantities` cannot be scored.
+
+The identity of a score is the prediction, each stream's outcome lines after the
+prediction's conditioning rows (stored as a data table), and the interval levels
+and PIT seed. Editing a held-out outcome makes another score of the same
+prediction. `camdl show` and `camdl cat` read a score; `cat` prints its
+`summary.tsv` by default.
+
+References: Bracher, Ray, Gneiting & Reich (2021), _PLOS Comput. Biol._ 17(2),
+e1008618; Ferro (2014), _Q. J. R. Meteorol. Soc._ 140(683), 1917–1923; King,
+Nguyen & Ionides (2016), _J. Stat. Softw._ 69(12).
+
 ### 2.3 Sweeping a fit over a fixed parameter
 
 `camdl fit run <config> --sweep NAME=SPEC` applies each sweep point to the

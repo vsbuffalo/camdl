@@ -126,6 +126,11 @@ fn conditioning_line(trace: &PrequentialTrace) -> String {
         Conditioning::HoldOutTail { train_end, .. } => format!(
             "Conditioning: held-out tail (train_end = {train_end}) — θ sealed \
              before the scored window."),
+        Conditioning::Unknown =>
+            "Conditioning: unknown — no record of the rows θ was fitted to.".to_string(),
+        Conditioning::HoldOutDeclared { trained_through } => format!(
+            "Conditioning: held out as declared (θ declared fitted through t = \
+             {trained_through}), not verified."),
     }
 }
 
@@ -141,6 +146,9 @@ fn basis_line(trace: &PrequentialTrace) -> Option<&'static str> {
             "Predictive: ODE free-forward — the deterministic skeleton run from \
              t_start at each θ, never re-anchored to data; each step scored by \
              the exact observation density, not a filter estimate."),
+        PredictiveBasis::SimulatedFreeForward => Some(
+            "Predictive: simulated free-forward — one stochastic trajectory per \
+             θ run from t_start, never re-anchored to data."),
     }
 }
 
@@ -962,6 +970,8 @@ fn basis_kind(b: &PredictiveBasis) -> String {
         PredictiveBasis::OdeFreeForward { samples_per_draw } => format!(
             "ode_free_forward (the ODE skeleton run from t_start at each θ, scored \
              exactly; {samples_per_draw} observation-model draws per θ)"),
+        PredictiveBasis::SimulatedFreeForward =>
+            "simulated_free_forward (one stochastic trajectory per θ from t_start)".to_string(),
     }
 }
 
@@ -978,6 +988,9 @@ fn conditioning_kind(c: &ConditioningMode) -> String {
         ConditioningMode::InSample => "in_sample (θ saw the scored window)".to_string(),
         ConditioningMode::HoldOutTail { train_end } =>
             format!("hold_out_tail (θ sealed at t = {train_end})"),
+        ConditioningMode::Unknown => "unknown (no record of the rows θ was fitted to)".to_string(),
+        ConditioningMode::HoldOutDeclared { trained_through } =>
+            format!("hold_out_declared (θ declared fitted through t = {trained_through}, not verified)"),
     }
 }
 
@@ -1097,6 +1110,7 @@ fn check_basis(rows: &[Row]) -> CheckResult {
     let key = |b: &PredictiveBasis| match b {
         PredictiveBasis::Filtered => (0, 0),
         PredictiveBasis::OdeFreeForward { samples_per_draw } => (1, *samples_per_draw),
+        PredictiveBasis::SimulatedFreeForward => (2, 0),
     };
     let groups = pf::partition(by_row(rows, |r| r.trace.basis),
         |a, b| key(a).cmp(&key(b)), |a, b| a == b);
@@ -1114,12 +1128,22 @@ fn check_conditioning(rows: &[Row]) -> CheckResult {
         Conditioning::InSample => ConditioningMode::InSample,
         Conditioning::HoldOutTail { train_end, .. } =>
             ConditioningMode::HoldOutTail { train_end: *train_end },
+        Conditioning::Unknown => ConditioningMode::Unknown,
+        Conditioning::HoldOutDeclared { trained_through } =>
+            ConditioningMode::HoldOutDeclared { trained_through: *trained_through },
     };
     let order = |a: &ConditioningMode, b: &ConditioningMode| match (a, b) {
         (ConditioningMode::InSample, ConditioningMode::InSample) => std::cmp::Ordering::Equal,
         (ConditioningMode::InSample, _) => std::cmp::Ordering::Less,
         (_, ConditioningMode::InSample) => std::cmp::Ordering::Greater,
         (ConditioningMode::HoldOutTail { train_end: x }, ConditioningMode::HoldOutTail { train_end: y }) =>
+            x.total_cmp(y),
+        (ConditioningMode::HoldOutTail { .. }, _) => std::cmp::Ordering::Less,
+        (_, ConditioningMode::HoldOutTail { .. }) => std::cmp::Ordering::Greater,
+        (ConditioningMode::Unknown, ConditioningMode::Unknown) => std::cmp::Ordering::Equal,
+        (ConditioningMode::Unknown, _) => std::cmp::Ordering::Less,
+        (_, ConditioningMode::Unknown) => std::cmp::Ordering::Greater,
+        (ConditioningMode::HoldOutDeclared { trained_through: x }, ConditioningMode::HoldOutDeclared { trained_through: y }) =>
             x.total_cmp(y),
     };
     let groups = pf::partition(by_row(rows, mode), order, |a, b| a == b);
@@ -1134,7 +1158,7 @@ fn check_conditioning(rows: &[Row]) -> CheckResult {
 fn check_training_boundary(rows: &[Row]) -> CheckResult {
     let held: Vec<(f64, String)> = rows.iter().filter_map(|r| match &r.trace.conditioning {
         Conditioning::HoldOutTail { train_end, .. } => Some((*train_end, r.name.clone())),
-        Conditioning::InSample => None,
+        Conditioning::InSample | Conditioning::Unknown | Conditioning::HoldOutDeclared { .. } => None,
     }).collect();
     let comparable = held.len() >= 2;
     let groups = pf::partition(held, |a, b| a.total_cmp(b), |a, b| same_sealed_boundary(*a, *b));
