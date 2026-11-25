@@ -117,24 +117,33 @@ impl Listings {
     }
 
     /// The source the answering invocation recorded for its listing of `of`
-    /// ([`crate::RunInfo::record_source`]), with the other sources earlier
-    /// listings recorded for it. [`Recorded::None`] when the answering
-    /// invocation recorded none, even if an earlier one did: no other
-    /// invocation stands in for it. A reference to a kind other than `B` is
-    /// no source of `B`.
+    /// ([`crate::RunInfo::record_source`]), with the other sources listings
+    /// recorded for it: further listings of `of` in the answering invocation
+    /// itself, as an import writes one per source the copied records gave a
+    /// result, and those of earlier invocations. [`Recorded::None`] when the
+    /// answering invocation recorded none, even if an earlier one did: no
+    /// other invocation stands in for it. A reference to a kind other than
+    /// `B` is no source of `B`.
     pub fn source<A: Artifact, B: Artifact>(&self, of: &Id<A>) -> Recorded<B> {
-        let recorded = |l: &Listed| -> Option<Id<B>> {
-            l.invocation
-                .record
-                .listings()
-                .iter()
-                .filter(|r| r.kind == A::KIND && r.run_id == of.key())
-                .find_map(|r| r.source.filter(|s| s.kind == B::KIND).map(|s| Id::from_key(s.run_id)))
+        // Each distinct source an invocation recorded for `of`, in the order
+        // of its listings.
+        let recorded = |l: &Listed| -> Vec<Id<B>> {
+            let mut out: Vec<Id<B>> = Vec::new();
+            for r in l.invocation.record.listings().iter().filter(|r| r.kind == A::KIND && r.run_id == of.key()) {
+                if let Some(s) = r.source.filter(|s| s.kind == B::KIND).map(|s| Id::from_key(s.run_id)) {
+                    if !out.contains(&s) {
+                        out.push(s);
+                    }
+                }
+            }
+            out
         };
         let Some(answering) = self.answering() else { return Recorded::None };
-        let Some(latest) = recorded(answering) else { return Recorded::None };
+        let mine = recorded(answering);
+        let Some((&latest, further)) = mine.split_first() else { return Recorded::None };
+        let earlier = self.listed[1..].iter().flat_map(|l| recorded(l).into_iter().map(move |s| (l.seq, s)));
         let others: Vec<(u64, Id<B>)> =
-            self.listed[1..].iter().filter_map(|l| Some((l.seq, recorded(l)?))).filter(|(_, s)| *s != latest).collect();
+            further.iter().map(|s| (answering.seq, *s)).chain(earlier).filter(|(_, s)| *s != latest).collect();
         if others.is_empty() {
             Recorded::One { source: latest, unfinished: answering.unfinished }
         } else {
@@ -151,8 +160,10 @@ pub enum Recorded<B: Artifact> {
     /// One source; `unfinished` when the answering listing is in a running
     /// record.
     One { source: Id<B>, unfinished: bool },
-    /// The answering invocation recorded `latest`, and the earlier listings
-    /// in `others` (by sequence number) recorded other sources.
+    /// The answering invocation recorded `latest`, and the listings in
+    /// `others`, by the sequence number of their invocation, recorded other
+    /// sources. An entry with the answering invocation's own number is a
+    /// further source that invocation recorded.
     Several { latest: Id<B>, others: Vec<(u64, Id<B>)> },
 }
 

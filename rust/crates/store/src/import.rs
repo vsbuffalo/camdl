@@ -6,8 +6,17 @@
 //! records that listed them. It moves the copy into `<root>/.staging/`, on this
 //! store's filesystem, checks every result folder in it, and places them only
 //! when every one passes, each by one rename. It then records them in one
-//! invocation of this store, with outcome `reused` and the attributes the copy's
-//! invocation records gave them.
+//! invocation of this store, with outcome `reused`: one listing of a result
+//! for each distinct combination of attributes and source the copy's
+//! invocation records gave it, so a result the other store's invocations
+//! listed with several model sources keeps all of them. The other store's
+//! labels are not carried: the copy's records are read, never placed.
+//!
+//! A source a listing references ([`crate::RunInfo::record_source`]) is
+//! followed as a dependency is: a copy whose records reference a result that
+//! is neither in the copy nor completed here is refused. A folder of a kind
+//! this store does not register is not placed, and is returned in
+//! [`Imported::not_placed`]; the rest of the copy is imported.
 //!
 //! A result keeps the path it had in the other store. Under
 //! [`crate::TopLevel::ByBuild`] that path begins with the other build's
@@ -55,6 +64,17 @@ pub struct Imported {
     pub placed: Vec<Key>,
     /// Held here already with the same result files, and left in place.
     pub present: Vec<Key>,
+    /// Result folders of the copy of a kind this store does not register,
+    /// which were not placed.
+    pub not_placed: Vec<Unregistered>,
+}
+
+/// A result folder of a copy whose kind this store does not register.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unregistered {
+    /// The folder, as the copy was given.
+    pub folder: PathBuf,
+    pub kind: String,
 }
 
 /// One result folder of the copy, read and checked.
@@ -64,8 +84,16 @@ struct Found {
     ident: IdentityFile,
     run: RunFile,
     ambient: Key,
+    /// Each distinct combination of attributes and source the copy's records
+    /// gave its listings, newest first; never empty.
+    listings: Vec<Copied>,
+}
+
+/// The attributes and the source one listing of a result in the copy's
+/// records gave it.
+#[derive(Clone, PartialEq)]
+struct Copied {
     attributes: serde_json::Value,
-    /// The source the copy's record gave its listing, if any.
     source: Option<Reference>,
 }
 
@@ -119,8 +147,11 @@ impl Store {
     /// registered kind and of this record format; whose run id does not
     /// compute from its `identity.json`; whose files do not have their
     /// recorded digests or which holds a file its record does not name; which
-    /// no invocation record in the copy lists; or whose parent, or a result it
-    /// depends on, is neither in the copy nor completed in this store. Refused
+    /// no invocation record in the copy lists; or whose parent, a result it
+    /// depends on, or a source a listing of it references, is neither in the
+    /// copy nor completed in this store. A folder of a kind this store does
+    /// not register is not placed, and is named in [`Imported::not_placed`].
+    /// Refused
     /// with [`Error::ImportedDiffers`] when this store holds a result's run id,
     /// or its folder's path, with other result files.
     pub fn import(&self, copy: &Path, info: &RunInfo) -> Result<Imported> {
@@ -198,8 +229,9 @@ impl Store {
     /// `shown` is the path the copy was given as, for refusals.
     pub(crate) fn import_staged(&self, staged: &Path, shown: &Path, info: &RunInfo) -> Result<Imported> {
         self.refuse_unverifiable(staged, shown)?;
-        let attributes = copy_attributes(staged);
+        let mut copied = copy_listings(staged);
         let mut found = Vec::new();
+        let mut not_placed = Vec::new();
         for (rel, ident) in identity_files(staged) {
             let refuse = |reason: String| Error::ImportRefused { folder: shown.join(&rel), reason };
             let ident = match ident {
@@ -207,11 +239,15 @@ impl Store {
                 Read::Bad(e) => return Err(refuse(e.to_string())),
                 Read::Absent => continue,
             };
+            if !self.inner.kinds.has(&ident.kind) {
+                not_placed.push(Unregistered { folder: shown.join(&rel), kind: ident.kind });
+                continue;
+            }
             let (run, ambient) = self.check_folder(&staged.join(&rel), &ident).map_err(refuse)?;
-            let Some((attributes, source)) = attributes.get(&ident.run_id).cloned() else {
+            let Some(listings) = copied.remove(&ident.run_id) else {
                 return Err(refuse("no invocation record in the copy lists it as completed".into()));
             };
-            found.push(Found { rel, ident, run, ambient, attributes, source });
+            found.push(Found { rel, ident, run, ambient, listings });
         }
         if found.is_empty() {
             return Err(Error::ImportRefused { folder: shown.to_path_buf(), reason: "it holds no result folder".into() });
@@ -239,22 +275,25 @@ impl Store {
         if recorded.is_err() {
             placing.undo();
         }
-        recorded
+        recorded.map(|imported| Imported { not_placed, ..imported })
     }
 
-    /// Records the placed copy: one invocation entry per result, then one
-    /// index line per result placed. An entry is `reused` once every step has
-    /// succeeded, and `failed` otherwise.
+    /// Records the placed copy: one invocation entry per listing of each
+    /// result ([`Found::listings`]), then one index line per result placed.
+    /// An entry is `reused` once every step has succeeded, and `failed`
+    /// otherwise.
     fn record(&self, planned: &[Planned], done: &[Action], info: &RunInfo) -> Result<Imported> {
         let inner = &self.inner;
         let entries = planned
             .iter()
-            .map(|p| Listing {
-                kind: p.found.ident.kind.clone(),
-                run_id: p.found.ident.run_id,
-                attributes: p.found.attributes.clone(),
-                source: p.found.source.clone(),
-                outcome: Pending::Planned,
+            .flat_map(|p| {
+                p.found.listings.iter().map(|l| Listing {
+                    kind: p.found.ident.kind.clone(),
+                    run_id: p.found.ident.run_id,
+                    attributes: l.attributes.clone(),
+                    source: l.source.clone(),
+                    outcome: Pending::Planned,
+                })
             })
             .collect();
         let idx = info.shared.register(inner, entries, Reuse::IfCompleted)?;
@@ -287,9 +326,6 @@ impl Store {
     /// is refused.
     fn check_folder(&self, dir: &Path, ident: &IdentityFile) -> std::result::Result<(RunFile, Key), String> {
         let kinds = &self.inner.kinds;
-        if !kinds.has(&ident.kind) {
-            return Err(format!("its kind `{}` is not one this program stores", ident.kind));
-        }
         let run: RunFile = match read_record(&dir.join(RUN_FILE)) {
             Read::Ok(r) => r,
             Read::Absent => return Err("it has no run.json".into()),
@@ -435,6 +471,16 @@ impl Store {
                         id.short12()
                     )));
                 }
+            }
+            // A source is in no identity, so a result already here can still
+            // be listed with one this store does not hold.
+            let mut sources = f.listings.iter().filter_map(|l| l.source.as_ref());
+            if let Some(s) = sources.find(|s| !in_copy.contains(&s.run_id) && !completed_here(&s.run_id)) {
+                return Err(refuse(format!(
+                    "the copy's records name the {} {} as its source, which is neither in the copy nor in this store",
+                    s.kind,
+                    s.run_id.short12()
+                )));
             }
             planned.push(Planned { found: f, action, dest, holder: holder_at, shown: imported });
         }
@@ -591,14 +637,19 @@ impl Store {
     }
 }
 
-/// The attributes and the source each result has in the copy: those the latest ended invocation
-/// record that lists it as computed or reused gave it.
-fn copy_attributes(copy: &Path) -> BTreeMap<Key, (serde_json::Value, Option<Reference>)> {
-    let mut out = BTreeMap::new();
-    for inv in all_invocations(copy).0 {
+/// Each distinct combination of attributes and source that the copy's ended
+/// invocation records gave a result, in listings that ended computed or
+/// reused, by run id, the newest record's first.
+fn copy_listings(copy: &Path) -> BTreeMap<Key, Vec<Copied>> {
+    let mut out: BTreeMap<Key, Vec<Copied>> = BTreeMap::new();
+    for inv in all_invocations(copy).0.into_iter().rev() {
         let Record::Ended(closed) = inv else { continue };
         for r in closed.results.into_iter().filter(|r| r.outcome.completed()) {
-            out.insert(r.run_id, (r.attributes, r.source));
+            let listing = Copied { attributes: r.attributes, source: r.source };
+            let of = out.entry(r.run_id).or_default();
+            if !of.contains(&listing) {
+                of.push(listing);
+            }
         }
     }
     out

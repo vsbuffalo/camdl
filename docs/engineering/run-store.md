@@ -2182,22 +2182,28 @@ they had there, with the parent folders a nested result sits in, and the
 invocation records that listed them. The copy is moved into
 `<root>/.staging/import.<owner>.<n>`, and every result folder in it is checked
 as `verify` checks one, hashing every file; each result's dependencies
-(`run.json`'s `deps`) must also be in the copy or completed here, so no result
-is placed that its readers cannot open. Nothing is placed unless every folder
-passes, and a refused copy is moved back where it was given. Each result keeps
-its path relative to the root, so a result of another build sits under that
-build's directory. A run id held here with the same result files is left in
-place; one held with other result files, or a destination already taken, is
-refused with
+(`run.json`'s `deps`) and each source the copy's records reference for it
+(`Listing::source`) must also be in the copy or completed here, so no result is
+placed that its readers cannot open. A folder of a kind this build does not
+register is not placed and is returned in `Imported::not_placed`. Nothing is
+placed unless every other folder passes, and a refused copy is moved back where
+it was given. Each result keeps its path relative to the root, so a result of
+another build sits under that build's directory. A run id held here with the
+same result files is left in place; one held with other result files, or a
+destination already taken, is refused with
 [`Error::ImportedDiffers`](rust:store::error::Error::ImportedDiffers), naming
 both folders. Each folder is placed by a rename that never replaces what is at
 the destination (`fsutil::rename_noreplace`: `renamex_np` with `RENAME_EXCL` on
 macOS, `renameat2` with `RENAME_NOREPLACE` on Linux with glibc, a check before
 the rename elsewhere), so a concurrent import of the same result that placed it
 first makes it `present`. One local invocation lists every imported result with
-outcome `reused` and the labels the copy's records gave it, so `camdl list` and
-`@label` find them. An import stopped midway leaves each folder it placed whole,
-and `clean` removes its staging once its process has stopped.
+outcome `reused`, once for each distinct combination of attributes and source
+the copy's closed records gave it, newest record first, so `camdl list` and
+`@label` find them and `Listings::source` answers with every source the other
+store recorded for a model (`Recorded::Several`, with the import's own sequence
+number on the further ones). The copy's `--label`s are not carried. An import
+stopped midway leaves each folder it placed whole, and `clean` removes its
+staging once its process has stopped.
 
 ## What is enforced, and by what
 

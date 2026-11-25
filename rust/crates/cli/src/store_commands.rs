@@ -32,7 +32,9 @@ pub(crate) fn cmd_store(command: store::StoreCommand, root: Option<PathBuf>) {
 /// `camdl import COPY`: places the results of a copy of another run store in
 /// the store the request names, creating it when absent, and records them in
 /// one invocation under `--label`. Prints one line per result imported, saying
-/// whether it was placed or was stored here already, and its folder. A refused
+/// whether it was placed or was stored here already, and its folder, and one
+/// notice per folder of a kind this build does not store, which is not
+/// placed. A refused
 /// copy exits 1 with the store's reason, and nothing is placed.
 pub(crate) fn cmd_import(args: crate::args::ImportArgs) {
     let out = crate::out::Out::new(false);
@@ -64,6 +66,13 @@ pub(crate) fn cmd_import(args: crate::args::ImportArgs) {
     }
     for key in &imported.present {
         line("present", *key);
+    }
+    for u in &imported.not_placed {
+        out.say(format_args!(
+            "import: not placed: {}, a result of kind `{}`, which this build does not store",
+            u.folder.display(),
+            u.kind
+        ));
     }
     out.say(format_args!(
         "import: {} placed, {} already stored, recorded as invocation {}",

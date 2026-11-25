@@ -320,24 +320,32 @@ pub(crate) enum Shown {
 /// Where a [`Shown::Recorded`] source came from: the invocation it was read
 /// from, or the model file this command was given.
 pub(crate) enum RecordedBy {
-    /// The invocation a label names.
-    Label,
+    /// The invocation a label names, by its sequence number. `others` holds
+    /// each further source that invocation recorded for the result's model,
+    /// as an import does when the copied records gave it several.
+    Label { invocation: u64, others: Vec<OtherSource> },
     /// The invocation that answers for a run id or a folder, by its sequence
-    /// number. `others` holds each different source an earlier invocation
-    /// that listed the result recorded for its model. `unfinished` when that
-    /// invocation has not ended: no closed record lists the result computed
-    /// or reused, and a running one (or a stopped owner's, until `clean`
-    /// closes it) answers.
+    /// number. `others` holds each different source that invocation, or an
+    /// earlier one that listed the result, recorded for its model.
+    /// `unfinished` when that invocation has not ended: no closed record
+    /// lists the result computed or reused, and a running one (or a stopped
+    /// owner's, until `clean` closes it) answers.
     Latest { invocation: u64, others: Vec<OtherSource>, unfinished: bool },
     /// No invocation: the model file this command was given, stored by it.
     Given,
 }
 
-/// A source an earlier invocation recorded for a result's model, with the
-/// labels that name those invocations (`@a`); empty when none does.
+/// A source other than the answering one that a listing recorded for a
+/// result's model, with the labels that name the earlier invocations that
+/// recorded it (`@a`); empty when none does.
 pub(crate) struct OtherSource {
     pub run_id: store::Key,
     pub labels: Vec<String>,
+    /// True when the answering invocation itself recorded it too: an import
+    /// lists a result once per source the copied records gave it, and the
+    /// labels of the store it copied from are not carried, so no label here
+    /// names that source alone.
+    pub by_answering: bool,
 }
 
 /// The source of the model `model` (a compiled model's run id) that the
@@ -349,7 +357,8 @@ pub(crate) struct OtherSource {
 /// lookup that fails otherwise, such as a prefix naming several results, is
 /// an error.
 /// For a run id or a folder, the sources earlier listings of the result
-/// recorded are named beside it ([`RecordedBy::Latest`]).
+/// recorded are named beside it ([`RecordedBy::Latest`]); for either handle,
+/// so are further sources the answering invocation itself recorded.
 pub(crate) fn shown_for(store: &Store, handle: &Handle, model: store::Key) -> Result<Shown, String> {
     let listings = match store.listings(handle) {
         Ok(l) => l,
@@ -371,7 +380,7 @@ pub(crate) fn shown_for(store: &Store, handle: &Handle, model: store::Key) -> Re
             .collect()
     };
     let by = |others: Vec<OtherSource>, unfinished: bool| match listings.by() {
-        store::By::Label { .. } => RecordedBy::Label,
+        store::By::Label { .. } => RecordedBy::Label { invocation: seq, others },
         store::By::Result { .. } => RecordedBy::Latest { invocation: seq, others, unfinished },
     };
     let (id, by) = match listings.source::<CompiledModel, ModelSource>(&Id::from_key(model)) {
@@ -380,9 +389,15 @@ pub(crate) fn shown_for(store: &Store, handle: &Handle, model: store::Key) -> Re
         store::Recorded::Several { latest, others } => {
             let mut grouped: Vec<OtherSource> = Vec::new();
             for (s, id) in others {
+                // The answering invocation's label names every source it
+                // recorded, so it names none of them alone.
+                let labels = if s == seq { Vec::new() } else { labelled(s) };
                 match grouped.iter_mut().find(|o| o.run_id == id.key()) {
-                    Some(o) => o.labels.extend(labelled(s)),
-                    None => grouped.push(OtherSource { run_id: id.key(), labels: labelled(s) }),
+                    Some(o) => {
+                        o.labels.extend(labels);
+                        o.by_answering |= s == seq;
+                    }
+                    None => grouped.push(OtherSource { run_id: id.key(), labels, by_answering: s == seq }),
                 }
             }
             (latest, by(grouped, false))
@@ -439,21 +454,41 @@ impl Shown {
                      its record"
                 ),
             )),
-            Shown::Recorded { by: RecordedBy::Latest { invocation, others, .. }, .. } if !others.is_empty() => {
-                let listed: Vec<String> = others
-                    .iter()
-                    .map(|o| match &o.labels[..] {
-                        [] => o.run_id.short12().to_string(),
-                        labels => format!("{} ({})", o.run_id.short12(), labels.join(", ")),
-                    })
-                    .collect();
+            Shown::Recorded {
+                by: RecordedBy::Latest { invocation, others, .. } | RecordedBy::Label { invocation, others }, ..
+            } if !others.is_empty() => {
+                let listed = |by_answering: bool| -> Vec<String> {
+                    others
+                        .iter()
+                        .filter(|o| o.by_answering == by_answering)
+                        .map(|o| match &o.labels[..] {
+                            [] => o.run_id.short12().to_string(),
+                            labels => format!("{} ({})", o.run_id.short12(), labels.join(", ")),
+                        })
+                        .collect()
+                };
+                let mut parts = Vec::new();
+                let (same, earlier) = (listed(true), listed(false));
+                if !same.is_empty() {
+                    parts.push(format!(
+                        "that invocation listed the model with other files too (model sources {}), as an import of \
+                         another store's results does",
+                        same.join(", ")
+                    ));
+                }
+                if !earlier.is_empty() {
+                    parts.push(format!(
+                        "earlier invocations that listed the result ran other files (model sources {}), which their \
+                         labels show",
+                        earlier.join(", ")
+                    ));
+                }
                 Some(Notice::info(
                     "model-source-one-of-several",
                     format!(
-                        "{handle}: the model's documentation is the one of the model file {} ran; earlier invocations \
-                         that listed the result ran other files (model sources {}), which their labels show",
+                        "{handle}: the model's documentation is the one of the model file {} ran; {}",
                         chosen(*invocation),
-                        listed.join(", ")
+                        parts.join("; ")
                     ),
                 ))
             }
@@ -639,10 +674,13 @@ impl StoredModel {
     /// those of the recorded source. Refused when no source is recorded or
     /// it cannot be read, and, for a run id or a folder whose listings
     /// recorded sources with other quantities, refused with the labels that
-    /// name them; sources whose quantities agree are one answer. A file a
-    /// command was given is the answer as it stands.
+    /// name them; sources whose quantities agree are one answer. Refused as
+    /// well, for either handle, when the answering invocation itself
+    /// recorded sources with other quantities, as an import does, saying that
+    /// the labels of the store the results were copied from did not travel.
+    /// A file a command was given is the answer as it stands.
     pub fn quantities(&self, store: &Store, text: &str) -> Result<Dep<Quantities>, String> {
-        let (source, others) = match &self.source {
+        let (source, others, invocation) = match &self.source {
             Shown::NotRecorded { .. } => {
                 return Err(format!(
                     "{text}: no invocation recorded the model file the fit ran, so its quantities are not known; \
@@ -652,25 +690,42 @@ impl StoredModel {
             Shown::Unreadable { run_id, why } => {
                 return Err(format!("{text}: the model source {} the fit's invocation recorded cannot be read: {why}", run_id.short12()))
             }
-            Shown::Recorded { source, by: RecordedBy::Latest { others, .. } } => (source, others.as_slice()),
-            Shown::Recorded { source, .. } => (source, &[][..]),
+            Shown::Recorded {
+                source,
+                by: RecordedBy::Latest { others, invocation, .. } | RecordedBy::Label { others, invocation },
+            } => (source, others.as_slice(), *invocation),
+            Shown::Recorded { source, by: RecordedBy::Given } => (source, &[][..], 0),
         };
         if let Some(why) = &self.unreadable_quantities {
             return Err(format!("{text}: the quantities of the model source {} cannot be read: {why}", source.id().key().short12()));
         }
         let latest = source.identity().quantities.clone();
         let mut differ = Vec::new();
+        let mut imported = false;
         for other in others {
             let read: Stored<ModelSource> = store
                 .get(&Id::from_key(other.run_id))
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| format!("{text}: the model source {} an earlier invocation recorded cannot be read", other.run_id.short12()))?;
             if read.identity().quantities.digest() != latest.digest() {
+                imported |= other.by_answering;
                 differ.push(match &other.labels[..] {
                     [] => format!("    model source {} (no label names it)", other.run_id.short12()),
                     labels => format!("    model source {} ({})", other.run_id.short12(), labels.join(", ")),
                 });
             }
+        }
+        if !differ.is_empty() && imported {
+            return Err(format!(
+                "{text} names a run whose model invocation {invocation} listed once for each of several model \
+                 files with different quantities blocks, as an import of another store's results does; the first \
+                 listing's model source is {}, and the others are:\n{}\n  The labels of the store the results were \
+                 copied from did not travel, \
+                 so no label here names one of these files: pass `--model FILE` to say whose quantities the \
+                 prediction evaluates.",
+                source.id().key().short12(),
+                differ.join("\n")
+            ));
         }
         if !differ.is_empty() {
             return Err(format!(

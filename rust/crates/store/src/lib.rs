@@ -59,7 +59,7 @@ pub use listings::{By, Listed, Listings, Recorded};
 pub use layout::{path_label, Layout, Placed, LABEL_CAP};
 pub use maintenance::{Cleaned, VerifyFailure};
 pub use owner::{pid_exists, this_host, Liveness, Owner, Timestamp, BEAT_INTERVAL, STALE_AFTER};
-pub use import::Imported;
+pub use import::{Imported, Unregistered};
 pub use record::{Lineage, Reference, Status, INVOCATION_FORMAT, MAX_PRESERVED_ATTEMPTS, RECORD_FORMAT, STORE_FORMAT};
 pub use run::{ByProductRun, ExpectedFiles, FileHandle, Run};
 pub use fsutil::write_file_atomic;

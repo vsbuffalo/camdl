@@ -340,3 +340,172 @@ fn import_links_what_it_received() {
     let report = p.dir().join("links/predictions/m4w_cloud/report.json");
     assert_eq!(report.canonicalize().unwrap(), path("report").canonicalize().unwrap());
 }
+
+/// A model in camdl source, with a documented parameter, for the tests of
+/// the model sources an import follows: each `fit run` of a file stores its
+/// model source and records it on the compiled model's listing.
+const SIR: &str = r#"
+time_unit = 'days
+compartments { S, I, R }
+parameters {
+  #' The transmission rate, per day.
+  beta  : rate         in [0.05, 1.0]  ~ log_normal(mu = -1.0, sigma = 0.5)
+  gamma : rate         in [0.01, 0.5]  ~ log_normal(mu = -2.0, sigma = 0.5)
+  N0    : count
+  I0    : count
+}
+let N = S + I + R
+transitions {
+  infection : S --> I  @ beta * S * I / N
+  recovery  : I --> R  @ gamma * I
+}
+init { S = N0 - I0  I = I0 }
+observations {
+  cases {
+    columns       { time : time, cases : count }
+    covers        = closing_at(time, 1 'days)
+    projected     = incidence(infection)
+    emit_schedule = every 1 'days
+    cases ~ poisson(rate = projected)
+  }
+}
+simulate { from = 0 'days  to = 20 'days }
+"#;
+
+const SIR_FIT: &str = r#"
+[model]
+camdl = "model.camdl"
+[data]
+file = "cases.tsv"
+[estimate]
+beta = { bounds = [0.1, 0.9], start = 0.4 }
+[fixed]
+gamma = 0.2
+N0 = 1000
+I0 = 5
+[method]
+algorithm = "if2"
+backend = "chain_binomial"
+chains = 1
+particles = 50
+iterations = 2
+cooling = 0.7
+starts = "from_prior"
+"#;
+
+/// A project whose `remote/` store holds one fit run, fitted from
+/// `model.camdl` with each of `models` in turn as its text, under the
+/// matching label.
+fn sir_remote(models: &[(&str, String)]) -> Project {
+    let p = Project::new();
+    let cases = [3, 6, 9, 14, 20, 27, 33, 38, 40, 39, 36, 31, 26, 21, 16, 12, 9, 7, 5, 4];
+    let mut tsv = String::from("time\tcases\n");
+    for (t, c) in cases.iter().enumerate() {
+        tsv.push_str(&format!("{}\t{c}\n", t + 1));
+    }
+    std::fs::write(p.dir().join("cases.tsv"), tsv).unwrap();
+    std::fs::write(p.dir().join("sir.toml"), SIR_FIT).unwrap();
+    for (label, model) in models {
+        std::fs::write(p.dir().join("model.camdl"), model).unwrap();
+        p.ok(&p.remote(), &[], &["fit", "run", "sir.toml", "--seed", "1", "--label", label, "--progress", "none"]);
+    }
+    p
+}
+
+/// The listings of `kind` in the store `root`'s invocation record `seq`.
+fn listings(root: &Path, seq: u64, kind: &str) -> Vec<serde_json::Value> {
+    let record = fit_store_support::json(&root.join(format!(".invocations/{seq}.json")));
+    record["results"].as_array().unwrap().iter().filter(|r| r["kind"] == kind).cloned().collect()
+}
+
+/// A copy without the model sources its records name as the sources of its
+/// compiled model is refused, naming the missing source, and nothing is
+/// placed: a fit imported without its model file would show no
+/// documentation and predict with no known quantities.
+#[test]
+fn import_refuses_a_copy_without_the_model_sources_its_records_name() {
+    let edited = SIR.replace("The transmission rate, per day.", "Transmission rate (edited doc).");
+    let p = sir_remote(&[("f", SIR.to_string()), ("g", edited)]);
+    p.pull();
+    let sources = fit_store_support::folders_of(&p.copy(), "model_source");
+    assert_eq!(sources.len(), 2, "premise: one model source per edit of the file: {sources:?}");
+    for d in &sources {
+        std::fs::remove_dir_all(d).unwrap();
+    }
+    let out = p.run(&p.local(), &[], &["import", "pull-staging", "--label", "got"]);
+    let all = text(&out);
+    assert_eq!(out.status.code(), Some(1), "{all}");
+    assert!(all.contains("model_source") && all.contains("source"), "{all}");
+    assert!(fit_folders(&p.local()).is_empty(), "nothing is placed");
+}
+
+/// A fit run that two invocations fitted from files with different
+/// quantities blocks is ambiguous by its run id in the store it was made in.
+/// The import keeps one listing per source the copy's records gave the
+/// compiled model, so the run id is refused here too, saying the other
+/// store's labels did not travel; those labels name nothing here.
+#[test]
+fn import_keeps_each_source_so_an_ambiguous_run_stays_ambiguous() {
+    let with_q = format!("{SIR}\nquantities {{\n  total_inf = final(R)\n}}\n");
+    let p = sir_remote(&[("plain", SIR.to_string()), ("withq", with_q)]);
+    let id = fit_store_support::run_id(&fit_store_support::the_run(&p.remote()));
+    let predict = |store: &Path, handle: &str| p.run(store, &[], &["predict", handle, "--mode", "free_forward", "--progress", "none"]);
+    let out = predict(&p.remote(), &id);
+    assert!(!out.status.success(), "premise: ambiguous in the store it was made in: {}", text(&out));
+
+    // Without the second quantities, the second source's dependency is
+    // missing, and the copy is refused.
+    p.pull();
+    let quantities = fit_store_support::folders_of(&p.copy(), "quantities");
+    assert_eq!(quantities.len(), 2, "premise: one quantities result per block: {quantities:?}");
+    let named = |d: &Path| fit_store_support::json(&d.join("identity.json"))["run_id"].as_str().unwrap().to_string();
+    let second_source = listings(&p.remote(), 2, "compiled_model")[0]["source"]["run_id"].as_str().unwrap().to_string();
+    let source_dir = fit_store_support::folders_of(&p.copy(), "model_source").into_iter().find(|d| named(d) == second_source).unwrap();
+    let source_run = fit_store_support::json(&source_dir.join("run.json"));
+    let second_q = source_run["deps"].as_array().unwrap().iter().find(|d| d["kind"] == "quantities").unwrap()["run_id"].clone();
+    std::fs::remove_dir_all(quantities.iter().find(|d| named(d) == second_q.as_str().unwrap()).unwrap()).unwrap();
+    let out = p.run(&p.local(), &[], &["import", "pull-staging", "--label", "got"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(fit_folders(&p.local()).is_empty(), "nothing is placed");
+    std::fs::remove_dir_all(p.copy()).unwrap();
+
+    // With both, the import lists the compiled model once per source.
+    p.pull();
+    p.ok(&p.local(), &[], &["import", "pull-staging", "--label", "got"]);
+    let models = listings(&p.local(), 1, "compiled_model");
+    let sources: std::collections::BTreeSet<String> = models.iter().map(|m| m["source"]["run_id"].as_str().unwrap().to_string()).collect();
+    assert_eq!(models.len(), 2, "one listing per source: {models:?}");
+    assert_eq!(sources.len(), 2, "{models:?}");
+    for handle in [id.as_str(), "@got"] {
+        let out = predict(&p.local(), handle);
+        let all = text(&out);
+        assert!(!out.status.success(), "{handle}: {all}");
+        assert!(all.contains("different quantities") && all.contains("did not travel"), "{handle}: {all}");
+    }
+    for label in ["@plain", "@withq"] {
+        let out = predict(&p.local(), label);
+        assert!(!out.status.success(), "the other store's label {label} names nothing here: {}", text(&out));
+    }
+}
+
+/// A result folder of a kind this build does not register, such as a model
+/// presentation an older build stored, is not placed and is reported; the
+/// rest of the copy is imported.
+#[test]
+fn import_reports_and_leaves_a_folder_of_an_unregistered_kind() {
+    let p = sir_remote(&[("f", SIR.to_string())]);
+    p.pull();
+    let source = fit_store_support::folders_of(&p.copy(), "model_source").pop().unwrap();
+    let kind_dir = source.parent().unwrap().parent().unwrap().join("model_presentation");
+    let old = kind_dir.join(source.file_name().unwrap());
+    fit_store_support::copy_tree(&source, &old);
+    let ident = old.join("identity.json");
+    let rewritten = std::fs::read_to_string(&ident).unwrap().replace("\"model_source\"", "\"model_presentation\"");
+    std::fs::write(&ident, rewritten).unwrap();
+
+    let report = p.ok(&p.local(), &[], &["import", "pull-staging", "--label", "got"]);
+    assert!(report.contains("not placed") && report.contains("model_presentation"), "{report}");
+    assert!(fit_folders(&p.local()).len() == 2, "the problem and the run are placed");
+    let kinds: Vec<String> = std::fs::read_dir(p.local()).unwrap().flatten().flat_map(|b| std::fs::read_dir(b.path()).into_iter().flatten().flatten().map(|k| k.file_name().to_string_lossy().into_owned()).collect::<Vec<_>>()).collect();
+    assert!(!kinds.iter().any(|k| k == "model_presentation"), "not placed: {kinds:?}");
+}

@@ -3683,21 +3683,25 @@ camdl import pull-staging/ --label m4w_mh
 ```
 
 The copy is moved into the store's `.staging/`, and every result folder in it is
-checked: its record is completed, of a kind and a record format this binary
-reads; its run id computes again from its `identity.json`; every result and
-provenance file has the SHA-256 `run.json` records for it; it holds no file its
-record does not name; an invocation record in the copy lists it; a nested
-result's parent is in the copy or already in this store; and every result it
-depends on, reads or records in its lineage, such as a fit's compiled model,
-data tables and quantities, is in the copy or already completed in this store. A
-symbolic link anywhere in the copy, and a dot-named directory inside a result
-other than the store's own `.staging/` and `.attempts/`, are refused, since no
-check reads what they hold. A folder that fails is refused by its path and the
-reason, nothing from the copy is placed, the copy is moved back where it was
-given, and the command exits 1. A failure while the folders are being placed,
-such as a directory of the store that cannot be written, moves every folder
-already placed back into the copy, so the store and the copy are as they were
-and no invocation is recorded.
+checked: its record is completed and of a record format this binary reads; its
+run id computes again from its `identity.json`; every result and provenance file
+has the SHA-256 `run.json` records for it; it holds no file its record does not
+name; an invocation record in the copy lists it; a nested result's parent is in
+the copy or already in this store; every result it depends on, reads or records
+in its lineage, such as a fit's compiled model and data tables, or a model
+source's quantities, is in the copy or already completed in this store; and the
+model source each of the copy's records names for a compiled model (§2.9) is in
+the copy or already completed in this store. A folder of a kind this binary does
+not store, such as a `model_presentation` folder an older build wrote, is not
+placed, and the command prints `import: not placed:` with its folder and kind;
+the rest of the copy is imported. A symbolic link anywhere in the copy, and a
+dot-named directory inside a result other than the store's own `.staging/` and
+`.attempts/`, are refused, since no check reads what they hold. A folder that
+fails is refused by its path and the reason, nothing from the copy is placed,
+the copy is moved back where it was given, and the command exits 1. A failure
+while the folders are being placed, such as a directory of the store that cannot
+be written, moves every folder already placed back into the copy, so the store
+and the copy are as they were and no invocation is recorded.
 
 What belongs to the other store's processes, not to a result, is left behind:
 each placed folder loses its `.staging/`, its `.attempts/`, its lock files and
@@ -3713,13 +3717,19 @@ not compared. A folder placed by another process at a result's path while the
 import runs is never replaced: when it holds the same result files the result is
 `present`, and otherwise it is refused, naming that folder.
 
-One invocation records every result imported, parents first, as reused, with the
-attributes the copy's invocation records gave it. `camdl list` and `@L` then see
-the imported results as they see local ones, and a command run here can read
-one, such as a prediction from a imported fit run. The command prints one line
-per result, `placed` or `present`, with its kind, its 12-hex run id and its
-folder. A imported copy is gone: its results are in the store and the rest is
-deleted.
+One invocation records every result imported, parents first, as reused. It lists
+a result once for each distinct combination of attributes and model source the
+copy's invocation records gave it, so a fit run that invocations of the other
+store fitted from two model files is listed with both. The other store's
+`--label`s are not carried: `@L` names the import, and a label of the other
+store names nothing here. `camdl list` and `@L` then see the imported results as
+they see local ones, and a command run here can read one, such as a prediction
+from an imported fit run. A fit run listed with model files whose quantities
+differ is refused by `predict`, by its run id and by `@L` alike, since no label
+here names one of the files; `predict --model FILE` names it. The command prints
+one line per result, `placed` or `present`, with its kind, its 12-hex run id and
+its folder. An imported copy is gone: its results are in the store and the rest
+is deleted.
 
 An import whose process is killed while it places folders leaves each folder it
 placed whole, and the rest of the copy in `.staging/`, which `clean` deletes

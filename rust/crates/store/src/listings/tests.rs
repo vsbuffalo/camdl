@@ -128,6 +128,45 @@ fn run_with_source(store: &crate::Store, info: &crate::RunInfo, seed: u64, text:
     (*s.id(), *m.id())
 }
 
+/// An import lists a result once per source the copied records gave it, so
+/// the import's own invocation answers with several sources, whether named
+/// by run id or by the import's label.
+#[test]
+fn an_imported_result_listed_with_two_sources_has_both() {
+    use crate::Recorded;
+    let remote = TempRoot::new("listings-import-remote");
+    let store = open(remote.path());
+    let a = info();
+    let (sim, m1) = run_with_source(&store, &a, 8, "S -> I");
+    a.finish(&store).unwrap();
+    let b = info();
+    let (_, m2) = run_with_source(&store, &b, 8, "S -> I -> R");
+    b.finish(&store).unwrap();
+
+    let pulled = TempRoot::new("listings-import-copy");
+    let copy = pulled.path().join("copy");
+    std::fs::create_dir_all(&copy).unwrap();
+    for e in std::fs::read_dir(remote.path()).unwrap().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') && name != ".invocations" {
+            continue;
+        }
+        if e.path().is_dir() {
+            crate::fsutil::copy_tree(&e.path(), &copy.join(&name)).unwrap();
+        } else {
+            std::fs::copy(e.path(), copy.join(&name)).unwrap();
+        }
+    }
+    let local_root = TempRoot::new("listings-import-local");
+    let local = open(local_root.path());
+    let i = labelled("got");
+    local.import(&copy, &i).unwrap();
+    let inv = i.finish(&local).unwrap();
+    let several = Recorded::Several { latest: m2, others: vec![(inv.seq(), m1)] };
+    assert_eq!(local.listings(&id_handle(sim.key())).unwrap().source::<Sim, Model>(&sim), several);
+    assert_eq!(local.listings(&"@got".parse().unwrap()).unwrap().source::<Sim, Model>(&sim), several);
+}
+
 #[test]
 fn the_source_is_the_answering_invocations_with_no_fallback_and_others_named() {
     use crate::Recorded;
