@@ -119,6 +119,10 @@ pub struct FitRunConfig {
     /// IF2's are also in `if2_config.steps`; PMMH and MH start their
     /// proposals from these.
     pub steps: super::steps::ResolvedSteps,
+    /// Each estimated parameter's map and the start θ₀ its step's
+    /// natural-scale equivalent is taken at (`steps::conversion_points`), by
+    /// name. One point for every chain, whatever the starts rule.
+    pub step_points: indexmap::IndexMap<String, (Transform, Option<super::steps::Theta0>)>,
     /// Canonical observation times (shared across all streams).
     pub observations: Vec<Observation>,
     /// Per-stream data. For single-stream models, len() == 1.
@@ -609,6 +613,7 @@ impl FitRunConfig {
 
         let param_names: Vec<String> =
             model.parameters.iter().map(|p| p.name.clone()).collect();
+        let step_points = super::steps::conversion_points(&fit.estimate, &model_declared)?;
         let config = FitRunConfig {
             compiled: Arc::new(compiled),
             model,
@@ -618,6 +623,7 @@ impl FitRunConfig {
             param_names,
             estimated_params: if2_params,
             steps: steps.clone(),
+            step_points,
             observations,
             streams,
             if2_config: config,
@@ -1191,8 +1197,8 @@ pub fn print_preflight(
         };
         let pos = format!("start={:.4} z={:.2}{}", spec.initial, z, mark);
         // The step in z, the same for every chain and particle, and the
-        // natural-scale step it is at the reference point (the box's
-        // midpoint, else the start). A method with no step shows none.
+        // natural-scale step it is at θ₀, the one start it is converted at
+        // whichever chain is shown. A method with no step shows none.
         let Some(&(z_sd, from, at)) = rows.get(&spec.name) else {
             out.say(format_args!("  {:12} {}  {}", spec.name, tname, pos));
             continue;
@@ -1201,16 +1207,11 @@ pub fn print_preflight(
             super::steps::StepFrom::Default => crate::out::paint::stderr().paint("default", Style::Warn),
             super::steps::StepFrom::Written => "written".to_string(),
         };
-        let reference = if matches!(spec.transform, Transform::Interval { .. } | Transform::LogInterval { .. }) {
-            "midpoint"
-        } else {
-            "start"
-        };
         let t0 = if at == Some(PerturbAt::TimeZeroOnly) { "  t0 only" } else { "" };
-        out.say(format_args!("  {:12} {}  {}  step(z)={:.3} ≈ {} natural at the {reference} ({}){t0}",
-            spec.name, tname, pos, z_sd,
-            sim::inference::diagnostic::format_start_value(spec.transform.natural_from_step(z_sd, spec.initial)),
-            source));
+        let natural = super::steps::natural_at_start(&spec.transform, z_sd,
+            config.step_points.get(&spec.name).and_then(|(_, t)| *t));
+        out.say(format_args!("  {:12} {}  {}  step(z)={:.3} {natural} ({}){t0}",
+            spec.name, tname, pos, z_sd, source));
 
         if from == super::steps::StepFrom::Default {
             collector.push(DiagnosticKind::AutoRwSd {
@@ -1477,8 +1478,8 @@ pub struct WrittenStep {
     /// The step in z: IF2's perturbation SD before cooling (the IF2 schedule,
     /// `if2::CoolingSchedule`, leaves `fraction` of it after `target_iters`
     /// iterations). A natural-scale `--rw-sd` is converted to it once at the
-    /// domain's reference point ([`Transform::step_from_natural`] at the
-    /// parameter's base value); a `[method.perturbation]` SD is already in z;
+    /// parameter's base value ([`Transform::step_from_natural`]); a
+    /// `[method.perturbation]` SD is already in z;
     /// otherwise it is the map's [`Transform::default_if2_step`], or NaN for
     /// `Identity`, which IF2 refuses before it runs
     /// ([`refuse_degenerate_auto_rw_sd`]).
@@ -5352,8 +5353,8 @@ dt = 1.0
     #[test]
     fn fit_bounds_propagate_to_rw_sd_auto_log_scale() {
         // The automatic step is the same in z for every log-interval box;
-        // its natural-scale size at the geometric midpoint is what an
-        // explicit rw_sd is compared against. The
+        // its natural-scale size at the start is what an explicit rw_sd is
+        // compared against. The
         // load-bearing thing is that the *log-scale* perturbation
         // magnitude shrinks with tighter bounds — IF2 perturbs in
         // transformed space, so that's what governs how many steps it
@@ -5373,8 +5374,8 @@ dt = 1.0
         // Convert each rw_sd back to log-scale by dividing by midpoint.
         let mid_wide  = (1e-6_f64 * 1.0).sqrt();
         let mid_tight = (0.1_f64 * 0.5).sqrt();
-        let log_sd_wide  = r_wide[0].transform.natural_from_step(r_wide[0].transform.default_if2_step().unwrap(), r_wide[0].initial)  / mid_wide;
-        let log_sd_tight = r_tight[0].transform.natural_from_step(r_tight[0].transform.default_if2_step().unwrap(), r_tight[0].initial) / mid_tight;
+        let log_sd_wide  = r_wide[0].transform.natural_from_step(r_wide[0].transform.default_if2_step().unwrap(), mid_wide) / mid_wide;
+        let log_sd_tight = r_tight[0].transform.natural_from_step(r_tight[0].transform.default_if2_step().unwrap(), mid_tight) / mid_tight;
         assert!(log_sd_tight < log_sd_wide,
             "tighter bounds must yield smaller log-scale rw_sd \
              (wide_log_sd={}, tight_log_sd={})", log_sd_wide, log_sd_tight);
@@ -5819,12 +5820,13 @@ dt = 1.0
     }
 
     /// `profile --rw-sd`'s natural-scale step is converted once at the
-    /// domain's reference point — the box's midpoint for the interval maps,
-    /// where dθ/dz is (hi − lo)/4, or θ·ln(hi/lo)/4 at the geometric
-    /// midpoint; the start for a half-bounded map — and is then the same
-    /// step for every chain.
+    /// parameter's start θ₀, here the model's value (lo + hi)/2, and is then
+    /// the same step for every chain. On the interval map dθ/dz there is
+    /// (θ₀ − lo)(hi − θ₀)/(hi − lo), (hi − lo)/4 for [0, 2]; on the
+    /// log-interval map of [0.05, 1] it is θ₀·ln(θ₀/lo)·ln(hi/θ₀)/ln(hi/lo)
+    /// at 0.525, not the geometric middle √0.05.
     #[test]
-    fn a_natural_rw_sd_is_converted_once_at_the_reference_point() {
+    fn a_natural_rw_sd_is_converted_once_at_the_start() {
         use ir::parameter::ParamKind::Rate;
         let built = |lo: f64, hi: f64, rw: f64| {
             let (model, compiled) = make_one_param_model("z", lo, hi, Some(Rate));
@@ -5836,7 +5838,8 @@ dt = 1.0
         let (_, step) = built(0.0, 2.0, 0.1);
         assert!((step.z_sd - 0.1 / (2.0 / 4.0)).abs() < 1e-12, "interval: {}", step.z_sd);
         let (p, step) = built(0.05, 1.0, 0.02);
-        let want = 0.02 / ((0.05_f64 * 1.0).sqrt() * (1.0_f64 / 0.05).ln() / 4.0);
+        let t0 = 0.525_f64;
+        let want = 0.02 / (t0 * (t0 / 0.05).ln() * (1.0 / t0).ln() / (1.0_f64 / 0.05).ln());
         assert!((step.z_sd - want).abs() < 1e-12, "log-interval: {} vs {want}", step.z_sd);
         assert!((p[0].transform.natural_from_step(step.z_sd, p[0].initial) - 0.02).abs() < 1e-15,
             "the natural step round-trips");

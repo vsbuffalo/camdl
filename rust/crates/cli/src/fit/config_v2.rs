@@ -2349,6 +2349,9 @@ pub struct LegacyStepKey {
     /// Whether the parameter is a member of a `[[simplex_groups]]` entry,
     /// whose IF2 `rw_sd` was read on its log-ratio coordinate as written.
     pub simplex_member: bool,
+    /// The entry's `start` and `bounds`, which the conversion reads.
+    pub start: Option<f64>,
+    pub bounds: Option<(f64, f64)>,
 }
 
 /// Every `[estimate]` entry of a fit config that writes `rw_sd` or
@@ -2357,6 +2360,24 @@ pub struct LegacyStepKey {
 pub struct LegacyStepKeys {
     pub algorithm: Option<String>,
     pub entries: Vec<LegacyStepKey>,
+}
+
+/// How one entry's natural-scale `rw_sd` converts to a step in z: at the
+/// point θ₀ on the parameter's map, or not at all, with the reason.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Conversion {
+    At { theta0: super::steps::Theta0, map: sim::inference::types::Transform },
+    Unavailable(String),
+}
+
+/// The largest converted step in z the refusal offers as a value to write.
+/// A z-SD of 3 already spans most of an interval map's range, so a larger
+/// one, which a start near a bound gives, is shown with its reason and the
+/// default step is recommended instead.
+const LARGEST_OFFERED_Z_STEP: f64 = 3.0;
+
+fn as_f64(v: &toml::Value) -> Option<f64> {
+    v.as_float().or_else(|| v.as_integer().map(|i| i as f64))
 }
 
 /// The `[estimate]` entries of `raw` that write a step key, or `None` when
@@ -2380,11 +2401,17 @@ pub fn detect_legacy_step_keys(raw: &toml::Value) -> Option<LegacyStepKeys> {
             if rw_sd.is_none() && flag.is_none() {
                 return None;
             }
+            let bounds = entry.get("bounds").and_then(toml::Value::as_array).and_then(|b| match b.as_slice() {
+                [lo, hi] => Some((as_f64(lo)?, as_f64(hi)?)),
+                _ => None,
+            });
             Some(LegacyStepKey {
                 param: name.clone(),
-                rw_sd: rw_sd.and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64))),
+                rw_sd: rw_sd.and_then(as_f64),
                 perturb_only_at_t0: flag.and_then(toml::Value::as_bool).unwrap_or(false),
                 simplex_member: members.contains(name.as_str()),
+                start: entry.get("start").and_then(as_f64),
+                bounds,
             })
         })
         .collect();
@@ -2395,11 +2422,89 @@ pub fn detect_legacy_step_keys(raw: &toml::Value) -> Option<LegacyStepKeys> {
     Some(LegacyStepKeys { algorithm, entries })
 }
 
+/// The written `rw_sd` of a parameter whose map has a finite end and whose
+/// converted step is larger than [`LARGEST_OFFERED_Z_STEP`]: where θ₀ sits
+/// relative to its nearer bound, the slope there, and the step in z the
+/// written step is. `None` when the step is offered.
+fn too_large(name: &str, rw: f64, shown_z: f64, theta0: f64, map: &sim::inference::types::Transform) -> Option<String> {
+    use super::steps::sig;
+    if shown_z <= LARGEST_OFFERED_Z_STEP || matches!(map, sim::inference::types::Transform::Identity) {
+        return None;
+    }
+    let (lo, hi) = map.bounds();
+    let (gap, side, bound) = match (theta0 - lo, hi - theta0) {
+        (below, above) if below <= above => (below, "above", lo),
+        (_, above) => (above, "below", hi),
+    };
+    Some(format!(
+        "`{name}` starts at {theta0}, {} {side} its bound {bound}, where |dθ/dz| = {}.\n  \
+         A natural step of {rw} there is {} in z, more than {LARGEST_OFFERED_Z_STEP}, which spans\n  \
+         most of the map's range in one step.",
+        sig(gap, 2), sig(map.slope_at(theta0), 2), sig(shown_z, 3)))
+}
+
 impl LegacyStepKeys {
-    /// The refusal: where each key moved for this file's method, and the
-    /// formula that converts a natural-scale `rw_sd` to the SD in z each
-    /// method takes.
-    pub fn message(&self) -> String {
+    /// Whether `e`'s `rw_sd` is converted to z under `if2` (or under PMMH
+    /// and MH, `if2` false): every `rw_sd` but a simplex member's under IF2,
+    /// which was already read on its group's log-ratio coordinate.
+    fn converts(e: &LegacyStepKey, if2: bool) -> bool {
+        e.rw_sd.is_some() && !(if2 && e.simplex_member)
+    }
+
+    /// Whether the message shows an IF2 table, a PMMH/MH table, or both.
+    fn tables(&self) -> (bool, bool) {
+        match self.algorithm.as_deref() {
+            Some("if2") => (true, false),
+            Some("pmmh") | Some("mh") => (false, true),
+            Some(_) => (false, false),
+            None => (true, true),
+        }
+    }
+
+    /// Each entry's conversion on `model`: its map from its bounds and the
+    /// model's declaration, at its θ₀ ([`super::steps::conversion_point`]:
+    /// the entry's `start`, else the model's value, else the middle of its
+    /// box). An entry without `rw_sd` needs none.
+    pub fn conversions(&self, model: &ir::Model) -> IndexMap<String, Conversion> {
+        use super::steps::{conversion_point, domain_of};
+        self.entries
+            .iter()
+            .filter(|e| e.rw_sd.is_some())
+            .map(|e| {
+                let conversion = match domain_of(&e.param, e.bounds, model) {
+                    Err(err) => Conversion::Unavailable(err),
+                    Ok(map) => {
+                        let value = model.parameters.iter().find(|p| p.name == e.param).and_then(|p| p.value.resolved_value());
+                        let (lo, hi) = map.bounds();
+                        match conversion_point(e.start, value, &map) {
+                            None => Conversion::Unavailable(format!(
+                                "its map is {}, on [{lo}, {hi}], and it has no start and no model value, so \
+                                 there is no point to take |dθ/dz| (the distance to the bound) at",
+                                map.tag())),
+                            Some(t0) if t0.value < lo || t0.value > hi => Conversion::Unavailable(format!(
+                                "its start {} is outside its box [{lo}, {hi}]", t0.value)),
+                            Some(t0) if map.on_an_end(t0.value) => Conversion::Unavailable(format!(
+                                "its start {} is on a bound of [{lo}, {hi}], where the map has no finite z",
+                                t0.value)),
+                            Some(theta0) => Conversion::At { theta0, map },
+                        }
+                    }
+                };
+                (e.param.clone(), conversion)
+            })
+            .collect()
+    }
+
+    /// The refusal: where each key moved for this file's method, with each
+    /// `rw_sd` converted to the SD in z the method takes at its start, from
+    /// `conversions` ([`LegacyStepKeys::conversions`]), and beside it what
+    /// the default step is there. An entry with no conversion, or every
+    /// entry when `conversions` is `None` (no model), gets a placeholder and
+    /// the formula. Under PMMH and MH the value is five times the IF2 one,
+    /// the old initial proposal.
+    pub fn message(&self, conversions: Option<&IndexMap<String, Conversion>>) -> String {
+        use super::steps::sig;
+        use sim::inference::types::Transform;
         let fmt = |x: f64| x.to_string();
         let which = match &self.algorithm {
             Some(a) => format!("This file's method is `{a}`."),
@@ -2413,61 +2518,157 @@ impl LegacyStepKeys {
         m.push_str(&which);
         m.push_str("\n  Delete both keys from [estimate]");
         let width = self.entries.iter().map(|e| e.param.len()).max().unwrap_or(0);
-        let if2_block = || -> String {
-            let mut b = String::from("    [method.perturbation]\n");
+        let converted = |e: &LegacyStepKey| -> Option<(f64, super::steps::Theta0, Transform)> {
+            match conversions?.get(&e.param)? {
+                Conversion::At { theta0, map } => Some((map.step_from_natural(e.rw_sd?, theta0.value), *theta0, *map)),
+                Conversion::Unavailable(_) => None,
+            }
+        };
+        // Paragraphs the blocks refer to: a converted step too large to
+        // offer, and an entry that could not be converted.
+        let (if2_table, mh_table) = self.tables();
+        let shown = |e: &LegacyStepKey| (if2_table && Self::converts(e, true)) || (mh_table && Self::converts(e, false));
+        let mut set_aside: Vec<String> = Vec::new();
+        let mut unconverted: Vec<String> = Vec::new();
+        let mut formula_needed = conversions.is_none() && self.entries.iter().any(shown);
+        for e in self.entries.iter().filter(|e| shown(e)) {
+            if let Some(Conversion::Unavailable(why)) = conversions.and_then(|c| c.get(&e.param)) {
+                unconverted.push(format!("`{}` is not converted: {why}.", e.param));
+                formula_needed = true;
+            }
+        }
+        // One method's block. `factor` is 1 for IF2 and 5 for PMMH and MH.
+        let block = |table: &str, factor: f64, if2: bool, set_aside: &mut Vec<String>| -> String {
+            let mut b = format!("    [method.{table}]\n");
             for e in &self.entries {
-                let value = match (e.rw_sd, e.simplex_member) {
-                    (Some(rw), true) => fmt(rw),
-                    (Some(_), false) => "<sd_z>".to_string(),
-                    (None, _) => String::new(),
+                if !if2 && e.rw_sd.is_none() {
+                    continue;
+                }
+                let (value, note) = match (e.rw_sd, e.simplex_member) {
+                    (Some(rw), true) if if2 => (fmt(rw), "# a simplex member: its rw_sd was already on its log-ratio scale".to_string()),
+                    (Some(rw), _) => match converted(e) {
+                        Some((sd, t0, map)) => {
+                            let shown = factor * sd;
+                            match too_large(&e.param, rw, shown, t0.value, &map) {
+                                Some(why) => {
+                                    if !set_aside.contains(&why) {
+                                        set_aside.push(why);
+                                    }
+                                    (String::new(), format!("# {}: the default step, see below", e.param))
+                                }
+                                None => (sig(shown, 3), format!("# rw_sd {} {}", fmt(rw), t0.describe())),
+                            }
+                        }
+                        None if factor == 1.0 => ("<sd_z>".to_string(), format!("# rw_sd {}", fmt(rw))),
+                        None => ("<5 × sd_z>".to_string(), format!("# rw_sd {}", fmt(rw))),
+                    },
+                    (None, _) => (String::new(), String::new()),
                 };
-                let entry = match (e.perturb_only_at_t0, value.is_empty()) {
+                let flag = if2 && e.perturb_only_at_t0;
+                let entry = match (flag, value.is_empty()) {
                     (true, false) => format!("{{ sd = {value}, initial_state = true }}"),
                     (true, true) => "{ initial_state = true }".to_string(),
                     (false, false) => value,
-                    (false, true) => continue,
-                };
-                let note = match (e.rw_sd, e.simplex_member) {
-                    (Some(rw), false) => format!("# rw_sd {}", fmt(rw)),
-                    (Some(_), true) => "# a simplex member: its rw_sd was already on its log-ratio scale".to_string(),
-                    (None, _) => String::new(),
+                    (false, true) => {
+                        if !note.is_empty() {
+                            b.push_str(&format!("    {note}\n"));
+                        }
+                        continue;
+                    }
                 };
                 let line = format!("    {:width$} = {entry:<40}{note}", e.param);
                 b.push_str(line.trim_end());
                 b.push('\n');
             }
-            b
+            b.trim_end().to_string()
         };
-        let proposal_block = || -> String {
-            let mut b = String::from("    [method.proposal]\n");
+        // What leaving each converted parameter out gives at the same θ₀.
+        // Each method is (label, its default on a map, whether it is IF2).
+        // The old step a default is compared with is `rw_sd` under IF2, and
+        // five times it, the old initial proposal, under PMMH and MH.
+        let defaults = |methods: &[(&str, fn(&Transform) -> Option<f64>, bool)]| -> String {
+            let mut d = String::new();
             for e in self.entries.iter().filter(|e| e.rw_sd.is_some()) {
-                b.push_str(&format!("    {:width$} = <5 × sd_z>  # rw_sd {}\n", e.param, fmt(e.rw_sd.unwrap_or_default())));
+                let Some((_, t0, map)) = converted(e) else { continue };
+                let rw = e.rw_sd.unwrap_or_default();
+                let parts: Vec<String> = methods
+                    .iter()
+                    .filter(|(_, _, if2)| Self::converts(e, *if2))
+                    .map(|(label, default, if2)| {
+                        let was = if *if2 { rw } else { 5.0 * rw };
+                        match default(&map) {
+                            Some(z) => format!("{label}{} in z = {} (was {})",
+                                fmt(z), sig(map.natural_from_step(z, t0.value), 2), fmt(was)),
+                            None => format!("{label}none: an unbounded `real` or `instant` has no default \
+                                step, so its line must stay"),
+                        }
+                    })
+                    .collect();
+                if parts.is_empty() {
+                    continue;
+                }
+                d.push_str(&format!("\n    {:width$}  {}", e.param, parts.join("; ")));
             }
-            b
+            d
         };
         let any_rw = self.entries.iter().any(|e| e.rw_sd.is_some());
+        let any_converted = self.entries.iter().any(|e| converted(e).is_some());
         let any_flag = self.entries.iter().any(|e| e.perturb_only_at_t0);
-        let formula = "\n  where sd_z = rw_sd / |dθ/dz|, the natural-scale step divided by the slope\n  \
+        let formula = "\n\n  where sd_z = rw_sd / |dθ/dz|, the natural-scale step divided by the slope\n  \
             of the parameter's map at its start θ₀ (its `start`, else the model's value,\n  \
             else the middle of its box): θ₀ − lo on [lo, ∞); (θ₀ − lo)(hi − θ₀)/(hi − lo)\n  \
             on a probability or a box that starts at 0; θ₀·ln(θ₀/lo)·ln(hi/θ₀)/ln(hi/lo)\n  \
-            on a positive kind's box [lo, hi] with lo > 0; 1 on an unbounded real.\n  \
-            This gives the old step at the start only, since the new step is fixed in z.";
+            on a positive kind's box [lo, hi] with lo > 0; 1 on an unbounded real.";
+        let local = "\n\n  These give your old step at the start; the new step is fixed in z,\n  \
+            so away from the start the natural-scale step differs.";
+        let tail = |m: &mut String, set_aside: &[String]| {
+            for p in set_aside {
+                m.push_str(&format!("\n\n  {p}\n  Leave it out to take the default step."));
+            }
+            for p in &unconverted {
+                m.push_str(&format!("\n\n  {p}"));
+            }
+            if formula_needed {
+                m.push_str(formula);
+            }
+        };
+        let if2_default: fn(&Transform) -> Option<f64> = Transform::default_if2_step;
+        let mh_default: fn(&Transform) -> Option<f64> = Transform::default_mh_step;
+        let leave_out = "\n\n  Leaving a parameter out uses the method's default step instead, which is a\n  \
+            different step.";
         match self.algorithm.as_deref() {
             Some("if2") => {
                 m.push_str(" and add:\n\n");
-                m.push_str(&if2_block());
-                if any_rw {
-                    m.push_str(formula);
+                m.push_str(&block("perturbation", 1.0, true, &mut set_aside));
+                if any_converted {
+                    m.push_str(local);
+                }
+                tail(&mut m, &set_aside);
+                m.push_str(leave_out);
+                if any_converted {
+                    m.push_str(" At the same start it gives:");
+                    m.push_str(&defaults(&[("", if2_default, true)]));
+                }
+                for e in self.entries.iter().filter(|e| e.perturb_only_at_t0 && e.rw_sd.is_some()) {
+                    m.push_str(&format!("\n  For {0} with the default step write `{0} = {{ initial_state = true }}`.", e.param));
                 }
             }
             Some("pmmh") | Some("mh") => {
                 if any_rw {
                     m.push_str(" and add:\n\n");
-                    m.push_str(&proposal_block());
-                    m.push_str(formula);
-                    m.push_str("\n  The old initial proposal was five times that z step; the new table is\n  \
-                        the proposal SD itself.");
+                    m.push_str(&block("proposal", 5.0, false, &mut set_aside));
+                    m.push_str("\n\n  The old initial proposal was five times rw_sd converted to z, so these are\n  \
+                        five times sd_z: the new table is the proposal SD itself, here a\n  \
+                        natural-scale step of 5 × rw_sd at the start.");
+                    if any_converted {
+                        m.push_str(local);
+                    }
+                    tail(&mut m, &set_aside);
+                    m.push_str(leave_out);
+                    if any_converted {
+                        m.push_str(" At the same start it gives:");
+                        m.push_str(&defaults(&[("", mh_default, false)]));
+                    }
                 } else {
                     m.push('.');
                 }
@@ -2482,29 +2683,70 @@ impl LegacyStepKeys {
             }
             None => {
                 m.push_str(", and add the table of the method that runs the file:\n\n  for `if2`:\n");
-                m.push_str(&if2_block());
+                m.push_str(&block("perturbation", 1.0, true, &mut set_aside));
                 if any_rw {
-                    m.push_str("\n  for `pmmh` or `mh`:\n");
-                    m.push_str(&proposal_block());
-                    m.push_str(formula);
+                    m.push_str("\n\n  for `pmmh` or `mh`, five times the IF2 value, the old initial proposal:\n");
+                    m.push_str(&block("proposal", 5.0, false, &mut set_aside));
+                }
+                if any_converted {
+                    m.push_str(local);
+                }
+                tail(&mut m, &set_aside);
+                m.push_str(leave_out);
+                if any_converted {
+                    m.push_str(" At the same start it gives:");
+                    m.push_str(&defaults(&[("if2 ", if2_default, true), ("pmmh or mh ", mh_default, false)]));
                 }
             }
         }
-        m.push_str(
-            "\n\n  Leaving a parameter out uses the method's default step instead, which is a\n  \
-             different step. See `camdl docs fit-toml`, \"Step sizes\".",
-        );
+        m.push_str("\n  See `camdl docs fit-toml`, \"Step sizes\".");
         m
     }
 }
 
 /// Refuse a live fit config whose `[estimate]` writes `rw_sd` or
-/// `perturb_only_at_t0`, naming where each moved.
+/// `perturb_only_at_t0`, naming where each moved, with the formula for the
+/// step in z. [`legacy_step_refusal`] gives the converted values instead
+/// when the file's model can be read.
 fn detect_legacy_step_keys_in(contents: &str) -> Result<(), String> {
-    let Ok(raw) = toml::from_str::<toml::Value>(contents) else { return Ok(()) };
-    match detect_legacy_step_keys(&raw) {
-        Some(keys) => Err(keys.message()),
+    match legacy_step_keys_in(contents) {
+        Some((_, keys)) => Err(keys.message(None)),
         None => Ok(()),
+    }
+}
+
+/// The file `contents` parsed, and its old step keys
+/// ([`detect_legacy_step_keys`]) in the order `[estimate]` writes them;
+/// `None` when it writes none or does not parse.
+fn legacy_step_keys_in(contents: &str) -> Option<(toml::Value, LegacyStepKeys)> {
+    #[derive(Deserialize)]
+    struct EstimateOrder {
+        #[serde(default)]
+        estimate: IndexMap<String, toml::Value>,
+    }
+    let raw = toml::from_str::<toml::Value>(contents).ok()?;
+    let mut keys = detect_legacy_step_keys(&raw)?;
+    if let Ok(order) = toml::from_str::<EstimateOrder>(contents) {
+        keys.entries.sort_by_key(|e| order.estimate.get_index_of(&e.param));
+    }
+    Some((raw, keys))
+}
+
+/// The refusal of a live config at `anchor_toml` that writes the old step
+/// keys, with each `rw_sd` converted at its start: the model named by
+/// `[model] camdl`, resolved against `anchor_toml`, is loaded (a `.camdl` is
+/// compiled) and each parameter's map built from it. When the model does
+/// not load, the refusal gives the formula and the error.
+pub fn legacy_step_refusal(keys: &LegacyStepKeys, raw: &toml::Value, anchor_toml: &std::path::Path) -> String {
+    let Some(camdl) = raw.get("model").and_then(|m| m.get("camdl")).and_then(toml::Value::as_str) else {
+        return keys.message(None);
+    };
+    let path = crate::util::resolve_relative_to_toml(anchor_toml, camdl);
+    match crate::util::load_model(&path, crate::util::CompileSettings::default()) {
+        Ok((model, _)) => keys.message(Some(&keys.conversions(&model))),
+        Err(e) => format!(
+            "{}\n\n  The converted values need the model, which did not load:\n  {e}",
+            keys.message(None)),
     }
 }
 
@@ -3012,8 +3254,15 @@ impl FitConfig {
         anchor_toml: &std::path::Path,
     ) -> Result<Self, String> {
         let path = read_path.to_string_lossy();
-        let mut config = FitConfig::from_toml_str_named(contents, &path)
-            .map_err(|e| format!("error in {}:\n{}", path, e))?;
+        let mut config = FitConfig::from_toml_str_named(contents, &path).map_err(|e| {
+            // The old step keys' refusal, given again with each step
+            // converted at its start: here the file's path names its model.
+            let e = match legacy_step_keys_in(contents) {
+                Some((raw, keys)) if e == keys.message(None) => legacy_step_refusal(&keys, &raw, anchor_toml),
+                _ => e,
+            };
+            format!("error in {}:\n{}", path, e)
+        })?;
 
         // gh#307: warn (do not error) on absolute file references — checked on
         // the as-written paths, before the relative-path resolution below turns
@@ -8220,6 +8469,228 @@ algorithm = "{algorithm}"
             && err.contains("`perturb_only_at_t0` is IF2's timing"), "{err}");
         let err = parse(&old("pgas", PGAS_BODY)).expect_err("rw_sd moved");
         assert!(err.contains("`pgas` reads neither key"), "{err}");
+    }
+
+    // ── The old step keys converted on the model (§7.3, §7.4) ──────────────
+    //
+    // The model is `sir_basic`'s compiled IR: beta, gamma rate in
+    // [0.001, 2] and [0.001, 1], N0 and I0 count. The fit boxes below narrow
+    // them to the proposal's §10 SIR, so beta, gamma and I0 take the
+    // log-interval map.
+
+    fn sir_ir_path() -> String {
+        format!("{}/../../../ocaml/golden/sir_basic.ir.json", env!("CARGO_MANIFEST_DIR"))
+    }
+
+    fn sir_model() -> ir::Model {
+        let json = std::fs::read_to_string(sir_ir_path()).unwrap();
+        ir::from_str(&json).unwrap()
+    }
+
+    /// The §10 file's `[estimate]`, with `method` as its `[method]` (or none).
+    fn section_10(method: Option<&str>) -> String {
+        let method = method.map(|a| format!("\n[method]\nalgorithm = \"{a}\"\n")).unwrap_or_default();
+        format!(r#"[model]
+camdl = "{}"
+
+[data.observations]
+weekly_cases = "data/weekly_cases.tsv"
+
+[estimate]
+beta  = {{ bounds = [0.05, 1.0], start = 0.25, rw_sd = 0.02 }}
+gamma = {{ bounds = [0.01, 0.5], start = 0.10, rw_sd = 0.01 }}
+I0    = {{ bounds = [1, 100], start = 10, rw_sd = 2.0, perturb_only_at_t0 = true }}
+{method}"#, sir_ir_path())
+    }
+
+    /// The refusal of `text` with each step converted on `model`.
+    fn converted_refusal(text: &str, model: &ir::Model) -> String {
+        let (_, keys) = legacy_step_keys_in(text).expect("the file writes the old keys");
+        keys.message(Some(&keys.conversions(model)))
+    }
+
+    /// §7.4, `if2`: `rw_sd` becomes `[method.perturbation] NAME = <sd_z>`,
+    /// and `perturb_only_at_t0` `{ sd = <sd_z>, initial_state = true }`, each
+    /// converted at the start: beta on [0.05, 1] at 0.25 has |dθ/dz| =
+    /// 0.18619, so 0.02 is 0.107 in z; gamma on [0.01, 0.5] at 0.1 has
+    /// 0.09473, so 0.01 is 0.106; I0 on [1, 100] at 10 has 11.513, so 2 is
+    /// 0.174. Beside each, the default 1/20 at the same start.
+    #[test]
+    fn an_if2_file_gets_each_step_converted_at_its_start() {
+        let err = converted_refusal(&section_10(Some("if2")), &sir_model());
+        for line in [
+            "    [method.perturbation]\n",
+            "    beta  = 0.107                                   # rw_sd 0.02 at start 0.25\n",
+            "    gamma = 0.106                                   # rw_sd 0.01 at start 0.1\n",
+            "    I0    = { sd = 0.174, initial_state = true }    # rw_sd 2 at start 10\n",
+            "    beta   0.05 in z = 0.0093 (was 0.02)",
+            "    gamma  0.05 in z = 0.0047 (was 0.01)",
+            "    I0     0.05 in z = 0.58 (was 2)",
+            "For I0 with the default step write `I0 = { initial_state = true }`.",
+            "These give your old step at the start",
+        ] {
+            assert!(err.contains(line), "missing {line:?} in:\n{err}");
+        }
+        assert!(!err.contains("<sd_z>") && !err.contains("where sd_z"), "every step converts:\n{err}");
+    }
+
+    /// §7.4, `pmmh` and `mh`: `rw_sd` becomes `[method.proposal] NAME =
+    /// <5 × sd_z>`, the old initial proposal (5 × 0.10742 = 0.537), beside
+    /// the default 0.25 in z at the start (0.25 × 0.18619 = 0.047 for
+    /// beta). `perturb_only_at_t0` is told to go.
+    #[test]
+    fn a_pmmh_or_mh_file_gets_five_times_the_converted_step() {
+        for algorithm in ["pmmh", "mh"] {
+            let err = converted_refusal(&section_10(Some(algorithm)), &sir_model());
+            for line in [
+                "    [method.proposal]\n",
+                "    beta  = 0.537                                   # rw_sd 0.02 at start 0.25\n",
+                "    gamma = 0.528                                   # rw_sd 0.01 at start 0.1\n",
+                "    I0    = 0.869                                   # rw_sd 2 at start 10\n",
+                "    beta   0.25 in z = 0.047 (was 0.1)",
+                "`perturb_only_at_t0` is IF2's timing, which this method does not read: delete it.",
+            ] {
+                assert!(err.contains(line), "{algorithm}: missing {line:?} in:\n{err}");
+            }
+            assert!(!err.contains("[method.perturbation]") && !err.contains("initial_state"), "{algorithm}:\n{err}");
+        }
+    }
+
+    /// §7.4, `pgas`, `pfilter` and `nl-*`: neither key was read, so the
+    /// message says to delete them and converts nothing.
+    #[test]
+    fn a_method_without_a_step_is_told_to_delete_the_keys() {
+        for algorithm in ["pgas", "pfilter", "nl-sbplx", "nl-bobyqa", "nl-lbfgs"] {
+            let err = converted_refusal(&section_10(Some(algorithm)), &sir_model());
+            assert!(err.contains(&format!("`{algorithm}` reads neither key: it takes no per-parameter step")), "{err}");
+            assert!(!err.contains("[method.perturbation]") && !err.contains("[method.proposal]")
+                && !err.contains("0.107"), "{algorithm}:\n{err}");
+        }
+    }
+
+    /// §7.4, no `[method]`: both tables, each converted, with both defaults.
+    #[test]
+    fn a_problem_only_file_gets_both_tables() {
+        let err = converted_refusal(&section_10(None), &sir_model());
+        for line in [
+            "for `if2`:\n    [method.perturbation]\n    beta  = 0.107",
+            "    I0    = { sd = 0.174, initial_state = true }",
+            "[method.proposal]\n    beta  = 0.537",
+            "    I0    = 0.869",
+            "    beta   if2 0.05 in z = 0.0093 (was 0.02); pmmh or mh 0.25 in z = 0.047 (was 0.1)",
+        ] {
+            assert!(err.contains(line), "missing {line:?} in:\n{err}");
+        }
+    }
+
+    /// §7.3's θ₀: the entry's start, else the model's value, else the
+    /// middle of the box (geometric on the log-interval map). beta on
+    /// [0.05, 1] at 0.5 has |dθ/dz| = 0.5·ln 10·ln 2/ln 20 = 0.26638, so
+    /// 0.02 is 0.0751 in z; at the geometric middle √0.05 = 0.22361 it has
+    /// 0.22361·(ln 4.4721)²/ln 20 = 0.16747, so 0.02 is 0.119.
+    #[test]
+    fn the_start_is_the_entry_start_then_the_model_value_then_the_box_middle() {
+        let text = section_10(Some("if2")).replace("start = 0.25, ", "");
+        let mut valued = sir_model();
+        let beta = valued.parameters.iter_mut().find(|p| p.name == "beta").unwrap();
+        beta.value = beta.value.with_value(0.5);
+        let err = converted_refusal(&text, &valued);
+        assert!(err.contains("beta  = 0.0751") && err.contains("# rw_sd 0.02 at the model's value 0.5"), "{err}");
+        let err = converted_refusal(&text, &sir_model());
+        assert!(err.contains("beta  = 0.119") && err.contains("# rw_sd 0.02 at the box middle 0.2236"), "{err}");
+        // A written start wins over the model's value.
+        let err = converted_refusal(&section_10(Some("if2")), &valued);
+        assert!(err.contains("beta  = 0.107") && err.contains("at start 0.25"), "{err}");
+    }
+
+    /// §7.3: a half-bounded map with no start and no model value has no
+    /// point to take |dθ/dz| at, so its line keeps the placeholder and the
+    /// formula is given. With a start it converts: I0 on [0, ∞) at 10 has
+    /// |dθ/dz| = 10, so 2 is 0.2 in z.
+    #[test]
+    fn a_half_bounded_parameter_with_no_start_is_not_converted() {
+        let mut model = sir_model();
+        let i0 = model.parameters.iter_mut().find(|p| p.name == "I0").unwrap();
+        i0.value = ir::parameter::ParamValue::Estimated { init: None, bounds: None, prior: ir::parameter::PriorSpec::Flat };
+        let text = section_10(Some("if2")).replace("bounds = [1, 100], ", "");
+        let err = converted_refusal(&text, &model);
+        assert!(err.contains("I0    = { sd = 0.200, initial_state = true }    # rw_sd 2 at start 10"), "{err}");
+        let err = converted_refusal(&text.replace("start = 10, ", ""), &model);
+        assert!(err.contains("I0    = { sd = <sd_z>, initial_state = true }")
+            && err.contains("`I0` is not converted: its map is lower_bounded, on [0, inf], and it has no start")
+            && err.contains("where sd_z = rw_sd / |dθ/dz|"), "{err}");
+        // The other two still convert.
+        assert!(err.contains("beta  = 0.107"), "{err}");
+    }
+
+    /// §7.3: the identity map (an unbounded `real`) has |dθ/dz| = 1, so the
+    /// step is written as it was; it has no default step, so its line must
+    /// stay.
+    #[test]
+    fn an_unbounded_real_converts_one_to_one_and_has_no_default() {
+        let mut model = sir_model();
+        let beta = model.parameters.iter_mut().find(|p| p.name == "beta").unwrap();
+        beta.param_kind = Some(ir::parameter::ParamKind::Real);
+        beta.value = ir::parameter::ParamValue::Estimated { init: None, bounds: None, prior: ir::parameter::PriorSpec::Flat };
+        let text = section_10(Some("if2")).replace("bounds = [0.05, 1.0], ", "");
+        let err = converted_refusal(&text, &model);
+        assert!(err.contains("beta  = 0.0200") && err.contains("beta   none: an unbounded `real` or `instant` has no default step"),
+            "{err}");
+    }
+
+    /// §7.3: a simplex member's IF2 `rw_sd` was read on its group's
+    /// log-ratio coordinate, so under IF2 it is kept as written; under PMMH
+    /// a member is an ordinary parameter and converts.
+    #[test]
+    fn a_simplex_members_rw_sd_is_kept_under_if2_and_converted_under_pmmh() {
+        let with_group = |a: &str| section_10(Some(a)).replace("[estimate]", "[[simplex_groups]]\nparams = [\"beta\", \"gamma\"]\n\n[estimate]");
+        let err = converted_refusal(&with_group("if2"), &sir_model());
+        assert!(err.contains("beta  = 0.02                                    # a simplex member"), "{err}");
+        let err = converted_refusal(&with_group("pmmh"), &sir_model());
+        assert!(err.contains("beta  = 0.537"), "{err}");
+    }
+
+    /// §7.3: a start near a bound has a small slope, so the converted step
+    /// is large. Above 3 in z it is not offered: beta at 0.0501, 1·10⁻⁴
+    /// above 0.05, has |dθ/dz| ≈ 1.0·10⁻⁴, so 0.02 is about 200 in z. The
+    /// message says so and recommends the default.
+    #[test]
+    fn a_converted_step_above_3_in_z_is_not_offered() {
+        let text = section_10(Some("if2")).replace("start = 0.25", "start = 0.0501");
+        let err = converted_refusal(&text, &sir_model());
+        assert!(err.contains("    # beta: the default step, see below\n")
+            && err.contains("`beta` starts at 0.0501, 1.0e-4 above its bound 0.05, where |dθ/dz| = 1.0e-4.\n  \
+                A natural step of 0.02 there is 200 in z, more than 3, which spans\n  \
+                most of the map's range in one step.\n  Leave it out to take the default step."),
+            "{err}");
+        assert!(!err.contains("beta  ="), "no value is offered for beta:\n{err}");
+    }
+
+    /// §7.3: a parameter the model does not declare is not converted; its
+    /// line keeps the placeholder with the reason.
+    #[test]
+    fn a_parameter_the_model_lacks_is_not_converted() {
+        let text = section_10(Some("if2")).replace("gamma = {", "delta = {");
+        let err = converted_refusal(&text, &sir_model());
+        assert!(err.contains("delta = <sd_z>") && err.contains("`delta` is not converted: parameter 'delta' not in model"),
+            "{err}");
+    }
+
+    /// A live config is loaded with its model (`FitConfig::load`), so its
+    /// refusal carries the converted values; when the model does not load,
+    /// the formula and the load error.
+    #[test]
+    fn a_live_config_is_refused_with_the_converted_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fit.toml");
+        std::fs::write(&path, section_10(Some("if2"))).unwrap();
+        let err = FitConfig::load(path.to_str().unwrap()).expect_err("the old keys are refused");
+        assert!(err.contains("beta  = 0.107") && !err.contains("<sd_z>"), "{err}");
+        std::fs::write(&path, section_10(Some("if2")).replace(&sir_ir_path(), "missing.ir.json")).unwrap();
+        let err = FitConfig::load(path.to_str().unwrap()).expect_err("the old keys are refused");
+        assert!(err.contains("beta  = <sd_z>") && err.contains("where sd_z")
+            && err.contains("The converted values need the model, which did not load:") && err.contains("missing.ir.json"),
+            "{err}");
     }
 
     /// Control: the same methods validate when no `[estimate]` entry declares

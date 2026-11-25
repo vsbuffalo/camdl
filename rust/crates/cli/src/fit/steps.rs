@@ -114,21 +114,134 @@ pub fn domains(
     estimate: &IndexMap<String, EstimateSpecV2>,
     model: &ir::Model,
 ) -> Result<IndexMap<String, Transform>, String> {
+    estimate
+        .iter()
+        .map(|(name, spec)| Ok((name.clone(), domain_of(name, spec.bounds, model)?)))
+        .collect()
+}
+
+/// The map onto one estimated parameter's effective domain, from its
+/// `[estimate]` bounds and its declaration in `model` ([`domains`]).
+pub fn domain_of(name: &str, bounds: Option<(f64, f64)>, model: &ir::Model) -> Result<Transform, String> {
     use super::runner::{estimated_kind, resolve_search_box};
+    let p = model.parameters.iter().find(|p| p.name == name).ok_or_else(|| {
+        format!("parameter '{name}' not in model{}", crate::util::constant_hints(model, [name]))
+    })?;
+    let kind = estimated_kind(p)?;
+    let support = crate::roles::support(p, kind);
+    let (lower, upper) = resolve_search_box(name, bounds, p)?;
+    let search = crate::roles::SearchBox { lower, upper, from: crate::roles::BoxFrom::FitConfig };
+    crate::roles::effective_domain(&support, &search, kind).map_err(|e| e.to_string())
+}
+
+/// Where θ₀, the point a natural-scale step and a step in z are converted
+/// at, came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Theta0From {
+    /// The entry's `[estimate]` `start`.
+    Start,
+    /// The model's value for the parameter, the base point the chains start
+    /// around when no start is written.
+    ModelValue,
+    /// The middle of the box: arithmetic on the interval map, geometric on
+    /// the log-interval map.
+    BoxMidpoint,
+}
+
+/// The point one parameter's natural-scale step and its step in z are
+/// converted at (`docs/dev/proposals/2026-10-29-method-scoped-settings.md`
+/// §7.3), and where it came from.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Theta0 {
+    pub value: f64,
+    pub from: Theta0From,
+}
+
+impl Theta0 {
+    /// "at start 0.25", "at the model's value 0.3", "at the box middle
+    /// 0.2236".
+    pub fn describe(&self) -> String {
+        match self.from {
+            Theta0From::Start => format!("at start {}", self.value),
+            Theta0From::ModelValue => format!("at the model's value {}", self.value),
+            Theta0From::BoxMidpoint => format!("at the box middle {}", sig(self.value, 4)),
+        }
+    }
+}
+
+/// θ₀ for a parameter on `map`: its written `start`, else the model's
+/// value, else the middle of a box finite at both ends. `None` for a
+/// half-bounded map with no start and no model value, which has no point to
+/// take the slope at. The identity map's slope is 1 everywhere, so it
+/// converts at any point, and takes 0 when nothing else is given.
+pub fn conversion_point(start: Option<f64>, model_value: Option<f64>, map: &Transform) -> Option<Theta0> {
+    if let Some(value) = start {
+        return Some(Theta0 { value, from: Theta0From::Start });
+    }
+    if let Some(value) = model_value {
+        return Some(Theta0 { value, from: Theta0From::ModelValue });
+    }
+    let value = match *map {
+        Transform::Interval { lo, hi } => 0.5 * (lo + hi),
+        Transform::LogInterval { lo, hi } => (lo * hi).sqrt(),
+        Transform::Identity => 0.0,
+        Transform::LowerBounded { .. } | Transform::UpperBounded { .. } => return None,
+    };
+    Some(Theta0 { value, from: Theta0From::BoxMidpoint })
+}
+
+/// Each estimated parameter's map and its conversion point
+/// ([`conversion_point`]), in `[estimate]` order: what the launch table and
+/// the run record convert each step at.
+pub fn conversion_points(
+    estimate: &IndexMap<String, EstimateSpecV2>,
+    model: &ir::Model,
+) -> Result<IndexMap<String, (Transform, Option<Theta0>)>, String> {
     estimate
         .iter()
         .map(|(name, spec)| {
-            let p = model.parameters.iter().find(|p| p.name == *name).ok_or_else(|| {
-                format!("parameter '{name}' not in model{}", crate::util::constant_hints(model, [name.as_str()]))
-            })?;
-            let kind = estimated_kind(p)?;
-            let support = crate::roles::support(p, kind);
-            let (lower, upper) = resolve_search_box(name, spec.bounds, p)?;
-            let search = crate::roles::SearchBox { lower, upper, from: crate::roles::BoxFrom::FitConfig };
-            let map = crate::roles::effective_domain(&support, &search, kind).map_err(|e| e.to_string())?;
-            Ok((name.clone(), map))
+            let map = domain_of(name, spec.bounds, model)?;
+            let value = model.parameters.iter().find(|p| p.name == *name).and_then(|p| p.value.resolved_value());
+            Ok((name.clone(), (map, conversion_point(spec.start, value, &map))))
         })
         .collect()
+}
+
+/// The launch table's natural-scale equivalent of a step of `z_sd` on
+/// `map`, at `theta0`: "≈ 0.0200 natural at start 0.25", with "start near
+/// bound" when θ₀ is within 1% of the box's width from a finite end, where
+/// the slope, and so the natural step, is small. With no θ₀ there is no
+/// equivalent to print.
+pub fn natural_at_start(map: &Transform, z_sd: f64, theta0: Option<Theta0>) -> String {
+    let Some(t0) = theta0.filter(|t| within(map, t.value)) else {
+        return "(no start in its box to take its natural-scale equivalent at)".to_string();
+    };
+    let natural = sim::inference::diagnostic::format_start_value(map.natural_from_step(z_sd, t0.value));
+    let (lo, hi) = map.bounds();
+    let near = lo.is_finite() && hi.is_finite()
+        && ((t0.value - lo) / (hi - lo) < 0.01 || (hi - t0.value) / (hi - lo) < 0.01);
+    format!("≈ {natural} natural {}{}", t0.describe(), if near { ", start near bound" } else { "" })
+}
+
+/// Whether `theta` lies in `map`'s domain, ends included: where its slope
+/// can be taken.
+fn within(map: &Transform, theta: f64) -> bool {
+    let (lo, hi) = map.bounds();
+    lo <= theta && theta <= hi
+}
+
+/// `x` to `n` significant digits, in scientific notation below 10⁻³ and
+/// from 10⁵.
+pub(crate) fn sig(x: f64, n: usize) -> String {
+    if x == 0.0 || !x.is_finite() {
+        return x.to_string();
+    }
+    if !(1e-3..1e5).contains(&x.abs()) {
+        return format!("{x:.prec$e}", prec = n.saturating_sub(1));
+    }
+    let magnitude = x.abs().log10().floor() as i32;
+    let decimals = (n as i32 - 1 - magnitude).max(0) as usize;
+    format!("{x:.decimals$}")
 }
 
 /// The step of every name in `domains` under `algorithm`, from its table.
@@ -319,10 +432,17 @@ impl ResolvedSteps {
     }
 
     /// The steps as the run's provenance records them (`run_inputs.json`,
-    /// `steps`): each SD in z, IF2's timing, and whether it was written or
-    /// is the default. `from` is recorded here and never keyed; the SDs and
-    /// timings are the method identity's.
-    pub fn record(&self) -> serde_json::Value {
+    /// `steps`): each parameter's map, its SD in z, IF2's timing, the point
+    /// θ₀ it is converted at (from `points`, [`conversion_points`]) with the
+    /// natural-scale step it is there, and whether it was written or is the
+    /// default. `from` is recorded here and never keyed; the SDs and timings
+    /// are the method identity's, and the map and θ₀ follow from the problem
+    /// and the written starts. θ₀ and the natural step are null for a
+    /// half-bounded map with no start and no model value, and for a θ₀
+    /// outside the box. A simplex member's
+    /// SD is on its group's log-ratio coordinate, so it has no natural-scale
+    /// equivalent.
+    pub fn record(&self, points: &IndexMap<String, (Transform, Option<Theta0>)>) -> serde_json::Value {
         use serde_json::json;
         let from = |f: StepFrom| match f {
             StepFrom::Written => "written",
@@ -332,12 +452,26 @@ impl ResolvedSteps {
             PerturbAt::EveryObservation => "every_observation",
             PerturbAt::TimeZeroOnly => "time_zero_only",
         };
+        let at_start = |name: &str, sd_z: f64| -> (serde_json::Value, serde_json::Value) {
+            match points.get(name) {
+                Some((map, Some(t0))) if within(map, t0.value) =>
+                    (json!(t0.value), json!(map.natural_from_step(sd_z, t0.value))),
+                _ => (serde_json::Value::Null, serde_json::Value::Null),
+            }
+        };
+        let maps = |names: &mut dyn Iterator<Item = &String>| -> serde_json::Map<String, serde_json::Value> {
+            names.filter_map(|n| points.get(n).map(|(m, _)| (n.clone(), json!(m.tag())))).collect()
+        };
         match self {
             ResolvedSteps::If2 { params, simplex } => json!({
                 "kind": "if2",
+                "map": maps(&mut params.keys()),
                 "perturbation": params.iter().filter_map(|(name, r)| match r.step {
-                    If2Step::Single(p) => Some((name.clone(),
-                        json!({ "sd_z": p.sd.get(), "at": at(p.at), "from": from(r.from) }))),
+                    If2Step::Single(p) => {
+                        let (start, natural) = at_start(name, p.sd.get());
+                        Some((name.clone(), json!({ "sd_z": p.sd.get(), "at": at(p.at),
+                            "start": start, "natural_at_start": natural, "from": from(r.from) })))
+                    }
                     If2Step::SimplexMember => None,
                 }).collect::<serde_json::Map<_, _>>(),
                 "simplex": simplex.iter().map(|g| g.iter().map(|(name, r)|
@@ -346,9 +480,12 @@ impl ResolvedSteps {
             }),
             ResolvedSteps::Proposal(map) => json!({
                 "kind": "proposal",
-                "proposal": map.iter().map(|(name, r)|
-                    (name.clone(), json!({ "sd_z": r.sd.get(), "from": from(r.from) })))
-                    .collect::<serde_json::Map<_, _>>(),
+                "map": maps(&mut map.keys()),
+                "proposal": map.iter().map(|(name, r)| {
+                    let (start, natural) = at_start(name, r.sd.get());
+                    (name.clone(), json!({ "sd_z": r.sd.get(), "start": start,
+                        "natural_at_start": natural, "from": from(r.from) }))
+                }).collect::<serde_json::Map<_, _>>(),
             }),
             ResolvedSteps::None => json!({ "kind": "none" }),
         }
@@ -462,6 +599,59 @@ mod tests {
         let steps = resolve_steps(&if2("[perturbation]\nc = 0.3"), &domains, &group).unwrap();
         let sds: Vec<f64> = steps.simplex_sds().unwrap()[0].iter().map(|s| s.get()).collect();
         assert_eq!(sds, vec![1.0 / 6.0, 1.0 / 6.0, 0.3]);
+    }
+
+    /// θ₀ is the written start, else the model's value, else the box's
+    /// middle (geometric on the log-interval map); a half-bounded map with
+    /// neither has none.
+    #[test]
+    fn the_conversion_point_is_the_start_then_the_model_value_then_the_middle() {
+        let log = Transform::LogInterval { lo: 0.05, hi: 1.0 };
+        let at = |start, value, map: &Transform| conversion_point(start, value, map).map(|t| (t.value, t.from));
+        assert_eq!(at(Some(0.25), Some(0.5), &log), Some((0.25, Theta0From::Start)));
+        assert_eq!(at(None, Some(0.5), &log), Some((0.5, Theta0From::ModelValue)));
+        assert_eq!(at(None, None, &log), Some((0.05f64.sqrt(), Theta0From::BoxMidpoint)));
+        assert_eq!(at(None, None, &Transform::Interval { lo: 0.0, hi: 0.5 }), Some((0.25, Theta0From::BoxMidpoint)));
+        assert_eq!(at(None, None, &Transform::LowerBounded { lo: 0.0 }), None);
+        assert_eq!(at(Some(3.0), None, &Transform::LowerBounded { lo: 0.0 }), Some((3.0, Theta0From::Start)));
+    }
+
+    /// `run_inputs.json`'s `steps` gives each step's map, its start and the
+    /// natural-scale step it is there: 0.107 in z on the log-interval map of
+    /// [0.05, 1] at 0.25 (|dθ/dz| = 0.18619) is 0.01992. A map with no
+    /// start records nulls.
+    #[test]
+    fn the_run_record_gives_each_step_at_its_start() {
+        let steps = resolve_steps(&if2("[perturbation]\nbeta = 0.107"), &beta_only(), &[]).unwrap();
+        let points: IndexMap<String, (Transform, Option<Theta0>)> = [(
+            "beta".to_string(),
+            (Transform::LogInterval { lo: 0.05, hi: 1.0 }, Some(Theta0 { value: 0.25, from: Theta0From::Start })),
+        )].into_iter().collect();
+        let r = steps.record(&points);
+        assert_eq!(r["map"]["beta"], "log_interval");
+        let beta = &r["perturbation"]["beta"];
+        assert_eq!((beta["sd_z"].as_f64(), beta["start"].as_f64(), beta["from"].as_str()),
+            (Some(0.107), Some(0.25), Some("written")));
+        let natural = beta["natural_at_start"].as_f64().unwrap();
+        assert!((natural - 0.107 * 0.186_19).abs() < 1e-5, "{natural}");
+        let pmmh_steps = resolve_steps(&pmmh(""), &beta_only(), &[]).unwrap();
+        let no_start: IndexMap<String, (Transform, Option<Theta0>)> =
+            [("beta".to_string(), (Transform::LowerBounded { lo: 0.0 }, None))].into_iter().collect();
+        let r = pmmh_steps.record(&no_start);
+        assert!(r["proposal"]["beta"]["start"].is_null() && r["proposal"]["beta"]["natural_at_start"].is_null(), "{r}");
+        assert_eq!(r["map"]["beta"], "lower_bounded");
+    }
+
+    /// The launch table's natural equivalent is taken at θ₀ and names it;
+    /// a start within 1% of the box's width from an end is marked.
+    #[test]
+    fn the_launch_tables_natural_step_is_at_the_start() {
+        let map = Transform::Interval { lo: 0.0, hi: 1.0 };
+        let at = |value| Some(Theta0 { value, from: Theta0From::Start });
+        // |dθ/dz| = 0.1 × 0.9 = 0.09 at 0.1, so 0.1 in z is 0.009.
+        assert_eq!(natural_at_start(&map, 0.1, at(0.1)), "≈ 0.0090 natural at start 0.1");
+        assert!(natural_at_start(&map, 0.1, at(0.005)).ends_with("at start 0.005, start near bound"));
+        assert!(natural_at_start(&map, 0.1, None).contains("no start"));
     }
 
     /// The group perturbs its members at t = 0 only, so `initial_state` on a

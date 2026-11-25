@@ -205,8 +205,8 @@ pgas	stderr	line	best complete-data ll:	-114.9 (chain 1)
 pgas	stderr	line	stored pgas	/runs/pgas-
 if2	stderr	line	fit:	if2.toml (method=if2)
 if2	stderr	line	running	4 chains × 200 particles × 20 iterations, cooling=0.9, dt=1
-if2	stderr	line	beta         log_interval	[0.05, 2]  start=0.4928 z=0.49  step(z)=0.050 ≈ 0.0146 natural at the midpoint (default)
-if2	stderr	line	gamma        log_interval	[0.02, 1]  start=0.2125 z=0.42  step(z)=0.050 ≈ 0.0069 natural at the midpoint (default)
+if2	stderr	line	beta         log_interval	[0.05, 2]  start=0.4928 z=0.49  step(z)=0.050 ≈ 0.0216 natural at start 0.5 (default)
+if2	stderr	line	gamma        log_interval	[0.02, 1]  start=0.2125 z=0.42  step(z)=0.050 ≈ 0.0095 natural at start 0.2 (default)
 if2	stderr	line	parameters use the default step	2/2
 if2	stderr	line	cooling:	cf50=0.90, reached at iter 50 (target), over a 20-iteration run × 14 observed times
 if2	stderr	line	chain 0: ll=	-44.1

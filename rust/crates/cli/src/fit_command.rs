@@ -1027,6 +1027,8 @@ fn compute_run(out: &mut Out, rc: RunCompute<'_>) -> Result<(), String> {
     out.method_done();
 
     let method_elapsed = method_t0.elapsed();
+    // Each step's map and the start it is converted at, for the record.
+    let step_points = crate::fit::steps::conversion_points(&problem.estimate, model)?;
     // What the run was asked to do, and what only the run can tell: its best
     // log-likelihood and chain, and for a resume, its lineage.
     let mut inputs = serde_json::json!({
@@ -1049,7 +1051,7 @@ fn compute_run(out: &mut Out, rc: RunCompute<'_>) -> Result<(), String> {
         "unused_starts": { "rule": record.starts_rule.tag(), "params": unused_starts },
         "best_loglik": ran.best_loglik,
         "best_chain": ran.best_chain,
-        "steps": steps.record(),
+        "steps": steps.record(&step_points),
     });
     // The forcing override, and the forcings it held, as the record of the
     // command that ran under it.

@@ -180,27 +180,29 @@ impl Transform {
         }
     }
 
-    /// The coordinate at which a natural-scale step is converted to z, once
-    /// (series (i) of the proposal): the box's midpoint, z = 0, for the
-    /// interval maps (geometric for `LogInterval`), and the start θ₀ for the
-    /// others.
-    pub fn reference_z(&self, theta0: f64) -> f64 {
-        match self {
-            Transform::Interval { .. } | Transform::LogInterval { .. } => 0.0,
-            _ => self.forward(theta0),
-        }
+    /// |dθ/dz| at θ = `theta0`: the natural-scale distance one unit of z
+    /// covers there. A natural-scale step and a step in z are converted into
+    /// each other at the parameter's resolved start, by this slope
+    /// (`docs/dev/proposals/2026-10-29-method-scoped-settings.md` §7.3). It
+    /// goes to 0 as `theta0` approaches a finite end; a `theta0` on an end
+    /// is taken where [`Transform::forward`] moves it.
+    pub fn slope_at(&self, theta0: f64) -> f64 {
+        self.deriv(self.forward(theta0)).abs()
     }
 
-    /// The step in z from a natural-scale step, converted once at the
-    /// domain's reference point ([`Transform::reference_z`]).
+    /// The step in z that moves θ by `natural_sd` at θ = `theta0`:
+    /// `natural_sd / |dθ/dz|` there ([`Transform::slope_at`]). It matches
+    /// the natural-scale step at `theta0` only; away from it the same step in
+    /// z is a different natural-scale step, the more so the more curved the
+    /// map is.
     pub fn step_from_natural(&self, natural_sd: f64, theta0: f64) -> f64 {
-        natural_sd / self.deriv(self.reference_z(theta0)).abs()
+        natural_sd / self.slope_at(theta0)
     }
 
-    /// The natural-scale step a step of `z_step` in z is at the domain's
-    /// reference point: the inverse of [`Transform::step_from_natural`].
+    /// The natural-scale step a step of `z_step` in z is at θ = `theta0`:
+    /// the inverse of [`Transform::step_from_natural`].
     pub fn natural_from_step(&self, z_step: f64, theta0: f64) -> f64 {
-        z_step * self.deriv(self.reference_z(theta0)).abs()
+        z_step * self.slope_at(theta0)
     }
 
     /// The map's short name, as the partition record and the launch table
@@ -1143,6 +1145,26 @@ mod tests {
 
     fn rel_close(a: f64, b: f64, tol: f64) -> bool {
         (a - b).abs() <= tol * a.abs().max(b.abs()).max(1e-300)
+    }
+
+    /// A natural-scale step converts to z at the start θ₀, not at the box's
+    /// middle: on [0, 1] at θ₀ = 0.1, |dθ/dz| = 0.1 × 0.9 = 0.09, so 0.009
+    /// natural is 0.1 in z (the middle's slope, 0.25, would give 0.036).
+    /// On the log-interval map of [0.05, 1] at 0.25, |dθ/dz| =
+    /// 0.25·ln 5·ln 4 / ln 20 = 0.18619, so 0.02 natural is 0.1074 in z.
+    #[test]
+    fn a_natural_step_converts_at_the_start() {
+        let interval = Transform::Interval { lo: 0.0, hi: 1.0 };
+        assert!((interval.slope_at(0.1) - 0.09).abs() < 1e-12, "{}", interval.slope_at(0.1));
+        assert!((interval.step_from_natural(0.009, 0.1) - 0.1).abs() < 1e-12);
+        assert!((interval.natural_from_step(0.1, 0.1) - 0.009).abs() < 1e-12);
+        let log = Transform::LogInterval { lo: 0.05, hi: 1.0 };
+        let slope = 0.25 * 5f64.ln() * 4f64.ln() / 20f64.ln();
+        assert!((log.slope_at(0.25) - slope).abs() < 1e-12, "{} vs {slope}", log.slope_at(0.25));
+        assert!((log.step_from_natural(0.02, 0.25) - 0.1074).abs() < 1e-4);
+        let lower = Transform::LowerBounded { lo: 0.0 };
+        assert!((lower.step_from_natural(0.5, 2.0) - 0.25).abs() < 1e-12);
+        assert_eq!(Transform::Identity.step_from_natural(0.3, 7.0), 0.3);
     }
 
     /// `jacobian_grad` and `prior_point`'s two derivatives against central
