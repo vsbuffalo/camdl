@@ -1051,11 +1051,12 @@ label names one invocation, which answers alone. A run id, a prefix or a folder
 names every closed listing of the result that ended computed or reused, and the
 newest answers; a failed or busy listing is passed over. When none counts, the
 newest listing in a running record answers, marked `unfinished`; running records
-are read from the directory under the lock. `answering()`, `labelled()` (the
-newest listing with a `--label`) and `first()` (the oldest) are what camdl's
-readers ask: the model's name of a fit problem or a prediction, the label
-`camdl list` and `fit table` show, the attributes of a manifest entry, and the
-first name a compiled model was stored under.
+are read from the directory, without the lock, so the read writes nothing (a
+record is replaced by renaming a whole version over it). `answering()`,
+`labelled()` (the newest listing with a `--label`) and `first()` (the oldest)
+are what camdl's readers ask: the model's name of a fit problem or a prediction,
+the label `camdl list` and `fit table` show, the attributes of a manifest entry,
+and the first name a compiled model was stored under.
 
 `Store::invocation(&Handle)` returns the answering invocation itself, which a
 rendering needs: `camdl cat @L` on a `--sweep-file` design renders the whole
@@ -1538,8 +1539,8 @@ stores in the opening its fit was read through). A record another process writes
 after the snapshot is not in it, nor is another process's running record. Two
 reads must see those, and read the directory each time, under the lock: the
 label check when a command starts, and the previous holder of a label when it
-ends. `camdl status` and `camdl clean` read the running records from the
-directory too.
+ends. `camdl status`, `camdl clean` and a lookup that falls to running records
+read them from the directory too, without the lock.
 
 ## Content artifacts and dependencies
 

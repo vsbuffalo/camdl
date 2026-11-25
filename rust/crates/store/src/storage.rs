@@ -699,18 +699,11 @@ impl Inner {
         r.merged = None;
     }
 
-    /// The running records under the root, read from the directory now,
-    /// under the store-wide lock, so a record another process is writing is
-    /// read whole and in its latest version.
-    pub(crate) fn running(&self) -> Result<Vec<Running>> {
-        let guard = crate::invocation::records_lock(self)?;
-        let running = self.running_unlocked();
-        drop(guard);
-        Ok(running)
-    }
-
-    /// [`Self::running`], for a caller that holds the lock.
-    pub(crate) fn running_unlocked(&self) -> Vec<Running> {
+    /// The running records under the root, read from the directory now. A
+    /// record is replaced by renaming a whole new version over it, so each is
+    /// read whole without the store-wide lock, and the read writes nothing:
+    /// a store with no `.invocations/` has no running record.
+    pub(crate) fn running(&self) -> Vec<Running> {
         self.read_records()
             .into_iter()
             .filter_map(|f| match f {

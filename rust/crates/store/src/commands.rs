@@ -56,7 +56,7 @@ impl StoreCommand {
                     return Err(Error::UnknownKind { kind: kind.clone() });
                 }
                 let invs: Vec<Record> =
-                    store.invocations().iter().map(|i| i.record.clone()).chain(inner.running()?.into_iter().map(Record::Running)).collect();
+                    store.invocations().iter().map(|i| i.record.clone()).chain(inner.running().into_iter().map(Record::Running)).collect();
                 for (dir, f) in walk(inner).into_iter().filter(|(_, f)| &f.kind == kind) {
                     let state = match folder_state(&dir, &f.run_id, &inner.kinds) {
                         State::Completed { .. } => "completed",
@@ -104,13 +104,13 @@ impl StoreCommand {
                     }
                 }
                 let invs: Vec<Record> =
-                    store.invocations().iter().map(|i| i.record.clone()).chain(inner.running()?.into_iter().map(Record::Running)).collect();
+                    store.invocations().iter().map(|i| i.record.clone()).chain(inner.running().into_iter().map(Record::Running)).collect();
                 for i in invs.iter().filter(|i| i.listings().iter().any(|r| r.run_id == id.run_id)) {
                     writeln!(out, "asked for by invocation {}{}", i.seq(), i.label().map(|l| format!(" (@{l})")).unwrap_or_default()).map_err(io)?;
                 }
             }
             StoreCommand::Status => {
-                for i in inner.running()?.iter() {
+                for i in inner.running().iter() {
                     let l = inner.liveness(&i.head.owner, std::time::Duration::ZERO);
                     let state = if l == Liveness::Dead { "interrupted" } else { "running" };
                     let closes = if l == Liveness::Dead && i.head.owner.is_this_host() { "  (clean closes its record)" } else { "" };

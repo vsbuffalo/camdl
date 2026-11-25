@@ -360,7 +360,7 @@ pub(crate) fn all_invocations(root: &Path) -> (Vec<Record>, Vec<UnreadRecord>) {
 /// Takes the store-wide lock `.invocations/.lock`, waiting while another
 /// process on this host holds it. A holder on another host that is stale or
 /// whose liveness is unknown is refused with [`Error::InvocationLockHeld`].
-pub(crate) fn records_lock(inner: &Inner) -> Result<crate::fsutil::LockGuard> {
+fn records_lock(inner: &Inner) -> Result<crate::fsutil::LockGuard> {
     let dir = inner.root.join(".invocations");
     std::fs::create_dir_all(&dir).at("create directory", &dir)?;
     let lock_path = dir.join(".lock");
@@ -386,7 +386,7 @@ fn start(inner: &Arc<Inner>, st: &mut State, reuse: Reuse, beat: Arc<Beat>) -> R
     let guard = records_lock(inner)?;
     let dir = inner.root.join(".invocations");
     if let Some(label) = st.request.label() {
-        for r in inner.running_unlocked().iter().filter(|r| r.head.label.as_ref().map(Label::as_str) == Some(label)) {
+        for r in inner.running().iter().filter(|r| r.head.label.as_ref().map(Label::as_str) == Some(label)) {
             if &r.head.owner == this_owner() {
                 continue;
             }

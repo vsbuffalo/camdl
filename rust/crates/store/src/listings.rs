@@ -12,8 +12,9 @@
 //!
 //! The closed listings come from the store's snapshot of the records
 //! ([`Store::invocations`]); the running ones are read from the directory,
-//! under the store-wide lock, since another process's running record is in no
-//! snapshot.
+//! since another process's running record is in no snapshot. That read takes
+//! no lock and writes nothing: each record is replaced by renaming a whole
+//! version over it.
 
 use crate::artifact::{Artifact, Id};
 use crate::error::{Error, Result};
@@ -193,7 +194,7 @@ impl Store {
         let mut running: Vec<Invocation> = snapshot.iter().filter(|i| in_running(&i.record)).cloned().collect();
         running.extend(
             self.inner
-                .running()?
+                .running()
                 .into_iter()
                 .map(|r| Invocation { record: Record::Running(r), took_label_from: None })
                 .filter(|i| in_running(&i.record)),

@@ -137,3 +137,49 @@ fn a_full_run_id_the_index_misplaces_is_found_by_a_walk() {
     assert!(String::from_utf8_lossy(&out.stdout).contains(&run_id[..12]), "{}", String::from_utf8_lossy(&out.stdout));
     assert_eq!(p.index(), before);
 }
+
+/// Every file under the store, by its path relative to the store, with its
+/// bytes.
+fn tree(root: &Path) -> BTreeMap<String, Vec<u8>> {
+    let mut out = BTreeMap::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for e in std::fs::read_dir(&dir).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                out.insert(p.strip_prefix(root).unwrap().display().to_string(), std::fs::read(&p).unwrap());
+            }
+        }
+    }
+    out
+}
+
+/// A read whose result no closed record lists computed or reused reads the
+/// running records, and that read writes nothing: no lock file is written
+/// where `.invocations/` exists, and no `.invocations/` is made where there
+/// is none.
+#[test]
+fn reading_the_running_records_writes_nothing() {
+    let p = Project::new("running");
+    let run_id = p.simulate();
+    let store = p.dir.join("store");
+    let record = store.join(".invocations/1.json");
+    let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+    for r in v["results"].as_array_mut().unwrap() {
+        r["outcome"] = "failed".into();
+        r["failure"] = serde_json::json!({ "operation": null, "reason": "test" });
+    }
+    std::fs::write(&record, serde_json::to_vec(&v).unwrap()).unwrap();
+    let before = tree(&store);
+    p.camdl(&["path", &run_id, "traj"]);
+    assert_eq!(tree(&store).keys().collect::<Vec<_>>(), before.keys().collect::<Vec<_>>());
+    assert_eq!(tree(&store), before, "a read of the running records writes nothing to the store");
+
+    std::fs::remove_dir_all(store.join(".invocations")).unwrap();
+    let before = tree(&store);
+    p.camdl(&["path", &run_id, "traj"]);
+    assert!(!store.join(".invocations").exists(), "a read makes no .invocations/");
+    assert_eq!(tree(&store), before);
+}
