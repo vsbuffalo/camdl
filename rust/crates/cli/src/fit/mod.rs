@@ -1918,6 +1918,7 @@ mod tests {
             burnin_dt,
             dt_check: config_v2::DtCheckConfig::default(),
             proposal: Default::default(),
+            prior_only: Default::default(),
         }
     }
 

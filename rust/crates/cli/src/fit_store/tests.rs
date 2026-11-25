@@ -787,6 +787,23 @@ fn a_method_length_is_outside_its_settings() {
     assert_eq!(a.record().algorithm(), "pmmh");
 }
 
+/// `prior_only` decides only whether a run is refused, so two PMMH methods
+/// differing only in it share one method key.
+#[test]
+fn prior_only_is_outside_the_method_key() {
+    let parse = |policy: &str| -> Method {
+        let text = format!(
+            "algorithm = \"pmmh\"\nbackend = \"chain_binomial\"\nchains = 1\nparticles = 50\n\
+             iterations = 200\nstarts = \"from_prior\"\nprior_only = \"{policy}\"\n"
+        );
+        toml::from_str(&text).unwrap()
+    };
+    let steps = crate::fit::steps::ResolvedSteps::Proposal(Default::default());
+    let (warn, _) = MethodIdentity::of(&parse("warn"), &steps).unwrap();
+    let (refuse, _) = MethodIdentity::of(&parse("refuse"), &steps).unwrap();
+    assert_eq!(warn.key(), refuse.key());
+}
+
 /// `[estimate]` keeps the file's order through the stored problem, which
 /// camdl reads in order: a set written `gamma` before `beta` reads back in that
 /// order, not sorted.

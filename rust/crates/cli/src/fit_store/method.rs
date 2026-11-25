@@ -292,6 +292,8 @@ impl MethodIdentity {
                 backend, chains, particles, sweeps, binomial, burn_in, thin, max_tree_depth,
                 trajectory_warmup, csmc_sweeps_per_nuts, n_trajectories, dense_mass, use_nuts,
                 ancestor_sampling,
+                // Can only refuse a run; never changes what one computes.
+                prior_only: _,
             } => {
                 let id = PgasIdentity {
                     backend: (*backend).into(),
@@ -310,7 +312,11 @@ impl MethodIdentity {
                 };
                 (MethodIdentity::Pgas(id), count(*sweeps))
             }
-            A::PMMH { backend, chains, particles, iterations, burn_in, thin, adapt, adapt_start, binomial, proposal: _ } => {
+            A::PMMH {
+                backend, chains, particles, iterations, burn_in, thin, adapt, adapt_start, binomial, proposal: _,
+                // Can only refuse a run; never changes what one computes.
+                prior_only: _,
+            } => {
                 let id = PmmhIdentity {
                     backend: (*backend).into(),
                     chains: count(*chains),
@@ -324,7 +330,11 @@ impl MethodIdentity {
                 };
                 (MethodIdentity::Pmmh(id), count(*iterations))
             }
-            A::Mh { backend, chains, iterations, burn_in, thin, adapt, adapt_start, burnin_dt, dt_check, proposal: _ } => {
+            A::Mh {
+                backend, chains, iterations, burn_in, thin, adapt, adapt_start, burnin_dt, dt_check, proposal: _,
+                // Can only refuse a run; never changes what one computes.
+                prior_only: _,
+            } => {
                 let id = MhIdentity {
                     backend: (*backend).into(),
                     chains: count(*chains),

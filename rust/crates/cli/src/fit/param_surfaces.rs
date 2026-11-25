@@ -44,7 +44,7 @@ use sim::inference::pmmh::Prior;
 use sim::inference::prior::Density;
 use sim::inference::types::{If2Step, PerturbAt};
 
-use super::config_v2::Algorithm;
+use super::config_v2::{Algorithm, PriorOnlyPolicy};
 use super::priors_precedence::ResolvedPrior;
 use super::steps::ResolvedSteps;
 
@@ -689,6 +689,7 @@ fn expr_names_param(e: &Expr, name: &str) -> bool {
 /// The use-class policy, from `classes`: IF2 and the `nl-*` optimizers,
 /// which read no prior, accept only [`UseClass::Likelihood`]. PMMH, MH and
 /// PGAS accept [`UseClass::Hierarchical`], warn on [`UseClass::PriorOnly`]
+/// (refuse it under `prior_only = "refuse"`, [`PriorOnlyPolicy::Refuse`])
 /// and refuse [`UseClass::Unused`]. `pfilter` estimates nothing and is not
 /// checked.
 ///
@@ -745,6 +746,7 @@ pub fn refuse_for_method(
         Algorithm::IF2 { .. } | Algorithm::NlSbplx(_) | Algorithm::NlBobyqa(_) | Algorithm::NlLbfgs(_) => false,
         Algorithm::PFilter { .. } => return finish(refused, warnings),
     };
+    let refuse_prior_only = algorithm.prior_only() == Some(PriorOnlyPolicy::Refuse);
     const NOWHERE: &str = "it enters no initial condition, rate, intervention or observation";
     for (name, class) in classes {
         match (class, reads_prior) {
@@ -762,6 +764,11 @@ pub fn refuse_for_method(
                 "`{name}` is estimated, and {NOWHERE}, nor the prior of a parameter that does. \
                  `{method}` reads only the likelihood, so `{name}` has no effect on what it \
                  computes. Fix `{name}` in [fixed], or remove it from [estimate].")),
+            (UseClass::PriorOnly, true) if refuse_prior_only => refused.push(format!(
+                "`{name}`'s marginal posterior equals its prior: it does not connect to the \
+                 likelihood. `prior_only = \"refuse\"` in [method] refuses such a parameter. Fix \
+                 `{name}` in [fixed], remove it from [estimate], or write \
+                 `prior_only = \"warn\"`.")),
             (UseClass::PriorOnly, true) => warnings.push(format!(
                 "`{name}`'s marginal posterior equals its prior: it does not connect to the \
                  likelihood")),

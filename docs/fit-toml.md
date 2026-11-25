@@ -743,6 +743,13 @@ fixed-time fraction transfers, `add` and `set` effects are carried); `nl-sbplx`
 and `nl-bobyqa` carry no such requirement. See `camdl docs inference` (the
 ODE-backend fitting section) for when to pick which.
 
+`pmmh`, `mh` and `pgas` also take `prior_only = "warn" | "refuse"` (default
+`"warn"`): what `fit run` does with an estimated parameter that reaches no
+likelihood term, whose posterior is therefore its prior. `"warn"` runs with a
+warning naming it; `"refuse"` refuses the run. The key decides only whether a
+run starts, so it is not part of the fit's identity, and it is refused under any
+other method.
+
 A `[method]` key the method's own settings leave with nothing to do is refused
 at load, not ignored: `max_tree_depth` or `dense_mass` under `use_nuts = false`
 (the θ-move is then Metropolis-within-Gibbs), and `adapt_start` under

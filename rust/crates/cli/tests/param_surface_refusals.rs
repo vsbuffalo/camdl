@@ -177,3 +177,24 @@ fn an_unused_parameter_is_refused_by_every_method() {
     let err = refused(&fit(&fx, "nu_if2", &est, IF2), "an unused parameter under IF2");
     assert!(err.contains("`nu` is estimated"), "{err}");
 }
+
+#[test]
+fn prior_only_refuse_refuses_a_prior_only_parameter_and_warn_runs_it() {
+    let fx = fixture();
+    let est = ["beta = { start = 0.3 }", "tau = { start = 1.0 }"];
+    let err = refused(&fit(&fx, "tau_refuse", &est, &format!("{PMMH}prior_only = \"refuse\"\n")),
+        "a prior-only parameter under prior_only = \"refuse\"");
+    assert!(err.contains("`tau`'s marginal posterior equals its prior")
+        && err.contains("prior_only = \"refuse\""), "{err}");
+    let err = ran(&fit(&fx, "tau_warn", &est, &format!("{PMMH}prior_only = \"warn\"\n")),
+        "a prior-only parameter under prior_only = \"warn\"");
+    assert!(err.contains("`tau`'s marginal posterior equals its prior"), "{err}");
+}
+
+#[test]
+fn prior_only_is_refused_under_a_method_that_reads_no_prior() {
+    let fx = fixture();
+    let method = format!("{IF2}prior_only = \"warn\"\n");
+    let err = refused(&fit(&fx, "prior_only_if2", &["beta = { start = 0.3 }"], &method), "prior_only under if2");
+    assert!(err.contains("`prior_only`") && err.contains("pmmh, mh and pgas") && err.contains("`if2`"), "{err}");
+}

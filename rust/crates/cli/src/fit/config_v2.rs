@@ -1020,6 +1020,31 @@ pub(crate) fn is_btpe(a: &sim::rng::BinomialAlgorithm) -> bool {
     matches!(a, sim::rng::BinomialAlgorithm::Btpe)
 }
 
+/// What `fit run` does with an estimated parameter whose posterior equals its
+/// prior, under a method that reads priors: one that reaches no likelihood
+/// term, directly or through the prior of a parameter that does
+/// ([`crate::fit::param_surfaces::UseClass::PriorOnly`]). The `prior_only`
+/// key of the `pmmh`, `mh` and `pgas` methods.
+///
+/// It decides only whether a run starts, never what a run computes, so it is
+/// not part of the method's identity, and a written method names it only
+/// when it is `refuse`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PriorOnlyPolicy {
+    /// The run proceeds, with one warning per such parameter.
+    #[default]
+    Warn,
+    /// The run is refused, naming each such parameter.
+    Refuse,
+}
+
+impl PriorOnlyPolicy {
+    fn is_warn(&self) -> bool {
+        matches!(self, PriorOnlyPolicy::Warn)
+    }
+}
+
 /// One inference algorithm with its knobs — the `[method]` table minus
 /// `starts`. Tagged by `algorithm`. Each variant carries an explicit `backend`
 /// field; the (algorithm, backend) pair is validated against
@@ -1122,8 +1147,8 @@ pub enum Algorithm {
         csmc_sweeps_per_nuts: usize,
         /// Posterior trajectory samples saved to disk (evenly spaced
         /// post-burn-in). It changes the stored trajectories, not the
-        /// chain's draws, and like every `[method]` key but the length and
-        /// `starts` it is part of the run's method identity
+        /// chain's draws, and like every `[method]` key but the length,
+        /// `starts` and `prior_only` it is part of the run's method identity
         /// (`fit_store::MethodIdentity`), so a different count is a
         /// different run. Default: 200.
         #[serde(default = "default_n_trajectories")]
@@ -1154,6 +1179,10 @@ pub enum Algorithm {
         #[serde(default = "default_ancestor_sampling",
                 skip_serializing_if = "ancestor_sampling_is_on")]
         ancestor_sampling: bool,
+        /// `prior_only`: whether an estimated prior-only parameter is warned
+        /// of or refused. Default `warn`.
+        #[serde(default, skip_serializing_if = "PriorOnlyPolicy::is_warn")]
+        prior_only: PriorOnlyPolicy,
     },
 
     #[serde(rename = "pmmh")]
@@ -1187,6 +1216,9 @@ pub enum Algorithm {
         /// map's default MH step (`fit::steps::resolve_steps`).
         #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
         proposal: IndexMap<String, sim::inference::types::ZSd>,
+        /// `prior_only`, as under `pgas`.
+        #[serde(default, skip_serializing_if = "PriorOnlyPolicy::is_warn")]
+        prior_only: PriorOnlyPolicy,
     },
 
     /// Metropolis-Hastings on the deterministic ODE marginal likelihood
@@ -1236,6 +1268,9 @@ pub enum Algorithm {
         /// `[method.proposal]`, as under `pmmh`.
         #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
         proposal: IndexMap<String, sim::inference::types::ZSd>,
+        /// `prior_only`, as under `pgas`.
+        #[serde(default, skip_serializing_if = "PriorOnlyPolicy::is_warn")]
+        prior_only: PriorOnlyPolicy,
     },
 
     #[serde(rename = "pfilter")]
@@ -1573,6 +1608,18 @@ impl Algorithm {
 
     pub fn requires_priors(&self) -> bool {
         matches!(self, Algorithm::PGAS { .. } | Algorithm::PMMH { .. } | Algorithm::Mh { .. })
+    }
+
+    /// The method's `prior_only` policy, or `None` for a method that reads no
+    /// prior and so has no such key.
+    pub fn prior_only(&self) -> Option<PriorOnlyPolicy> {
+        match self {
+            Algorithm::PGAS { prior_only, .. } | Algorithm::PMMH { prior_only, .. } | Algorithm::Mh { prior_only, .. } => {
+                Some(*prior_only)
+            }
+            Algorithm::IF2 { .. } | Algorithm::PFilter { .. } | Algorithm::NlSbplx(_) | Algorithm::NlBobyqa(_)
+            | Algorithm::NlLbfgs(_) => None,
+        }
     }
 
     pub fn chains(&self) -> usize {
@@ -3002,6 +3049,9 @@ fn validate_method_keys(contents: &str, method: &Method) -> Result<(), String> {
         known.insert("binomial".into());
         known.insert("ancestor_sampling".into());
     }
+    if method.algorithm.prior_only().is_some() {
+        known.insert("prior_only".into());
+    }
     // Each step table is serialized only when non-empty.
     match method.algorithm {
         Algorithm::IF2 { .. } => { known.insert("perturbation".into()); }
@@ -3055,6 +3105,14 @@ fn validate_method_keys(contents: &str, method: &Method) -> Result<(), String> {
         };
         if let Some(why) = retired {
             return Err(format!("{why} See `camdl docs fit-toml`."));
+        }
+        if key == "prior_only" {
+            return Err(format!(
+                "`prior_only` in [method] is a key of the methods that read priors: pmmh, mh \
+                 and pgas. `{}` reads no prior, so the key has no effect under it. Delete the \
+                 line. See `camdl docs fit-toml`.",
+                method.algorithm.method_name(),
+            ));
         }
         let mut allowed: Vec<&String> = known.iter().collect();
         allowed.sort();
@@ -8917,6 +8975,7 @@ decibans_thresh = 100.0
                 use_nuts: true,
                 binomial: sim::rng::BinomialAlgorithm::Btpe,
                 ancestor_sampling: true,
+                prior_only: PriorOnlyPolicy::Warn,
             },
             starts: Some(ChainStarts::uniform_unconstrained()),
         }
@@ -8932,6 +8991,7 @@ decibans_thresh = 100.0
                 adapt: true, adapt_start: 300,
                 binomial: sim::rng::BinomialAlgorithm::Btpe,
                 proposal: IndexMap::new(),
+                prior_only: PriorOnlyPolicy::Warn,
             },
             starts: Some(ChainStarts::uniform_unconstrained()),
         }
