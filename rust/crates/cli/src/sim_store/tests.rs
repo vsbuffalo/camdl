@@ -816,15 +816,15 @@ fn the_guide_models_simulate_what_they_simulated_before_the_move() {
         (
             "beta = 1.6\ngamma = 0.4\nN0 = 763\nI0 = 3\n",
             vec![g("first-fit/sir-beta.camdl"), "--seed".into(), "7".into()],
-            &[("seed_7/traj.tsv", "8b9bf9fd038674a7")],
+            &[("seed_7/traj.tsv", "bf26f5bdde7d284a")],
         ),
         (
             "R0 = 3.75\ngamma = 0.4\nk = 20\nN0 = 763\nI0 = 3\n",
             vec![g("first-fit/sir-negbin.camdl"), "--seed".into(), "7".into(), "--replicates".into(), "3".into(), "--obs-dir".into(), "od".into()],
             &[
-                ("seed_7/traj.tsv", "b4f500bdb05bc1dd"),
-                ("seed_7-r1/traj.tsv", "9a85cc62c8c39fab"),
-                ("seed_7-r2/traj.tsv", "32b323df4960a829"),
+                ("seed_7/traj.tsv", "77194517523b59eb"),
+                ("seed_7-r1/traj.tsv", "82f178dfe59ca0e7"),
+                ("seed_7-r2/traj.tsv", "5023448f92259d66"),
                 ("seed_7/obs/in_bed/in_bed.tsv", "54d806e5657c4c1f"),
                 ("seed_7-r1/obs/in_bed/in_bed.tsv", "6cd26cc784dbf985"),
                 ("seed_7-r2/obs/in_bed/in_bed.tsv", "b99a367ff57be36d"),
@@ -842,10 +842,10 @@ fn the_guide_models_simulate_what_they_simulated_before_the_move() {
                 "1,2".into(),
             ],
             &[
-                ("baseline/seed_1/traj.tsv", "4e7ca82f3621e39c"),
-                ("baseline/seed_2/traj.tsv", "04e9cab1d8c4db04"),
-                ("asymmetric/seed_1/traj.tsv", "4c5d552fa6be6bef"),
-                ("asymmetric/seed_2/traj.tsv", "ac185532a92622d9"),
+                ("baseline/seed_1/traj.tsv", "68200c89aadb7f18"),
+                ("baseline/seed_2/traj.tsv", "936e3b1f4c574a92"),
+                ("asymmetric/seed_1/traj.tsv", "31982397fd1da765"),
+                ("asymmetric/seed_2/traj.tsv", "865173aff40613cb"),
             ],
         ),
     ];
@@ -953,7 +953,7 @@ fn a_label_names_the_invocation_and_cat_renders_its_table() {
         let file = std::fs::read(cwd.path().join(format!("{label}.tsv"))).unwrap();
         assert_eq!(cat.stdout, file, "cat @{label} renders the table -o wrote");
         let header = String::from_utf8_lossy(&file).lines().nth(1).unwrap().to_string();
-        assert!(header.starts_with("replicate\tscenario\tseed\tt\t"), "{header}");
+        assert!(header.starts_with("replicate\tscenario\tseed\ttime\t"), "{header}");
     }
     let (_, err, out) = run_in(
         &store,

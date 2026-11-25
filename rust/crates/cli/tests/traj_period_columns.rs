@@ -74,10 +74,10 @@ fn num(row: &[String], i: usize) -> f64 {
 fn assert_periods_tile_and_reconcile(backend: &str, stdout: &str, flow_tol: f64) {
     let (header, rows) = table(stdout);
     assert_eq!(&header[..3], COORDS, "[{backend}] the coordinate columns lead the header");
-    assert_eq!(&header[3..6], ["t", "t_start", "t_stop"], "[{backend}] the time columns follow the coordinates");
+    assert_eq!(&header[3..6], ["time", "t_start", "t_stop"], "[{backend}] the time columns follow the coordinates");
     assert!(rows.len() > 2, "[{backend}] a run has more than two output rows");
 
-    let (t, start, stop) = (col(&header, "t"), col(&header, "t_start"), col(&header, "t_stop"));
+    let (t, start, stop) = (col(&header, "time"), col(&header, "t_start"), col(&header, "t_stop"));
     let s = col(&header, "S");
     let flows: Vec<usize> = header.iter().enumerate()
         .filter(|(_, c)| c.starts_with("flow_")).map(|(i, _)| i).collect();
@@ -163,7 +163,7 @@ fn dates_gives_each_boundary_its_calendar_twin() {
         "--param", "N0=5000", "--param", "rho=0.5", "--param", "k=20", "--param", "tau=2"]);
     let (header, rows) = table(&stdout);
     assert_eq!(&header[..3], COORDS);
-    assert_eq!(&header[3..9], ["t", "t_start", "t_stop", "date", "date_start", "date_stop"]);
+    assert_eq!(&header[3..9], ["time", "t_start", "t_stop", "date", "date_start", "date_stop"]);
     let (date, ds, de) = (col(&header, "date"), col(&header, "date_start"), col(&header, "date_stop"));
     assert_eq!(rows[0][date], "2020-02-24", "the origin");
     assert_eq!(rows[0][ds], rows[0][date], "the first row's empty period opens on its own date");

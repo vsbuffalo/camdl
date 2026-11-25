@@ -158,7 +158,7 @@ fn rows(path: &Path) -> Vec<(String, f64, f64)> {
         .collect();
     let header: Vec<&str> = lines[0].split('\t').collect();
     let scen_i = header.iter().position(|c| *c == "scenario");
-    let t_i = header.iter().position(|c| *c == "t").expect("t column");
+    let t_i = header.iter().position(|c| *c == "time").expect("time column");
     let s_i = header.iter().position(|c| *c == "S").expect("S column");
     lines[1..]
         .iter()
@@ -773,7 +773,7 @@ fn extending_past_a_baked_intervention_end_is_refused() {
         .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
         .collect();
     let header: Vec<&str> = rows[0].split('\t').collect();
-    let t_i = header.iter().position(|c| *c == "t").expect("t column");
+    let t_i = header.iter().position(|c| *c == "time").expect("time column");
     let v_i = header.iter().position(|c| *c == "V").expect("V column");
     let v_at = |t: f64| -> f64 {
         rows[1..]

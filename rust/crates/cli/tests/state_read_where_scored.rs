@@ -96,7 +96,7 @@ fn setup(dir: &Path) -> (PathBuf, Vec<f64>) {
     let text = std::fs::read_to_string(dir.join("traj.tsv")).unwrap();
     let mut lines = text.lines().filter(|l| !l.starts_with('#'));
     let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
-    let (ti, ii) = (header.iter().position(|c| *c == "t").unwrap(),
+    let (ti, ii) = (header.iter().position(|c| *c == "time").unwrap(),
         header.iter().position(|c| *c == "I").unwrap());
     let mut i_at: Vec<f64> = Vec::new();
     for l in lines {

@@ -180,7 +180,7 @@ fn simulate(p: &Project, extra: &[&str]) -> (String, f64, f64) {
     let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
     let row: Vec<&str> = lines.next().unwrap().split('\t').collect();
     let col = |n: &str| row[header.iter().position(|h| *h == n).unwrap()].parse::<f64>().unwrap();
-    (stderr, col("t"), col("S"))
+    (stderr, col("time"), col("S"))
 }
 
 /// Every simulation cell's run id stored under the project's store.

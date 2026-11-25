@@ -115,7 +115,7 @@ fn the_ode_score_is_the_observation_density_at_the_trajectory() {
     ok(&sim, "simulate");
     let traj = tsv_rows(&std::fs::read_to_string(cwd.path().join("traj.tsv")).unwrap());
     let flow_at = |t: f64| -> f64 {
-        traj.iter().find(|r| r["t"].parse::<f64>().unwrap() == t).map(|r| r["flow_infection"].parse().unwrap()).unwrap()
+        traj.iter().find(|r| r["time"].parse::<f64>().unwrap() == t).map(|r| r["flow_infection"].parse().unwrap()).unwrap()
     };
     let rho = 0.5;
     let mut n = 0;

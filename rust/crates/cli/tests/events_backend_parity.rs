@@ -68,7 +68,7 @@ fn col_at(traj_path: &Path, col_name: &str, target_t: f64) -> Option<f64> {
         let cols: Vec<&str> = line.split('\t').collect();
         if header.is_empty() { header = cols; continue; }
         // The `t` column follows the cell's coordinate columns.
-        let t_idx = header.iter().position(|h| *h == "t")?;
+        let t_idx = header.iter().position(|h| *h == "time")?;
         let t: f64 = cols[t_idx].parse().ok()?;
         if (t - target_t).abs() < 1e-6 {
             let idx = header.iter().position(|h| *h == col_name)?;

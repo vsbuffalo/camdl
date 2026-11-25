@@ -1990,10 +1990,10 @@ A particle filter run at one parameter point. Contract version 1.
 
 #### `sim`
 
-One simulated cell. Contract version 1.
+One simulated cell. Contract version 2.
 
 - `traj`: `traj.tsv`, TSV (when the engine ran). The trajectory at the output
-  times: `t`, `t_start`, `t_stop`, each compartment and each `flow_<name>`.
+  times: `time`, `t_start`, `t_stop`, each compartment and each `flow_<name>`.
 - `reactive_log`: `reactive_log.tsv`, TSV (when the run kept a reactive policy's
   firings). Each firing of a reactive policy.
 - `failure`: `failure.toml`, TOML (in place of `traj` when the engine stopped
@@ -3136,7 +3136,7 @@ camdl simulate seir_vaccine.camdl --params params.toml --seed 42 \
 
 ```
 # 0.1.0+3e2b2888
-replicate	scenario	seed	t	t_start	t_stop	S	I
+replicate	scenario	seed	time	t_start	t_stop	S	I
 0	(none)	42	0	0	0	99990	10
 0	(none)	42	30	0	30	99791	64
 0	(none)	42	60	30	60	96434	1208
@@ -3205,13 +3205,13 @@ camdl pfilter seir_observations.camdl --scenario baseline \
 **The combined table.** `-o`, `--stdout` and `camdl cat @LABEL` all write one
 table rendered from the stored cells, in the order the command asked for them.
 It has a `# <version>` line, then the columns
-`replicate scenario [point_id sweep:<param>…] [draw] seed t t_start t_stop [date date_start date_stop]`
+`replicate scenario [point_id sweep:<param>…] [draw] seed time t_start t_stop [date date_start date_stop]`
 and the state and flow columns. The columns are the same for one cell and for
 many, so a script does not branch on the number of cells:
 
 ```
 # 0.1.0+3e2b2888
-replicate	scenario	seed	t	t_start	t_stop	S	E	I	R	V	flow_infection	flow_progression	flow_recovery	flow_waning
+replicate	scenario	seed	time	t_start	t_stop	S	E	I	R	V	flow_infection	flow_progression	flow_recovery	flow_waning
 0	baseline	1	0	0	0	99990	0	10	0	0	0	0	0	0
 ```
 
@@ -6371,7 +6371,7 @@ The canonical per-cell trajectory file of a `sim` cell. One row per output time.
 **No comment or version line** — the first line is the header:
 
 ```
-t	t_start	t_stop	S	I	R	flow_infection	flow_recovery
+time	t_start	t_stop	S	I	R	flow_infection	flow_recovery
 0	0	0	990	10	0	0	0
 1	0	1	989	9	2	1	2
 ```
@@ -6379,16 +6379,17 @@ t	t_start	t_stop	S	I	R	flow_infection	flow_recovery
 Columns, in this order (`util::TRAJ_TIME_HEADER`, then
 `util::TrajColumns::select`):
 
-1. `t` — the output time, rendered with `{}` on an `f64` (`0`, `1`, `0.5`). The
-   compartment columns are read **at** this instant.
+1. `time` — the output time, rendered with `{}` on an `f64` (`0`, `1`, `0.5`).
+   The compartment columns are read **at** this instant.
 2. `t_start`, `t_stop` — the half-open period `[t_start, t_stop)` the row's
-   `flow_*` columns were accumulated over: `t_stop` is the row's `t`, `t_start`
-   the previous row's. The initial-condition row has no interval before it and
-   writes the empty `[t, t)`; its flows are zero. When the output schedule has
-   no time at the run's start (an `at = [...]` list without it) there is no
-   initial row, and the first row's `t_start` is the run's start. A row carries
-   both readings — a state _at_ `t`, a flow _over_ the period — and names each
-   boundary rather than leaving the period to be inferred from the row above.
+   `flow_*` columns were accumulated over: `t_stop` is the row's `time`,
+   `t_start` the previous row's. The initial-condition row has no interval
+   before it and writes the empty period `[time, time)`; its flows are zero.
+   When the output schedule has no time at the run's start (an `at = [...]` list
+   without it) there is no initial row, and the first row's `t_start` is the
+   run's start. A row carries both readings — a state _at_ `time`, a flow _over_
+   the period — and names each boundary rather than leaving the period to be
+   inferred from the row above.
 3. Integer compartments, in model declaration order, rendered `{}`.
 4. Real compartments, in model declaration order, rendered `{:.4}`.
 5. `flow_<transition>` for every transition, in model declaration order —
@@ -6411,7 +6412,7 @@ not stored; the three write the same bytes.
 
 ```
 # 0.1.0+<git>
-replicate	scenario	seed	t	t_start	t_stop	date	date_start	date_stop	S	I	R	V	flow_infection	flow_recovery
+replicate	scenario	seed	time	t_start	t_stop	date	date_start	date_stop	S	I	R	V	flow_infection	flow_recovery
 0	(none)	1	0	0	0	2020-01-01	2020-01-01	2020-01-01	9990	10	0	0	0	0
 0	(none)	1	1	0	1	2020-01-02	2020-01-01	2020-01-02	9985	13	2	0	5	2
 ```
@@ -6434,7 +6435,7 @@ replicate	scenario	seed	t	t_start	t_stop	date	date_start	date_stop	S	I	R	V	flow_
   `seed` is the process seed the cell ran under; passed back to `--seeds` it
   reproduces the cell.
 - `date`, `date_start`, `date_stop` appear only under `--dates`, which requires
-  the model to declare an `origin`; each is its numeric twin (`t`, `t_start`,
+  the model to declare an `origin`; each is its numeric twin (`time`, `t_start`,
   `t_stop`) rendered via `ir::caltime::internal_to_date_hires`.
 - The data columns are identical to §10.1 and honour the same
   `--no-flows`/`--columns` filter.

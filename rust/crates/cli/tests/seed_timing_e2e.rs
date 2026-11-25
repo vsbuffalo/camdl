@@ -86,7 +86,7 @@ fn traj_summary(path: &Path) -> (i64, Option<f64>, i64) {
             continue;
         }
         let col = |name: &str| header.iter().position(|h| *h == name).map(|i| cols[i]);
-        let t: f64 = col("t").unwrap().parse().unwrap();
+        let t: f64 = col("time").unwrap().parse().unwrap();
         let i: i64 = col("I").unwrap().parse().unwrap();
         let fseed: i64 = col("flow_seed").map(|v| v.parse().unwrap()).unwrap_or(0);
         peak_i = peak_i.max(i);

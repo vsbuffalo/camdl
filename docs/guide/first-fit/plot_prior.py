@@ -64,7 +64,7 @@ def main(draws_path: str, traj_path: str, data_path: str, out_path: str) -> None
     left.yaxis.get_major_locator().set_params(integer=True)
 
     for _, g in traj.group_by("draw"):
-        right.plot(g["t"], g["I"], color=DRAWS, alpha=0.12, lw=0.8)
+        right.plot(g["time"], g["I"], color=DRAWS, alpha=0.12, lw=0.8)
     right.plot(data["time"], data["in_bed"], "o-", color=INK, ms=4, lw=1.2, label="observed")
     right.set_xlabel("day")
     right.set_ylabel("number ill")

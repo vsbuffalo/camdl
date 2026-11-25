@@ -130,7 +130,7 @@ fn first_time(traj: &Path) -> f64 {
     let txt = std::fs::read_to_string(traj).unwrap();
     let mut lines = txt.lines().filter(|l| !l.trim().is_empty() && !l.starts_with('#'));
     let hdr: Vec<&str> = lines.next().unwrap().split('\t').collect();
-    let i = hdr.iter().position(|h| *h == "t").expect("t column");
+    let i = hdr.iter().position(|h| *h == "time").expect("time column");
     lines.map(|l| l.split('\t').nth(i).unwrap().parse::<f64>().unwrap()).fold(f64::INFINITY, f64::min)
 }
 

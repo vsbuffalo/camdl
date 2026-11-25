@@ -837,8 +837,8 @@ fn cat_emits_cached_trajectory() {
     assert!(out.status.success(), "cat short-hash should resolve uniquely");
     let stdout = String::from_utf8_lossy(&out.stdout);
     // The stored cell's trajectory carries no `# camdl <version>` header and
-    // no coordinate columns; it starts with the `t` column header.
-    assert!(stdout.starts_with("t\t"), "cat should emit the trajectory header row: {:?}",
+    // no coordinate columns; it starts with the `time` column header.
+    assert!(stdout.starts_with("time\t"), "cat should emit the trajectory header row: {:?}",
         &stdout[..stdout.len().min(40)]);
     assert!(stdout.contains("\tS\t") || stdout.contains("\tI\t"),
         "cat should include compartment columns");
@@ -1452,8 +1452,8 @@ fn stdout_streams_trajectory_and_skips_the_store() {
     assert!(out.status.success(), "simulate --stdout should succeed");
     let stdout = String::from_utf8_lossy(&out.stdout);
     // A wide-format table on stdout: a `# <version>` comment, then the header
-    // (`replicate`, `scenario`, `seed`, then `t` …), then rows.
-    assert!(stdout.lines().any(|l| l.starts_with("replicate\tscenario\tseed\tt\t")),
+    // (`replicate`, `scenario`, `seed`, then `time` …), then rows.
+    assert!(stdout.lines().any(|l| l.starts_with("replicate\tscenario\tseed\ttime\t")),
         "stdout should carry the combined table header, got:\n{stdout}");
     assert!(stdout.lines().count() > 3, "stdout should carry trajectory rows");
     // The cell was stored, and stdout is the table `-o` writes from it.

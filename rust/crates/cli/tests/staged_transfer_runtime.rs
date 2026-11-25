@@ -125,7 +125,7 @@ fn row_at(dir: &Path, run: &Run<'_>, t: f64) -> Row {
     // The combined table opens with the coordinate columns (`replicate`,
     // `scenario`, `seed`); the trajectory's own columns start at `t`.
     let header: Vec<&str> = lines.next().expect("header").split('\t').collect();
-    let t_col = header.iter().position(|h| *h == "t").expect("a `t` column");
+    let t_col = header.iter().position(|h| *h == "time").expect("a `time` column");
     assert_eq!(&header[..t_col], ["replicate", "scenario", "seed"], "{}: coordinate columns", run.tag);
     let header = &header[t_col..];
     for line in lines {

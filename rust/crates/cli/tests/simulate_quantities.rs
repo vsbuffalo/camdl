@@ -122,7 +122,7 @@ fn simulate_stdout_still_writes_the_quantities_sidecar() {
     );
     assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.lines().any(|l| l.starts_with("replicate\tscenario\tseed\tt\t")),
+    assert!(stdout.lines().any(|l| l.starts_with("replicate\tscenario\tseed\ttime\t")),
         "the trajectory still streams to stdout:\n{stdout}");
     assert!(qdir.join("quantities.json").exists(),
         "--quantities-out must write its manifest under --stdout too");

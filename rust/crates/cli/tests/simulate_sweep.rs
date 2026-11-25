@@ -397,7 +397,7 @@ fn combined_table_of_a_sweep_job_has_point_id_sweep_and_seed_columns() {
     let (header, rows) = table(&fx.path("c.tsv"));
     assert_eq!(
         &header[..8],
-        ["replicate", "scenario", "point_id", "sweep:rho", "seed", "t", "t_start", "t_stop"],
+        ["replicate", "scenario", "point_id", "sweep:rho", "seed", "time", "t_start", "t_stop"],
         "coordinate columns lead the time columns: {header:?}"
     );
     assert!(!header.iter().any(|h| h == "draw"), "a sweep job writes no `draw` column: {header:?}");
@@ -434,7 +434,7 @@ fn point_ids_do_not_depend_on_flag_order() {
     let a = std::fs::read(fx.path("a.tsv")).unwrap();
     assert_eq!(a, std::fs::read(fx.path("b.tsv")).unwrap(), "flag order must not change the combined file");
     let (header, rows) = table(&fx.path("a.tsv"));
-    assert_eq!(&header[..7], ["replicate", "scenario", "point_id", "sweep:gamma", "sweep:rho", "seed", "t"]);
+    assert_eq!(&header[..7], ["replicate", "scenario", "point_id", "sweep:gamma", "sweep:rho", "seed", "time"]);
     // point_id 0 is (gamma=0.1, rho=0.5), 1 is (gamma=0.1, rho=0.9): gamma varies slowest.
     let pid = column(&header, &rows, "point_id");
     let g = column(&header, &rows, "sweep:gamma");

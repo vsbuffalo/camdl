@@ -265,7 +265,7 @@ fn quantities_match_independent_recomputation() {
 
     // Rebuild the state series the evaluator folded, from the emitted trajectory.
     let (h, rows) = read_tsv(&traj);
-    let t = column(&h, &rows, "t");
+    let t = column(&h, &rows, "time");
     let (sa, sb) = (column(&h, &rows, "S_a"), column(&h, &rows, "S_b"));
     let (ia, ib) = (column(&h, &rows, "I_a"), column(&h, &rows, "I_b"));
     let (ra, rb) = (column(&h, &rows, "R_a"), column(&h, &rows, "R_b"));

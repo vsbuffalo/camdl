@@ -134,7 +134,7 @@ fn every_contract_version_is_pinned_to_its_files() {
         ("final_state", 1, "540e45de2abcd932"),
         ("saved_paths", 2, "db7b52705e4c11fe"),
         ("prequential", 1, "e2fbc4e24518b585"),
-        ("sim", 1, "8f7955f955526563"),
+        ("sim", 2, "8f7955f955526563"),
         ("obs", 1, "35903996fb59dba8"),
         ("event_log", 1, "e063ab91a24119ac"),
         ("sim_quantities", 1, "54d153eb11c03a3c"),

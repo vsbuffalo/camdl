@@ -112,7 +112,7 @@ fn unindexed_intervention_moves_n_once() {
             .position(|h| *h == name)
             .unwrap_or_else(|| panic!("no column {name} in {header:?}"))
     };
-    let (t, s, v) = (col("t"), col("S"), col("V"));
+    let (t, s, v) = (col("time"), col("S"), col("V"));
     let row: Vec<&str> = lines
         .map(|l| l.split('\t').collect::<Vec<_>>())
         .find(|r| r[t].parse::<f64>().unwrap() == 11.0)
@@ -199,7 +199,7 @@ fn unindexed_transition_runs_at_beta() {
             .position(|h| *h == name)
             .unwrap_or_else(|| panic!("no column {name} in {header:?}"))
     };
-    let (t, s) = (col("t"), col("S"));
+    let (t, s) = (col("time"), col("S"));
     let row: Vec<&str> = lines
         .map(|l| l.split('\t').collect::<Vec<_>>())
         .find(|r| r[t].parse::<f64>().unwrap() == 10.0)

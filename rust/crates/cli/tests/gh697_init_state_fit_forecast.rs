@@ -250,7 +250,7 @@ fn expected_pairing(method: &Path) -> Vec<((usize, usize), (f64, f64), Sir)> {
 fn traj_by_draw(path: &Path) -> BTreeMap<usize, Vec<(f64, Sir)>> {
     let (hdr, rows) = read_tsv(path);
     let di = idx(&hdr, "draw");
-    let ti = idx(&hdr, "t");
+    let ti = idx(&hdr, "time");
     let (si, ii, ri) = (idx(&hdr, "S"), idx(&hdr, "I"), idx(&hdr, "R"));
     let mut out: BTreeMap<usize, Vec<(f64, Sir)>> = BTreeMap::new();
     for r in &rows {

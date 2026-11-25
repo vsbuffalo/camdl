@@ -92,7 +92,7 @@ fn simulate(src: &str, backend: &str) -> (bool, String, String) {
 fn row_at(tsv: &str, t: &str) -> Vec<f64> {
     let mut lines = tsv.lines().filter(|l| !l.starts_with('#'));
     let header: Vec<&str> = lines.next().expect("header").split('\t').collect();
-    let ti = header.iter().position(|h| *h == "t").expect("a `t` column");
+    let ti = header.iter().position(|h| *h == "time").expect("a `time` column");
     let row: Vec<&str> = lines
         .find(|l| l.split('\t').nth(ti) == Some(t))
         .unwrap_or_else(|| panic!("no row at t = {t}"))

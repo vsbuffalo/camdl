@@ -57,7 +57,7 @@ impl ResultFile for SimFile {
     }
     fn about(&self) -> &'static str {
         match self {
-            SimFile::Traj => "The trajectory at the output times: `t`, `t_start`, `t_stop`, each compartment and each `flow_<name>`.",
+            SimFile::Traj => "The trajectory at the output times: `time`, `t_start`, `t_stop`, each compartment and each `flow_<name>`.",
             SimFile::ReactiveLog => "Each firing of a reactive policy.",
             SimFile::Failure => "The operation and the error the engine stopped with.",
             SimFile::Provenance => "Where each parameter value came from, and the notices of the resolution.",
@@ -67,7 +67,7 @@ impl ResultFile for SimFile {
 
 impl Files for Sim {
     type File = SimFile;
-    const CONTRACT: u16 = 1;
+    const CONTRACT: u16 = 2;
 }
 
 impl ParseFile for SimFile {

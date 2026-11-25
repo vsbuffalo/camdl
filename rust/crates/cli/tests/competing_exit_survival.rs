@@ -83,7 +83,7 @@ fn final_row(dir: &Path, stages: u32) -> Vec<(String, f64)> {
     // The `-o` table opens with the cell's coordinate columns (`replicate`,
     // `scenario`, `seed`); the trajectory starts at `t`.
     let full_header: Vec<&str> = lines.next().expect("header").split('\t').collect();
-    let t_col = full_header.iter().position(|h| *h == "t").expect("a `t` column");
+    let t_col = full_header.iter().position(|h| *h == "time").expect("a `time` column");
     let header: Vec<String> = full_header[t_col..].iter().map(|h| h.to_string()).collect();
     let last: Vec<f64> = lines
         .next_back()

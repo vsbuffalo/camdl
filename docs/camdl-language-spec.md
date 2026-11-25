@@ -5270,7 +5270,7 @@ provenance.json  # where each parameter value came from
 traj.tsv         # one row per output time
 ```
 
-`traj.tsv` has a `t` column, a `t_start`/`t_stop` pair, one column per
+`traj.tsv` has a `time` column, a `t_start`/`t_stop` pair, one column per
 compartment and one `flow_<transition>` column per transition. A row's
 `flow_<transition>` is the number of that transition's events in
 `[t_start, t_stop)`, which runs from the previous output time, or for the first
@@ -6334,7 +6334,7 @@ Options:
 the root), and prints the `camdl cat` command that reads it back. `-o FILE`
 writes the combined table of the stored cells to `FILE`, and `--stdout` writes
 it to standard output. The trajectory's columns
-are `t`, `t_start` and `t_stop` (the period each row's flows cover), one column
+are `time`, `t_start` and `t_stop` (the period each row's flows cover), one column
 per compartment, and `flow_<name>` per transition (run spec §10.1).
 Observation draws are written with `--obs`, `--obs-dir` or `--obs-only` (§12.4).
 

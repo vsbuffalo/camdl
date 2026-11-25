@@ -83,7 +83,7 @@ fn columns_restricts_to_the_allow_list() {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let h = header(&out.stdout);
     let h: Vec<&str> = h.iter().map(String::as_str).collect();
-    assert_eq!(h, ["replicate", "scenario", "seed", "t", "t_start", "t_stop", "S", "flow_infection"],
+    assert_eq!(h, ["replicate", "scenario", "seed", "time", "t_start", "t_stop", "S", "flow_infection"],
         "--columns must restrict to the coordinate and time columns + the listed columns \
          (mixed compartment + flow)");
 }

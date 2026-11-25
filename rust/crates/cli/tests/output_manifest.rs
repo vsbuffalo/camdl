@@ -196,7 +196,8 @@ fn manifest_digests_are_the_store_digests() {
     for r in results(&m) {
         let id = r["run_id"].as_str().unwrap();
         assert_eq!(id.len(), 64, "a run id is 64 hex digits");
-        assert_eq!(r["contract"], 1);
+        let contract = if r["kind"] == "sim" { 2 } else { 1 };
+        assert_eq!(r["contract"], contract, "{}", r["kind"]);
         let run = &records[id];
         let result_files: Vec<&str> = run["files"]
             .as_object()

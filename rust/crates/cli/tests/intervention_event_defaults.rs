@@ -96,7 +96,7 @@ fn s_at(traj: &str, t: f64) -> i64 {
     let header: Vec<&str> = lines.next().expect("a header").split('\t').collect();
     let col = |name: &str| header.iter().position(|c| *c == name)
         .unwrap_or_else(|| panic!("no `{name}` column in {header:?}"));
-    let (t_i, s_i) = (col("t"), col("S"));
+    let (t_i, s_i) = (col("time"), col("S"));
     for line in lines {
         let cols: Vec<&str> = line.split('\t').collect();
         let t_parsed: f64 = cols[t_i].parse().unwrap_or(-1.0);

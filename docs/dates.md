@@ -253,14 +253,14 @@ to different things:
 | column                                                        | what the row's time means                                                                                                    |
 | ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
 | compartment state (`S`, `I`), `prevalence(of = …, among = …)` | the value **at** that instant                                                                                                |
-| trajectory flow (`flow_*`)                                    | the total over `[t_start, t_stop)`, which the row states beside `t` — `t_stop` is `t`, `t_start` the previous row's          |
+| trajectory flow (`flow_*`)                                    | the total over `[t_start, t_stop)`, which the row states beside `time` — `t_stop` is `time`, `t_start` the previous row's    |
 | observation `incidence(...)`                                  | the total over the period the stream's `covers` assigns to the label — `[D−Δ, D)` under `closing_at`, `[D, D+1)` under `day` |
 
 ```tsv dates-example=trajectory-rows model=daily_trajectory cmd="simulate --dates --backend ode" excerpt
-t  t_start  t_stop  date        date_start  date_stop   S      I    flow_infection
-4  3        4       2026-07-05  2026-07-04  2026-07-05  9914   73    34.3868
-5  4        5       2026-07-06  2026-07-05  2026-07-06  9858  120    56.1248
-6  5        6       2026-07-07  2026-07-06  2026-07-07  9767  195    91.0209
+time  t_start  t_stop  date        date_start  date_stop   S      I    flow_infection
+4     3        4       2026-07-05  2026-07-04  2026-07-05  9914   73    34.3868
+5     4        5       2026-07-06  2026-07-05  2026-07-06  9858  120    56.1248
+6     5        6       2026-07-07  2026-07-06  2026-07-07  9767  195    91.0209
 ```
 
 The flow column is what happened _between_ two rows; `S` and `I` are counts _at_

@@ -319,7 +319,7 @@ fn forecast_starts_from_the_restored_state_at_the_declared_origin() {
     assert!(out.status.success(), "forecast failed: {}", String::from_utf8_lossy(&out.stderr));
 
     let (hdr, rows) = read_tsv(&traj);
-    let times: Vec<f64> = col(&hdr, &rows, "t").iter().map(|v| v.parse().unwrap()).collect();
+    let times: Vec<f64> = col(&hdr, &rows, "time").iter().map(|v| v.parse().unwrap()).collect();
     let tmin = times.iter().cloned().fold(f64::INFINITY, f64::min);
     let tmax = times.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     assert_eq!(tmin, 30.0, "the forecast starts at the file's origin, not the model's t_start");
@@ -396,7 +396,7 @@ fn composes_with_an_observation_anchored_horizon() {
     );
 
     let (hdr, rows) = read_tsv(&traj);
-    let times: Vec<f64> = col(&hdr, &rows, "t").iter().map(|v| v.parse().unwrap()).collect();
+    let times: Vec<f64> = col(&hdr, &rows, "time").iter().map(|v| v.parse().unwrap()).collect();
     let tmin = times.iter().cloned().fold(f64::INFINITY, f64::min);
     let tmax = times.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     // last_obs = 30, + 8 weeks = 30 + 56 = 86.

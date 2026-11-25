@@ -66,7 +66,7 @@ const PARAMS: [&str; 8] = [
 fn max_time(tsv: &str) -> f64 {
     let mut lines = tsv.lines().filter(|l| !l.trim_start().starts_with('#'));
     let header = lines.next().expect("header");
-    let ti = header.split('\t').position(|c| c == "time" || c == "t")
+    let ti = header.split('\t').position(|c| c == "time")
         .unwrap_or_else(|| panic!("time column in header: {header:?}"));
     lines
         .filter(|l| !l.trim().is_empty())

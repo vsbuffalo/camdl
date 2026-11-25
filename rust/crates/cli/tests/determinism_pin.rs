@@ -79,21 +79,21 @@ fn content_lines(tsv: &str) -> Vec<&str> {
         .collect()
 }
 
-/// The index of the `t` column in a combined table's header. The columns
+/// The index of the `time` column in a combined table's header. The columns
 /// before it are the cell's coordinates (`replicate`, `scenario`, `seed`);
-/// the trajectory row starts at `t`.
+/// the trajectory row starts at `time`.
 fn t_column(header: &str) -> usize {
-    header.split('\t').position(|h| h == "t")
-        .unwrap_or_else(|| panic!("no `t` column in {header}"))
+    header.split('\t').position(|h| h == "time")
+        .unwrap_or_else(|| panic!("no `time` column in {header}"))
 }
 
-/// The trajectory part of a row: its columns from `t` on.
+/// The trajectory part of a row: its columns from `time` on.
 fn trajectory_part(line: &str, t_col: usize) -> String {
     line.split('\t').skip(t_col).collect::<Vec<_>>().join("\t")
 }
 
-/// Map a single-run trajectory (columns `t  t_start  t_stop  S  I  R  V
-/// flow_*` after the coordinate columns) to t → the row from `t` on.
+/// Map a single-run trajectory (columns `time  t_start  t_stop  S  I  R  V
+/// flow_*` after the coordinate columns) to t → the row from `time` on.
 fn rows_by_t(tsv: &str) -> BTreeMap<i64, String> {
     let lines = content_lines(tsv);
     let t_col = t_column(lines[0]);
@@ -179,7 +179,7 @@ fn explicit_seeds_match_single_runs() {
     run_sim(&bin, &model, &["--seeds", "7,8,9"], &multi);
 
     // Multi output has a leading `replicate` column. Extract replicate 1's
-    // rows (0-based → the second seed, 8), keeping the columns from `t` on,
+    // rows (0-based → the second seed, 8), keeping the columns from `time` on,
     // into t → row.
     let multi_txt = std::fs::read_to_string(&multi).unwrap();
     let lines = content_lines(&multi_txt);

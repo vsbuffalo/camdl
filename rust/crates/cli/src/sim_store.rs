@@ -148,7 +148,7 @@ pub(crate) fn config_label(config: &SimConfigRecord) -> String {
 
 /// One simulation cell.
 #[derive(store::Identity, Clone, Debug)]
-#[identity(tag = "sim", version = 1)]
+#[identity(tag = "sim", version = 2)]
 pub(crate) struct SimIdentity {
     pub model: Dep<CompiledModel>,
     pub config: SimConfig,

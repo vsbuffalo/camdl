@@ -4501,14 +4501,15 @@ fn write_traj_to(
     Ok(())
 }
 
-/// The time columns every trajectory row carries (gh#833): `t`, the instant
-/// the compartment columns are read at, and `t_start`/`t_stop`, the half-open
+/// The time columns every trajectory row carries: `time`, the instant the
+/// compartment columns are read at, and `t_start`/`t_stop`, the half-open
 /// period the `flow_*` columns were accumulated over
-/// ([`Trajectory::flow_periods`]). The two writers of a trajectory table —
-/// the leaf renderer above and the `--stdout` / `-o` mirror in `main.rs` —
-/// share these so a flow can never be labelled by one boundary in one file
-/// and by both in the other.
-pub const TRAJ_TIME_HEADER: &str = "t\tt_start\tt_stop";
+/// ([`Trajectory::flow_periods`]). PGAS's latent paths and `pfilter
+/// --save-paths` name their time columns the same way. The two writers of a
+/// trajectory table — the leaf renderer above and the `--stdout` / `-o`
+/// mirror in `main.rs` — share these so a flow can never be labelled by one
+/// boundary in one file and by both in the other.
+pub const TRAJ_TIME_HEADER: &str = "time\tt_start\tt_stop";
 
 /// The `--dates` twins of [`TRAJ_TIME_HEADER`], written after it.
 pub const TRAJ_DATE_HEADER: &str = "\tdate\tdate_start\tdate_stop";
