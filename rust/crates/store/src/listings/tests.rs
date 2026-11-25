@@ -175,3 +175,34 @@ fn a_second_different_source_for_one_result_is_refused() {
     i.finish(&store).unwrap();
     assert_eq!(store.listings(&id_handle(sim.key())).unwrap().source::<Sim, Model>(&sim), crate::Recorded::One { source: m1, unfinished: false });
 }
+
+/// An `interrupted` record is closed: a result it computed before its owner
+/// stopped is listed and answers, not unfinished, and the record holds no
+/// label.
+#[test]
+fn an_interrupted_records_completed_listing_answers() {
+    let root = TempRoot::new("listings-interrupted");
+    let s = run_sim(&open(root.path()), &labelled("cut"), 12);
+    edit_record(root.path(), 1, |v| v["status"] = "interrupted".into());
+    let store = open(root.path());
+    let l = store.listings(&id_handle(s.id().key())).unwrap();
+    let answering = l.answering().unwrap();
+    assert_eq!((answering.seq, answering.unfinished), (1, false));
+    assert!(matches!(store.listings(&"@cut".parse().unwrap()), Err(Error::NotFound { .. })), "an interrupted record holds no label");
+}
+
+/// This process's own running record is in the snapshot: a result only it
+/// lists answers from it, marked unfinished.
+#[test]
+fn this_processs_running_record_answers_marked_unfinished() {
+    let root = TempRoot::new("listings-own-running");
+    let store = open(root.path());
+    let running = info();
+    let s = run_sim(&store, &running, 13);
+    let l = store.listings(&id_handle(s.id().key())).unwrap();
+    let answering = l.answering().unwrap();
+    assert_eq!((answering.seq, answering.unfinished), (1, true));
+    running.finish(&store).unwrap();
+    let answering = store.listings(&id_handle(s.id().key())).unwrap().answering().unwrap().clone();
+    assert_eq!((answering.seq, answering.unfinished), (1, false), "once it ends, the closed record answers");
+}

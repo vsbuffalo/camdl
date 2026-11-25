@@ -139,7 +139,47 @@ fn a_prediction_made_with_another_model_file_scores() {
     let mut args = vec!["predict", "@a", "--model", "edited.camdl", "--label", "p"];
     args.extend_from_slice(PREDICT);
     succeeds(camdl_in(dir, &args), "predict --model");
+    assert_eq!(evaluated(dir), ["peak_R.tsv"], "the prediction evaluates the file given's quantity, not the run's");
     succeeds(camdl_in(dir, &["score", "@p", "--data", "cases=cases.tsv", "--label", "s", "--progress", "none"]), "score");
+}
+
+/// The quantities the prediction the newest invocation listed evaluates:
+/// the files of its `quantities-model/`.
+fn evaluated(dir: &Path) -> Vec<String> {
+    let record = last_record(dir);
+    let id = record["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["kind"] == "prediction")
+        .and_then(|r| r["run_id"].as_str())
+        .unwrap_or_else(|| panic!("the record lists a prediction: {record:#}"))
+        .to_string();
+    let mut stack = vec![dir.join("st")];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap().flatten() {
+            let p = e.path();
+            if !p.is_dir() {
+                continue;
+            }
+            let identity = p.join("identity.json");
+            if identity.is_file() {
+                let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&identity).unwrap()).unwrap();
+                if v["run_id"] == id.as_str() {
+                    let mut names: Vec<String> = std::fs::read_dir(p.join("quantities-model"))
+                        .into_iter()
+                        .flatten()
+                        .flatten()
+                        .map(|e| e.file_name().to_string_lossy().into_owned())
+                        .collect();
+                    names.sort();
+                    return names;
+                }
+            }
+            stack.push(p);
+        }
+    }
+    panic!("no folder of the prediction {id}");
 }
 
 /// A run whose answering invocation recorded no model source has no known
@@ -180,10 +220,11 @@ fn a_run_id_whose_sources_differ_in_quantities_is_refused() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "{stderr}");
     assert!(stderr.contains("different quantities") && stderr.contains("@a") && stderr.contains("@label"), "{stderr}");
-    for label in ["@a", "@b"] {
+    for (label, quantity) in [("@a", "peak_I.tsv"), ("@b", "peak_R.tsv")] {
         let mut args = vec!["predict", label];
         args.extend_from_slice(PREDICT);
         succeeds(camdl_in(dir, &args), label);
+        assert_eq!(evaluated(dir), [quantity], "{label} evaluates its own file's quantities");
     }
 }
 
