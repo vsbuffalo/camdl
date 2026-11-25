@@ -217,7 +217,9 @@ fn a_by_product_rendering_reads_each_members_own_by_product() {
     }
     let inv = i.finish(&store).unwrap();
     let to = ExportPath(root.path().join("out"));
-    inv.render_by_products::<WithObs>(&store, &(), &to).unwrap();
+    let mut files = crate::ExportFiles::default();
+    inv.render_by_products_to::<WithObs>(&store, &(), &mut files).unwrap();
+    files.write_to(&to).unwrap();
     for (seed, want) in [(1, "o1"), (2, ""), (3, "o3")] {
         assert_eq!(std::fs::read_to_string(to.0.join(format!("seed_{seed}.tsv"))).unwrap(), want);
     }
@@ -264,7 +266,6 @@ fn the_runs_a_configuration_file_produced_are_listed_from_the_invocation_records
     let s = run_sim(&store, &i, 1);
     i.finish(&store).unwrap();
     assert_eq!(store.runs_of_configuration(source.digest()), vec![s.id().key()]);
-    assert!(matches!(store.configuration_not_a_run(&source), Error::ConfigurationNotARun { runs, .. } if runs == vec![s.id().key()]));
 }
 
 /// How many times `store` has read the directory of invocation records.

@@ -519,12 +519,6 @@ impl Store {
         out
     }
 
-    /// Refuses a configuration file offered where one run is needed, listing
-    /// the runs it has produced.
-    pub fn configuration_not_a_run(&self, source: &crate::SourceBytes) -> Error {
-        Error::ConfigurationNotARun { path: source.path().to_path_buf(), runs: self.runs_of_configuration(source.digest()) }
-    }
-
     /// Every closed invocation record, and this store's own records, by
     /// sequence number: a snapshot read from the directory once, at the
     /// store's first lookup, to which each record this store writes is

@@ -649,18 +649,9 @@ impl Invocation {
         Ok(out)
     }
 
-    /// Renders this invocation's members and their by-products to the export
-    /// path: a rendering that names one file `""` writes the path itself, and
-    /// any other is written under the path as a directory. A member, or an
-    /// asked-for by-product, that is not completed is refused with
-    /// [`Error::MemberNotCompleted`], naming each.
-    pub fn render_by_products<R: ByProductRendering>(&self, store: &Store, options: &R::Options, to: &ExportPath) -> Result<()> {
-        let mut files = ExportFiles::default();
-        self.render_by_products_to::<R>(store, options, &mut files)?;
-        files.write_to(to)
-    }
-
-    /// The same rendering, to any sink.
+    /// Renders this invocation's members and their by-products to `out`. A
+    /// member, or an asked-for by-product, that is not completed is refused
+    /// with [`Error::MemberNotCompleted`], naming each.
     pub fn render_by_products_to<R: ByProductRendering>(&self, store: &Store, options: &R::Options, out: &mut dyn ExportSink) -> Result<()> {
         let members = self.completed_members_with::<R>(store)?;
         R::render(&members, options, out)

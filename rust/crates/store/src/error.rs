@@ -66,12 +66,6 @@ pub enum Error {
     InvocationLockHeld { owner: Owner, path: PathBuf },
     #[error("invocation {invocation} has results that did not complete: {}", list_keys(members))]
     MemberNotCompleted { invocation: u64, members: Vec<Key> },
-    #[error(
-        "{} is a configuration file, which does not name one run; name the run by its label, \
-         id or path. Runs it has produced, newest first: {}",
-        path.display(), list_keys(runs)
-    )]
-    ConfigurationNotARun { path: PathBuf, runs: Vec<Key> },
     #[error("{} holds no result record; name a run by its label, id or path", path.display())]
     NoRecord { path: PathBuf },
     #[error("the file `{name}` was opened twice in one run")]

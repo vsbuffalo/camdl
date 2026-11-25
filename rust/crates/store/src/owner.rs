@@ -111,14 +111,6 @@ pub enum Liveness {
     Unknown,
 }
 
-impl Liveness {
-    /// Whether a claim with this owner may still be in use: alive, or not
-    /// known to have stopped.
-    pub fn may_be_alive(&self) -> bool {
-        !matches!(self, Liveness::Dead)
-    }
-}
-
 /// This machine's host name; empty when it cannot be read.
 pub fn this_host() -> &'static str {
     static HOST: OnceLock<String> = OnceLock::new();
