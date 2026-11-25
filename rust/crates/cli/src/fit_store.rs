@@ -1500,6 +1500,10 @@ pub(crate) struct OpenedFit {
     pub shown: crate::camdl_store::Shown,
     /// The handle the fit was opened by, as parsed.
     pub handle: Handle,
+    /// The store the fit was opened in: a command that reads it, and stores
+    /// what it makes from it, uses this one opening, so it reads the
+    /// invocation records once.
+    pub store: Store,
     _scratch: tempfile::TempDir,
 }
 
@@ -1688,10 +1692,10 @@ fn problem_quantities(
     Ok(Some((dep, content)))
 }
 
-/// The labels the invocation that stored `problem` gave it.
+/// The attributes the invocation that answers for `problem` gave it
+/// ([`Store::listings`]).
 fn problem_labels(store: &Store, problem: &Stored<FitProblem>) -> Option<ProblemAttributes> {
-    let inv = store.invocation(&Handle::IdPrefix(problem.id().key().to_hex())).ok()?;
-    inv.members::<FitProblem>().ok()?.into_iter().find(|(id, _)| id == problem.id()).map(|(_, l)| l)
+    store.listings(&Handle::IdPrefix(problem.id().key().to_hex())).ok()?.answering()?.attributes::<FitProblem>()
 }
 
 /// Opens the fit `text` names in `store` for a reader: `@label`, a run-id or
@@ -1763,7 +1767,7 @@ pub(crate) fn open_fit(store: &Store, text: &str) -> Result<OpenedFit, String> {
     let config = FitConfig { problem, inference: fit.config.inference.clone() };
     let leaf = run.as_ref().map(|r| r.path().to_path_buf());
     let segment = leaf.clone().unwrap_or_else(|| scratch.path().to_path_buf());
-    Ok(OpenedFit { fit, model_ir, run, labels, segment, leaf, config, quantities, shown, handle, _scratch: scratch })
+    Ok(OpenedFit { fit, model_ir, run, labels, segment, leaf, config, quantities, shown, handle, store: store.clone(), _scratch: scratch })
 }
 
 /// The run store a reader of a stored fit opens: the one the command stores
@@ -1842,11 +1846,7 @@ pub(crate) fn open_run_unshared(text: &str) -> Result<OpenedFit, String> {
 /// its runs.
 fn refuse_problem_handle(text: &str, o: &OpenedFit) -> Result<(), String> {
     if o.run.is_none() {
-        let store = crate::camdl_store::open_existing(&store_holding(Path::new(text)).unwrap_or_else(reader_root));
-        return Err(match store {
-            Some(store) => not_one_run_of(&store, text, o.fit.problem.id()),
-            None => format!("{text} names a fit problem, and this reads one run of it; name the run"),
-        });
+        return Err(not_one_run_of(&o.store, text, o.fit.problem.id()));
     }
     Ok(())
 }

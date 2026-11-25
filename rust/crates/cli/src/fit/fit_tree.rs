@@ -50,18 +50,11 @@ pub fn fill_from_record(view: &mut FitView, opened: &crate::fit_store::OpenedFit
     }
 }
 
-/// The label of the latest invocation that asked for the run `run` and held
-/// a label, in the store at `root`.
-pub fn run_label(root: &Path, run: &store::Key) -> Option<String> {
-    let store = crate::camdl_store::open_existing(root)?;
-    let mut label = None;
-    for inv in store.invocations().iter() {
-        let Ok(members) = inv.members::<crate::fit_store::FitRun>() else { continue };
-        if members.iter().any(|(id, _)| id.key() == *run) && inv.label().is_some() {
-            label = inv.label().map(str::to_string);
-        }
-    }
-    label
+/// The label of the newest invocation with a `--label` that listed the run
+/// `run` ([`store::Listings::labelled`]).
+pub fn run_label(store: &store::Store, run: &store::Key) -> Option<String> {
+    let listings = store.listings(&store::Handle::IdPrefix(run.to_hex())).ok()?;
+    listings.labelled()?.label.as_ref().map(|l| l.as_str().to_string())
 }
 
 /// Every fit run stored in the run store at `root`, each opened for reading

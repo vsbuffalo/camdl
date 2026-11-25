@@ -28,6 +28,7 @@ mod index;
 mod inputs;
 mod invocation;
 mod label;
+mod listings;
 mod layout;
 mod maintenance;
 mod owner;
@@ -54,6 +55,7 @@ pub use invocation::{
     OutputFile, Rendering, RunInfo, StoreRequest, Unread, UnreadRecord, UnreadReporter,
 };
 pub use label::Label;
+pub use listings::{By, Listed, Listings};
 pub use layout::{path_label, Layout, Placed, LABEL_CAP};
 pub use maintenance::{Cleaned, VerifyFailure};
 pub use owner::{pid_exists, this_host, Liveness, Owner, Timestamp, BEAT_INTERVAL, STALE_AFTER};

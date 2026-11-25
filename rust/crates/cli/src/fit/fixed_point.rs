@@ -31,8 +31,8 @@ use crate::fit_store::Numerics;
 /// A fixed-point prediction resolved against its model and data, with what
 /// its identity depends on stored.
 pub(crate) struct FixedPoint {
-    /// The root of the store the prediction is stored in.
-    pub store_root: PathBuf,
+    /// The store the prediction is stored in, as this command opened it.
+    pub store: store::Store,
     pub model: Dep<CompiledModel>,
     /// The compile's quantities and contrasts, which the prediction
     /// evaluates.
@@ -242,7 +242,7 @@ pub(crate) fn resolve(
         allow_degenerate_rates: flags.allow_degenerate_rates,
     };
     Ok(FixedPoint {
-        store_root: store.root().to_path_buf(),
+        store: store.clone(),
         model: model_dep,
         quantities,
         params,

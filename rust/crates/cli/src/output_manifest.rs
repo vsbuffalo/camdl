@@ -114,13 +114,12 @@ impl OutputManifest {
     }
 
     /// The manifest of the completed results `run_ids` of `store`, in that
-    /// order with repeats dropped, each with the labels the latest
-    /// invocation record that lists it gives it: for a command, such as
-    /// `compare`, that reads results its own invocation record does not
-    /// list.
+    /// order with repeats dropped, each with the attributes the invocation
+    /// that answers for it gives it ([`store::Store::listings`]): for a
+    /// command, such as `compare`, that reads results its own invocation
+    /// record does not list.
     pub(crate) fn of_results(store: &store::Store, run_ids: &[Key]) -> Result<OutputManifest, String> {
         let mut seen = std::collections::BTreeSet::new();
-        let invocations = store.invocations();
         let mut outputs = Vec::new();
         for id in run_ids.iter().filter(|id| seen.insert(**id)) {
             let located = store.locate(*id).map_err(|e| e.to_string())?;
@@ -129,10 +128,11 @@ impl OutputManifest {
                 .into_iter()
                 .map(|(name, (sha256, bytes))| (name.to_string(), store::OutputFile { sha256, bytes }))
                 .collect();
-            let labels = invocations
-                .iter()
-                .rev()
-                .find_map(|inv| inv.attributes_of(located.kind(), *id))
+            let labels = store
+                .listings(&store::Handle::IdPrefix(id.to_hex()))
+                .map_err(|e| e.to_string())?
+                .answering()
+                .and_then(|l| l.invocation().attributes_of(located.kind(), *id))
                 .unwrap_or(serde_json::Value::Null);
             outputs.push(store::Output { kind: located.kind().to_string(), run_id: *id, upstream: located.upstream(), attributes: labels, files });
         }

@@ -500,3 +500,7 @@ pub(crate) fn link_presentation(
 
 #[cfg(test)]
 mod tests;
+/// A store holding a fit, a prediction, a profile and a simulation, each
+/// labelled, for tests of the readers of stored results.
+#[cfg(test)]
+pub(crate) use tests::store_of_four;

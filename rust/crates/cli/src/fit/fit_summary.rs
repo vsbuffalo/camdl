@@ -957,10 +957,7 @@ fn stored_row(dir: &Path, diff: ConfigDiff, now_unix: i64) -> Result<table_row::
         fit_dir: dir.to_path_buf(),
         message: "not a fit run's files (no run_inputs.json)".into(),
     })?;
-    let label = opened.fit.run.as_ref().and_then(|r| {
-        let root = crate::fit_store::store_holding(r.folder())?;
-        crate::fit::fit_tree::run_label(&root, &r.id().key())
-    });
+    let label = opened.fit.run.as_ref().and_then(|r| crate::fit::fit_tree::run_label(&opened.store, &r.id().key()));
     crate::fit::fit_tree::fill_from_record(&mut view, &opened, label);
     table_row::build_row_of(&view, diff, 0.0, now_unix)
 }

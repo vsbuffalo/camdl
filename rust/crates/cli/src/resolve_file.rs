@@ -407,7 +407,8 @@ fn narrow_or_source(narrow: &Narrow) -> String {
 
 /// The result a run id, a prefix or a folder names, then the by-products
 /// stored for it, in the order the invocation records first list them; each
-/// with the labels of the latest invocation record that lists it. An entry's
+/// with the attributes the invocation that answers for it gives it
+/// ([`store::Store::listings`]). An entry's
 /// upstream is read from its identity record before the entry is located,
 /// so a sweep's other cells are never checked.
 fn one_with_by_products(store: &Store, handle: &Handle, narrow: &Narrow) -> Result<Candidates, FileRefusal> {
@@ -417,7 +418,11 @@ fn one_with_by_products(store: &Store, handle: &Handle, narrow: &Narrow) -> Resu
     })?;
     let invocations = store.invocations();
     let latest_labels = |kind: &str, id: Key| {
-        let labels = invocations.iter().rev().find_map(|inv| inv.attributes_of(kind, id)).unwrap_or(serde_json::Value::Null);
+        let labels = store
+            .listings(&Handle::IdPrefix(id.to_hex()))
+            .ok()
+            .and_then(|l| l.answering()?.invocation().attributes_of(kind, id))
+            .unwrap_or(serde_json::Value::Null);
         crate::output_manifest::manifest_labels(kind, labels)
     };
     let id = main.run_id();

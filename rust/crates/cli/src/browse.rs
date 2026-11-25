@@ -60,8 +60,7 @@ fn store_root_for(flag: Option<&Path>, target: &str) -> PathBuf {
 
 /// Every completed filter run the run store's invocation records list, once,
 /// with the label of the latest invocation that asked for it.
-fn discover_pfilter_rows(root: &Path) -> Vec<PfilterRow> {
-    let Some(store) = crate::camdl_store::open_existing(root) else { return Vec::new() };
+fn discover_pfilter_rows(store: &store::Store) -> Vec<PfilterRow> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut rows: std::collections::BTreeMap<store::Key, PfilterRow> = std::collections::BTreeMap::new();
     for inv in store.invocations().iter() {
@@ -179,20 +178,19 @@ impl StoredFitRow {
 }
 
 /// The model a stored problem was posed on, by the name the invocation that
-/// stored it gave it.
+/// answers for it gave it ([`store::Store::listings`]).
 fn problem_model_name(store: &store::Store, problem: &store::Id<crate::fit_store::FitProblem>) -> String {
     store
-        .invocation(&store::Handle::IdPrefix(problem.key().to_hex()))
+        .listings(&store::Handle::IdPrefix(problem.key().to_hex()))
         .ok()
-        .and_then(|inv| inv.members::<crate::fit_store::FitProblem>().ok())
-        .and_then(|m| m.into_iter().find(|(id, _)| id == problem).map(|(_, l)| l.model))
+        .and_then(|l| l.answering()?.attributes_of(problem))
+        .map(|a| a.model)
         .unwrap_or_default()
 }
 
 /// Every completed fit run the run store's invocation records list, once,
 /// with the label of the latest invocation that asked for it.
-fn discover_stored_fit_rows(root: &Path) -> Vec<StoredFitRow> {
-    let Some(store) = crate::camdl_store::open_existing(root) else { return Vec::new() };
+fn discover_stored_fit_rows(store: &store::Store) -> Vec<StoredFitRow> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut rows: std::collections::BTreeMap<store::Key, StoredFitRow> = std::collections::BTreeMap::new();
     for inv in store.invocations().iter() {
@@ -207,7 +205,7 @@ fn discover_stored_fit_rows(root: &Path) -> Vec<StoredFitRow> {
             let Ok(Some(stored)) = store.get(&id) else { continue };
             let created = std::fs::metadata(stored.folder()).and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
             let rel_path = pathdiff_str(stored.folder(), &cwd);
-            let model = problem_model_name(&store, stored.identity().chain.problem.id());
+            let model = problem_model_name(store, stored.identity().chain.problem.id());
             rows.insert(id.key(), StoredFitRow { stored, labels, model, label: inv.label().map(str::to_string), rel_path, created });
         }
     }
@@ -471,8 +469,7 @@ impl StoredSimRow {
 
 /// Every completed simulation cell the run store's invocation records list,
 /// once, with the label of the latest invocation that asked for it.
-fn discover_stored_sim_rows(root: &Path) -> Vec<StoredSimRow> {
-    let Some(store) = crate::camdl_store::open_existing(root) else { return Vec::new() };
+fn discover_stored_sim_rows(store: &store::Store) -> Vec<StoredSimRow> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut rows: std::collections::BTreeMap<store::Key, StoredSimRow> = std::collections::BTreeMap::new();
     for inv in store.invocations().iter() {
@@ -591,6 +588,25 @@ impl KindFilter {
     fn includes_pfilters(self)  -> bool { matches!(self, Self::Pfilter  | Self::All) }
 }
 
+/// The rows `camdl list` shows of the kinds `filter` keeps, from one opening
+/// of the store, so the invocation records are read once.
+#[derive(Default)]
+struct Rows {
+    fits: Vec<StoredFitRow>,
+    profiles: Vec<crate::profile_store::ProfileInvocationRow>,
+    pfilters: Vec<PfilterRow>,
+    sims: Vec<StoredSimRow>,
+}
+
+fn rows(store: &store::Store, filter: KindFilter) -> Rows {
+    Rows {
+        fits: if filter.includes_fits() { discover_stored_fit_rows(store) } else { Vec::new() },
+        profiles: if filter.includes_profiles() { crate::profile_store::discover_invocations(store) } else { Vec::new() },
+        pfilters: if filter.includes_pfilters() { discover_pfilter_rows(store) } else { Vec::new() },
+        sims: if filter.includes_sims() { discover_stored_sim_rows(store) } else { Vec::new() },
+    }
+}
+
 pub fn cmd_list(a: &crate::args::ListArgs) {
     let out = crate::out::Out::new(false);
     let filter_since: Option<std::time::Duration> = a.since.as_ref().map(|d| d.0);
@@ -603,15 +619,8 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
     };
     let format_json = a.format.as_deref() == Some("json");
     let root = store_root(a.store.as_deref());
-
-    let fits = if !filter_kind.includes_fits() { Vec::new() } else { discover_stored_fit_rows(&root) };
-    let mut stored_profiles = if !filter_kind.includes_profiles() {
-        Vec::new()
-    } else {
-        crate::profile_store::discover_invocations(&root)
-    };
-    let pfilters = if !filter_kind.includes_pfilters() { Vec::new() } else { discover_pfilter_rows(&root) };
-    let stored_sims = if !filter_kind.includes_sims() { Vec::new() } else { discover_stored_sim_rows(&root) };
+    let Rows { fits, profiles: mut stored_profiles, pfilters, sims: stored_sims } =
+        crate::camdl_store::open_existing(&root).map(|store| rows(&store, filter_kind)).unwrap_or_default();
 
     let now = SystemTime::now();
 
@@ -803,15 +812,11 @@ fn usage(message: &str) -> ! {
     clap::Error::raw(clap::error::ErrorKind::ArgumentConflict, format!("{message}\n")).exit()
 }
 
-/// The label the latest invocation that lists `run_id` and has a label gave
-/// it.
+/// The label of the newest invocation with a `--label` that listed `run_id`
+/// ([`store::Listings::labelled`]).
 fn latest_label(store: &store::Store, run_id: store::Key) -> Option<String> {
-    store
-        .invocations()
-        .iter()
-        .rev()
-        .find(|inv| inv.label().is_some() && inv.entries().iter().any(|(_, id, _)| *id == run_id))
-        .and_then(|inv| inv.label().map(str::to_string))
+    let listings = store.listings(&store::Handle::IdPrefix(run_id.to_hex())).ok()?;
+    listings.labelled()?.label.as_ref().map(|l| l.as_str().to_string())
 }
 
 // ── cmd_show ─────────────────────────────────────────────────────────────────
@@ -1208,6 +1213,18 @@ fn show_json(out: &crate::out::Out, format: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `camdl list` builds every kind's rows from one opening of the store,
+    /// so it reads the invocation records once.
+    #[test]
+    fn list_reads_the_invocation_records_once() {
+        let (tmp, _) = crate::camdl_store::presentation::store_of_four();
+        let store = crate::camdl_store::open_existing(&tmp.path().join("st")).expect("the store");
+        assert_eq!(store.directory_reads(), 0);
+        let rows = rows(&store, KindFilter::All);
+        assert!(!rows.fits.is_empty() && !rows.profiles.is_empty() && !rows.sims.is_empty());
+        assert_eq!(store.directory_reads(), 1, "one read of the records answers every row");
+    }
 
     #[test]
     fn parse_duration_ok() {

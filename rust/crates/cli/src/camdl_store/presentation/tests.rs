@@ -91,7 +91,7 @@ fn camdl(dir: &Path, args: &[&str]) {
 /// prediction `@p` from it, a profile `@pr` of it run from a file documenting
 /// `beta` as `profile`, and a simulation `@s` of a file documenting `beta`
 /// as `sim`.
-fn store_of_four() -> (tempfile::TempDir, Store) {
+pub(crate) fn store_of_four() -> (tempfile::TempDir, Store) {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     std::fs::write(dir.join("model.camdl"), doc_model("fit", true)).unwrap();

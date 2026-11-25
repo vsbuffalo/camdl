@@ -2270,8 +2270,8 @@ writes the bytes the computation wrote.
 - `score`: the outcome data tables, then the `score`.
 - `compare`: for each input in order, each replicate's `prediction` and then its
   `score`, whether compare read them from the store or stored them. Each has the
-  attributes of the latest invocation record that lists it, and the manifest's
-  `label` is `null`.
+  attributes of the newest invocation record that lists it computed or reused,
+  and the manifest's `label` is `null`.
 - `import`: every result placed or found already stored, parents first, each
   with the attributes the copy's invocation records gave it (§4.5). A result's
   entry is the one the command that computed it wrote, apart from `camdl` and

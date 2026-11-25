@@ -224,7 +224,7 @@ impl Store {
                 }
             }
         }
-        for inv in inner.running() {
+        for inv in inner.running()? {
             if !inv.head.owner.is_this_host() || inner.liveness(&inv.head.owner, Duration::ZERO) != Liveness::Dead {
                 continue;
             }

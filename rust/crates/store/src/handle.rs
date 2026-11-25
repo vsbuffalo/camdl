@@ -172,25 +172,16 @@ impl Store {
         label_holders(&self.inner, label)
     }
 
-    /// The invocation a handle names: for `@L` and `@L~n`, that invocation;
-    /// for a path or an id, the latest invocation that listed that result.
+    /// The invocation that answers for what a handle names
+    /// ([`Store::listings`]): for `@L` and `@L~n`, that invocation; for a
+    /// path or an id, the newest that listed the result computed or reused,
+    /// else the newest running one that lists it. Refused with
+    /// [`Error::NotFound`] when there is none.
     pub fn invocation(&self, handle: &Handle) -> Result<Invocation> {
-        let text = handle.to_string();
-        match handle {
-            Handle::Label { name, back } => {
-                label_holders(&self.inner, name).into_iter().nth(*back as usize).ok_or(Error::NotFound { handle: text })
-            }
-            Handle::Path(_) | Handle::IdPrefix(_) => {
-                let (key, _) = self.resolve_key(handle, "")?;
-                self.inner
-                    .invocations()
-                    .iter()
-                    .rev()
-                    .find(|i| i.record.listings().iter().any(|r| r.run_id == key))
-                    .cloned()
-                    .ok_or(Error::NotFound { handle: text })
-            }
-        }
+        self.listings(handle)?
+            .answering()
+            .map(|l| l.invocation().clone())
+            .ok_or_else(|| Error::NotFound { handle: handle.to_string() })
     }
 }
 

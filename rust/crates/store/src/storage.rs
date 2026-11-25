@@ -120,7 +120,9 @@ impl<A: Artifact> Wanted<A> {
     }
 }
 
-/// A store root opened by one command.
+/// A store root opened by one command. A clone is the same opening: it shares
+/// the snapshot of the invocation records and this process's beat.
+#[derive(Clone)]
 pub struct Store {
     pub(crate) inner: Arc<Inner>,
 }
@@ -532,6 +534,18 @@ impl Store {
         self.inner.invocations()
     }
 
+    /// How many times this store, and its clones, have read `.invocations/`:
+    /// for a test that checks a command reads the records once.
+    #[doc(hidden)]
+    pub fn directory_reads(&self) -> usize {
+        self.inner.record_reads.load(Ordering::Relaxed)
+    }
+
+    /// Whether `self` and `other` are one opening of a store.
+    pub fn same_opening(&self, other: &Store) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
     /// The invocation records this store's reads of `.invocations/` found and
     /// did not read ([`UnreadRecord`]), by path.
     pub fn unread_records(&self) -> Vec<UnreadRecord> {
@@ -685,8 +699,18 @@ impl Inner {
         r.merged = None;
     }
 
-    /// The running records under the root, read from the directory now.
-    pub(crate) fn running(&self) -> Vec<Running> {
+    /// The running records under the root, read from the directory now,
+    /// under the store-wide lock, so a record another process is writing is
+    /// read whole and in its latest version.
+    pub(crate) fn running(&self) -> Result<Vec<Running>> {
+        let guard = crate::invocation::records_lock(self)?;
+        let running = self.running_unlocked();
+        drop(guard);
+        Ok(running)
+    }
+
+    /// [`Self::running`], for a caller that holds the lock.
+    pub(crate) fn running_unlocked(&self) -> Vec<Running> {
         self.read_records()
             .into_iter()
             .filter_map(|f| match f {

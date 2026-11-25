@@ -1694,13 +1694,13 @@ impl PredictSource {
     /// The store the prediction is stored in: the one holding the run, which
     /// a folder handle names whatever `CAMDL_STORE` is; or the one a fixed
     /// point's model and data were stored in.
+    /// It is the opening the fit was read through, or the fixed point
+    /// stored in, so the command reads the invocation records once.
     fn store(&self) -> Result<store::Store, String> {
-        let root = match self {
-            PredictSource::Posterior(fit) => crate::fit_store::store_holding(fit.fit.problem.folder())
-                .unwrap_or_else(crate::fit_store::reader_root),
-            PredictSource::FixedPoint(p) => p.store_root.clone(),
-        };
-        crate::camdl_store::open_existing(&root).ok_or_else(|| format!("no run store at {}", root.display()))
+        Ok(match self {
+            PredictSource::Posterior(fit) => fit.store.clone(),
+            PredictSource::FixedPoint(p) => p.store.clone(),
+        })
     }
 
     /// Records in `info` the presentation of the model a prediction from a
@@ -2038,8 +2038,7 @@ fn reported_through(
     let parts = crate::camdl_store::CompiledParts::split(envelope, stem, crate::camdl_store::ModelSource::read(&bytes, model))?;
     let content = QuantitiesContent::from_bytes(&parts.quantities.get().to_bytes()).map_err(|e| e.to_string())?;
     // The store holding the run, where the prediction is stored too.
-    let root = crate::fit_store::store_holding(fit.fit.problem.folder()).unwrap_or_else(crate::fit_store::reader_root);
-    let store = crate::camdl_store::open_existing(&root).ok_or_else(|| format!("no run store at {}", root.display()))?;
+    let store = fit.store.clone();
     let storing_quantities = |e: store::Error| format!("--model: storing the quantities of {path}: {e}");
     let quantities = store
         .put::<Quantities>(parts.quantities, &parts.labels, &store::Provenance::none(), info)
@@ -2295,7 +2294,7 @@ pub(crate) fn repose(
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| format!("the fit run {} the prediction's draws came from is not stored", draws.id().key().short12()))?;
             let text = run.folder().to_string_lossy().into_owned();
-            let fit = crate::fit_store::opened_run(&text)?;
+            let fit = std::sync::Arc::new(crate::fit_store::open_fit(store, &text)?);
             // The model file is the one the prediction's invocation recorded,
             // not the run's latest: another file may have been fitted to the
             // same run since.
@@ -2316,10 +2315,10 @@ pub(crate) fn repose(
             let record = serde_json::to_value(&id.source).map_err(|e| e.to_string())?;
             let point = &record["FixedPoint"];
             let name = store
-                .invocation(&store::Handle::IdPrefix(stored.id().key().to_hex()))
+                .listings(&store::Handle::IdPrefix(stored.id().key().to_hex()))
                 .ok()
-                .and_then(|inv| inv.members::<crate::fit_store::Prediction>().ok())
-                .and_then(|m| m.into_iter().find(|(i, _)| i == stored.id()).map(|(_, l)| l.model))
+                .and_then(|l| l.answering()?.attributes::<crate::fit_store::Prediction>())
+                .map(|a| a.model)
                 .unwrap_or_else(|| "model".to_string());
             let mut envelope = crate::fit_store::stored_envelope(store, model, &name)?;
             let handle = store::Handle::IdPrefix(stored.id().key().to_hex());
@@ -6313,6 +6312,20 @@ mod tests {
     const FREE_FORWARD_KEY: &str = "c3d82086913c29f5a729e920a61aff64";
     const SCENARIOS_AB_KEY: &str = "efe665fc26e51684ba9ac7f8f2e5a688";
     const STREAM_ONSET_KEY: &str = "0fd2a1e70cb0f7a22152c0f284e4d821";
+
+    /// A prediction from a stored fit stores in, and records through, the
+    /// store the fit was opened in, so the command reads the invocation
+    /// records once.
+    #[test]
+    fn a_prediction_uses_the_store_its_fit_was_opened_in() {
+        let (tmp, _) = crate::camdl_store::presentation::store_of_four();
+        let store = crate::camdl_store::open_existing(&tmp.path().join("st")).expect("the store");
+        let fit = crate::fit_store::open_fit(&store, "@a").unwrap();
+        let source = super::PredictSource::Posterior(std::sync::Arc::new(fit));
+        assert!(source.store().unwrap().same_opening(&store));
+        assert!(source.store().unwrap().same_opening(&source.store().unwrap()));
+        assert_eq!(store.directory_reads(), 1, "opening the fit read the records once");
+    }
 
     /// One draw's record of one stream over two stops: three particles, the
     /// second killed by the filter at stop 0 (joint weight −∞, its

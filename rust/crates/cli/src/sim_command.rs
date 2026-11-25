@@ -343,8 +343,8 @@ pub(crate) fn run(ctx: StoreRun<'_>) {
 }
 
 /// Says, once, that the cells reused were stored from a model file of another
-/// name: the compiled model's first label, from the invocation that first
-/// stored it, differs from this file's stem. The reuse is right, since a file
+/// name: the compiled model's name in its oldest listing
+/// ([`store::Listings::first`]) differs from this file's stem. The reuse is right, since a file
 /// name is a label; the warning keeps it from being read as a fresh run.
 fn note_model_stored_under_another_name(
     out: &crate::out::Out,
@@ -353,9 +353,11 @@ fn note_model_stored_under_another_name(
     stem: &str,
     path: &str,
 ) {
-    let first = store.invocations().iter().find_map(|inv| {
-        inv.members::<CompiledModel>().ok()?.into_iter().find(|(id, _)| id == model.id()).map(|(_, l)| l.name)
-    });
+    let first = store
+        .listings(&store::Handle::IdPrefix(model.id().key().to_hex()))
+        .ok()
+        .and_then(|l| l.first()?.attributes_of(model.id()))
+        .map(|a| a.name);
     let Some(first) = first.filter(|f| f != stem) else { return };
     let current = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let ext = std::path::Path::new(path).extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();

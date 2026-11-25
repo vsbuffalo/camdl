@@ -732,10 +732,8 @@ impl ProfileInvocationRow {
     }
 }
 
-/// Every invocation in the run store at `root` that asked for profile
-/// points, oldest first.
-pub(crate) fn discover_invocations(root: &std::path::Path) -> Vec<ProfileInvocationRow> {
-    let Some(store) = crate::camdl_store::open_existing(root) else { return Vec::new() };
+/// Every invocation in `store` that asked for profile points, oldest first.
+pub(crate) fn discover_invocations(store: &store::Store) -> Vec<ProfileInvocationRow> {
     let mut rows = Vec::new();
     for inv in store.invocations().iter() {
         let Ok(members) = inv.members::<ProfilePoint>() else { continue };
