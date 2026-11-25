@@ -41,7 +41,7 @@ use crate::invocation::{all_invocations, RunInfo};
 use crate::maintenance::walk;
 use crate::owner::this_owner;
 use crate::record::{
-    read_record, Failure, IdentityFile, Lineage, Listing, Outcome, Pending, Read, Record, Relation, Role, RunFile,
+    read_record, Failure, IdentityFile, Lineage, Listing, Outcome, Pending, Read, Record, Reference, Relation, Role, RunFile,
     Status, StoreFile, ATTEMPTS_DIR, IDENTITY_FILE, PROGRESS_FILE, RUN_FILE, RUN_TMP, STAGING_DIR, STORE_FORMAT,
 };
 use crate::storage::{folder_state, identity_of, visible_dirs, State, Store};
@@ -65,6 +65,8 @@ struct Found {
     run: RunFile,
     ambient: Key,
     attributes: serde_json::Value,
+    /// The source the copy's record gave its listing, if any.
+    source: Option<Reference>,
 }
 
 /// What placing does with one result of the copy.
@@ -206,10 +208,10 @@ impl Store {
                 Read::Absent => continue,
             };
             let (run, ambient) = self.check_folder(&staged.join(&rel), &ident).map_err(refuse)?;
-            let Some(attributes) = attributes.get(&ident.run_id).cloned() else {
+            let Some((attributes, source)) = attributes.get(&ident.run_id).cloned() else {
                 return Err(refuse("no invocation record in the copy lists it as completed".into()));
             };
-            found.push(Found { rel, ident, run, ambient, attributes });
+            found.push(Found { rel, ident, run, ambient, attributes, source });
         }
         if found.is_empty() {
             return Err(Error::ImportRefused { folder: shown.to_path_buf(), reason: "it holds no result folder".into() });
@@ -251,7 +253,7 @@ impl Store {
                 kind: p.found.ident.kind.clone(),
                 run_id: p.found.ident.run_id,
                 attributes: p.found.attributes.clone(),
-                source: None,
+                source: p.found.source.clone(),
                 outcome: Pending::Planned,
             })
             .collect();
@@ -589,14 +591,14 @@ impl Store {
     }
 }
 
-/// The attributes each result has in the copy: those the latest ended invocation
+/// The attributes and the source each result has in the copy: those the latest ended invocation
 /// record that lists it as computed or reused gave it.
-fn copy_attributes(copy: &Path) -> BTreeMap<Key, serde_json::Value> {
+fn copy_attributes(copy: &Path) -> BTreeMap<Key, (serde_json::Value, Option<Reference>)> {
     let mut out = BTreeMap::new();
     for inv in all_invocations(copy).0 {
         let Record::Ended(closed) = inv else { continue };
         for r in closed.results.into_iter().filter(|r| r.outcome.completed()) {
-            out.insert(r.run_id, r.attributes);
+            out.insert(r.run_id, (r.attributes, r.source));
         }
     }
     out

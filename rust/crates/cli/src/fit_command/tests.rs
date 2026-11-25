@@ -1153,8 +1153,7 @@ fn a_prediction_evaluates_the_quantities_of_the_invocation_it_names() {
     let refused = run(&["predict", &id, "--mode", "free_forward", "--n-draws", "2"]);
     let err = String::from_utf8_lossy(&refused.stderr);
     assert!(!refused.status.success(), "an id two invocations compiled differently is refused:\n{err}");
-    assert!(err.contains("different quantities blocks") && err.contains("invocation 1") && err.contains("invocation 2")
-        && err.contains("@label"), "{err}");
+    assert!(err.contains("different quantities blocks") && err.contains("@first") && err.contains("@label"), "{err}");
 }
 
 /// `predict @run --model FILE` reports a stored fit through a model file whose

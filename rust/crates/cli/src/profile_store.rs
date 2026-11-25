@@ -365,7 +365,7 @@ fn refuse_another_model(
 }
 
 /// Stores the compile at `ir`, as `fit run` stores a problem's: the model
-/// part, depended on, and its quantities, named as lineage. The compile is
+/// part, depended on, and its model source with the quantities. The compile is
 /// recorded with the model source `named` when one is given, and otherwise
 /// with the source of `source`, the model file at `source_path` it was
 /// compiled from.
@@ -389,10 +389,7 @@ pub(crate) fn put_compile(
     let parts = crate::camdl_store::CompiledParts::split(envelope, stem.to_string(), source)?;
     let crate::camdl_store::CompiledParts { model, quantities, source: of_source, labels, provenance } = parts;
     store::release(quantities, "the model source stores the quantities");
-    let source = named.unwrap_or(of_source).put(store, &labels, info).map_err(|e| format!("storing the model source: {e}"))?;
-    info.lineage(&source.identity().quantities);
-    let source = crate::camdl_store::SourceOf::Stored(*source.id());
-    crate::camdl_store::put_compiled(store, info, model, source, &labels, &provenance)
+    crate::camdl_store::put_compiled(store, info, model, named.unwrap_or(of_source), &labels, &provenance)
         .map_err(|e| format!("storing the compiled model: {e}"))
 }
 

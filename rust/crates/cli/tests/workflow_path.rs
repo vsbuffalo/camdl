@@ -451,13 +451,13 @@ fn path_each_takes_the_union_of_label_keys() {
     let table = p.ok(&["path", "--manifest", "build/fit.json", "run.json", "--each"]);
     let mut lines = table.lines();
     let header: Vec<&str> = lines.next().unwrap().split('\t').collect();
-    assert_eq!(header, ["run_id", "name", "model", "method", "quantities", "seed", "path"]);
+    assert_eq!(header, ["run_id", "name", "model", "method", "seed", "path"]);
     let rows: Vec<Vec<&str>> = lines.map(|l| l.split('\t').collect()).collect();
-    assert_eq!(rows.len(), 5, "quantities, model presentation, compiled model, fit problem, fit run");
+    assert_eq!(rows.len(), 5, "quantities, model source, compiled model, fit problem, fit run");
     assert_eq!(rows[0][1], "sir", "the quantities' name");
     assert_eq!(rows[0][3], "", "the quantities have no method");
     assert_eq!(rows[4][3], "pgas", "the run's method");
-    assert!(rows.iter().all(|r| r[6].ends_with("/run.json")));
+    assert!(rows.iter().all(|r| r[5].ends_with("/run.json")));
 }
 
 /// A manifest that records other bytes than the store holds is refused by

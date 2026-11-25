@@ -172,7 +172,7 @@ fn run_identity(model: &ir::Model, problem: &Stored<FitProblem>, config: &FitCon
     let method = config.inference.method.as_ref().unwrap();
     let steps = crate::fit::steps::resolve_for(&method.algorithm, &config.problem, model).unwrap();
     let (settings, length) = MethodIdentity::of(method, &steps).unwrap();
-    let labels = RunAttributes { method: method.algorithm.method_name().to_string(), seed: 1, quantities: None };
+    let labels = RunAttributes { method: method.algorithm.method_name().to_string(), seed: 1 };
     let chain = ChainIdentity {
         problem: problem.dep_all(),
         method: settings,

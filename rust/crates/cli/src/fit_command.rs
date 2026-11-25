@@ -315,9 +315,6 @@ fn run_fit(mut out: Out, cx: FitCommand<'_>) -> Vec<String> {
         .unwrap_or_else(|e| out.fail(format!("error: cannot read the model {model_path}: {e}")));
     let model_stem = crate::hashing::path_stem_slug(&model_path).unwrap_or_else(|| "model".to_string());
     let model_source = || ModelSourceFile { bytes: model_bytes.clone(), camdl: crate::util::model_is_camdl_source(&model_path) };
-    // The quantities part of the compile the runs run, which each run's
-    // labels in this invocation record.
-    let run_quantities: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
     let put_model = |ir_path: &str| -> store::Dep<CompiledModel> {
         let text = std::fs::read_to_string(ir_path)
             .unwrap_or_else(|e| out.fail(format!("error: cannot read the compiled model {ir_path}: {e}")));
@@ -328,16 +325,10 @@ fn run_fit(mut out: Out, cx: FitCommand<'_>) -> Vec<String> {
             crate::camdl_store::SourceText::read(&model_bytes, Path::new(&model_path)),
         ).unwrap_or_else(|e| out.fail(format!("error: {e}")));
         let crate::camdl_store::CompiledParts { model: part, quantities, source, labels, provenance } = parts;
-        // The quantities and contrasts do not change the fit, so the problem
-        // names them as lineage: `camdl predict` evaluates them. The model
-        // source stores them.
+        // The quantities and contrasts do not change the fit: the model
+        // source records them, and `camdl predict` evaluates those of the
+        // source the run's invocation recorded.
         store::release(quantities, "the model source stores the quantities");
-        let source = source.put(store, &labels, info)
-            .unwrap_or_else(|e| out.fail(format!("error: storing the model source: {e}")));
-        let quantities = source.identity().quantities.clone();
-        info.lineage(&quantities);
-        *run_quantities.borrow_mut() = Some(quantities.id().key().to_hex());
-        let source = crate::camdl_store::SourceOf::Stored(*source.id());
         crate::camdl_store::put_compiled(store, info, part, source, &labels, &provenance)
             .unwrap_or_else(|e| out.fail(format!("error: storing the compiled model: {e}")))
     };
@@ -621,7 +612,7 @@ fn run_fit(mut out: Out, cx: FitCommand<'_>) -> Vec<String> {
                 length,
                 resumed_from: base.as_ref().map(|b| b.dep.clone()),
             };
-            let labels = RunAttributes { method: method_name.to_string(), seed, quantities: run_quantities.borrow().clone() };
+            let labels = RunAttributes { method: method_name.to_string(), seed };
             planned.push(PlannedRun { posed: posed_i, seed, identity, labels, base });
         }
     }

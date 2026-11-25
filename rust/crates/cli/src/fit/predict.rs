@@ -1998,7 +1998,11 @@ fn resolve_source(
         return Ok(PredictSource::FixedPoint(std::sync::Arc::new(point)));
     }
     match &args.posterior.model {
-        None => Ok(PredictSource::Posterior(crate::fit_store::opened_run(text)?)),
+        None => {
+            let fit = crate::fit_store::opened_run(text)?;
+            fit.prediction_quantities(text)?;
+            Ok(PredictSource::Posterior(fit))
+        }
         Some(model) => reported_through(out, text, model, compile, info).map(|fit| PredictSource::Posterior(std::sync::Arc::new(fit))),
     }
 }
@@ -2290,13 +2294,27 @@ pub(crate) fn repose(
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| format!("the fit run {} the prediction's draws came from is not stored", draws.id().key().short12()))?;
             let text = run.folder().to_string_lossy().into_owned();
-            let fit = std::sync::Arc::new(crate::fit_store::open_fit(store, &text)?);
+            let mut opened = crate::fit_store::open_fit(store, &text)?;
             // The model file is the one the prediction's invocation recorded,
             // not the run's latest: another file may have been fitted to the
-            // same run since.
+            // same run since. The quantities are the prediction's own, which
+            // its identity holds: those of the file that invocation compiled
+            // or `--model` gave.
             let handle = store::Handle::IdPrefix(stored.id().key().to_hex());
-            let shown = crate::camdl_store::shown_for(store, &handle, fit.fit.model.id().key());
-            crate::fit_store::record_source(store, info, &fit.fit.model, &shown, &fit.model_name())?;
+            let shown = crate::camdl_store::shown_for(store, &handle, opened.fit.model.id().key());
+            let opened = match &id.quantities {
+                Some(q) => {
+                    let content = crate::fit_store::read_quantities(store, q)?;
+                    opened.reported_through(store, q.clone(), &content, shown)?
+                }
+                None => {
+                    opened.quantities = None;
+                    opened.shown = shown;
+                    opened
+                }
+            };
+            let fit = std::sync::Arc::new(opened);
+            fit.record_source(store, info)?;
             let spec = fit.config.problem.data_spec().map_err(|e| format!("the fit binds no data: {e}"))?;
             let (model, _) = crate::util::load_ir(&fit.model_ir.to_string_lossy())?;
             conditioned = crate::fit::stream_bindings::StreamBindings::resolve(&model, spec)?
