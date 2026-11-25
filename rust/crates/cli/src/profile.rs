@@ -230,11 +230,6 @@ pub(crate) fn profile_cooling_schedule(
     }
 }
 
-/// The IF2 configuration every IF2 profile cell runs with, built in one
-/// place from the resolved configuration: the particles, the iterations, the
-/// cooling schedule a fit's `cooling` would mean (`profile_cooling_schedule`),
-/// the step, the degeneracy budget and the binomial sampler.
-#[allow(clippy::too_many_arguments)]
 /// How cool an IF2 run's perturbation got: the cooling factor of its last
 /// iteration, `last`, the one multiplier that iteration's diagnostics apply
 /// to every parameter's step (`ParamIterDiag::effective_sd` is each step
@@ -249,6 +244,11 @@ pub(crate) fn cooling_final(
     schedule.multiplier_at_iter(n_assimilations, last.iteration)
 }
 
+/// The IF2 configuration every IF2 profile cell runs with, built in one
+/// place from the resolved configuration: the particles, the iterations, the
+/// cooling schedule a fit's `cooling` would mean (`profile_cooling_schedule`),
+/// the step, the degeneracy budget and the binomial sampler.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn profile_if2_config(
     n_particles: usize,
     n_iterations: usize,
