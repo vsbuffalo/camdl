@@ -223,7 +223,8 @@ pub fn cmd_pfilter(inv: crate::args::PfilterInvocation) {
     let ((), (), _inference_exports, (), output, (), _manifest, _link_root) = exports.into_parts();
     let (request,) = request.into_parts();
     let ((), (), _inference_request, (), (), no_store, force, label, root) = request.into_parts();
-    let request = crate::camdl_store::store_request_with_fit_file(label, force, root, file_store);
+    let request = crate::camdl_store::store_request_with_fit_file(label, force, root, file_store)
+        .unwrap_or_else(|e| out.fail(format!("error: {e}")));
     let execution_record = crate::args::PfilterInvocationExecution {
         args: crate::args::PfilterExecution { model_overrides: (), scenario: (), inference, stream: (), path_columns: () },
         no_ir_cache,

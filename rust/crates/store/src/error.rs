@@ -44,6 +44,8 @@ pub enum Error {
     #[error("the label `{label}` names an invocation that is still running, owned by {owner}{}",
             running.map(|k| format!(", computing {k}")).unwrap_or_default())]
     LabelInUse { label: String, running: Option<Key>, owner: Owner },
+    #[error("the label `{label}` is refused: {why}")]
+    InvalidLabel { label: String, why: String },
     #[error(
         "{} is held by {owner}, whose beat has stopped; it may still be alive on that host. \
          Remove the lock file by hand once that process is known to have stopped",

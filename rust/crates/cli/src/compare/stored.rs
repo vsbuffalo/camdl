@@ -235,7 +235,7 @@ pub(super) fn load(
 ) -> Result<(Vec<Loaded>, Vec<store::Key>), String> {
     let Prepared { text, store, root, input, mode, optimizer, .. } = prepared;
     let text = text.as_str();
-    let request = crate::camdl_store::store_request(None, false, Some(root.clone()));
+    let request = crate::camdl_store::unlabelled_request(Some(root.clone()));
     let info = store::RunInfo::new(&store::Given::__from_fields(serde_json::Map::new()), &(), &request)
         .map_err(|e| e.to_string())?;
     let wanted = req.replicates.unwrap_or(DEFAULT_REPLICATES).max(1);

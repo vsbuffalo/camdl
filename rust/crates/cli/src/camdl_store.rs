@@ -106,32 +106,43 @@ pub(crate) fn camdl_kinds() -> Kinds {
 /// another host with a beat that changes. An owner on another host whose beat
 /// file is stale or cannot be read is taken, though it may still be running:
 /// `force` asserts that it has stopped.
+///
+/// A `label` [`store::Label::parse`] refuses is refused with
+/// [`store::Error::InvalidLabel`].
+#[allow(clippy::result_large_err)] // the store's error carries the paths and owners a person acts on, returned once
 pub(crate) fn store_request_with_fit_file(
     label: Option<String>,
     force: bool,
     flag: Option<PathBuf>,
     fit_file_store: Option<PathBuf>,
-) -> StoreRequest {
+) -> store::Result<StoreRequest> {
     request_from(label, force, flag, fit_file_store, crate::env::get().vars.store.clone())
 }
 
 /// [`store_request_with_fit_file`] for a command that reads no fit file: the
 /// root is `root` (`--store`), else `CAMDL_STORE`, else [`DEFAULT_ROOT`].
-pub(crate) fn store_request(label: Option<String>, force: bool, root: Option<PathBuf>) -> StoreRequest {
+#[allow(clippy::result_large_err)] // the store's error carries the paths and owners a person acts on, returned once
+pub(crate) fn store_request(label: Option<String>, force: bool, root: Option<PathBuf>) -> store::Result<StoreRequest> {
     store_request_with_fit_file(label, force, root, None)
+}
+
+/// [`store_request`] for a command that names no invocation.
+pub(crate) fn unlabelled_request(root: Option<PathBuf>) -> StoreRequest {
+    store_request(None, false, root).expect("a request without a label is never refused")
 }
 
 /// The request [`store_request_with_fit_file`] builds, given the value of
 /// `CAMDL_STORE`.
+#[allow(clippy::result_large_err)] // the store's error carries the paths and owners a person acts on, returned once
 fn request_from(
     label: Option<String>,
     force: bool,
     flag: Option<PathBuf>,
     fit_file_store: Option<PathBuf>,
     env_store: Option<PathBuf>,
-) -> StoreRequest {
-    let env = StoreRequest::new(None, false, env_store);
-    StoreRequest::new(label, force, flag.or(fit_file_store)).merge(env)
+) -> store::Result<StoreRequest> {
+    let env = StoreRequest::new(None, false, env_store)?;
+    Ok(StoreRequest::new(label.as_deref(), force, flag.or(fit_file_store))?.merge(env))
 }
 
 /// camdl's run store root when no input names one.
@@ -158,7 +169,7 @@ pub(crate) fn scratch() -> store::Result<Store> {
 /// The root a reader uses when it is given no store: `CAMDL_STORE`, else the
 /// default.
 pub(crate) fn read_root() -> PathBuf {
-    root_of(&store_request(None, false, None))
+    root_of(&unlabelled_request(None))
 }
 
 /// Opens the store at `root` for reading, or `None` when no store is there.
@@ -166,7 +177,7 @@ pub(crate) fn open_existing(root: &Path) -> Option<Store> {
     if !root.join("store.json").exists() {
         return None;
     }
-    open(&StoreRequest::new(None, false, Some(root.to_path_buf()))).ok()
+    open(&unlabelled_request(Some(root.to_path_buf()))).ok()
 }
 
 // ── Beginning a run ──────────────────────────────────────────────────────────

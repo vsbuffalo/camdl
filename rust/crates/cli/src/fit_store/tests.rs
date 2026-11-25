@@ -244,7 +244,7 @@ fn a_reader_is_given_the_documentation_of_its_own_model_file() {
             },
         )
         .unwrap();
-        let info = RunInfo::new(&Given::default(), &(), &StoreRequest::new(Some(label.into()), false, None)).unwrap();
+        let info = RunInfo::new(&Given::default(), &(), &StoreRequest::new(Some(label), false, None).unwrap()).unwrap();
         deps.push(
             crate::camdl_store::put_compiled(&o.store, &info, parts.model, parts.presentation, &parts.labels, &parts.provenance)
                 .unwrap(),

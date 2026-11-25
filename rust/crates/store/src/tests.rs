@@ -238,7 +238,7 @@ pub(crate) fn info() -> RunInfo {
 }
 
 pub(crate) fn labelled(label: &str) -> RunInfo {
-    RunInfo::new(&Given::default(), &(), &StoreRequest::new(Some(label.into()), false, None)).unwrap()
+    RunInfo::new(&Given::default(), &(), &StoreRequest::new(Some(label), false, None).unwrap()).unwrap()
 }
 
 pub(crate) fn sim(seed: u64) -> (SimId, SimLabels) {

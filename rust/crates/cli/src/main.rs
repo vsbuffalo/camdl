@@ -906,7 +906,8 @@ fn run_simulate(inv: args::SimulateInvocation) {
         .and_then(|text| crate::fit::config_v2::FitConfig::load(&text).ok())
         .and_then(|c| c.problem.store)
         .map(std::path::PathBuf::from);
-    let request = crate::camdl_store::store_request_with_fit_file(label.clone(), force, store_root.clone(), file_store);
+    let request = crate::camdl_store::store_request_with_fit_file(label.clone(), force, store_root.clone(), file_store)
+        .unwrap_or_else(|e| out.fail(format!("error: {e}")));
     // A stored fit `--fit` names is read in the store this command stores in.
     crate::fit_store::set_reader_root(crate::camdl_store::root_of(&request));
     let execution_record = args::SimulateInvocationExecution {

@@ -405,7 +405,12 @@ the first writer's labels name the result's folder through `layout`. A second
 request for the same result under other labels finds the folder already named.
 
 A `--label L` on the command line is different: it names the invocation, not a
-result ([The invocation record](#the-invocation-record)).
+result ([The invocation record](#the-invocation-record)). `StoreRequest::new`
+parses it with `Label::parse` (`label.rs`), so every command applies one rule:
+one to 64 characters after trimming, each an ASCII letter or digit, a space, a
+comma, a dot, an underscore or a hyphen, and not `.` or `..`. The rule keeps out
+`~`, which `@L~n` reads as a previous holder, and anything that is not a
+directory name of the link tree.
 
 ### The record files
 

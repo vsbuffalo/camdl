@@ -1647,41 +1647,6 @@ pub fn cmd_fit_new(a: &crate::args::FitNewArgs, compile: crate::util::CompileSet
     out.say(format_args!("created {}", to));
 }
 
-// ─── Labels (proposal §5) ─────────────────────────────────────────────
-
-/// Validate a user-supplied label string against the proposal's
-/// rule: 1–64 characters after trim, restricted to letters, digits,
-/// spaces, commas, dot, underscore, hyphen. Returns the trimmed
-/// label on success, or a descriptive Err message.
-///
-/// Why a custom regex check rather than a clap value parser: we
-/// want the same validator on every `--label` flag (fit, simulate,
-/// profile, …), with identical error messages. A function call from each entry point is the
-/// simplest way to keep them aligned.
-pub fn validate_label(raw: &str) -> Result<String, String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err("label is empty after trim — \
-                    pass at least one printable character".into());
-    }
-    let n = trimmed.chars().count();
-    if n > 64 {
-        return Err(format!(
-            "label is {} characters; max is 64 after trim", n));
-    }
-    for (i, c) in trimmed.chars().enumerate() {
-        let ok = c.is_ascii_alphanumeric()
-            || c == ' ' || c == ',' || c == '.' || c == '_' || c == '-';
-        if !ok {
-            return Err(format!(
-                "label contains invalid character `{}` at position {} — \
-                 allowed: letters, digits, spaces, commas, dot, underscore, hyphen",
-                c, i + 1));
-        }
-    }
-    Ok(trimmed.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1938,74 +1903,6 @@ mod tests {
         gate_run_method_against_model(&method, &compiled, 1.0).unwrap_or_else(|e| {
             panic!("an mh method with no burnin_dt must be accepted at dt=1: {e}")
         });
-    }
-
-    // ── validate_label ────────────────────────────────────────────
-
-    #[test]
-    fn validate_label_accepts_canonical_examples() {
-        // The `--label` documentation lists these as the expected
-        // shapes; assert each one is accepted with the trimmed value
-        // returned verbatim.
-        for ok in [
-            "narrow R0, take 1",
-            "iota free",
-            "log_normal R0 prior",
-            "take 1, attempt 2",
-            "a",                    // single char (min length)
-            "a-b_c.d 0,1",          // every allowed punctuation
-        ] {
-            let out = validate_label(ok)
-                .unwrap_or_else(|e| panic!("`{}` should validate; got error: {}", ok, e));
-            assert_eq!(out, ok);
-        }
-    }
-
-    #[test]
-    fn validate_label_trims_surrounding_whitespace() {
-        let out = validate_label("   narrow R0   ").unwrap();
-        assert_eq!(out, "narrow R0");
-    }
-
-    #[test]
-    fn validate_label_rejects_empty_after_trim() {
-        for empty in ["", "   ", "\t \n"] {
-            let err = validate_label(empty).expect_err("empty must reject");
-            assert!(err.contains("empty"), "err should mention empty: {}", err);
-        }
-    }
-
-    #[test]
-    fn validate_label_rejects_over_64_chars() {
-        let too_long: String = "a".repeat(65);
-        let err = validate_label(&too_long).expect_err("65-char label must reject");
-        assert!(err.contains("64"), "err should mention max length: {}", err);
-    }
-
-    #[test]
-    fn validate_label_accepts_64_chars_exactly() {
-        let just_right: String = "a".repeat(64);
-        validate_label(&just_right).expect("64-char label should validate");
-    }
-
-    #[test]
-    fn validate_label_rejects_disallowed_characters() {
-        // Each of these contains exactly one disallowed char; the
-        // error message should call it out by character + position.
-        for (raw, bad_char) in [
-            ("R0/2",      "/"),
-            ("alpha=2",   "="),
-            ("name:tag",  ":"),
-            ("a;b",       ";"),
-            ("a*b",       "*"),
-            ("emoji 🎯",   "🎯"),
-        ] {
-            let err = validate_label(raw)
-                .expect_err(&format!("`{}` should reject", raw));
-            assert!(err.contains(bad_char),
-                "err for `{}` should call out `{}` by character; got: {}",
-                raw, bad_char, err);
-        }
     }
 
     // ── gh#771: the sidecar hashes the RESOLVED stream set ─────────

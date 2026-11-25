@@ -15,7 +15,7 @@ use std::path::PathBuf;
 /// A `verify` that finds a damaged result exits 1 after its report.
 pub(crate) fn cmd_store(command: store::StoreCommand, root: Option<PathBuf>) {
     let out = crate::out::Out::new(false);
-    let request = crate::camdl_store::store_request(None, false, root);
+    let request = crate::camdl_store::unlabelled_request(root);
     let root = crate::camdl_store::root_of(&request);
     if !root.join("store.json").exists() {
         out.fail(format!("error: no run store at {} (it has no store.json)", root.display()));
@@ -42,7 +42,7 @@ pub(crate) fn cmd_import(args: crate::args::ImportArgs) {
     let (label, root) = request.into_parts();
     let link_root = crate::link_tree::link_root(link_root.as_deref());
     let bindings = crate::bindings::claim(&out, manifest.as_deref(), link_root, label.as_deref());
-    let request = crate::camdl_store::store_request(label, false, root);
+    let request = crate::camdl_store::store_request(label, false, root).unwrap_or_else(|e| out.fail(format!("error: {e}")));
     let store = crate::camdl_store::open(&request).unwrap_or_else(|e| out.fail(format!("error: {e}")));
     let info = store::RunInfo::new(&given, &(), &request).unwrap_or_else(|e| out.fail(format!("error: {e}")));
     let imported = match store.import(&copy, &info) {

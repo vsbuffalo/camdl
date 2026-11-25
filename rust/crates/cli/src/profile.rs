@@ -308,7 +308,8 @@ pub fn cmd_profile(inv: crate::args::ProfileInvocation) {
     let ((), (), _inference_exports, output, format, _manifest, _link_root) = exports.into_parts();
     let (request,) = request.into_parts();
     let ((), (), _inference_request, label, force, root) = request.into_parts();
-    let request = crate::camdl_store::store_request_with_fit_file(label, force, root, file_store);
+    let request = crate::camdl_store::store_request_with_fit_file(label, force, root, file_store)
+        .unwrap_or_else(|e| out.fail(format!("error: {e}")));
     let execution_record = crate::args::ProfileInvocationExecution {
         args: crate::args::ProfileExecution {
             model_overrides: (),

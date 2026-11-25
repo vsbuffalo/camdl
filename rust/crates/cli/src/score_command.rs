@@ -45,7 +45,7 @@ pub(crate) fn cmd_score(inv: crate::args::ScoreInvocation) {
     let (request,) = request.into_parts();
     let (force, label, root_flag) = request.into_parts();
     let link_label = label.clone();
-    let request = crate::camdl_store::store_request(label, force, root_flag);
+    let request = crate::camdl_store::store_request(label, force, root_flag).unwrap_or_else(|e| out.fail(format!("error: {e}")));
     if let Some(dir) = &output {
         if let Err(e) = crate::util::refuse_missing_export_dir("-o", dir) {
             out.fail(format!("error: {e}"));

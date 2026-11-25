@@ -108,11 +108,11 @@ fn an_engine_switch_changes_the_ambient_key() {
 /// root is never the default.
 #[test]
 fn the_root_is_the_flag_then_the_environment_then_the_default() {
-    let env = StoreRequest::new(None, false, Some("from-env".into()));
-    let flag = StoreRequest::new(None, false, Some("from-flag".into()));
+    let env = StoreRequest::new(None, false, Some("from-env".into())).unwrap();
+    let flag = StoreRequest::new(None, false, Some("from-flag".into())).unwrap();
     assert_eq!(root_of(&flag.clone().merge(env.clone())), PathBuf::from("from-flag"));
-    assert_eq!(root_of(&StoreRequest::new(None, false, None).merge(env)), PathBuf::from("from-env"));
-    assert_eq!(root_of(&StoreRequest::new(None, false, None)), PathBuf::from("camdl-store"));
+    assert_eq!(root_of(&StoreRequest::new(None, false, None).unwrap().merge(env)), PathBuf::from("from-env"));
+    assert_eq!(root_of(&StoreRequest::new(None, false, None).unwrap()), PathBuf::from("camdl-store"));
 }
 
 /// The root is `--store`, then the fit file's `store` key, then
@@ -120,7 +120,7 @@ fn the_root_is_the_flag_then_the_environment_then_the_default() {
 #[test]
 fn a_fit_files_store_key_comes_between_the_flag_and_the_environment() {
     let p = |s: &str| Some(PathBuf::from(s));
-    let root = |flag, key, env| root_of(&request_from(None, false, flag, key, env));
+    let root = |flag, key, env| root_of(&request_from(None, false, flag, key, env).unwrap());
     assert_eq!(root(p("flag"), p("key"), p("env")), PathBuf::from("flag"));
     assert_eq!(root(None, p("key"), p("env")), PathBuf::from("key"));
     assert_eq!(root(None, None, p("env")), PathBuf::from("env"));

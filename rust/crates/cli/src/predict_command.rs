@@ -66,7 +66,8 @@ pub(crate) fn cmd_predict(inv: PredictInvocation) {
         inv.args.flags.label.clone(),
         inv.args.flags.force,
         inv.args.flags.store.clone(),
-    );
+    )
+    .unwrap_or_else(|e| out.fail(format!("error: {e}")));
     let (declared, execution, _exports, _request, given) = store::Inputs::split(inv).into_parts();
     let (args, no_licm) = declared.into_parts();
     let (source, flags, posterior, fixed_point) = args.into_parts();

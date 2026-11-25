@@ -27,6 +27,7 @@ mod identity;
 mod index;
 mod inputs;
 mod invocation;
+mod label;
 mod layout;
 mod maintenance;
 mod owner;
@@ -52,6 +53,7 @@ pub use invocation::{
     ByProductRendering, ExportFiles, ExportPath, ExportSink, Invocation, Member, MemberWith, Output, OutputFile, Rendering, RunInfo,
     StoreRequest,
 };
+pub use label::Label;
 pub use layout::{path_label, Layout, Placed, LABEL_CAP};
 pub use maintenance::{Cleaned, VerifyFailure};
 pub use owner::{pid_exists, this_host, Liveness, Owner, Timestamp, BEAT_INTERVAL, STALE_AFTER};

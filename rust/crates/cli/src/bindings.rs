@@ -28,7 +28,13 @@ pub(crate) struct Bindings {
 /// the command with the refusal. A command that keeps nothing in the store
 /// (`--dry-run`, `--no-store`) passes no root, so a `CAMDL_LINK_ROOT` in its
 /// environment removes no links.
+///
+/// `label` is parsed by [`store::Label::parse`] first, the rule the command's
+/// store request applies too, so a label it refuses fails the command before
+/// the claim moves a previous holder's links aside.
 pub(crate) fn claim(out: &crate::out::Out, manifest: Option<&Path>, link_root: Option<PathBuf>, label: Option<&str>) -> Bindings {
+    let label = label.map(|l| store::Label::parse(l).unwrap_or_else(|e| out.fail(format!("error: {e}"))));
+    let label = label.as_ref().map(store::Label::as_str);
     let manifest = crate::output_manifest::claim(out, manifest);
     let links = link_root.map(|root| LinkTree::claim(&root, label).unwrap_or_else(|e| out.fail(format!("error: {e}"))));
     Bindings { manifest, links }

@@ -127,12 +127,6 @@ pub(crate) fn cmd_fit_run(inv: crate::args::FitRunInvocation) {
         link_root: link_root.clone(),
         store: None,
     };
-    // A malformed label is refused before the claim removes anything.
-    if let Some(raw) = label.as_deref() {
-        if let Err(e) = crate::fit::validate_label(raw) {
-            out.fail(format!("error: invalid --label: {e}"));
-        }
-    }
     let link_root = crate::link_tree::link_root(link_root.as_deref());
     let bindings = crate::bindings::claim(&out, manifest.as_deref(), link_root, label.as_deref());
 
@@ -152,7 +146,8 @@ pub(crate) fn cmd_fit_run(inv: crate::args::FitRunInvocation) {
     let (resolved, _forcing_route) = crate::fit::run_config::resolve(&a, text, compile, &out);
     refuse_before_storing(&out, &resolved, &config.to_string_lossy());
 
-    let request = crate::camdl_store::store_request_with_fit_file(label, force, store_flag, resolved.store_root.clone());
+    let request = crate::camdl_store::store_request_with_fit_file(label, force, store_flag, resolved.store_root.clone())
+        .unwrap_or_else(|e| out.fail(format!("error: {e}")));
     let store = crate::camdl_store::open(&request).unwrap_or_else(|e| {
         out.fail(format!("error: the run store at {}: {e}", crate::camdl_store::root_of(&request).display()))
     });

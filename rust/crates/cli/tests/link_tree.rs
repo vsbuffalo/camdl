@@ -470,9 +470,12 @@ fn a_file_or_foreign_link_in_the_way_is_refused_and_kept() {
     assert!(err.contains("traj.tsv"), "{err}");
     assert_eq!(std::fs::read_link(p.path("results/sims/x/traj.tsv")).unwrap(), p.path("cases.tsv"));
 
-    // A label that is not a plain directory name is refused with a root.
-    let err = p.refused(&sim(&["--seed", "1", "--label", "..", "--link-root", "results"]));
+    // A label the store accepts that is not a plain directory name is
+    // refused with a root; `..` is refused by the store's label rule.
+    let err = p.refused(&sim(&["--seed", "1", "--label", ".x", "--link-root", "results"]));
     assert!(err.contains("--link-root"), "{err}");
+    let err = p.refused(&sim(&["--seed", "1", "--label", "..", "--link-root", "results"]));
+    assert!(err.contains("the label `..` is refused"), "{err}");
 }
 
 /// Links are an export: a command with them stores and reuses what the
@@ -525,14 +528,14 @@ fn labels_one_directory_holds_are_refused() {
     }
 }
 
-/// A label too long to name a link directory's temporary name is refused
-/// before anything is stored.
+/// A label longer than the store's rule allows is refused before anything is
+/// stored.
 #[test]
 fn an_over_long_label_is_refused_before_anything_is_stored() {
     let p = Project::new();
     let label = "a".repeat(240);
     let err = p.refused(&sim(&["--seed", "1", "--label", &label, "--link-root", "results"]));
-    assert!(err.contains("too long"), "{err}");
+    assert!(err.contains("at most 64"), "{err}");
     assert_eq!(p.invocations(), 0, "nothing was stored");
 }
 

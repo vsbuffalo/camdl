@@ -18,6 +18,7 @@ use crate::error::{json_err, At, Error, Result};
 use crate::fsutil::{try_lock, write_file_atomic, write_json_atomic, LockAttempt};
 use crate::hash::Key;
 use crate::inputs::Given;
+use crate::label::Label;
 use crate::owner::{this_owner, Beat, Liveness, Timestamp, STALE_AFTER};
 use crate::record::{
     read_record, Counts, Failure, InvocationFile, InvocationStatus, Lineage, Outcome, Read, ResultEntry,
@@ -30,14 +31,18 @@ use crate::Reuse;
 /// The store-class inputs, merged from every source.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StoreRequest {
-    label: Option<String>,
+    label: Option<Label>,
     force: bool,
     root: Option<PathBuf>,
 }
 
 impl StoreRequest {
-    pub fn new(label: Option<String>, force: bool, root: Option<PathBuf>) -> Self {
-        StoreRequest { label, force, root }
+    /// A request to store under `root` (`None` for the caller's default),
+    /// computing each result again when `force`, with the invocation named by
+    /// `label`. A label [`Label::parse`] refuses refuses the request.
+    pub fn new(label: Option<&str>, force: bool, root: Option<PathBuf>) -> Result<Self> {
+        let label = label.map(Label::parse).transpose()?;
+        Ok(StoreRequest { label, force, root })
     }
 
     /// Each value given in `self` wins over `other`'s; `force` is true if
@@ -65,7 +70,7 @@ impl StoreRequest {
     }
 
     pub fn label(&self) -> Option<&str> {
-        self.label.as_deref()
+        self.label.as_ref().map(Label::as_str)
     }
 }
 
@@ -245,7 +250,7 @@ impl State {
             owner: this_owner().clone(),
             started: s.owner_started.clone(),
             ended: (status == InvocationStatus::Ended).then(Timestamp::now),
-            label: self.request.label.clone(),
+            label: self.request.label().map(str::to_string),
             argv: self.given.argv.clone(),
             given: serde_json::Value::Object(self.given.fields.clone()),
             config_files: self.given.config_files.clone(),
@@ -308,8 +313,8 @@ fn start(inner: &Arc<Inner>, st: &mut State, reuse: Reuse, beat: Arc<Beat>) -> R
         }
     };
     let existing = all_invocations(&inner.root);
-    if let Some(label) = &st.request.label {
-        for f in existing.iter().filter(|f| f.label.as_deref() == Some(label.as_str())) {
+    if let Some(label) = st.request.label() {
+        for f in existing.iter().filter(|f| f.label.as_deref() == Some(label)) {
             if f.status != InvocationStatus::Running || &f.owner == this_owner() {
                 continue;
             }
@@ -319,7 +324,7 @@ fn start(inner: &Arc<Inner>, st: &mut State, reuse: Reuse, beat: Arc<Beat>) -> R
                 continue;
             }
             let running = f.results.iter().find(|r| r.outcome == Outcome::Planned).map(|r| r.run_id);
-            return Err(Error::LabelInUse { label: label.clone(), running, owner: f.owner.clone() });
+            return Err(Error::LabelInUse { label: label.to_string(), running, owner: f.owner.clone() });
         }
     }
     let highest = std::fs::read_dir(&dir)

@@ -3483,6 +3483,17 @@ A lookup is among the candidate results its source names:
   result itself before its by-products, so `run.json` names the cell's record,
   and `obs:run.json` its observations'.
 
+A label is one to 64 characters once surrounding whitespace is trimmed, each an
+ASCII letter or digit, a space, a comma, a dot, an underscore or a hyphen, and
+is neither `.` nor `..`. Every command that takes `--label` applies this rule
+before it stores anything and records the trimmed label; it refuses any other
+label, such as `f~1`, which `@f~1` would read as the label `f` and its first
+previous holder:
+
+```
+error: the label `f~1` is refused: `~` at position 2 is not allowed: a label holds letters, digits, spaces, commas, dots, underscores and hyphens
+```
+
 For a label, a run id, a prefix or a folder and a name qualified by
 `model_presentation` (`model_presentation:render`), the presentation of the
 model the result ran is a candidate too: the one the invocation the source names
