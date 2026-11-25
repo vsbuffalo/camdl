@@ -144,6 +144,7 @@ pub mod dt_check;
 pub mod init;
 pub mod starts;         // the `starts` rule: where a method's chains begin
 pub mod steps;          // each estimated parameter's step for the method that runs
+pub mod param_surfaces; // where each parameter enters the compiled model, and the checks a method makes of it
 pub mod chain_starts;
 pub mod chain_fanout;   // gh#821: run chains so each started chain keeps advancing
 pub mod loglik_eval;

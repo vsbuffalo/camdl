@@ -524,6 +524,25 @@ fn run_fit(mut out: Out, cx: FitCommand<'_>) -> Vec<String> {
     // dataset changes. The run is keyed by it and runs with it.
     let steps = crate::fit::steps::resolve_for(&method.algorithm, &config.problem, &model)
         .unwrap_or_else(|e| out.fail(format!("error: {fit_path}: {e}")));
+    // Where each estimated parameter enters the model, against what the
+    // method does with it: IF2's timing, and whether the method reads
+    // anything the parameter changes.
+    {
+        use crate::fit::param_surfaces as ps;
+        let classification = ps::param_surfaces(&model);
+        let names: Vec<String> = config.problem.estimate.keys().cloned().collect();
+        let priors = crate::fit::priors_precedence::resolve_priors_with_precedence(
+            &names, &config.problem.estimate, &model);
+        let classes = ps::use_classes(&classification, &priors, &model);
+        match ps::refuse_for_method(&method.algorithm, &steps, &classification, &classes, &priors, &model) {
+            Ok(warnings) => {
+                for w in warnings {
+                    out.say(format_args!("{} {w}", crate::out::paint::warning_tag()));
+                }
+            }
+            Err(e) => out.fail(format!("error: {fit_path}: {e}")),
+        }
+    }
     let starts_ext: Option<String> = match &starts_identity.input {
         StartInput::File { file } => Some(file.ext.clone()),
         _ => None,
