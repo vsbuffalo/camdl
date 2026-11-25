@@ -202,7 +202,7 @@ pub(crate) fn cmd_fit_summary(args: &FitSummaryArgs, compile: crate::util::Compi
     };
     // Whether the model's documentation is shown, when not, or when it is
     // one of several files the run was given.
-    if let Some(n) = opened.model.notice(&opened.handle) {
+    for n in opened.model.notices(&opened.handle) {
         out.notice(&n);
     }
     let dir = opened.run_dir().expect("a run handle has its files").to_string_lossy().into_owned();

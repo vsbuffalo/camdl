@@ -187,6 +187,72 @@ fn a_run_id_whose_sources_differ_in_quantities_is_refused() {
     }
 }
 
+/// The folder of the quantities the model source invocation `seq` recorded
+/// for its compiled model depends on.
+fn recorded_quantities_folder(dir: &Path, seq: u64) -> PathBuf {
+    let record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join(format!("st/.invocations/{seq}.json"))).unwrap()).unwrap();
+    let source = record["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|r| r["source"]["run_id"].as_str())
+        .expect("the record names a model source")
+        .to_string();
+    let find = |kind: &str, run_id: &str| -> PathBuf {
+        let mut stack = vec![dir.join("st")];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).unwrap().flatten() {
+                let p = e.path();
+                if !p.is_dir() {
+                    continue;
+                }
+                if p.parent().and_then(|q| q.file_name()).is_some_and(|n| n == kind) && p.to_string_lossy().ends_with(&run_id[..12]) {
+                    return p;
+                }
+                stack.push(p);
+            }
+        }
+        panic!("no {kind} folder {run_id}");
+    };
+    let identity: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(find("model_source", &source).join("identity.json")).unwrap()).unwrap();
+    let quantities = identity["identity"]["quantities"]["run_id"].as_str().expect("the source depends on its quantities").to_string();
+    find("quantities", &quantities)
+}
+
+/// A source whose quantities cannot be read stops only what evaluates them:
+/// a reader of the fit goes on with one notice, `--model FILE` uses the file
+/// given, a prediction from the run's own record is refused naming them, and
+/// a stored prediction with its own quantities intact is scored.
+#[test]
+fn unreadable_quantities_refuse_only_their_own_use() {
+    let tmp = inputs(&[("a", "peak_I = max(I)"), ("b", "peak_R = max(R)")]);
+    let dir = tmp.path();
+    fit(dir, "a", "a");
+    let mut args = vec!["predict", "@a", "--model", "b.camdl", "--label", "p"];
+    args.extend_from_slice(PREDICT);
+    succeeds(camdl_in(dir, &args), "predict --model");
+    let folder = recorded_quantities_folder(dir, 1);
+    let shown = folder.file_name().unwrap().to_string_lossy().rsplit('-').next().unwrap().to_string();
+    std::fs::remove_dir_all(&folder).unwrap();
+
+    let out = succeeds(camdl_in(dir, &["fit", "summary", "@a"]), "fit summary");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(stderr.matches(&shown).count(), 1, "one notice names the quantities: {stderr}");
+
+    let mut args = vec!["predict", "@a"];
+    args.extend_from_slice(PREDICT);
+    let out = camdl_in(dir, &args);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success() && stderr.contains(&shown), "a prediction of the run's own quantities is refused naming them: {stderr}");
+
+    let mut args = vec!["predict", "@a", "--model", "b.camdl"];
+    args.extend_from_slice(PREDICT);
+    succeeds(camdl_in(dir, &args), "predict --model with the recorded quantities gone");
+    succeeds(camdl_in(dir, &["score", "@p", "--data", "cases=cases.tsv", "--progress", "none"]), "score of a prediction with its own quantities");
+}
+
 /// A label names one invocation, which answers alone, for the model's name
 /// too: two files that differ only in a comment pose one problem, and
 /// `predict @a` names the model as `@a`'s file does, not as the later one.

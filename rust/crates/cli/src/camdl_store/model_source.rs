@@ -530,8 +530,12 @@ pub(crate) struct StoredModel {
     /// The quantities [`Self::model`] holds: the recorded source's, or those
     /// a command put in their place (`predict --model FILE`, or a stored
     /// prediction's own when `score` poses it again). `None` when no source
-    /// is recorded or it cannot be read.
+    /// is recorded or it cannot be read, or its quantities cannot be.
     pub evaluated: Option<Dep<Quantities>>,
+    /// Why the recorded source's quantities cannot be read, when they cannot:
+    /// a reader of the model goes on and says so once ([`Self::notices`]),
+    /// and only a use of them is refused ([`Self::quantities`]).
+    unreadable_quantities: Option<String>,
 }
 
 impl StoredModel {
@@ -542,12 +546,20 @@ impl StoredModel {
     /// without them.
     pub fn of(store: &Store, handle: &Handle, dep: &Dep<CompiledModel>, name: &str) -> Result<StoredModel, String> {
         let model = crate::fit_store::stored_envelope(store, dep, name)?.model;
-        let mut stored = StoredModel { model, source: Shown::NotRecorded { invocation: None }, views: None, evaluated: None };
+        let mut stored = StoredModel {
+            model,
+            source: Shown::NotRecorded { invocation: None },
+            views: None,
+            evaluated: None,
+            unreadable_quantities: None,
+        };
         stored.with_source(handle, shown_for(store, handle, dep.id().key())?);
         if let Shown::Recorded { source, .. } = &stored.source {
             let q = source.identity().quantities.clone();
-            let content = crate::fit_store::read_quantities(store, &q)?;
-            stored.evaluate(q, &content)?;
+            match crate::fit_store::read_quantities(store, &q).and_then(|content| stored.evaluate(q, &content)) {
+                Ok(()) => {}
+                Err(e) => stored.unreadable_quantities = Some(e),
+            }
         }
         Ok(stored)
     }
@@ -558,6 +570,7 @@ impl StoredModel {
         self.model.quantities = content.quantities()?;
         self.model.contrasts = content.contrasts()?;
         self.evaluated = Some(dep);
+        self.unreadable_quantities = None;
         Ok(())
     }
 
@@ -611,6 +624,9 @@ impl StoredModel {
             Shown::Recorded { source, by: RecordedBy::Latest { others, .. } } => (source, others.as_slice()),
             Shown::Recorded { source, .. } => (source, &[][..]),
         };
+        if let Some(why) = &self.unreadable_quantities {
+            return Err(format!("{text}: the quantities of the model source {} cannot be read: {why}", source.id().key().short12()));
+        }
         let latest = source.identity().quantities.clone();
         let mut differ = Vec::new();
         for other in others {
@@ -644,10 +660,20 @@ impl StoredModel {
         self.views.as_ref().map(|v| &v.docs).unwrap_or_else(|| NONE.get_or_init(ir::ModelDocs::default))
     }
 
-    /// What a reader that shows the model's documentation tells the user,
-    /// for the result `handle` names ([`Shown::notice`]).
-    pub fn notice(&self, handle: &Handle) -> Option<crate::out::notice::Notice> {
-        self.source.notice(handle)
+    /// What a reader that shows the model tells the user about it: what
+    /// [`Shown::notice`] says of its documentation, for the result `handle`
+    /// names, and that the
+    /// source's quantities cannot be read, when they cannot.
+    pub fn notices(&self, handle: &Handle) -> Vec<crate::out::notice::Notice> {
+        let mut out: Vec<_> = self.source.notice(handle).into_iter().collect();
+        if let (Some(why), None) = (&self.unreadable_quantities, &self.evaluated) {
+            out.push(crate::out::notice::Notice {
+                severity: crate::out::notice::Severity::Warning,
+                code: "model-source-quantities-unreadable",
+                message: format!("{handle}: the model's quantities and contrasts are not read, so none is shown: {why}"),
+            });
+        }
+        out
     }
 
     /// The model as an IR envelope with the source's documentation, for a
