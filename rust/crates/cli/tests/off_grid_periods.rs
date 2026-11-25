@@ -88,7 +88,7 @@ fn method_block(algorithm: &str) -> &'static str {
     }
 }
 
-fn write_fit_toml(dir: &Path, ir: &Path, data: &Path, algorithm: &str, config_extra: &str) -> PathBuf {
+fn write_fit_toml(dir: &Path, ir: &Path, data: &Path, algorithm: &str) -> PathBuf {
     let toml = format!(r#"
 store = "{out}"
 [model]
@@ -97,7 +97,6 @@ camdl = "{ir}"
 cases = "{data}"
 [config]
 dt = 1.0
-{config_extra}
 [estimate]
 beta  = {{ bounds = [0.01, 2.0], prior = {{ log_normal = {{ mu = -1.0, sigma = 0.5 }} }}, start = 0.4 }}
 [fixed]
@@ -130,7 +129,7 @@ fn f1_off_grid_periods_fit_under_every_exact_stepping_method() {
         let tmp = tempdir(algorithm);
         let ir = write_model(tmp.path(), 0.0, 2.5, 1.0);
         let data = write_data(tmp.path(), &f1_rows());
-        let toml = write_fit_toml(tmp.path(), &ir, &data, algorithm, "");
+        let toml = write_fit_toml(tmp.path(), &ir, &data, algorithm);
         let o = fit_run(&toml);
         assert!(o.status.success(),
             "[{algorithm}] periods closing at 2.5, 5, … under dt = 1 must fit:\n{}",
@@ -146,7 +145,7 @@ fn f1_pgas_variant_is_refused_naming_the_row_and_the_grid_times() {
     let tmp = tempdir("pgas");
     let ir = write_model(tmp.path(), 0.5, 2.0, 1.0);
     let data = write_data(tmp.path(), &[(3.0, 4), (5.0, 7), (7.0, 11), (9.0, 16)]);
-    let toml = write_fit_toml(tmp.path(), &ir, &data, "pgas", "");
+    let toml = write_fit_toml(tmp.path(), &ir, &data, "pgas");
     let o = fit_run(&toml);
     let stderr = String::from_utf8_lossy(&o.stderr);
     assert!(!o.status.success(), "PGAS must refuse periods off its grid; it ran:\n{stderr}");
@@ -165,28 +164,9 @@ fn pgas_runs_periods_on_its_grid_from_an_off_integer_start() {
     let tmp = tempdir("pgas_on_grid");
     let ir = write_model(tmp.path(), 0.5, 2.0, 1.0);
     let data = write_data(tmp.path(), &[(2.5, 4), (4.5, 7), (6.5, 11), (8.5, 16)]);
-    let toml = write_fit_toml(tmp.path(), &ir, &data, "pgas", "");
+    let toml = write_fit_toml(tmp.path(), &ir, &data, "pgas");
     let o = fit_run(&toml);
     assert!(o.status.success(), "periods on PGAS's grid must run:\n{}", String::from_utf8_lossy(&o.stderr));
-}
-
-/// `[config] obs_alignment` is removed: a fit config carrying it is refused,
-/// saying so, rather than parsed and ignored.
-#[test]
-fn a_fit_config_with_obs_alignment_is_refused() {
-    for value in ["exact", "snap"] {
-        let tmp = tempdir("obs_alignment");
-        // On-grid periods, so that nothing but the key can refuse the fit.
-        let ir = write_model(tmp.path(), 0.0, 3.0, 1.0);
-        let data = write_data(tmp.path(), &[(3.0, 4), (6.0, 7), (9.0, 11), (12.0, 16)]);
-        let toml = write_fit_toml(tmp.path(), &ir, &data, "if2",
-            &format!("obs_alignment = \"{value}\""));
-        let o = fit_run(&toml);
-        let stderr = String::from_utf8_lossy(&o.stderr);
-        assert!(!o.status.success(), "obs_alignment = \"{value}\" must be refused; it ran:\n{stderr}");
-        assert!(stderr.contains("obs_alignment") && stderr.contains("removed"),
-            "the refusal must say obs_alignment was removed:\n{stderr}");
-    }
 }
 
 /// A run store of its own for one command, so tests that run the same filter

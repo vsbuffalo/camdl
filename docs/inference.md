@@ -334,9 +334,7 @@ years before the case series so births and campaigns shape the susceptible pool
 — the first period still opens where its declaration says, so the first datum is
 scored against one declared period and the pre-data span contributes no
 likelihood term. Nothing has to be set for this: the declaration is the
-boundary. (The former `fit.toml` key `condition_from`, which hand-placed that
-boundary, is removed; a leftover key is a hard error saying so — see
-`camdl docs language-changes`.)
+boundary.
 
 Prevalence observations (`current_pop`) read state at the instant and have no
 period; neither point applies to them. See `camdl docs fit-toml` ("Where scoring

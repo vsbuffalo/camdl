@@ -503,12 +503,8 @@ so a multi-cadence model needs nothing extra either.
 - **Domain.** A first period that opens before `simulate.from` is a hard error
   naming both times — that span is never simulated, so the row would be scored
   against flow that does not exist. Opening exactly at `simulate.from` is fine.
-- **Removed surface.** The `fit.toml` key `condition_from` (string or per-stream
-  table) and its `--condition-from` flag on `fit run` / `pfilter` / `profile`,
-  which hand-placed this boundary, and the W329 wide-first-window guard that
-  demanded it, are removed. A leftover key is a hard error stating that the
-  declaration now does this and to delete the key; a leftover flag is an
-  unknown-argument error. See `camdl docs language-changes`.
+- **No setting.** No `fit.toml` key or command-line flag places this boundary;
+  the declaration does.
 
 See `docs/dev/proposals/2026-09-05-observation-time-as-a-sum-type.md` for the
 design and the runtime mechanics.

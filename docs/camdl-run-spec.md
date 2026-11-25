@@ -4512,9 +4512,8 @@ with the serde list quoted in §6.9.
 | `dt`                     | float | the model's `dt`, else `1.0` | Integrator step. A model's declared `simulate { dt }` is the step; a `[config] dt` that differs is refused, an agreeing one accepted. A top-level `dt` is a load error. |
 | `allow_degenerate_rates` | bool  | `false`                      | Treat a numerical collapse in a rate expression (div-by-zero, `Pow`→NaN, `Sqrt` of a negative) as `0.0`.                                                                |
 
-`[config] backend` was relocated to `[synthetic] backend` (gh#241) and is
-rejected with a migration message. `[config] obs_alignment` is removed (§6.5)
-and refused with a message saying so.
+The synthetic-data backend is `[synthetic] backend`. Any other key under
+`[config]` is refused at load as an unknown field.
 
 `[data]` (`DataSpec`, `config_v2.rs`):
 
@@ -4597,14 +4596,10 @@ declares what each row covers (`covers = ...`, or `window_start`/`window_stop`
 columns — `camdl-data-spec.md`, "What a row covers"), and a declared first
 period opens where it says: the span from `t_start` to that opening is simulated
 and scored nowhere, and the first datum is scored against its own period. A
-first period opening before `t_start` is a load error naming both times. The
-former `condition_from` key (string or per-stream table) that hand-placed this
-boundary is removed; `detect_removed_condition_from` (`config_v2.rs`) refuses it
-ahead of the strict `deny_unknown_fields` parse — at the top level or anywhere
-under `[data]` — with a message naming the replacement, so a stale config fails
-with a migration rather than a bare unknown-field error. `camdl pfilter`,
-`camdl profile` and `camdl predict` bind the same declared periods, so a fixed-θ
-loglik and a predictive row cover the window the fit scored.
+first period opening before `t_start` is a load error naming both times.
+`camdl pfilter`, `camdl profile` and `camdl predict` bind the same declared
+periods, so a fixed-θ loglik and a predictive row cover the window the fit
+scored.
 
 ### 6.3 `[estimate]` — free parameters
 
@@ -4877,9 +4872,7 @@ lies off the grid (within `schedule::GRID_TOL`), naming the stream, the row, its
 period and the two grid times either side
 (`runner::refuse_periods_off_the_grid`). The ODE algorithms read the trajectory
 at its output times and refuse a boundary with no output time. No method moves a
-period. The `[config] obs_alignment` key that used to name a choice here is
-removed; a config carrying it is refused before parsing, with a message saying
-so.
+period, and no setting chooses how a period relates to the grid.
 
 **IC-free support.** `ic_free = true` is honored by `if2`, and by `pfilter` /
 `pmmh` on a model whose `init { }` declares a law
@@ -5147,18 +5140,14 @@ resolves the new source, a new dependency, and re-keys.
 
 ### 6.9 Load-time validation
 
-`FitConfig::from_toml_str` (`config_v2.rs`) runs the migration detectors before
-the typed parse and the `[method]` key check on its result;
+`FitConfig::from_toml_str` (`config_v2.rs`) runs the checks below that read the
+raw file before the typed parse and the `[method]` key check on its result;
 `FitConfig::validate` then runs the semantic checks once the model IR is loaded
 and `[fixed]
 from_scenario` has been expanded. Everything below fires before the
 method executes.
 
 **Parse-time.**
-
-- A relocated `[config] backend`:
-
-  > `` `[config].backend` has moved to `[synthetic].backend` (gh#241). ``
 
 - A `[stages]` table. There is no silent conversion: the loader prints the
   rewrite, in the file's own declaration order, naming the last-declared stage
@@ -5185,10 +5174,6 @@ method executes.
   input. Use `starts = "from_prior"`, or run a short fit and write `starts
   = { from_posterior = "@handle" }`. ``
   An empty `[stages]` is refused with `replacement: delete it`.
-
-- The removed top-level `fit_starts`:
-
-  > `` `fit_starts` is no longer a fit.toml key. Chain starts are the `starts` key of `[method]`: `from_prior` is the default whenever every estimated parameter declares a prior, so `fit_starts = "prior"` is simply deleted; `fit_starts = "model_default"` is `starts = "single"`. See `camdl docs fit-toml`. ``
 
 - An unknown top-level key:
 
@@ -7764,7 +7749,7 @@ language spec's priors section, which is the normative source for the surface.
 ### 12.4 Prior support and the search box
 
 There is no `transform` key in `[estimate.<p>]` (a file carrying one is refused
-at load, naming the line to delete). The transform follows from the parameter's
+at load as an unknown field). The transform follows from the parameter's
 resolved bounds and declared type (§6.3), and every prior density reads the
 logarithms it needs from the transformed coordinate, so the prior is exact under
 whichever transform results. What is checked, before the fit starts, is that the

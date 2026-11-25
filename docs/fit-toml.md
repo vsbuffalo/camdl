@@ -246,8 +246,7 @@ and `pmmh` step exactly to every observed period's start and end; `pgas` steps
 only on its grid and refuses a run in which any period starts or ends off it,
 naming the row and the two grid times either side — choose a `dt` that puts
 every boundary on the grid, or fit with `if2` or `pmmh`. There is no setting for
-this: `[config] obs_alignment` is removed, and a file that carries it is
-refused.
+this.
 
 ## Step sizes
 
@@ -651,9 +650,7 @@ legacy table `[stages.posterior]`
 Nothing is converted silently. `init` is `starts`; `init_mle` is one of the two
 sourced rules, chosen by the author, with the upstream run first and named by
 handle; `survey_top_k` with `survey_path` / `survey_top_k_n` is refused, and
-`from_prior`, or `from_posterior` from a short run, takes its place; the
-top-level `fit_starts` key, which no runner read, is gone with it (`from_prior`
-is now the default whenever every estimated parameter declares a prior).
+`from_prior`, or `from_posterior` from a short run, takes its place.
 
 ## Where scoring begins
 
@@ -671,20 +668,9 @@ there is no `fit.toml` setting for that boundary. A first period that opens
 before `simulate.from` is an error naming both times: that span is never
 simulated.
 
-`fit.toml` used to carry a `condition_from` key for this. It is removed, and a
-leftover key — top-level, or under `[data]` — is a hard error rather than an
-unknown-field rejection:
-
-```
-condition_from = ... is no longer a fit.toml key: an incidence stream now states
-what each row covers (`covers = ...` or window columns in the model), and a
-declared first period opens where it says, so the warm-up before the first row
-is discarded without a separate setting. Delete the key.
-```
-
 `camdl pfilter`, `camdl profile` and `camdl predict` bind the same declared
 periods, so a fixed-θ log-likelihood or a predictive row covers exactly the
-window the fit scored. The history is in `camdl docs language-changes`.
+window the fit scored.
 
 ## Priors
 

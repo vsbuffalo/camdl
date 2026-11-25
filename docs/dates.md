@@ -978,8 +978,7 @@ camdl pfilter model.camdl --data cases_dated.tsv ...
   read their trajectory at its output times and refuse a period boundary that
   has no output time. Interventions and events fire on the run's own grid,
   `k = ⌊(t − t_start)/dt + ½⌋` on every chain-binomial path (language spec
-  §13.2). The `[config] obs_alignment` key that used to name a choice here is
-  removed; a fit config that carries it is refused.
+  §13.2).
 
 ## Getting dates back out
 

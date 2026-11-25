@@ -184,8 +184,7 @@ a user setting:
 | `AtOutputTimes`    | `nl-sbplx`, `nl-bobyqa`, `nl-lbfgs`, `mh` | read from the ODE trajectory at its output times; a boundary with no output time is refused by the trajectory walk (`ode_loglik.rs`) |
 
 `FitRunConfig::build` reads it once the method is known, over every row of every
-bound stream, held-out rows included. The `[config] obs_alignment` key that used
-to present this as a choice is removed, and refused at load.
+bound stream, held-out rows included.
 
 ## Axis 3 — model-feature × algorithm (ad-hoc, not a system)
 

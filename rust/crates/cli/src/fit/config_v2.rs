@@ -482,8 +482,6 @@ pub struct SyntheticSpec {
     /// Forward-simulation backend used to GENERATE the synthetic datasets
     /// (`chain_binomial` | `gillespie` | `ode`). This is a property of data
     /// generation, not of fitting — fit methods declare their own backends.
-    /// Relocated from `[config].backend` (gh#241): the backend only ever fed
-    /// synthetic generation, so it belongs in the block that owns generation.
     #[serde(default = "default_backend")]
     pub backend: crate::args::types::ForwardBackend,
 }
@@ -2277,29 +2275,6 @@ pub struct FitProvenance {
 
 // ─── Loading + Validation ───────────────────────────────────────────────────
 
-/// gh#241: `[config].backend` was relocated to `[synthetic].backend` (it only
-/// ever fed synthetic-data generation). Catch the old key BEFORE the strict
-/// `deny_unknown_fields` parse, so the user gets a migration message naming the
-/// replacement instead of a bare "unknown field `backend`" serde error.
-fn detect_relocated_config_backend(contents: &str) -> Result<(), String> {
-    let value: toml::Value = match toml::from_str(contents) {
-        Ok(v) => v,
-        // Malformed TOML surfaces from the strict parse with its own message.
-        Err(_) => return Ok(()),
-    };
-    if value.get("config").and_then(|c| c.get("backend")).is_some() {
-        return Err(
-            "`[config].backend` has moved to `[synthetic].backend` (gh#241).\n  \
-             The backend is a forward-simulation setting for synthetic-data \
-             generation, not a fit-wide config — fit methods declare their own \
-             `backend`. Move it under your `[synthetic]` block, or remove it for \
-             a real-data fit.\n  See `camdl docs fit-toml`."
-                .into(),
-        );
-    }
-    Ok(())
-}
-
 /// Refuse `algorithm = "nuts"` under `[method]` before the strict parse, so the
 /// user gets the same steer as the `--algorithm` boundary
 /// ([`super::methods::NUTS_STEER`]) instead of serde's bare "unknown variant".
@@ -2318,69 +2293,6 @@ fn detect_nuts_algorithm(contents: &str) -> Result<(), String> {
             "[method]: unknown algorithm \"nuts\".\n  {}\n  See `camdl docs fit-toml`.",
             super::methods::NUTS_STEER.replace('\n', "\n  ")
         ));
-    }
-    Ok(())
-}
-
-/// The error a `condition_from` key in a fit.toml raises. The key opened an
-/// incidence stream's first bin somewhere other than `t_start` when nothing
-/// else could; every incidence stream now declares what its rows cover, and a
-/// first period opens where it says, so the key has no job left. Kept as a
-/// hard error rather than an unknown-field rejection so the user is told what
-/// replaced it (proposal 2026-09-05-observation-time-as-a-sum-type, ruling 4).
-pub const CONDITION_FROM_REMOVED_MSG: &str =
-    "condition_from = ... is no longer a fit.toml key: an incidence stream now \
-     states what each row covers (`covers = ...` or window columns in the \
-     model), and a declared first period opens where it says, so the warm-up \
-     before the first row is discarded without a separate setting. Delete the \
-     key.";
-
-/// Refuse a removed `condition_from` key before the strict
-/// `deny_unknown_fields` parse, so the user gets
-/// [`CONDITION_FROM_REMOVED_MSG`] rather than a bare serde "unknown field"
-/// error. Fires on the key at the top level (both the `condition_from = "…"`
-/// scalar and the `[condition_from]` table spell a top-level key) and on the
-/// key anywhere under `[data]`, where a user may have guessed it belongs.
-fn detect_removed_condition_from(contents: &str) -> Result<(), String> {
-    fn table_has_key_anywhere(value: &toml::Value, key: &str) -> bool {
-        match value.as_table() {
-            Some(t) => t.contains_key(key)
-                || t.values().any(|v| table_has_key_anywhere(v, key)),
-            None => false,
-        }
-    }
-    let value: toml::Value = match toml::from_str(contents) {
-        Ok(v) => v,
-        // Malformed TOML surfaces from the strict parse with its own message.
-        Err(_) => return Ok(()),
-    };
-    let at_top = value.get("condition_from").is_some();
-    let under_data = value
-        .get("data")
-        .is_some_and(|d| table_has_key_anywhere(d, "condition_from"));
-    if at_top || under_data {
-        return Err(CONDITION_FROM_REMOVED_MSG.into());
-    }
-    Ok(())
-}
-
-/// Refuse the removed `[estimate.<name>].transform` key (support-keyed
-/// transforms, D2) before the strict parse, so the user is told the key is
-/// gone and what replaces it rather than a bare serde "unknown field".
-fn detect_removed_estimate_transform(contents: &str) -> Result<(), String> {
-    let value: toml::Value = match toml::from_str(contents) {
-        Ok(v) => v,
-        Err(_) => return Ok(()),
-    };
-    let Some(estimate) = value.get("estimate").and_then(|e| e.as_table()) else {
-        return Ok(());
-    };
-    for (name, entry) in estimate {
-        if entry.get("transform").is_some() {
-            return Err(format!(
-                "estimate.{name}: `transform` was removed: the transform follows from the \
-                 parameter's kind and bounds. Delete the line. See `camdl docs fit-toml`."));
-        }
     }
     Ok(())
 }
@@ -2855,29 +2767,6 @@ fn detect_misplaced_step_table(contents: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Refuse the removed `[config] obs_alignment` key (D43,
-/// `docs/dev/temporal-architecture.md` §4.5) before the strict parse, so the
-/// user is told the setting is gone and why, rather than a bare serde
-/// "unknown field". Where a period's boundaries may lie relative to the step
-/// grid is a capability of the method, not a choice.
-fn detect_removed_obs_alignment(contents: &str) -> Result<(), String> {
-    let value: toml::Value = match toml::from_str(contents) {
-        Ok(v) => v,
-        Err(_) => return Ok(()),
-    };
-    if value.get("config").and_then(|c| c.get("obs_alignment")).is_some() {
-        return Err(
-            "[config] `obs_alignment` was removed: how an observed period relates to the \
-             step grid is not a setting. if2, pfilter and pmmh step exactly to every \
-             period's start and end; pgas steps only on its grid t_start + k·dt and \
-             refuses a period whose start or end lies off it. Delete the line. See \
-             `camdl docs fit-toml`."
-                .into(),
-        );
-    }
-    Ok(())
-}
-
 /// The `[stages]` rejection (proposal 2026-09-08-workflow-first-fit-config,
 /// §5). A file that still carries the method map is refused at load with the
 /// rewrite spelled out: the last-declared method becomes the file's `[method]`,
@@ -2993,28 +2882,6 @@ pub fn detect_legacy_stages(contents: &str, file_name: &str) -> Result<(), Strin
     }
     msg.push_str("  See `camdl docs fit-toml`.");
     Err(msg)
-}
-
-/// `fit_starts` was a top-level key that was parsed, serialized into every
-/// fit-level identity as `null`, consulted once to silence a warning, and read
-/// by nothing. Its one meaningful value, `"prior"`, is now the default
-/// `starts` rule whenever every estimated parameter declares a prior.
-fn detect_removed_fit_starts(contents: &str) -> Result<(), String> {
-    let value: toml::Value = match toml::from_str(contents) {
-        Ok(v) => v,
-        Err(_) => return Ok(()),
-    };
-    if value.get("fit_starts").is_some() {
-        return Err(
-            "`fit_starts` is no longer a fit.toml key. Chain starts are the `starts` key of \
-             `[method]`: `from_prior` is the default whenever every estimated parameter \
-             declares a prior, so `fit_starts = \"prior\"` is simply deleted; \
-             `fit_starts = \"model_default\"` is `starts = \"single\"`. See `camdl docs \
-             fit-toml`."
-                .into(),
-        );
-    }
-    Ok(())
 }
 
 /// gh#241 (C3): reject unknown keys inside `[method]`.
@@ -3250,11 +3117,11 @@ fn refuse_inert_method_keys(
 }
 
 impl FitConfig {
-    /// Parse a fit.toml string. Runs the migration detectors — the
-    /// `[stages]` rejection, the removed `fit_starts` / `condition_from` /
-    /// `[config].backend` keys — before handing the string to the
-    /// strongly-typed deserializer, so each names its replacement instead of
-    /// surfacing as a bare "unknown field".
+    /// Parse a fit.toml string. A `[stages]` table, a step key in
+    /// `[estimate]`, a step table under a method that does not read it and
+    /// `algorithm = "nuts"` are each refused before the strongly-typed
+    /// parse, with a message naming what to write instead; every other
+    /// unknown key is refused by that parse.
     pub fn from_toml_str(contents: &str) -> Result<Self, String> {
         Self::from_toml_str_named(contents, "fit.toml")
     }
@@ -3263,13 +3130,8 @@ impl FitConfig {
     /// which the `[stages]` rewrite quotes in its `camdl fit run …` line.
     pub fn from_toml_str_named(contents: &str, file_name: &str) -> Result<Self, String> {
         detect_legacy_stages(contents, file_name)?;
-        detect_removed_fit_starts(contents)?;
-        detect_relocated_config_backend(contents)?;
-        detect_removed_condition_from(contents)?;
-        detect_removed_estimate_transform(contents)?;
         detect_legacy_step_keys_in(contents)?;
         detect_misplaced_step_table(contents)?;
-        detect_removed_obs_alignment(contents)?;
         detect_nuts_algorithm(contents)?;
         let wire: FitConfigWire = toml::from_str(contents)
             .map_err(|e| format!("parse error: {}", e))?;
@@ -5579,41 +5441,29 @@ cooling = 0.7
         }
     }
 
+    /// A key no table reads is refused by the strict parse wherever it is
+    /// written: at the top level, under `[data]`, under `[config]`, and in an
+    /// `[estimate]` entry, inline or as a table.
     #[test]
-    fn an_obs_alignment_key_in_config_says_it_was_removed() {
-        let base = "[model]\ncamdl = \"models/sir.camdl\"\n\
-                    [data.observations]\nweekly_cases = \"data/cases.tsv\"\n\
-                    [estimate]\nbeta = { bounds = [0.01, 2.0] }\n[fixed]\nN0 = 1000000\n\
-                    [method]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\n\
+    fn a_key_no_table_reads_is_refused_where_it_is_written() {
+        let model = "[model]\ncamdl = \"models/sir.camdl\"\n";
+        let obs = "[data.observations]\nweekly_cases = \"data/cases.tsv\"\n";
+        let estimate = "[estimate]\nbeta = { bounds = [0.01, 2.0] }\n";
+        let rest = "[fixed]\nN0 = 1000000\n[method]\nalgorithm = \"if2\"\nbackend = \"chain_binomial\"\n\
                     chains = 8\nparticles = 1000\niterations = 80\ncooling = 0.70\n";
-        for value in ["exact", "snap"] {
-            let stale = format!("{base}[config]\ndt = 1.0\nobs_alignment = \"{value}\"\n");
-            let err = FitConfig::from_toml_str(&stale).expect_err("`obs_alignment` is not a key");
-            assert!(err.contains("`obs_alignment` was removed") && err.contains("Delete the line"),
-                "must say the key was removed and to delete the line; got: {err}");
+        let cases = [
+            format!("unread = 1\n{model}{obs}{estimate}{rest}"),
+            format!("{model}[data]\nunread = 1\n{obs}{estimate}{rest}"),
+            format!("{model}{obs}{estimate}[config]\ndt = 1.0\nunread = 1\n{rest}"),
+            format!("{model}{obs}[estimate]\nbeta = {{ bounds = [0.01, 2.0], unread = 1 }}\n{rest}"),
+            format!("{model}{obs}[estimate.beta]\nbounds = [0.01, 2.0]\nunread = 1\n{rest}"),
+        ];
+        for toml_str in &cases {
+            let err = FitConfig::from_toml_str(toml_str).expect_err(toml_str);
+            assert!(err.contains("unknown field `unread`"), "names the key; got: {err}\n{toml_str}");
         }
-        let without = format!("{base}[config]\ndt = 1.0\n");
-        assert!(FitConfig::from_toml_str(&without).is_ok(),
-            "the same file without the key must parse: {:?}", FitConfig::from_toml_str(&without).err());
-    }
-
-    #[test]
-    fn a_transform_key_in_estimate_says_it_was_removed() {
-        let base = "[model]\ncamdl = \"models/sir.camdl\"\n\
-                    [data.observations]\nweekly_cases = \"data/cases.tsv\"\n\
-                    [fixed]\nN0 = 1000000\n[method]\nalgorithm = \"if2\"\n\
-                    backend = \"chain_binomial\"\nchains = 8\nparticles = 1000\n\
-                    iterations = 80\ncooling = 0.70\n";
-        let stale = format!("{base}[estimate]\nbeta = {{ bounds = [0.01, 2.0], transform = \"log\" }}\n");
-        let err = FitConfig::from_toml_str(&stale).expect_err("`transform` is not a key");
-        assert!(err.contains("estimate.beta") && err.contains("`transform` was removed")
-            && err.contains("kind and bounds") && err.contains("Delete the line"),
-            "must say the key was removed and to delete the line; got: {err}");
-        let table = format!("{base}[estimate.beta]\nbounds = [0.01, 2.0]\ntransform = \"logit\"\n");
-        assert!(FitConfig::from_toml_str(&table).unwrap_err().contains("`transform` was removed"));
-        let without = stale.replace(", transform = \"log\"", "");
-        assert!(FitConfig::from_toml_str(&without).is_ok(),
-            "the same file without the key must parse: {:?}", FitConfig::from_toml_str(&without).err());
+        let without = format!("{model}{obs}{estimate}[config]\ndt = 1.0\n{rest}");
+        FitConfig::from_toml_str(&without).expect("the same file without the key parses");
     }
 
     #[test]
@@ -7444,72 +7294,6 @@ cooling = 0.70
         "#).unwrap();
 
         assert_eq!(config.problem.config.dt, 1.0);
-    }
-
-    #[test]
-    fn legacy_config_backend_is_rejected_with_migration_message() {
-        // gh#241: `[config].backend` relocated to `[synthetic].backend`. The old
-        // key must fail with a migration message naming the replacement, not a
-        // bare serde "unknown field" error.
-        let err = parse(r#"
-[model]
-camdl = "m.camdl"
-[data.observations]
-cases = "d.tsv"
-[estimate]
-beta = { bounds = [0.01, 2.0] }
-[config]
-backend = "ode"
-[method]
-algorithm = "if2"
-backend = "chain_binomial"
-chains = 2
-particles = 100
-iterations = 5
-cooling = 0.7
-        "#).unwrap_err();
-        assert!(err.contains("[synthetic].backend"), "names the new location: {err}");
-        assert!(err.contains("gh#241"), "cites the change: {err}");
-        assert!(!err.contains("unknown field"), "not a bare serde error: {err}");
-    }
-
-    #[test]
-    fn removed_condition_from_key_is_rejected_with_covers_hint() {
-        // Ruling 4 of proposal 2026-09-05-observation-time-as-a-sum-type: the
-        // key is gone, and every spelling of it must fail with the hint that
-        // names `covers`, not a bare serde "unknown field" error. Three
-        // spellings: the top-level scalar, the `[condition_from]` table, and
-        // the key misplaced under `[data]`.
-        let body = r#"
-[model]
-camdl = "m.camdl"
-[estimate]
-beta = { bounds = [0.01, 2.0] }
-[fixed]
-gamma = 0.2
-[method]
-algorithm = "if2"
-backend = "chain_binomial"
-chains = 2
-particles = 100
-iterations = 5
-cooling = 0.7
-"#;
-        let spellings = [
-            format!("condition_from = \"first_obs - 1 week\"\n[data.observations]\ncases = \"d.tsv\"\n{body}"),
-            format!("[condition_from]\ncases = \"14\"\n[data.observations]\ncases = \"d.tsv\"\n{body}"),
-            format!("[data]\ncondition_from = \"14\"\n[data.observations]\ncases = \"d.tsv\"\n{body}"),
-        ];
-        for toml_str in &spellings {
-            let err = parse(toml_str).unwrap_err();
-            assert_eq!(err, CONDITION_FROM_REMOVED_MSG, "exact hint text for:\n{toml_str}");
-            assert!(err.contains("covers"), "points at the replacement: {err}");
-            assert!(!err.contains("unknown field"), "not a bare serde error: {err}");
-        }
-        // The same document without the key parses — the detector is keyed
-        // on the name, not on anything else in the fixture.
-        parse(&format!("[data.observations]\ncases = \"d.tsv\"\n{body}"))
-            .expect("fixture without condition_from must parse");
     }
 
     #[test]
@@ -9597,16 +9381,6 @@ survey_top_k_n = 4
             "a removed rule must not be offered as a rename: {err}");
     }
 
-    /// `fit_starts` was read by nothing; its one meaningful value is now the
-    /// default.
-    #[test]
-    fn removed_fit_starts_key_is_rejected_with_the_default_explained() {
-        let err = parse(&format!("fit_starts = \"prior\"\n{STRICT_BASE}"))
-            .expect_err("fit_starts is not a key");
-        assert!(err.contains("`fit_starts` is no longer a fit.toml key"), "{err}");
-        assert!(err.contains("`from_prior` is the default"), "{err}");
-        assert!(err.contains("`fit_starts = \"model_default\"` is `starts = \"single\"`"), "{err}");
-    }
 
     /// A file with no `[method]` at all is a complete problem: the non-fit
     /// readers load it, and `fit run` refuses it by name.

@@ -693,9 +693,7 @@ method, recorded once per method in `fit::methods::METHODS` as
   time.
 
 A period is never moved to a different period to fit a grid. This is a
-capability of the method, not a user setting; the `[config] obs_alignment` key
-is removed, and a config that carries it is refused with a message saying so
-(`config_v2::detect_removed_obs_alignment`). The check runs once the method is
+capability of the method, not a user setting. The check runs once the method is
 known, measured from the run's start.
 
 ### 4.6 Time functions outside their range, and future covariates (D44, D48)
