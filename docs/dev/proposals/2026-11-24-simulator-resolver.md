@@ -4,8 +4,8 @@ Date: 2026-11-24. Status: accepted by the maintainer on 2026-11-24, with two
 behaviour decisions: `design` and an anchored `--to` refuse a written step that
 disagrees with the model's (commit 6), and `pfilter --fit` and `profile --fit`
 use the fit's binomial sampler, which re-keys them (commit 7). The audit's fixes
-for `simulate --params` and `--integrator` are on main (f43c73d27); the type
-below is not built.
+for `simulate --params` and `--integrator` are on main (f43c73d27). All seven
+commits are implemented (main 51568c468).
 
 ## The problem
 

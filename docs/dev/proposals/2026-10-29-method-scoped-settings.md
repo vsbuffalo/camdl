@@ -4,7 +4,9 @@ Date: 2026-10-29. Status: accepted 2026-10-29: built on the maintainer decisions
 of 2026-10-29 listed in §1; D1–D24 (§14) are decided, nothing is pending; the
 default steps are decided heuristics (§4.4). Amended 2026-11-23: "Identity on
 the run store" (the first section) restates §5 and §11 against the run store;
-where it and §5 or §11 differ, it governs.
+where it and §5 or §11 differ, it governs. Series A and C are implemented (main
+6d4247982); Series B and D are not built, and are scheduled with parameter-roles
+Stages 2 and 3. The `fit run --prior-only` flag of §4.6 is not built.
 
 Area: fit config, run identity, resolved problem and execution plan, IF2, PMMH
 and MH step sizes, profile CLI. Issue: gh#1001. Supersedes
