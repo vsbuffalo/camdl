@@ -3044,9 +3044,14 @@ fn validate_method_keys(contents: &str, method: &Method) -> Result<(), String> {
         .and_then(|v| v.as_object().map(|o| o.keys().cloned().collect()))
         .unwrap_or_default();
     known.insert("starts".into());
-    if matches!(method.algorithm, Algorithm::PGAS { .. }) {
-        // Serialized only off their default; still legitimate keys.
+    // Serialized only off their default; still legitimate keys.
+    if matches!(
+        method.algorithm,
+        Algorithm::IF2 { .. } | Algorithm::PGAS { .. } | Algorithm::PMMH { .. } | Algorithm::PFilter { .. }
+    ) {
         known.insert("binomial".into());
+    }
+    if matches!(method.algorithm, Algorithm::PGAS { .. }) {
         known.insert("ancestor_sampling".into());
     }
     if method.algorithm.prior_only().is_some() {
@@ -4451,6 +4456,28 @@ mod tests {
         source.compiled_ir = Some("compiled.ir.json".into());
         assert_eq!(source.compiled_model().unwrap(), "compiled.ir.json");
         assert_eq!(problem("m.ir.json").compiled_model().unwrap(), "m.ir.json");
+    }
+
+    /// `binomial` is a key of every chain-binomial method, and writing its
+    /// default explicitly is accepted, though the method writes it back only
+    /// off the default.
+    #[test]
+    fn an_explicit_default_binomial_is_a_known_key() {
+        let bodies = [
+            ("if2", "chains = 2\nparticles = 10\niterations = 5\ncooling = 0.7\n"),
+            ("pgas", "chains = 2\nparticles = 10\nsweeps = 5\n"),
+            ("pmmh", "chains = 1\nparticles = 10\niterations = 5\n"),
+            ("pfilter", "particles = 10\n"),
+        ];
+        for (algorithm, body) in bodies {
+            let toml = format!(
+                "[model]\ncamdl = \"m.ir.json\"\n[estimate]\nbeta = {{ bounds = [0.1, 1.0] }}\n\
+                 [fixed]\n[method]\nalgorithm = \"{algorithm}\"\nbackend = \"chain_binomial\"\n\
+                 {body}binomial = \"btpe\"\n"
+            );
+            let parsed = parse(&toml);
+            assert!(parsed.is_ok(), "{algorithm}: binomial = \"btpe\" refused: {}", parsed.unwrap_err());
+        }
     }
 
     #[test]
