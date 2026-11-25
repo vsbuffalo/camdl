@@ -94,7 +94,7 @@ pub fn run_case(case_dir: &Path) -> anyhow::Result<CaseOutcome> {
                 return Ok(CaseOutcome {
                     name: case.name.clone(),
                     status: Status::Crash(format!(
-                        "camdl batch exit={:?} (see {})",
+                        "camdl exit={:?} (see {})",
                         batch.exit_code, batch.stderr_path.display())),
                     checks: vec![],
                     run_dir,

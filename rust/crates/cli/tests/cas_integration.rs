@@ -515,10 +515,9 @@ fn a_camdl_source_lands_on_one_model_directory_with_the_ir_cache_on_or_off() {
     }
 }
 
-/// gh#592, on the surface that replaced `batch status`: the store view of a
-/// multi-cell `--dry-run` over a `.camdl` source with `--output-every`. It
-/// must predict the identity the run resolves — the model compiled from
-/// source, with the output cadence lowered into it — so a completed grid
+/// gh#592: the store view of a multi-cell `--dry-run` over a `.camdl` source
+/// with `--output-every`. It must predict the identity the run resolves — the
+/// model compiled from source, with the output cadence lowered into it — so a completed grid
 /// reports every cell a hit, and one more seed reports exactly one miss, the
 /// new seed's cell.
 #[test]
