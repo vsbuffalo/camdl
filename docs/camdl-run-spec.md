@@ -1753,10 +1753,11 @@ record.
 
 The files each kind of result stores, which a program reading the store relies
 on. A kind's files are fixed by the kind and its inputs; the folders they sit in
-are not part of the contract (§2.1). The three content artifacts each store one
+are not part of the contract (§2.1). Three content artifacts each store one
 file: `compiled_model` its `model.ir.json`, `quantities` its `quantities.json`
 and `data_table` its `table.tsv`, beside the provenance files their writer
-records.
+records. The fourth, `model_source`, stores the model file and its views, listed
+below.
 
 <!-- The result-file contract below is generated from the file enums of rust/crates/cli/src/result_files; run `make update-result-file-contract` after changing them. -->
 
@@ -1768,10 +1769,10 @@ other file, or lacks one it declared, is not stored.
 
 Each kind's contract version, which an output manifest records with each result
 (§2.10), is given with its files; it is bumped when a file is added, removed or
-renamed, or a column changes. Each of the three content artifacts has a contract
-version of its own: `compiled_model` 1, `quantities` 1 and `data_table` 1. The
-logical name of each one's file is its stored name up to the first `.`: `model`,
-`quantities` and `table`.
+renamed, or a column changes. Each of the three single-file content artifacts
+has a contract version of its own: `compiled_model` 1, `quantities` 1 and
+`data_table` 1. The logical name of each one's file is its stored name up to the
+first `.`: `model`, `quantities` and `table`.
 
 #### `fit_run`
 
@@ -1886,7 +1887,8 @@ names, as its `source`, the model source of the file that invocation compiled. A
 command that stores a result from a stored one (`predict RUN`, `score`,
 `profile MODEL --fit RUN`) lists the stored compiled model in its own record
 with the source of the file it was given or, when it was given none, the one the
-stored result's invocation recorded. Contract version 1.
+stored result's invocation recorded, and lists that source too. Contract
+version 1.
 
 - `source`: `source.camdl`, camdl (always; `source.ir.json` for a compiled
   model). The model file as written.
@@ -1924,7 +1926,7 @@ A fit problem: the model, the data and the rows that train. Contract version 1.
 - `model`: `model.camdl`, camdl, provenance (always; `model.ir.json` for a
   compiled model). A model file that compiles to the problem's model: the one
   the command that first stored the problem was given. Each invocation's own
-  model file is its model presentation's `source`.
+  model file is its model source's `source`.
 
 #### `prediction`
 
@@ -3410,7 +3412,7 @@ camdl simulate seir_vaccine.camdl --params params.toml --scenario baseline,with_
           camdl list
 ```
 
-### 4.5 `camdl list` / `show` / `cat` / `path` / `label` — the primary access path
+### 4.5 `camdl list` / `show` / `cat` / `path` — the primary access path
 
 Because output goes to the store by default, these are **the** way you reach
 results. They read one root, the run store (`--store DIR`, else `CAMDL_STORE`,
@@ -3563,8 +3565,11 @@ newest invocation that listed the result computed or reused. No other invocation
 stands in. When that invocation recorded no source, the name finds none and a
 warning says that no model file was recorded. When an earlier invocation that
 listed the result recorded a different source, an info notice names it and the
-labels that name its invocations. A manifest lists the model source only when
-its command compiled the model file.
+labels that name its invocations; when the answering invocation itself recorded
+several, as an import of results another store's invocations fitted from several
+files does, the notice names the others. A manifest lists the model source of
+each compiled model it lists whose command recorded one, whether the command
+compiled the model file or read a stored result (§2.10).
 
 `--kind KIND` keeps the candidates of one kind, and `--run PREFIX` the one whose
 run id begins with `PREFIX`. A name is resolved by the first of these rules that

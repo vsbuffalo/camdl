@@ -530,9 +530,9 @@ no tag, or with another tag, was written by a build whose keys this build may
 read differently. It is refused as the input to a new computation: a `from_mle`
 start in `fit run` or `profile`, the convergence check on a warm-start source,
 and a resumed PGAS chain's base. The refusal names the build that wrote it and
-says to run the fit again. `fit summary`, `fit table` and `fit predict` still
-read it, with one notice naming the build and the keys not read under their own
-name; in an untagged file, the initial-state list is read under its old key,
+says to run the fit again. `fit summary`, `fit table` and `predict` still read
+it, with one notice naming the build and the keys not read under their own name;
+in an untagged file, the initial-state list is read under its old key,
 `perturb_only_at_t0_params`.
 
 ```toml

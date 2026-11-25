@@ -104,7 +104,7 @@ pub(super) fn kinds() -> Vec<(&'static str, &'static str, Vec<Row>)> {
         ),
         (
             "model_source",
-            "The model file one command compiled, with its name, what the compiler shows of it, and the quantities its compile produced, on which it depends. No simulation or fit depends on it; the compiled model's listing in each invocation record names, as its `source`, the model source of the file that invocation compiled. A command that stores a result from a stored one (`predict RUN`, `score`, `profile MODEL --fit RUN`) lists the stored compiled model in its own record with the source of the file it was given or, when it was given none, the one the stored result's invocation recorded.",
+            "The model file one command compiled, with its name, what the compiler shows of it, and the quantities its compile produced, on which it depends. No simulation or fit depends on it; the compiled model's listing in each invocation record names, as its `source`, the model source of the file that invocation compiled. A command that stores a result from a stored one (`predict RUN`, `score`, `profile MODEL --fit RUN`) lists the stored compiled model in its own record with the source of the file it was given or, when it was given none, the one the stored result's invocation recorded, and lists that source too.",
             vec![
                 row(SourceFile::Source { camdl: true }, "always; `source.ir.json` for a compiled model"),
                 row(SourceFile::Docs, "always"),
@@ -222,7 +222,7 @@ pub(crate) fn render() -> String {
     s.push_str(&format!(
         "\nEach kind's contract version, which an output manifest records with each result (§2.10), is \
          given with its files; it is bumped when a file is added, removed or renamed, or a column changes. \
-         Each of the three content artifacts has a contract version of its own: `compiled_model` {}, \
+         Each of the three single-file content artifacts has a contract version of its own: `compiled_model` {}, \
          `quantities` {} and `data_table` {}. The logical name of each one's file is its stored name up to \
          the first `.`: `model`, `quantities` and `table`.\n",
         super::COMPILED_MODEL_CONTRACT,

@@ -173,8 +173,8 @@ same root (`store_commands.rs:15`).
 A stored result is one folder holding the files one computation wrote, two
 record files the store wrote, and nothing else. Four things describe it: its
 artifact kind, which says what sort of result it is; its identity, which
-determines its output; its labels, which people recognize it by; and its run id,
-which names it. The subsections below take each in turn.
+determines its output; its attributes, which people recognize it by; and its run
+id, which names it. The subsections below take each in turn.
 
 ### Artifact kinds
 
@@ -184,7 +184,7 @@ Rust type that implements the trait `Artifact`. A _trait_ is Rust's interface: a
 set of methods, constants and _associated types_ (types each implementation
 chooses) that a type promises to provide. `Artifact` asks for the artifact
 kind's name, which is also the name of its directory in the store; how its files
-reach disk; the type of its identity; and the type of its labels.
+reach disk; the type of its identity; and the type of its attributes.
 
 ```rust
 // rust/crates/store/src/artifact.rs:15
@@ -197,7 +197,7 @@ pub trait Artifact: 'static {
 
 // :30
 pub trait Primary: Artifact {
-    fn layout(identity: &Self::Identity, labels: &Self::Attributes) -> Placed;
+    fn layout(identity: &Self::Identity, attributes: &Self::Attributes) -> Placed;
 }
 
 // :37
@@ -205,7 +205,7 @@ pub trait ByProduct: Artifact {
     type Of: Primary;
     fn upstream(identity: &Self::Identity)
         -> &<<Self::Of as Artifact>::Identity as Identity>::Record;
-    fn label(identity: &Self::Identity, labels: &Self::Attributes) -> String;
+    fn label(identity: &Self::Identity, attributes: &Self::Attributes) -> String;
 }
 ```
 
@@ -982,10 +982,10 @@ replaced by `*`; `sim_store/tests.rs:716` does the same for `simulate`.
 
 The store often has a run id and needs the folder that holds it: to reuse a
 result, to follow a `Dep`, or to answer `camdl show <id prefix>`. It cannot
-compute the path from the run id. A folder's name is built from the labels of
-the first request that stored the result (the model file's stem, the seed as
-typed), and a later request for the same run id may carry other labels. So the
-store looks the folder up.
+compute the path from the run id. A folder's name is built from the attributes
+of the first request that stored the result (the model file's stem, the seed as
+typed), and a later request for the same run id may carry other attributes. So
+the store looks the folder up.
 
 It tries three sources, cheapest first (`storage.rs:649`, `locate`; `:690`,
 `find_any`):
@@ -1076,9 +1076,10 @@ In `pfilter`, and in the other commands, the steps are:
 
 1. Open the store ([`camdl_store::open`](rust:cli::camdl_store::open), or
    `scratch` under `--no-store`) and build one `RunInfo` from the split inputs.
-2. `put` each content artifact the result depends on (the compiled model, its
-   quantities, each data table) and take a `Dep` on it.
-3. Build the identity and labels, and `begin` it (or `begin_with` its wanted
+2. `put` each content artifact the result depends on (the compiled model,
+   through `put_compiled`, which stores the compile's quantities and model
+   source with it; each data table) and take a `Dep` on it.
+3. Build the identity and attributes, and `begin` it (or `begin_with` its wanted
    by-products, or `declare` a batch and begin its members through it).
 4. On `Claimed`, compute under the claim, write files through the `Run`, and end
    with `finish` or `fail`. On `Reused`, take the stored result. On `Busy`,
@@ -1092,9 +1093,9 @@ these steps.
 
 ### Beginning a run
 
-To begin a run, a command hands the store the identity, the labels and, if it
-wants any, the by-products it is asking for. The store looks up the run id and
-answers in one of three ways: the result is already stored and is reused;
+To begin a run, a command hands the store the identity, the attributes and, if
+it wants any, the by-products it is asking for. The store looks up the run id
+and answers in one of three ways: the result is already stored and is reused;
 another owner holds it; or this process now holds a claim on it and must compute
 it. The answer is a `Begin`:
 
@@ -1107,7 +1108,7 @@ pub enum Begin<A: Artifact> {
 }
 
 // :280
-pub fn begin_with<A: Primary>(&self, identity: &A::Identity, labels: &A::Attributes,
+pub fn begin_with<A: Primary>(&self, identity: &A::Identity, attributes: &A::Attributes,
     wanted: &Wanted<A>, info: &RunInfo, reuse: Reuse) -> Result<Begin<A>>;
 ```
 
@@ -1437,7 +1438,7 @@ table.tsv`. It is made from stored files after `finish` or `get`,
 never by running the computation again or from the computation's memory, so what
 the user receives is always what the store holds. It is either a byte copy of a
 stored result file (`Stored::export`) or a rendering: a pure function of an
-invocation's stored results, their labels and options.
+invocation's stored results, their attributes and options.
 
 ```rust
 // rust/crates/store/src/invocation.rs:564
@@ -1646,7 +1647,13 @@ which of three things holds:
 - `Recorded`: the source is read. For a run id or a folder it also holds the
   different sources earlier invocations that listed the result recorded, which
   the reader names in an info notice with the labels of their invocations
-  (`model-source-one-of-several`).
+  (`model-source-one-of-several`). For either handle it holds the further
+  sources the answering invocation itself recorded: an import lists a compiled
+  model once for each source the copied records gave it, and no label here names
+  one of them alone. A prediction refuses a run whose sources' quantities differ
+  (`StoredModel::quantities`), asking for an `@label`, or, when the answering
+  invocation recorded them, for `--model FILE`, since the labels of the store
+  the results came from did not travel.
 - `NotRecorded`: the answering invocation records none. The reader goes on
   without the documentation and says so in a warning
   (`model-source-not-recorded`).
@@ -1667,11 +1674,13 @@ copy in place is moved to quarantine first (`storage.rs`, `put_inner`). It
 returns a `Stored<C>`, from which the command takes a dependency:
 
 ```rust
-// rust/crates/cli/src/pfilter.rs:568-571 (error handling trimmed)
-let model = store
-    .put::<CompiledModel>(model_part, &model_labels, &provenance, &info)?
-    .dep(CompiledModel::FILE)?;
+// rust/crates/cli/src/pfilter.rs:605 (error handling trimmed)
+let model = crate::camdl_store::put_compiled(&store, &info, model_part, source, &model_labels, &provenance)?;
 ```
+
+`put_compiled` (`camdl_store/model_source.rs`) puts the model source, which
+depends on the compile's quantities, then the compiled model, and records the
+source on the compiled model's listing ([A model's source](#a-models-source)).
 
 ### Dependencies
 
@@ -2027,19 +2036,19 @@ impl Primary for Pfilter {
 
 Open the store with [`camdl_store::open`](rust:cli::camdl_store::open) (or
 `scratch` under `--no-store`), build one `RunInfo`, `put` the compiled model and
-each data table, and put their `Dep`s in the identity.
+each data table, and put their `Dep`s in the identity. A compiled model goes
+through `put_compiled`, with the model source it was compiled from.
 
 ```rust
 let info = store::RunInfo::new(&given, &execution_record, &request)?;
-let model = store
-    .put::<CompiledModel>(model_part, &model_labels, &provenance, &info)?
-    .dep(CompiledModel::FILE)?;        // goes into PfilterIdentity::model
+let model = crate::camdl_store::put_compiled(&store, &info, model_part, source, &model_labels, &provenance)?;
+// `model` goes into PfilterIdentity::model
 ```
 
 ### 6. Run under a claim
 
-`begin_with` the identity, labels and `Wanted`; check that the model about to
-run is the stored compile (`require_stored_model`); write files through the
+`begin_with` the identity, attributes and `Wanted`; check that the model about
+to run is the stored compile (`require_stored_model`); write files through the
 `Run`; read stored inputs with [`Run::load`](rust:store::run::Run::load),
 [`Run::open`](rust:store::run::Run::open) or
 [`Run::open_in`](rust:store::run::Run::open_in); end with `finish` or `fail`.
@@ -2122,7 +2131,7 @@ which take a run id prefix, an `@label` or a result's folder
 filter runs and simulations, newest first. It filters by `--model`,
 `--scenario`, `--since` and `--kind`, and prints JSON under `--format json`.
 
-`camdl show <handle>` prints a result's details, such as its folder, labels,
+`camdl show <handle>` prints a result's details, such as its folder, attributes,
 model, settings and seed for a filter run; `--format json` prints them as JSON.
 
 `camdl cat <handle>` prints a result's main file: `traj.tsv` for a simulation
@@ -2229,7 +2238,7 @@ engine code reads nothing behind the store's back.
 | [Execution inputs do not change results]{#enf-execution}                             | Class checks, each on a named fixture that exercises the input, with `shows_use` requiring the run to show the input was used                                                                              | Only as good as the fixture; not provable                                                                                                                                   |
 | [Identity inputs do change the id]{#enf-identity}                                    | Class checks, using each field's `Vary` value                                                                                                                                                              | A second value that happens to be equivalent                                                                                                                                |
 | [Only completed results are reused or read as results]{#enf-completed}               | Types: `Stored<A>` exists only for a completed result                                                                                                                                                      | A reader that opens files by a path it built                                                                                                                                |
-| [Completed records are sealed]{#enf-sealed}                                          | Types: nothing takes a completed result mutably; labels live in invocation records                                                                                                                         | A hand-built path                                                                                                                                                           |
+| [Completed records are sealed]{#enf-sealed}                                          | Types: nothing takes a completed result mutably; attributes live in invocation records                                                                                                                     | A hand-built path                                                                                                                                                           |
 | [Every write goes through the store]{#enf-writes}                                    | Types: a run hands out files; its folder only as a path to show ([`Run::folder`](rust:store::run::Run::folder), `Stored::folder`)                                                                          | A hand-built path under the root                                                                                                                                            |
 | [Every upstream read is declared]{#enf-reads}                                        | Types: [`Run::open`](rust:store::run::Run::open) takes a `Dep`; the lint and the poisoning test below                                                                                                      | A plain file read on a hand-built path that a lint exemption covers; a read, while a command resolves its inputs, of a stored fit it names, which the poisoning test allows |
 | [One id is never computed twice at once]{#enf-claim}                                 | Library: a claim in both write modes; a second request for an atomic id waits for the first, and one for an in-place id is refused. A content artifact is not claimed: two writers produce identical bytes | Filesystems without exclusive create                                                                                                                                        |

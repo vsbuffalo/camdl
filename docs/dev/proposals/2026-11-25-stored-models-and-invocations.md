@@ -496,6 +496,12 @@ reported.
   `--quantities` file's digest (`fit/predict.rs:5258`), so removing the option
   re-keys every prediction, and every score that depends on one. They are
   computed again when next asked for.
+
+  Correction, 2026-11-25: they do not move; the removed digest was an optional
+  field skipped when absent (`skip_serializing_if = "Option::is_none"`,
+  `fit/predict.rs`), so a prediction made without `--quantities` keeps its
+  identity (verified when the option was removed: no prediction or score pin
+  moved).
 - **Run ids of model sources:** every one moves (the kind is renamed and its
   identity gains the name and the quantities key).
 - **The invocation record:** format 2, with its own version constant;
