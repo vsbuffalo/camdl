@@ -1491,6 +1491,18 @@ from their records. `Invocation::members::<A>()` returns the entries of one
 artifact kind with their labels, which is how a rendering and `camdl list` read
 them.
 
+A store reads `.invocations/` for its lookups once. `Store::invocations()`
+returns an `Arc<[Invocation]>` snapshot: the closed records (`ended` or
+`interrupted`) read at the store's first lookup, and each record this store
+writes for its own invocations, added as it writes it. `Store::invocation`,
+`Store::label_holders`, `Store::runs_of_configuration` and every camdl reader of
+the records answer from it, so `fit summary @f` reads the directory once however
+many lookups it makes. A record another process writes after the snapshot is not
+in it, nor is another process's running record. Two reads must see those, and
+read the directory each time: the label check when a command starts, under the
+lock, and the previous holder of a label when it ends. `camdl status` and
+`camdl clean` read the running records from the directory too.
+
 ## Content artifacts and dependencies
 
 Most stored results are computed: their run id is a hash of the inputs that

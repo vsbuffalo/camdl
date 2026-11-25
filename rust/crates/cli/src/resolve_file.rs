@@ -425,7 +425,7 @@ fn one_with_by_products(store: &Store, handle: &Handle, narrow: &Narrow) -> Resu
     let mut found = vec![Candidate::new(main, latest_labels(&main_kind, id), None)?];
     let mut unavailable = Vec::new();
     let mut seen = BTreeSet::from([id]);
-    for inv in &invocations {
+    for inv in invocations.iter() {
         let entries = inv.entries();
         if !entries.iter().any(|(_, k, _)| *k == id) {
             continue;

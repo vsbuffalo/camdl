@@ -1630,8 +1630,8 @@ fn run_quantities(
         Handle::Label { .. } => store.invocation(handle).ok().as_ref().and_then(recorded),
         _ => {
             let mut seen: Vec<(u64, String)> = Vec::new();
-            for inv in store.invocations() {
-                if let Some(q) = recorded(&inv) {
+            for inv in store.invocations().iter() {
+                if let Some(q) = recorded(inv) {
                     seen.push((inv.seq(), q));
                 }
             }
@@ -2072,7 +2072,7 @@ fn entry_state(state: &store::EntryState) -> String {
 /// even when it holds one, since a later run of it would change the answer.
 fn not_one_run_of(store: &Store, text: &str, problem: &store::Id<FitProblem>) -> String {
     let mut runs: Vec<(store::Key, std::path::PathBuf)> = Vec::new();
-    for inv in store.invocations() {
+    for inv in store.invocations().iter() {
         let Ok(members) = inv.members::<FitRun>() else { continue };
         for (id, _) in members {
             if runs.iter().any(|(k, _)| *k == id.key()) {

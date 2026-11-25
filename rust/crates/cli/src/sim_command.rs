@@ -353,7 +353,7 @@ fn note_model_stored_under_another_name(
     stem: &str,
     path: &str,
 ) {
-    let first = store.invocations().into_iter().find_map(|inv| {
+    let first = store.invocations().iter().find_map(|inv| {
         inv.members::<CompiledModel>().ok()?.into_iter().find(|(id, _)| id == model.id()).map(|(_, l)| l.name)
     });
     let Some(first) = first.filter(|f| f != stem) else { return };

@@ -317,7 +317,7 @@ pub(crate) fn shown_for(store: &Store, handle: &Handle, result: store::Key, mode
         }
         Handle::IdPrefix(_) | Handle::Path(_) => {
             let listing: Vec<store::Invocation> =
-                store.invocations().into_iter().filter(|inv| inv.entries().iter().any(|(_, k, _)| *k == result)).collect();
+                store.invocations().iter().filter(|inv| inv.entries().iter().any(|(_, k, _)| *k == result)).cloned().collect();
             let Some((latest, earlier)) = listing.split_last() else { return Shown::NotRecorded { invocation: None } };
             let hex = recorded(latest);
             let mut others: Vec<OtherPresentation> = Vec::new();

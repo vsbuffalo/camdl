@@ -6,10 +6,9 @@ use std::path::PathBuf;
 
 use crate::error::{Error, Result};
 use crate::handle::Handle;
-use crate::invocation::all_invocations;
 use crate::maintenance::walk;
 use crate::owner::Liveness;
-use crate::record::{read_record, InvocationStatus, Read, RunFile, RUN_FILE};
+use crate::record::{read_record, InvocationFile, Read, RunFile, RUN_FILE};
 use crate::storage::{folder_state, State, Store};
 
 /// The store's commands.
@@ -56,7 +55,7 @@ impl StoreCommand {
                 if !inner.kinds.has(kind) {
                     return Err(Error::UnknownKind { kind: kind.clone() });
                 }
-                let invs = all_invocations(&inner.root);
+                let invs: Vec<InvocationFile> = store.invocations().iter().map(|i| i.file.clone()).chain(inner.running()).collect();
                 for (dir, f) in walk(inner).into_iter().filter(|(_, f)| &f.kind == kind) {
                     let state = match folder_state(&dir, &f.run_id, &inner.kinds) {
                         State::Completed { .. } => "completed",
@@ -103,12 +102,13 @@ impl StoreCommand {
                         writeln!(out, "cross-build dependency: {} {} was made by build {}", d.kind, d.run_id.short12(), &d.build[..d.build.len().min(12)]).map_err(io)?;
                     }
                 }
-                for i in all_invocations(&inner.root).iter().filter(|i| i.results.iter().any(|r| r.run_id == id.run_id)) {
+                let invs: Vec<InvocationFile> = store.invocations().iter().map(|i| i.file.clone()).chain(inner.running()).collect();
+                for i in invs.iter().filter(|i| i.results.iter().any(|r| r.run_id == id.run_id)) {
                     writeln!(out, "asked for by invocation {}{}", i.seq, i.label.as_ref().map(|l| format!(" (@{l})")).unwrap_or_default()).map_err(io)?;
                 }
             }
             StoreCommand::Status => {
-                for i in all_invocations(&inner.root).iter().filter(|i| i.status == InvocationStatus::Running) {
+                for i in inner.running().iter() {
                     let l = inner.liveness(&i.owner, std::time::Duration::ZERO);
                     let state = if l == Liveness::Dead { "interrupted" } else { "running" };
                     let closes = if l == Liveness::Dead && i.owner.is_this_host() { "  (clean closes its record)" } else { "" };

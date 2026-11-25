@@ -102,6 +102,19 @@ struct Started {
     owner_started: Timestamp,
     /// Keeps this process's beat running while the invocation is open.
     _beat: Arc<Beat>,
+    /// The store whose snapshot each version of the record is added to.
+    inner: std::sync::Weak<Inner>,
+}
+
+impl Started {
+    /// Writes `file` as the record, and adds it to the store's snapshot.
+    fn write(&self, file: &InvocationFile) -> Result<()> {
+        write_json_atomic(&invocation_path(&self.root, self.seq), file)?;
+        if let Some(inner) = self.inner.upgrade() {
+            inner.wrote_own(file);
+        }
+        Ok(())
+    }
 }
 
 impl RunInfo {
@@ -178,7 +191,7 @@ impl Shared {
             return Ok(());
         }
         let file = st.file(InvocationStatus::Running);
-        write_json_atomic(&invocation_path(&s.root, s.seq), &file)
+        s.write(&file)
     }
 
     pub(crate) fn set(&self, idx: &[usize], outcome: Outcome, failure: Option<Failure>) {
@@ -225,7 +238,7 @@ impl Shared {
         }
         let file = st.file(InvocationStatus::Ended);
         let s = st.started.as_ref().expect("checked above");
-        write_json_atomic(&invocation_path(&s.root, s.seq), &file)?;
+        s.write(&file)?;
         let _ = std::fs::remove_file(s.root.join(".invocations").join(format!("{}.progress.json", s.seq)));
         Ok(Some(file))
     }
@@ -312,7 +325,7 @@ fn start(inner: &Arc<Inner>, st: &mut State, reuse: Reuse, beat: Arc<Beat>) -> R
             LockAttempt::Held(..) => std::thread::sleep(std::time::Duration::from_millis(20)),
         }
     };
-    let existing = all_invocations(&inner.root);
+    let existing = inner.read_records();
     if let Some(label) = st.request.label() {
         for f in existing.iter().filter(|f| f.label.as_deref() == Some(label)) {
             if f.status != InvocationStatus::Running || &f.owner == this_owner() {
@@ -339,9 +352,10 @@ fn start(inner: &Arc<Inner>, st: &mut State, reuse: Reuse, beat: Arc<Beat>) -> R
         seq,
         owner_started: Timestamp::now(),
         _beat: beat,
+        inner: Arc::downgrade(inner),
     });
     let file = st.file(InvocationStatus::Running);
-    write_json_atomic(&invocation_path(&inner.root, seq), &file)?;
+    st.started.as_ref().expect("set above").write(&file)?;
     drop(guard);
     Ok(())
 }
@@ -352,7 +366,8 @@ fn previous_holder(inner: &Inner, file: &InvocationFile) -> Result<Option<u64>> 
     if !all_completed(file) {
         return Ok(None);
     }
-    Ok(all_invocations(&inner.root)
+    Ok(inner
+        .read_records()
         .into_iter()
         .filter(|f| f.seq < file.seq && f.label.as_deref() == Some(label.as_str()) && all_completed(f))
         .map(|f| f.seq)

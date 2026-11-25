@@ -172,6 +172,9 @@ fn a_record_naming_no_presentation_gives_none_to_either_reader() {
     let mut record: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     record["results"].as_array_mut().unwrap().retain(|r| r["kind"] != "compiled_model");
     std::fs::write(&path, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+    // A store reads the records once, so the edited record is read by a store
+    // opened after it, as by the next command.
+    let store = crate::camdl_store::open_existing(&tmp.path().join("st")).expect("the store");
 
     let result = result_of(&store, "p", "prediction");
     for handle in [Handle::Label { name: "p".into(), back: 0 }, Handle::IdPrefix(result.to_hex())] {

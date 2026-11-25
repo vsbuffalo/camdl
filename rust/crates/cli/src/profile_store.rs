@@ -737,7 +737,7 @@ impl ProfileInvocationRow {
 pub(crate) fn discover_invocations(root: &std::path::Path) -> Vec<ProfileInvocationRow> {
     let Some(store) = crate::camdl_store::open_existing(root) else { return Vec::new() };
     let mut rows = Vec::new();
-    for inv in store.invocations() {
+    for inv in store.invocations().iter() {
         let Ok(members) = inv.members::<ProfilePoint>() else { continue };
         let Some((first_id, first)) = members.first().cloned() else { continue };
         let mut points: Vec<store::Key> = Vec::new();

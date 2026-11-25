@@ -8,7 +8,7 @@ use crate::error::Result;
 use crate::fsutil::{draft_owner, fsync_dir, remove_all, write_file_atomic, write_json_atomic};
 use crate::hash::Key;
 use crate::index::{index_dir, own_log, Index};
-use crate::invocation::{all_invocations, invocation_path};
+use crate::invocation::invocation_path;
 use crate::owner::{local_liveness, local_liveness_of_stem, Liveness, Owner, Timestamp};
 use crate::record::{
     read_record, Failure, IdentityFile, IndexLine, InvocationStatus, Outcome, Read, Role, RunFile, Status, ATTEMPTS_DIR,
@@ -224,7 +224,7 @@ impl Store {
                 }
             }
         }
-        for mut inv in all_invocations(&inner.root).into_iter().filter(|i| i.status == InvocationStatus::Running) {
+        for mut inv in inner.running() {
             if !inv.owner.is_this_host() || inner.liveness(&inv.owner, Duration::ZERO) != Liveness::Dead {
                 continue;
             }
@@ -241,6 +241,9 @@ impl Store {
             write_json_atomic(&invocation_path(&inner.root, inv.seq), &inv)?;
             let _ = std::fs::remove_file(inner.root.join(".invocations").join(format!("{}.progress.json", inv.seq)));
             out.invocations.push(inv.seq);
+        }
+        if !out.invocations.is_empty() {
+            inner.forget_records();
         }
         let q = inner.root.join(".quarantine");
         for entry in std::fs::read_dir(&q).into_iter().flatten().flatten() {

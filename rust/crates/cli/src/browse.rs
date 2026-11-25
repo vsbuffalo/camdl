@@ -64,7 +64,7 @@ fn discover_pfilter_rows(root: &Path) -> Vec<PfilterRow> {
     let Some(store) = crate::camdl_store::open_existing(root) else { return Vec::new() };
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut rows: std::collections::BTreeMap<store::Key, PfilterRow> = std::collections::BTreeMap::new();
-    for inv in store.invocations() {
+    for inv in store.invocations().iter() {
         let Ok(members) = inv.members::<crate::pfilter_store::Pfilter>() else { continue };
         for (id, labels) in members {
             if let Some(row) = rows.get_mut(&id.key()) {
@@ -195,7 +195,7 @@ fn discover_stored_fit_rows(root: &Path) -> Vec<StoredFitRow> {
     let Some(store) = crate::camdl_store::open_existing(root) else { return Vec::new() };
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut rows: std::collections::BTreeMap<store::Key, StoredFitRow> = std::collections::BTreeMap::new();
-    for inv in store.invocations() {
+    for inv in store.invocations().iter() {
         let Ok(members) = inv.members::<crate::fit_store::FitRun>() else { continue };
         for (id, labels) in members {
             if let Some(row) = rows.get_mut(&id.key()) {
@@ -269,7 +269,7 @@ impl RunExtras {
         let mut label = None;
         let mut seen = std::collections::BTreeSet::new();
         let mut predictions = Vec::new();
-        for inv in store.invocations() {
+        for inv in store.invocations().iter() {
             if let Ok(members) = inv.members::<crate::fit_store::FitRun>() {
                 if members.iter().any(|(id, _)| id == run.id()) && inv.label().is_some() {
                     label = inv.label().map(str::to_string);
@@ -475,7 +475,7 @@ fn discover_stored_sim_rows(root: &Path) -> Vec<StoredSimRow> {
     let Some(store) = crate::camdl_store::open_existing(root) else { return Vec::new() };
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut rows: std::collections::BTreeMap<store::Key, StoredSimRow> = std::collections::BTreeMap::new();
-    for inv in store.invocations() {
+    for inv in store.invocations().iter() {
         let Ok(members) = inv.members::<crate::sim_store::Sim>() else { continue };
         for (id, labels) in members {
             if let Some(row) = rows.get_mut(&id.key()) {

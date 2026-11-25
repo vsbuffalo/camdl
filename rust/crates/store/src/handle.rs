@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use crate::artifact::{Artifact, Id};
 use crate::error::{Error, Result};
 use crate::hash::Key;
-use crate::invocation::{all_invocations, Invocation};
+use crate::invocation::Invocation;
 use crate::record::{read_record, IdentityFile, IDENTITY_FILE};
 use crate::storage::{label_holders, Store};
 use crate::stored::{Entry, Stored};
@@ -160,7 +160,7 @@ impl Store {
     /// first, `@L~n` the one `n` places after it. An invocation whose results
     /// did not all complete holds no label.
     pub fn label_holders(&self, label: &str) -> Vec<Invocation> {
-        label_holders(&self.inner.root, label).into_iter().map(|file| Invocation { file, took_label_from: None }).collect()
+        label_holders(&self.inner, label)
     }
 
     /// The invocation a handle names: for `@L` and `@L~n`, that invocation;
@@ -169,20 +169,16 @@ impl Store {
         let text = handle.to_string();
         match handle {
             Handle::Label { name, back } => {
-                let holders = label_holders(&self.inner.root, name);
-                holders
-                    .into_iter()
-                    .nth(*back as usize)
-                    .map(|file| Invocation { file, took_label_from: None })
-                    .ok_or(Error::NotFound { handle: text })
+                label_holders(&self.inner, name).into_iter().nth(*back as usize).ok_or(Error::NotFound { handle: text })
             }
             Handle::Path(_) | Handle::IdPrefix(_) => {
                 let (key, _) = self.resolve_key(handle, "")?;
-                all_invocations(&self.inner.root)
-                    .into_iter()
+                self.inner
+                    .invocations()
+                    .iter()
                     .rev()
-                    .find(|f| f.results.iter().any(|r| r.run_id == key))
-                    .map(|file| Invocation { file, took_label_from: None })
+                    .find(|i| i.file.results.iter().any(|r| r.run_id == key))
+                    .cloned()
                     .ok_or(Error::NotFound { handle: text })
             }
         }

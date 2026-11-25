@@ -12,6 +12,7 @@ use std::any::Any;
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -29,7 +30,7 @@ use crate::invocation::{all_invocations, all_completed, config_digests, encode_l
 use crate::layout::{dir_name, Base, Placed};
 use crate::owner::{local_liveness, this_owner, Beat, BeatMemory, Liveness, Owner, BEAT_INTERVAL, STALE_AFTER};
 use crate::record::{
-    read_record, Failure, IdentityFile, IndexLine, Outcome, Parent, Read, Relation, ResultEntry, Role, RunFile, Status,
+    read_record, Failure, IdentityFile, IndexLine, InvocationFile, InvocationStatus, Outcome, Parent, Read, Relation, ResultEntry, Role, RunFile, Status,
     StoreFile, ATTEMPTS_DIR, ATTEMPT_RECORD, IDENTITY_FILE, LOCK_FILE, MAX_PRESERVED_ATTEMPTS, RECORD_FORMAT, RUN_FILE,
     STAGING_DIR, STORE_FORMAT,
 };
@@ -136,6 +137,24 @@ pub(crate) struct Inner {
     beats: BeatMemory,
     pub(crate) index: Mutex<Option<Index>>,
     pub(crate) scratch: bool,
+    /// How many times this store has read the directory of invocation
+    /// records.
+    pub(crate) record_reads: AtomicUsize,
+    records: Mutex<Records>,
+}
+
+/// The invocation records a store's lookups answer from: the closed records
+/// read from `.invocations/` once, at the first lookup, and the records this
+/// store's own invocations have written since, in whatever state each was
+/// last written. A record of another process that is still running is in
+/// neither; [`Inner::running`] reads those from the directory.
+#[derive(Default)]
+struct Records {
+    read: Option<Vec<InvocationFile>>,
+    own: BTreeMap<u64, InvocationFile>,
+    /// `read` and `own` merged by sequence number, own winning; dropped when
+    /// an own record is written.
+    merged: Option<Arc<[Invocation]>>,
 }
 
 impl Drop for Inner {
@@ -261,6 +280,8 @@ impl Store {
                 beats: BeatMemory::default(),
                 index: Mutex::new(None),
                 scratch,
+                record_reads: AtomicUsize::new(0),
+                records: Mutex::new(Records::default()),
             }),
         })
     }
@@ -480,8 +501,8 @@ impl Store {
     /// invocation records that read a file with this digest.
     pub fn runs_of_configuration(&self, digest: Key) -> Vec<Key> {
         let mut out = Vec::new();
-        for f in all_invocations(&self.inner.root).into_iter().rev() {
-            if config_digests(&f).any(|d| d == digest) {
+        for f in self.inner.invocations().iter().rev().map(|i| &i.file) {
+            if config_digests(f).any(|d| d == digest) {
                 for r in &f.results {
                     if !out.contains(&r.run_id) {
                         out.push(r.run_id);
@@ -498,9 +519,13 @@ impl Store {
         Error::ConfigurationNotARun { path: source.path().to_path_buf(), runs: self.runs_of_configuration(source.digest()) }
     }
 
-    /// Every invocation record, by sequence number.
-    pub fn invocations(&self) -> Vec<Invocation> {
-        all_invocations(&self.inner.root).into_iter().map(|file| Invocation { file, took_label_from: None }).collect()
+    /// Every closed invocation record, and this store's own records, by
+    /// sequence number: a snapshot read from the directory once, at the
+    /// store's first lookup, to which each record this store writes is
+    /// added. A record another process writes after the snapshot is not in
+    /// it, nor is another process's running record.
+    pub fn invocations(&self) -> Arc<[Invocation]> {
+        self.inner.invocations()
     }
 
     fn register<A: Artifact>(
@@ -614,6 +639,51 @@ impl<A: Primary> Declared<A> {
 }
 
 impl Inner {
+    /// The snapshot [`Store::invocations`] returns.
+    pub(crate) fn invocations(&self) -> Arc<[Invocation]> {
+        let mut r = self.records.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(m) = &r.merged {
+            return Arc::clone(m);
+        }
+        if r.read.is_none() {
+            let closed = self.read_records().into_iter().filter(|f| f.status != InvocationStatus::Running).collect();
+            r.read = Some(closed);
+        }
+        let mut by_seq: BTreeMap<u64, &InvocationFile> = r.read.iter().flatten().map(|f| (f.seq, f)).collect();
+        by_seq.extend(r.own.iter().map(|(seq, f)| (*seq, f)));
+        let merged: Arc<[Invocation]> =
+            by_seq.into_values().map(|f| Invocation { file: f.clone(), took_label_from: None }).collect();
+        r.merged = Some(Arc::clone(&merged));
+        merged
+    }
+
+    /// Adds `file`, a record this store has just written for one of its own
+    /// invocations, to the snapshot.
+    pub(crate) fn wrote_own(&self, file: &InvocationFile) {
+        let mut r = self.records.lock().unwrap_or_else(|e| e.into_inner());
+        r.own.insert(file.seq, file.clone());
+        r.merged = None;
+    }
+
+    /// Drops the snapshot, so the next lookup reads the directory: after
+    /// `clean` closes other processes' records.
+    pub(crate) fn forget_records(&self) {
+        let mut r = self.records.lock().unwrap_or_else(|e| e.into_inner());
+        r.read = None;
+        r.merged = None;
+    }
+
+    /// The running records under the root, read from the directory now.
+    pub(crate) fn running(&self) -> Vec<InvocationFile> {
+        self.read_records().into_iter().filter(|f| f.status == InvocationStatus::Running).collect()
+    }
+
+    /// Every invocation record under the root, read from the directory now.
+    pub(crate) fn read_records(&self) -> Vec<InvocationFile> {
+        self.record_reads.fetch_add(1, Ordering::Relaxed);
+        all_invocations(&self.root)
+    }
+
     /// This process's beat in this root, started at the first call.
     pub(crate) fn beat(&self) -> Result<Arc<Beat>> {
         let mut b = self.beat.lock().unwrap_or_else(|e| e.into_inner());
@@ -1676,13 +1746,8 @@ fn preserve_attempt(dir: &Path) -> Result<()> {
 }
 
 /// The ids of every invocation that may hold `label`, newest first.
-pub(crate) fn label_holders(root: &Path, label: &str) -> Vec<crate::record::InvocationFile> {
-    let mut v: Vec<_> = all_invocations(root)
-        .into_iter()
-        .filter(|f| f.label.as_deref() == Some(label) && all_completed(f))
-        .collect();
-    v.reverse();
-    v
+pub(crate) fn label_holders(inner: &Inner, label: &str) -> Vec<Invocation> {
+    inner.invocations().iter().rev().filter(|i| i.file.label.as_deref() == Some(label) && all_completed(&i.file)).cloned().collect()
 }
 
 #[cfg(test)]

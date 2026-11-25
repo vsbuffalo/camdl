@@ -55,7 +55,7 @@ pub fn fill_from_record(view: &mut FitView, opened: &crate::fit_store::OpenedFit
 pub fn run_label(root: &Path, run: &store::Key) -> Option<String> {
     let store = crate::camdl_store::open_existing(root)?;
     let mut label = None;
-    for inv in store.invocations() {
+    for inv in store.invocations().iter() {
         let Ok(members) = inv.members::<crate::fit_store::FitRun>() else { continue };
         if members.iter().any(|(id, _)| id.key() == *run) && inv.label().is_some() {
             label = inv.label().map(str::to_string);
@@ -77,7 +77,7 @@ pub fn walk_fits_root(root: &Path) -> io::Result<Vec<FitDirEntry>> {
     let Some(store) = crate::camdl_store::open_existing(root) else { return Ok(out) };
     let mut labels: std::collections::BTreeMap<store::Key, String> = std::collections::BTreeMap::new();
     let mut order: Vec<store::Key> = Vec::new();
-    for inv in store.invocations() {
+    for inv in store.invocations().iter() {
         let Ok(members) = inv.members::<crate::fit_store::FitRun>() else { continue };
         for (id, _) in members {
             if !order.contains(&id.key()) {

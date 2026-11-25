@@ -262,3 +262,55 @@ fn the_runs_a_configuration_file_produced_are_listed_from_the_invocation_records
     assert_eq!(store.runs_of_configuration(source.digest()), vec![s.id().key()]);
     assert!(matches!(store.configuration_not_a_run(&source), Error::ConfigurationNotARun { runs, .. } if runs == vec![s.id().key()]));
 }
+
+/// How many times `store` has read the directory of invocation records.
+fn record_reads(store: &Store) -> usize {
+    store.inner.record_reads.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// A command's lookups read the closed invocation records once: every later
+/// lookup is answered from the snapshot that read took.
+#[test]
+fn a_commands_lookups_read_the_invocation_records_once() {
+    let root = TempRoot::new("one-read");
+    let writer = open(root.path());
+    let i1 = labelled("base");
+    let first = run_sim(&writer, &i1, 1);
+    i1.finish(&writer).unwrap();
+    let i2 = labelled("base");
+    run_sim(&writer, &i2, 2);
+    i2.finish(&writer).unwrap();
+    let i3 = info();
+    run_sim(&writer, &i3, 3);
+    i3.finish(&writer).unwrap();
+
+    let store = open(root.path());
+    assert_eq!(record_reads(&store), 0);
+    assert_eq!(store.invocations().len(), 3);
+    assert_eq!(store.invocation(&"@base".parse().unwrap()).unwrap().seq(), 2);
+    assert_eq!(store.invocation(&"@base~1".parse().unwrap()).unwrap().seq(), 1);
+    assert_eq!(store.invocation(&Handle::IdPrefix(first.id().key().to_hex())).unwrap().seq(), 1);
+    assert_eq!(store.label_holders("base").len(), 2);
+    assert!(store.runs_of_configuration(crate::Key::digest_bytes(b"no such file")).is_empty());
+    assert_eq!(record_reads(&store), 1, "one read of the records answers every lookup");
+}
+
+/// A command sees its own record as it writes it, without reading the
+/// directory again; the label check when it starts and the previous holder
+/// when it ends read the directory, since another process may have written a
+/// record a moment before.
+#[test]
+fn a_command_sees_its_own_record_without_reading_the_records_again() {
+    let root = TempRoot::new("own-record");
+    let store = open(root.path());
+    assert!(store.invocations().is_empty());
+    let i = labelled("mine");
+    let s = run_sim(&store, &i, 1);
+    let running = store.invocations();
+    assert_eq!(running.len(), 1);
+    assert_eq!(running[0].entries().len(), 1);
+    i.finish(&store).unwrap();
+    assert_eq!(store.invocation(&"@mine".parse().unwrap()).unwrap().members::<Sim>().unwrap()[0].0, *s.id());
+    assert_eq!(store.invocation(&Handle::IdPrefix(s.id().key().to_hex())).unwrap().label(), Some("mine"));
+    assert_eq!(record_reads(&store), 3, "the snapshot, the label check at the start and the previous holder at the end");
+}
