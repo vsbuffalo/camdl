@@ -51,22 +51,22 @@ pub(crate) fn claim_draft_name(owner: &Owner, hex: &str) -> String {
 }
 
 /// The prefix of the `.staging/` folder a store copy is checked in by
-/// [`crate::Store::receive`].
-const RECEIVE_DRAFT: &str = "receive";
+/// [`crate::Store::import`].
+const IMPORT_DRAFT: &str = "import";
 
 /// The name of the folder under `.staging/` that a store copy is moved into
-/// while `receive` checks and places it: `receive.<host>-<pid>-<start>.<n>`,
+/// while `import` checks and places it: `import.<host>-<pid>-<start>.<n>`,
 /// naming the owner, so that `clean` removes it once that owner has stopped
 /// ([`draft_owner`]).
-pub(crate) fn receive_draft_name(owner: &Owner) -> String {
+pub(crate) fn import_draft_name(owner: &Owner) -> String {
     static N: AtomicU64 = AtomicU64::new(0);
-    format!("{RECEIVE_DRAFT}.{}.{}", owner.file_stem(), N.fetch_add(1, Ordering::Relaxed))
+    format!("{IMPORT_DRAFT}.{}.{}", owner.file_stem(), N.fetch_add(1, Ordering::Relaxed))
 }
 
 /// The owner-name part of a `.staging/` entry named by [`claim_draft_name`]
-/// or [`receive_draft_name`], or `None` for any other name.
+/// or [`import_draft_name`], or `None` for any other name.
 pub(crate) fn draft_owner(name: &str) -> Option<&str> {
-    if let Some(rest) = name.strip_prefix(RECEIVE_DRAFT).and_then(|r| r.strip_prefix('.')) {
+    if let Some(rest) = name.strip_prefix(IMPORT_DRAFT).and_then(|r| r.strip_prefix('.')) {
         let (stem, n) = rest.rsplit_once('.')?;
         n.parse::<u64>().ok()?;
         return Some(stem);

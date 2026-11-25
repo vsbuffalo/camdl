@@ -7,7 +7,7 @@
 
 pub mod types;
 mod store_commands;
-pub use store_commands::{CleanArgs, ReceiveArgs, StatusArgs, StoreReindexArgs, VerifyArgs};
+pub use store_commands::{CleanArgs, ImportArgs, StatusArgs, StoreReindexArgs, VerifyArgs};
 
 use std::path::PathBuf;
 use clap::{Args, ArgGroup};

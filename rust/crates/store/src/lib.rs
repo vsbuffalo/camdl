@@ -30,7 +30,7 @@ mod invocation;
 mod layout;
 mod maintenance;
 mod owner;
-mod receive;
+mod import;
 mod record;
 mod run;
 mod storage;
@@ -55,7 +55,7 @@ pub use invocation::{
 pub use layout::{path_label, Layout, Placed, LABEL_CAP};
 pub use maintenance::{Cleaned, VerifyFailure};
 pub use owner::{pid_exists, this_host, Liveness, Owner, Timestamp, BEAT_INTERVAL, STALE_AFTER};
-pub use receive::Received;
+pub use import::Imported;
 pub use record::{Lineage, Status, MAX_PRESERVED_ATTEMPTS, RECORD_FORMAT, STORE_FORMAT};
 pub use run::{ByProductRun, ExpectedFiles, FileHandle, Run};
 pub use fsutil::write_file_atomic;

@@ -1,9 +1,9 @@
-//! `camdl receive`: a fit run, its fit problem and a prediction inside the
+//! `camdl import`: a fit run, its fit problem and a prediction inside the
 //! run, made in one run store under another build and copied as `pull`
 //! copies them, placed in a second store and recorded there.
 //!
 //! End to end because what is tested is what the second store's commands
-//! then see (`list`, `@LABEL`, `verify`, a prediction from the received run)
+//! then see (`list`, `@LABEL`, `verify`, a prediction from the imported run)
 //! and the exit status of a refused copy. The fit is the SEIR golden IR with
 //! one estimated parameter under PGAS at 2 chains x 20 particles x 4 sweeps.
 
@@ -33,7 +33,7 @@ fn golden_ir() -> PathBuf {
 const OTHER_BUILD: (&str, &str) = ("CAMDL_EXPERIMENTAL_RECEIVE_TEST", "remote");
 
 /// A scratch directory holding the data, a fit config and two stores:
-/// `remote/`, where the results are made, and `local/`, which receives them.
+/// `remote/`, where the results are made, and `local/`, which imports them.
 struct Project {
     tmp: tempfile::TempDir,
 }
@@ -165,11 +165,11 @@ fn fit_folders(root: &Path) -> Vec<PathBuf> {
 }
 
 #[test]
-fn receive_places_and_records_a_pulled_fit() {
+fn import_places_and_records_a_pulled_fit() {
     let p = Project::new();
     p.make_remote(&[OTHER_BUILD]);
     p.pull();
-    let report = p.ok(&p.local(), &[], &["receive", "pull-staging", "--label", "m4w_cloud"]);
+    let report = p.ok(&p.local(), &[], &["import", "pull-staging", "--label", "m4w_cloud"]);
     assert!(report.contains("placed"), "{report}");
 
     // The fit problem, the run inside it and the prediction inside the run
@@ -182,22 +182,22 @@ fn receive_places_and_records_a_pulled_fit() {
     assert!(run.starts_with(&fit_store_support::problems(&p.local())[0]));
     assert!(!p.copy().exists(), "the copy is consumed");
 
-    // `list` shows the run under the receive's label, `@LABEL` names it, and
-    // every received result verifies.
+    // `list` shows the run under the import's label, `@LABEL` names it, and
+    // every imported result verifies.
     let list = p.ok(&p.local(), &[], &["list", "--kind", "fit"]);
     assert!(list.contains("m4w_cloud"), "{list}");
     let summary = p.ok(&p.local(), &[], &["fit", "summary", "@m4w_cloud"]);
     assert!(summary.contains("pgas"), "{summary}");
     p.ok(&p.local(), &[], &["verify", "@m4w_cloud"]);
 
-    // This build predicts from the received run: its prediction sits beside
-    // the received one, inside the run.
+    // This build predicts from the imported run: its prediction sits beside
+    // the imported one, inside the run.
     p.ok(&p.local(), &[], &["predict", "@m4w_cloud", "--mode", "free_forward", "--n-draws", "2"]);
     let preds = fit_store_support::predictions(&p.local());
     assert_eq!(preds.len(), 2, "{preds:?}");
     assert!(preds.iter().all(|d| d.starts_with(&run)));
     // The same fit run here goes under this build's directory, which is not
-    // the received one.
+    // the imported one.
     p.ok(&p.local(), &[], &["fit", "run", "fit.toml", "--seed", "1"]);
     let top = |d: &Path| d.strip_prefix(p.local()).unwrap().components().next().unwrap().as_os_str().to_owned();
     let tops: std::collections::BTreeSet<_> = fit_store_support::runs(&p.local()).iter().map(|d| top(d)).collect();
@@ -206,9 +206,9 @@ fn receive_places_and_records_a_pulled_fit() {
 }
 
 /// A copy without the quantities the fit run's lineage names is refused, so
-/// no received run is left whose prediction here could not find them.
+/// no imported run is left whose prediction here could not find them.
 #[test]
-fn receive_refuses_a_copy_without_the_runs_quantities() {
+fn import_refuses_a_copy_without_the_runs_quantities() {
     let p = Project::new();
     p.make_remote(&[OTHER_BUILD]);
     p.pull();
@@ -217,7 +217,7 @@ fn receive_refuses_a_copy_without_the_runs_quantities() {
             std::fs::remove_dir_all(d).unwrap();
         }
     }
-    let out = p.run(&p.local(), &[], &["receive", "pull-staging", "--label", "m4w_cloud"]);
+    let out = p.run(&p.local(), &[], &["import", "pull-staging", "--label", "m4w_cloud"]);
     let all = text(&out);
     assert_eq!(out.status.code(), Some(1), "{all}");
     assert!(all.contains("dependency") && all.contains("quantities"), "{all}");
@@ -225,7 +225,7 @@ fn receive_refuses_a_copy_without_the_runs_quantities() {
 }
 
 #[test]
-fn receive_refuses_a_damaged_copy_and_places_nothing() {
+fn import_refuses_a_damaged_copy_and_places_nothing() {
     let p = Project::new();
     p.make_remote(&[OTHER_BUILD]);
     p.pull();
@@ -241,10 +241,10 @@ fn receive_refuses_a_damaged_copy_and_places_nothing() {
     bytes[last] = if bytes[last] == b'0' { b'1' } else { b'0' };
     std::fs::write(&file, &bytes).unwrap();
 
-    let out = p.run(&p.local(), &[], &["receive", "pull-staging", "--label", "m4w_cloud"]);
+    let out = p.run(&p.local(), &[], &["import", "pull-staging", "--label", "m4w_cloud"]);
     let all = text(&out);
     assert_eq!(out.status.code(), Some(1), "{all}");
-    assert!(all.contains("cannot be received") && all.contains("recorded digest"), "{all}");
+    assert!(all.contains("cannot be imported") && all.contains("recorded digest"), "{all}");
     assert!(fit_folders(&p.local()).is_empty(), "nothing is placed");
     assert!(p.copy().join("store.json").exists(), "the copy is back where it was given");
     let list = p.ok(&p.local(), &[], &["list"]);
@@ -252,10 +252,10 @@ fn receive_refuses_a_damaged_copy_and_places_nothing() {
 }
 
 /// A copy without the compiled model the fit depends on is refused, naming
-/// the model, so no received run is left that a prediction here could not
+/// the model, so no imported run is left that a prediction here could not
 /// read.
 #[test]
-fn receive_refuses_a_copy_without_its_compiled_model() {
+fn import_refuses_a_copy_without_its_compiled_model() {
     let p = Project::new();
     p.make_remote(&[OTHER_BUILD]);
     p.pull();
@@ -263,22 +263,22 @@ fn receive_refuses_a_copy_without_its_compiled_model() {
     assert_eq!(models.len(), 1, "premise: one compiled model: {models:?}");
     std::fs::remove_dir_all(&models[0]).unwrap();
 
-    let out = p.run(&p.local(), &[], &["receive", "pull-staging", "--label", "m4w_cloud"]);
+    let out = p.run(&p.local(), &[], &["import", "pull-staging", "--label", "m4w_cloud"]);
     let all = text(&out);
     assert_eq!(out.status.code(), Some(1), "{all}");
     assert!(all.contains("dependency") && all.contains("compiled_model"), "{all}");
     assert!(fit_folders(&p.local()).is_empty(), "nothing is placed");
 }
 
-/// `receive --manifest` lists every result it placed, each as the remote
-/// command's own manifest lists it; receiving the results again, now
+/// `import --manifest` lists every result it placed, each as the remote
+/// command's own manifest lists it; importing the results again, now
 /// present, writes the same entries.
 #[test]
-fn receive_writes_the_manifest_of_what_it_placed_or_found() {
+fn import_writes_the_manifest_of_what_it_placed_or_found() {
     let p = Project::new();
     p.ok(&p.remote(), &[OTHER_BUILD], &["fit", "run", "fit.toml", "--seed", "1", "--label", "m4w", "--manifest", "remote.json"]);
     p.pull();
-    p.ok(&p.local(), &[], &["receive", "pull-staging", "--label", "m4w_cloud", "--manifest", "local.json"]);
+    p.ok(&p.local(), &[], &["import", "pull-staging", "--label", "m4w_cloud", "--manifest", "local.json"]);
     let read = |name: &str| -> serde_json::Value { serde_json::from_slice(&std::fs::read(p.dir().join(name)).unwrap()).unwrap() };
     let (remote, local) = (read("remote.json"), read("local.json"));
     assert_eq!(local["label"], "m4w_cloud");
@@ -287,22 +287,22 @@ fn receive_writes_the_manifest_of_what_it_placed_or_found() {
         m["results"].as_array().unwrap().iter().map(|r| (r["run_id"].as_str().unwrap().to_string(), r.clone())).collect()
     };
     let (remote_entries, local_entries) = (entries(&remote), entries(&local));
-    assert_eq!(local_entries, remote_entries, "the received results, each as the remote manifest lists it");
+    assert_eq!(local_entries, remote_entries, "the imported results, each as the remote manifest lists it");
     let kinds: Vec<&str> = local["results"].as_array().unwrap().iter().map(|r| r["kind"].as_str().unwrap()).collect();
     assert!(kinds.contains(&"fit_run") && kinds.contains(&"fit"), "{kinds:?}");
     // Parents first: the fit problem before the run that sits inside it.
     let at = |k: &str| kinds.iter().position(|x| *x == k).unwrap();
     assert!(at("fit") < at("fit_run"), "the problem is listed before its run: {kinds:?}");
 
-    // The results are now here: a second receive of the same copy finds
+    // The results are now here: a second import of the same copy finds
     // every one present and lists the same entries.
     p.pull();
-    p.ok(&p.local(), &[], &["receive", "pull-staging", "--label", "m4w_cloud", "--manifest", "again.json"]);
+    p.ok(&p.local(), &[], &["import", "pull-staging", "--label", "m4w_cloud", "--manifest", "again.json"]);
     assert_eq!(entries(&read("again.json")), local_entries);
 }
 
 #[test]
-fn receive_of_results_already_here_leaves_them_in_place() {
+fn import_of_results_already_here_leaves_them_in_place() {
     let p = Project::new();
     // One build for both stores, so the fit computed here has the run ids of
     // the fit in the copy.
@@ -310,7 +310,7 @@ fn receive_of_results_already_here_leaves_them_in_place() {
     p.pull();
     p.ok(&p.local(), &[], &["fit", "run", "fit.toml", "--seed", "1"]);
     let run = fit_store_support::the_run(&p.local());
-    let report = p.ok(&p.local(), &[], &["receive", "pull-staging", "--label", "m4w_cloud"]);
+    let report = p.ok(&p.local(), &[], &["import", "pull-staging", "--label", "m4w_cloud"]);
     let present: Vec<&str> = report.lines().filter(|l| l.starts_with("present")).collect();
     assert!(present.iter().any(|l| l.contains("fit_run")), "{report}");
     assert!(report.lines().any(|l| l.starts_with("placed") && l.contains("prediction")), "{report}");
@@ -319,16 +319,16 @@ fn receive_of_results_already_here_leaves_them_in_place() {
     p.ok(&p.local(), &[], &["verify"]);
 }
 
-/// `receive --link-root` links the received results by the receive's label,
+/// `import --link-root` links the imported results by the import's label,
 /// as every other storing command does: the fit run under `fits/`, the
 /// prediction inside it under `predictions/`, each link resolving to the
-/// file `camdl path` names through the receive's manifest.
+/// file `camdl path` names through the import's manifest.
 #[test]
-fn receive_links_what_it_received() {
+fn import_links_what_it_received() {
     let p = Project::new();
     p.make_remote(&[OTHER_BUILD]);
     p.pull();
-    p.ok(&p.local(), &[], &["receive", "pull-staging", "--label", "m4w_cloud", "--manifest", "local.json", "--link-root", "links"]);
+    p.ok(&p.local(), &[], &["import", "pull-staging", "--label", "m4w_cloud", "--manifest", "local.json", "--link-root", "links"]);
     let path = |name: &str| -> PathBuf {
         let out = p.run(&p.local(), &[], &["path", "--manifest", "local.json", name]);
         assert!(out.status.success(), "{}", text(&out));

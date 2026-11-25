@@ -1,6 +1,6 @@
-//! Receiving results copied from another store.
+//! Importing results copied from another store.
 //!
-//! [`Store::receive`] takes a partial copy of another store: its `store.json`,
+//! [`Store::import`] takes a partial copy of another store: its `store.json`,
 //! the result folders wanted, each at the path relative to the root it had
 //! there, with the parent folders a nested result sits in, and the invocation
 //! records that listed them. It moves the copy into `<root>/.staging/`, on this
@@ -21,7 +21,7 @@
 //! name besides the store's own entries and its nested results. A run id
 //! already held here is compared by its result files: equal digests leave the
 //! stored folder in place, and other digests are refused with
-//! [`Error::ReceivedDiffers`], as is a folder path held by another result.
+//! [`Error::ImportedDiffers`], as is a folder path held by another result.
 //! Provenance files are not compared, as on a recompute.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -34,7 +34,7 @@ use crate::artifact::run_id;
 use crate::check::{damage, only_a_lock};
 use crate::error::{At, Error, Result};
 use crate::fsutil::{
-    copy_tree, create_dirs_durable, fsync_dir, is_lock_entry, is_temporary_of, receive_draft_name, remove_all, rename_noreplace,
+    copy_tree, create_dirs_durable, fsync_dir, is_lock_entry, is_temporary_of, import_draft_name, remove_all, rename_noreplace,
 };
 use crate::hash::{Key, HASH_VERSION};
 use crate::invocation::{all_invocations, RunInfo};
@@ -47,10 +47,10 @@ use crate::record::{
 use crate::storage::{folder_state, identity_of, visible_dirs, State, Store};
 use crate::Reuse;
 
-/// What a receive did with each result of the copy, by run id, in the copy's
+/// What an import did with each result of the copy, by run id, in the copy's
 /// parent-before-child order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Received {
+pub struct Imported {
     /// Moved into this store.
     pub placed: Vec<Key>,
     /// Held here already with the same result files, and left in place.
@@ -105,13 +105,13 @@ impl Store {
     /// unless every folder passes.
     ///
     /// The copy is moved into `<root>/.staging/` first, so each rename that
-    /// places a folder is atomic. When the receive succeeds the copy is gone:
+    /// places a folder is atomic. When the import succeeds the copy is gone:
     /// its results are in the store and the rest is deleted. When it is
     /// refused, or a placement or the record fails, every folder already
     /// placed is moved back into the copy, the copy is moved back to `copy`,
     /// and no invocation is recorded.
     ///
-    /// Refused with [`Error::ReceiveRefused`], naming the folder and the
+    /// Refused with [`Error::ImportRefused`], naming the folder and the
     /// reason, for a copy that is not a store of this store's format and
     /// layout, and for a result folder whose record is not completed, of a
     /// registered kind and of this record format; whose run id does not
@@ -119,13 +119,13 @@ impl Store {
     /// recorded digests or which holds a file its record does not name; which
     /// no invocation record in the copy lists; or whose parent, or a result it
     /// depends on, is neither in the copy nor completed in this store. Refused
-    /// with [`Error::ReceivedDiffers`] when this store holds a result's run id,
+    /// with [`Error::ImportedDiffers`] when this store holds a result's run id,
     /// or its folder's path, with other result files.
-    pub fn receive(&self, copy: &Path, info: &RunInfo) -> Result<Received> {
+    pub fn import(&self, copy: &Path, info: &RunInfo) -> Result<Imported> {
         self.check_copy_root(copy)?;
         let staging_root = self.inner.root.join(STAGING_DIR);
         std::fs::create_dir_all(&staging_root).at("create directory", &staging_root)?;
-        let staged = staging_root.join(receive_draft_name(this_owner()));
+        let staged = staging_root.join(import_draft_name(this_owner()));
         let moved = match std::fs::rename(copy, &staged) {
             Ok(()) => Moved::Renamed,
             Err(e) if e.kind() == ErrorKind::CrossesDevices => match copy_tree(copy, &staged) {
@@ -138,8 +138,8 @@ impl Store {
             Err(e) => return Err(e).at("move into the store's staging", copy),
         };
         fsync_dir(&staging_root)?;
-        let received = self.receive_staged(&staged, copy, info);
-        match (&received, moved) {
+        let imported = self.import_staged(&staged, copy, info);
+        match (&imported, moved) {
             (Ok(_), Moved::Renamed) => remove_all(&staged)?,
             (Ok(_), Moved::Copied) => {
                 remove_all(&staged)?;
@@ -155,14 +155,14 @@ impl Store {
                 let _ = remove_all(&staged);
             }
         }
-        received
+        imported
     }
 
     /// Refuses a copy that is not a directory holding a `store.json` of this
     /// store's format and layout, and the store's root or a directory holding
     /// it.
     fn check_copy_root(&self, copy: &Path) -> Result<()> {
-        let refuse = |reason: String| Error::ReceiveRefused { folder: copy.to_path_buf(), reason };
+        let refuse = |reason: String| Error::ImportRefused { folder: copy.to_path_buf(), reason };
         let meta = std::fs::symlink_metadata(copy).map_err(|e| refuse(format!("it cannot be read: {e}")))?;
         if !meta.is_dir() {
             return Err(refuse("it is not a directory".into()));
@@ -194,12 +194,12 @@ impl Store {
 
     /// Checks, places and records the copy at `staged`, under `.staging/`.
     /// `shown` is the path the copy was given as, for refusals.
-    pub(crate) fn receive_staged(&self, staged: &Path, shown: &Path, info: &RunInfo) -> Result<Received> {
+    pub(crate) fn import_staged(&self, staged: &Path, shown: &Path, info: &RunInfo) -> Result<Imported> {
         self.refuse_unverifiable(staged, shown)?;
         let labels = copy_labels(staged);
         let mut found = Vec::new();
         for (rel, ident) in identity_files(staged) {
-            let refuse = |reason: String| Error::ReceiveRefused { folder: shown.join(&rel), reason };
+            let refuse = |reason: String| Error::ImportRefused { folder: shown.join(&rel), reason };
             let ident = match ident {
                 Read::Ok(f) => f,
                 Read::Bad(e) => return Err(refuse(e.to_string())),
@@ -212,10 +212,10 @@ impl Store {
             found.push(Found { rel, ident, run, ambient, labels });
         }
         if found.is_empty() {
-            return Err(Error::ReceiveRefused { folder: shown.to_path_buf(), reason: "it holds no result folder".into() });
+            return Err(Error::ImportRefused { folder: shown.to_path_buf(), reason: "it holds no result folder".into() });
         }
         found.sort_by(|a, b| a.rel.cmp(&b.rel));
-        let planned = self.plan_receive(found, shown)?;
+        let planned = self.plan_import(found, shown)?;
         for p in planned.iter().filter(|p| p.action != Action::Present) {
             drop_owned_entries(&staged.join(&p.found.rel))?;
         }
@@ -223,7 +223,7 @@ impl Store {
 
         // Every folder is placed before anything is recorded, and a failure
         // at any later step moves every placed folder back into the staged
-        // copy, so a receive either places and records the whole copy or
+        // copy, so an import either places and records the whole copy or
         // leaves the store as it was.
         let mut placing = Placing::default();
         let done = match self.place(staged, &planned, &mut placing) {
@@ -243,7 +243,7 @@ impl Store {
     /// Records the placed copy: one invocation entry per result, then one
     /// index line per result placed. An entry is `reused` once every step has
     /// succeeded, and `failed` otherwise.
-    fn record(&self, planned: &[Planned], done: &[Action], info: &RunInfo) -> Result<Received> {
+    fn record(&self, planned: &[Planned], done: &[Action], info: &RunInfo) -> Result<Imported> {
         let inner = &self.inner;
         let entries = planned
             .iter()
@@ -256,8 +256,8 @@ impl Store {
             })
             .collect();
         let idx = info.shared.register(inner, entries, Reuse::IfCompleted)?;
-        let indexed = (|| -> Result<Received> {
-            let mut out = Received::default();
+        let indexed = (|| -> Result<Imported> {
+            let mut out = Imported::default();
             for (p, action) in planned.iter().zip(done) {
                 let key = p.found.ident.run_id;
                 if *action == Action::Present {
@@ -273,7 +273,7 @@ impl Store {
         match &indexed {
             Ok(_) => info.shared.set(&idx, Outcome::Reused, None),
             Err(e) => {
-                let failure = Failure { operation: Some("receiving".into()), reason: Some(e.to_string()) };
+                let failure = Failure { operation: Some("importing".into()), reason: Some(e.to_string()) };
                 info.shared.set(&idx, Outcome::Failed, Some(failure));
             }
         }
@@ -333,7 +333,7 @@ impl Store {
     }
 
     /// Decides where each result goes, refusing before anything moves.
-    fn plan_receive(&self, found: Vec<Found>, shown: &Path) -> Result<Vec<Planned>> {
+    fn plan_import(&self, found: Vec<Found>, shown: &Path) -> Result<Vec<Planned>> {
         let inner = &self.inner;
         let held: HashMap<Key, (PathBuf, IdentityFile)> = walk(inner).into_iter().map(|(d, f)| (f.run_id, (d, f))).collect();
         let in_copy: BTreeSet<Key> = found.iter().map(|f| f.ident.run_id).collect();
@@ -342,8 +342,8 @@ impl Store {
         };
         let mut planned: Vec<Planned> = Vec::new();
         for f in found {
-            let received = shown.join(&f.rel);
-            let refuse = |reason: String| Error::ReceiveRefused { folder: received.clone(), reason };
+            let imported = shown.join(&f.rel);
+            let refuse = |reason: String| Error::ImportRefused { folder: imported.clone(), reason };
             let key = f.ident.run_id;
             // The nearest result of the copy this one sits inside.
             let holder_at = planned
@@ -411,7 +411,7 @@ impl Store {
                     match folder_state(local, &key, &inner.kinds) {
                         State::Completed { run, .. } if result_digests(&run) == result_digests(&f.run) => (Action::Present, local.clone()),
                         State::Completed { .. } => {
-                            return Err(Error::ReceivedDiffers { run_id: key, local: local.clone(), received });
+                            return Err(Error::ImportedDiffers { run_id: key, local: local.clone(), imported });
                         }
                         other => {
                             return Err(refuse(format!("this store holds it at {}, {}", local.display(), state_words(&other))));
@@ -421,7 +421,7 @@ impl Store {
                 None if carried => (Action::Carried, dest),
                 None => {
                     if std::fs::symlink_metadata(&dest).is_ok() {
-                        return Err(taken(key, &dest, &received));
+                        return Err(taken(key, &dest, &imported));
                     }
                     (Action::Move, dest)
                 }
@@ -434,7 +434,7 @@ impl Store {
                     )));
                 }
             }
-            planned.push(Planned { found: f, action, dest, holder: holder_at, shown: received });
+            planned.push(Planned { found: f, action, dest, holder: holder_at, shown: imported });
         }
         Ok(planned)
     }
@@ -457,9 +457,9 @@ impl Store {
     /// rename, or present.
     ///
     /// A destination that another writer filled since the plan, such as a
-    /// second receive of the same result, is compared: a completed result
+    /// second import of the same result, is compared: a completed result
     /// with the same result files makes this one present, and anything else is
-    /// refused with [`Error::ReceivedDiffers`]. A result whose holder turned
+    /// refused with [`Error::ImportedDiffers`]. A result whose holder turned
     /// out present is then renamed on its own into the holder's folder.
     fn place(&self, staged: &Path, planned: &[Planned], placing: &mut Placing) -> Result<Vec<Action>> {
         let mut done: Vec<Action> = planned.iter().map(|p| p.action).collect();
@@ -496,7 +496,7 @@ impl Store {
                         _ => return Err(taken(key, &p.dest, &p.shown)),
                     }
                 }
-                Err(e) => return Err(e).at("move the received result into place", &p.dest),
+                Err(e) => return Err(e).at("move the imported result into place", &p.dest),
             }
         }
         Ok(done)
@@ -547,11 +547,11 @@ fn missing_dirs(root: &Path, dir: &Path) -> Vec<PathBuf> {
 
 /// The refusal of a result whose place in this store is taken: by a result,
 /// which then holds other bytes, or by a folder that holds none.
-fn taken(run_id: Key, dest: &Path, received: &Path) -> Error {
+fn taken(run_id: Key, dest: &Path, imported: &Path) -> Error {
     match identity_of(dest) {
-        Some(_) => Error::ReceivedDiffers { run_id, local: dest.to_path_buf(), received: received.to_path_buf() },
-        None => Error::ReceiveRefused {
-            folder: received.to_path_buf(),
+        Some(_) => Error::ImportedDiffers { run_id, local: dest.to_path_buf(), imported: imported.to_path_buf() },
+        None => Error::ImportRefused {
+            folder: imported.to_path_buf(),
             reason: format!("its place in this store, {}, is taken by a folder that holds no result", dest.display()),
         },
     }
@@ -567,7 +567,7 @@ impl Store {
             for entry in std::fs::read_dir(dir).at("list", dir)?.flatten() {
                 let path = entry.path();
                 let rel = path.strip_prefix(staged).expect("below the copy").to_path_buf();
-                let refuse = |reason: &str| Error::ReceiveRefused { folder: shown.join(&rel), reason: reason.into() };
+                let refuse = |reason: &str| Error::ImportRefused { folder: shown.join(&rel), reason: reason.into() };
                 let kind = std::fs::symlink_metadata(&path).at("stat", &path)?.file_type();
                 if kind.is_symlink() {
                     return Err(refuse("it is a symbolic link"));
@@ -677,7 +677,7 @@ fn file_digest(path: &Path) -> std::io::Result<Key> {
     Ok(Key::from_bytes(hasher.finalize().into()))
 }
 
-/// Removes from a received result folder, at every level, the entries that
+/// Removes from an imported result folder, at every level, the entries that
 /// belong to the other store's processes rather than to the result, none of
 /// which the checks read: `.staging/`, where a process built by-products;
 /// `.attempts/`, the records of earlier attempts; lock files, and folders

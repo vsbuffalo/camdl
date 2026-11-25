@@ -1,4 +1,4 @@
-//! Receiving a copy of another store: what is placed, where, what is
+//! Importing a copy of another store: what is placed, where, what is
 //! recorded, and what is refused with nothing placed.
 
 use std::cell::{Cell, RefCell};
@@ -19,12 +19,12 @@ thread_local! {
 }
 
 /// Called by `place` before each rename: once the moves allowed by
-/// [`MOVES_LEFT`] are used it panics, so no code of the receive runs after
+/// [`MOVES_LEFT`] are used it panics, so no code of the import runs after
 /// it, as when the process is killed; and it runs the [`INTERLOPER`] on the
 /// destination.
 pub(crate) fn before_move(dest: &Path) -> crate::Result<()> {
     MOVES_LEFT.with(|m| match m.get() {
-        Some(0) => panic!("the receive stops here, as a killed process would"),
+        Some(0) => panic!("the import stops here, as a killed process would"),
         Some(n) => m.set(Some(n - 1)),
         None => {}
     });
@@ -149,7 +149,7 @@ impl Scene {
 }
 
 #[test]
-fn receive_places_and_records_a_pulled_store_with_its_nested_results() {
+fn import_places_and_records_a_pulled_store_with_its_nested_results() {
     let s = Scene::new("recv");
     // The other store's process state in the fit's folder: a lock and a
     // by-product claim, each naming an owner on another host.
@@ -166,7 +166,7 @@ fn receive_places_and_records_a_pulled_store_with_its_nested_results() {
     std::fs::write(claim.join(".lock"), b"{}").unwrap();
     let local = open(s.local_root.path());
     let i = labelled("pulled");
-    let got = local.receive(&s.copy(), &i).unwrap();
+    let got = local.import(&s.copy(), &i).unwrap();
     let inv = i.finish(&local).unwrap();
 
     let r = &s.remote;
@@ -235,11 +235,11 @@ fn local_build_suffix() -> String {
 }
 
 #[test]
-fn receive_writes_nothing_outside_staging_the_placed_folders_and_the_records() {
+fn import_writes_nothing_outside_staging_the_placed_folders_and_the_records() {
     let s = Scene::new("recv-writes");
     let local = open(s.local_root.path());
     let i = labelled("pulled");
-    local.receive(&s.copy(), &i).unwrap();
+    local.import(&s.copy(), &i).unwrap();
     i.finish(&local).unwrap();
     let placed: Vec<String> = result_folders(s.local_root.path());
     for path in tree(s.local_root.path()).keys() {
@@ -251,7 +251,7 @@ fn receive_writes_nothing_outside_staging_the_placed_folders_and_the_records() {
 }
 
 #[test]
-fn receive_refuses_a_damaged_copy_and_places_nothing() {
+fn import_refuses_a_damaged_copy_and_places_nothing() {
     let s = Scene::new("recv-damaged");
     let local = open(s.local_root.path());
     // One byte of one file changed, its size and modification time kept, so
@@ -263,9 +263,9 @@ fn receive_refuses_a_damaged_copy_and_places_nothing() {
     let before_copy = tree(&s.copy());
     let before_local = tree(s.local_root.path());
     let i = labelled("pulled");
-    let e = local.receive(&s.copy(), &i).unwrap_err();
+    let e = local.import(&s.copy(), &i).unwrap_err();
     match &e {
-        Error::ReceiveRefused { folder, reason } => {
+        Error::ImportRefused { folder, reason } => {
             assert_eq!(folder, &s.copied(s.remote.pred));
             assert!(reason.contains("p.tsv"), "{reason}");
         }
@@ -278,41 +278,41 @@ fn receive_refuses_a_damaged_copy_and_places_nothing() {
 }
 
 #[test]
-fn receive_refuses_a_result_whose_identity_computes_to_another_run_id() {
+fn import_refuses_a_result_whose_identity_computes_to_another_run_id() {
     let s = Scene::new("recv-identity");
     let local = open(s.local_root.path());
     let p = s.copied(s.remote.sim).join("identity.json");
     let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
     v["identity"]["seed"] = 2.into();
     std::fs::write(&p, serde_json::to_vec(&v).unwrap()).unwrap();
-    let e = local.receive(&s.copy(), &info()).unwrap_err();
-    assert!(matches!(&e, Error::ReceiveRefused { reason, .. } if reason.contains("computes to")), "{e}");
+    let e = local.import(&s.copy(), &info()).unwrap_err();
+    assert!(matches!(&e, Error::ImportRefused { reason, .. } if reason.contains("computes to")), "{e}");
     assert!(result_folders(s.local_root.path()).is_empty());
 }
 
 #[test]
-fn receive_refuses_a_result_that_did_not_complete() {
+fn import_refuses_a_result_that_did_not_complete() {
     let s = Scene::new("recv-running");
     let local = open(s.local_root.path());
     let p = s.copied(s.remote.fit).join("run.json");
     let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
     v["status"] = "running".into();
     std::fs::write(&p, serde_json::to_vec(&v).unwrap()).unwrap();
-    let e = local.receive(&s.copy(), &info()).unwrap_err();
-    assert!(matches!(&e, Error::ReceiveRefused { reason, .. } if reason.contains("running")), "{e}");
+    let e = local.import(&s.copy(), &info()).unwrap_err();
+    assert!(matches!(&e, Error::ImportRefused { reason, .. } if reason.contains("running")), "{e}");
     assert!(result_folders(s.local_root.path()).is_empty());
 }
 
 #[test]
-fn receive_refuses_a_result_no_invocation_record_in_the_copy_lists() {
+fn import_refuses_a_result_no_invocation_record_in_the_copy_lists() {
     let s = Scene::new("recv-unlisted");
     let local = open(s.local_root.path());
     // The record of the invocation that made the prediction.
     let invs = s.copy().join(".invocations");
     std::fs::remove_file(invs.join("2.json")).unwrap();
-    let e = local.receive(&s.copy(), &info()).unwrap_err();
+    let e = local.import(&s.copy(), &info()).unwrap_err();
     match &e {
-        Error::ReceiveRefused { folder, reason } => {
+        Error::ImportRefused { folder, reason } => {
             assert_eq!(folder, &s.copied(s.remote.pred));
             assert!(reason.contains("invocation record"), "{reason}");
         }
@@ -321,7 +321,7 @@ fn receive_refuses_a_result_no_invocation_record_in_the_copy_lists() {
 }
 
 #[test]
-fn receive_of_a_result_already_here_with_equal_bytes_leaves_it_in_place() {
+fn import_of_a_result_already_here_with_equal_bytes_leaves_it_in_place() {
     let s = Scene::new("recv-present");
     // The same build as the copy's, and the same simulation computed here:
     // its provenance file differs, its result files do not.
@@ -337,7 +337,7 @@ fn receive_of_a_result_already_here_with_equal_bytes_leaves_it_in_place() {
     let before = ino(&here.folder().join("traj.tsv"));
 
     let i = labelled("pulled");
-    let got = local.receive(&s.copy(), &i).unwrap();
+    let got = local.import(&s.copy(), &i).unwrap();
     let inv = i.finish(&local).unwrap();
     assert_eq!(got.present, vec![s.remote.sim]);
     assert!(got.placed.contains(&s.remote.fit) && got.placed.contains(&s.remote.pred));
@@ -352,18 +352,18 @@ fn receive_of_a_result_already_here_with_equal_bytes_leaves_it_in_place() {
 }
 
 #[test]
-fn receive_of_a_result_here_with_other_bytes_is_refused_naming_both() {
+fn import_of_a_result_here_with_other_bytes_is_refused_naming_both() {
     let s = Scene::new("recv-differs");
     let local = open_build(s.local_root.path(), "remote");
     let here = fit_in(&local, &info(), b"other draws");
     assert_eq!(here.id().key(), s.remote.fit, "premise: one run id");
     let before = tree(s.local_root.path());
-    let e = local.receive(&s.copy(), &info()).unwrap_err();
+    let e = local.import(&s.copy(), &info()).unwrap_err();
     match &e {
-        Error::ReceivedDiffers { run_id, local: l, received } => {
+        Error::ImportedDiffers { run_id, local: l, imported } => {
             assert_eq!(*run_id, s.remote.fit);
             assert_eq!(l, here.folder());
-            assert_eq!(received, &s.copied(s.remote.fit));
+            assert_eq!(imported, &s.copied(s.remote.fit));
         }
         other => panic!("{other}"),
     }
@@ -383,15 +383,15 @@ fn a_folder_path_held_by_another_result_is_refused() {
     let other = run_sim(&open(other_root.path()), &info(), 7);
     std::fs::create_dir_all(taken.parent().unwrap()).unwrap();
     crate::fsutil::copy_tree(other.folder(), &taken).unwrap();
-    let e = local.receive(&s.copy(), &info()).unwrap_err();
-    assert!(matches!(&e, Error::ReceivedDiffers { run_id, local: l, .. } if *run_id == s.remote.sim && l == &taken), "{e}");
+    let e = local.import(&s.copy(), &info()).unwrap_err();
+    assert!(matches!(&e, Error::ImportedDiffers { run_id, local: l, .. } if *run_id == s.remote.sim && l == &taken), "{e}");
     std::fs::remove_dir_all(&taken).unwrap();
 
     // A folder there that holds no result is refused saying so.
     std::fs::create_dir_all(&taken).unwrap();
     std::fs::write(taken.join("other.tsv"), b"x").unwrap();
-    let e = local.receive(&s.copy(), &info()).unwrap_err();
-    assert!(matches!(&e, Error::ReceiveRefused { reason, .. } if reason.contains("holds no result")), "{e}");
+    let e = local.import(&s.copy(), &info()).unwrap_err();
+    assert!(matches!(&e, Error::ImportRefused { reason, .. } if reason.contains("holds no result")), "{e}");
     assert_eq!(result_folders(s.local_root.path()), Vec::<String>::new());
 }
 
@@ -405,13 +405,13 @@ fn a_result_away_from_its_layout_path_is_refused() {
     let kind_dir = sim.parent().unwrap().parent().unwrap().to_path_buf();
     let moved = kind_dir.with_file_name("simulations");
     std::fs::rename(&kind_dir, &moved).unwrap();
-    let e = local.receive(&s.copy(), &info()).unwrap_err();
-    assert!(matches!(&e, Error::ReceiveRefused { reason, .. } if reason.contains("not at a path")), "{e}");
+    let e = local.import(&s.copy(), &info()).unwrap_err();
+    assert!(matches!(&e, Error::ImportRefused { reason, .. } if reason.contains("not at a path")), "{e}");
     std::fs::rename(&moved, &kind_dir).unwrap();
     let renamed = sim.with_file_name("seed_1");
     std::fs::rename(&sim, &renamed).unwrap();
-    let e = local.receive(&s.copy(), &info()).unwrap_err();
-    assert!(matches!(&e, Error::ReceiveRefused { folder, reason } if folder == &renamed && reason.contains("run id")), "{e}");
+    let e = local.import(&s.copy(), &info()).unwrap_err();
+    assert!(matches!(&e, Error::ImportRefused { folder, reason } if folder == &renamed && reason.contains("run id")), "{e}");
     assert!(result_folders(s.local_root.path()).is_empty());
 }
 
@@ -433,7 +433,7 @@ fn a_nested_result_whose_parent_is_here_is_placed_inside_it() {
     let local = open_build(s.local_root.path(), "remote");
     let here = fit_in(&local, &info(), b"d");
     assert_eq!(here.id().key(), s.remote.fit, "premise: one run id");
-    let got = local.receive(&s.copy(), &info()).unwrap();
+    let got = local.import(&s.copy(), &info()).unwrap();
     assert!(got.placed.contains(&s.remote.pred));
     assert!(!got.placed.contains(&s.remote.fit) && !got.present.contains(&s.remote.fit));
     assert!(local.locate(s.remote.pred).unwrap().folder().starts_with(here.folder()));
@@ -445,9 +445,9 @@ fn a_nested_result_whose_parent_is_nowhere_is_refused() {
     let s = Scene::new("recv-parent-missing");
     copy_without_the_fit(&s);
     let local = open(s.local_root.path());
-    let e = local.receive(&s.copy(), &info()).unwrap_err();
+    let e = local.import(&s.copy(), &info()).unwrap_err();
     match &e {
-        Error::ReceiveRefused { folder, reason } => {
+        Error::ImportRefused { folder, reason } => {
             assert_eq!(folder, &s.copied(s.remote.pred));
             assert!(reason.contains("neither in the copy nor in this store"), "{reason}");
         }
@@ -461,12 +461,12 @@ fn a_copy_of_another_layout_is_refused() {
     let s = Scene::new("recv-layout");
     let root = TempRoot::new("recv-bykind");
     let local = Store::open(root.path(), Build::Known(Engine { build: "b1".into() }), TopLevel::ByKind, kinds()).unwrap();
-    let e = local.receive(&s.copy(), &info()).unwrap_err();
-    assert!(matches!(&e, Error::ReceiveRefused { reason, .. } if reason.contains("lays results out")), "{e}");
+    let e = local.import(&s.copy(), &info()).unwrap_err();
+    assert!(matches!(&e, Error::ImportRefused { reason, .. } if reason.contains("lays results out")), "{e}");
     assert!(s.copy().exists());
 }
 
-/// A receive stopped after its first rename, as a killed process stops:
+/// An import stopped after its first rename, as a killed process stops:
 /// every folder outside `.staging/` is a whole result, the one placed is
 /// found, and `clean` removes what is left once its owner has stopped.
 #[test]
@@ -475,11 +475,11 @@ fn a_receive_stopped_midway_leaves_the_store_valid() {
     let local = open(s.local_root.path());
     let staging = s.local_root.path().join(".staging");
     std::fs::create_dir_all(&staging).unwrap();
-    let staged = staging.join(crate::fsutil::receive_draft_name(&dead_owner()));
+    let staged = staging.join(crate::fsutil::import_draft_name(&dead_owner()));
     std::fs::rename(s.copy(), &staged).unwrap();
     MOVES_LEFT.with(|m| m.set(Some(1)));
     let i = labelled("pulled");
-    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| local.receive_staged(&staged, &s.copy(), &i)));
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| local.import_staged(&staged, &s.copy(), &i)));
     MOVES_LEFT.with(|m| m.set(None));
     std::mem::forget(i);
     assert!(r.is_err(), "premise: stopped");
@@ -496,8 +496,8 @@ fn a_receive_stopped_midway_leaves_the_store_valid() {
     assert!(local.verify(None).unwrap().is_empty());
 }
 
-/// A second receive of the same result reaching its destination first: the
-/// folder it placed has the same result files, so this receive records the
+/// A second import of the same result reaching its destination first: the
+/// folder it placed has the same result files, so this import records the
 /// result, and the by-product inside it, as present.
 #[test]
 fn a_destination_filled_meanwhile_with_the_same_result_is_present() {
@@ -515,7 +515,7 @@ fn a_destination_filled_meanwhile_with_the_same_result_is_present() {
             }
         }))
     });
-    let got = local.receive(&s.copy(), &info());
+    let got = local.import(&s.copy(), &info());
     INTERLOPER.with(|i| *i.borrow_mut() = None);
     let got = got.unwrap();
     assert!(got.present.contains(&s.remote.sim) && got.present.contains(&s.remote.obs), "{got:?}");
@@ -542,11 +542,11 @@ fn a_destination_created_meanwhile_is_not_replaced() {
     });
     let before_copy = tree(&s.copy());
     let i = labelled("pulled");
-    let e = local.receive(&s.copy(), &i);
+    let e = local.import(&s.copy(), &i);
     INTERLOPER.with(|i| *i.borrow_mut() = None);
     drop(i);
     let e = e.unwrap_err();
-    assert!(matches!(&e, Error::ReceiveRefused { reason, .. } if reason.contains("holds no result")), "{e}");
+    assert!(matches!(&e, Error::ImportRefused { reason, .. } if reason.contains("holds no result")), "{e}");
     assert_eq!(std::fs::read_dir(&dest).unwrap().count(), 0, "the folder another writer made is left as it was");
     // The fit, placed before the sim's rename was refused, is moved back.
     assert!(result_folders(s.local_root.path()).is_empty(), "{:?}", result_folders(s.local_root.path()));
@@ -584,7 +584,7 @@ fn a_placement_that_fails_midway_is_undone() {
     };
     let (before_files, before_dirs, before_copy) = (tree(s.local_root.path()), dirs(s.local_root.path()), tree(&s.copy()));
     let i = labelled("pulled");
-    let r = local.receive(&s.copy(), &i);
+    let r = local.import(&s.copy(), &i);
     drop(i);
     std::fs::set_permissions(&kind_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
     assert!(r.is_err(), "premise: the sim cannot be placed");
@@ -605,8 +605,8 @@ fn a_symbolic_link_in_the_copy_is_refused() {
     let ident = s.copied(s.remote.fit).join("identity.json");
     std::fs::rename(&ident, &outside).unwrap();
     std::os::unix::fs::symlink(&outside, &ident).unwrap();
-    let e = local.receive(&s.copy(), &info()).unwrap_err();
-    assert!(matches!(&e, Error::ReceiveRefused { folder, reason } if folder == &ident && reason.contains("symbolic link")), "{e}");
+    let e = local.import(&s.copy(), &info()).unwrap_err();
+    assert!(matches!(&e, Error::ImportRefused { folder, reason } if folder == &ident && reason.contains("symbolic link")), "{e}");
     assert!(result_folders(s.local_root.path()).is_empty());
 }
 
@@ -620,8 +620,8 @@ fn a_dot_named_directory_inside_a_result_is_refused() {
     let sneak = pred.parent().unwrap().join(".sneak");
     crate::fsutil::copy_tree(&pred, &sneak).unwrap();
     std::fs::write(sneak.join("payload"), b"unverified").unwrap();
-    let e = local.receive(&s.copy(), &info()).unwrap_err();
-    assert!(matches!(&e, Error::ReceiveRefused { folder, reason } if folder == &sneak && reason.contains("dot-named")), "{e}");
+    let e = local.import(&s.copy(), &info()).unwrap_err();
+    assert!(matches!(&e, Error::ImportRefused { folder, reason } if folder == &sneak && reason.contains("dot-named")), "{e}");
     assert!(result_folders(s.local_root.path()).is_empty());
 }
 
@@ -684,17 +684,17 @@ fn a_result_whose_dependency_is_nowhere_is_refused() {
 
     let local_root = TempRoot::new("recv-dep-local");
     let local = open_scoring(local_root.path(), "remote");
-    let e = local.receive(&copy, &info()).unwrap_err();
+    let e = local.import(&copy, &info()).unwrap_err();
     match &e {
-        Error::ReceiveRefused { reason, .. } => {
+        Error::ImportRefused { reason, .. } => {
             assert!(reason.contains("dependency") && reason.contains("compiled_model") && reason.contains(&model.short12()), "{reason}");
         }
         other => panic!("{other}"),
     }
     assert!(result_folders(local_root.path()).is_empty());
 
-    // With the model stored here, the score is received on its own.
+    // With the model stored here, the score is imported on its own.
     assert_eq!(put_model(&local, &info()).id().key(), model, "premise: one model run id");
-    let got = local.receive(&copy, &info()).unwrap();
+    let got = local.import(&copy, &info()).unwrap();
     assert_eq!(got.placed, vec![score]);
 }

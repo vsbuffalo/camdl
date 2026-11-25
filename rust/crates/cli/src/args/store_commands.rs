@@ -93,11 +93,10 @@ pub struct CleanArgs {
 
 #[derive(Args, Debug, Clone, store::Inputs)]
 #[command(after_help = colored_help!("\
-COPY is a partial copy of another run store, such as a cloud machine's: its
-`store.json`, the result folders wanted, each at the path it had there with
-the parent folders a nested result sits in (a fit run inside its fit problem,
-a prediction inside its fit run), and the invocation records that listed
-them.
+COPY is a partial copy of another run store: its `store.json`, the result
+folders wanted, each at the path it had there with the parent folders a nested
+result sits in (a fit run inside its fit problem, a prediction inside its fit
+run), and the invocation records that listed them.
 
 The copy is moved into this store's `.staging/`, and every result folder in it
 is checked as `camdl verify` checks one: its run id computed again from its
@@ -106,17 +105,17 @@ placed unless every folder passes. Each result then goes to the path it had in
 the other store, under that build's directory, beside this build's results. A
 result already stored here with the same result files is left in place; one
 stored here with other files is refused, naming both folders. One invocation
-records every result received, with the labels the copy's invocation records
+records every result imported, with the labels the copy's invocation records
 gave them, so `camdl list` shows them and `@LABEL` names them. A refused copy
-is moved back where it was given; a received one is gone.
+is moved back where it was given; an imported one is gone.
 
 Examples:
-  camdl receive pull-staging/ --label m4w_mh_cloud
-  camdl receive pull-staging/ --store /data/camdl-store
-  camdl receive pull-staging/ --label m4w_mh_cloud --manifest build/fits/m4w_mh.json
+  camdl import pull-staging/ --label m4w_mh
+  camdl import pull-staging/ --store /data/camdl-store
+  camdl import pull-staging/ --label m4w_mh --manifest build/fits/m4w_mh.json
 "))]
-pub struct ReceiveArgs {
-    /// The copy of another run store to receive from
+pub struct ImportArgs {
+    /// The copy of another run store to import from
     #[input(recorded)]
     pub copy: PathBuf,
 
@@ -131,7 +130,7 @@ pub struct ReceiveArgs {
     #[arg(long, value_name = "DIR")]
     #[input(store)]
     pub store: Option<PathBuf>,
-    /// Write the output manifest to PATH once the receive has succeeded: a
+    /// Write the output manifest to PATH once the import has succeeded: a
     /// JSON file naming every result placed or found already stored, each
     /// result file by logical name with its SHA-256 and size (run spec
     /// §2.10). Any file at PATH is removed when the command starts.

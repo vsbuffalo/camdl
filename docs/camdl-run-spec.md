@@ -2097,12 +2097,12 @@ declares the manifest as its output instead, and a later step reads run ids and
 file names from it. The design is
 `docs/dev/proposals/2026-11-23-workflow-bindings.md`.
 
-`simulate`, `fit run`, `pfilter`, `profile`, `predict`, `score`, `receive` and
+`simulate`, `fit run`, `pfilter`, `profile`, `predict`, `score`, `import` and
 `compare` take it:
 
 ```bash
 camdl fit run fits/m4w_mh.toml --label m4w_mh --manifest build/fits/m4w_mh.json
-camdl receive pull-staging/ --label m4w_mh_cloud --manifest build/fits/m4w_mh.json
+camdl import pull-staging/ --label m4w_mh --manifest build/fits/m4w_mh.json
 ```
 
 `pfilter` refuses it with `--no-store`, and `simulate` with `--dry-run` or
@@ -2225,8 +2225,8 @@ This is the manifest of a filter run with `--pf-health`:
   fingerprint, and `ambient_key`, the 64-hex hash of the build and the
   environment switches that this build's run ids hold. They describe the writing
   build only. A result computed by another build, such as one placed by
-  `receive`, keeps its own run id, which holds that build's ambient key, not
-  this one.
+  `import`, keeps its own run id, which holds that build's ambient key, not this
+  one.
 - `label` is the command's `--label`, or `null`. It is recorded and never read
   back as a reference: a manifest names its results by run id.
 - `results` lists each distinct result the command's invocation record lists, in
@@ -2272,10 +2272,10 @@ writes the bytes the computation wrote.
   `score`, whether compare read them from the store or stored them. Each has the
   labels of the latest invocation record that lists it, and the manifest's
   `label` is `null`.
-- `receive`: every result placed or found already stored, parents first, each
+- `import`: every result placed or found already stored, parents first, each
   with the labels the copy's invocation records gave it (§4.5). A result's entry
   is the one the command that computed it wrote, apart from `camdl` and `label`,
-  which are the receiving build's and the receive's own.
+  which are the importing build's and the import's own.
 
 ### 2.11 The link tree
 
@@ -2288,7 +2288,7 @@ read exactly what an earlier step made depends on that step's output manifest
 follow the label. The design is
 `docs/dev/proposals/2026-11-23-workflow-bindings.md`, "Links".
 
-`simulate`, `fit run`, `pfilter`, `profile`, `predict`, `score` and `receive`
+`simulate`, `fit run`, `pfilter`, `profile`, `predict`, `score` and `import`
 take it:
 
 ```bash
@@ -3654,19 +3654,19 @@ camdl reindex                # rebuild the index from the records
   known to have stopped, and prints how many result folders it read. The index
   is a cache: a result is found without it.
 
-#### Receiving results from another store: `receive`
+#### Importing results from another store: `import`
 
-`camdl receive COPY` places results computed in another run store, such as a
-cloud machine's, in this one. COPY is a partial copy of the other store: its
-`store.json`, the result folders wanted, each at the path it had relative to
-that store's root, with the parent folders a nested result sits in (a fit run
-inside its fit problem, a prediction inside its fit run), and the invocation
-records that listed them. `--store DIR` names the store to place them in, else
-`CAMDL_STORE`, else `./camdl-store`, which is created when absent. `--label L`
-names the invocation that records them, so that `@L` names them.
+`camdl import COPY` places results computed in another run store in this one.
+COPY is a partial copy of the other store: its `store.json`, the result folders
+wanted, each at the path it had relative to that store's root, with the parent
+folders a nested result sits in (a fit run inside its fit problem, a prediction
+inside its fit run), and the invocation records that listed them. `--store DIR`
+names the store to place them in, else `CAMDL_STORE`, else `./camdl-store`,
+which is created when absent. `--label L` names the invocation that records
+them, so that `@L` names them.
 
 ```bash
-camdl receive pull-staging/ --label m4w_mh_cloud
+camdl import pull-staging/ --label m4w_mh
 ```
 
 The copy is moved into the store's `.staging/`, and every result folder in it is
@@ -3697,24 +3697,24 @@ parent's folder. A run id already stored here with the same result files is left
 in place and printed as `present`; one stored with other result files, or a path
 held by another result, is refused, naming both folders. Provenance files are
 not compared. A folder placed by another process at a result's path while the
-receive runs is never replaced: when it holds the same result files the result
-is `present`, and otherwise it is refused, naming that folder.
+import runs is never replaced: when it holds the same result files the result is
+`present`, and otherwise it is refused, naming that folder.
 
-One invocation records every result received, parents first, as reused, with the
+One invocation records every result imported, parents first, as reused, with the
 labels the copy's invocation records gave it. `camdl list` and `@L` then see the
-received results as they see local ones, and a command run here can read one,
-such as a prediction from a received fit run. The command prints one line per
+imported results as they see local ones, and a command run here can read one,
+such as a prediction from a imported fit run. The command prints one line per
 result, `placed` or `present`, with its kind, its 12-hex run id and its folder.
-A received copy is gone: its results are in the store and the rest is deleted.
+A imported copy is gone: its results are in the store and the rest is deleted.
 
-A receive whose process is killed while it places folders leaves each folder it
+An import whose process is killed while it places folders leaves each folder it
 placed whole, and the rest of the copy in `.staging/`, which `clean` deletes
-once the process has stopped. The copy must then be pulled again; receiving it
+once the process has stopped. The copy must then be pulled again; importing it
 again finds the results already placed `present`.
 
-`--manifest PATH` writes the output manifest of the received results, placed and
+`--manifest PATH` writes the output manifest of the imported results, placed and
 present alike (§2.10), so a workflow rule can declare a pull's manifest as its
-output, and `--link-root DIR` links them under the receive's label (§2.11).
+output, and `--link-root DIR` links them under the import's label (§2.11).
 
 ### 4.6 Synthetic Observations
 

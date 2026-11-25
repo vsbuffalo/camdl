@@ -234,7 +234,7 @@ pub(crate) enum Command {
     Reindex(args::StoreReindexArgs),
 
     /// Check results copied from another run store, then place and record them in this one
-    Receive(args::ReceiveArgs),
+    Import(args::ImportArgs),
 
     /// Parse and type-check a .camdl model (delegates to camdlc)
     #[command(after_help = colored_help!("\
@@ -668,7 +668,7 @@ fn main() {
         Command::Verify(a)  => store_commands::cmd_store(store::StoreCommand::Verify { handle: a.handle }, a.store.store),
         Command::Clean(a)   => store_commands::cmd_store(store::StoreCommand::Clean, a.store.store),
         Command::Reindex(a) => store_commands::cmd_store(store::StoreCommand::Reindex, a.store.store),
-        Command::Receive(a) => store_commands::cmd_receive(a),
+        Command::Import(a) => store_commands::cmd_import(a),
         Command::Dev(DevCmd::Eval(a))    => eval::cmd_eval(&a, compile),
         Command::Dev(DevCmd::Compile(a)) => {
             let refs: Vec<&str> = a.args.iter().map(String::as_str).collect();

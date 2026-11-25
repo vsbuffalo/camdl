@@ -68,19 +68,19 @@ pub enum Error {
     WriterOpen { name: String },
     #[error("a write to `{name}` after its run ended")]
     WriteAfterEnd { name: String },
-    /// A store copy given to [`crate::Store::receive`] holds a result whose
+    /// A store copy given to [`crate::Store::import`] holds a result whose
     /// run id, or whose folder path, this store already holds with other
     /// bytes. Nothing from the copy was placed.
     #[error(
         "the result {run_id} at {} is held in this store with other bytes, at {}: two stores hold \
          different results under one identity, or one path. Nothing from the copy was placed",
-        received.display(), local.display()
+        imported.display(), local.display()
     )]
-    ReceivedDiffers { run_id: Key, local: PathBuf, received: PathBuf },
-    /// A store copy given to [`crate::Store::receive`] holds a folder that
+    ImportedDiffers { run_id: Key, local: PathBuf, imported: PathBuf },
+    /// A store copy given to [`crate::Store::import`] holds a folder that
     /// fails a check. Nothing from the copy was placed.
-    #[error("{} cannot be received: {reason}. Nothing from the copy was placed", folder.display())]
-    ReceiveRefused { folder: PathBuf, reason: String },
+    #[error("{} cannot be imported: {reason}. Nothing from the copy was placed", folder.display())]
+    ImportRefused { folder: PathBuf, reason: String },
     /// A run finished holding other result or provenance files than it
     /// declared with `Run::expect`: the declared files it did not write, and
     /// the files it wrote that it did not declare.
