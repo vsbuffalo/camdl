@@ -715,7 +715,7 @@ PfilterInvocation ──Inputs::split──┬─ Declared ──pfilter_config:
                                                                                                                         ▼
                                            run id = SHA-256( HASH_VERSION ‖ "pfilter" ‖ ambient key ‖ identity key )
                                                                                                                         │
-  Pfilter::layout(identity, labels) ─────────────────────────────────────────────────────────────────────────────────────┤
+  Pfilter::layout(identity, attributes) ─────────────────────────────────────────────────────────────────────────────────┤
                                                                                                                         ▼
   <root>/<version>-<12 hex ambient key>/pfilter/<model>-<12 hex>/pf-n…-<12 hex>/params-<12 hex>/seed_<seed>-<12 hex run id>/
 ```
@@ -882,10 +882,10 @@ pub(crate) fn camdl_groups<S: ContentAddressed>(
 
 // rust/crates/cli/src/pfilter_store.rs:151
 impl Primary for Pfilter {
-    fn layout(id: &PfilterIdentity, labels: &PfilterAttributes) -> Placed {
-        camdl_groups(&labels.model, &id.model, &id.config.label(), &id.config,
+    fn layout(id: &PfilterIdentity, attributes: &PfilterAttributes) -> Placed {
+        camdl_groups(&attributes.model, &id.model, &id.config.label(), &id.config,
                      Some(("params", &id.params)))
-            .result(&format!("seed_{}", labels.seed))
+            .result(&format!("seed_{}", attributes.seed))
     }
 }
 ```
@@ -952,7 +952,13 @@ store/
   0.1.0_ca899034b-380dcb726337/                 the build directory: version, 12 hex of the ambient key
     compiled_model/
       sir_r0-cb8e23e2e2a4/                      a content artifact, labelled by the model's stem
-        identity.json  run.json  model.ir.json  source.camdl  docs.json  declared.json
+        identity.json  run.json  model.ir.json
+    model_source/
+      sir_r0-e50954d6c45a/                      the model file the command used, and what is read from it
+        identity.json  run.json  source.camdl  docs.json  declared.json  model.graph.json  model.render.json
+    quantities/
+      sir_r0-7a9964450aa0/                      the model's quantities, keyed by their bytes
+        identity.json  run.json  quantities.json
     data_table/
       in_bed-2e05b33118fc/                      a content artifact, labelled by the stream
         identity.json  run.json  table.tsv
@@ -970,13 +976,14 @@ store/
 
 The second command reused the filter run and its saved paths, and computed only
 the trace, by running the filter again in reproducing mode
-([By-products](#by-products)). Its invocation record lists five results in call
-order: the compiled model, the data table and the filter run as `reused`, the
-trace as `computed` and the saved paths as `reused`.
+([By-products](#by-products)). Its invocation record lists seven results in call
+order: the quantities, the model source, the compiled model, the data table and
+the filter run as `reused`, the trace as `computed` and the saved paths as
+`reused`.
 
-The test `a_run_makes_the_tree_of_the_proposal` (`pfilter_store/tests.rs:617`)
+The test `a_run_makes_the_tree_of_the_proposal` (`pfilter_store/tests.rs:639`)
 asserts this shape for a run with `--save-paths`, with each 12-hex suffix
-replaced by `*`; `sim_store/tests.rs:716` does the same for `simulate`.
+replaced by `*`; `sim_store/tests.rs:723` does the same for `simulate`.
 
 ### Finding a result's folder
 
@@ -1675,7 +1682,7 @@ returns a `Stored<C>`, from which the command takes a dependency:
 
 ```rust
 // rust/crates/cli/src/pfilter.rs:605 (error handling trimmed)
-let model = crate::camdl_store::put_compiled(&store, &info, model_part, source, &model_labels, &provenance)?;
+let model = crate::camdl_store::put_compiled(&store, &info, model_part, source, &model_attributes, &provenance)?;
 ```
 
 `put_compiled` (`camdl_store/model_source.rs`) puts the model source, which
@@ -2024,10 +2031,10 @@ impl Artifact for Pfilter {
 }
 
 impl Primary for Pfilter {
-    fn layout(id: &PfilterIdentity, labels: &PfilterAttributes) -> Placed {
-        camdl_groups(&labels.model, &id.model, &id.config.label(), &id.config,
+    fn layout(id: &PfilterIdentity, attributes: &PfilterAttributes) -> Placed {
+        camdl_groups(&attributes.model, &id.model, &id.config.label(), &id.config,
                      Some(("params", &id.params)))
-            .result(&format!("seed_{}", labels.seed))
+            .result(&format!("seed_{}", attributes.seed))
     }
 }
 ```
@@ -2041,7 +2048,7 @@ through `put_compiled`, with the model source it was compiled from.
 
 ```rust
 let info = store::RunInfo::new(&given, &execution_record, &request)?;
-let model = crate::camdl_store::put_compiled(&store, &info, model_part, source, &model_labels, &provenance)?;
+let model = crate::camdl_store::put_compiled(&store, &info, model_part, source, &model_attributes, &provenance)?;
 // `model` goes into PfilterIdentity::model
 ```
 
@@ -2056,7 +2063,7 @@ Decide which failures are results and which are failed runs, and write the rule
 in the code.
 
 ```rust
-match store.begin_with::<Pfilter>(&identity, &labels, &wanted, &info, request.reuse())? {
+match store.begin_with::<Pfilter>(&identity, &attributes, &wanted, &info, request.reuse())? {
     Begin::Reused(stored) => stored,                       // computed before: use it
     Begin::Busy(owner) => return Err(busy_message(owner)), // another process holds it
     Begin::Claimed(mut run) => {
