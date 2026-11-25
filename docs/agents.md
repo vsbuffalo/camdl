@@ -569,33 +569,26 @@ posterior, and has to be rewritten for every run. A reduction (`max`, `final`,
 attack rate, time-to-peak); omit the reduction to keep the full series. See
 `camdl docs user-features` ("Reporting derived quantities").
 
-**A shared reporting vocabulary is a file, not a copy-paste.** When several
-models want the same summaries, put the `quantities {}` block in its own
-`.camdl` file — a file containing nothing else — and apply it at the point of
-use:
-
-```
-camdl simulate model.camdl --quantities reporting/national.camdl --quantities-out out/
-camdl predict @jigawa-baseline --quantities reporting/national.camdl
-```
-
-The file REPLACES the model's own block; it never merges. It is compiled against
-the model it is applied to, so a name that model does not declare is an error
-naming both the name and the file — which is the signal that this family of
-models needs its own vocabulary (an Erlang-staged model's `reff` formula is not
-an exponential-dwell model's). The emitted tables land in `quantities-<key>/`,
-keyed by the file's contents, so applying two vocabularies to one run gives you
-two tables rather than overwriting one, and correcting a formula in place
-produces a new table instead of a stale cache hit. Neither a simulated cell's
-identity nor the fit's moves: quantities are derived reports, not inputs. A
-stored cell that lacks the quantities asked for is simulated again to evaluate
-them, and its trajectory is checked against the stored one.
+**Quantities belong in the model file.** Adding or editing a quantity there
+changes no compiled model, so no fit is invalidated; only predictions that
+evaluate quantities are computed again. A stored cell that lacks the quantities
+asked for is simulated again to evaluate them, and its trajectory is checked
+against the stored one.
 
 This is also the answer to "I corrected a `quantities {}` formula and
-`camdl predict` still reports the old number": `camdl predict` reads the model
-IR archived inside the fit, so editing the source does nothing to a fit that
-already ran. Pass the corrected block with `--quantities` instead. It is refused
-if the model source has drifted from the one the fit ran on.
+`camdl predict` still reports the old number": a prediction from a stored fit
+evaluates the quantities of the model file the run's invocation recorded. On the
+same camdl build, run `camdl fit run` again with the edited file, which reuses
+the stored fit and records the edited file, and predict from its `@label`. After
+a camdl upgrade, which would compute the fit again, pass the edited file
+instead:
+
+```
+camdl predict @jigawa-baseline --model models/jigawa.camdl
+```
+
+It is refused if the file is not the model the fit ran on apart from its
+`quantities {}` and `contrasts {}`.
 
 **Don't reach for these escape hatches without understanding them:**
 

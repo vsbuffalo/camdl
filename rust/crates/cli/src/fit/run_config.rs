@@ -286,7 +286,7 @@ pub(crate) fn resolve(
     // so lean vs full share the same model digest).
     let needs_state_grad = config.needs_state_grad();
     let (compiled_ir, _ir_tmp) = crate::util::resolve_ir_path(
-        &config.problem.model.camdl, needs_state_grad, None, compile)
+        &config.problem.model.camdl, needs_state_grad, compile)
         .unwrap_or_else(|e| {
             out.fail(format!("error: {}", e));
         });
@@ -328,7 +328,7 @@ pub(crate) fn resolve(
     // state Jacobian, which is then the run's own content. The ordinary
     // compile is made here too, rewritten from the data the same way.
     let problem_ir: Option<String> = if needs_state_grad {
-        let (lean, _lean_tmp) = crate::util::resolve_ir_path(&config.problem.model.camdl, false, None, compile)
+        let (lean, _lean_tmp) = crate::util::resolve_ir_path(&config.problem.model.camdl, false, compile)
             .unwrap_or_else(|e| out.fail(format!("error: {}", e)));
         let lean = super::resolve_anchors_into_temp_ir(None, &lean, &config.problem)
             .unwrap_or_else(|e| out.fail(format!("error: {}", e)));

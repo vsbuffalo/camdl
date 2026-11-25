@@ -59,7 +59,6 @@ pub(crate) struct QuantitiesWant {
     pub dir: std::path::PathBuf,
     pub mode: crate::quantity_output::Mode,
     pub scenario_axis: bool,
-    pub vocabulary: Option<crate::quantities_file::QuantitiesOverride>,
 }
 
 /// The exports and their rendering options.
@@ -320,7 +319,6 @@ pub(crate) fn run(ctx: StoreRun<'_>) {
             mode: q.mode,
             scenario_axis: q.scenario_axis,
             calendar: ir::caltime::CalendarAxis::from_model(&p.cell.run.model).unwrap_or_else(|e| fail(e.to_string())),
-            vocabulary: q.vocabulary.clone(),
         };
         let mut files = store::ExportFiles::default();
         invocation.render_by_products_to::<QuantityTable>(&store, &options, &mut files).unwrap_or_else(|e| fail(e.to_string()));

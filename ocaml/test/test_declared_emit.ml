@@ -675,20 +675,6 @@ simulate { from = 0 'days
      | Some s -> s.sm_text
      | None -> Alcotest.fail "no simulate block")
 
-(* A quantity declared in a separate vocabulary file (`--quantities`) takes
-   its text from that file. The entry sits on line 3 of the vocabulary, which
-   in the model is the `compartments` line: reading the wrong file would
-   return model text. *)
-let test_source_text_second_file () =
-  let vocab = "quantities {\n  # peak prevalence\n  peak   =   max(I)\n}\n" in
-  match Compiler.compile_with_declared ~name:"m" ~filename:"m.camdl"
-          ~quantities:("vocab.camdl", vocab) (sir "beta * S * I / N") with
-  | Error e -> Alcotest.failf "does not compile: %s" e
-  | Ok (_, _, d) ->
-    Alcotest.(check (list (option string))) "the vocabulary file's own bytes"
-      [ Some "peak   =   max(I)" ]
-      (List.map (fun (q : D.quantity_decl) -> q.qd_text) d.dm_quantities)
-
 (* On every golden, every declaration has its text, and a declaration with a
    name begins with that name, with `let`, or with an attribute. This reads
    the serialized section, so a declaration kind added without a text fails
@@ -998,8 +984,6 @@ let () =
       ("text as written",
        Alcotest.test_case "each declaration carries its own bytes" `Quick
          test_source_text
-       :: Alcotest.test_case "a second file's declaration carries that file's bytes"
-            `Quick test_source_text_second_file
        :: List.map (fun path ->
            Alcotest.test_case (relative path) `Quick
              (test_golden_source_text path))

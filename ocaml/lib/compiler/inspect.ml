@@ -1452,16 +1452,13 @@ let run_inspect path opts =
     [Compiler.compile] and [Compiler.collect_diagnostics] also use, so it
     runs the stages a compile runs (parsing, expansion, validation,
     dimension checking, lints, differentiation) and cannot disagree with a
-    compile about a model's validity. [quantities] is the path of a
-    [--quantities] vocabulary file, which replaces the model's own
-    [quantities { }] block as it does in a compile. *)
-let run_check ?quantities path =
+    compile about a model's validity. *)
+let run_check path =
   let name = Filename.basename path |> Filename.remove_extension in
   let src  = Compiler.read_file path in
-  let quantities = Option.map (fun q -> (q, Compiler.read_file q)) quantities in
   Term_style.apply_policy ();
   let (detail, diags, source) =
-    Compiler.collect_detail ~name ~filename:path ?quantities src in
+    Compiler.collect_detail ~name ~filename:path src in
   match detail with
   | None ->
     (* lex/parse/expand structurally failed; [diags] holds the E001.

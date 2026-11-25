@@ -999,8 +999,6 @@ fn manifest(
             "intervals": [rules.intervals.0, rules.intervals.1],
             "pit": "randomized within the jump of a count",
             "pit_seed": rules.pit_seed,
-            "not_scored": "a prediction made with --quantities, whose identity keeps the vocabulary's digest \
-                and not the file, cannot be computed again and so cannot be scored",
         },
         "covariates": labels.covariates,
         "labels": labels_out,

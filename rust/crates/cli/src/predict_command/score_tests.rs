@@ -558,8 +558,7 @@ fn every_draw_degenerating_on_a_row_scores_it_minus_infinity() {
     assert_eq!((held["n"].as_str(), held["n_unscored"].as_str(), held["log_score_sum"].as_str()), ("10", "33", "-inf"));
 }
 
-/// The refusals of `--data`, of the outcome rows and of a prediction made
-/// with `--quantities`.
+/// The refusals of `--data` and of the outcome rows.
 #[test]
 fn the_outcome_refusals() {
     let fresh = tempfile::tempdir().unwrap();
@@ -587,11 +586,6 @@ fn the_outcome_refusals() {
     std::fs::write(cwd.path().join("dup.tsv"), dup).unwrap();
     refused(&["@fc", "--data", "daily_cases=dup.tsv"], "both measure the target ending at 22");
     assert!(scores(&root).is_empty(), "nothing is stored");
-    ok(
-        &predict_in(cwd.path(), &root, &["predict", "@fit", "--mode", "free_forward", "--n-draws", "4", "--quantities", "vocab.camdl", "--label", "vocab"]),
-        "predict",
-    );
-    refused(&["@vocab", "--data", "daily_cases=daily_cases.tsv"], "--quantities");
 }
 
 /// A stored prediction file edited by hand is refused before anything is

@@ -204,9 +204,7 @@ The tree {!Ast} stays close to what was written. Names are unresolved strings;
 an indexed family such as [infection[p in patch]] is one node; a [let] is a
 declaration in its own right; a number with a unit is an [EUnit] node that
 remembers the unit. Most declarations carry two spans: one for diagnostics to
-point at, and one for the declared-model section to quote. The [--quantities]
-flag adds a second compilation unit, whose [quantities] block replaces the
-model's own before expansion.
+point at, and one for the declared-model section to quote.
 
 {!modules: Ast Param_annot Parser_errors}
 
@@ -377,8 +375,7 @@ it cannot classify is warning [W203], and the compiled model is unaffected.
 {!Declared} defines the section's types and codec. The Rust crate
 [rust/crates/declared] is the authority for its format, and one shared JSON
 fixture is read by tests on both sides. [camdlc] adds what only the command
-line knows, the [--set] overrides and the [--quantities] file, before writing
-it.
+line knows, the [--set] overrides, before writing it.
 
 {!modules: Declared Declared_emit}
 

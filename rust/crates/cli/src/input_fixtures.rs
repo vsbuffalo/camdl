@@ -185,10 +185,6 @@ pub(crate) fn sim_emit_every() -> Vec<String> {
     vec!["2".into()]
 }
 
-pub(crate) fn sim_vocabulary() -> Option<PathBuf> {
-    Some("vocabulary.camdl".into())
-}
-
 pub(crate) fn other_backend() -> Option<crate::args::types::ForwardBackend> {
     Some(crate::args::types::ForwardBackend::Gillespie)
 }
@@ -363,11 +359,6 @@ pub(crate) fn predict_covariate() -> Vec<crate::args::types::CovariateSpec> {
     vec!["pop=hold".parse().expect("a covariate statement")]
 }
 
-/// A reporting vocabulary in place of the model's own quantities.
-pub(crate) fn predict_quantities() -> Option<PathBuf> {
-    Some("vocab.camdl".into())
-}
-
 /// The fixture model with another quantity, to report the fit through.
 pub(crate) fn predict_model() -> Option<PathBuf> {
     Some("reported.camdl".into())
@@ -443,18 +434,21 @@ pub(crate) fn predict_time_format() -> (crate::args::FixedPointFlags, crate::arg
 }
 
 
-/// A vocabulary compiled with and without loop-invariant code motion against
-/// the source of `@hoisted`, a fit whose infection rate has a factor the
-/// motion hoists: on a posterior, `--no-licm` reaches only this compile.
+/// A prediction of `@hoisted`, a fit whose infection rate has a factor
+/// loop-invariant code motion hoists, with and without the motion: a
+/// posterior prediction given no `--model` compiles nothing.
 #[cfg(test)]
 pub(crate) fn predict_no_licm() -> (PredictInvocation, PredictInvocation) {
-    let base = predict_from(&["@hoisted", "--mode", "free_forward", "--n-draws", "4", "--quantities", "vocab.camdl"]);
+    let base = predict_from(&["@hoisted", "--mode", "free_forward", "--n-draws", "4"]);
     (PredictInvocation { no_licm: false, ..base.clone() }, PredictInvocation { no_licm: true, ..base })
 }
 
-/// A vocabulary compiled with and without the IR cache.
+/// A fixed point's model file compiled with and without the IR cache.
 pub(crate) fn predict_no_ir_cache() -> (PredictInvocation, PredictInvocation) {
-    let base = predict_from(&["@fit", "--mode", "free_forward", "--n-draws", "4", "--quantities", "vocab.camdl"]);
+    let base = predict_from(&[
+        "model.camdl", "--params", "point.toml", "--data", "daily_cases=daily_cases.tsv", "--mode", "free_forward",
+        "--n-draws", "4",
+    ]);
     (PredictInvocation { no_ir_cache: false, ..base.clone() }, PredictInvocation { no_ir_cache: true, ..base })
 }
 

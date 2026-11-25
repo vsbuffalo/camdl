@@ -327,7 +327,7 @@ impl ByProduct for EventLog {
 #[identity(tag = "sim_quantities", version = 1)]
 pub(crate) struct SimQuantitiesIdentity {
     pub sim: SimIdentityRecord,
-    /// The model's own block, or the `--quantities FILE` vocabulary.
+    /// The model's `quantities {}` and `contrasts {}`.
     pub quantities: Dep<Quantities>,
     /// The `--emit-every` override an `observations.<stream>` quantity
     /// reduces under.
@@ -817,8 +817,6 @@ pub(crate) struct QuantityTableOptions {
     /// only then.
     pub scenario_axis: bool,
     pub calendar: ir::caltime::CalendarAxis,
-    /// The `--quantities FILE` vocabulary, which names the tables' directory.
-    pub vocabulary: Option<crate::quantities_file::QuantitiesOverride>,
 }
 
 impl ByProductRendering for QuantityTable {
@@ -867,14 +865,11 @@ impl ByProductRendering for QuantityTable {
             let names: Vec<String> = rendered.failures.iter().map(|f| format!("quantity '{}': {}", f.name, f.reason())).collect();
             return Err(parse(names.join("; ")));
         }
-        let sub = crate::quantities_file::quantities_dir_name(options.vocabulary.as_ref());
+        let sub = crate::quantity_output::QUANTITIES_DIR;
         for (name, content) in &rendered.files {
             out.file(&format!("{sub}/{name}.tsv"))?.write_all(content.as_bytes()).map_err(io)?;
         }
-        let manifest = crate::quantities_file::stamp_provenance(&rendered.manifest, options.vocabulary.as_ref()).map_err(parse)?;
-        out.file(&crate::quantities_file::quantities_manifest_name(options.vocabulary.as_ref()))?
-            .write_all(manifest.as_bytes())
-            .map_err(io)?;
+        out.file(&format!("{sub}.json"))?.write_all(rendered.manifest.as_bytes()).map_err(io)?;
         Ok(())
     }
 }

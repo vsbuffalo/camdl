@@ -156,7 +156,7 @@ pub(crate) fn pose_problem(
                             fit.handle
                         ));
                     }
-                    let (ir, _tmp) = crate::util::resolve_ir_path(named, false, None, compile)?;
+                    let (ir, _tmp) = crate::util::resolve_ir_path(named, false, compile)?;
                     (ir, given_model.clone(), named.clone())
                 }
             };
@@ -293,7 +293,7 @@ pub(crate) fn jacobian_compile(
     let src = opened.model_source()?;
     let src_str = src.to_string_lossy().into_owned();
     let bytes = std::fs::read(&src).map_err(|e| format!("cannot read {}: {e}", src.display()))?;
-    let (full, _tmp) = crate::util::resolve_ir_path(&src_str, true, None, compile)?;
+    let (full, _tmp) = crate::util::resolve_ir_path(&src_str, true, compile)?;
     let full = crate::fit::resolve_anchors_into_temp_ir(Some(out), &full, &posed.config.problem)?;
     let (full, _bound) = crate::fit::bind_tables_into_temp_ir(&full, &posed.config.problem)?;
     let read = |p: &str| std::fs::read_to_string(p).map_err(|e| format!("cannot read {p}: {e}"));
@@ -340,7 +340,7 @@ fn refuse_another_model(
         return Ok(());
     }
     let problem = &opened.config.problem;
-    let (ir, _tmp) = crate::util::resolve_ir_path(model, false, None, compile)?;
+    let (ir, _tmp) = crate::util::resolve_ir_path(model, false, compile)?;
     let ir = crate::fit::resolve_anchors_into_temp_ir(Some(out), &ir, problem)?;
     let (ir, _bound) = crate::fit::bind_tables_into_temp_ir(&ir, problem)?;
     let structural = |path: &str| -> Result<ir::model_hash::ContentHash, String> {

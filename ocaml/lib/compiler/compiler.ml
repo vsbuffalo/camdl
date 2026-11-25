@@ -2,10 +2,8 @@
     compile stops, and hands back either the compiled model or the rendered
     diagnostics.
 
-    A compile starts from the source text of a model, and of an optional
-    vocabulary file given with [--quantities], and goes through three phases.
-    The front end, [front_end_collect], parses each file, swaps the model's
-    [quantities] block for the vocabulary file's, and calls
+    A compile starts from the source text of a model and goes through three
+    phases. The front end, [front_end_collect], parses the file and calls
     {!Expander.expand_detail}. It then adds the lexer's warnings (W100) and the
     errors that parser actions recorded in {!Parser_errors} to the expander's
     diagnostics. A lexing or syntax error is E001 at the position where
@@ -66,10 +64,9 @@ type compile_detail = {
   summary : Expander.model_summary;
       (** Counts of declared and expanded constructs, for [camdlc inspect]. *)
   source  : Source_cache.t;
-      (** The text of every file of the compile, for rendering. *)
+      (** The text of the model file, for rendering. *)
   decls   : Ast.declaration list;
-      (** The declarations as parsed, after the [--quantities] splice. The
-          declared-model section is built from these and never from [ctx],
+      (** The declarations as parsed. The declared-model section is built from these and never from [ctx],
           whose transitions and compartments the [via] lowering has
           rewritten. *)
   declared : (Declared.declared_model * Declared_emit.unresolved list) Lazy.t;
@@ -165,15 +162,13 @@ let bare_duration_word_before (src : string) ~(before : Lexing.position)
   in
   scan false
 
-(* Parse one compilation unit into its declaration list, recording a located
-   lex/parse failure as E001/E115 against [parse_diags] under that unit's own
-   filename. A compile can have two units: the model, and the `--quantities`
-   vocabulary file. *)
-let parse_unit (parse_diags : Diagnostics.t) ~(filename : string) (src : string)
+(* Parse the model file into its declaration list, recording a located
+   lex/parse failure as E001/E115 against [parse_diags]. *)
+let parse_model (parse_diags : Diagnostics.t) ~(filename : string) (src : string)
     : (Ast.declaration list, unit) result =
   let lexbuf = Lexing.from_string src in
   Lexing.set_filename lexbuf filename;
-  (* Offsets are per unit; a stale entry from another unit could hide E107. *)
+  (* A stale entry from an earlier parse in this process could hide E107. *)
   Hashtbl.reset Parser_errors.paren_starts;
   try Ok (Parser.file Lexer.token lexbuf)
   with
@@ -206,99 +201,9 @@ let parse_unit (parse_diags : Diagnostics.t) ~(filename : string) (src : string)
          ~message:"syntax error" ());
     Error ()
 
-(* The English name of a declaration kind, for the E339 message. *)
-let decl_kind_name : Ast.declaration -> string = function
-  | DTimeUnit _     -> "a `time_unit`"
-  | DDescription _  -> "a `description`"
-  | DModelDoc _     -> "a model-level `#'` doc block"
-  | DOrigin _       -> "an `origin`"
-  | DDimensions _   -> "a `dimensions { }` block"
-  | DCompartments _ -> "a `compartments { }` block"
-  | DParameters _   -> "a `parameters { }` block"
-  | DTables _       -> "a `tables { }` block"
-  | DForcing _      -> "a `forcing { }` block"
-  | DTransitions _  -> "a `transitions { }` block"
-  | DObservations _ -> "an `observations { }` block"
-  | DInterventions _ -> "an `interventions { }` block"
-  | DEvents _       -> "an `events { }` block"
-  | DReactiveInterventions _ -> "a `reactive { }` block"
-  | DODE _          -> "an `ode { }` block"
-  | DOutput _       -> "an `output { }` block"
-  | DSimulate _     -> "a `simulate { }` block"
-  | DInit _         -> "an `init { }` block"
-  | DTimepoints _   -> "a `timepoints { }` block"
-  | DStratify _     -> "a `stratify(...)`"
-  | DLet _          -> "a top-level `let`"
-  | DScenarios _    -> "a `scenarios { }` block"
-  | DBalance _      -> "a `balance { }` block"
-  | DQuantities _   -> "a `quantities { }` block"
-  | DContrasts _    -> "a `contrasts { }` block"
-
-(* Splice a vocabulary file's `quantities { }` into the model's declaration
-   list, replacing the model's own block wholesale. Replacement, not merge: a
-   merge rule is a silent-precedence surface, and "swap the reporting
-   vocabulary" is what the flag means.
-
-   The vocabulary file is a compilation unit of its own, so its declarations are
-   stamped with its path before the splice — a diagnostic about a name the model
-   does not declare must point at the vocabulary, or the author cannot tell
-   which of the two files is wrong. *)
-let splice_quantities (diags : Diagnostics.t) ~(file : string)
-    (model_decls : Ast.declaration list) (unit_decls : Ast.declaration list)
-    : (Ast.declaration list, unit) result =
-  let file_loc = { Diagnostics.no_loc with Diagnostics.file = file } in
-  match List.find_opt (function Ast.DQuantities _ -> false | _ -> true) unit_decls with
-  | Some other ->
-    Diagnostics.error diags ~code:"E339" ~loc:file_loc
-      ~message:(Printf.sprintf
-        "the quantities file '%s' also declares %s; a file supplied to \
-         --quantities may contain only a `quantities { }` block"
-        file (decl_kind_name other))
-      (* A file-header `#'` block reaches here too, and the generic
-         "move the declarations back" hint would be wrong advice for it: the
-         author wrote a description, not a declaration. Point at the fix that
-         applies — the model's header documents the model; a vocabulary file
-         describes itself in an ordinary comment. *)
-      ~hint:(match other with
-        | Ast.DModelDoc _ ->
-          "a `#'` block at the top of a file documents the MODEL, and a \
-           vocabulary file is not one — describe the vocabulary with an \
-           ordinary `#` comment, or move the prose to the model's own header"
-        | _ ->
-          "a quantities file is a reporting vocabulary applied to a model \
-           that already exists — move the model declarations back into the \
-           model file")
-      ();
-    Error ()
-  | None ->
-    let qds =
-      List.concat_map (function Ast.DQuantities qs -> qs | _ -> []) unit_decls in
-    if qds = [] then begin
-      Diagnostics.error diags ~code:"E340" ~loc:file_loc
-        ~message:(Printf.sprintf
-          "the quantities file '%s' declares no quantities" file)
-        ~hint:"--quantities replaces the model's own `quantities { }` block, so \
-               an empty vocabulary would report nothing; drop the flag to use \
-               the model's own block"
-        ();
-      Error ()
-    end else
-      let qds = List.map (Ast.stamp_quantity_decl_file ~file) qds in
-      Ok (List.filter (function Ast.DQuantities _ -> false | _ -> true) model_decls
-          @ [Ast.DQuantities qds])
-
-(* [quantities] is an optional second compilation unit — (filename, source) —
-   whose `quantities { }` block replaces the model's own. See
-   [splice_quantities]. *)
-let front_end_collect ?(name = "model") ?(filename = "<input>")
-    ?(quantities : (string * string) option) (src : string)
+let front_end_collect ?(name = "model") ?(filename = "<input>") (src : string)
     : compile_detail option * Diagnostics.t * Source_cache.t =
   let source = Source_cache.of_string ~filename src in
-  let source =
-    match quantities with
-    | Some (qfile, qsrc) -> Source_cache.add_unit source ~filename:qfile qsrc
-    | None -> source
-  in
   (* Drain any stale lex-phase warnings from a previous compilation in the
      same process. pending_warnings is a mutable global ref; clearing it
      here ensures we never replay warnings from a prior run. *)
@@ -309,18 +214,11 @@ let front_end_collect ?(name = "model") ?(filename = "<input>")
      W100 lex warnings, and the errors parser actions reported while parsing
      went on (see [Parser_errors]). Every return path drains, so a later
      syntax error or an expansion failure does not hide the errors reported
-     before it (gh#1210).
-
-     A position is attributed to the unit it was lexed from: with a
-     `--quantities` vocabulary file there are two units in one compile, and
-     [Lexing.set_filename] stamped each position with its own path. A
-     position with no stamp falls back to the model filename. *)
+     before it (gh#1210). *)
   let drain_pending (diags : Diagnostics.t) =
-    let unit_file (sp : Lexing.position) =
-      if sp.Lexing.pos_fname = "" then filename else sp.Lexing.pos_fname in
     List.iter (fun (sp, ep, msg) ->
       Diagnostics.warning diags ~code:"W100"
-        ~loc:(Diagnostics.loc_of_positions ~file:(unit_file sp) sp ep)
+        ~loc:(Diagnostics.loc_of_positions ~file:filename sp ep)
         ~message:msg ()
     ) (List.rev !Lexer.pending_warnings);
     Lexer.pending_warnings := [];
@@ -329,10 +227,10 @@ let front_end_collect ?(name = "model") ?(filename = "<input>")
         | None -> []
         | Some (fsp, fep, replacement) ->
           [ { Diagnostics.fix_loc =
-                Diagnostics.loc_of_positions ~file:(unit_file fsp) fsp fep;
+                Diagnostics.loc_of_positions ~file:filename fsp fep;
               replacement } ] in
       Diagnostics.error diags ~code
-        ~loc:(Diagnostics.loc_of_positions ~file:(unit_file sp) sp ep)
+        ~loc:(Diagnostics.loc_of_positions ~file:filename sp ep)
         ~message:msg ?hint ~fixes ()
     ) (List.rev !Parser_errors.pending_errors);
     Parser_errors.pending_errors := []
@@ -340,15 +238,7 @@ let front_end_collect ?(name = "model") ?(filename = "<input>")
   match
     capture_e001 parse_diags (fun () ->
        let t_parse = Sys.time () in
-       let decls =
-         match parse_unit parse_diags ~filename src, quantities with
-         | Error (), _ -> Error ()
-         | Ok decls, None -> Ok decls
-         | Ok decls, Some (qfile, qsrc) ->
-           (match parse_unit parse_diags ~filename:qfile qsrc with
-            | Error () -> Error ()
-            | Ok qdecls -> splice_quantities parse_diags ~file:qfile decls qdecls)
-       in
+       let decls = parse_model parse_diags ~filename src in
        Passtime.record "parse" (Sys.time () -. t_parse);
        decls)
   with
@@ -379,10 +269,9 @@ let front_end_collect ?(name = "model") ?(filename = "<input>")
     Error line. Warnings are not rendered here: callers render once at the
     end of their pipeline, so expansion-phase warnings do not print twice
     when downstream passes also emit diagnostics. *)
-let compile_detail_result ?(name = "model") ?(filename = "<input>")
-    ?(quantities : (string * string) option) (src : string)
+let compile_detail_result ?(name = "model") ?(filename = "<input>") (src : string)
     : (compile_detail, string) result =
-  let (detail, diags, source) = front_end_collect ~name ~filename ?quantities src in
+  let (detail, diags, source) = front_end_collect ~name ~filename src in
   match detail with
   | None ->
     (* Front-end failure (lex/parse/expand): [front_end_collect] captured it
@@ -1014,22 +903,19 @@ let finish_compile (d : compile_detail) : (Ir.model, string) result =
 
 (** Compile a model's source text to the finished IR, rendering every
     diagnostic. [name] becomes the model's name; [filename] is used in
-    diagnostics and to resolve data paths relative to the model;
-    [quantities] is the vocabulary file, as (file name, text). *)
-let compile ?(name = "model") ?(filename = "<input>")
-    ?(quantities : (string * string) option) (src : string)
+    diagnostics and to resolve data paths relative to the model. *)
+let compile ?(name = "model") ?(filename = "<input>") (src : string)
     : (Ir.model, string) result =
-  match compile_detail_result ~name ~filename ?quantities src with
+  match compile_detail_result ~name ~filename src with
   | Ok d -> finish_compile d
   | Error e -> Error e
 
 (** As {!compile}, and also the distinct data files the compile opened, as
     (as written, resolved) pairs, for [camdlc --emit-deps]. The model is the
     one {!compile} returns. *)
-let compile_with_reads ?(name = "model") ?(filename = "<input>")
-    ?(quantities : (string * string) option) (src : string)
+let compile_with_reads ?(name = "model") ?(filename = "<input>") (src : string)
     : (Ir.model * (string * string) list, string) result =
-  match compile_detail_result ~name ~filename ?quantities src with
+  match compile_detail_result ~name ~filename src with
   | Ok d ->
     (match finish_compile d with
      | Ok m -> Ok (m, Expander.reads d.ctx)
@@ -1040,10 +926,9 @@ let compile_with_reads ?(name = "model") ?(filename = "<input>")
     envelope: the model as its author wrote it, built from the same compile,
     so the two describe one model. The model is the one {!compile} returns.
     [camdlc] calls this. *)
-let compile_with_declared ?(name = "model") ?(filename = "<input>")
-    ?(quantities : (string * string) option) (src : string)
+let compile_with_declared ?(name = "model") ?(filename = "<input>") (src : string)
     : (Ir.model * (string * string) list * Declared.declared_model, string) result =
-  match compile_detail_result ~name ~filename ?quantities src with
+  match compile_detail_result ~name ~filename src with
   | Ok d ->
     (match finish_compile d with
      | Ok m -> Ok (m, Expander.reads d.ctx, fst (Lazy.force d.declared))
@@ -1082,8 +967,6 @@ let write_depfile ~(path : string) ~(model : string)
 
    Routing `run_check` through this core means one place defines the
    pipeline, so `check` and `compile` cannot disagree on a model's validity.
-   [quantities] is the `--quantities` vocabulary file, as for [compile], so
-   `check` checks a model with the vocabulary a compile would use.
 
    The pipeline short-circuits exactly as [compile] does: a structural
    [Validate] error stops before dimcheck (Validate runs first because
@@ -1096,10 +979,9 @@ let write_depfile ~(path : string) ~(model : string)
    [detail = None] when lex/parse/expand structurally failed (then [diags]
    holds the E001), [Some d] otherwise (then [diags] is [d.ctx.diags], now
    also carrying any validate/dimcheck/lint/autodiff diagnostics). *)
-let collect_detail ?(name = "model") ?(filename = "<input>")
-    ?(quantities : (string * string) option) (src : string)
+let collect_detail ?(name = "model") ?(filename = "<input>") (src : string)
     : compile_detail option * Diagnostics.t * Source_cache.t =
-  let (detail, diags, source) = front_end_collect ~name ~filename ?quantities src in
+  let (detail, diags, source) = front_end_collect ~name ~filename src in
   (match detail with
    | None -> ()                     (* lex/parse/expand failed; diags has the E001 *)
    | Some d ->

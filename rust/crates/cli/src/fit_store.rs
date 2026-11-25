@@ -375,8 +375,7 @@ pub(crate) struct PredictOptions {
     pub mode: PredictMode,
     /// Every option that changes what is written — the reach, the draws, the
     /// seed, the streams, the scenario and sweep arms, the chain selection,
-    /// the particle count, a `--quantities` vocabulary's digest, a
-    /// forecast's targets and design mode — as canonical JSON of the options
+    /// the particle count, a forecast's targets and design mode — as canonical JSON of the options
     /// `camdl predict` resolved. A new option is in it unless it is named as
     /// left out there.
     pub settings: String,

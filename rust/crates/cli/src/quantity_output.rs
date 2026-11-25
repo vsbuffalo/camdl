@@ -19,6 +19,17 @@ use indexmap::IndexMap;
 
 use crate::quantile::{band, fmt_time, fmt_value, QUANTILE_LEVELS};
 
+/// The directory `simulate --quantities-out DIR` writes a run's quantity
+/// tables to, `DIR/quantities/`, with the manifest `DIR/quantities.json`
+/// beside it. A stored prediction names its manifest `quantities.json` too,
+/// followed by a chain selection's suffix.
+pub(crate) const QUANTITIES_DIR: &str = "quantities";
+
+/// The directory a stored prediction keeps its quantity tables in. The run
+/// store keeps every kind's name, `quantities` among them, out of a result's
+/// top-level directories.
+pub(crate) const STORED_QUANTITIES_DIR: &str = "quantities-model";
+
 /// Banded (predict, `simulate --draws`) vs point (a single fixed-params
 /// `simulate` run). Keyed by the param-source kind, never the cell count alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

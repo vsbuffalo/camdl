@@ -134,7 +134,6 @@ fn fixture_files() -> Vec<(&'static str, String)> {
         ("patch.camdl", PATCH.to_string()),
         ("sir_anchor.camdl", SIR.replace("peak = max(I / N)", "late = value_at(I, last_obs)")),
         ("negative.camdl", NEGATIVE.to_string()),
-        ("vocabulary.camdl", "quantities {\n  peak_i = max(I)\n}\n".into()),
         ("p.toml", "beta_a = 0.4\nbeta_b = 0.2\ngamma = 0.2\nrho = 0.5\n".into()),
         ("p2.toml", "beta_a = 0.5\nbeta_b = 0.2\ngamma = 0.2\nrho = 0.5\n".into()),
         ("patch.toml", "beta = 0.4\ngamma = 0.2\n".into()),
@@ -283,7 +282,6 @@ fn argv(inv: &SimulateInvocation) -> Vec<String> {
         projected_out,
         dates,
         quantities_out,
-        quantities,
         dry_run,
         store,
         parallel,
@@ -369,7 +367,6 @@ fn argv(inv: &SimulateInvocation) -> Vec<String> {
     opt("--design-from", design_from.as_deref().map(p));
     opt("--projected-out", projected_out.as_deref().map(p));
     opt("--quantities-out", quantities_out.as_deref().map(p));
-    opt("--quantities", quantities.as_deref().map(p));
     opt("--store", store.as_deref().map(p));
     opt("--parallel", parallel.map(|n| n.to_string()));
     opt("--label", label.clone());

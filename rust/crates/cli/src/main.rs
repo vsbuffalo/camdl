@@ -14,7 +14,6 @@ mod posterior_draws; // resolve a fit run's canonical posterior draws (--draws p
 mod chain_index;    // the chain number, counted from 0: the one index base every fit surface names (gh#990)
 mod chain_selection; // read-side --exclude-chains: the one chain filter over a posterior cloud
 mod quantile; // shared quantile reduction + numeric formatting (proposal 2026-08-11 §3.6)
-mod quantities_file; // `--quantities FILE`: a separable reporting vocabulary + its artifact key
 mod quantity_output; // generated-quantities banding + tidy-TSV rendering (shared by predict + simulate)
 mod obs_anchor;     // gh#616: runtime resolution of a model's observation anchors
 mod forcing_extrapolation; // a forcing evaluated outside its range: refuse, or hold under the override
@@ -892,7 +891,7 @@ fn run_simulate(inv: args::SimulateInvocation) {
         model, to, from, init_state, allow_degenerate_rates, forcing_extrapolation, model_overrides, param_vec,
         scenarios, enable, disable, backend, output_view, seed, seeds, replicates, draws, sweep, sweep_file, fit,
         n_draws, chains, exclude_chains, emit_every, obs, obs_dir, obs_only, obs_only_dir, quantities_out,
-        quantities, event_log,
+        event_log,
     ) = declared.into_parts();
     let (allow_forcing_extrapolation,) = forcing_extrapolation.into_parts();
     let (params, param, table) = model_overrides.into_parts();
@@ -931,7 +930,7 @@ fn run_simulate(inv: args::SimulateInvocation) {
         output_view: args::OutputView { every, columns: args::ColumnSelection { no_flows, columns } },
         seed, seeds, replicates, draws, sweep, sweep_file, fit, n_draws, chains, exclude_chains, draws_out, output,
         stdout, emit_every, obs, obs_dir, obs_only, obs_only_dir, design_from, projected_out, dates, quantities_out,
-        quantities, dry_run, store: store_root, parallel, force, label, event_log, format, tsv, reactive_log,
+        dry_run, store: store_root, parallel, force, label, event_log, format, tsv, reactive_log,
         manifest, link_root,
     };
     // A file an export writes after the cells are stored must have a
@@ -988,27 +987,12 @@ fn run_simulate(inv: args::SimulateInvocation) {
     // is the resolved IR used for all compilation.
     // `simulate` never reads the state-Jacobian, so compile lean
     // (`needs_state_grad = false`, gh#439 A2 — `--no-state-grad`).
-    // `--quantities FILE` (proposal 2026-08-19): a reporting vocabulary compiled
-    // in place of the model's own `quantities {}` block. Loaded here, before the
-    // compile, because it is a COMPILER input — the block is resolved against
-    // this model's symbols, so a name the model does not declare is a compile
-    // error naming FILE. Its bytes also key the IR cache and, below, the emitted
-    // tables. `Model::hash_into` excludes quantities, so the trajectory leaves
-    // and their `run_id`s are unaffected.
-    let quantities_override: Option<crate::quantities_file::QuantitiesOverride> =
-        match a.quantities.as_deref().map(crate::quantities_file::QuantitiesOverride::load) {
-            None => None,
-            Some(Ok(q)) => Some(q),
-            Some(Err(e)) => {
-                out.fail(format!("error: {}", e));
-            }
-        };
     // `ir_path_given` is the model as named, before any run-time rewrite: a
     // replay of a stored fit compares THIS against the fit's archived model,
     // since `--output-every` below changes the output schedule the model
     // identity hashes, and is a property of this run, not of the model.
     let (ir_path_given, _ir_tmp) =
-        util::resolve_ir_path(&ir_path, false, quantities_override.as_ref(), compile)
+        util::resolve_ir_path(&ir_path, false, compile)
             .unwrap_or_else(|e| {
                 out.fail(format!("error: {}", e));
             });
@@ -2435,7 +2419,6 @@ fn run_simulate(inv: args::SimulateInvocation) {
                 dir,
                 mode,
                 scenario_axis: !scenario_names.is_empty(),
-                vocabulary: quantities_override.clone(),
             })
         } else {
             if !dry_run {

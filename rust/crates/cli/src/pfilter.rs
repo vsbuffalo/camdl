@@ -341,7 +341,7 @@ fn run_pfilter(
     // A `.camdl` is compiled through the IR cache under the command's compile
     // settings, to the full IR (`--no-ir-cache` compiles every time); an
     // `.ir.json` is read as given.
-    let (resolved_ir, ir_tmp) = crate::util::resolve_ir_path(&ir_path, true, None, compile)
+    let (resolved_ir, ir_tmp) = crate::util::resolve_ir_path(&ir_path, true, compile)
         .unwrap_or_else(|e| { out.fail(format!("error: {}", e)); });
     let loaded = crate::util::load_ir(&resolved_ir);
     if let Some(tmp) = &ir_tmp {

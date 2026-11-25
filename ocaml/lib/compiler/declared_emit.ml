@@ -43,8 +43,8 @@
     {!build_detail} and {!build} take the context of a successful
     [Expander.expand_detail]; {!Compiler} builds the section lazily, once,
     after the analysis passes succeed. {!with_compile_inputs} adds what only
-    the command line knows, the [--set] overrides and the [--quantities]
-    file, and [camdlc] calls it before writing the envelope. *)
+    the command line knows, the [--set] overrides, and [camdlc] calls it
+    before writing the envelope. *)
 
 open Ast
 module D = Declared
@@ -67,7 +67,7 @@ type unresolved = {
     are mutated during {!build_detail}. *)
 type env = {
   ctx       : Expander.context;
-  source    : Source_cache.t;  (* the text of every unit of this compile *)
+  source    : Source_cache.t;  (* the text of the model file *)
   comps     : string list;   (* declared compartment names, pre-lowering *)
   quantities : string list;  (* declared quantity names *)
   streams   : string list;   (* declared observation stream names *)
@@ -652,7 +652,7 @@ let files (ctx : Expander.context) : D.file_input list =
     declarations were parsed from, and is where each declaration's text as
     written is read back. The section's compile inputs hold the data files
     the compile read and no [--set] overrides; {!with_compile_inputs} adds
-    those and the [--quantities] file. It fills [Latex]'s table of [@symbol]
+    those. It fills [Latex]'s table of [@symbol]
     overrides from [decls] as a side effect. *)
 let build_detail ~(source : Source_cache.t) (ctx : Expander.context)
     (decls : declaration list)
@@ -795,22 +795,11 @@ let build_detail ~(source : Source_cache.t) (ctx : Expander.context)
 let build ~source ctx decls : D.declared_model =
   fst (build_detail ~source ctx decls)
 
-(** Add what only the compiler's command line knows: the `--set` overrides, in
-    the order given, and a `--quantities` vocabulary file. [model_dir] is the
-    directory of the model file; the vocabulary path is recorded relative to
-    it. *)
-let with_compile_inputs ~(model_dir : string)
-    ~(set_values : (string * float) list)
-    ~(quantities_file : string option) (d : D.declared_model) : D.declared_model =
-  let extra = match quantities_file with
-    | None -> []
-    | Some path ->
-      let sha = match Sha256.hex_of_file path with
-        | h -> Some h
-        | exception Sys_error _ -> None in
-      [ { D.fi_path = relative_between ~from_dir:model_dir path; fi_sha256 = sha } ]
-  in
+(** Add what only the compiler's command line knows: the `--set` overrides,
+    in the order given. *)
+let with_compile_inputs ~(set_values : (string * float) list)
+    (d : D.declared_model) : D.declared_model =
   { d with dm_compile_inputs = {
+      d.dm_compile_inputs with
       ci_set_values = List.map (fun (n, v) ->
-        { D.sv_name = n; sv_value = v }) set_values;
-      ci_files = d.dm_compile_inputs.ci_files @ extra } }
+        { D.sv_name = n; sv_value = v }) set_values } }

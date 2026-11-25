@@ -105,8 +105,8 @@ thin = 1
 "#.to_string()
 }
 
-/// The project every case runs in: the model, its data, two fit configs, a
-/// reporting vocabulary, parameters, and one fit of `fit.toml` (made once per
+/// The project every case runs in: the model, its data, two fit configs,
+/// parameters, and one fit of `fit.toml` (made once per
 /// test binary, before any shim is in place). Each case gets its own copy of
 /// the directory, so cases do not share a store or a log.
 struct Project {
@@ -125,7 +125,6 @@ fn project() -> &'static Project {
         std::fs::write(root.join("fit.toml"), fit_toml()).unwrap();
         std::fs::write(root.join("other.toml"), fit_toml().replace("model.camdl", "other.camdl"))
             .unwrap();
-        std::fs::write(root.join("vocab.camdl"), "quantities {\n  attack_rate = final((N0 - S) / N0)\n}\n").unwrap();
         std::fs::write(root.join("p.toml"), "beta = 0.3\ngamma = 0.1\nN0 = 10000\nI0 = 10\nrho = 0.6\nk = 10\n")
             .unwrap();
         let o = Command::new(binary())
@@ -268,13 +267,13 @@ fn fit_diff() {
     assert_every_compile_follows_the_flag("fit diff", &["fit", "diff", "fit.toml", "other.toml"]);
 }
 
-/// `camdl predict` replays the archived model; a reporting vocabulary is
-/// compiled against the model source, under the flag.
+/// `camdl predict` replays the archived model; a `--model` file is compiled
+/// under the flag.
 #[test]
-fn fit_predict_with_a_vocabulary() {
+fn fit_predict_with_a_model_file() {
     assert_every_compile_follows_the_flag(
-        "predict --quantities",
-        &["predict", &leaf_arg(), "--mode", "free_forward", "--quantities", "vocab.camdl", "--n-draws", "2"],
+        "predict --model",
+        &["predict", &leaf_arg(), "--mode", "free_forward", "--model", "model.camdl", "--n-draws", "2"],
     );
 }
 

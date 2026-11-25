@@ -2,8 +2,7 @@
     model was built from.
 
     A model can read data files at compile time: the knots of a file-backed
-    forcing, the levels of a dimension read from a file, the vocabulary file
-    given with [--quantities]. The compiler records the hash of each such file
+    forcing, the levels of a dimension read from a file. The compiler records the hash of each such file
     beside its path, in a forcing's {!Ir.data_source} and in the file list of
     the declared-model section, so that a compiled model, and every fit built
     on it, says which contents it came from. {!hex_of_file} is what those

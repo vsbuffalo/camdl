@@ -888,32 +888,31 @@ option that changes the output, resolved to the values used: the mode
 `--scenario`/`--enable`/`--disable`, `--sweep`, `--by-chain`, the chains
 `--exclude-chains`/`--chains` drop from the fit's cloud (so the two spellings of
 one selection are one key), the particle count, the quantities and contrasts it
-evaluates (those of the recorded model file, or of `--model`), the SHA-256 of a
-`--quantities` file, `--allow-forcing-extrapolation`, and, for a forecast, its
-target set (each target's stream, period or instant, and design values where it
-reads any; D80, D81), the design mode, and each `--covariate` statement, by
-forcing. A forecast that reads no table forcing after its origin states none,
-and its identity has no field for them. The build is in the ambient key, as for
-every result in the run store. Two predictions that differ in the run, the build
-or any of those inputs therefore never share a folder. The held-out outcomes are
-not in the identity: they change no prediction (D79). The data are the problem's
-stored training files, so an edit to the user's data file after the fit does not
-reach a prediction. A forecast from a stored fit reads its targets from the
-problem's `held_out/` files, computes no held-out score, and refuses
-`--realised-design`, whose design values are held-out values; the held-out rows
-of a stored fit are scored only by `camdl score` against outcome files (§2.2.4),
-and compared by `camdl compare` (Appendix A, `camdl compare`). A rerun of
-`camdl predict` with the same inputs is served from the store, without computing
-the prediction again for every mode but a forecast, whose identity holds the
-target set it computes. `predictive.json`, `observed.json` and `forecast.json`
-record the key under `address_key` and the options under `options`. Every
-manifest of a prediction (`predictive.json`, `observed.json`, the quantities
-manifest, `report.json`, `forecast.json`) records the engine that made it as
-`run.json` does: `engine_version`, the build fingerprint, and `engine_switches`,
-absent when no switch was on. `fit table --quantity` reads the address its own
-free-forward derivation writes. Inside the directory, `--exclude-chains` and
-`--quantities` also name the files (`predictive-excl3/`, `quantities-<key8>/`),
-so a chain-subset or other-vocabulary table says so in its name. A forecast's
+evaluates (those of the recorded model file, or of `--model`),
+`--allow-forcing-extrapolation`, and, for a forecast, its target set (each
+target's stream, period or instant, and design values where it reads any; D80,
+D81), the design mode, and each `--covariate` statement, by forcing. A forecast
+that reads no table forcing after its origin states none, and its identity has
+no field for them. The build is in the ambient key, as for every result in the
+run store. Two predictions that differ in the run, the build or any of those
+inputs therefore never share a folder. The held-out outcomes are not in the
+identity: they change no prediction (D79). The data are the problem's stored
+training files, so an edit to the user's data file after the fit does not reach
+a prediction. A forecast from a stored fit reads its targets from the problem's
+`held_out/` files, computes no held-out score, and refuses `--realised-design`,
+whose design values are held-out values; the held-out rows of a stored fit are
+scored only by `camdl score` against outcome files (§2.2.4), and compared by
+`camdl compare` (Appendix A, `camdl compare`). A rerun of `camdl predict` with
+the same inputs is served from the store, without computing the prediction again
+for every mode but a forecast, whose identity holds the target set it computes.
+`predictive.json`, `observed.json` and `forecast.json` record the key under
+`address_key` and the options under `options`. Every manifest of a prediction
+(`predictive.json`, `observed.json`, the quantities manifest, `report.json`,
+`forecast.json`) records the engine that made it as `run.json` does:
+`engine_version`, the build fingerprint, and `engine_switches`, absent when no
+switch was on. `fit table --quantity` reads the address its own free-forward
+derivation writes. Inside the directory, `--exclude-chains` also names the files
+(`predictive-excl3/`), so a chain-subset table says so in its name. A forecast's
 files carry no such suffix (D86): `forecast.json`, `forecast-samples.tsv`,
 `forecast/` and `report.json` keep their names, the directory alone is keyed by
 the selection, and `forecast.json` states `options.excluded_chains` (`[]` for
@@ -1386,8 +1385,7 @@ a non-finite quantity is an error there, named, with nothing written.
 `predictive-excl3_5.json`, and likewise `contrasts-excl3_5/`,
 `quantities-model-excl3_5/` with its manifest `quantities-excl3_5.json`, and
 `report-excl3_5.json`; the full cloud keeps the bare names. The key is the
-excluded **set**, so `3,5` and `5,3` are one address, and it composes with the
-reporting-vocabulary key (`quantities-<key8>-excl3_5/`). Without this a subset
+excluded **set**, so `3,5` and `5,3` are one address. Without this a subset
 would silently replace the run's canonical predictive and a second subset would
 replace that, leaving only a stamp inside the file that had already been
 overwritten. `observed/` is not keyed — it is the recorded data, identical under
@@ -1430,8 +1428,7 @@ loads back through `--data` to the time it was rendered from (`docs/dates.md`,
 #### 2.2.3 Which object a quantity is read on
 
 `camdl predict` also writes the model's `quantities {}` block to
-`quantities-model/<name>.tsv` plus a `quantities.json` manifest (a
-`--quantities` vocabulary's tables are `quantities-<key8>/`). The run store
+`quantities-model/<name>.tsv` plus a `quantities.json` manifest. The run store
 keeps every result kind's name, `quantities` among them, out of a result's
 top-level directories; `simulate --quantities-out DIR` writes `DIR/quantities/`.
 Those numbers are not all folded over the same object, and the manifest says
@@ -1530,8 +1527,7 @@ own computation with each draw's own seed and the outcomes bound. A bound
 outcome is a held-out value that no filter weight reads and that draws no random
 number, so the prediction computed has the stored prediction's run id and writes
 its files byte for byte; a difference is refused as an internal error and no
-score is written. A prediction made with `--quantities` is refused: its identity
-keeps the vocabulary's digest, not the file.
+score is written.
 
 What is scored, by mode:
 
@@ -1620,8 +1616,6 @@ with `lead` empty. Only the log score is computed for a `joint` row.
   the sets of streams the `joint` rows are of; the notes; and `forcings_held`,
   each forcing the computation held outside its range under
   `--allow-forcing-extrapolation`, which `score` also prints on stderr.
-  `rules.not_scored` records that a prediction made with `--quantities` cannot
-  be scored.
 
 The identity of a score is the prediction, each stream's outcome lines after the
 prediction's conditioning rows (stored as a data table), and the interval levels
@@ -1931,8 +1925,7 @@ A fit problem: the model, the data and the rows that train. Contract version 1.
 #### `prediction`
 
 A prediction from a fit run's posterior or from a fixed point. A name carries a
-suffix when chains were excluded or a quantities vocabulary was read. Contract
-version 2.
+suffix when chains were excluded. Contract version 2.
 
 - `predictive`: `predictive.json`, JSON (always). A part's manifest: its schema,
   its tables and how they were made.
@@ -1954,8 +1947,7 @@ version 2.
 - `quantities`: `quantities.json`, JSON (when the model has quantities). A
   part's manifest: its schema, its tables and how they were made.
 - `quantities-model/<quantity>`: `quantities-model/<quantity>.tsv`, TSV (each
-  quantity of the model's own block; a vocabulary's are under the name of its
-  manifest, `quantities-<key8>/`). One quantity's bands, per time.
+  quantity). One quantity's bands, per time.
 - `contrasts`: `contrasts.json`, JSON (a fit run's prediction when the model has
   contrasts). A part's manifest: its schema, its tables and how they were made.
 - `contrasts/<contrast>`: `contrasts/<contrast>.tsv`, TSV (each contrast
@@ -2759,7 +2751,7 @@ estimated for. So before anything runs, `simulate` compares the two:
 - a **fit config** (`--draws prior|<file> --fit fit.toml`) is compared with the
   model its `[model]` names, compiled now.
 
-The comparison is the one `camdl predict --quantities` uses
+The comparison is the one `camdl predict --model` uses
 (`rust/crates/cli/src/fit/fitted_model.rs`, `compare_to_fitted`): the
 presentation-normalized model identity, which excludes `quantities {}` and
 `contrasts {}`, the model's file name, and `--output-every` (a property of this
@@ -3312,11 +3304,11 @@ seed_42-e81f5a0c3d29/
 Asking for a by-product never changes the cell's id or its record. A rerun that
 asks for a by-product the store lacks simulates the cell again, checks that the
 trajectory reproduces the stored one, and stores the by-product. The quantities
-block a cell evaluates (the model's own, or `--quantities FILE`) is stored once
-as a content artifact under `<build>/quantities/<stem>-<12 hex>/`, as the
-compiled model is under `<build>/compiled_model/`. The observation and quantity
-exports are rendered from the stored by-products; the bare `--event-log` exports
-nothing, and `--event-log PATH` exports the stored log.
+block a cell evaluates is stored once as a content artifact under
+`<build>/quantities/<stem>-<12 hex>/`, as the compiled model is under
+`<build>/compiled_model/`. The observation and quantity exports are rendered
+from the stored by-products; the bare `--event-log` exports nothing, and
+`--event-log PATH` exports the stored log.
 
 **Failures.** A cell whose engine stops with an error is a completed result: its
 folder holds `failure.toml` in place of `traj.tsv`, and each by-product asked of
@@ -6956,13 +6948,13 @@ scenario) group's replicates.
 Each cell's quantities are a `sim_quantities` by-product stored inside the cell
 at `sim_quantities/quantities-<12 hex>/quantities.json`, evaluated from the
 trajectory at full precision, and the tables are rendered from them. The
-quantities block (the model's own, or the `--quantities FILE` vocabulary) is
-stored once as a content artifact at `<build>/quantities/<stem>-<12 hex>/`, and
-the by-product depends on it; the cell's own identity does not (`quantities` and
-`contrasts` are model fields the compiled model's key leaves out). A cell
-already stored without its quantities is simulated again to evaluate them, and
-its trajectory is checked against the stored one. A quantity that is not finite
-stores `failure.toml` in the by-product, and the cell keeps its trajectory.
+quantities block is stored once as a content artifact at
+`<build>/quantities/<stem>-<12 hex>/`, and the by-product depends on it; the
+cell's own identity does not (`quantities` and `contrasts` are model fields the
+compiled model's key leaves out). A cell already stored without its quantities
+is simulated again to evaluate them, and its trajectory is checked against the
+stored one. A quantity that is not finite stores `failure.toml` in the
+by-product, and the cell keeps its trajectory.
 
 Without the flag, a model that declares quantities prints a note and skips them
 rather than erroring.
@@ -8399,10 +8391,6 @@ Observation output
 Other artifacts
   --quantities-out DIR        emit quantities { } as <dir>/quantities/<name>.tsv +
                               quantities.json. A multi-scenario run writes one band per scenario
-  --quantities FILE           with --quantities-out: report with the `quantities { }`
-                              block in FILE (a .camdl file holding only that block)
-                              instead of the model's own; tables land in
-                              <dir>/quantities-<key>/, keyed by FILE's contents
   --event-log [FILE]          store the lineage event log as a by-product of the cell;
                               pass a PATH to also export it. Single-run only
   --format parquet|tsv        event-log export format (default parquet); --tsv is

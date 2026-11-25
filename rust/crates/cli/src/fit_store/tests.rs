@@ -420,9 +420,9 @@ fn the_tree_is_the_layout() {
 /// missing when the prediction is stored; a predictive table no manifest
 /// lists is left out of the set, and so refused; the forecast's produced
 /// streams and its samples file are declared. The quantities manifest lists
-/// one table per quantity it names, under `quantities-model/` for the model's
-/// own block and under the manifest's own name for a vocabulary's; the
-/// contrasts manifest lists its files. A quantity or contrast table no
+/// one table per quantity it names, under `quantities-model/`, followed by a
+/// chain selection's suffix when it has one; the contrasts manifest lists its
+/// files. A quantity or contrast table no
 /// manifest lists is refused, and one listed and never written is missing.
 #[test]
 fn a_prediction_declares_the_tables_its_manifests_list() {
@@ -446,16 +446,16 @@ fn a_prediction_declares_the_tables_its_manifests_list() {
     write("quantities.json", r#"{"quantities": [{"name": "peak", "scenario": "a"}, {"name": "peak", "scenario": "b"}, {"name": "onset"}]}"#);
     write("quantities-model/peak.tsv", "t\n");
     write("quantities-model/stray.tsv", "t\n");
-    write("quantities-ab12cd34.json", r#"{"quantities": [{"name": "size"}], "vocabulary": {"file": "v.toml"}}"#);
-    write("quantities-ab12cd34/size.tsv", "t\n");
+    write("quantities-excl1.json", r#"{"quantities": [{"name": "size"}]}"#);
+    write("quantities-model-excl1/size.tsv", "t\n");
     write("report.json", "{}");
     let declared: Vec<String> = PredictionFile::of_dir(scratch.path()).unwrap().iter().map(ResultFile::stored).collect();
     assert_eq!(
         declared,
         [
             "contrasts.json", "contrasts/averted.tsv", "forecast-samples.tsv", "forecast.json", "forecast/cases.tsv",
-            "predictive.json", "predictive/cases.tsv", "predictive/deaths.tsv", "quantities-ab12cd34.json",
-            "quantities-ab12cd34/size.tsv", "quantities-model/onset.tsv", "quantities-model/peak.tsv",
+            "predictive.json", "predictive/cases.tsv", "predictive/deaths.tsv", "quantities-excl1.json",
+            "quantities-model-excl1/size.tsv", "quantities-model/onset.tsv", "quantities-model/peak.tsv",
             "quantities.json", "report.json",
         ]
     );
@@ -481,7 +481,7 @@ fn a_prediction_declares_the_tables_its_manifests_list() {
     for name in ["predictive.json", "predictive/cases.tsv", "predictive/hosp.tsv", "forecast.json", "forecast/cases.tsv",
                  "forecast-samples.tsv", "contrasts.json", "contrasts/averted.tsv", "contrasts/stray.tsv",
                  "quantities.json", "quantities-model/peak.tsv", "quantities-model/stray.tsv",
-                 "quantities-ab12cd34.json", "quantities-ab12cd34/size.tsv", "report.json"] {
+                 "quantities-excl1.json", "quantities-model-excl1/size.tsv", "report.json"] {
         prediction.result_file(name).unwrap().write_all(b"x").unwrap();
     }
     match prediction.finish() {

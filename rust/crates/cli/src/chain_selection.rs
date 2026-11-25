@@ -660,8 +660,7 @@ pub fn eprint_bias_caveat(out: &crate::out::Out, ) {
 ///
 /// The ids are spelled out rather than digested: a reader who lists the run
 /// directory must be able to see which artifact is which without opening a
-/// file, and unlike a vocabulary file's bytes an exclusion set has a short
-/// canonical literal form. The cost is that the name grows with the set — a
+/// file, and an exclusion set has a short canonical literal form. The cost is that the name grows with the set — a
 /// selection of some tens of chains would exceed a filesystem's 255-byte
 /// component limit, and fails loudly at write time if it ever does.
 pub fn artifact_name(base: &str, selection: Option<&SubsetInfo>) -> String {
@@ -865,13 +864,11 @@ mod tests {
         assert_eq!(artifact_name("predictive", None), "predictive");
         assert_eq!(artifact_name("quantities", None), "quantities");
         assert_eq!(artifact_name("contrasts", None), "contrasts");
-        // An already-keyed quantities vocabulary passes through untouched.
-        assert_eq!(artifact_name("quantities-a1b2c3d4", None), "quantities-a1b2c3d4");
     }
 
     /// The key is the dropped SET, so two spellings of one exclusion are one
-    /// address, a kept set and its complementary dropped set are one address,
-    /// and the key composes with the `quantities-<key8>` vocabulary key.
+    /// address, and a kept set and its complementary dropped set are one
+    /// address.
     #[test]
     fn a_selection_keys_the_address_by_its_normal_form() {
         let six: BTreeSet<ChainIndex> = ChainIndex::all(6).collect();
@@ -896,9 +893,7 @@ mod tests {
             assert_ne!(name("predictive", sel), "predictive");
         }
 
-        // Composes with the vocabulary key: a reporting vocabulary AND a chain
-        // subset are two independent report keys over one fit.
-        assert_eq!(name("quantities-a1b2c3d4", &a), "quantities-a1b2c3d4-excl2_4");
+        assert_eq!(name("quantities-model", &a), "quantities-model-excl2_4");
         assert_eq!(name("contrasts", &a), "contrasts-excl2_4");
     }
 

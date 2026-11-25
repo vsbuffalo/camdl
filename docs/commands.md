@@ -379,8 +379,8 @@ It writes `forecast/<stream>.tsv` (one row per target: `t_start`, `t_stop`,
 and `forecast.json` (the origin, the reach, the rows that conditioned the
 parameters and the state, each target's design values and the design mode with
 its label, and the calendar). Forecasts are available for chain-binomial
-posteriors (PMMH, PGAS); an ODE posterior, `--enable`, `--disable`,
-`--quantities`, `--model` and `--by-chain` are refused in this mode for now.
+posteriors (PMMH, PGAS); an ODE posterior, `--enable`, `--disable`, `--model`
+and `--by-chain` are refused in this mode for now.
 
 `--scenario NAME` and `--sweep` add _arms_ to a forecast: the fitted model is
 the first arm, each scenario and each sweep point another, and every table gains

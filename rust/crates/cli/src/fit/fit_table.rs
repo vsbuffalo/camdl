@@ -462,7 +462,7 @@ fn resolve_quantity_median(
             Some(sel.resolve(&present).ok()?)
         }
     };
-    let sub = crate::chain_selection::artifact_name(&crate::quantities_file::stored_quantities_dir_name(None), info.as_ref());
+    let sub = crate::chain_selection::artifact_name(crate::quantity_output::STORED_QUANTITIES_DIR, info.as_ref());
     // The address the derivation below writes: the run's, keyed by the
     // free-forward options it passes, the chain selection among them (gh#896).
     let options = crate::fit::predict::PredictOptions::free_forward(info.as_ref());

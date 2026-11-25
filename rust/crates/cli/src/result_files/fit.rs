@@ -148,15 +148,14 @@ impl PredictionPart {
     }
 
     /// The part a stored stem names: the part's name, alone or followed by
-    /// `-` and a suffix (a quantities vocabulary's key, a chain exclusion).
+    /// `-` and a suffix (a chain exclusion).
     fn of_stem(stem: &str) -> Option<PredictionPart> {
         PredictionPart::ALL.into_iter().find(|p| stem == p.name() || stem.strip_prefix(p.name()).is_some_and(|r| r.starts_with('-')))
     }
 }
 
 /// The files of a prediction (`prediction`). Its manifests and tables are
-/// named by part, with a suffix when the prediction excluded chains or reads
-/// a quantities vocabulary.
+/// named by part, with a suffix when the prediction excluded chains.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PredictionFile {
     /// `<stem>.json`: a part's manifest, or the report of what failed and
@@ -253,21 +252,13 @@ impl PredictionFile {
             if *part == PredictionPart::Quantities {
                 // Each entry names one quantity, whose table is `<name>.tsv`;
                 // a quantity evaluated in several design cells has an entry
-                // per cell and one table. The model's own block writes its
-                // manifest under `quantities_dir_name(None)` and its tables
-                // under `stored_quantities_dir_name(None)`, each followed by
-                // the chain selection's suffix (`artifact_name`); a
-                // vocabulary's manifest carries its `vocabulary`, and its
-                // tables are under the manifest's own name.
-                let table_dir = if manifest.get("vocabulary").is_some() {
-                    stem.clone()
-                } else {
-                    let manifest_base = crate::quantities_file::quantities_dir_name(None);
-                    let suffix = stem.strip_prefix(&manifest_base).ok_or_else(|| {
-                        format!("internal error: the prediction's quantities manifest `{stem}.json` is not named for the model's block")
-                    })?;
-                    format!("{}{suffix}", crate::quantities_file::stored_quantities_dir_name(None))
-                };
+                // per cell and one table. The manifest is `QUANTITIES_DIR` and
+                // the tables are under `STORED_QUANTITIES_DIR`, each followed
+                // by the chain selection's suffix (`artifact_name`).
+                let suffix = stem.strip_prefix(crate::quantity_output::QUANTITIES_DIR).ok_or_else(|| {
+                    format!("internal error: the prediction's quantities manifest `{stem}.json` is not named for the model's block")
+                })?;
+                let table_dir = format!("{}{suffix}", crate::quantity_output::STORED_QUANTITIES_DIR);
                 for name in manifest["quantities"].as_array().into_iter().flatten().filter_map(|q| q["name"].as_str()) {
                     listed.push(PredictionFile::Table { part: PredictionPart::Quantities, dir: table_dir.clone(), stream: name.into() });
                 }

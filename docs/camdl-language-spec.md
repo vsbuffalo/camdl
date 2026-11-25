@@ -5483,35 +5483,15 @@ of why a prior is what it is free to edit after a long run. Anything the model
 computes with re-keys: a rate, a prior, a bound, a compartment, a transition, an
 observation.
 
-**Vocabulary files.** A `quantities {}` block can be kept in its own `.camdl`
-file, containing only that block, and supplied at the point of use, so several
-models share one reporting vocabulary:
-
-```
-camdl simulate model.camdl --quantities reporting/national.camdl --quantities-out out/
-camdl predict @jigawa-baseline --quantities reporting/national.camdl
-```
-
-The file is compiled with the model, so its body is resolved against the
-model's compartments, parameters and `let` bindings, and a name the model does
-not declare is an error located in the file. It **replaces** the model's own
-block and is never merged with it, so the reported table does not depend on an
-order between two files. A file that declares anything besides quantities is
-**E339**; a file that declares no quantities is **E340**, since the
-replacement would report nothing.
-
-The tables are keyed by the file's contents: `quantities-<key>/<name>.tsv`,
-with a `quantities-<key>.json` manifest whose `vocabulary` object records the
-file's path and SHA-256 digest. Two vocabularies applied to one run therefore
-write two tables, and a formula corrected in place writes a new table. Run
-identity is unchanged.
-
-A fit stores the model IR it ran on, and `camdl predict` reads that stored IR, so
-editing a formula in the model source does not change what an existing fit
-reports; `camdl predict --quantities` does. The vocabulary is compiled against the
-fit's model source and refused unless that source is still the model the fit
-ran on. The comparison excludes quantities and contrasts, so a source edited
-only in its reporting blocks is accepted.
+**Quantities edited after a fit.** A `quantities {}` block belongs in the model
+file. A prediction from a stored fit evaluates the quantities of the model file
+the run's invocation recorded, so editing a formula in the model file after the
+fit does not change what an existing run reports. On the same build, running
+`camdl fit run` again with the edited file reuses the stored fit and records
+the edited file, and `camdl predict @label` evaluates its quantities.
+`camdl predict @run --model FILE` evaluates `FILE`'s quantities instead, on any
+build that can read the fit: `FILE` is refused unless it is the model the fit
+ran on apart from its `quantities {}` and `contrasts {}` (run spec §2.2.2).
 
 ### 16.5 Counterfactual contrasts (`contrasts {}`)
 

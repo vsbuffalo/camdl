@@ -30,8 +30,7 @@
     Lines and columns are 1-based. Columns count bytes, not characters, so a
     multi-byte character such as [×] advances the column by more than one.
     [end_col] is one past the last byte of the span. The parser leaves [file]
-    empty; the expander substitutes the model's file name when it reports, and
-    {!stamp_loc_file} fills it for declarations read from a second file. *)
+    empty; the expander substitutes the model's file name when it reports. *)
 type loc = {
   file     : string;
   line     : int;   (** First line. *)
@@ -1452,44 +1451,3 @@ type declaration =
   | DQuantities   of quantity_decl list
   | DContrasts    of contrast_decl list
 
-(** [l] with [file] set to [file], unless it already names a file.
-
-    A [quantities] block can come from a second file
-    ([camdlc MODEL.camdl --quantities VOCAB.camdl]), and a diagnostic about it
-    must name that file, not the model. The parser leaves every [file] empty
-    and the expander fills it with the model's name, so the declarations read
-    from the second file are stamped with its path before they join the
-    model's list. *)
-let stamp_loc_file ~file (l : loc) : loc =
-  if l.file = "" then { l with file } else l
-
-(** [e] with every location in it stamped by {!stamp_loc_file}. *)
-let rec stamp_expr_file ~file (e : expr) : expr =
-  let go = stamp_expr_file ~file in
-  match e with
-  | EConst _ | EUnit _ -> e
-  | EIdent (n, l) -> EIdent (n, stamp_loc_file ~file l)
-  | EIndex (n, items, l) ->
-    EIndex (n, List.map (stamp_index_item_file ~file) items, stamp_loc_file ~file l)
-  | EBinOp (op, a, b) -> EBinOp (op, go a, go b)
-  | EUnOp (op, a) -> EUnOp (op, go a)
-  | ESum (v, d, g, body, l) -> ESum (v, d, g, go body, stamp_loc_file ~file l)
-  | ESumStages (v, c, body, l) -> ESumStages (v, c, go body, stamp_loc_file ~file l)
-  | ECond (p, a, b) -> ECond (go p, go a, go b)
-  | EFuncCall (f, kvs) -> EFuncCall (f, List.map (fun (k, v) -> (k, go v)) kvs)
-  | EList xs -> EList (List.map go xs)
-  | ERange (a, b) -> ERange (go a, go b)
-  | EObsAccess (s, l) -> EObsAccess (s, stamp_loc_file ~file l)
-  | ERunMember r -> ERunMember { r with loc = stamp_loc_file ~file r.loc }
-
-and stamp_index_item_file ~file = function
-  | IPosn e -> IPosn (stamp_expr_file ~file e)
-  | INamed (n, e) -> INamed (n, stamp_expr_file ~file e)
-  | IStage e -> IStage (stamp_expr_file ~file e)
-
-(** A quantity declaration with its body and spans stamped by
-    {!stamp_loc_file}. *)
-let stamp_quantity_decl_file ~file (qd : quantity_decl) : quantity_decl =
-  { qd with qd_body = stamp_expr_file ~file qd.qd_body;
-            qd_loc  = stamp_loc_file ~file qd.qd_loc;
-            qd_span = stamp_loc_file ~file qd.qd_span }

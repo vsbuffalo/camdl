@@ -768,19 +768,6 @@ pub struct SimulateArgs {
     #[input(adds)]
     pub quantities_out: Option<PathBuf>,
 
-    /// Report with the `quantities {}` block in FILE instead of the model's own.
-    /// FILE is an ordinary `.camdl` file containing ONLY a `quantities {}`
-    /// block; it is compiled against this model, and a name the model does not
-    /// declare is an error naming both the name and FILE. It REPLACES the
-    /// model's block — never merges. The tables land in
-    /// `<dir>/quantities-<key>/`, keyed by FILE's contents, so two vocabularies
-    /// over one model produce two tables rather than overwriting each other.
-    /// The trajectory and the run's identity are unaffected (proposal
-    /// 2026-08-19).
-    #[arg(long, value_name = "FILE", requires = "quantities_out")]
-    #[input(identity, vary = crate::input_fixtures::sim_vocabulary)]
-    pub quantities: Option<PathBuf>,
-
     /// Print resolved run plan without simulating
     #[arg(long)]
     #[input(skip)]
@@ -1763,19 +1750,6 @@ pub struct PredictFlags {
     #[input(identity, vary = crate::input_fixtures::predict_covariate)]
     pub covariate: Vec<crate::args::types::CovariateSpec>,
 
-    /// Report this fit with the `quantities {}` block in FILE instead of the
-    /// model's own. FILE is an ordinary `.camdl` file containing ONLY a
-    /// `quantities {}` block; it is compiled against this fit's model source and
-    /// refused unless that source is still the model the fit ran on. It REPLACES
-    /// the model's block — never merges — and a name the model does not declare
-    /// is an error naming both the name and FILE. The tables land in
-    /// `quantities-<key>/`, keyed by FILE's contents, so two vocabularies over
-    /// one fit produce two tables rather than overwriting each other. The fit's
-    /// own identity is untouched (proposal 2026-08-19).
-    #[arg(long, value_name = "FILE")]
-    #[input(identity, vary = crate::input_fixtures::predict_quantities)]
-    pub quantities: Option<PathBuf>,
-
     /// The draws the bands pool over (default 200): from a stored fit, a cap
     /// on the posterior subsample; from a model file, the number of copies of
     /// the point, each under its own seed. Each horizon pools plenty at a few
@@ -1927,7 +1901,7 @@ pub struct PosteriorFlags {
     /// the model the fit ran on apart from its quantities and contrasts, so
     /// the fit is not computed again. This invocation records FILE as the
     /// model file the fit's compiled model was run from.
-    #[arg(long, value_name = "FILE", conflicts_with = "quantities")]
+    #[arg(long, value_name = "FILE")]
     #[input(identity, vary = crate::input_fixtures::predict_model)]
     pub model: Option<PathBuf>,
 }
@@ -2084,18 +2058,15 @@ pub struct PredictInvocation {
     /// file's compile is the compiled model a fixed-point prediction's
     /// identity holds, so it re-keys the prediction through the model's key.
     /// A posterior prediction runs the fit's stored compile, and the flag
-    /// reaches only the compile of a `--quantities` vocabulary or of a
-    /// `--model` file. A vocabulary is checked against the fit's compile with
-    /// every hoisted subexpression written back in place and contributes only
-    /// its quantities, which hoisting does not touch; there it changes
-    /// nothing. A `--model` file is compared with the fit's compile as
-    /// `simulate --fit` compares a model, hoisted subexpressions included, so
-    /// a file compiled without hoisting is refused beside a fit compiled
-    /// with it.
+    /// reaches only the compile of a `--model` file, which is compared with
+    /// the fit's compile as `simulate --fit` compares a model, hoisted
+    /// subexpressions included: a file compiled without hoisting is refused
+    /// beside a fit compiled with it.
     #[input(identity)]
     pub no_licm: bool,
-    /// `--no-ir-cache`: compile a `--quantities` vocabulary or a `--model` file
-    /// rather than reuse a cached IR, which is the IR a compile emits.
+    /// `--no-ir-cache`: compile a fixed point's model file rather than reuse
+    /// a cached IR, which is the IR a compile emits. A posterior prediction
+    /// reads no cached IR: a `--model` file is compiled every time.
     #[input(execution, exercised_by = crate::input_fixtures::predict_no_ir_cache)]
     pub no_ir_cache: bool,
     #[input(skip)]

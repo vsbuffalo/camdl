@@ -3,8 +3,6 @@
 //! The flag parsing lives in `ocaml/bin/camdlc.ml`, the compiler's entry
 //! point, which no OCaml test links, so these run the built compiler:
 //!
-//! - `check` takes `--quantities FILE` as a compile does, and applies it, so a
-//!   model checked clean compiles clean with the same flags;
 //! - `inspect --help`, `doctest --help` and `render --help` print help and
 //!   exit 0, as the error for an unknown flag and the Makefile tell the
 //!   reader to run them;
@@ -70,31 +68,6 @@ fn write(dir: &Path, name: &str, text: &str) -> String {
     let p = dir.join(name);
     std::fs::write(&p, text).unwrap();
     p.to_str().unwrap().to_string()
-}
-
-#[test]
-fn check_takes_and_applies_quantities() {
-    let Some(cc) = camdlc() else { return };
-    let dir = tempfile::tempdir().unwrap();
-    let model = write(dir.path(), "sir.camdl", SIR);
-    let good = write(dir.path(), "good.camdl", "quantities {\n  peak_i = max(I)\n}\n");
-    // A vocabulary that reads a compartment the model does not have: if
-    // `check` applied it, this fails; if it ignored it, it passes.
-    let bad = write(dir.path(), "bad.camdl", "quantities {\n  peak_x = max(X)\n}\n");
-
-    let o = run(&cc, &["check", "--quantities", &good, &model]);
-    assert!(o.status.success(), "check --quantities good: {}", all_output(&o));
-
-    let o = run(&cc, &["check", &model, "--quantities", &bad]);
-    assert!(!o.status.success(), "check applied no vocabulary: {}", all_output(&o));
-    assert!(
-        !all_output(&o).contains("unknown flag"),
-        "--quantities refused as a flag: {}",
-        all_output(&o)
-    );
-    // The compile agrees with the check.
-    let o = run(&cc, &["--quantities", &bad, &model]);
-    assert!(!o.status.success(), "compile accepted the bad vocabulary");
 }
 
 #[test]

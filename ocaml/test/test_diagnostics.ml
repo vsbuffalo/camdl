@@ -948,20 +948,6 @@ let test_pending_errors_survive_syntax_error () =
   Alcotest.(check bool) "the comma error recorded before it is reported" true
     (comma_error_reported ds)
 
-(* The front end stops after parsing for a reason of its own: a
-   `--quantities` file that declares more than quantities (E339). *)
-let test_pending_errors_survive_front_end_stop () =
-  let (detail, diags, _) =
-    Compiler.front_end_collect ~name:"pae" ~filename:"pae.camdl"
-      ~quantities:("q.camdl", "compartments { X }\n") sir_head
-  in
-  Alcotest.(check bool) "the front end stopped" true (detail = None);
-  let ds = List.rev diags.Diagnostics.diags in
-  Alcotest.(check bool) "E339 is reported" true
-    (List.exists (fun (d : Diagnostics.diagnostic) -> d.code = "E339") ds);
-  Alcotest.(check bool) "the comma error is reported" true
-    (comma_error_reported ds)
-
 (* ── gh#1213: scenario, forcing, table and no-net-effect diagnostics are
    located ───────────────────────────────────────────────────────────────────
 
@@ -1138,8 +1124,6 @@ let () =
     "pending-errors-gh1210", [
       Alcotest.test_case "kept when a later syntax error stops the parse"
         `Quick test_pending_errors_survive_syntax_error;
-      Alcotest.test_case "kept when the front end stops after parsing"
-        `Quick test_pending_errors_survive_front_end_stop;
     ];
     "check-compile-parity", [
       Alcotest.test_case "dangling obs (E507) rejected by check AND compile"

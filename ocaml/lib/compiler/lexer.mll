@@ -143,9 +143,9 @@
 
      The answer is read off the text rather than kept in a "have I emitted a
      token yet" flag, because such a flag would have to be reset per
-     compilation unit and a process compiles several (a model plus its
-     `--quantities` vocabulary; the test suites parse many). Every lexbuf in
-     this compiler is `Lexing.from_string` over one whole file, so the bytes
+     parse and a process parses several (the test suites parse many). Every
+     lexbuf in this compiler is `Lexing.from_string` over one whole file, so
+     the bytes
      before the lexeme are all in [lex_buffer] at their true offsets;
      [lex_abs_pos <> 0] (a refilling channel buffer) falls back to DOC.
 

@@ -13,10 +13,8 @@
 //! otherwise run the fit's draws through different dynamics and exit 0.
 //!
 //! There is one comparison, [`compare_to_fitted`], and every such check uses
-//! it: `camdl predict --quantities` (is the source still the fitted model, so a
-//! vocabulary compiled against it may be transplanted?), `camdl predict
-//! --model` (may the fit be reported through the given file's quantities?)
-//! and the replaying `simulate` paths. It is `ir::model_hash::model_ir_hash` — the
+//! it: `camdl predict --model` (may the fit be reported through the given
+//! file's quantities?) and the replaying `simulate` paths. It is `ir::model_hash::model_ir_hash` — the
 //! presentation-normalized model identity, which excludes `quantities` and
 //! `contrasts` (reporting-only, `Model::hash_into`), the model's file-stem
 //! name, and the gradient maps (model hash SV=2). That is exactly the question a
@@ -38,45 +36,12 @@ pub enum ModelAgreement {
     /// The same model, reporting layer included.
     Same,
     /// The same model apart from its `quantities {}` / `contrasts {}`: a run
-    /// replays the fitted dynamics and reports through the given vocabulary.
+    /// replays the fitted dynamics and reports through the given model's
+    /// quantities and contrasts.
     ReportingDiffers,
     /// A different model: the dynamics, observations, parameters or
     /// simulation settings changed. Both identities, for the message.
     Differs { fitted: ContentHash, given: ContentHash },
-}
-
-/// `m` with every subexpression loop-invariant code motion hoisted written
-/// back in place: each `per_eval_ref` replaced by the body of the binding it
-/// names, and no `per_eval_bindings`. Hoisting moves a parameter-only factor
-/// of a rate into a binding evaluated once per parameter set, which changes
-/// the IR and not the model, so a model compiled with it and one compiled
-/// without it are equal after this. A reference to a name no binding
-/// declares is an error.
-pub fn without_hoisting(m: &ir::Model) -> Result<ir::Model, String> {
-    use serde_json::Value;
-    fn inline(v: &Value, bodies: &std::collections::BTreeMap<String, Value>) -> Result<Value, String> {
-        Ok(match v {
-            Value::Object(o) => {
-                if let (1, Some(Value::String(name))) = (o.len(), o.get("per_eval_ref")) {
-                    return bodies.get(name).cloned().ok_or_else(|| format!("a reference to `{name}`, which no hoisted binding declares"));
-                }
-                Value::Object(o.iter().map(|(k, x)| Ok((k.clone(), inline(x, bodies)?))).collect::<Result<_, String>>()?)
-            }
-            Value::Array(a) => Value::Array(a.iter().map(|x| inline(x, bodies)).collect::<Result<_, _>>()?),
-            other => other.clone(),
-        })
-    }
-    // A binding's body may refer to an earlier binding, so each is inlined
-    // against the ones before it.
-    let mut bodies = std::collections::BTreeMap::new();
-    for b in &m.per_eval_bindings {
-        let body = inline(&serde_json::to_value(&b.expr).map_err(|e| e.to_string())?, &bodies)?;
-        bodies.insert(b.name.clone(), body);
-    }
-    let mut bare = m.clone();
-    bare.per_eval_bindings.clear();
-    let value = inline(&serde_json::to_value(&bare).map_err(|e| e.to_string())?, &bodies)?;
-    serde_json::from_value(value).map_err(|e| e.to_string())
 }
 
 /// Compare `given` against the fit's model `fitted` — the one comparison
@@ -100,7 +65,7 @@ pub fn short(h: &ContentHash) -> String {
 }
 
 /// The notice for [`ModelAgreement::ReportingDiffers`]: the run goes ahead,
-/// and says whose reporting vocabulary it uses.
+/// and says whose quantities and contrasts it uses.
 /// `relation` says what the reference model is to `fit` ("ran on", "names").
 fn reporting_notice(fit: &str, relation: &str, given_path: &str) -> String {
     format!(
@@ -341,7 +306,7 @@ pub(crate) fn check_fit_config(
     given_path: &str,
     compile: crate::util::CompileSettings,
 ) -> Result<Option<String>, String> {
-    let (ir_path, _tmp) = crate::util::resolve_ir_path(config_model, false, None, compile)
+    let (ir_path, _tmp) = crate::util::resolve_ir_path(config_model, false, compile)
         .map_err(|e| format!("--fit {fit_toml}: compiling its [model] {config_model}: {e}"))?;
     let (named, _) = crate::util::load_ir(&ir_path)?;
     match compare_to_fitted(&named, given) {

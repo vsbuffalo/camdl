@@ -410,12 +410,6 @@ fn check_emitted_ir_version(
 /// so a lean-compiled entry is never served to an nl-lbfgs+ode fit (which needs
 /// the Jacobian) and vice-versa.
 ///
-/// `quantities` is an optional vocabulary file whose `quantities { }` block
-/// REPLACES the model's own (proposal 2026-08-19). It is passed to camdlc by
-/// path — the compiler reads it as a second compilation unit and resolves it
-/// against this model's symbols — and its bytes are folded into the IR-cache
-/// key, so two vocabularies over one model never share a cached IR.
-///
 /// camdlc can take ~20s on large stratified models and `.output()` blocks
 /// the whole time. While it runs we show a progress indicator on **stderr**
 /// so the user knows the tool is working, respecting the `--progress` mode:
@@ -434,7 +428,6 @@ pub(crate) fn run_camdlc_compile(
     camdl_path: &str,
     emit_deps: Option<&std::path::Path>,
     needs_state_grad: bool,
-    quantities: Option<&crate::quantities_file::QuantitiesOverride>,
     compile: CompileSettings,
 ) -> Result<String, String> {
     let camdlc = find_camdlc()?;
@@ -485,12 +478,6 @@ pub(crate) fn run_camdlc_compile(
     // recompiles rather than serving the wrong variant.
     if !needs_state_grad {
         cmd.arg("--no-state-grad");
-    }
-    // The reporting vocabulary (proposal 2026-08-19). camdlc parses it as a
-    // second compilation unit and splices its `quantities { }` in place of the
-    // model's, so a missing symbol is reported against THIS path.
-    if let Some(q) = quantities {
-        cmd.arg("--quantities").arg(&q.path);
     }
     pass_stderr_color_policy(&mut cmd);
     let output = cmd.output();
@@ -676,7 +663,6 @@ pub(crate) fn ir_cache_key(
     fold_disabled: bool,
     licm_enabled: bool,
     state_grad_emitted: bool,
-    quantities: Option<&[u8]>,
 ) -> String {
     let mut buf = Vec::with_capacity(content.len() + compiler_id.len() + ir_ver.len() + 8);
     buf.extend_from_slice(content);
@@ -695,20 +681,6 @@ pub(crate) fn ir_cache_key(
     buf.push(fold_disabled as u8);
     buf.push(licm_enabled as u8);
     buf.push(state_grad_emitted as u8);
-    // The `--quantities` vocabulary (proposal 2026-08-19): a compiler input
-    // that changes the emitted IR, so it belongs here for the same reason
-    // `--no-state-grad` does. Without it, two vocabularies over one model
-    // collide on one cache entry and the second run is served the first's
-    // quantities. Length-prefixed, so no vocabulary's bytes can be confused
-    // with the absence of one.
-    match quantities {
-        None => buf.push(0),
-        Some(q) => {
-            buf.push(1);
-            buf.extend_from_slice(&(q.len() as u64).to_le_bytes());
-            buf.extend_from_slice(q);
-        }
-    }
     crate::hashing::sha256_hex(&buf)
 }
 
@@ -1173,31 +1145,14 @@ mod single_flight {
 /// the fit path passes `true` iff any method is nuts+ode. The bit is folded into
 /// the cache key, so a lean entry is never reused for a nuts+ode fit.
 ///
-/// `quantities` is an optional reporting vocabulary spliced in (proposal
-/// 2026-08-19): it replaces the model's own `quantities { }` block, reaches
-/// camdlc as `--quantities <path>`, and its bytes key the cache entry, so a
-/// second vocabulary over the same model compiles rather than being served the
-/// first one's IR. The compile runs under `compile`, the command's settings.
+/// The compile runs under `compile`, the command's settings.
 #[expect(clippy::disallowed_methods, reason = "reads the model source to key the IR cache; the compiled IR it resolves to is what the model's identity hashes")]
 pub(crate) fn resolve_ir_path(
     path: &str,
     needs_state_grad: bool,
-    quantities: Option<&crate::quantities_file::QuantitiesOverride>,
     compile: CompileSettings,
 ) -> Result<(String, Option<std::path::PathBuf>), String> {
     if !path.ends_with(".camdl") {
-        // A vocabulary can only be applied by the compiler, and a compiled
-        // `.ir.json` has no compiler step left. Refuse rather than return IR
-        // carrying the model's own quantities under a flag that says otherwise.
-        if let Some(q) = quantities {
-            return Err(format!(
-                "--quantities {} needs the model SOURCE, but {} is compiled IR; \
-                 a vocabulary is resolved against the model's symbols at compile \
-                 time, so it cannot be applied to an already-compiled model",
-                q.path.display(),
-                path
-            ));
-        }
         return Ok((path.to_string(), None));
     }
 
@@ -1212,7 +1167,7 @@ pub(crate) fn resolve_ir_path(
                 // change the IR camdlc emits, so both belong in the key — else
                 // flipping one serves the stale variant.
                 let fold_disabled = crate::env::get().vars.no_constant_fold;
-                let key = ir_cache_key(&content, &compiled_model_name(path), &compiler_id, ir::IR_VERSION.trim(), fold_disabled, compile.licm_enabled(), needs_state_grad, quantities.map(|q| q.bytes.as_slice()));
+                let key = ir_cache_key(&content, &compiled_model_name(path), &compiler_id, ir::IR_VERSION.trim(), fold_disabled, compile.licm_enabled(), needs_state_grad);
                 Some((dir.join(format!("{}.ir.json", key)), key))
             }
             _ => None,
@@ -1263,7 +1218,7 @@ pub(crate) fn resolve_ir_path(
     let deps_tmp = cache_target.as_ref().map(|(_, key)| {
         std::env::temp_dir().join(format!("camdl_deps_{}_{}.json", std::process::id(), key))
     });
-    let json = run_camdlc_compile(path, deps_tmp.as_deref(), needs_state_grad, quantities, compile)?;
+    let json = run_camdlc_compile(path, deps_tmp.as_deref(), needs_state_grad, compile)?;
     let read_deps = match deps_tmp.as_ref() {
         Some(dp) => {
             let built = build_read_deps(dp);
@@ -1330,7 +1285,7 @@ fn ir_text(path: &str, compile: Option<CompileSettings>) -> Result<String, Strin
         // (`--no-state-grad`) lives on the run-producing path
         // (`resolve_ir_path`), which knows the method and so can safely drop
         // the Jacobian.
-        Some(compile) if path.ends_with(".camdl") => run_camdlc_compile(path, None, true, None, compile),
+        Some(compile) if path.ends_with(".camdl") => run_camdlc_compile(path, None, true, compile),
         Some(_) => std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {}", path, e)),
         None => {
             require_compiled(path)?;
@@ -2016,63 +1971,43 @@ mod ir_cache_key_tests {
     fn key_is_stable_and_distinguishes_content_compiler_and_schema() {
         // Args: (content, compiler_id, ir_ver, fold_disabled, licm_enabled,
         //        state_grad_emitted). `a` = full IR (state-Jacobian emitted).
-        let a = ir_cache_key(b"model A", "m", "git1", "0.7", false, false, true, None);
+        let a = ir_cache_key(b"model A", "m", "git1", "0.7", false, false, true);
         // Same inputs → same key (cache hit).
-        assert_eq!(a, ir_cache_key(b"model A", "m", "git1", "0.7", false, false, true, None));
+        assert_eq!(a, ir_cache_key(b"model A", "m", "git1", "0.7", false, false, true));
         // Different model content → different key (an edit recompiles).
-        assert_ne!(a, ir_cache_key(b"model B", "m", "git1", "0.7", false, false, true, None));
+        assert_ne!(a, ir_cache_key(b"model B", "m", "git1", "0.7", false, false, true));
         // The file stem names the model in the emitted IR, so it keys.
-        assert_ne!(a, ir_cache_key(b"model A", "n", "git1", "0.7", false, false, true, None));
+        assert_ne!(a, ir_cache_key(b"model A", "n", "git1", "0.7", false, false, true));
         // Different compiler version → different key (a camdlc upgrade recompiles).
-        assert_ne!(a, ir_cache_key(b"model A", "m", "git2", "0.7", false, false, true, None));
+        assert_ne!(a, ir_cache_key(b"model A", "m", "git2", "0.7", false, false, true));
         // Different IR schema version → different key (a format change recompiles).
-        assert_ne!(a, ir_cache_key(b"model A", "m", "git1", "0.8", false, false, true, None));
+        assert_ne!(a, ir_cache_key(b"model A", "m", "git1", "0.8", false, false, true));
         // Flipping CAMDL_NO_CONSTANT_FOLD changes the emitted IR → different key
         // (must not serve the folded IR when the user asked for unfolded).
-        assert_ne!(a, ir_cache_key(b"model A", "m", "git1", "0.7", true, false, true, None));
+        assert_ne!(a, ir_cache_key(b"model A", "m", "git1", "0.7", true, false, true));
         // gh#272: LICM on vs off (default-on; `--no-licm` / `CAMDL_NO_LICM` forces
         // off) changes the emitted IR (hoisted vs inlined) → different key, so the
         // toggle recompiles rather than serving the stale variant through fit.
-        assert_ne!(a, ir_cache_key(b"model A", "m", "git1", "0.7", false, true, true, None));
+        assert_ne!(a, ir_cache_key(b"model A", "m", "git1", "0.7", false, true, true));
         // gh#439 A2: state-Jacobian emitted (full, nuts+ode) vs skipped (lean,
         // `--no-state-grad`) changes the emitted IR bytes → different key, so a
         // lean simulate/mh entry is never served to a nuts+ode fit that needs the
         // Jacobian (and vice-versa).
-        assert_ne!(a, ir_cache_key(b"model A", "m", "git1", "0.7", false, false, false, None));
+        assert_ne!(a, ir_cache_key(b"model A", "m", "git1", "0.7", false, false, false));
         // The three switches are independent — none masks the others.
         assert_ne!(
-            ir_cache_key(b"model A", "m", "git1", "0.7", true, false, true, None),
-            ir_cache_key(b"model A", "m", "git1", "0.7", false, true, true, None)
+            ir_cache_key(b"model A", "m", "git1", "0.7", true, false, true),
+            ir_cache_key(b"model A", "m", "git1", "0.7", false, true, true)
         );
         assert_ne!(
-            ir_cache_key(b"model A", "m", "git1", "0.7", false, false, false, None),
-            ir_cache_key(b"model A", "m", "git1", "0.7", false, true, true, None)
+            ir_cache_key(b"model A", "m", "git1", "0.7", false, false, false),
+            ir_cache_key(b"model A", "m", "git1", "0.7", false, true, true)
         );
         // 64-hex sha256.
         assert_eq!(a.len(), 64);
         assert!(a.bytes().all(|c| c.is_ascii_hexdigit()));
     }
 
-    /// The `--quantities` vocabulary is a compiler input that changes the
-    /// emitted IR, so it must key the cache entry. Without this, two
-    /// vocabularies over one model collide and the second run is served the
-    /// first's quantities — the same class as the fold/LICM/state-grad
-    /// switches above.
-    #[test]
-    fn key_distinguishes_the_quantities_vocabulary() {
-        let none = ir_cache_key(b"model A", "m", "git1", "0.7", false, false, true, None);
-        let va = ir_cache_key(b"model A", "m", "git1", "0.7", false, false, true, Some(b"quantities { a = final(S) }"));
-        let vb = ir_cache_key(b"model A", "m", "git1", "0.7", false, false, true, Some(b"quantities { b = final(R) }"));
-        assert_ne!(none, va, "a vocabulary must not share the model's own key");
-        assert_ne!(va, vb, "two vocabularies must not collide");
-        assert_eq!(
-            va,
-            ir_cache_key(b"model A", "m", "git1", "0.7", false, false, true, Some(b"quantities { a = final(S) }")),
-            "the same vocabulary is the same entry (a cache hit)"
-        );
-        // Length-prefixed, so an empty vocabulary is distinguishable from none.
-        assert_ne!(none, ir_cache_key(b"model A", "m", "git1", "0.7", false, false, true, Some(b"")));
-    }
 }
 
 #[cfg(test)]
@@ -2953,17 +2888,6 @@ pub fn resolve_param_vec_entries(
         }
     }
     Ok(out)
-}
-
-/// `None`. There is no CLI tolerance flag — the orphan-tolerance state stays
-/// unrepresentable (tolerances are a model property).
-pub fn apply_integrator_override(
-    model: &mut ir::Model,
-    method: Option<crate::args::types::IntegratorArg>,
-) {
-    if let Some(m) = method {
-        model.simulation.integrator = overridden_integrator(&model.simulation.integrator, m);
-    }
 }
 
 /// The integrator `--integrator method` selects over a model declaring
@@ -4819,34 +4743,27 @@ mod tests {
         }
     }
 
-    // ── apply_integrator_override (gh#166 C4) ────────────────────────────────
+    // ── overridden_integrator ────────────────────────────────────────────────
 
     #[test]
     fn integrator_override_method_only_and_preserves_tolerances() {
         use ir::model::Integrator;
         use crate::args::types::IntegratorArg;
-        let (base, _) = load_ir(&sir_model()).expect("load golden");
-        let with = |i: Integrator| { let mut m = base.clone(); m.simulation.integrator = i; m };
 
         // rk4 model + force rk45 → rk45 with DEFAULT (None) tolerances.
-        let mut m = with(Integrator::Rk4);
-        apply_integrator_override(&mut m, Some(IntegratorArg::Rk45));
-        assert_eq!(m.simulation.integrator, Integrator::Rk45 { atol: None, rtol: None });
+        assert_eq!(
+            overridden_integrator(&Integrator::Rk4, IntegratorArg::Rk45),
+            Integrator::Rk45 { atol: None, rtol: None }
+        );
 
         // rk45 model with tolerances + force rk45 → tolerances PRESERVED.
-        let mut m = with(Integrator::Rk45 { atol: Some(1e-9), rtol: Some(1e-7) });
-        apply_integrator_override(&mut m, Some(IntegratorArg::Rk45));
-        assert_eq!(m.simulation.integrator, Integrator::Rk45 { atol: Some(1e-9), rtol: Some(1e-7) });
+        assert_eq!(
+            overridden_integrator(&Integrator::Rk45 { atol: Some(1e-9), rtol: Some(1e-7) }, IntegratorArg::Rk45),
+            Integrator::Rk45 { atol: Some(1e-9), rtol: Some(1e-7) }
+        );
 
         // rk45 model + force rk4 → rk4 (tolerances dropped).
-        let mut m = with(Integrator::Rk45 { atol: Some(1e-9), rtol: None });
-        apply_integrator_override(&mut m, Some(IntegratorArg::Rk4));
-        assert_eq!(m.simulation.integrator, Integrator::Rk4);
-
-        // None override → unchanged.
-        let mut m = with(Integrator::Rk45 { atol: Some(1e-9), rtol: Some(1e-7) });
-        apply_integrator_override(&mut m, None);
-        assert_eq!(m.simulation.integrator, Integrator::Rk45 { atol: Some(1e-9), rtol: Some(1e-7) });
+        assert_eq!(overridden_integrator(&Integrator::Rk45 { atol: Some(1e-9), rtol: None }, IntegratorArg::Rk4), Integrator::Rk4);
     }
 
     // ── resolve_relative_to_toml ─────────────────────────────────────────────

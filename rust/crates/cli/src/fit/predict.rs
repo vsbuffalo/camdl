@@ -2202,9 +2202,7 @@ impl Reposed {
 /// through `--holdout-after` binds the outcome file `outcomes` gives for a
 /// stream source in place of its stored data, which holds no row after the
 /// declaration and so cannot be cut by it; the conditioned lines it yields
-/// must be the stored ones, which the prediction's run id then checks. A
-/// prediction made with a `--quantities` vocabulary is refused: its identity
-/// keeps the vocabulary's digest, not the file.
+/// must be the stored ones, which the prediction's run id then checks.
 pub(crate) fn repose(
     out: &crate::out::Out,
     store: &store::Store,
@@ -2220,12 +2218,6 @@ pub(crate) fn repose(
     let settings: serde_json::Value =
         serde_json::from_str(&id.options.settings).map_err(|e| format!("the prediction's options: {e}"))?;
     let bad = |what: &str| format!("internal error: the prediction's options hold no valid `{what}`");
-    if settings.get("quantities").is_some_and(|q| !q.is_null()) {
-        return Err("this prediction evaluated a `--quantities` vocabulary, and its identity keeps the \
-                    vocabulary's digest, not the file, so `score` cannot compute it again. Predict \
-                    without --quantities and score that prediction."
-            .into());
-    }
     let strings = |v: &serde_json::Value| -> Vec<String> {
         match v {
             serde_json::Value::String(s) => vec![s.clone()],
@@ -2731,7 +2723,7 @@ impl SourceReads {
             // `camdl predict` replays forward trajectories from stored draws — it never
             // recomputes an ODE gradient, so compile lean (`needs_state_grad = false`,
             // gh#439 A2).
-            crate::util::resolve_ir_path(&config.model.camdl, false, None, compile)?
+            crate::util::resolve_ir_path(&config.model.camdl, false, compile)?
         };
         let schema = crate::run_meta::read_fit_sidecar(&segment)?.and_then(|s| s.schema);
         Ok(SourceReads {
@@ -2888,35 +2880,13 @@ fn run_predict(
     // stored compile the prediction's identity names.
     crate::camdl_store::require_stored_model(&model, stored_model, "prediction", &compiled_ir)?;
 
-    // 3a. `--quantities FILE` (proposal 2026-08-19): report this fit with a
-    //     supplied reporting vocabulary in place of the model's own. This is the
-    //     reason the feature exists — the archived IR above is what makes a fit
-    //     self-contained AND what makes correcting a quantity in the source have
-    //     no effect on a fit that already ran.
-    //
-    //     The vocabulary is compiled against the model SOURCE, not the archived
-    //     IR, and the source is required. A `let` that mentions a parameter
-    //     (`let R0 = beta / gamma`) is INLINED at its use sites and appears
-    //     nowhere in the compiled IR, so a vocabulary resolved against the IR
-    //     would reject `R0` as undeclared against a model that plainly declares
-    //     it — a wrong answer of exactly the plausible-looking kind.
-    //
-    //     Safety comes from a hash, not from trust: `model_ir_hash` EXCLUDES
-    //     `quantities` (`ir::model_hash`'s `ir_quantities_excluded_from_hash`), so the
-    //     recompiled model and the archived one must hash equal. If they do the
-    //     source is the same model that was fit, modulo exactly the reporting
-    //     layer we are replacing, and transplanting its quantities is sound. If
-    //     they differ the source has drifted and we refuse — the alternative is
-    //     reporting a fit through formulas written for a different model.
-    let vocabulary: Option<crate::quantities_file::QuantitiesOverride> =
-        args.flags.quantities.as_deref().map(crate::quantities_file::QuantitiesOverride::load).transpose()?;
     // The options that key the output directory. A forecast's gain its design
     // inputs (D81) once its plan is built, so the forecast addresses its own
     // directory (`run_forecast`); every other mode's is addressed below,
     // after the forecast branch.
     let mut options = PredictOptions {
         particles: runs_filter.then_some(particles.n),
-        ..PredictOptions::of(args, posterior.selection(), vocabulary.as_ref())
+        ..PredictOptions::of(args, posterior.selection())
     };
     // With no --mode, the modes that apply to the fit's backend, resolved
     // before the options are keyed: where the one-step band does not apply,
@@ -2932,19 +2902,6 @@ fn run_predict(
             if args.posterior.realised_design { "--realised-design" } else { "--design" }));
     }
     refuse_covariate_outside_forecast(args, mode)?;
-    if let Some(v) = &vocabulary {
-        // The vocabulary compiles against the model file the problem keeps.
-        let mut posed = config.clone();
-        posed.model.camdl = match &source {
-            PredictSource::Posterior(fit) => fit.model_source()?,
-            PredictSource::FixedPoint(p) => p.model_source.clone(),
-        }
-        .to_string_lossy()
-        .into_owned();
-        model.quantities =
-            quantities_from_vocabulary(&model, &posed, v, compile, args.fixed_point.integrator, treatment_kind)?;
-    }
-
     // gh#616: `camdl predict` HAS the fit's data, so it resolves the model's
     // observation anchors rather than refusing them — and it must do so HERE,
     // before the horizon guard below and before any compile. Inheriting an
@@ -3274,7 +3231,7 @@ fn run_predict(
 
     // The output directory, keyed by every input that changes what is written
     // there: the run, the engine, and the options as resolved (the chain
-    // selection against this fit's chains, the vocabulary by its bytes). Two
+    // selection against this fit's chains). Two
     // predictions from different inputs never share it.
     let address_key = options.address_key(&run_id);
     let out_dir = scratch.path().to_path_buf();
@@ -4490,36 +4447,26 @@ fn run_predict(
     // These are NOT in the run_id-keyed CAS leaf — a regenerated sidecar beside
     // `predictive/`/`observed/`, overwritten in place.
     //
-    // WHICH sidecar, though, is keyed by the reporting vocabulary that produced
-    // it (proposal 2026-08-19): the model's own block keeps writing
-    // `quantities/`, a `--quantities` vocabulary writes `quantities-<key8>/`
-    // with a matching manifest. Two vocabularies applied to one fit are two
-    // different tables; sharing one address would overwrite the first and leave
-    // no way to tell which formulas produced the survivor.
-    //
-    // A quantity is read off the posterior cloud, so the CHAIN SELECTION keys it
-    // for exactly the same reason (gh#795) — a chain-subset table is a different
-    // table. The two keys are independent and compose:
-    // `quantities-<key8>-excl3_5/`.
+    // A quantity is read off the posterior cloud, so the chain selection keys
+    // its table (gh#795): a chain-subset table is a different table,
+    // `quantities-model-excl3_5/`.
     let quantities_sub = crate::chain_selection::artifact_name(
-        &crate::quantities_file::stored_quantities_dir_name(vocabulary.as_ref()),
+        crate::quantity_output::STORED_QUANTITIES_DIR,
         posterior.selection(),
     );
     for (name, content) in &quantity_outputs {
         written.push(write_tsv(&out_dir, &quantities_sub, name, content)?);
     }
     if let Some(manifest) = &quantity_manifest {
-        let manifest =
-            crate::quantities_file::stamp_provenance(manifest, vocabulary.as_ref())?;
-        let mut manifest: serde_json::Value = serde_json::from_str(&manifest)
+        let mut manifest: serde_json::Value = serde_json::from_str(manifest)
             .map_err(|e| format!("parsing the quantities manifest: {e}"))?;
         stamp_engine(&mut manifest);
         let manifest = serde_json::to_string_pretty(&manifest)
             .map_err(|e| format!("serializing the quantities manifest: {e}"))?;
-        // The manifest keeps the name `quantities_dir_name` gives, a file the
-        // store allows at the top level.
+        // The manifest is named `quantities.json`, a file the store allows at
+        // the top level.
         let manifest_name = crate::chain_selection::artifact_name(
-            &crate::quantities_file::quantities_dir_name(vocabulary.as_ref()),
+            crate::quantity_output::QUANTITIES_DIR,
             posterior.selection(),
         );
         let path = out_dir.join(format!("{manifest_name}.json"));
@@ -4689,105 +4636,6 @@ fn free_forward_scored(
         }
     }
     cells
-}
-
-/// Compile `vocabulary` against the fit's model SOURCE and return the quantity
-/// IR to transplant onto `archived` — refusing unless the source is still the
-/// same model the fit ran on.
-///
-/// The equality test is [`crate::fit::fitted_model::compare_to_fitted`] —
-/// `ir::model_hash::model_ir_hash`, which excludes `quantities` (and
-/// `contrasts`), the comparison every replay of a fit through a given model
-/// shares. That is what makes it the right test rather
-/// than merely a convenient one: it asks "is this the same model apart from its
-/// reporting layer?", which is exactly the question a reporting-layer swap has
-/// to answer yes to. It is also gradient-independent (model hash SV=2), so the lean
-/// recompile here and a full-Jacobian fit compile still agree.
-fn quantities_from_vocabulary(
-    archived: &ir::Model,
-    config: &crate::fit::config_v2::Problem,
-    vocabulary: &crate::quantities_file::QuantitiesOverride,
-    compile: crate::util::CompileSettings,
-    integrator: Option<crate::args::types::IntegratorArg>,
-    treatment: TreatmentKind,
-) -> Result<Vec<ir::quantity::Quantity>, String> {
-    let model_source: &str = &config.model.camdl;
-    // What the messages call the model the prediction runs: a fit's, or the
-    // model file a fixed point was given with.
-    let whose = match treatment {
-        TreatmentKind::Posterior => "this fit's model",
-        TreatmentKind::PlugIn => "the fixed point's model",
-    };
-    // Messages name the model file in the stored problem, not its scratch copy.
-    let shown = crate::fit_store::shown(std::path::Path::new(model_source));
-    if !crate::util::model_is_camdl_source(model_source) {
-        return Err(format!(
-            "--quantities needs {whose} SOURCE, but the prediction runs `{}`, \
-             which is compiled IR. A reporting vocabulary is resolved against the model's \
-             symbols at compile time, and a `let` that mentions a parameter is inlined away \
-             in the IR, so it cannot be applied to a compiled model.",
-            shown.display()
-        ));
-    }
-    if !std::path::Path::new(model_source).is_file() {
-        return Err(format!(
-            "--quantities needs {whose} source `{}`, which is not readable from here. A \
-             reporting vocabulary has to be compiled against the model's symbols.",
-            shown.display()
-        ));
-    }
-    // Lean compile: `camdl predict` replays forward trajectories and never
-    // recomputes an ODE gradient (gh#439 A2). Identity is gradient-independent,
-    // so this does not disturb the hash comparison below.
-    let (ir_path, _tmp) = crate::util::resolve_ir_path(model_source, false, Some(vocabulary), compile)?;
-    let (mut recompiled, _) = crate::util::load_ir(&ir_path)?;
-    // A fixed point's compile carries `--integrator`, written in before it
-    // was keyed; the source compiled here is given the same.
-    crate::util::apply_integrator_override(&mut recompiled, integrator);
-    use crate::fit::fitted_model::{as_fitted, compare_to_fitted, short, without_hoisting, ModelAgreement};
-    // The archived IR is the model AFTER `fit run` resolved its observation
-    // anchors; the recompiled source still carries them. Both go through the
-    // fit's own resolution before the comparison — a no-op on the archived IR,
-    // and on the pre-archive fallback (`archived` recompiled from source) it
-    // resolves both sides alike. Both are compared with their hoisted
-    // subexpressions written back in place, so the fit's compile and this
-    // one agree whether loop-invariant code motion ran in either.
-    let resolve = |m: &ir::Model| {
-        as_fitted(m, config).map(|(m, _)| m).and_then(|m| without_hoisting(&m)).map_err(|e| {
-            format!(
-                "--quantities: resolving the observation anchors of {whose} against its \
-                 data, to compare the source with the model the prediction runs, failed: {e}"
-            )
-        })
-    };
-    let recompiled = resolve(&recompiled)?;
-    if let ModelAgreement::Differs { fitted: archived_h, given: recompiled_h } =
-        compare_to_fitted(&resolve(archived)?, &recompiled)
-    {
-        return Err(match treatment {
-            TreatmentKind::Posterior => format!(
-                "this fit's model source `{}` is no longer the model the fit ran on, \
-                 so a reporting vocabulary cannot be checked against it (archived {}, source {}). \
-                 Quantities are excluded from that hash, so this difference is a real change to \
-                 the dynamics, observations, or parameters — not the vocabulary. Re-run the fit \
-                 against the current source, or check out the source the fit used.",
-                shown.display(),
-                short(&archived_h),
-                short(&recompiled_h),
-            ),
-            TreatmentKind::PlugIn => format!(
-                "the model file `{}` compiled with the vocabulary is not the model the fixed point \
-                 runs (model {}, with the vocabulary {}). Quantities are excluded from that hash, so \
-                 the file changed while the prediction ran; run it again.",
-                shown.display(),
-                short(&archived_h),
-                short(&recompiled_h),
-            ),
-        });
-    }
-    // The quantities transplanted refer to no hoisted binding, so they read
-    // the same in the archived model whatever it hoisted.
-    Ok(recompiled.quantities)
 }
 
 /// Whether a model observation leaf corresponds to a loaded `LeafObs` (matched
@@ -5201,10 +5049,6 @@ pub(crate) struct PredictOptions {
     /// the whole cloud was used.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub excluded_chains: Option<Vec<usize>>,
-    /// The SHA-256 of the `--quantities` file; absent for the model's own
-    /// `quantities {}` block.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub quantities: Option<String>,
     /// `--allow-forcing-extrapolation` as given on the command line.
     pub allow_forcing_extrapolation: bool,
     /// The filters' particle count (D85), present whenever a filter runs
@@ -5264,7 +5108,6 @@ impl PredictOptions {
             sweep: Vec::new(),
             by_chain: false,
             excluded_chains: None,
-            quantities: None,
             allow_forcing_extrapolation: false,
             particles: None,
             forecast: None,
@@ -5282,11 +5125,10 @@ impl PredictOptions {
     }
 
     /// The options of `args`, with the chain selection as resolved against the
-    /// fit (`excluded`) and the `--quantities` vocabulary as loaded.
+    /// fit (`excluded`).
     pub(crate) fn of(
         args: &crate::args::PredictArgs,
         excluded: Option<&crate::chain_selection::SubsetInfo>,
-        vocabulary: Option<&crate::quantities_file::QuantitiesOverride>,
     ) -> Self {
         use crate::args::types::PredictModeArg;
         PredictOptions {
@@ -5308,7 +5150,6 @@ impl PredictOptions {
             sweep: args.flags.sweep.iter().map(|s| (s.name.clone(), s.grid.expand())).collect(),
             by_chain: args.posterior.by_chain,
             excluded_chains: excluded_chain_ids(excluded),
-            quantities: vocabulary.map(|v| v.digest.clone()),
             allow_forcing_extrapolation: args.flags.forcing_extrapolation.allow_forcing_extrapolation,
             particles: None,
             forecast: None,
@@ -6550,8 +6391,7 @@ mod tests {
 
     /// Every input that changes the output moves the key: the run, the engine,
     /// and each option `PredictOptions` carries for it — among them the chain
-    /// selection, the `--quantities` vocabulary and
-    /// `--allow-forcing-extrapolation`.
+    /// selection and `--allow-forcing-extrapolation`.
     #[test]
     fn every_output_changing_input_moves_the_predict_address_key() {
         let base = PredictOptions::free_forward(None);
@@ -6570,7 +6410,6 @@ mod tests {
             ("sweep", PredictOptions { sweep: vec![("q".into(), vec![1.0])], ..base.clone() }),
             ("by_chain", PredictOptions { by_chain: true, ..base.clone() }),
             ("excluded_chains", PredictOptions { excluded_chains: Some(vec![1]), ..base.clone() }),
-            ("quantities", PredictOptions { quantities: Some("ab".repeat(32)), ..base.clone() }),
             ("allow_forcing_extrapolation",
              PredictOptions { allow_forcing_extrapolation: true, ..base.clone() }),
             ("forecast", PredictOptions {

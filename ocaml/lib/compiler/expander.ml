@@ -296,7 +296,7 @@ type context = {
   mutable reactive_decls  : reactive_decl list;
       (** The [reactive] interventions. *)
   mutable quantity_decls  : quantity_decl list;
-      (** The [quantities] declarations, after any [--quantities] file has taken the place of the model's own. *)
+      (** The [quantities] declarations. *)
   mutable contrast_decls  : contrast_decl list;   (* counterfactual contrasts *)
       (** The [contrasts] declarations. *)
   mutable timepoint_decls : timepoint_decl list;  (* parsed, lowered for checking, not emitted *)

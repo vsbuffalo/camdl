@@ -130,7 +130,7 @@ pub(super) fn kinds() -> Vec<(&'static str, &'static str, Vec<Row>)> {
         ),
         (
             "prediction",
-            "A prediction from a fit run's posterior or from a fixed point. A name carries a suffix when chains were excluded or a quantities vocabulary was read.",
+            "A prediction from a fit run's posterior or from a fixed point. A name carries a suffix when chains were excluded.",
             vec![
                 row(PredictionFile::Manifest { part: PredictionPart::Predictive, stem: "predictive".into() }, "always"),
                 row(PredictionFile::Table { part: PredictionPart::Predictive, dir: "predictive".into(), stream: stream() }, "each stream predicted"),
@@ -141,7 +141,7 @@ pub(super) fn kinds() -> Vec<(&'static str, &'static str, Vec<Row>)> {
                 row(PredictionFile::ForecastSamples, "a forecast"),
                 row(PredictionFile::ForecastContrasts, "a forecast with contrasts"),
                 row(PredictionFile::Manifest { part: PredictionPart::Quantities, stem: "quantities".into() }, "when the model has quantities"),
-                row(PredictionFile::Table { part: PredictionPart::Quantities, dir: "quantities-model".into(), stream: "<quantity>".into() }, "each quantity of the model's own block; a vocabulary's are under the name of its manifest, `quantities-<key8>/`"),
+                row(PredictionFile::Table { part: PredictionPart::Quantities, dir: "quantities-model".into(), stream: "<quantity>".into() }, "each quantity"),
                 row(PredictionFile::Manifest { part: PredictionPart::Contrasts, stem: "contrasts".into() }, "a fit run's prediction when the model has contrasts"),
                 row(PredictionFile::Table { part: PredictionPart::Contrasts, dir: "contrasts".into(), stream: "<contrast>".into() }, "each contrast forked"),
                 row(PredictionFile::Manifest { part: PredictionPart::Report, stem: "report".into() }, "always"),

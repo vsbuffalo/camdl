@@ -52,9 +52,6 @@ pub(crate) struct FixedPoint {
     pub problem: Problem,
     /// The keyed compile as an IR file, which every cell of the engine loads.
     pub model_ir: PathBuf,
-    /// The model file given, which a `--quantities` vocabulary compiles
-    /// against.
-    pub model_source: PathBuf,
     /// The model file's stem.
     pub model_name: String,
     /// Which rows trained, cut by `--holdout-after`.
@@ -105,7 +102,7 @@ pub(crate) fn resolve(
         .map_err(|e| format!("cannot make a scratch directory: {e}"))?;
 
     // The compile, and the streams `--data` binds.
-    let (ir_path, _ir_tmp) = crate::util::resolve_ir_path(model_path, false, None, compile)?;
+    let (ir_path, _ir_tmp) = crate::util::resolve_ir_path(model_path, false, compile)?;
     let (model_in, _) = crate::util::load_ir(&ir_path)?;
     let leaf_names: Vec<String> = model_in.observations.iter().map(|o| o.name.clone()).collect();
     let bound = crate::util::resolve_data_specs(&flags.data, &leaf_names, flags.obs.as_deref())?;
@@ -256,7 +253,6 @@ pub(crate) fn resolve(
         data,
         problem: posed,
         model_ir,
-        model_source: PathBuf::from(model_path),
         model_name,
         partition: resolved.partition().clone(),
         _scratch: scratch,

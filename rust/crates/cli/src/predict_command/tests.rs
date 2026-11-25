@@ -223,7 +223,6 @@ fn fixture() -> &'static Fixture {
                 + "[method]\nalgorithm = \"mh\"\nbackend = \"ode\"\nchains = 2\niterations = 40\nburn_in = 10\n",
         )
         .unwrap();
-        std::fs::write(dir.join("vocab.camdl"), "quantities {\n  peak_R = max(R)\n}\n").unwrap();
         std::fs::write(dir.join("reported.camdl"), model().replace("peak_I = max(I)", "peak_R = max(R)")).unwrap();
         std::fs::write(dir.join("design.tsv"), "time\ttested\n28\t60\n35\t70\n").unwrap();
         std::fs::write(dir.join("design2.tsv"), "time\ttested\n28\t61\n35\t70\n").unwrap();
@@ -307,7 +306,6 @@ fn argv(inv: &PredictInvocation) -> Vec<String> {
                 horizon,
                 design,
                 covariate,
-                quantities,
                 n_draws,
                 particles,
                 seed,
@@ -367,7 +365,6 @@ fn argv(inv: &PredictInvocation) -> Vec<String> {
     for c in covariate {
         opt("--covariate", Some(format!("{}={}", c.forcing, c.statement.as_str())));
     }
-    opt("--quantities", quantities.as_ref().map(|p| p.to_string_lossy().into_owned()));
     opt("--n-draws", n_draws.map(|x| x.to_string()));
     opt("--particles", particles.map(|x| x.to_string()));
     opt("--seed", seed.map(|x| x.to_string()));
@@ -936,40 +933,6 @@ fn the_removed_spellings_are_refused_with_their_replacement() {
     assert!(folders(&root).iter().all(|(_, id, _)| id["kind"] != crate::fit_store::Prediction::KIND), "nothing is stored");
 }
 
-/// A reporting vocabulary is checked against the fit's compile whatever
-/// either was compiled with: loop-invariant code motion moves a hoistable
-/// rate's factor into a binding without changing the model. A fit compiled
-/// with it is predicted with `--quantities` under `--no-licm`, and a fit
-/// compiled under `--no-licm` is predicted without it; both run, and give
-/// the bytes the matching setting gives.
-#[test]
-fn a_vocabulary_is_checked_against_the_fit_whatever_its_licm_setting() {
-    let fresh = tempfile::tempdir().unwrap();
-    let root = fresh.path().join("camdl-store");
-    let cwd = workdir(&root);
-    let run = |args: &[&str]| camdl(cwd.path(), &root, &args.iter().map(|s| s.to_string()).collect::<Vec<_>>(), &[]);
-    let ok = |o: Output, what: &str| assert!(o.status.success(), "{what}: {}", String::from_utf8_lossy(&o.stderr));
-    ok(run(&["--no-licm", "fit", "run", "fit_hoisted.toml", "--label", "inlined", "--progress", "none"]), "the --no-licm fit");
-    let vocab = ["--mode", "free_forward", "--n-draws", "4", "--quantities", "vocab.camdl", "--progress", "none"];
-    let predict = |licm_off: bool, handle: &str| {
-        let mut a: Vec<&str> = if licm_off { vec!["--no-licm"] } else { vec![] };
-        a.extend(["predict", handle]);
-        a.extend(vocab);
-        run(&a)
-    };
-    for (off, handle) in [(true, "@hoisted"), (false, "@inlined"), (false, "@hoisted"), (true, "@inlined")] {
-        let out = predict(off, handle);
-        let err = String::from_utf8_lossy(&out.stderr);
-        assert!(out.status.success(), "predict {handle} (--no-licm: {off}):\n{err}");
-    }
-    let predictions: Vec<PathBuf> = folders(&root)
-        .into_iter()
-        .filter(|(_, id, _)| id["kind"] == crate::fit_store::Prediction::KIND)
-        .map(|(p, _, _)| p)
-        .collect();
-    assert_eq!(predictions.len(), 2, "one prediction of each run, whatever --no-licm: {predictions:?}");
-}
-
 /// With no `--mode` the prediction is every mode that applies to the fit's
 /// backend, resolved before its identity: on an ODE fit that is the
 /// free-forward band alone, so the default and `--mode free_forward` are one
@@ -1115,7 +1078,6 @@ fn each_prediction_computes_what_fit_predict_computed() {
         ("by_chain", &["@fit", "--mode", "free_forward", "--by-chain", "--exclude-chains", "1", "--n-draws", "8"]),
         ("sweep", &["@fit", "--mode", "free_forward", "--sweep", "gamma=0.2,0.3", "--n-draws", "4"]),
         ("scenario", &["@fit", "--mode", "free_forward", "--scenario", "vax", "--n-draws", "8", "--seed", "3"]),
-        ("quantities", &["@fit", "--mode", "free_forward", "--quantities", "vocab.camdl", "--n-draws", "4"]),
         ("one_step", &["@fit", "--mode", "one_step", "--n-draws", "4", "--particles", "20"]),
     ];
     let mut got = BTreeMap::new();
@@ -1188,19 +1150,6 @@ const ARM64: Pins = &[
         ("predictive/daily_cases.tsv", "44d4e876965d2c6e"),
         ("predictive/survey.tsv", "74157070354d7fc0"),
         ("predictive/weekly_cases.tsv", "71b2e2f38444c2c8"),
-        ("report.json", "d47528701a6bf746"),
-    ]),
-    ("quantities", &[
-        ("observed.json", "d5f50fb8a31bdf75"),
-        ("observed/daily_cases.tsv", "ee9d3cb76b7457fc"),
-        ("observed/survey.tsv", "739e02d5718619d2"),
-        ("observed/weekly_cases.tsv", "884f26939b41d3c2"),
-        ("predictive.json", "b54c480cd3525b07"),
-        ("predictive/daily_cases.tsv", "cbf91408c4b93f48"),
-        ("predictive/survey.tsv", "58fac19f758a19a2"),
-        ("predictive/weekly_cases.tsv", "5d0beb52e9b320df"),
-        ("quantities-38c32924.json", "760ad761ec3f118d"),
-        ("quantities-38c32924/peak_R.tsv", "35c08c2b2cfab668"),
         ("report.json", "d47528701a6bf746"),
     ]),
     ("scenario", &[
@@ -1689,23 +1638,6 @@ fn output_exports_the_result_files_for_both_sources() {
 
 // ── Review fixes ─────────────────────────────────────────────────────────────
 
-/// A reporting vocabulary is checked against the model file a fixed point
-/// was compiled from with `--integrator` applied to both sides: a
-/// non-default integrator is not a change to the model.
-#[test]
-fn a_vocabulary_is_checked_against_a_fixed_point_whatever_its_integrator() {
-    let fresh = tempfile::tempdir().unwrap();
-    let root = fresh.path().join("camdl-store");
-    let cwd = workdir(&root);
-    let line = [FIXED, &["--backend", "ode", "--integrator", "rk45", "--quantities", "vocab.camdl"]].concat();
-    let out = predict_in(cwd.path(), &root, &line);
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "{err}");
-    assert!(!err.contains("this fit"), "a fixed point is not a fit:\n{err}");
-    let (folder, _) = &predictions(&root)[0];
-    assert!(files_under(folder).keys().any(|k| k.ends_with("peak_R.tsv")), "the vocabulary's quantity is written");
-}
-
 /// A stored prediction whose report records a deterministic failure fails
 /// a rerun that reuses it as it failed the run that computed it: exit 1,
 /// with the failure named, for both sources.
@@ -1745,9 +1677,9 @@ fn a_reused_prediction_with_failures_exits_1_for_both_sources() {
     }
 }
 
-/// `--no-licm` on a posterior prediction reaches only a `--quantities`
-/// vocabulary's compile, which is checked against the fit's with hoisting
-/// written back: with and without it, one prediction with one set of bytes.
+/// A posterior prediction given no `--model` compiles nothing, so
+/// `--no-licm` changes nothing: with and without it, one prediction with one
+/// set of bytes.
 #[test]
 fn no_licm_changes_no_posterior_prediction() {
     let (off, on) = crate::input_fixtures::predict_no_licm();
