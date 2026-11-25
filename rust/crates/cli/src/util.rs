@@ -906,9 +906,9 @@ fn persist_cache_entry(cache_path: &std::path::Path, ir_json: &str, deps: &[Read
 
 /// The compiled-IR cache directory: `$CAMDL_IR_CACHE_DIR` if set (tests /
 /// overrides), else `$XDG_CACHE_HOME/camdl/ir` or `$HOME/.cache/camdl/ir`. A
-/// GLOBAL cache (not under `--output-dir`): the IR is hardware-independent and
-/// deterministic from (model, compiler, schema), so sharing across projects
-/// and output dirs is safe and maximizes reuse. `None` if unresolvable (then
+/// machine-wide cache, outside every run store: the IR is hardware-independent
+/// and deterministic from (model, compiler, schema), so one compile serves
+/// every project and store. `None` if unresolvable (then
 /// the cache is silently skipped — caching is best-effort, never fatal).
 fn ir_cache_dir() -> Option<std::path::PathBuf> {
     let env = &crate::env::get().vars;

@@ -921,21 +921,6 @@ fn a_rerun_prints_the_same_table_and_force_computes_it_again() {
     assert_eq!(forced.stdout, first.stdout);
 }
 
-/// `--output-dir` is not a flag of `profile`: clap refuses it, and nothing
-/// is stored.
-#[test]
-fn output_dir_is_not_a_flag() {
-    let cwd = workdir();
-    let store = cwd.path().join("camdl-store");
-    let mut args = argv(&profile_base());
-    args.extend(["--output-dir".to_string(), "results".to_string()]);
-    let out = camdl(cwd.path(), &store, &args, &[]);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success(), "{stderr}");
-    assert!(stderr.contains("unexpected argument '--output-dir'"), "{stderr}");
-    assert!(!store.exists() && !cwd.path().join("results").exists(), "nothing is stored");
-}
-
 /// The run store is the one `fit run` would store the fit in: `--store`, else
 /// the fit file's `store` key (relative to the file), else `CAMDL_STORE`.
 #[test]

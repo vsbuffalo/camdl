@@ -2627,20 +2627,6 @@ pub struct PfilterInvocation {
     pub no_progress: bool,
 }
 
-// ─── if2 (removed; deprecation stub) ────────────────────────────────────────────
-
-/// `camdl if2` is removed (gh#147). A one-method IF2 fit is now a fit
-/// with a single `algorithm = "if2"` method, run through `camdl fit run`.
-/// This catch-all accepts and ignores any arguments so an old invocation
-/// lands on the actionable migration message in [`crate::if2::cmd_if2`]
-/// rather than a clap parse error — a deprecation redirect, not a
-/// back-compat shim.
-#[derive(Args)]
-pub struct If2Args {
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
-    pub _ignored: Vec<String>,
-}
-
 // ─── profile ──────────────────────────────────────────────────────────────────
 
 #[derive(Args, Clone, store::Inputs)]
@@ -3944,29 +3930,6 @@ mod tests {
         assert!(e.contains("--n-starts 4"), "the message names the count flag: {e}");
         assert!(e.contains("not how many there are"),
             "and says what `starts` means: {e}");
-    }
-
-    /// `camdl if2` is removed (gh#147); its arg struct is a catch-all so
-    /// an old invocation still PARSES and reaches the deprecation message
-    /// in `if2::cmd_if2`, rather than dying on a clap "unexpected
-    /// argument" error before the migration hint can be shown.
-    #[test]
-    fn if2_is_a_deprecation_catch_all() {
-        let full = ["camdl", "if2", "model.camdl",
-                    "--data", "cases.tsv",
-                    "--rw-sd", "auto",
-                    "--particles", "100",
-                    "--regime", "scout",
-                    "--params", "truth.toml"];
-        let parsed = Cli::try_parse_from(full)
-            .expect("camdl if2 must still parse so the stub can show the migration message");
-        match parsed.command {
-            Command::If2(a) => {
-                assert!(!a._ignored.is_empty(),
-                    "old if2 args must be swallowed into the catch-all");
-            }
-            _ => unreachable!(),
-        }
     }
 
     /// `--starts <spec>` parses every rule: the bare names and the sourced
