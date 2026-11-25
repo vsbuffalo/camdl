@@ -12,7 +12,7 @@
 //! so a reader sees no manifest or a whole one.
 //!
 //! The manifest's bytes are a function of the invocation's ordered results,
-//! their labels, their result files' names, digests and sizes, the `--label`
+//! their attributes and sources, their result files' names, digests and sizes, the `--label`
 //! and the build. It holds no time, outcome or path, the store root and the
 //! results' folders included, so a cache hit writes the bytes the computation
 //! wrote and one command against two store roots writes one manifest.
@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use store::Key;
 
 /// The manifest's `schema` value.
-pub(crate) const SCHEMA: &str = "camdl.output-manifest/v1";
+pub(crate) const SCHEMA: &str = "camdl.output-manifest/v2";
 
 /// One command's output manifest.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -64,8 +64,13 @@ pub(crate) struct ManifestEntry {
     pub upstream: Option<Key>,
     /// The kind's contract version (run spec §2.9).
     pub contract: u16,
-    /// The labels the invocation record gave the result.
-    pub labels: serde_json::Value,
+    /// The attributes the invocation record gave the result.
+    pub attributes: serde_json::Value,
+    /// For a compiled model, the run id of the model source the invocation
+    /// recorded for it, which is another entry of the manifest; absent for
+    /// every other kind, and for a compiled model with no recorded source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<Key>,
     /// Every result file of the result, by logical name. Provenance and
     /// attempt files are not listed.
     pub files: BTreeMap<String, ManifestFile>,
@@ -128,13 +133,19 @@ impl OutputManifest {
                 .into_iter()
                 .map(|(name, (sha256, bytes))| (name.to_string(), store::OutputFile { sha256, bytes }))
                 .collect();
-            let labels = store
-                .listings(&store::Handle::IdPrefix(id.to_hex()))
-                .map_err(|e| e.to_string())?
-                .answering()
-                .and_then(|l| l.invocation().attributes_of(located.kind(), *id))
-                .unwrap_or(serde_json::Value::Null);
-            outputs.push(store::Output { kind: located.kind().to_string(), run_id: *id, upstream: located.upstream(), attributes: labels, files });
+            let listings = store.listings(&store::Handle::IdPrefix(id.to_hex())).map_err(|e| e.to_string())?;
+            let answering = listings.answering().map(|l| l.invocation());
+            let attributes =
+                answering.and_then(|i| i.attributes_of(located.kind(), *id)).unwrap_or(serde_json::Value::Null);
+            let source = answering.and_then(|i| i.source_of(located.kind(), *id));
+            outputs.push(store::Output {
+                kind: located.kind().to_string(),
+                run_id: *id,
+                upstream: located.upstream(),
+                attributes,
+                source,
+                files,
+            });
         }
         Self::of_outputs(store, None, outputs)
     }
@@ -163,13 +174,14 @@ impl OutputManifest {
                     ));
                 }
             }
-            let labels = manifest_labels(&o.kind, o.attributes);
+            let attributes = manifest_attributes(&o.kind, o.attributes);
             results.push(ManifestEntry {
                 kind: o.kind,
                 run_id: o.run_id,
                 upstream: o.upstream,
                 contract: contract.version,
-                labels,
+                attributes,
+                source: o.source.map(|s| s.run_id),
                 files,
             });
         }
@@ -213,20 +225,20 @@ impl OutputManifest {
     }
 }
 
-/// A result's labels as the manifest records them: the invocation record's
-/// attributes, less any that hold a path as it was typed. A data table's
+/// A result's attributes as the manifest records them: the invocation
+/// record's, less any that hold a path as it was typed. A data table's
 /// `path` is the `--data` argument, which names one file differently from
 /// another working directory, so the manifest keeps only its `stream`. Every
 /// other kind's attributes hold names and values.
-pub(crate) fn manifest_labels(kind: &str, mut labels: serde_json::Value) -> serde_json::Value {
+pub(crate) fn manifest_attributes(kind: &str, mut attributes: serde_json::Value) -> serde_json::Value {
     let link = match kind {
         k if k == <crate::camdl_store::DataTable as store::Artifact>::KIND => Some("path"),
         _ => None,
     };
-    if let (Some(field), Some(map)) = (link, labels.as_object_mut()) {
+    if let (Some(field), Some(map)) = (link, attributes.as_object_mut()) {
         map.remove(field);
     }
-    labels
+    attributes
 }
 
 /// A `--manifest` path a command has claimed: checked, and cleared of any

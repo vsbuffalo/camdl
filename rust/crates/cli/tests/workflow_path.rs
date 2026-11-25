@@ -379,10 +379,10 @@ fn refusals_name_what_exists() {
     let err = p.refused(&["path", "--manifest", "cases.tsv", "traj"]);
     assert!(err.contains("not an output manifest"), "{err}");
     let mut newer = p.manifest("build/grid.json");
-    newer["schema"] = "camdl.output-manifest/v2".into();
+    newer["schema"] = "camdl.output-manifest/v3".into();
     std::fs::write(p.path("build/newer.json"), serde_json::to_vec(&newer).unwrap()).unwrap();
     let err = p.refused(&["path", "--manifest", "build/newer.json", "traj"]);
-    assert!(err.contains("camdl.output-manifest/v2") && err.contains("reads `camdl.output-manifest/v1`"), "{err}");
+    assert!(err.contains("camdl.output-manifest/v3") && err.contains("reads `camdl.output-manifest/v2`"), "{err}");
 
     // Read against another store, a manifest fails on its first run id.
     let out = p.command().env("CAMDL_STORE", p.path("other")).args(["path", "--manifest", "build/grid.json", "traj", "--each"]).output().unwrap();
@@ -413,9 +413,9 @@ fn path_each_over_a_sweep_is_in_manifest_order() {
     for (row, cell) in rows.iter().zip(&cells) {
         let id = cell["run_id"].as_str().unwrap();
         assert_eq!(row[0], id, "rows in the manifest's order, by the full run id");
-        assert_eq!(row[5], cell["labels"]["seed"].to_string());
-        assert_eq!(row[8], cell["labels"]["point"]["point_id"].to_string());
-        assert_eq!(row[9].parse::<f64>().unwrap(), cell["labels"]["point"]["values"][0][1].as_f64().unwrap());
+        assert_eq!(row[5], cell["attributes"]["seed"].to_string());
+        assert_eq!(row[8], cell["attributes"]["point"]["point_id"].to_string());
+        assert_eq!(row[9].parse::<f64>().unwrap(), cell["attributes"]["point"]["values"][0][1].as_f64().unwrap());
         assert_eq!(PathBuf::from(row[10]), folders[id].join("traj.tsv"));
     }
     assert_eq!(p.ok(&["path", "--manifest", "build/grid.json", "traj", "--each"]), table, "the same bytes again");
@@ -551,7 +551,7 @@ fn cat_each_prepends_labels_and_refuses_a_header_mismatch() {
     let rows: Vec<&str> = lines.collect();
     let mut want = Vec::new();
     for (cell, text) in cells.iter().zip(&traj) {
-        let beta = cell["labels"]["point"]["values"][0][1].as_f64().unwrap();
+        let beta = cell["attributes"]["point"]["values"][0][1].as_f64().unwrap();
         for row in text.lines().filter(|l| !l.starts_with('#')).skip(1) {
             want.push((beta, row.to_string()));
         }

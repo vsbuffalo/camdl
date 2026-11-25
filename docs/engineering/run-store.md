@@ -1628,7 +1628,10 @@ prediction or a score from a stored fit run. It lists the stored compiled model
 in its own invocation record, as reused, with the source the invocation it read
 from recorded, or the source of the file `--model` gave (`link_source`, through
 [`Store::list`](rust:store::storage::Store::list), which registers a stored
-result in the current invocation and stores nothing, and `record_source`).
+result in the current invocation and stores nothing, and `record_source`). A
+stored source is listed too, as reused, so the output manifest's entry for the
+compiled model names its source by an entry of the same manifest; a recorded
+source that is not stored is not listed.
 
 A reader finds the source by one rule,
 [`shown_for`](rust:cli::camdl_store::model_source::shown_for): the source the

@@ -294,12 +294,22 @@ pub(crate) fn put_compiled(
     Ok(dep)
 }
 
-/// The run id of `source`, stored under `attributes` first when it is new.
+/// The run id of `source`, listed in this invocation under `attributes`:
+/// stored first when it is new, and listed as reused when it is stored, so
+/// the output manifest's entry for the compiled model names another entry.
+/// A recorded source that is not stored is not listed; no result depends on
+/// a source, and the reader that shows it reports it as unreadable.
 #[allow(clippy::result_large_err)] // as put_compiled's
 fn source_id(store: &Store, info: &store::RunInfo, source: SourceOf, attributes: &ModelAttributes) -> store::Result<Option<Id<ModelSource>>> {
     Ok(match source {
         SourceOf::New(p) => Some(*p.put(store, attributes, info)?.id()),
-        SourceOf::Stored(id) => Some(id),
+        SourceOf::Stored(id) => {
+            match store.list::<ModelSource>(&id, attributes, info) {
+                Ok(()) | Err(store::Error::NotFound { .. }) => {}
+                Err(e) => return Err(e),
+            }
+            Some(id)
+        }
         SourceOf::Unknown => None,
     })
 }

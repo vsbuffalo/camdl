@@ -35,7 +35,7 @@ impl PfilterRow {
             "kind": "pfilter",
             "run_id": self.stored.id().key().to_hex(),
             "label": self.label,
-            "labels": self.labels,
+            "attributes": self.labels,
             "path": self.rel_path,
             "identity": self.stored.identity(),
             "loglik": self.loglik(),
@@ -458,7 +458,7 @@ impl StoredSimRow {
             "kind": "sim",
             "run_id": self.stored.id().key().to_hex(),
             "label": self.label,
-            "labels": self.labels,
+            "attributes": self.labels,
             "path": self.rel_path,
             "identity": self.stored.identity(),
             "files": self.stored.result_files(),
@@ -915,7 +915,7 @@ fn show_any(out: &crate::out::Out, c: &crate::resolve_file::Candidate, rel_path:
             "run_id": located.run_id().to_hex(),
             "upstream": located.upstream().map(|k| k.to_hex()),
             "path": rel_path,
-            "labels": c.labels,
+            "attributes": c.labels,
             "files": files.iter().map(|(l, s)| serde_json::json!({ "name": l, "file": s })).collect::<Vec<_>>(),
         });
         out.report_line(format_args!("{}", serde_json::to_string_pretty(&value).unwrap_or_default()));

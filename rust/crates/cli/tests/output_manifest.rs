@@ -187,7 +187,7 @@ fn manifest_digests_are_the_store_digests() {
     let p = Project::new();
     p.ok(&simulate(&["--seed", "1", "--obs-dir", "obs", "--label", "one", "--manifest", "build/one.json"]));
     let m = p.manifest("build/one.json");
-    assert_eq!(m["schema"], "camdl.output-manifest/v1");
+    assert_eq!(m["schema"], "camdl.output-manifest/v2");
     assert_eq!(m["label"], "one");
     assert_eq!(m["camdl"]["engine_id"].as_str().unwrap().len(), 32);
     assert_eq!(m["camdl"]["ambient_key"].as_str().unwrap().len(), 64);
@@ -227,6 +227,35 @@ fn manifest_digests_are_the_store_digests() {
     assert!(results(&m).iter().find(|r| r["kind"] == "compiled_model").unwrap()["files"]["model"]["file"] == "model.ir.json", "the compiled model's file is `model`");
 }
 
+/// Each entry carries the attributes the invocation record gives its result,
+/// under the record's own name; a compiled model's entry names its model
+/// source by run id, and the source is an entry of the same manifest, for a
+/// command that compiles the model and for a prediction that reads it from
+/// a stored fit. `camdl list` and `camdl show` print the same field.
+#[test]
+fn a_compiled_models_entry_names_its_source_entry() {
+    let p = Project::new();
+    let names_its_source = |m: &serde_json::Value| {
+        assert_eq!(m["schema"], "camdl.output-manifest/v2");
+        for r in results(m) {
+            assert!(r.get("attributes").is_some() && r.get("labels").is_none(), "{r}");
+            assert_eq!(r.get("source").is_some(), r["kind"] == "compiled_model", "only a compiled model names a source: {r}");
+        }
+        let model = results(m).iter().find(|r| r["kind"] == "compiled_model").unwrap();
+        let source = results(m).iter().find(|r| r["kind"] == "model_source").expect("the source is an entry");
+        assert_eq!(model["source"], source["run_id"]);
+    };
+    p.ok(&simulate(&["--seed", "1", "--label", "one", "--manifest", "build/one.json"]));
+    names_its_source(&p.manifest("build/one.json"));
+    p.ok(&["fit", "run", "fit.toml", "--seed", "1", "--label", "f"]);
+    p.ok(&["predict", "@f", "--mode", "free_forward", "--label", "pred", "--manifest", "build/pred.json"]);
+    names_its_source(&p.manifest("build/pred.json"));
+
+    let list = p.ok(&["list", "--format", "json"]);
+    let sim: serde_json::Value = list.lines().map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()).find(|r| r["kind"] == "sim").unwrap();
+    assert!(sim.get("attributes").is_some() && sim.get("labels").is_none(), "{sim}");
+}
+
 /// A workflow step reads a run id and a stored name from the manifest, reads
 /// the file through camdl, and gets the bytes whose digest the manifest
 /// records.
@@ -252,7 +281,7 @@ fn manifest_bytes_are_identical_on_a_cache_hit_and_for_two_store_roots() {
     let args = simulate(&["--seeds", "1:2", "--label", "pair", "--manifest", "build/pair.json"]);
     p.ok(&args);
     let first = std::fs::read(p.path("build/pair.json")).unwrap();
-    std::fs::write(p.path("build/pair.json"), r#"{"schema": "camdl.output-manifest/v1", "results": []}"#).unwrap();
+    std::fs::write(p.path("build/pair.json"), r#"{"schema": "camdl.output-manifest/v2", "results": []}"#).unwrap();
     let out = p.run(&args);
     assert!(out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("cached 2 of 2 cells"), "the rerun is a cache hit");
@@ -273,7 +302,7 @@ fn a_batch_manifest_lists_every_member() {
     let ids: std::collections::BTreeSet<&str> = results(&m).iter().map(|r| r["run_id"].as_str().unwrap()).collect();
     assert_eq!(ids.len(), 9, "every cell is a distinct result");
     let points: Vec<String> =
-        results(&m).iter().filter(|r| r["kind"] == "sim").map(|r| r["labels"]["point"].to_string()).collect();
+        results(&m).iter().filter(|r| r["kind"] == "sim").map(|r| r["attributes"]["point"].to_string()).collect();
     assert_eq!(points.iter().collect::<std::collections::BTreeSet<_>>().len(), 3, "three sweep points: {points:?}");
 }
 
@@ -394,7 +423,7 @@ fn a_data_path_spelled_two_ways_gives_one_manifest() {
     assert!(!text.contains("cases.tsv\""), "no data path in the manifest: {text}");
     let m = p.manifest("build/relative.json");
     let table = results(&m).iter().find(|r| r["kind"] == "data_table").unwrap();
-    assert_eq!(table["labels"], serde_json::json!({ "stream": "cases" }));
+    assert_eq!(table["attributes"], serde_json::json!({ "stream": "cases" }));
 }
 
 /// A fit for a profile: beta and gamma estimated by NLopt on the ODE.
@@ -454,9 +483,9 @@ fn a_profile_manifest_lists_every_point() {
 
 /// A fit run lists its quantities, compiled model, fit problem and run, the
 /// run's files by their logical names; a prediction from it lists the
-/// prediction and the compiled model it read, whose labels name the model's
-/// presentation, and a score of the prediction the score, the outcome table
-/// it stored and that compiled model.
+/// prediction, then the model source and the compiled model it read, and a
+/// score of the prediction that model source and compiled model, the outcome
+/// table it stored and the score.
 #[test]
 fn fit_predict_and_score_manifests() {
     let p = Project::new();
@@ -485,15 +514,19 @@ fn fit_predict_and_score_manifests() {
     let fit_run_id = run["run_id"].as_str().unwrap().to_string();
     p.ok(&["predict", &fit_run_id, "--mode", "free_forward", "--label", "pred", "--manifest", "build/pred.json"]);
     let m = p.manifest("build/pred.json");
-    assert_eq!(kinds(&m), ["prediction", "compiled_model"], "the fit run predicted from is a dependency, not a member");
+    assert_eq!(kinds(&m), ["prediction", "model_source", "compiled_model"], "the fit run predicted from is a dependency, not a member");
     let pred = &results(&m)[0];
     assert!(pred["files"]["predictive"]["file"] == "predictive.json");
     assert!(pred["files"]["report"]["file"] == "report.json");
 
     p.ok(&["score", pred["run_id"].as_str().unwrap(), "--data", "cases=cases.tsv", "--manifest", "build/score.json"]);
     let m = p.manifest("build/score.json");
-    assert_eq!(kinds(&m), ["compiled_model", "data_table", "score"], "the model read, the outcome table the score stored, then the score");
-    let names: Vec<&str> = results(&m)[2]["files"].as_object().unwrap().keys().map(String::as_str).collect();
+    assert_eq!(
+        kinds(&m),
+        ["model_source", "compiled_model", "data_table", "score"],
+        "the model read, the outcome table the score stored, then the score"
+    );
+    let names: Vec<&str> = results(&m)[3]["files"].as_object().unwrap().keys().map(String::as_str).collect();
     assert_eq!(names, ["score", "scored", "summary"]);
 }
 
@@ -582,7 +615,7 @@ fn a_parallel_design_manifest_is_in_file_order() {
     let rows: Vec<u64> = results(&m)
         .iter()
         .filter(|r| r["kind"] == "pfilter")
-        .map(|r| r["labels"]["point"]["row"].as_u64().unwrap_or_else(|| panic!("a design label: {}", r["labels"])))
+        .map(|r| r["attributes"]["point"]["row"].as_u64().unwrap_or_else(|| panic!("a design label: {}", r["attributes"])))
         .collect();
     assert_eq!(rows, (0..16).collect::<Vec<u64>>(), "the points in file order");
     for _ in 0..2 {

@@ -453,6 +453,9 @@ pub struct Output {
     pub upstream: Option<Key>,
     /// The attributes the invocation record gave it.
     pub attributes: serde_json::Value,
+    /// The source the invocation recorded for it
+    /// ([`crate::RunInfo::record_source`]); `None` when it recorded none.
+    pub source: Option<crate::Reference>,
     /// Every file of role result in the result's `run.json`, by stored name.
     pub files: std::collections::BTreeMap<String, OutputFile>,
 }
@@ -523,6 +526,12 @@ impl Invocation {
         self.record.listings().into_iter().find(|r| r.kind == kind && r.run_id == run_id).map(|r| r.attributes.clone())
     }
 
+    /// The source this invocation recorded for its first listing of the
+    /// result `run_id` of kind `kind`, or `None` when it recorded none.
+    pub fn source_of(&self, kind: &str, run_id: Key) -> Option<crate::Reference> {
+        self.record.listings().into_iter().find(|r| r.kind == kind && r.run_id == run_id).and_then(|r| r.source.cloned())
+    }
+
     /// Each distinct (kind, run id) this invocation listed, in first-listed
     /// order, read from the results' records alone. Refused with
     /// [`Error::MemberNotCompleted`], naming each, when any entry did not end
@@ -556,6 +565,7 @@ impl Invocation {
                 run_id: r.run_id,
                 upstream: located.upstream(),
                 attributes: r.attributes.clone(),
+                source: r.source.cloned(),
                 files,
             });
         }

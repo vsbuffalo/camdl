@@ -2145,22 +2145,65 @@ This is the manifest of a filter run with `--pf-health`:
 
 ```json
 {
-  "schema": "camdl.output-manifest/v1",
+  "schema": "camdl.output-manifest/v2",
   "camdl": {
     "version": "0.1.0+…",
-    "engine_id": "b2db5d07e20c55a614ec69081df9a208",
-    "ambient_key": "2f46cd4cfe5f40f5352b877ece67b92817d0afc452e0bf91be9d021b506bac51"
+    "engine_id": "c6691a8e07590752508220d277d6de58",
+    "ambient_key": "09c0b02809bbb777b661008ae7e0bb85efd6642aa050462a05c09b98f45f4c04"
   },
   "label": "sir_filter",
   "results": [
     {
-      "kind": "compiled_model",
-      "run_id": "664a6ba33a01573b5de431ee988f0e11ac48c03a41070c44403223b27049656e",
+      "kind": "quantities",
+      "run_id": "e1dc4cce0127eddbf458959369fd4430c9f6f5ec618844d5325ea27494d41f8d",
       "upstream": null,
       "contract": 1,
-      "labels": {
+      "attributes": {
         "name": "sir"
       },
+      "files": {
+        "quantities": {
+          "file": "quantities.json",
+          "sha256": "71dac8712e85d5466929914da2059221b5228482e2af4265cd4091626e4eaf96",
+          "bytes": 32
+        }
+      }
+    },
+    {
+      "kind": "model_source",
+      "run_id": "fd58d4aa96790fd4ea23302c26e522938582e579e3f51271500f1e11266833de",
+      "upstream": null,
+      "contract": 1,
+      "attributes": {
+        "name": "sir"
+      },
+      "files": {
+        "declared": {
+          "file": "declared.json",
+          "sha256": "5885da0260453563d16085c564b5c522f1a4e95363bfdd177740ea03c707626e",
+          "bytes": 9977
+        },
+        "docs": {
+          "file": "docs.json",
+          "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "bytes": 2
+        },
+        "source": {
+          "file": "source.ir.json",
+          "sha256": "234228b6198339feffc1bc17e4c1c2f2d20e5d6f501fdcaf19b4fc345ebe67f0",
+          "bytes": 7576
+        }
+      }
+    },
+    {
+      "kind": "compiled_model",
+      "run_id": "51ee63aa0bad34bdbcb8fda33789eacf11132eb7b619c37c5be9f6eeddb17083",
+      "upstream": null,
+      "contract": 1,
+      "attributes": {
+        "name": "sir"
+      },
+      "source": "fd58d4aa96790fd4ea23302c26e522938582e579e3f51271500f1e11266833de",
       "files": {
         "model": {
           "file": "model.ir.json",
@@ -2171,10 +2214,10 @@ This is the manifest of a filter run with `--pf-health`:
     },
     {
       "kind": "data_table",
-      "run_id": "3e233c9ebdd2e1471d1be1619fdfa288821cd218dd21ac0de1fa4554edea35ba",
+      "run_id": "b275e1ccd19aba3819c8f2dafc4a58df9a5b618398598d7f82a071261a7369f8",
       "upstream": null,
       "contract": 1,
-      "labels": {
+      "attributes": {
         "stream": "cases"
       },
       "files": {
@@ -2187,32 +2230,32 @@ This is the manifest of a filter run with `--pf-health`:
     },
     {
       "kind": "pfilter",
-      "run_id": "acb4f246b0f49f4958f176ecd12c7ac0dc7c8d80a9411febdb4fd9890e3c27f8",
+      "run_id": "9babe8c932c64568e233168cda98907e91318b9855f526505089e14bfe00b3a0",
       "upstream": null,
       "contract": 1,
-      "labels": {
+      "attributes": {
         "model": "sir",
         "seed": 1
       },
       "files": {
         "loglik": {
           "file": "loglik.toml",
-          "sha256": "3a3ebd0bab8e78ea7b008ece180c4b4781115da70afe9eca45a63a7483cca53f",
+          "sha256": "6e1b475931dfb2d1fd20ed1a5735ceefac8627f59329983bd8d675c26df37574",
           "bytes": 63
         }
       }
     },
     {
       "kind": "pf_health",
-      "run_id": "f44636410d73febf43177fca1795c9e94cc40918597bc10741ba3ec8f93ca32f",
-      "upstream": "acb4f246b0f49f4958f176ecd12c7ac0dc7c8d80a9411febdb4fd9890e3c27f8",
+      "run_id": "d5436e03216c6d3241f18040bebf911d4dd460a38a353dbd18e9003f41353aeb",
+      "upstream": "9babe8c932c64568e233168cda98907e91318b9855f526505089e14bfe00b3a0",
       "contract": 1,
-      "labels": null,
+      "attributes": null,
       "files": {
         "pf_health": {
           "file": "pf_health.tsv",
-          "sha256": "467f4f38a71d7372683eacd314aae1c4d86271b319e9d457f72fc01fd4331bdb",
-          "bytes": 155
+          "sha256": "45f16be10d3fde9fa287f8985d118b3ec99bb2ba889a561ff5460cb88c811ded",
+          "bytes": 154
         }
       }
     }
@@ -2220,7 +2263,7 @@ This is the manifest of a filter run with `--pf-health`:
 }
 ```
 
-- `schema` is `camdl.output-manifest/v1`. A change to the fields below changes
+- `schema` is `camdl.output-manifest/v2`. A change to the fields below changes
   the version.
 - `camdl` is the build that wrote the manifest: `version` as `camdl --version`
   prints it (elided in the example above), `engine_id`, the 32-hex build
@@ -2236,10 +2279,15 @@ This is the manifest of a filter run with `--pf-health`:
   (64 hex digits), `upstream`, the run id of the result it is a by-product of,
   or `null` for any other result, `contract`, its kind's contract version
   (§2.9), which changes whenever a file of the kind is added, removed or renamed
-  or a column changes (a test pins each version to the kind's files), `labels`,
-  the attributes the invocation record gives it, and `files`. A `data_table`'s
-  attributes leave out the `--data` path as typed, which would make `cases.tsv`
-  and `./cases.tsv` give two manifests; they keep its `stream`.
+  or a column changes (a test pins each version to the kind's files),
+  `attributes`, the attributes the invocation record gives it, and `files`. A
+  `data_table`'s attributes leave out the `--data` path as typed, which would
+  make `cases.tsv` and `./cases.tsv` give two manifests; they keep its `stream`.
+  A `compiled_model` entry also has `source`, the run id of the model source
+  (§2.9, `model_source`) the invocation recorded for it, the model file the
+  command compiled or the one the result it read was computed from; that model
+  source is itself an entry of the manifest. The field is absent on every other
+  kind, and on a compiled model for which no model source is recorded.
 - `files` maps each result file's logical name (§2.9) to `file`, its stored
   name, `sha256` and `bytes`, the digest and size the result's `run.json`
   records. Provenance and attempt files are not listed, so a recomputation under
@@ -2256,28 +2304,35 @@ writes the bytes the computation wrote.
 
 #### Which results each command lists
 
-- `simulate`: the compiled model, then each cell (`sim`), each followed by the
-  by-products asked for: `obs`, `event_log`, `sim_quantities`. With
-  `--quantities-out`, the model's `quantities` follow the compiled model.
-- `pfilter`: the compiled model, each bound data table, then each filter run
-  (one, or one per design point) with the by-products its flags asked for.
-- `fit run`: per problem, its `quantities`, compiled model and fit problem
-  (`fit`), then the `fit_run`; a `--sweep` lists every problem and run.
-- `profile`: the `quantities`, compiled model and fit problem, then every
-  `profile_point`.
+Every command that compiles a model file lists the compile's `quantities`, its
+`model_source` and the `compiled_model`, in that order, before anything else it
+stores; a command that reads a stored fit lists the fit's `model_source` and
+`compiled_model`, so a compiled model's `source` always names an entry.
+
+- `simulate`: the compile, then each cell (`sim`), each followed by the
+  by-products asked for: `obs`, `event_log`, `sim_quantities`.
+- `pfilter`: the compile, each bound data table, then each filter run (one, or
+  one per design point) with the by-products its flags asked for.
+- `fit run`: per problem, its compile and fit problem (`fit`), then the
+  `fit_run`; a `--sweep` lists every problem and run.
+- `profile`: the compile and fit problem, then every `profile_point`.
 - `predict`: the inputs it stores, then the `prediction`. A fixed-point
-  prediction stores its `quantities`, compiled model and data tables, and a
-  forecast each `--design` file as a data table. The fit run a prediction reads
-  from is a dependency, not a result of the command, and is not listed.
-- `score`: the outcome data tables, then the `score`.
+  prediction stores its compile and data tables, and a forecast each `--design`
+  file as a data table. A prediction from a stored fit also lists the model
+  source and compiled model it read, the source of FILE under `--model FILE`.
+  The fit run a prediction reads from is a dependency, not a result of the
+  command, and is not listed.
+- `score`: the model source and compiled model it read, the outcome data tables,
+  then the `score`.
 - `compare`: for each input in order, each replicate's `prediction` and then its
   `score`, whether compare read them from the store or stored them. Each has the
   attributes of the newest invocation record that lists it computed or reused,
   and the manifest's `label` is `null`.
 - `import`: every result placed or found already stored, parents first, each
-  with the attributes the copy's invocation records gave it (§4.5). A result's
-  entry is the one the command that computed it wrote, apart from `camdl` and
-  `label`, which are the importing build's and the import's own.
+  with the attributes and source of the newest of the copy's invocation records
+  that lists it (§4.5). A result's entry is the one the command that computed it
+  wrote, apart from `camdl` and `label`, which are the importing build's and the
+  import's own.
 
 ### 2.11 The link tree
 
@@ -3447,7 +3502,10 @@ files (`camdl cat @r0 draws`).
 
 `--format json` emits the sim, fit, profile and pfilter sections as JSON Lines
 (one object per line). The stream is therefore not a single JSON document; parse
-it per line or filter with `--kind`. A fit row is one run:
+it per line or filter with `--kind`. A sim or pfilter row, and the
+`camdl show --format json` of one, carries `attributes`, the attributes the
+answering invocation record gives the result, as the output manifest does
+(§2.10). A fit row is one run:
 
 ```json
 {"best_loglik":-60.69877640031929,"kind":"fit_run","label":"r0","method":"pmmh","model":"sir_r0","path":"camdl-store/0.1.0_f531753ac.dirty-a20ab6cb-4bff11f93f55/fit/sir_r0-c39a2f446d42/runs/pmmh-fc5c33ebd296/seed_4-44fbdf1c80d9","problem_id":"c39a2f446d42c89dc3cfa679f49cdf99bd1ff0e58b296269e084a9f9d6981771","run_id":"44fbdf1c80d99fc484a400970e0183922961fc530972199790790b5425cbb2d5","seed":4}

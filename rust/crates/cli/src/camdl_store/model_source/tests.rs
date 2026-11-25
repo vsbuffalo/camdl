@@ -160,16 +160,17 @@ fn a_results_model_source_is_the_one_camdl_path_resolves() {
     }
 }
 
-/// A prediction whose invocation record lists no compiled model has no model
-/// source for either reader: no other invocation stands in for it, although
-/// another recorded a source of the same compiled model.
+/// A prediction whose invocation record lists no compiled model, and so no
+/// model source, has no model source for either reader: no other invocation
+/// stands in for it, although another recorded a source of the same compiled
+/// model.
 #[test]
 fn a_record_naming_no_source_gives_none_to_either_reader() {
     let (tmp, store) = store_of_four();
     let seq = store.invocation(&Handle::Label { name: "p".into(), back: 0 }).unwrap().seq();
     let path: PathBuf = tmp.path().join("st/.invocations").join(format!("{seq}.json"));
     let mut record: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    record["results"].as_array_mut().unwrap().retain(|r| r["kind"] != "compiled_model");
+    record["results"].as_array_mut().unwrap().retain(|r| r["kind"] != "compiled_model" && r["kind"] != "model_source");
     std::fs::write(&path, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
     // A store reads the records once, so the edited record is read by a store
     // opened after it, as by the next command.

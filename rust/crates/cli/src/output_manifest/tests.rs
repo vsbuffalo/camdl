@@ -21,7 +21,8 @@ fn sample(n_files: usize) -> OutputManifest {
                 run_id: key(1),
                 upstream: None,
                 contract: 1,
-                labels: serde_json::json!({ "model": "sir", "seed": 7 }),
+                attributes: serde_json::json!({ "model": "sir", "seed": 7 }),
+                source: None,
                 files: files("loglik"),
             },
             ManifestEntry {
@@ -29,7 +30,8 @@ fn sample(n_files: usize) -> OutputManifest {
                 run_id: key(2),
                 upstream: Some(key(1)),
                 contract: 1,
-                labels: serde_json::Value::Null,
+                attributes: serde_json::Value::Null,
+                source: None,
                 files: files("pf_health"),
             },
         ],
@@ -63,6 +65,9 @@ fn the_run_spec_example_reads_as_the_type() {
     let m: OutputManifest = serde_json::from_str(&section[start..end]).unwrap();
     assert_eq!(m.schema, SCHEMA);
     assert!(m.results.iter().any(|r| r.upstream.is_some()), "the example shows a by-product");
+    let model = m.results.iter().find(|r| r.kind == "compiled_model").expect("the example shows a compiled model");
+    let source = model.source.expect("the example's compiled model names its source");
+    assert!(m.results.iter().any(|r| r.kind == "model_source" && r.run_id == source), "its source is an entry");
     for r in &m.results {
         let contract = crate::result_files::contract(&r.kind).expect("a kind camdl stores");
         assert_eq!(r.contract, contract.version);

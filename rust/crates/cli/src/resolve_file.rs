@@ -344,7 +344,7 @@ fn shown_result(store: &Store, located: &Located) -> String {
 pub(crate) fn candidates(store: &Store, source: &Source, narrow: &Narrow) -> Result<Candidates, FileRefusal> {
     let listed: Vec<(String, Key, serde_json::Value, Option<BTreeMap<String, ManifestFile>>)> = match source {
         Source::Manifest { manifest, .. } => {
-            manifest.results.iter().map(|e| (e.kind.clone(), e.run_id, e.labels.clone(), Some(e.files.clone()))).collect()
+            manifest.results.iter().map(|e| (e.kind.clone(), e.run_id, e.attributes.clone(), Some(e.files.clone()))).collect()
         }
         Source::Handle(h @ Handle::Label { .. }) => {
             let inv = store.invocation(h).map_err(refusal)?;
@@ -353,7 +353,7 @@ pub(crate) fn candidates(store: &Store, source: &Source, narrow: &Narrow) -> Res
                 .into_iter()
                 .filter(|(k, id, completed)| *completed && seen.insert((k.to_string(), *id)))
                 .map(|(k, id, _)| {
-                    let labels = crate::output_manifest::manifest_labels(k, inv.attributes_of(k, id).unwrap_or(serde_json::Value::Null));
+                    let labels = crate::output_manifest::manifest_attributes(k, inv.attributes_of(k, id).unwrap_or(serde_json::Value::Null));
                     (k.to_string(), id, labels, None)
                 })
                 .collect()
@@ -423,7 +423,7 @@ fn one_with_by_products(store: &Store, handle: &Handle, narrow: &Narrow) -> Resu
             .ok()
             .and_then(|l| l.answering()?.invocation().attributes_of(kind, id))
             .unwrap_or(serde_json::Value::Null);
-        crate::output_manifest::manifest_labels(kind, labels)
+        crate::output_manifest::manifest_attributes(kind, labels)
     };
     let id = main.run_id();
     let main_kind = main.kind().to_string();
