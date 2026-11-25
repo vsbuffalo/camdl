@@ -5,7 +5,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::tests::*;
-use crate::record::{InvocationFile, Outcome, RunFile, Status};
+use crate::record::{Outcome, Pending, Record, RunFile, Status};
 use crate::{Begin, EntryState, Error, Id, Provenance, Reuse, Wanted};
 
 fn read_run(dir: &Path) -> RunFile {
@@ -81,9 +81,8 @@ fn a_failed_atomic_result_leaves_no_folder_and_its_reason_is_in_the_invocation_r
     assert!(result_folders(root.path()).is_empty());
     assert_eq!(std::fs::read_dir(root.path().join(".staging")).unwrap().count(), 0);
     let inv = info.finish(&store).unwrap();
-    let e = &inv.file.results[0];
-    assert_eq!(e.outcome, Outcome::Failed);
-    let f = e.failure.as_ref().unwrap();
+    let e = inv.record.listings()[0];
+    let Some(Outcome::Failed(f)) = e.outcome else { panic!("{:?}", e.outcome) };
     assert_eq!(f.operation.as_deref(), Some("simulating"));
     assert_eq!(f.reason.as_deref(), Some("the rate went negative"));
 }
@@ -527,7 +526,7 @@ impl Artifact for Table {
     const KIND: &'static str = "table";
     const WRITE: WriteMode = WriteMode::Atomic;
     type Identity = TableId;
-    type Labels = ();
+    type Attributes = ();
 }
 impl Primary for Table {
     fn layout(_: &TableId, _: &()) -> Placed {
@@ -622,21 +621,21 @@ fn the_invocation_record_is_written_at_the_first_call_and_when_the_command_ends(
     let Begin::Claimed(mut run) = store.begin::<Sim>(&id, &labels, &info, Reuse::IfCompleted).unwrap() else { panic!() };
     run.expect(expecting(&["traj.tsv"]));
     let path = root.path().join(".invocations/1.json");
-    let first: InvocationFile = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(first.status, crate::record::InvocationStatus::Running);
-    assert_eq!(first.results[0].outcome, Outcome::Planned);
-    assert_eq!(first.results[0].labels, serde_json::json!({"model": "sir", "seed": 14}));
+    let first: Record = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let Record::Running(first) = first else { panic!("the first version is running: {first:?}") };
+    assert_eq!(first.head.format, crate::record::INVOCATION_FORMAT);
+    assert_eq!(first.results[0].outcome, Pending::Planned);
+    assert_eq!(first.results[0].attributes, serde_json::json!({"model": "sir", "seed": 14}));
     run.result_file("traj.tsv").unwrap().write_all(b"x").unwrap();
     run.finish().unwrap();
     run_sim(&store, &info, 14);
     let inv = info.finish(&store).unwrap();
     assert_eq!(inv.seq(), 1);
-    let last: InvocationFile = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(last.status, crate::record::InvocationStatus::Ended);
-    assert_eq!(last.label.as_deref(), Some("baseline"));
-    let outcomes: Vec<Outcome> = last.results.iter().map(|r| r.outcome).collect();
+    let last: Record = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let Record::Ended(last) = last else { panic!("the last version is ended: {last:?}") };
+    assert_eq!(last.head.label.as_ref().map(crate::Label::as_str), Some("baseline"));
+    let outcomes: Vec<Outcome> = last.results.iter().map(|r| r.outcome.clone()).collect();
     assert_eq!(outcomes, vec![Outcome::Computed, Outcome::Reused]);
-    assert_eq!(last.counts.completed, 2);
     let stored = store.get(&Id::<Sim>::of(&store.inner.ambient_key, &id)).unwrap().unwrap();
     assert_eq!(read_run(stored.folder()).invocation, Some(1));
 }
@@ -673,15 +672,15 @@ fn declared_members_are_listed_before_any_is_claimed() {
     let root = TempRoot::new("declare");
     let store = open(root.path());
     let info = info();
-    let members: Vec<(SimId, SimLabels, Wanted<Sim>)> =
+    let members: Vec<(SimId, SimAttributes, Wanted<Sim>)> =
         [5u64, 6, 7].iter().map(|s| { let (i, l) = sim(*s); (i, l, Wanted::none()) }).collect();
     let mut declared = store.declare::<Sim>(&members, &info, Reuse::IfCompleted).unwrap();
     let path = root.path().join(".invocations/1.json");
-    let running: InvocationFile = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(running.status, crate::record::InvocationStatus::Running);
-    let seeds: Vec<serde_json::Value> = running.results.iter().map(|r| r.labels["seed"].clone()).collect();
+    let running: Record = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let Record::Running(running) = running else { panic!("the record is running: {running:?}") };
+    let seeds: Vec<serde_json::Value> = running.results.iter().map(|r| r.attributes["seed"].clone()).collect();
     assert_eq!(seeds, vec![serde_json::json!(5), serde_json::json!(6), serde_json::json!(7)]);
-    assert!(running.results.iter().all(|r| r.outcome == Outcome::Planned), "{:?}", running.results);
+    assert!(running.results.iter().all(|r| r.outcome == Pending::Planned), "{:?}", running.results);
     assert!(root.path().join(".staging").read_dir().map_or(true, |mut d| d.next().is_none()), "nothing is claimed");
 
     let Some(Begin::Claimed(mut run)) = declared.begin(1).unwrap() else { panic!("seed 6 is claimed") };
@@ -697,8 +696,11 @@ fn declared_members_are_listed_before_any_is_claimed() {
     drop(declared);
 
     let inv = info.finish(&store).unwrap();
-    let outcomes: Vec<Outcome> = inv.file.results.iter().map(|r| r.outcome).collect();
-    assert_eq!(outcomes, vec![Outcome::Computed, Outcome::Computed, Outcome::Failed]);
+    let outcomes: Vec<Option<&Outcome>> = inv.record.listings().iter().map(|r| r.outcome).collect();
+    assert!(
+        matches!(outcomes[..], [Some(Outcome::Computed), Some(Outcome::Computed), Some(Outcome::Failed(_))]),
+        "{outcomes:?}"
+    );
     assert!(store.get(&sim_id(&store, 7)).unwrap().is_none(), "the member never begun was not computed");
 }
 
@@ -708,7 +710,7 @@ fn a_batch_claims_a_repeated_identity_once_and_answers_in_the_order_asked() {
     let store = open(root.path());
     run_sim(&store, &info(), 2);
     let info = info();
-    let members: Vec<(SimId, SimLabels, Wanted<Sim>)> =
+    let members: Vec<(SimId, SimAttributes, Wanted<Sim>)> =
         [3u64, 2, 3, 1].iter().map(|s| { let (i, l) = sim(*s); (i, l, Wanted::none()) }).collect();
     let plan = store.plan::<Sim>(&members.iter().map(|(i, l, _)| (i.clone(), l.clone())).collect::<Vec<_>>()).unwrap();
     let states: Vec<crate::PlanState> = plan.into_iter().map(|p| p.state).collect();
@@ -729,11 +731,15 @@ fn a_batch_claims_a_repeated_identity_once_and_answers_in_the_order_asked() {
     }
     assert_eq!(seen, vec![("claimed", 3), ("reused", 2), ("claimed", 1)]);
     batch.progress(&serde_json::json!({"done": 3})).unwrap();
+    let progress: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.path().join(".invocations/2.progress.json")).unwrap()).unwrap();
+    assert_eq!(progress["snapshot"], serde_json::json!({"done": 3}), "the progress is written beside the record");
     let inv = info.finish(&store).unwrap();
-    assert_eq!(inv.file.results.len(), 4, "a result asked for twice is listed twice");
-    assert_eq!(inv.file.results[0].run_id, inv.file.results[2].run_id);
-    assert_eq!(inv.file.results[2].outcome, Outcome::Computed);
-    assert_eq!(inv.file.progress, Some(serde_json::json!({"done": 3})));
+    let listed = inv.record.listings();
+    assert_eq!(listed.len(), 4, "a result asked for twice is listed twice");
+    assert_eq!(listed[0].run_id, listed[2].run_id);
+    assert_eq!(listed[2].outcome, Some(&Outcome::Computed));
+    assert!(!root.path().join(".invocations/2.progress.json").exists(), "the progress file goes when the command ends");
 }
 
 #[test]
@@ -744,15 +750,15 @@ fn a_content_artifact_is_stored_once_and_read_through_a_dependency() {
     let prov = Provenance::none().file("source.camdl", b"model sir".to_vec()).value("whole_digest", &"abc").unwrap();
     assert!(store.get_content::<Model>(&content).unwrap().is_none(), "a content not yet put is not found");
     let info1 = info();
-    let a = store.put::<Model>(content.clone(), &ModelLabels { name: "sir".into() }, &prov, &info1).unwrap();
-    let b = store.put::<Model>(content.clone(), &ModelLabels { name: "renamed".into() }, &Provenance::none(), &info()).unwrap();
+    let a = store.put::<Model>(content.clone(), &ModelAttributes { name: "sir".into() }, &prov, &info1).unwrap();
+    let b = store.put::<Model>(content.clone(), &ModelAttributes { name: "renamed".into() }, &Provenance::none(), &info()).unwrap();
     assert_eq!(a.folder(), b.folder(), "the first writer's labels name the folder");
     assert_eq!(store.get_content::<Model>(&content).unwrap().unwrap().folder(), a.folder(), "a put content is found by its content");
     assert!(a.folder().file_name().unwrap().to_string_lossy().starts_with("sir-"));
     assert_eq!(a.recorded("whole_digest"), Some(&serde_json::json!("abc")));
     assert_eq!(*a.identity(), content.digest());
     let inv = info1.finish(&store).unwrap();
-    assert_eq!(inv.file.results[0].outcome, Outcome::Computed);
+    assert_eq!(inv.record.listings()[0].outcome, Some(&Outcome::Computed));
 
     // A result depending on the model reads it, checked, and records the read.
     #[derive(Identity, Clone, Debug)]
@@ -765,7 +771,7 @@ fn a_content_artifact_is_stored_once_and_read_through_a_dependency() {
         const KIND: &'static str = "uses";
         const WRITE: WriteMode = WriteMode::Atomic;
         type Identity = UsesId;
-        type Labels = ();
+        type Attributes = ();
     }
     impl Primary for Uses {
         fn layout(_: &UsesId, _: &()) -> Placed {
@@ -928,8 +934,8 @@ fn a_label_check_sees_an_invocation_that_has_taken_its_number() {
     let Begin::Claimed(run) = store.begin::<Sim>(&id, &labels, &i, Reuse::IfCompleted).unwrap() else { panic!() };
     // Under the store-wide lock the record is written before the lock is
     // released, so the file holds a running record, never a placeholder.
-    let first: InvocationFile = serde_json::from_slice(&std::fs::read(root.path().join(".invocations/1.json")).unwrap()).unwrap();
-    assert_eq!(first.status, crate::record::InvocationStatus::Running);
+    let first: Record = serde_json::from_slice(&std::fs::read(root.path().join(".invocations/1.json")).unwrap()).unwrap();
+    assert!(first.is_running(), "{first:?}");
     drop(run);
     std::fs::write(root.path().join(".invocations/5.json"), b"{}").unwrap();
     let (id, labels) = sim(23);
@@ -956,8 +962,11 @@ fn an_atomic_finish_that_meets_a_stored_copy_of_its_id_keeps_the_stored_one_and_
     let s = run.finish().unwrap();
     assert_eq!(s.folder(), dest);
     let inv = info.finish(&store).unwrap();
-    let outcomes: Vec<_> = inv.file.results.iter().map(|r| (r.kind.as_str(), r.outcome)).collect();
-    assert_eq!(outcomes, vec![("sim", Outcome::Reused), ("obs", Outcome::Failed)], "a by-product not stored is not called computed");
+    let outcomes: Vec<_> = inv.record.listings().iter().map(|r| (r.kind, r.outcome.cloned())).collect();
+    assert!(
+        matches!(outcomes[..], [("sim", Some(Outcome::Reused)), ("obs", Some(Outcome::Failed(_)))]),
+        "a by-product not stored is not called computed: {outcomes:?}"
+    );
 }
 
 #[test]
@@ -1036,7 +1045,7 @@ fn finish_refuses_an_undeclared_file() {
     }
     assert!(result_folders(root.path()).is_empty());
     let inv = info.finish(&store).unwrap();
-    assert_eq!(inv.file.results[0].outcome, Outcome::Failed);
+    assert!(matches!(inv.record.listings()[0].outcome, Some(Outcome::Failed(_))));
 }
 
 /// A run that declared no file set is refused at finish; a later declaration
@@ -1102,14 +1111,14 @@ fn a_content_artifact_of_several_files_is_stored_once() {
         text: Hashed::new(ModelText("S -> I".into())),
         picture: Some(Hashed::new(ModelText("[S]->[I]".into()))),
     };
-    let labels = ModelLabels { name: "sir".into() };
+    let labels = ModelAttributes { name: "sir".into() };
     let info1 = info();
     let a = store.put::<Presentation>(id.clone(), &labels, &Provenance::none(), &info1).unwrap();
     assert_eq!(a.open("text.txt").unwrap().into_inner(), b"S -> I");
     assert_eq!(a.open("picture.txt").unwrap().into_inner(), b"[S]->[I]");
     let b = store.put::<Presentation>(id.clone(), &labels, &Provenance::none(), &info()).unwrap();
     assert_eq!(a.folder(), b.folder());
-    assert_eq!(info1.finish(&store).unwrap().file.results[0].outcome, Outcome::Computed);
+    assert_eq!(info1.finish(&store).unwrap().record.listings()[0].outcome, Some(&Outcome::Computed));
 
     let bare = PresentationId { text: id.text.clone(), picture: None };
     let c = store.put::<Presentation>(bare, &labels, &Provenance::none(), &info()).unwrap();
@@ -1124,21 +1133,22 @@ fn a_content_artifact_of_several_files_is_stored_once() {
 fn a_stored_result_is_listed_with_new_labels_and_not_stored_again() {
     let root = TempRoot::new("list");
     let content = Hashed::new(ModelText("S -> I".into()));
-    let a = open_build(root.path(), "b1").put::<Model>(content.clone(), &ModelLabels { name: "sir".into() }, &Provenance::none(), &info()).unwrap();
+    let a = open_build(root.path(), "b1").put::<Model>(content.clone(), &ModelAttributes { name: "sir".into() }, &Provenance::none(), &info()).unwrap();
     let before = result_folders(root.path());
 
     let store = open_build(root.path(), "b2");
     let info2 = info();
-    store.list::<Model>(a.id(), &ModelLabels { name: "renamed".into() }, &info2).unwrap();
+    store.list::<Model>(a.id(), &ModelAttributes { name: "renamed".into() }, &info2).unwrap();
     let inv = info2.finish(&store).unwrap();
-    assert_eq!(inv.file.results.len(), 1);
-    assert_eq!(inv.file.results[0].run_id, a.id().key());
-    assert_eq!(inv.file.results[0].outcome, Outcome::Reused);
-    assert_eq!(inv.labels_of("compiled_model", a.id().key()), Some(serde_json::json!({"name": "renamed"})));
+    let listed = inv.record.listings();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].run_id, a.id().key());
+    assert_eq!(listed[0].outcome, Some(&Outcome::Reused));
+    assert_eq!(inv.attributes_of("compiled_model", a.id().key()), Some(serde_json::json!({"name": "renamed"})));
     assert_eq!(result_folders(root.path()), before, "nothing is stored");
 
     let absent = Id::<Model>::of(&store.inner.ambient_key, &Hashed::new(ModelText("S -> R".into())));
-    let e = store.list::<Model>(&absent, &ModelLabels { name: "x".into() }, &info()).err().unwrap();
+    let e = store.list::<Model>(&absent, &ModelAttributes { name: "x".into() }, &info()).err().unwrap();
     assert!(matches!(e, Error::NotFound { .. }), "{e}");
 }
 
@@ -1151,10 +1161,10 @@ fn a_content_file_the_identity_does_not_hold_is_refused() {
         const KIND: &'static str = "unheld";
         const WRITE: WriteMode = WriteMode::Atomic;
         type Identity = Hashed<ModelText>;
-        type Labels = ModelLabels;
+        type Attributes = ModelAttributes;
     }
     impl Primary for Unheld {
-        fn layout(_: &Hashed<ModelText>, labels: &ModelLabels) -> Placed {
+        fn layout(_: &Hashed<ModelText>, labels: &ModelAttributes) -> Placed {
             Layout::in_kind().result(&labels.name)
         }
     }
@@ -1172,7 +1182,38 @@ fn a_content_file_the_identity_does_not_hold_is_refused() {
     )
     .unwrap();
     let content = Hashed::new(ModelText("S -> I".into()));
-    let e = store.put::<Unheld>(content.clone(), &ModelLabels { name: "sir".into() }, &Provenance::none(), &info()).err().unwrap();
+    let e = store.put::<Unheld>(content.clone(), &ModelAttributes { name: "sir".into() }, &Provenance::none(), &info()).err().unwrap();
     assert!(matches!(e, Error::ContentUnheld { ref file } if file == "extra.txt"), "{e}");
     assert!(store.get_content::<Unheld>(&content).unwrap().is_none());
+}
+
+/// A record of another format, and a closed record that lists a result as
+/// planned, are left out of the snapshot and listed as unread; the results
+/// they list stay reusable, and a label they hold names nothing.
+#[test]
+fn records_the_store_does_not_read_are_listed_and_left_out() {
+    let root = TempRoot::new("unread");
+    let s = run_sim(&open(root.path()), &labelled("old"), 41);
+    run_sim(&open(root.path()), &labelled("planned"), 42);
+    let edit = |seq: u64, f: &dyn Fn(&mut serde_json::Value)| {
+        let path = root.path().join(format!(".invocations/{seq}.json"));
+        let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        f(&mut v);
+        std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
+        path
+    };
+    let old = edit(1, &|v| v["format"] = 1.into());
+    let planned = edit(2, &|v| v["results"][0]["outcome"] = "planned".into());
+
+    let store = open(root.path());
+    assert!(store.invocations().is_empty(), "neither record is read");
+    assert!(store.label_holders("old").is_empty() && store.label_holders("planned").is_empty());
+    let unread = store.unread_records();
+    assert_eq!(unread.len(), 2, "{unread:?}");
+    assert_eq!(unread[0], crate::UnreadRecord { path: old, why: crate::Unread::Format { found: 1 } });
+    assert_eq!(unread[1].path, planned);
+    assert!(matches!(&unread[1].why, crate::Unread::Invalid { why } if why.contains("planned")), "{:?}", unread[1]);
+    let i = info();
+    let (id, labels) = sim(41);
+    assert!(matches!(store.begin::<Sim>(&id, &labels, &i, Reuse::IfCompleted).unwrap(), Begin::Reused(r) if r.id() == s.id()));
 }

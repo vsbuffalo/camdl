@@ -3,7 +3,7 @@
 use std::io::Write;
 
 use crate::tests::*;
-use crate::record::{InvocationFile, InvocationStatus, Outcome, ResultEntry, RECORD_FORMAT};
+use crate::record::{Head, Listing, Pending, Record, RecordKind, Running, INVOCATION_FORMAT};
 use crate::{Begin, Error, ExportPath, Handle, Reuse, RunRef, Stored};
 
 fn resolve_sim(store: &Store, h: &str) -> crate::Result<Stored<Sim>> {
@@ -78,22 +78,25 @@ fn a_label_names_the_latest_invocation_whose_results_all_completed() {
 }
 
 fn running_invocation(root: &std::path::Path, seq: u64, label: &str, owner: crate::Owner) {
-    let f = InvocationFile {
-        format: RECORD_FORMAT,
-        seq,
-        record: "invocation".into(),
-        status: InvocationStatus::Running,
-        owner,
-        started: crate::Timestamp::now(),
-        ended: None,
-        label: Some(label.into()),
-        argv: vec![],
-        given: serde_json::json!({}),
-        config_files: vec![],
-        results: vec![ResultEntry { kind: "sim".into(), run_id: crate::Key::digest_bytes(b"r"), labels: serde_json::Value::Null, outcome: Outcome::Planned, failure: None }],
-        counts: Default::default(),
-        progress: None,
-    };
+    let f = Record::Running(Running {
+        head: Head {
+            format: INVOCATION_FORMAT,
+            record: RecordKind::Invocation,
+            seq,
+            owner,
+            started: crate::Timestamp::now(),
+            label: Some(crate::Label::parse(label).unwrap()),
+            argv: vec![],
+            given: serde_json::json!({}),
+            config_files: vec![],
+        },
+        results: vec![Listing {
+            kind: "sim".into(),
+            run_id: crate::Key::digest_bytes(b"r"),
+            attributes: serde_json::Value::Null,
+            outcome: Pending::Planned,
+        }],
+    });
     std::fs::create_dir_all(root.join(".invocations")).unwrap();
     std::fs::write(root.join(format!(".invocations/{seq}.json")), serde_json::to_vec(&f).unwrap()).unwrap();
 }
@@ -125,7 +128,7 @@ struct Combined;
 impl crate::Rendering for Combined {
     type Of = Sim;
     type Options = bool;
-    fn render(members: &[(Stored<Sim>, SimLabels)], header: &bool, out: &mut dyn Write) -> crate::Result<()> {
+    fn render(members: &[(Stored<Sim>, SimAttributes)], header: &bool, out: &mut dyn Write) -> crate::Result<()> {
         if *header {
             writeln!(out, "seed\tbytes").unwrap();
         }

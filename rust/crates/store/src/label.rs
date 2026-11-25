@@ -58,6 +58,21 @@ impl std::fmt::Display for Label {
     }
 }
 
+impl serde::Serialize for Label {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.serialize_str(&self.0)
+    }
+}
+
+/// A record's label is read by [`Label::parse`], so a record holding one the
+/// rule refuses does not read.
+impl<'de> serde::Deserialize<'de> for Label {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let raw = String::deserialize(d)?;
+        Label::parse(&raw).map_err(serde::de::Error::custom)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::Label;

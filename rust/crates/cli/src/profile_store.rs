@@ -109,7 +109,7 @@ pub(crate) fn pose_problem(
     compile: crate::util::CompileSettings,
     overrides: &ProblemOverrides<'_>,
 ) -> Result<PosedProblem, String> {
-    use crate::fit_store::{FitProblem, ModelSourceFile, ProblemLabels};
+    use crate::fit_store::{FitProblem, ModelSourceFile, ProblemAttributes};
     let given_model = std::fs::read(model).map_err(|e| format!("cannot read the model {model}: {e}"))?;
     // A stored fit's problem is compiled from the model file it keeps; the
     // file this profile names is compiled once, to refuse another model and
@@ -242,7 +242,7 @@ pub(crate) fn pose_problem(
                 ModelSourceFile { bytes: source_bytes, camdl: crate::util::model_is_camdl_source(&source_path) },
                 crate::fit_store::DataOrigin::Files,
             )?;
-            let labels = ProblemLabels { model: stem, sweep_point: None };
+            let labels = ProblemAttributes { model: stem, sweep_point: None };
             let stored = match crate::camdl_store::begin::<FitProblem>(store, &posed.identity, &labels, info, store::Reuse::IfCompleted, crate::fit_store::problem_files(&posed)).map_err(|e| e.to_string())? {
                 store::Begin::Reused(stored) => stored,
                 store::Begin::Busy(owner) => return Err(store::Error::InProgress(owner).to_string()),
@@ -566,7 +566,7 @@ pub(crate) fn point_seed(seed: u64, focal: &BTreeMap<String, Finite>, start: &BT
 /// (`beta=0.3000__gamma=0.1000`), the method's name, the seed the user typed
 /// and the start's index in the invocation.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub(crate) struct ProfilePointLabels {
+pub(crate) struct ProfilePointAttributes {
     pub model: String,
     pub focal: String,
     pub method: String,
@@ -587,11 +587,11 @@ impl Artifact for ProfilePoint {
     const KIND: &'static str = "profile_point";
     const WRITE: WriteMode = WriteMode::InPlace;
     type Identity = ProfilePointIdentity;
-    type Labels = ProfilePointLabels;
+    type Attributes = ProfilePointAttributes;
 }
 
 impl Primary for ProfilePoint {
-    fn layout(id: &ProfilePointIdentity, labels: &ProfilePointLabels) -> Placed {
+    fn layout(id: &ProfilePointIdentity, labels: &ProfilePointAttributes) -> Placed {
         Layout::in_kind()
             .group(&labels.model, &id.problem)
             .group(&labels.focal, &id.focal)

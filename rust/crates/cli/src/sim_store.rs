@@ -176,7 +176,7 @@ pub(crate) enum PointLabel {
 
 /// A cell's labels: what a user recognises it by, never hashed.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub(crate) struct CellLabels {
+pub(crate) struct CellAttributes {
     /// The model file's stem.
     pub model: String,
     /// `base`, or a sweep point's or draw row's values at those the cell ran.
@@ -196,7 +196,7 @@ pub(crate) struct CellLabels {
     pub point: PointLabel,
 }
 
-impl CellLabels {
+impl CellAttributes {
     /// `seed_<seed typed>`, with `-r<n>` for every replicate of that seed
     /// after the first.
     pub fn seed_label(&self) -> String {
@@ -238,11 +238,11 @@ impl Artifact for Sim {
     const KIND: &'static str = "sim";
     const WRITE: WriteMode = WriteMode::Atomic;
     type Identity = SimIdentity;
-    type Labels = CellLabels;
+    type Attributes = CellAttributes;
 }
 
 impl Primary for Sim {
-    fn layout(id: &SimIdentity, labels: &CellLabels) -> Placed {
+    fn layout(id: &SimIdentity, labels: &CellAttributes) -> Placed {
         camdl_groups(&labels.model, &id.model, &id.config.label(), &id.config, Some((labels.params.as_str(), &id.params)))
             .group(&labels.scenario, &id.scenario)
             .result(&labels.seed_label())
@@ -277,7 +277,7 @@ impl Artifact for Obs {
     const KIND: &'static str = "obs";
     const WRITE: WriteMode = WriteMode::Atomic;
     type Identity = ObsIdentity;
-    type Labels = ();
+    type Attributes = ();
 }
 
 impl ByProduct for Obs {
@@ -308,7 +308,7 @@ impl Artifact for EventLog {
     const KIND: &'static str = "event_log";
     const WRITE: WriteMode = WriteMode::Atomic;
     type Identity = EventLogIdentity;
-    type Labels = ();
+    type Attributes = ();
 }
 
 impl ByProduct for EventLog {
@@ -346,7 +346,7 @@ impl Artifact for SimQuantities {
     const KIND: &'static str = "sim_quantities";
     const WRITE: WriteMode = WriteMode::Atomic;
     type Identity = SimQuantitiesIdentity;
-    type Labels = ();
+    type Attributes = ();
 }
 
 impl ByProduct for SimQuantities {
@@ -467,7 +467,7 @@ fn io(e: std::io::Error) -> store::Error {
 /// naming each such cell: leaving its rows out would write a table that looks
 /// complete and is not.
 fn refuse_failures<'a>(
-    members: impl Iterator<Item = (&'a Stored<Sim>, &'a CellLabels, Option<(Failure, std::path::PathBuf)>)>,
+    members: impl Iterator<Item = (&'a Stored<Sim>, &'a CellAttributes, Option<(Failure, std::path::PathBuf)>)>,
 ) -> store::Result<()> {
     let mut failed = Vec::new();
     for (stored, labels, by_product) in members {
@@ -495,7 +495,7 @@ fn by_product_failure<B: Artifact>(stored: &Option<Stored<B>>) -> store::Result<
 }
 
 /// A cell as a person names it: its scenario and the seed typed.
-pub(crate) fn cell_name(labels: &CellLabels) -> String {
+pub(crate) fn cell_name(labels: &CellAttributes) -> String {
     format!("scenario={} {}", labels.scenario, labels.seed_label())
 }
 
@@ -508,7 +508,7 @@ struct Coords {
 }
 
 impl Coords {
-    fn of(members: &[&CellLabels]) -> store::Result<Coords> {
+    fn of(members: &[&CellAttributes]) -> store::Result<Coords> {
         let first = members.first().map(|l| &l.point);
         let coords = match first {
             Some(PointLabel::Sweep { values, .. }) => Coords { sweep: Some(values.iter().map(|(k, _)| k.clone()).collect()), draws: false },
@@ -532,7 +532,7 @@ impl Coords {
         write!(out, "seed\t")
     }
 
-    fn cells(&self, out: &mut dyn Write, l: &CellLabels) -> store::Result<()> {
+    fn cells(&self, out: &mut dyn Write, l: &CellAttributes) -> store::Result<()> {
         write!(out, "{}\t{}\t", l.replicate, l.scenario).map_err(io)?;
         match (&self.sweep, &l.point) {
             (Some(params), PointLabel::Sweep { point_id, values }) => {

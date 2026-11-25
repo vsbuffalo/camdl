@@ -1720,7 +1720,7 @@ impl PredictSource {
         &self,
         options: &PredictOptions,
         design: BTreeMap<String, store::Dep<crate::camdl_store::DataTable>>,
-    ) -> Result<(crate::fit_store::PredictIdentity, crate::fit_store::PredictionLabels), String> {
+    ) -> Result<(crate::fit_store::PredictIdentity, crate::fit_store::PredictionAttributes), String> {
         match self {
             PredictSource::Posterior(fit) => prediction_identity(fit, options, design),
             PredictSource::FixedPoint(p) => {
@@ -2157,7 +2157,7 @@ fn design_deps(
         let table = store::Hashed::new(
             <crate::camdl_store::Table as store::Content>::from_bytes(&bytes).map_err(|e| e.to_string())?,
         );
-        let labels = crate::camdl_store::TableLabels { stream: source.to_string(), path: path.to_string() };
+        let labels = crate::camdl_store::TableAttributes { stream: source.to_string(), path: path.to_string() };
         let dep = store
             .put::<crate::camdl_store::DataTable>(table, &labels, &store::Provenance::none(), info)
             .and_then(|s| s.dep(<crate::camdl_store::DataTable as store::ContentArtifact>::FILE))
@@ -2478,7 +2478,7 @@ pub(crate) fn prediction_identity(
     fit: &crate::fit_store::OpenedFit,
     options: &PredictOptions,
     design: std::collections::BTreeMap<String, store::Dep<crate::camdl_store::DataTable>>,
-) -> Result<(crate::fit_store::PredictIdentity, crate::fit_store::PredictionLabels), String> {
+) -> Result<(crate::fit_store::PredictIdentity, crate::fit_store::PredictionAttributes), String> {
     let run = fit.fit.run.as_ref().ok_or("a prediction is made from a run, and the handle names a problem")?;
     identity_from(
         crate::fit_store::ParameterSource::Posterior { draws: run.dep_all(), problem: fit.fit.problem.dep_all() },
@@ -2500,8 +2500,8 @@ fn identity_from(
     options: &PredictOptions,
     design: std::collections::BTreeMap<String, store::Dep<crate::camdl_store::DataTable>>,
     model: String,
-) -> Result<(crate::fit_store::PredictIdentity, crate::fit_store::PredictionLabels), String> {
-    use crate::fit_store::{PredictIdentity, PredictMode, PredictionLabels};
+) -> Result<(crate::fit_store::PredictIdentity, crate::fit_store::PredictionAttributes), String> {
+    use crate::fit_store::{PredictIdentity, PredictMode, PredictionAttributes};
     let mode = match options.mode {
         "free_forward" => PredictMode::FreeForward,
         "one_step" => PredictMode::OneStep,
@@ -2520,7 +2520,7 @@ fn identity_from(
             design,
         },
     };
-    let labels = PredictionLabels { mode: mode.label().to_string(), scenarios: options.scenarios.clone(), model };
+    let labels = PredictionAttributes { mode: mode.label().to_string(), scenarios: options.scenarios.clone(), model };
     Ok((identity, labels))
 }
 

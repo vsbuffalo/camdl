@@ -172,6 +172,31 @@ pub(crate) fn read_root() -> PathBuf {
     root_of(&unlabelled_request(None))
 }
 
+/// Says, once per command, that the invocation records `unread` under the
+/// store at `root` are not read: the store calls it ([`store::report_unread_records_to`])
+/// the first time a read of the records meets one. A record of another
+/// format was written by another build; one of this format that does not
+/// read is damaged. Neither's label or listings are seen by a lookup, and the
+/// results they list stay reusable.
+pub(crate) fn report_unread_records(root: &Path, unread: &[store::UnreadRecord]) {
+    static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if unread.is_empty() || SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let listed: Vec<String> = unread.iter().map(|u| format!("\n    {u}")).collect();
+    crate::out::live().notice(&crate::out::notice::Notice {
+        severity: crate::out::notice::Severity::Warning,
+        code: "invocation-records-not-read",
+        message: format!(
+            "{} invocation record(s) in the run store at {} are not read, so no label or listing they hold is \
+             seen; the results they list stay reusable:{}",
+            unread.len(),
+            root.display(),
+            listed.concat()
+        ),
+    });
+}
+
 /// Opens the store at `root` for reading, or `None` when no store is there.
 pub(crate) fn open_existing(root: &Path) -> Option<Store> {
     if !root.join("store.json").exists() {
@@ -190,7 +215,7 @@ pub(crate) fn open_existing(root: &Path) -> Option<Store> {
 pub(crate) fn begin<A: Primary + Files>(
     store: &Store,
     identity: &A::Identity,
-    labels: &A::Labels,
+    labels: &A::Attributes,
     info: &store::RunInfo,
     reuse: store::Reuse,
     files: impl IntoIterator<Item = A::File>,
@@ -203,7 +228,7 @@ pub(crate) fn begin<A: Primary + Files>(
 pub(crate) fn begin_with<A: Primary + Files>(
     store: &Store,
     identity: &A::Identity,
-    labels: &A::Labels,
+    labels: &A::Attributes,
     wanted: &store::Wanted<A>,
     info: &store::RunInfo,
     reuse: store::Reuse,
@@ -476,7 +501,7 @@ impl store::Content for QuantitiesContent {
 /// compiled model's labels in an invocation also name the presentation that
 /// invocation compiled it from.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub(crate) struct ModelLabels {
+pub(crate) struct ModelAttributes {
     pub name: String,
     /// The run id (hex) of the [`ModelPresentation`] stored with the compiled
     /// model, set by [`put_compiled`]; `None` in the labels of every other
@@ -493,7 +518,7 @@ pub(crate) struct CompiledParts {
     /// The source file, the description, the `#'` documentation, the
     /// declared model and the renders.
     pub presentation: PresentationIdentity,
-    pub labels: ModelLabels,
+    pub labels: ModelAttributes,
     /// The envelope's `ir_version` and `validated_by`, and the digests of the
     /// whole compiled output and of the source file.
     pub provenance: Provenance,
@@ -595,7 +620,7 @@ impl CompiledParts {
             model: Hashed::new(CompiledModelContent::of(model_part)),
             quantities: Hashed::new(quantities),
             presentation,
-            labels: ModelLabels { name, presentation: None },
+            labels: ModelAttributes { name, presentation: None },
             provenance,
         })
     }
@@ -609,11 +634,11 @@ impl Artifact for CompiledModel {
     const KIND: &'static str = "compiled_model";
     const WRITE: WriteMode = WriteMode::Atomic;
     type Identity = Hashed<CompiledModelContent>;
-    type Labels = ModelLabels;
+    type Attributes = ModelAttributes;
 }
 
 impl Primary for CompiledModel {
-    fn layout(_id: &Self::Identity, labels: &ModelLabels) -> Placed {
+    fn layout(_id: &Self::Identity, labels: &ModelAttributes) -> Placed {
         Layout::in_kind().result(&labels.name)
     }
 }
@@ -631,11 +656,11 @@ impl Artifact for Quantities {
     const KIND: &'static str = "quantities";
     const WRITE: WriteMode = WriteMode::Atomic;
     type Identity = Hashed<QuantitiesContent>;
-    type Labels = ModelLabels;
+    type Attributes = ModelAttributes;
 }
 
 impl Primary for Quantities {
-    fn layout(_id: &Self::Identity, labels: &ModelLabels) -> Placed {
+    fn layout(_id: &Self::Identity, labels: &ModelAttributes) -> Placed {
         Layout::in_kind().result(&labels.name)
     }
 }
@@ -664,7 +689,7 @@ impl store::Content for Table {
 
 /// The stream a table is bound to and its path as given.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub(crate) struct TableLabels {
+pub(crate) struct TableAttributes {
     pub stream: String,
     pub path: String,
 }
@@ -676,11 +701,11 @@ impl Artifact for DataTable {
     const KIND: &'static str = "data_table";
     const WRITE: WriteMode = WriteMode::Atomic;
     type Identity = Hashed<Table>;
-    type Labels = TableLabels;
+    type Attributes = TableAttributes;
 }
 
 impl Primary for DataTable {
-    fn layout(_id: &Self::Identity, labels: &TableLabels) -> Placed {
+    fn layout(_id: &Self::Identity, labels: &TableAttributes) -> Placed {
         Layout::in_kind().result(&labels.stream)
     }
 }

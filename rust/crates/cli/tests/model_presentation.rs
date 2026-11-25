@@ -311,7 +311,7 @@ fn a_summary_with_no_recorded_model_file_says_so() {
     let record = dir.join("st/.invocations/1.json");
     let mut inv: serde_json::Value = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
     for r in inv["results"].as_array_mut().unwrap() {
-        r["labels"].as_object_mut().unwrap().remove("presentation");
+        r["attributes"].as_object_mut().unwrap().remove("presentation");
     }
     std::fs::write(&record, serde_json::to_vec_pretty(&inv).unwrap()).unwrap();
 

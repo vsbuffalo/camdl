@@ -858,7 +858,7 @@ fn a_larger_grid_computes_only_its_new_points() {
     }
     let outcomes: Vec<(String, String)> = last_invocation(&store)["results"].as_array().unwrap().iter()
         .filter(|r| r["kind"] == super::ProfilePoint::KIND)
-        .map(|r| (r["labels"]["focal"].as_str().unwrap().to_string(), r["outcome"].as_str().unwrap().to_string()))
+        .map(|r| (r["attributes"]["focal"].as_str().unwrap().to_string(), r["outcome"].as_str().unwrap().to_string()))
         .collect();
     assert_eq!(outcomes.len(), 12);
     for (focal, outcome) in &outcomes {
@@ -1084,7 +1084,7 @@ fn pinned_view(store: &Path) -> BTreeMap<String, String> {
     last_invocation(store)["results"].as_array().unwrap().iter()
         .filter(|r| r["kind"] == super::ProfilePoint::KIND)
         .map(|r| {
-            let l = &r["labels"];
+            let l = &r["attributes"];
             let key = format!("{} seed_{} start_{}", l["focal"].as_str().unwrap(), l["seed"], l["start"]);
             let id = Key::from_hex(r["run_id"].as_str().unwrap()).unwrap();
             (key, files[&id][super::MLE_FILE].to_hex())

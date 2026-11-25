@@ -192,12 +192,12 @@ pub trait Artifact: 'static {
     const KIND: &'static str;          // "pfilter"; also the artifact kind's directory name
     const WRITE: WriteMode;            // Atomic or InPlace
     type Identity: Identity;           // what determines the result's output
-    type Labels: Serialize + DeserializeOwned + Clone + 'static;
+    type Attributes: Serialize + DeserializeOwned + Clone + 'static;
 }
 
 // :30
 pub trait Primary: Artifact {
-    fn layout(identity: &Self::Identity, labels: &Self::Labels) -> Placed;
+    fn layout(identity: &Self::Identity, labels: &Self::Attributes) -> Placed;
 }
 
 // :37
@@ -205,7 +205,7 @@ pub trait ByProduct: Artifact {
     type Of: Primary;
     fn upstream(identity: &Self::Identity)
         -> &<<Self::Of as Artifact>::Identity as Identity>::Record;
-    fn label(identity: &Self::Identity, labels: &Self::Labels) -> String;
+    fn label(identity: &Self::Identity, labels: &Self::Attributes) -> String;
 }
 ```
 
@@ -227,7 +227,7 @@ impl Artifact for Pfilter {
     const KIND: &'static str = "pfilter";
     const WRITE: WriteMode = WriteMode::InPlace;
     type Identity = PfilterIdentity;
-    type Labels = PfilterLabels;
+    type Attributes = PfilterAttributes;
 }
 ```
 
@@ -392,17 +392,19 @@ determine some component (`ENGINE_REUSE`, `version.rs:59`). Under
 because they change the compiled model's bytes, which the run's identity already
 holds.
 
-### Labels
+### Attributes
 
-Labels are what a user recognizes a result by but what does not determine it.
-For a filter run they are the model file's stem, the seed as typed, and for a
-point of a `--sweep-file` design, its row and values (`PfilterLabels`,
-`pfilter_store.rs:124`).
+A result's attributes are what a user recognizes it by but what does not
+determine it. For a filter run they are the model file's stem, the seed as
+typed, and for a point of a `--sweep-file` design, its row and values
+(`PfilterAttributes`, `pfilter_store.rs`). Each kind names their type as
+`Artifact::Attributes`.
 
-Labels are passed to `begin` beside the identity. The store never hashes them
-and never looks inside them. They are written into the invocation record, and
-the first writer's labels name the result's folder through `layout`. A second
-request for the same result under other labels finds the folder already named.
+Attributes are passed to `begin` beside the identity. The store never hashes
+them and never looks inside them. They are written into the invocation record,
+and the first writer's attributes name the result's folder through `layout`. A
+second request for the same result under other attributes finds the folder
+already named.
 
 A `--label L` on the command line is different: it names the invocation, not a
 result ([The invocation record](#the-invocation-record)). `StoreRequest::new`
@@ -880,7 +882,7 @@ pub(crate) fn camdl_groups<S: ContentAddressed>(
 
 // rust/crates/cli/src/pfilter_store.rs:151
 impl Primary for Pfilter {
-    fn layout(id: &PfilterIdentity, labels: &PfilterLabels) -> Placed {
+    fn layout(id: &PfilterIdentity, labels: &PfilterAttributes) -> Placed {
         camdl_groups(&labels.model, &id.model, &id.config.label(), &id.config,
                      Some(("params", &id.params)))
             .result(&format!("seed_{}", labels.seed))
@@ -1090,7 +1092,7 @@ pub enum Begin<A: Artifact> {
 }
 
 // :280
-pub fn begin_with<A: Primary>(&self, identity: &A::Identity, labels: &A::Labels,
+pub fn begin_with<A: Primary>(&self, identity: &A::Identity, labels: &A::Attributes,
     wanted: &Wanted<A>, info: &RunInfo, reuse: Reuse) -> Result<Begin<A>>;
 ```
 
@@ -1427,7 +1429,7 @@ invocation's stored results, their labels and options.
 pub trait Rendering {
     type Of: Artifact;
     type Options;
-    fn render(members: &[(Stored<Self::Of>, <Self::Of as Artifact>::Labels)],
+    fn render(members: &[(Stored<Self::Of>, <Self::Of as Artifact>::Attributes)],
               options: &Self::Options, out: &mut dyn Write) -> Result<()>;
 }
 
@@ -1486,16 +1488,28 @@ by `camdl clean` with status `interrupted`, its unfinished results recorded as
 failed (`maintenance.rs:198`).
 
 The record holds the command line, the inputs as given, the digest of each
-configuration file read, the `--label`, counts of completed and failed results,
-and every result the command passed to the store in call order, each with its
-artifact kind, run id, labels and outcome: `computed`, `reused`, `failed` with
-its reason, or `busy`. A result still `planned` when the command ends is
-recorded as failed.
+configuration file read, the `--label`, and every result the command passed to
+the store in call order, each with its artifact kind, run id, `attributes` and
+outcome: `computed`, `reused`, `failed` with its reason, or `busy`. A result
+still `planned` when the command ends is recorded as failed. Its states are
+types (`record::Record`): a `Running` record's results may be `planned`, and a
+`Closed` one (`ended` or `interrupted`) holds an ended outcome for every result,
+so a closed record that lists one as `planned` does not read. A command's live
+progress is the separate file `.invocations/<seq>.progress.json`, removed when
+the command ends.
+
+The record has its own format, `INVOCATION_FORMAT` (2); `store.json` and every
+result's records are `RECORD_FORMAT` (1). A record of another format, or one
+that does not read, is left out of every lookup and listed by
+`Store::unread_records`; the store calls the reporter the project sets
+(`report_unread_records_to`) once, the first time a read meets one, and camdl
+prints one warning naming each such record. The results such a record lists stay
+reusable, since reuse goes by identity, but its label names nothing.
 
 The record is durable. The index lists completed results only, and is rebuilt
 from their records. `Invocation::members::<A>()` returns the entries of one
-artifact kind with their labels, which is how a rendering and `camdl list` read
-them.
+artifact kind with their attributes, which is how a rendering and `camdl list`
+read them.
 
 A store reads `.invocations/` for its lookups once. `Store::invocations()`
 returns an `Arc<[Invocation]>` snapshot: the closed records (`ended` or
@@ -1505,8 +1519,8 @@ writes for its own invocations, added as it writes it. `Store::invocation`,
 the records answer from it, so `fit summary @f` reads the directory once however
 many lookups it makes. A record another process writes after the snapshot is not
 in it, nor is another process's running record. Two reads must see those, and
-read the directory each time: the label check when a command starts, under the
-lock, and the previous holder of a label when it ends. `camdl status` and
+read the directory each time, under the lock: the label check when a command
+starts, and the previous holder of a label when it ends. `camdl status` and
 `camdl clean` read the running records from the directory too.
 
 ## Content artifacts and dependencies
@@ -1975,11 +1989,11 @@ impl Artifact for Pfilter {
     const KIND: &'static str = "pfilter";
     const WRITE: WriteMode = WriteMode::InPlace;   // a long run whose progress is watched
     type Identity = PfilterIdentity;
-    type Labels = PfilterLabels;
+    type Attributes = PfilterAttributes;
 }
 
 impl Primary for Pfilter {
-    fn layout(id: &PfilterIdentity, labels: &PfilterLabels) -> Placed {
+    fn layout(id: &PfilterIdentity, labels: &PfilterAttributes) -> Placed {
         camdl_groups(&labels.model, &id.model, &id.config.label(), &id.config,
                      Some(("params", &id.params)))
             .result(&format!("seed_{}", labels.seed))

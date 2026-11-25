@@ -353,7 +353,7 @@ pub(crate) fn candidates(store: &Store, source: &Source, narrow: &Narrow) -> Res
                 .into_iter()
                 .filter(|(k, id, completed)| *completed && seen.insert((k.to_string(), *id)))
                 .map(|(k, id, _)| {
-                    let labels = crate::output_manifest::manifest_labels(k, inv.labels_of(k, id).unwrap_or(serde_json::Value::Null));
+                    let labels = crate::output_manifest::manifest_labels(k, inv.attributes_of(k, id).unwrap_or(serde_json::Value::Null));
                     (k.to_string(), id, labels, None)
                 })
                 .collect()
@@ -417,7 +417,7 @@ fn one_with_by_products(store: &Store, handle: &Handle, narrow: &Narrow) -> Resu
     })?;
     let invocations = store.invocations();
     let latest_labels = |kind: &str, id: Key| {
-        let labels = invocations.iter().rev().find_map(|inv| inv.labels_of(kind, id)).unwrap_or(serde_json::Value::Null);
+        let labels = invocations.iter().rev().find_map(|inv| inv.attributes_of(kind, id)).unwrap_or(serde_json::Value::Null);
         crate::output_manifest::manifest_labels(kind, labels)
     };
     let id = main.run_id();
@@ -853,12 +853,12 @@ pub(crate) fn push_swept(columns: &mut Vec<(String, String)>, values: &[(String,
 fn label_columns(kind: &str, labels: &serde_json::Value) -> Vec<(String, String)> {
     use store::Artifact;
     if kind == crate::sim_store::Sim::KIND {
-        if let Ok(l) = serde_json::from_value::<crate::sim_store::CellLabels>(labels.clone()) {
+        if let Ok(l) = serde_json::from_value::<crate::sim_store::CellAttributes>(labels.clone()) {
             return l.columns();
         }
     }
     if kind == crate::pfilter_store::Pfilter::KIND {
-        if let Ok(l) = serde_json::from_value::<crate::pfilter_store::PfilterLabels>(labels.clone()) {
+        if let Ok(l) = serde_json::from_value::<crate::pfilter_store::PfilterAttributes>(labels.clone()) {
             return l.columns();
         }
     }

@@ -121,14 +121,14 @@ pub(crate) struct PfilterIdentity {
 /// The model file's stem, the seed the user typed, and for a point of a
 /// `--sweep-file` design, the point.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub(crate) struct PfilterLabels {
+pub(crate) struct PfilterAttributes {
     pub model: String,
     pub seed: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub point: Option<DesignPointLabel>,
 }
 
-impl PfilterLabels {
+impl PfilterAttributes {
     /// The labels as the columns of a `--each` table (run spec §4.5): the
     /// model and the seed, then for a design point its `row`, its
     /// `point_id` and one column per design column.
@@ -160,11 +160,11 @@ impl Artifact for Pfilter {
     const KIND: &'static str = "pfilter";
     const WRITE: WriteMode = WriteMode::InPlace;
     type Identity = PfilterIdentity;
-    type Labels = PfilterLabels;
+    type Attributes = PfilterAttributes;
 }
 
 impl Primary for Pfilter {
-    fn layout(id: &PfilterIdentity, labels: &PfilterLabels) -> Placed {
+    fn layout(id: &PfilterIdentity, labels: &PfilterAttributes) -> Placed {
         camdl_groups(&labels.model, &id.model, &id.config.label(), &id.config, Some(("params", &id.params)))
             .result(&format!("seed_{}", labels.seed))
     }
@@ -196,7 +196,7 @@ macro_rules! run_by_product {
             const KIND: &'static str = $tag;
             const WRITE: WriteMode = WriteMode::Atomic;
             type Identity = $identity;
-            type Labels = ();
+            type Attributes = ();
         }
 
         impl ByProduct for $name {
@@ -274,7 +274,7 @@ impl Artifact for SavedPaths {
     const WRITE: WriteMode = WriteMode::Atomic;
     type Identity = SavedPathsIdentity;
     /// `None` in an invocation record that holds no grid.
-    type Labels = Option<PathRows>;
+    type Attributes = Option<PathRows>;
 }
 
 impl ByProduct for SavedPaths {
@@ -312,7 +312,7 @@ impl Artifact for Prequential {
     const KIND: &'static str = "prequential";
     const WRITE: WriteMode = WriteMode::Atomic;
     type Identity = PrequentialIdentity;
-    type Labels = ();
+    type Attributes = ();
 }
 
 impl ByProduct for Prequential {

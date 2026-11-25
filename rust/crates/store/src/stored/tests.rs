@@ -44,7 +44,7 @@ fn a_by_product_is_located_with_its_upstream_and_a_nested_result_without_one() {
     let i = info();
     let s = sim_with_obs(&store, &i, 2);
     let inv = i.finish(&store).unwrap();
-    let obs = inv.file.results.iter().find(|r| r.kind == "obs").unwrap().run_id;
+    let obs = inv.record.listings().iter().find(|r| r.kind == "obs").unwrap().run_id;
     let located = store.locate(obs).unwrap();
     assert_eq!(located.kind(), "obs");
     assert_eq!(located.upstream(), Some(s.id().key()));
@@ -161,12 +161,12 @@ fn outputs_list_each_distinct_result_in_order_with_by_products_and_result_files_
     let inv = i.finish(&store).unwrap();
     let outputs = inv.outputs(&store).unwrap();
     let got: Vec<(&str, Key, Option<Key>)> = outputs.iter().map(|o| (o.kind.as_str(), o.run_id, o.upstream)).collect();
-    let obs = inv.file.results.iter().find(|r| r.kind == "obs").unwrap().run_id;
+    let obs = inv.record.listings().iter().find(|r| r.kind == "obs").unwrap().run_id;
     assert_eq!(got, vec![("sim", a.id().key(), None), ("obs", obs, Some(a.id().key())), ("sim", b.id().key(), None)]);
     // The provenance file `execution.json` is not a result file.
     assert_eq!(outputs[0].files.keys().collect::<Vec<_>>(), vec!["traj.tsv"]);
     assert_eq!(outputs[0].files["traj.tsv"], crate::OutputFile { sha256: Key::digest_bytes(b"t\tI\n0\t7\n"), bytes: 8 });
-    assert_eq!(outputs[0].labels, serde_json::json!({ "model": "sir", "seed": 7 }));
+    assert_eq!(outputs[0].attributes, serde_json::json!({ "model": "sir", "seed": 7 }));
 }
 
 #[test]
@@ -207,7 +207,7 @@ fn a_damaged_by_product_still_names_its_upstream() {
     let i = info();
     let s = sim_with_obs(&store, &i, 12);
     let inv = i.finish(&store).unwrap();
-    let obs = inv.file.results.iter().find(|r| r.kind == "obs").unwrap().run_id;
+    let obs = inv.record.listings().iter().find(|r| r.kind == "obs").unwrap().run_id;
     let folder = store.locate(obs).unwrap().folder().to_path_buf();
     std::fs::write(folder.join("obs.tsv"), b"other").unwrap();
     assert!(store.locate(obs).is_err() || store.locate(obs).unwrap().read("obs.tsv").is_err(), "the by-product is damaged");

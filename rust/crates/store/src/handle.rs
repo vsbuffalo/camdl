@@ -124,7 +124,7 @@ impl Store {
             }
             Handle::Label { .. } => {
                 let inv = self.invocation(handle)?;
-                let members: Vec<Key> = inv.file.results.iter().filter(|r| r.kind == kind).map(|r| r.run_id).collect();
+                let members: Vec<Key> = inv.record.listings().iter().filter(|r| r.kind == kind).map(|r| r.run_id).collect();
                 let mut distinct = members.clone();
                 distinct.sort();
                 distinct.dedup();
@@ -133,7 +133,8 @@ impl Store {
                     // The invocation holds no result of this kind: whatever it
                     // holds is of other kinds, named in the refusal.
                     0 => {
-                        let mut kinds: Vec<&str> = inv.file.results.iter().map(|r| r.kind.as_str()).collect();
+                        let listings = inv.record.listings();
+                        let mut kinds: Vec<&str> = listings.iter().map(|r| r.kind).collect();
                         kinds.sort();
                         kinds.dedup();
                         Err(Error::WrongKind { handle: text, expected: kind, found: kinds.join(", ") })
@@ -185,7 +186,7 @@ impl Store {
                     .invocations()
                     .iter()
                     .rev()
-                    .find(|i| i.file.results.iter().any(|r| r.run_id == key))
+                    .find(|i| i.record.listings().iter().any(|r| r.run_id == key))
                     .cloned()
                     .ok_or(Error::NotFound { handle: text })
             }

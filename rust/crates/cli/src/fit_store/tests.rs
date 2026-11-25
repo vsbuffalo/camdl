@@ -155,7 +155,7 @@ fn resolved(fx: &Fixture, o: &Opened, config: &FitConfig) -> ResolvedProblem {
 }
 
 fn store_problem(o: &Opened, problem: &ResolvedProblem) -> Stored<FitProblem> {
-    let labels = ProblemLabels { model: "model".into(), sweep_point: None };
+    let labels = ProblemAttributes { model: "model".into(), sweep_point: None };
     match crate::camdl_store::begin::<FitProblem>(&o.store, &problem.identity, &labels, &o.info, Reuse::IfCompleted, problem_files(problem)).unwrap() {
         Begin::Claimed(mut run) => {
             write_problem(&mut run, problem).unwrap();
@@ -168,11 +168,11 @@ fn store_problem(o: &Opened, problem: &ResolvedProblem) -> Stored<FitProblem> {
 
 /// The run `fit run` keys for `config` on `problem`, as `fit_command` builds
 /// it: the steps resolved from `model`'s domains, then the method and starts.
-fn run_identity(model: &ir::Model, problem: &Stored<FitProblem>, config: &FitConfig) -> (FitRunIdentity, RunLabels) {
+fn run_identity(model: &ir::Model, problem: &Stored<FitProblem>, config: &FitConfig) -> (FitRunIdentity, RunAttributes) {
     let method = config.inference.method.as_ref().unwrap();
     let steps = crate::fit::steps::resolve_for(&method.algorithm, &config.problem, model).unwrap();
     let (settings, length) = MethodIdentity::of(method, &steps).unwrap();
-    let labels = RunLabels { method: method.algorithm.method_name().to_string(), seed: 1, quantities: None };
+    let labels = RunAttributes { method: method.algorithm.method_name().to_string(), seed: 1, quantities: None };
     let chain = ChainIdentity {
         problem: problem.dep_all(),
         method: settings,
@@ -401,7 +401,7 @@ fn the_tree_is_the_layout() {
         quantities: None,
         options: PredictOptions { mode: PredictMode::Forecast, settings: "{\"reach\":\"7 days\"}".into(), design: BTreeMap::new() },
     };
-    let labels = PredictionLabels { mode: PredictMode::Forecast.label().into(), scenarios: Vec::new(), model: "model".into() };
+    let labels = PredictionAttributes { mode: PredictMode::Forecast.label().into(), scenarios: Vec::new(), model: "model".into() };
     let prediction = match crate::camdl_store::begin::<Prediction>(&o.store, &id, &labels, &o.info, Reuse::IfCompleted, crate::result_files::fit::PredictionFile::parse("predictive.json")).unwrap() {
         Begin::Claimed(run) => {
             run.result_file("predictive.json").unwrap().write_all(b"{}").unwrap();
@@ -471,7 +471,7 @@ fn a_prediction_declares_the_tables_its_manifests_list() {
         quantities: None,
         options: PredictOptions { mode: PredictMode::All, settings: "{}".into(), design: BTreeMap::new() },
     };
-    let labels = PredictionLabels { mode: PredictMode::All.label().into(), scenarios: Vec::new(), model: "model".into() };
+    let labels = PredictionAttributes { mode: PredictMode::All.label().into(), scenarios: Vec::new(), model: "model".into() };
     let declared = PredictionFile::of_dir(scratch.path()).unwrap();
     let Begin::Claimed(prediction) =
         crate::camdl_store::begin::<Prediction>(&o.store, &id, &labels, &o.info, Reuse::IfCompleted, declared).unwrap()

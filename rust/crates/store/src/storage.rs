@@ -26,11 +26,11 @@ use crate::fsutil::{
 use crate::hash::{ContentAddressed, Key, HASH_VERSION};
 use crate::identity::Identity;
 use crate::index::Index;
-use crate::invocation::{all_invocations, all_completed, config_digests, encode_labels, Invocation, RunInfo, Shared};
+use crate::invocation::{all_invocations, config_digests, encode_attributes, Invocation, RunInfo, Shared, UnreadRecord};
 use crate::layout::{dir_name, Base, Placed};
 use crate::owner::{local_liveness, this_owner, Beat, BeatMemory, Liveness, Owner, BEAT_INTERVAL, STALE_AFTER};
 use crate::record::{
-    read_record, Failure, IdentityFile, IndexLine, InvocationFile, InvocationStatus, Outcome, Parent, Read, Relation, ResultEntry, Role, RunFile, Status,
+    read_record, Failure, IdentityFile, IndexLine, Listing, Outcome, Parent, Pending, Read, Record, Relation, Role, RunFile, Running, Status,
     StoreFile, ATTEMPTS_DIR, ATTEMPT_RECORD, IDENTITY_FILE, LOCK_FILE, MAX_PRESERVED_ATTEMPTS, RECORD_FORMAT, RUN_FILE,
     STAGING_DIR, STORE_FORMAT,
 };
@@ -70,7 +70,7 @@ pub enum Begin<A: Artifact> {
 }
 
 /// The by-products wanted from one run of `A`, each with its identity and
-/// labels.
+/// attributes.
 pub struct Wanted<A: Artifact> {
     pub(crate) items: Vec<WantedItem>,
     _of: PhantomData<fn() -> A>,
@@ -83,7 +83,7 @@ pub(crate) struct WantedItem {
     identity_key: Key,
     upstream_key: Key,
     record: serde_json::Value,
-    labels: serde_json::Value,
+    attributes: serde_json::Value,
     label: String,
     held: Vec<Key>,
     deps: Vec<crate::identity::DepInfo>,
@@ -100,17 +100,17 @@ impl<A: Artifact> Wanted<A> {
         Wanted { items: Vec::new(), _of: PhantomData }
     }
 
-    pub fn with<B: ByProduct<Of = A>>(mut self, identity: B::Identity, labels: B::Labels) -> Self
+    pub fn with<B: ByProduct<Of = A>>(mut self, identity: B::Identity, attributes: B::Attributes) -> Self
     where
         B::Identity: Send + Sync,
     {
-        let label = B::label(&identity, &labels);
+        let label = B::label(&identity, &attributes);
         self.items.push(WantedItem {
             kind: B::KIND,
             identity_key: identity.key(),
             upstream_key: B::upstream(&identity).content_hash(),
             record: serde_json::to_value(identity.record()).expect("an identity record encodes"),
-            labels: serde_json::to_value(&labels).expect("labels encode"),
+            attributes: serde_json::to_value(&attributes).expect("attributes encode"),
             label,
             held: identity.held_content(),
             deps: identity.deps(),
@@ -150,8 +150,12 @@ pub(crate) struct Inner {
 /// neither; [`Inner::running`] reads those from the directory.
 #[derive(Default)]
 struct Records {
-    read: Option<Vec<InvocationFile>>,
-    own: BTreeMap<u64, InvocationFile>,
+    read: Option<Vec<Record>>,
+    own: BTreeMap<u64, Record>,
+    /// Every record a read of the directory found and did not read, by path.
+    unread: BTreeMap<PathBuf, UnreadRecord>,
+    /// Whether the unread records have been reported.
+    reported: bool,
     /// `read` and `own` merged by sequence number, own winning; dropped when
     /// an own record is written.
     merged: Option<Arc<[Invocation]>>,
@@ -297,24 +301,24 @@ impl Store {
     }
 
     /// Begins `identity`: reuses a completed result, refuses a busy one, or
-    /// claims the run id. Writes the labels into the invocation record's entry
+    /// claims the run id. Writes the attributes into the invocation record's entry
     /// for this result, whatever it returns.
-    pub fn begin<A: Primary>(&self, identity: &A::Identity, labels: &A::Labels, info: &RunInfo, reuse: Reuse) -> Result<Begin<A>> {
-        self.begin_with(identity, labels, &Wanted::none(), info, reuse)
+    pub fn begin<A: Primary>(&self, identity: &A::Identity, attributes: &A::Attributes, info: &RunInfo, reuse: Reuse) -> Result<Begin<A>> {
+        self.begin_with(identity, attributes, &Wanted::none(), info, reuse)
     }
 
     /// As [`Store::begin`], also wanting by-products of the same computation.
     pub fn begin_with<A: Primary>(
         &self,
         identity: &A::Identity,
-        labels: &A::Labels,
+        attributes: &A::Attributes,
         wanted: &Wanted<A>,
         info: &RunInfo,
         reuse: Reuse,
     ) -> Result<Begin<A>> {
         let id = Id::<A>::of(&self.inner.ambient_key, identity);
-        let entries = self.register(info, id.key(), identity.key(), A::KIND, labels, wanted, reuse)?;
-        self.inner.begin_inner(identity, labels, wanted, &info.shared, reuse, &entries)
+        let entries = self.register(info, id.key(), identity.key(), A::KIND, attributes, wanted, reuse)?;
+        self.inner.begin_inner(identity, attributes, wanted, &info.shared, reuse, &entries)
     }
 
     /// Begins, then reuses, refuses a busy id with [`Error::InProgress`], or
@@ -324,14 +328,14 @@ impl Store {
     pub fn run<A: Primary, E: std::fmt::Display>(
         &self,
         identity: &A::Identity,
-        labels: &A::Labels,
+        attributes: &A::Attributes,
         info: &RunInfo,
         reuse: Reuse,
         expected: crate::run::ExpectedFiles,
         operation: &str,
         compute: impl FnOnce(&mut Run<A>) -> std::result::Result<(), E>,
     ) -> std::result::Result<Stored<A>, RunError<E>> {
-        match self.begin::<A>(identity, labels, info, reuse)? {
+        match self.begin::<A>(identity, attributes, info, reuse)? {
             Begin::Reused(s) => Ok(s),
             Begin::Busy(owner) => Err(RunError::Store(Error::InProgress(owner))),
             Begin::Claimed(mut run) => {
@@ -361,36 +365,36 @@ impl Store {
     }
 
     /// Stores the content if it is not there yet, and returns it as a result
-    /// to depend on. The labels and the provenance are the first writer's; the
-    /// labels name the folder. Takes no claim.
+    /// to depend on. The attributes and the provenance are the first writer's; the
+    /// attributes name the folder. Takes no claim.
     pub fn put<C: ContentFiles>(
         &self,
         content: C::Identity,
-        labels: &C::Labels,
+        attributes: &C::Attributes,
         provenance: &Provenance,
         info: &RunInfo,
     ) -> Result<Stored<C>> {
         let id = Id::<C>::of(&self.inner.ambient_key, &content);
-        let entries = self.register(info, id.key(), content.key(), C::KIND, labels, &Wanted::<C>::none(), Reuse::IfCompleted)?;
-        let r = self.inner.put_inner::<C>(&content, labels, provenance, &info.shared, id.key());
+        let entries = self.register(info, id.key(), content.key(), C::KIND, attributes, &Wanted::<C>::none(), Reuse::IfCompleted)?;
+        let r = self.inner.put_inner::<C>(&content, attributes, provenance, &info.shared, id.key());
         match &r {
-            Ok((_, computed)) => info.shared.set(&entries.upstream, if *computed { Outcome::Computed } else { Outcome::Reused }, None),
-            Err(e) => info.shared.set(&entries.upstream, Outcome::Failed, Some(Failure { operation: Some("storing".into()), reason: Some(e.to_string()) })),
+            Ok((_, computed)) => info.shared.set(&entries.upstream, if *computed { Outcome::Computed } else { Outcome::Reused }),
+            Err(e) => info.shared.set(&entries.upstream, Outcome::Failed(Failure { operation: Some("storing".into()), reason: Some(e.to_string()) })),
         }
         r.map(|(s, _)| s)
     }
 
-    /// Lists the stored result `id` in the invocation `info` with `labels`,
+    /// Lists the stored result `id` in the invocation `info` with `attributes`,
     /// as reused, and stores nothing: for a command that reads a result
     /// stored by another invocation, perhaps by another build, and records
-    /// labels of its own for it. Refused with [`Error::NotFound`] when no
+    /// attributes of its own for it. Refused with [`Error::NotFound`] when no
     /// completed result is `id`.
-    pub fn list<A: Artifact>(&self, id: &Id<A>, labels: &A::Labels, info: &RunInfo) -> Result<()> {
+    pub fn list<A: Artifact>(&self, id: &Id<A>, attributes: &A::Attributes, info: &RunInfo) -> Result<()> {
         if self.inner.find_completed(A::KIND, &id.key())?.is_none() {
             return Err(Error::NotFound { handle: id.key().to_hex() });
         }
-        let entries = self.register(info, id.key(), id.key(), A::KIND, labels, &Wanted::<A>::none(), Reuse::IfCompleted)?;
-        info.shared.set(&entries.upstream, Outcome::Reused, None);
+        let entries = self.register(info, id.key(), id.key(), A::KIND, attributes, &Wanted::<A>::none(), Reuse::IfCompleted)?;
+        info.shared.set(&entries.upstream, Outcome::Reused);
         Ok(())
     }
 
@@ -401,12 +405,12 @@ impl Store {
     }
 
     /// Read-only: what exists for each identity. Nothing is claimed.
-    pub fn plan<A: Primary>(&self, members: &[(A::Identity, A::Labels)]) -> Result<Vec<Planned<A>>> {
+    pub fn plan<A: Primary>(&self, members: &[(A::Identity, A::Attributes)]) -> Result<Vec<Planned<A>>> {
         members
             .iter()
-            .map(|(identity, labels)| {
+            .map(|(identity, attributes)| {
                 let id = Id::<A>::of(&self.inner.ambient_key, identity);
-                let placed = A::layout(identity, labels);
+                let placed = A::layout(identity, attributes);
                 let state = match self.inner.classify(A::KIND, id.key(), Where::Placed(&placed))? {
                     State::Absent => PlanState::Absent,
                     State::Claim { owner, .. } | State::Running { owner, .. } | State::HalfMade { owner: Some(owner), .. } => {
@@ -429,10 +433,10 @@ impl Store {
     /// member: a completed member lacking a completed wanted by-product is
     /// [`PlanState::ByProductsMissing`], since beginning it would compute it
     /// again to produce them.
-    pub fn plan_with<A: Primary>(&self, members: &[(A::Identity, A::Labels, Wanted<A>)]) -> Result<Vec<Planned<A>>> {
+    pub fn plan_with<A: Primary>(&self, members: &[(A::Identity, A::Attributes, Wanted<A>)]) -> Result<Vec<Planned<A>>> {
         let mut out = Vec::with_capacity(members.len());
-        for (identity, labels, wanted) in members {
-            let mut planned = self.plan::<A>(std::slice::from_ref(&(identity.clone(), labels.clone())))?.remove(0);
+        for (identity, attributes, wanted) in members {
+            let mut planned = self.plan::<A>(std::slice::from_ref(&(identity.clone(), attributes.clone())))?.remove(0);
             if planned.state == PlanState::Completed {
                 for w in &wanted.items {
                     let bp = crate::artifact::run_id(w.kind, &self.inner.ambient_key, &w.identity_key);
@@ -447,23 +451,23 @@ impl Store {
         Ok(out)
     }
 
-    /// Declares the members a command will compute, each with its labels and
+    /// Declares the members a command will compute, each with its attributes and
     /// the by-products wanted of it, in the order it asks for them: each is
     /// registered in the invocation record as planned, the running record is
     /// written with all of them, and none is claimed. A repeated identity is
     /// listed once per time it is asked for and claimed once.
     pub fn declare<A: Primary>(
         &self,
-        members: &[(A::Identity, A::Labels, Wanted<A>)],
+        members: &[(A::Identity, A::Attributes, Wanted<A>)],
         info: &RunInfo,
         reuse: Reuse,
     ) -> Result<Declared<A>> {
         let mut slots: Vec<Slot<A>> = Vec::new();
         let mut position = Vec::with_capacity(members.len());
         let mut by_id: BTreeMap<Key, usize> = BTreeMap::new();
-        for (identity, labels, wanted) in members {
+        for (identity, attributes, wanted) in members {
             let id = Id::<A>::of(&self.inner.ambient_key, identity);
-            let e = self.register(info, id.key(), identity.key(), A::KIND, labels, wanted, reuse)?;
+            let e = self.register(info, id.key(), identity.key(), A::KIND, attributes, wanted, reuse)?;
             match by_id.get(&id.key()) {
                 Some(&s) => {
                     let all = &mut slots[s].entries;
@@ -479,7 +483,7 @@ impl Store {
                     slots.push(Slot {
                         key: id.key(),
                         identity: identity.clone(),
-                        labels: labels.clone(),
+                        attributes: attributes.clone(),
                         wanted: wanted.clone(),
                         entries: e,
                         begun: false,
@@ -501,9 +505,9 @@ impl Store {
     /// invocation records that read a file with this digest.
     pub fn runs_of_configuration(&self, digest: Key) -> Vec<Key> {
         let mut out = Vec::new();
-        for f in self.inner.invocations().iter().rev().map(|i| &i.file) {
+        for f in self.inner.invocations().iter().rev().map(|i| &i.record) {
             if config_digests(f).any(|d| d == digest) {
-                for r in &f.results {
+                for r in f.listings() {
                     if !out.contains(&r.run_id) {
                         out.push(r.run_id);
                     }
@@ -528,17 +532,23 @@ impl Store {
         self.inner.invocations()
     }
 
+    /// The invocation records this store's reads of `.invocations/` found and
+    /// did not read ([`UnreadRecord`]), by path.
+    pub fn unread_records(&self) -> Vec<UnreadRecord> {
+        self.inner.records.lock().unwrap_or_else(|e| e.into_inner()).unread.values().cloned().collect()
+    }
+
     fn register<A: Artifact>(
         &self,
         info: &RunInfo,
         run_id: Key,
         identity_key: Key,
         kind: &'static str,
-        labels: &A::Labels,
+        attributes: &A::Attributes,
         wanted: &Wanted<A>,
         reuse: Reuse,
     ) -> Result<Entries> {
-        let mut list = vec![ResultEntry { kind: kind.into(), run_id, labels: encode_labels(labels)?, outcome: Outcome::Planned, failure: None }];
+        let mut list = vec![Listing { kind: kind.into(), run_id, attributes: encode_attributes(attributes)?, outcome: Pending::Planned }];
         for w in &wanted.items {
             assert_eq!(
                 w.upstream_key, identity_key,
@@ -546,7 +556,7 @@ impl Store {
                 w.kind
             );
             let bp_id = crate::artifact::run_id(w.kind, &self.inner.ambient_key, &w.identity_key);
-            list.push(ResultEntry { kind: w.kind.into(), run_id: bp_id, labels: w.labels.clone(), outcome: Outcome::Planned, failure: None });
+            list.push(Listing { kind: w.kind.into(), run_id: bp_id, attributes: w.attributes.clone(), outcome: Pending::Planned });
         }
         let idx = info.shared.register(&self.inner, list, reuse)?;
         Ok(Entries { upstream: vec![idx[0]], by_products: idx[1..].iter().map(|i| vec![*i]).collect() })
@@ -588,7 +598,7 @@ pub struct Declared<A: Primary> {
 struct Slot<A: Primary> {
     key: Key,
     identity: A::Identity,
-    labels: A::Labels,
+    attributes: A::Attributes,
     wanted: Wanted<A>,
     /// Its rows in the invocation record.
     entries: Entries,
@@ -609,7 +619,7 @@ impl<A: Primary> Declared<A> {
         slot.begun = true;
         let slot = &self.slots[s];
         self.inner
-            .begin_inner(&slot.identity, &slot.labels, &slot.wanted, &self.info, self.reuse, &slot.entries)
+            .begin_inner(&slot.identity, &slot.attributes, &slot.wanted, &self.info, self.reuse, &slot.entries)
             .map(Some)
     }
 
@@ -625,7 +635,7 @@ impl<A: Primary> Declared<A> {
         for s in order {
             self.slots[s].begun = true;
             let slot = &self.slots[s];
-            let b = self.inner.begin_inner(&slot.identity, &slot.labels, &slot.wanted, &self.info, self.reuse, &slot.entries)?;
+            let b = self.inner.begin_inner(&slot.identity, &slot.attributes, &slot.wanted, &self.info, self.reuse, &slot.entries)?;
             begun.insert(s, b);
         }
         Ok(begun.into_values().collect())
@@ -646,22 +656,24 @@ impl Inner {
             return Arc::clone(m);
         }
         if r.read.is_none() {
-            let closed = self.read_records().into_iter().filter(|f| f.status != InvocationStatus::Running).collect();
-            r.read = Some(closed);
+            drop(r);
+            let closed: Vec<Record> = self.read_records().into_iter().filter(|f| !f.is_running()).collect();
+            r = self.records.lock().unwrap_or_else(|e| e.into_inner());
+            r.read.get_or_insert(closed);
         }
-        let mut by_seq: BTreeMap<u64, &InvocationFile> = r.read.iter().flatten().map(|f| (f.seq, f)).collect();
+        let mut by_seq: BTreeMap<u64, &Record> = r.read.iter().flatten().map(|f| (f.seq(), f)).collect();
         by_seq.extend(r.own.iter().map(|(seq, f)| (*seq, f)));
         let merged: Arc<[Invocation]> =
-            by_seq.into_values().map(|f| Invocation { file: f.clone(), took_label_from: None }).collect();
+            by_seq.into_values().map(|f| Invocation { record: f.clone(), took_label_from: None }).collect();
         r.merged = Some(Arc::clone(&merged));
         merged
     }
 
     /// Adds `file`, a record this store has just written for one of its own
     /// invocations, to the snapshot.
-    pub(crate) fn wrote_own(&self, file: &InvocationFile) {
+    pub(crate) fn wrote_own(&self, file: &Record) {
         let mut r = self.records.lock().unwrap_or_else(|e| e.into_inner());
-        r.own.insert(file.seq, file.clone());
+        r.own.insert(file.seq(), file.clone());
         r.merged = None;
     }
 
@@ -674,14 +686,35 @@ impl Inner {
     }
 
     /// The running records under the root, read from the directory now.
-    pub(crate) fn running(&self) -> Vec<InvocationFile> {
-        self.read_records().into_iter().filter(|f| f.status == InvocationStatus::Running).collect()
+    pub(crate) fn running(&self) -> Vec<Running> {
+        self.read_records()
+            .into_iter()
+            .filter_map(|f| match f {
+                Record::Running(r) => Some(r),
+                Record::Ended(_) | Record::Interrupted(_) => None,
+            })
+            .collect()
     }
 
     /// Every invocation record under the root, read from the directory now.
-    pub(crate) fn read_records(&self) -> Vec<InvocationFile> {
+    /// The records it finds and does not read are kept, and reported once
+    /// per store to the reporter [`crate::report_unread_records_to`] set.
+    pub(crate) fn read_records(&self) -> Vec<Record> {
         self.record_reads.fetch_add(1, Ordering::Relaxed);
-        all_invocations(&self.root)
+        let (records, unread) = all_invocations(&self.root);
+        if !unread.is_empty() {
+            let mut r = self.records.lock().unwrap_or_else(|e| e.into_inner());
+            for u in unread {
+                r.unread.entry(u.path.clone()).or_insert(u);
+            }
+            if !r.reported {
+                r.reported = true;
+                let all: Vec<UnreadRecord> = r.unread.values().cloned().collect();
+                drop(r);
+                crate::invocation::report_unread(&self.root, &all);
+            }
+        }
+        records
     }
 
     /// This process's beat in this root, started at the first call.
@@ -709,8 +742,8 @@ impl Inner {
         (self.ambient_check)(ambient).ok()
     }
 
-    pub(crate) fn info_set(&self, info: &Shared, idx: &[usize], outcome: Outcome, failure: Option<Failure>) {
-        info.set(idx, outcome, failure);
+    pub(crate) fn info_set(&self, info: &Shared, idx: &[usize], outcome: Outcome) {
+        info.set(idx, outcome);
     }
 
     // ── Paths ──────────────────────────────────────────────────────────────
@@ -933,19 +966,19 @@ impl Inner {
     pub(crate) fn begin_inner<A: Primary>(
         self: &Arc<Self>,
         identity: &A::Identity,
-        labels: &A::Labels,
+        attributes: &A::Attributes,
         wanted: &Wanted<A>,
         info: &Arc<Shared>,
         reuse: Reuse,
         entries: &Entries,
     ) -> Result<Begin<A>> {
         let id = Id::<A>::of(&self.ambient_key, identity);
-        let placed = A::layout(identity, labels);
+        let placed = A::layout(identity, attributes);
         let force = reuse == Reuse::Force || !self.known_build;
         let busy = |owner: Owner| {
-            info.set(&entries.upstream, Outcome::Busy, None);
+            info.set(&entries.upstream, Outcome::Busy);
             for e in &entries.by_products {
-                info.set(e, Outcome::Busy, None);
+                info.set(e, Outcome::Busy);
             }
             Ok(Begin::Busy(owner))
         };
@@ -1428,15 +1461,15 @@ impl Inner {
             }
         }
         if missing.is_empty() {
-            info.set(&entries.upstream, Outcome::Reused, None);
+            info.set(&entries.upstream, Outcome::Reused);
             for e in &entries.by_products {
-                info.set(e, Outcome::Reused, None);
+                info.set(e, Outcome::Reused);
             }
             return Ok(ByProducts::Done(Begin::Reused(Stored::open_at(self, run_id, dir)?)));
         }
         for (i, e) in entries.by_products.iter().enumerate() {
             if !missing.contains(&i) {
-                info.set(e, Outcome::Reused, None);
+                info.set(e, Outcome::Reused);
             }
         }
         // Claim each missing by-product: a staging folder created whole by a rename.
@@ -1483,9 +1516,9 @@ impl Inner {
     }
 
     fn all_busy<A: Artifact>(&self, owner: Owner, info: &Shared, entries: &Entries) -> Result<ByProducts<A>> {
-        info.set(&entries.upstream, Outcome::Busy, None);
+        info.set(&entries.upstream, Outcome::Busy);
         for e in &entries.by_products {
-            info.set(e, Outcome::Busy, None);
+            info.set(e, Outcome::Busy);
         }
         Ok(ByProducts::Done(Begin::Busy(owner)))
     }
@@ -1564,12 +1597,12 @@ impl Inner {
     fn put_inner<C: ContentFiles>(
         self: &Arc<Self>,
         content: &C::Identity,
-        labels: &C::Labels,
+        attributes: &C::Attributes,
         provenance: &Provenance,
         info: &Arc<Shared>,
         run_id: Key,
     ) -> Result<(Stored<C>, bool)> {
-        let placed = C::layout(content, labels);
+        let placed = C::layout(content, attributes);
         self.beat()?;
         loop {
             match self.locate(C::KIND, &run_id, &Where::Placed(&placed))? {
@@ -1741,7 +1774,7 @@ fn preserve_attempt(dir: &Path) -> Result<()> {
 
 /// The ids of every invocation that may hold `label`, newest first.
 pub(crate) fn label_holders(inner: &Inner, label: &str) -> Vec<Invocation> {
-    inner.invocations().iter().rev().filter(|i| i.file.label.as_deref() == Some(label) && all_completed(&i.file)).cloned().collect()
+    inner.invocations().iter().rev().filter(|i| i.record.label() == Some(label) && i.record.all_completed()).cloned().collect()
 }
 
 #[cfg(test)]

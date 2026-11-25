@@ -83,7 +83,7 @@ struct Planned {
     spec: crate::engine::CellSpec,
     cell: ResolvedCell,
     identity: SimIdentity,
-    labels: CellLabels,
+    labels: CellAttributes,
     wanted: store::Wanted<Sim>,
 }
 
@@ -180,7 +180,7 @@ pub(crate) fn run(ctx: StoreRun<'_>) {
             fail(e);
         }
     }
-    let members: Vec<(SimIdentity, CellLabels, store::Wanted<Sim>)> =
+    let members: Vec<(SimIdentity, CellAttributes, store::Wanted<Sim>)> =
         planned.iter().map(|p| (p.identity.clone(), p.labels.clone(), p.wanted.clone())).collect();
     // `begin_all` begins each distinct identity once, and answers in the
     // order first asked for.
@@ -246,7 +246,7 @@ pub(crate) fn run(ctx: StoreRun<'_>) {
 
     // ── Failures the cells stored ───────────────────────────────────────────
     failures.extend(stored_failures(&store, &invocation).unwrap_or_else(|e| fail(e)));
-    let cells: Vec<(store::Stored<Sim>, CellLabels)> = invocation
+    let cells: Vec<(store::Stored<Sim>, CellAttributes)> = invocation
         .members::<Sim>()
         .unwrap_or_else(|e| fail(e.to_string()))
         .into_iter()
@@ -445,7 +445,7 @@ fn plan_cell(ctx: &StoreRun<'_>, shared: &Shared, spec: crate::engine::CellSpec)
         crate::sim_job::ParamSource::Draws { .. } => PointLabel::Draw { index: spec.point_idx },
         crate::sim_job::ParamSource::Point { .. } => PointLabel::None,
     };
-    let labels = CellLabels {
+    let labels = CellAttributes {
         model: ctx.sim.model.stem.clone(),
         params: params_label(&ran_point),
         scenario,
@@ -809,7 +809,7 @@ fn stored_failures(store: &store::Store, invocation: &store::Invocation) -> Resu
 
 /// The milestone a run prints: the one cell's folder, or the number of cells
 /// and the store's root, with how many were read from the store.
-fn report(out: &crate::out::Out, store: &store::Store, cells: &[(store::Stored<Sim>, CellLabels)], total: usize, computed: usize, reused: usize) {
+fn report(out: &crate::out::Out, store: &store::Store, cells: &[(store::Stored<Sim>, CellAttributes)], total: usize, computed: usize, reused: usize) {
     if reused > 0 && total > 1 {
         out.milestone("cached", format!("{reused} of {total} cells read from the store; simulated {computed}"));
     }

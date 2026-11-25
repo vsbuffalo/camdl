@@ -216,7 +216,7 @@ pub(crate) fn resolve(
     let mut conditioned: IndexMap<String, String> = IndexMap::new();
     let given = &problem.data.as_ref().expect("posed with [data]").observations;
     for (source, file) in &resolved.identity.training {
-        let labels = crate::camdl_store::TableLabels {
+        let labels = crate::camdl_store::TableAttributes {
             stream: source.clone(),
             path: given.get(source).cloned().unwrap_or_default(),
         };

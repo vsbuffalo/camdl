@@ -22,15 +22,15 @@ pub trait Artifact: 'static {
     /// number, the seed typed. An opaque value the project supplies with each
     /// identity; the library stores it in the invocation record and never
     /// looks inside it.
-    type Labels: Serialize + DeserializeOwned + Clone + 'static;
+    type Attributes: Serialize + DeserializeOwned + Clone + 'static;
 }
 
 /// A kind that is the main output of its own computation, placed by its own
 /// layout.
 pub trait Primary: Artifact {
     /// Where the folder sits and what it is called. Fixed by the first writer,
-    /// whose labels it may use; nothing reads it back.
-    fn layout(identity: &Self::Identity, labels: &Self::Labels) -> Placed;
+    /// whose attributes it may use; nothing reads it back.
+    fn layout(identity: &Self::Identity, attributes: &Self::Attributes) -> Placed;
 }
 
 /// An artifact produced by the same computation as another.
@@ -41,7 +41,7 @@ pub trait ByProduct: Artifact {
     /// The label of this by-product's folder, `<label>-<12 hex of its run
     /// id>/`, which the library places inside the upstream's folder, under
     /// `KIND/`.
-    fn label(identity: &Self::Identity, labels: &Self::Labels) -> String;
+    fn label(identity: &Self::Identity, attributes: &Self::Attributes) -> String;
 }
 
 /// An artifact whose identity is its content: one or more result files, each

@@ -6,7 +6,7 @@
 //! records that listed them. It moves the copy into `<root>/.staging/`, on this
 //! store's filesystem, checks every result folder in it, and places them only
 //! when every one passes, each by one rename. It then records them in one
-//! invocation of this store, with outcome `reused` and the labels the copy's
+//! invocation of this store, with outcome `reused` and the attributes the copy's
 //! invocation records gave them.
 //!
 //! A result keeps the path it had in the other store. Under
@@ -41,7 +41,7 @@ use crate::invocation::{all_invocations, RunInfo};
 use crate::maintenance::walk;
 use crate::owner::this_owner;
 use crate::record::{
-    read_record, Failure, IdentityFile, InvocationStatus, Lineage, Outcome, Read, Relation, ResultEntry, Role, RunFile,
+    read_record, Failure, IdentityFile, Lineage, Listing, Outcome, Pending, Read, Record, Relation, Role, RunFile,
     Status, StoreFile, ATTEMPTS_DIR, IDENTITY_FILE, PROGRESS_FILE, RUN_FILE, RUN_TMP, STAGING_DIR, STORE_FORMAT,
 };
 use crate::storage::{folder_state, identity_of, visible_dirs, State, Store};
@@ -64,7 +64,7 @@ struct Found {
     ident: IdentityFile,
     run: RunFile,
     ambient: Key,
-    labels: serde_json::Value,
+    attributes: serde_json::Value,
 }
 
 /// What placing does with one result of the copy.
@@ -196,7 +196,7 @@ impl Store {
     /// `shown` is the path the copy was given as, for refusals.
     pub(crate) fn import_staged(&self, staged: &Path, shown: &Path, info: &RunInfo) -> Result<Imported> {
         self.refuse_unverifiable(staged, shown)?;
-        let labels = copy_labels(staged);
+        let attributes = copy_attributes(staged);
         let mut found = Vec::new();
         for (rel, ident) in identity_files(staged) {
             let refuse = |reason: String| Error::ImportRefused { folder: shown.join(&rel), reason };
@@ -206,10 +206,10 @@ impl Store {
                 Read::Absent => continue,
             };
             let (run, ambient) = self.check_folder(&staged.join(&rel), &ident).map_err(refuse)?;
-            let Some(labels) = labels.get(&ident.run_id).cloned() else {
+            let Some(attributes) = attributes.get(&ident.run_id).cloned() else {
                 return Err(refuse("no invocation record in the copy lists it as completed".into()));
             };
-            found.push(Found { rel, ident, run, ambient, labels });
+            found.push(Found { rel, ident, run, ambient, attributes });
         }
         if found.is_empty() {
             return Err(Error::ImportRefused { folder: shown.to_path_buf(), reason: "it holds no result folder".into() });
@@ -247,12 +247,11 @@ impl Store {
         let inner = &self.inner;
         let entries = planned
             .iter()
-            .map(|p| ResultEntry {
+            .map(|p| Listing {
                 kind: p.found.ident.kind.clone(),
                 run_id: p.found.ident.run_id,
-                labels: p.found.labels.clone(),
-                outcome: Outcome::Planned,
-                failure: None,
+                attributes: p.found.attributes.clone(),
+                outcome: Pending::Planned,
             })
             .collect();
         let idx = info.shared.register(inner, entries, Reuse::IfCompleted)?;
@@ -271,10 +270,10 @@ impl Store {
             Ok(out)
         })();
         match &indexed {
-            Ok(_) => info.shared.set(&idx, Outcome::Reused, None),
+            Ok(_) => info.shared.set(&idx, Outcome::Reused),
             Err(e) => {
                 let failure = Failure { operation: Some("importing".into()), reason: Some(e.to_string()) };
-                info.shared.set(&idx, Outcome::Failed, Some(failure));
+                info.shared.set(&idx, Outcome::Failed(failure));
             }
         }
         indexed
@@ -589,13 +588,14 @@ impl Store {
     }
 }
 
-/// The labels each result has in the copy: those the latest ended invocation
+/// The attributes each result has in the copy: those the latest ended invocation
 /// record that lists it as computed or reused gave it.
-fn copy_labels(copy: &Path) -> BTreeMap<Key, serde_json::Value> {
+fn copy_attributes(copy: &Path) -> BTreeMap<Key, serde_json::Value> {
     let mut out = BTreeMap::new();
-    for inv in all_invocations(copy).into_iter().filter(|i| i.status == InvocationStatus::Ended) {
-        for r in inv.results.into_iter().filter(|r| matches!(r.outcome, Outcome::Computed | Outcome::Reused)) {
-            out.insert(r.run_id, r.labels);
+    for inv in all_invocations(copy).0 {
+        let Record::Ended(closed) = inv else { continue };
+        for r in closed.results.into_iter().filter(|r| r.outcome.completed()) {
+            out.insert(r.run_id, r.attributes);
         }
     }
     out

@@ -2235,9 +2235,9 @@ This is the manifest of a filter run with `--pf-health`:
   or `null` for any other result, `contract`, its kind's contract version
   (§2.9), which changes whenever a file of the kind is added, removed or renamed
   or a column changes (a test pins each version to the kind's files), `labels`,
-  the labels the invocation record gives it, and `files`. A `data_table`'s
-  labels leave out the `--data` path as typed, which would make `cases.tsv` and
-  `./cases.tsv` give two manifests; they keep its `stream`.
+  the attributes the invocation record gives it, and `files`. A `data_table`'s
+  attributes leave out the `--data` path as typed, which would make `cases.tsv`
+  and `./cases.tsv` give two manifests; they keep its `stream`.
 - `files` maps each result file's logical name (§2.9) to `file`, its stored
   name, `sha256` and `bytes`, the digest and size the result's `run.json`
   records. Provenance and attempt files are not listed, so a recomputation under
@@ -2270,12 +2270,12 @@ writes the bytes the computation wrote.
 - `score`: the outcome data tables, then the `score`.
 - `compare`: for each input in order, each replicate's `prediction` and then its
   `score`, whether compare read them from the store or stored them. Each has the
-  labels of the latest invocation record that lists it, and the manifest's
+  attributes of the latest invocation record that lists it, and the manifest's
   `label` is `null`.
 - `import`: every result placed or found already stored, parents first, each
-  with the labels the copy's invocation records gave it (§4.5). A result's entry
-  is the one the command that computed it wrote, apart from `camdl` and `label`,
-  which are the importing build's and the import's own.
+  with the attributes the copy's invocation records gave it (§4.5). A result's
+  entry is the one the command that computed it wrote, apart from `camdl` and
+  `label`, which are the importing build's and the import's own.
 
 ### 2.11 The link tree
 
@@ -3712,11 +3712,12 @@ import runs is never replaced: when it holds the same result files the result is
 `present`, and otherwise it is refused, naming that folder.
 
 One invocation records every result imported, parents first, as reused, with the
-labels the copy's invocation records gave it. `camdl list` and `@L` then see the
-imported results as they see local ones, and a command run here can read one,
-such as a prediction from a imported fit run. The command prints one line per
-result, `placed` or `present`, with its kind, its 12-hex run id and its folder.
-A imported copy is gone: its results are in the store and the rest is deleted.
+attributes the copy's invocation records gave it. `camdl list` and `@L` then see
+the imported results as they see local ones, and a command run here can read
+one, such as a prediction from a imported fit run. The command prints one line
+per result, `placed` or `present`, with its kind, its 12-hex run id and its
+folder. A imported copy is gone: its results are in the store and the rest is
+deleted.
 
 An import whose process is killed while it places folders leaves each folder it
 placed whole, and the rest of the copy in `.staging/`, which `clean` deletes
@@ -7193,7 +7194,7 @@ input to anything a run computes. In consequence:
 A profile's points are claimed together when the command starts, and each is
 visible in its folder, with status `running`, while it computes (§2.8). The
 invocation record (`<root>/.invocations/<seq>.json`) lists every point the
-command asked for, in the order (seed, cell, start), each with its labels
+command asked for, in the order (seed, cell, start), each with its attributes
 (`model`, `focal`, `method`, `seed`, `start`) and its outcome: `computed`,
 `reused`, `failed` with its reason, or `busy`. While the command runs,
 `<root>/.invocations/<seq>.progress.json` holds a snapshot with phase

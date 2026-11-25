@@ -28,7 +28,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use store::{Artifact, ContentFiles, Dep, Handle, Hashed, Layout, Placed, Primary, Provenance, RunRef, Store, Stored, WriteMode};
 
-use super::{CompiledModel, CompiledModelContent, ModelLabels};
+use super::{CompiledModel, CompiledModelContent, ModelAttributes};
 
 /// One file of a presentation, as bytes.
 #[derive(Clone, Debug, PartialEq)]
@@ -96,11 +96,11 @@ impl Artifact for ModelPresentation {
     const KIND: &'static str = "model_presentation";
     const WRITE: WriteMode = WriteMode::Atomic;
     type Identity = PresentationIdentity;
-    type Labels = ModelLabels;
+    type Attributes = ModelAttributes;
 }
 
 impl Primary for ModelPresentation {
-    fn layout(_id: &PresentationIdentity, labels: &ModelLabels) -> Placed {
+    fn layout(_id: &PresentationIdentity, labels: &ModelAttributes) -> Placed {
         Layout::in_kind().result(&labels.name)
     }
 }
@@ -235,11 +235,11 @@ pub(crate) fn put_compiled(
     info: &store::RunInfo,
     model: Hashed<CompiledModelContent>,
     presentation: impl Into<Presentation>,
-    labels: &ModelLabels,
+    labels: &ModelAttributes,
     provenance: &Provenance,
 ) -> store::Result<Dep<CompiledModel>> {
     use store::ContentArtifact;
-    let labels = ModelLabels { presentation: presentation_run_id(store, info, presentation.into(), labels)?, ..labels.clone() };
+    let labels = ModelAttributes { presentation: presentation_run_id(store, info, presentation.into(), labels)?, ..labels.clone() };
     store.put::<CompiledModel>(model, &labels, provenance, info)?.dep(CompiledModel::FILE)
 }
 
@@ -250,7 +250,7 @@ fn presentation_run_id(
     store: &Store,
     info: &store::RunInfo,
     presentation: Presentation,
-    labels: &ModelLabels,
+    labels: &ModelAttributes,
 ) -> store::Result<Option<String>> {
     Ok(match presentation {
         Presentation::New(p) => Some(store.put::<ModelPresentation>(p, labels, &Provenance::none(), info)?.id().key().to_hex()),
@@ -307,8 +307,8 @@ pub(crate) struct OtherPresentation {
 /// ([`RecordedBy::Latest`]).
 pub(crate) fn shown_for(store: &Store, handle: &Handle, result: store::Key, model: store::Key) -> Shown {
     let recorded = |inv: &store::Invocation| -> Option<String> {
-        let labels = inv.labels_of(<CompiledModel as Artifact>::KIND, model)?;
-        serde_json::from_value::<ModelLabels>(labels).ok()?.presentation
+        let labels = inv.attributes_of(<CompiledModel as Artifact>::KIND, model)?;
+        serde_json::from_value::<ModelAttributes>(labels).ok()?.presentation
     };
     let (seq, hex, by) = match handle {
         Handle::Label { .. } => {
@@ -490,11 +490,11 @@ pub(crate) fn link_presentation(
     presentation: impl Into<Presentation>,
     name: &str,
 ) -> Result<(), String> {
-    let labels = ModelLabels { name: name.to_string(), presentation: None };
+    let labels = ModelAttributes { name: name.to_string(), presentation: None };
     let presentation = presentation_run_id(store, info, presentation.into(), &labels)
         .map_err(|e| format!("storing the model's presentation: {e}"))?;
     store
-        .list::<CompiledModel>(model.id(), &ModelLabels { presentation, ..labels }, info)
+        .list::<CompiledModel>(model.id(), &ModelAttributes { presentation, ..labels }, info)
         .map_err(|e| format!("the compiled model {}: {e}", model.id().key().short12()))
 }
 

@@ -1623,12 +1623,12 @@ fn run_profile(
         .flat_map(|seed_idx| (0..grid_points.len())
             .flat_map(move |gi| (0..n_starts).map(move |si| (seed_idx, gi, si))))
         .collect();
-    let members: Vec<(crate::profile_store::ProfilePointIdentity, crate::profile_store::ProfilePointLabels, store::Wanted<crate::profile_store::ProfilePoint>)> =
+    let members: Vec<(crate::profile_store::ProfilePointIdentity, crate::profile_store::ProfilePointAttributes, store::Wanted<crate::profile_store::ProfilePoint>)> =
         jobs.iter().map(|&(seed_idx, gi, si)| {
             let focal = cell_focal[gi].clone();
             let start = start_values[si].clone();
             let seed = crate::profile_store::point_seed(seeds[seed_idx], &focal, &start, replicate[si]);
-            let labels = crate::profile_store::ProfilePointLabels {
+            let labels = crate::profile_store::ProfilePointAttributes {
                 model: stem.clone(),
                 focal: crate::profile_store::focal_label(&focal),
                 method: method_identity.label(),

@@ -66,8 +66,8 @@ fn a_by_product_asked_for_later_reproduces_the_upstream_without_touching_it() {
     let staging: Vec<_> = std::fs::read_dir(s.folder().join(".staging")).map(|d| d.flatten().count()).into_iter().collect();
     assert!(staging.iter().all(|n| *n == 0), "nothing is left in staging");
     let inv = info.finish(&store).unwrap();
-    let outcomes: Vec<_> = inv.file.results.iter().map(|r| (r.kind.as_str(), r.outcome)).collect();
-    assert_eq!(outcomes, vec![("sim", crate::record::Outcome::Reused), ("obs", crate::record::Outcome::Computed)]);
+    let outcomes: Vec<_> = inv.record.listings().iter().map(|r| (r.kind, r.outcome.cloned())).collect();
+    assert_eq!(outcomes, vec![("sim", Some(crate::record::Outcome::Reused)), ("obs", Some(crate::record::Outcome::Computed))]);
 }
 
 #[test]
@@ -114,7 +114,7 @@ fn a_failed_upstream_fails_its_by_products() {
     run.fail("simulating", "a negative rate").unwrap();
     assert!(result_folders(root.path()).is_empty());
     let inv = info.finish(&store).unwrap();
-    assert!(inv.file.results.iter().all(|r| r.outcome == crate::record::Outcome::Failed));
+    assert!(inv.record.listings().iter().all(|r| matches!(r.outcome, Some(crate::record::Outcome::Failed(_)))));
 }
 
 #[test]
@@ -151,7 +151,7 @@ fn a_divergence_from_an_extra_file_leaves_the_stored_upstream_reused() {
     run.result_file("extra.tsv").unwrap().write_all(b"x").unwrap();
     assert!(matches!(run.finish(), Err(Error::Divergent { .. })));
     let inv = info.finish(&store).unwrap();
-    assert_eq!(inv.file.results[0].outcome, crate::record::Outcome::Reused);
+    assert_eq!(inv.record.listings()[0].outcome, Some(&crate::record::Outcome::Reused));
 }
 
 /// A by-product's record lists the reads of the run that wrote it, whether
@@ -161,7 +161,7 @@ fn a_by_product_records_the_reads_made_to_write_it() {
     let root = TempRoot::new("bp-reads");
     let store = open(root.path());
     let model = store
-        .put::<Model>(Hashed::new(ModelText("m".into())), &ModelLabels { name: "m".into() }, &crate::Provenance::none(), &info())
+        .put::<Model>(Hashed::new(ModelText("m".into())), &ModelAttributes { name: "m".into() }, &crate::Provenance::none(), &info())
         .unwrap()
         .dep(Model::FILE)
         .unwrap();

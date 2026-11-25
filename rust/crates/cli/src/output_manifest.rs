@@ -132,9 +132,9 @@ impl OutputManifest {
             let labels = invocations
                 .iter()
                 .rev()
-                .find_map(|inv| inv.labels_of(located.kind(), *id))
+                .find_map(|inv| inv.attributes_of(located.kind(), *id))
                 .unwrap_or(serde_json::Value::Null);
-            outputs.push(store::Output { kind: located.kind().to_string(), run_id: *id, upstream: located.upstream(), labels, files });
+            outputs.push(store::Output { kind: located.kind().to_string(), run_id: *id, upstream: located.upstream(), attributes: labels, files });
         }
         Self::of_outputs(store, None, outputs)
     }
@@ -163,7 +163,7 @@ impl OutputManifest {
                     ));
                 }
             }
-            let labels = manifest_labels(&o.kind, o.labels);
+            let labels = manifest_labels(&o.kind, o.attributes);
             results.push(ManifestEntry {
                 kind: o.kind,
                 run_id: o.run_id,

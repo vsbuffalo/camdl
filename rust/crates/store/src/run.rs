@@ -614,7 +614,7 @@ impl Core {
         let reproducing = matches!(self.place, Place::Reproducing { .. });
         for bp in std::mem::take(&mut self.by_products) {
             bp.table.end();
-            self.store.info_set(&self.info, &bp.entries, Outcome::Failed, Some(Failure { operation: operation.clone(), reason: reason.clone() }));
+            self.store.info_set(&self.info, &bp.entries, Outcome::Failed(Failure { operation: operation.clone(), reason: reason.clone() }));
             if reproducing {
                 self.dropped.push(bp.dir);
             } else {
@@ -671,7 +671,7 @@ impl Core {
                             recomputed: ours.unwrap_or(Key::from_bytes([0; 32])),
                         };
                         self.fail_by_products(Some("reproducing its upstream".into()), Some(err.to_string()));
-                        self.store.info_set(&self.info, &self.entries, Outcome::Reused, None);
+                        self.store.info_set(&self.info, &self.entries, Outcome::Reused);
                         self.settled = true;
                         return Err(err);
                     }
@@ -685,7 +685,7 @@ impl Core {
                         recomputed: files[name].sha256.unwrap_or(Key::from_bytes([0; 32])),
                     };
                     self.fail_by_products(Some("reproducing its upstream".into()), Some(err.to_string()));
-                    self.store.info_set(&self.info, &self.entries, Outcome::Reused, None);
+                    self.store.info_set(&self.info, &self.entries, Outcome::Reused);
                     self.settled = true;
                     return Err(err);
                 }
@@ -694,9 +694,9 @@ impl Core {
                 for (bp, f) in self.by_products.iter_mut().zip(bp_files) {
                     commit_staged_by_product(&self.store, self.run_id, &stored_dir, bp, f, &now)?;
                 }
-                self.store.info_set(&self.info, &self.entries, Outcome::Reused, None);
+                self.store.info_set(&self.info, &self.entries, Outcome::Reused);
                 for bp in &self.by_products {
-                    self.store.info_set(&self.info, &bp.entries, Outcome::Computed, None);
+                    self.store.info_set(&self.info, &bp.entries, Outcome::Computed);
                 }
                 self.settled = true;
                 Ok(stored_dir)
@@ -726,9 +726,9 @@ impl Core {
                     let rel = bp.dir.strip_prefix(&dir).expect("an atomic by-product is staged inside its upstream");
                     self.store.index_completed(bp.kind, bp.run_id, &dest.join(rel), &bp.run_file, Some(self.run_id))?;
                 }
-                self.store.info_set(&self.info, &self.entries, Outcome::Computed, None);
+                self.store.info_set(&self.info, &self.entries, Outcome::Computed);
                 for bp in &self.by_products {
-                    self.store.info_set(&self.info, &bp.entries, Outcome::Computed, None);
+                    self.store.info_set(&self.info, &bp.entries, Outcome::Computed);
                 }
                 Ok(dest)
             }
@@ -744,10 +744,10 @@ impl Core {
                 }
                 self.settled = true;
                 self.store.index_completed(self.kind, self.run_id, &dir, &self.run_file, None)?;
-                self.store.info_set(&self.info, &self.entries, Outcome::Computed, None);
+                self.store.info_set(&self.info, &self.entries, Outcome::Computed);
                 for (bp, f) in self.by_products.iter_mut().zip(bp_files) {
                     commit_staged_by_product(&self.store, self.run_id, &dir, bp, f, &now)?;
-                    self.store.info_set(&self.info, &bp.entries, Outcome::Computed, None);
+                    self.store.info_set(&self.info, &bp.entries, Outcome::Computed);
                 }
                 Ok(dir)
             }
@@ -784,21 +784,21 @@ impl Core {
                     recomputed: ours(n).unwrap_or(Key::from_bytes([0; 32])),
                 };
                 let failure = Failure { operation: Some("storing".into()), reason: Some(err.to_string()) };
-                self.store.info_set(&self.info, &self.entries, Outcome::Failed, Some(failure.clone()));
+                self.store.info_set(&self.info, &self.entries, Outcome::Failed(failure.clone()));
                 for bp in &self.by_products {
-                    self.store.info_set(&self.info, &bp.entries, Outcome::Failed, Some(failure.clone()));
+                    self.store.info_set(&self.info, &bp.entries, Outcome::Failed(failure.clone()));
                 }
                 return Err(err);
             }
         }
-        self.store.info_set(&self.info, &self.entries, Outcome::Reused, None);
+        self.store.info_set(&self.info, &self.entries, Outcome::Reused);
         for bp in &self.by_products {
             let stored = self.store.find_completed(bp.kind, &bp.run_id)?.is_some();
             if stored {
-                self.store.info_set(&self.info, &bp.entries, Outcome::Reused, None);
+                self.store.info_set(&self.info, &bp.entries, Outcome::Reused);
             } else {
                 let reason = "another process stored this result first, without this by-product".to_string();
-                self.store.info_set(&self.info, &bp.entries, Outcome::Failed, Some(Failure { operation: None, reason: Some(reason) }));
+                self.store.info_set(&self.info, &bp.entries, Outcome::Failed(Failure { operation: None, reason: Some(reason) }));
             }
         }
         remove_all(staging)?;
@@ -811,7 +811,7 @@ impl Core {
             if !matches!(self.place, Place::Staging { .. }) {
                 let _ = remove_all(&bp.dir);
             }
-            self.store.info_set(&self.info, &bp.entries, Outcome::Failed, Some(Failure { operation: operation.clone(), reason: reason.clone() }));
+            self.store.info_set(&self.info, &bp.entries, Outcome::Failed(Failure { operation: operation.clone(), reason: reason.clone() }));
         }
     }
 
@@ -826,7 +826,7 @@ impl Core {
         match &mut self.place {
             Place::Staging { dir, .. } => {
                 let r = remove_all(dir);
-                self.store.info_set(&self.info, &self.entries, Outcome::Failed, Some(failure));
+                self.store.info_set(&self.info, &self.entries, Outcome::Failed(failure));
                 r
             }
             Place::Final { dir, lock } => {
@@ -835,12 +835,12 @@ impl Core {
                 self.run_file.failure = Some(failure.clone());
                 let r = write_record_in_place(dir, &self.run_file);
                 drop(lock.take());
-                self.store.info_set(&self.info, &self.entries, Outcome::Failed, Some(failure));
+                self.store.info_set(&self.info, &self.entries, Outcome::Failed(failure));
                 r
             }
             Place::Reproducing { files_dir, .. } => {
                 let _ = remove_all(files_dir);
-                self.store.info_set(&self.info, &self.entries, Outcome::Reused, None);
+                self.store.info_set(&self.info, &self.entries, Outcome::Reused);
                 self.remove_dropped();
                 Ok(())
             }

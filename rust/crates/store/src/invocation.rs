@@ -21,8 +21,8 @@ use crate::inputs::Given;
 use crate::label::Label;
 use crate::owner::{this_owner, Beat, Liveness, Timestamp, STALE_AFTER};
 use crate::record::{
-    read_record, Counts, Failure, InvocationFile, InvocationStatus, Lineage, Outcome, Read, ResultEntry,
-    RECORD_FORMAT,
+    read_versioned, Closed, Failure, Head, Lineage, Listing, Outcome, Pending, Read, Record, RecordKind, Running,
+    INVOCATION_FORMAT, RECORD_FORMAT,
 };
 use crate::storage::{Inner, Store};
 use crate::stored::Stored;
@@ -90,8 +90,7 @@ pub(crate) struct State {
     pub(crate) execution: serde_json::Value,
     pub(crate) request: StoreRequest,
     pub(crate) lineage: Vec<Lineage>,
-    pub(crate) results: Vec<ResultEntry>,
-    pub(crate) progress: Option<serde_json::Value>,
+    pub(crate) results: Vec<Listing<Pending>>,
     started: Option<Started>,
     ended: bool,
 }
@@ -108,7 +107,7 @@ struct Started {
 
 impl Started {
     /// Writes `file` as the record, and adds it to the store's snapshot.
-    fn write(&self, file: &InvocationFile) -> Result<()> {
+    fn write(&self, file: &Record) -> Result<()> {
         write_json_atomic(&invocation_path(&self.root, self.seq), file)?;
         if let Some(inner) = self.inner.upgrade() {
             inner.wrote_own(file);
@@ -129,7 +128,6 @@ impl RunInfo {
                     request: request.clone(),
                     lineage: Vec::new(),
                     results: Vec::new(),
-                    progress: None,
                     started: None,
                     ended: false,
                 }),
@@ -147,12 +145,11 @@ impl RunInfo {
     /// A `RunInfo` dropped without this writes the last version too, with
     /// what is known.
     pub fn finish(self, store: &Store) -> Result<Invocation> {
-        let file = self.shared.end()?;
-        let Some(file) = file else {
+        let Some(closed) = self.shared.end()? else {
             return Err(Error::NotFound { handle: "an invocation that never called the store".into() });
         };
-        let took = previous_holder(&store.inner, &file)?;
-        Ok(Invocation { file, took_label_from: took })
+        let took = previous_holder(&store.inner, &closed)?;
+        Ok(Invocation { record: Record::Ended(closed), took_label_from: took })
     }
 }
 
@@ -169,7 +166,7 @@ impl Shared {
 
     /// Adds `entries` to the record and, at the command's first call to the
     /// store, writes its first version. Returns each entry's position.
-    pub(crate) fn register(&self, inner: &Arc<Inner>, entries: Vec<ResultEntry>, reuse: Reuse) -> Result<Vec<usize>> {
+    pub(crate) fn register(&self, inner: &Arc<Inner>, entries: Vec<Listing<Pending>>, reuse: Reuse) -> Result<Vec<usize>> {
         let mut st = self.lock();
         let first = st.results.len();
         st.results.extend(entries);
@@ -190,16 +187,14 @@ impl Shared {
         if st.ended {
             return Ok(());
         }
-        let file = st.file(InvocationStatus::Running);
-        s.write(&file)
+        s.write(&Record::Running(st.running()))
     }
 
-    pub(crate) fn set(&self, idx: &[usize], outcome: Outcome, failure: Option<Failure>) {
+    pub(crate) fn set(&self, idx: &[usize], outcome: Outcome) {
         let mut st = self.lock();
         for &i in idx {
             if let Some(e) = st.results.get_mut(i) {
-                e.outcome = outcome;
-                e.failure = failure.clone();
+                e.outcome = Pending::Done(outcome.clone());
             }
         }
     }
@@ -210,17 +205,15 @@ impl Shared {
 
     /// Writes a batch's progress snapshot beside the record.
     pub(crate) fn progress(&self, snapshot: serde_json::Value) -> Result<()> {
-        let mut st = self.lock();
+        let st = self.lock();
         let Some(s) = st.started.as_ref() else { return Ok(()) };
         let path = s.root.join(".invocations").join(format!("{}.progress.json", s.seq));
         let body = serde_json::json!({ "format": RECORD_FORMAT, "at": Timestamp::now(), "snapshot": snapshot });
-        write_json_atomic(&path, &body)?;
-        st.progress = Some(snapshot);
-        Ok(())
+        write_json_atomic(&path, &body)
     }
 
     /// Writes the last version, once. `None` when the store was never called.
-    fn end(&self) -> Result<Option<InvocationFile>> {
+    fn end(&self) -> Result<Option<Closed>> {
         let mut st = self.lock();
         if st.ended {
             return Ok(None);
@@ -229,93 +222,131 @@ impl Shared {
         if st.started.is_none() {
             return Ok(None);
         }
-        for e in st.results.iter_mut().filter(|e| e.outcome == Outcome::Planned) {
-            e.outcome = Outcome::Failed;
-            e.failure = Some(Failure {
-                operation: None,
-                reason: Some("the command ended before this result did".into()),
-            });
-        }
-        let file = st.file(InvocationStatus::Ended);
+        let closed = st.closed("the command ended before this result did");
         let s = st.started.as_ref().expect("checked above");
-        s.write(&file)?;
+        s.write(&Record::Ended(closed.clone()))?;
         let _ = std::fs::remove_file(s.root.join(".invocations").join(format!("{}.progress.json", s.seq)));
-        Ok(Some(file))
+        Ok(Some(closed))
     }
 }
 
 impl State {
-    fn file(&self, status: InvocationStatus) -> InvocationFile {
-        let s = self.started.as_ref().expect("an invocation file is written once started");
-        let mut counts = Counts::default();
-        for r in &self.results {
-            match r.outcome {
-                Outcome::Computed | Outcome::Reused => counts.completed += 1,
-                Outcome::Failed => counts.failed += 1,
-                Outcome::Planned | Outcome::Busy => {}
-            }
-        }
-        InvocationFile {
-            format: RECORD_FORMAT,
+    fn head(&self) -> Head {
+        let s = self.started.as_ref().expect("an invocation record is written once started");
+        Head {
+            format: INVOCATION_FORMAT,
+            record: RecordKind::Invocation,
             seq: s.seq,
-            record: "invocation".into(),
-            status,
             owner: this_owner().clone(),
             started: s.owner_started.clone(),
-            ended: (status == InvocationStatus::Ended).then(Timestamp::now),
-            label: self.request.label().map(str::to_string),
+            label: self.request.label.clone(),
             argv: self.given.argv.clone(),
             given: serde_json::Value::Object(self.given.fields.clone()),
             config_files: self.given.config_files.clone(),
-            results: self.results.clone(),
-            counts,
-            progress: self.progress.clone(),
         }
     }
+
+    fn running(&self) -> Running {
+        Running { head: self.head(), results: self.results.clone() }
+    }
+
+    /// The closed record: a result still planned is recorded as failed, for
+    /// `reason`.
+    fn closed(&self, reason: &str) -> Closed {
+        close(self.running(), reason)
+    }
+}
+
+/// `running`, closed now: each result still planned is recorded as failed,
+/// for `reason`.
+pub(crate) fn close(running: Running, reason: &str) -> Closed {
+    let results = running
+        .results
+        .into_iter()
+        .map(|l| Listing {
+            kind: l.kind,
+            run_id: l.run_id,
+            attributes: l.attributes,
+            outcome: match l.outcome {
+                Pending::Done(o) => o,
+                Pending::Planned => Outcome::Failed(Failure { operation: None, reason: Some(reason.into()) }),
+            },
+        })
+        .collect();
+    Closed { head: running.head, ended: Timestamp::now(), results }
 }
 
 pub(crate) fn invocation_path(root: &Path, seq: u64) -> PathBuf {
     root.join(".invocations").join(format!("{seq}.json"))
 }
 
-/// Every invocation record under the root, by sequence number. A record that
-/// cannot be read is left out.
-pub(crate) fn all_invocations(root: &Path) -> Vec<InvocationFile> {
-    let dir = root.join(".invocations");
-    let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
-    let mut out: Vec<InvocationFile> = entries
-        .flatten()
-        .filter_map(|e| {
-            let name = e.file_name().to_string_lossy().into_owned();
-            let seq = name.strip_suffix(".json")?;
-            seq.parse::<u64>().ok()?;
-            match read_record::<InvocationFile>(&e.path()) {
-                Read::Ok(f) => Some(f),
-                _ => None,
+/// An invocation record the store does not read: one of another format, such
+/// as one written by an earlier build, or one that does not parse as a record
+/// of this format. The results it lists stay reusable, since reuse goes by
+/// identity; a lookup by label or by the record's listings does not see it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnreadRecord {
+    pub path: PathBuf,
+    pub why: Unread,
+}
+
+/// Why an invocation record is not read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unread {
+    /// Its `format` is `found`; this build reads [`INVOCATION_FORMAT`].
+    Format { found: u16 },
+    /// It is of this format and does not read as a record of it.
+    Invalid { why: String },
+}
+
+impl std::fmt::Display for UnreadRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.why {
+            Unread::Format { found } => {
+                write!(f, "{} has format {found}; this build reads format {INVOCATION_FORMAT}", self.path.display())
             }
-        })
-        .collect();
-    out.sort_by_key(|f| f.seq);
-    out
+            Unread::Invalid { why } => write!(f, "{} does not read: {why}", self.path.display()),
+        }
+    }
 }
 
-/// Whether every result of an invocation completed, so it may hold its label.
-pub(crate) fn all_completed(f: &InvocationFile) -> bool {
-    f.status == InvocationStatus::Ended
-        && f.results.iter().all(|r| matches!(r.outcome, Outcome::Computed | Outcome::Reused))
+/// Every invocation record under the root, by sequence number, and the
+/// records it holds that are not read.
+pub(crate) fn all_invocations(root: &Path) -> (Vec<Record>, Vec<UnreadRecord>) {
+    let dir = root.join(".invocations");
+    let Ok(entries) = std::fs::read_dir(&dir) else { return (Vec::new(), Vec::new()) };
+    let mut out = Vec::new();
+    let mut unread = Vec::new();
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Some(seq) = name.strip_suffix(".json") else { continue };
+        if seq.parse::<u64>().is_err() {
+            continue;
+        }
+        let path = e.path();
+        match read_versioned::<Record>(&path, INVOCATION_FORMAT) {
+            Read::Ok(r) => out.push(r),
+            Read::Absent => {}
+            Read::Bad(Error::OldRecord { found, .. }) => unread.push(UnreadRecord { path, why: Unread::Format { found } }),
+            Read::Bad(e) => unread.push(UnreadRecord { path, why: Unread::Invalid { why: e.to_string() } }),
+        }
+    }
+    out.sort_by_key(Record::seq);
+    unread.sort_by(|a, b| a.path.cmp(&b.path));
+    (out, unread)
 }
 
-/// Takes the store-wide lock, checks the label, takes the next sequence
-/// number and writes the record's first version, all before the lock is
-/// released, so a later command's label check sees this one running.
-fn start(inner: &Arc<Inner>, st: &mut State, reuse: Reuse, beat: Arc<Beat>) -> Result<()> {
+/// Takes the store-wide lock `.invocations/.lock`, waiting while another
+/// process on this host holds it. A holder on another host that is stale or
+/// whose liveness is unknown is refused with [`Error::InvocationLockHeld`].
+fn records_lock(inner: &Inner) -> Result<crate::fsutil::LockGuard> {
     let dir = inner.root.join(".invocations");
     std::fs::create_dir_all(&dir).at("create directory", &dir)?;
     let lock_path = dir.join(".lock");
-    let guard = loop {
+    loop {
         let live = |o: &crate::Owner| inner.liveness(o, STALE_AFTER);
         match try_lock(&lock_path, &live)? {
-            LockAttempt::Acquired(g) => break g,
+            LockAttempt::Acquired(g) => return Ok(g),
             LockAttempt::Held(owner, Liveness::Stale { .. }) if !owner.is_this_host() => {
                 return Err(Error::InvocationLockHeld { owner, path: lock_path });
             }
@@ -324,20 +355,27 @@ fn start(inner: &Arc<Inner>, st: &mut State, reuse: Reuse, beat: Arc<Beat>) -> R
             }
             LockAttempt::Held(..) => std::thread::sleep(std::time::Duration::from_millis(20)),
         }
-    };
-    let existing = inner.read_records();
+    }
+}
+
+/// Takes the store-wide lock, checks the label, takes the next sequence
+/// number and writes the record's first version, all before the lock is
+/// released, so a later command's label check sees this one running.
+fn start(inner: &Arc<Inner>, st: &mut State, reuse: Reuse, beat: Arc<Beat>) -> Result<()> {
+    let guard = records_lock(inner)?;
+    let dir = inner.root.join(".invocations");
     if let Some(label) = st.request.label() {
-        for f in existing.iter().filter(|f| f.label.as_deref() == Some(label)) {
-            if f.status != InvocationStatus::Running || &f.owner == this_owner() {
+        for r in inner.running().iter().filter(|r| r.head.label.as_ref().map(Label::as_str) == Some(label)) {
+            if &r.head.owner == this_owner() {
                 continue;
             }
-            let l = inner.liveness(&f.owner, STALE_AFTER);
-            let stopped_elsewhere = !f.owner.is_this_host() && matches!(l, Liveness::Stale { .. } | Liveness::Unknown);
+            let l = inner.liveness(&r.head.owner, STALE_AFTER);
+            let stopped_elsewhere = !r.head.owner.is_this_host() && matches!(l, Liveness::Stale { .. } | Liveness::Unknown);
             if l == Liveness::Dead || (stopped_elsewhere && reuse == Reuse::Force) {
                 continue;
             }
-            let running = f.results.iter().find(|r| r.outcome == Outcome::Planned).map(|r| r.run_id);
-            return Err(Error::LabelInUse { label: label.to_string(), running, owner: f.owner.clone() });
+            let running = r.results.iter().find(|l| l.outcome == Pending::Planned).map(|l| l.run_id);
+            return Err(Error::LabelInUse { label: label.to_string(), running, owner: r.head.owner.clone() });
         }
     }
     let highest = std::fs::read_dir(&dir)
@@ -354,24 +392,28 @@ fn start(inner: &Arc<Inner>, st: &mut State, reuse: Reuse, beat: Arc<Beat>) -> R
         _beat: beat,
         inner: Arc::downgrade(inner),
     });
-    let file = st.file(InvocationStatus::Running);
-    st.started.as_ref().expect("set above").write(&file)?;
+    st.started.as_ref().expect("set above").write(&Record::Running(st.running()))?;
     drop(guard);
     Ok(())
 }
 
-/// The invocation that held `file`'s label before it, when `file` now holds it.
-fn previous_holder(inner: &Inner, file: &InvocationFile) -> Result<Option<u64>> {
-    let Some(label) = &file.label else { return Ok(None) };
-    if !all_completed(file) {
+/// The invocation that held `closed`'s label before it, when `closed` now
+/// holds it. Read from the directory under the store-wide lock, so a holder
+/// another process closed a moment ago is seen.
+fn previous_holder(inner: &Inner, closed: &Closed) -> Result<Option<u64>> {
+    let Some(label) = &closed.head.label else { return Ok(None) };
+    if !closed.results.iter().all(|l| l.outcome.completed()) {
         return Ok(None);
     }
-    Ok(inner
+    let guard = records_lock(inner)?;
+    let held = inner
         .read_records()
         .into_iter()
-        .filter(|f| f.seq < file.seq && f.label.as_deref() == Some(label.as_str()) && all_completed(f))
-        .map(|f| f.seq)
-        .max())
+        .filter(|r| r.seq() < closed.head.seq && r.label() == Some(label.as_str()) && r.all_completed())
+        .map(|r| r.seq())
+        .max();
+    drop(guard);
+    Ok(held)
 }
 
 /// One result an ended invocation listed, as a consumer outside the store
@@ -382,8 +424,8 @@ pub struct Output {
     pub run_id: Key,
     /// The result this one is a by-product of.
     pub upstream: Option<Key>,
-    /// The labels the invocation record gave it.
-    pub labels: serde_json::Value,
+    /// The attributes the invocation record gave it.
+    pub attributes: serde_json::Value,
     /// Every file of role result in the result's `run.json`, by stored name.
     pub files: std::collections::BTreeMap<String, OutputFile>,
 }
@@ -399,22 +441,22 @@ pub struct OutputFile {
 /// An invocation record, as read back.
 #[derive(Debug, Clone)]
 pub struct Invocation {
-    pub(crate) file: InvocationFile,
+    pub(crate) record: Record,
     pub(crate) took_label_from: Option<u64>,
 }
 
 impl Invocation {
     pub fn seq(&self) -> u64 {
-        self.file.seq
+        self.record.seq()
     }
 
     pub fn label(&self) -> Option<&str> {
-        self.file.label.as_deref()
+        self.record.label()
     }
 
     /// The command line as given.
     pub fn argv(&self) -> &[String] {
-        &self.file.argv
+        &self.record.head().argv
     }
 
     /// When this invocation now holds its label, the invocation that held it
@@ -424,36 +466,34 @@ impl Invocation {
     }
 
     /// The results this invocation asked for, of kind `A`, in order, with
-    /// their labels. Labels that do not read as `A::Labels` are refused.
-    pub fn members<A: Artifact>(&self) -> Result<Vec<(Id<A>, A::Labels)>> {
-        self.file
-            .results
-            .iter()
+    /// their attributes. Attributes that do not read as `A::Attributes` are
+    /// refused.
+    pub fn members<A: Artifact>(&self) -> Result<Vec<(Id<A>, A::Attributes)>> {
+        self.record
+            .listings()
+            .into_iter()
             .filter(|r| r.kind == A::KIND)
-            .map(|r| {
-                let labels = serde_json::from_value(r.labels.clone()).map_err(|e| Error::Parse {
-                    what: format!("the labels of {} in invocation {}", r.run_id.short12(), self.file.seq),
-                    why: e.to_string(),
-                })?;
-                Ok((Id::from_key(r.run_id), labels))
-            })
+            .map(|r| Ok((Id::from_key(r.run_id), self.decode::<A>(r.run_id, r.attributes)?)))
             .collect()
+    }
+
+    fn decode<A: Artifact>(&self, run_id: Key, attributes: &serde_json::Value) -> Result<A::Attributes> {
+        serde_json::from_value(attributes.clone()).map_err(|e| Error::Parse {
+            what: format!("the attributes of {} in invocation {}", run_id.short12(), self.seq()),
+            why: e.to_string(),
+        })
     }
 
     /// Each entry this invocation listed, as its kind, run id and whether it
     /// ended `computed` or `reused`, in listed order.
     pub fn entries(&self) -> Vec<(&str, Key, bool)> {
-        self.file
-            .results
-            .iter()
-            .map(|r| (r.kind.as_str(), r.run_id, matches!(r.outcome, Outcome::Computed | Outcome::Reused)))
-            .collect()
+        self.record.listings().into_iter().map(|r| (r.kind, r.run_id, r.completed())).collect()
     }
 
-    /// The labels this invocation gave the result `run_id` of kind `kind`,
-    /// or `None` when it did not list it.
-    pub fn labels_of(&self, kind: &str, run_id: Key) -> Option<serde_json::Value> {
-        self.file.results.iter().find(|r| r.kind == kind && r.run_id == run_id).map(|r| r.labels.clone())
+    /// The attributes this invocation gave the result `run_id` of kind
+    /// `kind`, or `None` when it did not list it.
+    pub fn attributes_of(&self, kind: &str, run_id: Key) -> Option<serde_json::Value> {
+        self.record.listings().into_iter().find(|r| r.kind == kind && r.run_id == run_id).map(|r| r.attributes.clone())
     }
 
     /// Each distinct (kind, run id) this invocation listed, in first-listed
@@ -461,27 +501,22 @@ impl Invocation {
     /// [`Error::MemberNotCompleted`], naming each, when any entry did not end
     /// `computed` or `reused`.
     pub fn outputs(&self, store: &Store) -> Result<Vec<Output>> {
-        let missing: Vec<Key> = self
-            .file
-            .results
-            .iter()
-            .filter(|r| !matches!(r.outcome, Outcome::Computed | Outcome::Reused))
-            .map(|r| r.run_id)
-            .collect();
+        let listings = self.record.listings();
+        let missing: Vec<Key> = listings.iter().filter(|r| !r.completed()).map(|r| r.run_id).collect();
         if !missing.is_empty() {
-            return Err(Error::MemberNotCompleted { invocation: self.file.seq, members: missing });
+            return Err(Error::MemberNotCompleted { invocation: self.seq(), members: missing });
         }
         let mut seen = std::collections::BTreeSet::new();
         let mut out = Vec::new();
-        for r in &self.file.results {
-            if !seen.insert((r.kind.as_str(), r.run_id)) {
+        for r in &listings {
+            if !seen.insert((r.kind, r.run_id)) {
                 continue;
             }
             let located = store.locate(r.run_id)?;
             if located.kind() != r.kind {
                 return Err(Error::Damaged {
                     run_id: r.run_id,
-                    what: format!("invocation {} lists it as `{}`, and its record says `{}`", self.file.seq, r.kind, located.kind()),
+                    what: format!("invocation {} lists it as `{}`, and its record says `{}`", self.seq(), r.kind, located.kind()),
                 });
             }
             let files = located
@@ -489,23 +524,29 @@ impl Invocation {
                 .into_iter()
                 .map(|(name, (sha256, bytes))| (name.to_string(), OutputFile { sha256, bytes }))
                 .collect();
-            out.push(Output { kind: r.kind.clone(), run_id: r.run_id, upstream: located.upstream(), labels: r.labels.clone(), files });
+            out.push(Output {
+                kind: r.kind.to_string(),
+                run_id: r.run_id,
+                upstream: located.upstream(),
+                attributes: r.attributes.clone(),
+                files,
+            });
         }
         Ok(out)
     }
 
-    /// Every member of kind `R::Of`, completed, with its labels.
+    /// Every member of kind `R::Of`, completed, with its attributes.
     fn completed_members<R: Rendering>(&self, store: &Store) -> Result<Vec<Member<R::Of>>> {
         let mut out = Vec::new();
         let mut missing = Vec::new();
-        for (id, labels) in self.members::<R::Of>()? {
+        for (id, attributes) in self.members::<R::Of>()? {
             match store.get(&id)? {
-                Some(s) => out.push((s, labels)),
+                Some(s) => out.push((s, attributes)),
                 None => missing.push(id.key()),
             }
         }
         if !missing.is_empty() {
-            return Err(Error::MemberNotCompleted { invocation: self.file.seq, members: missing });
+            return Err(Error::MemberNotCompleted { invocation: self.seq(), members: missing });
         }
         Ok(out)
     }
@@ -527,8 +568,8 @@ impl Invocation {
     }
 }
 
-/// One result of an invocation, completed, with its labels.
-pub type Member<A> = (Stored<A>, <A as Artifact>::Labels);
+/// One result of an invocation, completed, with its attributes.
+pub type Member<A> = (Stored<A>, <A as Artifact>::Attributes);
 
 impl Invocation {
     /// Every member of kind `R::Of`, completed, with the completed by-product
@@ -536,14 +577,10 @@ impl Invocation {
     /// belongs to the member entry registered before it, since a member and
     /// the by-products wanted of it are registered together.
     fn completed_members_with<R: ByProductRendering>(&self, store: &Store) -> Result<Vec<MemberWith<R::Of, R::By>>> {
-        let label_err = |r: &crate::record::ResultEntry, e: serde_json::Error| Error::Parse {
-            what: format!("the labels of {} in invocation {}", r.run_id.short12(), self.file.seq),
-            why: e.to_string(),
-        };
-        let mut wanted: Vec<(Key, <R::Of as Artifact>::Labels, Option<Key>)> = Vec::new();
-        for r in &self.file.results {
+        let mut wanted: Vec<(Key, <R::Of as Artifact>::Attributes, Option<Key>)> = Vec::new();
+        for r in self.record.listings() {
             if r.kind == <R::Of as Artifact>::KIND {
-                wanted.push((r.run_id, serde_json::from_value(r.labels.clone()).map_err(|e| label_err(r, e))?, None));
+                wanted.push((r.run_id, self.decode::<R::Of>(r.run_id, r.attributes)?, None));
             } else if r.kind == <R::By as Artifact>::KIND {
                 if let Some(last) = wanted.last_mut() {
                     last.2 = Some(r.run_id);
@@ -552,7 +589,7 @@ impl Invocation {
         }
         let mut out = Vec::new();
         let mut missing = Vec::new();
-        for (key, labels, by) in wanted {
+        for (key, attributes, by) in wanted {
             let member = store.get(&Id::<R::Of>::from_key(key))?;
             let by_product = match by {
                 Some(b) => match store.get(&Id::<R::By>::from_key(b))? {
@@ -565,12 +602,12 @@ impl Invocation {
                 None => None,
             };
             match member {
-                Some(s) => out.push(((s, labels), by_product)),
+                Some(s) => out.push(((s, attributes), by_product)),
                 None => missing.push(key),
             }
         }
         if !missing.is_empty() {
-            return Err(Error::MemberNotCompleted { invocation: self.file.seq, members: missing });
+            return Err(Error::MemberNotCompleted { invocation: self.seq(), members: missing });
         }
         Ok(out)
     }
@@ -658,8 +695,8 @@ impl ExportSink for ExportFiles {
     }
 }
 
-/// A rendering: a pure function of stored result files, an invocation's labels
-/// and options.
+/// A rendering: a pure function of stored result files, an invocation's
+/// attributes and options.
 pub trait Rendering {
     /// The kind of result it renders: the invocation's results of this kind,
     /// in order.
@@ -699,10 +736,30 @@ impl Serialize for ExportPath {
 
 /// The digest of an invocation record's configuration files, for
 /// [`Store::runs_of_configuration`].
-pub(crate) fn config_digests(f: &InvocationFile) -> impl Iterator<Item = Key> + '_ {
-    f.config_files.iter().map(|c| c.sha256)
+pub(crate) fn config_digests(r: &Record) -> impl Iterator<Item = Key> + '_ {
+    r.head().config_files.iter().map(|c| c.sha256)
 }
 
-pub(crate) fn encode_labels<T: Serialize>(labels: &T) -> Result<serde_json::Value> {
-    serde_json::to_value(labels).map_err(|e| json_err("encode the labels of", Path::new("a result"), e))
+pub(crate) fn encode_attributes<T: Serialize>(attributes: &T) -> Result<serde_json::Value> {
+    serde_json::to_value(attributes).map_err(|e| json_err("encode the attributes of", Path::new("a result"), e))
+}
+
+/// What the project is told of the invocation records a store does not read:
+/// the store's root and every such record found so far.
+pub type UnreadReporter = fn(&Path, &[UnreadRecord]);
+
+static UNREAD_REPORTER: std::sync::OnceLock<UnreadReporter> = std::sync::OnceLock::new();
+
+/// Sets the function each store calls, once per store, the first time a read
+/// of its `.invocations/` finds records it does not read. The first call
+/// wins. Without one, the records are only listed by
+/// [`Store::unread_records`].
+pub fn report_unread_records_to(f: UnreadReporter) {
+    let _ = UNREAD_REPORTER.set(f);
+}
+
+pub(crate) fn report_unread(root: &Path, unread: &[UnreadRecord]) {
+    if let Some(f) = UNREAD_REPORTER.get() {
+        f(root, unread);
+    }
 }

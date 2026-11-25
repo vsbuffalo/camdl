@@ -8,10 +8,10 @@ use crate::error::Result;
 use crate::fsutil::{draft_owner, fsync_dir, remove_all, write_file_atomic, write_json_atomic};
 use crate::hash::Key;
 use crate::index::{index_dir, own_log, Index};
-use crate::invocation::invocation_path;
-use crate::owner::{local_liveness, local_liveness_of_stem, Liveness, Owner, Timestamp};
+use crate::invocation::{close, invocation_path};
+use crate::owner::{local_liveness, local_liveness_of_stem, Liveness, Owner};
 use crate::record::{
-    read_record, Failure, IdentityFile, IndexLine, InvocationStatus, Outcome, Read, Role, RunFile, Status, ATTEMPTS_DIR,
+    read_record, IdentityFile, IndexLine, Read, Record, Role, RunFile, Status, ATTEMPTS_DIR,
     RECORD_FORMAT, RUN_FILE, STAGING_DIR,
 };
 use crate::storage::{folder_state, identity_of, visible_dirs, Inner, State, Store};
@@ -224,23 +224,15 @@ impl Store {
                 }
             }
         }
-        for mut inv in inner.running() {
-            if !inv.owner.is_this_host() || inner.liveness(&inv.owner, Duration::ZERO) != Liveness::Dead {
+        for inv in inner.running() {
+            if !inv.head.owner.is_this_host() || inner.liveness(&inv.head.owner, Duration::ZERO) != Liveness::Dead {
                 continue;
             }
-            for r in inv.results.iter_mut().filter(|r| r.outcome == Outcome::Planned) {
-                r.outcome = Outcome::Failed;
-                r.failure = Some(Failure {
-                    operation: None,
-                    reason: Some("the command was interrupted before this result ended".into()),
-                });
-                inv.counts.failed += 1;
-            }
-            inv.status = InvocationStatus::Interrupted;
-            inv.ended = Some(Timestamp::now());
-            write_json_atomic(&invocation_path(&inner.root, inv.seq), &inv)?;
-            let _ = std::fs::remove_file(inner.root.join(".invocations").join(format!("{}.progress.json", inv.seq)));
-            out.invocations.push(inv.seq);
+            let seq = inv.head.seq;
+            let closed = close(inv, "the command was interrupted before this result ended");
+            write_json_atomic(&invocation_path(&inner.root, seq), &Record::Interrupted(closed))?;
+            let _ = std::fs::remove_file(inner.root.join(".invocations").join(format!("{seq}.progress.json")));
+            out.invocations.push(seq);
         }
         if !out.invocations.is_empty() {
             inner.forget_records();

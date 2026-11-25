@@ -8,7 +8,7 @@ use crate::error::{Error, Result};
 use crate::handle::Handle;
 use crate::maintenance::walk;
 use crate::owner::Liveness;
-use crate::record::{read_record, InvocationFile, Read, RunFile, RUN_FILE};
+use crate::record::{read_record, Read, Record, RunFile, RUN_FILE};
 use crate::storage::{folder_state, State, Store};
 
 /// The store's commands.
@@ -55,7 +55,8 @@ impl StoreCommand {
                 if !inner.kinds.has(kind) {
                     return Err(Error::UnknownKind { kind: kind.clone() });
                 }
-                let invs: Vec<InvocationFile> = store.invocations().iter().map(|i| i.file.clone()).chain(inner.running()).collect();
+                let invs: Vec<Record> =
+                    store.invocations().iter().map(|i| i.record.clone()).chain(inner.running().into_iter().map(Record::Running)).collect();
                 for (dir, f) in walk(inner).into_iter().filter(|(_, f)| &f.kind == kind) {
                     let state = match folder_state(&dir, &f.run_id, &inner.kinds) {
                         State::Completed { .. } => "completed",
@@ -66,8 +67,8 @@ impl StoreCommand {
                     };
                     let labels: Vec<&str> = invs
                         .iter()
-                        .filter(|i| i.results.iter().any(|r| r.run_id == f.run_id))
-                        .filter_map(|i| i.label.as_deref())
+                        .filter(|i| i.listings().iter().any(|r| r.run_id == f.run_id))
+                        .filter_map(Record::label)
                         .collect();
                     let time = match read_record::<RunFile>(&dir.join(RUN_FILE)) {
                         Read::Ok(r) => r.finished.unwrap_or(r.started).0,
@@ -86,7 +87,7 @@ impl StoreCommand {
                             Handle::IdPrefix(p) => {
                                 walk(inner).into_iter().find(|(_, f)| f.run_id.to_hex().starts_with(p.as_str())).map(|(_, f)| f.run_id)
                             }
-                            _ => inv.file.results.first().map(|r| r.run_id),
+                            _ => inv.record.listings().first().map(|r| r.run_id),
                         }
                         .ok_or_else(|| Error::NotFound { handle: handle.clone() })?;
                         walk(inner).into_iter().find(|(_, f)| f.run_id == key).map(|(d, _)| d).ok_or(Error::NotFound { handle: handle.clone() })?
@@ -102,17 +103,18 @@ impl StoreCommand {
                         writeln!(out, "cross-build dependency: {} {} was made by build {}", d.kind, d.run_id.short12(), &d.build[..d.build.len().min(12)]).map_err(io)?;
                     }
                 }
-                let invs: Vec<InvocationFile> = store.invocations().iter().map(|i| i.file.clone()).chain(inner.running()).collect();
-                for i in invs.iter().filter(|i| i.results.iter().any(|r| r.run_id == id.run_id)) {
-                    writeln!(out, "asked for by invocation {}{}", i.seq, i.label.as_ref().map(|l| format!(" (@{l})")).unwrap_or_default()).map_err(io)?;
+                let invs: Vec<Record> =
+                    store.invocations().iter().map(|i| i.record.clone()).chain(inner.running().into_iter().map(Record::Running)).collect();
+                for i in invs.iter().filter(|i| i.listings().iter().any(|r| r.run_id == id.run_id)) {
+                    writeln!(out, "asked for by invocation {}{}", i.seq(), i.label().map(|l| format!(" (@{l})")).unwrap_or_default()).map_err(io)?;
                 }
             }
             StoreCommand::Status => {
                 for i in inner.running().iter() {
-                    let l = inner.liveness(&i.owner, std::time::Duration::ZERO);
+                    let l = inner.liveness(&i.head.owner, std::time::Duration::ZERO);
                     let state = if l == Liveness::Dead { "interrupted" } else { "running" };
-                    let closes = if l == Liveness::Dead && i.owner.is_this_host() { "  (clean closes its record)" } else { "" };
-                    writeln!(out, "invocation {}  {state}  {} results  {}{closes}", i.seq, i.results.len(), i.owner).map_err(io)?;
+                    let closes = if l == Liveness::Dead && i.head.owner.is_this_host() { "  (clean closes its record)" } else { "" };
+                    writeln!(out, "invocation {}  {state}  {} results  {}{closes}", i.head.seq, i.results.len(), i.head.owner).map_err(io)?;
                 }
                 for (dir, f) in walk(inner) {
                     match folder_state(&dir, &f.run_id, &inner.kinds) {
@@ -150,7 +152,7 @@ impl StoreCommand {
                             }
                             label @ Handle::Label { .. } => {
                                 let inv = store.invocation(&label)?;
-                                let keys: Vec<_> = inv.file.results.iter().map(|r| r.run_id).collect();
+                                let keys: Vec<_> = inv.record.listings().iter().map(|r| r.run_id).collect();
                                 let dirs: Vec<_> =
                                     walk(inner).into_iter().filter(|(_, f)| keys.contains(&f.run_id)).map(|(d, _)| d).collect();
                                 if dirs.is_empty() {

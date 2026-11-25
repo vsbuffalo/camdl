@@ -1211,7 +1211,7 @@ fn predict_reports_a_stored_fit_through_the_model_file_it_is_given() {
     );
     let models: Vec<&serde_json::Value> = results.iter().filter(|r| r["kind"] == "compiled_model").collect();
     assert_eq!(models.len(), 1, "one listing of the fit's compiled model: {last:#}");
-    let presentation = models[0]["labels"]["presentation"].as_str().expect("the listing names a presentation");
+    let presentation = models[0]["attributes"]["presentation"].as_str().expect("the listing names a presentation");
     let source = folders(&store)
         .into_iter()
         .find(|(_, id, _)| id["kind"] == "model_presentation" && id["run_id"] == presentation)
@@ -1400,7 +1400,7 @@ fn a_running_fit_lists_every_planned_run_in_its_invocation_record() {
         std::thread::sleep(std::time::Duration::from_millis(50));
     };
     let runs: Vec<&serde_json::Value> = v["results"].as_array().unwrap().iter().filter(|r| r["kind"] == "fit_run").collect();
-    let seeds: Vec<&serde_json::Value> = runs.iter().map(|r| &r["labels"]["seed"]).collect();
+    let seeds: Vec<&serde_json::Value> = runs.iter().map(|r| &r["attributes"]["seed"]).collect();
     assert_eq!(seeds, [&serde_json::json!(1), &serde_json::json!(2), &serde_json::json!(3)], "{v:#}");
     assert!(runs.iter().all(|r| r["outcome"] == "planned"), "{v:#}");
     assert_eq!(run_folders_now(), 1, "only the run being computed holds a folder");

@@ -214,7 +214,7 @@ pub(crate) const SYNTHETIC_TRUTH_FILE: &str = "synthetic/truth.toml";
 
 /// The model file's stem and, in a sweep, the point's values as typed.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub(crate) struct ProblemLabels {
+pub(crate) struct ProblemAttributes {
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sweep_point: Option<String>,
@@ -227,11 +227,11 @@ impl Artifact for FitProblem {
     const KIND: &'static str = "fit";
     const WRITE: WriteMode = WriteMode::Atomic;
     type Identity = FitProblemIdentity;
-    type Labels = ProblemLabels;
+    type Attributes = ProblemAttributes;
 }
 
 impl Primary for FitProblem {
-    fn layout(_id: &FitProblemIdentity, labels: &ProblemLabels) -> Placed {
+    fn layout(_id: &FitProblemIdentity, labels: &ProblemAttributes) -> Placed {
         Layout::in_kind().result(&labels.model)
     }
 }
@@ -299,7 +299,7 @@ pub(crate) struct FitRunIdentity {
 /// quantities records its own: the quantities do not change the run, and a
 /// prediction evaluates the ones the command that names the run compiled.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub(crate) struct RunLabels {
+pub(crate) struct RunAttributes {
     pub method: String,
     pub seed: u64,
     /// The run id (hex) of the `Quantities` content the invocation stored.
@@ -314,11 +314,11 @@ impl Artifact for FitRun {
     const KIND: &'static str = "fit_run";
     const WRITE: WriteMode = WriteMode::InPlace;
     type Identity = FitRunIdentity;
-    type Labels = RunLabels;
+    type Attributes = RunAttributes;
 }
 
 impl Primary for FitRun {
-    fn layout(id: &FitRunIdentity, labels: &RunLabels) -> Placed {
+    fn layout(id: &FitRunIdentity, labels: &RunAttributes) -> Placed {
         Layout::inside(id.chain.problem.id(), "runs")
             .group(&labels.method, &id.chain.method)
             .result(&format!("seed_{}", labels.seed))
@@ -439,7 +439,7 @@ pub(crate) struct PredictIdentity {
 
 /// The mode, the scenario names as typed, and the model file's stem.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub(crate) struct PredictionLabels {
+pub(crate) struct PredictionAttributes {
     pub mode: String,
     pub scenarios: Vec<String>,
     pub model: String,
@@ -452,11 +452,11 @@ impl Artifact for Prediction {
     const KIND: &'static str = "prediction";
     const WRITE: WriteMode = WriteMode::Atomic;
     type Identity = PredictIdentity;
-    type Labels = PredictionLabels;
+    type Attributes = PredictionAttributes;
 }
 
 impl Primary for Prediction {
-    fn layout(id: &PredictIdentity, labels: &PredictionLabels) -> Placed {
+    fn layout(id: &PredictIdentity, labels: &PredictionAttributes) -> Placed {
         match &id.source {
             ParameterSource::Posterior { draws, .. } => Layout::inside(draws.id(), "predict"),
             ParameterSource::FixedPoint { model, .. } => Layout::in_kind().group(&labels.model, model),
@@ -502,7 +502,7 @@ impl Artifact for Score {
     const KIND: &'static str = "score";
     const WRITE: WriteMode = WriteMode::Atomic;
     type Identity = ScoreIdentity;
-    type Labels = ();
+    type Attributes = ();
 }
 
 impl Primary for Score {
@@ -1482,7 +1482,7 @@ pub(crate) struct OpenedFit {
     /// problem handle.
     pub run: Option<RunFiles>,
     /// The problem's labels, from the invocation that stored it.
-    pub labels: Option<ProblemLabels>,
+    pub labels: Option<ProblemAttributes>,
     /// The directory holding `model.ir.json`: the copy of the run's files,
     /// or for a problem handle the scratch directory.
     pub segment: std::path::PathBuf,
@@ -1689,7 +1689,7 @@ fn problem_quantities(
 }
 
 /// The labels the invocation that stored `problem` gave it.
-fn problem_labels(store: &Store, problem: &Stored<FitProblem>) -> Option<ProblemLabels> {
+fn problem_labels(store: &Store, problem: &Stored<FitProblem>) -> Option<ProblemAttributes> {
     let inv = store.invocation(&Handle::IdPrefix(problem.id().key().to_hex())).ok()?;
     inv.members::<FitProblem>().ok()?.into_iter().find(|(id, _)| id == problem.id()).map(|(_, l)| l)
 }

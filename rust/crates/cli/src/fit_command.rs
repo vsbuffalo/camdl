@@ -42,8 +42,8 @@ use store::{Begin, ContentAddressed, ContentArtifact, Identity, Reuse, Stored};
 use crate::camdl_store::{CompiledModel, ProcessSeed};
 use crate::fit::config_v2::{self, Algorithm};
 use crate::fit_store::{
-    ChainIdentity, FitProblem, FitRun, FitRunIdentity, MethodIdentity, ModelSourceFile, ProblemLabels,
-    RunLabels, StartInput, StartSource,
+    ChainIdentity, FitProblem, FitRun, FitRunIdentity, MethodIdentity, ModelSourceFile, ProblemAttributes,
+    RunAttributes, StartInput, StartSource,
 };
 use crate::out::Out;
 use crate::result_files::fit_run::PlannedMethod;
@@ -518,7 +518,7 @@ fn run_fit(mut out: Out, cx: FitCommand<'_>) -> Vec<String> {
         if let Err(e) = crate::fit::runner::validate_prior_transform_compat(&cell.problem.estimate, &model) {
             out.fail(format!("error: {e}"));
         }
-        let labels = ProblemLabels {
+        let labels = ProblemAttributes {
             model: model_stem.clone(),
             sweep_point: (!cell.sweep_point.is_empty()).then(|| point_slug(&cell.sweep_point)),
         };
@@ -618,11 +618,11 @@ fn run_fit(mut out: Out, cx: FitCommand<'_>) -> Vec<String> {
                 length,
                 resumed_from: base.as_ref().map(|b| b.dep.clone()),
             };
-            let labels = RunLabels { method: method_name.to_string(), seed, quantities: run_quantities.borrow().clone() };
+            let labels = RunAttributes { method: method_name.to_string(), seed, quantities: run_quantities.borrow().clone() };
             planned.push(PlannedRun { posed: posed_i, seed, identity, labels, base });
         }
     }
-    let members: Vec<(FitRunIdentity, RunLabels, store::Wanted<FitRun>)> =
+    let members: Vec<(FitRunIdentity, RunAttributes, store::Wanted<FitRun>)> =
         planned.iter().map(|r| (r.identity.clone(), r.labels.clone(), store::Wanted::none())).collect();
     let mut declared = store.declare::<FitRun>(&members, info, reuse)
         .unwrap_or_else(|e| out.fail(format!("error: declaring the runs: {e}")));
@@ -733,7 +733,7 @@ struct PlannedRun {
     posed: usize,
     seed: u64,
     identity: FitRunIdentity,
-    labels: RunLabels,
+    labels: RunAttributes,
     base: Option<ResumeBase>,
 }
 

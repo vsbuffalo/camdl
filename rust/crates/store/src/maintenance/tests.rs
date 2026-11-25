@@ -166,7 +166,7 @@ fn clean_closes_the_record_of_an_interrupted_invocation() {
     assert_eq!(closed["status"], "interrupted");
     assert!(closed["ended"].is_string());
     assert_eq!(closed["results"][0]["outcome"], "failed");
-    assert_eq!(closed["counts"]["failed"], 1);
+    assert!(closed.get("counts").is_none() && closed.get("progress").is_none(), "{closed:#}");
     assert_eq!(read(2)["status"], "running", "a live owner's invocation is left");
     assert_eq!(read(3)["status"], "running", "another host's invocation is left");
     let after = status(&store);

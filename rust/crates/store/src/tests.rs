@@ -28,7 +28,7 @@ pub(crate) struct SimId {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub(crate) struct SimLabels {
+pub(crate) struct SimAttributes {
     pub model: String,
     pub seed: u64,
 }
@@ -38,10 +38,10 @@ impl Artifact for Sim {
     const KIND: &'static str = "sim";
     const WRITE: WriteMode = WriteMode::Atomic;
     type Identity = SimId;
-    type Labels = SimLabels;
+    type Attributes = SimAttributes;
 }
 impl Primary for Sim {
-    fn layout(id: &SimId, labels: &SimLabels) -> Placed {
+    fn layout(id: &SimId, labels: &SimAttributes) -> Placed {
         Layout::in_kind().group(&labels.model, &id.model).result(&format!("seed_{}", labels.seed))
     }
 }
@@ -58,7 +58,7 @@ impl Artifact for Obs {
     const KIND: &'static str = "obs";
     const WRITE: WriteMode = WriteMode::Atomic;
     type Identity = ObsId;
-    type Labels = ();
+    type Attributes = ();
 }
 impl ByProduct for Obs {
     type Of = Sim;
@@ -82,7 +82,7 @@ impl Artifact for Fit {
     const KIND: &'static str = "fit";
     const WRITE: WriteMode = WriteMode::InPlace;
     type Identity = FitId;
-    type Labels = ();
+    type Attributes = ();
 }
 impl Primary for Fit {
     fn layout(id: &FitId, _: &()) -> Placed {
@@ -101,7 +101,7 @@ impl Artifact for Trace {
     const KIND: &'static str = "trace";
     const WRITE: WriteMode = WriteMode::Atomic;
     type Identity = TraceId;
-    type Labels = ();
+    type Attributes = ();
 }
 impl ByProduct for Trace {
     type Of = Fit;
@@ -125,7 +125,7 @@ impl Artifact for Pred {
     const KIND: &'static str = "prediction";
     const WRITE: WriteMode = WriteMode::Atomic;
     type Identity = PredId;
-    type Labels = ();
+    type Attributes = ();
 }
 impl Primary for Pred {
     fn layout(id: &PredId, _: &()) -> Placed {
@@ -145,7 +145,7 @@ impl Content for ModelText {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ModelLabels {
+pub(crate) struct ModelAttributes {
     pub name: String,
 }
 
@@ -154,10 +154,10 @@ impl Artifact for Model {
     const KIND: &'static str = "compiled_model";
     const WRITE: WriteMode = WriteMode::Atomic;
     type Identity = Hashed<ModelText>;
-    type Labels = ModelLabels;
+    type Attributes = ModelAttributes;
 }
 impl Primary for Model {
-    fn layout(_: &Hashed<ModelText>, labels: &ModelLabels) -> Placed {
+    fn layout(_: &Hashed<ModelText>, labels: &ModelAttributes) -> Placed {
         Layout::in_kind().result(&labels.name)
     }
 }
@@ -180,10 +180,10 @@ impl Artifact for Presentation {
     const KIND: &'static str = "presentation";
     const WRITE: WriteMode = WriteMode::Atomic;
     type Identity = PresentationId;
-    type Labels = ModelLabels;
+    type Attributes = ModelAttributes;
 }
 impl Primary for Presentation {
-    fn layout(_: &PresentationId, labels: &ModelLabels) -> Placed {
+    fn layout(_: &PresentationId, labels: &ModelAttributes) -> Placed {
         Layout::in_kind().result(&labels.name)
     }
 }
@@ -241,8 +241,8 @@ pub(crate) fn labelled(label: &str) -> RunInfo {
     RunInfo::new(&Given::default(), &(), &StoreRequest::new(Some(label), false, None).unwrap()).unwrap()
 }
 
-pub(crate) fn sim(seed: u64) -> (SimId, SimLabels) {
-    (SimId { model: "sir".into(), dt: Finite::new(0.5).unwrap(), seed }, SimLabels { model: "sir".into(), seed })
+pub(crate) fn sim(seed: u64) -> (SimId, SimAttributes) {
+    (SimId { model: "sir".into(), dt: Finite::new(0.5).unwrap(), seed }, SimAttributes { model: "sir".into(), seed })
 }
 
 /// A file set of the result files `names` and no provenance file.

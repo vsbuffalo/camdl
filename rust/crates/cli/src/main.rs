@@ -590,6 +590,9 @@ fn main() {
     // What the engine meets mid-run and records once (`sim::run_notes`) is
     // said as it is first recorded, as a warning.
     sim::run_notes::set_reporter(util::report_run_note);
+    // An invocation record the run store does not read is said once, as a
+    // warning.
+    store::report_unread_records_to(camdl_store::report_unread_records);
     // `--no-licm` / `CAMDL_NO_LICM` and `--no-ir-cache` / `CAMDL_NO_IR_CACHE`:
     // the settings every compile of this invocation runs under, resolved once
     // and passed to each command that compiles (`util::CompileSettings`).

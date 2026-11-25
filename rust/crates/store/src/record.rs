@@ -13,9 +13,11 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 use crate::hash::Key;
 use crate::identity::DepInfo;
+use crate::label::Label;
 use crate::owner::{Owner, Timestamp};
 
-/// The format version of every record the store writes.
+/// The format version of every record the store writes except the
+/// invocation record ([`INVOCATION_FORMAT`]).
 pub const RECORD_FORMAT: u16 = 1;
 
 /// The format of a store root, the `format` in `store.json`.
@@ -160,26 +162,127 @@ pub(crate) struct RunFile {
     pub failure: Option<Failure>,
 }
 
-/// What became of one result an invocation asked for.
+/// The format of an invocation record, `.invocations/<seq>.json`. Every other
+/// record the store writes is [`RECORD_FORMAT`].
+pub const INVOCATION_FORMAT: u16 = 2;
+
+/// What became of one result an invocation asked for, once it ended.
+///
+/// Written as `"outcome": "computed" | "reused" | "busy" | "failed"`, with
+/// `"failure"` beside it for a failed result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(into = "OutcomeWire", try_from = "OutcomeWire")]
+pub enum Outcome {
+    Computed,
+    Reused,
+    /// Another owner held its claim, so this invocation neither computed nor
+    /// read it.
+    Busy,
+    Failed(Failure),
+}
+
+impl Outcome {
+    /// Whether the result is complete: computed or reused.
+    pub fn completed(&self) -> bool {
+        matches!(self, Outcome::Computed | Outcome::Reused)
+    }
+}
+
+/// A result of a running invocation: not yet ended, or ended. Written as an
+/// [`Outcome`] is, with `"outcome": "planned"` for one not yet ended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(into = "OutcomeWire", try_from = "OutcomeWire")]
+pub(crate) enum Pending {
+    Planned,
+    Done(Outcome),
+}
+
+impl Pending {
+    /// The outcome; `None` while planned.
+    pub fn done(&self) -> Option<&Outcome> {
+        match self {
+            Pending::Planned => None,
+            Pending::Done(o) => Some(o),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Outcome {
-    /// Asked for and not yet ended; written in an invocation's first version only.
+enum OutcomeTag {
     Planned,
     Computed,
     Reused,
-    Failed,
     Busy,
+    Failed,
 }
 
-/// One result an invocation asked for.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ResultEntry {
+/// The two fields an outcome is written as.
+#[derive(Clone, Serialize, Deserialize)]
+struct OutcomeWire {
+    outcome: OutcomeTag,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    failure: Option<Failure>,
+}
+
+impl From<Outcome> for OutcomeWire {
+    fn from(o: Outcome) -> Self {
+        let (outcome, failure) = match o {
+            Outcome::Computed => (OutcomeTag::Computed, None),
+            Outcome::Reused => (OutcomeTag::Reused, None),
+            Outcome::Busy => (OutcomeTag::Busy, None),
+            Outcome::Failed(f) => (OutcomeTag::Failed, Some(f)),
+        };
+        OutcomeWire { outcome, failure }
+    }
+}
+
+impl TryFrom<OutcomeWire> for Outcome {
+    type Error = String;
+    fn try_from(w: OutcomeWire) -> std::result::Result<Self, String> {
+        match (w.outcome, w.failure) {
+            (OutcomeTag::Failed, f) => Ok(Outcome::Failed(f.unwrap_or_default())),
+            (OutcomeTag::Planned, _) => Err("a closed invocation record lists a result as `planned`".into()),
+            (_, Some(_)) => Err("a `failure` is recorded beside an outcome that is not `failed`".into()),
+            (OutcomeTag::Computed, None) => Ok(Outcome::Computed),
+            (OutcomeTag::Reused, None) => Ok(Outcome::Reused),
+            (OutcomeTag::Busy, None) => Ok(Outcome::Busy),
+        }
+    }
+}
+
+impl From<Pending> for OutcomeWire {
+    fn from(p: Pending) -> Self {
+        match p {
+            Pending::Planned => OutcomeWire { outcome: OutcomeTag::Planned, failure: None },
+            Pending::Done(o) => o.into(),
+        }
+    }
+}
+
+impl TryFrom<OutcomeWire> for Pending {
+    type Error = String;
+    fn try_from(w: OutcomeWire) -> std::result::Result<Self, String> {
+        match w.outcome {
+            OutcomeTag::Planned if w.failure.is_none() => Ok(Pending::Planned),
+            OutcomeTag::Planned => Err("a `failure` is recorded beside a `planned` result".into()),
+            _ => Outcome::try_from(w).map(Pending::Done),
+        }
+    }
+}
+
+/// One result an invocation asked for: its kind and run id, the attributes
+/// the project gave it, and what became of it (`O`: a [`Pending`] in a
+/// running record, an [`Outcome`] in a closed one).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct Listing<O> {
     pub kind: String,
     pub run_id: Key,
-    pub labels: serde_json::Value,
-    pub outcome: Outcome,
-    pub failure: Option<Failure>,
+    /// The project's names and values for the result, such as a scenario's
+    /// name or the seed typed; the store never reads them.
+    pub attributes: serde_json::Value,
+    #[serde(flatten)]
+    pub outcome: O,
 }
 
 /// A configuration file an invocation read, by the field that named it.
@@ -190,39 +293,119 @@ pub(crate) struct ConfigFile {
     pub sha256: Key,
 }
 
+/// The one value of a record's `record` field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum InvocationStatus {
-    Running,
-    Ended,
-    /// Its owner stopped while it was running, and `clean` closed its record:
-    /// a result it had not finished is recorded as failed.
-    Interrupted,
+pub(crate) enum RecordKind {
+    Invocation,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Counts {
-    pub completed: u64,
-    pub failed: u64,
-}
-
-/// `.invocations/<seq>.json`: one command run.
+/// What an invocation record fixes when the command starts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct InvocationFile {
+pub(crate) struct Head {
+    /// [`INVOCATION_FORMAT`].
     pub format: u16,
+    pub record: RecordKind,
     pub seq: u64,
-    pub record: String,
-    pub status: InvocationStatus,
     pub owner: Owner,
     pub started: Timestamp,
-    pub ended: Option<Timestamp>,
-    pub label: Option<String>,
+    pub label: Option<Label>,
     pub argv: Vec<String>,
     pub given: serde_json::Value,
     pub config_files: Vec<ConfigFile>,
-    pub results: Vec<ResultEntry>,
-    pub counts: Counts,
-    pub progress: Option<serde_json::Value>,
+}
+
+/// A running invocation's record: the results asked for so far.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct Running {
+    #[serde(flatten)]
+    pub head: Head,
+    pub results: Vec<Listing<Pending>>,
+}
+
+/// A closed invocation's record: when it ended, and what became of each
+/// result. No result of it is planned.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct Closed {
+    #[serde(flatten)]
+    pub head: Head,
+    pub ended: Timestamp,
+    pub results: Vec<Listing<Outcome>>,
+}
+
+/// `.invocations/<seq>.json`: one command run, in its state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub(crate) enum Record {
+    Running(Running),
+    /// The command ended and wrote its last version.
+    Ended(Closed),
+    /// Its owner stopped while it was running, and `clean` closed its record:
+    /// a result it had not finished is recorded as failed.
+    Interrupted(Closed),
+}
+
+/// One listing of a record, in either state: `outcome` is `None` for a
+/// result still planned.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ListingRef<'a> {
+    pub kind: &'a str,
+    pub run_id: Key,
+    pub attributes: &'a serde_json::Value,
+    pub outcome: Option<&'a Outcome>,
+}
+
+impl ListingRef<'_> {
+    /// Whether the result ended computed or reused.
+    pub fn completed(&self) -> bool {
+        self.outcome.is_some_and(Outcome::completed)
+    }
+}
+
+impl Record {
+    pub fn head(&self) -> &Head {
+        match self {
+            Record::Running(r) => &r.head,
+            Record::Ended(c) | Record::Interrupted(c) => &c.head,
+        }
+    }
+
+    pub fn seq(&self) -> u64 {
+        self.head().seq
+    }
+
+    pub fn label(&self) -> Option<&str> {
+        self.head().label.as_ref().map(Label::as_str)
+    }
+
+    pub fn is_running(&self) -> bool {
+        matches!(self, Record::Running(_))
+    }
+
+    /// Every listing, in listed order.
+    pub fn listings(&self) -> Vec<ListingRef<'_>> {
+        match self {
+            Record::Running(r) => r
+                .results
+                .iter()
+                .map(|l| ListingRef { kind: &l.kind, run_id: l.run_id, attributes: &l.attributes, outcome: l.outcome.done() })
+                .collect(),
+            Record::Ended(c) | Record::Interrupted(c) => c
+                .results
+                .iter()
+                .map(|l| ListingRef { kind: &l.kind, run_id: l.run_id, attributes: &l.attributes, outcome: Some(&l.outcome) })
+                .collect(),
+        }
+    }
+
+    /// Whether the invocation ended with every result complete, so it may
+    /// hold its label.
+    pub fn all_completed(&self) -> bool {
+        match self {
+            Record::Ended(c) => c.results.iter().all(|l| l.outcome.completed()),
+            Record::Running(_) | Record::Interrupted(_) => false,
+        }
+    }
 }
 
 /// One line of an owner's index log.
@@ -253,6 +436,12 @@ pub(crate) enum Read<T> {
 
 /// Reads a record that carries `format`, refusing another version by name.
 pub(crate) fn read_record<T: DeserializeOwned>(path: &Path) -> Read<T> {
+    read_versioned(path, RECORD_FORMAT)
+}
+
+/// Reads a record whose `format` must be `expected`, refusing another
+/// version by name.
+pub(crate) fn read_versioned<T: DeserializeOwned>(path: &Path, expected: u16) -> Read<T> {
     let bytes = match std::fs::read(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Read::Absent,
         Err(e) => return Read::Bad(Error::Io { op: "read", path: path.to_path_buf(), source: e }),
@@ -263,11 +452,11 @@ pub(crate) fn read_record<T: DeserializeOwned>(path: &Path) -> Read<T> {
         Err(e) => return Read::Bad(Error::Parse { what: path.display().to_string(), why: e.to_string() }),
     };
     let found = value.get("format").and_then(|f| f.as_u64());
-    if found != Some(RECORD_FORMAT as u64) {
+    if found != Some(expected as u64) {
         return Read::Bad(Error::OldRecord {
             path: path.to_path_buf(),
             found: found.map(|f| f as u16).unwrap_or(0),
-            reads: RECORD_FORMAT,
+            reads: expected,
         });
     }
     match serde_json::from_value(value) {

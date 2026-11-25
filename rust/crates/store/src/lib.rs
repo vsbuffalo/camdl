@@ -50,15 +50,15 @@ pub use inputs::{
     release, Class, EnvInputs, EnvParts, FieldInfo, FileInputs, Given, InputFile, Inputs, Parsed, SourceBytes, Split, Vary,
 };
 pub use invocation::{
-    ByProductRendering, ExportFiles, ExportPath, ExportSink, Invocation, Member, MemberWith, Output, OutputFile, Rendering, RunInfo,
-    StoreRequest,
+    report_unread_records_to, ByProductRendering, ExportFiles, ExportPath, ExportSink, Invocation, Member, MemberWith, Output,
+    OutputFile, Rendering, RunInfo, StoreRequest, Unread, UnreadRecord, UnreadReporter,
 };
 pub use label::Label;
 pub use layout::{path_label, Layout, Placed, LABEL_CAP};
 pub use maintenance::{Cleaned, VerifyFailure};
 pub use owner::{pid_exists, this_host, Liveness, Owner, Timestamp, BEAT_INTERVAL, STALE_AFTER};
 pub use import::Imported;
-pub use record::{Lineage, Status, MAX_PRESERVED_ATTEMPTS, RECORD_FORMAT, STORE_FORMAT};
+pub use record::{Lineage, Status, INVOCATION_FORMAT, MAX_PRESERVED_ATTEMPTS, RECORD_FORMAT, STORE_FORMAT};
 pub use run::{ByProductRun, ExpectedFiles, FileHandle, Run};
 pub use fsutil::write_file_atomic;
 pub use storage::{Begin, Declared, PlanState, Planned, Reuse, Store, Wanted};

@@ -16,7 +16,7 @@ use crate::util::fmt_relative_time;
 /// A filter run on the run store, prepared for `list` and `show`.
 struct PfilterRow {
     stored: store::Stored<crate::pfilter_store::Pfilter>,
-    labels: crate::pfilter_store::PfilterLabels,
+    labels: crate::pfilter_store::PfilterAttributes,
     /// The label of the latest invocation that asked for it, if it had one.
     label: Option<String>,
     rel_path: String,
@@ -145,7 +145,7 @@ fn show_stored_pfilter(out: &crate::out::Out, row: &PfilterRow) {
 /// A fit run on the run store, prepared for `list`.
 struct StoredFitRow {
     stored: store::Stored<crate::fit_store::FitRun>,
-    labels: crate::fit_store::RunLabels,
+    labels: crate::fit_store::RunAttributes,
     /// The model the problem was posed on, by name.
     model: String,
     /// The label of the latest invocation that asked for it, if it had one.
@@ -447,7 +447,7 @@ impl StoredFitResult {
 /// A simulation cell on the run store, prepared for `list` and `show`.
 struct StoredSimRow {
     stored: store::Stored<crate::sim_store::Sim>,
-    labels: crate::sim_store::CellLabels,
+    labels: crate::sim_store::CellAttributes,
     /// The label of the latest invocation that asked for it, if it had one.
     label: Option<String>,
     rel_path: String,

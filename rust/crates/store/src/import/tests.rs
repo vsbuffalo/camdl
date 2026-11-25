@@ -59,7 +59,7 @@ fn fill(store: &Store) -> Remote {
     let s = run.finish().unwrap();
     let fit = fit_in(store, &i, b"d");
     let inv = i.finish(store).unwrap();
-    let obs = inv.file.results.iter().find(|r| r.kind == "obs").unwrap().run_id;
+    let obs = inv.record.listings().iter().find(|r| r.kind == "obs").unwrap().run_id;
     let p = labelled("forecast");
     let pred = pred_in(store, &p, &fit);
     p.finish(store).unwrap();
@@ -209,11 +209,11 @@ fn import_places_and_records_a_pulled_store_with_its_nested_results() {
     // One invocation lists them, parents first, reused, with the labels the
     // other store's records gave them.
     assert_eq!(inv.label(), Some("pulled"));
-    let kinds: Vec<&str> = inv.file.results.iter().map(|e| e.kind.as_str()).collect();
+    let kinds: Vec<&str> = inv.record.listings().iter().map(|e| e.kind).collect();
     let pos = |k: &str| kinds.iter().position(|x| *x == k).unwrap();
     assert!(pos("fit") < pos("prediction") && pos("sim") < pos("obs"));
-    assert!(inv.file.results.iter().all(|e| e.outcome == crate::record::Outcome::Reused));
-    assert_eq!(inv.members::<Sim>().unwrap()[0].1, SimLabels { model: "sir".into(), seed: 1 });
+    assert!(inv.record.listings().iter().all(|e| e.outcome == Some(&crate::record::Outcome::Reused)));
+    assert_eq!(inv.members::<Sim>().unwrap()[0].1, SimAttributes { model: "sir".into(), seed: 1 });
     // `@pulled` names them.
     let pred: RunRef<Pred> = "@pulled".parse().unwrap();
     assert_eq!(local.resolve(&pred).unwrap().id().key(), r.pred);
@@ -347,7 +347,7 @@ fn import_of_a_result_already_here_with_equal_bytes_leaves_it_in_place() {
     assert!(local.locate(s.remote.obs).unwrap().folder().starts_with(here.folder()));
     assert_eq!(ino(&here.folder().join("traj.tsv")), before, "the stored folder is left in place");
     assert_eq!(std::fs::read(here.folder().join("execution.json")).unwrap(), b"{\"host\":\"here\"}");
-    assert!(inv.file.results.iter().any(|e| e.run_id == s.remote.sim && e.outcome == crate::record::Outcome::Reused));
+    assert!(inv.record.listings().iter().any(|e| e.run_id == s.remote.sim && e.outcome == Some(&crate::record::Outcome::Reused)));
     assert!(local.verify(None).unwrap().is_empty());
 }
 
@@ -638,7 +638,7 @@ impl Artifact for Score {
     const KIND: &'static str = "score";
     const WRITE: WriteMode = WriteMode::Atomic;
     type Identity = ScoreId;
-    type Labels = ();
+    type Attributes = ();
 }
 impl Primary for Score {
     fn layout(id: &ScoreId, _: &()) -> Placed {
@@ -654,7 +654,7 @@ fn open_scoring(root: &Path, build: &str) -> Store {
 /// Stores the model in `store` under `info`.
 fn put_model(store: &Store, info: &RunInfo) -> crate::Stored<Model> {
     let content = Hashed::new(ModelText("S -> I".into()));
-    store.put::<Model>(content, &ModelLabels { name: "sir".into() }, &crate::Provenance::none(), info).unwrap()
+    store.put::<Model>(content, &ModelAttributes { name: "sir".into() }, &crate::Provenance::none(), info).unwrap()
 }
 
 #[test]

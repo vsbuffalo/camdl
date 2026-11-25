@@ -221,7 +221,7 @@ impl Store {
         let key = match handle {
             crate::Handle::Label { .. } => {
                 let inv = self.invocation(handle)?;
-                let mut keys: Vec<Key> = inv.file.results.iter().map(|r| r.run_id).collect();
+                let mut keys: Vec<Key> = inv.record.listings().iter().map(|r| r.run_id).collect();
                 keys.sort();
                 keys.dedup();
                 match keys.len() {

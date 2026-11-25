@@ -606,7 +606,7 @@ fn run_pfilter(
             .unwrap_or_else(|e| out.fail(format!("error: storing the compiled model: {e}")));
         let mut data = std::collections::BTreeMap::new();
         for (name, path, table) in tables {
-            let labels = crate::camdl_store::TableLabels { stream: name.clone(), path: path.display().to_string() };
+            let labels = crate::camdl_store::TableAttributes { stream: name.clone(), path: path.display().to_string() };
             let dep = store
                 .put::<crate::camdl_store::DataTable>(table, &labels, &store::Provenance::none(), &info)
                 .unwrap_or_else(|e| out.fail(format!("error: storing the data table of `{name}`: {e}")))
@@ -1242,7 +1242,7 @@ fn run_pfilter(
             PointRole::Single => None,
             PointRole::Design { row, point_id, .. } => Some(DesignPointLabel { row, point_id, values: overrides.to_vec() }),
         };
-        let labels = PfilterLabels { model: stem.clone(), seed, point };
+        let labels = PfilterAttributes { model: stem.clone(), seed, point };
         let filter = store::Identity::record(&identity);
         let asked_by_products = trace_path.is_some() || pf_health.is_some() || save_final_state_path.is_some()
             || save_paths.is_some() || save_prequential.is_some() || save_filtering.is_some()
@@ -1429,7 +1429,7 @@ struct Prepared {
 /// identity and labels and the by-products wanted of it.
 struct PosedPoint {
     identity: crate::pfilter_store::PfilterIdentity,
-    labels: crate::pfilter_store::PfilterLabels,
+    labels: crate::pfilter_store::PfilterAttributes,
     wanted: store::Wanted<crate::pfilter_store::Pfilter>,
 }
 
@@ -4135,7 +4135,7 @@ mod tests {
             filtering: None,
             filtered_streams: None,
         };
-        let labels = PfilterLabels { model: "m".into(), seed: 1, point: None };
+        let labels = PfilterAttributes { model: "m".into(), seed: 1, point: None };
         let claim = |seed: u64, with_trace: bool, info: &RunInfo| {
             let identity = PfilterIdentity { seed: crate::camdl_store::ProcessSeed { seed }, ..identity.clone() };
             let filter = store::Identity::record(&identity);

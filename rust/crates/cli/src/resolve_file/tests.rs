@@ -1,8 +1,8 @@
 use super::*;
-use crate::sim_store::{CellLabels, PointLabel};
+use crate::sim_store::{CellAttributes, PointLabel};
 
-fn cell(point: PointLabel) -> CellLabels {
-    CellLabels {
+fn cell(point: PointLabel) -> CellAttributes {
+    CellAttributes {
         model: "sir".into(),
         params: "beta=0.2".into(),
         scenario: "(none)".into(),
