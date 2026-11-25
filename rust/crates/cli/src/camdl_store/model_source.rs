@@ -536,6 +536,10 @@ pub(crate) struct StoredModel {
     /// a reader of the model goes on and says so once ([`Self::notices`]),
     /// and only a use of them is refused ([`Self::quantities`]).
     unreadable_quantities: Option<String>,
+    /// True when a command put [`Self::evaluated`] in place of the recorded
+    /// quantities ([`Self::evaluate`]); false while they are the recorded
+    /// source's, to which [`Self::quantities`]' rule applies.
+    put: bool,
 }
 
 impl StoredModel {
@@ -552,11 +556,12 @@ impl StoredModel {
             views: None,
             evaluated: None,
             unreadable_quantities: None,
+            put: false,
         };
         stored.with_source(handle, shown_for(store, handle, dep.id().key())?);
         if let Shown::Recorded { source, .. } = &stored.source {
             let q = source.identity().quantities.clone();
-            match crate::fit_store::read_quantities(store, &q).and_then(|content| stored.evaluate(q, &content)) {
+            match crate::fit_store::read_quantities(store, &q).and_then(|content| stored.restore(q, &content)) {
                 Ok(()) => {}
                 Err(e) => stored.unreadable_quantities = Some(e),
             }
@@ -567,11 +572,37 @@ impl StoredModel {
     /// Puts the quantities `dep`, whose content is `content`, in the model in
     /// place of the recorded ones.
     pub fn evaluate(&mut self, dep: Dep<Quantities>, content: &QuantitiesContent) -> Result<(), String> {
+        self.restore(dep, content)?;
+        self.put = true;
+        Ok(())
+    }
+
+    /// Says that the model evaluates no quantities a command put in place of
+    /// the recorded ones, as a stored prediction made without any did.
+    pub fn evaluate_none(&mut self) {
+        self.evaluated = None;
+        self.unreadable_quantities = None;
+        self.put = true;
+    }
+
+    fn restore(&mut self, dep: Dep<Quantities>, content: &QuantitiesContent) -> Result<(), String> {
         self.model.quantities = content.quantities()?;
         self.model.contrasts = content.contrasts()?;
         self.evaluated = Some(dep);
         self.unreadable_quantities = None;
         Ok(())
+    }
+
+    /// The quantities a prediction made through this model evaluates, for
+    /// the result `text` names: those a command put in place of the recorded
+    /// ones, else the recorded source's by [`Self::quantities`]' rule,
+    /// refusal included. Every path that makes a prediction of a fit run
+    /// takes them here.
+    pub fn prediction_quantities(&self, store: &Store, text: &str) -> Result<Option<Dep<Quantities>>, String> {
+        if self.put {
+            return Ok(self.evaluated.clone());
+        }
+        self.quantities(store, text).map(Some)
     }
 
     /// Reads the model's documentation from `source` in place of the

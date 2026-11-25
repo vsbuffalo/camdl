@@ -1535,10 +1535,11 @@ impl OpenedFit {
         self.labels.as_ref().map(|l| l.model.clone()).unwrap_or_else(|| "model".to_string())
     }
 
-    /// The quantities a prediction from this fit evaluates, named by `text`
-    /// ([`crate::camdl_store::StoredModel::quantities`]).
-    pub fn prediction_quantities(&self, text: &str) -> Result<Dep<crate::camdl_store::Quantities>, String> {
-        self.model.quantities(&self.store, text)
+    /// The quantities a prediction from this fit evaluates
+    /// ([`crate::camdl_store::StoredModel::prediction_quantities`]), the
+    /// fit named by its handle.
+    pub fn prediction_quantities(&self) -> Result<Option<Dep<crate::camdl_store::Quantities>>, String> {
+        self.model.prediction_quantities(&self.store, &self.handle.to_string())
     }
 
     /// Records in the invocation `info` that this fit's compiled model was
@@ -1579,7 +1580,7 @@ impl OpenedFit {
         self.model.with_source(&self.handle, shown);
         match quantities {
             Some((dep, content)) => self.model.evaluate(dep, &content)?,
-            None => self.model.evaluated = None,
+            None => self.model.evaluate_none(),
         }
         self.write_model()?;
         Ok(self)

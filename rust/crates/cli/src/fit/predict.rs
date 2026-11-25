@@ -2000,7 +2000,7 @@ fn resolve_source(
     match &args.posterior.model {
         None => {
             let fit = crate::fit_store::opened_run(text)?;
-            fit.prediction_quantities(text)?;
+            fit.prediction_quantities()?;
             Ok(PredictSource::Posterior(fit))
         }
         Some(model) => reported_through(out, text, model, compile, info).map(|fit| PredictSource::Posterior(std::sync::Arc::new(fit))),
@@ -2489,7 +2489,7 @@ pub(crate) fn prediction_identity(
     identity_from(
         crate::fit_store::ParameterSource::Posterior { draws: run.dep_all(), problem: fit.fit.problem.dep_all() },
         std::collections::BTreeMap::new(),
-        fit.model.evaluated.clone(),
+        fit.prediction_quantities()?,
         options,
         design,
         fit.model_name(),

@@ -187,6 +187,32 @@ fn a_run_id_whose_sources_differ_in_quantities_is_refused() {
     }
 }
 
+/// Removes the `source` of every listing in invocation `seq`'s record.
+fn strip_sources(dir: &Path, seq: u64) {
+    let record = dir.join(format!("st/.invocations/{seq}.json"));
+    let mut inv: serde_json::Value = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+    for r in inv["results"].as_array_mut().unwrap() {
+        r.as_object_mut().unwrap().remove("source");
+    }
+    std::fs::write(&record, serde_json::to_vec_pretty(&inv).unwrap()).unwrap();
+}
+
+/// `compare` of a fit run makes its predictions by the rule `predict` uses:
+/// a run whose answering invocation recorded no model source has no known
+/// quantities, and the comparison is refused before anything is stored.
+#[test]
+fn compare_of_a_run_with_no_recorded_source_is_refused() {
+    let tmp = inputs(&[("a", "peak_I = max(I)")]);
+    let dir = tmp.path();
+    fit(dir, "a", "a");
+    succeeds(camdl_in(dir, &["fit", "run", "a.toml", "--seed", "2", "--label", "a2", "--progress", "none"]), "fit run");
+    strip_sources(dir, 1);
+    let out = camdl_in(dir, &["compare", "@a", "@a2", "--progress", "none"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "compare predicted @a with no known quantities: {stderr}");
+    assert!(stderr.contains("no invocation recorded the model file"), "{stderr}");
+}
+
 /// The folder of the quantities the model source invocation `seq` recorded
 /// for its compiled model depends on.
 fn recorded_quantities_folder(dir: &Path, seq: u64) -> PathBuf {
