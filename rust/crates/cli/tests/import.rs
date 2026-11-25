@@ -30,7 +30,7 @@ fn golden_ir() -> PathBuf {
 /// The environment variable that puts the other store's results under
 /// another build: every set `CAMDL_EXPERIMENTAL_*` is part of the ambient
 /// identity.
-const OTHER_BUILD: (&str, &str) = ("CAMDL_EXPERIMENTAL_RECEIVE_TEST", "remote");
+const OTHER_BUILD: (&str, &str) = ("CAMDL_EXPERIMENTAL_IMPORT_TEST", "remote");
 
 /// A scratch directory holding the data, a fit config and two stores:
 /// `remote/`, where the results are made, and `local/`, which imports them.
@@ -324,7 +324,7 @@ fn import_of_results_already_here_leaves_them_in_place() {
 /// prediction inside it under `predictions/`, each link resolving to the
 /// file `camdl path` names through the import's manifest.
 #[test]
-fn import_links_what_it_received() {
+fn import_links_what_it_placed() {
     let p = Project::new();
     p.make_remote(&[OTHER_BUILD]);
     p.pull();

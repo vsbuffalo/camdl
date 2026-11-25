@@ -150,7 +150,7 @@ impl Scene {
 
 #[test]
 fn import_places_and_records_a_pulled_store_with_its_nested_results() {
-    let s = Scene::new("recv");
+    let s = Scene::new("import");
     // The other store's process state in the fit's folder: a lock and a
     // by-product claim, each naming an owner on another host.
     let fit_copy = s.copied(s.remote.fit);
@@ -236,7 +236,7 @@ fn local_build_suffix() -> String {
 
 #[test]
 fn import_writes_nothing_outside_staging_the_placed_folders_and_the_records() {
-    let s = Scene::new("recv-writes");
+    let s = Scene::new("import-writes");
     let local = open(s.local_root.path());
     let i = labelled("pulled");
     local.import(&s.copy(), &i).unwrap();
@@ -252,7 +252,7 @@ fn import_writes_nothing_outside_staging_the_placed_folders_and_the_records() {
 
 #[test]
 fn import_refuses_a_damaged_copy_and_places_nothing() {
-    let s = Scene::new("recv-damaged");
+    let s = Scene::new("import-damaged");
     let local = open(s.local_root.path());
     // One byte of one file changed, its size and modification time kept, so
     // only its digest tells.
@@ -279,7 +279,7 @@ fn import_refuses_a_damaged_copy_and_places_nothing() {
 
 #[test]
 fn import_refuses_a_result_whose_identity_computes_to_another_run_id() {
-    let s = Scene::new("recv-identity");
+    let s = Scene::new("import-identity");
     let local = open(s.local_root.path());
     let p = s.copied(s.remote.sim).join("identity.json");
     let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
@@ -292,7 +292,7 @@ fn import_refuses_a_result_whose_identity_computes_to_another_run_id() {
 
 #[test]
 fn import_refuses_a_result_that_did_not_complete() {
-    let s = Scene::new("recv-running");
+    let s = Scene::new("import-running");
     let local = open(s.local_root.path());
     let p = s.copied(s.remote.fit).join("run.json");
     let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
@@ -305,7 +305,7 @@ fn import_refuses_a_result_that_did_not_complete() {
 
 #[test]
 fn import_refuses_a_result_no_invocation_record_in_the_copy_lists() {
-    let s = Scene::new("recv-unlisted");
+    let s = Scene::new("import-unlisted");
     let local = open(s.local_root.path());
     // The record of the invocation that made the prediction.
     let invs = s.copy().join(".invocations");
@@ -322,7 +322,7 @@ fn import_refuses_a_result_no_invocation_record_in_the_copy_lists() {
 
 #[test]
 fn import_of_a_result_already_here_with_equal_bytes_leaves_it_in_place() {
-    let s = Scene::new("recv-present");
+    let s = Scene::new("import-present");
     // The same build as the copy's, and the same simulation computed here:
     // its provenance file differs, its result files do not.
     let local = open_build(s.local_root.path(), "remote");
@@ -353,7 +353,7 @@ fn import_of_a_result_already_here_with_equal_bytes_leaves_it_in_place() {
 
 #[test]
 fn import_of_a_result_here_with_other_bytes_is_refused_naming_both() {
-    let s = Scene::new("recv-differs");
+    let s = Scene::new("import-differs");
     let local = open_build(s.local_root.path(), "remote");
     let here = fit_in(&local, &info(), b"other draws");
     assert_eq!(here.id().key(), s.remote.fit, "premise: one run id");
@@ -374,12 +374,12 @@ fn import_of_a_result_here_with_other_bytes_is_refused_naming_both() {
 
 #[test]
 fn a_folder_path_held_by_another_result_is_refused() {
-    let s = Scene::new("recv-path");
+    let s = Scene::new("import-path");
     let local = open(s.local_root.path());
     let rel = s.copied(s.remote.sim).strip_prefix(s.copy()).unwrap().to_path_buf();
     let taken = s.local_root.path().join(&rel);
     // Another result's records in the folder at the sim's path.
-    let other_root = TempRoot::new("recv-path-other");
+    let other_root = TempRoot::new("import-path-other");
     let other = run_sim(&open(other_root.path()), &info(), 7);
     std::fs::create_dir_all(taken.parent().unwrap()).unwrap();
     crate::fsutil::copy_tree(other.folder(), &taken).unwrap();
@@ -399,7 +399,7 @@ fn a_folder_path_held_by_another_result_is_refused() {
 /// another kind's directory, or renamed without its run id.
 #[test]
 fn a_result_away_from_its_layout_path_is_refused() {
-    let s = Scene::new("recv-misplaced");
+    let s = Scene::new("import-misplaced");
     let local = open(s.local_root.path());
     let sim = s.copied(s.remote.sim);
     let kind_dir = sim.parent().unwrap().parent().unwrap().to_path_buf();
@@ -428,7 +428,7 @@ fn copy_without_the_fit(s: &Scene) {
 
 #[test]
 fn a_nested_result_whose_parent_is_here_is_placed_inside_it() {
-    let s = Scene::new("recv-parent-here");
+    let s = Scene::new("import-parent-here");
     copy_without_the_fit(&s);
     let local = open_build(s.local_root.path(), "remote");
     let here = fit_in(&local, &info(), b"d");
@@ -442,7 +442,7 @@ fn a_nested_result_whose_parent_is_here_is_placed_inside_it() {
 
 #[test]
 fn a_nested_result_whose_parent_is_nowhere_is_refused() {
-    let s = Scene::new("recv-parent-missing");
+    let s = Scene::new("import-parent-missing");
     copy_without_the_fit(&s);
     let local = open(s.local_root.path());
     let e = local.import(&s.copy(), &info()).unwrap_err();
@@ -458,8 +458,8 @@ fn a_nested_result_whose_parent_is_nowhere_is_refused() {
 
 #[test]
 fn a_copy_of_another_layout_is_refused() {
-    let s = Scene::new("recv-layout");
-    let root = TempRoot::new("recv-bykind");
+    let s = Scene::new("import-layout");
+    let root = TempRoot::new("import-bykind");
     let local = Store::open(root.path(), Build::Known(Engine { build: "b1".into() }), TopLevel::ByKind, kinds()).unwrap();
     let e = local.import(&s.copy(), &info()).unwrap_err();
     assert!(matches!(&e, Error::ImportRefused { reason, .. } if reason.contains("lays results out")), "{e}");
@@ -470,8 +470,8 @@ fn a_copy_of_another_layout_is_refused() {
 /// every folder outside `.staging/` is a whole result, the one placed is
 /// found, and `clean` removes what is left once its owner has stopped.
 #[test]
-fn a_receive_stopped_midway_leaves_the_store_valid() {
-    let s = Scene::new("recv-crash");
+fn an_import_stopped_midway_leaves_the_store_valid() {
+    let s = Scene::new("import-crash");
     let local = open(s.local_root.path());
     let staging = s.local_root.path().join(".staging");
     std::fs::create_dir_all(&staging).unwrap();
@@ -501,7 +501,7 @@ fn a_receive_stopped_midway_leaves_the_store_valid() {
 /// result, and the by-product inside it, as present.
 #[test]
 fn a_destination_filled_meanwhile_with_the_same_result_is_present() {
-    let s = Scene::new("recv-race");
+    let s = Scene::new("import-race");
     let local = open(s.local_root.path());
     let rel = s.copied(s.remote.sim).strip_prefix(s.copy()).unwrap().to_path_buf();
     let theirs = s.remote_root.path().join(&rel);
@@ -528,7 +528,7 @@ fn a_destination_filled_meanwhile_with_the_same_result_is_present() {
 /// not replaced: the result is refused naming it.
 #[test]
 fn a_destination_created_meanwhile_is_not_replaced() {
-    let s = Scene::new("recv-race-empty");
+    let s = Scene::new("import-race-empty");
     let local = open(s.local_root.path());
     let rel = s.copied(s.remote.sim).strip_prefix(s.copy()).unwrap().to_path_buf();
     let dest = s.local_root.path().join(&rel);
@@ -560,7 +560,7 @@ fn a_destination_created_meanwhile_is_not_replaced() {
 #[test]
 fn a_placement_that_fails_midway_is_undone() {
     use std::os::unix::fs::PermissionsExt;
-    let s = Scene::new("recv-undo");
+    let s = Scene::new("import-undo");
     let local = open(s.local_root.path());
     // The sim's kind directory, read-only: the fit, which sorts first, is
     // placed, and the sim cannot be.
@@ -599,7 +599,7 @@ fn a_placement_that_fails_midway_is_undone() {
 /// wherever they are.
 #[test]
 fn a_symbolic_link_in_the_copy_is_refused() {
-    let s = Scene::new("recv-symlink");
+    let s = Scene::new("import-symlink");
     let local = open(s.local_root.path());
     let outside = s.pull_root.path().join("identity.json");
     let ident = s.copied(s.remote.fit).join("identity.json");
@@ -614,7 +614,7 @@ fn a_symbolic_link_in_the_copy_is_refused() {
 /// refused even when it looks like a nested result.
 #[test]
 fn a_dot_named_directory_inside_a_result_is_refused() {
-    let s = Scene::new("recv-sneak");
+    let s = Scene::new("import-sneak");
     let local = open(s.local_root.path());
     let pred = s.copied(s.remote.pred);
     let sneak = pred.parent().unwrap().join(".sneak");
@@ -659,7 +659,7 @@ fn put_model(store: &Store, info: &RunInfo) -> crate::Stored<Model> {
 
 #[test]
 fn a_result_whose_dependency_is_nowhere_is_refused() {
-    let remote = TempRoot::new("recv-dep-remote");
+    let remote = TempRoot::new("import-dep-remote");
     let (score, model) = {
         let store = open_scoring(remote.path(), "remote");
         let i = labelled("scored");
@@ -672,7 +672,7 @@ fn a_result_whose_dependency_is_nowhere_is_refused() {
         i.finish(&store).unwrap();
         (score.id().key(), model.id().key())
     };
-    let pulled = TempRoot::new("recv-dep-pull");
+    let pulled = TempRoot::new("import-dep-pull");
     let copy = pulled.path().join("copy");
     pull(remote.path(), &copy);
     let model_dir = result_folders(&copy)
@@ -682,7 +682,7 @@ fn a_result_whose_dependency_is_nowhere_is_refused() {
         .unwrap();
     crate::fsutil::remove_all(&model_dir).unwrap();
 
-    let local_root = TempRoot::new("recv-dep-local");
+    let local_root = TempRoot::new("import-dep-local");
     let local = open_scoring(local_root.path(), "remote");
     let e = local.import(&copy, &info()).unwrap_err();
     match &e {

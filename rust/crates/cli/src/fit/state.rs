@@ -8,7 +8,7 @@
 //! runner's read-back of the record it wrote. It refuses a file of any other
 //! schema. [`FitState::load_for_inspection`] reads it for display: the typed
 //! method results (`method_result.rs`: `If2Run`, `PmmhRun`, …) that
-//! `fit summary`, `fit table` and `fit predict` are built from, and the
+//! `fit summary`, `fit table` and `predict` are built from, and the
 //! method report. It reads a file of another schema with a notice.
 
 use serde::{Deserialize, Serialize};
@@ -366,7 +366,7 @@ impl FitState {
     }
 
     /// Reads `<dir>/fit_state.toml` for display: `fit summary`, `fit table`,
-    /// a method report, and `fit predict`'s check of how the chains started.
+    /// a method report, and `predict`'s check of how the chains started.
     ///
     /// A file [`load_input`](Self::load_input) refuses is read as far as its
     /// keys allow, with a notice naming the build that wrote it, its tag and

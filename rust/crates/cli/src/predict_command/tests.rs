@@ -1,7 +1,6 @@
 //! `camdl predict` on the run store, checked by running the release binary:
 //! every declared input against its class (`store::check_input_classes`),
-//! the bytes a prediction computes against those `fit predict` computed
-//! before it was replaced, and the refusals of the removed spellings.
+//! and the bytes each prediction computes against pins.
 //!
 //! The binary is `rust/target/release/camdl` and the compiler
 //! `ocaml/_build/default/bin/camdlc.exe`, both built by `make build` from the
@@ -1010,21 +1009,18 @@ fn an_optimizer_run_is_predicted_at_its_winner_with_verified_conditioning() {
     assert_eq!(manifest["conditioning"]["hold_out_tail"]["train_end"], serde_json::json!(24.0), "{manifest:#}");
 }
 
-/// The bytes each prediction computes, as `camdl fit predict` computed them
-/// for the same runs before `camdl predict` replaced it: the digest of each
+/// The bytes each prediction computes, pinned: the digest of each
 /// result file, with the fit run's id written `<run>`, and the lines that
 /// name the build dropped (`engine_version`, and `address_key`, which hashes
 /// it). The run id holds the build too, so it is checked to be the run's own
 /// rather than pinned.
 ///
 /// The pins are a regression pin per platform, keyed by `target_os` and
-/// `target_arch`, because the digests depend on the platform's libm. That
-/// `camdl predict` computes what `camdl fit predict` computed was checked on
-/// macOS arm64 against the binary of `78f32ece0`; linux arm64 computes the
-/// same table. On a platform with no pins the test fails and prints the
-/// table to add.
+/// `target_arch`, because the digests depend on the platform's libm; linux
+/// arm64 computes the macOS arm64 table. On a platform with no pins the test
+/// fails and prints the table to add.
 #[test]
-fn each_prediction_computes_what_fit_predict_computed() {
+fn each_prediction_computes_its_pinned_bytes() {
     use sha2::{Digest, Sha256};
     let digests = |dir: &Path, run_id: &str| -> BTreeMap<String, String> {
         let mut out = BTreeMap::new();
@@ -1083,7 +1079,7 @@ fn each_prediction_computes_what_fit_predict_computed() {
     crate::test_support::assert_pinned(PINS, &got, "the files a prediction computes moved");
 }
 
-/// The pins of [`each_prediction_computes_what_fit_predict_computed`], per
+/// The pins of [`each_prediction_computes_its_pinned_bytes`], per
 /// `(target_os, target_arch)`.
 /// Linux arm64 computes the macOS arm64 table, digest for digest, so the two
 /// share it. Linux x86-64 is not measured, and has no row.

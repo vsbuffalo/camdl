@@ -5037,7 +5037,6 @@ pub(crate) const DEFAULT_PREDICT_DRAWS: usize = 200;
 ///   `--scenario`, `--enable`, `--disable`, `--sweep`, `--by-chain`: fields.
 /// - `--exclude-chains` / `--chains`: `excluded_chains`, the chains dropped
 ///   from the fit's cloud, so the two spellings of one selection are one key.
-/// - `--quantities FILE`: `quantities`, the SHA-256 of the file's bytes.
 /// - `--allow-forcing-extrapolation`: `allow_forcing_extrapolation`, as given;
 ///   the fit's own `[config]` setting is part of the run.
 ///
