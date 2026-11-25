@@ -1028,7 +1028,17 @@ mod single_flight {
                     use std::io::Write;
                     let _ = write!(f, "{}", std::process::id());
                     let _ = f.sync_all();
-                    return Lease::Compile(LockGuard { lock_path });
+                    let guard = LockGuard { lock_path };
+                    // A leader can publish its entry and remove its lock
+                    // between the check at the top of this loop and the create
+                    // above, which then succeeds. Holding the lock, check
+                    // again: an entry present now came from that leader, and
+                    // compiling would repeat its work. Returning drops the
+                    // guard, which removes the lock.
+                    if is_cached() {
+                        return Lease::AlreadyCached;
+                    }
+                    return Lease::Compile(guard);
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                     // Someone else holds it. Decide: wait (live holder) or
@@ -1050,6 +1060,10 @@ mod single_flight {
                             // again and re-evaluate.
                             let _ = std::fs::remove_file(&lock_path);
                             // loop: attempt to become the leader.
+                        }
+                        HolderState::Released => {
+                            // loop: re-check the cache the holder has just
+                            // published, then the lock.
                         }
                         HolderState::Unknown => {
                             // Can't determine liveness (unreadable lock, or a
@@ -1076,6 +1090,9 @@ mod single_flight {
     enum HolderState {
         Alive,
         Dead,
+        /// The lock no longer exists: its holder finished and removed it
+        /// after our create found it present.
+        Released,
         Unknown,
     }
 
@@ -1083,10 +1100,10 @@ mod single_flight {
     /// checking liveness with `kill(pid, 0)`.
     #[expect(clippy::disallowed_methods, reason = "reads the process id in camdlc's compile lock, which holds no stored result")]
     fn holder_state(lock_path: &Path) -> HolderState {
-        let Ok(contents) = std::fs::read_to_string(lock_path) else {
-            // The lock may have just been removed by its holder (race) — treat
-            // as unknown so we loop and re-check the cache / re-create.
-            return HolderState::Unknown;
+        let contents = match std::fs::read_to_string(lock_path) {
+            Ok(contents) => contents,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return HolderState::Released,
+            Err(_) => return HolderState::Unknown,
         };
         let trimmed = contents.trim();
         if trimmed.is_empty() {
@@ -1125,6 +1142,34 @@ mod single_flight {
         // the wait and falls back to an uncoordinated compile, so a crashed
         // holder on Windows degrades to (at most) the pre-fix storm, not a hang.
         true
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::cell::Cell;
+
+        /// A leader that publishes its entry and removes its lock after a
+        /// contender's first cache check, but before the contender's create,
+        /// leaves the contender holding a fresh lock over a published entry.
+        /// The contender is served that entry; it does not compile again.
+        #[test]
+        fn an_entry_published_just_before_the_lock_is_taken_is_served() {
+            let dir = tempfile::tempdir().unwrap();
+            let cache_path = dir.path().join("key.ir.json");
+            let checks = Cell::new(0);
+            // The first check misses; the leader then publishes, so every
+            // later check finds the entry.
+            let is_cached = || {
+                checks.set(checks.get() + 1);
+                checks.get() > 1
+            };
+            let lease = acquire(&cache_path, &is_cached);
+            assert!(matches!(lease, Lease::AlreadyCached),
+                "the contender must serve the published entry, not compile it again");
+            assert!(!lock_path_for(&cache_path).exists(),
+                "the contender must not leave its lock behind");
+        }
     }
 }
 
