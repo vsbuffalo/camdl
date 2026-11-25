@@ -548,7 +548,7 @@ fn with_source(store: &Store, source: &Source, name: &str, mut cands: Candidates
         return Ok(cands);
     }
     let Some(model) = named_model(store, handle, &cands) else { return Ok(cands) };
-    let shown = shown_for(store, handle, model);
+    let shown = shown_for(store, handle, model).map_err(FileRefusal::Store)?;
     if let Some(n) = shown.notice(handle) {
         crate::out::live().notice(&n);
     }

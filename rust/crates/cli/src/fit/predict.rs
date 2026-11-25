@@ -2300,7 +2300,7 @@ pub(crate) fn repose(
             // its identity holds: those of the file that invocation compiled
             // or `--model` gave.
             let handle = store::Handle::IdPrefix(stored.id().key().to_hex());
-            let shown = crate::camdl_store::shown_for(store, &handle, opened.fit.model.id().key());
+            let shown = crate::camdl_store::shown_for(store, &handle, opened.fit.model.id().key())?;
             let quantities = match &id.quantities {
                 Some(q) => Some((q.clone(), crate::fit_store::read_quantities(store, q)?)),
                 None => None,
@@ -2329,7 +2329,7 @@ pub(crate) fn repose(
                 .unwrap_or_else(|| "model".to_string());
             let mut envelope = crate::fit_store::stored_envelope(store, model, &name)?;
             let handle = store::Handle::IdPrefix(stored.id().key().to_hex());
-            let shown = crate::camdl_store::shown_for(store, &handle, model.id().key());
+            let shown = crate::camdl_store::shown_for(store, &handle, model.id().key())?;
             shown.restore(&handle, &mut envelope);
             let reposed = shown.source_of();
             if let Some(q) = &id.quantities {

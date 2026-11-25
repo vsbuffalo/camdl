@@ -128,7 +128,7 @@ fn result_of(store: &Store, label: &str, kind: &str) -> Key {
 fn both(store: &Store, handle: &Handle, result: Key) -> (Option<Key>, Option<Key>) {
     let located = store.locate(result).unwrap();
     let model = model_of(store, &located).expect("the result's compiled model");
-    let shown = match shown_for(store, handle, model) {
+    let shown = match shown_for(store, handle, model).unwrap() {
         Shown::Recorded { source, .. } => Some(source.id().key()),
         Shown::NotRecorded { .. } => None,
         Shown::Unreadable { run_id, why } => panic!("{handle}: {run_id} unreadable: {why}"),
@@ -179,4 +179,16 @@ fn a_record_naming_no_source_gives_none_to_either_reader() {
     for handle in [Handle::Label { name: "p".into(), back: 0 }, Handle::IdPrefix(result.to_hex())] {
         assert_eq!(both(&store, &handle, result), (None, None), "{handle}");
     }
+}
+
+/// A lookup that fails is an error of the reader, not a record that names no
+/// source: a prefix that names several results is refused, and the refusal
+/// reaches the caller.
+#[test]
+fn a_failed_lookup_is_an_error_and_not_an_unrecorded_source() {
+    let (_tmp, store) = store_of_four();
+    let model = model_of(&store, &store.locate(result_of(&store, "a", "fit_run")).unwrap()).unwrap();
+    let shown = shown_for(&store, &Handle::IdPrefix(String::new()), model);
+    assert!(!matches!(shown, Ok(Shown::NotRecorded { .. })), "a lookup that failed read as no recorded source");
+    assert!(shown.is_err(), "the failed lookup is the caller's error");
 }

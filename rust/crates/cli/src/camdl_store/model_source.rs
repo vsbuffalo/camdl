@@ -341,12 +341,20 @@ pub(crate) struct OtherSource {
 /// invocation answering for `handle` recorded ([`store::Listings::source`]):
 /// for `@label`, the invocation the label names; for a run id, a prefix or a
 /// folder, the newest that listed the result computed or reused. No other
-/// invocation stands in: one that recorded none gives [`Shown::NotRecorded`].
+/// invocation stands in: one that recorded none gives [`Shown::NotRecorded`],
+/// and a label that names no invocation gives it with no sequence number. A
+/// lookup that fails otherwise, such as a prefix naming several results, is
+/// an error.
 /// For a run id or a folder, the sources earlier listings of the result
 /// recorded are named beside it ([`RecordedBy::Latest`]).
-pub(crate) fn shown_for(store: &Store, handle: &Handle, model: store::Key) -> Shown {
-    let Ok(listings) = store.listings(handle) else { return Shown::NotRecorded { invocation: None } };
-    let Some(seq) = listings.answering().map(|l| l.seq) else { return Shown::NotRecorded { invocation: None } };
+pub(crate) fn shown_for(store: &Store, handle: &Handle, model: store::Key) -> Result<Shown, String> {
+    let listings = match store.listings(handle) {
+        Ok(l) => l,
+        // A label that names no invocation: none answers.
+        Err(store::Error::NotFound { .. }) => return Ok(Shown::NotRecorded { invocation: None }),
+        Err(e) => return Err(format!("{handle}: {e}")),
+    };
+    let Some(seq) = listings.answering().map(|l| l.seq) else { return Ok(Shown::NotRecorded { invocation: None }) };
     let labelled = |s: u64| -> Vec<String> {
         // A label names the newest invocation that holds it, which may be a
         // later one.
@@ -364,7 +372,7 @@ pub(crate) fn shown_for(store: &Store, handle: &Handle, model: store::Key) -> Sh
         store::By::Result { .. } => RecordedBy::Latest { invocation: seq, others },
     };
     let (id, by) = match listings.source::<CompiledModel, ModelSource>(&Id::from_key(model)) {
-        store::Recorded::None => return Shown::NotRecorded { invocation: Some(seq) },
+        store::Recorded::None => return Ok(Shown::NotRecorded { invocation: Some(seq) }),
         store::Recorded::One { source, .. } => (source, by(Vec::new())),
         store::Recorded::Several { latest, others } => {
             let mut grouped: Vec<OtherSource> = Vec::new();
@@ -377,11 +385,11 @@ pub(crate) fn shown_for(store: &Store, handle: &Handle, model: store::Key) -> Sh
             (latest, by(grouped))
         }
     };
-    match store.get(&id) {
+    Ok(match store.get(&id) {
         Ok(Some(source)) => Shown::Recorded { source, by },
         Ok(None) => Shown::Unreadable { run_id: id.key(), why: "it is not stored".into() },
         Err(e) => Shown::Unreadable { run_id: id.key(), why: e.to_string() },
-    }
+    })
 }
 
 impl Shown {
@@ -523,7 +531,7 @@ impl StoredModel {
     pub fn of(store: &Store, handle: &Handle, dep: &Dep<CompiledModel>, name: &str) -> Result<StoredModel, String> {
         let model = crate::fit_store::stored_envelope(store, dep, name)?.model;
         let mut stored = StoredModel { model, source: Shown::NotRecorded { invocation: None }, views: None, evaluated: None };
-        stored.with_source(handle, shown_for(store, handle, dep.id().key()));
+        stored.with_source(handle, shown_for(store, handle, dep.id().key())?);
         if let Shown::Recorded { source, .. } = &stored.source {
             let q = source.identity().quantities.clone();
             let content = crate::fit_store::read_quantities(store, &q)?;
