@@ -15,11 +15,16 @@
     levels of a dimension whose levels are listed in the model.
 
     {!tex} renders one expression. A name becomes a symbol by a few rules,
-    in order: a [#' @symbol] the author declared, a Greek letter's name, a
-    single letter, a capital followed by lowercase letters ([Iv] becomes
-    [I_v]), and otherwise the name set upright. Trailing digits and
-    [_]-separated parts become subscripts, merged with the indices into one
-    subscript group. A product or quotient is flattened into one fraction,
+    in order: a [#' @symbol] the author declared, a Greek letter's name
+    ([gamma] becomes [\gamma], [Gamma] becomes [\Gamma]), a capitalised
+    Greek name whose capital has no macro, set upright ([Beta] becomes
+    [\mathrm{Beta}]), a single letter, a capital followed by lowercase
+    letters ([Iv] becomes [I_v]), and otherwise the name set upright. LaTeX
+    has no macro for capital alpha, beta, rho and the others like them
+    because they are drawn with Latin glyphs (A, B, P); setting the name
+    upright keeps [Rho] from reading as a parameter named [P]. Trailing
+    digits and [_]-separated parts become subscripts, merged with the
+    indices into one subscript group. A product or quotient is flattened into one fraction,
     so [beta * S * (I / N)] becomes [\frac{\beta\,S\,I}{N}]. Because these
     rules regroup, round numbers and drop units, a rendering can lose part
     of what the expression says; {!tex_loss} lists what is lost, so the
@@ -51,7 +56,13 @@ let greek =
     "tau"; "upsilon"; "phi"; "chi"; "psi"; "omega" ]
 
 let upper_greek =
-  [ "Gamma"; "Delta"; "Theta"; "Lambda"; "Xi"; "Pi"; "Sigma"; "Phi"; "Psi"; "Omega" ]
+  [ "Gamma"; "Delta"; "Theta"; "Lambda"; "Xi"; "Pi"; "Sigma"; "Upsilon"; "Phi";
+    "Psi"; "Omega" ]
+
+(* Capital Greek letters drawn with a Latin glyph, which have no LaTeX macro. *)
+let latin_glyph_greek =
+  [ "Alpha"; "Beta"; "Epsilon"; "Zeta"; "Eta"; "Iota"; "Kappa"; "Mu"; "Nu";
+    "Omicron"; "Rho"; "Tau"; "Chi" ]
 
 let is_digit c = c >= '0' && c <= '9'
 let is_lower c = c >= 'a' && c <= 'z'
@@ -97,7 +108,8 @@ let escape_prose s =
 let overrides : (string, string) Hashtbl.t = Hashtbl.create 16
 
 (* A camdl identifier -> (base symbol, intrinsic subscripts). Order: an explicit
-   `@symbol` wins; then greek (upper + lower), single letters, the `Iv -> I_v`
+   `@symbol` wins; then greek (upper + lower), the Latin-glyph capitals set
+   upright, single letters, the `Iv -> I_v`
    capital-lower split, and finally a multi-word name set upright in \mathrm.
    The *parts* form lets callers merge an index (S[a]) into one subscript rather
    than emitting an invalid double subscript `_{1}_{a}`. *)
@@ -112,6 +124,8 @@ let sym_parts (name : string) : string * string list =
     let subs = dsub @ tail in
     if List.mem head upper_greek then ("\\" ^ head, subs)
     else if List.mem head greek then ("\\" ^ head, subs)
+    else if tail = [] && dsub = [] && List.mem head latin_glyph_greek then
+      ("\\mathrm{" ^ head ^ "}", [])
     else if String.length head = 1 then (head, subs)
     else if tail = [] && dsub = [] then
       (match split_cap_lower head with

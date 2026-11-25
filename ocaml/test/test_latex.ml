@@ -269,6 +269,35 @@ let test_greek_fallback () =
   has_not ~doc:"no β override" "β" out;
   has_not ~doc:"no γ override" "γ" out
 
+(* A capitalised Greek name is a Greek name, not a capital followed by a
+   subscript: `Beta` must not render as B_{eta}. Capitals drawn with a Latin
+   glyph (Beta, Rho) are set upright by name; one with its own macro (Upsilon)
+   uses it. `Iv` is the control for the capital-then-lowercase split. *)
+let sir_capital_greek = {|
+time_unit = 'days
+compartments { S, Iv, R }
+let N = S + Iv + R
+parameters {
+  Beta    : rate in [0.001, 2.0]
+  Rho     : rate in [0.001, 1.0]
+  Upsilon : rate in [0.001, 1.0]
+}
+transitions {
+  infection : S --> Iv @ Beta * S * Iv / N
+  recovery  : Iv --> R @ (Rho + Upsilon) * Iv
+}
+|}
+
+let test_capital_greek_names () =
+  let out = render_json sir_capital_greek in
+  has ~doc:"Beta upright" {|{ "name": "Beta", "symbol": "\\mathrm{Beta}" }|} out;
+  has ~doc:"Rho upright" {|{ "name": "Rho", "symbol": "\\mathrm{Rho}" }|} out;
+  has ~doc:"Upsilon macro" {|{ "name": "Upsilon", "symbol": "\\Upsilon" }|} out;
+  has ~doc:"Iv split control" "I_{v}" out;
+  has_not ~doc:"no B_{eta}" "B_{eta}" out;
+  has_not ~doc:"no R_{ho}" "R_{ho}" out;
+  has_not ~doc:"no U_{psilon}" "U_{psilon}" out
+
 (* gh#527. A `let` is the site where the auto-heuristic guesses worst: the name
    is chosen for code (`Ntot`), while the paper writes it \Pi. `@symbol` was
    harvested off compartments and parameters ONLY, so on a `let` it parsed, was
@@ -481,7 +510,9 @@ let () =
           Alcotest.test_case "@symbol on a let (gh#527)" `Quick
             test_symbol_override_on_let;
           Alcotest.test_case "greek fallback (negative control)" `Quick
-            test_greek_fallback ] );
+            test_greek_fallback;
+          Alcotest.test_case "capitalised Greek names" `Quick
+            test_capital_greek_names ] );
       ( "structure",
         [ Alcotest.test_case "let -> Definitions block" `Quick
             test_let_becomes_definition;
