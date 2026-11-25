@@ -332,7 +332,6 @@ fn argv(inv: &PredictInvocation) -> Vec<String> {
                 allow_degenerate_rates,
                 time_format,
             },
-        _removed_fit: _,
     } = args;
     let mut v: Vec<String> = vec!["predict".into(), source.clone().expect("a run or a model")];
     let mut opt = |flag: &str, value: Option<String>| {
@@ -914,23 +913,6 @@ fn a_lag_parameter_that_can_be_negative_is_refused_at_compile_time() {
     assert!(!out.status.success(), "a `real` lag parameter compiled:\n{err}");
     assert!(err.contains("E425") && err.contains("reads parameter 'tau', declared `real` with no lower bound"),
         "the refusal is E425 naming `tau`:\n{err}");
-}
-
-/// `camdl fit predict` and `camdl predict --fit` are refused, each naming
-/// `camdl predict @run`; nothing is stored.
-#[test]
-fn the_removed_spellings_are_refused_with_their_replacement() {
-    let fresh = tempfile::tempdir().unwrap();
-    let root = fresh.path().join("camdl-store");
-    let cwd = workdir(&root);
-    for line in [&["fit", "predict", "@fit", "--mode", "free_forward"][..], &["fit", "predict", "--fit", "@fit"], &["predict", "--fit", "@fit"]] {
-        let args: Vec<String> = line.iter().map(|s| s.to_string()).collect();
-        let out = camdl(cwd.path(), &root, &args, &[]);
-        let err = String::from_utf8_lossy(&out.stderr);
-        assert!(!out.status.success(), "{line:?} ran:\n{err}");
-        assert!(err.contains("camdl predict @"), "{line:?}: the refusal names the replacement:\n{err}");
-    }
-    assert!(folders(&root).iter().all(|(_, id, _)| id["kind"] != crate::fit_store::Prediction::KIND), "nothing is stored");
 }
 
 /// With no `--mode` the prediction is every mode that applies to the fit's

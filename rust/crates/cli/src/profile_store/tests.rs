@@ -325,7 +325,7 @@ fn argv(inv: &ProfileInvocation) -> Vec<String> {
     let ProfileInvocation { args, no_licm, no_ir_cache, verbosity: _, progress: _, no_progress: _ } = inv;
     let crate::args::ProfileArgs {
         model,
-        model_overrides: crate::args::InferenceModelOverrides { fixed_cli, fixed_files, table, _removed_param: _ },
+        model_overrides: crate::args::InferenceModelOverrides { fixed_cli, fixed_files, table },
         scenario: crate::args::ScenarioArgs { scenario, enable, disable },
         inference:
             crate::args::ProfileCore {
@@ -348,13 +348,6 @@ fn argv(inv: &ProfileInvocation) -> Vec<String> {
         starts,
         starts_chains,
         allow_nonconverged_source,
-        _removed_init: _,
-        _removed_posterior: _,
-        _removed_mle: _,
-        _removed_params: _,
-        _removed_pmmh_steps: _,
-        _removed_pmmh_particles: _,
-        _removed_pmmh_rho: _,
         cooling,
         cooling_target_iters,
         rw_sd,

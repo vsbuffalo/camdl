@@ -409,9 +409,6 @@ pub(crate) enum FitCmd {
     Table(args::FitTableArgs),
     /// Derive a new fit.toml from an existing one
     New(args::FitNewArgs),
-    /// (removed) A prediction is `camdl predict RUN`
-    #[command(hide = true)]
-    Predict(args::FitPredictRemovedArgs),
     /// List supported (algorithm, backend) pairs and their descriptions
     Methods,
 }
@@ -619,7 +616,6 @@ fn main() {
         Command::Fit(FitCmd::Diff(a))   => fit::cmd_fit_diff(&a, compile),
         Command::Fit(FitCmd::Table(a))  => fit::cmd_fit_table(&a),
         Command::Fit(FitCmd::New(a))    => fit::cmd_fit_new(&a, compile),
-        Command::Fit(FitCmd::Predict(_)) => predict_command::refuse_fit_predict(),
         Command::Predict(a)             => predict_command::cmd_predict(args::PredictInvocation {
             args: a,
             no_licm: cli.global.no_licm,

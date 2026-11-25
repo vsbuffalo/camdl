@@ -514,35 +514,3 @@ pub(crate) fn resolve(
     };
     (resolved, _forcing_route)
 }
-
-/// Refuses every removed spelling `a` carries, each with its replacement.
-/// Run on the arguments as clap parsed them: the split that follows does not
-/// carry the removed fields.
-pub(crate) fn refuse_removed_flags(a: &crate::args::FitRunArgs, out: &crate::out::Out) {
-    if let Some(msg) = super::removed_flag_message(a) {
-        out.fail(format!("error: {}", msg));
-    }
-    // PGAS parallel tempering was removed (gh#789); the flag is trapped so a
-    // stale script is answered with the fix rather than clap's "unexpected
-    // argument".
-    if let Some(raw) = a._removed_tempering.as_deref() {
-        out.fail(format!(
-            "error: --tempering is no longer accepted on `camdl fit run`: PGAS parallel \
-             tempering was removed (gh#789), and every PGAS chain samples the posterior \
-             directly, as the ladder's cold rung did. Drop `--tempering {raw}`; a \
-             `tempering = [...]` line under [method] must be deleted too. Fits stored \
-             before the removal are not reused and cannot be resumed; they run again."
-        ));
-    }
-    // Correlated pseudo-marginal PMMH was removed; `--rho` is trapped the same
-    // way.
-    if let Some(raw) = a._removed_rho.as_deref() {
-        out.fail(format!(
-            "error: --rho is no longer accepted on `camdl fit run`: correlated \
-             pseudo-marginal PMMH was removed, and `pmmh` runs the bootstrap particle \
-             filter with independent likelihood evaluations. Drop `--rho {raw}`; a \
-             `rho = ...` line under [method] must be deleted too. PMMH fits stored \
-             before the removal are not reused and cannot be resumed; they run again."
-        ));
-    }
-}

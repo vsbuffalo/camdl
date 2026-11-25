@@ -283,7 +283,7 @@ pub fn cmd_profile(inv: crate::args::ProfileInvocation) {
     // profile has no `--no-color`: its painters follow the environment and
     // whether each stream is a terminal.
     let out = crate::out::Out::new(false);
-    crate::profile_config::refuse_removed(&inv.args, &out);
+    crate::profile_config::refuse_data_beside_fit(&inv.args, &out);
     let link_root = crate::link_tree::link_root(inv.args.link_root.as_deref());
     let bindings = crate::bindings::claim(&out, inv.args.manifest.as_deref(), link_root, inv.args.label.as_deref());
     // A fit file is read once, here, before the store is chosen: its `store`

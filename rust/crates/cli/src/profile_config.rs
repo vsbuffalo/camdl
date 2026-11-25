@@ -18,8 +18,8 @@
 //! and `allow_forcing_extrapolation` folded with the flags, its nl-* method's
 //! budget and `[method] starts` read, the starts rule in force decided
 //! (`--starts`, else the fit's, qualified by `--starts-chains`) and `--seeds`
-//! expanded. The removed spellings are refused before the split
-//! ([`refuse_removed`]).
+//! expanded. `--data` and `--obs`, which the problem `--fit` names sets, are
+//! refused before the split ([`refuse_data_beside_fit`]).
 
 use crate::args::types::{RwSd, SweepSpec};
 use crate::fit::fitted_model::FittedSettings;
@@ -129,25 +129,10 @@ pub(crate) struct ProfileGates {
     pub allow_nonconverged_source: bool,
 }
 
-/// Refuses the spellings `profile` accepts only to refuse them, each naming
-/// what to write instead: `--pmmh-*`, the `--init` family, `--param`,
-/// `--output-dir`, and `--data` and `--obs`, which the problem `--fit` names
-/// sets. They are skip-class inputs, which the split does not carry, so they
-/// are read here, before it.
-pub(crate) fn refuse_removed(a: &crate::args::ProfileArgs, out: &crate::out::Out) {
-    use crate::profile::PROFILE_PMMH_REMOVED;
-    // The `--pmmh-*` flags went with per-cell PMMH. They are trapped so a
-    // stale script is answered with the reason rather than clap's
-    // "unexpected argument", before any file is read.
-    for (flag, given) in [
-        ("--pmmh-steps", a._removed_pmmh_steps.as_deref()),
-        ("--pmmh-particles", a._removed_pmmh_particles.as_deref()),
-        ("--pmmh-rho", a._removed_pmmh_rho.as_deref()),
-    ] {
-        if let Some(raw) = given {
-            out.fail(format!("error: {flag} {raw} is no longer accepted: {PROFILE_PMMH_REMOVED}"));
-        }
-    }
+/// Refuses `--data` and `--obs`, which the problem `--fit` names sets, each
+/// naming what to write instead. They are skip-class inputs, which the split
+/// does not carry, so they are read here, before it.
+pub(crate) fn refuse_data_beside_fit(a: &crate::args::ProfileArgs, out: &crate::out::Out) {
     // gh#1354: data and stream selection beside `--fit`'s problem.
     if !a.data.is_empty() {
         out.fail("error: --data binds data beside --fit, whose problem names its own data; \
@@ -156,26 +141,6 @@ pub(crate) fn refuse_removed(a: &crate::args::ProfileArgs, out: &crate::out::Out
     if a.obs.is_some() {
         out.fail("error: --obs selects a stream beside --fit, whose problem binds its own streams; \
             bind the streams in the fit file's [data.observations] (gh#1354).");
-    }
-    // M-1 break per docs/dev/proposals/2026-05-25-cli-init-and-params-ux.md
-    // §"Migration": fail loudly on removed flags before any work.
-    a.model_overrides.check_removed_flags("profile");
-    // gh#889: the `--init` family, answered with the same `--starts`
-    // replacements `fit run` gives, from the same builder.
-    if let Some(msg) = crate::fit::removed_flags_message(
-        "profile",
-        crate::fit::starts_family_removed_lines(
-            a._removed_init.as_deref(),
-            a._removed_posterior.as_deref(),
-            a._removed_mle.as_deref(),
-            a._removed_params.as_deref(),
-        ),
-    ) {
-        out.error(crate::out::CommandError {
-            code: crate::out::ExitCode(2),
-            ..crate::out::CommandError::new(format!("error: {msg}"))
-        })
-        .exit();
     }
 }
 

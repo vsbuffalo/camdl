@@ -756,17 +756,12 @@ fn a_run_ids_own_result_answers_first() {
     assert_eq!(p.path_of(&[&obs, "run.json"]), folders[&obs].join("run.json"), "a by-product's own id names it first");
 }
 
-/// The other refusals say what to do: the removed `cat --stream`, a kind no
-/// result is, a manifest read where no store is, and a multi-cell label
+/// The other refusals say what to do: a kind no result is, a manifest read where no store is, and a multi-cell label
 /// given to `show`; a label names the kind of the result it resolved to.
 #[test]
 fn refusals_say_what_to_write() {
     let p = Project::new();
     p.ok(&simulate("sir.ir.json", &["--sweep", "beta=lin(0.2,0.4,2)", "--seed", "1", "--label", "grid", "--manifest", "build/grid.json"]));
-    let m = p.manifest("build/grid.json");
-    let cell = results(&m).iter().find(|r| r["kind"] == "sim").unwrap()["run_id"].as_str().unwrap().to_string();
-    let err = p.refused(&["cat", &cell, "--stream", "traj"]);
-    assert!(err.contains("write `camdl cat HANDLE traj`"), "{err}");
     let err = p.refused(&["path", "--manifest", "build/grid.json", "fit_run:draws"]);
     assert!(err.contains("is a `fit_run`") && err.contains("compiled_model, sim"), "{err}");
     let out = p.command().env("CAMDL_STORE", p.path("nowhere")).args(["path", "--manifest", "build/grid.json", "traj", "--each"]).output().unwrap();

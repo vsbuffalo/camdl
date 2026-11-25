@@ -588,11 +588,8 @@ fn list_shows_cached_runs() {
     assert!(stdout.contains("baseline"), "list should show scenario name");
 }
 
-/// `--starts-from` (2026-05-25 CLI UX rev 2) and `--init from_mle --mle`
-/// (the `[stages]` → `[method]` split) are both gone. Users get an actionable
-/// error naming the replacement, and `--starts from_mle=<hash>` resolves a
-/// short prefix of a method leaf's `run_id` to that leaf (Hardening #9's
-/// resolver behaviour under the new spelling).
+/// `--starts from_mle=<hash>` resolves a short prefix of a method leaf's
+/// `run_id` to that leaf (Hardening #9's resolver behaviour).
 #[test]
 fn starts_from_resolves_short_hash() {
     let bin = skip_if_missing_binary();
@@ -604,54 +601,9 @@ fn starts_from_resolves_short_hash() {
     let run_id = fit_store_support::run_id(&run);
     let prefix = &run_id[..8];
 
-    let ir = seed_timing_ir();
     let fit_toml = fit_toml(tmp.path(), "f.toml", &results, 4);
 
-    // Removed flags, every one named with its replacement in one message
-    // (the ebola agents' habitual `--stage posterior --init from_prior`).
-    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .current_dir(tmp.path())
-        .args(["fit", "run", &fit_toml.to_string_lossy(),
-               "--stage", "posterior", "--init", "from_prior",
-               "--starts-from", "deadbeef"])
-        .output().expect("spawn");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success(),
-        "removed flags must fail with the removed-flag error");
-    assert!(stderr.contains("these `camdl fit run` flags were removed"),
-        "expected the removed-flag error, got: {}", stderr);
-    assert!(stderr.contains("--stage posterior:") && stderr.contains("drop the flag"),
-        "--stage must be named as gone, got: {}", stderr);
-    assert!(stderr.contains("--init from_prior: write `--starts from_prior`"),
-        "--init must name `--starts`, got: {}", stderr);
-    assert!(stderr.contains("--starts-from deadbeef: write `--starts from_mle=deadbeef`"),
-        "--starts-from must name its replacement, got: {}", stderr);
-
-    // gh#889: `camdl profile` answers the same four flags the same way, and
-    // refuses before it does any work — the earlier surface accepted them and
-    // ran with a start rule the flag was meant to select.
-    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .current_dir(tmp.path())
-        .env("CAMDL_STORE", &results)
-        .args(["profile", &ir.to_string_lossy(),
-               "--fit", &fit_toml.to_string_lossy(),
-               "--sweep", "beta=lin(0.1,0.5,2)", "--rw-sd", "auto",
-               "--particles", "20",
-               "--init", "from_params", "--params", "truth.toml"])
-        .output().expect("spawn");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success(),
-        "profile's removed flags must fail, not be ignored: {stderr}");
-    assert!(stderr.contains("these `camdl profile` flags were removed"),
-        "expected the removed-flag error naming this verb, got: {stderr}");
-    assert!(stderr.contains("--init from_params: write `--starts from_params=<source>`"),
-        "--init must name `--starts`, got: {stderr}");
-    assert!(stderr.contains("--params truth.toml: write `--starts from_params=truth.toml`"),
-        "--params must name its replacement, got: {stderr}");
-    assert!(!stderr.contains("compiling"),
-        "the refusal must land before any work, got: {stderr}");
-
-    // Bad hash with the new spelling: the resolver finds no run.
+    // Bad hash: the resolver finds no run.
     let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
         .current_dir(tmp.path())
         .args(["fit", "run", &fit_toml.to_string_lossy(),

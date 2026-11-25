@@ -938,9 +938,6 @@ pub fn cmd_cat(a: &crate::args::CatArgs) {
     use crate::resolve_file as rf;
     use std::io::Write as _;
     let out = crate::out::Out::new(false);
-    if let Some(name) = &a._removed_stream {
-        out.fail(format!("error: `cat --stream` is not accepted; write `camdl cat HANDLE {name}`, with the file's name after the handle"));
-    }
     let selection = crate::chain_selection::ChainSelection::from_flags(a.chains.as_deref(), a.exclude_chains.as_deref())
         .unwrap_or_else(|e| out.fail(format!("error: {e}")));
     let narrow = rf::Narrow { kind: a.kind.clone(), run: a.run.clone() };

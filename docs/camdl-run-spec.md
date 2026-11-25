@@ -5276,26 +5276,7 @@ $ camdl fit run fit_if2.toml --seed 3 --label i
   cache hit — reusing 0.1.0_f531753ac.dirty-a20ab6cb-4bff11f93f55/fit/sir-8bcb39805e9d/runs/if2-e5e94eb7c269/seed_3-be6657446294
 ```
 
-**The flags the split removed are parsed only to reject them**, so the error
-names each one's replacement rather than printing `unexpected argument`:
-
-```
-$ camdl fit run fits/09_pgas_only.toml --stage posterior --init from_prior
-error: these `camdl fit run` flags were removed with the `[stages]` → `[method]` split (proposal 2026-09-08-workflow-first-fit-config):
-  --stage posterior: a fit.toml carries one `[method]`, so there is nothing to select; drop the flag. A second way of fitting the same problem is a second file (`camdl fit new --from fit.toml fit-posterior.toml`).
-  --init from_prior: write `--starts from_prior`.
-  See `camdl fit run --help` and `camdl docs fit-toml`.
-```
-
-`--posterior <P>`, `--mle <P>` and `--params <P>` are answered with
-`--starts from_posterior=<P>` / `from_mle=<P>` / `from_params=<P>`;
-`--survey-path` / `--survey-top-k` with the note that the `survey_top_k` rule
-was removed and `--starts from_prior` or a `from_posterior` from a short run is
-the replacement; `--allow-nonconverged-scout` with
-`--allow-nonconverged-source`; and the older `--starts-from` / `--init-method`
-spellings likewise.
-
-The `fit.toml` side is the `[stages]` rejection of §6.9.
+A `fit.toml` with a `[stages]` table is refused (§6.9).
 
 ### 7.2 CLI Type
 
@@ -8471,11 +8452,6 @@ Per-algorithm overrides
   --record-ancestry           record ancestor indices for smoothing paths
   --record-prequential        record per-step predictive samples for `camdl compare`
 ```
-
-`--stage`, `--init`, `--posterior`, `--mle`, `--params`, `--survey-path`,
-`--survey-top-k`, `--allow-nonconverged-scout`, `--starts-from` and
-`--init-method` are parsed only to be refused, each naming its replacement
-(§7.1).
 
 ### `camdl fit` — the other subcommands
 

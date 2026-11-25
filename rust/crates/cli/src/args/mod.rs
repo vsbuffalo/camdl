@@ -90,11 +90,6 @@ pub struct ModelOverrides {
 /// [`ModelOverrides`] structurally but drops `--params` / `--param` in
 /// favour of `--fixed NAME=VALUE` / `--fixed-file <toml>` (the
 /// universal value-setter from 2026-05-25 CLI UX rev 2).
-///
-/// `--params` and `--param` are reintroduced as hidden traps that
-/// produce an actionable error at dispatch time (per CLAUDE.md alpha
-/// posture: no backwards-compat shims, hard break with replacement
-/// spelled out).
 #[derive(Args, Clone, Default, store::Inputs)]
 pub struct InferenceModelOverrides {
     /// Pin NAME to VALUE (repeatable; sets value and removes the
@@ -119,41 +114,6 @@ pub struct InferenceModelOverrides {
     #[input(identity, vary = crate::input_fixtures::other_table)]
     pub table: Vec<TableSpec>,
 
-    // ── Removed-flag traps (M-1 break per proposal §"Migration") ──
-    //
-    // `--param` (singular) is trapped here because no inference
-    // subcommand has a legitimate use for that flag name.
-    //
-    // `--params` (plural) is **not** trapped at this level: profile
-    // and fit-run have a legitimate `--params <TOML>` companion to
-    // `--init from_params`. Trapping `--params` here would shadow
-    // that companion (two clap defs with `long = "params"` in the
-    // same Args graph: the trap field wins by definition order, the
-    // companion is silently unreachable).
-    //
-    // Per CLAUDE.md alpha posture: no back-compat shims, no aliases —
-    // these traps exist purely so the error message is actionable.
-    // They have no other effect.
-    #[arg(long = "param", value_name = "NAME=VALUE", hide = true)]
-    #[input(skip)]
-    pub _removed_param: Vec<ParamOverride>,
-}
-
-impl InferenceModelOverrides {
-    /// Emit an actionable error and abort if a removed flag was used.
-    /// Called by every inference-subcommand dispatch function before
-    /// any other work. Matches the wording in the proposal §"Migration".
-    pub fn check_removed_flags(&self, subcmd: &str) {
-        if !self._removed_param.is_empty() {
-            crate::out::detached().fail(format!(
-                "error: --param is no longer accepted on `camdl {}`. \
-                 Replacement:\n  \
-                 --fixed NAME=VALUE             (set & freeze a single value)\n  \
-                 --fixed-file <toml>            (load fixed values from a TOML file)\n\
-                 See `camdl {} --help` (SET PARAMETER VALUES section).",
-                subcmd, subcmd));
-        }
-    }
 }
 
 /// `--scenario` XOR `--enable`/`--disable`
@@ -1011,53 +971,6 @@ pub struct FitRunArgs {
     #[input(export)]
     pub link_root: Option<PathBuf>,
 
-    // ── Removed-flag traps ───────────────────────────────────────────
-    //
-    // Each of these was renamed or removed with the `[stages]` → `[method]`
-    // split (proposal 2026-09-08); the dispatch site answers every one it
-    // sees with its replacement in one message. Per CLAUDE.md alpha posture,
-    // no back-compat shims — they exist purely so the error names the right
-    // replacement.
-    #[arg(long = "stage", value_name = "STAGE", hide = true)]
-    #[input(skip)]
-    pub _removed_stage: Option<String>,
-    #[arg(long = "init", value_name = "MODE", hide = true)]
-    #[input(skip)]
-    pub _removed_init: Option<String>,
-    #[arg(long = "posterior", value_name = "PATH", hide = true)]
-    #[input(skip)]
-    pub _removed_posterior: Option<String>,
-    #[arg(long = "mle", value_name = "PATH", hide = true)]
-    #[input(skip)]
-    pub _removed_mle: Option<String>,
-    #[arg(long = "params", value_name = "TOML", hide = true)]
-    #[input(skip)]
-    pub _removed_params: Option<String>,
-    #[arg(long = "survey-path", value_name = "DIR", hide = true)]
-    #[input(skip)]
-    pub _removed_survey_path: Option<String>,
-    #[arg(long = "survey-top-k", value_name = "N", hide = true)]
-    #[input(skip)]
-    pub _removed_survey_top_k: Option<String>,
-    #[arg(long = "allow-nonconverged-scout", hide = true)]
-    #[input(skip)]
-    pub _removed_allow_nonconverged_scout: bool,
-    #[arg(long = "init-method", value_name = "MODE", hide = true)]
-    #[input(skip)]
-    pub _removed_init_method: Option<String>,
-    #[arg(long = "starts-from", value_name = "DIR_OR_HASH", hide = true)]
-    #[input(skip)]
-    pub _removed_starts_from: Option<String>,
-    // `--tempering` went with PGAS parallel tempering (gh#789); same shape,
-    // its own message.
-    #[arg(long = "tempering", value_name = "B1,B2,...", hide = true)]
-    #[input(skip)]
-    pub _removed_tempering: Option<String>,
-    // `--rho` went with correlated pseudo-marginal PMMH; same shape, its own
-    // message.
-    #[arg(long = "rho", value_name = "F", hide = true)]
-    #[input(skip)]
-    pub _removed_rho: Option<String>,
 }
 
 /// The flags of `fit run` that change the problem.
@@ -1629,7 +1542,7 @@ pub struct PredictArgs {
     /// prediction uses. A model file (`.camdl` or `.ir.json`) names a model,
     /// predicted at the one point `--params` and `--param` give. A
     /// `fit.toml` names no run and is refused, with the runs it made listed.
-    #[arg(value_name = "RUN|MODEL", required_unless_present = "_removed_fit")]
+    #[arg(value_name = "RUN|MODEL", required = true)]
     #[input(identity, vary = crate::input_fixtures::predict_other_run)]
     pub source: Option<String>,
 
@@ -1645,11 +1558,6 @@ pub struct PredictArgs {
     #[input(group)]
     pub fixed_point: FixedPointFlags,
 
-    // `--fit` named the run before the run became the positional argument;
-    // the dispatch answers it with the command line that replaces it.
-    #[arg(long = "fit", value_name = "FIT", hide = true)]
-    #[input(skip)]
-    pub _removed_fit: Option<String>,
 }
 
 /// The flags of `camdl predict` that mean the same thing whatever the
@@ -2165,15 +2073,6 @@ pub struct ScoreInvocation {
     pub args: ScoreArgs,
     #[input(skip)]
     pub verbosity: Option<log::LevelFilter>,
-}
-
-/// `camdl fit predict` is removed: a prediction is `camdl predict RUN`. This
-/// catch-all accepts any arguments so an old command line is answered with
-/// the one that replaces it rather than a clap parse error.
-#[derive(Args)]
-pub struct FitPredictRemovedArgs {
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
-    pub _ignored: Vec<String>,
 }
 
 /// The reserved scenario name for the no-overlay row — the fitted model as
@@ -2921,35 +2820,6 @@ pub struct ProfileArgs {
     #[input(execution, exercised_by = crate::input_fixtures::profile_allow_nonconverged_source)]
     pub allow_nonconverged_source: bool,
 
-    // The `--init` family the `[stages]` -> `[method]` split removed on
-    // `fit run`, and gh#889 removes here: accepted by clap so the error can
-    // name the replacement, trapped before any work runs. Per CLAUDE.md's
-    // alpha posture these are not back-compat shims — nothing behind them
-    // works — they exist so one message corrects a habitual invocation.
-    #[arg(long = "init", value_name = "MODE", hide = true)]
-    #[input(skip)]
-    pub _removed_init: Option<String>,
-    #[arg(long = "posterior", value_name = "PATH", hide = true)]
-    #[input(skip)]
-    pub _removed_posterior: Option<String>,
-    #[arg(long = "mle", value_name = "PATH", hide = true)]
-    #[input(skip)]
-    pub _removed_mle: Option<String>,
-    #[arg(long = "params", value_name = "TOML", hide = true)]
-    #[input(skip)]
-    pub _removed_params: Option<String>,
-    // The `--pmmh-*` flags went with per-cell PMMH; same shape, one message
-    // (answered in `cmd_profile` before any file is read).
-    #[arg(long = "pmmh-steps", value_name = "N", hide = true)]
-    #[input(skip)]
-    pub _removed_pmmh_steps: Option<String>,
-    #[arg(long = "pmmh-particles", value_name = "N", hide = true)]
-    #[input(skip)]
-    pub _removed_pmmh_particles: Option<String>,
-    #[arg(long = "pmmh-rho", value_name = "F", hide = true)]
-    #[input(skip)]
-    pub _removed_pmmh_rho: Option<String>,
-
     /// IF2 cooling fraction (default 0.95): the perturbation SD reaches this
     /// fraction of its initial value at iteration `--cooling-target-iters`,
     /// then keeps cooling (pomp's `cooling.fraction.50`, the same schedule
@@ -3521,11 +3391,6 @@ pub struct CatArgs {
     #[arg(long, value_name = "IDS")]
     pub exclude_chains: Option<String>,
 
-    // `--stream NAME` took the file's name before it became the positional
-    // NAME. The trap is never accepted: it exists so the refusal says what
-    // to write, where clap's tip would offer `--store`.
-    #[arg(long = "stream", value_name = "NAME", hide = true)]
-    pub _removed_stream: Option<String>,
 }
 
 #[derive(Args)]
@@ -4081,37 +3946,6 @@ mod tests {
             "and says what `starts` means: {e}");
     }
 
-    /// The four flags gh#889 removed from `profile` still parse, into their
-    /// hidden traps, so the dispatch site answers with the `--starts`
-    /// replacement instead of clap's "unexpected argument".
-    #[test]
-    fn profile_removed_init_family_is_trapped_at_parse() {
-        let a = try_parse_profile(&[
-            "--init", "from_params", "--params", "truth.toml",
-            "--posterior", "fits/a", "--mle", "fits/b",
-        ]).expect("the hidden traps must accept the removed flags");
-        assert_eq!(a._removed_init.as_deref(), Some("from_params"));
-        assert_eq!(a._removed_params.as_deref(), Some("truth.toml"));
-        assert_eq!(a._removed_posterior.as_deref(), Some("fits/a"));
-        assert_eq!(a._removed_mle.as_deref(), Some("fits/b"));
-        assert_eq!(a.model_overrides.fixed_cli.len(), 0,
-            "--params must not pollute fixed_cli");
-
-        // And each is answered with the replacement `fit run` gives, from the
-        // one builder both verbs use.
-        let msg = crate::fit::removed_flags_message(
-            "profile",
-            crate::fit::starts_family_removed_lines(
-                a._removed_init.as_deref(), a._removed_posterior.as_deref(),
-                a._removed_mle.as_deref(), a._removed_params.as_deref(),
-            ),
-        ).expect("a message for every removed flag passed");
-        assert!(msg.contains("`camdl profile` flags were removed"), "{msg}");
-        assert!(msg.contains("--starts from_params=truth.toml"), "{msg}");
-        assert!(msg.contains("--starts from_posterior=fits/a"), "{msg}");
-        assert!(msg.contains("--starts from_mle=fits/b"), "{msg}");
-    }
-
     /// `camdl if2` is removed (gh#147); its arg struct is a catch-all so
     /// an old invocation still PARSES and reaches the deprecation message
     /// in `if2::cmd_if2`, rather than dying on a clap "unexpected
@@ -4133,34 +3967,6 @@ mod tests {
             }
             _ => unreachable!(),
         }
-    }
-
-    /// Every flag the `[stages]` → `[method]` split removed from `fit run`
-    /// still parses, into its hidden trap, so the dispatch site can answer
-    /// with the replacement instead of clap's "unexpected argument".
-    #[test]
-    fn fit_run_removed_flags_are_trapped_at_parse() {
-        let a = try_parse_fit_run(&[
-            "fit.toml", "--stage", "posterior", "--init", "from_prior",
-        ]).expect("hidden traps must accept --stage and --init");
-        assert_eq!(a._removed_stage.as_deref(), Some("posterior"));
-        assert_eq!(a._removed_init.as_deref(), Some("from_prior"));
-        assert!(a.run.starts.is_none(), "a trapped --init must not populate --starts");
-
-        let a = try_parse_fit_run(&[
-            "fit.toml", "--posterior", "fits/a", "--mle", "fits/b",
-            "--params", "theta.toml", "--survey-path", "surveys/x",
-            "--survey-top-k", "4", "--allow-nonconverged-scout",
-            "--init-method", "lhs", "--starts-from", "fits/scout/",
-        ]).expect("every removed flag must parse into its trap");
-        assert_eq!(a._removed_posterior.as_deref(), Some("fits/a"));
-        assert_eq!(a._removed_mle.as_deref(), Some("fits/b"));
-        assert_eq!(a._removed_params.as_deref(), Some("theta.toml"));
-        assert_eq!(a._removed_survey_path.as_deref(), Some("surveys/x"));
-        assert_eq!(a._removed_survey_top_k.as_deref(), Some("4"));
-        assert!(a._removed_allow_nonconverged_scout);
-        assert_eq!(a._removed_init_method.as_deref(), Some("lhs"));
-        assert_eq!(a._removed_starts_from.as_deref(), Some("fits/scout/"));
     }
 
     /// `--starts <spec>` parses every rule: the bare names and the sourced

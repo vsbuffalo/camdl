@@ -34,7 +34,7 @@
 // returned once per result.
 #![allow(clippy::result_large_err)]
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use store::{Begin, ContentAddressed, ContentArtifact, Identity, Reuse, Stored};
@@ -57,9 +57,6 @@ const CARRIED: [&str; 3] = crate::fit::resumed_chain::CARRIED_CHAIN_FILES;
 pub(crate) fn cmd_fit_run(inv: crate::args::FitRunInvocation) {
     let out = Out::new(false);
     let _eval_stats_guard = crate::util::EvalStatsReportGuard::start(); // gh#audit-H5
-    // Removed flags fail before any work, each naming its replacement.
-    crate::fit::run_config::refuse_removed_flags(&inv.args, &out);
-    let removed = RemovedFlags::of(&inv.args);
     let (declared, execution, exports, request, given) = store::Inputs::split(inv).into_parts();
     let (exports,) = exports.into_parts();
     let (_problem_exports, (), (), manifest, link_root) = exports.into_parts();
@@ -128,7 +125,7 @@ pub(crate) fn cmd_fit_run(inv: crate::args::FitRunInvocation) {
         label: label.clone(),
         manifest: manifest.clone(),
         link_root: link_root.clone(),
-        ..removed.into_args()
+        store: None,
     };
     // A malformed label is refused before the claim removes anything.
     if let Some(raw) = label.as_deref() {
@@ -175,44 +172,6 @@ pub(crate) fn cmd_fit_run(inv: crate::args::FitRunInvocation) {
             failures.len(), failures.join("\n  ")));
     }
     crate::bindings::write(&out, &bindings, &store, &invocation);
-}
-
-/// The skipped removed-flag fields, which the split does not carry; the
-/// refusal above has already answered every one that was given.
-struct RemovedFlags;
-
-impl RemovedFlags {
-    fn of(_a: &crate::args::FitRunArgs) -> Self {
-        RemovedFlags
-    }
-
-    fn into_args(self) -> crate::args::FitRunArgs {
-        crate::args::FitRunArgs {
-            config: PathBuf::new(),
-            problem: Default::default(),
-            run: Default::default(),
-            method: Default::default(),
-            allow_nonconverged_source: false,
-            parallel: 0,
-            force: false,
-            label: None,
-            store: None,
-            manifest: None,
-            link_root: None,
-            _removed_stage: None,
-            _removed_init: None,
-            _removed_posterior: None,
-            _removed_mle: None,
-            _removed_params: None,
-            _removed_survey_path: None,
-            _removed_survey_top_k: None,
-            _removed_allow_nonconverged_scout: false,
-            _removed_init_method: None,
-            _removed_starts_from: None,
-            _removed_tempering: None,
-            _removed_rho: None,
-        }
-    }
 }
 
 /// What one `fit run` computes with, past its resolution.

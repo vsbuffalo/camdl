@@ -17,16 +17,6 @@
 use crate::args::{FixedPointFlags, PosteriorFlags, PredictArgs, PredictFlags, PredictInvocation};
 use crate::out::Out;
 
-/// The refusal of `camdl fit predict`, which `camdl predict` replaced.
-pub(crate) fn refuse_fit_predict() {
-    Out::new(false).fail(
-        "error: `camdl fit predict` has been removed. A prediction is made from a stored fit run by \
-         `camdl predict @run`, where `@run` is the run's @label, a run-id prefix or its folder; \
-         every other flag keeps its meaning (`camdl predict --help`)."
-            .to_string(),
-    );
-}
-
 /// Refuse a flag of one source's group given with the other source: the
 /// posterior flags name a fit's chains or read its held-out rows, and the
 /// fixed-point flags give what a stored fit problem already holds.
@@ -62,11 +52,6 @@ pub(crate) fn refuse_other_source_flags(args: &PredictArgs) -> Result<(), String
 /// `camdl predict RUN|MODEL`.
 pub(crate) fn cmd_predict(inv: PredictInvocation) {
     let out = Out::new(false);
-    if let Some(fit) = inv.args._removed_fit.as_deref() {
-        out.fail(format!(
-            "error: --fit has been removed; the run is the positional argument: `camdl predict {fit}`."
-        ));
-    }
     if let Err(e) = refuse_other_source_flags(&inv.args) {
         out.fail(format!("error: {e}"));
     }
@@ -147,7 +132,6 @@ pub(crate) fn cmd_predict(inv: PredictInvocation) {
             allow_degenerate_rates,
             time_format,
         },
-        _removed_fit: None,
     };
     if let Some(dir) = &output {
         if let Err(e) = crate::util::refuse_missing_export_dir("-o", dir) {
