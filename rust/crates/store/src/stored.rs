@@ -186,6 +186,7 @@ pub struct Located {
     upstream: Option<Key>,
     parent: Option<Key>,
     files: BTreeMap<String, FileEntry>,
+    deps: Vec<DepInfo>,
 }
 
 impl Store {
@@ -205,7 +206,7 @@ impl Store {
         let parent = ident.parent.as_ref().map(|p| p.run_id);
         match crate::storage::folder_state(&dir, &run_id, &self.inner.kinds) {
             crate::storage::State::Completed { dir, run } => {
-                Ok(Located { run_id, kind: ident.kind, dir, upstream, parent, files: run.files })
+                Ok(Located { run_id, kind: ident.kind, dir, upstream, parent, files: run.files, deps: run.deps })
             }
             crate::storage::State::Damaged { what, .. } => Err(Error::Damaged { run_id, what }),
             crate::storage::State::Failed { .. } => Err(Error::NotCompleted { run_id, status: "failed" }),
@@ -316,6 +317,11 @@ impl Located {
     /// (a prediction inside its fit run); `None` for a top-level result.
     pub fn parent(&self) -> Option<Key> {
         self.parent
+    }
+
+    /// The dependencies its identity holds, as recorded.
+    pub fn deps(&self) -> &[DepInfo] {
+        &self.deps
     }
 
     /// Every result file, by stored name, with its digest and size.

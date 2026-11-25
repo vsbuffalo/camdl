@@ -2255,8 +2255,8 @@ pub(crate) fn repose(
             // not the run's latest: another file may have been fitted to the
             // same run since.
             let handle = store::Handle::IdPrefix(stored.id().key().to_hex());
-            let shown = crate::camdl_store::recorded_presentation(store, &handle, &fit.fit.model);
-            crate::fit_store::record_presentation(store, info, &fit.fit.model, shown, &fit.model_name())?;
+            let shown = crate::camdl_store::shown_for(store, &handle, stored.id().key(), fit.fit.model.id().key());
+            crate::fit_store::record_presentation(store, info, &fit.fit.model, &shown, &fit.model_name())?;
             let spec = fit.config.problem.data_spec().map_err(|e| format!("the fit binds no data: {e}"))?;
             let (model, _) = crate::util::load_ir(&fit.model_ir.to_string_lossy())?;
             conditioned = crate::fit::stream_bindings::StreamBindings::resolve(&model, spec)?
@@ -2278,11 +2278,9 @@ pub(crate) fn repose(
                 .unwrap_or_else(|| "model".to_string());
             let mut envelope = crate::fit_store::stored_envelope(store, model, &name)?;
             let handle = store::Handle::IdPrefix(stored.id().key().to_hex());
-            crate::camdl_store::present(store, &handle, model, &mut envelope);
-            let reposed = match crate::camdl_store::recorded_presentation(store, &handle, model) {
-                Some(hex) => crate::camdl_store::Presentation::Stored(hex),
-                None => crate::camdl_store::Presentation::Unknown,
-            };
+            let shown = crate::camdl_store::shown_for(store, &handle, stored.id().key(), model.id().key());
+            shown.restore(&handle, &mut envelope);
+            let reposed = shown.presentation();
             if let Some(q) = &id.quantities {
                 let qs: store::Stored<crate::camdl_store::Quantities> = store
                     .get(q.id())

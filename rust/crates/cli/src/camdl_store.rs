@@ -680,7 +680,7 @@ impl ContentArtifact for DataTable {
 }
 
 pub(crate) mod presentation;
-pub(crate) use presentation::{present, put_compiled, recorded_presentation, Presentation, ModelPresentation, PresentationIdentity, Rendered};
+pub(crate) use presentation::{put_compiled, shown_for, Presentation, ModelPresentation, PresentationIdentity, Rendered, Shown};
 
 #[cfg(test)]
 mod tests;

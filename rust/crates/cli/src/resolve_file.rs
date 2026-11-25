@@ -528,35 +528,62 @@ fn is_primary(located: &Located) -> bool {
         && located.kind() != <crate::fit_store::FitProblem as store::Artifact>::KIND
 }
 
-/// For a run id, a prefix or a folder and a name qualified by
-/// `model_presentation` (`model_presentation:render`), `cands` with the
-/// presentation of the model the result ran added last
-/// ([`crate::camdl_store::presentation::presentation_of`]); for a label
-/// whose invocation compiled nothing, the presentation its compiled-model
-/// entries name. A manifest, and a label whose invocation compiled the model,
-/// list the presentation among their results already, and an unqualified
-/// name is looked up among the result and its by-products alone.
+/// For a handle and a name qualified by `model_presentation`
+/// (`model_presentation:render`), `cands` with the presentation of the model
+/// the named result ran added last, as [`crate::camdl_store::shown_for`]
+/// finds it. A label whose invocation stored the presentation lists it among
+/// its results already, and so does a manifest. An unqualified name is
+/// looked up among the result and its by-products alone.
 fn with_presentation(store: &Store, source: &Source, name: &str, mut cands: Candidates) -> Result<Candidates, FileRefusal> {
+    use crate::camdl_store::presentation::{shown_for, Shown};
     let kind = <crate::camdl_store::ModelPresentation as store::Artifact>::KIND;
     let qualified = name.split_once(':').is_some_and(|(k, _)| k == kind);
     let Source::Handle(handle) = source else { return Ok(cands) };
     if !qualified || cands.found.iter().any(|c| c.located.kind() == kind) {
         return Ok(cands);
     }
-    let named = match handle {
-        Handle::Label { .. } => store.invocation(handle).ok().as_ref().and_then(crate::camdl_store::presentation::named_by),
-        _ => {
-            let Some(id) = store.locate_handle(handle).ok().map(|l| l.run_id()) else { return Ok(cands) };
-            crate::camdl_store::presentation::presentation_of(store, id)
+    let Some((result, model)) = named_result(store, handle, &cands) else { return Ok(cands) };
+    match shown_for(store, handle, result, model) {
+        Shown::Recorded { presentation, .. } => {
+            let key = presentation.id().key();
+            match store.locate(key) {
+                Ok(located) => cands.found.push(Candidate::new(located, serde_json::Value::Null, None)?),
+                Err(e) => cands.unavailable.push(Unavailable { kind: kind.to_string(), run_id: key, why: e.to_string() }),
+            }
         }
-    };
-    if let Some(key) = named {
-        match store.locate(key) {
-            Ok(located) => cands.found.push(Candidate::new(located, serde_json::Value::Null, None)?),
-            Err(e) => cands.unavailable.push(Unavailable { kind: kind.to_string(), run_id: key, why: e.to_string() }),
+        Shown::Unreadable { run_id, why } => {
+            if let Ok(key) = Key::from_hex(&run_id) {
+                cands.unavailable.push(Unavailable { kind: kind.to_string(), run_id: key, why });
+            }
         }
+        Shown::NotRecorded => {}
     }
     Ok(cands)
+}
+
+/// The result `handle` names and the compiled model it ran, by run id: for
+/// a label, its invocation's primary results, which must all have run one
+/// model; for a run id, a prefix or a folder, that result. `None` when there
+/// is no such result or model.
+fn named_result(
+    store: &Store,
+    handle: &Handle,
+    cands: &Candidates,
+) -> Option<(Key, Key)> {
+    match handle {
+        Handle::Label { .. } => {
+            let primary: Vec<&Located> = cands.found.iter().map(|c| &c.located).filter(|l| is_primary(l)).collect();
+            let models: BTreeSet<Key> = primary.iter().filter_map(|l| crate::camdl_store::presentation::model_of(store, l)).collect();
+            match (primary.first(), &models.into_iter().collect::<Vec<_>>()[..]) {
+                (Some(first), [model]) => Some((first.run_id(), *model)),
+                _ => None,
+            }
+        }
+        _ => {
+            let located = store.locate_handle(handle).ok()?;
+            crate::camdl_store::presentation::model_of(store, &located).map(|m| (located.run_id(), m))
+        }
+    }
 }
 
 /// The stored file `name` names among the results `source` and `narrow`

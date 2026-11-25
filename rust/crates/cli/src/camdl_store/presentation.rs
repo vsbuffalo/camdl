@@ -10,8 +10,17 @@
 //! model, whose labels in that command's invocation record name the
 //! presentation ([`put_compiled`]). Two files that differ only in their
 //! comments thus share one compiled model, and each invocation names its own
-//! presentation. A reader finds a result's presentation through the
-//! invocation that names the result ([`model_presentation`]). The design is
+//! presentation. A command that stores a result read from a stored one, such
+//! as a prediction from a stored fit, compiles nothing; it lists the stored
+//! compiled model in its own record with the presentation the result's
+//! invocation named ([`link_presentation`]). So every invocation that lists
+//! a result of a model names the model's presentation.
+//!
+//! A reader finds a result's presentation by one rule ([`shown_for`]): the
+//! invocation its handle names (for `@label`, that invocation; for a run id
+//! or a folder, the latest that listed the result), and in it the entry for
+//! the result's compiled model ([`model_of`]). No other invocation is read,
+//! so a record that names none gives [`Shown::NotRecorded`]. The design is
 //! `docs/dev/proposals/2026-11-24-model-presentation.md`.
 
 use std::path::Path;
@@ -250,90 +259,122 @@ fn presentation_run_id(
     })
 }
 
-/// The run id (hex) of the presentation the invocation `handle` names
-/// recorded for the compiled model `model`: for `@label`, that invocation;
-/// for an id or a folder, the latest invocation that listed the result. When
-/// that invocation did not compile `model` (a prediction from a stored fit),
-/// the latest invocation that compiled it answers. `None` when no invocation
-/// recorded one. Nothing is read from the presentation.
-pub(crate) fn recorded_presentation(store: &Store, handle: &Handle, model: &Dep<CompiledModel>) -> Option<String> {
+/// The presentation an invocation recorded for the model of a stored result,
+/// as [`shown_for`] finds it.
+pub(crate) enum Shown {
+    /// The presentation the chosen invocation names, read.
+    Recorded { presentation: Stored<ModelPresentation> },
+    /// The chosen invocation names no presentation for the result's model:
+    /// its record lists the model without one, or does not list the model.
+    NotRecorded,
+    /// The chosen invocation names a presentation that cannot be read.
+    Unreadable { run_id: String, why: String },
+}
+
+/// The presentation of the model `model` (a compiled model's run id) that
+/// the invocation `handle` names recorded for the stored result `result`:
+///
+/// - for `@label`, the invocation the label names;
+/// - for a run id, a prefix or a folder, the latest invocation that listed
+///   `result`;
+///
+/// and within that invocation, the entry for `model`. No other invocation is
+/// read for the presentation: an invocation that names none gives
+/// [`Shown::NotRecorded`].
+pub(crate) fn shown_for(store: &Store, handle: &Handle, result: store::Key, model: store::Key) -> Shown {
     let recorded = |inv: &store::Invocation| -> Option<String> {
-        let labels = inv.labels_of(<CompiledModel as Artifact>::KIND, model.id().key())?;
+        let labels = inv.labels_of(<CompiledModel as Artifact>::KIND, model)?;
         serde_json::from_value::<ModelLabels>(labels).ok()?.presentation
     };
-    store
-        .invocation(handle)
-        .ok()
-        .as_ref()
-        .and_then(recorded)
-        .or_else(|| store.invocation(&Handle::IdPrefix(model.id().key().to_hex())).ok().as_ref().and_then(recorded))
-}
-
-/// The stored presentation [`recorded_presentation`] names, read.
-fn model_presentation(
-    store: &Store,
-    handle: &Handle,
-    model: &Dep<CompiledModel>,
-) -> Result<Option<Stored<ModelPresentation>>, String> {
-    let Some(hex) = recorded_presentation(store, handle, model) else { return Ok(None) };
-    store
-        .resolve(&RunRef::new(Handle::IdPrefix(hex.clone())))
-        .map(Some)
-        .map_err(|e| format!("the model's presentation {}: {e}", &hex[..12.min(hex.len())]))
-}
-
-/// Restores into `envelope` the description and documentation of the
-/// presentation that `handle` names for `model` ([`model_presentation`]).
-/// No result depends on a presentation, so one that cannot be read leaves
-/// the envelope without them and is reported as a warning; the command goes
-/// on.
-pub(crate) fn present(store: &Store, handle: &Handle, model: &Dep<CompiledModel>, envelope: &mut ir::IrEnvelope) {
-    let read = || -> Result<Option<PresentedDocs>, String> {
-        let Some(shown) = model_presentation(store, handle, model)? else { return Ok(None) };
-        let bytes = super::read_stored(&shown, DOCS)?;
-        serde_json::from_slice(&bytes).map(Some).map_err(|e| format!("{DOCS}: {e}"))
-    };
-    match read() {
-        Ok(Some(docs)) => {
-            envelope.model.description = docs.description;
-            envelope.docs = docs.docs;
+    let chosen = match handle {
+        Handle::Label { .. } => store.invocation(handle).ok(),
+        Handle::IdPrefix(_) | Handle::Path(_) => {
+            store.invocations().into_iter().rev().find(|inv| inv.entries().iter().any(|(_, k, _)| *k == result))
         }
-        Ok(None) => {}
-        Err(e) => crate::out::live().notice(&crate::out::notice::Notice {
+    };
+    let Some(hex) = chosen.as_ref().and_then(recorded) else { return Shown::NotRecorded };
+    match store.resolve::<ModelPresentation>(&RunRef::new(Handle::IdPrefix(hex.clone()))) {
+        Ok(presentation) => Shown::Recorded { presentation },
+        Err(e) => Shown::Unreadable { run_id: hex, why: e.to_string() },
+    }
+}
+
+impl Shown {
+    /// The run id (hex) of the recorded presentation, read or not.
+    pub fn run_id(&self) -> Option<String> {
+        match self {
+            Shown::Recorded { presentation, .. } => Some(presentation.id().key().to_hex()),
+            Shown::Unreadable { run_id, .. } => Some(run_id.clone()),
+            Shown::NotRecorded => None,
+        }
+    }
+
+    /// The presentation this records, as a compile camdl writes itself from
+    /// the stored result is stored with.
+    pub fn presentation(&self) -> Presentation {
+        match self.run_id() {
+            Some(hex) => Presentation::Stored(hex),
+            None => Presentation::Unknown,
+        }
+    }
+
+    /// Restores into `envelope` the description and the documentation of
+    /// the recorded presentation. No result depends on a presentation, so
+    /// one that cannot be read leaves the envelope without them and is
+    /// reported as a warning naming `handle`; the command goes on.
+    pub fn restore(&self, handle: &Handle, envelope: &mut ir::IrEnvelope) {
+        let read = |presentation: &Stored<ModelPresentation>| -> Result<PresentedDocs, String> {
+            let bytes = super::read_stored(presentation, DOCS)?;
+            serde_json::from_slice(&bytes).map_err(|e| format!("{DOCS}: {e}"))
+        };
+        let unreadable = match self {
+            Shown::Recorded { presentation, .. } => match read(presentation) {
+                Ok(docs) => {
+                    envelope.model.description = docs.description;
+                    envelope.docs = docs.docs;
+                    return;
+                }
+                Err(e) => format!("{}: {e}", presentation.id().key().short12()),
+            },
+            Shown::Unreadable { run_id, why } => format!("{}: {why}", &run_id[..12.min(run_id.len())]),
+            Shown::NotRecorded => return,
+        };
+        crate::out::live().notice(&crate::out::notice::Notice {
             severity: crate::out::notice::Severity::Warning,
             code: "model-presentation-unreadable",
-            message: format!("{handle}: the model's documentation is not shown, since its stored presentation cannot be read: {e}"),
-        }),
+            message: format!(
+                "{handle}: the model's documentation is not shown, since its stored presentation cannot be read: \
+                 the model's presentation {unreadable}"
+            ),
+        });
     }
 }
 
-/// The presentation of the model the stored result `run_id` ran: the one the
-/// compiled-model entries name in the latest invocation that listed the
-/// result and whose compiled-model entries name exactly one; otherwise, the
-/// same for the result's upstream (a prediction from a stored fit compiles
-/// nothing itself). `None` when no such invocation exists.
-pub(crate) fn presentation_of(store: &Store, run_id: store::Key) -> Option<store::Key> {
-    let invocations = store.invocations();
-    let mut at = Some(run_id);
-    while let Some(id) = at {
-        let named = invocations.iter().rev().filter(|inv| inv.entries().iter().any(|(_, k, _)| *k == id)).find_map(named_by);
-        if named.is_some() {
-            return named;
+/// The compiled model the stored result `located` was computed from: a
+/// compiled model among its dependencies, else among theirs, nearest first,
+/// then the same for the result it sits in. Itself, for a compiled model.
+/// `None` when no such dependency is stored.
+pub(crate) fn model_of(store: &Store, located: &store::Located) -> Option<store::Key> {
+    let kind = <CompiledModel as Artifact>::KIND;
+    if located.kind() == kind {
+        return Some(located.run_id());
+    }
+    let mut seen = std::collections::BTreeSet::from([located.run_id()]);
+    let mut queue: std::collections::VecDeque<store::Located> = std::collections::VecDeque::from([located.clone()]);
+    while let Some(at) = queue.pop_front() {
+        if let Some(dep) = at.deps().iter().find(|d| d.kind == kind) {
+            return Some(dep.run_id);
         }
-        at = store.upstream_of(id).ok().flatten();
+        let next = at.deps().iter().map(|d| d.run_id).chain(at.parent());
+        for key in next {
+            if seen.insert(key) {
+                if let Ok(l) = store.locate(key) {
+                    queue.push_back(l);
+                }
+            }
+        }
     }
     None
-}
-
-/// The one presentation the compiled-model entries of `inv` name; `None`
-/// when they name none or several.
-pub(crate) fn named_by(inv: &store::Invocation) -> Option<store::Key> {
-    let shown: std::collections::BTreeSet<String> =
-        inv.members::<CompiledModel>().ok()?.into_iter().filter_map(|(_, labels)| labels.presentation).collect();
-    match shown.len() {
-        1 => shown.into_iter().next().and_then(|hex| store::Key::from_hex(&hex).ok()),
-        _ => None,
-    }
 }
 
 /// Records in this invocation that the stored compiled model `model` was
@@ -359,3 +400,6 @@ pub(crate) fn link_presentation(
         .list::<CompiledModel>(model.id(), &ModelLabels { presentation, ..labels }, info)
         .map_err(|e| format!("the compiled model {}: {e}", model.id().key().short12()))
 }
+
+#[cfg(test)]
+mod tests;

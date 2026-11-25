@@ -254,7 +254,7 @@ fn a_reader_is_given_the_documentation_of_its_own_model_file() {
     assert_eq!(deps[0].id(), deps[1].id(), "a doc comment does not change the compiled model");
     let doc = |handle: Handle| {
         let mut envelope = stored_envelope(&o.store, &deps[0], "model").unwrap();
-        crate::camdl_store::present(&o.store, &handle, &deps[0], &mut envelope);
+        crate::camdl_store::shown_for(&o.store, &handle, deps[0].id().key(), deps[0].id().key()).restore(&handle, &mut envelope);
         envelope.docs.parameters["beta"].text.clone().unwrap()
     };
     assert_eq!(doc(Handle::IdPrefix(deps[0].id().key().to_hex())), "the second doc");
