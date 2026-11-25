@@ -1250,9 +1250,9 @@ pub fn print_preflight(
         "\ncooling: cf50={:.2}, reached at iter {} (target), over a {}-iteration run × {} observed times",
         frac, target_iters, iters, n_obs
     ));
-    out.say(format_args!("  iter {:3}: rw_sd at {:.1}%", 1, rw_at(1) * 100.0));
-    out.say(format_args!("  iter {:3}: rw_sd at {:.1}% (cf50 reached)", target_iters, rw_at(target_iters) * 100.0));
-    out.say(format_args!("  iter {:3}: rw_sd at {:.1}% (run end)", iters, rw_at(iters) * 100.0));
+    out.say(format_args!("  iter {:3}: step at {:.1}%", 1, rw_at(1) * 100.0));
+    out.say(format_args!("  iter {:3}: step at {:.1}% (cf50 reached)", target_iters, rw_at(target_iters) * 100.0));
+    out.say(format_args!("  iter {:3}: step at {:.1}% (run end)", iters, rw_at(iters) * 100.0));
 
     // Warn if cooling exhausts well before the run ends
     let two_thirds = (iters * 2 / 3).max(1);
@@ -1528,7 +1528,7 @@ pub fn if2_steps(
         }
         let sd = ZSd::new(s.z_sd).map_err(|e| format!(
             "`{}`: its IF2 random-walk step in the transformed coordinate is {e}. Give a \
-             positive rw_sd.", p.name))?;
+             positive `sd` in [method.perturbation].", p.name))?;
         Ok(If2Step::Single(sim::inference::if2::Perturbation { sd, at: s.at }))
     }).collect()
 }

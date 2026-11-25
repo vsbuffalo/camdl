@@ -2029,7 +2029,7 @@ mod tests {
                 .into_iter().collect();
         let block = plain_formatter().gate_verdict_block(&If2Record::from_state(&state));
         assert!(block.contains("max Â = 16.500 (I0)"), "{block}");
-        assert!(block.contains("dynamics only (without perturb_only_at_t0): ✓"), "{block}");
+        assert!(block.contains("dynamics only (without the initial-state parameters): ✓"), "{block}");
         assert!(block.contains("FAIL"), "{block}");
     }
 

@@ -104,8 +104,8 @@ const PREQUENTIAL_STREAMS: [Column; 11] = [
 /// The files every method stores.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum CommonFile {
-    /// `method.toml`: the run's merged `[method]` and its `[estimate]`
-    /// perturbation keys.
+    /// `method.toml`: the run's merged `[method]`, with its resolved step
+    /// tables.
     Method,
     /// `summary.json`: the run's fit summary.
     Summary,
@@ -160,7 +160,7 @@ impl ResultFile for CommonFile {
     }
     fn about(&self) -> &'static str {
         match self {
-            CommonFile::Method => "The run's `[method]` table as merged, with its perturbation keys.",
+            CommonFile::Method => "The run's `[method]` table as merged, with its resolved step tables.",
             CommonFile::Summary => "`camdl.fit-run-summary/v1`: the run's fit summary, without times, paths or a baseline.",
             CommonFile::StartsInput(_) => "A starts file named directly, as read.",
             CommonFile::FitConfig => "The fit configuration file as given.",

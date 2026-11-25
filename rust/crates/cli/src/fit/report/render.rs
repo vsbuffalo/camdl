@@ -788,7 +788,7 @@ pub(crate) fn if2_gate_section(state: &If2Record) -> Vec<Line> {
     if !assessed.perturb_only_at_t0.is_empty() {
         let dynamics = if assessed.dynamics_a_passes(&gate) { "✓" } else { "✗" };
         out.push(indented("    ",
-            format!("dynamics only (without perturb_only_at_t0): {dynamics}"), Style::Dim));
+            format!("dynamics only (without the initial-state parameters): {dynamics}"), Style::Dim));
     }
 
     match assessed.spread {

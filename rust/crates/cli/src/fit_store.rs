@@ -580,7 +580,7 @@ pub(crate) const RECOVERY_TABLE_FILE: &str = "synthetic.toml";
 /// The stored problem's files.
 pub(crate) const PROBLEM_FILE: &str = "problem.toml";
 pub(crate) const PARTITION_FILE: &str = "partition.json";
-/// The run's merged `[method]` and its `[estimate]` perturbation keys.
+/// The run's merged `[method]`, with its resolved step tables.
 pub(crate) const METHOD_FILE: &str = "method.toml";
 
 pub(crate) fn training_file(source: &str, ext: &str) -> String {

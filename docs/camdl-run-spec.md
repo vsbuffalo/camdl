@@ -1772,7 +1772,7 @@ ended, as `chain_starts.tsv` records it: `accepted` (ran to the end), `skipped`
 (ran and was dropped, IF2) or `refused` (never ran). Contract version 1.
 
 - `method`: `method.toml`, TOML (every method). The run's `[method]` table as
-  merged, with its perturbation keys.
+  merged, with its resolved step tables.
 - `summary`: `summary.json`, JSON (every method). `camdl.fit-run-summary/v1`:
   the run's fit summary, without times, paths or a baseline.
 - `inputs/starts`: `inputs/starts.<ext>`, TSV (a starts file named directly). A
