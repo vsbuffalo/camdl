@@ -67,6 +67,13 @@ fn tempdir(tag: &str) -> Tmp {
 /// A closed SIR with the extra parameter lines `params` spliced into the
 /// `parameters` block. `beta` and `gamma` are held by every fit.
 fn model_src(params: &str) -> String {
+    model_src_observing(params, "projected")
+}
+
+/// [`model_src`] with `rate` as the Poisson rate of the observations, so a
+/// spliced parameter can enter the likelihood. IF2 and the `nl-*`
+/// optimizers refuse an estimated parameter that does not.
+fn model_src_observing(params: &str, rate: &str) -> String {
     format!(
         r#"time_unit = 'days
 compartments {{ S, I, R }}
@@ -84,7 +91,7 @@ observations {{
     columns       {{ time : time, cases : count }}
     projected  = I
     emit_schedule = every 1 'days
-    cases ~ poisson(rate = projected)
+    cases ~ poisson(rate = {rate})
   }}
 }}
 init {{ S = 990  I = 10 }}
@@ -113,10 +120,15 @@ const IF2: &str = "algorithm = \"if2\"\nbackend = \"chain_binomial\"\nchains = 2
 /// Write a fit toml estimating `estimate` (one or more `name = {...}` lines)
 /// under `method`, run it, and return the output and the results directory.
 fn run_fit(dir: &Path, ir: &Path, estimate: &str, method: &str, tag: &str) -> (Output, PathBuf) {
+    run_fit_holding(dir, ir, estimate, "", method, tag)
+}
+
+/// [`run_fit`], with the `[fixed]` lines `held` beside `beta` and `gamma`.
+fn run_fit_holding(dir: &Path, ir: &Path, estimate: &str, held: &str, method: &str, tag: &str) -> (Output, PathBuf) {
     let results = dir.join(format!("results_{tag}"));
     let toml = format!(
         "store = \"{out}\"\n[model]\ncamdl = \"{ir}\"\n[data.observations]\ncases = \"{data}\"\n\
-         [estimate]\n{estimate}\n[fixed]\nbeta = 0.3\ngamma = 0.25\n[method]\n{method}\n",
+         [estimate]\n{estimate}\n[fixed]\nbeta = 0.3\ngamma = 0.25\n{held}\n[method]\n{method}\n",
         out = results.file_name().unwrap().to_string_lossy(),
         ir = ir.file_name().unwrap().to_string_lossy(),
         data = "cases.tsv",
@@ -187,6 +199,8 @@ fn assert_inside(vals: &[f64], lo: f64, hi: f64, what: &str) {
 }
 
 const C_REAL: &str = "  c : real ~ normal(mu = 0.0, sigma = 1.0)";
+/// An observation rate that reads `c`, for the fits under IF2 and `nl-*`.
+const C_OBSERVED: &str = "projected * exp(0.01 * c)";
 
 #[test]
 fn a_transform_key_in_estimate_is_refused_at_load() {
@@ -269,7 +283,7 @@ fn prior_drawn_starts_lie_inside_the_box() {
         return;
     }
     let tmp = tempdir("starts");
-    let ir = compile(&tmp.0, "ident", &model_src(C_REAL));
+    let ir = compile(&tmp.0, "ident", &model_src_observing(C_REAL, C_OBSERVED));
     let est = "c = { bounds = [0, 1] }";
     let pmmh = "algorithm = \"pmmh\"\nbackend = \"chain_binomial\"\nchains = 8\nparticles = 10\n\
                 iterations = 20\nburn_in = 2\nstarts = \"from_prior\"";
@@ -306,8 +320,13 @@ fn hierarchical_leaf_box_that_cuts_the_prior_is_refused() {
         assert!(err.contains("Widen the bounds to the prior's support, or remove the hierarchical prior"), "{tag}: {err}");
         assert!(find_all(&results, "draws.tsv").is_empty(), "{tag}: refused before sampling");
     }
-    // IF2 reads no prior: the missing constant cannot bias it.
-    let (out, _) = run_fit(&tmp.0, &ir, est, IF2, "if2");
+    // IF2 reads no prior: the missing constant cannot bias it, and the
+    // boxed leaves run. IF2 estimates only parameters the likelihood
+    // reads, so the leaves enter the observations and `mu` is held.
+    let observed = compile(&tmp.0, "hier_observed",
+        &model_src_observing(HIER, "projected * exp(0.01 * (a1 + a2))"));
+    let leaves = "a1 = { bounds = [1, 2], start = 1.5 }\na2 = { bounds = [1, 2], start = 1.5 }";
+    let (out, _) = run_fit_holding(&tmp.0, &observed, leaves, "mu = 0.0", IF2, "if2");
     assert!(out.status.success(), "if2 must run; stderr=\n{}", stderr(&out));
 
     // Control: leaves with no box (an unconstrained `real` with no bounds has
@@ -525,7 +544,7 @@ fn a_start_on_a_bound_is_refused_by_the_transformed_samplers_only() {
         return;
     }
     let tmp = tempdir("edge_refusal");
-    let ir = compile(&tmp.0, "edge", &model_src(C_REAL));
+    let ir = compile(&tmp.0, "edge", &model_src_observing(C_REAL, C_OBSERVED));
     let est = "c = { bounds = [0, 1], start = 0.0 }";
     let nl = "algorithm = \"nl-sbplx\"\nbackend = \"ode\"\nchains = 1\nmax_evals = 20\nstarts = \"single\"\n[method.dt_check]\nenabled = false";
     let if2 = format!("{IF2}\nstarts = \"single\"");

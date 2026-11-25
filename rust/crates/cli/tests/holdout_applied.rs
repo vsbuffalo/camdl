@@ -92,6 +92,10 @@ particles  = 50
 iterations = 1
 cooling    = 0.5
 
+# I0 sets only the initial state, so IF2 perturbs it at t = 0 only.
+[method.perturbation]
+I0 = {{ initial_state = true }}
+
 [config]
 dt = 1.0
 "#, ir = golden_ir().canonicalize().unwrap().display())).unwrap();
@@ -304,6 +308,10 @@ particles  = 50
 iterations = 1
 cooling    = 0.5
 
+# I0 sets only the initial state, so IF2 perturbs it at t = 0 only.
+[method.perturbation]
+I0 = {{ initial_state = true }}
+
 [config]
 dt = 1.0
 "#, ir = golden_ir().canonicalize().unwrap().display());
@@ -391,6 +399,10 @@ chains     = 1
 particles  = 50
 iterations = 1
 cooling    = 0.5
+
+# I0 sets only the initial state, so IF2 perturbs it at t = 0 only.
+[method.perturbation]
+I0 = {{ initial_state = true }}
 
 [config]
 dt = 1.0
