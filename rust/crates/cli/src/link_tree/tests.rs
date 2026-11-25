@@ -114,22 +114,37 @@ fn a_directory_recorded_for_another_label_is_refused_naming_both() {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir(root.path().join("sims")).unwrap();
     write_dir(&root.path().join("sims"), "up", &up).unwrap();
-    let e = LinkTree::claim(root.path(), Some("up")).unwrap_err();
+    let e = LinkTree::claim(root.path(), Some(&label("up"))).unwrap_err();
     assert!(e.contains("`Up`"), "{e}");
     assert!(root.path().join("sims/up/traj.tsv").symlink_metadata().is_ok(), "the refused directory is put back");
     let names: Vec<_> = std::fs::read_dir(root.path().join("sims")).unwrap().flatten().map(|e| e.file_name()).collect();
     assert_eq!(names, vec![std::ffi::OsString::from("up")], "no directory is left aside");
 }
 
+fn label(s: &str) -> store::Label {
+    store::Label::parse(s).unwrap()
+}
+
+/// The longest label the store accepts names a link directory, and its
+/// temporary names fit the 255 bytes a file name can have.
 #[test]
-fn a_label_too_long_for_a_temporary_name_is_refused() {
+fn the_longest_label_has_temporary_names_that_fit() {
     let root = tempfile::tempdir().unwrap();
-    let long = "a".repeat(LABEL_MAX + 1);
-    let e = LinkTree::claim(root.path(), Some(&long)).unwrap_err();
-    assert!(e.contains("too long"), "{e}");
-    assert!(LinkTree::claim(root.path(), Some(&"a".repeat(LABEL_MAX))).is_ok());
-    // The longest label's temporary name fits.
-    assert!(format!(".{}.camdl-new.{}", "a".repeat(LABEL_MAX), temporary_tag()).len() <= NAME_MAX);
+    let longest = "a".repeat(64);
+    assert!(store::Label::parse(&format!("{longest}a")).is_err(), "the store's limit moved; check the bound below");
+    LinkTree::claim(root.path(), Some(&label(&longest))).unwrap();
+    for kind in [".camdl-new.", ".camdl-old."] {
+        assert!(format!(".{longest}{kind}{}", temporary_tag()).len() <= 255);
+    }
+}
+
+/// A label the store accepts that begins with `.` would name a hidden
+/// directory, and is refused.
+#[test]
+fn a_label_beginning_with_a_dot_is_refused() {
+    let root = tempfile::tempdir().unwrap();
+    let e = LinkTree::claim(root.path(), Some(&label(".x"))).unwrap_err();
+    assert!(e.contains("must not begin with `.`"), "{e}");
 }
 
 /// The temporary directories of a process that is no longer running are
@@ -149,14 +164,14 @@ fn a_killed_commands_temporary_directories_are_removed() {
     std::fs::create_dir(sims.join(format!(".x.camdl-old.{dead}.2"))).unwrap();
     let live = format!(".x.camdl-new.{}.3", std::process::id());
     std::fs::create_dir(sims.join(&live)).unwrap();
-    LinkTree::claim(root.path(), Some("x")).unwrap();
+    LinkTree::claim(root.path(), Some(&label("x"))).unwrap();
     let names: Vec<String> = std::fs::read_dir(&sims).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
     assert_eq!(names, vec![live], "only a running process's directory is left");
 
     let foreign = sims.join(format!(".x.camdl-old.{dead}.4"));
     std::fs::create_dir(&foreign).unwrap();
     std::fs::write(foreign.join("mine"), "keep").unwrap();
-    let e = LinkTree::claim(root.path(), Some("x")).unwrap_err();
+    let e = LinkTree::claim(root.path(), Some(&label("x"))).unwrap_err();
     assert!(e.contains("mine"), "{e}");
     assert_eq!(std::fs::read(foreign.join("mine")).unwrap(), b"keep");
 }

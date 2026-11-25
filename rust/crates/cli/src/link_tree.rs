@@ -104,17 +104,6 @@ fn link_name(logical: &str, stored: &str) -> String {
     }
 }
 
-/// The longest name a directory entry can have on Linux and macOS, in bytes.
-const NAME_MAX: usize = 255;
-
-/// The bytes a link directory's temporary name adds to its name: a leading
-/// `.`, then `.camdl-new.`, a process id of up to 10 digits, `.` and a time
-/// of up to 20 digits, with room to spare.
-const TEMPORARY_SUFFIX: usize = 48;
-
-/// The longest label that can name a link directory, in bytes.
-const LABEL_MAX: usize = NAME_MAX - TEMPORARY_SUFFIX;
-
 /// The record a link directory holds: the name camdl gave the directory (the
 /// label, or the run id's digits), and each link camdl wrote in it, by its
 /// path relative to the directory, with the target as written. The name is
@@ -146,15 +135,19 @@ struct LinkDir {
 
 impl LinkTree {
     /// Claims the links of `label` under `root`, an absolute path: refuses a
-    /// root that is not a directory, a label that cannot name a directory,
-    /// and anything at one of the label's link directories that camdl did
+    /// root that is not a directory, a label beginning with `.`, and anything at one of the label's link directories that camdl did
     /// not write, then removes every link directory of the label, and the
     /// temporary directories of the label that a killed command left. Each
     /// directory is renamed aside before it is checked, so what is checked is
     /// what is removed; nothing is removed unless every one passes. A command
     /// with no label names its results' directories by run id, and has none
     /// to remove before it runs.
-    pub(crate) fn claim(root: &Path, label: Option<&str>) -> Result<LinkTree, String> {
+    ///
+    /// A [`store::Label`] is one to 64 ASCII characters with no `/`, so every
+    /// other label names a directory, and its temporary names (`label` plus at
+    /// most 48 bytes) fit the 255 bytes a file name can have on Linux and
+    /// macOS.
+    pub(crate) fn claim(root: &Path, label: Option<&store::Label>) -> Result<LinkTree, String> {
         let shown = root.display();
         let refuse = |e: String| format!("--link-root {shown}: {e}");
         if !cfg!(unix) {
@@ -163,17 +156,11 @@ impl LinkTree {
         if root.symlink_metadata().is_ok() && !root.is_dir() {
             return Err(refuse("is not a directory".into()));
         }
-        if let Some(l) = label {
-            if l.is_empty() || l.starts_with('.') || l.contains(['/', '\0']) {
+        if let Some(l) = label.map(store::Label::as_str) {
+            if l.starts_with('.') {
                 return Err(refuse(format!(
                     "the label `{l}` names its link directories, and is not a directory name: \
-                     it must be non-empty, not begin with `.`, and hold no `/`"
-                )));
-            }
-            if l.len() > LABEL_MAX {
-                return Err(refuse(format!(
-                    "the label is too long to name a link directory: {} bytes, and at most {LABEL_MAX} can be used",
-                    l.len()
+                     it must not begin with `.`"
                 )));
             }
             for g in GROUPS {
@@ -203,7 +190,7 @@ impl LinkTree {
                 std::fs::remove_dir_all(old).map_err(|e| refuse(format!("cannot remove the earlier links {}: {e}", place.display())))?;
             }
         }
-        Ok(LinkTree { root: root.to_path_buf(), label: label.map(str::to_string) })
+        Ok(LinkTree { root: root.to_path_buf(), label: label.map(|l| l.as_str().to_string()) })
     }
 
     /// Writes the links of `manifest`'s results, which `store` holds, and
