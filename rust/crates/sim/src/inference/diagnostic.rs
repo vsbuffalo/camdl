@@ -594,10 +594,11 @@ const START_VALUE_LARGE: f64 = 1e5;
 /// consults to judge whether the start was sane. An ordinary bad-start
 /// refusal therefore read as a refusal at the truth, and cost gh#876 its
 /// whole investigation (gh#880).
-/// How many times larger a natural-scale step is in z at coordinate `z` of an
-/// interval map than at its midpoint: dθ/dz is (hi − lo)·σ(z)σ(−z), a quarter
-/// of the width at z = 0, so the ratio is 1/(4σ(z)σ(−z)). The log-interval
-/// map's dθ/dz carries a further factor θ/θ_mid, which the message names.
+/// How many times less a step in z moves θ at coordinate `z` of an interval map
+/// than at its midpoint: dθ/dz is (hi − lo)·σ(z)σ(−z), a quarter of the width
+/// at z = 0, so the ratio is 1/(4σ(z)σ(−z)). The log-interval map's dθ/dz
+/// carries a further factor θ/θ_mid, so the ratio there is scaled by θ_mid/θ,
+/// which the message names.
 fn compression_factor(z: f64) -> f64 {
     let s = 1.0 / (1.0 + (-z.abs()).exp());
     1.0 / (4.0 * s * (1.0 - s))
@@ -800,9 +801,9 @@ impl DiagnosticKind {
             Self::CompressedLogitPosition { param, z } =>
                 format!("'{}' starts at |z| = {:.1} > 2 in its transformed coordinate (an \
                          interval or log-interval map), near an end of its box: the map is \
-                         compressed there, so its natural-scale rw_sd, converted at each \
-                         particle's value, is a step in z about {:.0}× its size at the \
-                         box's midpoint (on a log-interval map, further scaled by θ_mid/θ).",
+                         compressed there, so a step in z moves it about {:.0}× less than \
+                         the same step at the box's midpoint (on a log-interval map, further \
+                         scaled by θ_mid/θ).",
                     param, z.abs(), compression_factor(*z)),
             Self::AutoRwSdNoConsensus { n_good, n_total } =>
                 format!("Auto rw_sd: only {}/{} chains agree — no consensus.",
@@ -844,7 +845,7 @@ impl DiagnosticKind {
                 "Run with --verbosity debug for per-substep diagnostics",
             ],
             Self::PerturbedSwarmInfeasible { .. } => vec![
-                "Give a smaller explicit rw_sd to the parameters the data constrain most",
+                "Give a smaller step, in z, to the parameters the data constrain most",
                 "chain_N/parameter_traces.tsv shows where each chain's estimate went",
             ],
             Self::BadInit { .. } => {
@@ -898,7 +899,7 @@ impl DiagnosticKind {
                 "Add a seeding term (iota) to the rate expression",
             ],
             Self::CompressedLogitPosition { .. } => vec![
-                "Start nearer the middle of the box, or give a smaller explicit rw_sd",
+                "Start nearer the middle of the box, or give the parameter a larger step in z",
                 "Widen parameter bounds if scientifically justified",
             ],
             Self::PathRenewalCoalesced { .. } => vec![
@@ -1808,13 +1809,13 @@ mod tests {
         }
     }
 
-    /// The compressed-position warning states the direction the per-particle
-    /// conversion moves the step: larger in z near an end, not smaller.
+    /// The compressed-position warning states the direction a step fixed in z
+    /// has near an end of the box: it moves θ less there than at the midpoint.
     #[test]
-    fn the_compressed_position_warning_says_the_step_grows() {
+    fn the_compressed_position_warning_says_a_step_moves_theta_less() {
         let r = DiagnosticKind::CompressedLogitPosition { param: "gamma".into(), z: -3.0 }.render();
-        assert!(r.contains("|z| = 3.0") && r.contains("step in z about 6×"), "{r}");
-        assert!(!r.contains("reduced") && !r.contains("logit position"), "{r}");
+        assert!(r.contains("|z| = 3.0") && r.contains("moves it about 6× less"), "{r}");
+        assert!(!r.contains("rw_sd") && !r.contains("logit position"), "{r}");
     }
 
     /// A near-bound report shows a small estimate, not `0.0000` (a box
