@@ -186,3 +186,36 @@ fn a_run_id_whose_sources_differ_in_quantities_is_refused() {
         succeeds(camdl_in(dir, &args), label);
     }
 }
+
+/// A label names one invocation, which answers alone, for the model's name
+/// too: two files that differ only in a comment pose one problem, and
+/// `predict @a` names the model as `@a`'s file does, not as the later one.
+#[test]
+fn a_label_names_the_model_as_its_own_invocation_did() {
+    let tmp = inputs(&[("a", "peak_I = max(I)")]);
+    let dir = tmp.path();
+    let a = std::fs::read_to_string(dir.join("a.camdl")).unwrap();
+    std::fs::write(dir.join("c.camdl"), format!("# the same model, commented\n{a}")).unwrap();
+    std::fs::write(dir.join("c.toml"), FIT_TOML.replace("model.camdl", "c.camdl")).unwrap();
+    fit(dir, "a", "a");
+    fit(dir, "c", "c");
+    let mut args = vec!["predict", "@a", "--label", "p"];
+    args.extend_from_slice(PREDICT);
+    succeeds(camdl_in(dir, &args), "predict @a");
+    let records = dir.join("st/.invocations");
+    let last = std::fs::read_dir(&records)
+        .unwrap()
+        .flatten()
+        .filter_map(|e| e.file_name().to_string_lossy().strip_suffix(".json")?.parse::<u64>().ok())
+        .max()
+        .unwrap();
+    let record: serde_json::Value = serde_json::from_slice(&std::fs::read(records.join(format!("{last}.json"))).unwrap()).unwrap();
+    let names: Vec<&serde_json::Value> = record["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["kind"] == "compiled_model" || r["kind"] == "prediction")
+        .map(|r| r["attributes"].get("name").or(r["attributes"].get("model")).unwrap())
+        .collect();
+    assert!(!names.is_empty() && names.iter().all(|n| *n == "a"), "the model is named as @a's file: {record:#}");
+}

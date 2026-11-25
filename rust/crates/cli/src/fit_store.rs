@@ -1649,10 +1649,14 @@ pub(crate) fn read_quantities(store: &Store, dep: &Dep<crate::camdl_store::Quant
     <crate::camdl_store::QuantitiesContent as Content>::from_bytes(&bytes).map_err(|e| e.to_string())
 }
 
-/// The attributes the invocation that answers for `problem` gave it
-/// ([`Store::listings`]).
-fn problem_labels(store: &Store, problem: &Stored<FitProblem>) -> Option<ProblemAttributes> {
-    store.listings(&Handle::IdPrefix(problem.id().key().to_hex())).ok()?.answering()?.attributes::<FitProblem>()
+/// The attributes the invocation answering for `handle` gave `problem`
+/// ([`Store::listings`]): for a label, the invocation it names, which
+/// answers alone. When that invocation lists no problem, as one that named a
+/// stored run without posing it does, the invocation answering for the
+/// problem's own id.
+fn problem_labels(store: &Store, handle: &Handle, problem: &Stored<FitProblem>) -> Option<ProblemAttributes> {
+    let of = |h: &Handle| store.listings(h).ok()?.answering()?.attributes_of(problem.id());
+    of(handle).or_else(|| of(&Handle::IdPrefix(problem.id().key().to_hex())))
 }
 
 /// Opens the fit `text` names in `store` for a reader: `@label`, a run-id or
@@ -1678,7 +1682,7 @@ pub(crate) fn open_fit(store: &Store, text: &str) -> Result<OpenedFit, String> {
         .prefix("camdl-fit-")
         .tempdir()
         .map_err(|e| format!("cannot make a scratch directory: {e}"))?;
-    let labels = problem_labels(store, &fit.problem);
+    let labels = problem_labels(store, &handle, &fit.problem);
     let name = labels.as_ref().map(|l| l.model.clone()).unwrap_or_else(|| "model".to_string());
     // The quantities are the recorded source's: those of the model file the
     // answering invocation compiled.
