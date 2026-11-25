@@ -3632,17 +3632,18 @@ selects it.
 `--each` takes a manifest or a label and one name, and acts on every candidate
 that holds the name, in the source's order. `path --each` prints a TSV whose
 columns are `run_id` (all 64 hex digits, a handle camdl reads back), one column
-per label key, then `path`. The label columns are the union of the candidates'
-label keys, in the order first seen, with an empty cell where a result lacks
-one. A cell's labels give `model`, `params`, `scenario`, `replicate`, `seed`,
-`seed_replicate` and `process_seed`, then for a sweep point `point_id` and one
-column per swept parameter, in the sweep's order, and for a draw `draw`. A
-filter run's give `model` and `seed`, then for a design point `row`, `point_id`
-and one column per design column. Any other kind's labels give one column per
-field, a value that is not a number, a string or a boolean written as compact
-JSON. A swept parameter named like another label column is written
-`param.<name>`, and a label named `run_id` or `path` is written `label.<name>`.
-Over a three-point sweep:
+per attribute key (the attributes the answering invocation record gives the
+result, §2.10), then `path`. The attribute columns are the union of the
+candidates' attribute keys, in the order first seen, with an empty cell where a
+result lacks one. A cell's attributes give `model`, `params`, `scenario`,
+`replicate`, `seed`, `seed_replicate` and `process_seed`, then for a sweep point
+`point_id` and one column per swept parameter, in the sweep's order, and for a
+draw `draw`. A filter run's give `model` and `seed`, then for a design point
+`row`, `point_id` and one column per design column. Any other kind's attributes
+give one column per field, a value that is not a number, a string or a boolean
+written as compact JSON. A swept parameter named like another attribute column
+is written `param.<name>`, and an attribute named `run_id` or `path` is written
+`attribute.<name>`. Over a three-point sweep:
 
 ```text
 run_id	model	params	scenario	replicate	seed	seed_replicate	process_seed	point_id	beta	path
@@ -3651,13 +3652,13 @@ f24a8397841f…	sir	beta=0.2	(none)	0	1	0	1	0	0.2	/…/seed_1-f24a8397841f/traj.
 a0d44ecd5f61…	sir	beta=0.4	(none)	2	1	0	1	2	0.4	/…/seed_1-a0d44ecd5f61/traj.tsv
 ```
 
-`cat --each` prints the rows of every such file as one TSV: the same label
+`cat --each` prints the rows of every such file as one TSV: the same attribute
 columns, then the file's own columns, under one header, so each row keeps its
-result's coordinates. Leading `#` comment lines are dropped, and a label column
-named like a column of the file is written `label.<name>`. A file that is not a
-TSV file is refused, naming its format, and so is a file whose header differs
-from the first file's, naming it and both headers, before any row is printed.
-Each file is read and checked as `cat` reads one.
+result's coordinates. Leading `#` comment lines are dropped, and an attribute
+column named like a column of the file is written `attribute.<name>`. A file
+that is not a TSV file is refused, naming its format, and so is a file whose
+header differs from the first file's, naming it and both headers, before any row
+is printed. Each file is read and checked as `cat` reads one.
 
 `cat` given no name prints the result's summary file: a cell's `traj.tsv`, a
 filter run's `loglik.toml`, a fit run's `fit_state.toml`, a fit problem's

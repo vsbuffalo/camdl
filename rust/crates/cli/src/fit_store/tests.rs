@@ -128,7 +128,7 @@ fn model_dep(o: &Opened, model: &ir::Model) -> Dep<CompiledModel> {
         crate::camdl_store::SourceText { bytes: MODEL.as_bytes(), path: Path::new("model.camdl"), rendered: crate::camdl_store::Rendered::nothing() },
     )
     .unwrap();
-    crate::camdl_store::put_compiled(&o.store, &o.info, parts.model, parts.source, &parts.labels, &parts.provenance).unwrap()
+    crate::camdl_store::put_compiled(&o.store, &o.info, parts.model, parts.source, &parts.attributes, &parts.provenance).unwrap()
 }
 
 fn try_resolved(fx: &Fixture, o: &Opened, config: &FitConfig) -> Result<ResolvedProblem, String> {
@@ -246,7 +246,7 @@ fn a_reader_is_given_the_documentation_of_its_own_model_file() {
         .unwrap();
         let info = RunInfo::new(&Given::default(), &(), &StoreRequest::new(Some(label), false, None).unwrap()).unwrap();
         deps.push(
-            crate::camdl_store::put_compiled(&o.store, &info, parts.model, parts.source, &parts.labels, &parts.provenance)
+            crate::camdl_store::put_compiled(&o.store, &info, parts.model, parts.source, &parts.attributes, &parts.provenance)
                 .unwrap(),
         );
         info.finish(&o.store).unwrap();

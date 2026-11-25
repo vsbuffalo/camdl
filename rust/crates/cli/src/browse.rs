@@ -16,7 +16,7 @@ use crate::util::fmt_relative_time;
 /// A filter run on the run store, prepared for `list` and `show`.
 struct PfilterRow {
     stored: store::Stored<crate::pfilter_store::Pfilter>,
-    labels: crate::pfilter_store::PfilterAttributes,
+    attributes: crate::pfilter_store::PfilterAttributes,
     /// The label of the latest invocation that asked for it, if it had one.
     label: Option<String>,
     rel_path: String,
@@ -35,7 +35,7 @@ impl PfilterRow {
             "kind": "pfilter",
             "run_id": self.stored.id().key().to_hex(),
             "label": self.label,
-            "attributes": self.labels,
+            "attributes": self.attributes,
             "path": self.rel_path,
             "identity": self.stored.identity(),
             "loglik": self.loglik(),
@@ -65,7 +65,7 @@ fn discover_pfilter_rows(store: &store::Store) -> Vec<PfilterRow> {
     let mut rows: std::collections::BTreeMap<store::Key, PfilterRow> = std::collections::BTreeMap::new();
     for inv in store.invocations().iter() {
         let Ok(members) = inv.members::<crate::pfilter_store::Pfilter>() else { continue };
-        for (id, labels) in members {
+        for (id, attributes) in members {
             if let Some(row) = rows.get_mut(&id.key()) {
                 if inv.label().is_some() {
                     row.label = inv.label().map(str::to_string);
@@ -75,7 +75,7 @@ fn discover_pfilter_rows(store: &store::Store) -> Vec<PfilterRow> {
             let Ok(Some(stored)) = store.get(&id) else { continue };
             let created = std::fs::metadata(stored.folder()).and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
             let rel_path = pathdiff_str(stored.folder(), &cwd);
-            rows.insert(id.key(), PfilterRow { stored, labels, label: inv.label().map(str::to_string), rel_path, created });
+            rows.insert(id.key(), PfilterRow { stored, attributes, label: inv.label().map(str::to_string), rel_path, created });
         }
     }
     rows.into_values().collect()
@@ -92,7 +92,7 @@ fn stored_design_table(root: &Path, target: &str) -> Option<Result<Vec<u8>, Stri
     let store = crate::camdl_store::open_existing(root)?;
     let invocation = store.invocation(&handle).ok()?;
     let members = invocation.members::<crate::pfilter_store::Pfilter>().ok()?;
-    if !members.iter().any(|(_, labels)| labels.point.is_some()) {
+    if !members.iter().any(|(_, attributes)| attributes.point.is_some()) {
         return None;
     }
     let mut table = Vec::new();
@@ -116,7 +116,7 @@ fn show_stored_pfilter(out: &crate::out::Out, row: &PfilterRow) {
         field("label", l);
     }
     let id = row.stored.identity();
-    field("model", &row.labels.model);
+    field("model", &row.attributes.model);
     field("config", &crate::pfilter_store::config_label(id.config.particles, id.config.replicates, id.config.dt.get()));
     field("seed", &id.seed.seed);
     field("run_id", &style::stdout().paint(&row.stored.id().key().to_hex(), Style::Dim));
@@ -144,7 +144,7 @@ fn show_stored_pfilter(out: &crate::out::Out, row: &PfilterRow) {
 /// A fit run on the run store, prepared for `list`.
 struct StoredFitRow {
     stored: store::Stored<crate::fit_store::FitRun>,
-    labels: crate::fit_store::RunAttributes,
+    attributes: crate::fit_store::RunAttributes,
     /// The model the problem was posed on, by name.
     model: String,
     /// The label of the latest invocation that asked for it, if it had one.
@@ -168,8 +168,8 @@ impl StoredFitRow {
             "run_id": self.stored.id().key().to_hex(),
             "problem_id": id.chain.problem.id().key().to_hex(),
             "label": self.label,
-            "method": self.labels.method,
-            "seed": self.labels.seed,
+            "method": self.attributes.method,
+            "seed": self.attributes.seed,
             "model": self.model,
             "path": self.rel_path,
             "best_loglik": self.best_loglik(),
@@ -195,7 +195,7 @@ fn discover_stored_fit_rows(store: &store::Store) -> Vec<StoredFitRow> {
     let mut rows: std::collections::BTreeMap<store::Key, StoredFitRow> = std::collections::BTreeMap::new();
     for inv in store.invocations().iter() {
         let Ok(members) = inv.members::<crate::fit_store::FitRun>() else { continue };
-        for (id, labels) in members {
+        for (id, attributes) in members {
             if let Some(row) = rows.get_mut(&id.key()) {
                 if inv.label().is_some() {
                     row.label = inv.label().map(str::to_string);
@@ -206,7 +206,7 @@ fn discover_stored_fit_rows(store: &store::Store) -> Vec<StoredFitRow> {
             let created = std::fs::metadata(stored.folder()).and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
             let rel_path = pathdiff_str(stored.folder(), &cwd);
             let model = problem_model_name(store, stored.identity().chain.problem.id());
-            rows.insert(id.key(), StoredFitRow { stored, labels, model, label: inv.label().map(str::to_string), rel_path, created });
+            rows.insert(id.key(), StoredFitRow { stored, attributes, model, label: inv.label().map(str::to_string), rel_path, created });
         }
     }
     rows.into_values().collect()
@@ -237,8 +237,8 @@ fn print_stored_fit_table(out: &crate::out::Out, rows: &[StoredFitRow], now: Sys
             short_hash_cell(&r.stored.identity().chain.problem.id().key().to_hex()),
             label_cell(&r.label),
             Cell::new(&r.model),
-            Cell::new(&r.labels.method),
-            Cell::new(r.labels.seed),
+            Cell::new(&r.attributes.method),
+            Cell::new(r.attributes.seed),
             Cell::new(ll).fg(comfy_table::Color::Magenta),
             Cell::new(&r.rel_path).fg(comfy_table::Color::Cyan),
         ]);
@@ -445,7 +445,7 @@ impl StoredFitResult {
 /// A simulation cell on the run store, prepared for `list` and `show`.
 struct StoredSimRow {
     stored: store::Stored<crate::sim_store::Sim>,
-    labels: crate::sim_store::CellAttributes,
+    attributes: crate::sim_store::CellAttributes,
     /// The label of the latest invocation that asked for it, if it had one.
     label: Option<String>,
     rel_path: String,
@@ -458,7 +458,7 @@ impl StoredSimRow {
             "kind": "sim",
             "run_id": self.stored.id().key().to_hex(),
             "label": self.label,
-            "attributes": self.labels,
+            "attributes": self.attributes,
             "path": self.rel_path,
             "identity": self.stored.identity(),
             "files": self.stored.result_files(),
@@ -474,7 +474,7 @@ fn discover_stored_sim_rows(store: &store::Store) -> Vec<StoredSimRow> {
     let mut rows: std::collections::BTreeMap<store::Key, StoredSimRow> = std::collections::BTreeMap::new();
     for inv in store.invocations().iter() {
         let Ok(members) = inv.members::<crate::sim_store::Sim>() else { continue };
-        for (id, labels) in members {
+        for (id, attributes) in members {
             if let Some(row) = rows.get_mut(&id.key()) {
                 if inv.label().is_some() {
                     row.label = inv.label().map(str::to_string);
@@ -484,7 +484,7 @@ fn discover_stored_sim_rows(store: &store::Store) -> Vec<StoredSimRow> {
             let Ok(Some(stored)) = store.get(&id) else { continue };
             let created = std::fs::metadata(stored.folder()).and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
             let rel_path = pathdiff_str(stored.folder(), &cwd);
-            rows.insert(id.key(), StoredSimRow { stored, labels, label: inv.label().map(str::to_string), rel_path, created });
+            rows.insert(id.key(), StoredSimRow { stored, attributes, label: inv.label().map(str::to_string), rel_path, created });
         }
     }
     rows.into_values().collect()
@@ -524,10 +524,10 @@ fn show_stored_sim(out: &crate::out::Out, row: &StoredSimRow) {
         field("label", l);
     }
     let id = row.stored.identity();
-    field("model", &row.labels.model);
+    field("model", &row.attributes.model);
     field("config", &crate::sim_store::config_label(&id.config));
-    field("scenario", &row.labels.scenario);
-    field("seed", &row.labels.seed_label());
+    field("scenario", &row.attributes.scenario);
+    field("seed", &row.attributes.seed_label());
     field("process seed", &id.seed.seed);
     field("run_id", &style::stdout().paint(&row.stored.id().key().to_hex(), Style::Dim));
     if let Ok(Some(f)) = crate::sim_store::Failure::of(&row.stored) {
@@ -564,10 +564,10 @@ fn print_stored_sim_table(out: &crate::out::Out, rows: &[StoredSimRow], now: Sys
             Cell::new(fmt_relative_time(r.created, now)).fg(comfy_table::Color::Yellow),
             short_hash_cell(&r.stored.id().key().to_hex()),
             label_cell(&r.label),
-            Cell::new(&r.labels.model),
+            Cell::new(&r.attributes.model),
             Cell::new(crate::sim_store::config_label(&r.stored.identity().config)).add_attribute(comfy_table::Attribute::Dim),
-            Cell::new(&r.labels.scenario),
-            Cell::new(r.labels.seed_label()),
+            Cell::new(&r.attributes.scenario),
+            Cell::new(r.attributes.seed_label()),
             Cell::new(&r.rel_path).fg(comfy_table::Color::Cyan),
         ]);
     }
@@ -640,7 +640,7 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
     stored_profiles.sort_by(|x, y| y.created.cmp(&x.created));
 
     let mut filtered_pfilters: Vec<PfilterRow> = pfilters.into_iter()
-        .filter(|p| a.model.as_deref().is_none_or(|m| p.labels.model.contains(m)))
+        .filter(|p| a.model.as_deref().is_none_or(|m| p.attributes.model.contains(m)))
         .filter(|_| a.scenario.is_none())
         .filter(|p| match filter_since {
             Some(dur) => now.duration_since(p.created).is_ok_and(|d| d <= dur),
@@ -650,8 +650,8 @@ pub fn cmd_list(a: &crate::args::ListArgs) {
     filtered_pfilters.sort_by(|x, y| y.created.cmp(&x.created));
 
     let mut filtered_stored_sims: Vec<StoredSimRow> = stored_sims.into_iter()
-        .filter(|r| a.model.as_deref().is_none_or(|m| r.labels.model.contains(m)))
-        .filter(|r| a.scenario.as_deref().is_none_or(|s| r.labels.scenario == s))
+        .filter(|r| a.model.as_deref().is_none_or(|m| r.attributes.model.contains(m)))
+        .filter(|r| a.scenario.as_deref().is_none_or(|s| r.attributes.scenario == s))
         .filter(|r| match filter_since {
             Some(dur) => now.duration_since(r.created).is_ok_and(|d| d <= dur),
             None => true,
@@ -841,17 +841,17 @@ fn show_result(out: &crate::out::Out, store: &store::Store, c: &crate::resolve_f
     let rel_path = pathdiff_str(located.folder(), &cwd);
     let created = std::fs::metadata(located.folder()).and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
     let label = || latest_label(store, located.run_id());
-    let labels_as = |what: &str| -> serde_json::Value {
-        if c.labels.is_null() {
-            out.fail(format!("error: no invocation record gives the {what} {} its labels", located.run_id().short12()));
+    let attributes_as = |what: &str| -> serde_json::Value {
+        if c.attributes.is_null() {
+            out.fail(format!("error: no invocation record gives the {what} {} its attributes", located.run_id().short12()));
         }
-        c.labels.clone()
+        c.attributes.clone()
     };
     match located.kind() {
         k if k == ps::Pfilter::KIND => {
             let stored = store.stored_as::<ps::Pfilter>(located).unwrap_or_else(|e| fail(e));
-            let labels = serde_json::from_value(labels_as("filter run")).unwrap_or_else(|e| out.fail(format!("error: {e}")));
-            let row = PfilterRow { stored, labels, label: label(), rel_path, created };
+            let attributes = serde_json::from_value(attributes_as("filter run")).unwrap_or_else(|e| out.fail(format!("error: {e}")));
+            let row = PfilterRow { stored, attributes, label: label(), rel_path, created };
             if json {
                 out.report_line(format_args!("{}", serde_json::to_string_pretty(&row.json()).unwrap_or_default()));
             } else {
@@ -860,8 +860,8 @@ fn show_result(out: &crate::out::Out, store: &store::Store, c: &crate::resolve_f
         }
         k if k == ss::Sim::KIND => {
             let stored = store.stored_as::<ss::Sim>(located).unwrap_or_else(|e| fail(e));
-            let labels = serde_json::from_value(labels_as("cell")).unwrap_or_else(|e| out.fail(format!("error: {e}")));
-            let row = StoredSimRow { stored, labels, label: label(), rel_path, created };
+            let attributes = serde_json::from_value(attributes_as("cell")).unwrap_or_else(|e| out.fail(format!("error: {e}")));
+            let row = StoredSimRow { stored, attributes, label: label(), rel_path, created };
             if json {
                 out.report_line(format_args!("{}", serde_json::to_string_pretty(&row.json()).unwrap_or_default()));
             } else {
@@ -915,7 +915,7 @@ fn show_any(out: &crate::out::Out, c: &crate::resolve_file::Candidate, rel_path:
             "run_id": located.run_id().to_hex(),
             "upstream": located.upstream().map(|k| k.to_hex()),
             "path": rel_path,
-            "attributes": c.labels,
+            "attributes": c.attributes,
             "files": files.iter().map(|(l, s)| serde_json::json!({ "name": l, "file": s })).collect::<Vec<_>>(),
         });
         out.report_line(format_args!("{}", serde_json::to_string_pretty(&value).unwrap_or_default()));
@@ -1134,10 +1134,10 @@ fn print_pfilter_table(out: &crate::out::Out, rows: &[PfilterRow], now: SystemTi
             Cell::new(fmt_relative_time(r.created, now)).fg(comfy_table::Color::Yellow),
             short_hash_cell(&r.stored.id().key().to_hex()),
             label_cell(&r.label),
-            Cell::new(&r.labels.model),
+            Cell::new(&r.attributes.model),
             Cell::new(crate::pfilter_store::config_label(id.config.particles, id.config.replicates, id.config.dt.get()))
                 .add_attribute(comfy_table::Attribute::Dim),
-            Cell::new(r.labels.seed),
+            Cell::new(r.attributes.seed),
             Cell::new(loglik).fg(comfy_table::Color::Magenta),
             Cell::new(&r.rel_path).fg(comfy_table::Color::Cyan),
         ]);

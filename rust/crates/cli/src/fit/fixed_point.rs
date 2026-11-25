@@ -191,13 +191,13 @@ pub(crate) fn resolve(
             },
         },
     )?;
-    let crate::camdl_store::CompiledParts { model: model_part, quantities, source, labels: model_labels, provenance } = parts;
+    let crate::camdl_store::CompiledParts { model: model_part, quantities, source, attributes: model_attributes, provenance } = parts;
     let source = reposed.unwrap_or(crate::camdl_store::SourceOf::New(source));
     let quantities = store
-        .put::<Quantities>(quantities, &model_labels, &store::Provenance::none(), info)
+        .put::<Quantities>(quantities, &model_attributes, &store::Provenance::none(), info)
         .and_then(|s| s.dep(Quantities::FILE))
         .map_err(|e| format!("storing the quantities: {e}"))?;
-    let model_dep = crate::camdl_store::put_compiled(&store, info, model_part, source, &model_labels, &provenance)
+    let model_dep = crate::camdl_store::put_compiled(&store, info, model_part, source, &model_attributes, &provenance)
         .map_err(|e| format!("storing the compiled model: {e}"))?;
 
     // The conditioned lines of each bound file, cut by the fit problem's rule.

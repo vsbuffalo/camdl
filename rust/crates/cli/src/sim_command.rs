@@ -78,12 +78,12 @@ pub(crate) struct Exports {
 }
 
 /// A cell planned for the batch: its spec, its resolution, its identity and
-/// labels, and the by-products wanted of it.
+/// attributes, and the by-products wanted of it.
 struct Planned {
     spec: crate::engine::CellSpec,
     cell: ResolvedCell,
     identity: SimIdentity,
-    labels: CellAttributes,
+    attributes: CellAttributes,
     wanted: store::Wanted<Sim>,
 }
 
@@ -142,13 +142,13 @@ pub(crate) fn run(ctx: StoreRun<'_>) {
     for item in &ctx.lineage {
         info.lineage(item.clone());
     }
-    let crate::camdl_store::CompiledParts { model: model_part, quantities, source, labels: model_labels, provenance } = parts;
-    let model = crate::camdl_store::put_compiled(&store, &info, model_part, source, &model_labels, &provenance)
+    let crate::camdl_store::CompiledParts { model: model_part, quantities, source, attributes: model_attributes, provenance } = parts;
+    let model = crate::camdl_store::put_compiled(&store, &info, model_part, source, &model_attributes, &provenance)
         .unwrap_or_else(|e| fail(format!("storing the compiled model: {e}")));
     let quantities = match &ctx.wants.quantities {
         Some(_) => Some(
             store
-                .put::<crate::camdl_store::Quantities>(quantities, &model_labels, &store::Provenance::none(), &info)
+                .put::<crate::camdl_store::Quantities>(quantities, &model_attributes, &store::Provenance::none(), &info)
                 .and_then(|s| s.dep(crate::camdl_store::Quantities::FILE))
                 .unwrap_or_else(|e| fail(format!("storing the quantities: {e}"))),
         ),
@@ -181,7 +181,7 @@ pub(crate) fn run(ctx: StoreRun<'_>) {
         }
     }
     let members: Vec<(SimIdentity, CellAttributes, store::Wanted<Sim>)> =
-        planned.iter().map(|p| (p.identity.clone(), p.labels.clone(), p.wanted.clone())).collect();
+        planned.iter().map(|p| (p.identity.clone(), p.attributes.clone(), p.wanted.clone())).collect();
     // `begin_all` begins each distinct identity once, and answers in the
     // order first asked for.
     let mut distinct: Vec<usize> = Vec::new();
@@ -203,7 +203,7 @@ pub(crate) fn run(ctx: StoreRun<'_>) {
                 store::Begin::Reused(_) => n_reused += 1,
                 store::Begin::Busy(owner) => failures.push(format!(
                     "{}: {}",
-                    cell_name(&planned[i].labels),
+                    cell_name(&planned[i].attributes),
                     store::Error::InProgress(owner)
                 )),
                 store::Begin::Claimed(run) => claimed.push((run, i)),
@@ -224,7 +224,7 @@ pub(crate) fn run(ctx: StoreRun<'_>) {
         if let Some(t) = bar.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
             t.inc(1);
         }
-        r.err().map(|e| format!("{}: {e}", cell_name(&p.labels)))
+        r.err().map(|e| format!("{}: {e}", cell_name(&p.attributes)))
     };
     let computed = claimed.len();
     let errors: Vec<String> = if ctx.job.parallel > 1 {
@@ -250,7 +250,7 @@ pub(crate) fn run(ctx: StoreRun<'_>) {
         .members::<Sim>()
         .unwrap_or_else(|e| fail(e.to_string()))
         .into_iter()
-        .filter_map(|(id, labels)| store.get(&id).ok().flatten().map(|s| (s, labels)))
+        .filter_map(|(id, attributes)| store.get(&id).ok().flatten().map(|s| (s, attributes)))
         .collect();
     report(out, &store, &cells, total, computed, n_reused);
     if !failures.is_empty() {
@@ -380,7 +380,7 @@ fn write_export(out: &crate::out::Out, to: &std::path::Path, files: &store::Expo
     }
 }
 
-/// One cell: its resolution, identity and labels, and the by-products
+/// One cell: its resolution, identity and attributes, and the by-products
 /// wanted of it. Refused, with the cell's name, when the cell does not
 /// resolve or runs on settings its identity does not hold.
 fn plan_cell(ctx: &StoreRun<'_>, shared: &Shared, spec: crate::engine::CellSpec) -> Result<Planned, (String, String)> {
@@ -442,12 +442,12 @@ fn plan_cell(ctx: &StoreRun<'_>, shared: &Shared, spec: crate::engine::CellSpec)
         crate::sim_job::ParamSource::Sweep { .. } => {
             let mut values: Vec<(String, f64)> = spec.point_overrides.iter().map(|(k, v)| (k.clone(), *v)).collect();
             values.sort_by(|a, b| a.0.cmp(&b.0));
-            PointLabel::Sweep { point_id: spec.point_id, values }
+            PointAttributes::Sweep { point_id: spec.point_id, values }
         }
-        crate::sim_job::ParamSource::Draws { .. } => PointLabel::Draw { index: spec.point_idx },
-        crate::sim_job::ParamSource::Point { .. } => PointLabel::None,
+        crate::sim_job::ParamSource::Draws { .. } => PointAttributes::Draw { index: spec.point_idx },
+        crate::sim_job::ParamSource::Point { .. } => PointAttributes::None,
     };
-    let labels = CellAttributes {
+    let attributes = CellAttributes {
         model: ctx.sim.model.stem.clone(),
         params: params_label(&ran_point),
         scenario,
@@ -479,7 +479,7 @@ fn plan_cell(ctx: &StoreRun<'_>, shared: &Shared, spec: crate::engine::CellSpec)
         };
         wanted = wanted.with::<SimQuantities>(id, ());
     }
-    Ok(Planned { spec, cell, identity, labels, wanted })
+    Ok(Planned { spec, cell, identity, attributes, wanted })
 }
 
 /// A readable label for a cell's parameters directory: `base`, or the
@@ -778,11 +778,11 @@ fn stored_failures(store: &store::Store, invocation: &store::Invocation) -> Resu
     let members = invocation.members::<Sim>().map_err(|e| e.to_string())?;
     // A by-product's upstream is named by its identity's record of the cell.
     let mut by_record = std::collections::BTreeMap::new();
-    for (id, labels) in &members {
+    for (id, attributes) in &members {
         if let Some(s) = store.get(id).map_err(|e| e.to_string())? {
-            by_record.entry(s.identity().content_hash()).or_insert_with(|| cell_name(labels));
+            by_record.entry(s.identity().content_hash()).or_insert_with(|| cell_name(attributes));
             if let Some(f) = Failure::of(&s)? {
-                let line = format!("{}: the {} stopped: {}", cell_name(labels), f.stage, f.reason);
+                let line = format!("{}: the {} stopped: {}", cell_name(attributes), f.stage, f.reason);
                 if last.as_deref() != Some(line.as_str()) {
                     out.push(line.clone());
                     last = Some(line);
@@ -892,14 +892,14 @@ fn dry_run_view(ctx: &StoreRun<'_>, parts: crate::camdl_store::CompiledParts, sp
         };
         let shared = Shared { model: model.clone(), quantities: if ctx.wants.quantities.is_some() { quantities.clone() } else { None } };
         match plan_cell(ctx, &shared, spec.clone()) {
-            Ok(p) => match store.plan_with::<Sim>(&[(p.identity, p.labels.clone(), p.wanted)]) {
+            Ok(p) => match store.plan_with::<Sim>(&[(p.identity, p.attributes.clone(), p.wanted)]) {
                 Ok(v) if !quantities_missing && v.first().is_some_and(|x| x.state == store::PlanState::Completed) => {
                     hits += 1;
-                    out.say(format_args!("  [hit ] {} {}", cell_name(&p.labels), v[0].id.key().short12()));
+                    out.say(format_args!("  [hit ] {} {}", cell_name(&p.attributes), v[0].id.key().short12()));
                 }
                 _ => {
                     misses += 1;
-                    out.say(format_args!("  [miss] {}", cell_name(&p.labels)));
+                    out.say(format_args!("  [miss] {}", cell_name(&p.attributes)));
                 }
             },
             Err((name, e)) => {

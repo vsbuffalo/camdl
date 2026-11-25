@@ -3331,7 +3331,7 @@ Examples:
   camdl cat @scout draws
   camdl cat --manifest build/scout.json draws
 
-  # Every cell's trajectory of a sweep, as one table with each cell's labels
+  # Every cell's trajectory of a sweep, as one table with each cell's attributes
   camdl cat --manifest build/sweep.json traj --each
 "))]
 pub struct CatArgs {
@@ -3362,7 +3362,7 @@ pub struct CatArgs {
     pub run: Option<String>,
 
     /// Print the named TSV file of every result of the manifest or label that
-    /// holds it, as one table: each row after its result's label columns
+    /// holds it, as one table: each row after its result's attribute columns
     #[arg(long, conflicts_with_all = ["chains", "exclude_chains"])]
     pub each: bool,
 
@@ -3393,7 +3393,7 @@ Examples:
   # Every result file of the manifest's fit run: the logical name, a tab, the path
   camdl path --manifest build/scout.json --kind fit_run --all
 
-  # One row per cell of a sweep: run_id, the cell's labels, path
+  # One row per cell of a sweep: run_id, the cell's attributes, path
   camdl path --manifest build/sweep.json traj --each
 "))]
 pub struct PathArgs {
@@ -3427,7 +3427,7 @@ pub struct PathArgs {
     pub all: bool,
 
     /// Print a TSV with one row per result of the manifest or label that
-    /// holds the named file: `run_id`, the result's labels, `path`
+    /// holds the named file: `run_id`, the result's attributes, `path`
     #[arg(long)]
     pub each: bool,
 }

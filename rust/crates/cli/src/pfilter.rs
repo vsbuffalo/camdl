@@ -600,9 +600,9 @@ fn run_pfilter(
             envelope, stem.clone(),
             crate::camdl_store::SourceText::read(&source, std::path::Path::new(&ir_path)),
         ).unwrap_or_else(|e| out.fail(format!("error: {e}")));
-        let crate::camdl_store::CompiledParts { model: model_part, quantities, source, labels: model_labels, provenance } = parts;
+        let crate::camdl_store::CompiledParts { model: model_part, quantities, source, attributes: model_attributes, provenance } = parts;
         store::release(quantities, "a filter run reports no quantities; the model source records them");
-        let model = crate::camdl_store::put_compiled(&store, &info, model_part, source, &model_labels, &provenance)
+        let model = crate::camdl_store::put_compiled(&store, &info, model_part, source, &model_attributes, &provenance)
             .unwrap_or_else(|e| out.fail(format!("error: storing the compiled model: {e}")));
         let mut data = std::collections::BTreeMap::new();
         for (name, path, table) in tables {
@@ -1240,7 +1240,7 @@ fn run_pfilter(
         };
         let point = match role {
             PointRole::Single => None,
-            PointRole::Design { row, point_id, .. } => Some(DesignPointLabel { row, point_id, values: overrides.to_vec() }),
+            PointRole::Design { row, point_id, .. } => Some(DesignPointAttributes { row, point_id, values: overrides.to_vec() }),
         };
         let labels = PfilterAttributes { model: stem.clone(), seed, point };
         let filter = store::Identity::record(&identity);
@@ -4102,7 +4102,7 @@ mod tests {
             crate::camdl_store::SourceText { bytes: src.as_bytes(), path: std::path::Path::new("m.camdl"), rendered: crate::camdl_store::Rendered::nothing() },
         )
         .unwrap();
-        let model_dep = crate::camdl_store::put_compiled(&store, &info, parts.model, parts.source, &parts.labels, &parts.provenance)
+        let model_dep = crate::camdl_store::put_compiled(&store, &info, parts.model, parts.source, &parts.attributes, &parts.provenance)
             .unwrap();
         let identity = PfilterIdentity {
             model: model_dep,

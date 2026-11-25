@@ -242,8 +242,8 @@ pub(crate) fn pose_problem(
                 ModelSourceFile { bytes: source_bytes, camdl: crate::util::model_is_camdl_source(&source_path) },
                 crate::fit_store::DataOrigin::Files,
             )?;
-            let labels = ProblemAttributes { model: stem, sweep_point: None };
-            let stored = match crate::camdl_store::begin::<FitProblem>(store, &posed.identity, &labels, info, store::Reuse::IfCompleted, crate::fit_store::problem_files(&posed)).map_err(|e| e.to_string())? {
+            let attributes = ProblemAttributes { model: stem, sweep_point: None };
+            let stored = match crate::camdl_store::begin::<FitProblem>(store, &posed.identity, &attributes, info, store::Reuse::IfCompleted, crate::fit_store::problem_files(&posed)).map_err(|e| e.to_string())? {
                 store::Begin::Reused(stored) => stored,
                 store::Begin::Busy(owner) => return Err(store::Error::InProgress(owner).to_string()),
                 store::Begin::Claimed(mut run) => match crate::fit_store::write_problem(&mut run, &posed) {
@@ -387,9 +387,9 @@ pub(crate) fn put_compile(
         None => crate::camdl_store::SourceText::read(source, path),
     };
     let parts = crate::camdl_store::CompiledParts::split(envelope, stem.to_string(), source)?;
-    let crate::camdl_store::CompiledParts { model, quantities, source: of_source, labels, provenance } = parts;
+    let crate::camdl_store::CompiledParts { model, quantities, source: of_source, attributes, provenance } = parts;
     store::release(quantities, "the model source stores the quantities");
-    crate::camdl_store::put_compiled(store, info, model, named.unwrap_or(of_source), &labels, &provenance)
+    crate::camdl_store::put_compiled(store, info, model, named.unwrap_or(of_source), &attributes, &provenance)
         .map_err(|e| format!("storing the compiled model: {e}"))
 }
 
@@ -584,12 +584,12 @@ impl Artifact for ProfilePoint {
 }
 
 impl Primary for ProfilePoint {
-    fn layout(id: &ProfilePointIdentity, labels: &ProfilePointAttributes) -> Placed {
+    fn layout(id: &ProfilePointIdentity, attributes: &ProfilePointAttributes) -> Placed {
         Layout::in_kind()
-            .group(&labels.model, &id.problem)
-            .group(&labels.focal, &id.focal)
-            .group(&labels.method, &id.method)
-            .result(&format!("seed_{}-start_{}", labels.seed, labels.start))
+            .group(&attributes.model, &id.problem)
+            .group(&attributes.focal, &id.focal)
+            .group(&attributes.method, &id.method)
+            .result(&format!("seed_{}-start_{}", attributes.seed, attributes.start))
     }
 }
 

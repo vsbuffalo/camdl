@@ -324,12 +324,12 @@ fn run_fit(mut out: Out, cx: FitCommand<'_>) -> Vec<String> {
             envelope, model_stem.clone(),
             crate::camdl_store::SourceText::read(&model_bytes, Path::new(&model_path)),
         ).unwrap_or_else(|e| out.fail(format!("error: {e}")));
-        let crate::camdl_store::CompiledParts { model: part, quantities, source, labels, provenance } = parts;
+        let crate::camdl_store::CompiledParts { model: part, quantities, source, attributes, provenance } = parts;
         // The quantities and contrasts do not change the fit: the model
         // source records them, and `camdl predict` evaluates those of the
         // source the run's invocation recorded.
         store::release(quantities, "the model source stores the quantities");
-        crate::camdl_store::put_compiled(store, info, part, source, &labels, &provenance)
+        crate::camdl_store::put_compiled(store, info, part, source, &attributes, &provenance)
             .unwrap_or_else(|e| out.fail(format!("error: storing the compiled model: {e}")))
     };
     let run_ir = config.problem.compiled_model().unwrap_or_else(|e| out.fail(format!("error: {e}"))).to_string();
@@ -512,7 +512,7 @@ fn run_fit(mut out: Out, cx: FitCommand<'_>) -> Vec<String> {
         if let Err(e) = crate::fit::runner::validate_prior_transform_compat(&cell.problem.estimate, &model) {
             out.fail(format!("error: {e}"));
         }
-        let labels = ProblemAttributes {
+        let attributes = ProblemAttributes {
             model: model_stem.clone(),
             sweep_point: (!cell.sweep_point.is_empty()).then(|| point_slug(&cell.sweep_point)),
         };
@@ -528,7 +528,7 @@ fn run_fit(mut out: Out, cx: FitCommand<'_>) -> Vec<String> {
         if let Some(w) = &window {
             w.partition_lines.say();
         }
-        let stored_problem: Stored<FitProblem> = match crate::camdl_store::begin::<FitProblem>(store, &posed_problem.identity, &labels, info, Reuse::IfCompleted, crate::fit_store::problem_files(&posed_problem)) {
+        let stored_problem: Stored<FitProblem> = match crate::camdl_store::begin::<FitProblem>(store, &posed_problem.identity, &attributes, info, Reuse::IfCompleted, crate::fit_store::problem_files(&posed_problem)) {
             Ok(Begin::Reused(stored)) => stored,
             Ok(Begin::Busy(owner)) => {
                 failures.push(format!("problem {}: {}", cell_i + 1, store::Error::InProgress(owner)));
@@ -612,12 +612,12 @@ fn run_fit(mut out: Out, cx: FitCommand<'_>) -> Vec<String> {
                 length,
                 resumed_from: base.as_ref().map(|b| b.dep.clone()),
             };
-            let labels = RunAttributes { method: method_name.to_string(), seed };
-            planned.push(PlannedRun { posed: posed_i, seed, identity, labels, base });
+            let attributes = RunAttributes { method: method_name.to_string(), seed };
+            planned.push(PlannedRun { posed: posed_i, seed, identity, attributes, base });
         }
     }
     let members: Vec<(FitRunIdentity, RunAttributes, store::Wanted<FitRun>)> =
-        planned.iter().map(|r| (r.identity.clone(), r.labels.clone(), store::Wanted::none())).collect();
+        planned.iter().map(|r| (r.identity.clone(), r.attributes.clone(), store::Wanted::none())).collect();
     let mut declared = store.declare::<FitRun>(&members, info, reuse)
         .unwrap_or_else(|e| out.fail(format!("error: declaring the runs: {e}")));
 
@@ -722,12 +722,12 @@ struct PosedCell<'a> {
 }
 
 /// One run the fit will compute: its problem (an index into the posed
-/// problems), its seed, its identity and labels, and the base it resumes.
+/// problems), its seed, its identity and attributes, and the base it resumes.
 struct PlannedRun {
     posed: usize,
     seed: u64,
     identity: FitRunIdentity,
-    labels: RunAttributes,
+    attributes: RunAttributes,
     base: Option<ResumeBase>,
 }
 

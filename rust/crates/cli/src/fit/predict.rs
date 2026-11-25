@@ -2045,7 +2045,7 @@ fn reported_through(
     let store = fit.store.clone();
     let source = parts
         .source
-        .put(&store, &parts.labels, info)
+        .put(&store, &parts.attributes, info)
         .map_err(|e| format!("--model: storing the model source of {path}: {e}"))?;
     fit.reported_through(source, &content)
 }

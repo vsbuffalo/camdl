@@ -1627,7 +1627,7 @@ fn run_profile(
             let focal = cell_focal[gi].clone();
             let start = start_values[si].clone();
             let seed = crate::profile_store::point_seed(seeds[seed_idx], &focal, &start, replicate[si]);
-            let labels = crate::profile_store::ProfilePointAttributes {
+            let attributes = crate::profile_store::ProfilePointAttributes {
                 model: stem.clone(),
                 focal: crate::profile_store::focal_label(&focal),
                 method: method_identity.label(),
@@ -1641,7 +1641,7 @@ fn run_profile(
                 start,
                 seed,
             };
-            (identity, labels, store::Wanted::none())
+            (identity, attributes, store::Wanted::none())
         }).collect();
     // `begin_all` begins each distinct identity once, and answers in the
     // order first asked for: a seed listed twice in `--seeds` names its

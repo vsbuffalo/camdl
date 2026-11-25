@@ -107,9 +107,9 @@ impl Narrow {
 #[derive(Clone)]
 pub(crate) struct Candidate {
     pub located: Located,
-    /// The labels the manifest or the invocation record gives the result;
+    /// The attributes the manifest or the invocation record gives the result;
     /// `null` when they give none.
-    pub labels: serde_json::Value,
+    pub attributes: serde_json::Value,
     /// For a manifest's entry, the files it records, by logical name.
     promised: Option<BTreeMap<String, ManifestFile>>,
     /// The provenance files `run.json` records, by stored name.
@@ -156,10 +156,10 @@ struct Named {
 }
 
 impl Candidate {
-    fn new(located: Located, labels: serde_json::Value, promised: Option<BTreeMap<String, ManifestFile>>) -> Result<Candidate, FileRefusal> {
+    fn new(located: Located, attributes: serde_json::Value, promised: Option<BTreeMap<String, ManifestFile>>) -> Result<Candidate, FileRefusal> {
         let provenance =
             located.provenance_files().map_err(|e| FileRefusal::Store(e.to_string()))?.keys().map(|s| s.to_string()).collect();
-        Ok(Candidate { located, labels, promised, provenance })
+        Ok(Candidate { located, attributes, promised, provenance })
     }
 
     fn logical_of(&self, stored: &str) -> String {
@@ -215,8 +215,8 @@ impl Candidate {
 pub(crate) struct ResolvedFile {
     /// The result that holds the file.
     pub located: Located,
-    /// The labels of the candidate the name was found through.
-    pub labels: serde_json::Value,
+    /// The attributes of the candidate the name was found through.
+    pub attributes: serde_json::Value,
     /// The logical name, or a record's file name.
     pub logical: String,
     /// The name inside the result's folder.
@@ -275,7 +275,7 @@ pub(crate) enum FileRefusal {
     ManifestDiffers { source: String, result: String, name: String, what: String },
     /// A result has no default file and holds several.
     NoDefault { result: String, files: Vec<String> },
-    /// A label value holds a tab or a line break, which a TSV cell cannot.
+    /// An attribute value holds a tab or a line break, which a TSV cell cannot.
     Untabular { what: String },
     /// `cat --each` of a file that is not a table, or of tables whose headers
     /// differ.
@@ -353,8 +353,8 @@ pub(crate) fn candidates(store: &Store, source: &Source, narrow: &Narrow) -> Res
                 .into_iter()
                 .filter(|(k, id, completed)| *completed && seen.insert((k.to_string(), *id)))
                 .map(|(k, id, _)| {
-                    let labels = crate::output_manifest::manifest_attributes(k, inv.attributes_of(k, id).unwrap_or(serde_json::Value::Null));
-                    (k.to_string(), id, labels, None)
+                    let attributes = crate::output_manifest::manifest_attributes(k, inv.attributes_of(k, id).unwrap_or(serde_json::Value::Null));
+                    (k.to_string(), id, attributes, None)
                 })
                 .collect()
         }
@@ -366,7 +366,7 @@ pub(crate) fn candidates(store: &Store, source: &Source, narrow: &Narrow) -> Res
         return Err(FileRefusal::Narrowed { source: source.shown(), narrow: narrow_or_source(narrow), results: all });
     }
     let mut out = Candidates { found: Vec::new(), unavailable: Vec::new(), named_first: false };
-    for (kind, run_id, labels, promised) in kept {
+    for (kind, run_id, attributes, promised) in kept {
         let located = match (store.locate(run_id), source) {
             (Ok(l), _) => l,
             // A manifest promises each entry, so one the store cannot serve
@@ -392,7 +392,7 @@ pub(crate) fn candidates(store: &Store, source: &Source, narrow: &Narrow) -> Res
                 what: format!("the store's result {} is a `{}`", run_id.short12(), located.kind()),
             });
         }
-        out.found.push(Candidate::new(located, labels, promised)?);
+        out.found.push(Candidate::new(located, attributes, promised)?);
     }
     Ok(out)
 }
@@ -417,17 +417,17 @@ fn one_with_by_products(store: &Store, handle: &Handle, narrow: &Narrow) -> Resu
         e => FileRefusal::Store(not_completed(store, handle, e)),
     })?;
     let invocations = store.invocations();
-    let latest_labels = |kind: &str, id: Key| {
-        let labels = store
+    let latest_attributes = |kind: &str, id: Key| {
+        let attributes = store
             .listings(&Handle::IdPrefix(id.to_hex()))
             .ok()
             .and_then(|l| l.answering()?.invocation().attributes_of(kind, id))
             .unwrap_or(serde_json::Value::Null);
-        crate::output_manifest::manifest_attributes(kind, labels)
+        crate::output_manifest::manifest_attributes(kind, attributes)
     };
     let id = main.run_id();
     let main_kind = main.kind().to_string();
-    let mut found = vec![Candidate::new(main, latest_labels(&main_kind, id), None)?];
+    let mut found = vec![Candidate::new(main, latest_attributes(&main_kind, id), None)?];
     let mut unavailable = Vec::new();
     let mut seen = BTreeSet::from([id]);
     for inv in invocations.iter() {
@@ -444,7 +444,7 @@ fn one_with_by_products(store: &Store, handle: &Handle, narrow: &Narrow) -> Resu
             }
             seen.insert(key);
             match store.locate(key) {
-                Ok(located) => found.push(Candidate::new(located, latest_labels(kind, key), None)?),
+                Ok(located) => found.push(Candidate::new(located, latest_attributes(kind, key), None)?),
                 Err(e) => unavailable.push(Unavailable { kind: kind.to_string(), run_id: key, why: e.to_string() }),
             }
         }
@@ -759,7 +759,7 @@ fn nested_hits(store: &Store, pool: &[&Candidate], name: &str) -> Vec<(Candidate
             if !descends_from(store, &located, c.located.run_id()) {
                 continue;
             }
-            let Ok(nested) = Candidate::new(located, c.labels.clone(), None) else { continue };
+            let Ok(nested) = Candidate::new(located, c.attributes.clone(), None) else { continue };
             let names = nested.names();
             if let Some(n) = names.iter().find(|n| n.logical == rest).or_else(|| names.iter().find(|n| n.stored == rest)) {
                 let n = n.clone();
@@ -825,7 +825,7 @@ fn file_of(store: &Store, source: &Source, c: &Candidate, named: &Named) -> Resu
     };
     Ok(ResolvedFile {
         located: located.clone(),
-        labels: c.labels.clone(),
+        attributes: c.attributes.clone(),
         logical: named.logical.clone(),
         stored: named.stored.clone(),
         path: std::path::absolute(&path).unwrap_or(path),
@@ -837,7 +837,7 @@ fn file_of(store: &Store, source: &Source, c: &Candidate, named: &Named) -> Resu
 // ── `--each` tables ──────────────────────────────────────────────────────────
 
 /// Appends one column per swept parameter, `values` in the order the design
-/// names them. A parameter whose name another label column already has is
+/// names them. A parameter whose name another attribute column already has is
 /// written `param.<name>`.
 pub(crate) fn push_swept(columns: &mut Vec<(String, String)>, values: &[(String, f64)]) {
     for (name, v) in values {
@@ -846,22 +846,22 @@ pub(crate) fn push_swept(columns: &mut Vec<(String, String)>, values: &[(String,
     }
 }
 
-/// A result's labels as `--each` columns: its kind's rule for a cell and a
+/// A result's attributes as `--each` columns: its kind's rule for a cell and a
 /// filter run, and otherwise each field under its name, a scalar as its
 /// text and anything else as compact JSON.
-fn label_columns(kind: &str, labels: &serde_json::Value) -> Vec<(String, String)> {
+fn attribute_columns(kind: &str, attributes: &serde_json::Value) -> Vec<(String, String)> {
     use store::Artifact;
     if kind == crate::sim_store::Sim::KIND {
-        if let Ok(l) = serde_json::from_value::<crate::sim_store::CellAttributes>(labels.clone()) {
+        if let Ok(l) = serde_json::from_value::<crate::sim_store::CellAttributes>(attributes.clone()) {
             return l.columns();
         }
     }
     if kind == crate::pfilter_store::Pfilter::KIND {
-        if let Ok(l) = serde_json::from_value::<crate::pfilter_store::PfilterAttributes>(labels.clone()) {
+        if let Ok(l) = serde_json::from_value::<crate::pfilter_store::PfilterAttributes>(attributes.clone()) {
             return l.columns();
         }
     }
-    let Some(map) = labels.as_object() else { return Vec::new() };
+    let Some(map) = attributes.as_object() else { return Vec::new() };
     map.iter()
         .map(|(k, v)| {
             let text = match v {
@@ -875,11 +875,11 @@ fn label_columns(kind: &str, labels: &serde_json::Value) -> Vec<(String, String)
         .collect()
 }
 
-/// The rows' label columns: the union of the files' label keys in the order
+/// The rows' attribute columns: the union of the files' attribute keys in the order
 /// they are first seen, each row with an empty value where its result lacks
-/// a key. A key that `taken` holds is written `label.<key>`.
-fn label_table(files: &[ResolvedFile], taken: &[&str]) -> Result<(Vec<String>, Vec<Vec<String>>), FileRefusal> {
-    let per_row: Vec<Vec<(String, String)>> = files.iter().map(|f| label_columns(f.located.kind(), &f.labels)).collect();
+/// a key. A key that `taken` holds is written `attribute.<key>`.
+fn attribute_table(files: &[ResolvedFile], taken: &[&str]) -> Result<(Vec<String>, Vec<Vec<String>>), FileRefusal> {
+    let per_row: Vec<Vec<(String, String)>> = files.iter().map(|f| attribute_columns(f.located.kind(), &f.attributes)).collect();
     let mut keys: Vec<String> = Vec::new();
     for row in &per_row {
         for (k, _) in row {
@@ -894,22 +894,27 @@ fn label_table(files: &[ResolvedFile], taken: &[&str]) -> Result<(Vec<String>, V
         for k in &keys {
             let v = row.iter().find(|(c, _)| c == k).map(|(_, v)| v.clone()).unwrap_or_default();
             if v.contains(['\t', '\n', '\r']) {
-                return Err(FileRefusal::Untabular { what: format!("the label `{k}` of the {} {}", f.located.kind(), f.located.run_id().short12()) });
+                return Err(FileRefusal::Untabular { what: format!("the attribute `{k}` of the {} {}", f.located.kind(), f.located.run_id().short12()) });
             }
             cells.push(v);
         }
         rows.push(cells);
     }
-    let header = keys.into_iter().map(|k| if taken.contains(&k.as_str()) { format!("label.{k}") } else { k }).collect();
-    Ok((header, rows))
+    Ok((attribute_header(keys, taken), rows))
+}
+
+/// The attribute columns' names: each key as written, and `attribute.<key>`
+/// for a key that `taken`, the table's own columns, already holds.
+fn attribute_header(keys: Vec<String>, taken: &[&str]) -> Vec<String> {
+    keys.into_iter().map(|k| if taken.contains(&k.as_str()) { format!("attribute.{k}") } else { k }).collect()
 }
 
 /// `camdl path --each`: a TSV with one row per file, `run_id` (64 hex
-/// digits), the label columns, then `path`.
+/// digits), the attribute columns, then `path`.
 pub(crate) fn path_table(files: &[ResolvedFile]) -> Result<String, FileRefusal> {
-    let (labels, rows) = label_table(files, &["run_id", "path"])?;
+    let (attributes, rows) = attribute_table(files, &["run_id", "path"])?;
     let mut out = String::new();
-    let header: Vec<&str> = std::iter::once("run_id").chain(labels.iter().map(String::as_str)).chain(std::iter::once("path")).collect();
+    let header: Vec<&str> = std::iter::once("run_id").chain(attributes.iter().map(String::as_str)).chain(std::iter::once("path")).collect();
     out.push_str(&header.join("\t"));
     out.push('\n');
     for (f, cells) in files.iter().zip(rows) {
@@ -925,7 +930,7 @@ pub(crate) fn path_table(files: &[ResolvedFile]) -> Result<String, FileRefusal> 
 }
 
 /// `camdl cat --each`: the rows of every file as one TSV, each row after its
-/// result's label columns, under one header. Each file is read through the
+/// result's attribute columns, under one header. Each file is read through the
 /// store and checked against its digest; leading `#` comment lines are
 /// dropped. A file that is not a table, and a file whose header differs from
 /// the first file's, are refused before anything is returned.
@@ -964,12 +969,12 @@ pub(crate) fn cat_table(files: &[ResolvedFile]) -> Result<Vec<u8>, FileRefusal> 
         )));
     }
     let columns: Vec<&str> = first.split('\t').collect();
-    let (labels, label_rows) = label_table(files, &columns)?;
+    let (attributes, attribute_rows) = attribute_table(files, &columns)?;
     let mut out = String::new();
-    let header: Vec<&str> = labels.iter().map(String::as_str).chain(columns.iter().copied()).collect();
+    let header: Vec<&str> = attributes.iter().map(String::as_str).chain(columns.iter().copied()).collect();
     out.push_str(&header.join("\t"));
     out.push('\n');
-    for ((_, rows), cells) in tables.iter().zip(label_rows) {
+    for ((_, rows), cells) in tables.iter().zip(attribute_rows) {
         let prefix = cells.join("\t");
         for row in rows {
             if !cells.is_empty() {

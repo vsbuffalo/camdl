@@ -392,7 +392,7 @@ fn refusals_name_what_exists() {
 }
 
 /// `path --each` over a sweep crossed with seeds: one row per cell, in the
-/// manifest's order, with `run_id`, the cell's labels, the swept parameter
+/// manifest's order, with `run_id`, the cell's attributes, the swept parameter
 /// and `path`; the same bytes on every call and after a cache hit.
 #[test]
 fn path_each_over_a_sweep_is_in_manifest_order() {
@@ -442,10 +442,10 @@ fn path_each_over_a_swept_fit_is_in_manifest_order() {
     assert_eq!(p.ok(&["path", "--manifest", "build/sweep.json", "draws", "--each"]), table);
 }
 
-/// The label columns are the union of the results' label keys, in the order
+/// The attribute columns are the union of the results' attribute keys, in the order
 /// first seen, with an empty cell where a result lacks a key.
 #[test]
-fn path_each_takes_the_union_of_label_keys() {
+fn path_each_takes_the_union_of_attribute_keys() {
     let p = Project::new();
     p.ok(&["fit", "run", "fit.toml", "--seed", "1", "--manifest", "build/fit.json"]);
     let table = p.ok(&["path", "--manifest", "build/fit.json", "run.json", "--each"]);
@@ -532,7 +532,7 @@ fn cat_prints_the_file_path_names() {
 }
 
 /// `cat --each` prints every cell's rows under one header, each row after
-/// its cell's labels; a JSON file, and files whose headers differ, are
+/// its cell's attributes; a JSON file, and files whose headers differ, are
 /// refused before a row is printed.
 #[test]
 fn cat_each_prepends_labels_and_refuses_a_header_mismatch() {
@@ -542,12 +542,12 @@ fn cat_each_prepends_labels_and_refuses_a_header_mismatch() {
     let table = p.ok(&["cat", "--manifest", "build/sir.json", "traj", "--each"]);
     let mut lines = table.lines();
     let header = lines.next().unwrap();
-    let labels = "model\tparams\tscenario\treplicate\tseed\tseed_replicate\tprocess_seed\tpoint_id\tbeta";
+    let attributes = "model\tparams\tscenario\treplicate\tseed\tseed_replicate\tprocess_seed\tpoint_id\tbeta";
     let folders = p.folders();
     let cells: Vec<&serde_json::Value> = results(&m).iter().filter(|r| r["kind"] == "sim").collect();
     let traj: Vec<String> = cells.iter().map(|c| std::fs::read_to_string(folders[c["run_id"].as_str().unwrap()].join("traj.tsv")).unwrap()).collect();
     let traj_header = traj[0].lines().find(|l| !l.starts_with('#')).unwrap();
-    assert_eq!(header, format!("{labels}\t{traj_header}"));
+    assert_eq!(header, format!("{attributes}\t{traj_header}"));
     let rows: Vec<&str> = lines.collect();
     let mut want = Vec::new();
     for (cell, text) in cells.iter().zip(&traj) {

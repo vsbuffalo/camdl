@@ -24,7 +24,7 @@
 //! The combined trajectory table (`-o`, `--stdout`, `camdl cat @L`), the
 //! combined observation tables (`--obs`, `--obs-dir`) and the quantity tables
 //! (`--quantities-out`) are renderings of the stored files and the invocation's
-//! labels; none is stored.
+//! attributes; none is stored.
 
 // The store's error carries the paths and owners a person acts on, and is
 // returned once per export or result.
@@ -164,7 +164,7 @@ pub(crate) struct SimIdentity {
 /// show it.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "axis", rename_all = "snake_case")]
-pub(crate) enum PointLabel {
+pub(crate) enum PointAttributes {
     /// One parameter point.
     None,
     /// `--draws`: the draw's 0-based index.
@@ -174,7 +174,7 @@ pub(crate) enum PointLabel {
     Sweep { point_id: usize, values: Vec<(String, f64)> },
 }
 
-/// A cell's labels: what a user recognises it by, never hashed.
+/// A cell's attributes: what a user recognises it by, never hashed.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CellAttributes {
     /// The model file's stem.
@@ -193,7 +193,7 @@ pub(crate) struct CellAttributes {
     /// The seed the cell ran under: passed back to `--seeds`, it reproduces
     /// the cell.
     pub process_seed: u64,
-    pub point: PointLabel,
+    pub point: PointAttributes,
 }
 
 impl CellAttributes {
@@ -206,7 +206,7 @@ impl CellAttributes {
         }
     }
 
-    /// The labels as the columns of a `--each` table (run spec §4.5): each
+    /// The attributes as the columns of a `--each` table (run spec §4.5): each
     /// field under its name, then for a draw its `draw`, and for a sweep
     /// point its `point_id` and one column per swept parameter.
     pub(crate) fn columns(&self) -> Vec<(String, String)> {
@@ -220,9 +220,9 @@ impl CellAttributes {
             ("process_seed".into(), self.process_seed.to_string()),
         ];
         match &self.point {
-            PointLabel::None => {}
-            PointLabel::Draw { index } => c.push(("draw".into(), index.to_string())),
-            PointLabel::Sweep { point_id, values } => {
+            PointAttributes::None => {}
+            PointAttributes::Draw { index } => c.push(("draw".into(), index.to_string())),
+            PointAttributes::Sweep { point_id, values } => {
                 c.push(("point_id".into(), point_id.to_string()));
                 crate::resolve_file::push_swept(&mut c, values);
             }
@@ -242,10 +242,10 @@ impl Artifact for Sim {
 }
 
 impl Primary for Sim {
-    fn layout(id: &SimIdentity, labels: &CellAttributes) -> Placed {
-        camdl_groups(&labels.model, &id.model, &id.config.label(), &id.config, Some((labels.params.as_str(), &id.params)))
-            .group(&labels.scenario, &id.scenario)
-            .result(&labels.seed_label())
+    fn layout(id: &SimIdentity, attributes: &CellAttributes) -> Placed {
+        camdl_groups(&attributes.model, &id.model, &id.config.label(), &id.config, Some((attributes.params.as_str(), &id.params)))
+            .group(&attributes.scenario, &id.scenario)
+            .result(&attributes.seed_label())
     }
 }
 
@@ -285,7 +285,7 @@ impl ByProduct for Obs {
     fn upstream(id: &ObsIdentity) -> &SimIdentityRecord {
         &id.sim
     }
-    fn label(id: &ObsIdentity, _labels: &()) -> String {
+    fn label(id: &ObsIdentity, _attributes: &()) -> String {
         id.streams.join("+")
     }
 }
@@ -316,7 +316,7 @@ impl ByProduct for EventLog {
     fn upstream(id: &EventLogIdentity) -> &SimIdentityRecord {
         &id.sim
     }
-    fn label(_id: &EventLogIdentity, _labels: &()) -> String {
+    fn label(_id: &EventLogIdentity, _attributes: &()) -> String {
         "event_log".into()
     }
 }
@@ -354,7 +354,7 @@ impl ByProduct for SimQuantities {
     fn upstream(id: &SimQuantitiesIdentity) -> &SimIdentityRecord {
         &id.sim
     }
-    fn label(_id: &SimQuantitiesIdentity, _labels: &()) -> String {
+    fn label(_id: &SimQuantitiesIdentity, _attributes: &()) -> String {
         "quantities".into()
     }
 }
@@ -470,10 +470,10 @@ fn refuse_failures<'a>(
     members: impl Iterator<Item = (&'a Stored<Sim>, &'a CellAttributes, Option<(Failure, std::path::PathBuf)>)>,
 ) -> store::Result<()> {
     let mut failed = Vec::new();
-    for (stored, labels, by_product) in members {
+    for (stored, attributes, by_product) in members {
         let own = Failure::of(stored).map_err(parse)?.map(|f| (f, stored.folder().join(FAILURE_FILE)));
         if let Some((f, path)) = own.or(by_product) {
-            failed.push(format!("{}: the {} stopped: {} ({})", cell_name(labels), f.stage, f.reason, path.display()));
+            failed.push(format!("{}: the {} stopped: {} ({})", cell_name(attributes), f.stage, f.reason, path.display()));
         }
     }
     if failed.is_empty() {
@@ -495,8 +495,8 @@ fn by_product_failure<B: Artifact>(stored: &Option<Stored<B>>) -> store::Result<
 }
 
 /// A cell as a person names it: its scenario and the seed typed.
-pub(crate) fn cell_name(labels: &CellAttributes) -> String {
-    format!("scenario={} {}", labels.scenario, labels.seed_label())
+pub(crate) fn cell_name(attributes: &CellAttributes) -> String {
+    format!("scenario={} {}", attributes.scenario, attributes.seed_label())
 }
 
 /// The coordinate columns of a combined table: `replicate` and `scenario`,
@@ -511,8 +511,8 @@ impl Coords {
     fn of(members: &[&CellAttributes]) -> store::Result<Coords> {
         let first = members.first().map(|l| &l.point);
         let coords = match first {
-            Some(PointLabel::Sweep { values, .. }) => Coords { sweep: Some(values.iter().map(|(k, _)| k.clone()).collect()), draws: false },
-            Some(PointLabel::Draw { .. }) => Coords { sweep: None, draws: true },
+            Some(PointAttributes::Sweep { values, .. }) => Coords { sweep: Some(values.iter().map(|(k, _)| k.clone()).collect()), draws: false },
+            Some(PointAttributes::Draw { .. }) => Coords { sweep: None, draws: true },
             _ => Coords { sweep: None, draws: false },
         };
         Ok(coords)
@@ -535,7 +535,7 @@ impl Coords {
     fn cells(&self, out: &mut dyn Write, l: &CellAttributes) -> store::Result<()> {
         write!(out, "{}\t{}\t", l.replicate, l.scenario).map_err(io)?;
         match (&self.sweep, &l.point) {
-            (Some(params), PointLabel::Sweep { point_id, values }) => {
+            (Some(params), PointAttributes::Sweep { point_id, values }) => {
                 write!(out, "{point_id}\t").map_err(io)?;
                 for p in params {
                     let v = values.iter().find(|(k, _)| k == p).map(|(_, v)| *v).ok_or_else(|| {
@@ -549,7 +549,7 @@ impl Coords {
         }
         if self.draws {
             match &l.point {
-                PointLabel::Draw { index } => write!(out, "{index}\t").map_err(io)?,
+                PointAttributes::Draw { index } => write!(out, "{index}\t").map_err(io)?,
                 _ => return Err(parse(format!("cell {} is not a draw", l.replicate))),
             }
         }
@@ -567,7 +567,7 @@ pub(crate) struct Dates {
 
 /// The combined trajectory table across an invocation's cells: `-o`,
 /// `--stdout` and `camdl cat @L`. Each cell's stored `traj.tsv` rows,
-/// prefixed with its labels as coordinate columns, in the order the cells
+/// prefixed with its attributes as coordinate columns, in the order the cells
 /// were asked for, after one version line and one header.
 pub(crate) struct CombinedTable;
 
@@ -583,7 +583,7 @@ impl Rendering for CombinedTable {
         refuse_failures(members.iter().map(|(s, l)| (s, l, None)))?;
         let coords = Coords::of(&members.iter().map(|(_, l)| l).collect::<Vec<_>>())?;
         let mut header_written = false;
-        for (stored, labels) in members {
+        for (stored, attributes) in members {
             let traj = String::from_utf8(crate::camdl_store::read_stored(stored, TRAJ_FILE).map_err(parse)?)
                 .map_err(|e| parse(e.to_string()))?;
             let mut lines = traj.lines();
@@ -607,7 +607,7 @@ impl Rendering for CombinedTable {
                     (Some(t), Some(a), Some(b)) => (t, a, b),
                     _ => return Err(parse(format!("a stored traj.tsv row `{row}` lacks the three time cells"))),
                 };
-                coords.cells(out, labels)?;
+                coords.cells(out, attributes)?;
                 write!(out, "{t}\t{start}\t{stop}").map_err(io)?;
                 if let Some(d) = &options.dates {
                     let num = |x: &str| x.parse::<f64>().map_err(|_| parse(format!("a stored time cell `{x}` is not a number")));
@@ -657,7 +657,7 @@ pub(crate) struct ObsTableOptions {
 }
 
 /// The combined observation tables: each cell's stored stream files, with
-/// the cell's labels as coordinate columns.
+/// the cell's attributes as coordinate columns.
 pub(crate) struct ObsTable;
 
 impl ByProductRendering for ObsTable {
@@ -673,8 +673,8 @@ impl ByProductRendering for ObsTable {
         let coords = Coords::of(&members.iter().map(|((_, l), _)| l).collect::<Vec<_>>())?;
         // Each member's values, per stream, as stored.
         let mut values: Vec<Vec<Vec<String>>> = Vec::with_capacity(members.len());
-        for ((_, labels), obs) in members {
-            let obs = obs.as_ref().ok_or_else(|| parse(format!("{} has no stored observations", cell_name(labels))))?;
+        for ((_, attributes), obs) in members {
+            let obs = obs.as_ref().ok_or_else(|| parse(format!("{} has no stored observations", cell_name(attributes))))?;
             let mut per = Vec::with_capacity(options.streams.len());
             for s in &options.streams {
                 let name = format!("{}.tsv", s.name);
@@ -715,9 +715,9 @@ impl ByProductRendering for ObsTable {
                 }
                 writeln!(w).map_err(io)?;
                 let n_times = options.streams.first().map(|s| s.plan.rows.len()).unwrap_or(0);
-                for (mi, ((_, labels), _)) in members.iter().enumerate() {
+                for (mi, ((_, attributes), _)) in members.iter().enumerate() {
                     for ti in 0..n_times {
-                        coords.cells(w, labels)?;
+                        coords.cells(w, attributes)?;
                         let t = options.streams[0].plan.rows[ti].label;
                         write!(w, "{t}").map_err(io)?;
                         if options.dates.is_some() {
@@ -754,12 +754,12 @@ impl ByProductRendering for ObsTable {
                         write!(w, "\t{header}").map_err(io)?;
                     }
                     writeln!(w, "\t{}", first.plan.scored).map_err(io)?;
-                    for (mi, ((_, labels), _)) in members.iter().enumerate() {
+                    for (mi, ((_, attributes), _)) in members.iter().enumerate() {
                         for ri in 0..first.plan.rows.len() {
                             for &si in &group {
                                 let s = &options.streams[si];
                                 let row = &s.plan.rows[ri];
-                                coords.cells(w, labels)?;
+                                coords.cells(w, attributes)?;
                                 match (&first.plan.columns, row.coverage) {
                                     (crate::obs_emit::TemporalColumns::Window { .. }, score::trace::Coverage::Interval { start, stop }) => {
                                         write!(w, "{start}\t{stop}").map_err(io)?;
@@ -835,20 +835,20 @@ impl ByProductRendering for QuantityTable {
         refuse_failures(members.iter().zip(q_failures).map(|(((s, l), _), f)| (s, l, f)))?;
         type Group = (Vec<Vec<sim::quantity::QuantityResult>>, Vec<f64>, Vec<(String, f64)>);
         let mut groups: indexmap::IndexMap<(usize, String), Group> = indexmap::IndexMap::new();
-        for ((_, labels), q) in members {
-            let q = q.as_ref().ok_or_else(|| parse(format!("{} has no stored quantities", cell_name(labels))))?;
+        for ((_, attributes), q) in members {
+            let q = q.as_ref().ok_or_else(|| parse(format!("{} has no stored quantities", cell_name(attributes))))?;
             let stored: CellQuantities = serde_json::from_slice(&crate::camdl_store::read_stored(q, SimQuantities::FILE).map_err(parse)?)
                 .map_err(|e| parse(e.to_string()))?;
             let (times, results) = stored.parts().map_err(parse)?;
-            let (point, sweep) = match &labels.point {
-                PointLabel::Sweep { point_id, values } => (*point_id, values.clone()),
+            let (point, sweep) = match &attributes.point {
+                PointAttributes::Sweep { point_id, values } => (*point_id, values.clone()),
                 _ => (0, Vec::new()),
             };
-            let g = groups.entry((point, labels.scenario.clone())).or_insert_with(|| (Vec::new(), times.clone(), sweep));
+            let g = groups.entry((point, attributes.scenario.clone())).or_insert_with(|| (Vec::new(), times.clone(), sweep));
             if g.1.len() != times.len() {
                 return Err(parse(format!(
                     "scenario '{}', point {point}: a cell has {} output times and this group's earlier cells have {}",
-                    labels.scenario,
+                    attributes.scenario,
                     times.len(),
                     g.1.len()
                 )));

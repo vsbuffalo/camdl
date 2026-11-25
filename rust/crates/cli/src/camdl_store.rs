@@ -215,12 +215,12 @@ pub(crate) fn open_existing(root: &Path) -> Option<Store> {
 pub(crate) fn begin<A: Primary + Files>(
     store: &Store,
     identity: &A::Identity,
-    labels: &A::Attributes,
+    attributes: &A::Attributes,
     info: &store::RunInfo,
     reuse: store::Reuse,
     files: impl IntoIterator<Item = A::File>,
 ) -> store::Result<store::Begin<A>> {
-    store.begin::<A>(identity, labels, info, reuse).map(|b| declared(b, files))
+    store.begin::<A>(identity, attributes, info, reuse).map(|b| declared(b, files))
 }
 
 /// [`begin`], also wanting the by-products `wanted`.
@@ -228,13 +228,13 @@ pub(crate) fn begin<A: Primary + Files>(
 pub(crate) fn begin_with<A: Primary + Files>(
     store: &Store,
     identity: &A::Identity,
-    labels: &A::Attributes,
+    attributes: &A::Attributes,
     wanted: &store::Wanted<A>,
     info: &store::RunInfo,
     reuse: store::Reuse,
     files: impl IntoIterator<Item = A::File>,
 ) -> store::Result<store::Begin<A>> {
-    store.begin_with::<A>(identity, labels, wanted, info, reuse).map(|b| declared(b, files))
+    store.begin_with::<A>(identity, attributes, wanted, info, reuse).map(|b| declared(b, files))
 }
 
 /// `begun`, with `files` declared on it when it is a claim: for each member
@@ -515,7 +515,7 @@ pub(crate) struct CompiledParts {
     /// the declared model, the renders and the quantities: the model source,
     /// before it is stored.
     pub source: SourceParts,
-    pub labels: ModelAttributes,
+    pub attributes: ModelAttributes,
     /// The envelope's `ir_version` and `validated_by`, and the digests of the
     /// whole compiled output and of the source file.
     pub provenance: Provenance,
@@ -628,7 +628,7 @@ impl CompiledParts {
             model: Hashed::new(CompiledModelContent::of(model_part)),
             quantities,
             source: model_source,
-            labels: ModelAttributes { name },
+            attributes: ModelAttributes { name },
             provenance,
         })
     }
@@ -646,8 +646,8 @@ impl Artifact for CompiledModel {
 }
 
 impl Primary for CompiledModel {
-    fn layout(_id: &Self::Identity, labels: &ModelAttributes) -> Placed {
-        Layout::in_kind().result(&labels.name)
+    fn layout(_id: &Self::Identity, attributes: &ModelAttributes) -> Placed {
+        Layout::in_kind().result(&attributes.name)
     }
 }
 
@@ -668,8 +668,8 @@ impl Artifact for Quantities {
 }
 
 impl Primary for Quantities {
-    fn layout(_id: &Self::Identity, labels: &ModelAttributes) -> Placed {
-        Layout::in_kind().result(&labels.name)
+    fn layout(_id: &Self::Identity, attributes: &ModelAttributes) -> Placed {
+        Layout::in_kind().result(&attributes.name)
     }
 }
 
@@ -713,8 +713,8 @@ impl Artifact for DataTable {
 }
 
 impl Primary for DataTable {
-    fn layout(_id: &Self::Identity, labels: &TableAttributes) -> Placed {
-        Layout::in_kind().result(&labels.stream)
+    fn layout(_id: &Self::Identity, attributes: &TableAttributes) -> Placed {
+        Layout::in_kind().result(&attributes.stream)
     }
 }
 

@@ -125,11 +125,11 @@ pub(crate) struct PfilterAttributes {
     pub model: String,
     pub seed: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub point: Option<DesignPointLabel>,
+    pub point: Option<DesignPointAttributes>,
 }
 
 impl PfilterAttributes {
-    /// The labels as the columns of a `--each` table (run spec §4.5): the
+    /// The attributes as the columns of a `--each` table (run spec §4.5): the
     /// model and the seed, then for a design point its `row`, its
     /// `point_id` and one column per design column.
     pub(crate) fn columns(&self) -> Vec<(String, String)> {
@@ -147,7 +147,7 @@ impl PfilterAttributes {
 /// position in the design file, its id, and the value of each design column,
 /// sorted by name.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub(crate) struct DesignPointLabel {
+pub(crate) struct DesignPointAttributes {
     pub row: usize,
     pub point_id: usize,
     pub values: Vec<(String, f64)>,
@@ -164,9 +164,9 @@ impl Artifact for Pfilter {
 }
 
 impl Primary for Pfilter {
-    fn layout(id: &PfilterIdentity, labels: &PfilterAttributes) -> Placed {
-        camdl_groups(&labels.model, &id.model, &id.config.label(), &id.config, Some(("params", &id.params)))
-            .result(&format!("seed_{}", labels.seed))
+    fn layout(id: &PfilterIdentity, attributes: &PfilterAttributes) -> Placed {
+        camdl_groups(&attributes.model, &id.model, &id.config.label(), &id.config, Some(("params", &id.params)))
+            .result(&format!("seed_{}", attributes.seed))
     }
 }
 
@@ -204,7 +204,7 @@ macro_rules! run_by_product {
             fn upstream(id: &$identity) -> &PfilterIdentityRecord {
                 &id.filter
             }
-            fn label(_id: &$identity, _labels: &()) -> String {
+            fn label(_id: &$identity, _attributes: &()) -> String {
                 $label.into()
             }
         }
@@ -282,7 +282,7 @@ impl ByProduct for SavedPaths {
     fn upstream(id: &SavedPathsIdentity) -> &PfilterIdentityRecord {
         &id.filter
     }
-    fn label(_id: &SavedPathsIdentity, _labels: &Option<PathRows>) -> String {
+    fn label(_id: &SavedPathsIdentity, _attributes: &Option<PathRows>) -> String {
         "paths".into()
     }
 }
@@ -320,7 +320,7 @@ impl ByProduct for Prequential {
     fn upstream(id: &PrequentialIdentity) -> &PfilterIdentityRecord {
         &id.filter
     }
-    fn label(_id: &PrequentialIdentity, _labels: &()) -> String {
+    fn label(_id: &PrequentialIdentity, _attributes: &()) -> String {
         "prequential".into()
     }
 }
@@ -475,7 +475,7 @@ impl Rendering for LoglikTable {
 
 /// The table a `--sweep-file` design writes: one row per design point, in the
 /// design file's order, with the point's id and design values from the
-/// invocation's labels and the rest from the stored run. The points are
+/// invocation's attributes and the rest from the stored run. The points are
 /// computed concurrently, so the invocation lists them in the order they
 /// reached the store, and the rows are put back in file order here.
 ///
@@ -501,7 +501,7 @@ impl Rendering for DesignTable {
         let parse = |why: String| store::Error::Parse { what: "a stored pfilter result".into(), why };
         let no_point = || parse("a member of the invocation is not a design point".into());
         let columns: Vec<&str> = match members.first() {
-            Some((_, labels)) => labels.point.as_ref().ok_or_else(no_point)?.values.iter().map(|(k, _)| k.as_str()).collect(),
+            Some((_, attributes)) => attributes.point.as_ref().ok_or_else(no_point)?.values.iter().map(|(k, _)| k.as_str()).collect(),
             None => Vec::new(),
         };
         let mut header = String::from("point_id");
@@ -510,8 +510,8 @@ impl Rendering for DesignTable {
         }
         writeln!(out, "{header}\tloglik\tloglik_sd\tn_failed\tfailure\trun_id").map_err(io)?;
         let mut rows = Vec::with_capacity(members.len());
-        for (stored, labels) in members {
-            rows.push((labels.point.as_ref().ok_or_else(no_point)?, stored));
+        for (stored, attributes) in members {
+            rows.push((attributes.point.as_ref().ok_or_else(no_point)?, stored));
         }
         rows.sort_by_key(|(point, _)| point.row);
         for (point, stored) in rows {
