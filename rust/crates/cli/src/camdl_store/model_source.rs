@@ -482,6 +482,178 @@ impl Shown {
     }
 }
 
+/// What a reader shows of a model source, read into memory once: its
+/// description and `#'` documentation (`docs.json`). The declared model and
+/// the renders are read as files, by `camdl path` and `camdl cat`.
+pub(crate) struct Views {
+    pub description: Option<String>,
+    pub docs: ir::ModelDocs,
+}
+
+impl Views {
+    /// The views `source` holds.
+    fn of(source: &Stored<ModelSource>) -> Result<Views, String> {
+        let docs: SourceDocs = serde_json::from_slice(&super::read_stored(source, DOCS)?).map_err(|e| format!("{DOCS}: {e}"))?;
+        Ok(Views { description: docs.description, docs: docs.docs })
+    }
+}
+
+/// The model a stored result was computed from, read once: what the engine
+/// runs, the source the answering invocation recorded for it, that source's
+/// views, and the quantities a reader evaluates.
+pub(crate) struct StoredModel {
+    /// What the engine runs, named, with the source's description and the
+    /// quantities and contrasts of [`Self::evaluated`].
+    pub model: ir::Model,
+    pub source: Shown,
+    views: Option<Views>,
+    /// The quantities [`Self::model`] holds: the recorded source's, or those
+    /// a command put in their place (`predict --model FILE`, or a stored
+    /// prediction's own when `score` poses it again). `None` when no source
+    /// is recorded or it cannot be read.
+    pub evaluated: Option<Dep<Quantities>>,
+}
+
+impl StoredModel {
+    /// The compiled model `dep`, named `name`, with the source the invocation
+    /// answering for `handle` recorded for it ([`shown_for`]) and that
+    /// source's views and quantities. A recorded source whose views do not
+    /// read is reported as a warning naming `handle`, and the model is read
+    /// without them.
+    pub fn of(store: &Store, handle: &Handle, dep: &Dep<CompiledModel>, name: &str) -> Result<StoredModel, String> {
+        let model = crate::fit_store::stored_envelope(store, dep, name)?.model;
+        let mut stored = StoredModel { model, source: Shown::NotRecorded { invocation: None }, views: None, evaluated: None };
+        stored.with_source(handle, shown_for(store, handle, dep.id().key()));
+        if let Shown::Recorded { source, .. } = &stored.source {
+            let q = source.identity().quantities.clone();
+            let content = crate::fit_store::read_quantities(store, &q)?;
+            stored.evaluate(q, &content)?;
+        }
+        Ok(stored)
+    }
+
+    /// Puts the quantities `dep`, whose content is `content`, in the model in
+    /// place of the recorded ones.
+    pub fn evaluate(&mut self, dep: Dep<Quantities>, content: &QuantitiesContent) -> Result<(), String> {
+        self.model.quantities = content.quantities()?;
+        self.model.contrasts = content.contrasts()?;
+        self.evaluated = Some(dep);
+        Ok(())
+    }
+
+    /// Reads the model's documentation from `source` in place of the
+    /// current one; the quantities are left as they are. A source whose
+    /// views do not read is reported as a warning naming `handle`.
+    pub fn with_source(&mut self, handle: &Handle, source: Shown) {
+        self.views = match &source {
+            Shown::Recorded { source: s, .. } => match Views::of(s) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    unreadable_views(handle, &format!("{}: {e}", s.id().key().short12()));
+                    None
+                }
+            },
+            Shown::Unreadable { run_id, why } => {
+                unreadable_views(handle, &format!("{}: {why}", run_id.short12()));
+                None
+            }
+            Shown::NotRecorded { .. } => None,
+        };
+        self.model.description = self.views.as_ref().and_then(|v| v.description.clone());
+        self.source = source;
+    }
+
+    /// The model as read through `source`, the model file a command was
+    /// given, whose documentation and quantities replace the recorded ones.
+    pub fn given(&mut self, handle: &Handle, source: Stored<ModelSource>, content: &QuantitiesContent) -> Result<(), String> {
+        let dep = source.identity().quantities.clone();
+        self.with_source(handle, Shown::Recorded { source, by: RecordedBy::Given });
+        self.evaluate(dep, content)
+    }
+
+    /// The quantities a prediction evaluates, for the result `text` names:
+    /// those of the recorded source. Refused when no source is recorded or
+    /// it cannot be read, and, for a run id or a folder whose listings
+    /// recorded sources with other quantities, refused with the labels that
+    /// name them; sources whose quantities agree are one answer. A file a
+    /// command was given is the answer as it stands.
+    pub fn quantities(&self, store: &Store, text: &str) -> Result<Dep<Quantities>, String> {
+        let (source, others) = match &self.source {
+            Shown::NotRecorded { .. } => {
+                return Err(format!(
+                    "{text}: no invocation recorded the model file the fit ran, so its quantities are not known; \
+                     run `fit run` again, or pass `--model FILE`"
+                ))
+            }
+            Shown::Unreadable { run_id, why } => {
+                return Err(format!("{text}: the model source {} the fit's invocation recorded cannot be read: {why}", run_id.short12()))
+            }
+            Shown::Recorded { source, by: RecordedBy::Latest { others, .. } } => (source, others.as_slice()),
+            Shown::Recorded { source, .. } => (source, &[][..]),
+        };
+        let latest = source.identity().quantities.clone();
+        let mut differ = Vec::new();
+        for other in others {
+            let read: Stored<ModelSource> = store
+                .get(&Id::from_key(other.run_id))
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("{text}: the model source {} an earlier invocation recorded cannot be read", other.run_id.short12()))?;
+            if read.identity().quantities.digest() != latest.digest() {
+                differ.push(match &other.labels[..] {
+                    [] => format!("    model source {} (no label names it)", other.run_id.short12()),
+                    labels => format!("    model source {} ({})", other.run_id.short12(), labels.join(", ")),
+                });
+            }
+        }
+        if !differ.is_empty() {
+            return Err(format!(
+                "{text} names a run that invocations fitted from model files with different quantities blocks; \
+                 the latest invocation's model source is {}, and earlier ones are:\n{}\n  Name the run by the \
+                 @label of the `fit run` whose model's quantities you mean, so the prediction evaluates those, \
+                 or pass `--model FILE`.",
+                source.id().key().short12(),
+                differ.join("\n")
+            ));
+        }
+        Ok(latest)
+    }
+
+    /// The source's `#'` documentation; empty when no source is read.
+    pub fn docs(&self) -> &ir::ModelDocs {
+        static NONE: std::sync::OnceLock<ir::ModelDocs> = std::sync::OnceLock::new();
+        self.views.as_ref().map(|v| &v.docs).unwrap_or_else(|| NONE.get_or_init(ir::ModelDocs::default))
+    }
+
+    /// What a reader that shows the model's documentation tells the user,
+    /// for the result `handle` names ([`Shown::notice`]).
+    pub fn notice(&self, handle: &Handle) -> Option<crate::out::notice::Notice> {
+        self.source.notice(handle)
+    }
+
+    /// The model as an IR envelope with the source's documentation, for a
+    /// reader that loads it from a file. The envelope records no declared
+    /// model, as the stored compile does not.
+    pub fn envelope(&self) -> ir::IrEnvelope {
+        let mut envelope = ir::IrEnvelope::wrap(self.model.clone(), None, declared::DeclaredSection::not_recorded());
+        envelope.docs = self.docs().clone();
+        envelope
+    }
+}
+
+/// Warns that the model's documentation is not shown because the source
+/// `what` names cannot be read. No result depends on a source, so the
+/// command goes on.
+fn unreadable_views(handle: &Handle, what: &str) {
+    crate::out::live().notice(&crate::out::notice::Notice {
+        severity: crate::out::notice::Severity::Warning,
+        code: "model-source-unreadable",
+        message: format!(
+            "{handle}: the model's documentation is not shown, since its stored model source cannot be read: \
+             the model source {what}"
+        ),
+    });
+}
+
 /// The compiled model the stored result `located` was computed from: a
 /// compiled model among its dependencies, else among theirs, nearest first,
 /// then the same for the result it sits in. Itself, for a compiled model.

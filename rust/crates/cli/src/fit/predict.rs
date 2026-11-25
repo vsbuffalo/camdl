@@ -2027,7 +2027,7 @@ fn reported_through(
     compile: crate::util::CompileSettings,
     info: &store::RunInfo,
 ) -> Result<crate::fit_store::OpenedFit, String> {
-    use crate::camdl_store::{model_source::RecordedBy, QuantitiesContent, Shown};
+    use crate::camdl_store::QuantitiesContent;
     use store::Content;
     let fit = crate::fit_store::open_run_unshared(text)?;
     let path = model.to_string_lossy().into_owned();
@@ -2047,8 +2047,7 @@ fn reported_through(
         .source
         .put(&store, &parts.labels, info)
         .map_err(|e| format!("--model: storing the model source of {path}: {e}"))?;
-    let quantities = source.identity().quantities.clone();
-    fit.reported_through(&store, quantities, &content, Shown::Recorded { source, by: RecordedBy::Given })
+    fit.reported_through(source, &content)
 }
 
 /// Store the prediction `p` describes: its files are the result files, and
@@ -2294,7 +2293,7 @@ pub(crate) fn repose(
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| format!("the fit run {} the prediction's draws came from is not stored", draws.id().key().short12()))?;
             let text = run.folder().to_string_lossy().into_owned();
-            let mut opened = crate::fit_store::open_fit(store, &text)?;
+            let opened = crate::fit_store::open_fit(store, &text)?;
             // The model file is the one the prediction's invocation recorded,
             // not the run's latest: another file may have been fitted to the
             // same run since. The quantities are the prediction's own, which
@@ -2302,17 +2301,11 @@ pub(crate) fn repose(
             // or `--model` gave.
             let handle = store::Handle::IdPrefix(stored.id().key().to_hex());
             let shown = crate::camdl_store::shown_for(store, &handle, opened.fit.model.id().key());
-            let opened = match &id.quantities {
-                Some(q) => {
-                    let content = crate::fit_store::read_quantities(store, q)?;
-                    opened.reported_through(store, q.clone(), &content, shown)?
-                }
-                None => {
-                    opened.quantities = None;
-                    opened.shown = shown;
-                    opened
-                }
+            let quantities = match &id.quantities {
+                Some(q) => Some((q.clone(), crate::fit_store::read_quantities(store, q)?)),
+                None => None,
             };
+            let opened = opened.reposed(shown, quantities)?;
             let fit = std::sync::Arc::new(opened);
             fit.record_source(store, info)?;
             let spec = fit.config.problem.data_spec().map_err(|e| format!("the fit binds no data: {e}"))?;
@@ -2496,7 +2489,7 @@ pub(crate) fn prediction_identity(
     identity_from(
         crate::fit_store::ParameterSource::Posterior { draws: run.dep_all(), problem: fit.fit.problem.dep_all() },
         std::collections::BTreeMap::new(),
-        fit.quantities.clone(),
+        fit.model.evaluated.clone(),
         options,
         design,
         fit.model_name(),

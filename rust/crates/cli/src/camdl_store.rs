@@ -724,7 +724,7 @@ impl ContentArtifact for DataTable {
 }
 
 pub(crate) mod model_source;
-pub(crate) use model_source::{put_compiled, shown_for, ModelSource, Rendered, Shown, SourceOf, SourceParts};
+pub(crate) use model_source::{put_compiled, shown_for, ModelSource, Rendered, Shown, SourceOf, SourceParts, StoredModel};
 
 #[cfg(test)]
 mod tests;

@@ -43,9 +43,6 @@ pub struct FitView {
     pub fit_hash: String,
     /// The directory the view was read from.
     pub segment: PathBuf,
-    /// The compiled model, relative to [`Self::segment`]: `model.ir.json` when
-    /// the copy holds it.
-    pub source_model: Option<String>,
     pub model_identity: String,
     /// The fit file the run was given, as typed; `None` from
     /// [`FitView::read`], and filled by the store's walker from the run's
@@ -65,12 +62,6 @@ impl FitMethodView {
 }
 
 impl FitView {
-    /// The compiled model the problem was posed on; `None` when the copy holds
-    /// none.
-    pub fn model_path(&self) -> Option<PathBuf> {
-        self.source_model.as_deref().map(|m| self.segment.join(m))
-    }
-
     /// The view of the run whose files `dir` holds: `None` when `dir` holds
     /// no `run_inputs.json`, or one that names no method this camdl knows.
     pub fn read(dir: &Path) -> Option<FitView> {
@@ -102,7 +93,6 @@ impl FitView {
         Some(FitView {
             fit_hash: text("problem_id"),
             segment: dir.to_path_buf(),
-            source_model: dir.join("model.ir.json").is_file().then(|| "model.ir.json".to_string()),
             model_identity: side.as_ref().map(|s| s.model_identity.clone()).unwrap_or_default(),
             source_config: None,
             fit_toml_hash: side.as_ref().map(|s| s.fit_toml_hash.clone()).unwrap_or_default(),

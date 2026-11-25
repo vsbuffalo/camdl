@@ -1484,15 +1484,10 @@ pub(crate) struct OpenedFit {
     /// The config the problem (and the run, when one is named) was resolved
     /// to, with every path naming a copy in the scratch directory.
     pub config: FitConfig,
-    /// The quantities and contrasts of the model source [`Self::shown`] names,
-    /// restored into [`Self::model_ir`]; `None` when no source is recorded or
-    /// it cannot be read. [`Self::prediction_quantities`] is the rule a
-    /// prediction applies to it.
-    pub quantities: Option<Dep<crate::camdl_store::Quantities>>,
-    /// The model source the invocation answering for the handle recorded
-    /// for [`StoredFit::model`] ([`crate::camdl_store::shown_for`]), whose
-    /// description and documentation are restored into [`Self::model_ir`].
-    pub shown: crate::camdl_store::Shown,
+    /// The model the fit ran, read once: what the engine runs, the source
+    /// the invocation answering for the handle recorded, its views and the
+    /// quantities a reader evaluates. [`Self::model_ir`] is it as a file.
+    pub model: crate::camdl_store::StoredModel,
     /// The handle the fit was opened by, as parsed.
     pub handle: Handle,
     /// The store the fit was opened in: a command that reads it, and stores
@@ -1540,90 +1535,66 @@ impl OpenedFit {
         self.labels.as_ref().map(|l| l.model.clone()).unwrap_or_else(|| "model".to_string())
     }
 
-    /// The quantities a prediction from this fit evaluates, named by `text`:
-    /// those of the model source the answering invocation recorded. Refused
-    /// when none is recorded or it cannot be read, and, for a run id or a
-    /// folder whose listings recorded sources with other quantities, refused
-    /// with the labels that name them; sources whose quantities agree are one
-    /// answer. A file `--model` gave is the answer as it stands.
+    /// The quantities a prediction from this fit evaluates, named by `text`
+    /// ([`crate::camdl_store::StoredModel::quantities`]).
     pub fn prediction_quantities(&self, text: &str) -> Result<Dep<crate::camdl_store::Quantities>, String> {
-        use crate::camdl_store::{model_source::RecordedBy, ModelSource, Shown};
-        let (source, others) = match &self.shown {
-            Shown::NotRecorded { .. } => {
-                return Err(format!(
-                    "{text}: no invocation recorded the model file the fit ran, so its quantities are not known; \
-                     run `fit run` again, or pass `--model FILE`"
-                ))
-            }
-            Shown::Unreadable { run_id, why } => {
-                return Err(format!("{text}: the model source {} the fit's invocation recorded cannot be read: {why}", run_id.short12()))
-            }
-            Shown::Recorded { source, by: RecordedBy::Latest { others, .. } } => (source, others.as_slice()),
-            Shown::Recorded { source, .. } => (source, &[][..]),
-        };
-        let latest = source.identity().quantities.clone();
-        let mut differ = Vec::new();
-        for other in others {
-            let read: Stored<ModelSource> = self
-                .store
-                .get(&store::Id::from_key(other.run_id))
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("{text}: the model source {} an earlier invocation recorded cannot be read", other.run_id.short12()))?;
-            if read.identity().quantities.digest() != latest.digest() {
-                differ.push(match &other.labels[..] {
-                    [] => format!("    model source {} (no label names it)", other.run_id.short12()),
-                    labels => format!("    model source {} ({})", other.run_id.short12(), labels.join(", ")),
-                });
-            }
-        }
-        if !differ.is_empty() {
-            return Err(format!(
-                "{text} names a run that invocations fitted from model files with different quantities blocks; \
-                 the latest invocation's model source is {}, and earlier ones are:\n{}\n  Name the run by the \
-                 @label of the `fit run` whose model's quantities you mean, so the prediction evaluates those, \
-                 or pass `--model FILE`.",
-                source.id().key().short12(),
-                differ.join("\n")
-            ));
-        }
-        Ok(latest)
+        self.model.quantities(&self.store, text)
     }
 
     /// Records in the invocation `info` that this fit's compiled model was
-    /// run from the model source [`Self::shown`] names, for a command that
+    /// run from the model source [`Self::model`] names, for a command that
     /// stores a result read from this fit: a reader of that result then finds
     /// the source through the command's own invocation. Nothing is recorded
     /// when no source was.
     pub fn record_source(&self, store: &Store, info: &store::RunInfo) -> Result<(), String> {
-        record_source(store, info, &self.fit.model, &self.shown, &self.model_name())
+        record_source(store, info, &self.fit.model, &self.model.source, &self.model_name())
     }
 
     /// This fit, reported through another model file, which the caller has
     /// checked compiles to the model the fit ran on apart from its quantities
-    /// and contrasts. `quantities`, what that file's compile produced, and
-    /// `shown`, its model source, replace the recorded ones: in
-    /// [`Self::quantities`], in [`Self::shown`] (so [`Self::record_source`]
-    /// records the file) and in the IR files a reader loads.
+    /// and contrasts. `source`, that file's stored model source, and
+    /// `content`, its quantities, replace the recorded ones in [`Self::model`]
+    /// (so [`Self::record_source`] records the file) and in the IR files a
+    /// reader loads.
     pub fn reported_through(
         mut self,
-        store: &Store,
-        quantities: Dep<crate::camdl_store::Quantities>,
+        source: Stored<crate::camdl_store::ModelSource>,
         content: &crate::camdl_store::QuantitiesContent,
-        shown: crate::camdl_store::Shown,
     ) -> Result<Self, String> {
-        let mut envelope = stored_envelope(store, &self.fit.model, &self.model_name())?;
-        shown.restore(&self.handle, &mut envelope);
-        envelope.model.quantities = content.quantities()?;
-        envelope.model.contrasts = content.contrasts()?;
-        let json = serde_json::to_string(&envelope).map_err(|e| e.to_string())?;
+        self.model.given(&self.handle, source, content)?;
+        self.write_model()?;
+        Ok(self)
+    }
+
+    /// This fit as a stored prediction from it was made: the model source
+    /// the prediction's invocation recorded, `shown`, and the prediction's
+    /// own quantities, `quantities`, in place of the recorded ones, in
+    /// [`Self::model`] and in the IR files a reader loads. With no
+    /// quantities, the model evaluates none it is said to.
+    pub fn reposed(
+        mut self,
+        shown: crate::camdl_store::Shown,
+        quantities: Option<(Dep<crate::camdl_store::Quantities>, crate::camdl_store::QuantitiesContent)>,
+    ) -> Result<Self, String> {
+        self.model.with_source(&self.handle, shown);
+        match quantities {
+            Some((dep, content)) => self.model.evaluate(dep, &content)?,
+            None => self.model.evaluated = None,
+        }
+        self.write_model()?;
+        Ok(self)
+    }
+
+    /// Writes [`Self::model`] as the IR files a reader loads: the scratch
+    /// compile and the copy beside the run's files.
+    fn write_model(&self) -> Result<(), String> {
+        let json = serde_json::to_string(&self.model.envelope()).map_err(|e| e.to_string())?;
         let mut files = vec![self.model_ir.clone()];
         files.extend(self.run.as_ref().map(|r| r.path().join("model.ir.json")));
         for path in files {
             std::fs::write(&path, &json).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
         }
-        self.quantities = Some(quantities);
-        self.shown = shown;
-        Ok(self)
+        Ok(())
     }
 }
 
@@ -1709,22 +1680,10 @@ pub(crate) fn open_fit(store: &Store, text: &str) -> Result<OpenedFit, String> {
         .map_err(|e| format!("cannot make a scratch directory: {e}"))?;
     let labels = problem_labels(store, &fit.problem);
     let name = labels.as_ref().map(|l| l.model.clone()).unwrap_or_else(|| "model".to_string());
-    let mut envelope = stored_envelope(store, &fit.model, &name)?;
-    let shown = crate::camdl_store::shown_for(store, &handle, fit.model.id().key());
-    shown.restore(&handle, &mut envelope);
     // The quantities are the recorded source's: those of the model file the
     // answering invocation compiled.
-    let quantities = match &shown {
-        crate::camdl_store::Shown::Recorded { source, .. } => {
-            let dep = source.identity().quantities.clone();
-            let content = read_quantities(store, &dep)?;
-            envelope.model.quantities = content.quantities()?;
-            envelope.model.contrasts = content.contrasts()?;
-            Some(dep)
-        }
-        crate::camdl_store::Shown::NotRecorded { .. } | crate::camdl_store::Shown::Unreadable { .. } => None,
-    };
-    let json = serde_json::to_string(&envelope).map_err(|e| e.to_string())?;
+    let model = crate::camdl_store::StoredModel::of(store, &handle, &fit.model, &name)?;
+    let json = serde_json::to_string(&model.envelope()).map_err(|e| e.to_string())?;
     let model_ir = scratch.path().join("model.ir.json");
     std::fs::write(&model_ir, &json).map_err(|e| format!("cannot write {}: {e}", model_ir.display()))?;
     let mut problem = fit.bind_in(&scratch.path().join("problem"))?;
@@ -1752,7 +1711,7 @@ pub(crate) fn open_fit(store: &Store, text: &str) -> Result<OpenedFit, String> {
     let config = FitConfig { problem, inference: fit.config.inference.clone() };
     let leaf = run.as_ref().map(|r| r.path().to_path_buf());
     let segment = leaf.clone().unwrap_or_else(|| scratch.path().to_path_buf());
-    Ok(OpenedFit { fit, model_ir, run, labels, segment, leaf, config, quantities, shown, handle, store: store.clone(), _scratch: scratch })
+    Ok(OpenedFit { fit, model_ir, run, labels, segment, leaf, config, model, handle, store: store.clone(), _scratch: scratch })
 }
 
 /// The run store a reader of a stored fit opens: the one the command stores

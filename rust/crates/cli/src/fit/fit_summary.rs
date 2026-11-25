@@ -202,7 +202,7 @@ pub(crate) fn cmd_fit_summary(args: &FitSummaryArgs, compile: crate::util::Compi
     };
     // Whether the model's documentation is shown, when not, or when it is
     // one of several files the run was given.
-    if let Some(n) = opened.shown.notice(&opened.handle) {
+    if let Some(n) = opened.model.notice(&opened.handle) {
         out.notice(&n);
     }
     let dir = opened.run_dir().expect("a run handle has its files").to_string_lossy().into_owned();
@@ -243,7 +243,7 @@ pub(crate) fn cmd_fit_summary(args: &FitSummaryArgs, compile: crate::util::Compi
     // calendar-date parameters but the model declares no `origin` — the
     // dates can't be rendered and the omission is otherwise silent.
     // stderr keeps the warning out of the JSON/stdout payload.
-    if let Some(msg) = load_calendar_context(Path::new(&dir), compile).missing_origin_warning() {
+    if let Some(msg) = CalendarContext::of_model(&opened.model.model).missing_origin_warning() {
         out.say(format_args!("{} {}", stderr.paint("warning:", Style::Warn), msg));
     }
 
@@ -303,44 +303,17 @@ pub(crate) fn cmd_fit_summary(args: &FitSummaryArgs, compile: crate::util::Compi
             Err(e) => out.error(CommandError::new(format!("error: {e}"))).exit(),
         };
 
+    let model = Some(&opened.model);
     let failures = match args.format {
-        FitSummaryFormat::Text => format_text(&mut out, &dir, args, &selected, strict, selection.as_ref(), compile),
-        FitSummaryFormat::Json => format_json(&mut out, &dir, &selected, strict, selection.as_ref(), compile),
-        FitSummaryFormat::Md => format_md(&mut out, &dir, &selected, strict, selection.as_ref(), compile),
-        FitSummaryFormat::Latex => format_latex(&mut out, &dir, &selected, strict, selection.as_ref(), compile),
+        FitSummaryFormat::Text => format_text(&mut out, &dir, args, &selected, strict, selection.as_ref(), model),
+        FitSummaryFormat::Json => format_json(&mut out, &dir, &selected, strict, selection.as_ref(), model),
+        FitSummaryFormat::Md => format_md(&mut out, &dir, &selected, strict, selection.as_ref(), model),
+        FitSummaryFormat::Latex => format_latex(&mut out, &dir, &selected, strict, selection.as_ref(), model),
     };
 
     // One exit decision for all four formats: an unreadable leaf is reported
     // the same way whatever was being rendered (gh#905).
     exit_if_nothing_loaded(&mut out, &dir, &completed, &failures);
-}
-
-/// Load the calendar context from a fit dir: read the model path from the
-/// fit-level view (`FitView::model_path`, sidecar-sourced), falling back to any method
-/// leaf's `provenance.source_paths`; load that model and extract `origin`,
-/// `time_unit`, and the `instant`-kind parameter set. Any failure (no fit view,
-/// model moved/unparseable) degrades to an empty context (numeric-only
-/// rendering) — never panics.
-pub(crate) fn load_calendar_context(fit_dir: &Path, compile: crate::util::CompileSettings) -> CalendarContext {
-    // The stored compile the run's copy holds beside its files.
-    let model_path = FitView::read(fit_dir)
-        .and_then(|v| v.model_path())
-        .map(|p| p.to_string_lossy().into_owned());
-    let Some(model_path) = model_path else {
-        return CalendarContext::default();
-    };
-    match crate::util::load_model(&model_path, compile) {
-        Ok((model, _)) => CalendarContext::of_model(&model),
-        Err(_) => CalendarContext::default(),
-    }
-}
-
-/// The fit's model, compiled from the source path its records name.
-fn load_fit_envelope(fit_dir: &Path, compile: crate::util::CompileSettings) -> Option<ir::IrEnvelope> {
-    let model_path = FitView::read(fit_dir)
-        .and_then(|v| v.model_path())
-        .map(|p| p.to_string_lossy().into_owned());
-    crate::util::load_model_envelope(&model_path?, compile).ok()
 }
 
 /// One fit-method leaf to report: its name, on-disk directory, method (so
@@ -626,22 +599,21 @@ fn format_text(
     methods: &[ResolvedMethod],
     strict: bool,
     selection: Option<&ChainSelection>,
-    compile: crate::util::CompileSettings,
+    stored: Option<&crate::camdl_store::StoredModel>,
 ) -> Vec<LoadFailure> {
     let mut failures: Vec<LoadFailure> = Vec::new();
     let stderr = out.stderr_painter();
-    let cal = load_calendar_context(Path::new(dir), compile);
+    let cal = stored.map(|m| CalendarContext::of_model(&m.model)).unwrap_or_default();
     let mut had_provenance_failure = false;
     // Emit the loud selection advisory (nudge + warning) once, from the first
     // Bayesian method that recomputes.
     let mut warned = false;
 
-    // One compile of the fit's model: its `#'` docs and constants for the
+    // The fit's model, read once: its `#'` docs and constants for the
     // legends, its observation streams for the method reports' checks.
-    let envelope = load_fit_envelope(Path::new(dir), compile);
-    let model = envelope.as_ref().map(|env| &env.model);
-    let (docs, constants) = envelope.as_ref()
-        .map(|env| (env.docs.clone(), env.model.constants.clone()))
+    let model = stored.map(|m| &m.model);
+    let (docs, constants) = stored
+        .map(|m| (m.docs().clone(), m.model.constants.clone()))
         .unwrap_or_default();
     let legend = crate::fit::report::render::Legend::of(docs.parameters.len(), constants.len());
     let shown = crate::fit::report::display_path(Path::new(dir));
@@ -802,9 +774,9 @@ pub(crate) fn forkability(
 /// [`exact_json`]: crate::fit::report::exact::exact_json
 fn format_json(
     out: &mut Out, dir: &str, methods: &[ResolvedMethod], strict: bool, selection: Option<&ChainSelection>,
-    compile: crate::util::CompileSettings,
+    model: Option<&crate::camdl_store::StoredModel>,
 ) -> Vec<LoadFailure> {
-    let doc = build_summary_doc(out, dir, methods, selection, compile);
+    let doc = build_summary_doc(out, dir, methods, selection, model);
     let any_failed = doc.methods.iter().any(|s| s.provenance_failed());
     write_data(out, &format!("{}\n", summary_json(&doc)));
     if strict && any_failed {
@@ -831,8 +803,8 @@ fn summary_json(doc: &FitSummaryDoc) -> String {
     serde_json::to_string_pretty(&v).expect("a JSON value encodes")
 }
 
-fn format_md(out: &mut Out, dir: &str, methods: &[ResolvedMethod], strict: bool, selection: Option<&ChainSelection>, compile: crate::util::CompileSettings) -> Vec<LoadFailure> {
-    let doc = build_summary_doc(out, dir, methods, selection, compile);
+fn format_md(out: &mut Out, dir: &str, methods: &[ResolvedMethod], strict: bool, selection: Option<&ChainSelection>, model: Option<&crate::camdl_store::StoredModel>) -> Vec<LoadFailure> {
+    let doc = build_summary_doc(out, dir, methods, selection, model);
     let any_failed = doc.methods.iter().any(|s| s.provenance_failed());
     write_data(out, &render_markdown(&doc));
     if strict && any_failed {
@@ -841,8 +813,8 @@ fn format_md(out: &mut Out, dir: &str, methods: &[ResolvedMethod], strict: bool,
     doc.failures
 }
 
-fn format_latex(out: &mut Out, dir: &str, methods: &[ResolvedMethod], strict: bool, selection: Option<&ChainSelection>, compile: crate::util::CompileSettings) -> Vec<LoadFailure> {
-    let doc = build_summary_doc(out, dir, methods, selection, compile);
+fn format_latex(out: &mut Out, dir: &str, methods: &[ResolvedMethod], strict: bool, selection: Option<&ChainSelection>, model: Option<&crate::camdl_store::StoredModel>) -> Vec<LoadFailure> {
+    let doc = build_summary_doc(out, dir, methods, selection, model);
     let any_failed = doc.methods.iter().any(|s| s.provenance_failed());
     write_data(out, &render_latex(&doc));
     if strict && any_failed {
@@ -967,11 +939,11 @@ fn build_summary_doc(
     dir: &str,
     methods: &[ResolvedMethod],
     selection: Option<&ChainSelection>,
-    compile: crate::util::CompileSettings,
+    stored: Option<&crate::camdl_store::StoredModel>,
 ) -> FitSummaryDoc {
     let stderr = out.stderr_painter();
-    let cal = load_calendar_context(Path::new(dir), compile);
-    let model = load_fit_envelope(Path::new(dir), compile).map(|env| env.model);
+    let cal = stored.map(|m| CalendarContext::of_model(&m.model)).unwrap_or_default();
+    let model = stored.map(|m| m.model.clone());
     let mut method_reports: Vec<MethodReport> = Vec::new();
     // The chain-selection provenance (stamped on the doc) + one-shot advisory.
     let mut chain_selection_json: Option<serde_json::Value> = None;
@@ -3717,7 +3689,7 @@ mod tests {
         let params = [("R0", 56.0_f64), ("sigma", 0.08), ("gamma", 0.08)];
         let dir = make_fit_dir("if2", &state, &params);
         let methods = discover_methods(&dir);
-        let doc = build_summary_doc(&mut Out::new(true), &dir.to_string_lossy(), &methods, None, crate::util::CompileSettings::default());
+        let doc = build_summary_doc(&mut Out::new(true), &dir.to_string_lossy(), &methods, None, None);
         let with = |v: Option<f64>| {
             let mut d = doc.clone();
             d.methods[0].initial_loglik = v;
@@ -3741,14 +3713,13 @@ mod tests {
         let state = synthetic_fit_state();
         let dir = make_fit_dir("if2", &state, &[("R0", 56.0_f64), ("sigma", 0.08), ("gamma", 0.08)]);
         let methods = discover_methods(&dir);
-        let compile = crate::util::CompileSettings::default();
         let fresh: serde_json::Value =
-            serde_json::from_str(&summary_json(&build_summary_doc(&mut Out::new(true), &dir.to_string_lossy(), &methods, None, compile))).unwrap();
+            serde_json::from_str(&summary_json(&build_summary_doc(&mut Out::new(true), &dir.to_string_lossy(), &methods, None, None))).unwrap();
         let mut stored = crate::fit::run_summary::stored(&fresh["methods"][0], Some(&fresh["table_rows"][0]));
         stored["report"]["best_loglik"] = serde_json::json!(-1.0);
         stored["table_row"]["best_loglik"] = serde_json::json!(-2.0);
         std::fs::write(dir.join(crate::fit::run_summary::FILE), crate::fit::run_summary::to_bytes(&stored)).unwrap();
-        let doc = build_summary_doc(&mut Out::new(true), &dir.to_string_lossy(), &methods, None, compile);
+        let doc = build_summary_doc(&mut Out::new(true), &dir.to_string_lossy(), &methods, None, None);
         let got: serde_json::Value = serde_json::from_str(&summary_json(&doc)).unwrap();
         assert_eq!(got["methods"][0]["best_loglik"], -1.0);
         assert_eq!(got["table_rows"][0]["best_loglik"], -2.0);
@@ -3765,7 +3736,7 @@ mod tests {
         let dir = make_fit_dir("if2", &state, &params);
 
         let methods = discover_methods(&dir);
-        let doc = build_summary_doc(&mut Out::new(true), &dir.to_string_lossy(), &methods, None, crate::util::CompileSettings::default());
+        let doc = build_summary_doc(&mut Out::new(true), &dir.to_string_lossy(), &methods, None, None);
         let json = serde_json::to_string_pretty(&doc).unwrap();
         assert!(json.contains("\"version\": 5"),
             "schema.version must be present and = 5: {}", json);
@@ -3797,7 +3768,7 @@ mod tests {
         let dir = make_fit_dir("if2", &state, &params);
 
         let methods = discover_methods(&dir);
-        let doc = build_summary_doc(&mut Out::new(true), &dir.to_string_lossy(), &methods, None, crate::util::CompileSettings::default());
+        let doc = build_summary_doc(&mut Out::new(true), &dir.to_string_lossy(), &methods, None, None);
         let md = render_markdown(&doc);
         assert!(md.contains("# Fit summary:"));
         assert!(md.contains("## `if2`"));
@@ -3818,7 +3789,7 @@ mod tests {
         let dir = make_fit_dir("if2", &state, &params);
 
         let methods = discover_methods(&dir);
-        let doc = build_summary_doc(&mut Out::new(true), &dir.to_string_lossy(), &methods, None, crate::util::CompileSettings::default());
+        let doc = build_summary_doc(&mut Out::new(true), &dir.to_string_lossy(), &methods, None, None);
         let tex = render_latex(&doc);
         // No preamble, but tabular blocks per method.
         assert!(tex.contains("\\subsection*{Method:"));

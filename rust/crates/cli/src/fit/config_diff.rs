@@ -524,7 +524,6 @@ mod tests {
         FitView {
             fit_hash: "f".repeat(64),
             segment: std::path::PathBuf::from("fits/sir-ffffffff"),
-            source_model: Some("../../sir.camdl".into()),
             model_identity: model_identity.into(),
             source_config: Some("fit.toml".into()),
             fit_toml_hash: "h".repeat(64),
