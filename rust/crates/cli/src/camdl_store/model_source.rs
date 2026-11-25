@@ -324,8 +324,11 @@ pub(crate) enum RecordedBy {
     Label,
     /// The invocation that answers for a run id or a folder, by its sequence
     /// number. `others` holds each different source an earlier invocation
-    /// that listed the result recorded for its model.
-    Latest { invocation: u64, others: Vec<OtherSource> },
+    /// that listed the result recorded for its model. `unfinished` when that
+    /// invocation has not ended: no closed record lists the result computed
+    /// or reused, and a running one (or a stopped owner's, until `clean`
+    /// closes it) answers.
+    Latest { invocation: u64, others: Vec<OtherSource>, unfinished: bool },
     /// No invocation: the model file this command was given, stored by it.
     Given,
 }
@@ -367,13 +370,13 @@ pub(crate) fn shown_for(store: &Store, handle: &Handle, model: store::Key) -> Re
             .map(|name| format!("@{name}"))
             .collect()
     };
-    let by = |others: Vec<OtherSource>| match listings.by() {
+    let by = |others: Vec<OtherSource>, unfinished: bool| match listings.by() {
         store::By::Label { .. } => RecordedBy::Label,
-        store::By::Result { .. } => RecordedBy::Latest { invocation: seq, others },
+        store::By::Result { .. } => RecordedBy::Latest { invocation: seq, others, unfinished },
     };
     let (id, by) = match listings.source::<CompiledModel, ModelSource>(&Id::from_key(model)) {
         store::Recorded::None => return Ok(Shown::NotRecorded { invocation: Some(seq) }),
-        store::Recorded::One { source, .. } => (source, by(Vec::new())),
+        store::Recorded::One { source, unfinished } => (source, by(Vec::new(), unfinished)),
         store::Recorded::Several { latest, others } => {
             let mut grouped: Vec<OtherSource> = Vec::new();
             for (s, id) in others {
@@ -382,7 +385,7 @@ pub(crate) fn shown_for(store: &Store, handle: &Handle, model: store::Key) -> Re
                     None => grouped.push(OtherSource { run_id: id.key(), labels: labelled(s) }),
                 }
             }
-            (latest, by(grouped))
+            (latest, by(grouped, false))
         }
     };
     Ok(match store.get(&id) {
@@ -406,7 +409,8 @@ impl Shown {
     /// about it, for the result `handle` names: that no invocation recorded
     /// the model file, so the reader goes on without the documentation; or
     /// that the invocations that listed the result recorded different
-    /// files, so the answering one's is shown. `None` otherwise. An
+    /// files, so the answering one's is shown; or that the answering
+    /// invocation has not ended. `None` otherwise. An
     /// unreadable source is reported by [`Self::restore`].
     pub fn notice(&self, handle: &Handle) -> Option<crate::out::notice::Notice> {
         use crate::out::notice::{Notice, Severity};
@@ -427,7 +431,15 @@ impl Shown {
                     None => format!("{handle}: the model's documentation is not shown: no invocation recorded the model file"),
                 },
             }),
-            Shown::Recorded { by: RecordedBy::Latest { invocation, others }, .. } if !others.is_empty() => {
+            Shown::Recorded { by: RecordedBy::Latest { invocation, unfinished: true, .. }, .. } => Some(Notice::info(
+                "model-source-unfinished",
+                format!(
+                    "{handle}: the model's documentation is the one of the model file invocation {invocation} ran, \
+                     which has not ended: it is running, or its owner stopped and `camdl clean` has not closed \
+                     its record"
+                ),
+            )),
+            Shown::Recorded { by: RecordedBy::Latest { invocation, others, .. }, .. } if !others.is_empty() => {
                 let listed: Vec<String> = others
                     .iter()
                     .map(|o| match &o.labels[..] {

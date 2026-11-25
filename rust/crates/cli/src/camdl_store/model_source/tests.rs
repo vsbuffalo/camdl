@@ -181,6 +181,32 @@ fn a_record_naming_no_source_gives_none_to_either_reader() {
     }
 }
 
+/// A source read from a running record, the only one that lists the result,
+/// is used and marked unfinished: the reader's notice says the invocation has
+/// not ended.
+#[test]
+fn a_source_from_a_running_record_is_said_to_be_unfinished() {
+    let (tmp, store) = store_of_four();
+    let seq = store.invocation(&Handle::Label { name: "p".into(), back: 0 }).unwrap().seq();
+    let result = result_of(&store, "p", "prediction");
+    let path: PathBuf = tmp.path().join("st/.invocations").join(format!("{seq}.json"));
+    let mut record: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    record["status"] = "running".into();
+    record.as_object_mut().unwrap().remove("ended");
+    for r in record["results"].as_array_mut().unwrap() {
+        r["outcome"] = "planned".into();
+    }
+    std::fs::write(&path, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+    let store = crate::camdl_store::open_existing(&tmp.path().join("st")).expect("the store");
+
+    let handle = Handle::IdPrefix(result.to_hex());
+    let model = model_of(&store, &store.locate(result).unwrap()).unwrap();
+    let shown = shown_for(&store, &handle, model).unwrap();
+    assert!(matches!(shown, Shown::Recorded { .. }), "the running record's source is used");
+    let notice = shown.notice(&handle).expect("the reader says the source is from an unfinished invocation");
+    assert!(notice.message.contains("has not ended"), "{}", notice.message);
+}
+
 /// A lookup that fails is an error of the reader, not a record that names no
 /// source: a prefix that names several results is refused, and the refusal
 /// reaches the caller.
