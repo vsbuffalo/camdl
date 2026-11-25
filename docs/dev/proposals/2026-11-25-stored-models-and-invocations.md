@@ -1,6 +1,6 @@
 # Stored models and invocation records
 
-Status: accepted. It supersedes
+Status: implemented (c736b5678..8c0481305). It supersedes
 `docs/dev/proposals/2026-11-24-model-presentation.md`. Read against main
 `658f3fac0`. Claims are marked **verified** (run, or read in the code, as
 stated) or **inferred**. The removal assessment is
