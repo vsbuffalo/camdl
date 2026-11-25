@@ -241,7 +241,8 @@ pub(crate) fn cooling_final(
     n_assimilations: usize,
     last: &sim::inference::if2::IF2IterResult,
 ) -> f64 {
-    schedule.multiplier_at_iter(n_assimilations, last.iteration)
+    // `iteration` counts from 0; `multiplier_at_iter` takes iterations completed.
+    schedule.multiplier_at_iter(n_assimilations, last.iteration + 1)
 }
 
 /// The IF2 configuration every IF2 profile cell runs with, built in one
@@ -2320,15 +2321,15 @@ mod tests {
 
     /// D21: `cooling_final` is the last iteration's cooling factor, the same
     /// for every parameter, and not a mean of the parameters' SDs. For
-    /// cooling 0.9 over 50 iterations, the last of 20 iterations has factor
-    /// 0.9^(19/50) = 0.9608; with steps 0.1 and 0.3 the mean of their cooled
-    /// SDs was 0.1922.
+    /// cooling 0.9 over 50 iterations, the last of 20 iterations (index 19)
+    /// ends at factor 0.9^(20/50) = 0.9587; with steps 0.1 and 0.3 the mean
+    /// of their cooled SDs would be 0.1917.
     #[test]
     fn cooling_final_is_the_last_iterations_cooling_factor() {
         use sim::inference::if2::{CoolingSchedule, IF2IterResult, ParamIterDiag};
         let schedule = CoolingSchedule { fraction: 0.9, target_iters: 50 };
         let n_assimilations = 14;
-        let factor = schedule.multiplier_at_iter(n_assimilations, 19);
+        let factor = schedule.multiplier_at_iter(n_assimilations, 20);
         let diag = |sd: f64| ParamIterDiag { param_index: 0, weighted_var_ratio: 1.0, q_ratio: 1.0, effective_sd: sd * factor };
         let last = IF2IterResult {
             iteration: 19, loglik: f64::NAN, if2_perturbed_loglik: -50.0,
@@ -2336,7 +2337,7 @@ mod tests {
         };
         let got = cooling_final(&schedule, n_assimilations, &last);
         assert_eq!(got, factor);
-        assert!((got - 0.9_f64.powf(19.0 / 50.0)).abs() < 1e-12, "{got}");
+        assert!((got - 0.9_f64.powf(20.0 / 50.0)).abs() < 1e-12, "{got}");
     }
 
     /// The resolver's result is checked against the stored problem: an

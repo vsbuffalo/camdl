@@ -780,9 +780,9 @@ pub fn run_if2_with_progress<P: ProcessModel<State = ParticleState>>(
         }
 
         // Per-parameter diagnostics for this iteration
-        // Diagnostic SD at end of `iter`: use (1 + n_assimilations) steps/iter
-        // to match the actual global-step accounting (the perturbation loop).
-        let cooling_at_iter = config.cooling.multiplier_at_iter(n_assimilations, iter);
+        // Diagnostic SD at the end of this iteration. `iter` counts from 0 and
+        // `multiplier_at_iter` takes the number of iterations completed.
+        let cooling_at_iter = config.cooling.multiplier_at_iter(n_assimilations, iter + 1);
         let param_diag: Vec<ParamIterDiag> = if2_params.iter().enumerate().map(|(pi, spec)| {
             let cnt = diag_count[pi].max(1) as f64;
             ParamIterDiag {

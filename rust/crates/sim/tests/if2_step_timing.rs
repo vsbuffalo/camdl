@@ -129,3 +129,29 @@ fn run_if2_refuses_steps_that_do_not_match_the_parameters() {
     let msg = refusal(vec![If2Step::SimplexMember, single], vec![group]);
     assert!(msg.contains("`b`") && msg.contains("also has a step of its own"), "{msg}");
 }
+
+/// The SD an iteration's diagnostics report is the step times the cooling
+/// factor at the end of that iteration, `multiplier_at_iter` of the number
+/// of iterations completed, so the first iteration's factor is below 1.
+#[test]
+fn an_iterations_effective_sd_is_cooled_to_the_end_of_that_iteration() {
+    let steps = vec![If2Step::every_observation(sd(0.1)), If2Step::every_observation(sd(0.2))];
+    let cooling = sim::inference::if2::CoolingSchedule { fraction: 0.5, target_iters: 2 };
+    let cfg = IF2Config { n_iterations: 3, cooling, ..config(steps, vec![]) };
+    let obs = Flat { seen: Mutex::new(Vec::new()) };
+    let result = run_if2(&NoDynamics, &obs, &[START, START], &[spec("a", 0), spec("b", 1)], &cfg, 3)
+        .expect("IF2 run");
+    assert_eq!(result.iterations.len(), 3);
+    for (k, it) in result.iterations.iter().enumerate() {
+        let completed = k + 1;
+        let factor = 0.5_f64.powf(completed as f64 / 2.0);
+        for (d, step) in it.param_diag.iter().zip([0.1, 0.2]) {
+            let want = step * factor;
+            assert!(
+                (d.effective_sd - want).abs() < 1e-12,
+                "iteration {completed}: effective_sd {} is not {step} x 0.5^({completed}/2) = {want}",
+                d.effective_sd
+            );
+        }
+    }
+}
