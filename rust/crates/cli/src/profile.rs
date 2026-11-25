@@ -34,18 +34,17 @@ use std::sync::Arc;
 /// A profile is the maximum over the nuisance parameters λ of the
 /// likelihood L(ψ, λ) at each grid value of the focal parameter ψ, so each
 /// cell is an optimisation. A per-cell MCMC chain with ψ pinned samples
-/// p(λ | ψ, y) correctly, but the number it reported — the log-likelihood
+/// p(λ | ψ, y) correctly, but the number it would report — the log-likelihood
 /// at the highest-posterior sample the chain visited — is neither that
 /// maximum (under an informative prior the MAP sample sits below it, by an
 /// amount that depends on how well a short chain explored) nor the marginal
 /// posterior p(ψ | y), which needs each cell's marginal likelihood
-/// p(y | ψ). Named once so the `--algorithm pmmh` refusal and the removed
-/// `--pmmh-*` flags give the same answer.
-pub(crate) const PROFILE_PMMH_REMOVED: &str = "per-cell PMMH was removed from `camdl profile`. \
+/// p(y | ψ).
+pub(crate) const PROFILE_NO_PMMH: &str = "`camdl profile` has no per-cell PMMH. \
     A profile likelihood is a maximum over the other parameters at each grid \
     value, so each cell is fitted by maximisation: use `--algorithm if2` \
     (chain_binomial) or an `nl-*` optimizer (`nl-sbplx`, `nl-bobyqa`, \
-    `nl-lbfgs`; `--backend ode`). The per-cell chain reported the \
+    `nl-lbfgs`; `--backend ode`). A per-cell chain would report the \
     log-likelihood at its highest-posterior sample, which is neither the \
     profile likelihood nor the marginal posterior of the swept parameter. For \
     a posterior of that parameter, fit once with `camdl fit run` (PMMH or \

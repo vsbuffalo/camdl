@@ -171,7 +171,7 @@ pub(crate) fn resolve(
     fit_file: Option<FitProblem>,
     store_root: &std::path::Path,
 ) -> (ResolvedProfileConfig, crate::forcing_extrapolation::Installed) {
-    use crate::profile::PROFILE_PMMH_REMOVED;
+    use crate::profile::PROFILE_NO_PMMH;
     let (
         model,
         model_overrides,
@@ -203,7 +203,7 @@ pub(crate) fn resolve(
     // Refused on any backend, before the registry's own (algorithm, backend)
     // check, so `--algorithm pmmh --backend ode` gets the same answer.
     if crate::fit::methods::parse_algorithm(algo_name) == Some(crate::run_meta::FitAlgorithm::Pmmh) {
-        out.fail(format!("error: --algorithm pmmh is not accepted: {PROFILE_PMMH_REMOVED}"));
+        out.fail(format!("error: --algorithm pmmh is not accepted: {PROFILE_NO_PMMH}"));
     }
     let method = crate::fit::methods::parse_combo(algo_name, backend_name).unwrap_or_else(|msg| {
         out.fail(format!("error: {}", msg));

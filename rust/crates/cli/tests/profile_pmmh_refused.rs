@@ -43,7 +43,7 @@ fn assert_refusal(out: &Output, what: &str) {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "{what}: the refusal exits 1; stderr: {stderr}");
     for needle in [
-        "per-cell PMMH was removed",
+        "has no per-cell PMMH",
         "profile likelihood",
         "--algorithm if2",
         "nl-sbplx",
