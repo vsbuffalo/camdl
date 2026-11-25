@@ -1000,8 +1000,14 @@ It tries three sources, cheapest first (`storage.rs:649`, `locate`; `:690`,
    follows at each group every directory whose name ends in that group's 12 hex
    digits, then takes every folder ending in the run id's 12 hex digits or all
    64.
-3. **A walk**, when only a run id is at hand: every result tree under the root,
-   every build included, after which the index is rewritten.
+3. **A walk**, when only a run id is at hand and the index does not name a
+   folder that holds it: every result tree under the root, every build included.
+   A walk writes nothing, so a command that only reads leaves `.index/` as it
+   was; only `camdl reindex` rewrites the index.
+
+A handle that is a full run id goes to the index first and then, if the folder
+it names does not confirm it, to a walk. A handle that is a prefix of a run id
+can be matched only against every stored id, so it walks.
 
 Whatever the source, each candidate folder is confirmed against the full run id
 in its `identity.json`; a folder whose id differs is another result and is

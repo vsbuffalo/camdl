@@ -834,26 +834,28 @@ impl Inner {
     }
 
     /// The folder of `run_id` in any status, found from the id alone: the
-    /// index, else a walk of every result tree.
+    /// folder the index names when its `identity.json` confirms it, else a
+    /// walk of every result tree. A walk does not write the index, so a
+    /// read leaves the store as it was.
     pub(crate) fn find_any(&self, kind: &str, run_id: &Key) -> Result<Option<PathBuf>> {
         if let Some(d) = self.index_folder(run_id) {
             if identity_of(&d).is_some_and(|f| &f.run_id == run_id && f.kind == kind) {
                 return Ok(Some(d));
             }
         }
-        let found = self.walk_and_reindex()?;
+        let found = crate::maintenance::walk(self);
         Ok(found.into_iter().find(|(_, f)| &f.run_id == run_id && f.kind == kind).map(|(d, _)| d))
     }
 
     /// The folder of `run_id` in any status and of any kind, with its identity
-    /// file: the index, else a walk of every result tree.
+    /// file, found as [`Inner::find_any`] finds one.
     pub(crate) fn find_any_kind(&self, run_id: &Key) -> Result<Option<(PathBuf, IdentityFile)>> {
         if let Some(d) = self.index_folder(run_id) {
             if let Some(f) = identity_of(&d).filter(|f| &f.run_id == run_id) {
                 return Ok(Some((d, f)));
             }
         }
-        let found = self.walk_and_reindex()?;
+        let found = crate::maintenance::walk(self);
         Ok(found.into_iter().find(|(_, f)| &f.run_id == run_id))
     }
 
@@ -864,14 +866,6 @@ impl Inner {
             State::Completed { dir, run } => Ok(Some((dir, *run))),
             _ => Ok(None),
         }
-    }
-
-    /// Every result folder under the root with its identity file, after which
-    /// the index is rebuilt from them.
-    pub(crate) fn walk_and_reindex(&self) -> Result<Vec<(PathBuf, IdentityFile)>> {
-        let found = crate::maintenance::walk(self);
-        crate::maintenance::write_compacted_index(self, &found)?;
-        Ok(found)
     }
 
     // ── Classification ─────────────────────────────────────────────────────

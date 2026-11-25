@@ -103,7 +103,15 @@ impl Store {
                 Ok((f.run_id, f.kind))
             }
             Handle::IdPrefix(prefix) => {
-                let found = self.inner.walk_and_reindex()?;
+                // A full run id is found through the index, confirmed against
+                // its folder, before any walk.
+                if let Ok(key) = Key::from_hex(prefix) {
+                    if let Some((_, f)) = self.inner.find_any_kind(&key)? {
+                        return Ok((f.run_id, f.kind));
+                    }
+                    return Err(Error::NotFound { handle: text });
+                }
+                let found = crate::maintenance::walk(&self.inner);
                 let mut matches: Vec<(Key, String)> =
                     found.into_iter().filter(|(_, f)| f.run_id.to_hex().starts_with(prefix.as_str())).map(|(_, f)| (f.run_id, f.kind)).collect();
                 matches.sort();
