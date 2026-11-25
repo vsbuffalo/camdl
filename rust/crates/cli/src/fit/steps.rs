@@ -16,7 +16,7 @@
 
 use indexmap::IndexMap;
 use sim::inference::if2::EstimatedParam;
-use sim::inference::types::{If2Step, PerturbAt, Perturbation, Transform, ZSd};
+use sim::inference::types::{If2Step, PerturbAt, Perturbation, Transform, ZSd, SIMPLEX_LOG_RATIO_STEP};
 
 use super::config_v2::{self, Algorithm, EstimateSpecV2};
 
@@ -184,16 +184,12 @@ pub fn resolve_steps(
                     g.params
                         .iter()
                         .map(|name| {
-                            let map = domains.get(name).ok_or_else(|| StepError::NotEstimated {
-                                table: "perturbation",
-                                name: name.clone(),
-                            })?;
+                            if !domains.contains_key(name) {
+                                return Err(StepError::NotEstimated { table: TABLE, name: name.clone() });
+                            }
                             let resolved = match perturbation.get(name).and_then(|s| s.sd) {
                                 Some(sd) => ResolvedProposal { sd, from: StepFrom::Written },
-                                None => ResolvedProposal {
-                                    sd: default_step(TABLE, name, map, Some(simplex_member_default_step(map)))?,
-                                    from: StepFrom::Default,
-                                },
+                                None => ResolvedProposal { sd: simplex_member_default_step(), from: StepFrom::Default },
                             };
                             Ok((name.clone(), resolved))
                         })
@@ -250,35 +246,11 @@ fn default_step(table: &'static str, name: &str, map: &Transform, default: Optio
     })
 }
 
-/// A simplex member's default log-ratio step under IF2: the natural-scale
-/// step the member's box gave before support-keyed transforms, read as is on
-/// the log-ratio coordinate, so the simplex perturbation is the one it was
-/// (`(hi − lo)/6` on [0, 1]).
-///
-/// LogInterval: ln(hi/lo)/20 converted at the geometric midpoint.
-/// LowerBounded: as LogInterval with hi = 1000·lo.
-/// Interval: (hi − lo)/6.
-/// Identity, UpperBounded: (hi − lo)/6, with ±1e6 for an infinite end.
-pub(crate) fn simplex_member_default_step(transform: &Transform) -> f64 {
-    let (lower, upper) = transform.bounds();
-    let log_auto = |lo: f64, hi: f64| {
-        let lo = lo.max(1e-300);
-        let hi_val = if hi.is_finite() { hi } else { lo * 1000.0 };
-        let log_range = (hi_val / lo).ln();
-        let log_sd = log_range / 20.0;
-        let midpoint = (lo * hi_val).sqrt();
-        midpoint * log_sd
-    };
-    match *transform {
-        Transform::LogInterval { lo, hi } => log_auto(lo, hi),
-        Transform::LowerBounded { lo } => log_auto(lo, f64::INFINITY),
-        Transform::Interval { lo, hi } => (hi - lo) / 6.0,
-        Transform::Identity | Transform::UpperBounded { .. } => {
-            let lo = if lower.is_finite() { lower } else { -1e6 };
-            let hi = if upper.is_finite() { upper } else { 1e6 };
-            (hi - lo) / 6.0
-        }
-    }
+/// A simplex member's default step under IF2, on the group's log-ratio
+/// coordinate: [`SIMPLEX_LOG_RATIO_STEP`], whatever the member's own box,
+/// since the group perturbs the log-ratios and not the members' own maps.
+pub(crate) fn simplex_member_default_step() -> ZSd {
+    ZSd::new(SIMPLEX_LOG_RATIO_STEP).expect("a positive constant")
 }
 
 impl ResolvedSteps {
@@ -473,6 +445,23 @@ mod tests {
         // A method with no step reads none.
         let pgas = method("pgas", "chains = 1\nparticles = 10\nsweeps = 1", "");
         assert_eq!(resolve_steps(&pgas, &domains(), &[]).unwrap(), ResolvedSteps::None);
+    }
+
+    /// D20: a simplex member's default IF2 step is one log-ratio constant,
+    /// 1/6, whatever its box: a member on the log-interval map of [0.05, 1]
+    /// and one on the interval map of [0, 0.5] both take it (their boxes gave
+    /// 0.0335 and 0.0833 before). A written member SD is used as written.
+    #[test]
+    fn a_simplex_members_default_step_is_one_log_ratio_constant() {
+        let domains: IndexMap<String, Transform> = [
+            ("a".to_string(), Transform::LogInterval { lo: 0.05, hi: 1.0 }),
+            ("b".to_string(), Transform::Interval { lo: 0.0, hi: 0.5 }),
+            ("c".to_string(), Transform::Interval { lo: 0.0, hi: 1.0 }),
+        ].into_iter().collect();
+        let group = [config_v2::SimplexGroup { params: vec!["a".into(), "b".into(), "c".into()] }];
+        let steps = resolve_steps(&if2("[perturbation]\nc = 0.3"), &domains, &group).unwrap();
+        let sds: Vec<f64> = steps.simplex_sds().unwrap()[0].iter().map(|s| s.get()).collect();
+        assert_eq!(sds, vec![1.0 / 6.0, 1.0 / 6.0, 0.3]);
     }
 
     /// The group perturbs its members at t = 0 only, so `initial_state` on a

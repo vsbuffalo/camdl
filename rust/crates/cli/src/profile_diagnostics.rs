@@ -53,9 +53,8 @@ pub struct PerStartDiagnostics {
     pub completed: bool,
     /// Final cooling-step index reached (IF2 only).
     pub iterations_used: Option<usize>,
-    /// Final perturbation SD applied at the last cooling step (IF2
-    /// only). Mean across estimated params at the final iteration —
-    /// scalar summary of "how cool we got."
+    /// The cooling factor of the last IF2 iteration, the multiplier on every
+    /// parameter's step there (IF2 only; `profile::cooling_final`).
     pub cooling_final: Option<f64>,
     /// Per-iteration (IF2) loglik trace. Used by
     /// the rollup to compute Gelman-Rubin Rhat across the K starts.

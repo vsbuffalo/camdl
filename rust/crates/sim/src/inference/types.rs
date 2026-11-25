@@ -85,6 +85,11 @@ pub const IF2_LOG_INTERVAL_STEP: f64 = 1.0 / 20.0;
 /// collapse there.
 pub const IF2_HALF_BOUNDED_STEP: f64 = 1.0 / 5.0;
 
+/// IF2's default step for a member of a simplex group, on the group's
+/// log-ratio coordinate, whatever the member's box: a starting heuristic. It
+/// is the step a member on [0, 1] took as (hi − lo)/6.
+pub const SIMPLEX_LOG_RATIO_STEP: f64 = 1.0 / 6.0;
+
 /// PMMH's and MH's default initial proposal SD in z, every map with a finite
 /// end (proposal D8). Robbins–Monro adaptation tunes it from the first
 /// warm-up step. It is near the scale adaptation reaches on a

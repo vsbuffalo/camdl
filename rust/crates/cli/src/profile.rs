@@ -235,6 +235,20 @@ pub(crate) fn profile_cooling_schedule(
 /// cooling schedule a fit's `cooling` would mean (`profile_cooling_schedule`),
 /// the step, the degeneracy budget and the binomial sampler.
 #[allow(clippy::too_many_arguments)]
+/// How cool an IF2 run's perturbation got: the cooling factor of its last
+/// iteration, `last`, the one multiplier that iteration's diagnostics apply
+/// to every parameter's step (`ParamIterDiag::effective_sd` is each step
+/// times it). It is the same for every parameter, so it is a property of the
+/// run and has no unit; a mean of the parameters' SDs would mix their
+/// coordinates.
+pub(crate) fn cooling_final(
+    schedule: &sim::inference::if2::CoolingSchedule,
+    n_assimilations: usize,
+    last: &sim::inference::if2::IF2IterResult,
+) -> f64 {
+    schedule.multiplier_at_iter(n_assimilations, last.iteration)
+}
+
 pub(crate) fn profile_if2_config(
     n_particles: usize,
     n_iterations: usize,
@@ -1224,11 +1238,7 @@ fn run_profile(
             g.params.iter().map(|name| {
                 match fit_perturbation.get(name).and_then(|t| t.sd) {
                     Some(sd) => Ok(sd),
-                    None => {
-                        let p = if2_params.iter().find(|p| p.name == *name).expect("checked estimated above");
-                        sim::inference::types::ZSd::new(crate::fit::steps::simplex_member_default_step(&p.transform))
-                            .map_err(|e| format!("simplex member `{name}`: {e}"))
-                    }
+                    None => Ok(crate::fit::steps::simplex_member_default_step()),
                 }
             }).collect::<Result<Vec<_>, String>>()
         }).collect::<Result<Vec<_>, String>>().unwrap_or_else(|e| out.fail(format!("error: {e}")));
@@ -1842,24 +1852,13 @@ fn run_profile(
                         let last_iter = r.iterations.last();
                         diag.completed = true_ll.is_finite();
                         diag.iterations_used = last_iter.map(|it| it.iteration + 1);
-                        // cooling_final: mean across estimated params
-                        // of the final iter's effective_sd (the
-                        // *actual* ending perturbation SD per
-                        // ParamIterDiag.effective_sd, in z). Scalar summary of "how cool
-                        // the perturbation got." Mean-across-params
-                        // is fine — a model with a heterogeneous
-                        // rw_sd has each param cooled by the same
-                        // schedule factor, so the spread between
-                        // params is mostly init-dependent and the
-                        // mean is a representative single number.
-                        diag.cooling_final = last_iter.and_then(|it| {
-                            if it.param_diag.is_empty() { None }
-                            else {
-                                let s: f64 = it.param_diag.iter()
-                                    .map(|p| p.effective_sd).sum();
-                                Some(s / it.param_diag.len() as f64)
-                            }
-                        });
+                        let n_assimilations = {
+                            use sim::inference::traits::ObservationModel;
+                            let obs: &dyn ObservationModel<sim::inference::ParticleState> = &*obs_model_obj;
+                            (0..obs.n_observations()).filter(|&i| obs.assimilates_at(i)).count()
+                        };
+                        diag.cooling_final = last_iter
+                            .map(|it| cooling_final(&config.cooling, n_assimilations, it));
                         diag.loglik_trace = trace;
                         (true_ll, r.mle)
                     }
@@ -2318,6 +2317,27 @@ fn legacy_role_inputs(sel: LegacySelection<'_>) -> Result<LegacyRoleDecls, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// D21: `cooling_final` is the last iteration's cooling factor, the same
+    /// for every parameter, and not a mean of the parameters' SDs. For
+    /// cooling 0.9 over 50 iterations, the last of 20 iterations has factor
+    /// 0.9^(19/50) = 0.9608; with steps 0.1 and 0.3 the mean of their cooled
+    /// SDs was 0.1922.
+    #[test]
+    fn cooling_final_is_the_last_iterations_cooling_factor() {
+        use sim::inference::if2::{CoolingSchedule, IF2IterResult, ParamIterDiag};
+        let schedule = CoolingSchedule { fraction: 0.9, target_iters: 50 };
+        let n_assimilations = 14;
+        let factor = schedule.multiplier_at_iter(n_assimilations, 19);
+        let diag = |sd: f64| ParamIterDiag { param_index: 0, weighted_var_ratio: 1.0, q_ratio: 1.0, effective_sd: sd * factor };
+        let last = IF2IterResult {
+            iteration: 19, loglik: f64::NAN, if2_perturbed_loglik: -50.0,
+            param_means: vec![], param_diag: vec![diag(0.1), diag(0.3)],
+        };
+        let got = cooling_final(&schedule, n_assimilations, &last);
+        assert_eq!(got, factor);
+        assert!((got - 0.9_f64.powf(19.0 / 50.0)).abs() < 1e-12, "{got}");
+    }
 
     /// The resolver's result is checked against the stored problem: an
     /// estimated set or a `[fixed]` value that differs, by one bit, is an
