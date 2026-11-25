@@ -1494,8 +1494,8 @@ pub(crate) struct OpenedFit {
     /// The compile's quantities and contrasts, which the problem names in its
     /// lineage; restored into [`Self::model_ir`].
     pub quantities: Option<Dep<crate::camdl_store::Quantities>>,
-    /// The presentation the invocation the handle names recorded for
-    /// [`StoredFit::model`] ([`crate::camdl_store::shown_for`]), whose
+    /// The model source the invocation answering for the handle recorded
+    /// for [`StoredFit::model`] ([`crate::camdl_store::shown_for`]), whose
     /// description and documentation are restored into [`Self::model_ir`].
     pub shown: crate::camdl_store::Shown,
     /// The handle the fit was opened by, as parsed.
@@ -1546,19 +1546,19 @@ impl OpenedFit {
     }
 
     /// Records in the invocation `info` that this fit's compiled model was
-    /// run from the model file [`Self::shown`] presents, for a command that
+    /// run from the model source [`Self::shown`] names, for a command that
     /// stores a result read from this fit: a reader of that result then finds
-    /// the presentation through the command's own invocation. Nothing is
-    /// recorded when no presentation was.
-    pub fn record_presentation(&self, store: &Store, info: &store::RunInfo) -> Result<(), String> {
-        record_presentation(store, info, &self.fit.model, &self.shown, &self.model_name())
+    /// the source through the command's own invocation. Nothing is recorded
+    /// when no source was.
+    pub fn record_source(&self, store: &Store, info: &store::RunInfo) -> Result<(), String> {
+        record_source(store, info, &self.fit.model, &self.shown, &self.model_name())
     }
 
     /// This fit, reported through another model file, which the caller has
     /// checked compiles to the model the fit ran on apart from its quantities
     /// and contrasts. `quantities`, what that file's compile produced, and
-    /// `shown`, its presentation, replace the recorded ones: in
-    /// [`Self::quantities`], in [`Self::shown`] (so [`Self::record_presentation`]
+    /// `shown`, its model source, replace the recorded ones: in
+    /// [`Self::quantities`], in [`Self::shown`] (so [`Self::record_source`]
     /// records the file) and in the IR files a reader loads.
     pub fn reported_through(
         mut self,
@@ -1584,22 +1584,25 @@ impl OpenedFit {
 }
 
 /// Records in the invocation `info` that the stored compiled model `model`,
-/// named `name`, was run from the model file the presentation `shown` names
-/// presents. Nothing is recorded when it names none.
-pub(crate) fn record_presentation(
+/// named `name`, was run from the model source `shown` names
+/// ([`crate::camdl_store::model_source::link_source`]). Nothing is recorded
+/// when it names none.
+pub(crate) fn record_source(
     store: &Store,
     info: &store::RunInfo,
     model: &Dep<CompiledModel>,
     shown: &crate::camdl_store::Shown,
     name: &str,
 ) -> Result<(), String> {
-    let Some(hex) = shown.run_id() else { return Ok(()) };
-    crate::camdl_store::presentation::link_presentation(store, info, model, crate::camdl_store::Presentation::Stored(hex), name)
+    if shown.run_id().is_none() {
+        return Ok(());
+    }
+    crate::camdl_store::model_source::link_source(store, info, model, shown.source_of(), name)
 }
 
 /// The compiled model a stored result names, as an IR envelope: the model
-/// part, named `name`. The description and the documentation are a
-/// presentation's, which [`crate::camdl_store::Shown::restore`] restores;
+/// part, named `name`. The description and the documentation are a model
+/// source's, which [`crate::camdl_store::Shown::restore`] restores;
 /// without it the envelope has neither.
 pub(crate) fn stored_envelope(store: &Store, dep: &Dep<CompiledModel>, name: &str) -> Result<ir::IrEnvelope, String> {
     let stored: Stored<CompiledModel> = store
@@ -1724,8 +1727,7 @@ pub(crate) fn open_fit(store: &Store, text: &str) -> Result<OpenedFit, String> {
     let labels = problem_labels(store, &fit.problem);
     let name = labels.as_ref().map(|l| l.model.clone()).unwrap_or_else(|| "model".to_string());
     let mut envelope = stored_envelope(store, &fit.model, &name)?;
-    let result = fit.run.as_ref().map(|r| r.id().key()).unwrap_or_else(|| fit.problem.id().key());
-    let shown = crate::camdl_store::shown_for(store, &handle, result, fit.model.id().key());
+    let shown = crate::camdl_store::shown_for(store, &handle, fit.model.id().key());
     shown.restore(&handle, &mut envelope);
     let quantities = match &fit.run {
         Some(run) => match run_quantities(store, &handle, text, run)? {

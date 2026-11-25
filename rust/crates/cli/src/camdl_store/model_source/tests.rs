@@ -1,4 +1,4 @@
-//! The presentation a reader of a stored result is given, by [`shown_for`],
+//! The model source a reader of a stored result is given, by [`shown_for`],
 //! and the one `camdl path` and `camdl cat` resolve, over a store the release
 //! binary writes: a fit run, a prediction from it, a profile point of it and
 //! a simulation, each named by its label and by its run id.
@@ -123,49 +123,48 @@ fn result_of(store: &Store, label: &str, kind: &str) -> Key {
     inv.entries().into_iter().find(|(k, _, _)| *k == kind).map(|(_, key, _)| key).unwrap_or_else(|| panic!("@{label} lists no {kind}"))
 }
 
-/// The presentation a reader of `result`, named by `handle`, is given, and
-/// the one `camdl path HANDLE model_presentation:docs` resolves.
+/// The model source a reader of `result`, named by `handle`, is given, and
+/// the one `camdl path HANDLE model_source:docs` resolves.
 fn both(store: &Store, handle: &Handle, result: Key) -> (Option<Key>, Option<Key>) {
     let located = store.locate(result).unwrap();
     let model = model_of(store, &located).expect("the result's compiled model");
-    let shown = match shown_for(store, handle, result, model) {
-        Shown::Recorded { presentation, .. } => Some(presentation.id().key()),
+    let shown = match shown_for(store, handle, model) {
+        Shown::Recorded { source, .. } => Some(source.id().key()),
         Shown::NotRecorded { .. } => None,
         Shown::Unreadable { run_id, why } => panic!("{handle}: {run_id} unreadable: {why}"),
     };
-    let path = resolve_file(store, &Source::Handle(handle), &Narrow::default(), "model_presentation:docs").ok().map(|f| f.located.run_id());
+    let path = resolve_file(store, &Source::Handle(handle), &Narrow::default(), "model_source:docs").ok().map(|f| f.located.run_id());
     (shown, path)
 }
 
-/// The documentation of `beta` the presentation `key` holds.
+/// The documentation of `beta` the model source `key` holds.
 fn beta_doc(store: &Store, key: Key) -> String {
-    let presentation: Stored<ModelPresentation> = store.resolve(&RunRef::new(Handle::IdPrefix(key.to_hex()))).unwrap();
-    let docs: PresentedDocs = serde_json::from_slice(&super::super::read_stored(&presentation, DOCS).unwrap()).unwrap();
+    let source: Stored<ModelSource> = store.resolve(&store::RunRef::new(Handle::IdPrefix(key.to_hex()))).unwrap();
+    let docs: SourceDocs = serde_json::from_slice(&super::super::read_stored(&source, DOCS).unwrap()).unwrap();
     docs.docs.parameters["beta"].text.clone().unwrap()
 }
 
-/// A reader of a stored result and `camdl path` are given one presentation,
+/// A reader of a stored result and `camdl path` are given one model source,
 /// the one of the file the naming invocation ran: by label and by run id,
 /// for a fit run, a prediction, a profile point and a simulation.
 #[test]
-fn a_results_presentation_is_the_one_camdl_path_resolves() {
+fn a_results_model_source_is_the_one_camdl_path_resolves() {
     let (_tmp, store) = store_of_four();
     for (label, kind, doc) in [("a", "fit_run", "fit"), ("p", "prediction", "fit"), ("pr", "profile_point", "profile"), ("s", "sim", "sim")] {
         let result = result_of(&store, label, kind);
         for handle in [Handle::Label { name: label.into(), back: 0 }, Handle::IdPrefix(result.to_hex())] {
             let (shown, path) = both(&store, &handle, result);
-            assert_eq!(shown, path, "{handle} ({kind}): the reader's presentation and camdl path's");
+            assert_eq!(shown, path, "{handle} ({kind}): the reader's model source and camdl path's");
             assert_eq!(shown.map(|k| beta_doc(&store, k)).as_deref(), Some(doc), "{handle} ({kind})");
         }
     }
 }
 
-/// A prediction whose invocation record lists no compiled model, as a record
-/// written before a prediction listed its model does, has no presentation
-/// for either reader: no other invocation is read for it, although one
-/// later recorded a presentation of the same compiled model.
+/// A prediction whose invocation record lists no compiled model has no model
+/// source for either reader: no other invocation stands in for it, although
+/// another recorded a source of the same compiled model.
 #[test]
-fn a_record_naming_no_presentation_gives_none_to_either_reader() {
+fn a_record_naming_no_source_gives_none_to_either_reader() {
     let (tmp, store) = store_of_four();
     let seq = store.invocation(&Handle::Label { name: "p".into(), back: 0 }).unwrap().seq();
     let path: PathBuf = tmp.path().join("st/.invocations").join(format!("{seq}.json"));

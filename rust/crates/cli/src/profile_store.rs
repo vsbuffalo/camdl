@@ -84,10 +84,10 @@ pub(crate) struct PosedProblem {
     pub fit: crate::fit_store::FitArg,
     /// The stored compile, as an IR file.
     pub model_ir: String,
-    /// The presentation of the model file the profile names, for a profile
+    /// The model source of the model file the profile names, for a profile
     /// of a stored fit, whose problem's compile is not of that file; `None`
     /// for a fit file's problem, compiled from the file itself.
-    pub presentation: Option<crate::camdl_store::PresentationIdentity>,
+    pub source: Option<crate::camdl_store::SourceParts>,
 }
 
 /// The fit problem a profile is of, stored as `camdl fit run` stores the
@@ -113,11 +113,11 @@ pub(crate) fn pose_problem(
     let given_model = std::fs::read(model).map_err(|e| format!("cannot read the model {model}: {e}"))?;
     // A stored fit's problem is compiled from the model file it keeps; the
     // file this profile names is compiled once, to refuse another model and
-    // to be this invocation's presentation.
+    // to be this invocation's model source.
     let named = match &fit.stored {
         Some(opened) => {
             refuse_another_model(out, opened, &given_model, model, &fit.handle, compile)?;
-            Some(named_presentation(&given_model, model, compile)?)
+            Some(named_source(&given_model, model, compile)?)
         }
         None => None,
     };
@@ -125,7 +125,7 @@ pub(crate) fn pose_problem(
         (Some(opened), false) => {
             let stem = crate::hashing::path_stem_slug(model).unwrap_or_else(|| "model".to_string());
             let shown = named.clone().expect("a stored fit's named model is compiled");
-            crate::camdl_store::presentation::link_presentation(store, info, &opened.fit.model, shown, &stem)?;
+            crate::camdl_store::model_source::link_source(store, info, &opened.fit.model, shown, &stem)?;
             opened.fit.problem.dep_all()
         }
         (stored, _) => {
@@ -269,7 +269,7 @@ pub(crate) fn pose_problem(
         }
     }
     let model_ir = posed.stored.as_ref().map(|o| o.model_ir.to_string_lossy().into_owned()).ok_or("internal: the stored problem reopened as no stored fit")?;
-    Ok(PosedProblem { dep, fit: posed, model_ir, presentation: named })
+    Ok(PosedProblem { dep, fit: posed, model_ir, source: named })
 }
 
 /// The compile with the state Jacobian of `model`, the model file the
@@ -278,9 +278,9 @@ pub(crate) fn pose_problem(
 /// it is the same model as `problem_ir`. [`pose_problem`] has refused a
 /// `model` that is not the problem's model, and the file is compiled where it
 /// lies, so the files it reads by a relative path are found. It is stored
-/// with `presentation`, the presentation of `model` for a profile of a stored
-/// fit ([`PosedProblem::presentation`]), or, when that is `None`, with the
-/// presentation of `model` rendered here. Returns its IR file and its
+/// with `source`, the model source of `model` for a profile of a stored
+/// fit ([`PosedProblem::source`]), or, when that is `None`, with the
+/// source of `model` rendered here. Returns its IR file and its
 /// dependency.
 #[expect(clippy::disallowed_methods, reason = "reads the model `model` names (declared `#[input(identity)]` on `ProfileArgs`) and the IR camdlc compiled from it, which is stored as a `CompiledModel` dependency")]
 #[allow(clippy::too_many_arguments)]
@@ -290,7 +290,7 @@ pub(crate) fn jacobian_compile(
     info: &store::RunInfo,
     posed: &crate::fit_store::FitArg,
     model: &str,
-    presentation: Option<crate::camdl_store::PresentationIdentity>,
+    source: Option<crate::camdl_store::SourceParts>,
     problem_ir: &str,
     compile: crate::util::CompileSettings,
 ) -> Result<(String, Dep<CompiledModel>), String> {
@@ -303,20 +303,20 @@ pub(crate) fn jacobian_compile(
         return Err("internal error: the compile with the state Jacobian is not the same model as the problem's".into());
     }
     let stem = opened.model_name();
-    let dep = put_compile(store, info, &full, &stem, &bytes, model, presentation)?;
+    let dep = put_compile(store, info, &full, &stem, &bytes, model, source)?;
     Ok((full, dep))
 }
 
-/// The presentation of the model file `model`, whose bytes are `bytes`,
+/// The model source of the model file `model`, whose bytes are `bytes`,
 /// compiled under `compile` and rendered.
-fn named_presentation(
+fn named_source(
     bytes: &[u8],
     model: &str,
     compile: crate::util::CompileSettings,
-) -> Result<crate::camdl_store::PresentationIdentity, String> {
+) -> Result<crate::camdl_store::SourceParts, String> {
     let envelope = crate::util::load_model_envelope(model, compile)?;
-    let source = crate::camdl_store::ModelSource::read(bytes, std::path::Path::new(model));
-    Ok(crate::camdl_store::CompiledParts::split(envelope, String::new(), source)?.presentation)
+    let source = crate::camdl_store::SourceText::read(bytes, std::path::Path::new(model));
+    Ok(crate::camdl_store::CompiledParts::split(envelope, String::new(), source)?.source)
 }
 
 /// The structural hash of the compiled model at `path`, with its description
@@ -366,8 +366,8 @@ fn refuse_another_model(
 
 /// Stores the compile at `ir`, as `fit run` stores a problem's: the model
 /// part, depended on, and its quantities, named as lineage. The compile is
-/// stored with `presentation` when one is given, and otherwise with the
-/// presentation of `source`, the model file at `source_path` it was
+/// recorded with the model source `named` when one is given, and otherwise
+/// with the source of `source`, the model file at `source_path` it was
 /// compiled from.
 #[expect(clippy::disallowed_methods, reason = "reads the IR camdlc compiled, which this function stores as the `CompiledModel` the result depends on")]
 pub(crate) fn put_compile(
@@ -377,26 +377,22 @@ pub(crate) fn put_compile(
     stem: &str,
     source: &[u8],
     source_path: &str,
-    presentation: Option<crate::camdl_store::PresentationIdentity>,
+    named: Option<crate::camdl_store::SourceParts>,
 ) -> Result<Dep<CompiledModel>, String> {
-    use store::ContentArtifact;
     let text = std::fs::read_to_string(ir).map_err(|e| format!("cannot read the compiled model {ir}: {e}"))?;
     let envelope = ir::envelope_from_str(&text).map_err(|e| format!("IR load error from {ir}: {e}"))?;
     let path = std::path::Path::new(source_path);
-    let source = match presentation {
-        Some(_) => crate::camdl_store::ModelSource { bytes: source, path, rendered: crate::camdl_store::Rendered::nothing() },
-        None => crate::camdl_store::ModelSource::read(source, path),
+    let source = match named {
+        Some(_) => crate::camdl_store::SourceText { bytes: source, path, rendered: crate::camdl_store::Rendered::nothing() },
+        None => crate::camdl_store::SourceText::read(source, path),
     };
     let parts = crate::camdl_store::CompiledParts::split(envelope, stem.to_string(), source)?;
-    let crate::camdl_store::CompiledParts { model, quantities, presentation: of_source, labels, provenance } = parts;
-    let presentation = presentation.unwrap_or(of_source);
-    let quantities = store
-        .put::<crate::camdl_store::Quantities>(quantities, &labels, &store::Provenance::none(), info)
-        .map_err(|e| format!("storing the quantities: {e}"))?
-        .dep(crate::camdl_store::Quantities::FILE)
-        .map_err(|e| format!("storing the quantities: {e}"))?;
-    info.lineage(&quantities);
-    crate::camdl_store::put_compiled(store, info, model, presentation, &labels, &provenance)
+    let crate::camdl_store::CompiledParts { model, quantities, source: of_source, labels, provenance } = parts;
+    store::release(quantities, "the model source stores the quantities");
+    let source = named.unwrap_or(of_source).put(store, &labels, info).map_err(|e| format!("storing the model source: {e}"))?;
+    info.lineage(&source.identity().quantities);
+    let source = crate::camdl_store::SourceOf::Stored(*source.id());
+    crate::camdl_store::put_compiled(store, info, model, source, &labels, &provenance)
         .map_err(|e| format!("storing the compiled model: {e}"))
 }
 

@@ -213,17 +213,14 @@ impl OutputManifest {
     }
 }
 
-/// A result's labels as the manifest records them: the invocation record's,
-/// less any that hold a path as it was typed or a link to another result. A
-/// data table's `path` is the `--data` argument, which names one file
-/// differently from another working directory, so the manifest keeps only
-/// its `stream`. A compiled model's `presentation` is the run id of the
-/// presentation stored with it, which the manifest lists as a result of its
-/// own. Every other kind's labels hold names and values.
+/// A result's labels as the manifest records them: the invocation record's
+/// attributes, less any that hold a path as it was typed. A data table's
+/// `path` is the `--data` argument, which names one file differently from
+/// another working directory, so the manifest keeps only its `stream`. Every
+/// other kind's attributes hold names and values.
 pub(crate) fn manifest_labels(kind: &str, mut labels: serde_json::Value) -> serde_json::Value {
     let link = match kind {
         k if k == <crate::camdl_store::DataTable as store::Artifact>::KIND => Some("path"),
-        k if k == <crate::camdl_store::CompiledModel as store::Artifact>::KIND => Some("presentation"),
         _ => None,
     };
     if let (Some(field), Some(map)) = (link, labels.as_object_mut()) {

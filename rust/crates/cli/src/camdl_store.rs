@@ -13,8 +13,8 @@
 //! `<root>/<version>-<12 hex of the ambient key>/` ([`camdl_top_level`]).
 //!
 //! The compiled model is split by [`CompiledParts::split`] into the part every
-//! result depends on ([`CompiledModelContent`]), the quantities, the model's
-//! presentation ([`presentation`]), the model's name (a label) and
+//! result depends on ([`CompiledModelContent`]), the quantities, the model
+//! source ([`model_source`]), the model's name (an attribute) and
 //! provenance. The model part is keyed by its own bytes, so a docstring, the
 //! description, a quantity or the file's name changes no result's key, and
 //! every other field, derivative tables included, does.
@@ -86,7 +86,7 @@ pub(crate) fn camdl_kinds() -> Kinds {
         .register::<CompiledModel>()
         .register::<Quantities>()
         .register::<DataTable>()
-        .register::<ModelPresentation>();
+        .register::<ModelSource>();
     let kinds = crate::fit_store::register(crate::sim_store::register(crate::pfilter_store::register(kinds)));
     crate::profile_store::register(kinds)
 }
@@ -497,17 +497,13 @@ impl store::Content for QuantitiesContent {
     }
 }
 
-/// The compiled model's name: the stem of the model file, as a label. A
-/// compiled model's labels in an invocation also name the presentation that
-/// invocation compiled it from.
+/// The model's name: the stem of the model file, as an attribute of a
+/// compiled model, its quantities and its model source. Which source an
+/// invocation compiled a model from is the listing's `source`, recorded by
+/// [`put_compiled`].
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ModelAttributes {
     pub name: String,
-    /// The run id (hex) of the [`ModelPresentation`] stored with the compiled
-    /// model, set by [`put_compiled`]; `None` in the labels of every other
-    /// kind.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub presentation: Option<String>,
 }
 
 /// Everything one compile yields, each field of the compiled output in
@@ -515,28 +511,30 @@ pub(crate) struct ModelAttributes {
 pub(crate) struct CompiledParts {
     pub model: Hashed<CompiledModelContent>,
     pub quantities: Hashed<QuantitiesContent>,
-    /// The source file, the description, the `#'` documentation, the
-    /// declared model and the renders.
-    pub presentation: PresentationIdentity,
+    /// The model file, its name, the description, the `#'` documentation,
+    /// the declared model, the renders and the quantities: the model source,
+    /// before it is stored.
+    pub source: SourceParts,
     pub labels: ModelAttributes,
     /// The envelope's `ir_version` and `validated_by`, and the digests of the
     /// whole compiled output and of the source file.
     pub provenance: Provenance,
 }
 
-/// The model file a compile came from: its bytes, its path, whose extension
-/// (`.camdl` or not) names the presentation's source file, and its renders.
-pub(crate) struct ModelSource<'a> {
+/// The model file a compile came from: its bytes, its path, whose name is
+/// the model source's and whose extension (`.camdl` or not) names its stored
+/// file, and its renders.
+pub(crate) struct SourceText<'a> {
     pub bytes: &'a [u8],
     pub path: &'a Path,
     pub rendered: Rendered,
 }
 
-impl<'a> ModelSource<'a> {
+impl<'a> SourceText<'a> {
     /// The model file at `path`, whose bytes are `bytes`, rendered by camdlc
     /// when it is a `.camdl` ([`Rendered::of`]).
     pub fn read(bytes: &'a [u8], path: &'a Path) -> Self {
-        ModelSource { bytes, path, rendered: Rendered::of(path) }
+        SourceText { bytes, path, rendered: Rendered::of(path) }
     }
 }
 
@@ -544,7 +542,7 @@ impl CompiledParts {
     /// Takes the compiled output apart. Every field of the envelope and of
     /// the model is named here, so a field added to the IR does not compile
     /// until it is assigned to a part.
-    pub fn split(envelope: ir::IrEnvelope, name: String, source: ModelSource<'_>) -> Result<Self, String> {
+    pub fn split(envelope: ir::IrEnvelope, name: String, source: SourceText<'_>) -> Result<Self, String> {
         let whole = Key::digest_bytes(&canonical_bytes(&envelope));
         let ir::IrEnvelope { ir_version, validated_by, model, docs, declared } = envelope;
         let ir::Model {
@@ -605,11 +603,21 @@ impl CompiledParts {
             quantities: Vec::new(),
             contrasts: Vec::new(),
         };
-        let quantities = QuantitiesContent {
+        let quantities = Hashed::new(QuantitiesContent {
             bytes: canonical_bytes(&serde_json::json!({ "quantities": quantities, "contrasts": contrasts })),
-        };
+        });
         let camdl = crate::util::model_is_camdl_source(&source.path.to_string_lossy());
-        let presentation = PresentationIdentity::of(source.bytes, camdl, description, docs, &declared, source.rendered)?;
+        let file_name = source.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let model_source = SourceParts::of(
+            file_name,
+            source.bytes,
+            camdl,
+            description,
+            docs,
+            &declared,
+            source.rendered,
+            quantities.clone(),
+        )?;
         let e = |e: store::Error| e.to_string();
         let provenance = Provenance::none()
             .value("ir_version", &ir_version).map_err(e)?
@@ -618,9 +626,9 @@ impl CompiledParts {
             .value("source_sha256", &Key::digest_bytes(source.bytes).to_hex()).map_err(e)?;
         Ok(CompiledParts {
             model: Hashed::new(CompiledModelContent::of(model_part)),
-            quantities: Hashed::new(quantities),
-            presentation,
-            labels: ModelAttributes { name, presentation: None },
+            quantities,
+            source: model_source,
+            labels: ModelAttributes { name },
             provenance,
         })
     }
@@ -715,8 +723,8 @@ impl ContentArtifact for DataTable {
     const FILE: &'static str = "table.tsv";
 }
 
-pub(crate) mod presentation;
-pub(crate) use presentation::{put_compiled, shown_for, Presentation, ModelPresentation, PresentationIdentity, Rendered, Shown};
+pub(crate) mod model_source;
+pub(crate) use model_source::{put_compiled, shown_for, ModelSource, Rendered, Shown, SourceOf, SourceParts};
 
 #[cfg(test)]
 mod tests;

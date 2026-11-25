@@ -1218,7 +1218,7 @@ mod tests {
     /// so it reads the invocation records once.
     #[test]
     fn list_reads_the_invocation_records_once() {
-        let (tmp, _) = crate::camdl_store::presentation::store_of_four();
+        let (tmp, _) = crate::camdl_store::model_source::store_of_four();
         let store = crate::camdl_store::open_existing(&tmp.path().join("st")).expect("the store");
         assert_eq!(store.directory_reads(), 0);
         let rows = rows(&store, KindFilter::All);

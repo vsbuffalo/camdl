@@ -114,6 +114,45 @@ impl Listings {
     pub fn first(&self) -> Option<&Listed> {
         self.listed.last()
     }
+
+    /// The source the answering invocation recorded for its listing of `of`
+    /// ([`crate::RunInfo::record_source`]), with the other sources earlier
+    /// listings recorded for it. [`Recorded::None`] when the answering
+    /// invocation recorded none, even if an earlier one did: no other
+    /// invocation stands in for it. A reference to a kind other than `B` is
+    /// no source of `B`.
+    pub fn source<A: Artifact, B: Artifact>(&self, of: &Id<A>) -> Recorded<B> {
+        let recorded = |l: &Listed| -> Option<Id<B>> {
+            l.invocation
+                .record
+                .listings()
+                .iter()
+                .filter(|r| r.kind == A::KIND && r.run_id == of.key())
+                .find_map(|r| r.source.filter(|s| s.kind == B::KIND).map(|s| Id::from_key(s.run_id)))
+        };
+        let Some(answering) = self.answering() else { return Recorded::None };
+        let Some(latest) = recorded(answering) else { return Recorded::None };
+        let others: Vec<(u64, Id<B>)> =
+            self.listed[1..].iter().filter_map(|l| Some((l.seq, recorded(l)?))).filter(|(_, s)| *s != latest).collect();
+        if others.is_empty() {
+            Recorded::One { source: latest, unfinished: answering.unfinished }
+        } else {
+            Recorded::Several { latest, others }
+        }
+    }
+}
+
+/// The source the answering invocation recorded for a listed result
+/// ([`Listings::source`]).
+pub enum Recorded<B: Artifact> {
+    /// The answering invocation recorded none, or no invocation answers.
+    None,
+    /// One source; `unfinished` when the answering listing is in a running
+    /// record.
+    One { source: Id<B>, unfinished: bool },
+    /// The answering invocation recorded `latest`, and the earlier listings
+    /// in `others` (by sequence number) recorded other sources.
+    Several { latest: Id<B>, others: Vec<(u64, Id<B>)> },
 }
 
 impl Store {
@@ -166,3 +205,30 @@ impl Store {
 
 #[cfg(test)]
 mod tests;
+
+// By hand, so that `B`, a marker type, need not be `Debug` or `PartialEq`.
+impl<B: Artifact> std::fmt::Debug for Recorded<B> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Recorded::None => f.write_str("None"),
+            Recorded::One { source, unfinished } => {
+                f.debug_struct("One").field("source", &source.key()).field("unfinished", unfinished).finish()
+            }
+            Recorded::Several { latest, others } => {
+                let others: Vec<(u64, Key)> = others.iter().map(|(s, id)| (*s, id.key())).collect();
+                f.debug_struct("Several").field("latest", &latest.key()).field("others", &others).finish()
+            }
+        }
+    }
+}
+
+impl<B: Artifact> PartialEq for Recorded<B> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Recorded::None, Recorded::None) => true,
+            (Recorded::One { source: a, unfinished: u }, Recorded::One { source: b, unfinished: v }) => a == b && u == v,
+            (Recorded::Several { latest: a, others: x }, Recorded::Several { latest: b, others: y }) => a == b && x == y,
+            _ => false,
+        }
+    }
+}

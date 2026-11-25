@@ -739,7 +739,7 @@ fn a_run_makes_the_tree_of_the_proposal() {
         "      identity.json",
         "      model.ir.json",
         "      run.json",
-        "  model_presentation",
+        "  model_source",
         "    sir-*",
         "      declared.json",
         "      docs.json",

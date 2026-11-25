@@ -281,8 +281,20 @@ pub(crate) struct Listing<O> {
     /// The project's names and values for the result, such as a scenario's
     /// name or the seed typed; the store never reads them.
     pub attributes: serde_json::Value,
+    /// The stored result this one was made from in this invocation
+    /// ([`crate::RunInfo::record_source`]): for camdl, a compiled model's
+    /// model source. In no identity, and absent on most listings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<Reference>,
     #[serde(flatten)]
     pub outcome: O,
+}
+
+/// A typed edge from a listing to another stored result, by kind and run id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reference {
+    pub kind: String,
+    pub run_id: Key,
 }
 
 /// A configuration file an invocation read, by the field that named it.
@@ -352,6 +364,7 @@ pub(crate) struct ListingRef<'a> {
     pub kind: &'a str,
     pub run_id: Key,
     pub attributes: &'a serde_json::Value,
+    pub source: Option<&'a Reference>,
     pub outcome: Option<&'a Outcome>,
 }
 
@@ -388,12 +401,24 @@ impl Record {
             Record::Running(r) => r
                 .results
                 .iter()
-                .map(|l| ListingRef { kind: &l.kind, run_id: l.run_id, attributes: &l.attributes, outcome: l.outcome.done() })
+                .map(|l| ListingRef {
+                    kind: &l.kind,
+                    run_id: l.run_id,
+                    attributes: &l.attributes,
+                    source: l.source.as_ref(),
+                    outcome: l.outcome.done(),
+                })
                 .collect(),
             Record::Ended(c) | Record::Interrupted(c) => c
                 .results
                 .iter()
-                .map(|l| ListingRef { kind: &l.kind, run_id: l.run_id, attributes: &l.attributes, outcome: Some(&l.outcome) })
+                .map(|l| ListingRef {
+                    kind: &l.kind,
+                    run_id: l.run_id,
+                    attributes: &l.attributes,
+                    source: l.source.as_ref(),
+                    outcome: Some(&l.outcome),
+                })
                 .collect(),
         }
     }

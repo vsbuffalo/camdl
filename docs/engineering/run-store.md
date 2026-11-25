@@ -1607,48 +1607,48 @@ the model is keyed, so runs at other parameter values share one compiled model
 that evaluate quantities (`sim_quantities`, `prediction`) hold a
 `Dep<Quantities>` of their own.
 
-### A model's presentation
+### A model's source
 
-The source file, the description, the documentation, the declared model and, for
-a `.camdl`, the model's mathematics and flow graph as `camdlc render` writes
-them, are the model's presentation
-([`camdl_store::presentation`](rust:cli::camdl_store::presentation)): a content
-artifact of several files, `model_presentation`, keyed by their bytes. No result
-depends on it, so a comment edit re-keys nothing. `put_compiled` stores it, then
-the compiled model, and the compiled model's labels in that invocation record
-name the presentation. Two files that differ only in their comments therefore
-share one compiled model, and each invocation records its own presentation.
+The model file, its name, the description, the documentation, the declared model
+and, for a `.camdl`, the model's mathematics and flow graph as `camdlc render`
+writes them, are the model source
+([`camdl_store::model_source`](rust:cli::camdl_store::model_source)): a content
+artifact of several files, `model_source`, keyed by their bytes, the file's name
+and a `Dep<Quantities>` on the quantities its compile produced. No simulation or
+fit depends on it, so a comment edit re-keys none of them. `put_compiled` stores
+the quantities, the source and the compiled model, and records the source on the
+compiled model's listing with `RunInfo::record_source`: the listing's `source`
+is `{"kind": "model_source", "run_id": ...}`, and its attributes hold only the
+model's name. Two files that differ only in their comments therefore share one
+compiled model, and each invocation records its own source.
 
 A command that stores a result read from a stored one compiles nothing: a
 prediction or a score from a stored fit run. It lists the stored compiled model
-in its own invocation record, as reused, with the presentation the invocation it
-read from recorded (`link_presentation`, through
+in its own invocation record, as reused, with the source the invocation it read
+from recorded, or the source of the file `--model` gave (`link_source`, through
 [`Store::list`](rust:store::storage::Store::list), which registers a stored
-result in the current invocation and stores nothing). Every invocation that
-lists a result of a model therefore names the model's presentation, including
-one whose compiled model another build stored.
+result in the current invocation and stores nothing, and `record_source`).
 
-A reader finds the presentation by one rule,
-[`shown_for`](rust:cli::camdl_store::presentation::shown_for): the invocation
-its handle names (`@label`'s invocation, or for a run id or a folder the latest
-one that listed the result), and in it the entry for the result's compiled
-model, which `model_of` finds among the result's recorded dependencies.
-`fit
-summary` and the re-posed prediction of `camdl score` take it with the
+A reader finds the source by one rule,
+[`shown_for`](rust:cli::camdl_store::model_source::shown_for): the source the
+invocation that answers for its handle (`Store::listings`) recorded for the
+result's compiled model, which `model_of` finds among the result's recorded
+dependencies (`Listings::source`, a `Recorded`: `None`, `One` or `Several`).
+`fit summary` and the re-posed prediction of `camdl score` take it with the
 stored fit; `camdl path` and `camdl cat` take it for a name qualified by
-`model_presentation`. No other invocation is read. The return value, `Shown`,
-says which of three things holds:
+`model_source`. No other invocation stands in. The return value, `Shown`, says
+which of three things holds:
 
-- `Recorded`: the presentation is read. For a run id or a folder it also holds
-  the different presentations earlier invocations that listed the result
-  recorded, which the reader names in an info notice with the labels of their
-  invocations (`model-presentation-one-of-several`).
-- `NotRecorded`: the invocation names none, as a record written before records
-  named a presentation does. The reader goes on without the documentation and
-  says so in a warning (`model-presentation-not-recorded`).
-- `Unreadable`: the invocation names a presentation that cannot be read. The
-  reader goes on without the documentation and says so in a warning
-  (`model-presentation-unreadable`); nothing is computed from it.
+- `Recorded`: the source is read. For a run id or a folder it also holds the
+  different sources earlier invocations that listed the result recorded, which
+  the reader names in an info notice with the labels of their invocations
+  (`model-source-one-of-several`).
+- `NotRecorded`: the answering invocation records none. The reader goes on
+  without the documentation and says so in a warning
+  (`model-source-not-recorded`).
+- `Unreadable`: the invocation names a source that cannot be read. The reader
+  goes on without the documentation and says so in a warning
+  (`model-source-unreadable`); nothing is computed from it.
 
 ### Storing a content artifact
 

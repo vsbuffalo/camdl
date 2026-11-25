@@ -116,3 +116,44 @@ fn a_running_listing_answers_marked_unfinished_when_no_closed_one_counts() {
     assert_eq!(l.listed().len(), 1);
     assert_eq!(answering.attributes::<Sim>().unwrap().seed, 7);
 }
+
+/// Stores the model `text` and records it, in `info`, as the source of the
+/// simulation of `seed`, which `info` lists.
+fn run_with_source(store: &crate::Store, info: &crate::RunInfo, seed: u64, text: &str) -> (crate::Id<Sim>, crate::Id<Model>) {
+    let s = run_sim(store, info, seed);
+    let m = store
+        .put::<Model>(crate::Hashed::new(ModelText(text.into())), &ModelAttributes { name: "m".into() }, &crate::Provenance::none(), info)
+        .unwrap();
+    info.record_source(s.id(), m.id()).unwrap();
+    (*s.id(), *m.id())
+}
+
+#[test]
+fn the_source_is_the_answering_invocations_with_no_fallback_and_others_named() {
+    use crate::Recorded;
+    let root = TempRoot::new("listings-source");
+    let store = open(root.path());
+    let a = labelled("a");
+    let (sim, m1) = run_with_source(&store, &a, 8, "S -> I");
+    a.finish(&store).unwrap();
+    let record: serde_json::Value = serde_json::from_slice(&std::fs::read(root.path().join(".invocations/1.json")).unwrap()).unwrap();
+    assert_eq!(record["results"][0]["source"], serde_json::json!({ "kind": "compiled_model", "run_id": m1.key().to_hex() }));
+    assert!(record["results"][1].get("source").is_none(), "a listing with no source has no field: {record:#}");
+    let by_label = store.listings(&"@a".parse().unwrap()).unwrap();
+    assert_eq!(by_label.source::<Sim, Model>(&sim), Recorded::One { source: m1, unfinished: false });
+
+    run_sim(&store, &info(), 8);
+    let by_id = id_handle(sim.key());
+    assert_eq!(store.listings(&by_id).unwrap().source::<Sim, Model>(&sim), Recorded::None, "the newest recorded none, and no earlier one stands in");
+
+    let c = info();
+    let (_, m2) = run_with_source(&store, &c, 8, "S -> I -> R");
+    c.finish(&store).unwrap();
+    assert_eq!(store.listings(&by_id).unwrap().source::<Sim, Model>(&sim), Recorded::Several { latest: m2, others: vec![(1, m1)] });
+
+    let other = info();
+    run_sim(&store, &other, 9);
+    let (unlisted, _) = super::super::tests::sim(10);
+    let id = crate::Id::<Sim>::of(&store.inner.ambient_key, &unlisted);
+    assert!(matches!(other.record_source(&id, &crate::Id::<Model>::from_key(sim.key())), Err(Error::NotListed { .. })));
+}

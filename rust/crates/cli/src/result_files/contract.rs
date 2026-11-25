@@ -11,7 +11,7 @@ use super::fit::{PredictionFile, PredictionPart, ProblemFile, ScoreFile};
 use super::fit_run::{
     CommonFile, FitRunFile, If2File, McmcFile, NloptFile, PfilterMethodFile, PgasFile, Sampler,
 };
-use super::presentation::PresentationFile;
+use super::model_source::SourceFile;
 use super::pfilter::{
     FilteredStreamsFile, FilteringFile, FinalStateFile, PfHealthFile, PfilterFile, PrequentialFile, SavedPathsFile,
     TraceFile,
@@ -103,14 +103,14 @@ pub(super) fn kinds() -> Vec<(&'static str, &'static str, Vec<Row>)> {
             ],
         ),
         (
-            "model_presentation",
-            "How a model file is shown: everything a compile yields that no computation reads. A result does not depend on it; the compiled model's entry in each invocation record names the presentation of the model file that invocation compiled. A command that stores a result from a stored one (`predict RUN`, `score`, `profile MODEL --fit RUN`) lists the stored compiled model in its own record, naming the presentation of the file it was given or, when it was given none, the one the stored result's invocation recorded.",
+            "model_source",
+            "The model file one command compiled, with its name, what the compiler shows of it, and the quantities its compile produced, on which it depends. No simulation or fit depends on it; the compiled model's listing in each invocation record names, as its `source`, the model source of the file that invocation compiled. A command that stores a result from a stored one (`predict RUN`, `score`, `profile MODEL --fit RUN`) lists the stored compiled model in its own record with the source of the file it was given or, when it was given none, the one the stored result's invocation recorded.",
             vec![
-                row(PresentationFile::Source { camdl: true }, "always; `source.ir.json` for a compiled model"),
-                row(PresentationFile::Docs, "always"),
-                row(PresentationFile::Declared, "always"),
-                row(PresentationFile::Render, "a `.camdl` model that camdlc rendered"),
-                row(PresentationFile::Graph, "a `.camdl` model that camdlc rendered"),
+                row(SourceFile::Source { camdl: true }, "always; `source.ir.json` for a compiled model"),
+                row(SourceFile::Docs, "always"),
+                row(SourceFile::Declared, "always"),
+                row(SourceFile::Render, "a `.camdl` model that camdlc rendered"),
+                row(SourceFile::Graph, "a `.camdl` model that camdlc rendered"),
             ],
         ),
         (
@@ -222,9 +222,12 @@ pub(crate) fn render() -> String {
     s.push_str(&format!(
         "\nEach kind's contract version, which an output manifest records with each result (§2.10), is \
          given with its files; it is bumped when a file is added, removed or renamed, or a column changes. \
-         The three content artifacts are at contract version {}, and the logical name of each one's file \
-         is its stored name up to the first `.`: `model`, `quantities` and `table`.\n",
-        super::CONTENT_CONTRACT
+         Each of the three content artifacts has a contract version of its own: `compiled_model` {}, \
+         `quantities` {} and `data_table` {}. The logical name of each one's file is its stored name up to \
+         the first `.`: `model`, `quantities` and `table`.\n",
+        super::COMPILED_MODEL_CONTRACT,
+        super::QUANTITIES_CONTRACT,
+        super::DATA_TABLE_CONTRACT
     ));
     for (kind, what, rows) in kinds() {
         let version = super::contract(kind).expect("every kind in the contract has a version").version;

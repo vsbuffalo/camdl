@@ -94,6 +94,7 @@ fn running_invocation(root: &std::path::Path, seq: u64, label: &str, owner: crat
             kind: "sim".into(),
             run_id: crate::Key::digest_bytes(b"r"),
             attributes: serde_json::Value::Null,
+            source: None,
             outcome: Pending::Planned,
         }],
     });

@@ -447,12 +447,12 @@ fn run_profile(
             dt: dt_flag,
         },
     ).unwrap_or_else(|e| out.fail(format!("error: {e}")));
-    let crate::profile_store::PosedProblem { dep: problem_dep, fit: posed_fit, model_ir, presentation } = posed;
+    let crate::profile_store::PosedProblem { dep: problem_dep, fit: posed_fit, model_ir, source } = posed;
     // `nl-lbfgs` climbs the ODE forward-sensitivity gradient, which reads the
     // compile with the state Jacobian of the model file the profile names;
     // every other cell runs the problem's compile.
     let jacobian = matches!(profile_algo, ProfileAlgo::Nlopt(sim::inference::deterministic::NloptAlgorithm::Lbfgs))
-        .then(|| crate::profile_store::jacobian_compile(out, &store, &info, &posed_fit, &ir_path, presentation.clone(), &model_ir, compile)
+        .then(|| crate::profile_store::jacobian_compile(out, &store, &info, &posed_fit, &ir_path, source.clone(), &model_ir, compile)
             .unwrap_or_else(|e| out.fail(format!("error: {e}"))));
     let (ir_path, jacobian_model) = match jacobian {
         Some((ir, dep)) => (ir, Some(dep)),

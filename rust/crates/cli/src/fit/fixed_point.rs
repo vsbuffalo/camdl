@@ -70,9 +70,9 @@ pub(crate) fn names_a_model(source: &str) -> bool {
 /// `flags` pose, storing the compiled model, its quantities and each stream's
 /// conditioned lines in the store `request` names (`--store`, else
 /// `CAMDL_STORE`, else `./camdl-store`), under `info`. `reposed` is the
-/// presentation of a model file camdl wrote itself from a stored prediction,
-/// which the compile is stored with; `None` for a model file the user gave,
-/// whose own presentation is rendered and stored.
+/// model source a model file camdl wrote itself from a stored prediction is
+/// recorded with; `None` for a model file the user gave, whose own source is
+/// rendered and stored.
 #[allow(clippy::result_large_err)] // the store's error carries the paths a person acts on, returned once
 #[expect(clippy::disallowed_methods, reason = "reads the model file `source` names (declared `#[input(identity)]` on `PredictArgs`) and the IR camdlc compiled from it, stored as the `CompiledModel` the prediction's identity holds, and writes scratch copies of the stored conditioned lines for the data loader")]
 pub(crate) fn resolve(
@@ -83,7 +83,7 @@ pub(crate) fn resolve(
     compile: crate::util::CompileSettings,
     info: &store::RunInfo,
     request: &store::StoreRequest,
-    reposed: Option<crate::camdl_store::Presentation>,
+    reposed: Option<crate::camdl_store::SourceOf>,
 ) -> Result<FixedPoint, String> {
     use crate::args::types::ForwardBackend;
     if flags.data.is_empty() {
@@ -183,21 +183,21 @@ pub(crate) fn resolve(
         envelope,
         model_name.clone(),
         match reposed {
-            None => crate::camdl_store::ModelSource::read(&source_bytes, Path::new(model_path)),
-            Some(_) => crate::camdl_store::ModelSource {
+            None => crate::camdl_store::SourceText::read(&source_bytes, Path::new(model_path)),
+            Some(_) => crate::camdl_store::SourceText {
                 bytes: &source_bytes,
                 path: Path::new(model_path),
                 rendered: crate::camdl_store::Rendered::nothing(),
             },
         },
     )?;
-    let crate::camdl_store::CompiledParts { model: model_part, quantities, presentation, labels: model_labels, provenance } = parts;
-    let presentation = reposed.unwrap_or(crate::camdl_store::Presentation::New(presentation));
+    let crate::camdl_store::CompiledParts { model: model_part, quantities, source, labels: model_labels, provenance } = parts;
+    let source = reposed.unwrap_or(crate::camdl_store::SourceOf::New(source));
     let quantities = store
         .put::<Quantities>(quantities, &model_labels, &store::Provenance::none(), info)
         .and_then(|s| s.dep(Quantities::FILE))
         .map_err(|e| format!("storing the quantities: {e}"))?;
-    let model_dep = crate::camdl_store::put_compiled(&store, info, model_part, presentation, &model_labels, &provenance)
+    let model_dep = crate::camdl_store::put_compiled(&store, info, model_part, source, &model_labels, &provenance)
         .map_err(|e| format!("storing the compiled model: {e}"))?;
 
     // The conditioned lines of each bound file, cut by the fit problem's rule.

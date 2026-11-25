@@ -6,7 +6,7 @@ fn envelope(model: ir::Model) -> ir::IrEnvelope {
 }
 
 fn parts(model: ir::Model) -> CompiledParts {
-    CompiledParts::split(envelope(model), "sir".into(), ModelSource { bytes: b"source", path: Path::new("sir.camdl"), rendered: Rendered::nothing() })
+    CompiledParts::split(envelope(model), "sir".into(), SourceText { bytes: b"source", path: Path::new("sir.camdl"), rendered: Rendered::nothing() })
         .expect("a tiny model splits")
 }
 
@@ -83,7 +83,7 @@ fn only_what_the_engine_runs_keys_the_model_part() {
     documented.docs = serde_json::from_value(serde_json::json!({ "model": { "text": "a docstring" } }))
         .expect("a model doc reads");
     assert!(!documented.docs.is_empty());
-    let p = CompiledParts::split(documented, "sir".into(), ModelSource { bytes: b"other source", path: Path::new("x.camdl"), rendered: Rendered::nothing() })
+    let p = CompiledParts::split(documented, "sir".into(), SourceText { bytes: b"other source", path: Path::new("x.camdl"), rendered: Rendered::nothing() })
         .unwrap();
     assert_eq!(p.model.digest(), base, "the documentation and the source file are provenance");
 

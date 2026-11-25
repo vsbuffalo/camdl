@@ -562,7 +562,7 @@ impl Store {
         wanted: &Wanted<A>,
         reuse: Reuse,
     ) -> Result<Entries> {
-        let mut list = vec![Listing { kind: kind.into(), run_id, attributes: encode_attributes(attributes)?, outcome: Pending::Planned }];
+        let mut list = vec![Listing { kind: kind.into(), run_id, attributes: encode_attributes(attributes)?, source: None, outcome: Pending::Planned }];
         for w in &wanted.items {
             assert_eq!(
                 w.upstream_key, identity_key,
@@ -570,7 +570,7 @@ impl Store {
                 w.kind
             );
             let bp_id = crate::artifact::run_id(w.kind, &self.inner.ambient_key, &w.identity_key);
-            list.push(Listing { kind: w.kind.into(), run_id: bp_id, attributes: w.attributes.clone(), outcome: Pending::Planned });
+            list.push(Listing { kind: w.kind.into(), run_id: bp_id, attributes: w.attributes.clone(), source: None, outcome: Pending::Planned });
         }
         let idx = info.shared.register(&self.inner, list, reuse)?;
         Ok(Entries { upstream: vec![idx[0]], by_products: idx[1..].iter().map(|i| vec![*i]).collect() })
@@ -1648,7 +1648,7 @@ impl Inner {
             let tmp = staging_root.join(claim_draft_name(this_owner(), &run_id.to_hex()));
             std::fs::create_dir(&tmp).at("create directory", &tmp)?;
             let ident = self.identity_file::<C>(content, Self::parent_of(&placed))?;
-            let mut run = running_record(info, info.seq(), Vec::new());
+            let mut run = running_record(info, info.seq(), content.deps());
             write_json_synced(&tmp.join(IDENTITY_FILE), &ident)?;
             let table = FileTable::new(tmp.clone(), self.reserved_names());
             let held = content.held_content();

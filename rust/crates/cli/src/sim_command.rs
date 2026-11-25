@@ -117,7 +117,7 @@ pub(crate) fn run(ctx: StoreRun<'_>) {
     let parts = crate::camdl_store::CompiledParts::split(
         envelope,
         stem.clone(),
-        crate::camdl_store::ModelSource::read(&source, std::path::Path::new(ctx.model_path)),
+        crate::camdl_store::SourceText::read(&source, std::path::Path::new(ctx.model_path)),
     )
     .unwrap_or_else(|e| fail(e));
 
@@ -142,8 +142,8 @@ pub(crate) fn run(ctx: StoreRun<'_>) {
     for item in &ctx.lineage {
         info.lineage(item.clone());
     }
-    let crate::camdl_store::CompiledParts { model: model_part, quantities, presentation, labels: model_labels, provenance } = parts;
-    let model = crate::camdl_store::put_compiled(&store, &info, model_part, presentation, &model_labels, &provenance)
+    let crate::camdl_store::CompiledParts { model: model_part, quantities, source, labels: model_labels, provenance } = parts;
+    let model = crate::camdl_store::put_compiled(&store, &info, model_part, source, &model_labels, &provenance)
         .unwrap_or_else(|e| fail(format!("storing the compiled model: {e}")));
     let quantities = match &ctx.wants.quantities {
         Some(_) => Some(

@@ -800,7 +800,7 @@ fn a_profile_makes_the_tree_of_the_proposal() {
         "      partition.json",
         "      problem.toml",
         "      run.json",
-        "  model_presentation",
+        "  model_source",
         "    sir-*",
         "      declared.json",
         "      docs.json",

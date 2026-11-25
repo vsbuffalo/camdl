@@ -10,7 +10,7 @@
 //! differ from its last declaration (`store::Error::FileSetMismatch`), and a
 //! run that declared none (`store::Error::NoExpectedFiles`). A content
 //! artifact stored with `Store::put` holds the files its identity names and
-//! its provenance files, which `put` declares itself; a model's presentation
+//! its provenance files, which `put` declares itself; a model source
 //! names its files by an enum, as a claimed kind does. The run spec's
 //! result-file contract (§2.9) is generated from the same variants, with
 //! their formats, meanings and header rows ([`contract`]). The design is
@@ -21,7 +21,7 @@ pub(crate) mod contract;
 pub(crate) mod fit;
 pub(crate) mod fit_run;
 pub(crate) mod pfilter;
-pub(crate) mod presentation;
+pub(crate) mod model_source;
 pub(crate) mod profile;
 pub(crate) mod sim;
 
@@ -130,7 +130,7 @@ fn find<F: ResultFile>(candidates: impl IntoIterator<Item = F>, stored: &str) ->
 }
 
 /// A kind whose files are an enum: every kind camdl stores through a claim,
-/// and a model's presentation.
+/// and a model source.
 pub(crate) trait Files: store::Artifact {
     type File: ParseFile;
     /// The version of the kind's file contract: which files it stores, under
@@ -142,11 +142,13 @@ pub(crate) trait Files: store::Artifact {
     const CONTRACT: u16;
 }
 
-/// The contract version of each content artifact (`compiled_model`,
-/// `quantities`, `data_table`), whose one file is its
-/// [`store::ContentArtifact::FILE`]. Pinned, with each kind's, by
+/// The contract version of each content artifact, whose one file is its
+/// [`store::ContentArtifact::FILE`]: `compiled_model`, `quantities` and
+/// `data_table`, each bumped on its own. Pinned, with each kind's, by
 /// `every_contract_version_is_pinned_to_its_files`.
-const CONTENT_CONTRACT: u16 = 1;
+pub(crate) const COMPILED_MODEL_CONTRACT: u16 = 1;
+pub(crate) const QUANTITIES_CONTRACT: u16 = 1;
+pub(crate) const DATA_TABLE_CONTRACT: u16 = 1;
 
 /// A kind's file contract as a reader outside camdl relies on it: its
 /// version and the logical name of each file it stores.
@@ -195,18 +197,18 @@ fn claimed<A: Files>() -> (&'static str, KindContract) {
     (A::KIND, KindContract { version: A::CONTRACT, logical: logical_of::<A::File>, format: format_of::<A::File> })
 }
 
-fn content<C: store::ContentArtifact>() -> (&'static str, KindContract) {
-    (C::KIND, KindContract { version: CONTENT_CONTRACT, logical: content_logical::<C>, format: content_format::<C> })
+fn content<C: store::ContentArtifact>(version: u16) -> (&'static str, KindContract) {
+    (C::KIND, KindContract { version, logical: content_logical::<C>, format: content_format::<C> })
 }
 
 /// The file contract of every kind camdl stores, by kind name.
 fn contracts() -> [(&'static str, KindContract); 21] {
     use crate::{camdl_store as cs, fit_store as fs, pfilter_store as ps, profile_store as pr, sim_store as ss};
     [
-        content::<cs::CompiledModel>(),
-        content::<cs::Quantities>(),
-        content::<cs::DataTable>(),
-        claimed::<cs::ModelPresentation>(),
+        content::<cs::CompiledModel>(COMPILED_MODEL_CONTRACT),
+        content::<cs::Quantities>(QUANTITIES_CONTRACT),
+        content::<cs::DataTable>(DATA_TABLE_CONTRACT),
+        claimed::<cs::ModelSource>(),
         claimed::<fs::FitProblem>(),
         claimed::<fs::FitRun>(),
         claimed::<fs::Prediction>(),
@@ -234,12 +236,12 @@ pub(crate) fn contract(kind: &str) -> Option<KindContract> {
 }
 
 /// Whether `kind` is a content artifact (`compiled_model`, `quantities`,
-/// `data_table`, `model_presentation`): a result named by its content, which
+/// `data_table`, `model_source`): a result named by its content, which
 /// a command stores beside the results it computes.
 pub(crate) fn is_content(kind: &str) -> bool {
     use crate::camdl_store as cs;
     use store::Artifact;
-    [cs::CompiledModel::KIND, cs::Quantities::KIND, cs::DataTable::KIND, cs::ModelPresentation::KIND].contains(&kind)
+    [cs::CompiledModel::KIND, cs::Quantities::KIND, cs::DataTable::KIND, cs::ModelSource::KIND].contains(&kind)
 }
 
 /// The expected set of a run that will hold exactly `files`.

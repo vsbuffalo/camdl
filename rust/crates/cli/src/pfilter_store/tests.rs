@@ -679,7 +679,7 @@ fn a_run_makes_the_tree_of_the_proposal() {
         "      identity.json",
         "      run.json",
         "      table.tsv",
-        "  model_presentation",
+        "  model_source",
         "    sir-*",
         "      declared.json",
         "      docs.json",
@@ -700,6 +700,11 @@ fn a_run_makes_the_tree_of_the_proposal() {
         "                identity.json",
         "                paths.tsv",
         "                run.json",
+        "  quantities",
+        "    sir-*",
+        "      identity.json",
+        "      quantities.json",
+        "      run.json",
         "store.json",
     ];
     assert_eq!(got, want, "the store's tree:\n{}", got.join("\n"));

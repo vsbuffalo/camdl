@@ -37,7 +37,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use store::{Begin, ContentAddressed, ContentArtifact, Identity, Reuse, Stored};
+use store::{Begin, ContentAddressed, Identity, Reuse, Stored};
 
 use crate::camdl_store::{CompiledModel, ProcessSeed};
 use crate::fit::config_v2::{self, Algorithm};
@@ -325,17 +325,20 @@ fn run_fit(mut out: Out, cx: FitCommand<'_>) -> Vec<String> {
             .unwrap_or_else(|e| out.fail(format!("error: IR load error from {ir_path}: {e}")));
         let parts = crate::camdl_store::CompiledParts::split(
             envelope, model_stem.clone(),
-            crate::camdl_store::ModelSource::read(&model_bytes, Path::new(&model_path)),
+            crate::camdl_store::SourceText::read(&model_bytes, Path::new(&model_path)),
         ).unwrap_or_else(|e| out.fail(format!("error: {e}")));
-        let crate::camdl_store::CompiledParts { model: part, quantities, presentation, labels, provenance } = parts;
+        let crate::camdl_store::CompiledParts { model: part, quantities, source, labels, provenance } = parts;
         // The quantities and contrasts do not change the fit, so the problem
-        // names them as lineage: `camdl predict` evaluates them.
-        let quantities = store.put::<crate::camdl_store::Quantities>(quantities, &labels, &store::Provenance::none(), info)
-            .and_then(|s| s.dep(crate::camdl_store::Quantities::FILE))
-            .unwrap_or_else(|e| out.fail(format!("error: storing the quantities: {e}")));
+        // names them as lineage: `camdl predict` evaluates them. The model
+        // source stores them.
+        store::release(quantities, "the model source stores the quantities");
+        let source = source.put(store, &labels, info)
+            .unwrap_or_else(|e| out.fail(format!("error: storing the model source: {e}")));
+        let quantities = source.identity().quantities.clone();
         info.lineage(&quantities);
         *run_quantities.borrow_mut() = Some(quantities.id().key().to_hex());
-        crate::camdl_store::put_compiled(store, info, part, presentation, &labels, &provenance)
+        let source = crate::camdl_store::SourceOf::Stored(*source.id());
+        crate::camdl_store::put_compiled(store, info, part, source, &labels, &provenance)
             .unwrap_or_else(|e| out.fail(format!("error: storing the compiled model: {e}")))
     };
     let run_ir = config.problem.compiled_model().unwrap_or_else(|e| out.fail(format!("error: {e}"))).to_string();

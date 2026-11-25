@@ -298,7 +298,7 @@ fn path_names_every_kind_through_every_handle_form() {
         }
     }
     let want: std::collections::BTreeSet<String> =
-        ["compiled_model", "model_presentation", "data_table", "quantities", "sim", "obs", "pfilter", "pf_health", "fit", "fit_run", "prediction", "score", "profile_point"]
+        ["compiled_model", "model_source", "data_table", "quantities", "sim", "obs", "pfilter", "pf_health", "fit", "fit_run", "prediction", "score", "profile_point"]
             .into_iter()
             .map(String::from)
             .collect();

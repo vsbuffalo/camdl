@@ -46,6 +46,10 @@ pub enum Error {
     LabelInUse { label: String, running: Option<Key>, owner: Owner },
     #[error("the label `{label}` is refused: {why}")]
     InvalidLabel { label: String, why: String },
+    /// `RunInfo::record_source` was asked to record a source for a result
+    /// this invocation did not list.
+    #[error("this invocation did not list the {kind} {run_id}, so it records no source for it")]
+    NotListed { kind: &'static str, run_id: Key },
     #[error(
         "{} is held by {owner}, whose beat has stopped; it may still be alive on that host. \
          Remove the lock file by hand once that process is known to have stopped",

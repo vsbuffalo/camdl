@@ -251,6 +251,7 @@ impl Store {
                 kind: p.found.ident.kind.clone(),
                 run_id: p.found.ident.run_id,
                 attributes: p.found.attributes.clone(),
+                source: None,
                 outcome: Pending::Planned,
             })
             .collect();

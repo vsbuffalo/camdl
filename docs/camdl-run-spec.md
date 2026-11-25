@@ -844,9 +844,9 @@ recorded. `FILE` is compiled and compared with the model the fit ran on as
 `simulate --fit` compares a model (§3.4): a file that differs is refused, and
 one that differs only in its `quantities {}` or `contrasts {}` is said on
 stderr. The fit is read from the store and not computed again. `FILE`'s
-quantities and its presentation are stored as any compile stores them, and the
-invocation records `FILE` as the model file the fit's compiled model was run
-from.
+quantities and its model source are stored as any compile stores them, and the
+invocation records `FILE`'s model source as the source of the fit's compiled
+model.
 
 `camdl predict MODEL`, with a `.camdl` or `.ir.json` model file in place of the
 handle, predicts at one point: the model's values, each `--params` file, then
@@ -1768,9 +1768,10 @@ other file, or lacks one it declared, is not stored.
 
 Each kind's contract version, which an output manifest records with each result
 (§2.10), is given with its files; it is bumped when a file is added, removed or
-renamed, or a column changes. The three content artifacts are at contract
-version 1, and the logical name of each one's file is its stored name up to the
-first `.`: `model`, `quantities` and `table`.
+renamed, or a column changes. Each of the three content artifacts has a contract
+version of its own: `compiled_model` 1, `quantities` 1 and `data_table` 1. The
+logical name of each one's file is its stored name up to the first `.`: `model`,
+`quantities` and `table`.
 
 #### `fit_run`
 
@@ -1876,15 +1877,16 @@ ended, as `chain_starts.tsv` records it: `accepted` (ran to the end), `skipped`
   Each search's every evaluation and its running best. Header: `chain`, `eval`,
   `loglik`, `best_loglik`, each estimated parameter.
 
-#### `model_presentation`
+#### `model_source`
 
-How a model file is shown: everything a compile yields that no computation
-reads. A result does not depend on it; the compiled model's entry in each
-invocation record names the presentation of the model file that invocation
-compiled. A command that stores a result from a stored one (`predict RUN`,
-`score`, `profile MODEL --fit RUN`) lists the stored compiled model in its own
-record, naming the presentation of the file it was given or, when it was given
-none, the one the stored result's invocation recorded. Contract version 1.
+The model file one command compiled, with its name, what the compiler shows of
+it, and the quantities its compile produced, on which it depends. No simulation
+or fit depends on it; the compiled model's listing in each invocation record
+names, as its `source`, the model source of the file that invocation compiled. A
+command that stores a result from a stored one (`predict RUN`, `score`,
+`profile MODEL --fit RUN`) lists the stored compiled model in its own record
+with the source of the file it was given or, when it was given none, the one the
+stored result's invocation recorded. Contract version 1.
 
 - `source`: `source.camdl`, camdl (always; `source.ir.json` for a compiled
   model). The model file as written.
@@ -3495,16 +3497,16 @@ error: the label `f~1` is refused: `~` at position 2 is not allowed: a label hol
 ```
 
 For a label, a run id, a prefix or a folder and a name qualified by
-`model_presentation` (`model_presentation:render`), the presentation of the
-model the result ran is a candidate too: the one the invocation the source names
-recorded with the result's compiled model (§2.9, `model_presentation`). For a
-label that is its invocation; for a run id, a prefix or a folder, the latest
-invocation that listed the result. No other invocation is read. When that
-invocation recorded no presentation, the name finds none and a warning says that
-no model file was recorded. When an earlier invocation that listed the result
-recorded a different presentation, an info notice names it and the labels that
-name its invocations. A manifest lists the presentation only when its command
-compiled the model file.
+`model_source` (`model_source:render`), the model source of the model the result
+ran is a candidate too: the one the invocation that answers for the source
+recorded as the `source` of the result's compiled model (§2.9, `model_source`).
+For a label that is its invocation; for a run id, a prefix or a folder, the
+newest invocation that listed the result computed or reused. No other invocation
+stands in. When that invocation recorded no source, the name finds none and a
+warning says that no model file was recorded. When an earlier invocation that
+listed the result recorded a different source, an info notice names it and the
+labels that name its invocations. A manifest lists the model source only when
+its command compiled the model file.
 
 `--kind KIND` keeps the candidates of one kind, and `--run PREFIX` the one whose
 run id begins with `PREFIX`. A name is resolved by the first of these rules that

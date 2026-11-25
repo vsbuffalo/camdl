@@ -654,7 +654,7 @@ fn a_fit_makes_the_tree_of_the_proposal() {
         "            run.json",
         "            run_inputs.json",
         "            summary.json",
-        "  model_presentation",
+        "  model_source",
         "    sir-*",
         "      declared.json",
         "      docs.json",
@@ -1194,7 +1194,7 @@ fn predict_reports_a_stored_fit_through_the_model_file_it_is_given() {
     assert_eq!(run_folders(&store).len(), 1, "one run");
 
     // The predict's record: no fit run computed, and the fit's compiled model
-    // listed with the presentation of the file given.
+    // listed with the model source of the file given.
     let records = store.join(".invocations");
     let mut seqs: Vec<PathBuf> = std::fs::read_dir(&records)
         .unwrap()
@@ -1211,13 +1211,14 @@ fn predict_reports_a_stored_fit_through_the_model_file_it_is_given() {
     );
     let models: Vec<&serde_json::Value> = results.iter().filter(|r| r["kind"] == "compiled_model").collect();
     assert_eq!(models.len(), 1, "one listing of the fit's compiled model: {last:#}");
-    let presentation = models[0]["attributes"]["presentation"].as_str().expect("the listing names a presentation");
+    assert_eq!(models[0]["source"]["kind"], "model_source", "the listing names its model source: {last:#}");
+    let recorded = models[0]["source"]["run_id"].as_str().expect("the listing names a model source");
     let source = folders(&store)
         .into_iter()
-        .find(|(_, id, _)| id["kind"] == "model_presentation" && id["run_id"] == presentation)
+        .find(|(_, id, _)| id["kind"] == "model_source" && id["run_id"] == recorded)
         .map(|(p, _, _)| std::fs::read_to_string(p.join("source.camdl")).unwrap())
-        .expect("the presentation is stored");
-    assert_eq!(source, with_quantities("peak_R = max(R)"), "the presentation is of edited.camdl");
+        .expect("the model source is stored");
+    assert_eq!(source, with_quantities("peak_R = max(R)"), "the model source is of edited.camdl");
 
     let refused = run(&["predict", "@first", "--model", "other.camdl", "--mode", "free_forward", "--n-draws", "2"]);
     let err = String::from_utf8_lossy(&refused.stderr);

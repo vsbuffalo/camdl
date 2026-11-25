@@ -650,7 +650,7 @@ impl TrainingPartitionRecord {
 /// v3: `calendar` is required (D59); a v2 record could omit it.
 ///
 /// v4: the model's `#'` documentation is not recorded here; it is the model
-/// presentation's `docs.json`.
+/// source's `docs.json`.
 pub const FIT_META_SCHEMA_VERSION: u32 = 4;
 
 /// The fit-level provenance sidecar (`fits/{stem}-{h8}/fit.meta.json`). A CAS

@@ -90,7 +90,10 @@ impl<A: Artifact> Id<A> {
         self.key
     }
 
-    pub(crate) fn from_key(key: Key) -> Self {
+    /// The id of kind `A` whose run id is `key`, such as one a dependency or
+    /// a recorded reference names. Nothing checks that a result of kind `A`
+    /// is stored under it: a read through the id does.
+    pub fn from_key(key: Key) -> Self {
         Id { key, _kind: PhantomData }
     }
 

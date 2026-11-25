@@ -666,7 +666,7 @@ fn a_fit_run_s_method_reaches_what_is_computed_from_it_only_through_its_id() {
 
 /// A profile of a stored fit takes a model file that differs from the one
 /// the fit was posed on only in its comments, and stores that file as its
-/// invocation's presentation. A model that differs in what the engine runs
+/// invocation's model source. A model that differs in what the engine runs
 /// is refused.
 #[test]
 fn a_profile_of_a_stored_fit_takes_its_model_with_other_comments() {
@@ -683,9 +683,9 @@ fn a_profile_of_a_stored_fit_takes_its_model_with_other_comments() {
     };
     let out = profile("commented.camdl", "commented");
     assert!(out.status.success(), "a comment is not another model:\n{}", String::from_utf8_lossy(&out.stderr));
-    let source = camdl(fx, work.path(), &store, &["cat", "@commented", "model_presentation:source"]);
+    let source = camdl(fx, work.path(), &store, &["cat", "@commented", "model_source:source"]);
     assert!(source.status.success(), "{}", String::from_utf8_lossy(&source.stderr));
-    assert_eq!(String::from_utf8_lossy(&source.stdout), commented, "the invocation's presentation is of its own file");
+    assert_eq!(String::from_utf8_lossy(&source.stdout), commented, "the invocation's model source is of its own file");
 
     let out = profile("other.camdl", "other");
     assert!(!out.status.success(), "another model is refused");

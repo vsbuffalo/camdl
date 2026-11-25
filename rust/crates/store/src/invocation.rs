@@ -135,6 +135,26 @@ impl RunInfo {
         })
     }
 
+    /// Records in this invocation that the listed result `of` was made from
+    /// the stored result `source`: every listing of `of` gains the reference,
+    /// which the record's last version holds. Refused with
+    /// [`Error::NotListed`] unless this invocation listed `of`. The store is
+    /// generic over kinds; camdl calls it with a compiled model and its model
+    /// source.
+    pub fn record_source<A: Artifact, B: Artifact>(&self, of: &Id<A>, source: &Id<B>) -> Result<()> {
+        let mut st = self.shared.lock();
+        let mut found = false;
+        for l in st.results.iter_mut().filter(|l| l.kind == A::KIND && l.run_id == of.key()) {
+            l.source = Some(crate::record::Reference { kind: B::KIND.to_string(), run_id: source.key() });
+            found = true;
+        }
+        if found {
+            Ok(())
+        } else {
+            Err(Error::NotListed { kind: A::KIND, run_id: of.key() })
+        }
+    }
+
     /// Records an upstream in `run.json` without hashing it. Applies to every
     /// result this `RunInfo` is passed to from now on.
     pub fn lineage(&self, item: impl Into<Lineage>) {
@@ -267,6 +287,7 @@ pub(crate) fn close(running: Running, reason: &str) -> Closed {
             kind: l.kind,
             run_id: l.run_id,
             attributes: l.attributes,
+            source: l.source,
             outcome: match l.outcome {
                 Pending::Done(o) => o,
                 Pending::Planned => Outcome::Failed(Failure { operation: None, reason: Some(reason.into()) }),

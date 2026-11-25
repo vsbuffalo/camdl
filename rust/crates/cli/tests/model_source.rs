@@ -1,9 +1,10 @@
-//! A command that compiles a model stores the model's presentation: the
-//! source, the documentation, and for a `.camdl` the rendered mathematics and
-//! flow graph, as `camdl render` writes them. A model given as compiled IR
-//! has no render, and the command says so. A command that stores a result
-//! from a stored one records the model's presentation too, so a reader finds
-//! it from either result.
+//! A command that compiles a model stores its model source: the file, the
+//! documentation, and for a `.camdl` the rendered mathematics and flow graph,
+//! as `camdl render` writes them, depending on the quantities the compile
+//! produced. The compiled model's listing in the command's invocation record
+//! names that source. A model given as compiled IR has no render, and the
+//! command says so. A command that stores a result from a stored one records
+//! the source too, so a reader finds it from either result.
 //!
 //! Shells out to the built `camdl` binary.
 
@@ -17,7 +18,7 @@ fn binary() -> PathBuf {
 }
 
 const MODEL: &str = r#"
-#' A closed SIR for the presentation test.
+#' A closed SIR for the model source test.
 time_unit = 'days
 compartments { S, I, R }
 parameters {
@@ -61,8 +62,8 @@ fn simulate(model: &Path, store: &Path) -> Output {
     out
 }
 
-/// Every stored presentation folder under `store`.
-fn presentations(store: &Path) -> Vec<PathBuf> {
+/// Every stored model source folder under `store`.
+fn sources(store: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     let mut stack = vec![store.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -71,7 +72,7 @@ fn presentations(store: &Path) -> Vec<PathBuf> {
             if !path.is_dir() {
                 continue;
             }
-            if path.parent().and_then(|p| p.file_name()).is_some_and(|n| n == "model_presentation") {
+            if path.parent().and_then(|p| p.file_name()).is_some_and(|n| n == "model_source") {
                 found.push(path);
             } else {
                 stack.push(path);
@@ -89,8 +90,8 @@ fn a_camdl_model_stores_its_render_and_graph() {
     let store = tmp.path().join("store");
     simulate(&model, &store);
 
-    let found = presentations(&store);
-    assert_eq!(found.len(), 1, "one presentation: {found:?}");
+    let found = sources(&store);
+    assert_eq!(found.len(), 1, "one model source: {found:?}");
     let dir = &found[0];
     for (file, format) in [("model.render.json", "json"), ("model.graph.json", "graph")] {
         let rendered = camdl(&["render", &model.to_string_lossy(), "--format", format]);
@@ -116,24 +117,24 @@ fn a_compiled_model_has_no_render_and_says_so() {
     let out = simulate(&ir, &store);
 
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(stderr.matches("is compiled IR, so its stored presentation has no rendered mathematics").count(), 1, "{stderr}");
-    let found = presentations(&store);
-    assert_eq!(found.len(), 1, "one presentation: {found:?}");
+    assert_eq!(stderr.matches("is compiled IR, so its stored model source has no rendered mathematics").count(), 1, "{stderr}");
+    let found = sources(&store);
+    assert_eq!(found.len(), 1, "one model source: {found:?}");
     assert!(found[0].join("source.ir.json").exists());
     assert!(!found[0].join("model.render.json").exists());
     assert!(!found[0].join("model.graph.json").exists());
 }
 
 /// A reader that names the simulation by its folder, as camdl-scope does,
-/// is given the presentation of the model the simulation ran.
+/// is given the model source of the model the simulation ran.
 #[test]
-fn a_result_folder_names_its_model_presentation() {
+fn a_result_folder_names_its_model_source() {
     let tmp = tempfile::tempdir().unwrap();
     let model = tmp.path().join("sir.camdl");
     std::fs::write(&model, MODEL).unwrap();
     let store = tmp.path().join("store");
     simulate(&model, &store);
-    let presentation = &presentations(&store)[0];
+    let source = &sources(&store)[0];
 
     let mut stack = vec![store.clone()];
     let mut cell = None;
@@ -149,12 +150,12 @@ fn a_result_folder_names_its_model_presentation() {
         }
     }
     let cell = cell.expect("a simulated cell");
-    let out = camdl(&["path", &cell.to_string_lossy(), "model_presentation:render", "--store", &store.to_string_lossy()]);
+    let out = camdl(&["path", &cell.to_string_lossy(), "model_source:render", "--store", &store.to_string_lossy()]);
     assert!(out.status.success(), "path: {}", String::from_utf8_lossy(&out.stderr));
     let printed = String::from_utf8_lossy(&out.stdout).trim().to_string();
     assert_eq!(
         std::fs::canonicalize(&printed).unwrap(),
-        std::fs::canonicalize(presentation.join("model.render.json")).unwrap()
+        std::fs::canonicalize(source.join("model.render.json")).unwrap()
     );
     let traj = camdl(&["path", &cell.to_string_lossy(), "traj", "--store", &store.to_string_lossy()]);
     assert!(traj.status.success(), "the cell's own files are found as before: {}", String::from_utf8_lossy(&traj.stderr));
@@ -259,10 +260,10 @@ fn folders_under(root: &Path, parent: &str) -> Vec<PathBuf> {
     found
 }
 
-/// The documentation of `beta` that `camdl cat HANDLE model_presentation:docs`
+/// The documentation of `beta` that `camdl cat HANDLE model_source:docs`
 /// prints.
 fn beta_doc(dir: &Path, handle: &str) -> serde_json::Value {
-    let out = succeeds(camdl_in(dir, &["cat", handle, "model_presentation:docs"]), &format!("cat {handle}"));
+    let out = succeeds(camdl_in(dir, &["cat", handle, "model_source:docs"]), &format!("cat {handle}"));
     let docs: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     docs["parameters"]["beta"]["text"].clone()
 }
@@ -271,7 +272,7 @@ fn beta_doc(dir: &Path, handle: &str) -> serde_json::Value {
 /// model's documentation is found from the prediction by label, by folder
 /// and by id, and it is the documentation of the file the fit was run from.
 #[test]
-fn a_prediction_from_a_stored_fit_names_the_fits_presentation() {
+fn a_prediction_from_a_stored_fit_names_the_fits_model_source() {
     let tmp = fit_inputs();
     let dir = tmp.path();
     succeeds(camdl_in(dir, &["fit", "run", "fit.toml", "--seed", "1", "--label", "a", "--progress", "none"]), "fit run");
@@ -300,9 +301,9 @@ fn run_folder(dir: &Path) -> PathBuf {
     runs[0].clone()
 }
 
-/// A run whose invocation record names no presentation for its model, as a
-/// record written before records named one does, is summarised without
-/// the model's documentation, and the summary says so once.
+/// A run whose invocation record names no model source for its model is
+/// summarised without the model's documentation, and the summary says so
+/// once.
 #[test]
 fn a_summary_with_no_recorded_model_file_says_so() {
     let tmp = fit_inputs();
@@ -311,7 +312,7 @@ fn a_summary_with_no_recorded_model_file_says_so() {
     let record = dir.join("st/.invocations/1.json");
     let mut inv: serde_json::Value = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
     for r in inv["results"].as_array_mut().unwrap() {
-        r["attributes"].as_object_mut().unwrap().remove("presentation");
+        r.as_object_mut().unwrap().remove("source");
     }
     std::fs::write(&record, serde_json::to_vec_pretty(&inv).unwrap()).unwrap();
 
@@ -340,28 +341,60 @@ fn an_id_whose_invocations_ran_different_files_names_the_others() {
     }
     let folder = run_folder(dir);
     let id = folder.to_string_lossy().rsplit('-').next().unwrap().to_string();
-    let first = folders_under(&dir.join("st"), "model_presentation")
+    let first = folders_under(&dir.join("st"), "model_source")
         .into_iter()
         .find(|p| std::fs::read_to_string(p.join("docs.json")).unwrap().contains("FIRST"))
-        .expect("the first file's presentation");
+        .expect("the first file's model source");
     let first = first.to_string_lossy().rsplit('-').next().unwrap().to_string();
 
     let notice = format!(
         "info: {id}: the model's documentation is the one of the model file the latest invocation that listed it \
-         (invocation 2) ran; earlier invocations that listed the result ran other files (presentations {first} (@a)), \
+         (invocation 2) ran; earlier invocations that listed the result ran other files (model sources {first} (@a)), \
          which their labels show"
     );
     let out = succeeds(camdl_in(dir, &["fit", "summary", &id, "--parameters"]), "fit summary");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(stderr.matches(&notice).count(), 1, "{stderr}");
     assert!(String::from_utf8_lossy(&out.stdout).contains("SECOND doc of beta."));
-    let out = succeeds(camdl_in(dir, &["cat", &id, "model_presentation:docs"]), "cat");
+    let out = succeeds(camdl_in(dir, &["cat", &id, "model_source:docs"]), "cat");
     assert_eq!(String::from_utf8_lossy(&out.stderr).matches(&notice).count(), 1, "{}", String::from_utf8_lossy(&out.stderr));
 
     for (label, doc) in [("@a", "FIRST doc of beta."), ("@b", "SECOND doc of beta.")] {
         let out = succeeds(camdl_in(dir, &["fit", "summary", label, "--parameters"]), "fit summary");
         assert!(String::from_utf8_lossy(&out.stdout).contains(doc), "{label}");
-        assert!(!String::from_utf8_lossy(&out.stderr).contains("model-presentation"), "{label}");
+        assert!(!String::from_utf8_lossy(&out.stderr).contains("model-source"), "{label}");
         assert!(!String::from_utf8_lossy(&out.stderr).contains("earlier invocations"), "{label}");
     }
+}
+
+/// The compiled model's listing in a command's record names its model
+/// source by kind and run id, and its attributes hold only its name; the
+/// source depends on the quantities the compile produced and holds the
+/// file's name.
+#[test]
+fn a_compiled_models_listing_names_its_model_source() {
+    let tmp = fit_inputs();
+    let dir = tmp.path();
+    succeeds(camdl_in(dir, &["fit", "run", "fit.toml", "--seed", "1", "--label", "f", "--progress", "none"]), "fit run");
+    let record: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("st/.invocations/1.json")).unwrap()).unwrap();
+    let models: Vec<&serde_json::Value> =
+        record["results"].as_array().unwrap().iter().filter(|r| r["kind"] == "compiled_model").collect();
+    assert!(!models.is_empty(), "{record:#}");
+    for m in &models {
+        assert_eq!(m["attributes"], serde_json::json!({ "name": "model" }), "{record:#}");
+        assert_eq!(m["source"]["kind"], "model_source", "{record:#}");
+    }
+    let source_id = models[0]["source"]["run_id"].as_str().unwrap();
+    let folder = folders_under(&dir.join("st"), "model_source")
+        .into_iter()
+        .find(|p| p.to_string_lossy().ends_with(&source_id[..12]))
+        .expect("the listed model source is stored");
+    let identity: serde_json::Value = serde_json::from_slice(&std::fs::read(folder.join("identity.json")).unwrap()).unwrap();
+    assert_eq!(identity["identity"]["file_name"], "model.camdl", "{identity:#}");
+    let run: serde_json::Value = serde_json::from_slice(&std::fs::read(folder.join("run.json")).unwrap()).unwrap();
+    let deps: Vec<&str> = run["deps"].as_array().unwrap().iter().map(|d| d["kind"].as_str().unwrap()).collect();
+    assert_eq!(deps, ["quantities"], "the source depends on its quantities: {run:#}");
+    let others: Vec<&serde_json::Value> =
+        record["results"].as_array().unwrap().iter().filter(|r| r["kind"] != "compiled_model").collect();
+    assert!(others.iter().all(|r| r.get("source").is_none()), "only a compiled model's listing names a source: {record:#}");
 }
