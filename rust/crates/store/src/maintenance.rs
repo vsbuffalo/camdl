@@ -1,5 +1,6 @@
 //! Walking every result, and `clean`, `verify` and `reindex`.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -10,8 +11,9 @@ use crate::hash::Key;
 use crate::index::{index_dir, own_log, Index};
 use crate::invocation::{close, invocation_path};
 use crate::owner::{local_liveness, local_liveness_of_stem, Liveness, Owner};
+use crate::import::Unregistered;
 use crate::record::{
-    read_record, IdentityFile, IndexLine, Read, Record, Role, RunFile, Status, ATTEMPTS_DIR,
+    read_record, IdentityFile, IndexLine, Read, Record, Reference, Role, RunFile, Status, ATTEMPTS_DIR,
     RECORD_FORMAT, RUN_FILE, STAGING_DIR,
 };
 use crate::storage::{folder_state, identity_of, visible_dirs, Inner, State, Store};
@@ -110,6 +112,33 @@ pub struct VerifyFailure {
     pub what: String,
 }
 
+/// What `verify` found: the damaged results, and, apart from them, the
+/// source references that name no stored result and the folders it did not
+/// check. Only `damaged` describes a result whose files cannot be trusted.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Verification {
+    pub damaged: Vec<VerifyFailure>,
+    /// Each listing whose source ([`crate::RunInfo::record_source`]) names
+    /// no completed result of this store: a reader of that listing finds no
+    /// source, and no result's files are wrong.
+    pub unresolved: Vec<UnresolvedSource>,
+    /// Result folders of a kind this store does not register, such as a
+    /// kind an older build stored: their run ids cannot be computed here.
+    pub unchecked: Vec<Unregistered>,
+}
+
+/// A listing whose source names no completed result of the store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnresolvedSource {
+    /// The invocation whose record holds the listing.
+    pub invocation: u64,
+    /// The listed result.
+    pub kind: String,
+    pub run_id: Key,
+    /// The source it names.
+    pub source: Reference,
+}
+
 /// What `clean` removed, and the staging it left because its owner is on
 /// another host.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -128,16 +157,25 @@ pub struct Cleaned {
 
 impl Store {
     /// Checks every completed result, or the ones given: computes each run
-    /// id again from `identity.json`, and each manifest file's SHA-256. Writes
-    /// nothing.
-    pub fn verify(&self, only: Option<&[PathBuf]>) -> Result<Vec<VerifyFailure>> {
+    /// id again from `identity.json`, and each manifest file's SHA-256; and
+    /// checks that each source an invocation record names for one of those
+    /// results is a completed result here. A folder of a kind this store
+    /// does not register is not checked, and is listed in
+    /// [`Verification::unchecked`]. Writes nothing.
+    pub fn verify(&self, only: Option<&[PathBuf]>) -> Result<Verification> {
         let inner = &self.inner;
         let found: Vec<(PathBuf, IdentityFile)> = match only {
             Some(dirs) => dirs.iter().filter_map(|d| identity_of(d).map(|f| (d.clone(), f))).collect(),
             None => walk(inner),
         };
-        let mut out = Vec::new();
+        let mut checked = Verification::default();
+        let named: BTreeSet<Key> = found.iter().map(|(_, f)| f.run_id).collect();
+        let out = &mut checked.damaged;
         for (dir, f) in found {
+            if !inner.kinds.has(&f.kind) {
+                checked.unchecked.push(Unregistered { folder: dir, kind: f.kind });
+                continue;
+            }
             let fail = |what: String| VerifyFailure { folder: dir.clone(), run_id: f.run_id, what };
             let run: RunFile = match read_record(&dir.join(RUN_FILE)) {
                 Read::Ok(r) => r,
@@ -174,7 +212,23 @@ impl Store {
                 }
             }
         }
-        Ok(out)
+        for inv in self.invocations().iter() {
+            for l in inv.record.listings() {
+                let Some(source) = l.source else { continue };
+                if only.is_some() && !named.contains(&l.run_id) {
+                    continue;
+                }
+                if inner.find_completed(&source.kind, &source.run_id)?.is_some() {
+                    continue;
+                }
+                let unresolved =
+                    UnresolvedSource { invocation: inv.seq(), kind: l.kind.to_string(), run_id: l.run_id, source: source.clone() };
+                if !checked.unresolved.contains(&unresolved) {
+                    checked.unresolved.push(unresolved);
+                }
+            }
+        }
+        Ok(checked)
     }
 
     /// Deletes staging folders whose owner is dead on this host (claims, and

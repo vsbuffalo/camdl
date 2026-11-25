@@ -2133,7 +2133,11 @@ result or of one of its by-products, such as `trace.tsv` or `draws.tsv`, and
 
 `camdl verify` computes each completed result's run id again from its
 `identity.json` and each manifest file's SHA-256, and exits 1 when it finds a
-damaged result (`maintenance.rs:143`).
+damaged result ([`Store::verify`](rust:store::storage::Store::verify) returns a
+`Verification`). It reports apart, without changing the exit status, each
+listing whose source names no completed result here
+(`Verification::unresolved`), and the folders of a kind this build does not
+register, which it does not check (`Verification::unchecked`).
 
 A result imported from another store (`camdl import`, under
 [Maintaining a store](#maintaining-a-store)) is read like a local one: `list`

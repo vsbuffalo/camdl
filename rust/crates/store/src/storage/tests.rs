@@ -371,7 +371,7 @@ fn a_store_copied_without_modification_times_reuses_every_result() {
         }
     }
     assert!(!copy.path().join(".quarantine").exists(), "nothing is moved to quarantine");
-    assert!(store.verify(None).unwrap().is_empty(), "verify agrees with the reader");
+    assert!(store.verify(None).unwrap().damaged.is_empty(), "verify agrees with the reader");
     let mut listed = Vec::new();
     StoreCommand::List { kind: "sim".into() }.run(&store, &mut listed).unwrap();
     let listed = String::from_utf8(listed).unwrap();
@@ -402,7 +402,7 @@ fn a_file_whose_bytes_changed_at_the_same_size_is_damaged_by_its_digest() {
         other => panic!("the digest finds the change: {other:?}"),
     }
     assert!(store.get(s.id()).unwrap().is_none());
-    assert_eq!(store.verify(None).unwrap().len(), 1, "verify agrees with the reader");
+    assert_eq!(store.verify(None).unwrap().damaged.len(), 1, "verify agrees with the reader");
 }
 
 #[test]
@@ -419,7 +419,7 @@ fn a_file_whose_size_changed_is_damaged_without_its_digest() {
         EntryState::Damaged { what } => assert!(what.contains("changed size"), "{what}"),
         other => panic!("a size change is damage: {other:?}"),
     }
-    assert_eq!(store.verify(None).unwrap().len(), 1, "verify agrees with the reader");
+    assert_eq!(store.verify(None).unwrap().damaged.len(), 1, "verify agrees with the reader");
 }
 
 #[test]

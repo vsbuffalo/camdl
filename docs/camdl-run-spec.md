@@ -3642,12 +3642,18 @@ camdl reindex                # rebuild the index from the records
   every file the manifest in `run.json` lists and compares it with the recorded
   digest. Each result that fails is printed as `damaged:` with its folder and
   what differs, and the command exits 1; otherwise it prints
-  `every result verified` and exits 0. It writes nothing. The next run that asks
-  for a damaged result moves it to `.quarantine/` and computes it again. That
-  run compares each listed file's size with the record, and compares the SHA-256
-  of a file whose modification time differs from the recorded one with the
-  recorded digest, so a store copied without its files' modification times is
-  read as whole. A handle that names no result is refused.
+  `every result verified` and exits 0. It also checks that the model source each
+  invocation record names for a compiled model it checks (§2.9) is stored here,
+  and prints each one that is not as `unresolved:`, with the invocation, the
+  source and the compiled model; a folder of a kind this binary does not store,
+  such as a `model_presentation` folder an older build wrote, is not checked,
+  and the folders of such kinds are counted on one `not checked:` line. Neither
+  damages a result, so neither changes the exit status. It writes nothing. The
+  next run that asks for a damaged result moves it to `.quarantine/` and
+  computes it again. That run compares each listed file's size with the record,
+  and compares the SHA-256 of a file whose modification time differs from the
+  recorded one with the recorded digest, so a store copied without its files'
+  modification times is read as whole. A handle that names no result is refused.
 - **`clean`** deletes each staging folder (`.staging/`) of an unfinished result
   whose owner was a process on this host that has stopped (a claim, or the
   folder a claim was being built in; a process id that now names a process with

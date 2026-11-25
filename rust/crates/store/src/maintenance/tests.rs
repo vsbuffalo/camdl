@@ -11,13 +11,13 @@ fn verify_finds_a_file_whose_bytes_changed_behind_its_size_and_time() {
     let root = TempRoot::new("verify");
     let store = open(root.path());
     let s = run_sim(&store, &info(), 1);
-    assert!(store.verify(None).unwrap().is_empty());
+    assert!(store.verify(None).unwrap().damaged.is_empty());
     let path = s.folder().join("traj.tsv");
     let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
     std::fs::write(&path, b"t\tI\n0\t9\n").unwrap();
     std::fs::File::options().write(true).open(&path).unwrap().set_modified(mtime).unwrap();
     assert!(store.get(s.id()).unwrap().is_some(), "the cheap check sees size and time only");
-    let failures = store.verify(None).unwrap();
+    let failures = store.verify(None).unwrap().damaged;
     assert_eq!(failures.len(), 1);
     assert!(failures[0].what.contains("traj.tsv"));
     assert!(matches!(s.open("traj.tsv"), Err(crate::Error::Damaged { .. })), "a read checks the digest");
@@ -32,9 +32,67 @@ fn verify_computes_the_run_id_again_from_the_identity_file() {
     let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
     v["identity"]["seed"] = 2.into();
     std::fs::write(&p, serde_json::to_vec(&v).unwrap()).unwrap();
-    let f = store.verify(None).unwrap();
+    let f = store.verify(None).unwrap().damaged;
     assert_eq!(f.len(), 1);
     assert!(f[0].what.contains("run id"), "{}", f[0].what);
+}
+
+/// The output of `verify` over the whole store, and its verdict.
+fn verify_all(store: &crate::Store) -> (String, crate::Verdict) {
+    let mut out = Vec::new();
+    let verdict = StoreCommand::Verify { handle: None }.run(store, &mut out).unwrap();
+    (String::from_utf8(out).unwrap(), verdict)
+}
+
+/// A source an invocation record references and the store does not hold is
+/// named, apart from the damaged results; it damages no result, so the
+/// verdict is unchanged.
+#[test]
+fn verify_names_a_source_reference_that_does_not_resolve() {
+    let root = TempRoot::new("verify-source");
+    let store = open(root.path());
+    let i = info();
+    let s = run_sim(&store, &i, 1);
+    let m = store
+        .put::<Model>(crate::Hashed::new(ModelText("S -> I".into())), &ModelAttributes { name: "m".into() }, &crate::Provenance::none(), &i)
+        .unwrap();
+    i.record_source(s.id(), m.id()).unwrap();
+    let seq = i.finish(&store).unwrap().seq();
+    assert_eq!(verify_all(&store), ("every result verified\n".to_string(), crate::Verdict::Sound));
+
+    crate::fsutil::remove_all(m.folder()).unwrap();
+    let store = open(root.path());
+    let (out, verdict) = verify_all(&store);
+    let line = format!(
+        "unresolved: invocation {seq} names the compiled_model {} as the source of the sim {}, and this store does not hold it\n",
+        m.id().key().short12(),
+        s.id().key().short12()
+    );
+    assert!(out.contains(&line), "{out}");
+    assert!(out.contains("every result verified"), "no result is damaged: {out}");
+    assert_eq!(verdict, crate::Verdict::Sound);
+}
+
+/// A result folder of a kind this store does not register, such as a model
+/// presentation an older build stored, is listed as not checked, in one
+/// line, and changes no verdict.
+#[test]
+fn verify_lists_a_folder_of_an_unregistered_kind_as_not_checked() {
+    let root = TempRoot::new("verify-unregistered");
+    let store = open(root.path());
+    let s = run_sim(&store, &info(), 1);
+    let kind_dir = s.folder().parent().unwrap().parent().unwrap().parent().unwrap().join("model_presentation");
+    let old = kind_dir.join("model-0123456789ab");
+    std::fs::create_dir_all(&kind_dir).unwrap();
+    crate::fsutil::copy_tree(s.folder(), &old).unwrap();
+    let ident = old.join("identity.json");
+    let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&ident).unwrap()).unwrap();
+    v["kind"] = "model_presentation".into();
+    std::fs::write(&ident, serde_json::to_vec(&v).unwrap()).unwrap();
+
+    let (out, verdict) = verify_all(&store);
+    assert_eq!(out, "not checked: 1 folder of a kind this store does not register (model_presentation: 1)\nevery result verified\n");
+    assert_eq!(verdict, crate::Verdict::Sound);
 }
 
 #[test]

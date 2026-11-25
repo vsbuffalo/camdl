@@ -204,7 +204,7 @@ fn import_places_and_records_a_pulled_store_with_its_nested_results() {
     assert!(!pred_dir.parent().unwrap().join("n2-000000000000").exists(), "a lock-only folder is dropped");
     assert!(local.locate(r.obs).unwrap().folder().starts_with(&sim_dir));
     assert_eq!(local.locate(r.obs).unwrap().upstream(), Some(r.sim));
-    assert!(local.verify(None).unwrap().is_empty());
+    assert!(local.verify(None).unwrap().damaged.is_empty());
 
     // One invocation lists them, parents first, reused, with the labels the
     // other store's records gave them.
@@ -348,7 +348,7 @@ fn import_of_a_result_already_here_with_equal_bytes_leaves_it_in_place() {
     assert_eq!(ino(&here.folder().join("traj.tsv")), before, "the stored folder is left in place");
     assert_eq!(std::fs::read(here.folder().join("execution.json")).unwrap(), b"{\"host\":\"here\"}");
     assert!(inv.record.listings().iter().any(|e| e.run_id == s.remote.sim && e.outcome == Some(&crate::record::Outcome::Reused)));
-    assert!(local.verify(None).unwrap().is_empty());
+    assert!(local.verify(None).unwrap().damaged.is_empty());
 }
 
 #[test]
@@ -437,7 +437,7 @@ fn a_nested_result_whose_parent_is_here_is_placed_inside_it() {
     assert!(got.placed.contains(&s.remote.pred));
     assert!(!got.placed.contains(&s.remote.fit) && !got.present.contains(&s.remote.fit));
     assert!(local.locate(s.remote.pred).unwrap().folder().starts_with(here.folder()));
-    assert!(local.verify(None).unwrap().is_empty());
+    assert!(local.verify(None).unwrap().damaged.is_empty());
 }
 
 #[test]
@@ -485,7 +485,7 @@ fn a_receive_stopped_midway_leaves_the_store_valid() {
     assert!(r.is_err(), "premise: stopped");
     let placed = result_folders(s.local_root.path());
     assert!(!placed.is_empty() && placed.len() < result_folders(s.remote_root.path()).len(), "premise: midway: {placed:?}");
-    assert!(local.verify(None).unwrap().is_empty());
+    assert!(local.verify(None).unwrap().damaged.is_empty());
     for f in &placed {
         let id = crate::storage::identity_of(&s.local_root.path().join(f)).unwrap();
         assert!(local.locate(id.run_id).is_ok(), "{f}");
@@ -493,7 +493,7 @@ fn a_receive_stopped_midway_leaves_the_store_valid() {
     let c = local.clean().unwrap();
     assert!(c.staging.contains(&staged), "{:?}", c.staging);
     assert_eq!(std::fs::read_dir(&staging).unwrap().count(), 0);
-    assert!(local.verify(None).unwrap().is_empty());
+    assert!(local.verify(None).unwrap().damaged.is_empty());
 }
 
 /// A second import of the same result reaching its destination first: the
@@ -521,7 +521,7 @@ fn a_destination_filled_meanwhile_with_the_same_result_is_present() {
     assert!(got.present.contains(&s.remote.sim) && got.present.contains(&s.remote.obs), "{got:?}");
     assert!(got.placed.contains(&s.remote.fit) && got.placed.contains(&s.remote.pred), "{got:?}");
     assert_eq!(local.locate(s.remote.sim).unwrap().folder(), dest);
-    assert!(local.verify(None).unwrap().is_empty());
+    assert!(local.verify(None).unwrap().damaged.is_empty());
 }
 
 /// A destination another writer created, empty, just before the rename is

@@ -164,9 +164,39 @@ impl StoreCommand {
                         Some(dirs)
                     }
                 };
-                let failures = store.verify(only.as_deref())?;
-                for f in &failures {
+                let checked = store.verify(only.as_deref())?;
+                let failures = &checked.damaged;
+                for f in failures {
                     writeln!(out, "damaged: {} ({}): {}", f.folder.display(), f.run_id.short12(), f.what).map_err(io)?;
+                }
+                // An unresolved source and an unchecked folder damage no
+                // result, so neither changes the verdict.
+                for u in &checked.unresolved {
+                    writeln!(
+                        out,
+                        "unresolved: invocation {} names the {} {} as the source of the {} {}, and this store does not hold it",
+                        u.invocation,
+                        u.source.kind,
+                        u.source.run_id.short12(),
+                        u.kind,
+                        u.run_id.short12()
+                    )
+                    .map_err(io)?;
+                }
+                if !checked.unchecked.is_empty() {
+                    let mut by_kind: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+                    for u in &checked.unchecked {
+                        *by_kind.entry(u.kind.as_str()).or_default() += 1;
+                    }
+                    let n = checked.unchecked.len();
+                    let kinds: Vec<String> = by_kind.iter().map(|(k, c)| format!("{k}: {c}")).collect();
+                    writeln!(
+                        out,
+                        "not checked: {n} folder{} of a kind this store does not register ({})",
+                        if n == 1 { "" } else { "s" },
+                        kinds.join(", ")
+                    )
+                    .map_err(io)?;
                 }
                 if failures.is_empty() {
                     writeln!(out, "every result verified").map_err(io)?;

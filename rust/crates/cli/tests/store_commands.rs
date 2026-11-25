@@ -273,6 +273,37 @@ fn verify_reports_the_damaged_result_and_only_that_one() {
     assert_eq!(results(&store).iter().map(|r| r.status.as_str()).collect::<Vec<_>>(), vec!["completed"; results(&store).len()], "verify writes nothing");
 }
 
+/// A model source an invocation record names, removed from the store, is
+/// named by `verify` apart from damaged results; a folder of a kind this
+/// build does not store is listed as not checked. Neither damages a result,
+/// so `verify` still exits 0.
+#[test]
+fn verify_names_an_unresolved_model_source_and_an_unchecked_folder() {
+    let p = Project::new("verify-source");
+    p.ok(&Project::simulate_args("1", &["--label", "sm"]));
+    let sources = of_kind(&p.store(), "model_source");
+    assert_eq!(sources.len(), 1, "premise: the simulation's compile stored its source: {sources:?}");
+    let source = sources[0].clone();
+    let old = source.dir.parent().unwrap().parent().unwrap().join("model_presentation").join(source.dir.file_name().unwrap());
+    std::fs::create_dir_all(&old).unwrap();
+    for f in ["identity.json", "run.json"] {
+        let text = std::fs::read_to_string(source.dir.join(f)).unwrap().replace("\"model_source\"", "\"model_presentation\"");
+        std::fs::write(old.join(f), text).unwrap();
+    }
+    std::fs::remove_dir_all(&source.dir).unwrap();
+
+    let out = p.ok(&["verify"]);
+    let model = of_kind(&p.store(), "compiled_model").remove(0);
+    let unresolved = format!(
+        "unresolved: invocation 1 names the model_source {} as the source of the compiled_model {}, and this store does not hold it\n",
+        &source.run_id[..12],
+        &model.run_id[..12]
+    );
+    assert!(out.contains(&unresolved), "{out}");
+    assert!(out.contains("not checked: 1 folder of a kind this store does not register (model_presentation: 1)\n"), "{out}");
+    assert!(out.ends_with("every result verified\n"), "{out}");
+}
+
 #[test]
 fn reindex_rebuilds_the_index_from_the_records() {
     let p = Project::new("reindex");
