@@ -324,8 +324,7 @@ type set_value  = { sv_name : string; sv_value : float }
 
     [fi_path] is relative to the model file's directory. A data file keeps
     the path the model wrote, unless the model wrote an absolute path, which
-    is rewritten relative to the model's directory; the [--quantities] file
-    is recorded relative to the model's directory. [fi_sha256] is the
+    is rewritten relative to the model's directory. [fi_sha256] is the
     lowercase hex digest, and [None] only when the file could not be
     re-opened to hash it. *)
 type file_input = { fi_path : string; fi_sha256 : string option }
@@ -337,8 +336,7 @@ type compile_inputs = {
       (** The [--set] overrides, in the order given. *)
   ci_files      : file_input list;
       (** The data files the model read (dimension levels, tables,
-          forcings), each once, in the order first read, then the
-          [--quantities] file when one was given. *)
+          forcings), each once, in the order first read. *)
 }
 
 (** Where a dimension's levels come from: listed inline, or read from a
@@ -879,8 +877,6 @@ type declared_model = {
   dm_output                 : output_decl option;
   dm_quantities             : quantity_decl list;
   dm_contrasts              : contrast_decl list;
-      (** With [--quantities FILE], the [quantities] block is that file's,
-          not the model's. *)
 }
 
 (* ── Codec helpers ───────────────────────────────────────────────────────── *)
