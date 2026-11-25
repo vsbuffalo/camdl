@@ -414,22 +414,6 @@ fn a_label_on_an_invocation_that_writes_several_runs_names_no_one_run() {
     }
 }
 
-/// `camdl label` of a stored fit run is refused: a run's record is never
-/// rewritten, and the refusal names the `fit run --label` that labels it.
-#[test]
-fn camdl_label_of_a_fit_run_is_refused() {
-    let p = Project::new();
-    p.config("scout.toml", &if2(2));
-    p.ok(&["fit", "run", "scout.toml", "--seed", "1"]);
-    let (id, ..) = record(&p.leaves()[0]);
-    let out = p.run(&["label", &id[..12], "scout"]);
-    let all = text(&out);
-    assert!(!out.status.success(), "{all}");
-    assert!(all.contains("sealed") && all.contains("--label"), "{all}");
-    let out = p.run(&["fit", "summary", "@scout"]);
-    assert!(!out.status.success(), "the refused label names nothing:\n{}", text(&out));
-}
-
 /// A `fit.toml` is not a run handle: `fit summary scout.toml` is refused,
 /// listing the run the file as it now reads produced, so the user can name it.
 #[test]

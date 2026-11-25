@@ -1752,8 +1752,7 @@ pub fn cmd_fit_new(a: &crate::args::FitNewArgs, compile: crate::util::CompileSet
 ///
 /// Why a custom regex check rather than a clap value parser: we
 /// want the same validator on every `--label` flag (fit, simulate,
-/// profile, …) and on `camdl label` at relabel time, with identical
-/// error messages. A function call from each entry point is the
+/// profile, …), with identical error messages. A function call from each entry point is the
 /// simplest way to keep them aligned.
 pub fn validate_label(raw: &str) -> Result<String, String> {
     let trimmed = raw.trim();
@@ -1777,61 +1776,6 @@ pub fn validate_label(raw: &str) -> Result<String, String> {
         }
     }
     Ok(trimmed.to_string())
-}
-
-/// `camdl label HANDLE LABEL`: refuses, because a stored result's record is
-/// sealed. A label names an invocation and is given with `--label` when the
-/// command runs; running the command again with `--label` reuses its stored
-/// results and names them. The label is validated first, so a malformed one is
-/// reported as such.
-pub fn cmd_label(args: &crate::args::LabelArgs) {
-    let out = crate::out::Out::new(false);
-    let new_label = match validate_label(&args.label) {
-        Ok(l) => l,
-        Err(e) => {
-            out.fail(format!("error: invalid label: {}", e));
-        }
-    };
-
-    // A filter run, a fit run and a profile point live on the run store, where a completed
-    // record is sealed: each is named by the invocation that runs it, never
-    // after.
-    if let Some(store) = crate::camdl_store::open_existing(&crate::camdl_store::read_root()) {
-        let fit = crate::fit_store::parse_handle(&args.hash).ok()
-            .and_then(|h| store.resolve::<crate::fit_store::FitRun>(&store::RunRef::new(h)).ok());
-        if let Some(stored) = fit {
-            out.fail(format!(
-                "error: the fit run {} is sealed: a stored result's record is never rewritten, so \
-                 it cannot be labelled after it ran. Name the run when it runs, with `--label`: \
-                 `camdl fit run ... --label {new_label}` reuses the stored run and names it @{new_label}.",
-                stored.id().key().short12()));
-        }
-        if let Ok(handle) = args.hash.parse::<store::RunRef<crate::pfilter_store::Pfilter>>() {
-            if let Ok(stored) = store.resolve(&handle) {
-                out.fail(format!(
-                    "error: the filter run {} is sealed: a stored result's record is never rewritten, so \
-                     it cannot be labelled after it ran. Name the run when it runs, with `--label`: \
-                     `camdl pfilter ... --label {new_label}` reuses the stored result and names it @{new_label}.",
-                    stored.id().key().short12()));
-            }
-        }
-        if let Ok(handle) = args.hash.parse::<store::RunRef<crate::profile_store::ProfilePoint>>() {
-            if let Ok(stored) = store.resolve(&handle) {
-                out.fail(format!(
-                    "error: the profile point {} is sealed: a stored result's record is never rewritten, so \
-                     it cannot be labelled after it ran. Name the profile when it runs, with `--label`: \
-                     `camdl profile ... --label {new_label}` reuses the stored points and names them @{new_label}.",
-                    stored.id().key().short12()));
-            }
-        }
-    }
-
-    out.fail(format!(
-        "error: a stored result is sealed: its record is never rewritten, so `{}` cannot be \
-         labelled after it ran. Name a result when it runs, with `--label`: running the same \
-         command again with `--label {new_label}` reuses its stored results and names them \
-         @{new_label}.",
-        args.hash));
 }
 
 #[cfg(test)]

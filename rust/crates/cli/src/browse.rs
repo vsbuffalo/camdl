@@ -1144,8 +1144,7 @@ fn print_pfilter_table(out: &crate::out::Out, rows: &[PfilterRow], now: SystemTi
 }
 
 
-/// 8-char hash prefix cell — what `camdl show <hash>` and
-/// `camdl label <hash>` accept.
+/// 8-char hash prefix cell — what `camdl show <hash>` accepts.
 fn short_hash_cell(hash: &str) -> comfy_table::Cell {
     let n = hash.len().min(8);
     comfy_table::Cell::new(&hash[..n]).add_attribute(comfy_table::Attribute::Dim)

@@ -314,28 +314,6 @@ fn find_pfilter_leaf_first(out_root: &Path) -> (PathBuf, String) {
     all_pfilter_leaves(out_root).into_iter().next().expect("at least one pfilter leaf")
 }
 
-/// A filter run's record is sealed, so `camdl label` cannot name it after
-/// the fact: it says so, and names `--label` at run time.
-#[test]
-fn label_refuses_a_sealed_pfilter_run() {
-    let bin = camdl_bin();
-    if camdlc_bin().is_none() { return }
-    let tmp = tempdir("label_sealed");
-    let (ir, data) = write_fixture(tmp.path());
-    let out_root = tmp.path().join("out");
-    assert!(run_pfilter(&bin, &out_root, &ir, &data, 0.3).status.success());
-    let (_, rid) = find_pfilter_leaf(&out_root);
-    let out = Command::new(&bin).env_remove("CLICOLOR_FORCE")
-        .env("CAMDL_STORE", &out_root)
-        .env("CAMDL_SKIP_VERSION_CHECK", "1")
-        .current_dir(tmp.path())
-        .args(["label", &rid[..8], "late"])
-        .output().expect("spawn camdl label");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success(), "{stderr}");
-    assert!(stderr.contains("sealed") && stderr.contains("--label"), "{stderr}");
-}
-
 /// `camdl cat <run> NAME` reads a file of the filter run or of one of
 /// its by-products, as it does for a simulation cell, by its stored name or
 /// its logical name (run spec §2.9), and a name none of them holds is refused

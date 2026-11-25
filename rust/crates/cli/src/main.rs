@@ -221,9 +221,6 @@ pub(crate) enum Command {
     /// Show what differs between two models, declaration by declaration
     Diff(args::DiffArgs),
 
-    /// Refuses: a stored result is sealed, and is named with `--label` when it runs
-    Label(args::LabelArgs),
-
     /// Which runs on the run store are running, failed or interrupted
     Status(args::StatusArgs),
 
@@ -636,7 +633,6 @@ fn main() {
             verbosity: cli.global.verbosity,
         }),
         Command::Fit(FitCmd::Methods)   => fit::cmd_fit_methods(),
-        Command::Label(a)               => fit::cmd_label(&a),
         Command::Pfilter(a)             => pfilter::cmd_pfilter(args::PfilterInvocation {
             args: a,
             no_licm: cli.global.no_licm,

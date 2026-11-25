@@ -669,9 +669,9 @@ camdl list                              # the new run appears alongside the prev
 
 A label names an invocation and moves: rerunning a changed fit under
 `--label m0` makes `@m0` the new run and `@m0~1` the previous one. A fit run is
-named only when it runs; `camdl label` refuses one. Resolve each label once per
-session with `camdl show @m0 --format json`, read its `run_id` and `path`, and
-use the run id from then on.
+named only when it runs. Resolve each label once per session with
+`camdl show @m0 --format json`, read its `run_id` and `path`, and use the run id
+from then on.
 
 A `fit.toml` path never names a run: one file makes a new run whenever its data,
 its seeds, a sweep or the camdl build changes. `fit summary`, `camdl predict`,

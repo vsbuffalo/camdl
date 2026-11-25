@@ -1362,11 +1362,6 @@ later goes elsewhere: a by-product, an attempt file written before `finish`, or
 an invocation record. A second request for a stored result is recorded in its
 own invocation record, and a name given later is a later invocation's `--label`.
 
-`camdl label` therefore always refuses, naming the result when the handle names
-a filter run, a fit run or a profile point, and suggests rerunning the command
-with `--label`, which reuses the stored results (`fit/mod.rs:1773`,
-`cmd_label`).
-
 ## Reading and rendering
 
 Once a result is stored, everything a user receives from it is made from the

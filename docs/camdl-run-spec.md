@@ -3452,10 +3452,9 @@ it per line or filter with `--kind`. A fit row is one run:
 {"best_loglik":-60.69877640031929,"kind":"fit_run","label":"r0","method":"pmmh","model":"sir_r0","path":"camdl-store/0.1.0_f531753ac.dirty-a20ab6cb-4bff11f93f55/fit/sir_r0-c39a2f446d42/runs/pmmh-fc5c33ebd296/seed_4-44fbdf1c80d9","problem_id":"c39a2f446d42c89dc3cfa679f49cdf99bd1ff0e58b296269e084a9f9d6981771","run_id":"44fbdf1c80d99fc484a400970e0183922961fc530972199790790b5425cbb2d5","seed":4}
 ```
 
-`camdl label HANDLE LABEL` refuses every handle: a stored result's record is
-sealed, and a result is named when it runs, with `--label` (§6.8). Running the
-same command again with `--label L` reuses its stored results and names them
-`@L`.
+A stored result's record is sealed, so a result is named when it runs, with
+`--label` (§6.8). Running the same command again with `--label L` reuses its
+stored results and names them `@L`.
 
 #### Looking up a stored file: `path` and `cat`
 
@@ -5050,13 +5049,6 @@ $ camdl fit run fit_if2.toml --seed 3 --label i
   cache hit — reusing 0.1.0_f531753ac.dirty-a20ab6cb-4bff11f93f55/fit/sir-8bcb39805e9d/runs/if2-e5e94eb7c269/seed_3-be6657446294
 ```
 
-`camdl label` refuses a fit run, since a completed record is sealed:
-
-```
-$ camdl label 9cd433e2 foo
-error: the fit run 9cd433e2dedb is sealed: a stored result's record is never rewritten, so it cannot be labelled after it ran. Name the run when it runs, with `--label`: `camdl fit run ... --label foo` reuses the stored run and names it @foo.
-```
-
 A run started from a labelled source (`from_mle`, `from_posterior`) records the
 handle as typed and depends on the source run's file, so moving the label cannot
 change what an existing run was started from; rerunning it after the move
@@ -6167,7 +6159,7 @@ fit_id     run          label                  stem           method   methods c
 8bcb3980   be6657446294 i                      fit_if2        if2      if2     no              -36.9 if2               4m
 ```
 
-Labels come from `--label` at run time (§6.8); `camdl label` refuses a fit run.
+Labels come from `--label` at run time (§6.8).
 
 Filters: `--converged` / `--gate-failed`, `--with-method if2|pgas|pmmh`,
 `--model <hash-prefix>`, `--hash <hash-prefix>`, `--since-seconds <n>`,
@@ -7905,12 +7897,11 @@ or per run, as `camdl fit run … --starts from_posterior=@<label>`.
 
 There is no `camdl summarize`. Four commands cover the ground:
 
-| Command                        | Answers                                                                                                                 |
-| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
-| `camdl list`                   | What runs exist? Filter by `--kind sim\|fit\|profile\|pfilter`, `--model`, `--scenario`, `--since 1h`. `--format json`. |
-| `camdl show <TARGET>`          | Full metadata for one run, by short hash prefix or path.                                                                |
-| `camdl cat <TARGET> [NAME]`    | A stored file of the result; without a name, its summary file (a cell's trajectory TSV).                                |
-| `camdl label <HANDLE> <LABEL>` | Refuses every handle: a stored result is sealed. Name a result when it runs, with `--label`.                            |
+| Command                     | Answers                                                                                                                 |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `camdl list`                | What runs exist? Filter by `--kind sim\|fit\|profile\|pfilter`, `--model`, `--scenario`, `--since 1h`. `--format json`. |
+| `camdl show <TARGET>`       | Full metadata for one run, by short hash prefix or path.                                                                |
+| `camdl cat <TARGET> [NAME]` | A stored file of the result; without a name, its summary file (a cell's trajectory TSV).                                |
 
 Per-scenario summary statistics over a trajectory tree (peak, time-of-peak,
 final value, integral) are **not** a camdl command. Declare them in the model as
@@ -9074,7 +9065,6 @@ camdl cat --manifest M NAME   --store DIR   --kind KIND   --run RUN_ID   --each
   --chains IDS | --exclude-chains IDS        rows of a fit run's draws
 camdl path HANDLE NAME...     --store DIR   --kind KIND   --run RUN_ID   --all | --each
 camdl path --manifest M NAME...
-camdl label HANDLE LABEL      refuses every handle: a stored result is sealed
 ```
 
 ### Compiler passthroughs

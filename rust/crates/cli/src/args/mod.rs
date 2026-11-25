@@ -2460,29 +2460,6 @@ pub struct FitNewArgs {
     pub dest: PathBuf,
 }
 
-// ─── label ────────────────────────────────────────────────────────────
-
-#[derive(Args)]
-#[command(after_help = colored_help!("\
-A stored result's record is sealed, so a result is never labelled after it
-ran, and this command refuses every handle. A label names the invocation that
-carries it: pass `--label L` to the command that computes the results, and
-`@L` names them. Running the same command again with `--label L` reuses the
-stored results and names them @L.
-
-Examples:
-  camdl fit run fit.toml --label baseline-2024
-  camdl show @baseline-2024
-"))]
-pub struct LabelArgs {
-    /// A handle of a stored result: a path, an id prefix, or `@L`
-    pub hash: String,
-
-    /// The label, 1-64 characters after trim: letters, digits, spaces,
-    /// commas, dot, underscore and hyphen
-    pub label: String,
-}
-
 // ─── pfilter ──────────────────────────────────────────────────────────────────
 
 #[derive(Args, Clone, store::Inputs)]

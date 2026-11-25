@@ -288,10 +288,8 @@ mod unlabelled_hint_tests {
         out
     }
 
-    /// gh#701: every command the hint names must be one the binary has.
-    /// It printed `camdl fit label <hash> "…"`, which is not a subcommand —
-    /// the labeller is top-level `camdl label` — so the one place camdl
-    /// volunteers help gave an instruction that fails.
+    /// gh#701: every command the hint names must be one the binary has, so
+    /// the hint never gives an instruction that fails.
     #[test]
     fn unlabelled_hint_commands_parse() {
         for line in UNLABELLED_HINT_COMMANDS {

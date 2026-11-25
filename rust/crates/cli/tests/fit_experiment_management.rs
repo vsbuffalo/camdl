@@ -500,9 +500,7 @@ fn a_swept_fit_records_each_sweep_points_own_fixed_values() {
 /// Full label workflow against the real binary:
 ///   1. `fit run --label "narrow R0, take 1"` names the run it stores
 ///   2. `fit table` shows the label in the run's row
-///   3. `camdl label` refuses a fit run: a stored run is sealed, and the
-///      refusal leaves its label as it was
-///   4. `fit run --label "narrow R0, take 2"` again reuses the stored run and
+///   3. `fit run --label "narrow R0, take 2"` again reuses the stored run and
 ///      names it by the new label, without changing the problem's id
 #[test]
 fn fit_label_workflow_persists_and_surfaces_in_table() {
@@ -535,19 +533,7 @@ fn fit_label_workflow_persists_and_surfaces_in_table() {
     assert_eq!(table_label(&camdl, &store).as_deref(), Some(initial_label),
         "table_row.label must be the run's label");
 
-    // Step 3: `camdl label` refuses the run, and writes nothing.
-    let run_id: String = fit_store_support::run_id(&fit_dir).chars().take(12).collect();
-    let relabel = Command::new(&camdl).env_remove("CLICOLOR_FORCE")
-        .arg("label").arg(&run_id).arg("narrow R0, take 2")
-        .env("CAMDL_STORE", &store)
-        .output().expect("camdl label must invoke");
-    let stderr = String::from_utf8_lossy(&relabel.stderr);
-    assert!(!relabel.status.success(), "`camdl label <fit run>` must be refused: {stderr}");
-    assert!(stderr.contains("is sealed") && stderr.contains("--label"),
-        "the refusal says the run is sealed and how to name it: {stderr}");
-    assert_eq!(table_label(&camdl, &store).as_deref(), Some(initial_label), "the refusal wrote nothing");
-
-    // Step 4: the same fit run under another label reuses the stored run.
+    // Step 3: the same fit run under another label reuses the stored run.
     let next_label = "narrow R0, take 2";
     let stderr = fit_run(next_label);
     assert!(stderr.contains("cache hit"), "the run is reused, not recomputed: {stderr}");
