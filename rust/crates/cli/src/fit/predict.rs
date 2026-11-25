@@ -1703,6 +1703,17 @@ impl PredictSource {
         crate::camdl_store::open_existing(&root).ok_or_else(|| format!("no run store at {}", root.display()))
     }
 
+    /// Records in `info` the presentation of the model a prediction from a
+    /// stored fit run was made with, as the invocation that named the run
+    /// recorded it. A fixed point compiled its model file in this command,
+    /// which recorded it then.
+    fn record_presentation(&self, store: &store::Store, info: &store::RunInfo) -> Result<(), String> {
+        match self {
+            PredictSource::Posterior(fit) => fit.record_presentation(store, info),
+            PredictSource::FixedPoint(_) => Ok(()),
+        }
+    }
+
     /// The identity and labels of the prediction from this source under
     /// `options`, with the `--design` tables `design`.
     fn identity(
@@ -1795,6 +1806,7 @@ pub(crate) fn predict(
     match run_predict(&out, args, compile, source, &info, request.reuse(), None) {
         Ok(Outcome::Reused { stored, source }) => {
             let store = source.store().unwrap_or_else(|e| out.fail(format!("error: {e}")));
+            source.record_presentation(&store, &info).unwrap_or_else(|e| out.fail(format!("error: {e}")));
             let invocation = info.finish(&store).unwrap_or_else(|e| out.fail(format!("error: {e}")));
             out.say(format_args!("predict: reused the stored prediction {}", stored.folder().display()));
             export(&out, &stored, output);
@@ -1825,6 +1837,7 @@ pub(crate) fn predict(
             let stored = store_prediction(&outcome.stored, &info, request.reuse())
                 .unwrap_or_else(|e| out.fail(format!("error: {e}")));
             let store = outcome.stored.source.store().unwrap_or_else(|e| out.fail(format!("error: {e}")));
+            outcome.stored.source.record_presentation(&store, &info).unwrap_or_else(|e| out.fail(format!("error: {e}")));
             let invocation = info.finish(&store).unwrap_or_else(|e| out.fail(format!("error: {e}")));
             let folder = stored.folder().to_path_buf();
             export(&out, &stored, output);
@@ -2238,6 +2251,12 @@ pub(crate) fn repose(
                 .ok_or_else(|| format!("the fit run {} the prediction's draws came from is not stored", draws.id().key().short12()))?;
             let text = run.folder().to_string_lossy().into_owned();
             let fit = crate::fit_store::opened_run(&text)?;
+            // The model file is the one the prediction's invocation recorded,
+            // not the run's latest: another file may have been fitted to the
+            // same run since.
+            let handle = store::Handle::IdPrefix(stored.id().key().to_hex());
+            let shown = crate::camdl_store::recorded_presentation(store, &handle, &fit.fit.model);
+            crate::fit_store::record_presentation(store, info, &fit.fit.model, shown, &fit.model_name())?;
             let spec = fit.config.problem.data_spec().map_err(|e| format!("the fit binds no data: {e}"))?;
             let (model, _) = crate::util::load_ir(&fit.model_ir.to_string_lossy())?;
             conditioned = crate::fit::stream_bindings::StreamBindings::resolve(&model, spec)?

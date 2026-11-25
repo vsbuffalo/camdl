@@ -1495,6 +1495,9 @@ pub(crate) struct OpenedFit {
     /// The compile's quantities and contrasts, which the problem names in its
     /// lineage; restored into [`Self::model_ir`].
     pub quantities: Option<Dep<crate::camdl_store::Quantities>>,
+    /// The run id (hex) of the presentation the invocation the handle names
+    /// recorded for [`StoredFit::model`]; `None` when it recorded none.
+    pub presentation: Option<String>,
     _scratch: tempfile::TempDir,
 }
 
@@ -1535,6 +1538,29 @@ impl OpenedFit {
     pub fn model_name(&self) -> String {
         self.labels.as_ref().map(|l| l.model.clone()).unwrap_or_else(|| "model".to_string())
     }
+
+    /// Records in the invocation `info` that this fit's compiled model was
+    /// run from the model file [`Self::presentation`] presents, for a command
+    /// that stores a result read from this fit: a reader of that result then
+    /// finds the presentation through the command's own invocation. Nothing
+    /// is recorded when no presentation was.
+    pub fn record_presentation(&self, store: &Store, info: &store::RunInfo) -> Result<(), String> {
+        record_presentation(store, info, &self.fit.model, self.presentation.clone(), &self.model_name())
+    }
+}
+
+/// Records in the invocation `info` that the stored compiled model `model`,
+/// named `name`, was run from the model file the presentation `presentation`
+/// (a run id, hex) presents. Nothing is recorded for `None`.
+pub(crate) fn record_presentation(
+    store: &Store,
+    info: &store::RunInfo,
+    model: &Dep<CompiledModel>,
+    presentation: Option<String>,
+    name: &str,
+) -> Result<(), String> {
+    let Some(hex) = presentation else { return Ok(()) };
+    crate::camdl_store::presentation::link_presentation(store, info, model, crate::camdl_store::Presentation::Stored(hex), name)
 }
 
 /// The compiled model a stored result names, as an IR envelope: the model
@@ -1665,6 +1691,7 @@ pub(crate) fn open_fit(store: &Store, text: &str) -> Result<OpenedFit, String> {
     let name = labels.as_ref().map(|l| l.model.clone()).unwrap_or_else(|| "model".to_string());
     let mut envelope = stored_envelope(store, &fit.model, &name)?;
     crate::camdl_store::present(store, &handle, &fit.model, &mut envelope);
+    let presentation = crate::camdl_store::recorded_presentation(store, &handle, &fit.model);
     let quantities = match &fit.run {
         Some(run) => match run_quantities(store, &handle, text, run)? {
             Some(q) => Some(q),
@@ -1705,7 +1732,7 @@ pub(crate) fn open_fit(store: &Store, text: &str) -> Result<OpenedFit, String> {
     let config = FitConfig { problem, inference: fit.config.inference.clone() };
     let leaf = run.as_ref().map(|r| r.path().to_path_buf());
     let segment = leaf.clone().unwrap_or_else(|| scratch.path().to_path_buf());
-    Ok(OpenedFit { fit, model_ir, run, labels, segment, leaf, config, quantities, _scratch: scratch })
+    Ok(OpenedFit { fit, model_ir, run, labels, segment, leaf, config, quantities, presentation, _scratch: scratch })
 }
 
 /// The run store a reader of a stored fit opens: the one the command stores

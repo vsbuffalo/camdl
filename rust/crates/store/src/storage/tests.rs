@@ -1117,6 +1117,31 @@ fn a_content_artifact_of_several_files_is_stored_once() {
     assert!(c.open("picture.txt").is_err());
 }
 
+/// A result another build stored is listed in an invocation of this build
+/// with this invocation's labels, as reused, and nothing is stored again; a
+/// result that is not stored is refused.
+#[test]
+fn a_stored_result_is_listed_with_new_labels_and_not_stored_again() {
+    let root = TempRoot::new("list");
+    let content = Hashed::new(ModelText("S -> I".into()));
+    let a = open_build(root.path(), "b1").put::<Model>(content.clone(), &ModelLabels { name: "sir".into() }, &Provenance::none(), &info()).unwrap();
+    let before = result_folders(root.path());
+
+    let store = open_build(root.path(), "b2");
+    let info2 = info();
+    store.list::<Model>(a.id(), &ModelLabels { name: "renamed".into() }, &info2).unwrap();
+    let inv = info2.finish(&store).unwrap();
+    assert_eq!(inv.file.results.len(), 1);
+    assert_eq!(inv.file.results[0].run_id, a.id().key());
+    assert_eq!(inv.file.results[0].outcome, Outcome::Reused);
+    assert_eq!(inv.labels_of("compiled_model", a.id().key()), Some(serde_json::json!({"name": "renamed"})));
+    assert_eq!(result_folders(root.path()), before, "nothing is stored");
+
+    let absent = Id::<Model>::of(&store.inner.ambient_key, &Hashed::new(ModelText("S -> R".into())));
+    let e = store.list::<Model>(&absent, &ModelLabels { name: "x".into() }, &info()).err().unwrap();
+    assert!(matches!(e, Error::NotFound { .. }), "{e}");
+}
+
 /// A file whose digest the identity does not hold is refused, and nothing is
 /// stored.
 #[test]

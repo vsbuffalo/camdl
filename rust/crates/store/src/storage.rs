@@ -359,6 +359,20 @@ impl Store {
         r.map(|(s, _)| s)
     }
 
+    /// Lists the stored result `id` in the invocation `info` with `labels`,
+    /// as reused, and stores nothing: for a command that reads a result
+    /// stored by another invocation, perhaps by another build, and records
+    /// labels of its own for it. Refused with [`Error::NotFound`] when no
+    /// completed result is `id`.
+    pub fn list<A: Artifact>(&self, id: &Id<A>, labels: &A::Labels, info: &RunInfo) -> Result<()> {
+        if self.inner.find_completed(A::KIND, &id.key())?.is_none() {
+            return Err(Error::NotFound { handle: id.key().to_hex() });
+        }
+        let entries = self.register(info, id.key(), id.key(), A::KIND, labels, &Wanted::<A>::none(), Reuse::IfCompleted)?;
+        info.shared.set(&entries.upstream, Outcome::Reused, None);
+        Ok(())
+    }
+
     /// Read-only: the content artifact holding `content`, when it is stored.
     /// Nothing is written, so a command that only plans can name it.
     pub fn get_content<C: ContentFiles>(&self, content: &C::Identity) -> Result<Option<Stored<C>>> {

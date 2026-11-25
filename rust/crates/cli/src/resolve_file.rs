@@ -531,18 +531,26 @@ fn is_primary(located: &Located) -> bool {
 /// For a run id, a prefix or a folder and a name qualified by
 /// `model_presentation` (`model_presentation:render`), `cands` with the
 /// presentation of the model the result ran added last
-/// ([`crate::camdl_store::presentation::presentation_of`]). A label and a
-/// manifest list the presentation among their results already, and an
-/// unqualified name is looked up among the result and its by-products alone.
+/// ([`crate::camdl_store::presentation::presentation_of`]); for a label
+/// whose invocation compiled nothing, the presentation its compiled-model
+/// entries name. A manifest, and a label whose invocation compiled the model,
+/// list the presentation among their results already, and an unqualified
+/// name is looked up among the result and its by-products alone.
 fn with_presentation(store: &Store, source: &Source, name: &str, mut cands: Candidates) -> Result<Candidates, FileRefusal> {
     let kind = <crate::camdl_store::ModelPresentation as store::Artifact>::KIND;
     let qualified = name.split_once(':').is_some_and(|(k, _)| k == kind);
     let Source::Handle(handle) = source else { return Ok(cands) };
-    if !qualified || matches!(handle, Handle::Label { .. }) {
+    if !qualified || cands.found.iter().any(|c| c.located.kind() == kind) {
         return Ok(cands);
     }
-    let Some(id) = store.locate_handle(handle).ok().map(|l| l.run_id()) else { return Ok(cands) };
-    if let Some(key) = crate::camdl_store::presentation::presentation_of(store, id) {
+    let named = match handle {
+        Handle::Label { .. } => store.invocation(handle).ok().as_ref().and_then(crate::camdl_store::presentation::named_by),
+        _ => {
+            let Some(id) = store.locate_handle(handle).ok().map(|l| l.run_id()) else { return Ok(cands) };
+            crate::camdl_store::presentation::presentation_of(store, id)
+        }
+    };
+    if let Some(key) = named {
         match store.locate(key) {
             Ok(located) => cands.found.push(Candidate::new(located, serde_json::Value::Null, None)?),
             Err(e) => cands.unavailable.push(Unavailable { kind: kind.to_string(), run_id: key, why: e.to_string() }),

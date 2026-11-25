@@ -454,7 +454,9 @@ fn a_profile_manifest_lists_every_point() {
 
 /// A fit run lists its quantities, compiled model, fit problem and run, the
 /// run's files by their logical names; a prediction from it lists the
-/// prediction alone, and a score of the prediction the score alone.
+/// prediction and the compiled model it read, whose labels name the model's
+/// presentation, and a score of the prediction the score, the outcome table
+/// it stored and that compiled model.
 #[test]
 fn fit_predict_and_score_manifests() {
     let p = Project::new();
@@ -483,15 +485,15 @@ fn fit_predict_and_score_manifests() {
     let fit_run_id = run["run_id"].as_str().unwrap().to_string();
     p.ok(&["predict", &fit_run_id, "--mode", "free_forward", "--label", "pred", "--manifest", "build/pred.json"]);
     let m = p.manifest("build/pred.json");
-    assert_eq!(kinds(&m), ["prediction"], "the fit run predicted from is a dependency, not a member");
+    assert_eq!(kinds(&m), ["prediction", "compiled_model"], "the fit run predicted from is a dependency, not a member");
     let pred = &results(&m)[0];
     assert!(pred["files"]["predictive"]["file"] == "predictive.json");
     assert!(pred["files"]["report"]["file"] == "report.json");
 
     p.ok(&["score", pred["run_id"].as_str().unwrap(), "--data", "cases=cases.tsv", "--manifest", "build/score.json"]);
     let m = p.manifest("build/score.json");
-    assert_eq!(kinds(&m), ["data_table", "score"], "the outcome table the score stored, then the score");
-    let names: Vec<&str> = results(&m)[1]["files"].as_object().unwrap().keys().map(String::as_str).collect();
+    assert_eq!(kinds(&m), ["compiled_model", "data_table", "score"], "the model read, the outcome table the score stored, then the score");
+    let names: Vec<&str> = results(&m)[2]["files"].as_object().unwrap().keys().map(String::as_str).collect();
     assert_eq!(names, ["score", "scored", "summary"]);
 }
 

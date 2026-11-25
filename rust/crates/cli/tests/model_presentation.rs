@@ -1,7 +1,9 @@
 //! A command that compiles a model stores the model's presentation: the
 //! source, the documentation, and for a `.camdl` the rendered mathematics and
 //! flow graph, as `camdl render` writes them. A model given as compiled IR
-//! has no render, and the command says so.
+//! has no render, and the command says so. A command that stores a result
+//! from a stored one records the model's presentation too, so a reader finds
+//! it from either result.
 //!
 //! Shells out to the built `camdl` binary.
 
@@ -156,4 +158,134 @@ fn a_result_folder_names_its_model_presentation() {
     );
     let traj = camdl(&["path", &cell.to_string_lossy(), "traj", "--store", &store.to_string_lossy()]);
     assert!(traj.status.success(), "the cell's own files are found as before: {}", String::from_utf8_lossy(&traj.stderr));
+}
+
+const FIT_MODEL: &str = r#"
+time_unit = 'days
+compartments { S, I, R }
+parameters {
+  #' The transmission rate, per day.
+  beta  : rate         in [0.05, 1.0]  ~ log_normal(mu = -1.0, sigma = 0.5)
+  gamma : rate         in [0.01, 0.5]  ~ log_normal(mu = -2.0, sigma = 0.5)
+  N0    : count
+  I0    : count
+}
+let N = S + I + R
+transitions {
+  infection : S --> I  @ beta * S * I / N
+  recovery  : I --> R  @ gamma * I
+}
+init { S = N0 - I0  I = I0 }
+observations {
+  cases {
+    columns       { time : time, cases : count }
+    covers        = closing_at(time, 1 'days)
+    projected     = incidence(infection)
+    emit_schedule = every 1 'days
+    cases ~ poisson(rate = projected)
+  }
+}
+simulate { from = 0 'days  to = 20 'days }
+"#;
+
+const FIT_TOML: &str = r#"
+[model]
+camdl = "model.camdl"
+[data]
+file = "cases.tsv"
+[estimate]
+beta = { bounds = [0.1, 0.9], start = 0.4 }
+[fixed]
+gamma = 0.2
+N0 = 1000
+I0 = 5
+[method]
+algorithm = "if2"
+backend = "chain_binomial"
+chains = 1
+particles = 50
+iterations = 2
+cooling = 0.7
+starts = "from_prior"
+"#;
+
+/// A directory holding `model.camdl`, `fit.toml` and `cases.tsv`, for a
+/// small IF2 fit whose model documents `beta`.
+fn fit_inputs() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("model.camdl"), FIT_MODEL).unwrap();
+    std::fs::write(tmp.path().join("fit.toml"), FIT_TOML).unwrap();
+    let cases = [3, 6, 9, 14, 20, 27, 33, 38, 40, 39, 36, 31, 26, 21, 16, 12, 9, 7, 5, 4];
+    let mut tsv = String::from("time\tcases\n");
+    for (t, c) in cases.iter().enumerate() {
+        tsv.push_str(&format!("{}\t{c}\n", t + 1));
+    }
+    std::fs::write(tmp.path().join("cases.tsv"), tsv).unwrap();
+    tmp
+}
+
+/// `camdl ARGS` run in `dir` against the store `dir/st`.
+fn camdl_in(dir: &Path, args: &[&str]) -> Output {
+    Command::new(binary())
+        .current_dir(dir)
+        .env_remove("CLICOLOR_FORCE")
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("CAMDL_STORE", dir.join("st"))
+        .args(args)
+        .output()
+        .expect("spawn camdl")
+}
+
+fn succeeds(out: Output, what: &str) -> Output {
+    assert!(out.status.success(), "{what}: {}", String::from_utf8_lossy(&out.stderr));
+    out
+}
+
+/// Every folder under `root` whose parent folder is named `parent`.
+fn folders_under(root: &Path, parent: &str) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if path.parent().and_then(|p| p.file_name()).is_some_and(|n| n == parent) {
+                    found.push(path.clone());
+                }
+                stack.push(path);
+            }
+        }
+    }
+    found
+}
+
+/// The documentation of `beta` that `camdl cat HANDLE model_presentation:docs`
+/// prints.
+fn beta_doc(dir: &Path, handle: &str) -> serde_json::Value {
+    let out = succeeds(camdl_in(dir, &["cat", handle, "model_presentation:docs"]), &format!("cat {handle}"));
+    let docs: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    docs["parameters"]["beta"]["text"].clone()
+}
+
+/// A prediction made from a stored fit run reads the run's model: the
+/// model's documentation is found from the prediction by label, by folder
+/// and by id, and it is the documentation of the file the fit was run from.
+#[test]
+fn a_prediction_from_a_stored_fit_names_the_fits_presentation() {
+    let tmp = fit_inputs();
+    let dir = tmp.path();
+    succeeds(camdl_in(dir, &["fit", "run", "fit.toml", "--seed", "1", "--label", "a", "--progress", "none"]), "fit run");
+    succeeds(camdl_in(dir, &["predict", "@a", "--label", "p", "--progress", "none"]), "predict");
+
+    let predictions = folders_under(&dir.join("st"), "predict");
+    assert_eq!(predictions.len(), 1, "one prediction: {predictions:?}");
+    let folder = predictions[0].to_string_lossy().into_owned();
+    let id = folder.rsplit('-').next().unwrap().to_string();
+    for handle in ["@p", folder.as_str(), id.as_str()] {
+        assert_eq!(beta_doc(dir, handle), "The transmission rate, per day.", "{handle}");
+    }
+
+    // A score of that prediction reads the same model.
+    succeeds(camdl_in(dir, &["score", "@p", "--data", "cases=cases.tsv", "--label", "s", "--progress", "none"]), "score");
+    assert_eq!(beta_doc(dir, "@s"), "The transmission rate, per day.", "@s");
 }

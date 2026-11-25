@@ -230,13 +230,24 @@ pub(crate) fn put_compiled(
     provenance: &Provenance,
 ) -> store::Result<Dep<CompiledModel>> {
     use store::ContentArtifact;
-    let presentation = match presentation.into() {
+    let labels = ModelLabels { presentation: presentation_run_id(store, info, presentation.into(), labels)?, ..labels.clone() };
+    store.put::<CompiledModel>(model, &labels, provenance, info)?.dep(CompiledModel::FILE)
+}
+
+/// The run id (hex) of `presentation`, stored under `labels` first when it
+/// is new.
+#[allow(clippy::result_large_err)] // as put_compiled's
+fn presentation_run_id(
+    store: &Store,
+    info: &store::RunInfo,
+    presentation: Presentation,
+    labels: &ModelLabels,
+) -> store::Result<Option<String>> {
+    Ok(match presentation {
         Presentation::New(p) => Some(store.put::<ModelPresentation>(p, labels, &Provenance::none(), info)?.id().key().to_hex()),
         Presentation::Stored(hex) => Some(hex),
         Presentation::Unknown => None,
-    };
-    let labels = ModelLabels { presentation, ..labels.clone() };
-    store.put::<CompiledModel>(model, &labels, provenance, info)?.dep(CompiledModel::FILE)
+    })
 }
 
 /// The run id (hex) of the presentation the invocation `handle` names
@@ -305,48 +316,46 @@ pub(crate) fn presentation_of(store: &Store, run_id: store::Key) -> Option<store
     let invocations = store.invocations();
     let mut at = Some(run_id);
     while let Some(id) = at {
-        let named = invocations.iter().rev().filter(|inv| inv.entries().iter().any(|(_, k, _)| *k == id)).find_map(|inv| {
-            let shown: std::collections::BTreeSet<String> = inv
-                .members::<CompiledModel>()
-                .ok()?
-                .into_iter()
-                .filter_map(|(_, labels)| labels.presentation)
-                .collect();
-            match shown.len() {
-                1 => shown.into_iter().next(),
-                _ => None,
-            }
-        });
-        if let Some(hex) = named {
-            return store::Key::from_hex(&hex).ok();
+        let named = invocations.iter().rev().filter(|inv| inv.entries().iter().any(|(_, k, _)| *k == id)).find_map(named_by);
+        if named.is_some() {
+            return named;
         }
         at = store.upstream_of(id).ok().flatten();
     }
     None
 }
 
+/// The one presentation the compiled-model entries of `inv` name; `None`
+/// when they name none or several.
+pub(crate) fn named_by(inv: &store::Invocation) -> Option<store::Key> {
+    let shown: std::collections::BTreeSet<String> =
+        inv.members::<CompiledModel>().ok()?.into_iter().filter_map(|(_, labels)| labels.presentation).collect();
+    match shown.len() {
+        1 => shown.into_iter().next().and_then(|hex| store::Key::from_hex(&hex).ok()),
+        _ => None,
+    }
+}
+
 /// Records in this invocation that the stored compiled model `model` was
-/// run from the model file `presentation` presents: the presentation is
-/// stored, and the compiled model, read back from the store, is put again
-/// (finding itself stored) with labels that name it. For a command that runs
+/// run from the model file `presentation` presents: a new presentation is
+/// stored, and the compiled model is listed in this invocation, as reused,
+/// with labels that name it. Nothing else is stored, so a compiled model a
+/// different build stored keeps its run id. For a command that runs
 /// a stored compile of a model file it names, such as a profile of a stored
-/// fit.
+/// fit, and for one that stores a result read from a stored result, such as
+/// a prediction from a stored fit, which names the presentation that
+/// result's invocation recorded.
 pub(crate) fn link_presentation(
     store: &Store,
     info: &store::RunInfo,
     model: &Dep<CompiledModel>,
-    presentation: PresentationIdentity,
+    presentation: impl Into<Presentation>,
     name: &str,
 ) -> Result<(), String> {
-    use store::{Content, ContentArtifact};
-    let stored: Stored<CompiledModel> = store
-        .get(model.id())
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("the compiled model {} is not stored", model.id().key().short12()))?;
-    let bytes = super::read_stored(&stored, CompiledModel::FILE)?;
-    let content = CompiledModelContent::from_bytes(&bytes).map_err(|e| e.to_string())?;
     let labels = ModelLabels { name: name.to_string(), presentation: None };
-    put_compiled(store, info, Hashed::new(content), presentation, &labels, &Provenance::none())
-        .map(|_| ())
-        .map_err(|e| format!("storing the model's presentation: {e}"))
+    let presentation = presentation_run_id(store, info, presentation.into(), &labels)
+        .map_err(|e| format!("storing the model's presentation: {e}"))?;
+    store
+        .list::<CompiledModel>(model.id(), &ModelLabels { presentation, ..labels }, info)
+        .map_err(|e| format!("the compiled model {}: {e}", model.id().key().short12()))
 }
