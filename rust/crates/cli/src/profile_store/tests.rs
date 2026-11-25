@@ -1253,3 +1253,55 @@ fn a_fit_files_binomial_sampler_is_the_profiles() {
     assert_eq!(from_fit, ids("fit_btrs.toml", &["--binomial", "btrs"]), "the fit's sampler, btrs");
     assert_ne!(from_fit, ids("fit.toml", &[]), "not the default sampler");
 }
+
+/// An `nl-lbfgs` profile on the ODE backend compiles the state Jacobian of
+/// the model file the profile is given, so a model that reads a table by a
+/// path relative to its own file profiles: the table is beside that file,
+/// and not beside the copy the stored problem keeps.
+#[test]
+fn an_nl_lbfgs_profile_compiles_the_model_file_it_is_given() {
+    let cwd = workdir();
+    let store = cwd.path().join("camdl-store");
+    std::fs::create_dir_all(cwd.path().join("data")).unwrap();
+    std::fs::write(cwd.path().join("data/w.tsv"), "g\tw\na\t1.0\nb\t2.0\n").unwrap();
+    std::fs::write(
+        cwd.path().join("rel.camdl"),
+        "time_unit = 'days\ndimensions { g = [a, b] }\ncompartments { S, I, R }\n\
+         tables { w : g = read(\"data/w.tsv\") }\n\
+         parameters {\n  beta  : rate  in [0.05, 1.0]\n  gamma : rate  in [0.01, 0.5]\n  N0    : count\n  I0    : count\n}\n\
+         let N = S + I + R\n\
+         transitions {\n  infection : S --> I  @ beta * w[a] * S * I / N\n  recovery  : I --> R  @ gamma * I\n}\n\
+         init { S = N0 - I0  I = I0 }\n\
+         observations {\n  cases {\n    columns       { time : time, cases : count }\n    covers        = closing_at(time, 1 'days)\n    \
+         projected     = incidence(infection)\n    emit_schedule = every 1 'days\n    cases ~ poisson(rate = projected)\n  }\n}\n\
+         simulate { from = 0 'days  to = 20 'days }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        cwd.path().join("ode.toml"),
+        "[model]\ncamdl = \"rel.camdl\"\n[data.observations]\ncases = \"cases.tsv\"\n\
+         [estimate]\nbeta = { bounds = [0.1, 0.9], start = 0.4 }\ngamma = { bounds = [0.05, 0.4], start = 0.2 }\n\
+         [fixed]\nN0 = 1000\nI0 = 5\n[method]\nalgorithm = \"nl-lbfgs\"\nbackend = \"ode\"\nchains = 1\n",
+    )
+    .unwrap();
+    let run = |args: &[&str]| camdl(cwd.path(), &store, &args.iter().map(|s| s.to_string()).collect::<Vec<_>>(), &[]);
+    let fit = run(&["fit", "run", "ode.toml", "--seed", "1", "--label", "o", "--progress", "none"]);
+    assert!(fit.status.success(), "the fit: {}", String::from_utf8_lossy(&fit.stderr));
+    let profile = run(&[
+        "profile", "rel.camdl", "--fit", "@o", "--sweep", "beta=lin(0.3,0.6,2)", "--algorithm", "nl-lbfgs",
+        "--backend", "ode", "--n-starts", "1", "--progress", "none",
+    ]);
+    assert!(profile.status.success(), "the profile: {}", String::from_utf8_lossy(&profile.stderr));
+    assert_eq!(points(&store).len(), 2, "one point per grid value");
+
+    // A file that differs from the fitted one only in its description is the
+    // same model, so its Jacobian compile is the same compile.
+    let source = std::fs::read_to_string(cwd.path().join("rel.camdl")).unwrap();
+    std::fs::write(cwd.path().join("described.camdl"), format!("description = \"An SIR model.\"\n{source}")).unwrap();
+    let described = run(&[
+        "profile", "described.camdl", "--fit", "@o", "--sweep", "beta=lin(0.3,0.6,2)", "--algorithm", "nl-lbfgs",
+        "--backend", "ode", "--n-starts", "1", "--progress", "none",
+    ]);
+    assert!(described.status.success(), "the described profile: {}", String::from_utf8_lossy(&described.stderr));
+    assert_eq!(points(&store).len(), 2, "the same points");
+}

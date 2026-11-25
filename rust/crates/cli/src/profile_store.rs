@@ -272,36 +272,38 @@ pub(crate) fn pose_problem(
     Ok(PosedProblem { dep, fit: posed, model_ir, presentation: named })
 }
 
-/// The compile with the state Jacobian of `posed`'s model, which an
-/// `nl-lbfgs` cell runs, stored: rewritten from the problem's data as the
-/// problem's compile is, and refused unless it is the same model as
-/// `problem_ir`. It is stored with `presentation`, the presentation of the
-/// model file the invocation names ([`PosedProblem::presentation`]), or,
-/// when that is `None`, of the model file the problem keeps. Returns its IR
-/// file and its dependency.
-#[expect(clippy::disallowed_methods, reason = "reads the stored model source copied out by `OpenedFit::model_source` and the IR camdlc compiled from it, which is stored as a `CompiledModel` dependency")]
+/// The compile with the state Jacobian of `model`, the model file the
+/// profile names, which an `nl-lbfgs` cell runs, stored: rewritten from the
+/// data of `posed`'s problem as the problem's compile is, and refused unless
+/// it is the same model as `problem_ir`. [`pose_problem`] has refused a
+/// `model` that is not the problem's model, and the file is compiled where it
+/// lies, so the files it reads by a relative path are found. It is stored
+/// with `presentation`, the presentation of `model` for a profile of a stored
+/// fit ([`PosedProblem::presentation`]), or, when that is `None`, with the
+/// presentation of `model` rendered here. Returns its IR file and its
+/// dependency.
+#[expect(clippy::disallowed_methods, reason = "reads the model `model` names (declared `#[input(identity)]` on `ProfileArgs`) and the IR camdlc compiled from it, which is stored as a `CompiledModel` dependency")]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn jacobian_compile(
     out: &crate::out::Out,
     store: &store::Store,
     info: &store::RunInfo,
     posed: &crate::fit_store::FitArg,
+    model: &str,
     presentation: Option<crate::camdl_store::PresentationIdentity>,
     problem_ir: &str,
     compile: crate::util::CompileSettings,
 ) -> Result<(String, Dep<CompiledModel>), String> {
     let opened = posed.stored.as_ref().ok_or("internal: the posed problem is not stored")?;
-    let src = opened.model_source()?;
-    let src_str = src.to_string_lossy().into_owned();
-    let bytes = std::fs::read(&src).map_err(|e| format!("cannot read {}: {e}", src.display()))?;
-    let (full, _tmp) = crate::util::resolve_ir_path(&src_str, true, compile)?;
+    let bytes = std::fs::read(model).map_err(|e| format!("cannot read the model {model}: {e}"))?;
+    let (full, _tmp) = crate::util::resolve_ir_path(model, true, compile)?;
     let full = crate::fit::resolve_anchors_into_temp_ir(Some(out), &full, &posed.config.problem)?;
     let (full, _bound) = crate::fit::bind_tables_into_temp_ir(&full, &posed.config.problem)?;
-    let read = |p: &str| std::fs::read_to_string(p).map_err(|e| format!("cannot read {p}: {e}"));
-    if crate::resolve::model_identity_from_ir(&read(problem_ir)?) != crate::resolve::model_identity_from_ir(&read(&full)?) {
+    if structural_hash(problem_ir)? != structural_hash(&full)? {
         return Err("internal error: the compile with the state Jacobian is not the same model as the problem's".into());
     }
     let stem = opened.model_name();
-    let dep = put_compile(store, info, &full, &stem, &bytes, &src_str, presentation)?;
+    let dep = put_compile(store, info, &full, &stem, &bytes, model, presentation)?;
     Ok((full, dep))
 }
 
@@ -315,6 +317,15 @@ fn named_presentation(
     let envelope = crate::util::load_model_envelope(model, compile)?;
     let source = crate::camdl_store::ModelSource::read(bytes, std::path::Path::new(model));
     Ok(crate::camdl_store::CompiledParts::split(envelope, String::new(), source)?.presentation)
+}
+
+/// The structural hash of the compiled model at `path`, with its description
+/// left out: two compiles that differ only in a comment, a `#'` docstring,
+/// the description or the quantities are one model.
+fn structural_hash(path: &str) -> Result<ir::model_hash::ContentHash, String> {
+    let mut m = crate::util::load_ir(path)?.0;
+    m.description = None;
+    Ok(ir::model_hash::model_ir_hash(&m))
 }
 
 /// Refuses a positional model other than the one a stored fit was posed on.
@@ -343,12 +354,7 @@ fn refuse_another_model(
     let (ir, _tmp) = crate::util::resolve_ir_path(model, false, compile)?;
     let ir = crate::fit::resolve_anchors_into_temp_ir(Some(out), &ir, problem)?;
     let (ir, _bound) = crate::fit::bind_tables_into_temp_ir(&ir, problem)?;
-    let structural = |path: &str| -> Result<ir::model_hash::ContentHash, String> {
-        let mut m = crate::util::load_ir(path)?.0;
-        m.description = None;
-        Ok(ir::model_hash::model_ir_hash(&m))
-    };
-    if structural(&ir)? != structural(&opened.model_ir.to_string_lossy())? {
+    if structural_hash(&ir)? != structural_hash(&opened.model_ir.to_string_lossy())? {
         return Err(format!(
             "the model {model} is not the model the stored fit {handle} was posed on; a profile of a \
              stored fit is of its problem, so name the model it keeps ({})",

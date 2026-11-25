@@ -1729,8 +1729,11 @@ A point's identity holds the problem, the focal values, the method (the
 algorithm with its settings, `dt`, each estimated parameter's domain and IF2
 step, the simplex groups, under IF2 the `--pf-max-substeps` budget and the
 binomial sampler, and for `nl-lbfgs` the compile with the state Jacobian), the
-start's values and a seed. It holds nothing about the grid: a larger grid finds
-every point a smaller one stored and computes only the others. The seed is
+start's values and a seed. The compile with the state Jacobian is of the model
+file the profile is given, where it lies, so the files the model reads by a
+relative path are found; it is rewritten from the problem's data and refused
+unless it is the problem's model. It holds nothing about the grid: a larger grid
+finds every point a smaller one stored and computes only the others. The seed is
 derived from `--seed` (or one of `--seeds`), the focal values and the start's
 values, so a point has one seed in every grid. Starts are drawn once for the
 invocation, so the start's index is a label. Starts with equal values (the
