@@ -72,8 +72,8 @@ fn a_failed_atomic_result_leaves_no_folder_and_its_reason_is_in_the_invocation_r
     let root = TempRoot::new("fail-atomic");
     let store = open(root.path());
     let info = info();
-    let (id, labels) = sim(3);
-    let r = store.run::<Sim, String>(&id, &labels, &info, Reuse::IfCompleted, expecting(&["traj.tsv"]), "simulating", |run| {
+    let (id, attributes) = sim(3);
+    let r = store.run::<Sim, String>(&id, &attributes, &info, Reuse::IfCompleted, expecting(&["traj.tsv"]), "simulating", |run| {
         run.result_file("traj.tsv").unwrap().write_all(b"partial").unwrap();
         Err("the rate went negative".into())
     });
@@ -91,13 +91,13 @@ fn a_failed_atomic_result_leaves_no_folder_and_its_reason_is_in_the_invocation_r
 fn a_dropped_atomic_claim_leaves_nothing_and_the_next_begin_claims() {
     let root = TempRoot::new("drop-atomic");
     let store = open(root.path());
-    let (id, labels) = sim(4);
-    match store.begin::<Sim>(&id, &labels, &info(), Reuse::IfCompleted).unwrap() {
+    let (id, attributes) = sim(4);
+    match store.begin::<Sim>(&id, &attributes, &info(), Reuse::IfCompleted).unwrap() {
         Begin::Claimed(run) => drop(run),
         _ => panic!(),
     }
     assert!(result_folders(root.path()).is_empty());
-    assert!(matches!(store.begin::<Sim>(&id, &labels, &info(), Reuse::IfCompleted).unwrap(), Begin::Claimed(_)));
+    assert!(matches!(store.begin::<Sim>(&id, &attributes, &info(), Reuse::IfCompleted).unwrap(), Begin::Claimed(_)));
 }
 
 #[test]
@@ -268,8 +268,8 @@ fn a_run_held_from_another_host_is_busy_and_force_moves_it_to_quarantine() {
 fn an_atomic_claim_held_by_a_live_process_is_waited_for() {
     let root = TempRoot::new("wait");
     let store = open(root.path());
-    let (id, labels) = sim(5);
-    let staging = match store.begin::<Sim>(&id, &labels, &info(), Reuse::IfCompleted).unwrap() {
+    let (id, attributes) = sim(5);
+    let staging = match store.begin::<Sim>(&id, &attributes, &info(), Reuse::IfCompleted).unwrap() {
         Begin::Claimed(run) => {
             let d = run.core.files_dir_pub();
             std::mem::forget(run);
@@ -285,7 +285,7 @@ fn an_atomic_claim_held_by_a_live_process_is_waited_for() {
         child.wait().unwrap();
     });
     let t0 = std::time::Instant::now();
-    let b = store.begin::<Sim>(&id, &labels, &info(), Reuse::IfCompleted).unwrap();
+    let b = store.begin::<Sim>(&id, &attributes, &info(), Reuse::IfCompleted).unwrap();
     killer.join().unwrap();
     assert!(t0.elapsed() >= Duration::from_millis(2000), "the claim was waited for");
     assert!(matches!(b, Begin::Claimed(_)), "a claim whose owner died is taken");
@@ -295,8 +295,8 @@ fn an_atomic_claim_held_by_a_live_process_is_waited_for() {
 fn an_atomic_claim_whose_owner_is_dead_is_removed_and_claimed() {
     let root = TempRoot::new("dead-atomic");
     let store = open(root.path());
-    let (id, labels) = sim(6);
-    let staging = match store.begin::<Sim>(&id, &labels, &info(), Reuse::IfCompleted).unwrap() {
+    let (id, attributes) = sim(6);
+    let staging = match store.begin::<Sim>(&id, &attributes, &info(), Reuse::IfCompleted).unwrap() {
         Begin::Claimed(run) => {
             let d = run.core.files_dir_pub();
             std::mem::forget(run);
@@ -305,7 +305,7 @@ fn an_atomic_claim_whose_owner_is_dead_is_removed_and_claimed() {
         _ => panic!(),
     };
     set_owner(&staging.join("run.json"), &dead_owner());
-    assert!(matches!(store.begin::<Sim>(&id, &labels, &info(), Reuse::IfCompleted).unwrap(), Begin::Claimed(_)));
+    assert!(matches!(store.begin::<Sim>(&id, &attributes, &info(), Reuse::IfCompleted).unwrap(), Begin::Claimed(_)));
 }
 
 #[test]
@@ -364,8 +364,8 @@ fn a_store_copied_without_modification_times_reuses_every_result() {
     for (seed, s) in (1..=3).zip(&stored) {
         let entry = store.inspect(s.id()).unwrap().unwrap();
         assert!(matches!(entry.state(), EntryState::Completed), "{:?}", entry.state());
-        let (id, labels) = sim(seed);
-        match store.begin::<Sim>(&id, &labels, &info(), Reuse::IfCompleted).unwrap() {
+        let (id, attributes) = sim(seed);
+        match store.begin::<Sim>(&id, &attributes, &info(), Reuse::IfCompleted).unwrap() {
             Begin::Reused(again) => assert!(again.open("traj.tsv").is_ok(), "a read checks the digest"),
             _ => panic!("a copied result is reused"),
         }
@@ -427,8 +427,8 @@ fn force_quarantines_a_completed_result_and_recomputes() {
     let root = TempRoot::new("force");
     let store = open(root.path());
     let s = run_sim(&store, &info(), 8);
-    let (id, labels) = sim(8);
-    match store.begin::<Sim>(&id, &labels, &info(), Reuse::Force).unwrap() {
+    let (id, attributes) = sim(8);
+    match store.begin::<Sim>(&id, &attributes, &info(), Reuse::Force).unwrap() {
         Begin::Claimed(mut run) => {
             run.expect(expecting(&["traj.tsv"]));
             run.result_file("traj.tsv").unwrap().write_all(b"t\tI\n0\t8\n").unwrap();
@@ -445,8 +445,8 @@ fn an_incomplete_build_never_reuses() {
     let root = TempRoot::new("incomplete");
     let store = Store::open(root.path(), Build::Incomplete(Engine { build: "?".into() }), TopLevel::ByBuild { label: "x".into() }, kinds()).unwrap();
     run_sim(&store, &info(), 9);
-    let (id, labels) = sim(9);
-    assert!(matches!(store.begin::<Sim>(&id, &labels, &info(), Reuse::IfCompleted).unwrap(), Begin::Claimed(_)));
+    let (id, attributes) = sim(9);
+    assert!(matches!(store.begin::<Sim>(&id, &attributes, &info(), Reuse::IfCompleted).unwrap(), Begin::Claimed(_)));
 }
 
 #[test]
@@ -494,8 +494,8 @@ fn a_folder_name_taken_by_another_result_gets_the_whole_run_id() {
 fn file_names_are_checked() {
     let root = TempRoot::new("names");
     let store = open(root.path());
-    let (id, labels) = sim(13);
-    let Begin::Claimed(mut run) = store.begin::<Sim>(&id, &labels, &info(), Reuse::IfCompleted).unwrap() else { panic!() };
+    let (id, attributes) = sim(13);
+    let Begin::Claimed(mut run) = store.begin::<Sim>(&id, &attributes, &info(), Reuse::IfCompleted).unwrap() else { panic!() };
     run.expect(expecting(&["traj.tsv"]));
     for bad in ["../x", "/abs", ".hidden", "a/.b", "run.json", "identity.json", "progress.json", "obs/x", "a:b", "a,b", "*", ""] {
         assert!(matches!(run.result_file(bad), Err(Error::BadFileName { .. })), "{bad:?}");
@@ -617,8 +617,8 @@ fn the_invocation_record_is_written_at_the_first_call_and_when_the_command_ends(
     let root = TempRoot::new("invocation");
     let store = open(root.path());
     let info = labelled("baseline");
-    let (id, labels) = sim(14);
-    let Begin::Claimed(mut run) = store.begin::<Sim>(&id, &labels, &info, Reuse::IfCompleted).unwrap() else { panic!() };
+    let (id, attributes) = sim(14);
+    let Begin::Claimed(mut run) = store.begin::<Sim>(&id, &attributes, &info, Reuse::IfCompleted).unwrap() else { panic!() };
     run.expect(expecting(&["traj.tsv"]));
     let path = root.path().join(".invocations/1.json");
     let first: Record = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
@@ -647,18 +647,18 @@ fn a_plan_with_by_products_names_a_result_that_lacks_one() {
     let root = TempRoot::new("plan-with");
     let store = open(root.path());
     run_sim(&store, &info(), 31);
-    let (id, labels) = sim(32);
+    let (id, attributes) = sim(32);
     let wanted = Wanted::<Sim>::none().with::<Obs>(ObsId { sim: id.record(), rate: Finite::new(0.3).unwrap() }, ());
     let i = info();
-    let Begin::Claimed(mut run) = store.begin_with(&id, &labels, &wanted, &i, Reuse::IfCompleted).unwrap() else { panic!() };
+    let Begin::Claimed(mut run) = store.begin_with(&id, &attributes, &wanted, &i, Reuse::IfCompleted).unwrap() else { panic!() };
     run.expect(expecting(&["traj.tsv"]));
     run.result_file("traj.tsv").unwrap().write_all(b"t\tI\n0\t32\n").unwrap();
     also_obs(&mut run).unwrap().result_file("obs.tsv").unwrap().write_all(b"o").unwrap();
     run.finish().unwrap();
     let want = |seed: u64| {
-        let (id, labels) = sim(seed);
+        let (id, attributes) = sim(seed);
         let w = Wanted::<Sim>::none().with::<Obs>(ObsId { sim: id.record(), rate: Finite::new(0.3).unwrap() }, ());
-        (id, labels, w)
+        (id, attributes, w)
     };
     let states: Vec<crate::PlanState> = store.plan_with::<Sim>(&[want(31), want(32), want(33)]).unwrap().into_iter().map(|p| p.state).collect();
     assert_eq!(states, vec![crate::PlanState::ByProductsMissing, crate::PlanState::Completed, crate::PlanState::Absent]);
@@ -752,7 +752,7 @@ fn a_content_artifact_is_stored_once_and_read_through_a_dependency() {
     let info1 = info();
     let a = store.put::<Model>(content.clone(), &ModelAttributes { name: "sir".into() }, &prov, &info1).unwrap();
     let b = store.put::<Model>(content.clone(), &ModelAttributes { name: "renamed".into() }, &Provenance::none(), &info()).unwrap();
-    assert_eq!(a.folder(), b.folder(), "the first writer's labels name the folder");
+    assert_eq!(a.folder(), b.folder(), "the first writer's attributes name the folder");
     assert_eq!(store.get_content::<Model>(&content).unwrap().unwrap().folder(), a.folder(), "a put content is found by its content");
     assert!(a.folder().file_name().unwrap().to_string_lossy().starts_with("sir-"));
     assert_eq!(a.recorded("whole_digest"), Some(&serde_json::json!("abc")));
@@ -894,8 +894,8 @@ fn finish_refuses_while_a_buffered_writer_is_open() {
     use std::io::Write as _;
     let root = TempRoot::new("writer-open");
     let store = open(root.path());
-    let (id, labels) = sim(21);
-    let Begin::Claimed(run) = store.begin::<Sim>(&id, &labels, &info(), Reuse::IfCompleted).unwrap() else { panic!() };
+    let (id, attributes) = sim(21);
+    let Begin::Claimed(run) = store.begin::<Sim>(&id, &attributes, &info(), Reuse::IfCompleted).unwrap() else { panic!() };
     let fh = run.result_file("traj.tsv").unwrap();
     let mut w = fh.writer();
     w.write_all(b"t\tI\n0\t1\n").unwrap();
@@ -930,16 +930,16 @@ fn a_label_check_sees_an_invocation_that_has_taken_its_number() {
     let root = TempRoot::new("label-window");
     let store = open(root.path());
     let i = labelled("base");
-    let (id, labels) = sim(22);
-    let Begin::Claimed(run) = store.begin::<Sim>(&id, &labels, &i, Reuse::IfCompleted).unwrap() else { panic!() };
+    let (id, attributes) = sim(22);
+    let Begin::Claimed(run) = store.begin::<Sim>(&id, &attributes, &i, Reuse::IfCompleted).unwrap() else { panic!() };
     // Under the store-wide lock the record is written before the lock is
     // released, so the file holds a running record, never a placeholder.
     let first: Record = serde_json::from_slice(&std::fs::read(root.path().join(".invocations/1.json")).unwrap()).unwrap();
     assert!(first.is_running(), "{first:?}");
     drop(run);
     std::fs::write(root.path().join(".invocations/5.json"), b"{}").unwrap();
-    let (id, labels) = sim(23);
-    assert!(store.begin::<Sim>(&id, &labels, &labelled("other"), Reuse::IfCompleted).is_ok());
+    let (id, attributes) = sim(23);
+    assert!(store.begin::<Sim>(&id, &attributes, &labelled("other"), Reuse::IfCompleted).is_ok());
 }
 
 #[test]
@@ -947,11 +947,11 @@ fn an_atomic_finish_that_meets_a_stored_copy_of_its_id_keeps_the_stored_one_and_
     let root = TempRoot::new("same-id");
     let other = TempRoot::new("same-id-b");
     let store = open(root.path());
-    let (id, labels) = sim(24);
+    let (id, attributes) = sim(24);
     let obs = ObsId { sim: id.record(), rate: Finite::new(0.3).unwrap() };
     let wanted = Wanted::<Sim>::none().with::<Obs>(obs.clone(), ());
     let info = info();
-    let Begin::Claimed(mut run) = store.begin_with(&id, &labels, &wanted, &info, Reuse::IfCompleted).unwrap() else { panic!() };
+    let Begin::Claimed(mut run) = store.begin_with(&id, &attributes, &wanted, &info, Reuse::IfCompleted).unwrap() else { panic!() };
     run.expect(expecting(&["traj.tsv"]));
     run.result_file("traj.tsv").unwrap().write_all(b"t\tI\n0\t24\n").unwrap();
     also_obs(&mut run).unwrap().result_file("obs.tsv").unwrap().write_all(b"o").unwrap();
@@ -974,8 +974,8 @@ fn an_atomic_finish_that_meets_a_different_stored_copy_of_its_id_is_divergent() 
     let root = TempRoot::new("same-id-div");
     let other = TempRoot::new("same-id-div-b");
     let store = open(root.path());
-    let (id, labels) = sim(25);
-    let Begin::Claimed(mut run) = store.begin::<Sim>(&id, &labels, &info(), Reuse::IfCompleted).unwrap() else { panic!() };
+    let (id, attributes) = sim(25);
+    let Begin::Claimed(mut run) = store.begin::<Sim>(&id, &attributes, &info(), Reuse::IfCompleted).unwrap() else { panic!() };
     run.expect(expecting(&["traj.tsv"]));
     run.result_file("traj.tsv").unwrap().write_all(b"different bytes").unwrap();
     let rel = { let st = open(other.path()); run_sim(&st, &crate::tests::info(), 25).folder().strip_prefix(other.path()).unwrap().to_path_buf() };
@@ -990,8 +990,8 @@ fn an_atomic_finish_that_meets_a_different_stored_copy_of_its_id_is_divergent() 
 fn a_claim_is_cleared_only_while_it_still_names_the_owner_that_was_read() {
     let root = TempRoot::new("clear-claim");
     let store = open(root.path());
-    let (id, labels) = sim(26);
-    let Begin::Claimed(mut run) = store.begin::<Sim>(&id, &labels, &info(), Reuse::IfCompleted).unwrap() else { panic!() };
+    let (id, attributes) = sim(26);
+    let Begin::Claimed(mut run) = store.begin::<Sim>(&id, &attributes, &info(), Reuse::IfCompleted).unwrap() else { panic!() };
     run.expect(expecting(&["traj.tsv"]));
     let staging = run.core.files_dir_pub();
     // A claimant read the folder when a dead owner held it; it now names this process.
@@ -1024,8 +1024,8 @@ fn finish_refuses_an_undeclared_file() {
     let root = TempRoot::new("undeclared");
     let store = open(root.path());
     let info = info();
-    let (id, labels) = sim(31);
-    let Begin::Claimed(mut run) = store.begin::<Sim>(&id, &labels, &info, Reuse::IfCompleted).unwrap() else { panic!() };
+    let (id, attributes) = sim(31);
+    let Begin::Claimed(mut run) = store.begin::<Sim>(&id, &attributes, &info, Reuse::IfCompleted).unwrap() else { panic!() };
     run.expect(files(&["traj.tsv", "failure.toml"], &["execution.json"]));
     run.result_file("traj.tsv").unwrap().write_all(b"t\n").unwrap();
     run.result_file("stray.tsv").unwrap().write_all(b"x").unwrap();
@@ -1054,8 +1054,8 @@ fn finish_refuses_an_undeclared_file() {
 fn finish_refuses_a_run_with_no_expected_set() {
     let root = TempRoot::new("no-expected");
     let store = open(root.path());
-    let (id, labels) = sim(32);
-    let Begin::Claimed(run) = store.begin::<Sim>(&id, &labels, &info(), Reuse::IfCompleted).unwrap() else { panic!() };
+    let (id, attributes) = sim(32);
+    let Begin::Claimed(run) = store.begin::<Sim>(&id, &attributes, &info(), Reuse::IfCompleted).unwrap() else { panic!() };
     run.result_file("traj.tsv").unwrap().write_all(b"t\n").unwrap();
     match run.finish() {
         Err(e @ Error::NoExpectedFiles { .. }) => {
@@ -1065,7 +1065,7 @@ fn finish_refuses_a_run_with_no_expected_set() {
         }
         other => panic!("{other:?}"),
     }
-    let Begin::Claimed(mut run) = store.begin::<Sim>(&id, &labels, &info(), Reuse::IfCompleted).unwrap() else { panic!() };
+    let Begin::Claimed(mut run) = store.begin::<Sim>(&id, &attributes, &info(), Reuse::IfCompleted).unwrap() else { panic!() };
     run.expect(expecting(&["traj.tsv"]));
     run.expect(expecting(&["failure.toml"]));
     run.result_file("failure.toml").unwrap().write_all(b"why").unwrap();
@@ -1079,9 +1079,9 @@ fn a_by_product_is_held_to_its_declared_files() {
     let root = TempRoot::new("bp-expected");
     let store = open(root.path());
     for declare in [false, true] {
-        let (id, labels) = sim(33 + declare as u64);
+        let (id, attributes) = sim(33 + declare as u64);
         let wanted = Wanted::<Sim>::none().with::<Obs>(ObsId { sim: id.record(), rate: Finite::new(0.3).unwrap() }, ());
-        let Begin::Claimed(mut run) = store.begin_with(&id, &labels, &wanted, &info(), Reuse::IfCompleted).unwrap() else { panic!() };
+        let Begin::Claimed(mut run) = store.begin_with(&id, &attributes, &wanted, &info(), Reuse::IfCompleted).unwrap() else { panic!() };
         run.expect(expecting(&["traj.tsv"]));
         run.result_file("traj.tsv").unwrap().write_all(b"t\n").unwrap();
         let mut obs = run.also::<Obs>().unwrap().unwrap();
@@ -1107,30 +1107,30 @@ fn a_by_product_is_held_to_its_declared_files() {
 fn a_content_artifact_of_several_files_is_stored_once() {
     let root = TempRoot::new("put-files");
     let store = open(root.path());
-    let id = PresentationId {
+    let id = SketchId {
         text: Hashed::new(ModelText("S -> I".into())),
         picture: Some(Hashed::new(ModelText("[S]->[I]".into()))),
     };
-    let labels = ModelAttributes { name: "sir".into() };
+    let attributes = ModelAttributes { name: "sir".into() };
     let info1 = info();
-    let a = store.put::<Presentation>(id.clone(), &labels, &Provenance::none(), &info1).unwrap();
+    let a = store.put::<Sketch>(id.clone(), &attributes, &Provenance::none(), &info1).unwrap();
     assert_eq!(a.open("text.txt").unwrap().into_inner(), b"S -> I");
     assert_eq!(a.open("picture.txt").unwrap().into_inner(), b"[S]->[I]");
-    let b = store.put::<Presentation>(id.clone(), &labels, &Provenance::none(), &info()).unwrap();
+    let b = store.put::<Sketch>(id.clone(), &attributes, &Provenance::none(), &info()).unwrap();
     assert_eq!(a.folder(), b.folder());
     assert_eq!(info1.finish(&store).unwrap().record.listings()[0].outcome, Some(&Outcome::Computed));
 
-    let bare = PresentationId { text: id.text.clone(), picture: None };
-    let c = store.put::<Presentation>(bare, &labels, &Provenance::none(), &info()).unwrap();
+    let bare = SketchId { text: id.text.clone(), picture: None };
+    let c = store.put::<Sketch>(bare, &attributes, &Provenance::none(), &info()).unwrap();
     assert_ne!(c.folder(), a.folder(), "a missing file is a different content");
     assert!(c.open("picture.txt").is_err());
 }
 
 /// A result another build stored is listed in an invocation of this build
-/// with this invocation's labels, as reused, and nothing is stored again; a
+/// with this invocation's attributes, as reused, and nothing is stored again; a
 /// result that is not stored is refused.
 #[test]
-fn a_stored_result_is_listed_with_new_labels_and_not_stored_again() {
+fn a_stored_result_is_listed_with_new_attributes_and_not_stored_again() {
     let root = TempRoot::new("list");
     let content = Hashed::new(ModelText("S -> I".into()));
     let a = open_build(root.path(), "b1").put::<Model>(content.clone(), &ModelAttributes { name: "sir".into() }, &Provenance::none(), &info()).unwrap();
@@ -1164,8 +1164,8 @@ fn a_content_file_the_identity_does_not_hold_is_refused() {
         type Attributes = ModelAttributes;
     }
     impl Primary for Unheld {
-        fn layout(_: &Hashed<ModelText>, labels: &ModelAttributes) -> Placed {
-            Layout::in_kind().result(&labels.name)
+        fn layout(_: &Hashed<ModelText>, attributes: &ModelAttributes) -> Placed {
+            Layout::in_kind().result(&attributes.name)
         }
     }
     impl ContentFiles for Unheld {
@@ -1214,6 +1214,6 @@ fn records_the_store_does_not_read_are_listed_and_left_out() {
     assert_eq!(unread[1].path, planned);
     assert!(matches!(&unread[1].why, crate::Unread::Invalid { why } if why.contains("planned")), "{:?}", unread[1]);
     let i = info();
-    let (id, labels) = sim(41);
-    assert!(matches!(store.begin::<Sim>(&id, &labels, &i, Reuse::IfCompleted).unwrap(), Begin::Reused(r) if r.id() == s.id()));
+    let (id, attributes) = sim(41);
+    assert!(matches!(store.begin::<Sim>(&id, &attributes, &i, Reuse::IfCompleted).unwrap(), Begin::Reused(r) if r.id() == s.id()));
 }

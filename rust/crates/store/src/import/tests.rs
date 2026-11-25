@@ -49,9 +49,9 @@ struct Remote {
 /// invocation labelled `remote`, the prediction under a second.
 fn fill(store: &Store) -> Remote {
     let i = labelled("remote");
-    let (id, labels) = sim(1);
+    let (id, attributes) = sim(1);
     let wanted = Wanted::<Sim>::none().with::<Obs>(ObsId { sim: id.record(), rate: Finite::new(0.3).unwrap() }, ());
-    let Begin::Claimed(mut run) = store.begin_with(&id, &labels, &wanted, &i, Reuse::IfCompleted).unwrap() else { panic!() };
+    let Begin::Claimed(mut run) = store.begin_with(&id, &attributes, &wanted, &i, Reuse::IfCompleted).unwrap() else { panic!() };
     run.expect(files(&["traj.tsv"], &["execution.json"]));
     run.result_file("traj.tsv").unwrap().write_all(b"t\tI\n0\t1\n").unwrap();
     run.provenance_file("execution.json").unwrap().write_all(b"{\"host\":\"remote\"}").unwrap();
@@ -206,7 +206,7 @@ fn import_places_and_records_a_pulled_store_with_its_nested_results() {
     assert_eq!(local.locate(r.obs).unwrap().upstream(), Some(r.sim));
     assert!(local.verify(None).unwrap().damaged.is_empty());
 
-    // One invocation lists them, parents first, reused, with the labels the
+    // One invocation lists them, parents first, reused, with the attributes the
     // other store's records gave them.
     assert_eq!(inv.label(), Some("pulled"));
     let kinds: Vec<&str> = inv.record.listings().iter().map(|e| e.kind).collect();
@@ -326,8 +326,8 @@ fn import_of_a_result_already_here_with_equal_bytes_leaves_it_in_place() {
     // The same build as the copy's, and the same simulation computed here:
     // its provenance file differs, its result files do not.
     let local = open_build(s.local_root.path(), "remote");
-    let (id, labels) = sim(1);
-    let Begin::Claimed(mut run) = local.begin::<Sim>(&id, &labels, &info(), Reuse::IfCompleted).unwrap() else { panic!() };
+    let (id, attributes) = sim(1);
+    let Begin::Claimed(mut run) = local.begin::<Sim>(&id, &attributes, &info(), Reuse::IfCompleted).unwrap() else { panic!() };
     run.expect(files(&["traj.tsv"], &["execution.json"]));
     run.result_file("traj.tsv").unwrap().write_all(b"t\tI\n0\t1\n").unwrap();
     run.provenance_file("execution.json").unwrap().write_all(b"{\"host\":\"here\"}").unwrap();

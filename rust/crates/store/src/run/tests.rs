@@ -24,9 +24,9 @@ fn write_obs(run: &mut crate::Run<Sim>) {
 fn a_by_product_wanted_with_its_upstream_is_committed_with_it() {
     let root = TempRoot::new("bp-together");
     let store = open(root.path());
-    let (id, labels) = sim(1);
+    let (id, attributes) = sim(1);
     let wanted = Wanted::<Sim>::none().with::<Obs>(obs_of(&id, 0.3), ());
-    let Begin::Claimed(mut run) = store.begin_with(&id, &labels, &wanted, &info(), Reuse::IfCompleted).unwrap() else { panic!() };
+    let Begin::Claimed(mut run) = store.begin_with(&id, &attributes, &wanted, &info(), Reuse::IfCompleted).unwrap() else { panic!() };
     assert!(!run.reproducing());
     write_sim(&mut run, 1);
     let mut obs = run.also::<Obs>().unwrap().expect("wanted");
@@ -42,7 +42,7 @@ fn a_by_product_wanted_with_its_upstream_is_committed_with_it() {
     assert!(store.get(s.id()).unwrap().is_some(), "its by-products do not damage the upstream");
     let obs_id = crate::Id::<Obs>::of(&store.inner.ambient_key, &obs_of(&id, 0.3));
     assert!(store.get(&obs_id).unwrap().is_some());
-    assert!(matches!(store.begin_with(&id, &labels, &wanted, &info(), Reuse::IfCompleted).unwrap(), Begin::Reused(_)));
+    assert!(matches!(store.begin_with(&id, &attributes, &wanted, &info(), Reuse::IfCompleted).unwrap(), Begin::Reused(_)));
 }
 
 #[test]
@@ -51,10 +51,10 @@ fn a_by_product_asked_for_later_reproduces_the_upstream_without_touching_it() {
     let store = open(root.path());
     let s = run_sim(&store, &info(), 2);
     let before = std::fs::read(s.folder().join("run.json")).unwrap();
-    let (id, labels) = sim(2);
+    let (id, attributes) = sim(2);
     let wanted = Wanted::<Sim>::none().with::<Obs>(obs_of(&id, 0.5), ());
     let info = info();
-    let Begin::Claimed(mut run) = store.begin_with(&id, &labels, &wanted, &info, Reuse::IfCompleted).unwrap() else { panic!() };
+    let Begin::Claimed(mut run) = store.begin_with(&id, &attributes, &wanted, &info, Reuse::IfCompleted).unwrap() else { panic!() };
     assert!(run.reproducing());
     write_sim(&mut run, 2);
     run.progress(&"reproducing").unwrap();
@@ -75,9 +75,9 @@ fn a_reproduced_upstream_that_differs_is_divergent_and_its_files_are_kept() {
     let root = TempRoot::new("bp-divergent");
     let store = open(root.path());
     let s = run_sim(&store, &info(), 3);
-    let (id, labels) = sim(3);
+    let (id, attributes) = sim(3);
     let wanted = Wanted::<Sim>::none().with::<Obs>(obs_of(&id, 0.5), ());
-    let Begin::Claimed(mut run) = store.begin_with(&id, &labels, &wanted, &info(), Reuse::IfCompleted).unwrap() else { panic!() };
+    let Begin::Claimed(mut run) = store.begin_with(&id, &attributes, &wanted, &info(), Reuse::IfCompleted).unwrap() else { panic!() };
     run.expect(expecting(&["traj.tsv"]));
     run.result_file("traj.tsv").unwrap().write_all(b"something else").unwrap();
     write_obs(&mut run);
@@ -96,9 +96,9 @@ fn a_reproduced_upstream_that_skips_a_stored_file_is_divergent() {
     let root = TempRoot::new("bp-skip");
     let store = open(root.path());
     run_sim(&store, &info(), 4);
-    let (id, labels) = sim(4);
+    let (id, attributes) = sim(4);
     let wanted = Wanted::<Sim>::none().with::<Obs>(obs_of(&id, 0.5), ());
-    let Begin::Claimed(run) = store.begin_with(&id, &labels, &wanted, &info(), Reuse::IfCompleted).unwrap() else { panic!() };
+    let Begin::Claimed(run) = store.begin_with(&id, &attributes, &wanted, &info(), Reuse::IfCompleted).unwrap() else { panic!() };
     assert!(matches!(run.finish(), Err(Error::Divergent { .. })));
 }
 
@@ -106,10 +106,10 @@ fn a_reproduced_upstream_that_skips_a_stored_file_is_divergent() {
 fn a_failed_upstream_fails_its_by_products() {
     let root = TempRoot::new("bp-fail");
     let store = open(root.path());
-    let (id, labels) = sim(5);
+    let (id, attributes) = sim(5);
     let wanted = Wanted::<Sim>::none().with::<Obs>(obs_of(&id, 0.5), ());
     let info = info();
-    let Begin::Claimed(mut run) = store.begin_with(&id, &labels, &wanted, &info, Reuse::IfCompleted).unwrap() else { panic!() };
+    let Begin::Claimed(mut run) = store.begin_with(&id, &attributes, &wanted, &info, Reuse::IfCompleted).unwrap() else { panic!() };
     write_obs(&mut run);
     run.fail("simulating", "a negative rate").unwrap();
     assert!(result_folders(root.path()).is_empty());
@@ -143,10 +143,10 @@ fn a_divergence_from_an_extra_file_leaves_the_stored_upstream_reused() {
     let root = TempRoot::new("bp-extra");
     let store = open(root.path());
     run_sim(&store, &info(), 6);
-    let (id, labels) = sim(6);
+    let (id, attributes) = sim(6);
     let wanted = Wanted::<Sim>::none().with::<Obs>(obs_of(&id, 0.5), ());
     let info = info();
-    let Begin::Claimed(mut run) = store.begin_with(&id, &labels, &wanted, &info, Reuse::IfCompleted).unwrap() else { panic!() };
+    let Begin::Claimed(mut run) = store.begin_with(&id, &attributes, &wanted, &info, Reuse::IfCompleted).unwrap() else { panic!() };
     write_sim(&mut run, 6);
     run.result_file("extra.tsv").unwrap().write_all(b"x").unwrap();
     assert!(matches!(run.finish(), Err(Error::Divergent { .. })));
@@ -174,15 +174,15 @@ fn a_by_product_records_the_reads_made_to_write_it() {
         if later {
             // The stored upstream read the model too, so a by-product added
             // later is written from a run whose own reads repeat it.
-            let (id, labels) = sim(seed);
-            let Begin::Claimed(mut run) = store.begin(&id, &labels, &info(), Reuse::IfCompleted).unwrap() else { panic!() };
+            let (id, attributes) = sim(seed);
+            let Begin::Claimed(mut run) = store.begin(&id, &attributes, &info(), Reuse::IfCompleted).unwrap() else { panic!() };
             run.load(&model).unwrap();
             write_sim(&mut run, seed);
             run.finish().unwrap();
         }
-        let (id, labels) = sim(seed);
+        let (id, attributes) = sim(seed);
         let wanted = Wanted::<Sim>::none().with::<Obs>(obs_of(&id, 0.3), ());
-        let Begin::Claimed(mut run) = store.begin_with(&id, &labels, &wanted, &info(), Reuse::IfCompleted).unwrap() else { panic!() };
+        let Begin::Claimed(mut run) = store.begin_with(&id, &attributes, &wanted, &info(), Reuse::IfCompleted).unwrap() else { panic!() };
         assert_eq!(run.reproducing(), later);
         run.load(&model).unwrap();
         write_sim(&mut run, seed);

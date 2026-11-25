@@ -109,8 +109,8 @@ fn clean_removes_quarantine_attempts_dead_staging_and_empty_directories_only() {
     let Begin::Claimed(mut run) = store.begin::<Fit>(&f, &(), &info(), Reuse::IfCompleted).unwrap() else { panic!() };
     run.expect(expecting(&[]));
     let fit = run.finish().unwrap();
-    let (id, labels) = sim(3);
-    let Begin::Claimed(run) = store.begin::<Sim>(&id, &labels, &info(), Reuse::IfCompleted).unwrap() else { panic!() };
+    let (id, attributes) = sim(3);
+    let Begin::Claimed(run) = store.begin::<Sim>(&id, &attributes, &info(), Reuse::IfCompleted).unwrap() else { panic!() };
     let staging = run.core.files_dir_pub();
     std::mem::forget(run);
     set_owner(&staging.join("run.json"), &dead_owner());

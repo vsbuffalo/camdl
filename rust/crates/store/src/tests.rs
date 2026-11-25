@@ -1,7 +1,7 @@
 //! A small project on the store, for the store's own tests: a simulation
 //! (atomic, grouped by model), its observations (a by-product), a fit (in
 //! place), a prediction placed inside a fit, a model (a content artifact of
-//! one file) and a model's presentation (a content artifact of several).
+//! one file) and a model's sketch (a content artifact of several).
 
 pub(crate) use std::path::{Path, PathBuf};
 
@@ -41,8 +41,8 @@ impl Artifact for Sim {
     type Attributes = SimAttributes;
 }
 impl Primary for Sim {
-    fn layout(id: &SimId, labels: &SimAttributes) -> Placed {
-        Layout::in_kind().group(&labels.model, &id.model).result(&format!("seed_{}", labels.seed))
+    fn layout(id: &SimId, attributes: &SimAttributes) -> Placed {
+        Layout::in_kind().group(&attributes.model, &id.model).result(&format!("seed_{}", attributes.seed))
     }
 }
 
@@ -157,8 +157,8 @@ impl Artifact for Model {
     type Attributes = ModelAttributes;
 }
 impl Primary for Model {
-    fn layout(_: &Hashed<ModelText>, labels: &ModelAttributes) -> Placed {
-        Layout::in_kind().result(&labels.name)
+    fn layout(_: &Hashed<ModelText>, attributes: &ModelAttributes) -> Placed {
+        Layout::in_kind().result(&attributes.name)
     }
 }
 impl ContentArtifact for Model {
@@ -169,26 +169,26 @@ impl ContentArtifact for Model {
 /// A model's text and, when it has one, its picture: two files, each held
 /// in the identity by its digest.
 #[derive(Identity, Clone, Debug)]
-#[identity(tag = "presentation", version = 1)]
-pub(crate) struct PresentationId {
+#[identity(tag = "sketch", version = 1)]
+pub(crate) struct SketchId {
     pub text: Hashed<ModelText>,
     pub picture: Option<Hashed<ModelText>>,
 }
 
-pub(crate) struct Presentation;
-impl Artifact for Presentation {
-    const KIND: &'static str = "presentation";
+pub(crate) struct Sketch;
+impl Artifact for Sketch {
+    const KIND: &'static str = "sketch";
     const WRITE: WriteMode = WriteMode::Atomic;
-    type Identity = PresentationId;
+    type Identity = SketchId;
     type Attributes = ModelAttributes;
 }
-impl Primary for Presentation {
-    fn layout(_: &PresentationId, labels: &ModelAttributes) -> Placed {
-        Layout::in_kind().result(&labels.name)
+impl Primary for Sketch {
+    fn layout(_: &SketchId, attributes: &ModelAttributes) -> Placed {
+        Layout::in_kind().result(&attributes.name)
     }
 }
-impl ContentFiles for Presentation {
-    fn files(id: &PresentationId) -> Vec<(String, Vec<u8>)> {
+impl ContentFiles for Sketch {
+    fn files(id: &SketchId) -> Vec<(String, Vec<u8>)> {
         let mut v = vec![("text.txt".to_string(), id.text.get().to_bytes())];
         v.extend(id.picture.iter().map(|p| ("picture.txt".to_string(), p.get().to_bytes())));
         v
@@ -203,7 +203,7 @@ pub(crate) fn kinds() -> Kinds {
         .register::<Trace>()
         .register::<Pred>()
         .register::<Model>()
-        .register::<Presentation>()
+        .register::<Sketch>()
 }
 
 /// A fresh, empty directory under the system's temporary directory, removed
@@ -269,9 +269,9 @@ pub(crate) fn also_obs(run: &mut crate::Run<Sim>) -> Option<crate::ByProductRun<
 /// Begins a simulation and, if claimed, writes `traj.tsv` from its seed and
 /// finishes it.
 pub(crate) fn run_sim(store: &Store, info: &RunInfo, seed: u64) -> crate::Stored<Sim> {
-    let (id, labels) = sim(seed);
+    let (id, attributes) = sim(seed);
     store
-        .run::<Sim, crate::Error>(&id, &labels, info, crate::Reuse::IfCompleted, expecting(&["traj.tsv"]), "simulating", |run| {
+        .run::<Sim, crate::Error>(&id, &attributes, info, crate::Reuse::IfCompleted, expecting(&["traj.tsv"]), "simulating", |run| {
             run.result_file("traj.tsv")?.write_all(format!("t\tI\n0\t{seed}\n").as_bytes())
         })
         .map_err(|e| e.to_string())

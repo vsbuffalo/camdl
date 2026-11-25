@@ -6,9 +6,9 @@ use crate::{Begin, Error, Key, Reuse, Wanted};
 
 /// A cell with its `obs` by-product, under `info`.
 fn sim_with_obs(store: &Store, info: &RunInfo, seed: u64) -> crate::Stored<Sim> {
-    let (id, labels) = sim(seed);
+    let (id, attributes) = sim(seed);
     let wanted = Wanted::<Sim>::none().with::<Obs>(ObsId { sim: id.record(), rate: Finite::new(0.3).unwrap() }, ());
-    let Begin::Claimed(mut run) = store.begin_with(&id, &labels, &wanted, info, Reuse::IfCompleted).unwrap() else { panic!() };
+    let Begin::Claimed(mut run) = store.begin_with(&id, &attributes, &wanted, info, Reuse::IfCompleted).unwrap() else { panic!() };
     run.expect(files(&["traj.tsv"], &["execution.json"]));
     run.result_file("traj.tsv").unwrap().write_all(format!("t\tI\n0\t{seed}\n").as_bytes()).unwrap();
     run.provenance_file("execution.json").unwrap().write_all(b"{}").unwrap();
@@ -175,8 +175,8 @@ fn outputs_refuse_an_invocation_with_a_result_that_did_not_complete() {
     let store = open(root.path());
     let i = info();
     let ok = run_sim(&store, &i, 9);
-    let (id, labels) = sim(10);
-    let _ = store.run::<Sim, String>(&id, &labels, &i, Reuse::IfCompleted, expecting(&[]), "simulating", |_| Err("no".into()));
+    let (id, attributes) = sim(10);
+    let _ = store.run::<Sim, String>(&id, &attributes, &i, Reuse::IfCompleted, expecting(&[]), "simulating", |_| Err("no".into()));
     let inv = i.finish(&store).unwrap();
     match inv.outputs(&store) {
         Err(Error::MemberNotCompleted { members, .. }) => {

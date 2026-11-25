@@ -61,8 +61,8 @@ fn a_label_names_the_latest_invocation_whose_results_all_completed() {
 
     // An invocation with a failed result does not take the name.
     let i3 = labelled("base");
-    let (id, labels) = sim(3);
-    let _ = store.run::<Sim, String>(&id, &labels, &i3, Reuse::IfCompleted, expecting(&[]), "simulating", |_| Err("no".into()));
+    let (id, attributes) = sim(3);
+    let _ = store.run::<Sim, String>(&id, &attributes, &i3, Reuse::IfCompleted, expecting(&[]), "simulating", |_| Err("no".into()));
     i3.finish(&store).unwrap();
     assert_eq!(resolve_sim(&store, "@base").unwrap().id(), second.id());
 
@@ -108,8 +108,8 @@ fn a_label_is_refused_while_an_invocation_carrying_it_runs() {
     let store = open(root.path());
     let (owner, mut child) = live_owner();
     running_invocation(root.path(), 7, "base", owner.clone());
-    let (id, labels) = sim(1);
-    match store.begin::<Sim>(&id, &labels, &labelled("base"), Reuse::IfCompleted) {
+    let (id, attributes) = sim(1);
+    match store.begin::<Sim>(&id, &attributes, &labelled("base"), Reuse::IfCompleted) {
         Err(Error::LabelInUse { owner: o, running, .. }) => {
             assert_eq!(o, owner);
             assert_eq!(running, Some(crate::Key::digest_bytes(b"r")));
@@ -118,7 +118,7 @@ fn a_label_is_refused_while_an_invocation_carrying_it_runs() {
     }
     child.kill().unwrap();
     child.wait().unwrap();
-    assert!(matches!(store.begin::<Sim>(&id, &labels, &labelled("base"), Reuse::IfCompleted).unwrap(), Begin::Claimed(_)));
+    assert!(matches!(store.begin::<Sim>(&id, &attributes, &labelled("base"), Reuse::IfCompleted).unwrap(), Begin::Claimed(_)));
     running_invocation(root.path(), 20, "other", dead_owner());
     let i = labelled("other");
     run_sim(&store, &i, 2);
@@ -143,7 +143,7 @@ impl crate::Rendering for Combined {
 }
 
 #[test]
-fn a_rendering_combines_an_invocations_results_with_their_labels() {
+fn a_rendering_combines_an_invocations_results_with_their_attributes() {
     let root = TempRoot::new("render");
     let store = open(root.path());
     let i = labelled("pair");
@@ -160,8 +160,8 @@ fn a_rendering_combines_an_invocations_results_with_their_labels() {
 
     let i = labelled("broken");
     run_sim(&store, &i, 3);
-    let (id, labels) = sim(4);
-    let _ = store.run::<Sim, String>(&id, &labels, &i, Reuse::IfCompleted, expecting(&[]), "simulating", |_| Err("no".into()));
+    let (id, attributes) = sim(4);
+    let _ = store.run::<Sim, String>(&id, &attributes, &i, Reuse::IfCompleted, expecting(&[]), "simulating", |_| Err("no".into()));
     let inv = i.finish(&store).unwrap();
     assert!(matches!(inv.render_to::<Combined>(&store, &false, &mut Vec::new()), Err(Error::MemberNotCompleted { .. })));
 
@@ -202,10 +202,10 @@ fn a_by_product_rendering_reads_each_members_own_by_product() {
     let store = open(root.path());
     let i = labelled("obs");
     for (seed, want) in [(1u64, true), (2, false), (3, true)] {
-        let (id, labels) = sim(seed);
+        let (id, attributes) = sim(seed);
         let obs = ObsId { sim: id.record(), rate: Finite::new(seed as f64).unwrap() };
         let wanted = if want { crate::Wanted::<Sim>::none().with::<Obs>(obs, ()) } else { crate::Wanted::none() };
-        let Begin::Claimed(mut run) = store.begin_with::<Sim>(&id, &labels, &wanted, &i, Reuse::IfCompleted).unwrap() else {
+        let Begin::Claimed(mut run) = store.begin_with::<Sim>(&id, &attributes, &wanted, &i, Reuse::IfCompleted).unwrap() else {
             panic!("claimed")
         };
         run.expect(expecting(&["traj.tsv"]));
