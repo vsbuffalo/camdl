@@ -839,6 +839,16 @@ scored rows end after it (§2.2.4); never declared or unknown. Its score records
 `parameters = "winner"`, which a fixed point's `fixed_point` does not share. A
 sampler run whose draws are not yet written is refused, naming its method.
 
+`camdl predict RUN --model FILE` evaluates the quantities and contrasts of the
+model file `FILE` in place of those of the model file the run's invocation
+recorded. `FILE` is compiled and compared with the model the fit ran on as
+`simulate --fit` compares a model (§3.4): a file that differs is refused, and
+one that differs only in its `quantities {}` or `contrasts {}` is said on
+stderr. The fit is read from the store and not computed again. `FILE`'s
+quantities and its presentation are stored as any compile stores them, and the
+invocation records `FILE` as the model file the fit's compiled model was run
+from.
+
 `camdl predict MODEL`, with a `.camdl` or `.ir.json` model file in place of the
 handle, predicts at one point: the model's values, each `--params` file, then
 each `--param` (§1.3, without a fit config's tier). `--data` is required and
@@ -860,10 +870,10 @@ time, each stream's conditioned rows as a stored data table, the model's
 quantities, and the same options as a posterior prediction's; a held-out row's
 value is in none of them. `--no-licm` changes the compiled model and so re-keys
 it. A posterior flag (`--by-chain`, `--exclude-chains`, `--chains`,
-`--realised-design`) is refused with a model file, and a fixed-point flag with a
-handle. A window-column stream with no emit schedule has no forecast target,
-since no held-out row is kept, and is refused for a forecast. Contrasts, which
-fork from a fit's saved smoothing paths, are skipped with a notice.
+`--realised-design`, `--model`) is refused with a model file, and a fixed-point
+flag with a handle. A window-column stream with no emit schedule has no forecast
+target, since no held-out row is kept, and is refused for a forecast. Contrasts,
+which fork from a fit's saved smoothing paths, are skipped with a notice.
 
 Both forms take `--store DIR` (the store a fixed-point prediction is stored in
 and a run handle is looked up in, over `CAMDL_STORE`; a folder handle names its
@@ -877,36 +887,37 @@ option that changes the output, resolved to the values used: the mode
 (`--mode`), `--horizon`, `--n-draws`, `--seed`, `--stream`,
 `--scenario`/`--enable`/`--disable`, `--sweep`, `--by-chain`, the chains
 `--exclude-chains`/`--chains` drop from the fit's cloud (so the two spellings of
-one selection are one key), the particle count, the SHA-256 of a `--quantities`
-file, `--allow-forcing-extrapolation`, and, for a forecast, its target set (each
-target's stream, period or instant, and design values where it reads any; D80,
-D81), the design mode, and each `--covariate` statement, by forcing. A forecast
-that reads no table forcing after its origin states none, and its identity has
-no field for them. The build is in the ambient key, as for every result in the
-run store. Two predictions that differ in the run, the build or any of those
-inputs therefore never share a folder. The held-out outcomes are not in the
-identity: they change no prediction (D79). The data are the problem's stored
-training files, so an edit to the user's data file after the fit does not reach
-a prediction. A forecast from a stored fit reads its targets from the problem's
-`held_out/` files, computes no held-out score, and refuses `--realised-design`,
-whose design values are held-out values; the held-out rows of a stored fit are
-scored only by `camdl score` against outcome files (§2.2.4), and compared by
-`camdl compare` (Appendix A, `camdl compare`). A rerun of `camdl predict` with
-the same inputs is served from the store, without computing the prediction again
-for every mode but a forecast, whose identity holds the target set it computes.
-`predictive.json`, `observed.json` and `forecast.json` record the key under
-`address_key` and the options under `options`. Every manifest of a prediction
-(`predictive.json`, `observed.json`, the quantities manifest, `report.json`,
-`forecast.json`) records the engine that made it as `run.json` does:
-`engine_version`, the build fingerprint, and `engine_switches`, absent when no
-switch was on. `fit table --quantity` reads the address its own free-forward
-derivation writes. Inside the directory, `--exclude-chains` and `--quantities`
-also name the files (`predictive-excl3/`, `quantities-<key8>/`), so a
-chain-subset or other-vocabulary table says so in its name. A forecast's files
-carry no such suffix (D86): `forecast.json`, `forecast-samples.tsv`, `forecast/`
-and `report.json` keep their names, the directory alone is keyed by the
-selection, and `forecast.json` states `options.excluded_chains` (`[]` for the
-full cloud).
+one selection are one key), the particle count, the quantities and contrasts it
+evaluates (those of the recorded model file, or of `--model`), the SHA-256 of a
+`--quantities` file, `--allow-forcing-extrapolation`, and, for a forecast, its
+target set (each target's stream, period or instant, and design values where it
+reads any; D80, D81), the design mode, and each `--covariate` statement, by
+forcing. A forecast that reads no table forcing after its origin states none,
+and its identity has no field for them. The build is in the ambient key, as for
+every result in the run store. Two predictions that differ in the run, the build
+or any of those inputs therefore never share a folder. The held-out outcomes are
+not in the identity: they change no prediction (D79). The data are the problem's
+stored training files, so an edit to the user's data file after the fit does not
+reach a prediction. A forecast from a stored fit reads its targets from the
+problem's `held_out/` files, computes no held-out score, and refuses
+`--realised-design`, whose design values are held-out values; the held-out rows
+of a stored fit are scored only by `camdl score` against outcome files (§2.2.4),
+and compared by `camdl compare` (Appendix A, `camdl compare`). A rerun of
+`camdl predict` with the same inputs is served from the store, without computing
+the prediction again for every mode but a forecast, whose identity holds the
+target set it computes. `predictive.json`, `observed.json` and `forecast.json`
+record the key under `address_key` and the options under `options`. Every
+manifest of a prediction (`predictive.json`, `observed.json`, the quantities
+manifest, `report.json`, `forecast.json`) records the engine that made it as
+`run.json` does: `engine_version`, the build fingerprint, and `engine_switches`,
+absent when no switch was on. `fit table --quantity` reads the address its own
+free-forward derivation writes. Inside the directory, `--exclude-chains` and
+`--quantities` also name the files (`predictive-excl3/`, `quantities-<key8>/`),
+so a chain-subset or other-vocabulary table says so in its name. A forecast's
+files carry no such suffix (D86): `forecast.json`, `forecast-samples.tsv`,
+`forecast/` and `report.json` keep their names, the directory alone is keyed by
+the selection, and `forecast.json` states `options.excluded_chains` (`[]` for
+the full cloud).
 
 **Forcings read after the origin.** A forcing read from a data table is an input
 at every time, and after a forecast's origin its values may have been fixed in

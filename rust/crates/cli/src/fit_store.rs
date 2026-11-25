@@ -1550,6 +1550,34 @@ impl OpenedFit {
     pub fn record_presentation(&self, store: &Store, info: &store::RunInfo) -> Result<(), String> {
         record_presentation(store, info, &self.fit.model, &self.shown, &self.model_name())
     }
+
+    /// This fit, reported through another model file, which the caller has
+    /// checked compiles to the model the fit ran on apart from its quantities
+    /// and contrasts. `quantities`, what that file's compile produced, and
+    /// `shown`, its presentation, replace the recorded ones: in
+    /// [`Self::quantities`], in [`Self::shown`] (so [`Self::record_presentation`]
+    /// records the file) and in the IR files a reader loads.
+    pub fn reported_through(
+        mut self,
+        store: &Store,
+        quantities: Dep<crate::camdl_store::Quantities>,
+        content: &crate::camdl_store::QuantitiesContent,
+        shown: crate::camdl_store::Shown,
+    ) -> Result<Self, String> {
+        let mut envelope = stored_envelope(store, &self.fit.model, &self.model_name())?;
+        shown.restore(&self.handle, &mut envelope);
+        envelope.model.quantities = content.quantities()?;
+        envelope.model.contrasts = content.contrasts()?;
+        let json = serde_json::to_string(&envelope).map_err(|e| e.to_string())?;
+        let mut files = vec![self.model_ir.clone()];
+        files.extend(self.run.as_ref().map(|r| r.path().join("model.ir.json")));
+        for path in files {
+            std::fs::write(&path, &json).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        }
+        self.quantities = Some(quantities);
+        self.shown = shown;
+        Ok(self)
+    }
 }
 
 /// Records in the invocation `info` that the stored compiled model `model`,
@@ -1772,6 +1800,14 @@ pub(crate) fn opened(text: &str) -> Result<std::sync::Arc<OpenedFit>, String> {
     if let Some(o) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(text) {
         return Ok(std::sync::Arc::clone(o));
     }
+    let o = std::sync::Arc::new(open_unshared(text)?);
+    cache.lock().unwrap_or_else(|e| e.into_inner()).insert(text.to_string(), std::sync::Arc::clone(&o));
+    Ok(o)
+}
+
+/// The fit `text` names, opened in the store [`opened`] reads it from, for a
+/// reader that changes what it opened and so does not share it.
+pub(crate) fn open_unshared(text: &str) -> Result<OpenedFit, String> {
     // A result's folder names its own store.
     let root = store_holding(Path::new(text)).unwrap_or_else(reader_root);
     let Some(store) = crate::camdl_store::open_existing(&root) else {
@@ -1785,14 +1821,27 @@ pub(crate) fn opened(text: &str) -> Result<std::sync::Arc<OpenedFit>, String> {
         }
         return Err(format!("{text} names a stored fit, and there is no run store at {}", root.display()));
     };
-    let o = std::sync::Arc::new(open_fit(&store, text)?);
-    cache.lock().unwrap_or_else(|e| e.into_inner()).insert(text.to_string(), std::sync::Arc::clone(&o));
-    Ok(o)
+    open_fit(&store, text)
 }
 
 /// [`opened`] for a reader that reads one run: a problem handle is refused.
 pub(crate) fn opened_run(text: &str) -> Result<std::sync::Arc<OpenedFit>, String> {
     let o = opened(text)?;
+    refuse_problem_handle(text, &o)?;
+    Ok(o)
+}
+
+/// [`open_unshared`] for a reader that reads one run: a problem handle is
+/// refused.
+pub(crate) fn open_run_unshared(text: &str) -> Result<OpenedFit, String> {
+    let o = open_unshared(text)?;
+    refuse_problem_handle(text, &o)?;
+    Ok(o)
+}
+
+/// Refuses `o`, opened by `text`, when it names a fit problem and not one of
+/// its runs.
+fn refuse_problem_handle(text: &str, o: &OpenedFit) -> Result<(), String> {
     if o.run.is_none() {
         let store = crate::camdl_store::open_existing(&store_holding(Path::new(text)).unwrap_or_else(reader_root));
         return Err(match store {
@@ -1800,7 +1849,7 @@ pub(crate) fn opened_run(text: &str) -> Result<std::sync::Arc<OpenedFit>, String
             None => format!("{text} names a fit problem, and this reads one run of it; name the run"),
         });
     }
-    Ok(o)
+    Ok(())
 }
 
 /// The fit problem a `--fit` argument names, for a reader of the problem

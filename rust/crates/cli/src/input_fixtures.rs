@@ -368,6 +368,11 @@ pub(crate) fn predict_quantities() -> Option<PathBuf> {
     Some("vocab.camdl".into())
 }
 
+/// The fixture model with another quantity, to report the fit through.
+pub(crate) fn predict_model() -> Option<PathBuf> {
+    Some("reported.camdl".into())
+}
+
 pub(crate) fn predict_n_draws() -> Option<usize> {
     Some(6)
 }

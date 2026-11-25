@@ -224,6 +224,7 @@ fn fixture() -> &'static Fixture {
         )
         .unwrap();
         std::fs::write(dir.join("vocab.camdl"), "quantities {\n  peak_R = max(R)\n}\n").unwrap();
+        std::fs::write(dir.join("reported.camdl"), model().replace("peak_I = max(I)", "peak_R = max(R)")).unwrap();
         std::fs::write(dir.join("design.tsv"), "time\ttested\n28\t60\n35\t70\n").unwrap();
         std::fs::write(dir.join("design2.tsv"), "time\ttested\n28\t61\n35\t70\n").unwrap();
         for (name, text) in fixed_point_files() {
@@ -317,7 +318,7 @@ fn argv(inv: &PredictInvocation) -> Vec<String> {
                 label,
                 store,
             },
-        posterior: crate::args::PosteriorFlags { by_chain, exclude_chains, chains, realised_design },
+        posterior: crate::args::PosteriorFlags { by_chain, exclude_chains, chains, realised_design, model },
         fixed_point:
             crate::args::FixedPointFlags {
                 params,
@@ -372,6 +373,7 @@ fn argv(inv: &PredictInvocation) -> Vec<String> {
     opt("--seed", seed.map(|x| x.to_string()));
     opt("--exclude-chains", exclude_chains.clone());
     opt("--chains", chains.clone());
+    opt("--model", model.as_ref().map(|p| p.to_string_lossy().into_owned()));
     for p in params {
         opt("--params", Some(p.to_string_lossy().into_owned()));
     }

@@ -14,8 +14,9 @@
 //!
 //! There is one comparison, [`compare_to_fitted`], and every such check uses
 //! it: `camdl predict --quantities` (is the source still the fitted model, so a
-//! vocabulary compiled against it may be transplanted?) and the replaying
-//! `simulate` paths. It is `ir::model_hash::model_ir_hash` — the
+//! vocabulary compiled against it may be transplanted?), `camdl predict
+//! --model` (may the fit be reported through the given file's quantities?)
+//! and the replaying `simulate` paths. It is `ir::model_hash::model_ir_hash` — the
 //! presentation-normalized model identity, which excludes `quantities` and
 //! `contrasts` (reporting-only, `Model::hash_into`), the model's file-stem
 //! name, and the gradient maps (model hash SV=2). That is exactly the question a

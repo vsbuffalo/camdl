@@ -1157,6 +1157,74 @@ fn a_prediction_evaluates_the_quantities_of_the_invocation_it_names() {
         && err.contains("@label"), "{err}");
 }
 
+/// `predict @run --model FILE` reports a stored fit through a model file whose
+/// quantities were edited since the fit: the prediction evaluates FILE's
+/// quantities, says that only the quantities differ, computes no fit, and
+/// records FILE as the model file the fit's compiled model was run from. A
+/// file whose dynamics differ is refused.
+#[test]
+fn predict_reports_a_stored_fit_through_the_model_file_it_is_given() {
+    let cwd = workdir();
+    let store = cwd.path().join("camdl-store");
+    let with_quantities = |q: &str| format!("{SIR}\nquantities {{\n  {q}\n}}\n");
+    std::fs::write(cwd.path().join("q.camdl"), with_quantities("peak_I = max(I)")).unwrap();
+    std::fs::write(cwd.path().join("edited.camdl"), with_quantities("peak_R = max(R)")).unwrap();
+    std::fs::write(
+        cwd.path().join("other.camdl"),
+        with_quantities("peak_R = max(R)").replace("gamma * I\n", "2 * gamma * I\n"),
+    )
+    .unwrap();
+    std::fs::write(cwd.path().join("fit_q.toml"), problem("q.camdl", 0.5) + method("pmmh")).unwrap();
+    let run = |args: &[&str]| camdl(cwd.path(), &store, &args.iter().map(|s| s.to_string()).collect::<Vec<_>>(), &[]);
+    let ok = |o: Output| -> String {
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        String::from_utf8_lossy(&o.stderr).into_owned()
+    };
+    ok(run(&["fit", "run", "fit_q.toml", "--label", "first", "--progress", "none"]));
+
+    let said = ok(run(&["predict", "@first", "--model", "edited.camdl", "--mode", "free_forward", "--n-draws", "2"]));
+    assert!(said.contains("apart from its quantities"), "the command says only the quantities differ:\n{said}");
+    let quantities: Vec<String> = folders(&store)
+        .into_iter()
+        .filter(|(_, id, _)| id["kind"] == "prediction")
+        .flat_map(|(p, _, _)| std::fs::read_dir(p.join("quantities-model")).into_iter().flatten().flatten())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(quantities, ["peak_R.tsv"], "the prediction evaluates the quantities of the file given");
+    assert_eq!(run_folders(&store).len(), 1, "one run");
+
+    // The predict's record: no fit run computed, and the fit's compiled model
+    // listed with the presentation of the file given.
+    let records = store.join(".invocations");
+    let mut seqs: Vec<PathBuf> = std::fs::read_dir(&records)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "json") && !p.to_string_lossy().ends_with(".progress.json"))
+        .collect();
+    seqs.sort();
+    let last: serde_json::Value = serde_json::from_slice(&std::fs::read(seqs.last().unwrap()).unwrap()).unwrap();
+    let results = last["results"].as_array().unwrap();
+    assert!(
+        results.iter().all(|r| r["kind"] != "fit_run" || r["outcome"] != "computed"),
+        "the predict computes no fit run: {last:#}"
+    );
+    let models: Vec<&serde_json::Value> = results.iter().filter(|r| r["kind"] == "compiled_model").collect();
+    assert_eq!(models.len(), 1, "one listing of the fit's compiled model: {last:#}");
+    let presentation = models[0]["labels"]["presentation"].as_str().expect("the listing names a presentation");
+    let source = folders(&store)
+        .into_iter()
+        .find(|(_, id, _)| id["kind"] == "model_presentation" && id["run_id"] == presentation)
+        .map(|(p, _, _)| std::fs::read_to_string(p.join("source.camdl")).unwrap())
+        .expect("the presentation is stored");
+    assert_eq!(source, with_quantities("peak_R = max(R)"), "the presentation is of edited.camdl");
+
+    let refused = run(&["predict", "@first", "--model", "other.camdl", "--mode", "free_forward", "--n-draws", "2"]);
+    let err = String::from_utf8_lossy(&refused.stderr);
+    assert!(!refused.status.success(), "a file whose dynamics differ is refused:\n{err}");
+    assert!(err.contains("is not the model this fit ran on"), "{err}");
+}
+
 /// A filter run given a stored fit that held rows out is refused before it
 /// runs: the stored problem keeps its training lines only, so filtering it
 /// would score fewer rows than the same problem named by its fit file, and

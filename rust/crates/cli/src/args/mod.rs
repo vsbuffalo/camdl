@@ -1920,6 +1920,16 @@ pub struct PosteriorFlags {
     #[arg(long)]
     #[input(identity)]
     pub realised_design: bool,
+
+    /// Report the fit through the model file FILE: its `quantities {}` and
+    /// `contrasts {}` are evaluated in place of those of the model file the
+    /// fit's invocation recorded. FILE is compiled and refused unless it is
+    /// the model the fit ran on apart from its quantities and contrasts, so
+    /// the fit is not computed again. This invocation records FILE as the
+    /// model file the fit's compiled model was run from.
+    #[arg(long, value_name = "FILE", conflicts_with = "quantities")]
+    #[input(identity, vary = crate::input_fixtures::predict_model)]
+    pub model: Option<PathBuf>,
 }
 
 /// The flags of `camdl predict` that pose a prediction from a fixed point:
@@ -2056,6 +2066,9 @@ impl PosteriorFlags {
         if self.realised_design {
             v.push("--realised-design");
         }
+        if self.model.is_some() {
+            v.push("--model");
+        }
         v
     }
 }
@@ -2071,14 +2084,18 @@ pub struct PredictInvocation {
     /// file's compile is the compiled model a fixed-point prediction's
     /// identity holds, so it re-keys the prediction through the model's key.
     /// A posterior prediction runs the fit's stored compile, and the flag
-    /// reaches only a `--quantities` vocabulary's compile, which is checked
-    /// against the fit's with every hoisted subexpression written back in
-    /// place and contributes only its quantities, which hoisting does not
-    /// touch; there it changes nothing.
+    /// reaches only the compile of a `--quantities` vocabulary or of a
+    /// `--model` file. A vocabulary is checked against the fit's compile with
+    /// every hoisted subexpression written back in place and contributes only
+    /// its quantities, which hoisting does not touch; there it changes
+    /// nothing. A `--model` file is compared with the fit's compile as
+    /// `simulate --fit` compares a model, hoisted subexpressions included, so
+    /// a file compiled without hoisting is refused beside a fit compiled
+    /// with it.
     #[input(identity)]
     pub no_licm: bool,
-    /// `--no-ir-cache`: compile a `--quantities` vocabulary rather than reuse
-    /// a cached IR, which is the IR a compile emits.
+    /// `--no-ir-cache`: compile a `--quantities` vocabulary or a `--model` file
+    /// rather than reuse a cached IR, which is the IR a compile emits.
     #[input(execution, exercised_by = crate::input_fixtures::predict_no_ir_cache)]
     pub no_ir_cache: bool,
     #[input(skip)]

@@ -273,7 +273,8 @@ pub(crate) enum Shown {
     Unreadable { run_id: String, why: String },
 }
 
-/// Which invocation a [`Shown::Recorded`] presentation was read from.
+/// Where a [`Shown::Recorded`] presentation came from: the invocation it was
+/// read from, or the model file this command was given.
 pub(crate) enum RecordedBy {
     /// The invocation a label names.
     Label,
@@ -281,6 +282,8 @@ pub(crate) enum RecordedBy {
     /// `others` holds each different presentation an earlier invocation that
     /// listed the result recorded for its model.
     Latest { invocation: u64, others: Vec<OtherPresentation> },
+    /// No invocation: the model file this command was given, stored by it.
+    Given,
 }
 
 /// A presentation an earlier invocation recorded for a result's model, with

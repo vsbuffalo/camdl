@@ -37,9 +37,9 @@ pub(crate) fn refuse_other_source_flags(args: &PredictArgs) -> Result<(), String
         if !given.is_empty() {
             return Err(format!(
                 "{} read(s) a stored fit's posterior, and {source} is a model file, predicted at one \
-                 point: --by-chain, --exclude-chains and --chains name a fit's chains, and \
+                 point: --by-chain, --exclude-chains and --chains name a fit's chains, \
                  --realised-design reads held-out rows' design values, which a fixed-point prediction \
-                 does not keep. Name a stored fit run (`camdl predict @run`), or drop {}.",
+                 does not keep, and --model reports a stored fit through another model file. Name a stored fit run (`camdl predict @run`), or drop {}.",
                 given.join(", "),
                 given.join(", ")
             ));
@@ -102,7 +102,7 @@ pub(crate) fn cmd_predict(inv: PredictInvocation) {
         seed,
     ) = flags.into_parts();
     let (allow_forcing_extrapolation,) = forcing_extrapolation.into_parts();
-    let (by_chain, exclude_chains, chains, realised_design) = posterior.into_parts();
+    let (by_chain, exclude_chains, chains, realised_design, model) = posterior.into_parts();
     let (params, param, table, data, obs, holdout_after, backend, dt, integrator, binomial, allow_degenerate_rates) =
         fixed_point.into_parts();
     let crate::args::PredictInvocationExecution { no_ir_cache, .. } = &execution;
@@ -134,7 +134,7 @@ pub(crate) fn cmd_predict(inv: PredictInvocation) {
             label: None,
             store: None,
         },
-        posterior: PosteriorFlags { by_chain, exclude_chains, chains, realised_design },
+        posterior: PosteriorFlags { by_chain, exclude_chains, chains, realised_design, model },
         fixed_point: FixedPointFlags {
             params,
             param,

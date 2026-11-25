@@ -289,6 +289,16 @@ what the artifact covers without the exit status. Every mode draws with the
 binomial sampler the fit ran (`btpe` or `btrs`, read from the fit run's
 `run_inputs.json`) and records it as `binomial` in the manifest.
 
+`camdl predict @label --model FILE` reports the run through the model file
+`FILE` in place of the one the run's invocation recorded, for example after a
+`quantities {}` formula was corrected: the prediction evaluates `FILE`'s
+quantities and contrasts. `FILE` is compiled and refused unless it is the model
+the fit ran on apart from its quantities and contrasts, so the fit is read from
+the store and not computed again. This holds after a camdl upgrade too, when
+running `fit run` on the edited file would compute the fit again, because the
+build is part of every run id. The invocation records `FILE` as the model file
+the fit's compiled model was run from.
+
 `camdl predict @label --horizon "4 weeks"` (or `--mode forecast`) writes the
 fixed-origin forecast instead: from the end of the fit's training rows (the
 _forecast origin_), the state is filtered through the training rows only and
@@ -370,7 +380,7 @@ and `forecast.json` (the origin, the reach, the rows that conditioned the
 parameters and the state, each target's design values and the design mode with
 its label, and the calendar). Forecasts are available for chain-binomial
 posteriors (PMMH, PGAS); an ODE posterior, `--enable`, `--disable`,
-`--quantities` and `--by-chain` are refused in this mode for now.
+`--quantities`, `--model` and `--by-chain` are refused in this mode for now.
 
 `--scenario NAME` and `--sweep` add _arms_ to a forecast: the fitted model is
 the first arm, each scenario and each sweep point another, and every table gains
@@ -507,11 +517,11 @@ copy of the prediction's result files into `DIR`, at their paths in its folder,
 whether the prediction was computed or reused.
 
 The flags that read a posterior (`--by-chain`, `--exclude-chains`, `--chains`,
-`--realised-design`) are refused with a model file, and the flags that pose a
-fixed point are refused with a run handle, whose problem holds its model, data
-and numerics. The other refusals are those of a posterior prediction: one-step
-on ODE or Gillespie, a forecast on Gillespie, `--particles` where no filter
-runs, `--design` and `--covariate` outside a forecast.
+`--realised-design`, `--model`) are refused with a model file, and the flags
+that pose a fixed point are refused with a run handle, whose problem holds its
+model, data and numerics. The other refusals are those of a posterior
+prediction: one-step on ODE or Gillespie, a forecast on Gillespie, `--particles`
+where no filter runs, `--design` and `--covariate` outside a forecast.
 
 ### Score a prediction
 

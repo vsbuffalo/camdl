@@ -195,6 +195,7 @@ pub(crate) fn refuse_unsupported(
     if !args.flags.disable.is_empty() { asked.push("--disable"); }
     if args.posterior.by_chain { asked.push("--by-chain"); }
     if args.flags.quantities.is_some() { asked.push("--quantities"); }
+    if args.posterior.model.is_some() { asked.push("--model"); }
     if !asked.is_empty() {
         return Err(format!(
             "{} cannot be combined with --mode forecast yet: a forecast writes no quantities \

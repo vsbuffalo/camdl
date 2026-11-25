@@ -1997,7 +1997,59 @@ fn resolve_source(
         )?;
         return Ok(PredictSource::FixedPoint(std::sync::Arc::new(point)));
     }
-    Ok(PredictSource::Posterior(crate::fit_store::opened_run(text)?))
+    match &args.posterior.model {
+        None => Ok(PredictSource::Posterior(crate::fit_store::opened_run(text)?)),
+        Some(model) => reported_through(out, text, model, compile, info).map(|fit| PredictSource::Posterior(std::sync::Arc::new(fit))),
+    }
+}
+
+/// The stored fit run `text` names, reported through the model file `model`
+/// (`predict @run --model FILE`). `model` is compiled under `compile` and
+/// checked against the model the fit ran on ([`check_stored_fit`]): a file
+/// whose dynamics, observations, parameters or simulation settings differ is
+/// refused, and one that differs only in its quantities or contrasts is said
+/// on stderr. Its quantities and its presentation are stored under `info`, as
+/// any compile stores them, and replace the recorded ones in the opened fit,
+/// so the prediction evaluates `model`'s quantities and this invocation
+/// records `model` as the file the fit's compiled model was run from. The fit
+/// is not computed again.
+///
+/// [`check_stored_fit`]: crate::fit::fitted_model::check_stored_fit
+#[expect(clippy::disallowed_methods, reason = "reads the model file `--model` names, declared `#[input(identity)]` on `PosteriorFlags`, to store its presentation")]
+fn reported_through(
+    out: &crate::out::Out,
+    text: &str,
+    model: &Path,
+    compile: crate::util::CompileSettings,
+    info: &store::RunInfo,
+) -> Result<crate::fit_store::OpenedFit, String> {
+    use crate::camdl_store::{presentation::RecordedBy, ModelPresentation, Quantities, QuantitiesContent, Shown};
+    use store::{Content, ContentArtifact};
+    let fit = crate::fit_store::open_run_unshared(text)?;
+    let path = model.to_string_lossy().into_owned();
+    let envelope = crate::util::load_model_envelope(&path, compile)?;
+    if let Some(notice) =
+        crate::fit::fitted_model::check_stored_fit(text, &fit, &fit.config.problem, &envelope.model, &path)?
+    {
+        out.say(format_args!("{notice}"));
+    }
+    let bytes = std::fs::read(model).map_err(|e| format!("--model: cannot read {path}: {e}"))?;
+    let stem = crate::hashing::path_stem_slug(&path).unwrap_or_else(|| "model".to_string());
+    let parts = crate::camdl_store::CompiledParts::split(envelope, stem, crate::camdl_store::ModelSource::read(&bytes, model))?;
+    let content = QuantitiesContent::from_bytes(&parts.quantities.get().to_bytes()).map_err(|e| e.to_string())?;
+    // The store holding the run, where the prediction is stored too.
+    let root = crate::fit_store::store_holding(fit.fit.problem.folder()).unwrap_or_else(crate::fit_store::reader_root);
+    let store = crate::camdl_store::open_existing(&root).ok_or_else(|| format!("no run store at {}", root.display()))?;
+    let storing_quantities = |e: store::Error| format!("--model: storing the quantities of {path}: {e}");
+    let quantities = store
+        .put::<Quantities>(parts.quantities, &parts.labels, &store::Provenance::none(), info)
+        .map_err(storing_quantities)?
+        .dep(Quantities::FILE)
+        .map_err(storing_quantities)?;
+    let presentation = store
+        .put::<ModelPresentation>(parts.presentation, &parts.labels, &store::Provenance::none(), info)
+        .map_err(|e| format!("--model: storing the presentation of {path}: {e}"))?;
+    fit.reported_through(&store, quantities, &content, Shown::Recorded { presentation, by: RecordedBy::Given })
 }
 
 /// Store the prediction `p` describes: its files are the result files, and
@@ -2241,6 +2293,7 @@ pub(crate) fn repose(
         }),
         chains: None,
         realised_design: settings["forecast"]["design_mode"].as_str() == Some("ex_post"),
+        model: None,
     };
 
     let (text, source, fixed_point) = match &id.source {
