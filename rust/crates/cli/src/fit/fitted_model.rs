@@ -163,18 +163,47 @@ fn recorded_model_source(opened: &crate::fit_store::OpenedFit) -> Option<String>
     Some(path.to_string_lossy().into_owned())
 }
 
+/// How a command was given the stored fit it checks a model against, so a
+/// refusal opens with what the user typed.
+#[derive(Debug, Clone, Copy)]
+pub enum FitNamed<'a> {
+    /// The handle given to `--fit` (`simulate MODEL --fit @run`).
+    Flag(&'a str),
+    /// The handle given as the command's positional argument
+    /// (`predict @run --model FILE`).
+    Positional(&'a str),
+}
+
+impl<'a> FitNamed<'a> {
+    /// The handle, as typed.
+    pub fn handle(self) -> &'a str {
+        match self {
+            FitNamed::Flag(h) | FitNamed::Positional(h) => h,
+        }
+    }
+}
+
+impl std::fmt::Display for FitNamed<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FitNamed::Flag(h) => write!(f, "--fit {h}"),
+            FitNamed::Positional(h) => f.write_str(h),
+        }
+    }
+}
+
 /// Refuse to replay a STORED fit's parameters through `given` unless it is the
 /// model the fit ran on, read from the fit's archived `model.ir.json`.
 ///
-/// `fit` is the handle as the user typed it; `opened` the stored fit, read
-/// out of the store; `problem` the fit's own config — its `[model]` source
+/// `fit` is how the user named the fit ([`FitNamed`]), which every refusal
+/// opens with; `opened` the stored fit, read out of the store; `problem` the fit's own config — its `[model]` source
 /// path (absolute, resolved at load) and the `[data]` its observation anchors
 /// resolve against. `given` is the command-line model as loaded, anchors
 /// unresolved; it goes through the fit's anchor substitution ([`as_fitted`])
 /// before the comparison. Returns the notice to print when only the reporting
 /// layer differs, `None` when the models are the same.
 pub fn check_stored_fit(
-    fit: &str,
+    fit: FitNamed<'_>,
     opened: &crate::fit_store::OpenedFit,
     problem: &crate::fit::config_v2::Problem,
     given: &ir::Model,
@@ -184,7 +213,7 @@ pub fn check_stored_fit(
     let archive: PathBuf = segment.join("model.ir.json");
     if !archive.is_file() {
         return Err(format!(
-            "--fit {fit}: this fit has no archived model ({} is missing), so there is no \
+            "{fit}: this fit has no archived model ({} is missing), so there is no \
              record of the model its parameters were estimated with to check {given_path} \
              against. Refit to replay it.",
             archive.display()
@@ -194,17 +223,17 @@ pub fn check_stored_fit(
     // The stored compile keeps its anchored horizons unresolved; they are
     // resolved against the fit's data, as the given model's are below.
     let (fitted, _) = as_fitted(&stored, problem)
-        .map_err(|e| format!("--fit {fit}: resolving the stored model's anchors against the fit's [data] failed: {e}"))?;
+        .map_err(|e| format!("{fit}: resolving the stored model's anchors against the fit's [data] failed: {e}"))?;
     let (given_resolved, resolved) = as_fitted(given, problem).map_err(|e| {
         format!(
-            "--fit {fit}: {given_path} is anchored to observed data, and resolving its \
+            "{fit}: {given_path} is anchored to observed data, and resolving its \
              anchors against the fit's [data], to compare it with the model the fit ran \
              on, failed: {e}"
         )
     })?;
     match compare_to_fitted(&fitted, &given_resolved) {
         ModelAgreement::Same => Ok(None),
-        ModelAgreement::ReportingDiffers => Ok(Some(reporting_notice(fit, "ran on", given_path))),
+        ModelAgreement::ReportingDiffers => Ok(Some(reporting_notice(fit.handle(), "ran on", given_path))),
         ModelAgreement::Differs { fitted: fitted_h, given: given_h } => {
             // The model file the stored problem keeps, in the store: the
             // source (or IR) the fit was posed on.
@@ -215,7 +244,7 @@ pub fn check_stored_fit(
                 .unwrap_or_else(|| crate::fit::report::display_path(&source_copy));
             let recorded_source = recorded_source_shown.as_str();
             let stem = format!(
-                "--fit {fit}: {given_path} is not the model this fit ran on (fitted model {}, \
+                "{fit}: {given_path} is not the model this fit ran on (fitted model {}, \
                  {given_path} {})",
                 short(&fitted_h),
                 short(&given_h),

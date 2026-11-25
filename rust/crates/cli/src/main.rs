@@ -2022,7 +2022,7 @@ fn run_simulate(inv: args::SimulateInvocation) {
                     // model before anything runs.
                     report_replay_check(&out, util::load_ir(&ir_path_given).and_then(|(given, _)| {
                         crate::fit::fitted_model::check_stored_fit(
-                            fit_handle,
+                            crate::fit::fitted_model::FitNamed::Flag(fit_handle),
                             resolved,
                             &resolved.config.problem,
                             &given,
@@ -3682,7 +3682,7 @@ fn check_replay_model(
     } else {
         let resolved = crate::fit_store::opened(fit_ref)?;
         crate::fit::fitted_model::check_stored_fit(
-            fit_ref,
+            crate::fit::fitted_model::FitNamed::Flag(fit_ref),
             &resolved,
             &resolved.config.problem,
             &given,

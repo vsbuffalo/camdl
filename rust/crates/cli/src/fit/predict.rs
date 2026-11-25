@@ -2033,7 +2033,7 @@ fn reported_through(
     let path = model.to_string_lossy().into_owned();
     let envelope = crate::util::load_model_envelope(&path, compile)?;
     if let Some(notice) =
-        crate::fit::fitted_model::check_stored_fit(text, &fit, &fit.config.problem, &envelope.model, &path)?
+        crate::fit::fitted_model::check_stored_fit(crate::fit::fitted_model::FitNamed::Positional(text), &fit, &fit.config.problem, &envelope.model, &path)?
     {
         out.say(format_args!("{notice}"));
     }

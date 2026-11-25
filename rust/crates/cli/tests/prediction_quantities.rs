@@ -143,6 +143,24 @@ fn a_prediction_made_with_another_model_file_scores() {
     succeeds(camdl_in(dir, &["score", "@p", "--data", "cases=cases.tsv", "--label", "s", "--progress", "none"]), "score");
 }
 
+/// `predict @a --model FILE` through a model whose dynamics differ is
+/// refused, and the refusal names the run as it was typed: the command's
+/// positional argument, not a `--fit` flag that `predict` does not take.
+#[test]
+fn a_prediction_through_a_different_model_names_the_run_as_typed() {
+    let tmp = inputs(&[("model", "peak_I = max(I)")]);
+    let dir = tmp.path();
+    std::fs::write(dir.join("other.camdl"), with_quantities("peak_I = max(I)").replace("gamma * I", "2 * gamma * I")).unwrap();
+    fit(dir, "model", "a");
+    let mut args = vec!["predict", "@a", "--model", "other.camdl"];
+    args.extend_from_slice(PREDICT);
+    let out = camdl_in(dir, &args);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "a different model is refused:\n{err}");
+    assert!(err.contains("@a: other.camdl is not the model this fit ran on"), "{err}");
+    assert!(!err.contains("--fit"), "predict takes no --fit:\n{err}");
+}
+
 /// The quantities the prediction the newest invocation listed evaluates:
 /// the files of its `quantities-model/`.
 fn evaluated(dir: &Path) -> Vec<String> {
