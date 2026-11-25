@@ -512,7 +512,7 @@ pub fn resolve_starts(
     );
     let leaf = files.path().to_path_buf();
     if matches!(rule, ChainStarts::Point(Point::FromMle { .. })) {
-        let method = super::state::FitState::load(&leaf.to_string_lossy())
+        let method = super::state::FitState::load_input(&leaf.to_string_lossy())
             .map(|s| s.method)
             .map_err(|e| format!("starts = {spelled}: cannot read its fit_state.toml: {e}"))?;
         refuse_sampler_as_mle_source(&method, &handle)?;
@@ -1232,7 +1232,7 @@ fn draw_from_mle(
         return Err(InitError::UnknownSource { path: path_buf });
     }
     let dir = path_buf.parent().map(Path::to_path_buf).unwrap_or_default();
-    let state = super::state::FitState::load(&dir.to_string_lossy()).map_err(|e| {
+    let state = super::state::FitState::load_input(&dir.to_string_lossy()).map_err(|e| {
         InitError::SchemaMismatch {
             path: path_buf.clone(),
             expected: "fit_state.toml of a completed method leaf",
@@ -1881,7 +1881,7 @@ mod tests {
     fn write_fit_state(dir: &Path, values: &[(&str, f64)]) -> PathBuf {
         std::fs::create_dir_all(dir).unwrap();
         let mut body = String::from(
-            "method = \"if2\"\nseed = 1\ntimestamp = \"2026-01-01T00:00:00Z\"\n\
+            "schema = \"camdl.fit-state/1\"\nmethod = \"if2\"\nseed = 1\ntimestamp = \"2026-01-01T00:00:00Z\"\n\
              best_loglik = -10.0\ninitial_loglik = -20.0\nbest_chain = 1\nn_chains = 2\n\n\
              [start_values]\n");
         for (k, v) in values {

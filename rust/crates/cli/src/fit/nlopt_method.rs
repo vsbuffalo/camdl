@@ -311,7 +311,7 @@ pub fn run_method(
         start_values.insert(name.clone(), winner.params[slot]);
     }
     // An optimizer perturbs nothing, so it has no initial-state timing.
-    let perturb_only_at_t0_params: Vec<String> = arc_config.steps.initial_state_params();
+    let initial_state_params: Vec<String> = arc_config.steps.initial_state_params();
 
     let fit_state = FitState {
         method: method_name.to_string(),
@@ -333,7 +333,7 @@ pub fn run_method(
         acceptance_rate: None,
         tail_chain_agreement: convergence.chain_agreement.iter()
             .map(|(k, v)| (k.clone(), *v)).collect(),
-        perturb_only_at_t0_params,
+        initial_state_params,
         chain_logliks,
         chain_eval_logliks: Vec::new(),
         chain_eval_ids: Vec::new(),

@@ -590,7 +590,7 @@ impl ChainDetail {
             subset,
             // Read for the identity line's chain count and the seeded-from
             // line: display details, not a verdict.
-            chain_starts: crate::fit::state::FitState::load(&method_dir.to_string_lossy()).ok()
+            chain_starts: crate::fit::state::FitState::load_for_inspection(&method_dir.to_string_lossy()).ok().map(|s| s.said())
                 .map(|st| ChainStarts {
                     n_chains: st.n_chains,
                     n_good_chains: st.n_good_chains,

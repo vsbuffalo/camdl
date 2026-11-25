@@ -1069,7 +1069,7 @@ pub fn run_method(
         // Bayesian methods don't produce an IF2-style Â table; the
         // refine-gates proposal only gates on scout→refine handoffs.
         tail_chain_agreement: std::collections::BTreeMap::new(),
-        perturb_only_at_t0_params: Vec::new(),
+        initial_state_params: Vec::new(),
         chain_logliks: Vec::new(),
         chain_eval_logliks: Vec::new(),
         chain_eval_ids: Vec::new(),

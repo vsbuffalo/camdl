@@ -1733,7 +1733,7 @@ pub fn run_method(
     // `fit_state.toml` records the best over every sweep it retained, so the
     // larger of the two is the best over the whole chain.
     let prior: Option<FitState> = match resume_base {
-        Some(base) => Some(FitState::load(&base.to_string_lossy())
+        Some(base) => Some(FitState::load_input(&base.to_string_lossy())
             .map_err(|e| format!("--resume: cannot read the base's fit_state.toml: {e}"))?),
         None => None,
     };
@@ -1764,7 +1764,7 @@ pub fn run_method(
         acceptance_rate,
         // Bayesian method, no IF2-style Â (chain agreement).
         tail_chain_agreement: std::collections::BTreeMap::new(),
-        perturb_only_at_t0_params: Vec::new(),
+        initial_state_params: Vec::new(),
         chain_logliks: Vec::new(),
         chain_eval_logliks: Vec::new(),
         chain_eval_ids: Vec::new(),

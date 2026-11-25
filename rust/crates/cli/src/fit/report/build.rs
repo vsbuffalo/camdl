@@ -548,7 +548,7 @@ pub(crate) fn if2_parameters(
     cal: &CalendarContext,
 ) -> Vec<ParameterReport> {
     let t0_set: std::collections::HashSet<&str> =
-        state.perturb_only_at_t0_params.iter().map(|s| s.as_str()).collect();
+        state.initial_state_params.iter().map(|s| s.as_str()).collect();
     let mut keys: Vec<&String> = state.start_values.keys().collect();
     keys.sort();
     let estimated = crate::fit::method_result::estimated_names(method_dir, &state.tail_chain_agreement);

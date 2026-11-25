@@ -1,12 +1,15 @@
 //! `fit_state.toml` — a fit method's result record.
 //!
-//! Written once per method leaf when the method finishes. Read today by:
-//! sourced chain starts (`chain_starts.rs`: a `from_mle` / `from_params`
-//! source's estimated values), the convergence check on such a source
-//! (`gating.rs`, unless `--allow-nonconverged-source`), `camdl profile` when it
-//! starts from a fit (`profile.rs`), and the typed method results
-//! (`method_result.rs`: `If2Run`, `PmmhRun`, …) that `fit summary` and
-//! `fit table` are built from.
+//! Written once per method leaf when the method finishes, opening with its
+//! schema tag ([`FIT_STATE_SCHEMA`]). It is read in one of two ways.
+//! [`FitState::load_input`] reads it as the input to a new computation: a
+//! `from_mle` start in `fit run` or `camdl profile`, the convergence check on
+//! a warm-start source (`gating.rs`), a resumed PGAS chain's base, and the
+//! runner's read-back of the record it wrote. It refuses a file of any other
+//! schema. [`FitState::load_for_inspection`] reads it for display: the typed
+//! method results (`method_result.rs`: `If2Run`, `PmmhRun`, …) that
+//! `fit summary`, `fit table` and `fit predict` are built from, and the
+//! method report. It reads a file of another schema with a notice.
 
 use serde::{Deserialize, Serialize};
 // gh#519: `fit_state.toml` is a serialized artifact whose digest is recorded
@@ -70,7 +73,7 @@ pub struct FitState {
     /// Stored here (not re-derived from fit.toml in the downstream) so the
     /// two can't drift.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub perturb_only_at_t0_params: Vec<String>,
+    pub initial_state_params: Vec<String>,
 
     /// Per-chain final log-likelihoods (the full distribution behind
     /// `best_loglik`). The convergence check on a starts source reads their
@@ -257,26 +260,160 @@ impl OptimizerConvergence {
 /// The file a run's [`FitState`] is stored in.
 pub(crate) const FIT_STATE_FILE: &str = "fit_state.toml";
 
+/// The schema tag of the `fit_state.toml` this build writes: the value of the
+/// file's top-level `schema` key. A file without the key was written before
+/// the tag existed.
+pub(crate) const FIT_STATE_SCHEMA: &str = "camdl.fit-state/1";
+
+/// Keys a `fit_state.toml` without a schema tag may carry that this build
+/// does not read under that name: `rw_sd` is not read at all, and
+/// `perturb_only_at_t0_params` is the initial-state list's old key.
+const LEGACY_KEYS: [&str; 2] = ["rw_sd", "perturb_only_at_t0_params"];
+
+/// A `fit_state.toml` read for display, with the notice owed to its reader
+/// when its schema is not the one this build writes.
+#[derive(Debug)]
+pub struct Inspected {
+    pub state: FitState,
+    /// `Some` when the file carries no schema tag or a tag other than
+    /// [`FIT_STATE_SCHEMA`]: one line naming the build that wrote it, its
+    /// tag, and the keys this build does not read under their own name.
+    pub notice: Option<crate::out::notice::Notice>,
+}
+
+impl Inspected {
+    /// The state, after saying its notice on stderr at most once per file in
+    /// this process. `fit summary` reads one run's state through several
+    /// typed results, and its reader is told once.
+    pub fn said(self) -> FitState {
+        static SAID: std::sync::Mutex<std::collections::BTreeSet<String>> =
+            std::sync::Mutex::new(std::collections::BTreeSet::new());
+        if let Some(n) = &self.notice {
+            let first = SAID.lock().unwrap_or_else(|e| e.into_inner()).insert(n.message.clone());
+            if first {
+                crate::out::detached().notice(n);
+            }
+        }
+        self.state
+    }
+}
+
+/// `<dir>/fit_state.toml` parsed as a TOML table, with its path for messages.
+/// A run whose chain directories count from 1 is refused first: its
+/// `best_chain` and `chain_eval_ids` count from 1 too, and reading them as
+/// counted from 0 would name the wrong chain everywhere the file is rendered.
+#[expect(clippy::disallowed_methods, reason = "reads `fit_state.toml` from a method directory: the folder of the run this process's `fit run` is writing, read back, or a `fit_store::RunFiles` copy of a stored run read out through the store")]
+fn read_table(dir: &str) -> Result<(String, toml::Table), String> {
+    crate::chain_index::refuse_one_based_layout(std::path::Path::new(dir))?;
+    let path = format!("{dir}/{FIT_STATE_FILE}");
+    let contents = std::fs::read_to_string(&path)
+        .map_err(|e| format!("cannot read {}: {}", path, e))?;
+    let table: toml::Table = toml::from_str(&contents)
+        .map_err(|e| format!("parse error in {}: {}", path, e))?;
+    Ok((path, table))
+}
+
+/// The file's schema tag, or `None` when it has none.
+fn schema_of(table: &toml::Table) -> Option<&str> {
+    table.get("schema").and_then(|v| v.as_str())
+}
+
+/// A schema tag as a message names it.
+fn describe_schema(tag: Option<&str>) -> String {
+    match tag {
+        Some(t) => format!("schema `{t}`"),
+        None => format!("no schema tag, before {FIT_STATE_SCHEMA}"),
+    }
+}
+
+/// The build a file records in `camdl_version`, as a message names it.
+fn producer_of(table: &toml::Table) -> String {
+    match table.get("camdl_version").and_then(|v| v.as_str()) {
+        Some(v) => format!("camdl {v}"),
+        None => "a camdl that did not record its version".to_string(),
+    }
+}
+
+fn state_of(path: &str, table: toml::Table) -> Result<FitState, String> {
+    table.try_into().map_err(|e| format!("parse error in {}: {}", path, e))
+}
+
 impl FitState {
-    /// Read `<dir>/fit_state.toml`. A leaf whose chain directories count from
-    /// 1 is refused first (gh#990): its `best_chain` and `chain_eval_ids`
-    /// are in the old base too, and reading them as the current one would
-    /// name the wrong chain everywhere this file is rendered.
-    #[expect(clippy::disallowed_methods, reason = "reads `fit_state.toml` from a method directory: the folder of the run this process's `fit run` is writing, read back, or a `fit_store::RunFiles` copy of a stored run read out through the store")]
-    pub fn load(dir: &str) -> Result<Self, String> {
-        crate::chain_index::refuse_one_based_layout(std::path::Path::new(dir))?;
-        let path = format!("{}/fit_state.toml", dir);
-        let contents = std::fs::read_to_string(&path)
-            .map_err(|e| format!("cannot read {}: {}", path, e))?;
-        toml::from_str(&contents)
-            .map_err(|e| format!("parse error in {}: {}", path, e))
+    /// Reads `<dir>/fit_state.toml` as the input to a new computation: the
+    /// point a `from_mle` start reads, the verdict the warm-start source
+    /// check reads, the base of a resumed PGAS chain, or the record a runner
+    /// reads back after writing it.
+    ///
+    /// A file whose schema tag is not [`FIT_STATE_SCHEMA`], including one
+    /// with no tag, is refused, naming the build that wrote it and its tag,
+    /// and saying to run the fit again: its keys are not certain to mean
+    /// what this build's keys mean, and a computation started from a misread
+    /// record gives a wrong answer that looks right. A file that cannot be
+    /// read or parsed is an error.
+    pub fn load_input(dir: &str) -> Result<Self, String> {
+        let (path, table) = read_table(dir)?;
+        let tag = schema_of(&table);
+        if tag != Some(FIT_STATE_SCHEMA) {
+            return Err(format!(
+                "{path} was written by {} with {}, which this build does not read \
+                 as an input. Run that fit again with this build and name the new \
+                 run; `camdl fit summary` still shows the old one.",
+                producer_of(&table),
+                describe_schema(tag),
+            ));
+        }
+        state_of(&path, table)
     }
 
-    /// Writes the state as the run's `fit_state.toml`.
+    /// Reads `<dir>/fit_state.toml` for display: `fit summary`, `fit table`,
+    /// a method report, and `fit predict`'s check of how the chains started.
+    ///
+    /// A file [`load_input`](Self::load_input) refuses is read as far as its
+    /// keys allow, with a notice naming the build that wrote it, its tag and
+    /// the keys this build does not read under their own name. In a file
+    /// without a tag, the initial-state list is read under its old key,
+    /// `perturb_only_at_t0_params`. That list decides only which parameters
+    /// the dynamics-only sub-verdict leaves out, never the overall verdict.
+    /// A file that cannot be read or parsed is an error.
+    pub fn load_for_inspection(dir: &str) -> Result<Inspected, String> {
+        let (path, mut table) = read_table(dir)?;
+        let tag = schema_of(&table).map(str::to_owned);
+        if tag.as_deref() == Some(FIT_STATE_SCHEMA) {
+            return Ok(Inspected { state: state_of(&path, table)?, notice: None });
+        }
+        let unread: Vec<&str> = LEGACY_KEYS.iter().copied().filter(|k| table.contains_key(*k)).collect();
+        let producer = producer_of(&table);
+        if tag.is_none() && !table.contains_key("initial_state_params") {
+            if let Some(list) = table.remove("perturb_only_at_t0_params") {
+                table.insert("initial_state_params".into(), list);
+            }
+        }
+        let keys = if unread.is_empty() {
+            String::new()
+        } else {
+            format!(" Keys this build does not read under their own name: {}.", unread.join(", "))
+        };
+        let notice = crate::out::notice::Notice::info(
+            "fit-state-schema",
+            format!(
+                "{path} was written by {producer} with {}. It is shown as far as this \
+                 build reads it, and is refused as an input to a new fit.{keys}",
+                describe_schema(tag.as_deref()),
+            ),
+        );
+        Ok(Inspected { state: state_of(&path, table)?, notice: Some(notice) })
+    }
+
+    /// Writes the state as the run's `fit_state.toml`, its schema tag
+    /// ([`FIT_STATE_SCHEMA`]) first.
     pub fn save(&self, files: &dyn crate::fit::output::RunWriter) -> Result<(), String> {
         let body = toml::to_string_pretty(self)
             .map_err(|e| format!("serialize error: {}", e))?;
-        let contents = format!("# Generated by {}\n{}", crate::version::VERSION_SHORT, body);
+        let contents = format!(
+            "# Generated by {}\nschema = \"{FIT_STATE_SCHEMA}\"\n{}",
+            crate::version::VERSION_SHORT,
+            body
+        );
         files.put(FIT_STATE_FILE, contents.as_bytes())
             .map_err(|e| format!("cannot write {FIT_STATE_FILE}: {e}"))
     }
@@ -343,7 +480,7 @@ mod tests {
             loglik_type: Some(crate::fit::loglik::LoglikType::If2),
             acceptance_rate: None,
             tail_chain_agreement,
-            perturb_only_at_t0_params: vec!["s0".into()],
+            initial_state_params: vec!["s0".into()],
             chain_logliks: vec![-130.0, -123.45],
             chain_eval_logliks: vec![-128.7, -123.1],
             chain_eval_ids: vec![ChainIndex(0), ChainIndex(1)],
@@ -375,13 +512,13 @@ mod tests {
 
         let s = synthetic_state();
         s.save(&crate::fit::output::DirWriter::new(&dir)).unwrap();
-        let loaded = FitState::load(&dir_str).unwrap();
+        let loaded = FitState::load_input(&dir_str).unwrap();
 
         assert_eq!(loaded.chain_eval_logliks, vec![-128.7, -123.1]);
         assert_eq!(loaded.chain_eval_ses, vec![1.5, 0.8]);
         assert_eq!(loaded.chain_logliks, vec![-130.0, -123.45]);
         assert_eq!(loaded.tail_chain_agreement.get("beta").copied(), Some(1.02));
-        assert_eq!(loaded.perturb_only_at_t0_params, vec!["s0".to_string()]);
+        assert_eq!(loaded.initial_state_params, vec!["s0".to_string()]);
         // Phase 3: resolved gate / clean-eval persisted with the
         // verdict so summary can report against the threshold the
         // run was actually judged by, not whatever fit.toml says
@@ -430,7 +567,7 @@ beta = 0.8
 
 [rw_sd]
 "#).unwrap();
-        let loaded = FitState::load(dir.to_str().unwrap()).unwrap();
+        let loaded = FitState::load_for_inspection(dir.to_str().unwrap()).unwrap().state;
         assert!(loaded.resolved_gate.is_none(),
             "legacy file must surface resolved_gate as None, not silently default");
         assert!(loaded.resolved_loglik_eval.is_none(),
@@ -495,5 +632,86 @@ beta = 0.8
         assert!(toml::from_str::<FitState>(&old).is_err(),
             "a file spelling the key `method` is not read (no compatibility \
              alias, VERSIONING.md alpha posture)");
+    }
+
+    /// An IF2 `fit_state.toml` as a build before the schema tag wrote it: no
+    /// `schema` key, the initial-state list under its old name, and the
+    /// `[rw_sd]` table this build no longer reads.
+    const UNTAGGED_IF2: &str = r#"# Generated by 0.1.0+oldbuild
+method = "if2"
+seed = 3
+camdl_version = "0.1.0+oldbuild"
+best_loglik = -100.0
+initial_loglik = -150.0
+best_chain = 0
+n_chains = 2
+perturb_only_at_t0_params = ["I0"]
+
+[start_values]
+beta = 0.5
+I0 = 4.0
+
+[tail_chain_agreement]
+beta = 1.0
+I0 = 1.3
+
+[rw_sd]
+beta = 0.02
+"#;
+
+    /// A state written by this build opens with its schema tag, and reads
+    /// back as an input with nothing to say.
+    #[test]
+    fn a_written_state_carries_the_schema_tag_and_is_an_input() {
+        let dir = tempfile::tempdir().unwrap();
+        synthetic_state().save(&crate::fit::output::DirWriter::new(dir.path())).unwrap();
+        let text = std::fs::read_to_string(dir.path().join(FIT_STATE_FILE)).unwrap();
+        assert_eq!(text.lines().nth(1), Some("schema = \"camdl.fit-state/1\""), "{text}");
+        let d = dir.path().to_string_lossy();
+        FitState::load_input(&d).expect("a tagged state is an input");
+        let seen = FitState::load_for_inspection(&d).unwrap();
+        assert!(seen.notice.is_none(), "{:?}", seen.notice);
+        assert_eq!(seen.state.initial_state_params, vec!["s0".to_string()]);
+    }
+
+    /// An untagged state is refused as an input, naming the build that wrote
+    /// it, its missing tag and what to do. A `from_mle` start, the
+    /// warm-start check, a PGAS resume and the runner's read-back all read
+    /// through this function.
+    #[test]
+    fn an_untagged_state_is_refused_as_an_input() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(FIT_STATE_FILE), UNTAGGED_IF2).unwrap();
+        let err = FitState::load_input(&dir.path().to_string_lossy())
+            .expect_err("an untagged state is not an input");
+        for want in ["camdl 0.1.0+oldbuild", "no schema tag, before camdl.fit-state/1", "Run that fit again"] {
+            assert!(err.contains(want), "the refusal names `{want}`: {err}");
+        }
+
+        std::fs::write(
+            dir.path().join(FIT_STATE_FILE),
+            UNTAGGED_IF2.replace("method = \"if2\"", "schema = \"camdl.fit-state/9\"\nmethod = \"if2\""),
+        ).unwrap();
+        let err = FitState::load_input(&dir.path().to_string_lossy())
+            .expect_err("a state of another schema is not an input");
+        assert!(err.contains("schema `camdl.fit-state/9`"), "{err}");
+    }
+
+    /// The same untagged state is read for display, with a notice naming its
+    /// build and the keys this build does not read under their own name, and
+    /// with its initial-state list read from the old key.
+    #[test]
+    fn an_untagged_state_is_read_for_inspection_with_a_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(FIT_STATE_FILE), UNTAGGED_IF2).unwrap();
+        let seen = FitState::load_for_inspection(&dir.path().to_string_lossy())
+            .expect("an untagged state is read for inspection");
+        assert_eq!(seen.state.start_values.get("I0").copied(), Some(4.0));
+        assert_eq!(seen.state.initial_state_params, vec!["I0".to_string()],
+            "the old key still names the parameters the dynamics-only sub-verdict leaves out");
+        let notice = seen.notice.expect("an untagged state is read with a notice");
+        for want in ["camdl 0.1.0+oldbuild", "no schema tag", "perturb_only_at_t0_params", "rw_sd"] {
+            assert!(notice.message.contains(want), "the notice names `{want}`: {}", notice.message);
+        }
     }
 }

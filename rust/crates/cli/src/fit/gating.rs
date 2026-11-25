@@ -325,7 +325,7 @@ impl If2Assessment {
 /// `fit table` read.
 pub fn assess_if2(state: &If2Record, gate: &GateConfig) -> If2Assessment {
     let t0_set: std::collections::HashSet<&str> =
-        state.perturb_only_at_t0_params.iter().map(|s| s.as_str()).collect();
+        state.initial_state_params.iter().map(|s| s.as_str()).collect();
     let mut structural: Vec<(String, f64)> = Vec::new();
     let mut unavailable: Vec<String> = Vec::new();
     let mut perturb_only_at_t0: Vec<(String, f64)> = Vec::new();
@@ -696,7 +696,7 @@ pub fn source_verdict(leaf: &Path, handle: &str) -> Result<Option<String>, Strin
     // `allow` does not lift it — it accepts a verdict of "not converged", not
     // a missing one. Every fit method writes fit_state.toml, and `from_mle`
     // reads its estimate from it.
-    let state = FitState::load(&dir).map_err(|e| format!(
+    let state = FitState::load_input(&dir).map_err(|e| format!(
         "starts source {handle}: cannot read its fit_state.toml, so its convergence \
          cannot be checked: {e}"))?;
     let verdict: Option<String> = match &state {
@@ -1049,6 +1049,28 @@ mod tests {
         std::fs::remove_dir_all(&sampler).ok();
     }
 
+    /// A source whose `fit_state.toml` predates the schema tag is refused by
+    /// the warm-start check, override or not, with the refusal naming the
+    /// build that wrote it: its record would otherwise be judged under keys
+    /// this build reads differently.
+    #[test]
+    fn a_source_written_before_the_schema_tag_is_refused() {
+        let leaf = scratch_leaf("untagged_state");
+        let st = make_state(&[("beta", 1.0)], &[], &[-60.0, -60.1], -60.0);
+        st.save(&crate::fit::output::DirWriter::new(&leaf)).unwrap();
+        check_source_converged(&leaf, "@old", false).expect("the tagged source is converged");
+        let path = leaf.join("fit_state.toml");
+        let text = std::fs::read_to_string(&path).unwrap()
+            .replace("schema = \"camdl.fit-state/1\"\n", "");
+        std::fs::write(&path, text).unwrap();
+        for allow in [false, true] {
+            let err = check_source_converged(&leaf, "@old", allow)
+                .expect_err("an untagged source is refused");
+            assert!(err.contains("@old") && err.contains("no schema tag, before camdl.fit-state/1"), "{err}");
+        }
+        std::fs::remove_dir_all(&leaf).ok();
+    }
+
     /// An nl-* leaf whose starts landed far apart. Its stored
     /// `tail_chain_agreement` holds per-parameter RELATIVE RANGES (range over
     /// bound width, at most 1 inside the box), not IF2's Â, so judging it
@@ -1062,7 +1084,7 @@ mod tests {
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
                 .unwrap().as_nanos()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("fit_state.toml"), r#"
+        std::fs::write(dir.join("fit_state.toml"), r#"schema = "camdl.fit-state/1"
 method = "nl-sbplx"
 seed = 1
 timestamp = "2026-10-29T00:00:00Z"
@@ -1101,7 +1123,7 @@ decibans_failed = true
 
     fn make_state(
         tail_chain_agreement: &[(&str, f64)],
-        perturb_only_at_t0_params: &[&str],
+        initial_state_params: &[&str],
         chain_logliks: &[f64],
         best_loglik: f64,
     ) -> FitState {
@@ -1119,7 +1141,7 @@ decibans_failed = true
             acceptance_rate: None,
             tail_chain_agreement: tail_chain_agreement.iter()
                 .map(|(k, v)| (k.to_string(), *v)).collect(),
-            perturb_only_at_t0_params: perturb_only_at_t0_params.iter()
+            initial_state_params: initial_state_params.iter()
                 .map(|s| s.to_string()).collect(),
             chain_logliks: chain_logliks.to_vec(),
             chain_eval_logliks: vec![],

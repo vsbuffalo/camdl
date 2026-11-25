@@ -4942,7 +4942,7 @@ dt = 1.0
     }
 
     /// End-to-end pin: a parameter declared `perturb_only_at_t0` in fit.toml
-    /// lands in `FitState::perturb_only_at_t0_params`, and is gated by the Â
+    /// lands in `FitState::initial_state_params`, and is gated by the Â
     /// check like any other estimate — an Â far above `a_thresh` fails it.
     ///
     /// The unit test in `gating.rs` starts from a hand-written FitState, so it
@@ -4979,7 +4979,7 @@ dt = 1.0
             tail_chain_agreement: [("beta".to_string(), 1.00),
                                    ("I0".to_string(), 16.5)]
                 .into_iter().collect(),
-            perturb_only_at_t0_params: t0_params,
+            initial_state_params: t0_params,
             chain_logliks: vec![-60.2, -60.5],
             chain_eval_logliks: vec![],
             chain_eval_ids: Vec::new(),

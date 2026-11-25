@@ -184,7 +184,7 @@ pub struct If2Record {
     /// Tail chain-agreement Â per estimated parameter.
     pub tail_chain_agreement: BTreeMap<String, f64>,
     /// Estimated parameters perturbed at t = 0 only.
-    pub perturb_only_at_t0_params: Vec<String>,
+    pub initial_state_params: Vec<String>,
     /// Clean-eval log-likelihood, standard error and chain of each row.
     pub chain_eval_logliks: Vec<f64>,
     pub chain_eval_ses: Vec<f64>,
@@ -211,7 +211,7 @@ impl If2Record {
             n_good_chains: state.n_good_chains,
             start_values: state.start_values.clone(),
             tail_chain_agreement: state.tail_chain_agreement.clone(),
-            perturb_only_at_t0_params: state.perturb_only_at_t0_params.clone(),
+            initial_state_params: state.initial_state_params.clone(),
             chain_eval_logliks: state.chain_eval_logliks.clone(),
             chain_eval_ses: state.chain_eval_ses.clone(),
             chain_eval_ids: state.chain_eval_ids.clone(),
@@ -718,7 +718,7 @@ pub fn point_start(method_dir: &Path) -> Result<Option<(usize, String)>, MethodR
     if !method_dir.join("fit_state.toml").is_file() {
         return Ok(None);
     }
-    let state = FitState::load(&method_dir.to_string_lossy()).map_err(|e| {
+    let state = FitState::load_for_inspection(&method_dir.to_string_lossy()).map(|s| s.said()).map_err(|e| {
         MethodResultError::Io {
             method_dir: method_dir.to_owned(),
             message: format!("fit_state.toml: {e}"),
@@ -813,7 +813,7 @@ impl NloptRun {
 
     pub fn load(method_dir: &Path, method: &str) -> Result<Self, MethodResultError> {
         let n_chains = inputs_n_chains(&read_method_inputs(method_dir)?);
-        let state = FitState::load(&method_dir.to_string_lossy()).map_err(|e| {
+        let state = FitState::load_for_inspection(&method_dir.to_string_lossy()).map(|s| s.said()).map_err(|e| {
             MethodResultError::Io {
                 method_dir: method_dir.to_owned(),
                 message: format!("fit_state.toml: {}", e),
@@ -851,7 +851,7 @@ impl If2Run {
         let inputs = read_method_inputs(method_dir)?;
         let n_chains = inputs_n_chains(&inputs);
 
-        let state = FitState::load(&method_dir.to_string_lossy()).map_err(|e| {
+        let state = FitState::load_for_inspection(&method_dir.to_string_lossy()).map(|s| s.said()).map_err(|e| {
             MethodResultError::Io {
                 method_dir: method_dir.to_owned(),
                 message: format!("fit_state.toml: {}", e),
@@ -1062,7 +1062,7 @@ impl PgasRun {
         let acceptance_kernel = summary.get("acceptance_kernel")
             .and_then(|v| serde_json::from_value(v.clone()).ok());
         let sampling_seconds = execution.as_ref().and_then(|e| e.sampling_seconds);
-        let state = FitState::load(&method_dir.to_string_lossy()).ok();
+        let state = FitState::load_for_inspection(&method_dir.to_string_lossy()).ok().map(|s| s.said());
 
         Ok(PgasRun {
             sampling_seconds,
@@ -1133,7 +1133,7 @@ impl PmmhRun {
         } else {
             BTreeMap::new()
         };
-        let state = FitState::load(&method_dir.to_string_lossy()).ok();
+        let state = FitState::load_for_inspection(&method_dir.to_string_lossy()).ok().map(|s| s.said());
         let pf_noise = state.as_ref().and_then(|s| s.pf_noise);
         let map_chain = state.as_ref().map(|s| s.best_chain);
         let cost = execution.and_then(|e| e.cost);
@@ -1579,7 +1579,7 @@ mod tests {
             loglik_type: Some(crate::fit::loglik::LoglikType::If2),
             acceptance_rate: None,
             tail_chain_agreement: agreement,
-            perturb_only_at_t0_params: vec![],
+            initial_state_params: vec![],
             chain_logliks: vec![-3810.0, -3805.0, -3812.0, -3804.9],
             chain_eval_logliks: vec![-3810.0, -3805.0, -3812.0, -3804.9],
             chain_eval_ids: Vec::new(),
@@ -1613,7 +1613,7 @@ mod tests {
         state.tail_chain_agreement =
             [("R0".to_string(), 1.001), ("sigma".to_string(), 1.002), ("I0".to_string(), 16.5)]
                 .into_iter().collect();
-        state.perturb_only_at_t0_params = vec!["I0".into()];
+        state.initial_state_params = vec!["I0".into()];
         state.save(&crate::fit::output::DirWriter::new(dir)).unwrap();
 
         let err = crate::fit::gating::check_source_converged(dir, "@t0", false)
@@ -1629,7 +1629,7 @@ mod tests {
         let gate = GateConfig { a_thresh: 1.10, decibans_thresh: 30.0 };
         let soft = |state: &mut FitState| {
             state.resolved_gate = Some(gate.clone());
-            state.perturb_only_at_t0_params = vec![];
+            state.initial_state_params = vec![];
         };
         let mut nan = synthetic_if2_state();
         soft(&mut nan);
@@ -1968,7 +1968,7 @@ mod tests {
     /// A `fit_state.toml` with only the fields the point-start check reads.
     fn write_state_with_starts(dir: &Path, n_chains: usize, kind: Option<&str>, source: &str) {
         let mut body = format!(
-            "method = \"pgas\"\nseed = 1\ntimestamp = \"2026-01-01T00:00:00Z\"\n\
+            "schema = \"camdl.fit-state/1\"\nmethod = \"pgas\"\nseed = 1\ntimestamp = \"2026-01-01T00:00:00Z\"\n\
              best_loglik = -10.0\ninitial_loglik = -20.0\nbest_chain = 1\nn_chains = {n_chains}\n\
              chain_init_source = \"{source}\"\n"
         );

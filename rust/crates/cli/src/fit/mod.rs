@@ -190,7 +190,7 @@ pub(crate) fn refuse_pfilter_point_source_missing(
     let names: std::collections::HashSet<String> = match rule {
         ChainStarts::Point(Point::FromMle { .. }) => {
             let dir = file.parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
-            state::FitState::load(&dir)?.start_values.into_keys().collect()
+            state::FitState::load_input(&dir)?.start_values.into_keys().collect()
         }
         ChainStarts::Point(Point::FromParams { .. }) => {
             crate::util::load_params_toml(&file.to_string_lossy())?.into_keys().collect()
@@ -588,7 +588,7 @@ pub(crate) fn run_method(out: &mut crate::out::Out, cx: MethodContext<'_>) -> Me
                 loglik_type: Some(loglik::LoglikType::If2),
                 acceptance_rate: None,
                 tail_chain_agreement: chain_results.chain_agreement.iter().map(|(k, v)| (k.clone(), *v)).collect(),
-                perturb_only_at_t0_params: run_config.steps.initial_state_params(),
+                initial_state_params: run_config.steps.initial_state_params(),
                 chain_logliks: chain_results.results.iter()
                     .map(|(_, r)| r.final_loglik).collect(),
                 chain_eval_logliks: chain_results.chain_eval_logliks(),
@@ -1317,7 +1317,7 @@ fn load_method_result_or_exit(
     method_name: &str,
     method_dir: &std::path::Path,
 ) -> state::FitState {
-    state::FitState::load(&method_dir.to_string_lossy()).unwrap_or_else(|e| {
+    state::FitState::load_input(&method_dir.to_string_lossy()).unwrap_or_else(|e| {
         abandon_method(
             out,
             format!(
@@ -1871,7 +1871,7 @@ mod tests {
     fn a_pfilter_from_mle_source_missing_a_parameter_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let state = dir.path().join("fit_state.toml");
-        std::fs::write(&state, "method = \"nl-sbplx\"\nseed = 1\ntimestamp = \"t\"\n\
+        std::fs::write(&state, "schema = \"camdl.fit-state/1\"\nmethod = \"nl-sbplx\"\nseed = 1\ntimestamp = \"t\"\n\
             best_loglik = -1.0\ninitial_loglik = -2.0\nbest_chain = 0\nn_chains = 1\n\
             [start_values]\nbeta = 0.4\n").unwrap();
         let rule = starts::ChainStarts::Point(starts::Point::FromMle {
