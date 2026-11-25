@@ -699,7 +699,7 @@ and the stored inputs (§2.2). Its keys, top-level and inside each map
 so two identical runs produce byte-identical files and a diff of two runs'
 metadata is meaningful.
 
-Fields: `schema_version` (3), `store_layout`, `model_identity` (the hex
+Fields: `schema_version` (4), `store_layout`, `model_identity` (the hex
 structural model hash), `fit_toml_hash` (SHA-256 of the fit file's raw bytes,
 the run's `fit.toml`; provenance only, and no handle is looked up by it),
 `data_hashes`, `holdout_hashes`, `table_hashes`, `estimated`, `fixed`,
@@ -722,9 +722,8 @@ cut" below), `dt` (the integration step the run ran at — the model's declared
 (the ODE integrator the model declares, `{"method": "rk4"}` when it declares
 none), which a replay of the fit's parameters runs on by default (§3.4),
 `calendar` (the model's calendar axis, §2.2.2's block, so the fit's model times
-can be dated without the model; required), `schema` (the observation/dimension
-schema below), and `docs` (the model's `#'` documentation dictionary, keyed by
-declaration name, so a consumer can label any output column).
+can be dated without the model; required), and `schema` (the
+observation/dimension schema below).
 
 **Table forcings across a cut.** A fit's cut is its training extent, and a
 forecast's is its origin. A table forcing can give values before the cut that
@@ -749,7 +748,7 @@ training extent) depend on 1 row after it". A fit records it in `fit.meta.json`
 (`forcing_interpolation`); a forecast records it in `forecast.json`'s
 `covariates.interpolation` (§2.2.2), beside any `--covariate` statement.
 
-`schema_version` is 3, and every reader refuses any other value, naming it,
+`schema_version` is 4, and every reader refuses any other value, naming it,
 rather than reading an older record's fields as if they meant the same thing.
 
 `data_hashes` holds, per observation source the fit binds (the `from <label>` a
@@ -3650,11 +3649,10 @@ camdl reindex                # rebuild the index from the records
   run, a run recorded as failed, or the index. A completed result leaves the
   store only after `--force` has moved it to `.quarantine/`, so the copy
   `--force` replaced can be recovered from there until `clean` runs.
-- **`reindex`** reads every `identity.json`, `run.json` and invocation record,
-  writes the index of completed results and ended invocations under `.index/` as
-  one log, removes the index logs of owners known to have stopped, and prints
-  how many result folders it read. The index is a cache: a result is found
-  without it.
+- **`reindex`** reads every `identity.json` and `run.json`, writes the index of
+  completed results under `.index/` as one log, removes the index logs of owners
+  known to have stopped, and prints how many result folders it read. The index
+  is a cache: a result is found without it.
 
 #### Receiving results from another store: `receive`
 

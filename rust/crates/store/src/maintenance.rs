@@ -37,8 +37,8 @@ fn visit(dir: &Path, out: &mut Vec<(PathBuf, IdentityFile)>) {
     }
 }
 
-/// Replaces this owner's log with one line per completed result found and per
-/// ended invocation, and removes the logs of owners known not to be running.
+/// Replaces this owner's log with one line per completed result found, and
+/// removes the logs of owners known not to be running.
 pub(crate) fn write_compacted_index(inner: &Inner, found: &[(PathBuf, IdentityFile)]) -> Result<()> {
     if inner.scratch {
         return Ok(());
@@ -63,16 +63,6 @@ pub(crate) fn write_compacted_index(inner: &Inner, found: &[(PathBuf, IdentityFi
                 })
                 .collect(),
             upstream: f.parent.as_ref().filter(|p| p.relation == crate::record::Relation::Upstream).map(|p| p.run_id),
-        };
-        text.push_str(&serde_json::to_string(&line).expect("an index line encodes"));
-        text.push('\n');
-    }
-    for inv in all_invocations(&inner.root).into_iter().filter(|i| i.status == InvocationStatus::Ended) {
-        let line = IndexLine::Invocation {
-            format: RECORD_FORMAT,
-            seq: inv.seq,
-            label: inv.label.clone(),
-            results: inv.results.iter().map(|r| r.run_id).collect(),
         };
         text.push_str(&serde_json::to_string(&line).expect("an index line encodes"));
         text.push('\n');

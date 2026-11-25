@@ -240,12 +240,6 @@ pub(crate) enum IndexLine {
         lineage: Vec<Key>,
         upstream: Option<Key>,
     },
-    Invocation {
-        format: u16,
-        seq: u64,
-        label: Option<String>,
-        results: Vec<Key>,
-    },
 }
 
 /// A record file read and checked for its format version.

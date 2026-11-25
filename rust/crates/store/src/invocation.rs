@@ -20,7 +20,7 @@ use crate::hash::Key;
 use crate::inputs::Given;
 use crate::owner::{this_owner, Beat, Liveness, Timestamp, STALE_AFTER};
 use crate::record::{
-    read_record, Counts, Failure, IndexLine, InvocationFile, InvocationStatus, Lineage, Outcome, Read, ResultEntry,
+    read_record, Counts, Failure, InvocationFile, InvocationStatus, Lineage, Outcome, Read, ResultEntry,
     RECORD_FORMAT,
 };
 use crate::storage::{Inner, Store};
@@ -97,7 +97,6 @@ struct Started {
     owner_started: Timestamp,
     /// Keeps this process's beat running while the invocation is open.
     _beat: Arc<Beat>,
-    inner: std::sync::Weak<Inner>,
 }
 
 impl RunInfo {
@@ -223,14 +222,6 @@ impl Shared {
         let s = st.started.as_ref().expect("checked above");
         write_json_atomic(&invocation_path(&s.root, s.seq), &file)?;
         let _ = std::fs::remove_file(s.root.join(".invocations").join(format!("{}.progress.json", s.seq)));
-        if let Some(inner) = s.inner.upgrade() {
-            inner.append_index(&IndexLine::Invocation {
-                format: RECORD_FORMAT,
-                seq: s.seq,
-                label: file.label.clone(),
-                results: file.results.iter().map(|r| r.run_id).collect(),
-            })?;
-        }
         Ok(Some(file))
     }
 }
@@ -343,7 +334,6 @@ fn start(inner: &Arc<Inner>, st: &mut State, reuse: Reuse, beat: Arc<Beat>) -> R
         seq,
         owner_started: Timestamp::now(),
         _beat: beat,
-        inner: Arc::downgrade(inner),
     });
     let file = st.file(InvocationStatus::Running);
     write_json_atomic(&invocation_path(&inner.root, seq), &file)?;

@@ -51,14 +51,13 @@ impl Index {
     }
 
     fn learn(&mut self, line: &IndexLine) {
-        if let IndexLine::Completed { run_id, folder, deps, lineage, upstream, .. } = line {
-            self.folders.insert(*run_id, folder.clone());
-            let ups: Vec<Key> = deps.iter().chain(lineage).chain(upstream.iter()).copied().collect();
-            for u in &ups {
-                self.consumers.entry(*u).or_default().push(*run_id);
-            }
-            self.consumed.insert(*run_id, ups);
+        let IndexLine::Completed { run_id, folder, deps, lineage, upstream, .. } = line;
+        self.folders.insert(*run_id, folder.clone());
+        let ups: Vec<Key> = deps.iter().chain(lineage).chain(upstream.iter()).copied().collect();
+        for u in &ups {
+            self.consumers.entry(*u).or_default().push(*run_id);
         }
+        self.consumed.insert(*run_id, ups);
     }
 
     /// The folder the index records for `run_id`, relative to the root.

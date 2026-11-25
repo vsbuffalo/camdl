@@ -648,7 +648,10 @@ impl TrainingPartitionRecord {
 /// wrongly from anywhere else (gh#1009).
 ///
 /// v3: `calendar` is required (D59); a v2 record could omit it.
-pub const FIT_META_SCHEMA_VERSION: u32 = 3;
+///
+/// v4: the model's `#'` documentation is not recorded here; it is the model
+/// presentation's `docs.json`.
+pub const FIT_META_SCHEMA_VERSION: u32 = 4;
 
 /// The fit-level provenance sidecar (`fits/{stem}-{h8}/fit.meta.json`). A CAS
 /// fit's fit level is a path segment with no `RunRecord`; this sidecar is the
@@ -812,17 +815,6 @@ pub struct FitSidecar {
     /// model source. `origin` is null for a model that has none. Required
     /// (D59).
     pub calendar: ir::caltime::CalendarAxis,
-    /// The model's `#'` documentation dictionary ([`ir::ModelDocs`]): the
-    /// model's own header block (`docs.model`, gh#750) plus params /
-    /// compartments / transitions / observations / dimensions / quantities →
-    /// `{symbol, text, ref}`, keyed by base declaration name. A downstream
-    /// consumer labels any output column (posterior-draw parameter names,
-    /// trajectory compartments, predict streams, generated quantities) by joining
-    /// its name against this, and answers "a fit of WHAT model?" from
-    /// `docs.model` without re-reading the `.camdl`. Empty (and omitted) when
-    /// the model documents nothing.
-    #[serde(default, skip_serializing_if = "ir::ModelDocs::is_empty")]
-    pub docs: ir::ModelDocs,
 }
 
 /// Test fixtures build partial sidecars; the axis they carry is a numeric
@@ -852,7 +844,6 @@ impl Default for FitSidecar {
             dt: None,
             integrator: None,
             calendar: ir::caltime::CalendarAxis::parse("days", None).expect("a known unit"),
-            docs: ir::ModelDocs::default(),
         }
     }
 }
@@ -906,10 +897,11 @@ pub fn read_fit_sidecar(fit_segment: &std::path::Path) -> Result<Option<FitSidec
     if version != u64::from(FIT_META_SCHEMA_VERSION) {
         return Err(format!(
             "{} is fit.meta.json schema version {version}; this camdl reads version \
-             {FIT_META_SCHEMA_VERSION} only (version 3 always records the model's calendar \
-             axis; version 2 records the source config relative to the fit folder, where \
-             version 1 recorded it relative to the directory the fit was run from). Re-run \
-             the fit with this camdl.",
+             {FIT_META_SCHEMA_VERSION} only (version 4 does not record the model's \
+             documentation; version 3 always records the model's calendar axis; version 2 \
+             records the source config relative to the fit folder, where version 1 recorded \
+             it relative to the directory the fit was run from). Re-run the fit with this \
+             camdl.",
             path.display()));
     }
     serde_json::from_value(value).map(Some).map_err(|e| format!("{}: {e}", path.display()))

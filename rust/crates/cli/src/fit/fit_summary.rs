@@ -3647,7 +3647,7 @@ mod tests {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(
             dir.join("fit.meta.json"),
-            r#"{"source_model":"sir.camdl","model_identity":"f00d","schema_version":3,"calendar":{"days_per_unit":1.0,"origin":null,"time_unit":"days"},"source_config":"fit.toml","estimated":["R0","sigma","gamma"]}"#,
+            r#"{"source_model":"sir.camdl","model_identity":"f00d","schema_version":4,"calendar":{"days_per_unit":1.0,"origin":null,"time_unit":"days"},"source_config":"fit.toml","estimated":["R0","sigma","gamma"]}"#,
         )
         .unwrap();
     }

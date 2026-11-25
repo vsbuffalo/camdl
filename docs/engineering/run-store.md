@@ -984,10 +984,10 @@ It tries three sources, cheapest first (`storage.rs:649`, `locate`; `:690`,
 `find_any`):
 
 1. **The index.** `.index/` holds one append-only log per process; each
-   completed result and each ended invocation adds one line, such as
+   completed result adds one line, such as
    `{"event":"completed","format":1,"kind":"trace","run_id":"083e…","folder":"0.1.0_…/trace/trace-083e32f9b862","invocation":2,"deps":[],"lineage":[],"upstream":"f395…"}`.
    Readers merge the logs. The index is a cache and can be rebuilt from the
-   records (`camdl reindex`).
+   result records (`camdl reindex`).
 2. **The layout, when the identity is at hand**, as it is in `begin`. Each group
    directory ends in the first 12 hex digits of the identity part it groups by,
    and the store can compute those from the identity. From the artifact kind's
@@ -1481,8 +1481,8 @@ artifact kind, run id, labels and outcome: `computed`, `reused`, `failed` with
 its reason, or `busy`. A result still `planned` when the command ends is
 recorded as failed.
 
-The record is durable; the index is rebuilt from the records and the invocation
-records together. `Invocation::members::<A>()` returns the entries of one
+The record is durable. The index lists completed results only, and is rebuilt
+from their records. `Invocation::members::<A>()` returns the entries of one
 artifact kind with their labels, which is how a rendering and `camdl list` read
 them.
 
@@ -2116,8 +2116,8 @@ Four commands look after the store as a whole.
 dead on this host and empty directories, and closes interrupted invocations. It
 deletes no result.
 
-`camdl reindex` rebuilds the index from the records and the invocation records.
-The index is a cache, so this is safe at any time.
+`camdl reindex` rebuilds the index from the result records. The index is a
+cache, so this is safe at any time.
 
 `camdl receive <copy>` brings in results computed in another store, such as a
 cloud machine's ([`Store::receive`](rust:store::storage::Store::receive),

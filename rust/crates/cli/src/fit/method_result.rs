@@ -1697,7 +1697,7 @@ mod tests {
         let tmp = tempdir("theta_hat_fixed");
         let seg = tmp.path();
         std::fs::write(seg.join("fit.meta.json"),
-            serde_json::json!({"schema_version": 3, "estimated": ["R0", "sigma"],
+            serde_json::json!({"schema_version": 4, "estimated": ["R0", "sigma"],
                 "calendar": {"days_per_unit": 1.0, "origin": null, "time_unit": "days"}}).to_string()).unwrap();
         let dir = seg.join("if2-abcd").join("seed_1-ef01");
         std::fs::create_dir_all(&dir).unwrap();

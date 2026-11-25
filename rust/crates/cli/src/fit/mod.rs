@@ -1463,9 +1463,6 @@ fn build_fit_sidecar(
         dt: Some(crate::dt_rule::resolved_dt(model.simulation.dt, problem.config.dt)),
         integrator: Some(model.simulation.integrator.clone()),
         calendar,
-        // The `#'` doc dictionary (presentation metadata), loaded from the same
-        // compiled IR. Empty when the model documents nothing.
-        docs: crate::util::load_ir_envelope(model_src)?.docs,
     })
 }
 
