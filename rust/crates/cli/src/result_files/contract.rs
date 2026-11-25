@@ -104,7 +104,7 @@ pub(super) fn kinds() -> Vec<(&'static str, &'static str, Vec<Row>)> {
         ),
         (
             "model_presentation",
-            "How a model file is shown: everything a compile yields that no computation reads. A result does not depend on it; the compiled model's entry in each invocation record names the presentation that invocation compiled.",
+            "How a model file is shown: everything a compile yields that no computation reads. A result does not depend on it; the compiled model's entry in each invocation record names the presentation of the model file that invocation compiled. A command that stores a result from a stored one (`predict RUN`, `score`, `profile MODEL --fit RUN`) lists the stored compiled model in its own record, naming the presentation of the file it was given or, when it was given none, the one the stored result's invocation recorded.",
             vec![
                 row(PresentationFile::Source { camdl: true }, "always; `source.ir.json` for a compiled model"),
                 row(PresentationFile::Docs, "always"),

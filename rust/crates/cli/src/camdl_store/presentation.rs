@@ -263,12 +263,31 @@ fn presentation_run_id(
 /// as [`shown_for`] finds it.
 pub(crate) enum Shown {
     /// The presentation the chosen invocation names, read.
-    Recorded { presentation: Stored<ModelPresentation> },
-    /// The chosen invocation names no presentation for the result's model:
-    /// its record lists the model without one, or does not list the model.
-    NotRecorded,
+    Recorded { presentation: Stored<ModelPresentation>, by: RecordedBy },
+    /// The chosen invocation, by its sequence number, names no presentation
+    /// for the result's model: its record lists the model without one, or
+    /// does not list the model. `None` when no invocation is chosen: the
+    /// label names none, or no invocation listed the result.
+    NotRecorded { invocation: Option<u64> },
     /// The chosen invocation names a presentation that cannot be read.
     Unreadable { run_id: String, why: String },
+}
+
+/// Which invocation a [`Shown::Recorded`] presentation was read from.
+pub(crate) enum RecordedBy {
+    /// The invocation a label names.
+    Label,
+    /// The latest invocation that listed the result, by its sequence number.
+    /// `others` holds each different presentation an earlier invocation that
+    /// listed the result recorded for its model.
+    Latest { invocation: u64, others: Vec<OtherPresentation> },
+}
+
+/// A presentation an earlier invocation recorded for a result's model, with
+/// the labels that name those invocations (`@a`); empty when none does.
+pub(crate) struct OtherPresentation {
+    pub run_id: store::Key,
+    pub labels: Vec<String>,
 }
 
 /// The presentation of the model `model` (a compiled model's run id) that
@@ -280,21 +299,49 @@ pub(crate) enum Shown {
 ///
 /// and within that invocation, the entry for `model`. No other invocation is
 /// read for the presentation: an invocation that names none gives
-/// [`Shown::NotRecorded`].
+/// [`Shown::NotRecorded`]. For a run id or a folder, the presentations the
+/// earlier invocations that listed `result` recorded are compared with it
+/// ([`RecordedBy::Latest`]).
 pub(crate) fn shown_for(store: &Store, handle: &Handle, result: store::Key, model: store::Key) -> Shown {
     let recorded = |inv: &store::Invocation| -> Option<String> {
         let labels = inv.labels_of(<CompiledModel as Artifact>::KIND, model)?;
         serde_json::from_value::<ModelLabels>(labels).ok()?.presentation
     };
-    let chosen = match handle {
-        Handle::Label { .. } => store.invocation(handle).ok(),
+    let (seq, hex, by) = match handle {
+        Handle::Label { .. } => {
+            let Ok(inv) = store.invocation(handle) else { return Shown::NotRecorded { invocation: None } };
+            (inv.seq(), recorded(&inv), RecordedBy::Label)
+        }
         Handle::IdPrefix(_) | Handle::Path(_) => {
-            store.invocations().into_iter().rev().find(|inv| inv.entries().iter().any(|(_, k, _)| *k == result))
+            let listing: Vec<store::Invocation> =
+                store.invocations().into_iter().filter(|inv| inv.entries().iter().any(|(_, k, _)| *k == result)).collect();
+            let Some((latest, earlier)) = listing.split_last() else { return Shown::NotRecorded { invocation: None } };
+            let hex = recorded(latest);
+            let mut others: Vec<OtherPresentation> = Vec::new();
+            for inv in earlier {
+                let Some(run_id) = recorded(inv).filter(|o| Some(o) != hex.as_ref()).and_then(|o| store::Key::from_hex(&o).ok())
+                else {
+                    continue;
+                };
+                // A label names the latest invocation that holds it, which
+                // may be a later one.
+                let label = inv
+                    .label()
+                    .filter(|name| {
+                        store.invocation(&Handle::Label { name: name.to_string(), back: 0 }).is_ok_and(|i| i.seq() == inv.seq())
+                    })
+                    .map(|name| format!("@{name}"));
+                match others.iter_mut().find(|o| o.run_id == run_id) {
+                    Some(o) => o.labels.extend(label),
+                    None => others.push(OtherPresentation { run_id, labels: label.into_iter().collect() }),
+                }
+            }
+            (latest.seq(), hex, RecordedBy::Latest { invocation: latest.seq(), others })
         }
     };
-    let Some(hex) = chosen.as_ref().and_then(recorded) else { return Shown::NotRecorded };
+    let Some(hex) = hex else { return Shown::NotRecorded { invocation: Some(seq) } };
     match store.resolve::<ModelPresentation>(&RunRef::new(Handle::IdPrefix(hex.clone()))) {
-        Ok(presentation) => Shown::Recorded { presentation },
+        Ok(presentation) => Shown::Recorded { presentation, by },
         Err(e) => Shown::Unreadable { run_id: hex, why: e.to_string() },
     }
 }
@@ -305,7 +352,54 @@ impl Shown {
         match self {
             Shown::Recorded { presentation, .. } => Some(presentation.id().key().to_hex()),
             Shown::Unreadable { run_id, .. } => Some(run_id.clone()),
-            Shown::NotRecorded => None,
+            Shown::NotRecorded { .. } => None,
+        }
+    }
+
+    /// What a reader that shows the model's documentation tells the user
+    /// about it, for the result `handle` names: that no invocation recorded
+    /// the model file, so the reader goes on without the documentation; or
+    /// that the invocations that listed the result recorded different
+    /// files, so the latest one's is shown. `None` otherwise. An unreadable
+    /// presentation is reported by [`Self::restore`].
+    pub fn notice(&self, handle: &Handle) -> Option<crate::out::notice::Notice> {
+        use crate::out::notice::{Notice, Severity};
+        let chosen = |seq: u64| match handle {
+            Handle::Label { .. } => format!("the invocation {handle} names (invocation {seq})"),
+            _ => format!("the latest invocation that listed it (invocation {seq})"),
+        };
+        match self {
+            Shown::NotRecorded { invocation } => Some(Notice {
+                severity: Severity::Warning,
+                code: "model-presentation-not-recorded",
+                message: match invocation {
+                    Some(seq) => format!(
+                        "{handle}: the model's documentation is not shown: {} recorded no model file for the \
+                         model the result ran",
+                        chosen(*seq)
+                    ),
+                    None => format!("{handle}: the model's documentation is not shown: no invocation recorded the model file"),
+                },
+            }),
+            Shown::Recorded { by: RecordedBy::Latest { invocation, others }, .. } if !others.is_empty() => {
+                let listed: Vec<String> = others
+                    .iter()
+                    .map(|o| match &o.labels[..] {
+                        [] => o.run_id.short12().to_string(),
+                        labels => format!("{} ({})", o.run_id.short12(), labels.join(", ")),
+                    })
+                    .collect();
+                Some(Notice::info(
+                    "model-presentation-one-of-several",
+                    format!(
+                        "{handle}: the model's documentation is the one of the model file {} ran; earlier invocations \
+                         that listed the result ran other files (presentations {}), which their labels show",
+                        chosen(*invocation),
+                        listed.join(", ")
+                    ),
+                ))
+            }
+            _ => None,
         }
     }
 
@@ -337,7 +431,7 @@ impl Shown {
                 Err(e) => format!("{}: {e}", presentation.id().key().short12()),
             },
             Shown::Unreadable { run_id, why } => format!("{}: {why}", &run_id[..12.min(run_id.len())]),
-            Shown::NotRecorded => return,
+            Shown::NotRecorded { .. } => return,
         };
         crate::out::live().notice(&crate::out::notice::Notice {
             severity: crate::out::notice::Severity::Warning,

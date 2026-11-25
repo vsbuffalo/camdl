@@ -510,13 +510,41 @@ pub(crate) fn summary_no_methods(dir: &str) -> Vec<Line> {
     ]
 }
 
+/// What `--parameters` adds to `fit summary`'s output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Legend {
+    /// Nothing: the model documents no parameter and has no constant.
+    Empty,
+    /// The constants' legend: the model has constants and documents no
+    /// parameter.
+    Constants,
+    /// The legend of the parameters the model documents (`#'`), and of its
+    /// constants.
+    Documented,
+}
+
+impl Legend {
+    /// The legend of a model documenting the parameters `documented` and
+    /// having `constants` constants.
+    pub(crate) fn of(documented: usize, constants: usize) -> Legend {
+        match (documented, constants) {
+            (0, 0) => Legend::Empty,
+            (0, _) => Legend::Constants,
+            _ => Legend::Documented,
+        }
+    }
+}
+
 /// The two flags that add to `fit summary`'s output, named where a reader has
 /// just finished reading it and is deciding what to ask next. Each is offered
 /// only while it would change what is on screen.
-pub(crate) fn summary_foot(has_legend: bool, parameters: bool, explain: bool) -> Vec<Line> {
+pub(crate) fn summary_foot(legend: Legend, parameters: bool, explain: bool) -> Vec<Line> {
     let mut offers: Vec<&str> = Vec::new();
-    if has_legend && !parameters {
-        offers.push("--parameters for priors and provenance");
+    match legend {
+        _ if parameters => {}
+        Legend::Documented => offers.push("--parameters for documentation, priors and provenance"),
+        Legend::Constants => offers.push("--parameters for priors and provenance"),
+        Legend::Empty => {}
     }
     if !explain {
         offers.push("--explain for how to read this");

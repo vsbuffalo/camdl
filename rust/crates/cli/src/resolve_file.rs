@@ -543,7 +543,11 @@ fn with_presentation(store: &Store, source: &Source, name: &str, mut cands: Cand
         return Ok(cands);
     }
     let Some((result, model)) = named_result(store, handle, &cands) else { return Ok(cands) };
-    match shown_for(store, handle, result, model) {
+    let shown = shown_for(store, handle, result, model);
+    if let Some(n) = shown.notice(handle) {
+        crate::out::live().notice(&n);
+    }
+    match shown {
         Shown::Recorded { presentation, .. } => {
             let key = presentation.id().key();
             match store.locate(key) {
@@ -556,7 +560,7 @@ fn with_presentation(store: &Store, source: &Source, name: &str, mut cands: Cand
                 cands.unavailable.push(Unavailable { kind: kind.to_string(), run_id: key, why });
             }
         }
-        Shown::NotRecorded => {}
+        Shown::NotRecorded { .. } => {}
     }
     Ok(cands)
 }

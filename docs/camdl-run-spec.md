@@ -1873,8 +1873,11 @@ ended, as `chain_starts.tsv` records it: `accepted` (ran to the end), `skipped`
 
 How a model file is shown: everything a compile yields that no computation
 reads. A result does not depend on it; the compiled model's entry in each
-invocation record names the presentation that invocation compiled. Contract
-version 1.
+invocation record names the presentation of the model file that invocation
+compiled. A command that stores a result from a stored one (`predict RUN`,
+`score`, `profile MODEL --fit RUN`) lists the stored compiled model in its own
+record, naming the presentation of the file it was given or, when it was given
+none, the one the stored result's invocation recorded. Contract version 1.
 
 - `source`: `source.camdl`, camdl (always; `source.ir.json` for a compiled
   model). The model file as written.
@@ -3474,12 +3477,19 @@ A lookup is among the candidate results its source names:
   by-product stored for it (the results whose `upstream` it is, §2.10), so a
   cell's handle reads its observation streams. Every rule below is tried on the
   result itself before its by-products, so `run.json` names the cell's record,
-  and `obs:run.json` its observations'. For a name qualified by
-  `model_presentation` (`model_presentation:render`), the presentation of the
-  model the result ran is a candidate too: the one the latest invocation that
-  listed the result recorded with its compiled model, or, when none did, its
-  upstream's (§2.9, `model_presentation`). A label and a manifest list the
-  presentation among their results already.
+  and `obs:run.json` its observations'.
+
+For a label, a run id, a prefix or a folder and a name qualified by
+`model_presentation` (`model_presentation:render`), the presentation of the
+model the result ran is a candidate too: the one the invocation the source names
+recorded with the result's compiled model (§2.9, `model_presentation`). For a
+label that is its invocation; for a run id, a prefix or a folder, the latest
+invocation that listed the result. No other invocation is read. When that
+invocation recorded no presentation, the name finds none and a warning says that
+no model file was recorded. When an earlier invocation that listed the result
+recorded a different presentation, an info notice names it and the labels that
+name its invocations. A manifest lists the presentation only when its command
+compiled the model file.
 
 `--kind KIND` keeps the candidates of one kind, and `--run PREFIX` the one whose
 run id begins with `PREFIX`. A name is resolved by the first of these rules that

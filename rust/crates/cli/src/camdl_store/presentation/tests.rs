@@ -129,8 +129,8 @@ fn both(store: &Store, handle: &Handle, result: Key) -> (Option<Key>, Option<Key
     let located = store.locate(result).unwrap();
     let model = model_of(store, &located).expect("the result's compiled model");
     let shown = match shown_for(store, handle, result, model) {
-        Shown::Recorded { presentation } => Some(presentation.id().key()),
-        Shown::NotRecorded => None,
+        Shown::Recorded { presentation, .. } => Some(presentation.id().key()),
+        Shown::NotRecorded { .. } => None,
         Shown::Unreadable { run_id, why } => panic!("{handle}: {run_id} unreadable: {why}"),
     };
     let path = resolve_file(store, &Source::Handle(handle), &Narrow::default(), "model_presentation:docs").ok().map(|f| f.located.run_id());

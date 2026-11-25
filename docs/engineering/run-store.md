@@ -1567,11 +1567,38 @@ artifact of several files, `model_presentation`, keyed by their bytes. No result
 depends on it, so a comment edit re-keys nothing. `put_compiled` stores it, then
 the compiled model, and the compiled model's labels in that invocation record
 name the presentation. Two files that differ only in their comments therefore
-share one compiled model, and each invocation records its own presentation. A
-reader takes the presentation the invocation it names recorded: `@label`'s
-invocation, or the latest one that listed the result. A presentation that cannot
-be read leaves the reader without the documentation and is reported as a
-warning; nothing is computed from it.
+share one compiled model, and each invocation records its own presentation.
+
+A command that stores a result read from a stored one compiles nothing: a
+prediction or a score from a stored fit run. It lists the stored compiled model
+in its own invocation record, as reused, with the presentation the invocation it
+read from recorded (`link_presentation`, through
+[`Store::list`](rust:store::storage::Store::list), which registers a stored
+result in the current invocation and stores nothing). Every invocation that
+lists a result of a model therefore names the model's presentation, including
+one whose compiled model another build stored.
+
+A reader finds the presentation by one rule,
+[`shown_for`](rust:cli::camdl_store::presentation::shown_for): the invocation
+its handle names (`@label`'s invocation, or for a run id or a folder the latest
+one that listed the result), and in it the entry for the result's compiled
+model, which `model_of` finds among the result's recorded dependencies.
+`fit
+summary` and the re-posed prediction of `camdl score` take it with the
+stored fit; `camdl path` and `camdl cat` take it for a name qualified by
+`model_presentation`. No other invocation is read. The return value, `Shown`,
+says which of three things holds:
+
+- `Recorded`: the presentation is read. For a run id or a folder it also holds
+  the different presentations earlier invocations that listed the result
+  recorded, which the reader names in an info notice with the labels of their
+  invocations (`model-presentation-one-of-several`).
+- `NotRecorded`: the invocation names none, as a record written before records
+  named a presentation does. The reader goes on without the documentation and
+  says so in a warning (`model-presentation-not-recorded`).
+- `Unreadable`: the invocation names a presentation that cannot be read. The
+  reader goes on without the documentation and says so in a warning
+  (`model-presentation-unreadable`); nothing is computed from it.
 
 ### Storing a content artifact
 

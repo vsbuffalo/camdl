@@ -289,3 +289,79 @@ fn a_prediction_from_a_stored_fit_names_the_fits_presentation() {
     succeeds(camdl_in(dir, &["score", "@p", "--data", "cases=cases.tsv", "--label", "s", "--progress", "none"]), "score");
     assert_eq!(beta_doc(dir, "@s"), "The transmission rate, per day.", "@s");
 }
+
+/// The one fit run's folder under `dir/st`.
+fn run_folder(dir: &Path) -> PathBuf {
+    let runs: Vec<PathBuf> = folders_under(&dir.join("st"), "runs")
+        .into_iter()
+        .flat_map(|method| std::fs::read_dir(method).unwrap().flatten().map(|e| e.path()).filter(|p| p.is_dir()))
+        .collect();
+    assert_eq!(runs.len(), 1, "one fit run: {runs:?}");
+    runs[0].clone()
+}
+
+/// A run whose invocation record names no presentation for its model, as a
+/// record written before records named one does, is summarised without
+/// the model's documentation, and the summary says so once.
+#[test]
+fn a_summary_with_no_recorded_model_file_says_so() {
+    let tmp = fit_inputs();
+    let dir = tmp.path();
+    succeeds(camdl_in(dir, &["fit", "run", "fit.toml", "--seed", "1", "--label", "f", "--progress", "none"]), "fit run");
+    let record = dir.join("st/.invocations/1.json");
+    let mut inv: serde_json::Value = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+    for r in inv["results"].as_array_mut().unwrap() {
+        r["labels"].as_object_mut().unwrap().remove("presentation");
+    }
+    std::fs::write(&record, serde_json::to_vec_pretty(&inv).unwrap()).unwrap();
+
+    let out = succeeds(camdl_in(dir, &["fit", "summary", "@f", "--parameters"]), "fit summary");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        stderr.matches("warning: @f: the model's documentation is not shown: the invocation @f names (invocation 1) recorded no model file").count(),
+        1,
+        "{stderr}"
+    );
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("The transmission rate, per day."));
+}
+
+/// Two model files that differ only in a doc line, fitted to one run: the
+/// run's id shows the latest invocation's file and names the other, with
+/// its label; each label shows its own file and says nothing.
+#[test]
+fn an_id_whose_invocations_ran_different_files_names_the_others() {
+    let tmp = fit_inputs();
+    let dir = tmp.path();
+    for (label, doc) in [("a", "FIRST doc of beta."), ("b", "SECOND doc of beta.")] {
+        std::fs::write(dir.join(format!("{label}.camdl")), FIT_MODEL.replace("The transmission rate, per day.", doc)).unwrap();
+        std::fs::write(dir.join(format!("{label}.toml")), FIT_TOML.replace("model.camdl", &format!("{label}.camdl"))).unwrap();
+        let toml = format!("{label}.toml");
+        succeeds(camdl_in(dir, &["fit", "run", &toml, "--seed", "1", "--label", label, "--progress", "none"]), "fit run");
+    }
+    let folder = run_folder(dir);
+    let id = folder.to_string_lossy().rsplit('-').next().unwrap().to_string();
+    let first = folders_under(&dir.join("st"), "model_presentation")
+        .into_iter()
+        .find(|p| std::fs::read_to_string(p.join("docs.json")).unwrap().contains("FIRST"))
+        .expect("the first file's presentation");
+    let first = first.to_string_lossy().rsplit('-').next().unwrap().to_string();
+
+    let notice = format!(
+        "info: {id}: the model's documentation is the one of the model file the latest invocation that listed it \
+         (invocation 2) ran; earlier invocations that listed the result ran other files (presentations {first} (@a)), \
+         which their labels show"
+    );
+    let out = succeeds(camdl_in(dir, &["fit", "summary", &id, "--parameters"]), "fit summary");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(stderr.matches(&notice).count(), 1, "{stderr}");
+    assert!(String::from_utf8_lossy(&out.stdout).contains("SECOND doc of beta."));
+    let out = succeeds(camdl_in(dir, &["cat", &id, "model_presentation:docs"]), "cat");
+    assert_eq!(String::from_utf8_lossy(&out.stderr).matches(&notice).count(), 1, "{}", String::from_utf8_lossy(&out.stderr));
+
+    for (label, doc) in [("@a", "FIRST doc of beta."), ("@b", "SECOND doc of beta.")] {
+        let out = succeeds(camdl_in(dir, &["fit", "summary", label, "--parameters"]), "fit summary");
+        assert!(String::from_utf8_lossy(&out.stdout).contains(doc), "{label}");
+        assert!(!String::from_utf8_lossy(&out.stderr).contains("model-presentation"), "{label}");
+        assert!(!String::from_utf8_lossy(&out.stderr).contains("earlier invocations"), "{label}");
+    }
+}

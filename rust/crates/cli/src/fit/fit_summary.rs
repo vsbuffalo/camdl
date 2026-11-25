@@ -200,6 +200,11 @@ pub(crate) fn cmd_fit_summary(args: &FitSummaryArgs, compile: crate::util::Compi
         Ok(o) => o,
         Err(e) => out.error(CommandError::new(format!("error: {e}"))).exit(),
     };
+    // Whether the model's documentation is shown, when not, or when it is
+    // one of several files the run was given.
+    if let Some(n) = opened.shown.notice(&opened.handle) {
+        out.notice(&n);
+    }
     let dir = opened.run_dir().expect("a run handle has its files").to_string_lossy().into_owned();
 
     let strict = args.strict || ci_env_set();
@@ -638,7 +643,7 @@ fn format_text(
     let (docs, constants) = envelope.as_ref()
         .map(|env| (env.docs.clone(), env.model.constants.clone()))
         .unwrap_or_default();
-    let has_legend = !docs.parameters.is_empty() || !constants.is_empty();
+    let legend = crate::fit::report::render::Legend::of(docs.parameters.len(), constants.len());
     let shown = crate::fit::report::display_path(Path::new(dir));
     out.report(&summary_head(&shown, &docs, &constants, args.parameters));
 
@@ -746,7 +751,7 @@ fn format_text(
     if methods.is_empty() {
         out.report(&summary_no_methods(dir));
     }
-    out.report(&summary_foot(has_legend, args.parameters, args.explain));
+    out.report(&summary_foot(legend, args.parameters, args.explain));
 
     if strict && had_provenance_failure {
         out.error(CommandError::new("\nerror: provenance cross-checks failed (--strict).")).exit();
@@ -3232,6 +3237,27 @@ mod tests {
         ));
         // A model that documents nothing has no legend to gate.
         assert_eq!(parameter_legend(&BTreeMap::new(), true), "");
+    }
+
+    /// The default summary's last line offers `--parameters` for what it adds:
+    /// the documentation when the model documents a parameter, and the
+    /// constants' priors and provenance otherwise; nothing under the flag.
+    #[test]
+    fn the_parameters_offer_names_the_documentation_when_there_is_some() {
+        let foot = |legend: Legend, parameters: bool| {
+            summary_foot(legend, parameters, false)
+                .iter()
+                .map(|l| crate::out::paint::Painter::plain().render(l))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert_eq!(
+            foot(Legend::of(2, 0), false),
+            "\n  --parameters for documentation, priors and provenance · --explain for how to read this"
+        );
+        assert_eq!(foot(Legend::of(0, 1), false), "\n  --parameters for priors and provenance · --explain for how to read this");
+        assert_eq!(foot(Legend::of(0, 0), false), "\n  --explain for how to read this");
+        assert_eq!(foot(Legend::of(2, 1), true), "\n  --explain for how to read this");
     }
 
     /// A model's constants are listed under their own heading, every one of

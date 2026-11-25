@@ -1499,6 +1499,8 @@ pub(crate) struct OpenedFit {
     /// [`StoredFit::model`] ([`crate::camdl_store::shown_for`]), whose
     /// description and documentation are restored into [`Self::model_ir`].
     pub shown: crate::camdl_store::Shown,
+    /// The handle the fit was opened by, as parsed.
+    pub handle: Handle,
     _scratch: tempfile::TempDir,
 }
 
@@ -1734,7 +1736,7 @@ pub(crate) fn open_fit(store: &Store, text: &str) -> Result<OpenedFit, String> {
     let config = FitConfig { problem, inference: fit.config.inference.clone() };
     let leaf = run.as_ref().map(|r| r.path().to_path_buf());
     let segment = leaf.clone().unwrap_or_else(|| scratch.path().to_path_buf());
-    Ok(OpenedFit { fit, model_ir, run, labels, segment, leaf, config, quantities, shown, _scratch: scratch })
+    Ok(OpenedFit { fit, model_ir, run, labels, segment, leaf, config, quantities, shown, handle, _scratch: scratch })
 }
 
 /// The run store a reader of a stored fit opens: the one the command stores

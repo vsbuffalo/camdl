@@ -295,7 +295,7 @@ pgas.summary	stdout	line	R̂ max (mixed)	1.169  1.250  1.353  1.278  1.658  1.80
 pgas.summary	stdout	line	ESS min (mixed)	13      9      7      9      5      5      4      4      4      4
 pgas.summary	stdout	line	no frozen-disagree cell	the chains' paths mix everywhere
 pgas.summary	stdout	line	ESS is over the 20 saved path(s) per chain	table: latent_convergence.tsv
-pgas.summary	stdout	line	--parameters for priors and provenance	--explain for how to read this
+pgas.summary	stdout	line	--parameters for documentation, priors and provenance	--explain for how to read this
 pgas.explain	stdout	block	parameters	beta  —  per-capita transmission rate
 pgas.explain	stdout	block	parameters	gamma  —  recovery rate; mean infectious period is 1/gamma
 pgas.explain	stdout	block	R̂ compares within-chain to between-chain variance	`classic` is the unnormalized statistic
