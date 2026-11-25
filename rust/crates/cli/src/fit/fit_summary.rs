@@ -1334,12 +1334,13 @@ fn posterior_point_toml(
     // The simulator the draws were made on, and what of it a replay of the
     // file cannot carry.
     let model = crate::fit::fitted_model::stored_fit_model(opened, compile)?;
-    let simulator = crate::fit::fitted_model::stored_fit_simulator(opened, &model)?;
+    let simulator = crate::fit::fitted_model::stored_fit_simulator(opened, &model, handle)?;
+    let settings = simulator.settings.unwrap_or_default();
     let mut unreplayable: Vec<String> = Vec::new();
-    if simulator.settings.allow_degenerate_rates {
+    if settings.allow_degenerate_rates {
         unreplayable.push("allow_degenerate_rates = true".into());
     }
-    if simulator.settings.allow_forcing_extrapolation {
+    if settings.allow_forcing_extrapolation {
         unreplayable.push("allow_forcing_extrapolation = true".into());
     }
     if simulator.integrator != model.simulation.integrator {

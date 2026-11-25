@@ -97,7 +97,7 @@ pub fn generate_synthetic_datasets(
     let (simulator, _) = crate::simulator::Simulator::resolve(
         crate::simulator::ModelSimulate::of(&model.simulation),
         crate::simulator::WrittenSimulator { backend: Some(spec.backend), config_dt: Some(dt), ..Default::default() },
-        crate::simulator::Basis::Fitting { backend: spec.backend, run: "this synthetic dataset", file: "" },
+        crate::simulator::Basis::Fitting { backend: spec.backend, run: "this synthetic dataset", file: crate::dt_rule::FitFile::Named },
     )?;
     let runs: Vec<crate::util::SimRun> = seeds.iter()
         .map(|&sim_seed| synthetic_sim_run(spec, model_path, sim_seed, &simulator, eval))

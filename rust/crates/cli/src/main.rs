@@ -1551,11 +1551,11 @@ fn run_simulate(inv: args::SimulateInvocation) {
         _ => None,
     };
     // The simulator a stored fit ran on, read from the model it ran on.
-    let stored_simulator = |r: &std::sync::Arc<crate::fit_store::OpenedFit>| {
+    let stored_simulator = |r: &std::sync::Arc<crate::fit_store::OpenedFit>, name: &str| {
         crate::fit::fitted_model::stored_fit_model(r, compile)
-            .and_then(|m| crate::fit::fitted_model::stored_fit_simulator(r, &m))
+            .and_then(|m| crate::fit::fitted_model::stored_fit_simulator(r, &m, name))
     };
-    let fitted_simulator: Option<(String, crate::fit::fitted_model::FittedSimulator)> =
+    let fitted_simulator: Option<crate::simulator::StoredSimulator> =
         match (draws_path.as_deref(), fit_path_for_draws.as_ref()) {
             (Some("posterior"), Some(fit_handle)) => {
                 // A bare directory holding a `draws.tsv` outside any fit has no
@@ -1563,12 +1563,11 @@ fn run_simulate(inv: args::SimulateInvocation) {
                 posterior_fit
                     .as_ref()
                     .and_then(|r| r.as_ref().ok())
-                    .map(stored_simulator)
+                    .map(|r| stored_simulator(r, fit_handle))
                     .transpose()
                     .unwrap_or_else(|e| {
                         out.fail(format!("error: --fit {fit_handle}: {e}"));
                     })
-                    .map(|s| (fit_handle.clone(), s))
             }
             (Some(source), Some(fit_ref)) if source != "uniform" => {
                 let sim = if std::path::Path::new(fit_ref).is_file() {
@@ -1576,14 +1575,11 @@ fn run_simulate(inv: args::SimulateInvocation) {
                         crate::fit::fitted_model::fit_config_simulator(fit_ref, &m)
                     })
                 } else {
-                    crate::fit_store::opened(fit_ref).and_then(|r| stored_simulator(&r))
+                    crate::fit_store::opened(fit_ref).and_then(|r| stored_simulator(&r, fit_ref))
                 };
-                Some((
-                    fit_ref.clone(),
-                    sim.unwrap_or_else(|e| {
-                        out.fail(format!("error: --fit {fit_ref}: {e}"));
-                    }),
-                ))
+                Some(sim.unwrap_or_else(|e| {
+                    out.fail(format!("error: --fit {fit_ref}: {e}"));
+                }))
             }
             _ => None,
         };
@@ -1615,14 +1611,7 @@ fn run_simulate(inv: args::SimulateInvocation) {
     // file's fit `[provenance]` block, which records the backend and the step;
     // its integrator is the model's, since a fit takes no integrator flag.
     let replayed: Option<crate::simulator::StoredSimulator> = match (&fitted_simulator, &fit_provenance) {
-        (Some((name, f)), _) => Some(crate::simulator::StoredSimulator {
-            name: name.clone(),
-            backend: f.backend,
-            dt: f.dt,
-            integrator: f.integrator.clone(),
-            binomial: None,
-            settings: Some(f.settings),
-        }),
+        (Some(fitted), _) => Some(fitted.clone()),
         (None, Some((pf, prov))) => Some(crate::simulator::StoredSimulator {
             name: pf.clone(),
             backend: Some(prov.backend),
@@ -2869,7 +2858,7 @@ fn simulate_anchor_dt(model: &ir::Model, fit_ref: &std::path::Path, flag_dt: Opt
         crate::simulator::Basis::Fitting {
             backend: crate::args::types::ForwardBackend::ChainBinomial,
             run: "this simulation",
-            file: crate::dt_rule::FIT_FLAG_FILE,
+            file: crate::dt_rule::FitFile::Flag,
         },
     )?;
     Ok(flag_dt.unwrap_or(simulator.dt().get()))

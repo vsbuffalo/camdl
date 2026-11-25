@@ -186,7 +186,7 @@ pub(crate) fn pose_problem(
             let (ir, _bound) = crate::fit::bind_tables_into_temp_ir(&ir, &problem)?;
             let (model_ir, _) = crate::util::load_ir(&ir)?;
             problem.config.dt =
-                crate::dt_rule::effective_dt_for_command(overrides.dt, crate::fit::config_v2::written_config_dt(fit.config_text()), model_ir.simulation.dt, crate::dt_rule::FIT_FLAG_FILE)?;
+                crate::dt_rule::effective_dt_for_command(overrides.dt, crate::fit::config_v2::written_config_dt(fit.config_text()), model_ir.simulation.dt, crate::dt_rule::FitFile::Flag)?;
             problem.expand_fixed_from_scenario(&model_ir)?;
             // A name the model does not declare is refused naming where it was
             // typed, before it reaches the problem's [fixed].

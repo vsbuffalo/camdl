@@ -134,7 +134,7 @@ fn resolve_estimated(
             config_dt: crate::fit::config_v2::written_config_dt(fit.config_text()),
             ..Default::default()
         },
-        crate::simulator::Basis::Fitting { backend, run: "this design", file: crate::dt_rule::FIT_FLAG_FILE },
+        crate::simulator::Basis::Fitting { backend, run: "this design", file: crate::dt_rule::FitFile::Flag },
     )?;
     let dt = simulator.dt().get();
     crate::obs_anchor::resolve_from_config(out, &mut model, config, dt)?;

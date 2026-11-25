@@ -122,7 +122,7 @@ pub(crate) fn resolve(
         crate::simulator::Basis::Fitting {
             backend: ForwardBackend::ChainBinomial,
             run: "this prediction",
-            file: crate::dt_rule::FIT_FLAG_FILE,
+            file: crate::dt_rule::FitFile::Flag,
         },
     )?;
     let dt = simulator.dt().get();

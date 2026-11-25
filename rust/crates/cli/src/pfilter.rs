@@ -377,7 +377,7 @@ fn run_pfilter(
         crate::simulator::Basis::Fitting {
             backend: crate::args::types::ForwardBackend::ChainBinomial,
             run: "this filter",
-            file: crate::dt_rule::FIT_FLAG_FILE,
+            file: crate::dt_rule::FitFile::Flag,
         },
     )
     .unwrap_or_else(|e| {

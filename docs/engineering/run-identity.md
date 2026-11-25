@@ -202,7 +202,7 @@ does not hide the refusal from the others.
 
 A command that replays a stored fit runs under the fit's own settings. The
 simulator a fit ran on,
-[`FittedSimulator`](rust:cli::fit::fitted_model::FittedSimulator), carries its
+[`StoredSimulator`](rust:cli::simulator::StoredSimulator), carries its
 `[config] allow_degenerate_rates` and `allow_forcing_extrapolation`, read from
 the stored problem's `problem.toml`; `simulate --draws … --fit` folds its own
 flags into them

@@ -368,21 +368,7 @@ pub(crate) fn check_fit_config(
 // flag that differs runs with a notice (`crate::simulator::Simulator::resolve`).
 
 use crate::args::types::ForwardBackend;
-use ir::model::Integrator;
-
-/// The simulator a fit's parameters were estimated on.
-#[derive(Debug, Clone, PartialEq)]
-pub struct FittedSimulator {
-    /// The forward backend. `None` for a fit config with no `[method]` (one
-    /// read only for its priors and `[fixed]`): it names no simulator.
-    pub backend: Option<ForwardBackend>,
-    /// The integration step (`crate::dt_rule`).
-    pub dt: f64,
-    /// The ODE integrator the model declares; what the ODE backend uses.
-    pub integrator: Integrator,
-    /// The evaluator settings of the fit's `[config]`.
-    pub settings: FittedSettings,
-}
+use crate::simulator::StoredSimulator;
 
 /// The two `[config]` settings a fit ran under that change what its model
 /// evaluates to: `allow_degenerate_rates` (a collapsed rate is 0 rather than
@@ -434,7 +420,7 @@ impl FittedSettings {
     }
 }
 
-/// The simulator of a stored fit — the one reader.
+/// The simulator of a stored fit, named `name` in messages.
 ///
 /// - **backend**: the named run's own record (its method's `backend` in
 ///   `run.json`, as `camdl predict` and `compare` read it); for a problem-folder
@@ -445,17 +431,19 @@ impl FittedSettings {
 ///   from.
 /// - **integrator**: `fit.meta.json`'s, else the archived model's.
 /// - **settings**: the stored config's `[config]` (`fit.resolved.toml`, the
-///   configuration the fit ran under, with a flag it was given written in).
+///   configuration the fit ran under, with a flag it was given written in),
+///   always `Some`.
+/// - **binomial**: `None`; a replay draws with the default sampler.
 ///
-/// Read by every replay of a stored fit on a simulator the replaying command
-/// chooses: `simulate --draws … --fit` and `compare`'s derived filter.
-/// `camdl predict` and the contrasts read the same two dt inputs through
-/// `dt_rule::resolved_dt` and the run's recorded backend. `model` is the
-/// model the fit ran on, as the caller loaded it ([`stored_fit_model`]).
+/// Read by `simulate --draws … --fit`, `fit summary --point` and `compare`.
+/// `camdl predict` builds its own from the run's recorded backend and sampler.
+/// `model` is the model the fit ran on, as the caller loaded it
+/// ([`stored_fit_model`]).
 pub(crate) fn stored_fit_simulator(
     resolved: &crate::fit_store::OpenedFit,
     model: &ir::Model,
-) -> Result<FittedSimulator, String> {
+    name: &str,
+) -> Result<StoredSimulator, String> {
     let sidecar = crate::run_meta::read_fit_sidecar(&resolved.segment)?;
     let backend = resolved
         .leaf
@@ -472,7 +460,7 @@ pub(crate) fn stored_fit_simulator(
         .and_then(|s| s.integrator)
         .unwrap_or_else(|| model.simulation.integrator.clone());
     let settings = FittedSettings::of(&resolved.config.problem.config);
-    Ok(FittedSimulator { backend, dt, integrator, settings })
+    Ok(StoredSimulator { name: name.to_string(), backend, dt, integrator, binomial: None, settings: Some(settings) })
 }
 
 /// The model a stored fit ran on: its archive, else (a fit that archived
@@ -493,19 +481,21 @@ pub(crate) fn stored_fit_model(
 /// [`check_fit_config`]): its `[method]` backend, the dt rule over the model's
 /// step and the config's written `[config] dt` (a disagreeing one is refused,
 /// as `fit run` refuses it), the model's integrator, and the config's
-/// `[config]` settings.
+/// `[config]` settings. Named by the file's path.
 #[expect(clippy::disallowed_methods, reason = "reads the fit config that `simulate --fit` names, declared `#[input(identity)]` on `SimulateArgs`, for the backend and step a replay runs on")]
-pub fn fit_config_simulator(fit_toml: &str, model: &ir::Model) -> Result<FittedSimulator, String> {
+pub(crate) fn fit_config_simulator(fit_toml: &str, model: &ir::Model) -> Result<StoredSimulator, String> {
     let config = crate::fit::config_v2::FitConfig::load(fit_toml)?;
     let raw = std::fs::read_to_string(fit_toml).map_err(|e| format!("cannot read {fit_toml}: {e}"))?;
     let written = crate::fit::config_v2::table_declares_key(&raw, "config", "dt")
         .then_some(config.problem.config.dt);
     let dt = crate::dt_rule::effective_dt(model.simulation.dt, written)
         .map_err(|m| format!("{fit_toml}: {}", m.message("[config] dt")))?;
-    Ok(FittedSimulator {
+    Ok(StoredSimulator {
+        name: fit_toml.to_string(),
         backend: config.inference.method.as_ref().map(|m| ForwardBackend::from(m.algorithm.backend())),
         dt,
         integrator: model.simulation.integrator.clone(),
-        settings: FittedSettings::of(&config.problem.config),
+        binomial: None,
+        settings: Some(FittedSettings::of(&config.problem.config)),
     })
 }

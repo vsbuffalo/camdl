@@ -4482,11 +4482,9 @@ fn run_predict(
             selection.as_ref(),
             &model,
             &fit_base,
-            simulator.backend(),
+            &simulator,
             seed,
             quantity_obs_anchors,
-            config.config.dt,
-            binomial,
             eval,
         )?;
         // The manifest of the contrast tables written, which the store's

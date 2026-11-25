@@ -769,7 +769,8 @@ impl Context {
 /// `allow_degenerate_rates`, `allow_forcing_extrapolation`).
 fn fit_settings(fit: &OpenedFit) -> Result<crate::fit::fitted_model::FittedSettings, String> {
     let (model, _) = crate::util::load_ir(&fit.model_ir.to_string_lossy())?;
-    Ok(crate::fit::fitted_model::stored_fit_simulator(fit, &model)?.settings)
+    let name = crate::fit::report::display_path(fit.fit.problem.folder());
+    Ok(crate::fit::fitted_model::stored_fit_simulator(fit, &model, &name)?.settings.unwrap_or_default())
 }
 
 /// The posterior draws a fit run's prediction drew from: its retained draws

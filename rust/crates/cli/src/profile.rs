@@ -577,7 +577,7 @@ fn run_profile(
         crate::simulator::Basis::Fitting {
             backend,
             run: "this profile",
-            file: crate::dt_rule::FIT_FLAG_FILE,
+            file: crate::dt_rule::FitFile::Flag,
         },
     )
     .unwrap_or_else(|e| { out.fail(format!("error: {e}")); });

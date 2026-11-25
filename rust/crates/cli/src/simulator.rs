@@ -106,7 +106,7 @@ pub(crate) enum Basis<'a> {
     /// `--backend` is written; `run` names the run in a refusal ("this
     /// prediction"), and `file` the fit file in a step error
     /// (`dt_rule::effective_dt_for_command`).
-    Fitting { backend: ForwardBackend, run: &'static str, file: &'static str },
+    Fitting { backend: ForwardBackend, run: &'static str, file: crate::dt_rule::FitFile },
     /// A stored fit or a params file's provenance: the fit's simulator, and a
     /// flag that differs runs with a note.
     Replay(&'a StoredSimulator),
@@ -381,7 +381,7 @@ mod tests {
     }
 
     fn fitting(backend: ForwardBackend) -> Basis<'static> {
-        Basis::Fitting { backend, run: "this prediction", file: crate::dt_rule::FIT_FLAG_FILE }
+        Basis::Fitting { backend, run: "this prediction", file: crate::dt_rule::FitFile::Flag }
     }
 
     fn resolve(m: ModelSimulate, w: WrittenSimulator, b: Basis) -> (Simulator, Option<String>) {

@@ -343,17 +343,32 @@ pub(crate) fn resolve(
     let (model, _) = crate::util::load_ir(&compiled_ir).unwrap_or_else(|e| {
         out.fail(format!("error: {}", e));
     });
-    // The one dt rule (`crate::dt_rule`): the model's declared step is the
-    // integration step for every method; a `--dt` or a `[config] dt` the file
-    // writes that differs from it, or from each other, is refused. The
-    // resolved step is written into the config before anything reads it — the
+    // The fit's simulator, under the fitting rule (`Simulator::resolve`,
+    // `Basis::Fitting`): the method's backend, the model's declared step (a
+    // `--dt` or a `[config] dt` the file writes that differs from it, or from
+    // each other, is refused), and on chain-binomial the method's sampler. The
+    // resolved step is written into the config before anything reads it: the
     // observation grid, the synthetic generator, every runner, and the
     // problem's identity, which so keys on the step the fit ran at.
     {
-        let written = config_v2::table_declares_key(&config_text, "config", "dt")
+        let method = config.inference.method.as_ref().expect("checked above");
+        let backend = crate::args::types::ForwardBackend::from(method.algorithm.backend());
+        let binomial = (backend == crate::args::types::ForwardBackend::ChainBinomial)
+            .then(|| method.algorithm.binomial());
+        let written_dt = config_v2::table_declares_key(&config_text, "config", "dt")
             .then_some(config.problem.config.dt);
-        match crate::dt_rule::effective_dt_for_command(a.problem.dt, written, model.simulation.dt, "") {
-            Ok(dt) => config.problem.config.dt = dt,
+        let resolved = crate::simulator::Simulator::resolve(
+            crate::simulator::ModelSimulate::of(&model.simulation),
+            crate::simulator::WrittenSimulator {
+                dt: a.problem.dt,
+                config_dt: written_dt,
+                binomial,
+                ..Default::default()
+            },
+            crate::simulator::Basis::Fitting { backend, run: "this fit", file: crate::dt_rule::FitFile::Named },
+        );
+        match resolved {
+            Ok((simulator, _)) => config.problem.config.dt = simulator.dt().get(),
             Err(e) => out.fail(format!("error: {fit_path}: {e}")),
         }
     }
