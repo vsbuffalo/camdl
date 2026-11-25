@@ -1,6 +1,7 @@
 # A model's presentation as its own content
 
-Status: draft for review
+Status: superseded by
+`docs/dev/proposals/2026-11-25-stored-models-and-invocations.md`
 
 ## The defect
 
