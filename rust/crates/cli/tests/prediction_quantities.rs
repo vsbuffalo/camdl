@@ -213,6 +213,63 @@ fn compare_of_a_run_with_no_recorded_source_is_refused() {
     assert!(stderr.contains("no invocation recorded the model file"), "{stderr}");
 }
 
+/// The newest invocation record under `dir/st`.
+fn last_record(dir: &Path) -> serde_json::Value {
+    let records = dir.join("st/.invocations");
+    let last = std::fs::read_dir(&records)
+        .unwrap()
+        .flatten()
+        .filter_map(|e| e.file_name().to_string_lossy().strip_suffix(".json")?.parse::<u64>().ok())
+        .max()
+        .unwrap();
+    serde_json::from_slice(&std::fs::read(records.join(format!("{last}.json"))).unwrap()).unwrap()
+}
+
+/// The predictions `compare` makes of fit runs record the model source they
+/// were made through, as `predict` records it: its record lists the runs'
+/// compiled model with that source.
+#[test]
+fn compare_records_the_source_its_predictions_used() {
+    let tmp = inputs(&[("a", "peak_I = max(I)")]);
+    let dir = tmp.path();
+    fit(dir, "a", "a");
+    succeeds(camdl_in(dir, &["fit", "run", "a.toml", "--seed", "2", "--label", "a2", "--progress", "none"]), "fit run");
+    succeeds(camdl_in(dir, &["compare", "@a", "@a2", "--progress", "none"]), "compare");
+    let record = last_record(dir);
+    let models: Vec<&serde_json::Value> =
+        record["results"].as_array().unwrap().iter().filter(|r| r["kind"] == "compiled_model").collect();
+    assert!(!models.is_empty() && models.iter().all(|m| m["source"]["kind"] == "model_source"), "{record:#}");
+}
+
+/// The source a record names for its compiled model, the one source it
+/// names.
+fn sources_of(record: &serde_json::Value) -> std::collections::BTreeSet<String> {
+    record["results"].as_array().unwrap().iter().filter_map(|r| r["source"]["run_id"].as_str().map(str::to_string)).collect()
+}
+
+/// Two runs of one compiled model fitted from different files have
+/// different sources. `compare` records each input's predictions in an
+/// invocation of their own, so each records its own run's source and
+/// neither is lost.
+#[test]
+fn compare_of_one_model_through_two_sources_records_each() {
+    let tmp = inputs(&[("a", "peak_I = max(I)")]);
+    let dir = tmp.path();
+    let a = std::fs::read_to_string(dir.join("a.camdl")).unwrap();
+    std::fs::write(dir.join("c.camdl"), format!("# the same model, commented\n{a}")).unwrap();
+    std::fs::write(dir.join("c.toml"), FIT_TOML.replace("model.camdl", "c.camdl")).unwrap();
+    fit(dir, "a", "a");
+    succeeds(camdl_in(dir, &["fit", "run", "c.toml", "--seed", "2", "--label", "c", "--progress", "none"]), "fit run");
+    let read = |seq: u64| -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(dir.join(format!("st/.invocations/{seq}.json"))).unwrap()).unwrap()
+    };
+    let (sa, sc) = (sources_of(&read(1)), sources_of(&read(2)));
+    assert!(sa.len() == 1 && sc.len() == 1 && sa != sc, "two sources of one compiled model: {sa:?} {sc:?}");
+    succeeds(camdl_in(dir, &["compare", "@a", "@c", "--progress", "none"]), "compare");
+    let compared: Vec<std::collections::BTreeSet<String>> = (3..=4).map(|seq| sources_of(&read(seq))).collect();
+    assert_eq!(compared, [sa, sc], "each input's invocation records its own run's source");
+}
+
 /// The folder of the quantities the model source invocation `seq` recorded
 /// for its compiled model depends on.
 fn recorded_quantities_folder(dir: &Path, seq: u64) -> PathBuf {

@@ -50,6 +50,14 @@ pub enum Error {
     /// this invocation did not list.
     #[error("this invocation did not list the {kind} {run_id}, so it records no source for it")]
     NotListed { kind: &'static str, run_id: Key },
+    /// `RunInfo::record_source` was asked to record a second, different
+    /// source for one result in one invocation.
+    #[error(
+        "this invocation already recorded the source {} for the {kind} {}, and is asked to record {} too; \
+         a record holds one source per result",
+        recorded.short12(), run_id.short12(), asked.short12()
+    )]
+    SourceDiffers { kind: &'static str, run_id: Key, recorded: Key, asked: Key },
     #[error(
         "{} is held by {owner}, whose beat has stopped; it may still be alive on that host. \
          Remove the lock file by hand once that process is known to have stopped",

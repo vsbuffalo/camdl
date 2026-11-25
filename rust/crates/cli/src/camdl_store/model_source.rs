@@ -780,7 +780,14 @@ pub(crate) fn link_source(
         .list::<CompiledModel>(model.id(), &attributes, info)
         .map_err(|e| format!("the compiled model {}: {e}", model.id().key().short12()))?;
     if let Some(source) = source {
-        info.record_source(model.id(), &source).map_err(|e| e.to_string())?;
+        info.record_source(model.id(), &source).map_err(|e| match e {
+            store::Error::SourceDiffers { .. } => format!(
+                "the compiled model {} is read through two model sources in this command ({e}); an invocation \
+                 records one model source per compiled model, so run the command once for each model file",
+                model.id().key().short12()
+            ),
+            e => e.to_string(),
+        })?;
     }
     Ok(())
 }

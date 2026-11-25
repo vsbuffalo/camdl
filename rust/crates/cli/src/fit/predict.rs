@@ -2122,9 +2122,18 @@ pub(crate) fn prediction_of(
         args.flags.forcing_extrapolation.allow_forcing_extrapolation,
     );
     let _forcing_route = forcing.install();
+    // The prediction records the model source it was made through, as
+    // `camdl predict` records it, so a reader of it by run id finds it.
     let stored = match run_predict(out, args, compile, source, info, store::Reuse::IfCompleted, None)? {
-        Outcome::Reused { stored, .. } => stored,
-        Outcome::Computed(o) => store_prediction(&o.stored, info, store::Reuse::IfCompleted)?,
+        Outcome::Reused { stored, source } => {
+            source.record_source(&source.store()?, info)?;
+            stored
+        }
+        Outcome::Computed(o) => {
+            let stored = store_prediction(&o.stored, info, store::Reuse::IfCompleted)?;
+            o.stored.source.record_source(&o.stored.source.store()?, info)?;
+            stored
+        }
     };
     let (failures, _) = stored_report(&stored)?;
     if let Some(f) = failures.first() {

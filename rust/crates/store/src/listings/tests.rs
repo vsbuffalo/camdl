@@ -157,3 +157,21 @@ fn the_source_is_the_answering_invocations_with_no_fallback_and_others_named() {
     let id = crate::Id::<Sim>::of(&store.inner.ambient_key, &unlisted);
     assert!(matches!(other.record_source(&id, &crate::Id::<Model>::from_key(sim.key())), Err(Error::NotListed { .. })));
 }
+
+/// An invocation records one source per result: the same source again is
+/// accepted, another one is refused, and the first stays recorded.
+#[test]
+fn a_second_different_source_for_one_result_is_refused() {
+    let root = TempRoot::new("listings-two-sources");
+    let store = open(root.path());
+    let i = info();
+    let (sim, m1) = run_with_source(&store, &i, 11, "S -> I");
+    i.record_source(&sim, &m1).unwrap();
+    let m2 = store
+        .put::<Model>(crate::Hashed::new(ModelText("S -> I -> R".into())), &ModelAttributes { name: "m".into() }, &crate::Provenance::none(), &i)
+        .unwrap();
+    let e = i.record_source(&sim, m2.id()).unwrap_err();
+    assert!(matches!(e, Error::SourceDiffers { recorded, asked, .. } if recorded == m1.key() && asked == m2.id().key()), "{e}");
+    i.finish(&store).unwrap();
+    assert_eq!(store.listings(&id_handle(sim.key())).unwrap().source::<Sim, Model>(&sim), crate::Recorded::One { source: m1, unfinished: false });
+}
