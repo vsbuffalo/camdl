@@ -472,9 +472,10 @@ step resolved from the model, `--dt` and `[config] dt` by §1.3.1,
 (`scenario`, `enable`, `disable`) as given; `ic_free`; and, for a `[synthetic]`
 problem, what generated its data: the true parameters file's bytes, the
 dataset's one seed and the block's other settings. Two fit files that pose one
-problem and differ in `[method]` share one problem folder. `rw_sd`,
-`perturb_only_at_t0` and `start`, though written under `[estimate.<parameter>]`,
-belong to the run, so two runs that differ only in them share a problem.
+problem and differ in `[method]` share one problem folder. The steps, in
+`[method.perturbation]` or `[method.proposal]`, belong to the method, and
+`start`, though written under `[estimate.<parameter>]`, belongs to where the
+chains start, so two runs that differ only in them share a problem.
 `[synthetic]` and `--emit-every` generate training rows, which the problem keys
 like any data. A `[data.holdout]` table's values enter no fit; its rows' dates
 are held-out rows like a cutoff's.
@@ -483,15 +484,21 @@ Data enter by **content**, not path. A change to any column within the training
 lines re-keys the problem, and with `holdout_after` the lines past the cutoff
 are not in it, so a change to a held-out value does not.
 
-**What a run's identity holds.** The problem it depends on, the method's
-settings without its length, the per-parameter run settings of `[estimate]`, the
-larger compile with the state Jacobian when the method needs it (`nl-lbfgs` on
-the ODE backend), the process seed, where the chains start, the length (PGAS
-`sweeps`, PMMH and `mh` `iterations`), and for a resume the base run (below). A
-sourced `starts` (`from_mle`, `from_posterior`, `from_params` on a stored fit)
-holds a dependency on the file it reads from the source run, so refitting the
-source with identical inputs leaves the dependency, and every run started from
-it, unchanged; a `--starts` file named directly is stored in the run as
+**What a run's identity holds.** The problem it depends on; the method's
+settings without its length, which for `if2` include every estimated parameter's
+resolved perturbation (its SD in z and whether it is perturbed at t = 0 only)
+and each simplex member's SD, and for `pmmh` and `mh` every estimated
+parameter's resolved proposal SD in z; the larger compile with the state
+Jacobian when the method needs it (`nl-lbfgs` on the ODE backend), the process
+seed, where the chains start, the length (PGAS `sweeps`, PMMH and `mh`
+`iterations`), and for a resume the base run (below). Where the chains start is
+the `starts` rule, what it reads, and the `start` values `[estimate]` writes. A
+step is keyed as resolved, so a step written at its default value and a step
+left out give one run, and two values that differ in a bit give two. A sourced
+`starts` (`from_mle`, `from_posterior`, `from_params` on a stored fit) holds a
+dependency on the file it reads from the source run, so refitting the source
+with identical inputs leaves the dependency, and every run started from it,
+unchanged; a `--starts` file named directly is stored in the run as
 `inputs/starts.<ext>` and keyed by its bytes.
 
 **The files a problem and a run hold.**
@@ -523,11 +530,13 @@ it, unchanged; a `--starts` file named directly is stored in the run as
   (`instant` or `period`) and `start`/`end`.
 - A run's `fit.toml` is the file it was given, comments included. Its
   `method.toml` is the `[method]` table after the command line's method flags
-  are applied, followed by an `[estimate.<parameter>]` table per parameter that
-  sets `rw_sd`, `perturb_only_at_t0` or `start`; with `problem.toml` it parses
-  to the configuration the run computed. `run_inputs.json` records the method,
-  backend, seed, chain count, starts rule and source, binomial sampler, best
-  chain and log-likelihood, and resume lineage; every reader of a run reads its
+  are applied, with every estimated parameter's resolved step written into
+  `[method.perturbation]` or `[method.proposal]`, followed by an
+  `[estimate.<parameter>]` table with its `start` for each parameter whose start
+  the file writes; with `problem.toml` it parses to the configuration the run
+  computed. `run_inputs.json` records the method, backend, seed, chain count,
+  starts rule and source, binomial sampler, best chain and log-likelihood, each
+  parameter's step (§9.5), and resume lineage; every reader of a run reads its
   method and backend there.
 
 A reader of a stored fit reads the problem through these files and the stored
@@ -4372,23 +4381,23 @@ Three properties govern the whole surface:
 Every key a `fit.toml` accepts at the top level. Anything else fails at load
 with the serde list quoted in §6.9.
 
-| key              | type            | required  | default                | meaning                                                                                                                                                                                                                                                                                                                                                                                                              |
-| ---------------- | --------------- | --------- | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `[model]`        | table           | **yes**   | —                      | `camdl = "<path>"`. Accepts a `.camdl` source or a pre-compiled `.ir.json`.                                                                                                                                                                                                                                                                                                                                          |
-| `[data]`         | table           | one of    | —                      | Real-data source. Mutually exclusive with `[synthetic]`; exactly one must be present.                                                                                                                                                                                                                                                                                                                                |
-| `[synthetic]`    | table           | one of    | —                      | Generate N datasets from known truth and fit each (simulation-based calibration).                                                                                                                                                                                                                                                                                                                                    |
-| `[estimate]`     | table of tables | **yes**   | —                      | The free parameters. See §6.3.                                                                                                                                                                                                                                                                                                                                                                                       |
-| `[fixed]`        | table           | **yes**   | —                      | The held-constant parameters. See §6.4.                                                                                                                                                                                                                                                                                                                                                                              |
-| `[method]`       | table           | `fit run` | —                      | One algorithm, its settings, and the chains' `starts`. Absent, the file is a complete problem for every other reader and `fit run` refuses it. See §6.5.                                                                                                                                                                                                                                                             |
-| `[config]`       | table           | no        | `{ dt = 1.0 }`         | Fit-wide simulator settings. See the sub-table below.                                                                                                                                                                                                                                                                                                                                                                |
-| `store`          | string          | no        | `camdl-store`          | The run store's root for every command that reads this file, below `--store` and above `CAMDL_STORE` (§2.1). Anchored at the `fit.toml`. Not part of any identity.                                                                                                                                                                                                                                                   |
-| `fit_seeds`      | list of ints    | no        | `[--seed]` (CLI, or 1) | One fit per listed seed. Duplicates rejected.                                                                                                                                                                                                                                                                                                                                                                        |
-| `simplex_groups` | array of tables | no        | `[]`                   | `[[simplex_groups]] params = ["a","b",…]` — members must form a probability simplex. Honored by IF2 only; other algorithms warn.                                                                                                                                                                                                                                                                                     |
-| `scenario`       | string          | no        | none                   | Named scenario from the model; applies its enable/disable lists and param overrides before inference. Exclusive with `enable`/`disable`.                                                                                                                                                                                                                                                                             |
-| `enable`         | list of strings | no        | `[]`                   | Ad-hoc intervention enable list; `"*"` enables every toggleable intervention.                                                                                                                                                                                                                                                                                                                                        |
-| `disable`        | list of strings | no        | `[]`                   | Ad-hoc disable list. Explicit disable beats `always_active`.                                                                                                                                                                                                                                                                                                                                                         |
-| `ic_free`        | bool            | no        | `false`                | Condition the likelihood on `y₁` rather than on a committed initial state. Requires particles that differ in x₀: `if2` always, `pfilter`/`pmmh` only when the model's `init { }` declares a law (gh#732). Also requires a non-missing `y₁`, and — when the model's `init { }` is deterministic — a `perturb_only_at_t0 = true` parameter. `profile --fit` and `pfilter --fit` score the same conditional likelihood. |
-| `[provenance]`   | table           | no        | none                   | Lineage metadata. See §6.7.                                                                                                                                                                                                                                                                                                                                                                                          |
+| key              | type            | required  | default                | meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| ---------------- | --------------- | --------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `[model]`        | table           | **yes**   | —                      | `camdl = "<path>"`. Accepts a `.camdl` source or a pre-compiled `.ir.json`.                                                                                                                                                                                                                                                                                                                                                                                        |
+| `[data]`         | table           | one of    | —                      | Real-data source. Mutually exclusive with `[synthetic]`; exactly one must be present.                                                                                                                                                                                                                                                                                                                                                                              |
+| `[synthetic]`    | table           | one of    | —                      | Generate N datasets from known truth and fit each (simulation-based calibration).                                                                                                                                                                                                                                                                                                                                                                                  |
+| `[estimate]`     | table of tables | **yes**   | —                      | The free parameters. See §6.3.                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `[fixed]`        | table           | **yes**   | —                      | The held-constant parameters. See §6.4.                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `[method]`       | table           | `fit run` | —                      | One algorithm, its settings, and the chains' `starts`. Absent, the file is a complete problem for every other reader and `fit run` refuses it. See §6.5.                                                                                                                                                                                                                                                                                                           |
+| `[config]`       | table           | no        | `{ dt = 1.0 }`         | Fit-wide simulator settings. See the sub-table below.                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `store`          | string          | no        | `camdl-store`          | The run store's root for every command that reads this file, below `--store` and above `CAMDL_STORE` (§2.1). Anchored at the `fit.toml`. Not part of any identity.                                                                                                                                                                                                                                                                                                 |
+| `fit_seeds`      | list of ints    | no        | `[--seed]` (CLI, or 1) | One fit per listed seed. Duplicates rejected.                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `simplex_groups` | array of tables | no        | `[]`                   | `[[simplex_groups]] params = ["a","b",…]` — members must form a probability simplex. Honored by IF2 only; other algorithms warn.                                                                                                                                                                                                                                                                                                                                   |
+| `scenario`       | string          | no        | none                   | Named scenario from the model; applies its enable/disable lists and param overrides before inference. Exclusive with `enable`/`disable`.                                                                                                                                                                                                                                                                                                                           |
+| `enable`         | list of strings | no        | `[]`                   | Ad-hoc intervention enable list; `"*"` enables every toggleable intervention.                                                                                                                                                                                                                                                                                                                                                                                      |
+| `disable`        | list of strings | no        | `[]`                   | Ad-hoc disable list. Explicit disable beats `always_active`.                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `ic_free`        | bool            | no        | `false`                | Condition the likelihood on `y₁` rather than on a committed initial state. Requires particles that differ in x₀: `if2` always, `pfilter`/`pmmh` only when the model's `init { }` declares a law (gh#732). Also requires a non-missing `y₁`, and — when the model's `init { }` is deterministic — an `if2` method with a `[method.perturbation]` entry that sets `initial_state = true`. `profile --fit` and `pfilter --fit` score the same conditional likelihood. |
+| `[provenance]`   | table           | no        | none                   | Lineage metadata. See §6.7.                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 
 `[config]` (`FitBackendConfig`, `config_v2.rs`):
 
@@ -4496,16 +4505,22 @@ loglik and a predictive row cover the window the fit scored.
 Each entry is `[estimate.<param>]` (or an inline table under `[estimate]`).
 `EstimateSpecV2` (`config_v2.rs`):
 
-| key                  | type         | default                     | meaning                                                                                                                                                                                                                                                                                                                  |
-| -------------------- | ------------ | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `bounds`             | `[lo, hi]`   | the model's `in [lo, hi]`   | Search box. May only **narrow** the model's declared range; loosening is an error.                                                                                                                                                                                                                                       |
-| `start`              | float        | a draw within the bounds    | The base point: where `starts = "single"` puts every chain, and where `uniform` puts chain 1; the other spread rules read it only at one chain, and the sourced rules not at all. Under `pmmh`/`mh` it is also the point of the pre-run likelihood check and of the initial proposal scale.                              |
-| `prior`              | inline table | the model's `~` declaration | See the wire format below. Required in some form for `pgas`/`pmmh`/`mh`.                                                                                                                                                                                                                                                 |
-| `perturb_only_at_t0` | bool         | `false`                     | Perturb at t=0 only, not at every observation — the IF2 schedule for an initial-state parameter. Accepted only under `if2`: every other method refuses the config at load, since it would read the flag nowhere. Required by `ic_free` unless the model's `init { }` declares a law, which supplies the same t=0 spread. |
-| `rw_sd`              | float        | auto-scaled from bounds     | IF2 per-parameter random-walk SD, on the natural scale; `pmmh`/`mh` also read it for the initial proposal SD.                                                                                                                                                                                                            |
+| key      | type         | default                     | meaning                                                                                                                                                                                                                                                                                                                                                                                 |
+| -------- | ------------ | --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bounds` | `[lo, hi]`   | the model's `in [lo, hi]`   | Search box. May only **narrow** the model's declared range; loosening is an error.                                                                                                                                                                                                                                                                                                      |
+| `start`  | float        | a draw within the bounds    | The base point: where `starts = "single"` puts every chain, and where `uniform` puts chain 1; the other spread rules read it only at one chain, and the sourced rules not at all. Under `pmmh`/`mh` it is also the point of the pre-run likelihood check. A written `start` is θ₀, the point at which the launch table and `run_inputs.json` give each step's natural-scale equivalent. |
+| `prior`  | inline table | the model's `~` declaration | See the wire format below. Required in some form for `pgas`/`pmmh`/`mh`.                                                                                                                                                                                                                                                                                                                |
 
 An entry with no fields at all (`beta = {}`) is legal: it means "estimate this,
-take the bounds and the prior from the model."
+take the bounds and the prior from the model." A step is not an `[estimate]`
+key: IF2's perturbation is `[method.perturbation]` and the initial proposal SD
+of `pmmh` and `mh` is `[method.proposal]` (§6.5). An entry that writes `rw_sd`
+or `perturb_only_at_t0` is refused before the typed parse, and the message
+gives, per parameter, the entry to write in the method's table: the old
+natural-scale step converted to z at θ₀ (its `start`, else the model's value,
+else the middle of its box; under `pmmh` and `mh` five times that, the old
+initial proposal), with the natural-scale step the default would give there.
+`fit-toml.md`, "Step sizes", gives the conversion.
 
 **Transforms** (`runner.rs`, `derive_transform_with_bounds`;
 `sim::inference::types::Transform::for_domain`) map the real line onto the
@@ -4621,15 +4636,42 @@ rejected at parse.
 
 Keys common to every method: `algorithm`, `backend`, `starts` (§6.6).
 
+**Step tables.** `[method.perturbation]` (`if2`) and `[method.proposal]`
+(`pmmh`, `mh`) hold each estimated parameter's step in z, the unconstrained
+coordinate of its map (§6.3); the tables below give each one's form and
+defaults. Either table under another method is refused at load, and an entry
+that names a parameter `[estimate]` does not list is refused before the run. A
+parameter on the `identity` map has no default step, and its step must be
+written. `pgas`, `pfilter` and the `nl-*` optimizers take no per-parameter step.
+Before any chain runs, `fit run` reads from the compiled model where each
+estimated parameter enters (the initial state, the dynamics or an observation,
+directly or through a binding, forcing or table) and refuses:
+
+- under `if2`, an estimated parameter that enters only the initial state without
+  `initial_state = true`, and `initial_state = true` on a parameter that enters
+  the dynamics or an observation, naming where it enters; when the compiled
+  model holds a reference that cannot be resolved, `initial_state` is refused on
+  every parameter;
+- under `if2` and the `nl-*` optimizers, an estimated parameter the likelihood
+  does not depend on, including one that appears only in another parameter's
+  prior;
+- under `pmmh`, `mh` and `pgas`, an estimated parameter with no connection to
+  the likelihood, directly or as a hyperparameter of one that has, and a flat
+  prior. One with a proper prior of its own runs, with a warning that its
+  marginal posterior equals its prior.
+
+The guide to choosing a step is `fit-toml.md`, "Step sizes".
+
 **`if2`** — `chains`, `particles`, `iterations`, `cooling` required.
 
-| key                    | default | meaning                                                                                                                                                                                                              |
-| ---------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `cooling`              | —       | Fraction of the initial perturbation SD remaining at `cooling_target_iters`.                                                                                                                                         |
-| `cooling_target_iters` | `50`    | pomp's `cooling.fraction.50` convention; decoupled from `iterations`.                                                                                                                                                |
-| `loglik_eval`          | table   | Clean re-scoring of candidate θ̂. `n_particles = 4000`, `n_replicates = 8`, `combine = "log_mean_exp"` (or `"mean"`).                                                                                                 |
-| `gate`                 | table   | `a_thresh = 1.01` (chain-agreement Â ceiling), `decibans_thresh = 30.0` (inter-chain loglik spread floor).                                                                                                           |
-| `dt_check`             | table   | Post-fit Richardson dt-convergence audit. `enabled = true`, `n_halvings = 2`; `n_particles`/`n_replicates`/`combine` inherit `loglik_eval`; `threshold_nats` defaults per backend (2.0 chain_binomial, 0.5 ode_rk4). |
+| key                    | default | meaning                                                                                                                                                                                                                                                                                                                                                |
+| ---------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `cooling`              | —       | Fraction of the initial perturbation SD remaining at `cooling_target_iters`.                                                                                                                                                                                                                                                                           |
+| `cooling_target_iters` | `50`    | pomp's `cooling.fraction.50` convention; decoupled from `iterations`.                                                                                                                                                                                                                                                                                  |
+| `loglik_eval`          | table   | Clean re-scoring of candidate θ̂. `n_particles = 4000`, `n_replicates = 8`, `combine = "log_mean_exp"` (or `"mean"`).                                                                                                                                                                                                                                   |
+| `gate`                 | table   | `a_thresh = 1.01` (chain-agreement Â ceiling), `decibans_thresh = 30.0` (inter-chain loglik spread floor).                                                                                                                                                                                                                                             |
+| `dt_check`             | table   | Post-fit Richardson dt-convergence audit. `enabled = true`, `n_halvings = 2`; `n_particles`/`n_replicates`/`combine` inherit `loglik_eval`; `threshold_nats` defaults per backend (2.0 chain_binomial, 0.5 ode_rk4).                                                                                                                                   |
+| `perturbation`         | table   | Per estimated parameter, its random-walk SD in z: `NAME = sd`, or `NAME = { sd = …, initial_state = true }` for a parameter that enters only the initial state, perturbed at t = 0 only. A name left out takes 1/20 on an `interval` or `log_interval` map and 1/5 on a one-sided map; a simplex member takes 1/6 on its group's log-ratio coordinate. |
 
 `iterations` must be ≥ 1. IF2 has no extension dimension, so `--resume` does not
 apply: its cooling schedule is determined by the total iteration count, and
@@ -4652,12 +4694,13 @@ restarting mid-schedule is statistically incoherent.
 
 **`pmmh`** — `chains`, `particles`, `iterations` required.
 
-| key           | default | meaning                                         |
-| ------------- | ------- | ----------------------------------------------- |
-| `burn_in`     | `5000`  | Must be `< iterations`.                         |
-| `thin`        | `10`    |                                                 |
-| `adapt`       | `true`  | Haario adaptive Metropolis on the proposal SDs. |
-| `adapt_start` | `300`   | MCMC step at which adaptation begins.           |
+| key           | default | meaning                                                                                                          |
+| ------------- | ------- | ---------------------------------------------------------------------------------------------------------------- |
+| `burn_in`     | `5000`  | Must be `< iterations`.                                                                                          |
+| `thin`        | `10`    |                                                                                                                  |
+| `adapt`       | `true`  | Haario adaptive Metropolis on the proposal SDs.                                                                  |
+| `adapt_start` | `300`   | MCMC step at which adaptation begins.                                                                            |
+| `proposal`    | table   | Per estimated parameter, its initial proposal SD in z, used as written: `NAME = sd`. A name left out takes 0.25. |
 
 **`mh`** — `chains`, `iterations` required. Reuses the PMMH chain and
 adaptive-proposal machinery with the particle-filter likelihood swapped for the
@@ -4669,6 +4712,7 @@ deterministic ODE evaluation, so it carries no `particles`.
 | `thin`        | `10`    |                                                                                                                                                                                   |
 | `adapt`       | `true`  |                                                                                                                                                                                   |
 | `adapt_start` | `300`   |                                                                                                                                                                                   |
+| `proposal`    | table   | As under `pmmh`.                                                                                                                                                                  |
 | `burnin_dt`   | none    | Coarse RK4 step for the unscored warm-up `[t_start, first_obs)`. `< dt` is refused and `= dt` is off; prevalence-scored streams, `rk4`, no `balance`/`events`. Identity-defining. |
 
 **`pfilter`** — `particles` required. No `chains` (it is always one); `starts`
@@ -5108,7 +5152,9 @@ method executes.
 12. Non-empty `bounds` on every entry that declares them.
     > `estimate.beta: bounds [0.6, 0.15] are empty (lo must be < hi)`
 13. Simplex groups: ≥ 2 members, every member in `[estimate]`, no member in two
-    groups, no member with `perturb_only_at_t0 = true`, no negative lower bound.
+    groups, no negative lower bound. A member's `[method.perturbation]` entry
+    may not set `initial_state`, which is refused when the steps are resolved:
+    the group perturbs its members at t = 0 only.
 
 `validate_priors_present` runs next, with the model IR in scope so the `~`
 fallback is honored — for a sampler method only; priors an optimizer ignores are
@@ -5174,7 +5220,7 @@ camdl fit run fits/09_pgas_only.toml --starts from_mle=089bc0f3   # a run id pre
 
 # Read side.
 camdl fit summary @mle
-camdl fit summary '@auto rw_sd, take 1'
+camdl fit summary '@default steps, take 1'
 camdl fit summary @mle --params-only
 camdl fit summary @mle --explain      # define each column
 camdl fit summary @mle --parameters   # the parameter legend
@@ -5497,14 +5543,14 @@ error: starts source @scout: it did not converge.
   with --allow-nonconverged-source
 ```
 
-Every estimated parameter's Â is judged, initial-state (`perturb_only_at_t0`)
-parameters included, and an Â that is not finite (within-chain variance
-collapsed) makes the verdict incomplete, which is refused like a failure: the
-decibans leg does not stand in for it, since chains spread along a ridge can
-agree in log-likelihood while disagreeing in θ. An IF2 source that lost started
-chains (`n_good_chains < n_chains`) is incomplete too, and refused with a
-message naming the count (`5 of its 6 IF2 chains were lost …`), what that leaves
-to judge, the remedy (re-run the source so every chain finishes) and the
+Every estimated parameter's Â is judged, initial-state parameters (IF2's
+`initial_state = true`) included, and an Â that is not finite (within-chain
+variance collapsed) makes the verdict incomplete, which is refused like a
+failure: the decibans leg does not stand in for it, since chains spread along a
+ridge can agree in log-likelihood while disagreeing in θ. An IF2 source that
+lost started chains (`n_good_chains < n_chains`) is incomplete too, and refused
+with a message naming the count (`5 of its 6 IF2 chains were lost …`), what that
+leaves to judge, the remedy (re-run the source so every chain finishes) and the
 `--allow-nonconverged-source` override. When such a source also fails a leg, the
 failure is the verdict and the refusal adds the lost-chain count. A source that
 asked for one chain is accepted, as before.
@@ -5594,10 +5640,10 @@ fit: fits/01_mle.toml (method=if2)
 running 4 chains × 200 particles × 10 iterations, cooling=0.7, dt=1
 
 transforms (chain 1 of 4; chains start at different points — see chain_starts.tsv):
-  beta         log_interval  [0.05, 1]  start=0.3757 z=0.72  rw_sd=0.0335 (0.135/step, auto)
-  gamma        log_interval  [0.01, 0.5]  start=0.1405 z=0.73  rw_sd=0.0138 (0.115/step, auto)
+  beta         log_interval  [0.05, 1]  start=0.3757 z=0.72  step(z)=0.050 ≈ 0.0093 natural at start 0.25 (default)
+  gamma        log_interval  [0.01, 0.5]  start=0.1405 z=0.73  step(z)=0.050 ≈ 0.0047 natural at start 0.1 (default)
 
-  ⚠ 2/2 parameters using auto rw_sd. Check traces and set explicit values.
+  ⚠ 2/2 parameters use the default step. Check traces, and write a step in the method's table where it does not move.
 
 cooling: cf50=0.70, reached at iter 50 (target), over a 10-iteration run × 12 observed times
   iter   1: rw_sd at 99.3%
@@ -5619,8 +5665,8 @@ chain clean logliks: [-58.5, -58.4, -58.6, -58.6]
 dt-convergence at θ̂: PASS  (|Δ_leg1| = 0.65, |Δ_leg2| = 1.16 nats (vs τ = 2.00); converged.)
 
 ── diagnostics ──────────────────────────────────────
-  i Auto rw_sd for 'beta': 0.033493.
-  i Auto rw_sd for 'gamma': 0.013831.
+  i Auto step for 'beta': 0.0500 in its transformed coordinate.
+  i Auto step for 'gamma': 0.0500 in its transformed coordinate.
   ! 1/2 parameters have Â > 1.1 (max 1.15).
   0 error(s), 1 warning(s), 2 info
 
@@ -6232,7 +6278,7 @@ What each edit does (§2.2 lists what each identity holds):
 | model, training lines of a data file, held-out dates, `[data.tables]` bytes                          | new problem → every run on it re-runs                       |
 | `[estimate]` bounds or priors, `[fixed]`, `simplex_groups`, `[config]`, the scenario keys, `ic_free` | new problem → every run on it re-runs                       |
 | a held-out value, under `holdout_after` or in a `[data.holdout]` table                               | nothing                                                     |
-| a `[method]` field, `starts` included, or `rw_sd` / `perturb_only_at_t0` / `start`                   | new run on the same problem; other method groups are reused |
+| a `[method]` field, `starts` and the step tables included, or an `[estimate]` `start`                | new run on the same problem; other method groups are reused |
 | a sourced start's source (`from_mle`, `from_posterior`, `from_params`)                               | new dependency → new run for the consumer                   |
 | `fit_seeds`, `--seed`                                                                                | new run                                                     |
 | the camdl build                                                                                      | new build directory → new problem and runs                  |
@@ -6293,6 +6339,31 @@ A fit run is a result in the run store, and its record is the run store's
   "starts": "from_prior",
   "starts_source": null,
   …
+}
+```
+
+`steps` is each estimated parameter's step as the run took it: `kind` (`if2`,
+`proposal` or `none`), `map`, each parameter's map tag, and per parameter under
+`perturbation` (`if2`) or `proposal` (`pmmh`, `mh`) its `sd_z`, IF2's `at`
+(`every_observation` or `time_zero_only`), `from` (`written` or `default`),
+`start`, the point θ₀ the step is converted at, and `natural_at_start`, the
+natural-scale step at θ₀. `start` and `natural_at_start` are `null` for a
+one-sided map with no start and no model value, and for a θ₀ outside the box. An
+IF2 run's `simplex` lists each group's members with their `sd_z` and `from`. The
+SDs and timings are the method identity's; `from`, `start` and
+`natural_at_start` are not keyed.
+
+```json
+"steps": {
+  "kind": "if2",
+  "map": { "beta": "log_interval", "gamma": "log_interval" },
+  "perturbation": {
+    "beta": { "at": "every_observation", "from": "default",
+              "natural_at_start": 0.009309721709264376, "sd_z": 0.05, "start": 0.25 },
+    "gamma": { "at": "every_observation", "from": "default",
+               "natural_at_start": 0.004736510675075432, "sd_z": 0.05, "start": 0.1 }
+  },
+  "simplex": []
 }
 ```
 
@@ -8674,7 +8745,9 @@ part of the leaf's identity, and the full objective leaves the key unchanged.
                             only (NAME=auto, or `auto`) and refuses an SD.
                             Optional with --fit: the estimated set is then the
                             config's [estimate] less swept and pinned names,
-                            each IF2 step its `rw_sd` or the automatic default;
+                            each IF2 step the --fit file's [method.perturbation]
+                            entry (an if2 --fit) or the default; a --rw-sd SD
+                            is natural-scale, converted to z at the base value;
                             a list given with --fit must name every such
                             [estimate] parameter. Required without --fit
 --algorithm NAME            per-cell algorithm (default if2); pair with --backend

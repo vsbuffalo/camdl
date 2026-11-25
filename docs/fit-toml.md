@@ -191,28 +191,16 @@ stored fit records the model with its start, so `camdl predict` and
 | `start = X`         | the base starting value. Optional — defaults to a draw within the bounds (a model carries no parameter value to start from). See "Where a chain starts" below.                                                        |
 | `prior = { … }`     | prior distribution. **Required** for a `pgas`/`pmmh`/`mh` method. It also picks the default chain starts under every method, `if2` included: `from_prior` when every estimated parameter has one. See "Priors" below. |
 
-A parameter's step is a setting of the method, not of `[estimate]`: IF2's
-random-walk SD is `[method.perturbation]`, and the initial proposal SD of `pmmh`
-and `mh` is `[method.proposal]`, each in the parameter's transformed coordinate
-z. A parameter left out takes its map's default: under IF2 1/20 in z on a box
-finite at both ends and 1/5 on a half-bounded domain such as `[0, ∞)`, and under
-`pmmh` and `mh` 0.25 (an unbounded `real` or `instant` has none and needs one
-written). A `[method.proposal]` value is the proposal SD as written.
-
-```toml
-[method.perturbation]                  # under algorithm = "if2"
-beta = 0.05
-I0   = { sd = 0.17, initial_state = true }   # perturbed at t = 0 only
-```
-
-`initial_state = true` marks an initial-state parameter (e.g. `s0`, `i0`), which
-IF2 perturbs at t = 0 only, never at an observation. A `rw_sd` or
-`perturb_only_at_t0` key in `[estimate]` is refused, with the table it moved to.
+A parameter's step is not an `[estimate]` key: it is a setting of the method
+that takes it, `[method.perturbation]` under `if2` and `[method.proposal]` under
+`pmmh` and `mh` (see "Step sizes" below). A `rw_sd` or `perturb_only_at_t0` key
+in `[estimate]` is refused, and the message gives the entry to write in the
+method's table.
 
 `camdl profile --fit` reads `[estimate]` the same way: without `--rw-sd`, each
 cell estimates `[estimate]` less the swept and pinned parameters, and an IF2
-cell steps each by the `[method.perturbation]` of an IF2 `--fit`, or the default
-above. A swept parameter is listed here too (its bounds bound the grid); each
+cell steps each by the `[method.perturbation]` of an IF2 `--fit`, or the
+default. A swept parameter is listed here too (its bounds bound the grid); each
 cell pins it.
 
 **`[fixed]`** — `param = value` for every model parameter you are _not_
@@ -260,6 +248,133 @@ naming the row and the two grid times either side — choose a `dt` that puts
 every boundary on the grid, or fit with `if2` or `pmmh`. There is no setting for
 this: `[config] obs_alignment` is removed, and a file that carries it is
 refused.
+
+## Step sizes
+
+IF2 perturbs each estimated parameter by a random walk, and `pmmh` and `mh`
+propose each move from a normal distribution around the current value. The SD of
+each is a setting of the method, written in that method's table under
+`[method]`, in z: the unconstrained coordinate the method moves in, θ = g(z),
+where g is the parameter's map onto its bounds (run spec §6.3).
+
+```toml
+[method]
+algorithm = "if2"
+backend = "chain_binomial"
+chains = 4
+particles = 1000
+iterations = 50
+cooling = 0.5
+
+[method.perturbation]
+beta = 0.1
+I0 = { sd = 0.2, initial_state = true } # perturbed at t = 0 only
+```
+
+```toml
+[method]
+algorithm = "pmmh"
+backend = "chain_binomial"
+chains = 4
+particles = 500
+iterations = 20000
+
+[method.proposal]
+beta = 0.5
+```
+
+A `[method.perturbation]` entry is a bare SD, or a table with `sd` and
+`initial_state`; `I0 = { initial_state = true }` takes the default SD. A
+`[method.proposal]` entry is a bare SD. Each table may name only estimated
+parameters, and only its own method reads it: `[method.proposal]` under `if2`,
+or `[method.perturbation]` under any other method, is refused at load. `pgas`,
+`pfilter` and the `nl-*` optimizers take no per-parameter step.
+
+A parameter the table leaves out takes a default chosen from its map. Under IF2
+the default is 1/20 in z on an `Interval` or `LogInterval` map and 1/5 on a
+one-sided map (`LowerBounded`, `UpperBounded`). A member of a
+`[[simplex_groups]]` entry is perturbed on its group's log-ratio coordinate
+instead, by 1/6 unless its entry gives an `sd`, and only at t = 0. Under `pmmh`
+and `mh` the default is 0.25 on every map with a finite end. An unbounded `real`
+or `instant`, on the `Identity` map, has no scale to take a default from: its
+step must be written, and on that map z is θ itself, so the value is a
+natural-scale SD. PGAS's Metropolis-within-Gibbs move (`use_nuts = false`)
+starts every parameter at 0.25 in z and has no table. These defaults are
+heuristics. Each is a starting point the launch table marks as `default`; check
+the traces of a parameter that does not move.
+
+A step written at its default value and a step left out are the same run: the
+run's identity holds the resolved step of every parameter, so the two key alike.
+
+A `[method.proposal]` value is the proposal SD itself; no factor is applied.
+With `adapt = true` (the default) it is the shape of the proposal until
+`adapt_start`, and a global scale adapts from the first step; from `adapt_start`
+the proposal's covariance is learned from the chain, and adaptation stops at
+`burn_in`. With `adapt = false` the written SDs are the proposal for the whole
+run.
+
+**What a step of s in z means.**
+
+| map (from the kind and the box)                     | a step of s in z                                                                                        |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `Identity` (`real`, `instant`, no range)            | θ moves by s                                                                                            |
+| `LowerBounded` (a positive kind, no upper bound)    | the distance θ − lo to the bound is multiplied by about e^±s: s = 0.2 is about ±20%                     |
+| `Interval` (`probability`; [0, hi]; a signed box)   | at the midpoint θ moves by s·(hi − lo)/4; near an end the odds (θ − lo)/(hi − θ) are multiplied by e^±s |
+| `LogInterval` (a positive kind on [lo, hi], 0 < lo) | at the geometric midpoint ln θ moves by s·ln(hi/lo)/4                                                   |
+
+On `Interval` and `LogInterval` the natural-scale step that one z value gives
+depends on the box: widening the bounds of a `LogInterval` parameter increases
+ln(hi/lo), and with it the natural-scale step of the same z. After changing
+bounds, read the natural-scale step the launch table prints beside each
+parameter (`step(z)=0.050 ≈ 0.0093 natural at start 0.25`). It is the step
+converted at θ₀, the parameter's `start`, else the model's value, else the
+middle of its box; `run_inputs.json` records the same value under `steps`.
+
+**`initial_state`.** A parameter that enters the model only through its initial
+state (`init { I = I0 }`) is selected by the data only through the state it sets
+at t = 0. IF2 perturbing it before every observation would move it with nothing
+to select it afterwards, so under IF2 such a parameter must carry
+`initial_state = true`, and IF2 then perturbs it at t = 0 only. `fit run` reads
+where each estimated parameter enters from the compiled model, and refuses an
+initial-state-only parameter without the flag, and the flag on a parameter that
+enters the dynamics or an observation, naming where it enters. When the compiled
+model holds a reference that cannot be resolved, the flag is refused on every
+parameter.
+
+**A parameter the method cannot use.** IF2 and the `nl-*` optimizers read only
+the likelihood, so they refuse an estimated parameter that the likelihood does
+not depend on, including one that appears only in another parameter's prior.
+`pmmh`, `mh` and `pgas` accept a hyperparameter of an estimated parameter's
+prior, warn on a parameter with no connection to the likelihood and a proper
+prior of its own (its marginal posterior is that prior), and refuse one with no
+connection to the likelihood and a flat prior, whose posterior is not a
+distribution. Each refusal names the parameter; fix it in `[fixed]` or remove it
+from `[estimate]`.
+
+**Porting from pomp.** pomp's `mif2` applies `rw.sd` on its transformed
+(estimation) scale when the model supplies parameter transformations (pomp
+6.5.0.0, `man/mif2.Rd`, argument `rw.sd`). That scale equals camdl's z only
+where the maps coincide: pomp `log` on an unboxed rate (camdl `LowerBounded` at
+0), pomp `logit` on an unboxed probability (camdl `Interval` on [0, 1]), and no
+transformation (`Identity`). There, copy the number. A boxed parameter has a
+different z. For pomp `log` on a camdl `LogInterval` [lo, hi], divide by L·u(1 −
+u), with L = ln(hi/lo) and u = ln(θ₀/lo)/L at your start θ₀. For example, β in
+[0.05, 1] at 0.25 has L = 3.00 and u = 0.537, so L·u(1 − u) = 0.745, and pomp's
+`rw.sd = 0.02` becomes `beta = 0.027`. In general, convert through the natural
+scale at θ₀: the natural step is s_pomp times |dθ/d(pomp coordinate)| there
+(θ₀·s_pomp for `log`), and the step in z is that natural step divided by |dθ/dz|
+at θ₀. pomp's `ivp(s)` is `{ sd = s, initial_state = true }`. pomp's `pmcmc`
+applies no transformation (`R/pmcmc.R`), so an `mvn_diag_rw` SD is a
+natural-scale SD: divide it by |dθ/dz| at θ₀ for `[method.proposal]`.
+
+The slope |dθ/dz| at θ₀ is θ₀ − lo on `[lo, ∞)`; hi − θ₀ on `(−∞, hi]`; (θ₀ −
+lo)(hi − θ₀)/(hi − lo) on an `Interval` [lo, hi];
+θ₀·ln(θ₀/lo)·ln(hi/θ₀)/ln(hi/lo) on a `LogInterval` [lo, hi]; and 1 on
+`Identity`. A config that still writes `rw_sd` is refused with this conversion
+done: the message gives, per parameter, the step in z that matches the old
+natural-scale step at θ₀, and the natural-scale step the default would give
+there. Leaving a line out is not the same as converting it; it switches that
+parameter to the default step.
 
 ## One model under several covariate files
 
@@ -606,15 +721,15 @@ the default `starts` from `from_prior` to `uniform_unconstrained`.
 
 ## Method algorithms
 
-| `algorithm`              | backend          | role                                              | key fields                                                                            |
-| ------------------------ | ---------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| `if2`                    | `chain_binomial` | iterated filtering → MLE                          | `chains`, `particles`, `iterations`, `cooling` (+ `cooling_target_iters`, default 50) |
-| `pgas`                   | `chain_binomial` | particle Gibbs + NUTS → posterior                 | `chains`, `particles`, `sweeps` (+ `burn_in`, `thin`, `max_tree_depth`)               |
-| `pmmh`                   | `chain_binomial` | particle marginal MH → posterior                  | `chains`, `particles`, `iterations`                                                   |
-| `pfilter`                | `chain_binomial` | particle filter at fixed θ → log-likelihood + ESS | `particles`, `replicates`                                                             |
-| `nl-sbplx` / `nl-bobyqa` | `ode`            | NLopt deterministic optimizer → MLE               | `chains` (LHS starts) (+ `max_evals`, `tolerance`)                                    |
-| `mh`                     | `ode`            | MH on the deterministic ODE marginal → posterior  | `chains`, `iterations` (+ `burn_in`, `thin`, `adapt`, `adapt_start`, `burnin_dt`)     |
-| `nl-lbfgs`               | `ode`            | NLopt L-BFGS (forward-sensitivity gradient) → MLE | `chains` (LHS starts) (+ `max_evals`, `tolerance`)                                    |
+| `algorithm`              | backend          | role                                              | key fields                                                                                                     |
+| ------------------------ | ---------------- | ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `if2`                    | `chain_binomial` | iterated filtering → MLE                          | `chains`, `particles`, `iterations`, `cooling` (+ `cooling_target_iters`, default 50, `[method.perturbation]`) |
+| `pgas`                   | `chain_binomial` | particle Gibbs + NUTS → posterior                 | `chains`, `particles`, `sweeps` (+ `burn_in`, `thin`, `max_tree_depth`)                                        |
+| `pmmh`                   | `chain_binomial` | particle marginal MH → posterior                  | `chains`, `particles`, `iterations` (+ `adapt`, `adapt_start`, `[method.proposal]`)                            |
+| `pfilter`                | `chain_binomial` | particle filter at fixed θ → log-likelihood + ESS | `particles`, `replicates`                                                                                      |
+| `nl-sbplx` / `nl-bobyqa` | `ode`            | NLopt deterministic optimizer → MLE               | `chains` (LHS starts) (+ `max_evals`, `tolerance`)                                                             |
+| `mh`                     | `ode`            | MH on the deterministic ODE marginal → posterior  | `chains`, `iterations` (+ `burn_in`, `thin`, `adapt`, `adapt_start`, `burnin_dt`, `[method.proposal]`)         |
+| `nl-lbfgs`               | `ode`            | NLopt L-BFGS (forward-sensitivity gradient) → MLE | `chains` (LHS starts) (+ `max_evals`, `tolerance`)                                                             |
 
 The `ode`-backend methods fit the **deterministic marginal likelihood**
 `p(y | θ, ODE skeleton)` rather than the stochastic `p(y | θ)` — a different
@@ -644,7 +759,8 @@ burn_in = 1000
 ```
 
 Common to every method: `starts` (above), and the `dt_check` sub-table where the
-method runs a dt-convergence audit.
+method runs a dt-convergence audit. The per-parameter step tables,
+`[method.perturbation]` and `[method.proposal]`, are under "Step sizes".
 
 ### Coarse warm-up step (`burnin_dt`, `mh` on `ode`)
 
@@ -720,8 +836,9 @@ The model file is the source of truth for what _can_ be estimated; the
   model, a `real` or `instant` parameter is searched over `(−∞, ∞)` with the
   identity transform; the positive kinds (`rate`, `positive`, `count`,
   `duration`) over `[0, ∞)` with θ = eᶻ; a `probability` over `[0, 1]`. A `real`
-  or `instant` on `(−∞, ∞)` has no automatic `rw_sd` (there is no scale to take
-  one from); give `rw_sd`. At two or more chains the `uniform`, `lhs` and
+  or `instant` on `(−∞, ∞)` has no default step (there is no scale to take one
+  from); under `if2`, `pmmh` and `mh` write its step in the method's table
+  ("Step sizes"). At two or more chains the `uniform`, `lhs` and
   `uniform_unconstrained` starts refuse it, the default `uniform_unconstrained`
   included. `from_prior` draws it from its prior, and `single` starts every
   chain at its `start`.

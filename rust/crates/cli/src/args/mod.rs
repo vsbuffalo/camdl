@@ -3001,11 +3001,12 @@ pub struct ProfileArgs {
     pub cooling_target_iters: Option<usize>,
 
     /// Without it each cell estimates the problem's `[estimate]` less the
-    /// swept and pinned parameters, and an IF2 cell steps each by its
-    /// `[estimate]` `rw_sd`, or the automatic default from its bounds, as
-    /// `fit run` does. Given, it names the estimated set and overrides the
-    /// steps: `NAME=SD,...`, `NAME=auto,...`, or `auto` (every parameter not
-    /// swept, pinned or a model constant). A list must name every
+    /// swept and pinned parameters, and an IF2 cell steps each by the
+    /// `[method.perturbation]` entry of an IF2 `--fit` file, in z, or its
+    /// map's default, as `fit run` does. Given, it names the estimated set and
+    /// overrides the steps: `NAME=SD,...` (a natural-scale SD, converted to z
+    /// at the parameter's base value), `NAME=auto,...`, or `auto` (every
+    /// parameter not swept, pinned or a model constant). A list must name every
     /// `[estimate]` parameter that is not swept or pinned. An nl-* cell
     /// perturbs nothing, so it takes names only (`NAME=auto` or `auto`) and
     /// refuses an SD.

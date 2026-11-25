@@ -1732,15 +1732,19 @@ identity alone), `partition.json`, `inputs/<source>.<ext>`,
 `inputs/tables/<name>.<ext>`, `held_out/<stream>.tsv` and, for a synthetic
 problem, `synthetic/truth.toml`; the model source is a provenance file. Every
 reader of a stored fit reads it through
-[`fit_store::read_fit`](rust:cli::fit_store::read_fit) (`:1203`), which takes
+[`fit_store::read_fit`](rust:cli::fit_store::read_fit) (`:1294`), which takes
 each file through the store.
 
-A fit run (`fit_run`, `FitRun`, `:334`) is in place, nested inside its problem
+A fit run (`fit_run`, `FitRun`, `:311`) is in place, nested inside its problem
 at `runs/<algorithm>-…/seed_<n>-…/`. Its identity is a `ChainIdentity` (the
-problem, the method's settings without its length, the per-parameter `rw_sd`,
-`perturb_only_at_t0` and `start`, the compile with the state Jacobian for
-`nl-lbfgs` on the ODE backend, the process seed and the chain starts), the
-length, and for a resume a `Dep` on the base run.
+problem; the method, a `MethodIdentity` (`fit_store/method.rs`) holding the
+algorithm's settings without its length and, for IF2, PMMH and MH, every
+estimated parameter's resolved step in z; the compile with the state Jacobian
+for `nl-lbfgs` on the ODE backend; the process seed; and the chain starts, a
+`StartSource` holding the rule, what it reads and the `[estimate]` `start`
+values in `written`), the length, and for a resume a `Dep` on the base run. The
+steps are resolved by `fit::steps::resolve_steps` before the identity is built,
+so a step written at its default and a step left out key alike.
 
 The method writes each file into the run as it produces it, through
 [`fit::output::LiveRun`](rust:cli::fit::output::LiveRun): a name that is one of

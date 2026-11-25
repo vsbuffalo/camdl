@@ -22,14 +22,16 @@ of the `n_obs` observation times. The per-step factor is
 c = cooling ^ (1 / (cooling_target_iters × (1 + n_obs)))
 ```
 
-and the perturbation SD at global step `s` is `rw_sd × c^s`. Because the step
-count per iteration cancels, the multiplier at the end of iteration `m` is
+and the perturbation SD at global step `s` is `sd × c^s`, where `sd` is the
+parameter's step in z, from `[method.perturbation]` or its map's default
+(`camdl docs fit-toml`, "Step sizes"). Because the step count per iteration
+cancels, the multiplier at the end of iteration `m` is
 
 ```
-SD(m) / rw_sd = cooling ^ (m / cooling_target_iters)
+SD(m) / sd = cooling ^ (m / cooling_target_iters)
 ```
 
-So the SD reaches `cooling × rw_sd` exactly at iteration `cooling_target_iters`,
+So the SD reaches `cooling × sd` exactly at iteration `cooling_target_iters`,
 and keeps shrinking at the same geometric rate after that. It does not stop at
 the target and it does not depend on the run's total `iterations`.
 
@@ -49,7 +51,7 @@ remaining after 50 of them (King, Nguyen & Ionides 2016, _J. Stat. Softw._
 
 `cooling = 0.7`, default target 50:
 
-| end of iteration | SD / rw_sd       |
+| end of iteration | SD / sd          |
 | ---------------- | ---------------- |
 | 25               | 0.7^0.5 = 0.837  |
 | 50               | 0.7 (the target) |
@@ -61,7 +63,7 @@ remaining after 50 of them (King, Nguyen & Ionides 2016, _J. Stat. Softw._
 Two consequences follow directly from the formula:
 
 - Lengthening a run cools it further. A 200-iteration run at `cooling = 0.7`
-  ends at 24% of `rw_sd`, not 70%.
+  ends at 24% of `sd`, not 70%.
 - Setting `cooling_target_iters` below `iterations` cools fast and then runs the
   remaining iterations near the noise floor; setting it above leaves the run hot
   at its end.

@@ -425,14 +425,15 @@ block's other settings), so each generated dataset is a problem of its own.
 `fit_store::resolve_problem` builds it from a `config_v2::Problem` it
 destructures with every field named, so a key added to the fit file does not
 compile until it is placed. A run's identity is `FitRunIdentity`: a
-`ChainIdentity` (the problem, the method's settings without its length, the
-per-parameter `rw_sd`, `perturb_only_at_t0` and `start`, the compile with the
-state Jacobian when `nl-lbfgs` runs on the ODE backend, the process seed and the
-chain starts), the length, and for a resume a dependency on the base run's
-carried chain files. A resumed run's `chain.key()` must equal its base's, and
-each chain's `resume_state.bin` records it. The run id hashes the kind, the
-ambient key (the build and the engine switches) and the identity's key, so a
-rebuilt camdl never reuses a fit another build stored.
+`ChainIdentity` (the problem, the method as a `MethodIdentity` with each
+estimated parameter's resolved step for IF2, PMMH and MH, the compile with the
+state Jacobian when `nl-lbfgs` runs on the ODE backend, the process seed, and
+the chain starts as a `StartSource` with the written `start` values), the
+length, and for a resume a dependency on the base run's carried chain files. A
+resumed run's `chain.key()` must equal its base's, and each chain's
+`resume_state.bin` records it. The run id hashes the kind, the ambient key (the
+build and the engine switches) and the identity's key, so a rebuilt camdl never
+reuses a fit another build stored.
 
 A prediction (kind `prediction`) is stored inside the run whose draws it uses,
 at `predict/`. Its identity is the run and its problem, the stored data the

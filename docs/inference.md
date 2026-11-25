@@ -619,10 +619,10 @@ The structure is identical to the particle filter, with two additions:
 ```
 1. PERTURB: jitter each particle's parameters (NEW in IF2)
    For each particle i, for each estimated parameter:
-     θ_i += Normal(0, sd_i × cooling) on the transformed scale, where
-     sd_i is the natural-scale rw_sd converted to the transformed scale
-     at particle i's current value (the delta method; see below)
-   Parameters declared `perturb_only_at_t0` (initial conditions) are
+     z_i += Normal(0, sd × cooling), where z_i is particle i's value in
+     the parameter's transformed coordinate and sd is its step in
+     [method.perturbation], the same for every particle (see below)
+   Parameters declared `initial_state = true` (initial conditions) are
    perturbed at t=0 only.
 
 2. PROPAGATE: same as PF, but each particle uses its OWN params
@@ -653,7 +653,7 @@ Per-step cooling factor:
   c = 0.95 ^ (1 / (50 × n_observations))
 
 After m iterations × n_obs steps each:
-  effective_sd = rw_sd × c^(m × n_obs)
+  effective_sd = sd × c^(m × n_obs)
 ```
 
 With 780 weekly observations, the cooling is very gentle per step (c ≈ 0.99993)
@@ -668,26 +668,31 @@ iterations: fine tuning (cloud contracts to a tight point).
 Parameters live on different scales. R₀=56.8 and ρ=0.488 need different
 perturbation strategies.
 
-| Parameter type          | Transform    | Why                             |
-| ----------------------- | ------------ | ------------------------------- |
-| `positive in [a, b]`    | Scaled logit | Bounds enforced by construction |
-| `rate` (unbounded)      | Log          | Multiplicative perturbation     |
-| `probability in [0, 1]` | Logit        | Stays in (0,1)                  |
+| Parameter type              | Transform (map)               | Why                             |
+| --------------------------- | ----------------------------- | ------------------------------- |
+| `positive in [a, b]`, 0 < a | Logit of ln θ (`LogInterval`) | Bounds enforced by construction |
+| `rate` (unbounded)          | Log (`LowerBounded`)          | Multiplicative perturbation     |
+| `probability in [0, 1]`     | Logit (`Interval`)            | Stays in (0,1)                  |
 
-The transform is derived automatically from the DSL parameter declaration. A
-parameter declared `R0 : positive in [1, 100]` uses scaled logit — the
-perturbation happens on (-∞, ∞) and the inverse transform maps back to [1, 100].
-R₀ can never leave its bounds.
+The transform is derived automatically from the DSL parameter declaration and
+the fit's bounds (run spec §6.3). A parameter declared
+`R0 : positive in [1, 100]` uses the logit of ln θ: the perturbation happens on
+(-∞, ∞) and the inverse transform maps back to [1, 100]. R₀ can never leave its
+bounds.
 
-**rw_sd is on the natural scale.** `--rw-sd "R0=5"` means "perturb R₀ by about 5
-units per step." Internally, this is converted to the transformed scale via the
-delta method: for log-transformed params, the effective SD on log scale ≈ rw_sd
-/ current_value. For R₀=56.8 with rw_sd=5, the perturbation is ~9% per step on
-the natural scale.
+**The step is in the transformed coordinate z.** `R0 = 0.1` in
+`[method.perturbation]` perturbs R₀'s z by 0.1 per step, at every particle and
+in every chain. What that is on the natural scale depends on the map and on
+where R₀ is: on the log map it is about ±10% of R₀ wherever R₀ is, and on a
+bounded map it shrinks toward either bound. The launch table prints each step
+with its natural-scale equivalent at the start, and `fit-toml.md`, "Step sizes",
+tabulates what a step means on each map and how to convert a natural-scale step.
+A parameter left out of the table takes its map's default (1/20 on a box, 1/5 on
+a one-sided range), which the launch table marks `default`.
 
-**Scale warnings:** If rw_sd is >50% of the parameter value, the perturbation is
-dangerously large. If <0.1%, the parameter isn't exploring. The CLI warns with
-suggested adjustments.
+**A start near a bound.** On a bounded map, a start with |z| > 2 is where the
+map is compressed: a step in z moves θ little there. The launch table marks such
+a start `⚠ compressed`.
 
 ### Multi-chain and chain-agreement Â
 
@@ -773,21 +778,39 @@ starts = { from_mle = "@scout" }
 ```
 
 Cooling follows pomp's `cooling.fraction.50`: the perturbation SD reaches
-`cooling × rw_sd` after `cooling_target_iters` iterations (default 50, pomp's
-fixed value) and keeps shrinking geometrically after that. Formula and worked
-numbers: `docs/methods/cooling.md`.
+`cooling` times its initial value after `cooling_target_iters` iterations
+(default 50, pomp's fixed value) and keeps shrinking geometrically after that.
+Formula and worked numbers: `docs/methods/cooling.md`.
 
-### Initial-state parameters (`perturb_only_at_t0`)
+### Initial-state parameters (`initial_state`)
 
 Initial conditions (S₀, E₀, I₀) set the starting state but don't change during
 simulation, so they are perturbed only at t=0, not at every observation. Declare
-that with `perturb_only_at_t0 = true` on the `[estimate]` entry. They are
-model-declared parameters: list them under `[estimate]` in the `fit.toml` like
-any other parameter, and the fit estimates them. The filter jitters their
-initial values once when particles initialize, then holds them fixed as it runs
-forward — whereas a parameter like R₀ is perturbed at every observation time.
-The flag is IF2's schedule, so only an `if2` config accepts it; any other method
-refuses the config at load rather than run without it.
+that with `initial_state = true` in the parameter's `[method.perturbation]`
+entry:
+
+```toml
+[estimate]
+I0 = { bounds = [1, 500] }
+
+[method.perturbation]
+I0 = { initial_state = true }   # the default SD; or { sd = 0.2, initial_state = true }
+```
+
+They are model-declared parameters: list them under `[estimate]` in the
+`fit.toml` like any other parameter, and the fit estimates them. The filter
+jitters their initial values once when particles initialize, then holds them
+fixed as it runs forward — whereas a parameter like R₀ is perturbed at every
+observation time. The flag is IF2's schedule, in IF2's own table, so any other
+method refuses a `[method.perturbation]` at load rather than run without it.
+
+The flag is checked against the model. `fit run` reads from the compiled model
+where each estimated parameter enters, and under IF2 it refuses a parameter that
+enters only the initial state without the flag, because perturbing it before
+every observation moves it with nothing to select it after t = 0. It refuses the
+flag on a parameter that also enters the dynamics or an observation, which
+perturbing at t = 0 only would leave almost unexplored. Both messages name where
+the parameter enters.
 
 The flag changes how IF2 perturbs the parameter, not how its convergence is
 judged: its tail chain agreement Â is gated like every other estimate's, and
@@ -838,13 +861,16 @@ Output: TSV with R₀, max loglik at each grid point, and the estimated values o
 all other parameters.
 
 `--rw-sd` is optional. Without it each cell estimates the config's `[estimate]`
-less the swept and pinned parameters, and an IF2 cell steps each by its
-`[estimate]` `rw_sd`, or the automatic default from its bounds, as `fit run`
-does; an `nl-*` cell reads no step at all. A swept parameter belongs in
-`[estimate]`: its entry's bounds bound the grid, and each cell pins it and
-estimates the rest (listing it in `[fixed]` is refused). Given, a `--rw-sd` list
-overrides the steps and must name every `[estimate]` parameter that is not swept
-or pinned, since one it left out would be held at its start.
+less the swept and pinned parameters, and an IF2 cell steps each by the
+`[method.perturbation]` entry of an IF2 `--fit` file, in z, or its map's
+default, as `fit run` does; an `nl-*` cell reads no step at all. A
+`--rw-sd NAME=SD` value is a natural-scale SD, converted to z once at the
+parameter's base value. The `initial_state` flag comes from the `--fit` file's
+`[method.perturbation]` either way. A swept parameter belongs in `[estimate]`:
+its entry's bounds bound the grid, and each cell pins it and estimates the rest
+(listing it in `[fixed]` is refused). Given, a `--rw-sd` list overrides the
+steps and must name every `[estimate]` parameter that is not swept or pinned,
+since one it left out would be held at its start.
 
 ```bash
 camdl profile model.camdl --fit fit.toml \
@@ -1139,9 +1165,10 @@ likelihood or the `ic_free` conditional one.
 
 Each leaf's `[diagnostics]` block carries the per-start record behind the row:
 `completed`, and for IF2 `iterations_used` (the final cooling step),
-`cooling_final` (the mean over estimated parameters of the last iteration's
-actual perturbation SD) and `loglik_trace` (the per-iteration perturbed
-log-likelihood). The table does not compute an R̂ across starts.
+`cooling_final` (the cooling factor of the last iteration: the multiplier that
+iteration applied to every parameter's step, so 1 is uncooled) and
+`loglik_trace` (the per-iteration perturbed log-likelihood). The table does not
+compute an R̂ across starts.
 
 ---
 
@@ -1262,9 +1289,9 @@ Nothing auto-detects initial-value parameters. PGAS used to: it finite-
 differenced a rounded initial count from the chain's own starting draw and
 attached a Binomial density to whatever compartment the parameter moved, so two
 chains of one fit could disagree about whether the term existed at all. Both the
-detector and that density were removed (gh#719). The `perturb_only_at_t0` flag
-is a separate thing — an IF2 perturbation schedule, refused at config load under
-every other method.
+detector and that density were removed (gh#719). The `initial_state` flag of
+`[method.perturbation]` is a separate thing — an IF2 perturbation schedule,
+refused at config load under every other method.
 
 #### Why a deterministic initial condition identifies its parameter poorly
 
@@ -1636,8 +1663,9 @@ iteration  loglik   R0      gamma
 ```
 
 Log-likelihood should improve monotonically (with noise). Parameters should
-approach stable values. If loglik oscillates without improving, rw_sd is too
-large. If parameters haven't moved after 20 iterations, rw_sd is too small.
+approach stable values. If loglik oscillates without improving, the
+`[method.perturbation]` step is too large. If parameters haven't moved after 20
+iterations, it is too small.
 
 ### IF2 chain-agreement diagnostics
 

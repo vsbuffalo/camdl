@@ -6416,10 +6416,12 @@ estimated parameter, and with it the estimated set:
 
 `--rw-sd` is required without `--fit`. With `--fit`, it is optional: the
 estimated set is the config's `[estimate]` less the swept and pinned
-parameters, each with its `rw_sd` or the default step, and a list given with
-`--fit` must name every such parameter. In a fit, IF2 takes each parameter's
-scale from its `[estimate]` `rw_sd`, or the default step when `rw_sd` is
-absent. Cooling follows pomp's `cooling.fraction.50`: the perturbation SD
+parameters, each with the step in z of its `[method.perturbation]` entry (an
+IF2 `--fit` file) or the default step, and a list given with `--fit` must name
+every such parameter. A `--rw-sd` scale is on the natural scale and is
+converted to z once, at the parameter's base value. In a fit, IF2 takes each
+parameter's step in z from `[method.perturbation]`, or the default step when
+the table leaves it out (`camdl docs fit-toml`, "Step sizes"). Cooling follows pomp's `cooling.fraction.50`: the perturbation SD
 reaches `cooling` times its initial value after `cooling_target_iters`
 iterations (default 50; `docs/methods/cooling.md`).
 

@@ -50,8 +50,8 @@ data to decision is auditable.
 ### 3.1 Structure
 
 ```toml
-[fit]
-model = "models/he2010_london.camdl"
+[model]
+camdl = "models/he2010_london.camdl"
 
 # Data sources — one per observation block in the model.
 # Keys must match observation block names in the .camdl file.
@@ -83,28 +83,24 @@ dt = 1.0
 # (gh#241); the fit's `[method]` declares its own `backend`.
 
 # ── Estimated parameters ──────────────────────────────
-# Every parameter here will be perturbed during IF2.
-# rw_sd is optional: if omitted, IF2 takes its default step in the
-# parameter's transformed coordinate z, one per transform (rule 2 of §3.2).
-# If specified, rw_sd is on the NATURAL scale, converted once to z at the
-# box's midpoint (the start, on a half-bounded domain); IF2 then takes the
-# same step in z for every chain and particle.
+# Every parameter here is estimated. An entry takes `bounds`, `start` and
+# `prior`; a step size is a setting of the method (below).
 [estimate]
-R0 = { rw_sd = 5.0 }
-sigma = {} # auto rw_sd from bounds
-gamma = {} # auto rw_sd from bounds
-rho = { rw_sd = 0.02 } # explicit override
+R0 = {}
+sigma = {}
+gamma = {}
+rho = {}
 amplitude = {}
-S0 = { perturb_only_at_t0 = true } # auto rw_sd, perturbed only at t=0
-E0 = { perturb_only_at_t0 = true }
-I0 = { perturb_only_at_t0 = true }
+S0 = {}
+E0 = {}
+I0 = {}
 
-# Optional: override starting value (default: from model)
+# Optional: a starting value (default: a draw within the bounds)
 # sigma = { start = 0.1 }
 
 # Optional: narrow the search region (default: full model bounds). Where the
 # model declares no range, bounds may narrow the kind's support but not leave it.
-# R0 = { rw_sd = 5.0, bounds = [30.0, 80.0] }
+# R0 = { bounds = [30.0, 80.0] }
 # gamma = { bounds = [0.05, 0.15] }
 
 # ── Fixed parameters ──────────────────────────────────
@@ -117,6 +113,26 @@ mu = 0.0002
 k = 10.0
 psi = 0.5
 cohort = 1.0
+
+# ── Method ────────────────────────────────────────────
+[method]
+algorithm = "if2"
+backend = "chain_binomial"
+chains = 8
+particles = 1000
+iterations = 50
+cooling = 0.5
+
+# IF2's random-walk SD per estimated parameter, in z, the unconstrained
+# coordinate of its map (fit-toml.md, "Step sizes"). A parameter left out
+# takes its map's default: 1/20 on a box finite at both ends, 1/5 on a
+# one-sided range.
+[method.perturbation]
+R0 = 0.1
+rho = 0.05
+S0 = { initial_state = true } # enters only init { }: perturbed at t = 0 only
+E0 = { initial_state = true }
+I0 = { initial_state = true }
 ```
 
 ### 3.2 Search Bounds
@@ -128,7 +144,7 @@ The fit.toml can declare narrower **search bounds** — "for this data, focus th
 search here":
 
 ```toml
-R0 = { rw_sd = 5.0, bounds = [30.0, 80.0] }
+R0 = { bounds = [30.0, 80.0] }
 ```
 
 Search bounds are optional on every parameter. When omitted, the full model
@@ -216,7 +232,7 @@ knowledge constrains the plausible region.
    This is reported in `{method}_summary.json` and `camdl fit summary`:
 
    ```
-   R0 = 30.2   rw_sd=5.0  bounds=[30, 80]  ⚠ AT LOWER BOUND
+   R0 = 30.2   bounds=[30, 80]  ⚠ AT LOWER BOUND
    ```
 
    The warning is the safety net. Without it, narrowed bounds can hide the true
@@ -276,7 +292,7 @@ If the user wants a non-default starting value, they use `start` in the
 `[estimate]` section:
 
 ```toml
-sigma = { rw_sd = 0.005, start = 0.1 }
+sigma = { start = 0.1 }
 ```
 
 This keeps the fit.toml self-contained: it says what to estimate and how, not
@@ -423,12 +439,15 @@ case. Two things supply that spread, and either is enough:
          S = N0 - I }
   ```
 
-- **A `perturb_only_at_t0` parameter, under `if2`.** IF2 moves each particle's θ
-  at `t=0` and each particle then builds its own initial state from that θ:
+- **An `initial_state` parameter, under `if2`.** IF2 moves each particle's θ at
+  `t=0` and each particle then builds its own initial state from that θ:
 
   ```toml
   [estimate]
-  I0 = { bounds = [1, 500], perturb_only_at_t0 = true }
+  I0 = { bounds = [1, 500] }
+
+  [method.perturbation]
+  I0 = { initial_state = true }
   ```
 
 The method's algorithm must be `if2`, `pfilter` or `pmmh`; `pgas` and the ODE
@@ -597,7 +616,7 @@ naming the previous by handle:
 scout.toml                                   [method] algorithm = "if2"
   │
   ├─ camdl fit run scout.toml --label scout
-  │    reads: scout.toml (config + rw_sd)
+  │    reads: scout.toml (config, with [method.perturbation])
   │    writes: camdl-store/<build>/fit/<model>-<h12>/runs/if2-<h12>/seed_<N>-<h12>/fit_state.toml
   │
 refine.toml                                  [method] starts = { from_mle = "@scout" }
@@ -611,14 +630,15 @@ When the method declares `starts = { from_mle = "<handle>" }`:
 
 - Starting values come from the source run's `fit_state.toml [start_values]`
   (every chain at that point; R̂ is not assessed, Â is annotated)
-- rw_sd comes from this file's `[estimate]` rw_sd values, else auto-scaled
-- Explicit `--rw-sd` CLI flags override everything
+- Each step comes from this file's `[method.perturbation]`, else the map's
+  default; the source run's steps are not read
 
 When no sourced rule is declared (`from_prior`, `uniform_unconstrained`, …):
 
 - Starting values are drawn per chain under the rule; `single` uses model
   defaults + fit.toml `start` fields
-- rw_sd comes from fit.toml `[estimate]` rw_sd values
+- Each step comes from this file's `[method.perturbation]` (IF2) or
+  `[method.proposal]` (PMMH, MH), else the map's default
 
 ---
 
@@ -780,13 +800,14 @@ camdl fit run scout.toml [--seed 1]
 ```
 
 **Defaults:** 8 chains, 500 particles, 30 iterations, `cooling_fraction = 0.5`
-(mild contraction — find basins, don't converge), rw_sd from fit.toml or auto
-from bounds (`/20` for log, `/6` for logit).
+(mild contraction — find basins, don't converge), each step from
+`[method.perturbation]` or its map's default (1/20 in z on a box finite at both
+ends, 1/5 on a one-sided range).
 
 **Seeded chains:** When `[estimate]` parameters have `start` values, chain 0
-starts near those values (jittered by rw_sd). Remaining chains start from random
-positions within bounds. Controlled by `start_chains` in `[scout]` (default 1
-when any start exists).
+starts near those values (jittered by its step). Remaining chains start from
+random positions within bounds. Controlled by `start_chains` in `[scout]`
+(default 1 when any start exists).
 
 **Writes:**
 
@@ -958,14 +979,14 @@ camdl-store/<build>/fit/he2010_london-…/runs/if2-…/seed_1-…/ — He et al.
   ESS at MLE: mean=3842, min=1205  ✓ filter is healthy
 
   Estimated (8 parameters):
-    R0        = 56.82   rw_sd=5.0    ✓ identified  CI: [52.1, 62.3]
-    sigma     = 0.0791  rw_sd=0.005  ✓ identified  CI: [0.073, 0.086]
-    gamma     = 0.0832  rw_sd=0.005  ✓ identified  CI: [0.077, 0.090]
-    rho       = 0.488   rw_sd=0.02   ✓ identified  CI: [0.45, 0.53]
-    amplitude = 0.554   rw_sd=0.03   ✓ identified  CI: [0.49, 0.61]
-    S0        = 73151   rw_sd=5000   ✓ identified  (t0-only)
-    E0        = 127     rw_sd=100    ✓ identified  (t0-only)
-    I0        = 127     rw_sd=50     ✓ identified  (t0-only)
+    R0        = 56.82   ✓ identified  CI: [52.1, 62.3]
+    sigma     = 0.0791  ✓ identified  CI: [0.073, 0.086]
+    gamma     = 0.0832  ✓ identified  CI: [0.077, 0.090]
+    rho       = 0.488   ✓ identified  CI: [0.45, 0.53]
+    amplitude = 0.554   ✓ identified  CI: [0.49, 0.61]
+    S0        = 73151   ✓ identified  (t0-only)
+    E0        = 127     ✓ identified  (t0-only)
+    I0        = 127     ✓ identified  (t0-only)
 
   Fixed (5 parameters):
     N0     = 2462500
