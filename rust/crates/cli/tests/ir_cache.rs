@@ -4,6 +4,8 @@
 //! on PATH and a per-test `CAMDL_IR_CACHE_DIR` (so the real user cache is
 //! never touched). Editing the model, or `--no-ir-cache`, must recompile.
 
+mod script_support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -78,17 +80,9 @@ const POP_TSV_B: &str = "patch\tN0\nnorth\t99999\nsouth\t30000\n";
 /// A camdlc wrapper that appends a line per *compile* (not the
 /// `--camdl-version` probe) before exec'ing the real camdlc.
 fn counting_shim(dir: &Path, real: &Path, counter: &Path) -> PathBuf {
-    let shim = dir.join("camdlc");
-    std::fs::write(&shim, format!(
+    script_support::install_script(&dir.join("camdlc"), &format!(
         "#!/bin/sh\ncase \"$1\" in\n  --camdl-version|render) ;;\n  *) echo x >> '{}' ;;\nesac\nexec '{}' \"$@\"\n",
-        counter.display(), real.display())).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut p = std::fs::metadata(&shim).unwrap().permissions();
-        p.set_mode(0o755);
-        std::fs::set_permissions(&shim, p).unwrap();
-    }
+        counter.display(), real.display()));
     dir.to_path_buf()
 }
 
@@ -432,8 +426,7 @@ fn expected_ir_version() -> String {
 /// counted as in `counting_shim`; the `--camdl-version` probe passes through
 /// untouched.
 fn stale_version_shim(dir: &Path, real: &Path, counter: &Path, fake: &str) -> PathBuf {
-    let shim = dir.join("camdlc");
-    std::fs::write(&shim, format!(
+    script_support::install_script(&dir.join("camdlc"), &format!(
         "#!/bin/sh\n\
          case \"$1\" in\n  \
            --camdl-version) exec '{real}' \"$@\" ;;\n\
@@ -441,14 +434,7 @@ fn stale_version_shim(dir: &Path, real: &Path, counter: &Path, fake: &str) -> Pa
          echo x >> '{counter}'\n\
          out=$('{real}' \"$@\") || exit $?\n\
          printf '%s' \"$out\" | sed '1s/\"ir_version\": *\"[^\"]*\"/\"ir_version\":\"{fake}\"/'\n",
-        real = real.display(), counter = counter.display(), fake = fake)).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut p = std::fs::metadata(&shim).unwrap().permissions();
-        p.set_mode(0o755);
-        std::fs::set_permissions(&shim, p).unwrap();
-    }
+        real = real.display(), counter = counter.display(), fake = fake));
     dir.to_path_buf()
 }
 

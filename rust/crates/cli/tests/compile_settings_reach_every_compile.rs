@@ -18,6 +18,7 @@
 //! move with the flag.
 
 mod fit_store_support;
+mod script_support;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -167,17 +168,14 @@ fn case() -> Case {
     std::fs::create_dir_all(&shim_dir).unwrap();
     let log = tmp.path().join("compiles.log");
     let shim = shim_dir.join("camdlc");
-    std::fs::write(
+    script_support::install_script(
         &shim,
-        format!(
+        &format!(
             "#!/bin/sh\ncase \"$1\" in\n  --camdl-version|render) ;;\n  *) echo \"no_licm=${{CAMDL_NO_LICM:-0}} $*\" >> '{log}' ;;\nesac\nexec '{real}' \"$@\"\n",
             log = log.display(),
             real = real_camdlc().display(),
         ),
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     Case { _tmp: tmp, dir, log, shim_dir }
 }
 

@@ -12,6 +12,8 @@
 //! asserts the wrapper is invoked once for a three-replicate run. A lone run is
 //! checked for the same one-compile property.
 
+mod script_support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -92,14 +94,7 @@ fn counting_camdlc_shim(dir: &Path, real: &Path, counter_file: &Path) -> PathBuf
         counter = counter_file.display(),
         real = real.display(),
     );
-    std::fs::write(&shim, script).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&shim).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&shim, perms).unwrap();
-    }
+    script_support::install_script(&shim, &script);
     dir.to_path_buf()
 }
 
