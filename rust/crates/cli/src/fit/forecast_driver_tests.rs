@@ -173,7 +173,7 @@ fn pooled_with_se(xs: &[f64], n_draws: usize, f: impl Fn(&[f64]) -> f64) -> (f64
     (m, (v / (n_draws as f64 - 1.0)).sqrt())
 }
 
-/// The importance-sampling reference of §4.4: prior trajectories of the
+/// The importance-sampling reference of §1.3: prior trajectories of the
 /// chain-binomial process at `dt = 1`, weighted by the Poisson likelihood of
 /// the daily counts (computed here by hand), and the weighted mean and
 /// variance of the infections over days `[a, b)`, each with its Monte Carlo
@@ -287,7 +287,7 @@ fn reference_check(n_draws: usize, n_particles: usize, m: usize) -> String {
     summary
 }
 
-/// The reference distribution (spec §4.4): origin day 24, the weekly target
+/// The reference distribution (§1.3): origin day 24, the weekly target
 /// [21, 28) under way. The driver's predictive mean and variance of the
 /// week's infections agree with importance sampling from the prior weighted
 /// by the daily data; the reported count's draws carry the declared

@@ -6,8 +6,8 @@
 //! its last; a `bspline` from the start of its window to the end. Outside that
 //! range the lookup holds the end value. Whether a run may rely on the hold is
 //! the command's decision (an error by default, a warning under
-//! `--allow-forcing-extrapolation`; spec `docs/dev/temporal-architecture.md`
-//! §4.6, D44 and D48), so the engine only records that it happened, through
+//! `--allow-forcing-extrapolation`; `docs/engineering/forecasting.md` §1.7,
+//! D44 and D48), so the engine only records that it happened, through
 //! [`crate::run_notes`], and goes on holding the value exactly as before.
 //!
 //! The record reads the times actually evaluated, not the run's span: a

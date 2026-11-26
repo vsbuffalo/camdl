@@ -1836,7 +1836,7 @@ pub(crate) fn resolve_and_load_obs_streams(
 /// hole's period still resets its stream's running total. The first such row
 /// is named with the two grid times either side of its boundary. A method
 /// that steps exactly to any boundary is not checked: its schedule lands on
-/// every one (`docs/dev/temporal-architecture.md` §4.5, D43).
+/// every one (`docs/camdl-run-spec.md` §6.5, D43).
 ///
 /// [`PeriodBoundaries::OnGrid`]: crate::fit::methods::PeriodBoundaries::OnGrid
 pub(crate) fn refuse_periods_off_the_grid(
@@ -1912,7 +1912,7 @@ pub(crate) fn stream_specs_from_obs_streams(
 
 /// Decide the fit's training partition from its holdout declaration, apply it
 /// to the loaded training streams, and say what it decided (D38;
-/// `docs/dev/temporal-architecture.md` §4.1).
+/// `docs/engineering/forecasting.md` §3.2).
 ///
 /// - `holdout_after = τ` (bare model time, a date, or `first_obs`/`last_obs`
 ///   ± N unit through the shared gh#626 grammar; the anchors resolve over the

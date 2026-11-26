@@ -1,5 +1,5 @@
-//! What a fixed-origin forecast predicts (`docs/dev/temporal-architecture.md`
-//! §2.5, §3.3, §4.3).
+//! What a fixed-origin forecast predicts (`docs/engineering/forecasting.md`
+//! §1.2, §1.6, §3.3).
 //!
 //! A [`ForecastPlan`] is built once, from the fit's training partition and each
 //! stream's declaration, before any filtering. It is the only place a target
@@ -8,11 +8,11 @@
 //! total only at the end of one of them. A period the plan did not declare is
 //! never read, because a stream's running total resets only where a declared
 //! period starts, so an undeclared one would silently include the previous
-//! period's flow (§4.4).
+//! period's flow (§1.3).
 //!
 //! The forecast origin is the training extent and the state is conditioned on
 //! the training rows only (D57); the horizon counts each stream's own targets
-//! from the first one ending after the origin (§2.5, D41).
+//! from the first one ending after the origin (§1.2, D41).
 
 use super::observed_rows::{Measures, ObservedRow};
 use super::runner::TIME_TIE_EPS;
@@ -110,7 +110,7 @@ pub(crate) struct HeldOut {
     pub row: ObservedRow,
 }
 
-/// Where a stream's targets come from (§4.3).
+/// Where a stream's targets come from (§1.6).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum TargetSource {
     /// A uniform `covers` form: the stream's tiling continued at its width.
@@ -136,7 +136,7 @@ impl TargetSource {
         }
     }
 
-    /// Whether the stream declares a cadence of its own (§4.3, 1 and 2), so
+    /// Whether the stream declares a cadence of its own (§1.6), so
     /// held-out rows only select its targets.
     fn is_declared_cadence(&self) -> bool {
         match self {
@@ -166,7 +166,7 @@ pub(crate) struct PlanStream<'a> {
     pub design: DesignInput<'a>,
 }
 
-/// Why a stream has no targets (§4.3, D42, D81).
+/// Why a stream has no targets (§1.6, D42, D81).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum StreamRefusal {
     /// A stream with window columns and no `emit_schedule`, or a state read
@@ -329,7 +329,7 @@ pub(crate) struct ForecastPlan {
 impl ForecastPlan {
     /// The plan for a forecast of reach `horizon` from the training extent of
     /// `parameters`, over `streams`. Each stream's targets come from its
-    /// declaration (§4.3); a stream that declares none is refused and recorded,
+    /// declaration (§1.6); a stream that declares none is refused and recorded,
     /// and the plan fails only when no stream has a target.
     pub(crate) fn new(
         parameters: TrainingPartition,
@@ -508,7 +508,7 @@ fn stream_targets(
             }
             (TargetSource::DeclaredTiling { span }, out)
         }
-        // §4.3 (3): a window-column stream with no emit schedule, scored,
+        // §1.6: a window-column stream with no emit schedule, scored,
         // takes its held-out rows' periods as targets; with no held-out row it
         // declares no rhythm and falls to the refusal below.
         (TemporalKind::Interval, Some(Covers::WindowColumns))

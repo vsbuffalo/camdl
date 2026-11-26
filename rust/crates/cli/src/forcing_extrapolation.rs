@@ -1,5 +1,5 @@
 //! What a command does when a run evaluates a forcing outside the range on
-//! which it is defined (spec `docs/dev/temporal-architecture.md` §4.6, D44 and
+//! which it is defined (`docs/engineering/forecasting.md` §1.7, D44 and
 //! D48): a data-table forcing before its first or after its last data point,
 //! or a `bspline` outside its window.
 //!

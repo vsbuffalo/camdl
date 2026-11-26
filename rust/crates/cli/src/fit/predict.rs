@@ -61,7 +61,7 @@ impl PredictiveMode {
 }
 
 /// The part a predictive row played in the fit — the `role` artifact column
-/// (`docs/dev/temporal-architecture.md` §5.3). A one-step band covers every
+/// (`docs/camdl-run-spec.md` §2.2.2). A one-step band covers every
 /// data row, and the parameters behind it were fitted to the `Trained` ones
 /// alone, so a `HeldOut` row's band is out of sample in its parameters while
 /// its state has been filtered through every earlier row (gh#1079). The
@@ -4377,8 +4377,8 @@ fn run_predict(
             // The one-step band's particle count per draw, as `{"n": N}`;
             // absent when no filter ran.
             "particles": one_step_fit.is_some().then_some(particles),
-            // The two information sets (`docs/dev/temporal-architecture.md`
-            // §2.4). The parameter set is the fit's recorded training
+            // The two information sets (`docs/engineering/forecasting.md`
+            // §1.4). The parameter set is the fit's recorded training
             // partition, as `forecast.json` carries it: the rule, the training
             // extent and each stream's training rows. A row's `role` is its
             // position against that stream's `rows`.

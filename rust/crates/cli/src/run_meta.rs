@@ -598,7 +598,7 @@ impl ObsSchema {
 /// (`resolved_priors` = gh#75 per-parameter prior source,
 /// `estimated`/`fixed`/`data_hashes`, `model_identity`, paths).
 ///
-/// Which rows the fit trained on (`docs/dev/temporal-architecture.md` §3.2,
+/// Which rows the fit trained on (`docs/engineering/forecasting.md` §3.2,
 /// D38): per stream the number of leading rows that trained and their row
 /// digest, the training extent, and the rule that decided it. The record of
 /// a `fit::training_partition::TrainingPartition`, value type for
@@ -840,7 +840,7 @@ pub struct FitSidecar {
     /// being read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub integrator: Option<ir::model::Integrator>,
-    /// The model's calendar axis (`docs/dev/temporal-architecture.md` §5.3):
+    /// The model's calendar axis (`docs/camdl-run-spec.md` §2.2.2):
     /// its time unit and the date of `t = 0`, so the fit's model times — the
     /// estimates' instants, the training window — can be dated without the
     /// model source. `origin` is null for a model that has none. Required

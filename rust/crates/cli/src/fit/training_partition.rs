@@ -1,5 +1,5 @@
-//! Which rows the parameters were fitted to (`docs/dev/temporal-architecture.md`
-//! §2.3, §3.2, §4.1, §4.7; D38, D40).
+//! Which rows the parameters were fitted to (`docs/engineering/forecasting.md`
+//! §1.1, §1.8, §3.2; D38, D40).
 //!
 //! A [`TrainingPartition`] is decided once, from the rows the one row reader
 //! ([`super::observed_rows::observed_rows`]) produced, and recorded in the
@@ -188,7 +188,7 @@ pub(crate) fn cutoff_prefix(rows: &[ObservedRow], at: f64) -> Result<usize, usiz
     }
 }
 
-/// Which rows of each stream the parameters were fitted to (spec §3.2).
+/// Which rows of each stream the parameters were fitted to (§3.2).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct TrainingPartition {
     rule: PartitionRule,
@@ -264,7 +264,7 @@ impl TrainingPartition {
     /// at least that many rows, and those rows must digest to the recorded
     /// digest. A forecast reads its parameter set only through this, so a plan
     /// can never claim the parameters were fitted to rows that changed after
-    /// the fit (`docs/dev/temporal-architecture.md` §3.3).
+    /// the fit (`docs/engineering/forecasting.md` §3.3).
     pub(crate) fn from_record(
         record: &crate::run_meta::TrainingPartitionRecord,
         rows: &BTreeMap<String, Vec<ObservedRow>>,

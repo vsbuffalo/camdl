@@ -8,7 +8,7 @@
 //! among them. `last_obs` in a model anchor is the latest end of an observed
 //! training row, so rows appended after the cutoff move no anchor.
 //!
-//! Spec: docs/dev/temporal-architecture.md §2.3, §3.2, §4.1, §4.7; proposal
+//! Spec: docs/engineering/forecasting.md §1.1, §1.8, §3.2; proposal
 //! docs/dev/proposals/2026-11-15-temporal-architecture-migration.md Stage 2,
 //! fixtures F2 and F3.
 

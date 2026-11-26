@@ -4,7 +4,7 @@ Status: implemented (65bd81771, a0daab8bf, e0f8457a9, eaa99988a).
 
 Builds on: `2026-11-20-run-store-api.md` (the run store, on main), whose
 "Scores" section defines the score's identity and leaves its command to this
-document; `docs/dev/temporal-architecture.md` (the temporal spec), whose terms
+document; `docs/engineering/forecasting.md` (the temporal spec), whose terms
 this document uses. Supersedes: the draft `2026-11-19-unified-prediction.md`
 (never merged), for everything it says about scores and the vocabulary of
 prediction. Its sections on forecasts from several origins and on covariate

@@ -3,7 +3,7 @@
 - Date: 2026-11-16
 - Proposal: `docs/dev/proposals/2026-11-15-temporal-architecture-migration.md`,
   Stage 5
-- Design: `docs/dev/temporal-architecture.md` §2.4, §2.5, §3.3, §4.3, §4.4
+- Design: `docs/engineering/forecasting.md` §1.2, §1.4, §1.6, §3.3, §3.4
 
 ## Measurement: the driver against an importance-sampling reference
 

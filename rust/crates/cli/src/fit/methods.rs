@@ -46,7 +46,7 @@ pub enum MethodCategory {
 }
 
 /// Where a method can place the start and end of an observed period
-/// (`docs/dev/temporal-architecture.md` §4.5, decision D43). A capability of
+/// (`docs/camdl-run-spec.md` §6.5, decision D43). A capability of
 /// the method, not a user setting: a period is never moved to a different
 /// period to fit a grid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

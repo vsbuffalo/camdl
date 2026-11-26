@@ -7,9 +7,9 @@ supersedes: 2026-05-31-prequential-bayesian-lfo.md
 # Honest predictive evaluation: trustworthy `compare`, holdout, and the posterior-mixture predictive
 
 **Amended (2026-11-15):** §3.7.2 forecast mode and §3.8 rolling origins are
-refined by `docs/dev/temporal-architecture.md` and D35: parameters fixed from
-one fit, the state conditioned up to each forecast date, scores per forecast
-date and horizon. Their implementation is Stage 6 of
+refined by `docs/engineering/forecasting.md` and D35: parameters fixed from one
+fit, the state conditioned up to each forecast date, scores per forecast date
+and horizon. Their implementation is Stage 6 of
 `2026-11-15-temporal-architecture-migration.md`.
 
 **Scope:** the `camdl compare` / prequential evaluation stack — what it

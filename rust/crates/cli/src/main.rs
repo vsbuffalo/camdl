@@ -2910,7 +2910,7 @@ pub(crate) fn obs_anchors_from_config(
 /// disagree with the one they score against.
 ///
 /// The anchors are the observed window of the training rows (D40,
-/// `docs/dev/temporal-architecture.md` §4.7): `first_obs` the earliest start
+/// `docs/engineering/forecasting.md` §1.8): `first_obs` the earliest start
 /// and `last_obs` the latest end of a row that carries a value, across every
 /// bound stream. Under `holdout_after` the training rows are the ones the fit
 /// trains on (the cutoff's own anchors resolve over the full files), so rows

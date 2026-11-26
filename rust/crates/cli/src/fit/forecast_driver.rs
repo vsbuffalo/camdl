@@ -1,4 +1,4 @@
-//! The fixed-origin forecast driver (`docs/dev/temporal-architecture.md` §4.4;
+//! The fixed-origin forecast driver (`docs/engineering/forecasting.md` §3.4;
 //! D39, D53, D54, D57).
 //!
 //! For each posterior draw it runs the existing bootstrap particle filter over
@@ -29,7 +29,7 @@ use super::observed_rows::Measures;
 use super::runner::{ObsStream, TIME_TIE_EPS};
 use super::training_partition::{row_digest, RowPrefix};
 
-/// The rows the state at the origin was conditioned on (§2.4). Built only
+/// The rows the state at the origin was conditioned on (§1.4). Built only
 /// here, from the rows handed to the filter: no caller can claim a
 /// conditioning that did not happen.
 #[derive(Debug, Clone, PartialEq)]
@@ -523,7 +523,7 @@ fn pre_origin_trace(
 /// of a declared period of that stream ending at `end` that carries no value.
 /// Anything else is refused: a stream's running total resets only where a
 /// declared period starts, so a reading at a time that ends no declared period
-/// would include flow from before the period meant (spec §4.4), and a reading
+/// would include flow from before the period meant (§1.3), and a reading
 /// at an observed row would predict what the filter already assimilated.
 pub(crate) fn declared_read(
     obs_model: &MultiStreamObsModel,

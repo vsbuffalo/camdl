@@ -8,7 +8,7 @@
 //! uniform `covers` form used to drop the row without a word, and the
 //! forecaster's first week went missing; a `window_start`/`window_stop` stream
 //! wrote a short first window instead. Both are refused by name here
-//! (`docs/dev/temporal-architecture.md` §4.4, "Restarts"; §5.2), and the
+//! (`docs/engineering/forecasting.md` §1.3), and the
 //! message points at `camdl predict --mode forecast`, which carries the period
 //! under way.
 //!

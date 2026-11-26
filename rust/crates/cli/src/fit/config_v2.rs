@@ -297,7 +297,7 @@ pub struct FitBackendConfig {
     /// Let the fit evaluate a forcing outside the range it is defined on (a
     /// data table past its data, a `bspline` past its window), holding its
     /// end value, with one warning per forcing; without it such a fit is
-    /// refused (spec `docs/dev/temporal-architecture.md` §4.6). Keyed: a fit
+    /// refused (`docs/engineering/forecasting.md` §1.7). Keyed: a fit
     /// made under it and one refused without it are different computations,
     /// and a stored fit must not answer for a run that would be refused.
     /// `skip_serializing_if` keeps the common `false` out of the identity

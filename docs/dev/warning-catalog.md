@@ -412,7 +412,7 @@ for all time and never fire.
 
 **Why:** past its data the lookup holds the end value, and a forecast or a fit
 run on a held covariate reads as a plausible answer while resting on a value
-nobody supplied (spec `docs/dev/temporal-architecture.md` §4.6, D44 and D48).
+nobody supplied (`docs/engineering/forecasting.md` §1.7, D44 and D48).
 
 **As an error** (the default), followed by the three fixes; the command exits 1
 before it commits anything, and a stored run that held a forcing is not served

@@ -173,9 +173,9 @@ hard aborts:
 Not bypassable on either real entry point.
 
 **What each method can do with an observed period** is also recorded here, as
-the entry's `period_boundaries` (`PeriodBoundaries`, decision D43 of
-`docs/dev/temporal-architecture.md` §4.5). It is a capability of the method, not
-a user setting:
+the entry's `period_boundaries` (`PeriodBoundaries`, decision D43;
+`docs/camdl-run-spec.md` §6.5, "Observation periods and the step grid"). It is a
+capability of the method, not a user setting:
 
 | `PeriodBoundaries` | methods                                   | a period start or end off the grid `t_start + k·dt`                                                                                  |
 | ------------------ | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |

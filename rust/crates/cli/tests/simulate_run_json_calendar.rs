@@ -1,6 +1,6 @@
 //! A stored simulation cell can be dated without the model source: its
 //! `run.json` names the compiled model it ran, and that stored model carries
-//! the calendar axis (`docs/dev/temporal-architecture.md` §5.3; M1, gh#838).
+//! the calendar axis (`docs/camdl-run-spec.md` §2.2.2; M1, gh#838).
 //! A fit run's `fit.meta.json` carries the axis itself.
 //!
 //! Shells out to the release `camdl` binary.

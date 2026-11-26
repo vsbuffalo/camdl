@@ -1,6 +1,6 @@
 # Proposal: the score artifact
 
-**Amended by** `docs/dev/temporal-architecture.md` and
+**Amended by** `docs/engineering/forecasting.md` and
 `2026-11-15-temporal-architecture-migration.md` (2026-11-15). Where they differ,
 they govern: `ObservedRow` carries what the row measures (`measures`, its
 instant or period) instead of `time`; the fit records a `training_partition`

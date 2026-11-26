@@ -1966,7 +1966,7 @@ mod tests {
     }
 
     /// `fit.meta.json` carries the model's calendar axis
-    /// (`docs/dev/temporal-architecture.md` §5.3), so the fit's model times can
+    /// (`docs/camdl-run-spec.md` §2.2.2), so the fit's model times can
     /// be dated without the model source.
     #[test]
     fn sidecar_records_the_models_calendar() {

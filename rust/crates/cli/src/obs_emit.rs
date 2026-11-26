@@ -273,7 +273,7 @@ fn emitted_covers(obs: &ObservationModel, override_step: Option<f64>) -> Option<
 
 /// Refuse a restart (`simulate --init-state`) that begins inside one of
 /// `obs`'s reporting periods (gh#1081, gh#1085;
-/// `docs/dev/temporal-architecture.md` §4.4, "Restarts").
+/// `docs/engineering/forecasting.md` §1.3).
 ///
 /// A saved state holds compartment counts and nothing else: not what a stream
 /// has counted since its current period began. The row for a period under way

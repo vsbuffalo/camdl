@@ -1,5 +1,5 @@
 //! A date camdl writes reads back to the model time it was written from
-//! (`docs/dev/temporal-architecture.md` §3.4; gh#839).
+//! (`docs/dates.md`, "Getting dates back out"; gh#839).
 //!
 //! [`CalendarAxis::date_of`] renders a model time as `YYYY-MM-DD`, or as
 //! `YYYY-MM-DD+<frac>d` inside a day; [`CalendarAxis::parse_instant`] is the

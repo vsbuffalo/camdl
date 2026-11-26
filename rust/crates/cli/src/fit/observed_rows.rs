@@ -1,5 +1,5 @@
 //! The one reader of an observation stream's rows, and what each row measures
-//! (`docs/dev/temporal-architecture.md` §2.2, §3.1).
+//! (`docs/engineering/forecasting.md` §3.1).
 //!
 //! [`observed_rows`] reads one leaf's rows from its data file once, through the
 //! column readers in `pfilter`, and records for each row the instant or period
@@ -332,8 +332,8 @@ mod tests {
         }).collect()
     }
 
-    /// The spec's §2.2 table, one row per uniform `covers` form, each in the
-    /// lowered form the expander emits (`ir::observation::Covers`): the row
+    /// One row per uniform `covers` form, each in the lowered form the expander
+    /// emits (the table on `ir::observation::Covers`): the row
     /// labelled 21 measures the period the table gives, and the next row,
     /// labelled 28, the period one week on.
     #[test]

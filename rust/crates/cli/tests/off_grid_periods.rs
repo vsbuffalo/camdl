@@ -1,5 +1,6 @@
 //! Observation periods whose starts and ends lie off the integration grid
-//! (`docs/dev/temporal-architecture.md` §4.5, decision D43).
+//! (`docs/camdl-run-spec.md` §6.5, "Observation periods and the step grid";
+//! decision D43).
 //!
 //! A method that steps exactly to every period boundary (if2, pfilter, pmmh)
 //! fits such data as it is. PGAS steps only on the grid `t_start + k·dt`, so a

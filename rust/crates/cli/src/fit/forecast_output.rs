@@ -1,6 +1,6 @@
 //! `camdl predict --mode forecast`: the fixed-origin forecast of a fit,
 //! from the end of its training rows out to `--horizon`
-//! (`docs/dev/temporal-architecture.md` §2.5, §4.4; migration plan, Stage 5).
+//! (`docs/engineering/forecasting.md` §1.2, §3.4; migration plan, Stage 5).
 //!
 //! Reads the fit's recorded training partition (verified against the data),
 //! builds the [`ForecastPlan`], runs the [`fixed_origin_forecast`] driver over

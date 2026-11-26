@@ -359,8 +359,9 @@ impl std::fmt::Display for RenderedInstant {
 /// not reached by more steps either (see [`CalendarAxis::date_of`]).
 const EXACT_RENDER_NEIGHBOURS: usize = 4;
 
-/// The mapping from model time to dates (`docs/dev/temporal-architecture.md`
-/// §3.4): the model's time unit and the date of `t = 0`, if it has one.
+/// The mapping from model time to dates: the model's time unit and the date of
+/// `t = 0`, if it has one (`docs/camdl-run-spec.md` §2.2.2, "Calendar semantics
+/// travel with the artifact").
 ///
 /// It owns the render/parse pair. [`Self::date_of`] writes a time as a date;
 /// [`Self::parse_instant`] is how the data loader reads one; a rendered date

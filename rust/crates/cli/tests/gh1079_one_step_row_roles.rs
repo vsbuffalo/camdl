@@ -1,6 +1,6 @@
 //! gh#1079: `camdl predict` marks each predictive row with the part it
 //! played in the fit, and `predictive.json` names both information sets
-//! (`docs/dev/temporal-architecture.md` §2.4, §5.3).
+//! (`docs/engineering/forecasting.md` §1.4, §1.5).
 //!
 //! The one-step band filters through every row of the bound files, held-out
 //! rows included, while the parameters came from the training rows alone.

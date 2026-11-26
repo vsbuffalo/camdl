@@ -4,7 +4,7 @@
 proposal was superseded by `2026-06-10-observation-data-entry-dsl.md`, the
 interval model by `docs/dev/temporal-architecture.md`, and the spine landed
 (`docs/dev/scheduling-spine.md`). The entry point for time, observation periods,
-training membership and forecasting is now `docs/dev/temporal-architecture.md`.
+training membership and forecasting is now `docs/engineering/forecasting.md`.
 Retained for history only.
 
 - **Status:** Overview / reader's map. This is the entry point to a

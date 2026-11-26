@@ -9,13 +9,14 @@ description: Calendar / time / date changes — the policy document, the unit ta
 
 ## Required reading
 
-- [`docs/dates.md`](../../docs/dates.md) — the policy document.
+- [`docs/dates.md`](../../docs/dates.md) — the policy document, including what
+  instant or period a data row measures and which rows train under a holdout
+  cutoff.
 - [`docs/camdl-language-spec.md`](../../docs/camdl-language-spec.md) §2.1 — the
   unit table.
 - `rust/crates/ir/src/caltime.rs` — the conversion code.
-- [`docs/dev/temporal-architecture.md`](../../docs/dev/temporal-architecture.md)
-  — observation periods, training membership, forecast origins, targets and
-  horizons; which layer owns each rule.
+- [`docs/engineering/forecasting.md`](../../docs/engineering/forecasting.md) —
+  the training partition, forecast origins, targets and horizons, and scoring.
 
 Background design, **archived** (decided; read for rationale, not for pending
 work):

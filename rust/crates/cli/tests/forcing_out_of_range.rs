@@ -9,7 +9,7 @@
 //! spline | constant`), and a `bspline` over a window. Each forcing's data, or
 //! window, ends at t = 50 while the run goes to t = 100.
 //!
-//! Spec: docs/dev/temporal-architecture.md §4.6 (D44, D48); proposal
+//! Spec: docs/engineering/forecasting.md §1.7 (D44, D48); proposal
 //! docs/dev/proposals/2026-11-15-temporal-architecture-migration.md Stage 0(f).
 
 mod fit_store_support;

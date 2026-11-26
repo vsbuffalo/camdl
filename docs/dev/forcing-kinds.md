@@ -104,8 +104,8 @@ past its range is never evaluated there and raises nothing. The engine records
 that the range was left in a set-once flag per forcing and side
 (`sim::forcing_range`), so a particle filter's threads do not contend on it, and
 the command decides whether that is an error or a warning
-(`cli::forcing_extrapolation`). The design is in
-`docs/dev/temporal-architecture.md` §4.6.
+(`cli::forcing_extrapolation`). What the rule means for a forecast is in
+`docs/engineering/forecasting.md` §1.7.
 
 ## Dimensional units
 
