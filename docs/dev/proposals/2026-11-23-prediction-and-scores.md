@@ -1,6 +1,6 @@
 # Prediction and scores: one vocabulary, `camdl predict` and `camdl score`
 
-Status: accepted 2026-11-23. Not yet implemented.
+Status: implemented (65bd81771, a0daab8bf, e0f8457a9, eaa99988a).
 
 Builds on: `2026-11-20-run-store-api.md` (the run store, on main), whose
 "Scores" section defines the score's identity and leaves its command to this
