@@ -1714,7 +1714,7 @@ impl PredictSource {
         }
     }
 
-    /// The identity and labels of the prediction from this source under
+    /// The identity and attributes of the prediction from this source under
     /// `options`, with the `--design` tables `design`.
     fn identity(
         &self,
@@ -1746,8 +1746,8 @@ impl PredictSource {
     ) -> Result<Option<store::Stored<crate::fit_store::Prediction>>, String> {
         use crate::fit_store::Prediction;
         let store = self.store()?;
-        let (identity, labels) = self.identity(options, BTreeMap::new())?;
-        let planned = store.plan::<Prediction>(&[(identity.clone(), labels.clone())]).map_err(|e| e.to_string())?;
+        let (identity, attributes) = self.identity(options, BTreeMap::new())?;
+        let planned = store.plan::<Prediction>(&[(identity.clone(), attributes.clone())]).map_err(|e| e.to_string())?;
         let completed = match planned.first() {
             Some(p) => store.get(&p.id).map_err(|e| e.to_string())?.is_some(),
             None => false,
@@ -1755,7 +1755,7 @@ impl PredictSource {
         if !completed {
             return Ok(None);
         }
-        match store.begin::<Prediction>(&identity, &labels, info, store::Reuse::IfCompleted).map_err(|e| e.to_string())? {
+        match store.begin::<Prediction>(&identity, &attributes, info, store::Reuse::IfCompleted).map_err(|e| e.to_string())? {
             store::Begin::Reused(stored) => Ok(Some(stored)),
             store::Begin::Busy(owner) => Err(store::Error::InProgress(owner).to_string()),
             // Completed a moment ago and gone now: compute it.
@@ -2064,9 +2064,9 @@ fn store_prediction(
     use crate::fit_store::Prediction;
     let store = p.source.store()?;
     let design = design_deps(&store, &p.design, info)?;
-    let (identity, labels) = p.source.identity(&p.options, design)?;
+    let (identity, attributes) = p.source.identity(&p.options, design)?;
     let declared = crate::result_files::fit::PredictionFile::of_dir(p.dir.path())?;
-    let stored = match crate::camdl_store::begin::<Prediction>(&store, &identity, &labels, info, reuse, declared)
+    let stored = match crate::camdl_store::begin::<Prediction>(&store, &identity, &attributes, info, reuse, declared)
         .map_err(|e| e.to_string())?
     {
         store::Begin::Reused(stored) => stored,
@@ -2164,9 +2164,9 @@ fn design_deps(
         let table = store::Hashed::new(
             <crate::camdl_store::Table as store::Content>::from_bytes(&bytes).map_err(|e| e.to_string())?,
         );
-        let labels = crate::camdl_store::TableAttributes { stream: source.to_string(), path: path.to_string() };
+        let attributes = crate::camdl_store::TableAttributes { stream: source.to_string(), path: path.to_string() };
         let dep = store
-            .put::<crate::camdl_store::DataTable>(table, &labels, &store::Provenance::none(), info)
+            .put::<crate::camdl_store::DataTable>(table, &attributes, &store::Provenance::none(), info)
             .and_then(|s| s.dep(<crate::camdl_store::DataTable as store::ContentArtifact>::FILE))
             .map_err(|e| format!("storing the design file of `{source}`: {e}"))?;
         design.insert(source.to_string(), dep);
@@ -2459,9 +2459,9 @@ pub(crate) fn recompute(
     };
     let store = o.stored.source.store()?;
     let design = design_deps(&store, &o.stored.design, info)?;
-    let (identity, labels) = o.stored.source.identity(&o.stored.options, design)?;
+    let (identity, attributes) = o.stored.source.identity(&o.stored.options, design)?;
     let planned = store
-        .plan::<crate::fit_store::Prediction>(&[(identity.clone(), labels)])
+        .plan::<crate::fit_store::Prediction>(&[(identity.clone(), attributes)])
         .map_err(|e| e.to_string())?;
     let id = planned.first().ok_or("internal error: the store planned no prediction")?.id.key();
     let mut files = BTreeMap::new();
@@ -2486,7 +2486,7 @@ pub(crate) fn recompute(
     })
 }
 
-/// The identity and labels of the prediction of the run `fit` names under
+/// The identity and attributes of the prediction of the run `fit` names under
 /// `options`: the run's draws and its problem, and every option that changes
 /// what is written.
 pub(crate) fn prediction_identity(
@@ -2505,7 +2505,7 @@ pub(crate) fn prediction_identity(
     )
 }
 
-/// The identity and labels of a prediction whose parameters come from
+/// The identity and attributes of a prediction whose parameters come from
 /// `source`, conditioned on `data`, evaluating `quantities`, under `options`
 /// with the `--design` tables `design`; `model` is the model file's stem.
 fn identity_from(
@@ -2535,8 +2535,8 @@ fn identity_from(
             design,
         },
     };
-    let labels = PredictionAttributes { mode: mode.label().to_string(), scenarios: options.scenarios.clone(), model };
-    Ok((identity, labels))
+    let attributes = PredictionAttributes { mode: mode.label().to_string(), scenarios: options.scenarios.clone(), model };
+    Ok((identity, attributes))
 }
 
 /// The stored prediction of the run `fit` names under `options`, if one is
@@ -2547,8 +2547,8 @@ pub(crate) fn stored_prediction(
     options: &PredictOptions,
 ) -> Result<Option<store::Stored<crate::fit_store::Prediction>>, String> {
     // A table's derived prediction reads no design file.
-    let (identity, labels) = prediction_identity(fit, options, std::collections::BTreeMap::new())?;
-    let planned = store.plan::<crate::fit_store::Prediction>(&[(identity, labels)]).map_err(|e| e.to_string())?;
+    let (identity, attributes) = prediction_identity(fit, options, std::collections::BTreeMap::new())?;
+    let planned = store.plan::<crate::fit_store::Prediction>(&[(identity, attributes)]).map_err(|e| e.to_string())?;
     match planned.first() {
         Some(p) => store.get(&p.id).map_err(|e| e.to_string()),
         None => Ok(None),

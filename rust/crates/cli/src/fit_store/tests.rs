@@ -155,8 +155,8 @@ fn resolved(fx: &Fixture, o: &Opened, config: &FitConfig) -> ResolvedProblem {
 }
 
 fn store_problem(o: &Opened, problem: &ResolvedProblem) -> Stored<FitProblem> {
-    let labels = ProblemAttributes { model: "model".into(), sweep_point: None };
-    match crate::camdl_store::begin::<FitProblem>(&o.store, &problem.identity, &labels, &o.info, Reuse::IfCompleted, problem_files(problem)).unwrap() {
+    let attributes = ProblemAttributes { model: "model".into(), sweep_point: None };
+    match crate::camdl_store::begin::<FitProblem>(&o.store, &problem.identity, &attributes, &o.info, Reuse::IfCompleted, problem_files(problem)).unwrap() {
         Begin::Claimed(mut run) => {
             write_problem(&mut run, problem).unwrap();
             run.finish().unwrap()
@@ -172,7 +172,7 @@ fn run_identity(model: &ir::Model, problem: &Stored<FitProblem>, config: &FitCon
     let method = config.inference.method.as_ref().unwrap();
     let steps = crate::fit::steps::resolve_for(&method.algorithm, &config.problem, model).unwrap();
     let (settings, length) = MethodIdentity::of(method, &steps).unwrap();
-    let labels = RunAttributes { method: method.algorithm.method_name().to_string(), seed: 1 };
+    let attributes = RunAttributes { method: method.algorithm.method_name().to_string(), seed: 1 };
     let chain = ChainIdentity {
         problem: problem.dep_all(),
         method: settings,
@@ -180,12 +180,12 @@ fn run_identity(model: &ir::Model, problem: &Stored<FitProblem>, config: &FitCon
         seed: ProcessSeed { seed: 1 },
         starts: StartSource::of(method, &config.problem.estimate, StartInput::None).unwrap(),
     };
-    (FitRunIdentity { chain, length, resumed_from: None }, labels)
+    (FitRunIdentity { chain, length, resumed_from: None }, attributes)
 }
 
 fn store_run(o: &Opened, model: &ir::Model, problem: &Stored<FitProblem>, config: &FitConfig) -> Stored<FitRun> {
-    let (id, labels) = run_identity(model, problem, config);
-    match crate::camdl_store::begin::<FitRun>(&o.store, &id, &labels, &o.info, Reuse::IfCompleted, [crate::result_files::fit_run::FitRunFile::Common(crate::result_files::fit_run::CommonFile::Method)]).unwrap() {
+    let (id, attributes) = run_identity(model, problem, config);
+    match crate::camdl_store::begin::<FitRun>(&o.store, &id, &attributes, &o.info, Reuse::IfCompleted, [crate::result_files::fit_run::FitRunFile::Common(crate::result_files::fit_run::CommonFile::Method)]).unwrap() {
         Begin::Claimed(mut run) => {
             write_method(&mut run, config.inference.method.as_ref().unwrap()).unwrap();
             run.finish().unwrap()
@@ -401,8 +401,8 @@ fn the_tree_is_the_layout() {
         quantities: None,
         options: PredictOptions { mode: PredictMode::Forecast, settings: "{\"reach\":\"7 days\"}".into(), design: BTreeMap::new() },
     };
-    let labels = PredictionAttributes { mode: PredictMode::Forecast.label().into(), scenarios: Vec::new(), model: "model".into() };
-    let prediction = match crate::camdl_store::begin::<Prediction>(&o.store, &id, &labels, &o.info, Reuse::IfCompleted, crate::result_files::fit::PredictionFile::parse("predictive.json")).unwrap() {
+    let attributes = PredictionAttributes { mode: PredictMode::Forecast.label().into(), scenarios: Vec::new(), model: "model".into() };
+    let prediction = match crate::camdl_store::begin::<Prediction>(&o.store, &id, &attributes, &o.info, Reuse::IfCompleted, crate::result_files::fit::PredictionFile::parse("predictive.json")).unwrap() {
         Begin::Claimed(run) => {
             run.result_file("predictive.json").unwrap().write_all(b"{}").unwrap();
             run.finish().unwrap()
@@ -471,10 +471,10 @@ fn a_prediction_declares_the_tables_its_manifests_list() {
         quantities: None,
         options: PredictOptions { mode: PredictMode::All, settings: "{}".into(), design: BTreeMap::new() },
     };
-    let labels = PredictionAttributes { mode: PredictMode::All.label().into(), scenarios: Vec::new(), model: "model".into() };
+    let attributes = PredictionAttributes { mode: PredictMode::All.label().into(), scenarios: Vec::new(), model: "model".into() };
     let declared = PredictionFile::of_dir(scratch.path()).unwrap();
     let Begin::Claimed(prediction) =
-        crate::camdl_store::begin::<Prediction>(&o.store, &id, &labels, &o.info, Reuse::IfCompleted, declared).unwrap()
+        crate::camdl_store::begin::<Prediction>(&o.store, &id, &attributes, &o.info, Reuse::IfCompleted, declared).unwrap()
     else {
         panic!("the prediction is new")
     };
@@ -534,8 +534,8 @@ fn a_method_output_refuses_a_file_its_method_does_not_store() {
     let o = open();
     let config = fx.config(&fit_toml("file = \"wide.tsv\"", 0.02));
     let problem = store_problem(&o, &resolved(&fx, &o, &config));
-    let (id, labels) = run_identity(&fx.model, &problem, &config);
-    let Begin::Claimed(run) = o.store.begin::<FitRun>(&id, &labels, &o.info, Reuse::IfCompleted).unwrap() else {
+    let (id, attributes) = run_identity(&fx.model, &problem, &config);
+    let Begin::Claimed(run) = o.store.begin::<FitRun>(&id, &attributes, &o.info, Reuse::IfCompleted).unwrap() else {
         panic!("the run is new")
     };
     let live = LiveRun::new(run);
@@ -545,7 +545,7 @@ fn a_method_output_refuses_a_file_its_method_does_not_store() {
     assert!(err.contains("the mh method wrote `mle_params.toml`") && err.contains("chain_0/trace"), "{err}");
     drop(live);
 
-    let Begin::Claimed(run) = o.store.begin::<FitRun>(&id, &labels, &o.info, Reuse::IfCompleted).unwrap() else {
+    let Begin::Claimed(run) = o.store.begin::<FitRun>(&id, &attributes, &o.info, Reuse::IfCompleted).unwrap() else {
         panic!("a failed run is claimed again")
     };
     let live = LiveRun::new(run);
@@ -589,8 +589,8 @@ fn a_completed_run_missing_a_chains_files_is_refused() {
     let o = open();
     let config = fx.config(&fit_toml("file = \"wide.tsv\"", 0.02));
     let problem = store_problem(&o, &resolved(&fx, &o, &config));
-    let (id, labels) = run_identity(&fx.model, &problem, &config);
-    let claim = || match o.store.begin::<FitRun>(&id, &labels, &o.info, Reuse::IfCompleted).unwrap() {
+    let (id, attributes) = run_identity(&fx.model, &problem, &config);
+    let claim = || match o.store.begin::<FitRun>(&id, &attributes, &o.info, Reuse::IfCompleted).unwrap() {
         Begin::Claimed(run) => LiveRun::new(run),
         _ => panic!("the run is claimed"),
     };

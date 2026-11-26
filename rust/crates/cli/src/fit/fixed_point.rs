@@ -216,12 +216,12 @@ pub(crate) fn resolve(
     let mut conditioned: IndexMap<String, String> = IndexMap::new();
     let given = &problem.data.as_ref().expect("posed with [data]").observations;
     for (source, file) in &resolved.identity.training {
-        let labels = crate::camdl_store::TableAttributes {
+        let attributes = crate::camdl_store::TableAttributes {
             stream: source.clone(),
             path: given.get(source).cloned().unwrap_or_default(),
         };
         let dep = store
-            .put::<DataTable>(file.content.clone(), &labels, &store::Provenance::none(), info)
+            .put::<DataTable>(file.content.clone(), &attributes, &store::Provenance::none(), info)
             .and_then(|s| s.dep(DataTable::FILE))
             .map_err(|e| format!("storing the data table of `{source}`: {e}"))?;
         data.insert(source.clone(), dep);

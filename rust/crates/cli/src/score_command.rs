@@ -502,9 +502,9 @@ fn bind_outcomes(
         let after = crate::fit_store::lines_after_conditioning(&bytes, &ext, &source, &leaves, &counts, &load)?;
         let table = store::Hashed::new(<crate::camdl_store::Table as store::Content>::from_bytes(&after).map_err(|e| e.to_string())?);
         let shown = recorded.get(path).map_or(path, String::as_str);
-        let labels = crate::camdl_store::TableAttributes { stream: source.clone(), path: shown.to_string() };
+        let attributes = crate::camdl_store::TableAttributes { stream: source.clone(), path: shown.to_string() };
         let dep = store
-            .put::<crate::camdl_store::DataTable>(table, &labels, &store::Provenance::none(), info)
+            .put::<crate::camdl_store::DataTable>(table, &attributes, &store::Provenance::none(), info)
             .and_then(|s| s.dep(<crate::camdl_store::DataTable as store::ContentArtifact>::FILE))
             .map_err(|e| format!("storing the outcomes of `{source}`: {e}"))?;
         tables.insert(source.clone(), dep);

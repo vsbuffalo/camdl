@@ -606,9 +606,9 @@ fn run_pfilter(
             .unwrap_or_else(|e| out.fail(format!("error: storing the compiled model: {e}")));
         let mut data = std::collections::BTreeMap::new();
         for (name, path, table) in tables {
-            let labels = crate::camdl_store::TableAttributes { stream: name.clone(), path: path.display().to_string() };
+            let attributes = crate::camdl_store::TableAttributes { stream: name.clone(), path: path.display().to_string() };
             let dep = store
-                .put::<crate::camdl_store::DataTable>(table, &labels, &store::Provenance::none(), &info)
+                .put::<crate::camdl_store::DataTable>(table, &attributes, &store::Provenance::none(), &info)
                 .unwrap_or_else(|e| out.fail(format!("error: storing the data table of `{name}`: {e}")))
                 .dep(crate::camdl_store::DataTable::FILE)
                 .unwrap_or_else(|e| out.fail(format!("error: storing the data table of `{name}`: {e}")));
@@ -1242,7 +1242,7 @@ fn run_pfilter(
             PointRole::Single => None,
             PointRole::Design { row, point_id, .. } => Some(DesignPointAttributes { row, point_id, values: overrides.to_vec() }),
         };
-        let labels = PfilterAttributes { model: stem.clone(), seed, point };
+        let attributes = PfilterAttributes { model: stem.clone(), seed, point };
         let filter = store::Identity::record(&identity);
         let asked_by_products = trace_path.is_some() || pf_health.is_some() || save_final_state_path.is_some()
             || save_paths.is_some() || save_prequential.is_some() || save_filtering.is_some()
@@ -1285,10 +1285,10 @@ fn run_pfilter(
         // rerun computes it.
         let not_completed = |message: String| PointResult::Failed(crate::out::CommandError::new(message));
         let begun = match gate {
-            Gate::Here => crate::camdl_store::begin_with::<Pfilter>(store, &identity, &labels, &wanted, info, request.reuse(),
+            Gate::Here => crate::camdl_store::begin_with::<Pfilter>(store, &identity, &attributes, &wanted, info, request.reuse(),
                 crate::result_files::pfilter::PfilterFile::of(n_replicates > 1)),
             Gate::Pose(slot) => {
-                *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(PosedPoint { identity, labels, wanted });
+                *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(PosedPoint { identity, attributes, wanted });
                 return not_completed("internal: a posed point is not computed".into());
             }
             Gate::Begun(slot) => match slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
@@ -1387,7 +1387,7 @@ fn run_pfilter(
                 let Prepared { store, info, .. } = prepared.get().expect("a posed point has opened the store");
                 let key = store::Identity::key(&posed.identity);
                 let begun = crate::camdl_store::begin_with::<crate::pfilter_store::Pfilter>(
-                    store, &posed.identity, &posed.labels, &posed.wanted, info, request.reuse(),
+                    store, &posed.identity, &posed.attributes, &posed.wanted, info, request.reuse(),
                     crate::result_files::pfilter::PfilterFile::of(n_replicates > 1));
                 (key, begun)
             };
@@ -1426,10 +1426,10 @@ struct Prepared {
 }
 
 /// What a design point resolves to before its run is begun: the run's
-/// identity and labels and the by-products wanted of it.
+/// identity and attributes and the by-products wanted of it.
 struct PosedPoint {
     identity: crate::pfilter_store::PfilterIdentity,
-    labels: crate::pfilter_store::PfilterAttributes,
+    attributes: crate::pfilter_store::PfilterAttributes,
     wanted: store::Wanted<crate::pfilter_store::Pfilter>,
 }
 
@@ -4135,7 +4135,7 @@ mod tests {
             filtering: None,
             filtered_streams: None,
         };
-        let labels = PfilterAttributes { model: "m".into(), seed: 1, point: None };
+        let attributes = PfilterAttributes { model: "m".into(), seed: 1, point: None };
         let claim = |seed: u64, with_trace: bool, info: &RunInfo| {
             let identity = PfilterIdentity { seed: crate::camdl_store::ProcessSeed { seed }, ..identity.clone() };
             let filter = store::Identity::record(&identity);
@@ -4144,7 +4144,7 @@ mod tests {
                 wanted = wanted.with::<Trace>(TraceIdentity { filter }, ());
             }
             match crate::camdl_store::begin_with::<Pfilter>(
-                &store, &identity, &labels, &wanted, info, Reuse::IfCompleted,
+                &store, &identity, &attributes, &wanted, info, Reuse::IfCompleted,
                 crate::result_files::pfilter::PfilterFile::of(false),
             )
             .unwrap()

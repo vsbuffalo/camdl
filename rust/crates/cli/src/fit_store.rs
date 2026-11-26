@@ -231,8 +231,8 @@ impl Artifact for FitProblem {
 }
 
 impl Primary for FitProblem {
-    fn layout(_id: &FitProblemIdentity, labels: &ProblemAttributes) -> Placed {
-        Layout::in_kind().result(&labels.model)
+    fn layout(_id: &FitProblemIdentity, attributes: &ProblemAttributes) -> Placed {
+        Layout::in_kind().result(&attributes.model)
     }
 }
 
@@ -311,10 +311,10 @@ impl Artifact for FitRun {
 }
 
 impl Primary for FitRun {
-    fn layout(id: &FitRunIdentity, labels: &RunAttributes) -> Placed {
+    fn layout(id: &FitRunIdentity, attributes: &RunAttributes) -> Placed {
         Layout::inside(id.chain.problem.id(), "runs")
-            .group(&labels.method, &id.chain.method)
-            .result(&format!("seed_{}", labels.seed))
+            .group(&attributes.method, &id.chain.method)
+            .result(&format!("seed_{}", attributes.seed))
     }
 }
 
@@ -449,12 +449,12 @@ impl Artifact for Prediction {
 }
 
 impl Primary for Prediction {
-    fn layout(id: &PredictIdentity, labels: &PredictionAttributes) -> Placed {
+    fn layout(id: &PredictIdentity, attributes: &PredictionAttributes) -> Placed {
         match &id.source {
             ParameterSource::Posterior { draws, .. } => Layout::inside(draws.id(), "predict"),
-            ParameterSource::FixedPoint { model, .. } => Layout::in_kind().group(&labels.model, model),
+            ParameterSource::FixedPoint { model, .. } => Layout::in_kind().group(&attributes.model, model),
         }
-        .result(&labels.mode)
+        .result(&attributes.mode)
     }
 }
 
@@ -1474,8 +1474,8 @@ pub(crate) struct OpenedFit {
     /// The run's files, with `model.ir.json` beside them; `None` for a
     /// problem handle.
     pub run: Option<RunFiles>,
-    /// The problem's labels, from the invocation that stored it.
-    pub labels: Option<ProblemAttributes>,
+    /// The problem's attributes, from the invocation that stored it.
+    pub attributes: Option<ProblemAttributes>,
     /// The directory holding `model.ir.json`: the copy of the run's files,
     /// or for a problem handle the scratch directory.
     pub segment: std::path::PathBuf,
@@ -1532,7 +1532,7 @@ impl OpenedFit {
 
     /// The model's name: the stem of the file the problem was posed on.
     pub fn model_name(&self) -> String {
-        self.labels.as_ref().map(|l| l.model.clone()).unwrap_or_else(|| "model".to_string())
+        self.attributes.as_ref().map(|l| l.model.clone()).unwrap_or_else(|| "model".to_string())
     }
 
     /// The quantities a prediction from this fit evaluates
@@ -1655,7 +1655,7 @@ pub(crate) fn read_quantities(store: &Store, dep: &Dep<crate::camdl_store::Quant
 /// answers alone. When that invocation lists no problem, as one that named a
 /// stored run without posing it does, the invocation answering for the
 /// problem's own id.
-fn problem_labels(store: &Store, handle: &Handle, problem: &Stored<FitProblem>) -> Option<ProblemAttributes> {
+fn problem_attributes(store: &Store, handle: &Handle, problem: &Stored<FitProblem>) -> Option<ProblemAttributes> {
     let of = |h: &Handle| store.listings(h).ok()?.answering()?.attributes_of(problem.id());
     of(handle).or_else(|| of(&Handle::IdPrefix(problem.id().key().to_hex())))
 }
@@ -1683,8 +1683,8 @@ pub(crate) fn open_fit(store: &Store, text: &str) -> Result<OpenedFit, String> {
         .prefix("camdl-fit-")
         .tempdir()
         .map_err(|e| format!("cannot make a scratch directory: {e}"))?;
-    let labels = problem_labels(store, &handle, &fit.problem);
-    let name = labels.as_ref().map(|l| l.model.clone()).unwrap_or_else(|| "model".to_string());
+    let attributes = problem_attributes(store, &handle, &fit.problem);
+    let name = attributes.as_ref().map(|l| l.model.clone()).unwrap_or_else(|| "model".to_string());
     // The quantities are the recorded source's: those of the model file the
     // answering invocation compiled.
     let model = crate::camdl_store::StoredModel::of(store, &handle, &fit.model, &name)?;
@@ -1716,7 +1716,7 @@ pub(crate) fn open_fit(store: &Store, text: &str) -> Result<OpenedFit, String> {
     let config = FitConfig { problem, inference: fit.config.inference.clone() };
     let leaf = run.as_ref().map(|r| r.path().to_path_buf());
     let segment = leaf.clone().unwrap_or_else(|| scratch.path().to_path_buf());
-    Ok(OpenedFit { fit, model_ir, run, labels, segment, leaf, config, model, handle, store: store.clone(), _scratch: scratch })
+    Ok(OpenedFit { fit, model_ir, run, attributes, segment, leaf, config, model, handle, store: store.clone(), _scratch: scratch })
 }
 
 /// The run store a reader of a stored fit opens: the one the command stores
