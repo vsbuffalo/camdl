@@ -398,3 +398,146 @@ fn a_compiled_models_listing_names_its_model_source() {
         record["results"].as_array().unwrap().iter().filter(|r| r["kind"] != "compiled_model").collect();
     assert!(others.iter().all(|r| r.get("source").is_none()), "only a compiled model's listing names a source: {record:#}");
 }
+
+/// A fit that runs until it is killed: [`FIT_TOML`] with many iterations of
+/// many particles.
+const SLOW_FIT_TOML: &str = r#"
+[model]
+camdl = "model.camdl"
+[data]
+file = "cases.tsv"
+[estimate]
+beta = { bounds = [0.1, 0.9], start = 0.4 }
+[fixed]
+gamma = 0.2
+N0 = 1000
+I0 = 5
+[method]
+algorithm = "if2"
+backend = "chain_binomial"
+chains = 1
+particles = 20000
+iterations = 100000
+cooling = 0.7
+starts = "from_prior"
+"#;
+
+/// A fit process, killed when dropped.
+struct Running(std::process::Child);
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// The folder of the one fit run under `dir/st` once its `run.json` says it
+/// is running, waiting up to two minutes for it.
+fn running_run_folder(dir: &Path, fit: &mut Running) -> PathBuf {
+    let start = std::time::Instant::now();
+    loop {
+        assert!(fit.0.try_wait().unwrap().is_none(), "the slow fit ended before it was read");
+        let runs: Vec<PathBuf> = if dir.join("st").is_dir() {
+            folders_under(&dir.join("st"), "runs")
+                .into_iter()
+                .flat_map(|m| std::fs::read_dir(m).unwrap().flatten().map(|e| e.path()).filter(|p| p.is_dir()))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let running = runs.iter().find(|r| {
+            std::fs::read(r.join("run.json"))
+                .ok()
+                .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+                .is_some_and(|v| v["status"] == "running")
+        });
+        if let Some(r) = running {
+            return r.clone();
+        }
+        assert!(start.elapsed() < std::time::Duration::from_secs(120), "no running fit run under {}", dir.display());
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+/// A fit run that has not completed is read for its model source: the
+/// invocation running it answers for it, and the reader says that
+/// invocation has not ended. The run's own files are refused until it
+/// completes.
+#[test]
+fn a_running_fit_names_its_model_source_and_refuses_its_own_files() {
+    let tmp = fit_inputs();
+    let dir = tmp.path();
+    std::fs::write(dir.join("slow.toml"), SLOW_FIT_TOML).unwrap();
+    let child = Command::new(binary())
+        .current_dir(dir)
+        .env_remove("CLICOLOR_FORCE")
+        .env("CAMDL_SKIP_VERSION_CHECK", "1")
+        .env("CAMDL_STORE", dir.join("st"))
+        .args(["fit", "run", "slow.toml", "--seed", "1", "--progress", "none"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn camdl fit run");
+    let mut fit = Running(child);
+    let run = running_run_folder(dir, &mut fit);
+    let handle = run.to_string_lossy().into_owned();
+
+    let out = camdl_in(dir, &["path", &handle, "model_source:docs"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "path of a running fit's model source: {stderr}");
+    let printed = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let source = folders_under(&dir.join("st"), "model_source");
+    assert_eq!(source.len(), 1, "{source:?}");
+    assert_eq!(
+        std::fs::canonicalize(&printed).unwrap(),
+        std::fs::canonicalize(source[0].join("docs.json")).unwrap(),
+        "{stderr}"
+    );
+    assert!(stderr.contains("which has not ended"), "the reader says the answering invocation is running: {stderr}");
+
+    let cat = camdl_in(dir, &["cat", &handle, "model_source:docs"]);
+    assert!(cat.status.success(), "cat of a running fit's model source: {}", String::from_utf8_lossy(&cat.stderr));
+    let docs: serde_json::Value = serde_json::from_slice(&cat.stdout).unwrap();
+    assert_eq!(docs["parameters"]["beta"]["text"], "The transmission rate, per day.");
+
+    for own in ["fit_meta", "summary"] {
+        let out = camdl_in(dir, &["path", &handle, own]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "`path {own}` of a running fit is refused: {stderr}");
+        assert!(stderr.contains("did not complete and is not read") && stderr.contains("is still running"), "{own}: {stderr}");
+    }
+}
+
+/// A fit run that failed is not read for its model source: its invocation's
+/// listing of it failed, so no invocation answers for it, and the lookup is
+/// refused as a lookup of its own files is, with no warning about a missing
+/// source.
+#[test]
+fn a_failed_fit_is_refused_for_its_model_source() {
+    let tmp = fit_inputs();
+    let dir = tmp.path();
+    succeeds(camdl_in(dir, &["fit", "run", "fit.toml", "--seed", "1", "--progress", "none"]), "fit run");
+    let run = run_folder(dir);
+    let failure = serde_json::json!({ "operation": "if2", "reason": "disk full" });
+    let run_json = run.join("run.json");
+    let mut rec: serde_json::Value = serde_json::from_slice(&std::fs::read(&run_json).unwrap()).unwrap();
+    rec["status"] = "failed".into();
+    rec["failure"] = failure.clone();
+    std::fs::write(&run_json, serde_json::to_vec_pretty(&rec).unwrap()).unwrap();
+    let inv_path = dir.join("st/.invocations/1.json");
+    let mut inv: serde_json::Value = serde_json::from_slice(&std::fs::read(&inv_path).unwrap()).unwrap();
+    for r in inv["results"].as_array_mut().unwrap() {
+        if r["kind"] == "fit_run" {
+            r["outcome"] = "failed".into();
+            r["failure"] = failure.clone();
+        }
+    }
+    std::fs::write(&inv_path, serde_json::to_vec_pretty(&inv).unwrap()).unwrap();
+
+    let out = camdl_in(dir, &["path", &run.to_string_lossy(), "model_source:docs"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "a failed fit's model source is refused: {stderr}");
+    assert!(stderr.contains("did not complete and is not read") && stderr.contains("failed while if2: disk full"), "{stderr}");
+    assert!(!stderr.contains("no invocation recorded"), "{stderr}");
+}

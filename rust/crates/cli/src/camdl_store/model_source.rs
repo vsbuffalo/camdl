@@ -823,6 +823,20 @@ pub(crate) fn model_of(store: &Store, located: &store::Located) -> Option<store:
     None
 }
 
+/// The compiled model the result `run_id` runs, for a result that did not
+/// complete: its `run.json` records its dependencies from its claim
+/// ([`store::Store::recorded_deps`]), and each completed result they or the
+/// result it sits in name is searched as [`model_of`] searches. `None` when
+/// the record does not read or names no compiled model.
+pub(crate) fn model_of_unfinished(store: &Store, run_id: store::Key) -> Option<store::Key> {
+    let (deps, parent) = store.recorded_deps(run_id).ok()?;
+    let kind = <CompiledModel as Artifact>::KIND;
+    if let Some(dep) = deps.iter().find(|d| d.kind == kind) {
+        return Some(dep.run_id);
+    }
+    deps.iter().map(|d| d.run_id).chain(parent).find_map(|key| store.locate(key).ok().and_then(|l| model_of(store, &l)))
+}
+
 /// Records in this invocation that the stored compiled model `model` was
 /// run from `source`: a new source is stored, and the compiled model is
 /// listed in this invocation, as reused, named `name`, with the source

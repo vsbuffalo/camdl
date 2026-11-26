@@ -26,7 +26,10 @@
 //! is set aside rather than failing the lookup ([`Unavailable`]). It fails a
 //! lookup only when it could answer the name: when it is of the kind of a
 //! result that does, so that serving the others would silently leave it
-//! out, or when nothing else answers.
+//! out, or when nothing else answers. A run id, a prefix or a folder naming
+//! a result that did not complete is refused for its own files, while a
+//! name qualified by `model_source` is looked up in the model source of the
+//! model it runs ([`named_candidates`]).
 //!
 //! A result file named through a manifest is checked against the manifest:
 //! the digest and size the store's `run.json` records must be the ones the
@@ -542,7 +545,7 @@ fn is_primary(located: &Located) -> bool {
 fn with_source(store: &Store, source: &Source, name: &str, mut cands: Candidates) -> Result<Candidates, FileRefusal> {
     use crate::camdl_store::model_source::{shown_for, Shown};
     let kind = <crate::camdl_store::ModelSource as store::Artifact>::KIND;
-    let qualified = name.split_once(':').is_some_and(|(k, _)| k == kind);
+    let qualified = names_a_source_file(name);
     let Source::Handle(handle) = source else { return Ok(cands) };
     if !qualified || cands.found.iter().any(|c| c.located.kind() == kind) {
         return Ok(cands);
@@ -566,6 +569,46 @@ fn with_source(store: &Store, source: &Source, name: &str, mut cands: Candidates
         Shown::NotRecorded { .. } => {}
     }
     Ok(cands)
+}
+
+/// Whether `name` is qualified by `model_source` (`model_source:docs`).
+fn names_a_source_file(name: &str) -> bool {
+    name.split_once(':').is_some_and(|(k, _)| k == <crate::camdl_store::ModelSource as store::Artifact>::KIND)
+}
+
+/// The candidates `name` is looked up among: those of [`candidates`], with
+/// the model source [`with_source`] adds. A run id, a prefix or a folder
+/// naming a result that did not complete has no candidates of its own, and
+/// the lookup is refused, except for a name qualified by `model_source`:
+/// the model source is a separate, completed result, found through the
+/// compiled model the result's record names
+/// ([`crate::camdl_store::model_source::model_of_unfinished`]) by the
+/// invocation that answers for the result (`store::Store::listings`), and
+/// said to be unfinished. A failed listing answers for nothing, so a result
+/// that failed, or one whose answering invocation recorded no readable
+/// source, is refused as its own files are.
+fn named_candidates(store: &Store, source: &Source, narrow: &Narrow, name: &str) -> Result<Candidates, FileRefusal> {
+    use crate::camdl_store::model_source::{model_of_unfinished, shown_for, Shown};
+    let refused = match candidates(store, source, narrow) {
+        Ok(cands) => return with_source(store, source, name, cands),
+        Err(refused) => refused,
+    };
+    let Source::Handle(handle @ (Handle::Path(_) | Handle::IdPrefix(_))) = source else { return Err(refused) };
+    if !names_a_source_file(name) || !narrow.is_empty() {
+        return Err(refused);
+    }
+    let Ok(store::By::Result { run_id }) = store.listings(handle).map(|l| l.by()) else { return Err(refused) };
+    if !matches!(store.locate(run_id), Err(store::Error::NotCompleted { .. })) {
+        return Err(refused);
+    }
+    let Some(model) = model_of_unfinished(store, run_id) else { return Err(refused) };
+    let shown = shown_for(store, handle, model).map_err(FileRefusal::Store)?;
+    let Shown::Recorded { source: model_source, .. } = &shown else { return Err(refused) };
+    let Ok(located) = store.locate(model_source.id().key()) else { return Err(refused) };
+    if let Some(n) = shown.notice(handle) {
+        crate::out::live().notice(&n);
+    }
+    Ok(Candidates { found: vec![Candidate::new(located, serde_json::Value::Null, None)?], unavailable: Vec::new(), named_first: false })
 }
 
 /// The compiled model the result `handle` names ran, by run id: for a
@@ -592,7 +635,7 @@ fn named_model(store: &Store, handle: &Handle, cands: &Candidates) -> Option<Key
 /// The stored file `name` names among the results `source` and `narrow`
 /// select. A name more than one of them holds is refused with the holders.
 pub(crate) fn resolve_file(store: &Store, source: &Source, narrow: &Narrow, name: &str) -> Result<ResolvedFile, FileRefusal> {
-    let cands = with_source(store, source, name, candidates(store, source, narrow)?)?;
+    let cands = named_candidates(store, source, narrow, name)?;
     let mut found = lookup(store, source, &cands, name)?;
     if found.len() == 1 {
         return Ok(found.remove(0));
@@ -608,7 +651,7 @@ pub(crate) fn resolve_file(store: &Store, source: &Source, narrow: &Narrow, name
 /// Every result among those `source` and `narrow` select that holds `name`,
 /// in the source's order, with the file it holds under that name.
 pub(crate) fn resolve_each(store: &Store, source: &Source, narrow: &Narrow, name: &str) -> Result<Vec<ResolvedFile>, FileRefusal> {
-    let cands = with_source(store, source, name, candidates(store, source, narrow)?)?;
+    let cands = named_candidates(store, source, narrow, name)?;
     lookup(store, source, &cands, name)
 }
 

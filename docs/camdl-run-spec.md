@@ -3571,6 +3571,16 @@ files does, the notice names the others. A manifest lists the model source of
 each compiled model it lists whose command recorded one, whether the command
 compiled the model file or read a stored result (§2.10).
 
+A run id, a prefix or a folder naming a result that has not completed is refused
+for the result's own files, which are incomplete until it ends, but not for a
+name qualified by `model_source`: the model source is a completed result of its
+own, and the result's record names its compiled model from the start. When no
+closed invocation listed the result computed or reused, the newest running
+invocation that lists it answers, and an info notice says that invocation has
+not ended. A failed listing answers for nothing, so a result that failed, or was
+interrupted and its record closed by `camdl clean`, is refused for its model
+source as it is for its own files.
+
 `--kind KIND` keeps the candidates of one kind, and `--run PREFIX` the one whose
 run id begins with `PREFIX`. A name is resolved by the first of these rules that
 any candidate answers:

@@ -247,6 +247,22 @@ impl Store {
         Ok(ident.parent.filter(|p| p.relation == Relation::Upstream).map(|p| p.run_id))
     }
 
+    /// The dependencies the `run.json` of `run_id` records, and the result
+    /// it sits in, in whatever state the result is: a result's claim writes
+    /// its dependencies, so a running or failed result has them. For a
+    /// reader that follows a result that did not complete to a completed
+    /// result it depends on, such as the compiled model a running fit runs,
+    /// which [`Store::locate`] refuses. [`Error::NotFound`] when no folder
+    /// holds `run_id`; an error naming the record when its `run.json` is
+    /// absent or does not read.
+    pub fn recorded_deps(&self, run_id: Key) -> Result<(Vec<DepInfo>, Option<Key>)> {
+        let Some((dir, ident)) = self.inner.find_any_kind(&run_id)? else {
+            return Err(Error::NotFound { handle: run_id.to_hex() });
+        };
+        let run: RunFile = read_record(&dir.join(RUN_FILE)).required(&dir.join(RUN_FILE))?;
+        Ok((run.deps, ident.parent.map(|p| p.run_id)))
+    }
+
     /// The located result as a completed result of kind `A`, with its typed
     /// identity: for a reader that found a result by run id and needs what
     /// only its kind records. Refused with [`Error::WrongKind`] when the
