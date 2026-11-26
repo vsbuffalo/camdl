@@ -125,6 +125,64 @@ fn a_compiled_model_has_no_render_and_says_so() {
     assert!(!found[0].join("model.graph.json").exists());
 }
 
+/// The folder of the one simulated cell under `store`.
+fn cell_folder(store: &Path) -> PathBuf {
+    let mut stack = vec![store.to_path_buf()];
+    let mut cells = Vec::new();
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if path.join("traj.tsv").exists() {
+                    cells.push(path.clone());
+                }
+                stack.push(path);
+            }
+        }
+    }
+    assert_eq!(cells.len(), 1, "one simulated cell: {cells:?}");
+    cells.remove(0)
+}
+
+/// A name the result's kind can hold but this result does not, such as the
+/// rendered mathematics of a model given as compiled IR, exits 3 from
+/// `path` and `cat`. A name no result of the kind holds, a kind that does
+/// not exist and a handle that names nothing are lookup failures, exiting 1.
+#[test]
+fn a_view_the_result_does_not_hold_exits_3() {
+    let tmp = tempfile::tempdir().unwrap();
+    let model = tmp.path().join("sir.camdl");
+    std::fs::write(&model, MODEL).unwrap();
+    let ir = tmp.path().join("sir.ir.json");
+    let camdlc = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../ocaml/_build/default/bin/camdlc.exe");
+    assert!(camdlc.exists(), "camdlc missing: {} - run `make build-ocaml`", camdlc.display());
+    let compiled = Command::new(camdlc).env_remove("CLICOLOR_FORCE").arg(&model).arg("-o").arg(&ir).output().unwrap();
+    assert!(compiled.status.success(), "compile: {}", String::from_utf8_lossy(&compiled.stderr));
+    let store = tmp.path().join("store");
+    simulate(&ir, &store);
+    let cell = cell_folder(&store).to_string_lossy().into_owned();
+    let store_arg = store.to_string_lossy().into_owned();
+
+    for command in ["path", "cat"] {
+        for name in ["model_source:render", "model_source:graph"] {
+            let out = camdl(&[command, &cell, name, "--store", &store_arg]);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(out.status.code(), Some(3), "{command} {name}: {stderr}");
+            assert!(stderr.contains(&format!("has no `{name}`")), "{command} {name}: {stderr}");
+        }
+        for (what, handle, name) in [
+            ("a misspelled view", cell.as_str(), "model_source:rendr"),
+            ("an unknown kind", cell.as_str(), "modl_source:render"),
+            ("a handle naming nothing", "0123456789ab", "model_source:render"),
+        ] {
+            let out = camdl(&[command, handle, name, "--store", &store_arg]);
+            assert_eq!(out.status.code(), Some(1), "{command}, {what}: {}", String::from_utf8_lossy(&out.stderr));
+        }
+        let held = camdl(&[command, &cell, "model_source:docs", "--store", &store_arg]);
+        assert!(held.status.success(), "{command} model_source:docs: {}", String::from_utf8_lossy(&held.stderr));
+    }
+}
+
 /// A reader that names the simulation by its folder, as camdl-scope does,
 /// is given the model source of the model the simulation ran.
 #[test]

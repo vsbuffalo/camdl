@@ -173,6 +173,16 @@ impl KindContract {
     }
 }
 
+/// Whether `name` is the logical or the stored name of a file a result of
+/// `kind` can hold, whether or not a given result holds it: a file of the
+/// kind's contract (§2.9 of the run spec, [`contract::kinds`]), where
+/// `chain_N` stands for any chain's number and a `<...>` placeholder for one
+/// path segment, or the stored name of a content artifact's one file, which
+/// every such result holds.
+pub(crate) fn kind_names(kind: &str, name: &str) -> bool {
+    contract::names(kind, name) || contract(kind).is_some_and(|c| c.logical(name).is_some())
+}
+
 fn logical_of<F: ParseFile>(stored: &str) -> Option<String> {
     F::of_stored(stored).map(|f| f.logical())
 }

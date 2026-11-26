@@ -3323,6 +3323,12 @@ pub struct ShowArgs {
 #[command(
     override_usage = "camdl cat [OPTIONS] <HANDLE> [NAME]\n       camdl cat [OPTIONS] --manifest <FILE> <NAME>",
     after_help = colored_help!("\
+Exit status: 0 when every file is found; 3 when the result exists and holds
+no file of the name, though a result of its kind can (a model given as
+compiled IR has no `model_source:render`, an IF2 run no `draws`); 2 for a
+usage error; 1 for every other refusal, including a handle that names
+nothing, an unknown kind and a name no result of the kind holds.
+
 Examples:
   # A cell's trajectory, and a file of the cell or of its by-products
   camdl cat abc1234
@@ -3384,6 +3390,12 @@ pub struct CatArgs {
 #[command(
     override_usage = "camdl path [OPTIONS] <HANDLE> <NAME>...\n       camdl path [OPTIONS] --manifest <FILE> <NAME>...",
     after_help = colored_help!("\
+Exit status: 0 when every file is found; 3 when the result exists and holds
+no file of the name, though a result of its kind can (a model given as
+compiled IR has no `model_source:render`, an IF2 run no `draws`); 2 for a
+usage error; 1 for every other refusal, including a handle that names
+nothing, an unknown kind and a name no result of the kind holds.
+
 Examples:
   # The path of a fit run's draws, by the manifest its command wrote
   camdl path --manifest build/scout.json draws

@@ -190,3 +190,22 @@ fn a_name_no_result_of_the_kind_stores_is_refused() {
     assert_eq!(contract("obs").unwrap().logical("nested/cases.tsv"), None);
     assert!(contract("no_such_kind").is_none());
 }
+
+/// A name a kind's contract lists, with `chain_N` and `<...>` read as any
+/// chain and any one path segment, is one the kind can hold; a name it does
+/// not list is not.
+#[test]
+fn kind_names_reads_the_contracts_templates() {
+    assert!(kind_names("model_source", "render"));
+    assert!(kind_names("model_source", "model.render.json"));
+    assert!(!kind_names("model_source", "rendr"));
+    assert!(kind_names("fit_run", "draws"));
+    assert!(kind_names("fit_run", "chain_12/trace"));
+    assert!(kind_names("fit_run", "chain_3/trace.tsv"));
+    assert!(!kind_names("fit_run", "chain_/trace"));
+    assert!(!kind_names("fit_run", "chain_x/trace"));
+    assert!(kind_names("prediction", "predictive/cases"));
+    assert!(!kind_names("prediction", "predictive/a/b"));
+    assert!(kind_names("compiled_model", "model.ir.json"));
+    assert!(!kind_names("no_such_kind", "draws"));
+}

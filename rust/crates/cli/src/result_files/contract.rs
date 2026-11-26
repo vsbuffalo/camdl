@@ -54,6 +54,39 @@ fn row<F: ResultFile>(f: F, when: &'static str) -> Row {
     }
 }
 
+/// Whether `name` is the logical or the stored name of a file of `kind` the
+/// contract lists ([`kinds`]), reading `chain_N` as any chain's number and a
+/// `<...>` placeholder as one path segment. `false` for a kind not listed.
+pub(crate) fn names(kind: &str, name: &str) -> bool {
+    kinds()
+        .into_iter()
+        .filter(|(k, ..)| *k == kind)
+        .flat_map(|(_, _, rows)| rows)
+        .any(|r| fits(&r.logical, name) || fits(&r.stored, name))
+}
+
+/// Whether `name` is an instance of the contract name `template`: `chain_N`
+/// matches `chain_` and digits, `<...>` matches one or more characters of a
+/// path segment, and every other character matches itself.
+fn fits(template: &str, name: &str) -> bool {
+    fn go(t: &[u8], n: &[u8]) -> bool {
+        if let Some(rest) = t.strip_prefix(b"chain_N") {
+            let digits = n.strip_prefix(b"chain_").map_or(0, |d| d.iter().take_while(|c| c.is_ascii_digit()).count());
+            return digits > 0 && go(rest, &n["chain_".len() + digits..]);
+        }
+        match t.first() {
+            None => n.is_empty(),
+            Some(b'<') => {
+                let Some(close) = t.iter().position(|&c| c == b'>') else { return false };
+                let rest = &t[close + 1..];
+                (1..=n.len()).take_while(|&k| n[k - 1] != b'/').any(|k| go(rest, &n[k..]))
+            }
+            Some(&c) => n.first() == Some(&c) && go(&t[1..], &n[1..]),
+        }
+    }
+    go(template.as_bytes(), name.as_bytes())
+}
+
 fn stream() -> String {
     "<stream>".into()
 }

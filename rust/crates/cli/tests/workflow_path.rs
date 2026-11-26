@@ -356,9 +356,16 @@ fn refusals_name_what_exists() {
     p.ok(&["fit", "run", "fit.toml", "--seed", "1", "--manifest", "build/fit.json"]);
     let m = p.manifest("build/fit.json");
     let run = results(&m).iter().find(|r| r["kind"] == "fit_run").unwrap()["run_id"].as_str().unwrap().to_string();
-    let err = p.refused(&["path", &run, "mle_params"]);
+    // A file a fit run can hold and this pgas run does not exits 3; a name
+    // no fit run holds is a lookup failure, exit 1.
+    let out = p.run(&["path", &run, "mle_params"]);
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(out.status.code(), Some(3), "{err}");
+    assert!(out.stdout.is_empty(), "{}", String::from_utf8_lossy(&out.stdout));
     assert!(err.contains(&format!("the pgas run {} has no `mle_params`", &run[..12])), "{err}");
     assert!(err.contains("draws") && err.contains("chain_0/trace"), "the run's files are listed: {err}");
+    let err = p.refused(&["path", &run, "mle_paramz"]);
+    assert!(err.contains(&format!("the pgas run {} has no `mle_paramz`", &run[..12])), "{err}");
 
     p.ok(&simulate("sir.ir.json", &["--sweep", "beta=lin(0.2,0.4,3)", "--seed", "1", "--manifest", "build/grid.json"]));
     let err = p.refused(&["path", "--manifest", "build/grid.json", "traj"]);

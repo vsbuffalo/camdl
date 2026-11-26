@@ -3635,6 +3635,19 @@ again with `--force`:
 error: the pgas run 4197734faa1d has no `mle_params`; its files are chain_0/resume_state, chain_0/trace, …
 ```
 
+The exit status tells such a refusal apart from a failed lookup, so a caller can
+treat a missing optional file as absent rather than as an error:
+
+- 3 when the name is one a candidate's kind can hold (a file of its contract,
+  §2.9, by logical or stored name), the candidates hold no file of it, and no
+  listed result was passed over unread: the `mle_params` of a pgas run, the
+  `model_source:render` of a model given as compiled IR;
+- 1 for every other refusal: a handle that names nothing, a `KIND:NAME` whose
+  kind no candidate is, a name no kind of the candidates holds (a misspelling
+  such as `model_source:rendr`), and a name a result passed over unread could
+  hold;
+- 2 for a usage error.
+
 Through a manifest, a file's digest and size in the store's `run.json` must be
 the ones the manifest records before its path is printed or its bytes are read,
 or the lookup is refused, naming the file and both digests:

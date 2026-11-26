@@ -263,7 +263,12 @@ pub(crate) enum FileRefusal {
     /// No candidate holds the name. `holders` gives each candidate and its
     /// file names, and `notes` each listed result that is stored but cannot
     /// be read, and why a path through a nested result was not looked up.
-    NoSuchName { name: String, source: String, holders: Vec<(String, Vec<String>)>, notes: Vec<String> },
+    /// `absent` is true when the name is one the kind of a candidate can
+    /// store ([`crate::result_files::kind_names`]) and no candidate
+    /// was set aside unread: the results exist and lack that file, as a model
+    /// given as compiled IR lacks `model_source:render`. A name no kind
+    /// holds, such as a misspelling, is not absent.
+    NoSuchName { name: String, source: String, holders: Vec<(String, Vec<String>)>, notes: Vec<String>, absent: bool },
     /// `KIND:NAME` names a kind none of the candidates is.
     NoSuchKind { kind: String, source: String, kinds: Vec<String> },
     /// A result that could answer the name is stored but cannot be read, so
@@ -285,6 +290,21 @@ pub(crate) enum FileRefusal {
     NotOneTable(String),
 }
 
+/// The exit status of `camdl path` and `camdl cat` when the results a
+/// lookup names exist and hold no file of a name their kind can store
+/// ([`FileRefusal::NoSuchName`] with `absent`). Every other refusal exits 1.
+pub(crate) const ABSENT_FILE: crate::out::ExitCode = crate::out::ExitCode(3);
+
+impl FileRefusal {
+    /// The status a command that reports this refusal exits with.
+    pub(crate) fn exit_code(&self) -> crate::out::ExitCode {
+        match self {
+            FileRefusal::NoSuchName { absent: true, .. } => ABSENT_FILE,
+            _ => crate::out::ExitCode::FAILURE,
+        }
+    }
+}
+
 impl fmt::Display for FileRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -293,7 +313,7 @@ impl fmt::Display for FileRefusal {
             FileRefusal::Narrowed { source, narrow, results } => {
                 write!(f, "{narrow} keeps none of the results of {source}: {}", results.join(", "))
             }
-            FileRefusal::NoSuchName { name, source, holders, notes } => {
+            FileRefusal::NoSuchName { name, source, holders, notes, .. } => {
                 if let [(result, names)] = &holders[..] {
                     write!(f, "the {result} has no `{name}`; its files are {}", names.join(", "))?;
                 } else {
@@ -729,11 +749,14 @@ fn lookup(store: &Store, source: &Source, cands: &Candidates, name: &str) -> Res
     if matches!(source, Source::Manifest { .. }) && bare.contains('/') {
         notes.push("A manifest names only its own entries, so no result nested in one is looked up through it".into());
     }
+    let absent = notes.is_empty()
+        && pool.iter().any(|c| crate::result_files::kind_names(c.located.kind(), bare));
     Err(FileRefusal::NoSuchName {
         name: name.into(),
         source: source.shown(),
         holders: pool.iter().map(|c| (shown_result(store, &c.located), c.listed())).collect(),
         notes,
+        absent,
     })
 }
 

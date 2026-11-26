@@ -796,13 +796,15 @@ impl Lookup {
         }
     }
 
-    /// A refusal, as the command's error: a handle that names nothing in the
-    /// store is `no run matches`.
+    /// A refusal, as the command's error, exiting with the refusal's status
+    /// ([`crate::resolve_file::FileRefusal::exit_code`]): a handle that names
+    /// nothing in the store is `no run matches`.
     fn fail(&self, out: &crate::out::Out, e: crate::resolve_file::FileRefusal) -> ! {
         if let (crate::resolve_file::FileRefusal::NoMatch, Target::Handle(h)) = (&e, &self.target) {
             out.fail(format!("error: no run matches '{h}' in the run store {}", self.store.root().display()));
         }
-        out.fail(format!("error: {e}"))
+        let code = e.exit_code();
+        out.error(crate::out::CommandError { code, message: format!("error: {e}"), hint: None }).exit()
     }
 }
 
