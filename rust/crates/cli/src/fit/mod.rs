@@ -1398,28 +1398,21 @@ fn build_fit_sidecar(
     let overrides = crate::fit::priors_precedence::prior_overrides(
         &names, &problem.estimate, model,
     );
+    // Each entry's bounds are those of the transform the method's
+    // `EstimatedParam` carries (`steps::domains`).
+    let domains = crate::fit::steps::domains(&problem.estimate, model)?;
     let resolved_priors: Vec<crate::run_meta::ResolvedPriorEntry> =
         crate::fit::priors_precedence::resolve_priors_with_precedence(
             &names, &problem.estimate, model,
         )
-        .into_iter()
+        .iter()
         .map(|r| {
-            let source = match r.source {
-                crate::fit::priors_precedence::PriorSource::FitToml      => "fit_toml",
-                crate::fit::priors_precedence::PriorSource::ModelIr      => "model_ir",
-                crate::fit::priors_precedence::PriorSource::FlatExplicit => "flat_explicit",
-                crate::fit::priors_precedence::PriorSource::FlatFallback => "flat_fallback",
-            };
-            // gh#369: the model prior the fit toml displaced, if any.
-            let overridden_model_prior = overrides.iter()
-                .find(|o| o.param == r.param).map(|o| o.model.clone());
-            crate::run_meta::ResolvedPriorEntry {
-                param:  r.param,
-                source: source.to_string(),
-                overridden_model_prior,
-            }
+            let bounds = domains.get(&r.param)
+                .ok_or_else(|| format!("estimate.{}: no effective domain", r.param))?
+                .bounds();
+            crate::fit::priors_precedence::entry(r, bounds, model, &overrides)
         })
-        .collect();
+        .collect::<Result<_, String>>()?;
     let calendar = ir::caltime::CalendarAxis::from_model(model).map_err(|e| e.to_string())?;
     Ok(crate::run_meta::FitSidecar {
         // Stamped by `write_fit_sidecar_with_config`.
@@ -1915,7 +1908,7 @@ mod tests {
     fn a_sidecar_whose_compiled_model_does_not_load_is_an_error() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let toml_src = "[model]\ncamdl = \"m.camdl\"\n[data.observations]\n\
-                        [estimate]\nbeta = { bounds = [0.01, 2.0] }\n[fixed]\nN0 = 1000\n";
+                        [estimate]\nbeta = { bounds = [0.01, 0.4] }\n[fixed]\nN0 = 1000\n";
         let fit_path = tmp.path().join("fit.toml");
         std::fs::write(&fit_path, toml_src).unwrap();
         let mut config = config_v2::FitConfig::from_toml_str(toml_src).unwrap();
@@ -2060,7 +2053,7 @@ camdl = "no-such-model.ir.json"
 file = "{}"
 
 [estimate]
-beta = {{ bounds = [0.01, 2.0] }}
+beta = {{ bounds = [0.01, 0.4] }}
 
 [fixed]
 N0 = 1000
@@ -2122,7 +2115,7 @@ camdl = "no-such-model.ir.json"
 [data.observations]
 
 [estimate]
-beta = {{ bounds = [0.01, 2.0], prior = {{ log_normal = {{ mu = -1.0, sigma = 0.5 }} }} }}
+beta = {{ bounds = [0.01, 0.4], prior = {{ log_normal = {{ mu = -1.0, sigma = 0.5 }} }} }}
 
 [fixed]
 N0 = 1000

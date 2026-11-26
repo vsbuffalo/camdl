@@ -1069,21 +1069,24 @@ pinned. A scenario that sets or scales a focal parameter is replaced by the grid
 at every point, and the profile says so once per run:
 ``info: scenario `baseline` sets beta = 0.4; beta is profiled, so the grid values replace it``.
 
-**Provenance.** Both subcommands write per-parameter `resolved_priors` into
-`run.json`:
+**Provenance.** Both subcommands record per-parameter `resolved_priors`: a fit
+run in its `fit.meta.json`, a profile in each point's `provenance.json`. Each
+entry gives the source, the prior with its arguments, and the bounds the run
+searches the parameter in:
 
 ```json
 "resolved_priors": [
-  { "param": "beta",  "source": "fit_toml" },
-  { "param": "gamma", "source": "model_ir" },
-  { "param": "sigma", "source": "flat_explicit" }
+  { "param": "beta",  "source": "fit_toml", "prior": { "log_normal": { "mu": -0.3, "sigma": 0.5 } }, "bounds": [0.01, 5.0] },
+  { "param": "gamma", "source": "model_ir", "prior": { "gamma": { "shape": 2.0, "rate": 5.0 } }, "bounds": [0.01, 1.0] },
+  { "param": "sigma", "source": "flat_explicit", "prior": { "flat": {} }, "bounds": [0.0, "inf"] }
 ]
 ```
 
-The four wire values are `"fit_toml"`, `"model_ir"`, `"flat_explicit"` (gh#75 —
-fit run only), and `"flat_fallback"` (profile only — the silent-fallback case).
-Reviewers reading a fit dir's `run.json` can audit at a glance whether the chain
-targeted a posterior with priors or the unconditioned likelihood.
+The four source values are `"fit_toml"`, `"model_ir"`, `"flat_explicit"` (fit
+run only), and `"flat_fallback"` (profile only, the silent-fallback case). A
+reader of the record can check whether the chain targeted a posterior with
+priors or the unconditioned likelihood, and which distribution and bounds it
+used.
 
 A fit's identity includes its stored compile of the model, so re-running the
 same fit toml after editing a `~` prior in the model file poses a different

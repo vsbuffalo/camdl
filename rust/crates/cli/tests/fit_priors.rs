@@ -304,6 +304,50 @@ fn fit_run_with_model_ir_priors_only_succeeds() {
         "gamma must be sourced from model_ir, got resolved_priors={}", resolved.iter().collect::<Vec<_>>().iter().map(|v| v.to_string()).collect::<Vec<_>>().join(","));
 }
 
+/// `fit.meta.json` records each estimated parameter's prior with its
+/// arguments and the bounds the run searches: `beta`'s prior and bounds
+/// from the fit file, whose lower bound 0.01 is inside the model's
+/// `in [0.001, 5.0]`, and `gamma`'s prior from the model's `~`. An
+/// explicit flat prior is `{"flat": {}}`.
+#[test]
+fn fit_meta_records_each_prior_with_its_arguments_and_bounds() {
+    let bin = camdl_bin();
+    if camdlc_bin().is_none() { return }
+    let tmp = tempdir("prior_numbers");
+    let (ir, data) = write_fixture(tmp.path(), TildeMode::Default);
+    let fit_toml = write_fit_toml(tmp.path(), &ir, &data, FitTomlMode::BetaOnly, "numbers");
+    let out = run_fit(&bin, &fit_toml);
+    assert!(out.status.success(), "fit run: {}", String::from_utf8_lossy(&out.stderr));
+    let fit_dir = find_fit_dir(&tmp.path().join("results"));
+    let meta: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(fit_dir.join("fit.meta.json")).unwrap()).unwrap();
+    assert_eq!(meta["schema_version"], 5);
+    let resolved = read_resolved_priors(&fit_dir);
+    assert_eq!(resolved, vec![
+        serde_json::json!({
+            "param": "beta", "source": "fit_toml",
+            "prior": { "log_normal": { "mu": -0.3, "sigma": 0.5 } },
+            "bounds": [0.01, 5.0],
+            "overridden_model_prior": "log_normal(mu=-0.3, sigma=0.5)",
+        }),
+        serde_json::json!({
+            "param": "gamma", "source": "model_ir",
+            "prior": { "log_normal": { "mu": -1.2, "sigma": 0.5 } },
+            "bounds": [0.01, 1.0],
+        }),
+    ]);
+
+    let flat_dir = tempdir("prior_numbers_flat");
+    let (ir, data) = write_fixture(flat_dir.path(), TildeMode::None);
+    let fit_toml = write_fit_toml(flat_dir.path(), &ir, &data, FitTomlMode::BothFlat, "flat");
+    let out = run_fit(&bin, &fit_toml);
+    assert!(out.status.success(), "flat fit run: {}", String::from_utf8_lossy(&out.stderr));
+    let resolved = read_resolved_priors(&find_fit_dir(&flat_dir.path().join("results")));
+    for e in &resolved {
+        assert_eq!(e["prior"], serde_json::json!({ "flat": {} }), "{e}");
+    }
+}
+
 /// Regression guard: when the fit TOML supplies a prior for every
 /// estimated parameter, the run succeeds and `resolved_priors`
 /// records `fit_toml` as the source for each. This was the

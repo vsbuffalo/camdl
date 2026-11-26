@@ -143,6 +143,72 @@ pub fn resolve_priors_with_precedence(
     }).collect()
 }
 
+impl PriorSource {
+    /// The tag a record writes: `fit_toml`, `model_ir`, `flat_explicit` or
+    /// `flat_fallback`.
+    pub fn tag(self) -> &'static str {
+        match self {
+            PriorSource::FitToml => "fit_toml",
+            PriorSource::ModelIr => "model_ir",
+            PriorSource::FlatExplicit => "flat_explicit",
+            PriorSource::FlatFallback => "flat_fallback",
+        }
+    }
+}
+
+/// The record of one resolved prior, as a fit's `fit.meta.json` and a
+/// profile's `provenance.json` write it: its source, the prior with its
+/// arguments ([`prior_law`]), `bounds`, the interval the run searches the
+/// parameter in (the bounds of its effective-domain transform), and the
+/// model prior a fit-toml prior displaced, from `overrides`.
+pub fn entry(
+    r: &ResolvedPrior,
+    bounds: (f64, f64),
+    model: &ir::Model,
+    overrides: &[PriorOverride],
+) -> Result<crate::run_meta::ResolvedPriorEntry, String> {
+    Ok(crate::run_meta::ResolvedPriorEntry {
+        param: r.param.clone(),
+        source: r.source.tag().to_string(),
+        prior: prior_law(r, model)?,
+        bounds: [crate::roles::Bound(bounds.0), crate::roles::Bound(bounds.1)],
+        overridden_model_prior: overrides.iter().find(|o| o.param == r.param).map(|o| o.model.clone()),
+    })
+}
+
+/// The prior `r` resolved to, with its arguments: a fixed prior as the
+/// IR's distribution, whose argument names are those a `~` prior and a fit
+/// file's `prior` take (`log_normal`'s `mu` and `sigma`); a hierarchical
+/// prior, which only the model declares, as the model's IR records it.
+fn prior_law(r: &ResolvedPrior, model: &ir::Model) -> Result<crate::run_meta::PriorLaw, String> {
+    use crate::run_meta::{FlatPrior, PriorLaw};
+    use ir::parameter as p;
+    use sim::inference::prior::Density as D;
+    let density = match &r.prior {
+        Prior::Fixed(d) => d,
+        Prior::Hierarchical(_) => {
+            let declared = model.parameters.iter().find(|q| q.name == r.param).and_then(|q| q.hierarchical());
+            return declared
+                .map(|h| PriorLaw::Hierarchical { hierarchical: h.clone() })
+                .ok_or_else(|| format!("estimate.{}: a hierarchical prior the model does not declare", r.param));
+        }
+    };
+    Ok(PriorLaw::Dist(match *density {
+        D::Flat => return Ok(PriorLaw::Flat { flat: FlatPrior {} }),
+        D::Uniform { lower, upper } => p::PriorDist::Uniform(p::UniformPrior { lower, upper }),
+        D::Normal { mean, sd } => p::PriorDist::Normal(p::NormalPrior { mean, sd }),
+        D::TransformedNormal { mean, sd } => p::PriorDist::LogNormal(p::LogNormalPrior { mu: mean, sigma: sd }),
+        D::HalfNormal { sigma } => p::PriorDist::HalfNormal(p::HalfNormalPrior { sigma }),
+        D::Beta { alpha, beta } => p::PriorDist::Beta(p::BetaPrior { alpha, beta }),
+        D::Gamma { shape, rate } => p::PriorDist::Gamma(p::GammaPrior { shape, rate }),
+        D::Exponential { rate } => p::PriorDist::Exponential(p::ExponentialPrior { rate }),
+        D::LogUniform { lower, upper } => p::PriorDist::LogUniform(p::LogUniformPrior { lower, upper }),
+        D::TruncatedNormal { mean, sd, lower, upper } => {
+            p::PriorDist::TruncatedNormal(p::TruncatedNormalPrior { mean, sd, lower, upper })
+        }
+    }))
+}
+
 /// A parameter whose fit-toml prior displaced a prior the model declares
 /// with `~` (gh#369). Both priors are rendered in the canonical
 /// `family(arg=value, ...)` form of [`crate::fit::config_diff::format_prior`].

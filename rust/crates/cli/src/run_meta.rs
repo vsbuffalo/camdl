@@ -215,24 +215,52 @@ impl From<InferenceBackend> for crate::args::types::ForwardBackend {
     }
 }
 
-/// One row of the per-parameter prior-resolution audit (gh#73). The
-/// CLI's `profile_priors::ResolvedPrior` does not implement
-/// `Serialize` directly (it carries a `Prior` enum from the `sim`
-/// crate); this lightweight mirror carries the audit-relevant
-/// fields — name and source tag — into `run.json`.
+/// One estimated parameter's prior as the run resolved it: the tier that
+/// supplied it, the distribution with its arguments as numbers, and the
+/// interval the run searches. A fit's `fit.meta.json` and a profile's
+/// `provenance.json` record one per estimated parameter
+/// ([`crate::fit::priors_precedence::entry`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolvedPriorEntry {
     pub param:  String,
-    /// `"fit_toml" | "model_ir" | "flat_fallback"` — see
-    /// `profile_priors::PriorSource`.
+    /// `"fit_toml" | "model_ir" | "flat_explicit" | "flat_fallback"`: the
+    /// tier of the precedence chain that supplied the prior
+    /// ([`crate::fit::priors_precedence::PriorSource`]).
     pub source: String,
+    /// The prior the run's density reads.
+    pub prior: PriorLaw,
+    /// The interval the run searches the parameter in and keeps it inside,
+    /// `[lower, upper]` on the natural scale: the fit file's `[estimate]`
+    /// bounds when it gives them, else the model's declared `in [lo, hi]`,
+    /// else the range of the parameter's kind, intersected with the model's
+    /// support. An infinite end is `"inf"` or `"-inf"`.
+    pub bounds: [crate::roles::Bound; 2],
     /// The model's `~` prior (canonical `family(arg=value, ...)` form) when
-    /// the fit toml's prior displaced it (gh#369), so an override is visible
-    /// after the fact and not only in the run's stderr. Absent when the model
+    /// the fit toml's prior displaced it, so an override is visible after
+    /// the fact and not only in the run's stderr. Absent when the model
     /// declares no prior or the fit toml supplies none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overridden_model_prior: Option<String>,
 }
+
+/// A resolved prior with its arguments, in the form a fit file's
+/// `[estimate.<param>] prior` takes and the compiled model's IR writes a
+/// `~` prior: `{"log_normal": {"mu": -1.0, "sigma": 0.5}}`. A flat prior is
+/// `{"flat": {}}`. A hierarchical prior, whose arguments are expressions
+/// over other parameters, is `{"hierarchical": {"kind", "args",
+/// "pool_over"}}`, each argument in the IR's expression form.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PriorLaw {
+    Dist(ir::parameter::PriorDist),
+    Flat { flat: FlatPrior },
+    Hierarchical { hierarchical: ir::parameter::HierarchicalPrior },
+}
+
+/// The empty table of [`PriorLaw::Flat`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FlatPrior {}
 
 // ── Parameter-value provenance into `run.json` (gh#83/gh#85 step 9) ─────────
 //
@@ -651,7 +679,10 @@ impl TrainingPartitionRecord {
 ///
 /// v4: the model's `#'` documentation is not recorded here; it is the model
 /// source's `docs.json`.
-pub const FIT_META_SCHEMA_VERSION: u32 = 4;
+///
+/// v5: each `resolved_priors` entry records the prior with its arguments
+/// (`prior`) and the interval the run searches (`bounds`).
+pub const FIT_META_SCHEMA_VERSION: u32 = 5;
 
 /// The fit-level provenance sidecar (`fits/{stem}-{h8}/fit.meta.json`). A CAS
 /// fit's fit level is a path segment with no `RunRecord`; this sidecar is the
@@ -897,8 +928,8 @@ pub fn read_fit_sidecar(fit_segment: &std::path::Path) -> Result<Option<FitSidec
     if version != u64::from(FIT_META_SCHEMA_VERSION) {
         return Err(format!(
             "{} is fit.meta.json schema version {version}; this camdl reads version \
-             {FIT_META_SCHEMA_VERSION} only (version 4 does not record the model's \
-             documentation; version 3 always records the model's calendar axis; version 2 \
+             {FIT_META_SCHEMA_VERSION} only (version 5 records each prior's arguments and \
+             bounds; version 4 does not record the model's documentation; version 3 always records the model's calendar axis; version 2 \
              records the source config relative to the fit folder, where version 1 recorded \
              it relative to the directory the fit was run from). Re-run the fit with this \
              camdl.",

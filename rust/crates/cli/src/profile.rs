@@ -1448,27 +1448,18 @@ fn run_profile(
         grid_points = expanded;
     }
 
-    // gh#73: the per-parameter source list is stored in the same
-    // order the resolver emitted (declaration order of estimated
-    // params). The `inner_hash` sort key normalises this to a
-    // canonical form for caching; we keep the natural order here so
-    // `run.json` is human-friendly.
-    let resolved_priors_kv: Vec<(String, String)> = resolved_priors.iter()
+    // One entry per parameter the cells estimate, in the resolver's order
+    // (declaration order). Each entry's bounds are those of the transform the cells' IF2 or
+    // optimizer moves the parameter under.
+    let resolved_priors_entries: Vec<crate::run_meta::ResolvedPriorEntry> = resolved_priors.iter()
         .map(|r| {
-            let source_str = match r.source {
-                crate::fit::priors_precedence::PriorSource::FitToml      => "fit_toml",
-                crate::fit::priors_precedence::PriorSource::ModelIr      => "model_ir",
-                crate::fit::priors_precedence::PriorSource::FlatFallback => "flat_fallback",
-                // gh#75: explicit flat-prior opt-in via `prior = { flat = {} }`.
-                // Not reachable on the profile path today (the resolver
-                // gets its fit-toml priors from `--fit`, which doesn't yet
-                // surface explicit flat — but the resolver's output is
-                // shared, so the match must be exhaustive).
-                crate::fit::priors_precedence::PriorSource::FlatExplicit => "flat_explicit",
-            };
-            (r.param.clone(), source_str.to_string())
+            let bounds = if2_params.iter().find(|p| p.name == r.param)
+                .ok_or_else(|| format!("estimate.{}: not estimated by the profile's cells", r.param))?
+                .bounds();
+            crate::fit::priors_precedence::entry(r, bounds, &model, &prior_overrides)
         })
-        .collect();
+        .collect::<Result<_, String>>()
+        .unwrap_or_else(|e| out.fail(format!("error: {e}")));
     // gh#83/gh#85 step 9: build parameters_provenance from the
     // unified resolver output (populated upstream). Each entry maps a
     // resolved parameter name to the value + source + role + audit
@@ -1511,12 +1502,7 @@ fn run_profile(
             serde_json::to_value(&init_provenance).unwrap_or(serde_json::Value::Null),
         // Where each estimated parameter's prior came from, and the model
         // prior a `--fit` prior displaced.
-        "resolved_priors": resolved_priors_kv.iter()
-            .map(|(n, s)| crate::run_meta::ResolvedPriorEntry {
-                param: n.clone(), source: s.clone(),
-                overridden_model_prior: prior_overrides.iter()
-                    .find(|o| &o.param == n).map(|o| o.model.clone()) })
-            .collect::<Vec<_>>(),
+        "resolved_priors": resolved_priors_entries,
         // Which rows each stream trained on.
         "training_partition": ir::caltime::CalendarAxis::from_model(&model)
             .map(|calendar| training_partition.record(&calendar))

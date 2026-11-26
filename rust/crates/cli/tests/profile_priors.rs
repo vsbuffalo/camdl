@@ -322,6 +322,10 @@ fn profile_with_fit_toml_records_fit_toml_priors() {
         gamma_entry.get("source").and_then(|s| s.as_str()),
         Some("fit_toml"),
         "gamma must be sourced from fit_toml. Got: {}", gamma_entry);
+    // The prior with its arguments and the bounds the cells search, as a
+    // fit's `fit.meta.json` records them.
+    assert_eq!(gamma_entry["prior"], serde_json::json!({ "log_normal": { "mu": -1.2, "sigma": 0.5 } }), "{gamma_entry}");
+    assert_eq!(gamma_entry["bounds"], serde_json::json!([0.01, 1.0]), "{gamma_entry}");
 }
 
 #[test]

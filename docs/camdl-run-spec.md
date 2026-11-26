@@ -699,31 +699,28 @@ and the stored inputs (§2.2). Its keys, top-level and inside each map
 so two identical runs produce byte-identical files and a diff of two runs'
 metadata is meaningful.
 
-Fields: `schema_version` (4), `store_layout`, `model_identity` (the hex
+Fields: `schema_version` (5), `store_layout`, `model_identity` (the hex
 structural model hash), `fit_toml_hash` (SHA-256 of the fit file's raw bytes,
 the run's `fit.toml`; provenance only, and no handle is looked up by it),
 `data_hashes`, `holdout_hashes`, `table_hashes`, `estimated`, `fixed`,
 `partition` (the run's parameter roles, below), `resolved_priors` (one
-`{param, source}` entry per estimated parameter,
-`source ∈ {fit_toml, model_ir, flat_explicit, flat_fallback}`, plus
+`{param, source, prior, bounds}` entry per estimated parameter, below, plus
 `overridden_model_prior` when the fit file's prior displaced a model `~` prior;
-recorded whichever method ran, since the resolution is a fact about the problem;
-`flat_fallback` appears only on a problem no posterior sampler can run on, since
-a sampler refuses an implicit flat prior before it starts),
-`parameters_provenance` (per parameter: resolved value, the tier that supplied
-it, and its role), `training_partition` (the problem's `partition.json`, §2.2;
-`date` is present when the model has an `origin`), `forcing_interpolation`
-(absent when empty; one `{forcing, method, cut, rows_after_cut}` entry per table
-forcing whose values before the cut, the training extent, depend on
-`rows_after_cut` rows after it, which `fit run` also says once as a note:
-"values before the cut depend on N rows after it"; see "Table forcings across a
-cut" below), `dt` (the integration step the run ran at — the model's declared
-`simulate { dt }`, else the config's `[config] dt`, else 1.0) and `integrator`
-(the ODE integrator the model declares, `{"method": "rk4"}` when it declares
-none), which a replay of the fit's parameters runs on by default (§3.4),
-`calendar` (the model's calendar axis, §2.2.2's block, so the fit's model times
-can be dated without the model; required), and `schema` (the
-observation/dimension schema below).
+recorded whichever method ran, since the resolution is a fact about the
+problem), `parameters_provenance` (per parameter: resolved value, the tier that
+supplied it, and its role), `training_partition` (the problem's
+`partition.json`, §2.2; `date` is present when the model has an `origin`),
+`forcing_interpolation` (absent when empty; one
+`{forcing, method, cut, rows_after_cut}` entry per table forcing whose values
+before the cut, the training extent, depend on `rows_after_cut` rows after it,
+which `fit run` also says once as a note: "values before the cut depend on N
+rows after it"; see "Table forcings across a cut" below), `dt` (the integration
+step the run ran at — the model's declared `simulate { dt }`, else the config's
+`[config] dt`, else 1.0) and `integrator` (the ODE integrator the model
+declares, `{"method": "rk4"}` when it declares none), which a replay of the
+fit's parameters runs on by default (§3.4), `calendar` (the model's calendar
+axis, §2.2.2's block, so the fit's model times can be dated without the model;
+required), and `schema` (the observation/dimension schema below).
 
 **Table forcings across a cut.** A fit's cut is its training extent, and a
 forecast's is its origin. A table forcing can give values before the cut that
@@ -748,7 +745,26 @@ training extent) depend on 1 row after it". A fit records it in `fit.meta.json`
 (`forcing_interpolation`); a forecast records it in `forecast.json`'s
 `covariates.interpolation` (§2.2.2), beside any `--covariate` statement.
 
-`schema_version` is 4, and every reader refuses any other value, naming it,
+`resolved_priors` holds, per estimated parameter:
+
+- `source`, the tier that supplied the prior:
+  `fit_toml, model_ir, flat_explicit, flat_fallback`. `flat_fallback` appears
+  only on a problem no posterior sampler can run on, since a sampler refuses an
+  implicit flat prior before it starts.
+- `prior`, the distribution with its arguments as numbers, in the form a fit
+  file's `[estimate.<param>] prior` takes:
+  `{"log_normal": {"mu": -1.0, "sigma": 0.5}}`,
+  `{"uniform": {"lower": 0.1, "upper": 0.9}}` (a `prior = { uniform = {} }`
+  resolved against the bounds), or `{"flat": {}}`. A hierarchical prior is
+  `{"hierarchical": {"kind", "args", "pool_over"}}`, as the compiled model
+  records it, each argument an expression over other parameters.
+- `bounds`, `[lower, upper]`, the interval the run searches the parameter in and
+  keeps it inside: the fit file's `[estimate]` bounds when it gives them (which
+  must lie inside the model's declared `in [lo, hi]`), else the declared range,
+  else the range of the parameter's kind. An infinite end is `"inf"` or
+  `"-inf"`.
+
+`schema_version` is 5, and every reader refuses any other value, naming it,
 rather than reading an older record's fields as if they meant the same thing.
 
 `data_hashes` holds, per observation source the fit binds (the `from <label>` a

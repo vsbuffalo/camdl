@@ -421,6 +421,8 @@ mod tests {
             resolved_priors: vec![crate::run_meta::ResolvedPriorEntry {
                 param: "beta".into(),
                 source: "model_ir".into(),
+                prior: crate::run_meta::PriorLaw::Flat { flat: crate::run_meta::FlatPrior {} },
+                bounds: [crate::roles::Bound(0.0), crate::roles::Bound(1.0)],
                 overridden_model_prior: None,
             }],
             store_layout: u32::from(store::STORE_FORMAT),
