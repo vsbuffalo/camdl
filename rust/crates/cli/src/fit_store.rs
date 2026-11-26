@@ -810,7 +810,10 @@ pub(crate) fn problem_estimate(estimate: &IndexMap<String, EstimateSpecV2>) -> R
             None => None,
         };
         let prior = match prior {
-            Some(p) => Some(canonical_json(&serde_json::to_value(p).map_err(|e| e.to_string())?)?),
+            Some(p) => {
+                crate::canonical_json::ensure_finite(p).map_err(|e| format!("{}: {e}", what("prior")))?;
+                Some(canonical_json(&serde_json::to_value(p).map_err(|e| e.to_string())?)?)
+            }
             None => None,
         };
         problem.push(Estimated { name: name.clone(), bounds, prior });

@@ -839,6 +839,18 @@ fn a_non_finite_method_setting_is_refused() {
     }
 }
 
+/// A NaN or infinite prior argument is refused rather than keyed: JSON writes
+/// both as `null`, so `mean = nan` and `mean = inf` would pose one problem.
+#[test]
+fn a_non_finite_prior_argument_is_refused() {
+    for mean in ["nan", "inf"] {
+        let text = format!("[beta]\nprior = {{ normal = {{ mean = {mean}, sd = 1.0 }} }}\n");
+        let estimate: IndexMap<String, crate::fit::config_v2::EstimateSpecV2> =
+            toml::from_str(&text).unwrap();
+        assert!(problem_estimate(&estimate).is_err(), "mean = {mean}");
+    }
+}
+
 /// A stored fit hands its readers the compile it was posed on and the bytes
 /// of each input, read through the store, and no path into its folder.
 #[test]
