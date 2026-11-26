@@ -4,7 +4,6 @@ status: accepted 2026-10-29 — implements maintainer decisions D3 (assessment t
 area: fit result records / convergence verdicts / run identity / fit table, fit summary, fit predict
 issues: none filed; §13 lists what is out of scope and why, and no follow-up is open
 related:
-  - ../inference-architecture.md (the invariants this implements: I5, I6, I7, I8)
   - 2026-10-26-parameter-roles.md (accepted; untouched by this proposal)
   - 2026-10-29-method-scoped-settings.md (accepted; §10 here states the order: Stage 3 after its D16 loader-split commit)
 ---
@@ -14,10 +13,7 @@ related:
 Code references are against `origin/main` at `a9a89178` unless marked with a
 branch. A claim marked _verified_ was read at the cited line or produced by the
 command shown; _inferred_ means reasoned from the code and not executed. Nothing
-in this document was measured by running a fit. The concepts and invariants this
-builds on are stated in `docs/dev/inference-architecture.md`; this document uses
-its terms (`ResolvedProblem`, `ExecutionPlan`, `RunRecord`, result record,
-`Assessment`, assessment record).
+in this document was measured by running a fit.
 
 ## 1. Every method writes one flat record, and its verdict is computed four ways
 
@@ -86,8 +82,7 @@ kinds apart.
 
 An **assessment policy** is the set of thresholds that turn measurements into a
 verdict. An **execution control** changes what the engine computes or when it
-stops. `docs/dev/inference-architecture.md` ("What counts as which") is the
-normative definition; §5 here classifies every current value.
+stops. §5 classifies every current value.
 
 A **leg** is one diagnostic within an assessment: one statistic, its value, its
 threshold and its outcome. A leg is **required** when the overall verdict
@@ -788,8 +783,8 @@ state.
 
 ### 4.5 Where a verdict and its policy are recorded
 
-A run record never depends on a policy (architecture I5). Assessments are
-computed on read; the two that are persisted go in the leaf's assessment record.
+A run record never depends on a policy. Assessments are computed on read; the
+two that are persisted go in the leaf's assessment record.
 
 ```rust
 // rust/crates/cli/src/fit/assessment_record.rs (new)
@@ -885,11 +880,11 @@ pub struct PolicyArgs {
 }
 ```
 
-Each flag has an observable effect or is refused (invariant I3), and its value
-passes `validate`. On `fit run` and on `fit summary` or `fit predict` of one
-leaf, a flag for a question the method does not answer (`--max-rhat` on an IF2
-fit) is refused naming the method; on `fit table`, which spans methods, a flag
-applies to the rows of its question and is refused only when no row answers it.
+Each flag has an observable effect or is refused, and its value passes
+`validate`. On `fit run` and on `fit summary` or `fit predict` of one leaf, a
+flag for a question the method does not answer (`--max-rhat` on an IF2 fit) is
+refused naming the method; on `fit table`, which spans methods, a flag applies
+to the rows of its question and is refused only when no row answers it.
 `--as-run` reads the assessment records and conflicts with every policy flag.
 
 ## 5. Every threshold and tolerance, classified (D3)
@@ -1409,11 +1404,11 @@ digest must not see a threshold either. A third part of `FitConfig` is outside
 both by construction, so no hash needs a subtraction except the config lookup.
 
 **A persisted verdict lives in a write-once assessment record, not in
-`run.json`.** A run record describes what happened (architecture I5); two
-executions of one `run_id` under different policies would otherwise write
-different `run.json` files. The record sits at `assessment/<policy digest>.toml`
-inside the leaf, skipped by name in the exact-set check, so it enters no
-identity and no dependency digest, and is never rewritten by a read.
+`run.json`.** A run record describes what happened; two executions of one
+`run_id` under different policies would otherwise write different `run.json`
+files. The record sits at `assessment/<policy digest>.toml` inside the leaf,
+skipped by name in the exact-set check, so it enters no identity and no
+dependency digest, and is never rewritten by a read.
 
 **The overall verdict is conservative.** Any required unavailable diagnostic
 makes it `Incomplete`; only a fit whose every required leg passes outright is

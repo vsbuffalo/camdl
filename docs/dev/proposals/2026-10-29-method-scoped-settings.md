@@ -1243,7 +1243,7 @@ Every refusal names the parameter and its class. At compile time, a parameter
 referenced nowhere, not even in a prior, is also the planned unused-parameter
 lint (`ocaml/lib/ir/lint.ml:14`). That lint is a warning, because such a model
 is still well-formed to simulate. The refusal applies only to estimating such a
-parameter, a request with no defined effect (invariant I3).
+parameter, a request with no defined effect.
 
 **The strict policy for prior-only parameters.** The key is
 `prior_only = "warn" | "refuse"` in `[method]`, on the `pmmh`, `mh` and `pgas`
@@ -1473,10 +1473,9 @@ step tables stay inside it.
 config whose `[method]` is IF2 (D9). Under `nl-*` there is no step: the step
 flags are refused, a `[method.perturbation]` read through `--fit` is ignored
 with one notice, and the method level hashes `{"kind": "none"}`. This is
-consistent with invariant I3 ("Every accepted user option has a defined,
-observable effect on the computation, or is refused",
-`docs/dev/inference-architecture.md`): the step flags are options given to this
-command and are refused, while the table is content of a referenced config,
+consistent with the rule ("Every accepted user option has a defined, observable
+effect on the computation, or is refused"): the step flags are options given to
+this command and are refused, while the table is content of a referenced config,
 written for that config's IF2 method, which this command does not run; the
 notice makes its non-use visible. Today profile hashes the `rw_sd` blob under
 every algorithm, `nl-*` included (`profile.rs:1293-1310`), a setting that does
@@ -1636,8 +1635,8 @@ impl ExecutionPlan {
 // IF2's automatic value (roles §6.4). What a method needs that the problem
 // does not state is method configuration, and goes in `MethodPlan`.
 //
-// **Plans are fully resolved** (invariant I2, `docs/dev/inference-architecture.md`:
-// "no `Option` that lets the engine pick a default later"). Today PGAS's and
+// **Plans are fully resolved**: no `Option`
+// lets the engine pick a default later. Today PGAS's and
 // PMMH's `burn_in` and `thin` are `Option` in the method
 // (`config_v2.rs:1066-1069`) and are filled at dispatch: PGAS 2000 and 5
 // (`cli/src/fit/pgas.rs:217-218`, `:237-238`), PMMH and MH 5000 and 10
