@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 262" role="img" aria-labelledby="t d">
+  <title id="t">Horizons on a daily and a weekly stream, with a week under way at the origin</title>
+  <desc id="d">A daily stream observed through day 23 and a weekly stream whose last training row covers days 14 to 20. The forecast origin is day 24. The daily stream's targets are days 24, 25, 26 and 27, with horizons 0 to 3. The weekly stream's week of days 21 to 27 began before the origin: days 21 to 23 have happened and their count is inferred from the latent state, days 24 to 27 are simulated, and the whole week is the weekly stream's horizon 0. Days 28 to 34 are its horizon 1 and days 35 to 41 its horizon 2.</desc>
+
+  <!-- day d sits at x = 150 + 16 * (d - 14) -->
+  <text x="4" y="58" class="t-mono-label fig-ink">daily</text>
+  <text x="4" y="126" class="t-mono-label fig-ink">weekly</text>
+
+  <!-- daily: observed days 14 to 23, targets from day 24 -->
+  <g class="fig-panel s-line">
+    <rect x="150" y="44" width="16" height="20"/><rect x="166" y="44" width="16" height="20"/>
+    <rect x="182" y="44" width="16" height="20"/><rect x="198" y="44" width="16" height="20"/>
+    <rect x="214" y="44" width="16" height="20"/><rect x="230" y="44" width="16" height="20"/>
+    <rect x="246" y="44" width="16" height="20"/><rect x="262" y="44" width="16" height="20"/>
+    <rect x="278" y="44" width="16" height="20"/><rect x="294" y="44" width="16" height="20"/>
+  </g>
+  <g class="fig-accent-soft s-accent">
+    <rect x="310" y="44" width="16" height="20"/><rect x="326" y="44" width="16" height="20"/>
+    <rect x="342" y="44" width="16" height="20"/><rect x="358" y="44" width="16" height="20"/>
+  </g>
+  <g class="t-small fig-ink" text-anchor="middle">
+    <text x="318" y="36">0</text><text x="334" y="36">1</text><text x="350" y="36">2</text><text x="366" y="36">3</text>
+  </g>
+  <text x="384" y="36" class="t-small fig-muted">horizons count days</text>
+
+  <!-- weekly: days 14 to 20 observed; the week of days 21 to 27 under way -->
+  <rect x="150" y="110" width="112" height="24" class="fig-panel s-line"/>
+  <text x="206" y="127" text-anchor="middle" class="t-small fig-muted">14–20</text>
+  <rect x="262" y="110" width="48" height="24" class="fig-code-bg s-warm" stroke-width="1.6" stroke-dasharray="4 3"/>
+  <rect x="310" y="110" width="64" height="24" class="fig-accent-soft s-accent"/>
+  <rect x="374" y="110" width="112" height="24" class="fig-accent-soft s-accent"/>
+  <rect x="486" y="110" width="112" height="24" class="fig-accent-soft s-accent"/>
+  <g class="t-small fig-ink" text-anchor="middle">
+    <text x="318" y="102">horizon 0</text><text x="430" y="102">horizon 1</text><text x="542" y="102">horizon 2</text>
+    <text x="430" y="127">28–34</text><text x="542" y="127">35–41</text>
+  </g>
+  <text x="330" y="156" class="t-small fig-ink">days 24–27: simulated after the origin</text>
+  <text x="330" y="176" class="t-small fig-warm">days 21–23: happened, inferred from the state</text>
+
+  <!-- the forecast origin -->
+  <line x1="310" y1="20" x2="310" y2="196" class="s-muted" stroke-dasharray="5 4"/>
+  <text x="310" y="214" text-anchor="middle" class="t-label t-b fig-ink">forecast origin, day 24</text>
+
+  <line x1="150" y1="232" x2="598" y2="232" class="s-muted"/>
+  <g class="s-muted">
+    <line x1="150" y1="232" x2="150" y2="238"/><line x1="262" y1="232" x2="262" y2="238"/>
+    <line x1="374" y1="232" x2="374" y2="238"/><line x1="486" y1="232" x2="486" y2="238"/>
+    <line x1="598" y1="232" x2="598" y2="238"/>
+  </g>
+  <g class="t-small fig-muted" text-anchor="middle">
+    <text x="150" y="256">day 14</text><text x="262" y="256">21</text><text x="374" y="256">28</text>
+    <text x="486" y="256">35</text><text x="598" y="256">42</text>
+  </g>
+</svg>

@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 278" role="img" aria-labelledby="t d">
+  <title id="t">One forecast of a weekly stream: training rows, origin, targets, horizons and lead times</title>
+  <desc id="d">A weekly stream with ten periods of seven days, from day 0 to day 70. The first six rows, ending at days 7 to 42, are the training rows: the parameters were fitted to them and the particle filter conditioned the latent state on them. The forecast origin is day 42, the end of the sixth period. The next four periods are the targets, with horizons 0, 1, 2 and 3 and lead times of 7, 14, 21 and 28 days, each measured from the origin to the end of the target. A reach of four weeks keeps the targets that end within 28 days of the origin.</desc>
+  <defs>
+    <marker id="fot-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" class="fig-arrow"/>
+    </marker>
+  </defs>
+
+  <!-- day d sits at x = 20 + 52 * d / 7 -->
+  <text x="20" y="16" class="t-small fig-ink">parameter set: the rows the parameters were fitted to</text>
+  <path d="M20,30 L20,24 L332,24 L332,30" class="s-muted"/>
+  <text x="20" y="50" class="t-small fig-ink">state set: the rows the latent state was conditioned on</text>
+  <path d="M20,64 L20,58 L332,58 L332,64" class="s-muted"/>
+
+  <g class="fig-panel s-line">
+    <rect x="20" y="72" width="52" height="28"/><rect x="72" y="72" width="52" height="28"/>
+    <rect x="124" y="72" width="52" height="28"/><rect x="176" y="72" width="52" height="28"/>
+    <rect x="228" y="72" width="52" height="28"/><rect x="280" y="72" width="52" height="28"/>
+  </g>
+  <g class="fig-accent-soft s-accent">
+    <rect x="332" y="72" width="52" height="28"/><rect x="384" y="72" width="52" height="28"/>
+    <rect x="436" y="72" width="52" height="28"/><rect x="488" y="72" width="52" height="28"/>
+  </g>
+  <text x="176" y="91" text-anchor="middle" class="t-small fig-muted">six training rows</text>
+  <g class="t-small fig-ink" text-anchor="middle">
+    <text x="358" y="91">h 0</text><text x="410" y="91">h 1</text>
+    <text x="462" y="91">h 2</text><text x="514" y="91">h 3</text>
+  </g>
+
+  <g class="t-small fig-muted" text-anchor="middle">
+    <text x="20" y="118">0</text><text x="72" y="118">7</text><text x="124" y="118">14</text>
+    <text x="176" y="118">21</text><text x="228" y="118">28</text><text x="280" y="118">35</text>
+    <text x="384" y="118">49</text><text x="436" y="118">56</text>
+    <text x="488" y="118">63</text><text x="540" y="118">70</text>
+  </g>
+  <text x="556" y="118" class="t-small fig-muted">day</text>
+
+  <!-- the forecast origin -->
+  <line x1="332" y1="64" x2="332" y2="232" class="s-muted" stroke-dasharray="5 4"/>
+  <text x="332" y="250" text-anchor="middle" class="t-label t-b fig-ink">forecast origin, day 42</text>
+  <text x="332" y="270" text-anchor="middle" class="t-small fig-muted">the training extent: the end of the last training row</text>
+
+  <!-- lead times -->
+  <g class="s-arrow">
+    <line x1="332" y1="136" x2="383" y2="136" marker-end="url(#fot-arrow)"/>
+    <line x1="332" y1="154" x2="435" y2="154" marker-end="url(#fot-arrow)"/>
+    <line x1="332" y1="172" x2="487" y2="172" marker-end="url(#fot-arrow)"/>
+    <line x1="332" y1="190" x2="539" y2="190" marker-end="url(#fot-arrow)"/>
+  </g>
+  <g class="t-small fig-ink">
+    <text x="390" y="141">lead 7</text><text x="442" y="159">lead 14</text>
+    <text x="494" y="177">lead 21</text><text x="546" y="195">lead 28</text>
+  </g>
+
+  <!-- the reach -->
+  <path d="M332,208 L332,214 L540,214 L540,208" class="s-muted"/>
+  <text x="344" y="232" class="t-small fig-ink"><tspan class="t-mono">--horizon "4 weeks"</tspan>: targets ending by day 70</text>
+</svg>

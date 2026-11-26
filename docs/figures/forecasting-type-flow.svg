@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 478" role="img" aria-labelledby="t d">
+  <title id="t">The values a forecast passes through, and the leak each one closes</title>
+  <desc id="d">Six steps from top to bottom. The row reader produces ObservedRow values, each with what the row measures, which closes a split or a score decided from a row's label; this is held by a convention. The fit builds a TrainingPartition, a row count and a digest per stream, which closes a row that is both trained and held out; this is held by the type. The fit writes the partition to fit.meta.json and a later command reads it back against the data, which closes a later step cutting the data differently and a fitted row edited after the fit; this is a run-time check. ForecastPlan takes its origin from the partition and lists the targets, which closes an origin anywhere but the end of the training rows; this is held by the type. The forecast driver runs a particle filter over the training rows and builds the StateConditioning, which closes a held-out row moving the state at the origin; this is a run-time check and a type. camdl score binds the outcome rows, which closes outcomes taken from another series and a score that changes the forecast; these are run-time checks.</desc>
+  <defs>
+    <marker id="ftf-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" class="fig-arrow"/>
+    </marker>
+  </defs>
+
+  <text x="2" y="14" class="t-cap fig-muted">VALUE</text>
+  <text x="262" y="14" class="t-cap fig-muted">THE LEAK IT CLOSES, AND WHAT HOLDS IT</text>
+
+  <g class="fig-card s-line">
+    <rect x="2" y="26" width="244" height="52" rx="4"/>
+    <rect x="2" y="104" width="244" height="52" rx="4"/>
+    <rect x="2" y="182" width="244" height="52" rx="4"/>
+    <rect x="2" y="260" width="244" height="52" rx="4"/>
+    <rect x="2" y="338" width="244" height="52" rx="4"/>
+    <rect x="2" y="416" width="244" height="52" rx="4"/>
+  </g>
+  <g class="s-arrow">
+    <line x1="30" y1="79" x2="30" y2="102" marker-end="url(#ftf-arrow)"/>
+    <line x1="30" y1="157" x2="30" y2="180" marker-end="url(#ftf-arrow)"/>
+    <line x1="30" y1="235" x2="30" y2="258" marker-end="url(#ftf-arrow)"/>
+    <line x1="30" y1="313" x2="30" y2="336" marker-end="url(#ftf-arrow)"/>
+    <line x1="30" y1="391" x2="30" y2="414" marker-end="url(#ftf-arrow)"/>
+  </g>
+
+  <text x="14" y="48" class="t-mono-label fig-ink">ObservedRow</text>
+  <text x="14" y="67" class="t-small fig-muted">a data row and what it measures</text>
+  <text x="262" y="48" class="t-small fig-ink">a split or a score decided from a row's label</text>
+  <text x="262" y="67" class="t-small fig-warm">convention: one function states the cutoff rule</text>
+
+  <text x="14" y="126" class="t-mono-label fig-ink">TrainingPartition</text>
+  <text x="14" y="145" class="t-small fig-muted">per stream, a row count and a digest</text>
+  <text x="262" y="126" class="t-small fig-ink">a row both trained and held out; a gap in training</text>
+  <text x="262" y="145" class="t-small fig-accent">type: membership is a position below the count</text>
+
+  <text x="14" y="204" class="t-mono-label fig-ink">fit.meta.json</text>
+  <text x="14" y="223" class="t-small fig-muted">the partition, read back on the data</text>
+  <text x="262" y="204" class="t-small fig-ink">a later step cutting differently; an edited fitted row</text>
+  <text x="262" y="223" class="t-small fig-accent">run-time check: the digest of the leading rows</text>
+
+  <text x="14" y="282" class="t-mono-label fig-ink">ForecastPlan, Target</text>
+  <text x="14" y="301" class="t-small fig-muted">the origin and what is predicted</text>
+  <text x="262" y="282" class="t-small fig-ink">an origin that is not the end of the training rows</text>
+  <text x="262" y="301" class="t-small fig-accent">type: the constructor takes no origin</text>
+
+  <text x="14" y="360" class="t-mono-label fig-ink">StateConditioning</text>
+  <text x="14" y="379" class="t-small fig-muted">the rows the filter was given</text>
+  <text x="262" y="360" class="t-small fig-ink">a held-out row moving the state at the origin</text>
+  <text x="262" y="379" class="t-small fig-accent">run-time check, and a cell type the filter skips</text>
+
+  <text x="14" y="438" class="t-mono-label fig-ink">camdl score</text>
+  <text x="14" y="457" class="t-small fig-muted">outcome rows bound to targets</text>
+  <text x="262" y="438" class="t-small fig-ink">outcomes from another series; a changed forecast</text>
+  <text x="262" y="457" class="t-small fig-accent">run-time checks: row digests, and a byte comparison</text>
+</svg>
