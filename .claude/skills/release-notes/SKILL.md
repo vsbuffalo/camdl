@@ -37,7 +37,9 @@ the SemVer policy.
 
 4. **Read for context, not just titles.** Scan `docs/dev/notes/`,
    `docs/dev/incidents/`, and `docs/dev/proposals/` whose dates fall in the
-   range — they carry the _why it matters_ that commit subjects omit (e.g. a
+   range. Start with any draft notes, `docs/dev/notes/*-release-notes.md`,
+   written while the work landed: fold them in, then delete them in the release
+   commit — they carry the _why it matters_ that commit subjects omit (e.g. a
    dimcheck fix's user impact, a found-bug's blast radius). Also check whether
    `ir/VERSION` changed in the range — an IR-schema bump is a compatibility
    event users must know about.

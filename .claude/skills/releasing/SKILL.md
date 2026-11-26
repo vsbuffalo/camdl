@@ -35,7 +35,8 @@ Cut through the tooling. The `make` targets are thin wrappers over
 2. `make release-prep VERSION=x.y.z` — bumps every manifest, regenerates
    `CHANGELOG.md`.
 3. Draft `RELEASE_NOTES-x.y.z.md` with the `release-notes` skill; edit it.
-4. `make test` green + CI green.
+4. `make test` green + CI green, and no open entry under "Release blockers" in
+   `RELEASING.md`.
 5. `make release-publish VERSION=x.y.z` — the only irreversible step; prompts
    before it commits, tags, pushes, and publishes.
 

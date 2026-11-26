@@ -107,6 +107,20 @@ above.
 - [ ] Every breaking change since the last tag has an `old → new` entry in
       [`docs/language-changes.md`](docs/language-changes.md) and a migration
       line in the notes.
+- [ ] No open release blocker (below).
+- [ ] Every draft in `docs/dev/notes/*-release-notes.md` has been folded into
+      the release notes, and then deleted.
+
+**Release blockers.** A release blocker is a condition that must be resolved
+before any release tag. Remove an entry when it is resolved.
+
+- **`profile --rw-sd` takes a natural-scale step, while every other command
+  takes steps in z.** No release may carry both units
+  (`docs/dev/proposals/2026-10-29-method-scoped-settings.md`, maintainer
+  decision 7). Resolve it in one of two ways:
+  - land Series D, which replaces `--rw-sd` with `--perturbation NAME=SD` in z;
+  - document `--rw-sd` as an interim natural-scale flag in the release notes and
+    in `camdl profile --help`.
 
 **Steps:**
 
