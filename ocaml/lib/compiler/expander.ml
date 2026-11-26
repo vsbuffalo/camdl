@@ -15713,7 +15713,7 @@ let expand_scenarios ctx : Ir.preset list =
     let own = collect_own_fields sd in
     let name = sd.scname in
     (* `fitted` is reserved: it labels the no-overlay row (the fitted model,
-       no scenario applied) in the `scenario` column emitted by `camdl fit
+       no scenario applied) in the `scenario` column emitted by `camdl
        predict`. A preset by that name would shadow the reserved value and make
        rows ambiguous. Reject it with a migration-style diagnostic that names the
        reservation and the fix (rename the scenario). *)
@@ -15724,7 +15724,7 @@ let expand_scenarios ctx : Ir.preset list =
         ~message:(Printf.sprintf
           "scenario name '%s' is reserved" name)
         ~hint:"`fitted` labels the no-overlay row (the fitted model, no \
-               scenario applied) in the `scenario` column of `camdl fit \
+               scenario applied) in the `scenario` column of `camdl \
                predict` output. Rename the scenario so it does not collide \
                with the reserved value."
         ();
