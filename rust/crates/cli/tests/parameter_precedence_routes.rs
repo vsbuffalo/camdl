@@ -943,8 +943,8 @@ particles = 50
 // ─── contrasts: an arm's scenario over the draws is reported once ───────────
 
 /// The posterior fixture's SIR with an SIA at day 28, a deaths quantity and
-/// one contrast whose `with_sia` arm also sets the dispersion `k`. `fit
-/// predict` runs no `--scenario` here, so the only resolutions under
+/// one contrast whose `with_sia` arm also sets the dispersion `k`. `predict`
+/// runs no `--scenario` here, so the only resolutions under
 /// `with_sia` are the contrast arm's, one per forkable draw.
 const CONTRAST_MODEL: &str = r#"
 time_unit = 'days

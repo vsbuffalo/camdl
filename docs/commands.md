@@ -400,12 +400,11 @@ pre-origin difference no observation reads is caught only by the check before
 the run.
 
 `--particles N` sets the particle count per posterior draw of the filters
-`fit
-predict` runs, the one-step band's and the forecast's. The default is the
-fit's own filter's count for a PMMH fit and 500 otherwise (PGAS's conditional
-SMC count is not a bootstrap-filter count). The manifest records the count and
-where it came from (`flag`, `fit_pmmh` or `default`); the count is part of the
-output address, so each count writes to its own directory. `forecast.json` also
+`predict` runs, the one-step band's and the forecast's. The default is the fit's
+own filter's count for a PMMH fit and 500 otherwise (PGAS's conditional SMC
+count is not a bootstrap-filter count). The manifest records the count and where
+it came from (`flag`, `fit_pmmh` or `default`); the count is part of the output
+address, so each count writes to its own directory. `forecast.json` also
 records, per draw, the effective sample size of the filter's weights at its last
 assimilation before the origin (before resampling), its time and ESS/N: a
 measure of the Monte Carlo reliability of the state the forecast starts from,

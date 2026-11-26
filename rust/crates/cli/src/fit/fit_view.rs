@@ -22,8 +22,8 @@ pub struct FitMethodView {
     pub method_dir: PathBuf,
     /// Inference algorithm tag.
     pub method: FitAlgorithm,
-    /// The run's id (64 hex digits): the address `camdl show` and `fit
-    /// predict` accept.
+    /// The run's id (64 hex digits): the address `camdl show` and
+    /// `predict` accept.
     pub run_id: String,
     /// The run's label: a stored run's files hold none, so [`FitView::read`]
     /// leaves it `None` and the store's walker fills it from the invocation

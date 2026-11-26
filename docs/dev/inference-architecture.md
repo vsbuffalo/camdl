@@ -53,8 +53,8 @@ How each estimation method treats them, from parameter-roles §4.4 and §6.4:
 | design    | one fit per design point (`fit run`); `profile` runs IF2 per focal point | one fit per design point (`fit run`)                                                                                   |
 | sampled   | refused (`fit run` accepts no sampled role)                              | refused                                                                                                                |
 
-A sampled role is accepted by `simulate` (optional) and required by
-`fit predict` (the posterior), neither of which estimates.
+A sampled role is accepted by `simulate` (optional) and required by `predict`
+(the posterior), neither of which estimates.
 
 **`ExecutionPlan`** is how one algorithm attempts that problem: a per-method
 plan (IF2's perturbations and cooling, a sampler's proposal and adaptation

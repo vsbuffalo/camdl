@@ -1040,8 +1040,8 @@ mod tests {
         }
     }
 
-    /// The sampler/optimizer partition is the authoritative classifier `fit
-    /// predict` uses to frame its refusals (gh#343). PGAS / PMMH / MH are
+    /// The sampler/optimizer partition is the authoritative classifier `predict`
+    /// uses to frame its refusals (gh#343). PGAS / PMMH / MH are
     /// Bayesian samplers (a completed run has a posterior band); IF2 and the
     /// NLopt family are optimizers (a single point, refused); a particle filter
     /// is neither (a likelihood eval, not a fit). Every variant is covered so a
