@@ -1,14 +1,10 @@
 # Temporal architecture: observation periods, training data and forecasts
 
-**Status:** Normative design, decided 2026-11-15 (decisions D35 and D38–D48 in
-the maintainer's docket). The staged plan that implements it is
+**Status:** Normative. Decisions are cited by their number in the maintainer's
+docket (D35 onward). The staged implementation plan is
 `docs/dev/proposals/2026-11-15-temporal-architecture-migration.md` (the
-migration plan). Its Phase A (row periods, the training partition, alignment
-judged by the method, the forcing-range error, dated artifacts) is implemented
-and the type sketches below are reconciled with it. Phase B, the forecast plan
-and forecast scoring (the plan's Stages 5 and 6), is not built: each section
-that describes it is marked "Not yet built (Phase B)". Part 1 describes the code
-before Phase A.
+migration plan); the `camdl predict` and `camdl score` commands are
+`docs/dev/proposals/2026-11-23-prediction-and-scores.md`.
 
 **Reader.** A contributor who needs to know how camdl represents time from a
 data file through a fit to a forecast and its score, and which code owns each
@@ -22,14 +18,13 @@ Every decision about a data row is made from the stretch of time the row
 measures, never from the date printed in its time column. Training membership is
 decided once, recorded as "the first _n_ rows of each stream" with a digest of
 those rows, and read by every later step rather than re-derived. Every
-prediction is made against an explicit list of targets, each a stream and a
-period, built once in a forecast plan that every backend computes against. The
-simulation engines keep plain floating-point times; the new structure sits
-between the IR and the engines.
+fixed-origin forecast is made against an explicit list of targets, each a stream
+and a period, built once in a forecast plan. The simulation engines keep plain
+floating-point times; the temporal types sit between the IR and the engines.
 
-## Part 1. The existing design and its problems
+## Part 1. Time below the compiler
 
-### 1.1 What stays: the calendar is erased at the compiler and loader
+### 1.1 The calendar is erased at the compiler and loader
 
 The compiler checks the source-language rules for time (an instant is not a
 duration; a calendar month cannot shift an instant except through
@@ -37,49 +32,15 @@ duration; a calendar month cannot shift an instant except through
 lowers every temporal expression to model time, a number in the model's
 `time_unit` counted from `origin`. The data loader converts dates in data files
 the same way. Below those two places every time is an `f64` (`docs/dates.md`,
-"The one rule"). This erasure is correct and this design keeps it: the engines
-have no use for calendar structure, and a second time language in Rust would be
-a second definition of one semantics.
+"The one rule"). The engines have no use for calendar structure, and a second
+time language in Rust would be a second definition of one semantics.
 
-The runtime already has the right primitive for a data row's time span: `Period`
-(`rust/crates/sim/src/inference/multi_stream_obs.rs:1434`), a half-open interval
+The runtime's primitive for a data row's time span is `Period`
+(`rust/crates/sim/src/inference/multi_stream_obs.rs`), a half-open interval
 whose only constructor refuses a non-finite or non-increasing pair, and
 `StreamTimes`, which holds a stream's instants or periods. `Covers::period_of`
-(`rust/crates/ir/src/observation.rs:304`) turns a label into a period under each
-`covers` form.
-
-### 1.2 Where meaning is lost
-
-Measured at `main` `0ed74876d`; the migration plan's Part 1 has the evidence and
-reproductions.
-
-- **The label is compared with the cutoff.** The loader keeps only each row's
-  label as its time (`Observation.time`), and the training cut compares that
-  label with `holdout_after` at six separate sites. Under a `covers` form whose
-  label is the start of the period, a fit trains on data past its cutoff and
-  records a training window it did not use.
-- **Forecast targets come from three rules in four places.** `fit predict`
-  continues the most common gap between observations; `simulate --obs` and
-  `--init-state` use the declared `emit_schedule`; `--design-from` reproduces
-  the fit's rows. Monthly series drift (gh#861).
-- **What conditioned a prediction is not recorded.**
-  `fit predict --horizon
-  one_step` filters through held-out rows and nothing
-  marks them.
-- **Alignment is checked before the method is known.** Off-grid observations are
-  refused even for methods that step exactly; PGAS rounds an observation's
-  period onto its grid without notice.
-- **Forcings built from data hold their last value silently** past their last
-  data point.
-- **Artifacts cannot all be dated.** The stored simulation record carries no
-  calendar; sub-day dated output cannot be read back.
-
-![Figure 1: four rows under a cutoff at day 24. The same week, days 21 to 27, is row 21 under starting_on and row 28 under closing_at; under day(time), row 23 trains and row 24 is held out. Before Phase A the starting_on row and the day-24 row trained because their labels are at or before 24.](figures/temporal-row-periods.svg)
-
-_Figure 1. A row's period, not its label, decides training._ All four rows are
-judged against `holdout_after = 24`. Before Phase A two of them trained because
-their label is at or before 24, although their periods end after it. The rule in
-§4.1 holds both out.
+(`rust/crates/ir/src/observation.rs`) turns a label into a period under each
+uniform `covers` form.
 
 ## Part 2. Concepts
 
@@ -107,16 +68,16 @@ period, the stream's `covers` line says how the label maps to the period:
 
 The **end** of what a row measures is the instant for an instant row and the
 period's end for a period row. It is when the row's information is complete, and
-it is the time at which the row is scored (`StreamTimes::closes`,
-`multi_stream_obs.rs:1520`). Every temporal decision in this design reads the
-period or its end; the label survives only as provenance, inside the row digest.
+it is the time at which the row is scored (`StreamTimes::closes`). Every
+temporal decision in this design reads the period or its end; the label survives
+only as provenance, inside the row digest.
 
 A row's **position** is its index among its stream's rows in file order. The
-binder requires each stream's ends to be strictly increasing
-(`multi_stream_obs.rs:1003`), so position order is time order. A uniform
-`covers` form also forbids gaps (`rust/crates/cli/src/pfilter.rs:1606`: a gap is
-a missing row; an unobserved period is written as an `NA` row), so a uniform
-stream's periods tile without gaps or overlaps.
+binder requires each stream's ends to be strictly increasing (`BoundObs::bind`),
+so position order is time order. A uniform `covers` form also forbids gaps
+(`pfilter::stream_times_of_measures`: a gap is a missing row; an unobserved
+period is written as an `NA` row), so a uniform stream's periods tile without
+gaps or overlaps.
 
 A **stream** here is one concrete observation series. The code calls it a _leaf_
 when a declared block expands into several (an indexed block over two patches is
@@ -147,9 +108,6 @@ row whose end is after the training extent (§4.2).
 
 ### 2.4 Two information sets
 
-_Not yet built (Phase B)._ No code records a state set or a forecast origin; the
-training partition (§3.2) is the parameter set.
-
 A prediction depends on two different sets of observations, recorded separately
 because they legitimately differ:
 
@@ -158,15 +116,16 @@ because they legitimately differ:
 - the **state set**: the rows the latent state at the forecast origin was
   conditioned on, by a filter or by sampled paths.
 
-In this migration the state set is the training rows: the forecast origin is the
+The state set of a forecast is the training rows: the forecast origin is the
 training extent, and the latent state is conditioned on exactly the rows the
 parameters were fitted to (D57). Conditioning the state on newer rows without a
-refit, which D35 allows and rolling forecast dates need, is deferred (Part 7);
-the two sets are still recorded separately so that it can be added without
-changing any type. For a free-running projection from the start of the run, the
-state set is empty, though its parameters are still posterior draws fitted to
-the training rows: it is conditioned on the data through the parameters, not an
-unconditional distribution.
+refit, which D35 allows and rolling forecast dates need, is unsupported (Part
+7). The two sets are recorded separately, as `parameter_set` and `state_set` in
+`forecast.json`, so that it can be added without changing any type. For a
+free-running projection from the start of the run, the state set is empty,
+though its parameters are still posterior draws fitted to the training rows: it
+is conditioned on the data through the parameters, not an unconditional
+distribution.
 
 What the state set means depends on the backend:
 
@@ -175,14 +134,14 @@ What the state set means depends on the backend:
   particles that approximate the state's distribution given those rows, and the
   forecast continues each particle. Each particle also carries, per stream, the
   flow accumulated since that stream's current period began
-  (`rust/crates/sim/src/inference/particle_filter.rs:427-429`, copied with the
-  particle on resampling at `:601-611`), which is what makes a period already
-  under way at the origin predictable (§4.4).
+  (`ParticleState::acc`, `rust/crates/sim/src/inference/types.rs`, copied with
+  the particle on resampling), which is what makes a period already under way at
+  the origin predictable (§4.4).
 - **PMMH and PGAS:** the forecast runs the particle filter above once per
   posterior parameter draw. PGAS's stored sampled paths are not used: a path is
   a draw given all of the fit's data, so it is a valid state at the origin only
   when the origin is the end of that data. For an earlier origin, later data
-  shaped it; a later origin needs the newer rows filtered, which is deferred
+  shaped it; a later origin needs the newer rows filtered, which is unsupported
   (D57).
 - **ODE:** given the parameters the state is fully determined, so conditioning
   on observations after fitting changes nothing; the data reach an ODE forecast
@@ -190,7 +149,9 @@ What the state set means depends on the backend:
   Consequently, rolling ODE forecasts with fixed parameters are slices of one
   trajectory and do not use newer data, while a stochastic model at the same
   forecast dates does. Comparing the two is fair, since the difference is the
-  model's, and the artifact says which kind each forecast is.
+  model's, and the artifact says which kind each forecast is. A fixed-origin
+  forecast of an ODE fit is unsupported: `camdl predict --mode forecast` refuses
+  it (`fit::forecast_output::refuse_unsupported`).
 - **Gillespie:** no forecast path exists; a forecast on this backend is refused.
 - **Single-estimate fits** (IF2 on chain-binomial; the NLopt optimizers on ODE)
   are refused for forecasting in this migration (D51); the full method ×
@@ -199,13 +160,11 @@ What the state set means depends on the backend:
 
 ### 2.5 Forecast origin, targets, horizon and lead time
 
-_Not yet built (Phase B)._ Nothing in the code computes a target, horizon or
-lead time; `fit predict` still builds its own grid.
-
 The **forecast origin** is the instant after which a forecast sees no data. By
 default it is the latest end among the rows of the state set. A user may set a
 later one, never an earlier one: an origin earlier than data the state has seen
-is refused.
+is refused. Setting the forecast origin is unsupported: it is always the
+training extent.
 
 A **target** is one stream's period (or instant) that the forecast predicts. A
 target exists whether or not an observation for it exists; when one does, the
@@ -243,9 +202,9 @@ horizons 0–27. The two uses of the word (the count on a target, the reach on t
 command line) follow the literature, which uses "horizon" for both (Hyndman and
 Athanasopoulos, _Forecasting: Principles and Practice_, 3rd ed.).
 
-![Figure 2: a weekly stream; the parameters were fitted to the first four rows, the state filtered through six; the forecast origin is the end of the sixth period; the next four periods are targets with horizons 0 to 3, each with a lead time from the origin to its end.](figures/temporal-information-sets.svg)
+![Figure 1: a weekly stream; the parameters were fitted to the first four rows, the state filtered through six; the forecast origin is the end of the sixth period; the next four periods are targets with horizons 0 to 3, each with a lead time from the origin to its end.](figures/temporal-information-sets.svg)
 
-_Figure 2. Two information sets and one forecast._ The parameters were fitted
+_Figure 1. Two information sets and one forecast._ The parameters were fitted
 once; the state was then filtered through two newer rows without a refit; the
 forecast origin is the end of the last filtered row.
 
@@ -256,41 +215,39 @@ origin is inferred from the state, and the part after it is predicted (§4.4).
 For a stream on a single cadence with the origin at the end of its data, the
 first target is a whole period, as in the hubs.
 
-![Figure 3: a daily stream observed through day 23 and a weekly stream whose last row covered days 14 to 20; the forecast origin is the start of day 24; the daily targets are days 24, 25, 26 with horizons 0, 1, 2; the weekly week of days 21 to 27 is horizon 0, with days 21 to 23 inferred and days 24 to 27 predicted.](figures/temporal-two-cadences.svg)
+![Figure 2: a daily stream observed through day 23 and a weekly stream whose last row covered days 14 to 20; the forecast origin is the start of day 24; the daily targets are days 24, 25, 26 with horizons 0, 1, 2; the weekly week of days 21 to 27 is horizon 0, with days 21 to 23 inferred and days 24 to 27 predicted.](figures/temporal-two-cadences.svg)
 
-_Figure 3. Horizons on two streams that report at different rates._ Each stream
+_Figure 2. Horizons on two streams that report at different rates._ Each stream
 counts horizons in its own period; the weekly stream's week under way is its
 horizon 0.
 
 ### 2.6 Three independent axes of a prediction
 
-_Not yet built (Phase B)._ The plan's `mode` does not exist; the `Provenance`
-and `basis` rows of the table describe existing score-trace fields.
-
-| Axis                                        | Values                                                                                                                                                                                                                                                                                                                   | Recorded as                                                       |
-| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------- |
-| **Mode**: what the prediction conditions on | in-sample (parameters fitted to the predicted rows); one step ahead (parameters exclude the predicted row; state filtered through every earlier row, so its lead is the time since the last assimilated row of any stream, which varies); fixed origin (state conditioned up to the forecast origin, free-running after) | the plan's `mode`                                                 |
-| **Parameter uncertainty**                   | one plug-in point, or a mixture over posterior draws                                                                                                                                                                                                                                                                     | the trace's `Provenance` (exists)                                 |
-| **Numerical method**                        | particle filter, ODE skeleton plus observation noise                                                                                                                                                                                                                                                                     | the trace's `basis` (exists, `rust/crates/score/src/trace.rs:61`) |
+| Axis                                        | Values                                                                                                                                                                                                                                                                                                                   | Recorded as                                                               |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------- |
+| **Mode**: what the prediction conditions on | in-sample (parameters fitted to the predicted rows); one step ahead (parameters exclude the predicted row; state filtered through every earlier row, so its lead is the time since the last assimilated row of any stream, which varies); fixed origin (state conditioned up to the forecast origin, free-running after) | the plan's `mode`                                                         |
+| **Parameter uncertainty**                   | one plug-in point, or a mixture over posterior draws                                                                                                                                                                                                                                                                     | the trace's `Provenance`                                                  |
+| **Numerical method**                        | particle filter, ODE skeleton plus observation noise                                                                                                                                                                                                                                                                     | the trace's `basis` (`PredictiveBasis`, `rust/crates/score/src/trace.rs`) |
 
 A free-running projection from the start of the run is a fixed-origin forecast
 whose origin is the run's start and whose state set is empty, not a fourth mode;
 its parameters remain conditioned on the training rows. No value on one axis
-implies a value on another. The three `fit predict` modes (free-forward,
-one-step, forecast) are three settings of the conditioning rule; they stay
-separate on the command line in this migration (D50).
+implies a value on another. The three `camdl predict` modes (free-forward,
+one-step, forecast) are three settings of the conditioning rule; they are three
+values of `--mode` (D50).
 
 ## Part 3. Type design
 
-![Figure 4: the compiler and IR are unchanged by this design; in the runtime, one row reader produces rows with their periods, the training partition is built from them and written to the fit record, the forecast plan reads the partition and the filter's record of what it assimilated, and the engines receive plain numbers.](figures/temporal-layers.svg)
+![Figure 3: the compiler and IR carry resolved numbers; in the runtime, one row reader produces rows with their periods, the training partition is built from them and written to the fit record, the forecast plan reads the partition and the filter's record of what it assimilated, and the engines receive plain numbers.](figures/temporal-layers.svg)
 
-_Figure 4. Layers, seams and ownership._ The new types form a thin band between
-the IR and the engines. Each is built at one boundary; the engines see only
-`f64` vectors through the existing `Schedule` and `StreamTimes::closes` seams.
+_Figure 3. Layers, seams and ownership._ The temporal types form a thin band
+between the IR and the engines. Each is built at one boundary; the engines see
+only `f64` vectors through the existing `Schedule` and `StreamTimes::closes`
+seams.
 
-Four runtime types are added or extended. For each: what it represents, the
-invalid state it removes, who builds it, who reads it, and how it is stored.
-Field names are illustrative; the meanings are normative.
+Four runtime types carry the design. For each: what it represents, the invalid
+state it removes, who builds it, who reads it, and how it is stored. Field names
+are illustrative; the meanings are normative.
 
 ### 3.1 `ObservedRow`: one data row, with what it measures
 
@@ -312,9 +269,9 @@ impl Measures { pub fn start(&self) -> f64; pub fn end(&self) -> f64; }
 - **Removes:** any comparison of a label with a cutoff. `label` is a plain
   field, the time cell in model time, and is read only where the file's own time
   is the answer: writing the time column back to a file, the time column of
-  `fit predict`'s tables, naming the row in a refusal, and the check that no row
-  is labelled before the run starts. No training, scoring or anchoring decision
-  reads it; those read `measures`.
+  `camdl predict`'s tables, naming the row in a refusal, and the check that no
+  row is labelled before the run starts. No training, scoring or anchoring
+  decision reads it; those read `measures`.
 - **Why the existing types do not suffice:** `StreamTimes` holds periods per
   stream but is built after the training cut, from rows whose only time is the
   label.
@@ -326,7 +283,7 @@ impl Measures { pub fn start(&self) -> f64; pub fn end(&self) -> f64; }
   (E350).
 - **Read by:** the likelihood loader (`runner::load_observations`), the stream's
   periods (`pfilter::stream_times_of_rows`), the training partition, the row
-  digest. The forecast plan will (Phase B).
+  digest, and the forecast plan (`forecast_plan::PlanStream`).
 - **Stored:** in memory only.
 
 ### 3.2 `TrainingPartition`: which rows the parameters were fitted to
@@ -377,16 +334,20 @@ that answers it.
 - **Invariant:** for each stream the training rows are a prefix. Ends increase
   strictly, so the rule in §4.1 always yields a prefix; the constructor checks
   it rather than assuming it.
-- **Built by:** `fit run` and `profile --fit`, through the two constructors only
+- **Built by:** `fit run` and `profile`, through the two constructors only
   (`runner::cutoff_partition` and `runner::whole_partition` wrap them and word
-  the refusals). **Read by:** `compare`, which checks each stream's recorded
-  prefix digest against the data it reads and scores the rows past the prefix.
-  `fit predict` and the forecast plan will read it (Phase B); there is no
-  `camdl score` command yet.
-- **Stored:** in `fit.meta.json`, for every fit, replacing `training_window`
-  (`TrainingPartitionRecord`, `run_meta.rs`). `rule_version` is
-  `PARTITION_RULE_VERSION`, the version of the rule that decides membership
-  (§5.4); a `date` is present when the model has an `origin`:
+  the refusals). **Read by:** `camdl predict`, in every mode, through
+  `TrainingPartition::read`, which refuses data whose leading rows no longer
+  digest to the recorded prefix; a predicted row's `role` is its position
+  against its stream's prefix (`RowRole::of_data_row`). The forecast plan takes
+  its parameter set and its origin from the partition read this way.
+  `pfilter --save-final-state` cuts its streams by the same rule
+  (`training_partition::cutoff_prefix`).
+- **Stored:** in `fit.meta.json`, for every fit (`TrainingPartitionRecord`,
+  `run_meta.rs`), and copied as `parameter_set` into `predictive.json` and
+  `forecast.json`. `rule_version` is `PARTITION_RULE_VERSION`, the version of
+  the rule that decides membership (§5.4); a `date` is present when the model
+  has an `origin`:
 
 ```json
 "training_partition": {
@@ -399,8 +360,12 @@ that answers it.
 
 ### 3.3 `ForecastPlan`: what is to be predicted
 
-_Not yet built (Phase B)._ None of these types exists; the sketch is the design
-the plan's Stage 5 builds. `StateConditioning` holds `RowPrefix` (§3.2).
+Types are in `rust/crates/cli/src/fit/forecast_plan.rs` (crate-private).
+`StateConditioning` holds `RowPrefix` (§3.2); it is built by the forecast driver
+(`fit/forecast_driver.rs`) and returned with the forecast, beside the plan. Only
+a fixed-origin forecast on the chain-binomial backend builds a plan; the plan in
+the code has no `mode`, `notes` or `required_times`, and `StateConditioning` has
+only its `Filtered` variant.
 
 ```rust
 pub struct ForecastPlan {
@@ -434,18 +399,16 @@ impl ForecastPlan {
   that filtered through held-out rows presented as a forecast.
 - **The seam:** every predictive command builds one plan and hands the engine
   `required_times()` and, per target, its start and end. Flow over a target is
-  the difference of the stream's cumulative projection at those two times, which
-  is how `fit predict` already computes bands
-  (`rust/crates/cli/src/fit/predict.rs:1990-2105`). No engine's inner loop
-  changes.
+  the difference of the stream's cumulative projection at those two times. No
+  engine's inner loop changes.
 - **Targets are declared before filtering:** `ForecastPlan::new` turns every
   target into a declared period of its stream before the filter runs, and the
   forecast driver reads a stream's running total only at the end of a period the
   plan declared. Callers do not declare periods. The reason is measured: a
   stream's running total is reset only where a declared period starts
-  (`multi_stream_obs.rs:1332-1360`), so if the week under way is not declared,
-  the total at the origin covers the previous week as well and the prediction is
-  wrong without any error (§4.4).
+  (`MultiStreamObsModel::reset_due_acc`), so if the week under way is not
+  declared, the total at the origin covers the previous week as well and the
+  prediction is wrong without any error (§4.4).
 - **Who may build the conditioning fields:** `parameters` is read only from a
   fit record whose prefix digests verify against the data read. `state` is built
   only from what the filter or path sampler returns; no caller passes it in. A
@@ -525,10 +488,10 @@ is hashed into the row digest. It is not an observation, so under
 no training rows, and a cutoff whose held-out rows are all `NA` is refused as
 holding out nothing.
 
-For `closing_at` and window-column streams the label is the period's end, so
-this rule trains exactly the rows today's label rule trains, and their fits are
-unchanged. For `day`, `starting_on` and `ending_on` streams the row whose period
-straddles the cutoff stops training.
+For `closing_at` and window-column streams the label is the period's end, so a
+rule that compared labels with the cutoff would train the same rows. For `day`,
+`starting_on` and `ending_on` streams it would not: the row whose period
+straddles the cutoff is held out, although its label is at or before the cutoff.
 
 ### 4.2 Which rows a held-out score scores
 
@@ -541,16 +504,15 @@ on which other streams the fit binds. Under `[data.holdout]` the fit refuses a
 holdout row that ends at or before the training extent (§4.1), so the extent
 condition removes no row there either. A `[data.holdout]` fit whose training
 file has rows past its recorded prefix is refused, since those rows lie in the
-window the score treats as held out. `compare` is the one reader of the
-partition; `--in-sample` scores the fit as the in-sample trace it is. A row
-whose period overlaps another stream's training days is scored: the row itself
-was never fitted, and overlap with other streams' data is the ordinary condition
-of every multi-stream score.
+window the score treats as held out. `camdl score` refuses an outcome file whose
+leading rows differ, by row digest, from the rows the prediction conditioned on
+(`score_command::check_agreement`), and `camdl compare` reads stored scores;
+`compare --in-sample` compares the training rows as the in-sample scores they
+are. A row whose period overlaps another stream's training days is scored: the
+row itself was never fitted, and overlap with other streams' data is the
+ordinary condition of every multi-stream score.
 
 ### 4.3 Where targets come from
-
-_Not yet built (Phase B)._ There is no forecast plan, target list or
-fixed-origin driver in the code.
 
 For each stream, one function builds the targets after the forecast origin
 (D80):
@@ -586,15 +548,12 @@ time.
 The most common gap between observations is never a target source. The horizon
 only truncates the list.
 
-Calendar-month and standard-week periods cannot be declared until the calendar
-`covers` forms of the follow-up proposal land (D45). Until then a monthly stream
-must use window columns and is refused a forecast tail; a 30-day step would be a
-different target.
+Calendar-month and standard-week periods cannot be declared as a uniform
+`covers` form (D45). A monthly stream therefore uses window columns, and its
+targets come from rule 2 or 3 or it is refused (rule 4); a 30-day step would be
+a different target.
 
 ### 4.4 Computing a target's value
-
-_Not yet built (Phase B)._ There is no forecast plan, target list or
-fixed-origin driver in the code.
 
 **Stochastic models (chain-binomial, under PMMH or PGAS).** For each posterior
 parameter draw, the forecast driver runs the existing bootstrap particle filter
@@ -615,8 +574,7 @@ inferred flow before the origin plus its simulated flow after it. The part
 before the origin is a latent quantity conditioned on the other streams'
 observations through the origin, not a known value. The stream's own row for
 that period cannot enter the filter before the period ends, and predictions are
-drawn before any reweighting at that step (`multi_stream_obs.rs:1316-1324`,
-`particle_filter.rs:432-457`).
+drawn before any reweighting at that step.
 
 This was checked by experiment on a chain-binomial SIR with a daily and a weekly
 incidence stream, forecast origin day 24, target week days 21–27, fixed
@@ -631,14 +589,16 @@ parameters:
 With matched random streams, stopping at day 24 and continuing was bit-identical
 to running through (12 of 12 particle comparisons), so the flow before the
 origin is neither reset nor counted twice. The prior mean is 123.1, so the daily
-data's conditioning is doing real work. The experiment checked the latent flow;
-the predictive distribution of the reported count, with its observation noise,
-is checked by the migration plan's Stage 5 tests.
+data's conditioning is doing real work. The test
+`the_week_under_way_matches_the_importance_sampling_reference`
+(`rust/crates/cli/src/fit/forecast_driver_tests.rs`) repeats the comparison
+through the forecast driver, for the latent flow and for the reported count with
+its observation noise.
 
 **ODE models.** The state is fixed by the parameters; a flow target over
 `[a, b)` is the difference of the cumulative flow at `b` and `a` on each
 posterior draw's trajectory, both recorded snapshot times, plus a draw from the
-observation model.
+observation model. ODE forecasts are unsupported (§2.4).
 
 **How far the run goes.** A forecast runs to the latest end among its targets,
 even past the model's `simulate { to }`, and builds its intervention plan to
@@ -666,8 +626,10 @@ forecast, every exposed sample is a complete trajectory.
 the draws. The log score needs the predictive density at the observed value,
 `log p̂(y) = logsumexp_i log p(y | x_i, θ_i) − log N` over equally weighted
 particles, evaluated with the same likelihood code as fitting and before the
-observation could be assimilated. How Stage 6 evaluates it is an implementation
-choice that does not change what a forecast is (D56).
+observation could be assimilated. The filter records each particle's
+log-likelihood of a target's held-out value without letting it enter any weight,
+and `camdl score` takes the log score from those records
+(`fit/forecast_score.rs`), so scoring a forecast does not change it (D56).
 
 **Restarts.** `simulate --init-state` restores compartment counts only, not the
 running totals or which period each belongs to. It therefore refuses to emit a
@@ -716,7 +678,8 @@ config blob), and every `run.json` such a command writes records it as
 `forcing_extrapolation: {allowed: true, held: [...]}`, each held entry giving
 the forcing, the range it is defined on, the side and the value held. A run
 without the override records nothing: it held nothing, or it was refused before
-it committed. The score artifact will record it too (Phase B).
+it committed. `score.json` records, as `forcings_held`, each forcing held while
+the prediction was computed again.
 
 The check reads the values the run actually evaluated, not the run's time span:
 a forcing referenced only under a condition that is never true past its range
@@ -758,10 +721,10 @@ computed over the full data files, because they define the split
 rows only, so appending held-out rows never changes a fit's end time or its
 identity. A fit prints a note, once, naming any stream whose last observation is
 more than one of its own periods before `last_obs` (`runner::partition_lines`),
-so a stream that stopped reporting is visible. The same note for a forecast, and
-`fit
-predict`'s free-forward grid (whose `last_obs` is still the largest label
-over the full file), come with the forecast plan in Phase B.
+so a stream that stopped reporting is visible. A forecast prints no such note.
+`camdl predict --mode free_forward` builds no forecast plan: past a stream's
+data, its grid continues the most common gap between the stream's observation
+times (`fit::predict::forecast_times`).
 
 ## Part 5. Boundaries, artifacts and identity
 
@@ -775,17 +738,16 @@ over the full file), come with the forecast plan in Phase B.
   `date_range(…,
   calendar_months = n)` computes each date from its start. It
   lowers every temporal expression to model time.
-- **The IR** already carries what the runtime needs: the calendar axis
-  (`time_unit`, `origin`, `origin_rata_die`), each stream's `covers`, column
-  roles, emit schedules and forcing knot times. Phase A changed no IR field; the
-  calendar `covers` forms (D45) are the next IR change.
+- **The IR** carries what the runtime needs: the calendar axis (`time_unit`,
+  `origin`, `origin_rata_die`), each stream's `covers`, column roles, emit
+  schedules and forcing knot times. It has no calendar `covers` form (D45).
 - **The runtime** owns everything about data, fits and forecasts. Each runtime
   type is built at one boundary, and the engines receive `f64` vectors. The CLI
-  time grammar (`parse_time_spec`, `rust/crates/cli/src/fit/runner.rs:2240`)
-  stays the runtime's one parser for times a user types, including
-  `--horizon
-  "4 weeks"`; its months and years are affine spans, as the IR's
-  are, and it accepts no calendar-month horizon.
+  time grammar (`runner::parse_time_spec`) is the runtime's one parser for times
+  a user types; `--horizon "4 weeks"` is read by `forecast_plan::parse_reach`,
+  with the same unit words (`runner::canonical_duration_unit`). Without an
+  `origin` their months and years are affine spans, as the IR's are; under an
+  `origin` a calendar-month or year horizon is refused.
 
 ### 5.2 Invariants and who enforces them
 
@@ -797,16 +759,17 @@ constructor refuses it.
 | A calendar duration shifts an instant only through `add_calendar_*`, in every position | `ocaml/lib/compiler/time_typing.ml`                | static                                                                    |
 | Instant arithmetic follows `docs/dates.md`, "Three concepts"                           | `time_typing.ml`                                   | static                                                                    |
 | `date_range` calendar stepping is computed from its start                              | `ocaml/lib/compiler/expander.ml`                   | static                                                                    |
-| A period has finite, increasing endpoints                                              | `Period::new`                                      | checked (exists)                                                          |
+| A period has finite, increasing endpoints                                              | `Period::new`                                      | checked                                                                   |
 | A row's period is computed in one place                                                | `observed_rows`                                    | static (only producer)                                                    |
 | Training is decided on periods, never labels                                           | `TrainingPartition::from_cutoff`                   | static (no label input)                                                   |
 | Training rows are a prefix of each stream                                              | `TrainingPartition`                                | checked                                                                   |
-| A held-out score's fitted rows digest to the fit's prefix                              | `compare` (`training_scoring_ends`)                | checked                                                                   |
-| Targets end after the origin, do not overlap, and stay within the horizon (Phase B)    | `ForecastPlan::new`                                | checked                                                                   |
+| A prediction's fitted rows digest to the fit's prefix                                  | `TrainingPartition::from_record`                   | checked                                                                   |
+| A score's outcome file begins with the rows the prediction conditioned on              | `camdl score` (`check_agreement`)                  | checked                                                                   |
+| Targets end after the origin, do not overlap, and stay within the horizon              | `ForecastPlan::new`                                | checked                                                                   |
 | Every running total read for a prediction belongs to a period the plan declared        | `ForecastPlan::new` and the forecast driver        | static (the driver declares the periods before filtering; callers cannot) |
 | No observed row ending after the origin reaches the filter                             | forecast driver                                    | checked (a likelihood increment after the origin fails a test)            |
-| A restart never emits a period that began before it                                    | `simulate --init-state`                            | checked (refusal)                                                         |
-| Conditioning fields come from the fit record and the filter, not a caller              | `ForecastPlan` constructor visibility              | static                                                                    |
+| A restart never emits a period that began before it                                    | `obs_emit::refuse_period_under_way`                | checked (refusal)                                                         |
+| Conditioning fields come from the fit record and the filter, not a caller              | `ForecastPlan::new`, `forecast_driver`             | static                                                                    |
 | A period is never moved to fit a step grid                                             | alignment check                                    | checked (refusal)                                                         |
 | A time function outside its range is an error unless overridden                        | `sim::forcing_range`, `cli::forcing_extrapolation` | checked                                                                   |
 | A rendered date parses back to the same model time                                     | `CalendarAxis`                                     | checked (property test, `ir/tests/calendar_axis_roundtrip.rs`)            |
@@ -818,44 +781,36 @@ Every artifact that carries a model time carries the `CalendarAxis` once, and
 names each instant as `{t, date}`, with `date` recorded or explicitly "not
 recorded" for a model without an origin.
 
-- **Run record** (`run.json`, every kind): carries `calendar` (built).
-- **Fit record** (`fit.meta.json`): `training_partition` replaces
-  `training_window`; gains `calendar` (built).
-- **Predictive artifacts** (not yet built, Phase B) (`fit predict`,
-  `simulate --init-state`): the plan (mode, forecast origin, horizon, both
-  information sets, notes) in the JSON; per row in the TSV, a `role` (`trained`,
-  `held_out`, `target`), the period (`t_start`, `t_stop`, and dates when the
-  model has an origin), and for targets `horizon` and `lead`.
-- **Score artifact** (`2026-11-14-score-artifact.md`; not yet built, Phase B):
-  its lead-time type gains a fixed-origin variant carrying the forecast origin;
-  each scored target records its horizon and lead; scores are kept per forecast
-  date and horizon and never pooled across horizons (D35); the fit's
-  conditioning travels with the score.
+- **Run record** (`run.json`, every kind): carries `calendar`.
+- **Fit record** (`fit.meta.json`): carries `training_partition` and `calendar`.
+- **Predictive artifacts** (`camdl predict`, `simulate --init-state`): the plan
+  (mode, forecast origin, horizon, both information sets, notes) in the JSON;
+  per row in the TSV, a `role` (`trained`, `held_out`, `target`), the period
+  (`t_start`, `t_stop`, and dates when the model has an origin), and for targets
+  `horizon` and `lead`.
+- **Score artifact** (`camdl score`; `2026-11-23-prediction-and-scores.md`):
+  each scored target records the forecast origin, its horizon and its lead;
+  scores are kept per forecast date and horizon and never pooled across horizons
+  (D35); the fit's conditioning travels with the score.
 
 ### 5.4 Identity
 
-The training rule is part of a fit's identity: a `holdout_after` fit on a start-
-or day-labelled stream trains on different rows after this change, so it must
-re-key. Each change to identity bumped `HASH_VERSION` (the old store's encoder;
-D58, which supersedes D47's single shared bump): the removal of `obs_alignment`
-from the fit identity is the bump from 3 to 4, and the bump from 4 to 5 covers
-two changes together, the training rule (rows decided by period, `last_obs` read
-over training rows) and the forcing-extrapolation override entering the identity
-of `simulate`, `pfilter` and `profile` runs. The score-artifact proposal's
-identity step will be a later bump.
+The training rule is part of a fit's identity: a change to which rows train
+changes the rows a fit is fitted to, so it re-keys the fit. The forcing-
+extrapolation override is part of the identity of `simulate`, `pfilter` and
+`profile` runs (§4.6).
 
 A fit problem's identity holds each data file's training lines and each stream's
 held-out dates without their values (`fit_store::FitProblemIdentity`), so two
 partitions of one file pose two problems and a held-out value is in no identity.
 The partition record carries the rule's version (`PARTITION_RULE_VERSION`) and
-each stream's training row digest. A forecast plan's mode, origin, horizon and
-target list will be identity for any stored predictive or score result; its
-notes are presentation (Phase B).
+each stream's training row digest. A forecast's mode, horizon and target list
+are part of the prediction's identity (`fit::predict::PredictOptions`, whose
+`ForecastKey` holds `ForecastPlan::targets_digest`, the design mode and the
+covariate statements); its origin is fixed by the fit it reads; notes are
+presentation.
 
 ### 5.5 Names
-
-Forecast origin, horizon and lead time name Phase B concepts; the code has no
-such types yet.
 
 | Concept                                                                     | Name                                         | Not to be called                                          |
 | --------------------------------------------------------------------------- | -------------------------------------------- | --------------------------------------------------------- |
@@ -868,7 +823,7 @@ such types yet.
 | a target's count of its stream's periods from the one containing the origin | horizon                                      | "step"; a hub's horizon, which export computes separately |
 | how far ahead a forecast reaches, as a duration (`--horizon "4 weeks"`)     | horizon (on the command line)                | —                                                         |
 | the duration from the forecast origin to a target's end                     | lead time                                    | —                                                         |
-| the predictive mode flag of `fit predict`                                   | `--mode`                                     | `--horizon`                                               |
+| the predictive mode flag of `camdl predict`                                 | `--mode`                                     | `--horizon`                                               |
 | the count of scored rows in `compare`                                       | scored steps                                 | horizon                                                   |
 
 ## Part 6. Worked examples
@@ -884,16 +839,11 @@ train (ends 1–24); weekly rows 7, 14 and 21 train (ends at or before 24). The
 extent is 24. Weekly row 28, covering days 21–27, did not train and is scored,
 like every daily row from 24 on.
 
-**A monthly series** (not yet built, Phase B). Window-column rows ending at days
-31, 59, 90, 120, 151 and 181, no `emit_schedule`. A forecast is refused: "stream
-'cases' states its periods per row and declares no `emit_schedule`; forecast
-targets need a declared rhythm". Today `fit predict` predicts at 211, 241, …
-where the month-ends are 212, 243, ….
-
-**A forecast origin before conditioned data (invalid; Phase B).** The state was
-filtered through rows ending at day 40, and the user asks for a forecast origin
-of day 35. Refused: "the forecast origin, day 35, is earlier than data the state
-was conditioned on (through day 40)".
+**A monthly series.** Window-column rows ending at days 31, 59, 90, 120, 151 and
+181, no `emit_schedule`, no held-out rows. A forecast is refused: "stream
+'cases' is refused a forecast: its rows state their own windows (window_start /
+window_stop), so there is no rule that says which period comes next", followed
+by the two ways to declare one.
 
 **A period moved by a grid (invalid).** PGAS, `simulate { from = 0.5 'days }`,
 `dt = 1 'days`, a `closing_at(time, 2 'days)` stream with labels 3, 5, 7. The
@@ -906,14 +856,14 @@ through day 100, a run to day 130: an error naming the forcing, its range (up to
 day 100) and that the run evaluated it after its last data point, unless
 `--allow-forcing-extrapolation` is given, in which case the run warns, naming
 the span held (from day 100 to the end of the run), and records it in
-`run.json`. A forecast from origin day 60 will additionally record that the
-forcing's values over days 60–100 were read after the forecast origin (Phase B).
+`run.json`. A forecast from origin day 60 that reads the forcing over days
+60–100 is refused until the forcing has a `--covariate` statement (§4.6).
 
 ## Part 7. Deferred, and why this design does not block it
 
 | Later work                                                            | What it adds                                                                                            | Why nothing here is rewritten                                                                                                            |
 | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| Calendar `covers` forms (D45, the immediate follow-up)                | `month(time)`, `iso_week(time)`, `mmwr_week(time)`; a load-time check that labels fall on the right day | a calendar width is one more declared tiling (§4.3, case 2); one IR variant                                                              |
+| Calendar `covers` forms (D45)                                         | `month(time)`, `iso_week(time)`, `mmwr_week(time)`; a load-time check that labels fall on the right day | a calendar width is one more declared tiling (§4.3, case 2); one IR variant                                                              |
 | Aggregated targets                                                    | weekly targets from a daily stream                                                                      | a target is a stream and a period; an aggregate is a new target kind beside it                                                           |
 | Observation identity across datasets                                  | a key per row independent of position                                                                   | consumers read membership only through `RowPrefix` and `TrainingPartition::rows`; a key set can replace the count behind the same method |
 | Data vintages and `as_of` reconstruction                              | "the data as known at the forecast origin"                                                              | the two information sets are already separate; a vintage becomes one more field of `RowPrefix`                                           |
