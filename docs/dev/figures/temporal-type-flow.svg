@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 520" role="img" aria-labelledby="t d">
+  <title id="t">The types a forecast passes through, and what each rules out</title>
+  <desc id="d">Six steps from top to bottom. The row reader produces ObservedRow values with what each row measures. The fit builds a TrainingPartition from them, a row count and a digest per stream, and records it in fit.meta.json. A later command reads the partition back, checked against the data. ForecastPlan takes its origin from the partition and lists the targets. The forecast driver runs a particle filter per parameter draw over the training rows and the targets. camdl score scores each target against an outcome row. Beside each step is the invalid state it rules out.</desc>
+  <defs>
+    <marker id="ttf-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" class="ahf"/>
+    </marker>
+  </defs>
+  <style>
+    text { font: 12px -apple-system, "Helvetica Neue", Helvetica, Arial, sans-serif; fill: #1d1f21; }
+    .b { font-weight: 600; }
+    .mut { fill: #5d6166; }
+    .sm { font-size: 11px; }
+    .hd { font-size: 11px; font-weight: 600; fill: #5d6166; letter-spacing: .04em; }
+    .new { fill: #ece2f7; stroke: #6b3fa0; stroke-width: 1.3; }
+    .ar { stroke: #1d1f21; stroke-width: 1.3; fill: none; }
+    .ahf { fill: #1d1f21; }
+    @media (prefers-color-scheme: dark) {
+      text { fill: #e3e4e6; }
+      .mut, .hd { fill: #a0a4aa; }
+      .new { fill: #34274a; stroke: #c09cf0; }
+      .ar { stroke: #e3e4e6; }
+      .ahf { fill: #e3e4e6; }
+    }
+  </style>
+
+  <text x="20" y="20" class="hd">TYPE OR RECORD</text>
+  <text x="350" y="20" class="hd">WHAT IT RULES OUT</text>
+
+  <rect x="20" y="34" width="310" height="50" rx="6" class="new"/>
+  <text x="34" y="55" class="b">ObservedRow, Measures</text>
+  <text x="34" y="72" class="mut sm">one data row and the instant or period it measures</text>
+  <text x="350" y="55" class="sm">a training or scoring decision made from a row's label:</text>
+  <text x="350" y="71" class="sm">the reader computes Measures once, and later code reads only that</text>
+  <path d="M175,84 L175,115" class="ar" marker-end="url(#ttf-ah)"/>
+  <text x="187" y="105" class="mut sm">TrainingPartition::from_cutoff / whole</text>
+  <rect x="20" y="118" width="310" height="50" rx="6" class="new"/>
+  <text x="34" y="139" class="b">TrainingPartition</text>
+  <text x="34" y="156" class="mut sm">per stream, a RowPrefix: a row count and a digest</text>
+  <text x="350" y="139" class="sm">a row on both sides of the split, or a split with gaps:</text>
+  <text x="350" y="155" class="sm">a row trained exactly when its position is below the count</text>
+  <path d="M175,168 L175,199" class="ar" marker-end="url(#ttf-ah)"/>
+  <text x="187" y="189" class="mut sm">record()</text>
+  <rect x="20" y="202" width="310" height="50" rx="6" class="new"/>
+  <text x="34" y="223" class="b">fit.meta.json: training_partition</text>
+  <text x="34" y="240" class="mut sm">the partition as the fit recorded it</text>
+  <text x="350" y="223" class="sm">a later command deriving a different split: read() takes the</text>
+  <text x="350" y="239" class="sm">recorded counts and refuses rows that no longer match the digest</text>
+  <path d="M175,252 L175,283" class="ar" marker-end="url(#ttf-ah)"/>
+  <text x="187" y="273" class="mut sm">TrainingPartition::read</text>
+  <rect x="20" y="286" width="310" height="50" rx="6" class="new"/>
+  <text x="34" y="307" class="b">ForecastPlan, Target</text>
+  <text x="34" y="324" class="mut sm">the origin and every stream's targets</text>
+  <text x="350" y="307" class="sm">an origin other than the training extent (new() takes no origin);</text>
+  <text x="350" y="323" class="sm">a target, or its held-out row, ending at or before the origin</text>
+  <path d="M175,336 L175,367" class="ar" marker-end="url(#ttf-ah)"/>
+  <text x="187" y="357" class="mut sm">fixed_origin_forecast</text>
+  <rect x="20" y="370" width="310" height="50" rx="6" class="new"/>
+  <text x="34" y="391" class="b">forecast driver: StateConditioning</text>
+  <text x="34" y="408" class="mut sm">one particle filter per parameter draw</text>
+  <text x="350" y="391" class="sm">a row after the origin changing a weight: held-out values enter</text>
+  <text x="350" y="407" class="sm">as ObsCell::HeldOut, which the filter evaluates and never assimilates</text>
+  <path d="M175,420 L175,451" class="ar" marker-end="url(#ttf-ah)"/>
+  <text x="187" y="441" class="mut sm">held-out log-likelihoods, draws</text>
+  <rect x="20" y="454" width="310" height="50" rx="6" class="new"/>
+  <text x="34" y="475" class="b">camdl score</text>
+  <text x="34" y="492" class="mut sm">scores each target against its outcome row</text>
+  <text x="350" y="475" class="sm">outcomes from a different series: the outcome file must begin</text>
+  <text x="350" y="491" class="sm">with the rows the prediction conditioned on (checked by row digest)</text>
+</svg>
