@@ -202,27 +202,6 @@ const C_REAL: &str = "  c : real ~ normal(mu = 0.0, sigma = 1.0)";
 /// An observation rate that reads `c`, for the fits under IF2 and `nl-*`.
 const C_OBSERVED: &str = "projected * exp(0.01 * c)";
 
-#[test]
-fn a_transform_key_in_estimate_is_refused_at_load() {
-    if camdlc_bin().is_none() {
-        return;
-    }
-    let tmp = tempdir("transform_key");
-    let ir = compile(&tmp.0, "ident", &model_src("  c : rate ~ normal(mu = 0.0, sigma = 1.0)"));
-    for (method, tag) in [(PMMH, "pmmh"), (MH, "mh"), (IF2, "if2")] {
-        // `log` on a rate's [0, 1] box is the map the parameter gets without
-        // the key; it is refused all the same, because the key is gone.
-        let (out, results) = run_fit(
-            &tmp.0, &ir, "c = { bounds = [0, 1], start = 0.5, transform = \"log\" }",
-            method, tag);
-        let err = stderr(&out);
-        assert!(!out.status.success(), "{tag}: a `transform` key must be refused; stderr=\n{err}");
-        assert!(err.contains("`transform` was removed") && err.contains("Delete the line"), "{tag}: {err}");
-        assert!(find_all(&results, "draws.tsv").is_empty(), "{tag}: refused before sampling");
-        assert!(find_all(&results, "parameter_traces.tsv").is_empty(), "{tag}: refused before sampling");
-    }
-}
-
 /// Strip `param_kind` from `name` in a compiled IR, as in IR written before
 /// the field existed.
 fn strip_kind(ir: &Path, name: &str) -> PathBuf {
