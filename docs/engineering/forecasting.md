@@ -1,38 +1,52 @@
 # Forecasting and scoring
 
-camdl forecasts from the end of the data a fit was trained on, and scores the
-forecast against rows the fit did not see. The score is evidence about the model
-only if no held-out row helped to make the forecast. This page is for a
-developer changing how camdl splits data into training and held-out rows, builds
-a forecast, or scores one. It describes the concepts, the routes by which later
-data can reach a forecast, the types and checks that close each route, and how a
-forecast is scored.
+How well a model fits the data it was estimated from overstates how well it
+predicts new data, because the estimates adapt to the noise in those data as
+well as to their signal. A model with enough freedom can fit its training data
+closely and still forecast badly (Hyndman and Athanasopoulos 2021, §5.8). The
+standard check is to hold back the last part of a series, fit the model to the
+rest, forecast the part held back, and score the forecast against it. That score
+estimates the model's accuracy on data it was not fitted to. Set beside the
+in-sample score, it shows how much of the in-sample fit was overfitting, and
+compared across models it ranks them by how well they forecast. A held-out score
+on its own does not separate overfitting from a model whose dynamics are wrong,
+since both forecast badly; the gap between the two scores is what points to
+overfitting.
 
-Three subjects are covered elsewhere and only linked from here. How a model time
-relates to a date, what instant or period a data row measures, and how the
-`covers` declaration maps a row's label to a period are in
-[Dates and calendar time](../dates.md), under "The calendar axis", "Three
-concepts" and "What a data row means is not `date()`'s job". The files a
-prediction and a score write are in the
-[run specification](../camdl-run-spec.md), §2.2.2 and §2.2.4. The scoring rules
-and how to read a comparison of two models are in
-[Model comparison](../methods/model-comparison.md).
+The score measures any of this only if nothing from the held-back rows reached
+the fit or the forecast. A route by which they can is called _leakage_. This
+page is for a developer changing how camdl splits data into training and
+held-out rows, builds a forecast, or scores one. It describes the concepts, the
+routes by which held-out data can reach a forecast, the types and checks that
+close each route, and how a forecast is scored.
 
-The examples use one model throughout. Its `time_unit` is days. A stream
-`weekly` counts cases over seven days and declares
-`covers = closing_at(time, 7 'days)`, so the row labelled 42 counts days 35 to
-41 and ends at `t = 42`. The data file has ten rows, labelled 7, 14, …, 70. A
-second stream, `daily`, declares `covers = day(time)`, so its row labelled 23
-counts day 23 and ends at `t = 24`.
+Some related subjects are covered on other pages and only linked from here:
+
+- How a model time relates to a date, what instant or period a data row
+  measures, and how the `covers` declaration maps a row's label to a period:
+  [Dates and calendar time](../dates.md), under "The calendar axis", "Three
+  concepts" and "What a data row means is not `date()`'s job".
+- The files a prediction and a score write: the
+  [run specification](../camdl-run-spec.md), §2.2.2 and §2.2.4.
+- The scoring rules, and how to read a comparison of two models:
+  [Model comparison](../methods/model-comparison.md).
+
+Throughout this page the examples share one setup. The model counts time in days
+from `origin = date("2025-01-05")`, a Sunday, so day 42 is the start of 16
+February. A stream `weekly` counts cases per week. Its data file has ten rows,
+each labelled with the Saturday that ends its week, from 11 January to 15 March.
+The stream declares `covers = ending_on(time, 7 'days)`, so the row labelled 15
+February counts the cases of 9 to 15 February. Some examples add a second
+stream, `daily`, which counts cases per day and declares `covers = day(time)`,
+so its row labelled 28 January counts the cases of that day.
 
 ## 1. Concepts
 
 ### 1.1 Training and test data
 
-A forecasting method is evaluated on data it was not fitted to. The available
-series is separated into training data, which are used to estimate the
-parameters, and test data, which are used only to measure accuracy (Hyndman and
-Athanasopoulos 2021, §5.8). camdl calls the test rows _held out_.
+The available series is separated into training data, which are used to estimate
+the parameters, and test data, which are used only to measure accuracy (Hyndman
+and Athanasopoulos 2021, §5.8). camdl calls the test rows _held out_.
 
 In a time series the separation has to follow time order. A forecast made in
 practice has no observation later than the moment it is made, so an evaluation
@@ -40,82 +54,117 @@ measures the same thing only if every training row precedes every test row.
 Hyndman and Athanasopoulos (2021, §5.10) state the requirement for their
 cross-validation procedure: the training set "consists only of observations that
 occurred prior to the observation that forms the test set", so that "no future
-observations can be used in constructing the forecast". A random split of the
-rows breaks this. Parameters fitted to rows on both sides of a test row have
-been informed by what happened after it, and the score of that row then
-overstates how well the model forecasts.
+observations can be used in constructing the forecast". A test row chosen at
+random has training rows on both sides of it. Its score measures how well the
+model interpolates rather than how well it forecasts, and the parameters were
+fitted to rows from after it.
+
+The cutoff need not be near the end of the available data. Any past date gives a
+retrospective forecast, often called a backtest: the model is fitted to the rows
+before the date and scored on the rows after it. One cutoff gives one sample of
+forecast performance. A cutoff chosen after seeing how forecasts from several
+cutoffs scored has used the held-out rows to make a choice, which is a form of
+the leakage described in §2.
 
 The forecasting literature distinguishes two designs (Tashman 2000). A
 _fixed-origin_ evaluation splits the series once and forecasts every test period
 from the end of the training data. A _rolling-origin_ evaluation repeats the
 split at successive times and forecasts from each; Hyndman and Athanasopoulos
 (2021, §5.10) call it "evaluation on a rolling forecasting origin". camdl
-implements the fixed-origin design. A fit declares one split, and the split is
-always at the tail of the data:
+implements only the fixed-origin design so far, and §5 lists the rolling origin
+among what is not supported. A fit declares one split, and the split is always
+at the tail of the data:
 
 ```toml
 [data]
-holdout_after = 42        # model time; or a date, or "last_obs - 4 weeks"
+holdout_after = "2025-02-16"   # a date; or a model time (42); or "last_obs - 4 weeks"
 ```
 
-The value is an instant, the _cutoff_. A row trains if the end of what it
-measures is at or before the cutoff, so with the `weekly` stream the rows
-labelled 7 to 42 train and the rows labelled 49 to 70 are held out. The rule
-reads the end of the row's period, and never its label; "Which rows train under
-a holdout cutoff" in [Dates and calendar time](../dates.md) gives the cases
-where the two differ. A fit can name separate holdout files under
-`[data.holdout]` instead, and then every row of the training files trains. With
-either form, the _training extent_ is the latest end among the training rows of
-every stream; in the example it is `t = 42`. A rolling-origin evaluation is done
-by running one fit per cutoff, and no camdl command does that (§5).
+The value is an [instant](../dates.md#three-concepts), the _cutoff_. A date used
+as a cutoff is the instant that day begins, so `"2025-02-16"` is day 42. A row
+is used for training if the end of what it measures is at or before the cutoff.
+In the example the `weekly` rows labelled 11 January to 15 February are used for
+training, and the four rows labelled 22 February to 15 March are held out. The
+rule reads the end of the row's period and never its label; "Which rows train
+under a holdout cutoff" in [Dates and calendar time](../dates.md) gives the
+cases where the two differ. A fit can name separate holdout files under
+`[data.holdout]` instead, and then every row of the training files is used for
+training. With either form, the _training extent_ is the latest end among the
+training rows of every stream; in the example it is day 42. A rolling-origin
+evaluation can be done by running one fit per cutoff, and no camdl command does
+that (§5).
 
-### 1.2 Forecast origin, targets, horizon and lead time
+### 1.2 Forecast origin, forecast targets and lead time
 
 The _forecast origin_ is the instant after which a forecast uses no observation.
-In camdl it is the training extent, `t = 42` in the example.
-[`ForecastPlan::new`](rust:cli::fit::forecast_plan::ForecastPlan::new) has no
-origin argument and reads the extent of the training partition it is given. The
-model's `origin` declaration is a different thing, the calendar date of `t = 0`.
-Prose and messages write "forecast origin" in full; only the fields and methods
-of the forecast modules shorten it to `origin`.
+In camdl it is the training extent: day 42, the start of 16 February, in the
+example. [`ForecastPlan::new`](rust:cli::fit::forecast_plan::ForecastPlan::new)
+has no origin argument and reads the extent of the training partition it is
+given. (Note that the model's `origin` declaration is a different thing, the
+calendar date of day 0. Prose and messages write "forecast origin" in full; only
+the fields and methods of the forecast modules shorten it to `origin`.)
 
-A _target_ is one stream's period, or instant, that the forecast predicts. A
-target exists whether or not an observation of it exists.
-[`Target`](rust:cli::fit::forecast_plan::Target) holds the stream, the period,
-and two measures of how far ahead it is.
+A forecast predicts a list of _forecast targets_. A forecast target is one
+period of one stream, of the same kind as the periods the stream's data rows
+measure: a week for `weekly`, a day for `daily`. For a stream that reads the
+state at instants, a target is an instant. A target exists whether or not an
+observation of it exists. How many targets a forecast has therefore depends on
+the interval at which each stream reports as well as on how far the forecast
+reaches.
 
-The _lead time_ is the duration from the forecast origin to the end of the
-target, in model time units. The _horizon_ is an integer: the target's position
-among its stream's targets, where horizon 0 is the first target that ends after
-the origin. A weekly stream counts weeks and a daily stream counts days, each
-from its own declaration.
+`--horizon` sets how far the forecast reaches. It is a duration, such as
+`"4 weeks"` or `"28 days"`, and the forecast predicts every target of every
+stream that ends within that duration of the origin
+([`parse_reach`](rust:cli::fit::forecast_plan::parse_reach)). With
+`holdout_after = "2025-02-16"` and `--horizon "4 weeks"`, the `weekly` stream
+has four targets:
 
-<!-- figure: forecasting-origin-and-targets, caption: One forecast of the `weekly` stream under `holdout_after = 42` and `--horizon "4 weeks"`. -->
+| Forecast target        | Position | Lead time |
+| ---------------------- | -------- | --------- |
+| week of 16–22 February | 0        | 7 days    |
+| week of 23 Feb – 1 Mar | 1        | 14 days   |
+| week of 2–8 March      | 2        | 21 days   |
+| week of 9–15 March     | 3        | 28 days   |
+
+A `daily` stream bound to the same fit would have 28 targets, one for each day
+from 16 February to 15 March, with lead times of 1 to 28 days. The reach only
+truncates each stream's list of targets. It does not move the origin and it does
+not define a period. A reach in months or years is refused for a model with a
+calendar `origin`, because a month counted from a forecast origin that is known
+only at run time has no fixed length; write it in weeks or days. Without an
+`origin`, a month is a fixed span of 30.44 days, so `--horizon "1 month"` would
+give the `weekly` stream the same four targets.
+
+Each target carries two measures of how far ahead it is.
+[`Target`](rust:cli::fit::forecast_plan::Target) holds both, with the stream and
+the period.
+
+- The _lead time_ is the duration from the forecast origin to the end of the
+  target, in model time units. It is comparable across streams.
+- The _position_ counts a stream's targets from 0, in the stream's own periods:
+  position 0 is the first target that ends after the origin. Position 2 is three
+  weeks ahead for `weekly` and three days ahead for `daily`, so positions are
+  comparable only within one stream. The field of `Target` and the column of a
+  forecast's output that hold it are both named `horizon`, the same word as the
+  flag, though they hold the position and not the reach.
+
+<!-- figure: forecasting-origin-and-targets, caption: One forecast of the `weekly` stream under `holdout_after = "2025-02-16"` and `--horizon "4 weeks"`. -->
 
 ```
-row label         7    14    21    28    35    42 |  49    56    63    70
-                [------- six training rows -------]|[h 0] [h 1] [h 2] [h 3]
-parameter set   <--------------------------------->|
-state set       <--------------------------------->|
-                                    forecast origin, t = 42
-lead (days)                                           7    14    21    28
+week ending       11 Jan … 8 Feb  15 Feb |  22 Feb   1 Mar   8 Mar  15 Mar
+                [---- six training rows --]|[pos 0] [pos 1] [pos 2] [pos 3]
+training rows     <----------------------->|
+conditioning rows <----------------------->|
+                          forecast origin, 16 Feb (day 42)
+lead (days)                                    7      14      21      28
 ```
 
 <!-- /figure -->
 
-On the command line, `--horizon "4 weeks"` is a duration, the _reach_: the
-forecast includes every target that ends within four weeks of the origin
-([`parse_reach`](rust:cli::fit::forecast_plan::parse_reach)). In the example the
-`weekly` stream gets the targets ending at 49, 56, 63 and 70, with horizons 0 to
-3 and leads of 7, 14, 21 and 28 days, and a daily stream bound to the same fit
-would get horizons 0 to 27. The reach only truncates the list of targets. It
-does not move the origin and it does not define a period.
-
-The word "horizon" therefore names two things in camdl, the reach on the command
-line and the index on a target. Hyndman and Athanasopoulos (2021, §5.8) use
-"forecast horizon" for the number of steps ahead, _h_, with the first future
-period at _h_ = 1. For a stream whose first target is a whole period, their
-_h_-step forecast is camdl's horizon _h_ − 1.
+Hyndman and Athanasopoulos (2021, §5.8) use "forecast horizon" for the number of
+steps ahead, _h_, with the first future period at _h_ = 1. For a stream whose
+first target is a whole period, their _h_-step forecast is camdl's position _h_
+− 1.
 
 The epidemic forecast hubs define a horizon by dates. In the CDC COVID-19
 Forecast Hub and in FluSight, a forecast has a `reference_date`, the Saturday
@@ -126,119 +175,67 @@ submission, and horizon −1 is the week before it, for which data usually exist
 The earlier US COVID-19 Forecast Hub named the unit in each target, with "N wk
 ahead" and "N day ahead" targets in one file (US COVID-19 Forecast Hub).
 
-camdl differs from the hubs in two ways. Its horizon is counted from the end of
-the data the fit trained on, and a hub's from the submission date, so the two
-agree only when the data are current. The CDC hub's README gives an example of
-its data timing: the release of 11 June 2025 holds data through the week ending
-7 June. Forecasts due that day have the reference date 14 June by the hub's
-rule, so their horizon 0 is the week of 8 to 14 June. A camdl forecast trained
-through 7 June has the same week as its horizon 0. If the same stream's data
-stopped a week earlier, camdl's horizon 0 would be the hub's horizon −1. The
-second difference is that camdl's horizon is never negative, because a target
-ends after the origin. A forecast converted to a hub format needs its hub
-horizon computed from each target's end date and the hub's reference date; camdl
-writes the end date and does not write a hub horizon.
+camdl's position differs from a hub horizon in two ways. First, it is counted
+from the end of the data the fit trained on, and a hub's horizon from the
+submission date, so the two agree only when the data are current. The CDC hub's
+README gives an example of its data timing: the release of 11 June 2025 holds
+data through the week ending 7 June. Forecasts due that day have the reference
+date 14 June by the hub's rule, so their horizon 0 is the week of 8 to 14 June.
+A camdl forecast trained through 7 June has the same week at position 0. If the
+same stream's data stopped a week earlier, camdl's position 0 would be the hub's
+horizon −1. Second, camdl's position is never negative, because a target ends
+after the origin. A forecast converted to a hub format needs its hub horizon
+computed from each target's end date and the hub's reference date; camdl writes
+the end date and does not write a hub horizon.
 
-### 1.3 A period under way at the origin
+### 1.3 What a forecast is conditioned on
 
-The forecast origin is the latest end among the training rows of every stream,
-so it can fall inside a period of a stream that reports less often. Bind both
-example streams and set `holdout_after = 24`. The `daily` rows labelled 0 to 23
-train, with ends 1 to 24. The `weekly` rows labelled 7, 14 and 21 train. The
-training extent is 24, and the `weekly` stream's week of days 21 to 27 began
-three days before it.
+A forecast from a state-space model depends on two unknowns that are estimated
+from the data: the model's parameters, and its latent state at the forecast
+origin, such as the number of people infectious at the start of 16 February.
+Each estimate is informed by some rows of data, and the two sets of rows need
+not be the same.
 
-<!-- figure: forecasting-two-cadences, caption: The `daily` and `weekly` streams under `holdout_after = 24`. Each stream counts horizons in its own periods. -->
-
-```
-day           14 ... 20 | 21  22  23 | 24  25  26  27 | 28 ... 34 | 35 ... 41
-daily         observed through day 23 | h0  h1  h2  h3   ...
-weekly        [ 14–20 ] [ happened    | simulated     ] [ 28–34  ] [ 35–41  ]
-                        [------- horizon 0 -----------] [  h 1   ] [  h 2   ]
-                                      forecast origin, t = 24
-```
-
-<!-- /figure -->
-
-That week is the `weekly` stream's horizon 0, with a lead of 4 days. It is
-predicted whole. The cases of days 21 to 23 have happened but the stream has not
-reported them, so they are a latent quantity: the particle filter has
-conditioned them on the `daily` rows through day 23. The cases of days 24 to 27
-are simulated. A forecaster on a hub faces the same kind of target when the week
-of submission is partly over; FluSight calls its horizon-0 prediction "a nowcast
-for the week of submission" (FluSight Forecast Hub).
-
-The mechanism is the per-stream running total each particle carries
-([`ParticleState::acc`](rust:sim::inference::types::ParticleState)). The total
-is copied with the particle on resampling and is reset only where a declared
-period of its stream starts. The forecast driver declares every target as a
-period of its stream before the filter runs, so at the end of the week the total
-holds that particle's count for days 21 to 23, as filtered, plus its simulated
-count for days 24 to 27. If the week were not declared, the total would not be
-reset at day 21 and would include the week of days 14 to 20 as well.
-
-This was measured on a chain-binomial SIR model with a daily and a weekly
-incidence stream, forecast origin day 24, target week days 21 to 27, at fixed
-parameters:
-
-| Method                                                                           | Mean of the weekly count | Variance      |
-| -------------------------------------------------------------------------------- | ------------------------ | ------------- |
-| Importance sampling from the prior, weighted by the daily data (2,000,000 draws) | 68.227 ± 0.034           | 189.84 ± 0.55 |
-| The filter with the target declared as a period                                  | 68.245 ± 0.021           | 190.41 ± 0.36 |
-| The same target not declared, so no reset at day 21                              | 256.951 ± 0.043          | 530.87 ± 1.07 |
-
-The prior mean of the weekly count is 123.1, so the daily rows change the answer
-by a factor of nearly two. The test
-`the_week_under_way_matches_the_importance_sampling_reference` in
-`rust/crates/cli/src/fit/forecast_driver_tests.rs` repeats the comparison
-through the forecast driver.
-
-A restart is a different case. `simulate --init-state` restores compartment
-counts and not the running totals, so it cannot write the row of a period that
-began before the restart.
-[`refuse_period_under_way`](rust:cli::obs_emit::refuse_period_under_way) refuses
-such a restart. A forecast does not go through a saved state: it filters from
-the start of the run, so its totals are always present.
-
-### 1.4 The parameter set and the state set
-
-A forecast from a state-space model is computed from two estimated quantities,
-the parameters and the latent state at the forecast origin. Each was informed by
-some rows of data, and the two sets of rows need not be the same.
-
-The _parameter set_ is the rows the parameters were fitted to: the training
-rows. The _state set_ is the rows the latent state at the origin was conditioned
+The _training rows_ are the rows the parameters were fitted to. The
+_conditioning rows_ are the rows the latent state at the origin was conditioned
 on. To condition the state on rows is to run a particle filter through them, so
 that the particles at the origin approximate the distribution of the state given
 those rows.
 
-The two sets answer different questions about a prediction, which is why they
-are recorded separately. Whether the parameters saw a row decides whether its
-score is in-sample. Whether the state saw the rows before it decides what kind
-of prediction it is: a one-step prediction of the row labelled 63 from a state
-filtered through the row labelled 56 is a legitimate forecast of one week, and
-it is not a forecast of three weeks from `t = 42`. Both sets are recorded per
-stream as a row count and a digest of those rows
-([`RowPrefix`](rust:cli::fit::training_partition::RowPrefix)).
+camdl records the two separately because they answer different questions about a
+prediction. Whether the parameters were fitted to a row decides whether that
+row's score is in-sample. Whether the state was conditioned on the rows before a
+row decides how far ahead the prediction of it is. A prediction of the week of 2
+to 8 March from a state conditioned on every row through 1 March is a forecast
+one week ahead, even though the parameters were fitted only through 15 February.
+It is not a forecast three weeks ahead from 16 February. Both sets of rows are
+recorded per stream as a row count and a digest of those rows
+([`RowPrefix`](rust:cli::fit::training_partition::RowPrefix)), and
+`forecast.json` writes them as `parameter_set` (the training rows) and
+`state_set` (the conditioning rows).
 
-For a fixed-origin forecast the two sets hold the same rows. The forecast driver
+For a fixed-origin forecast the two hold the same rows. The forecast driver
 filters through the training rows and checks that the rows it was given are the
-ones the parameter set records (§3.4). `forecast.json` still writes them as two
-fields, `parameter_set` and `state_set`. A state conditioned on rows newer than
-the fit, with the parameters left as fitted, would make the state set the larger
-one; camdl does not do this in a forecast (§5).
+training rows the fit recorded (§3.4). A state conditioned on rows newer than
+the fit, with the parameters left as fitted, would make the conditioning rows
+the larger set; camdl does not do this in a forecast (§5).
 
-### 1.5 The axes of a prediction
+### 1.4 Kinds of prediction
 
-Four properties describe a prediction, and each is recorded under its own name
-in the artifacts.
+Not every prediction camdl makes is a forecast. Four properties describe a
+prediction, and each is recorded under its own name in the artifacts:
 
-The first is the mode, the value of `camdl predict --mode`
-([`PredictModeArg`](rust:cli::args::types::PredictModeArg)). It says which rows
-the state was conditioned on.
+- the mode, which says which rows the state was conditioned on;
+- the role of each predicted row, which says whether the parameters were fitted
+  to it;
+- the treatment of the parameters: a posterior, or a single point;
+- the simulation backend, which limits which modes exist.
 
-- `free_forward` conditions on none. The model runs from the start of the run,
-  and the data reach the prediction only through the parameters.
+**Mode.** The mode is the value of `camdl predict --mode`
+([`PredictModeArg`](rust:cli::args::types::PredictModeArg)).
+
+- `free_forward` conditions on no rows. The model runs from the start of the
+  run, and the data reach the prediction only through the parameters.
 - `one_step` predicts each data row from a state filtered through every earlier
   row of every stream. Under `camdl predict` the filter walks the fit's stored
   training rows. Under `camdl score` it carries on through the outcome rows,
@@ -246,51 +243,76 @@ the state was conditioned on.
 - `forecast` conditions on the training rows up to the forecast origin and on no
   row after it. Passing `--horizon` without `--mode` selects it.
 
-The second is whether the parameters were fitted to the predicted row. This is a
-property of each row, independent of the mode, and it is the `role` column
+A `forecast`, and a `one_step` prediction of a held-out row, are forecasts in
+the sense of §1.1. A `one_step` prediction of a training row is what Hyndman and
+Athanasopoulos (2021, §5.3) call a fitted value. They note that "fitted values
+are often not true forecasts", because the parameters were estimated from all
+the observations, including those after the predicted one. A `free_forward`
+prediction over the training rows is in-sample in the same way.
+
+**Role.** Whether the parameters were fitted to the predicted row is a property
+of each row, independent of the mode. It is the `role` column
 ([`RowRole`](rust:cli::fit::predict::RowRole)): `trained`, `held_out`, `future`
 for a period the prediction read no data row for, or `unknown` for a parameter
-point with no record of its training rows. "In-sample" is a value of this axis
-and not a mode.
+point with no record of its training rows. "In-sample" is a value of this
+property and not a mode.
 
-The third is how the parameters enter
-([`TreatmentKind`](rust:cli::fit::predict::TreatmentKind)). A `posterior`
+**Parameter treatment.** How the parameters enter is recorded as
+[`TreatmentKind`](rust:cli::fit::predict::TreatmentKind). A `posterior`
 prediction runs once per posterior draw and pools the results, so its intervals
 include parameter uncertainty. A `plug_in` prediction uses one point, an
 optimizer's winner or a point given in a file, and its intervals include process
-noise and observation noise only.
+noise and observation noise only. They therefore cover the observed values less
+often than their nominal level when the parameters are poorly identified. A
+plug-in forecast is still a forecast, and a proper score evaluates it as one; it
+is likely to score worse than a posterior forecast of the same model for this
+reason.
 
-The fourth is the simulation backend, which limits the mode. On the
-chain-binomial backend the state is random given the parameters, so conditioning
-it on data changes the prediction, and all three modes exist. On the ODE backend
-the state is a deterministic function of the parameters. Conditioning it on rows
-changes nothing, the state set is always empty, and only `free_forward` exists.
-The Gillespie backend is not a fitting backend and runs no particle filter. A
-fixed-origin forecast of a fit on either of those two backends is refused by
-[`refuse_unsupported`](rust:cli::fit::forecast_output::refuse_unsupported).
+**Backend.** Two backends fit models. On the chain-binomial backend the state is
+random given the parameters, so conditioning it on data changes the prediction,
+and all three modes exist. On the ODE backend the state is a deterministic
+function of the parameters, so conditioning it on rows adds nothing the
+parameters do not already determine. A forecast of an ODE fit is still well
+defined: past the origin it is the trajectory each draw determines, read over
+the targets, with observation noise added. camdl does not implement it yet. A
+fixed-origin forecast of an ODE fit is refused by
+[`refuse_unsupported`](rust:cli::fit::forecast_output::refuse_unsupported), and
+the refusal points to `--mode free_forward`. The Gillespie backend simulates but
+does not fit, and a forecast on it is refused as well.
 
 The inference method matters only through what it produced. PMMH and PGAS
-produce posterior draws on the chain-binomial backend. IF2 produces one winning
-point on the same backend. MH and the NLopt optimizers fit on the ODE backend,
-so their fits have no fixed-origin forecast whatever they produced.
+produce posterior draws on the chain-binomial backend, and IF2 produces one
+winning point on the same backend. MH and the NLopt optimizers fit on the ODE
+backend.
 
-| What the fit produced                    | Backend        | Fixed-origin forecast |
-| ---------------------------------------- | -------------- | --------------------- |
-| posterior draws (PMMH, PGAS)             | chain-binomial | yes, `posterior`      |
-| one winning point (IF2)                  | chain-binomial | yes, `plug_in`        |
-| a parameter point in a file, with data   | chain-binomial | yes, `plug_in`        |
-| posterior draws (MH)                     | ODE            | refused               |
-| one winning point (the NLopt optimizers) | ODE            | refused               |
+| What the fit produced                    | Backend        | Fixed-origin forecast        |
+| ---------------------------------------- | -------------- | ---------------------------- |
+| posterior draws (PMMH, PGAS)             | chain-binomial | yes, `posterior`             |
+| one winning point (IF2)                  | chain-binomial | yes, `plug_in`               |
+| a parameter point in a file, with data   | chain-binomial | yes, `plug_in`               |
+| posterior draws (MH)                     | ODE            | refused; not implemented yet |
+| one winning point (the NLopt optimizers) | ODE            | refused; not implemented yet |
 
 The supported and refused cells are tested in
 `rust/crates/cli/tests/fit_predict_forecast.rs`.
 
-### 1.6 Where targets come from
+### 1.5 Where forecast targets come from
 
-A stream's targets continue the rhythm the stream declares.
+A forecast target is one period of one stream (§1.2), and a stream's targets
+continue the rhythm in which it reports: the targets of `weekly` are the weeks
+after its last training row. camdl reads that rhythm from what the stream
+declares, never from the spacing of its past rows. In camdl, a stream gets its
+targets in one of three ways:
+
+- from a uniform `covers` form, which tiles time into periods of one width;
+- from an `emit_schedule`, which lists the times at which the stream reports;
+- from its held-out rows, for a stream with `window_start` and `window_stop`
+  columns and no schedule.
+
 [`stream_targets`](rust:cli::fit::forecast_plan::stream_targets) is the only
-function that makes them, and it reads one of three sources
-([`TargetSource`](rust:cli::fit::forecast_plan::TargetSource)).
+function that makes targets, and
+[`TargetSource`](rust:cli::fit::forecast_plan::TargetSource) records which of
+the three a stream used. The rules for each follow.
 
 A stream with a uniform `covers` form, such as the two example streams, takes
 its targets from the declared tiling. Its periods tile without gaps, so its last
@@ -310,9 +332,9 @@ is refused, because there is no rule for which one to follow
 A stream with window columns and no `emit_schedule` declares no rhythm. When it
 has held-out rows, their periods within the reach are its targets, after a check
 that they are in order, distinct, and overlap neither each other nor a training
-row. Nothing is extrapolated. Such a target's horizon counts held-out rows and
-is not comparable with the horizon of a tiled stream; compare these targets by
-lead time.
+row. Nothing is extrapolated. Such a target's position counts held-out rows and
+is not comparable with the position of a tiled stream's target; compare these
+targets by lead time.
 
 Anything else is refused, per stream
 ([`StreamRefusal`](rust:cli::fit::forecast_plan::StreamRefusal)). A
@@ -327,7 +349,7 @@ stream has a target.
 
 When a stream has a declared rhythm, held-out rows only select which targets
 have an observed value. They do not renumber the targets, so a missing week does
-not shift the horizon of the weeks after it. A held-out row within the reach
+not shift the position of the weeks after it. A held-out row within the reach
 whose period is not one of the stream's targets is refused. Skipping it would
 leave a period out of the score without saying so.
 
@@ -337,10 +359,78 @@ rows continue at the most common gap between the stream's observation times
 plotting grid for an unconditioned projection, and it is never a source of
 forecast targets.
 
+### 1.6 Forecast targets that began before the origin
+
+When a fit has streams that report at different intervals, their last training
+rows usually end at different times. The forecast origin is the latest of those
+ends, so a stream that reports less often can have a period already under way at
+the origin. Take both example streams with `holdout_after = "2025-01-29"`:
+
+- the `daily` rows are used for training through 28 January;
+- the `weekly` rows are used for training through the week ending 25 January;
+- the forecast origin is the start of 29 January, day 24, set by the `daily`
+  stream.
+
+The `weekly` stream's next week, 26 January to 1 February, began three days
+before the origin. Because the stream's targets tile from its last training row
+(§1.5), that week is its first target, at position 0 with a lead time of 4 days.
+
+<!-- figure: forecasting-two-cadences, caption: The `daily` and `weekly` streams under `holdout_after = "2025-01-29"`. Each stream counts positions in its own periods. -->
+
+```
+date          19 … 25 Jan | 26  27  28 Jan | 29 Jan … 1 Feb | 2 … 8 Feb | 9 … 15 Feb
+daily         observed through 28 Jan       | pos 0, 1, 2, 3 …
+weekly        [ 19–25 Jan ] [ happened      | simulated     ] [ 2–8 Feb ] [ 9–15 Feb ]
+                            [------- position 0 ------------] [ pos 1   ] [ pos 2    ]
+                                       forecast origin, 29 Jan (day 24)
+```
+
+<!-- /figure -->
+
+The target is predicted whole: the forecast of it is a draw of the count for all
+seven days. The cases of 26 to 28 January have happened, but the `weekly` stream
+has not reported them, so they are a latent quantity, estimated through the
+conditioning on the `daily` rows. The cases of 29 January to 1 February are
+simulated. A forecaster on a hub faces the same kind of target when the week of
+submission is partly over; FluSight calls its horizon-0 prediction "a nowcast
+for the week of submission" (FluSight Forecast Hub).
+
+#### On the chain-binomial backend
+
+The count for such a week is the per-stream running total each particle carries
+([`ParticleState::acc`](rust:sim::inference::types::ParticleState)). The total
+is copied with the particle on resampling and is reset only where a declared
+period of its stream starts. The forecast driver declares every target as a
+period of its stream before the filter runs, so at the end of the week the total
+holds that particle's count for 26 to 28 January, as filtered, plus its
+simulated count for 29 January to 1 February. If the week were not declared, the
+total would not be reset at its start and would include the week before as well.
+
+The test `the_week_under_way_matches_the_importance_sampling_reference` in
+`rust/crates/cli/src/fit/forecast_driver_tests.rs` checks this at fixed
+parameters. It compares the forecast of the week with an estimate of the same
+week's count given the daily rows that uses no particle filter (simulated
+trajectories weighted by the likelihood of the daily rows), and checks that
+leaving the week undeclared gives a different answer.
+
+A restart is a different case. `simulate --init-state` restores compartment
+counts and not the running totals, so it cannot write the row of a period that
+began before the restart.
+[`refuse_period_under_way`](rust:cli::obs_emit::refuse_period_under_way) refuses
+such a restart. A forecast does not go through a saved state: it filters from
+the start of the run, so its totals are always present.
+
+#### On the ODE backend
+
+The week's count would be the difference of the cumulative flow at the week's
+two ends on each draw's trajectory. A fixed-origin forecast on this backend is
+refused (§1.4).
+
 ### 1.7 Forcings and covariates after the origin
 
-A model can read values that are not simulated: a forcing interpolated from a
-data table, such as temperature or a vaccination schedule, or a column of the
+A model may read values that it does not simulate, from an external data file or
+defined in the model itself. Examples are a forcing interpolated from a data
+table, such as temperature or a vaccination schedule, and a column of the
 observation data that the likelihood reads, such as the number tested in a
 survey. For a forecast these raise the question the forecasting literature puts
 as ex-ante against ex-post. An _ex-ante_ forecast uses "only the information
@@ -460,7 +550,7 @@ one function is the only one written to decide it, and nothing stops a second.
 | The split decided from a row's label                           | `trains_under_cutoff` reads the end of what the row measures                                                                                                  | convention                         |
 | A later command cutting the data differently                   | the partition is read from the fit's record and never cut again                                                                                               | run-time check                     |
 | A fitted row edited after the fit                              | the digest of each stream's leading rows                                                                                                                      | run-time check                     |
-| A held-out row conditioning the state at the origin            | `conditioning` compares the rows handed to the filter with the parameter set; a target's value is an `ObsCell::HeldOut`, which the filter does not assimilate | run-time check, and a type         |
+| A held-out row conditioning the state at the origin            | `conditioning` compares the rows handed to the filter with the training rows; a target's value is an `ObsCell::HeldOut`, which the filter does not assimilate | run-time check, and a type         |
 | A forecast origin other than the end of the training rows      | `ForecastPlan::new` takes no origin                                                                                                                           | type                               |
 | A target that overlaps a training row                          | targets are kept only when they end after the origin; an overlap check in debug builds                                                                        | run-time check in part (see §3.3)  |
 | Outcomes scored against a different series                     | `check_agreement` compares the outcome file's leading rows with the conditioning rows                                                                         | run-time check                     |
@@ -499,10 +589,10 @@ camdl score            outcome rows bound to targets
 1. [`observed_rows`](rust:cli::fit::observed_rows::observed_rows) reads the
    `weekly` file once and returns ten rows, each with the period it measures.
    Every later step works from these rows.
-2. The fit builds a `TrainingPartition` under `holdout_after = 42`. For `weekly`
-   it holds the count 6 and a digest of the first six rows. A row trained
-   exactly when its position is below 6, so within one file no row is on both
-   sides and the training rows have no gap.
+2. The fit builds a `TrainingPartition` under `holdout_after = "2025-02-16"`.
+   For `weekly` it holds the count 6 and a digest of the first six rows. A row
+   trained exactly when its position is below 6, so within one file no row is on
+   both sides and the training rows have no gap.
 3. The fit writes the partition to `fit.meta.json`. Its stored problem keeps the
    six training lines, and for rows 7 to 10 keeps the file, position and period
    of each without its value.
@@ -510,11 +600,12 @@ camdl score            outcome rows bound to targets
    the record, digests the first six rows of the data it has, and refuses the
    data if the digest differs or the file has fewer than six rows.
 5. `ForecastPlan::new` takes that partition and the reach. The origin is the
-   partition's extent, 42. The targets are the four weeks ending at 49 to 70.
+   partition's extent, day 42. The targets are the four weeks ending 22 February
+   to 15 March.
 6. The forecast driver digests the rows it was handed, fails unless they are the
-   six rows of the parameter set and all end at or before 42, and only then
-   builds the state set. It appends the four targets to the stream as periods
-   with no assimilated value.
+   six training rows and all end at or before day 42, and only then records them
+   as the conditioning rows. It appends the four targets to the stream as
+   periods with no assimilated value.
 7. `camdl score` is given a file with all ten rows. It refuses the file unless
    its first six rows equal, by digest, the rows the forecast conditioned on.
    Rows 7 to 10 supply the observed values of the four targets, matched by
@@ -564,7 +655,7 @@ position orders its stream in time.
 
 A `TrainingPartition` records which rows of each stream the parameters were
 fitted to. It belongs in a page on forecasting because the forecast origin is
-its extent and the parameter set is its list of prefixes.
+its extent and its list of prefixes is the training rows.
 
 Because a stream's training rows are stored as a count, a partition cannot
 represent a row that both trained and was held out, or training rows with a gap
@@ -621,13 +712,13 @@ The partition is written to `fit.meta.json` and copied as `parameter_set` into
 <!-- decl: rust:cli::fit::forecast_plan::Target -->
 
 A `ForecastPlan` is what one fixed-origin forecast predicts: the origin, the
-reach, the parameter set, the targets, where each stream's targets came from,
+reach, the training rows, the targets, where each stream's targets came from,
 and each stream that was refused. Only a fixed-origin forecast builds one.
 
 The plan removes three invalid states. A forecast cannot start anywhere but the
 end of the training rows, because `new` takes the partition and no origin. Two
 commands cannot disagree about a stream's targets, because `stream_targets` is
-the only function that makes them (§1.6). A period under way at the origin
+the only function that makes them (§1.5). A period under way at the origin
 cannot be dropped, because the first target of a tiled stream is the first
 period that ends after the origin, whenever it began.
 
@@ -674,10 +765,11 @@ stream.
 It is built in one place, the private function
 [`conditioning`](rust:cli::fit::forecast_driver::conditioning), from the rows
 handed to the filter. The function digests those rows and fails unless each
-stream's count and digest equal the plan's parameter set and every row ends at
-or before the origin. No caller passes a state set in, so the recorded state set
-describes the rows the filter was given. The failure is reported as an internal
-error, since a caller that reaches it has cut the streams wrongly.
+stream's count and digest equal the plan's training rows and every row ends at
+or before the origin. No caller passes conditioning rows in, so the recorded
+conditioning rows describes the rows the filter was given. The failure is
+reported as an internal error, since a caller that reaches it has cut the
+streams wrongly.
 
 [`fixed_origin_forecast`](rust:cli::fit::forecast_driver::fixed_origin_forecast)
 is the driver. It takes the plan, each stream cut to its training prefix, one
@@ -833,7 +925,7 @@ score's notes.
 
 ### 4.4 Which rows a held-out score counts
 
-Every scored row carries its `role` (§1.5), read from the row's position against
+Every scored row carries its `role` (§1.4), read from the row's position against
 its stream's training prefix. A forecast target's role is `future`. The summary
 table never pools rows of different roles, modes, streams or leads, so a
 held-out mean score is a mean over `held_out` rows of one stream in one mode.
@@ -860,17 +952,17 @@ stream's held-out rows, and those rows would be scored as held out although the
 parameters had seen data from the same days.
 
 A held-out row of one stream can cover days on which another stream has training
-rows. In the two-stream example, the `weekly` row labelled 28 covers days 21 to
-27 and the `daily` rows for days 21 to 23 trained. The row is still held out:
-its own value was never fitted, and a forecast made at the origin would have had
-those daily rows.
+rows. In the two-stream example, the `weekly` row labelled 1 February covers 26
+January to 1 February, and the `daily` rows for 26 to 28 January were used for
+training. The row is still held out: its own value was never fitted, and a
+forecast made at the origin would have had those daily rows.
 
 In the one-step mode, held-out rows are scored with assimilation. The filter
-predicts the row labelled 49, is scored on it, assimilates it, and then predicts
-the row labelled 56. The parameters stay as fitted to rows 1 to 6. This is a
-sequence of one-week forecasts with fixed parameters, and its scores are not
-comparable with the forecast mode's scores at leads of 14, 21 and 28 days.
-`camdl compare` refuses to difference rows of different modes or leads
+predicts the row labelled 22 February, is scored on it, assimilates it, and then
+predicts the row labelled 1 March. The parameters stay as fitted to rows 1 to 6.
+This is a sequence of one-week forecasts with fixed parameters, and its scores
+are not comparable with the forecast mode's scores at leads of 14, 21 and 28
+days. `camdl compare` refuses to difference rows of different modes or leads
 ([Model comparison](../methods/model-comparison.md), §2).
 
 ## 5. What is not supported
@@ -879,8 +971,8 @@ Each of these is refused or absent.
 
 - A rolling origin. One fit has one training extent and a forecast starts there.
   Conditioning the state on rows after the fit with the parameters left as
-  fitted, which would make the state set larger than the parameter set, is not
-  implemented in the forecast mode.
+  fitted, which would make the conditioning rows a larger set than the training
+  rows, is not implemented in the forecast mode.
 - A forecast origin chosen by the user. `ForecastPlan::new` has no origin
   argument.
 - A fixed-origin forecast on the ODE backend. The value of a flow target would
@@ -889,7 +981,7 @@ Each of these is refused or absent.
   predicted with `--mode free_forward`.
 - A calendar period as a uniform `covers` form. A stream of calendar months or
   epidemiological weeks uses window columns, and needs an `emit_schedule` or
-  held-out rows to have targets (§1.6).
+  held-out rows to have targets (§1.5).
 - A target aggregated from a finer stream, such as a weekly target from a daily
   stream.
 - Data vintages. The data are taken as given. A value revised after the forecast
