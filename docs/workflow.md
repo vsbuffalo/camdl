@@ -448,12 +448,12 @@ the run directory:
   rather than minimizing over the ones that do. The sibling `predictive.json`
   tags this contract `camdl.predictive/v6`. Earlier tags are not join-compatible
   with it and **must not be joined without keying on the tag**: `/v5` named the
-  `periods_ahead` column `horizon` and the manifest's `training_rows`
-  `parameter_set`, `/v4` held the mode in a column named `horizon` and had no
-  `quantity` column, `/v3` had no `role` column, `/v2` spelled these two columns
-  `rhat_max`/`ess_min` and had no per-row channels, and `/v1` carried classic
-  Gelman–Rubin R̂ and a per-chain Geyer sum under those same two names — the same
-  header, a different statistic.
+  `periods_ahead` column `horizon` and called the manifest's `training_rows`
+  `parameter_set` and its `conditioning_rows` `state_sets`, `/v4` held the mode
+  in a column named `horizon` and had no `quantity` column, `/v3` had no `role`
+  column, `/v2` spelled these two columns `rhat_max`/`ess_min` and had no
+  per-row channels, and `/v1` carried classic Gelman–Rubin R̂ and a per-chain
+  Geyer sum under those same two names — the same header, a different statistic.
 
   `fit_rhat_max`/`fit_ess_min` describe **the fit**, not the row — which is what
   their names say. They are the worst parameter's numbers, repeated identically

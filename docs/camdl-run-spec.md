@@ -1067,12 +1067,12 @@ both sets:
 - `training_rows`: the fit's training partition, as `forecast.json` carries it
   (the `rule`, the training `extent` as `{t, date}`, and each stream's training
   `rows` and their digest).
-- `state_sets`, keyed by `mode` value, one per section written. `free_forward`
-  is `{"conditioning": "none", "streams": []}`: the band is never conditioned on
-  a row. `one_step` is `"conditioning": "filtered"` with, per stream, the `rows`
-  the filter walked, how many of them are `held_out_rows`, and the rows' digest.
-  The filter walks a stored fit's training rows, so `held_out_rows` is 0; under
-  `--stream` only the selected streams are listed.
+- `conditioning_rows`, keyed by `mode` value, one per section written.
+  `free_forward` is `{"conditioning": "none", "streams": []}`: the band is never
+  conditioned on a row. `one_step` is `"conditioning": "filtered"` with, per
+  stream, the `rows` the filter walked, how many of them are `held_out_rows`,
+  and the rows' digest. The filter walks a stored fit's training rows, so
+  `held_out_rows` is 0; under `--stream` only the selected streams are listed.
 - `holdout_files`, at the top level: `null` without `[data.holdout]`, and under
   it `{"read": false, "sources": […]}`. These two modes do not read the holdout
   files, so their rows are neither filtered through nor predicted as data rows.
@@ -1204,7 +1204,7 @@ The versions do not carry the same numbers under the same column names:
 | `v3` | `fit_rhat_max`, `fit_ess_min`            | the v2 statistics, renamed to say whose they are, plus the per-row `rhat_mean`/`ess_mean`/`rhat_pred`/`ess_pred` channels                                                               |
 | `v4` | `fit_rhat_max`, `fit_ess_min`            | the v3 statistics; the `role` coordinate is added after `treatment`, and the manifest gains `parameter_set` and `state_sets`                                                            |
 | `v5` | `fit_rhat_max`, `fit_ess_min`            | the v4 statistics; the mode-valued `horizon` column is renamed `mode`, `horizon` holds a forecast target's position (empty here), `quantity` follows `role`, and `role` gains `unknown` |
-| `v6` | `fit_rhat_max`, `fit_ess_min`            | the v5 statistics; the `horizon` column is renamed `periods_ahead`, and the manifest's `parameter_set` is renamed `training_rows`                                                       |
+| `v6` | `fit_rhat_max`, `fit_ess_min`            | the v5 statistics; the `horizon` column is renamed `periods_ahead`, and the manifest's `parameter_set` and `state_sets` are renamed `training_rows` and `conditioning_rows`             |
 
 The v1 → v2 row is why the tag exists at all: the estimator changed and the
 column names did not, so for those two versions the tag is the _only_ signal

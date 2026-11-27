@@ -1465,7 +1465,7 @@ The role column says what part each row played in the fit:
              --holdout-after: nothing records which rows the point was
              fitted to.
 predictive.json records both sets: training_rows (the rows the parameters
-were fitted to) and state_sets (the rows each band's state was filtered
+were fitted to) and conditioning_rows (the rows each band's state was filtered
 through).
 For a stream labelled by each period's start, one_step rows carry the
 period's end in `time` while free_forward rows and observed/ carry the label

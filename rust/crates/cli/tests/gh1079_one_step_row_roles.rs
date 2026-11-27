@@ -205,7 +205,7 @@ fn rows_past_the_training_prefix_are_held_out_and_the_manifest_names_both_sets()
         .map(|s| (s["stream"].as_str().unwrap(), s["rows"].as_u64().unwrap())).collect();
     assert_eq!(trained, [("daily_cases", 24), ("weekly_cases", 3)]);
     // The state sets, one per section written.
-    let os = &m["state_sets"]["one_step"];
+    let os = &m["conditioning_rows"]["one_step"];
     assert_eq!(os["conditioning"], "filtered");
     let filtered: Vec<(&str, u64, u64)> = os["streams"].as_array().unwrap().iter()
         .map(|s| (s["stream"].as_str().unwrap(), s["rows"].as_u64().unwrap(), s["held_out_rows"].as_u64().unwrap()))
@@ -214,7 +214,7 @@ fn rows_past_the_training_prefix_are_held_out_and_the_manifest_names_both_sets()
     // stored with their values.
     assert_eq!(filtered, [("daily_cases", 24, 0), ("weekly_cases", 3, 0)]);
     assert!(os.get("through").is_none(), "the counts say what was filtered through: {os}");
-    assert_eq!(m["state_sets"]["free_forward"], json!({"conditioning": "none", "streams": []}));
+    assert_eq!(m["conditioning_rows"]["free_forward"], json!({"conditioning": "none", "streams": []}));
     // Written, as `null`, without a `[data.holdout]`: the key is not missing.
     assert_eq!(m.as_object().unwrap().get("holdout_files"), Some(&serde_json::Value::Null));
 
@@ -225,7 +225,7 @@ fn rows_past_the_training_prefix_are_held_out_and_the_manifest_names_both_sets()
     let (text, out) = predict(dir, &["--mode", "one_step", "--stream", "weekly_cases"]);
     assert!(!text.contains("held-out rows"), "{text}");
     let m = read_json(&out.join("predictive.json"));
-    let filtered: Vec<&str> = m["state_sets"]["one_step"]["streams"].as_array().unwrap().iter()
+    let filtered: Vec<&str> = m["conditioning_rows"]["one_step"]["streams"].as_array().unwrap().iter()
         .map(|s| s["stream"].as_str().unwrap()).collect();
     assert_eq!(filtered, ["weekly_cases"]);
     assert_eq!(roles(&out, "weekly_cases", "one_step"), trained_only(split_at((1..=9).map(|w| 7 * w), 24)));
@@ -255,7 +255,7 @@ fn without_a_holdout_every_data_row_trained_and_the_rows_past_the_data_are_futur
     let m = read_json(&out.join("predictive.json"));
     assert_eq!(m["training_rows"]["rule"], json!({"kind": "all"}));
     assert_eq!(m["training_rows"]["extent"], json!({"t": 42.0}));
-    let held: Vec<u64> = m["state_sets"]["one_step"]["streams"].as_array().unwrap().iter()
+    let held: Vec<u64> = m["conditioning_rows"]["one_step"]["streams"].as_array().unwrap().iter()
         .map(|s| s["held_out_rows"].as_u64().unwrap()).collect();
     assert_eq!(held, [0, 0]);
     assert!(!text.contains("held-out rows"), "{text}");
@@ -282,11 +282,11 @@ fn a_holdout_file_is_not_read_and_the_manifest_says_so() {
     assert_eq!(m["training_rows"]["rule"], json!({"kind": "separate_files"}));
     let not_read = json!({"read": false, "sources": ["weekly_cases"]});
     assert_eq!(m["holdout_files"], not_read);
-    let os = &m["state_sets"]["one_step"];
+    let os = &m["conditioning_rows"]["one_step"];
     let filtered: Vec<(u64, u64)> = os["streams"].as_array().unwrap().iter()
         .map(|s| (s["rows"].as_u64().unwrap(), s["held_out_rows"].as_u64().unwrap())).collect();
     assert_eq!(filtered, [(24, 0), (3, 0)]);
-    assert!(m["state_sets"].get("free_forward").is_none(), "no free-forward section was written");
+    assert!(m["conditioning_rows"].get("free_forward").is_none(), "no free-forward section was written");
     assert!(!text.contains("include held-out rows"), "{text}");
 
     // Free-forward alone: the training rows, then the periods no data row was
@@ -299,7 +299,7 @@ fn a_holdout_file_is_not_read_and_the_manifest_says_so() {
     assert_eq!(roles(&out, "daily_cases", "free_forward"), past((1..=63).collect()));
     let m = read_json(&out.join("predictive.json"));
     assert_eq!(m["holdout_files"], not_read, "a free-forward manifest says so too");
-    assert!(m["state_sets"].get("one_step").is_none());
+    assert!(m["conditioning_rows"].get("one_step").is_none());
 }
 
 /// Position, not label against the cutoff. The weekly stream is labelled by

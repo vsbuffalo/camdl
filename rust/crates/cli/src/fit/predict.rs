@@ -4339,11 +4339,11 @@ fn run_predict(
     // (regenerated, overwritten in place). Written whenever any predictive
     // stream was emitted.
     if !predictive_manifest_entries.is_empty() {
-        let mut state_sets = serde_json::Map::new();
+        let mut conditioning_rows = serde_json::Map::new();
         if free_forward.is_some() {
             // A free-forward band runs the fitted model from its start and is
             // never conditioned on a row.
-            state_sets.insert(
+            conditioning_rows.insert(
                 PredictiveMode::FreeForward.as_str().to_string(),
                 serde_json::json!({ "conditioning": "none", "streams": [] }),
             );
@@ -4355,7 +4355,7 @@ fn run_predict(
             // `held_out_rows` lie after the fit's training prefix. The counts
             // say whether held-out rows were filtered through; no prose
             // restates them.
-            state_sets.insert(
+            conditioning_rows.insert(
                 PredictiveMode::OneStepAhead.as_str().to_string(),
                 serde_json::json!({ "conditioning": "filtered", "streams": &o.filtered }),
             );
@@ -4383,10 +4383,10 @@ fn run_predict(
             // extent and each stream's training rows. A row's `role` is its
             // position against that stream's `rows`.
             "training_rows": &parameter_set.record,
-            // The state set of each section written, keyed by its `mode`
-            // value: the rows the latent state behind a band was conditioned
-            // on.
-            "state_sets": state_sets,
+            // The conditioning rows of each section written, keyed by its
+            // `mode` value: the rows the latent state behind a band was
+            // conditioned on.
+            "conditioning_rows": conditioning_rows,
             // `[data.holdout]` files are not read by the free-forward or the
             // one-step mode: their rows are neither filtered through nor
             // predicted as data rows, so a free-forward row in a period they
