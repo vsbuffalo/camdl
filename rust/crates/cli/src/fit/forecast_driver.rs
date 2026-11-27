@@ -1,4 +1,4 @@
-//! The fixed-origin forecast driver (`docs/engineering/forecasting.md` §3.4;
+//! The fixed-origin forecast driver (`docs/engineering/forecasting.md` §3.5;
 //! D39, D53, D54, D57).
 //!
 //! For each posterior draw it runs the existing bootstrap particle filter over

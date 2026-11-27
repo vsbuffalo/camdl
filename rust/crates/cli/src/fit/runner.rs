@@ -1912,7 +1912,7 @@ pub(crate) fn stream_specs_from_obs_streams(
 
 /// Decide the fit's training partition from its holdout declaration, apply it
 /// to the loaded training streams, and say what it decided (D38;
-/// `docs/engineering/forecasting.md` §3.2).
+/// `docs/engineering/forecasting.md` §3.3).
 ///
 /// - `holdout_after = τ` (bare model time, a date, or `first_obs`/`last_obs`
 ///   ± N unit through the shared gh#626 grammar; the anchors resolve over the

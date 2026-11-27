@@ -1,5 +1,5 @@
 //! The one reader of an observation stream's rows, and what each row measures
-//! (`docs/engineering/forecasting.md` §3.1).
+//! (`docs/engineering/forecasting.md` §3.2).
 //!
 //! [`observed_rows`] reads one leaf's rows from its data file once, through the
 //! column readers in `pfilter`, and records for each row the instant or period

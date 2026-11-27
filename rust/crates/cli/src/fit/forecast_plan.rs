@@ -1,5 +1,5 @@
 //! What a fixed-origin forecast predicts (`docs/engineering/forecasting.md`
-//! §1.2, §1.6, §3.3).
+//! §1.2, §1.5, §3.4).
 //!
 //! A [`ForecastPlan`] is built once, from the fit's training partition and each
 //! stream's declaration, before any filtering. It is the only place a target
@@ -393,7 +393,7 @@ impl ForecastPlan {
         Ok(plan)
     }
 
-    /// The invariants of §3.3, which the construction above establishes:
+    /// The invariants of §3.4, which the construction above establishes:
     /// each target ends after the origin and within the horizon; one stream's
     /// targets increase strictly and do not overlap. A failure is an internal
     /// error, not a user's.

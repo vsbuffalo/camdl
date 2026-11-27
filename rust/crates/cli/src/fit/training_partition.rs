@@ -1,5 +1,5 @@
 //! Which rows the parameters were fitted to (`docs/engineering/forecasting.md`
-//! §1.1, §1.8, §3.2; D38, D40).
+//! §1.1, §1.8, §3.3; D38, D40).
 //!
 //! A [`TrainingPartition`] is decided once, from the rows the one row reader
 //! ([`super::observed_rows::observed_rows`]) produced, and recorded in the

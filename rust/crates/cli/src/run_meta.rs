@@ -598,7 +598,7 @@ impl ObsSchema {
 /// (`resolved_priors` = gh#75 per-parameter prior source,
 /// `estimated`/`fixed`/`data_hashes`, `model_identity`, paths).
 ///
-/// Which rows the fit trained on (`docs/engineering/forecasting.md` §3.2,
+/// Which rows the fit trained on (`docs/engineering/forecasting.md` §3.3,
 /// D38): per stream the number of leading rows that trained and their row
 /// digest, the training extent, and the rule that decided it. The record of
 /// a `fit::training_partition::TrainingPartition`, value type for

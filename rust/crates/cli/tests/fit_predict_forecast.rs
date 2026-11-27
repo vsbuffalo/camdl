@@ -1,6 +1,6 @@
 //! `camdl predict --horizon DURATION` (`--mode forecast`): the
 //! fixed-origin forecast from the end of a fit's training rows (migration
-//! plan, Stage 5; `docs/engineering/forecasting.md` §1.2, §1.6, §3.4).
+//! plan, Stage 5; `docs/engineering/forecasting.md` §1.2, §1.5, §3.5).
 //!
 //! The fixture is `tests/fixtures/forecast/two_cadence_sir.camdl`, a
 //! chain-binomial SIR reported daily and weekly, fitted by PMMH with

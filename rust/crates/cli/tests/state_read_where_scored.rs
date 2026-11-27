@@ -1,6 +1,6 @@
 //! A simulated or predicted observation reads the state where the fit scores
 //! the row: the instant it reads, or its period's stop (`StreamTimes::closes`),
-//! never the row's label (D59, `docs/engineering/forecasting.md` §3.1).
+//! never the row's label (D59, `docs/engineering/forecasting.md` §3.2).
 //!
 //! The witness is a `starting_on(time, 7 'days)` stream, whose label is its
 //! period's start, with a likelihood whose mean reads both the state and the
