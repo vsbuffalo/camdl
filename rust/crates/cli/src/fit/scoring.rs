@@ -87,9 +87,9 @@ pub(crate) struct ScoredCell {
     pub mode: ScoreMode,
     /// The forecast origin; `None` outside a forecast.
     pub origin: Option<f64>,
-    /// The target's position among its stream's targets; `None` outside a
-    /// forecast.
-    pub horizon: Option<i64>,
+    /// How many of its stream's periods ahead of the forecast origin the
+    /// target is, from 1; `None` outside a forecast.
+    pub periods_ahead: Option<i64>,
     /// A forecast target's time from the origin to its end, or a one-step
     /// row's period; `None` for a free-forward row.
     pub lead: Option<f64>,
@@ -115,7 +115,7 @@ pub(crate) struct JointCell {
     pub sweep: Vec<(String, f64)>,
     pub mode: ScoreMode,
     pub origin: Option<f64>,
-    pub horizon: Option<i64>,
+    pub periods_ahead: Option<i64>,
     pub lead: Option<f64>,
     pub start: f64,
     pub stop: f64,
@@ -235,7 +235,7 @@ mod tests {
             stop: 7.0,
             mode: ScoreMode::Forecast,
             origin: Some(0.0),
-            horizon: Some(0),
+            periods_ahead: Some(1),
             lead: Some(7.0),
             role: RowRole::Future,
             observed: y,

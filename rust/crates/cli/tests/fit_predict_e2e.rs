@@ -221,7 +221,7 @@ thin = 1
     let header = lines.next().unwrap();
     assert_eq!(
         header,
-        "scenario\ttime\tmode\thorizon\ttreatment\trole\tquantity\tfit_rhat_max\tfit_ess_min\trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws\tq05\tq25\tq50\tq75\tq95",
+        "scenario\ttime\tmode\tperiods_ahead\ttreatment\trole\tquantity\tfit_rhat_max\tfit_ess_min\trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws\tq05\tq25\tq50\tq75\tq95",
         "predictive header leads with the scenario overlay axis, then both axes + convergence + band"
     );
     let first = lines.next().expect("at least one predictive row");
@@ -409,7 +409,7 @@ thin = 1
     // one store hold different quantities. v3 renames them `fit_rhat_max` /
     // `fit_ess_min` and adds the per-row channels (gh#794). v4 adds the `role`
     // coordinate and the two information sets (gh#1079).
-    assert_eq!(pjson["schema"], "camdl.predictive/v5", "predictive manifest schema tag");
+    assert_eq!(pjson["schema"], "camdl.predictive/v6", "predictive manifest schema tag");
     let streams = pjson["streams"].as_array().expect("streams array");
     let wc = streams
         .iter()
@@ -422,7 +422,7 @@ thin = 1
     // predictive TSV header's join keys.
     let coords: Vec<&str> = wc["coordinates"].as_array().unwrap()
         .iter().map(|c| c.as_str().unwrap()).collect();
-    assert_eq!(coords, ["scenario", "time", "mode", "horizon", "treatment", "role", "quantity"],
+    assert_eq!(coords, ["scenario", "time", "mode", "periods_ahead", "treatment", "role", "quantity"],
         "coordinate columns name the group-by keys, in header order");
     let band: Vec<&str> = wc["band"].as_array().unwrap()
         .iter().map(|c| c.as_str().unwrap()).collect();
@@ -535,7 +535,7 @@ thin = 1
     let mut lines = pred_txt.lines();
     assert_eq!(
         lines.next().unwrap(),
-        "scenario\ttime\tmode\thorizon\ttreatment\trole\tquantity\tfit_rhat_max\tfit_ess_min\trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws\tq05\tq25\tq50\tq75\tq95",
+        "scenario\ttime\tmode\tperiods_ahead\ttreatment\trole\tquantity\tfit_rhat_max\tfit_ess_min\trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws\tq05\tq25\tq50\tq75\tq95",
         "one header, scenario leads"
     );
     let scenarios_seen: std::collections::BTreeSet<&str> =

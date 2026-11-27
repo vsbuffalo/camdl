@@ -110,8 +110,8 @@ fn rows(path: &Path) -> Vec<std::collections::HashMap<String, String>> {
 }
 
 /// The headline: from the training extent (day 24, inside a week),
-/// `--horizon "4 weeks"` forecasts the week under way as weekly horizon 0
-/// and daily horizons 0–27; the targets are the declared periods, not the
+/// `--horizon "4 weeks"` forecasts the week under way as 1 week ahead,
+/// and daily targets 1–28 periods ahead; the targets are the declared periods, not the
 /// most common gap; nothing after the origin is filtered, and the held-out
 /// weekly rows name their targets.
 #[test]
@@ -125,7 +125,7 @@ fn a_forecast_starts_at_the_training_extent_and_counts_each_streams_own_periods(
 
     let manifest: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(fdir.join("forecast.json")).unwrap()).unwrap();
-    assert_eq!(manifest["schema"], "camdl.forecast/v5");
+    assert_eq!(manifest["schema"], "camdl.forecast/v6");
     let fit_run = fit_store_support::the_run(&dir.join("results"));
     let identity = fit_store_support::json(&fit_run.join("identity.json"));
     // The engine stamp is spelled as the run's `identity.json` spells it: the
@@ -150,29 +150,29 @@ fn a_forecast_starts_at_the_training_extent_and_counts_each_streams_own_periods(
     assert_eq!(manifest["mode"], "fixed_origin");
     assert_eq!(manifest["origin"]["t"], 24.0, "the origin is the training extent");
     assert_eq!(manifest["horizon"]["duration"], 28.0);
-    assert_eq!(manifest["state_set"]["through"]["t"], 24.0);
-    let state_rows: Vec<(String, u64)> = manifest["state_set"]["streams"].as_array().unwrap().iter()
+    assert_eq!(manifest["conditioning_rows"]["through"]["t"], 24.0);
+    let state_rows: Vec<(String, u64)> = manifest["conditioning_rows"]["streams"].as_array().unwrap().iter()
         .map(|s| (s["stream"].as_str().unwrap().to_string(), s["rows"].as_u64().unwrap()))
         .collect();
     assert_eq!(state_rows, vec![("daily_cases".into(), 24), ("weekly_cases".into(), 3)],
-        "the state set is the training rows: no row ending after the origin is filtered");
+        "the conditioning rows are the training rows: no row ending after the origin is filtered");
 
     let weekly = rows(&fdir.join("forecast/weekly_cases.tsv"));
     let spans: Vec<(&str, &str, &str, &str)> = weekly.iter()
-        .map(|r| (r["t_start"].as_str(), r["t_stop"].as_str(), r["horizon"].as_str(),
+        .map(|r| (r["t_start"].as_str(), r["t_stop"].as_str(), r["periods_ahead"].as_str(),
                   r["lead"].as_str()))
         .collect();
     assert_eq!(spans, vec![
-        ("21", "28", "0", "4"),
-        ("28", "35", "1", "11"),
-        ("35", "42", "2", "18"),
-        ("42", "49", "3", "25"),
-    ], "the week under way is horizon 0; horizons count weeks");
+        ("21", "28", "1", "4"),
+        ("28", "35", "2", "11"),
+        ("35", "42", "3", "18"),
+        ("42", "49", "4", "25"),
+    ], "the week under way is 1 period ahead; periods_ahead counts weeks");
     assert!(weekly.iter().all(|r| !r.keys().any(|k| k.contains("held_out"))), "no held-out column");
     let daily = rows(&fdir.join("forecast/daily_cases.tsv"));
-    assert_eq!(daily.len(), 28, "daily horizons 0–27");
+    assert_eq!(daily.len(), 28, "daily targets 1–28 periods ahead");
     assert_eq!((daily[0]["t_start"].as_str(), daily[0]["t_stop"].as_str()), ("24", "25"));
-    assert_eq!(daily[27]["horizon"], "27");
+    assert_eq!(daily[27]["periods_ahead"], "28");
     for r in daily.iter().chain(&weekly) {
         assert_eq!((r["mode"].as_str(), r["quantity"].as_str()), ("forecast", "observation"), "{r:?}");
     }

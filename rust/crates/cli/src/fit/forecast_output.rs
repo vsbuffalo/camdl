@@ -7,11 +7,12 @@
 //! the posterior draws, and writes the forecast artifact:
 //!
 //! - `forecast/<stream>.tsv`: one row per target, with its period, mode,
-//!   horizon, lead time, quantity, quantiles and mean;
+//!   periods ahead, lead time, quantity, quantiles and mean;
 //! - `forecast-samples.tsv`: joint samples, each a complete trajectory across
 //!   every target (D54), with the quantity each value is a draw of;
 //! - `forecast.json`: the plan (origin, reach, targets and where each stream's
-//!   came from), the parameter set and the state set, and the calendar.
+//!   came from), the training rows and the conditioning rows, and the
+//!   calendar.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -53,7 +54,7 @@ impl DrawRef {
 }
 
 /// The `schema` tag of `forecast.json`.
-pub(crate) const FORECAST_SCHEMA: &str = "camdl.forecast/v5";
+pub(crate) const FORECAST_SCHEMA: &str = "camdl.forecast/v6";
 
 /// The file [`write_manifest`] writes in a forecast's directory.
 pub(crate) const FORECAST_MANIFEST: &str = "forecast.json";
@@ -669,7 +670,7 @@ fn scored_targets(arms: &[ArmForecast], values: &HeldOutValues, model: &ir::Mode
     for arm in arms {
         let fc = &arm.fc;
         let n = fc.n_draws * fc.n_particles;
-        let joint = |ks: &[usize], start: f64, stop: f64, horizon: Option<i64>, lead: Option<f64>| {
+        let joint = |ks: &[usize], start: f64, stop: f64, periods_ahead: Option<i64>, lead: Option<f64>| {
             let mut sum = vec![0.0_f64; n];
             for &k in ks {
                 if let Some(ll) = &fc.held_out_log_liks[k] {
@@ -681,7 +682,7 @@ fn scored_targets(arms: &[ArmForecast], values: &HeldOutValues, model: &ir::Mode
                 sweep: arm.label.sweep.clone(),
                 mode: ScoreMode::Forecast,
                 origin: Some(origin),
-                horizon,
+                periods_ahead,
                 lead,
                 start,
                 stop,
@@ -704,7 +705,7 @@ fn scored_targets(arms: &[ArmForecast], values: &HeldOutValues, model: &ir::Mode
                 stop: t.measures.end(),
                 mode: ScoreMode::Forecast,
                 origin: Some(origin),
-                horizon: Some(t.horizon),
+                periods_ahead: Some(t.periods_ahead),
                 lead: Some(t.lead),
                 role: crate::fit::predict::RowRole::Future,
                 observed: y,
@@ -717,8 +718,8 @@ fn scored_targets(arms: &[ArmForecast], values: &HeldOutValues, model: &ir::Mode
             }
         }
         for (end, ks) in &by_end {
-            // The targets ending at one time share their lead; a horizon is a
-            // position within one stream and is left out of the joint.
+            // The targets ending at one time share their lead; `periods_ahead`
+            // counts within one stream and is left out of the joint.
             let lead = fc.plan.targets()[ks[0]].lead;
             let start = ks.iter().map(|&k| fc.plan.targets()[k].measures.start()).fold(f64::INFINITY, f64::min);
             scored.joints.push(joint(ks, start, *end, None, Some(lead)));
@@ -824,7 +825,7 @@ fn write_tables(
         let dims = crate::fit::predict::index_dims_for(schema, source, &stratum_of(first).into_iter().map(|(d, _)| d).collect::<Vec<_>>());
         let mut header: Vec<String> = arm_header(&sweep);
         header.extend(dims.iter().cloned());
-        header.extend(["t_start", "t_stop", "mode", "horizon", "lead", "quantity", "mean"]
+        header.extend(["t_start", "t_stop", "mode", "periods_ahead", "lead", "quantity", "mean"]
             .map(String::from));
         header.extend(QUANTILE_LEVELS.iter().map(|(_, l)| l.to_string()));
         header.push("n_samples".into());
@@ -842,7 +843,7 @@ fn write_tables(
             cells.push(fmt_time(t.measures.start()));
             cells.push(fmt_time(t.measures.end()));
             cells.push(FORECAST_MODE.to_string());
-            cells.push(t.horizon.to_string());
+            cells.push(t.periods_ahead.to_string());
             cells.push(fmt_time(t.lead));
             cells.push(FORECAST_QUANTITY.as_str().to_string());
             cells.push(fmt_value(mean));
@@ -859,7 +860,7 @@ fn write_tables(
     let n = fc0.n_particles;
     let per = FORECAST_SAMPLES_PER_DRAW.min(n);
     let mut tsv = arm_header(&sweep).join("\t")
-        + "\tsample\tchain\tdraw\tcloud_row\tparticle\tstream\tt_start\tt_stop\thorizon\tquantity\tvalue\n";
+        + "\tsample\tchain\tdraw\tcloud_row\tparticle\tstream\tt_start\tt_stop\tperiods_ahead\tquantity\tvalue\n";
     for arm in arms {
         let lead = arm_cells(&arm.label, &sweep).join("\t");
         let mut sample = 0usize;
@@ -873,7 +874,7 @@ fn write_tables(
                 for (k, t) in targets.iter().enumerate() {
                     tsv += &format!("{lead}\t{sample}\t{chain}\t{draw}\t{}\t{p}\t{}\t{}\t{}\t{}\t{}\t{}\n",
                         r.cloud_row, t.stream, fmt_time(t.measures.start()), fmt_time(t.measures.end()),
-                        t.horizon, FORECAST_QUANTITY.as_str(), fmt_value(arm.fc.draws[k][d * n + p]));
+                        t.periods_ahead, FORECAST_QUANTITY.as_str(), fmt_value(arm.fc.draws[k][d * n + p]));
                 }
                 sample += 1;
             }
@@ -914,7 +915,7 @@ fn write_contrasts(
     let chains: Vec<Option<usize>> = draw_refs.iter().take(base.n_draws).map(|r| r.key.map(|k| k.0)).collect();
     let mean = |ys: &[f64]| ys.iter().sum::<f64>() / ys.len() as f64;
     let mut tsv = arm_header(sweep).join("\t")
-        + "\tstream\tt_start\tt_stop\thorizon\tlead\tmean\tmean_fitted\tdelta\tdelta_mcse\tess\tn_draws\tmcse_note\n";
+        + "\tstream\tt_start\tt_stop\tperiods_ahead\tlead\tmean\tmean_fitted\tdelta\tdelta_mcse\tess\tn_draws\tmcse_note\n";
     for arm in &arms[1..] {
         let lead = arm_cells(&arm.label, sweep).join("\t");
         for (k, t) in base.plan.targets().iter().enumerate() {
@@ -925,7 +926,7 @@ fn write_contrasts(
                 Err(why) => (String::new(), why.describe()),
             };
             tsv += &format!("{lead}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{se}\t{}\t{}\t{note}\n",
-                t.stream, fmt_time(t.measures.start()), fmt_time(t.measures.end()), t.horizon, fmt_time(t.lead),
+                t.stream, fmt_time(t.measures.start()), fmt_time(t.measures.end()), t.periods_ahead, fmt_time(t.lead),
                 fmt_value(mean(&arm.fc.draws[k])), fmt_value(mean(&base.draws[k])), fmt_value(r.delta),
                 if r.ess.is_finite() { fmt_value(r.ess) } else { String::new() }, d.len());
         }
@@ -975,7 +976,7 @@ fn write_manifest(arms: &[ArmForecast], job: &ForecastJob, m: ManifestInputs) ->
             "measures": kind,
             "start": point(start),
             "end": point(t.measures.end()),
-            "horizon": t.horizon,
+            "periods_ahead": t.periods_ahead,
             "lead": t.lead,
             // D81: the design values the prediction read; absent for a
             // stream whose likelihood reads none.
@@ -1005,8 +1006,8 @@ fn write_manifest(arms: &[ArmForecast], job: &ForecastJob, m: ManifestInputs) ->
             "run_end": point(fc.plan.run_end().max(model_end)),
             "extended": fc.plan.run_end() > model_end,
         },
-        "parameter_set": record,
-        "state_set": {
+        "training_rows": record,
+        "conditioning_rows": {
             "conditioning": "filtered",
             "through": point(*through),
             "streams": rows.iter().map(|p| serde_json::json!({

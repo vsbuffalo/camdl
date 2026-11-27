@@ -594,7 +594,7 @@ impl Labels {
             .filter(|(n, _)| !n.contains('/') && n.ends_with(".json") && (n.starts_with("predictive") || n.starts_with("forecast")))
             .find_map(|(_, b)| {
                 let doc: serde_json::Value = serde_json::from_slice(b).ok()?;
-                let p = &doc["parameter_set"];
+                let p = &doc["training_rows"];
                 Some((p["rule"]["kind"].as_str() != Some("all"), p["extent"]["t"].as_f64()?))
             });
         let (parameters, conditioning) = match &id.source {
@@ -657,7 +657,7 @@ struct Line<'a> {
     stop: f64,
     mode: ScoreMode,
     origin: Option<f64>,
-    horizon: Option<i64>,
+    periods_ahead: Option<i64>,
     lead: Option<f64>,
     role: RowRole,
     observed: Option<f64>,
@@ -718,7 +718,7 @@ fn render(
             stop: c.stop,
             mode: c.mode,
             origin: c.origin,
-            horizon: c.horizon,
+            periods_ahead: c.periods_ahead,
             lead: c.lead,
             role: c.role,
             observed: Some(c.observed),
@@ -743,7 +743,7 @@ fn render(
             stop: j.stop,
             mode: j.mode,
             origin: j.origin,
-            horizon: j.horizon,
+            periods_ahead: j.periods_ahead,
             lead: j.lead,
             role: j.role,
             observed: None,
@@ -793,7 +793,7 @@ fn render(
     }
     header.extend(
         [
-            "mode", "origin", "horizon", "lead", "role", "parameters", "quantity", "mean", "q05", "q25", "q50", "q75", "q95",
+            "mode", "origin", "periods_ahead", "lead", "role", "parameters", "quantity", "mean", "q05", "q25", "q50", "q75", "q95",
             "observed", "log_score", "crps", "wis", "wis_dispersion", "wis_over", "wis_under", "pit", "in_50", "in_90",
         ]
         .map(String::from),
@@ -839,7 +839,7 @@ fn render(
         }
         row.push(l.mode.as_str().into());
         row.push(opt_time(l.origin));
-        row.push(l.horizon.map(|h| h.to_string()).unwrap_or_default());
+        row.push(l.periods_ahead.map(|h| h.to_string()).unwrap_or_default());
         row.push(lead.clone());
         row.push(l.role.as_str().into());
         row.push(labels.parameters.into());

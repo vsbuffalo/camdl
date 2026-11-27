@@ -192,13 +192,13 @@ fn rows_past_the_training_prefix_are_held_out_and_the_manifest_names_both_sets()
     assert_eq!(at("role"), at("treatment") + 1, "{h:?}");
 
     let m = read_json(&out.join("predictive.json"));
-    assert_eq!(m["schema"], "camdl.predictive/v5");
+    assert_eq!(m["schema"], "camdl.predictive/v6");
     for s in m["streams"].as_array().unwrap() {
         let coords: Vec<&str> = s["coordinates"].as_array().unwrap().iter().map(|c| c.as_str().unwrap()).collect();
-        assert_eq!(&coords[coords.len() - 5..], ["mode", "horizon", "treatment", "role", "quantity"], "{s}");
+        assert_eq!(&coords[coords.len() - 5..], ["mode", "periods_ahead", "treatment", "role", "quantity"], "{s}");
     }
     // The parameter set: the partition the fit recorded.
-    let p = &m["parameter_set"];
+    let p = &m["training_rows"];
     assert_eq!(p["rule"], json!({"kind": "cutoff", "at": {"t": 24.0}}));
     assert_eq!(p["extent"], json!({"t": 24.0}));
     let trained: Vec<(&str, u64)> = p["streams"].as_array().unwrap().iter()
@@ -253,8 +253,8 @@ fn without_a_holdout_every_data_row_trained_and_the_rows_past_the_data_are_futur
     assert_eq!(roles(&out, "daily_cases", "free_forward"), tail((1..=63).collect()));
 
     let m = read_json(&out.join("predictive.json"));
-    assert_eq!(m["parameter_set"]["rule"], json!({"kind": "all"}));
-    assert_eq!(m["parameter_set"]["extent"], json!({"t": 42.0}));
+    assert_eq!(m["training_rows"]["rule"], json!({"kind": "all"}));
+    assert_eq!(m["training_rows"]["extent"], json!({"t": 42.0}));
     let held: Vec<u64> = m["state_sets"]["one_step"]["streams"].as_array().unwrap().iter()
         .map(|s| s["held_out_rows"].as_u64().unwrap()).collect();
     assert_eq!(held, [0, 0]);
@@ -279,7 +279,7 @@ fn a_holdout_file_is_not_read_and_the_manifest_says_so() {
     assert_eq!(roles(&out, "weekly_cases", "one_step"), split_at((1..=3).map(|w| 7 * w), 24));
     assert_eq!(roles(&out, "daily_cases", "one_step"), split_at(1..=24, 24));
     let m = read_json(&out.join("predictive.json"));
-    assert_eq!(m["parameter_set"]["rule"], json!({"kind": "separate_files"}));
+    assert_eq!(m["training_rows"]["rule"], json!({"kind": "separate_files"}));
     let not_read = json!({"read": false, "sources": ["weekly_cases"]});
     assert_eq!(m["holdout_files"], not_read);
     let os = &m["state_sets"]["one_step"];
@@ -331,7 +331,7 @@ fn a_row_whose_label_precedes_the_cutoff_and_whose_period_ends_after_it_is_held_
     let (_, out) = predict(dir, &[]);
 
     let m = read_json(&out.join("predictive.json"));
-    let weekly_prefix = m["parameter_set"]["streams"].as_array().unwrap().iter()
+    let weekly_prefix = m["training_rows"]["streams"].as_array().unwrap().iter()
         .find(|s| s["stream"] == "weekly_cases").unwrap()["rows"].as_u64().unwrap();
     assert_eq!(weekly_prefix, 3, "the fit trained on the weeks labelled 0, 7, 14");
 

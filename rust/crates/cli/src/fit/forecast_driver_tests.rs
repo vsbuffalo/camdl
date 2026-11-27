@@ -253,7 +253,7 @@ fn reference_check(n_draws: usize, n_particles: usize, m: usize) -> String {
     let s = setup(with_truth(compile(&fixture_source(), "reference")), &daily, &weekly, "reference").unwrap();
     let plan = s.plan(7.0, &["weekly_cases"]);
     let k = index_of(&plan, "weekly_cases", 28.0);
-    assert_eq!((plan.targets()[k].measures.start(), plan.targets()[k].horizon), (21.0, 0));
+    assert_eq!((plan.targets()[k].measures.start(), plan.targets()[k].periods_ahead), (21.0, 1));
     let fc = s.run(plan, n_draws, n_particles, 11).unwrap();
     let (rho, kd) = (0.5, 10.0);
     let w: Vec<f64> = fc.expected.as_ref().unwrap()[k].iter().map(|e| e / rho).collect();

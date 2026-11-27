@@ -66,7 +66,7 @@ impl PredictiveMode {
 /// alone, so a `HeldOut` row's band is out of sample in its parameters while
 /// its state has been filtered through every earlier row (gh#1079). The
 /// spec's third role, `target`, belongs to a forecast's targets (each with a
-/// horizon and a lead) and is not written here.
+/// `periods_ahead` and a lead) and is not written here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowRole {
     /// A row of the fit's training prefix of its stream (an `NA` row
@@ -722,14 +722,14 @@ pub struct PredictiveSection<'a> {
 }
 
 /// Render `predictive/<stream>.tsv`: `scenario | time | <dims…> | mode |
-/// horizon | treatment | role | quantity | fit_rhat_max | fit_ess_min |
+/// periods_ahead | treatment | role | quantity | fit_rhat_max | fit_ess_min |
 /// rhat_mean | ess_mean | rhat_pred | ess_pred | n_draws | q05 … q95`. Tidy,
 /// plot-ready; the axes and the convergence channels are columns so a new
 /// predictive cell — a new scenario, a new mode, a new treatment — is more
 /// rows, never new consumer code. Several [`PredictiveSection`]s (one per
-/// (scenario, mode)) stack under the single header. `horizon`, a forecast
-/// target's position after its origin, is empty: neither mode written here
-/// has an origin.
+/// (scenario, mode)) stack under the single header. `periods_ahead`, how
+/// many of its stream's periods a forecast target is ahead of its origin, is
+/// empty: neither mode written here has an origin.
 ///
 /// Two convergence channels sit side by side and must not be confused (gh#794).
 /// `fit_rhat_max`/`fit_ess_min` are the *producing method's* worst-parameter numbers,
@@ -773,7 +773,7 @@ pub fn render_predictive_tsv_sections(
         out.push_str(d);
     }
     out.push_str(
-        "\tmode\thorizon\ttreatment\trole\tquantity\tfit_rhat_max\tfit_ess_min\
+        "\tmode\tperiods_ahead\ttreatment\trole\tquantity\tfit_rhat_max\tfit_ess_min\
          \trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws",
     );
     for (_, label) in QUANTILE_LEVELS {
@@ -809,7 +809,7 @@ pub fn render_predictive_tsv_sections(
             }
             out.push('\t');
             out.push_str(section.mode.as_str());
-            // `horizon`: empty, as no row here has a forecast origin.
+            // `periods_ahead`: empty, as no row here has a forecast origin.
             out.push('\t');
             out.push('\t');
             out.push_str(section.treatment.label());
@@ -4136,7 +4136,7 @@ fn run_predict(
 
     // 6. Write the predictive artifact — every scenario's free-forward rows plus
     // the one-step rows stacked into one file per logical stream (the leading
-    // `scenario` column and the typed `horizon` column distinguish the rows). The
+    // `scenario` column and the typed `mode` column distinguish the rows). The
     // observed half follows.
     //
     // The one-step horizon is scenario-AGNOSTIC: it filters the OBSERVED data
@@ -4144,7 +4144,7 @@ fn run_predict(
     // factual scenario to a filter over the actual data is ill-defined (you would
     // condition the modified model on data the unmodified model generated). It is
     // emitted once, tagged `fitted`, alongside every scenario's free-forward
-    // rows. The `scenario`/`horizon` columns keep the file tidy.
+    // rows. The `scenario`/`mode` columns keep the file tidy.
     let mut written = Vec::new();
     let one_step_streams: &[StreamBands] =
         one_step.as_ref().map(|o| o.streams.as_slice()).unwrap_or(&[]);
@@ -4288,7 +4288,7 @@ fn run_predict(
         // Record this stream's join contract for `predictive.json`. Coordinate
         // columns (the group-by keys) in header order: the `chain` column when
         // `--by-chain` wrote one, `scenario`, the `sweep:<param>` columns,
-        // `time`, the stratum dims, `mode`, `horizon`, `treatment`, `role`,
+        // `time`, the stratum dims, `mode`, `periods_ahead`, `treatment`, `role`,
         // `quantity`. The band columns are
         // the quantile labels; the diagnostics
         // are the method-provenance pair (`fit_rhat_max` / `fit_ess_min`, constant down
@@ -4305,7 +4305,7 @@ fn run_predict(
         coordinates.push("time".to_string());
         coordinates.extend(index_dims.iter().cloned());
         coordinates.push("mode".to_string());
-        coordinates.push("horizon".to_string());
+        coordinates.push("periods_ahead".to_string());
         coordinates.push("treatment".to_string());
         coordinates.push("role".to_string());
         coordinates.push("quantity".to_string());
@@ -4364,7 +4364,7 @@ fn run_predict(
             // The tag names the column contract the file was written under;
             // every change to the column set bumps it. The versions are
             // listed in docs/camdl-run-spec.md §2.2.2.
-            "schema": "camdl.predictive/v5",
+            "schema": "camdl.predictive/v6",
             // gh#896: the run whose draws these bands replay, and the options
             // that shaped them (they also key this directory's address).
             "run_id": run_id,
@@ -4378,11 +4378,11 @@ fn run_predict(
             // absent when no filter ran.
             "particles": one_step_fit.is_some().then_some(particles),
             // The two information sets (`docs/engineering/forecasting.md`
-            // §1.4). The parameter set is the fit's recorded training
+            // §1.4). The training rows are the fit's recorded training
             // partition, as `forecast.json` carries it: the rule, the training
             // extent and each stream's training rows. A row's `role` is its
             // position against that stream's `rows`.
-            "parameter_set": &parameter_set.record,
+            "training_rows": &parameter_set.record,
             // The state set of each section written, keyed by its `mode`
             // value: the rows the latent state behind a band was conditioned
             // on.
@@ -4641,7 +4641,7 @@ fn free_forward_scored(
                 stop,
                 mode: ScoreMode::FreeForward,
                 origin: None,
-                horizon: None,
+                periods_ahead: None,
                 lead: None,
                 role,
                 observed: *y,
@@ -6115,7 +6115,7 @@ fn one_step_scored(
                 stop: end,
                 mode: ScoreMode::OneStep,
                 origin: None,
-                horizon: None,
+                periods_ahead: None,
                 lead,
                 role: parameter_set.role(name, position),
                 observed: y,
@@ -6150,7 +6150,7 @@ fn one_step_scored(
             sweep: Vec::new(),
             mode: ScoreMode::OneStep,
             origin: None,
-            horizon: None,
+            periods_ahead: None,
             lead: if leads_agree { lead } else { None },
             start: cells.iter().map(|&c| scored.cells[c].start).fold(f64::INFINITY, f64::min),
             stop: obs_times[ti],
@@ -7464,7 +7464,7 @@ mod tests {
         );
         let lines: Vec<&str> = tsv.trim_end().lines().collect();
         assert_eq!(lines[0],
-            "scenario\ttime\tpatch\tmode\thorizon\ttreatment\trole\tquantity\tfit_rhat_max\tfit_ess_min\
+            "scenario\ttime\tpatch\tmode\tperiods_ahead\ttreatment\trole\tquantity\tfit_rhat_max\tfit_ess_min\
              \trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws\tq05\tq25\tq50\tq75\tq95");
         assert_eq!(lines[1],
             "fitted\t7\tBo\tfree_forward\t\tposterior\ttrained\tobservation\t1.0100\t420\t\t\t\t\t40\t0\t1\t3\t6\t12");
@@ -7499,7 +7499,7 @@ mod tests {
         // No dim column; not-assessed rhat/ess are empty cells, not fabricated
         // values; n_draws is still carried. Scenario leads.
         assert_eq!(lines[0],
-            "scenario\ttime\tmode\thorizon\ttreatment\trole\tquantity\tfit_rhat_max\tfit_ess_min\
+            "scenario\ttime\tmode\tperiods_ahead\ttreatment\trole\tquantity\tfit_rhat_max\tfit_ess_min\
              \trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws\tq05\tq25\tq50\tq75\tq95");
         assert_eq!(lines[1], "fitted\t1\tfree_forward\t\tposterior\ttrained\tobservation\t\t\t\t\t\t\t12\t1\t2\t3\t4\t5");
     }
@@ -7552,7 +7552,7 @@ mod tests {
         let lines: Vec<&str> = tsv.trim_end().lines().collect();
         assert_eq!(
             lines[0],
-            "scenario\tsweep:k\ttime\tmode\thorizon\ttreatment\trole\tquantity\tfit_rhat_max\tfit_ess_min\
+            "scenario\tsweep:k\ttime\tmode\tperiods_ahead\ttreatment\trole\tquantity\tfit_rhat_max\tfit_ess_min\
              \trhat_mean\tess_mean\trhat_pred\tess_pred\tn_draws\tq05\tq25\tq50\tq75\tq95",
             "sweep:k column follows scenario"
         );

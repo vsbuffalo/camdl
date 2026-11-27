@@ -11,8 +11,8 @@
 //! period's flow (§1.3).
 //!
 //! The forecast origin is the training extent and the state is conditioned on
-//! the training rows only (D57); the horizon counts each stream's own targets
-//! from the first one ending after the origin (§1.2, D41).
+//! the training rows only (D57); `periods_ahead` counts each stream's own
+//! targets from 1, the first one ending after the origin (§1.2, D41).
 
 use super::observed_rows::{Measures, ObservedRow};
 use super::runner::TIME_TIE_EPS;
@@ -27,9 +27,10 @@ pub(crate) struct Target {
     pub stream: String,
     /// The period or instant predicted.
     pub measures: Measures,
-    /// The position of this target among its stream's targets; 0 is the first
-    /// that ends after the origin (the period under way, when one is).
-    pub horizon: i64,
+    /// How many of its stream's periods ahead of the origin this target is,
+    /// counted from 1: the first target that ends after the origin (the
+    /// period under way, when one is) is 1.
+    pub periods_ahead: i64,
     /// The duration from the origin to the target's end, in model time units.
     pub lead: f64,
     /// The held-out row that measures the same period, when one exists.
@@ -120,8 +121,8 @@ pub(crate) enum TargetSource {
     EmitSchedule,
     /// A window-column stream with no `emit_schedule`, scored: the periods of
     /// its held-out rows within the reach (D80). Nothing is extrapolated, and
-    /// a target's ordinal counts only the held-out rows, so it is not a
-    /// horizon comparable with a tiled stream's; compare such targets by lead.
+    /// a target's `periods_ahead` counts only the held-out rows, so it is not
+    /// comparable with a tiled stream's; compare such targets by lead.
     HeldOutRows,
 }
 
@@ -130,8 +131,8 @@ impl TargetSource {
         match self {
             TargetSource::DeclaredTiling { span } => format!("declared_tiling(span = {span})"),
             TargetSource::EmitSchedule => "emit_schedule".to_string(),
-            TargetSource::HeldOutRows => "held_out_rows (each target's horizon is its position \
-                among the held-out rows, not a count of declared periods; compare by lead)"
+            TargetSource::HeldOutRows => "held_out_rows (each target's periods_ahead is its position, \
+                from 1, among the held-out rows, not a count of declared periods; compare by lead)"
                 .to_string(),
         }
     }
@@ -584,7 +585,7 @@ fn stream_targets(
             stream: stream.clone(),
             observed,
             measures: m,
-            horizon: h as i64,
+            periods_ahead: h as i64 + 1,
             lead: m.end() - origin,
             design,
         })
@@ -899,10 +900,10 @@ mod tests {
     }
 
     /// The spec's Figure 3: daily through day 24, weekly through day 21. The
-    /// origin is 24; the weekly week [21, 28) is under way and is horizon 0;
-    /// the daily days are horizons 0, 1, 2, …
+    /// origin is 24; the weekly week [21, 28) is under way and is 1 period
+    /// ahead; the daily days are 1, 2, 3, … periods ahead.
     #[test]
-    fn the_week_under_way_is_horizon_zero_and_each_stream_counts_its_own_periods() {
+    fn the_week_under_way_is_one_period_ahead_and_each_stream_counts_its_own_periods() {
         let d: Vec<ObservedRow> = (0..24).map(|i| row(i, i as f64, i as f64 + 1.0)).collect();
         let w: Vec<ObservedRow> = (0..3).map(|i| row(i, 7.0 * i as f64, 7.0 * (i + 1) as f64)).collect();
         let rows = BTreeMap::from([("daily".to_string(), d.clone()), ("weekly".to_string(), w.clone())]);
@@ -915,17 +916,17 @@ mod tests {
         let weekly: Vec<&Target> = plan.targets_of("weekly").collect();
         assert_eq!(weekly.len(), 1, "{weekly:?}");
         assert_eq!((weekly[0].measures.start(), weekly[0].measures.end()), (21.0, 28.0));
-        assert_eq!((weekly[0].horizon, weekly[0].lead), (0, 4.0));
+        assert_eq!((weekly[0].periods_ahead, weekly[0].lead), (1, 4.0));
         let daily: Vec<(f64, f64, i64)> = plan.targets_of("daily")
-            .map(|t| (t.measures.start(), t.measures.end(), t.horizon)).collect();
-        assert_eq!(daily, (0..7).map(|h| (24.0 + h as f64, 25.0 + h as f64, h)).collect::<Vec<_>>());
+            .map(|t| (t.measures.start(), t.measures.end(), t.periods_ahead)).collect();
+        assert_eq!(daily, (0..7).map(|h| (24.0 + h as f64, 25.0 + h as f64, h + 1)).collect::<Vec<_>>());
         assert_eq!(plan.run_end(), 31.0);
     }
 
-    /// `--horizon "4 weeks"` from a week boundary: weekly horizons 0–3, daily
-    /// horizons 0–27.
+    /// `--horizon "4 weeks"` from a week boundary: weekly targets 1–4 periods
+    /// ahead, daily 1–28.
     #[test]
-    fn four_weeks_from_a_week_boundary_gives_weekly_0_to_3_and_daily_0_to_27() {
+    fn four_weeks_from_a_week_boundary_gives_weekly_1_to_4_and_daily_1_to_28() {
         let d: Vec<ObservedRow> = (0..21).map(|i| row(i, i as f64, i as f64 + 1.0)).collect();
         let w: Vec<ObservedRow> = (0..3).map(|i| row(i, 7.0 * i as f64, 7.0 * (i + 1) as f64)).collect();
         let rows = BTreeMap::from([("daily".to_string(), d.clone()), ("weekly".to_string(), w.clone())]);
@@ -935,10 +936,10 @@ mod tests {
             PlanStream { obs: &dobs, training: &d, held_out: &[], design: DesignInput::NotSupplied },
             PlanStream { obs: &wobs, training: &w, held_out: &[], design: DesignInput::NotSupplied },
         ]).unwrap();
-        let wh: Vec<i64> = plan.targets_of("weekly").map(|t| t.horizon).collect();
-        let dh: Vec<i64> = plan.targets_of("daily").map(|t| t.horizon).collect();
-        assert_eq!(wh, vec![0, 1, 2, 3]);
-        assert_eq!(dh, (0..28).collect::<Vec<_>>());
+        let wh: Vec<i64> = plan.targets_of("weekly").map(|t| t.periods_ahead).collect();
+        let dh: Vec<i64> = plan.targets_of("daily").map(|t| t.periods_ahead).collect();
+        assert_eq!(wh, vec![1, 2, 3, 4]);
+        assert_eq!(dh, (1..=28).collect::<Vec<_>>());
         let leads: Vec<f64> = plan.targets_of("weekly").map(|t| t.lead).collect();
         assert_eq!(leads, vec![7.0, 14.0, 21.0, 28.0]);
     }
@@ -1028,8 +1029,8 @@ mod tests {
         let plan = ForecastPlan::new(partition(&rows), 14.0, &[
             PlanStream { obs: &every, training: &p, held_out: &[], design: DesignInput::NotSupplied },
         ]).unwrap();
-        let at: Vec<(f64, i64)> = plan.targets().iter().map(|t| (t.measures.end(), t.horizon)).collect();
-        assert_eq!(at, vec![(21.0, 0), (28.0, 1)], "the schedule continues past its baked end");
+        let at: Vec<(f64, i64)> = plan.targets().iter().map(|t| (t.measures.end(), t.periods_ahead)).collect();
+        assert_eq!(at, vec![(21.0, 1), (28.0, 2)], "the schedule continues past its baked end");
     }
 
     /// A likelihood that reads a data column (a binomial's `n`) is refused a
@@ -1228,8 +1229,8 @@ mod tests {
     }
 
     /// D80: a held-out row of a declared-cadence stream selects a target and
-    /// does not renumber it: with the second week missing, the third keeps
-    /// horizon 2.
+    /// does not renumber it: with the second week missing, the third is
+    /// still 3 periods ahead.
     #[test]
     fn held_out_rows_select_targets_without_renumbering_them() {
         let train: Vec<ObservedRow> = (0..3).map(|i| row(i, 7.0 * i as f64, 7.0 * (i + 1) as f64)).collect();
@@ -1243,8 +1244,8 @@ mod tests {
             PlanStream { obs: &wobs, training: &train, held_out: &held, design: DesignInput::NotSupplied },
         ]).unwrap();
         let got: Vec<(i64, f64, Option<usize>)> = plan.targets().iter()
-            .map(|t| (t.horizon, t.lead, t.observed.map(|h| h.position))).collect();
-        assert_eq!(got, vec![(0, 7.0, Some(3)), (1, 14.0, None), (2, 21.0, Some(4))]);
+            .map(|t| (t.periods_ahead, t.lead, t.observed.map(|h| h.position))).collect();
+        assert_eq!(got, vec![(1, 7.0, Some(3)), (2, 14.0, None), (3, 21.0, Some(4))]);
     }
 
     /// D80: two held-out rows naming one target are refused, not resolved by
@@ -1270,7 +1271,8 @@ mod tests {
 
     /// D80: a window-column stream with no `emit_schedule` takes its
     /// held-out periods as targets when there are held-out rows; each carries
-    /// its lead, and its ordinal is labelled as not a tiled horizon.
+    /// its lead, and its `periods_ahead` is labelled as not a count of
+    /// declared periods.
     #[test]
     fn a_window_column_stream_takes_its_held_out_periods_as_targets() {
         let train = vec![row(0, 0.0, 30.0), row(1, 30.0, 61.0)];
@@ -1286,8 +1288,8 @@ mod tests {
             PlanStream { obs: &o, training: &train, held_out: &held, design: DesignInput::NotSupplied },
         ]).unwrap();
         let got: Vec<(f64, f64, i64, f64)> = plan.targets().iter()
-            .map(|t| (t.measures.start(), t.measures.end(), t.horizon, t.lead)).collect();
-        assert_eq!(got, vec![(61.0, 92.0, 0, 31.0), (100.0, 130.0, 1, 69.0)]);
+            .map(|t| (t.measures.start(), t.measures.end(), t.periods_ahead, t.lead)).collect();
+        assert_eq!(got, vec![(61.0, 92.0, 1, 31.0), (100.0, 130.0, 2, 69.0)]);
         assert_eq!(plan.sources()[0].1, TargetSource::HeldOutRows);
         assert!(TargetSource::HeldOutRows.describe().contains("lead"));
     }

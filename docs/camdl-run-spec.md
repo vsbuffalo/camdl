@@ -1010,7 +1010,8 @@ tables stay on the declared output grid.
 
 ```
 <run folder>/predict/<mode>-<12 hex>/predictive/<stream>.tsv
-  scenario | sweep:<param>… | time | <dims…> | mode | horizon | treatment | role
+  scenario | sweep:<param>… | time | <dims…> | mode | periods_ahead | treatment
+           | role
            | quantity | fit_rhat_max | fit_ess_min
            | rhat_mean | ess_mean | rhat_pred | ess_pred
            | n_draws | q05 | q25 | q50 | q75 | q95
@@ -1028,11 +1029,12 @@ predictive cell is more rows and never new consumer code. The `mode` column is
 draw and pooling over particles × draws); both stack under one header. The two
 modes walk the step the fit ran at — the model's declared `dt` when it has one
 (the one dt rule), else the fit's `[config] dt` — since either mode on another
-step would replay a different process than the posterior describes. `horizon` is
-a forecast target's position after its origin (as in `forecast/<stream>.tsv`)
-and is empty on every row here, since neither mode has an origin. `quantity`
-says what a band is of: `observation`, a draw `y` from the observation model, on
-every row `camdl predict` writes; `expectation`, the observation model's mean
+step would replay a different process than the posterior describes.
+`periods_ahead` counts how many of its stream's periods a forecast target is
+ahead of its origin, from 1 (as in `forecast/<stream>.tsv`), and is empty on
+every row here, since neither mode has an origin. `quantity` says what a band is
+of: `observation`, a draw `y` from the observation model, on every row
+`camdl predict` writes; `expectation`, the observation model's mean
 `E[y | x, θ]` with no observation noise drawn, is the other value, written by
 `pfilter --save-filtered-streams`. Observed data are compared with an
 `observation` band; an `expectation` band is narrower by the observation noise.
@@ -1048,7 +1050,7 @@ which rows the point was fitted to; with `--holdout-after` the rows it
 conditions on are `trained`, as declared and not checked. A fixed point takes no
 `[data.holdout]` file, so `--holdout-after` is its only way to declare its
 training rows. (`target` is reserved for a forecast's targets, which carry a
-horizon and a lead; these two modes write none.) Membership is the row's
+`periods_ahead` and a lead; these two modes write none.) Membership is the row's
 position in its stream, read from the training partition the fit recorded and
 checked against the data files; a fit that recorded none is refused. A
 `one_step` band covers every row of the bound files. At a `held_out` row its
@@ -1062,7 +1064,7 @@ period's end while `free_forward` rows and `observed/` carry the label
 `role` is read by row position and is right on both. `predictive.json` records
 both sets:
 
-- `parameter_set`: the fit's training partition, as `forecast.json` carries it
+- `training_rows`: the fit's training partition, as `forecast.json` carries it
   (the `rule`, the training `extent` as `{t, date}`, and each stream's training
   `rows` and their digest).
 - `state_sets`, keyed by `mode` value, one per section written. `free_forward`
@@ -1180,7 +1182,7 @@ tidy keys. A hole — a scheduled but unobserved cell — renders as an empty
 per stratum, using `index_dims` from the `fit.meta.json` schema and no
 run-store, DSL, or likelihood knowledge.
 
-`predictive.json` (schema tag `camdl.predictive/v5`) records the `run_id` whose
+`predictive.json` (schema tag `camdl.predictive/v6`) records the `run_id` whose
 draws it replays and declares, per stream, which columns are join coordinates
 versus band versus per-cell diagnostics, the `value_kind`, and the band's
 quantile levels; it also carries a `chain_selection` block when
@@ -1202,6 +1204,7 @@ The versions do not carry the same numbers under the same column names:
 | `v3` | `fit_rhat_max`, `fit_ess_min`            | the v2 statistics, renamed to say whose they are, plus the per-row `rhat_mean`/`ess_mean`/`rhat_pred`/`ess_pred` channels                                                               |
 | `v4` | `fit_rhat_max`, `fit_ess_min`            | the v3 statistics; the `role` coordinate is added after `treatment`, and the manifest gains `parameter_set` and `state_sets`                                                            |
 | `v5` | `fit_rhat_max`, `fit_ess_min`            | the v4 statistics; the mode-valued `horizon` column is renamed `mode`, `horizon` holds a forecast target's position (empty here), `quantity` follows `role`, and `role` gains `unknown` |
+| `v6` | `fit_rhat_max`, `fit_ess_min`            | the v5 statistics; the `horizon` column is renamed `periods_ahead`, and the manifest's `parameter_set` is renamed `training_rows`                                                       |
 
 The v1 → v2 row is why the tag exists at all: the estimator changed and the
 column names did not, so for those two versions the tag is the _only_ signal
@@ -1249,7 +1252,7 @@ is a failure. The exit status follows:
 | an eligible stream fails while it is produced (e.g. refused a forecast) | 1    |
 
 The manifest — `predictive.json` for the free-forward and one-step modes,
-`forecast.json` (`camdl.forecast/v5`) for a forecast — lists `produced` (leaf
+`forecast.json` (`camdl.forecast/v6`) for a forecast — lists `produced` (leaf
 names), `skipped` (`{"stream", "reason"}`) and `failed`
 (`{"stream", "reason"}`), so a consumer reads completeness off the artifact
 rather than the exit status. A forecast also skips an eligible stream none of
@@ -1260,16 +1263,17 @@ A forecast's tables are:
 
 ```
 <run folder>/predict/forecast-<12 hex>/forecast/<stream>.tsv
-  scenario | sweep:<param>… | <dims…> | t_start | t_stop | mode | horizon | lead
+  scenario | sweep:<param>… | <dims…> | t_start | t_stop | mode | periods_ahead | lead
            | quantity | mean | q05 | q25 | q50 | q75 | q95 | n_samples
 
 <run folder>/predict/forecast-<12 hex>/forecast-samples.tsv
   scenario | sweep:<param>… | sample | chain | draw | cloud_row | particle
-           | stream | t_start | t_stop | horizon | quantity | value
+           | stream | t_start | t_stop | periods_ahead | quantity | value
 ```
 
-`mode` is `forecast` on every row, `horizon` the target's position among its
-stream's targets, `lead` its end minus the origin, and `quantity` is
+`mode` is `forecast` on every row, `periods_ahead` how many of its stream's
+periods the target is ahead of the origin, counted from 1 for the first target
+that ends after it, `lead` its end minus the origin, and `quantity` is
 `observation`: the bands and the samples are of draws from the observation
 model.
 
@@ -1281,6 +1285,11 @@ model.
   went to (`run_end`, the latest target end when that is later) and whether it
   was `extended` (D49). Interventions are planned to `run_end`; nothing else is
   extended.
+- `training_rows`: the fit's training partition, as `predictive.json` records
+  it. `conditioning_rows`: the rows the state at the origin was filtered
+  through, as `conditioning` (`filtered`), `through` (the origin, as
+  `{t, date}`) and, per stream, the `rows` and their `digest`. For a
+  fixed-origin forecast the two hold the same rows.
 - `samples`: what `forecast-samples.tsv` holds. Each posterior draw contributes
   `per_draw` joint samples (5), evenly strided over its `of_particles`
   particles; each sample is one particle's trajectory across every target. The
@@ -1297,13 +1306,14 @@ model.
   held-out rows' digests, which targets they measure and which row matched which
   target, and the log-likelihoods belong to the score artifact (forecast
   scoring, Stage 6).
-- `targets`: each target's `stream`, `start` and `end`, `horizon` (its position
-  among its stream's targets), `lead` (its end minus the origin), and `design`,
-  the design values the prediction read (absent for a stream that reads none).
-  `target_sources` names each stream's source: `declared_tiling`,
-  `emit_schedule`, or `held_out_rows` for a window-column stream with no
-  `emit_schedule`, whose horizons count its held-out rows and are not comparable
-  with a tiled stream's; compare such targets by `lead`.
+- `targets`: each target's `stream`, `start` and `end`, `periods_ahead` (how
+  many of its stream's periods it is ahead of the origin, from 1), `lead` (its
+  end minus the origin), and `design`, the design values the prediction read
+  (absent for a stream that reads none). `target_sources` names each stream's
+  source: `declared_tiling`, `emit_schedule`, or `held_out_rows` for a
+  window-column stream with no `emit_schedule`, whose `periods_ahead` counts its
+  held-out rows and is not comparable with a tiled stream's; compare such
+  targets by `lead`.
 - `design` (D81): `null` when no target reads a design column; otherwise `mode`
   (`prospective`, from `--design` files; `ex_post`, from the held-out rows'
   realised values under `--realised-design`), `label` (an ex-post forecast is
@@ -1603,7 +1613,7 @@ with `lead` empty. Only the log score is computed for a `joint` row.
 `scores/score-<12 hex>/`:
 
 - `scored.tsv`: one row per scored row or target, with the columns
-  `scenario [sweep:<p>] stream source <dims> t_start t_stop [date_start date_stop] mode origin horizon lead role parameters quantity mean q05 q25 q50 q75 q95 observed log_score crps wis wis_dispersion wis_over wis_under pit in_50 in_90`.
+  `scenario [sweep:<p>] stream source <dims> t_start t_stop [date_start date_stop] mode origin periods_ahead lead role parameters quantity mean q05 q25 q50 q75 q95 observed log_score crps wis wis_dispersion wis_over wis_under pit in_50 in_90`.
   `stream` is the observation block, and `source` the data source it reads: two
   blocks reading one source (`weekly from surv`, `recovered from surv`) are two
   streams. `role` is `trained`, `held_out`, `future` (every forecast target) or
@@ -6039,7 +6049,7 @@ wrote camdl-store/<build>/fit/sir-…/runs/pgas-…/seed_1-…/predict/all-…/o
 
 ```
 $ cut -f1-7 camdl-store/<build>/fit/sir-…/runs/pgas-…/seed_1-…/predict/all-…/predictive/weekly_cases.tsv | head -3
-scenario	time	mode	horizon	treatment	role	quantity
+scenario	time	mode	periods_ahead	treatment	role	quantity
 fitted	0	free_forward		posterior	trained	observation
 fitted	7	free_forward		posterior	trained	observation
 ```
@@ -7485,7 +7495,8 @@ camdl predict @posterior
 It emits, under the run's `predict/<mode>-<12 hex>/` (§2.2.2):
 
 ```
-predictive/<stream>.tsv   time | <dims…> | mode | horizon | treatment | role | quantity
+predictive/<stream>.tsv   time | <dims…> | mode | periods_ahead | treatment | role
+                          | quantity
                           | fit_rhat_max | fit_ess_min
                           | rhat_mean | ess_mean | rhat_pred | ess_pred
                           | n_draws | q05..q95

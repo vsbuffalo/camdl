@@ -302,24 +302,24 @@ the fit's compiled model was run from.
 fixed-origin forecast instead: from the end of the fit's training rows (the
 _forecast origin_), the state is filtered through the training rows only and
 each stream's periods ending within the reach are predicted, the period under
-way at the origin included. A target's `horizon` counts its stream's own periods
-from that one (0, 1, …); `lead` is the time from the origin to the target's end.
-The targets are the periods the stream declares — a uniform `covers` form
-continues its tiling, window columns use `emit_schedule` — and the rows after
-the training rows (the _held-out_ rows) only select which of those targets have
-an observed value; they never renumber them. A held-out row within the reach
-whose period is not one of the stream's targets is refused, not skipped, and so
-are two held-out rows naming one target. A stream with window columns and no
-`emit_schedule` takes its held-out rows' windows within the reach as its
-targets, which must be in order, distinct and disjoint, and must not overlap its
-training rows; their `horizon` counts the held-out rows, not declared periods,
-so compare such targets by `lead`. A stream whose rows and `emit_schedule` give
-different periods over the same reporting interval is refused, with both periods
-and where each comes from. A stream with no declared rhythm and no held-out rows
-is refused. A refused stream is listed under `failed`, named in `report.json`,
-and the exit status is 1. A stream none of whose periods ends within the reach
-is skipped with the reason `no_target_within_horizon` (a failure if `--stream`
-named it).
+way at the origin included. A target's `periods_ahead` counts its stream's own
+periods from that one (1, 2, …); `lead` is the time from the origin to the
+target's end. The targets are the periods the stream declares — a uniform
+`covers` form continues its tiling, window columns use `emit_schedule` — and the
+rows after the training rows (the _held-out_ rows) only select which of those
+targets have an observed value; they never renumber them. A held-out row within
+the reach whose period is not one of the stream's targets is refused, not
+skipped, and so are two held-out rows naming one target. A stream with window
+columns and no `emit_schedule` takes its held-out rows' windows within the reach
+as its targets, which must be in order, distinct and disjoint, and must not
+overlap its training rows; their `periods_ahead` counts the held-out rows, not
+declared periods, so compare such targets by `lead`. A stream whose rows and
+`emit_schedule` give different periods over the same reporting interval is
+refused, with both periods and where each comes from. A stream with no declared
+rhythm and no held-out rows is refused. A refused stream is listed under
+`failed`, named in `report.json`, and the exit status is 1. A stream none of
+whose periods ends within the reach is skipped with the reason
+`no_target_within_horizon` (a failure if `--stream` named it).
 
 A stream whose likelihood reads a design column, such as a binomial's
 `n = tested`, needs that column's value at every target. `--design SOURCE=FILE`
@@ -373,7 +373,7 @@ forecasts above are three predictions. The rules are in the run spec, §2.2.2,
 "Forcings read after the origin".
 
 It writes `forecast/<stream>.tsv` (one row per target: `t_start`, `t_stop`,
-`mode`, `horizon`, `lead`, `quantity`, the mean and the `q05…q95` band),
+`mode`, `periods_ahead`, `lead`, `quantity`, the mean and the `q05…q95` band),
 `forecast-samples.tsv` (joint samples, each one trajectory across every target),
 and `forecast.json` (the origin, the reach, the rows that conditioned the
 parameters and the state, each target's design values and the design mode with

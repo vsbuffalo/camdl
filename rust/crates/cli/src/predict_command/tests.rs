@@ -1091,10 +1091,10 @@ const ARM64: Pins = &[
         ("observed/daily_cases.tsv", "ee9d3cb76b7457fc"),
         ("observed/survey.tsv", "739e02d5718619d2"),
         ("observed/weekly_cases.tsv", "884f26939b41d3c2"),
-        ("predictive.json", "dc359400da62b079"),
-        ("predictive/daily_cases.tsv", "2b33dfcd44f8c52a"),
-        ("predictive/survey.tsv", "b073348f274ff007"),
-        ("predictive/weekly_cases.tsv", "495e63eaed00bc66"),
+        ("predictive.json", "72d11662538e1041"),
+        ("predictive/daily_cases.tsv", "5a36ac41383fcb03"),
+        ("predictive/survey.tsv", "94018928058468fd"),
+        ("predictive/weekly_cases.tsv", "f0103657206f0947"),
         ("quantities-model/peak_I.tsv", "1e14411cf72c645f"),
         ("quantities.json", "daf5039b8d4a73b3"),
         ("report.json", "d47528701a6bf746"),
@@ -1104,19 +1104,19 @@ const ARM64: Pins = &[
         ("observed/daily_cases.tsv", "ee9d3cb76b7457fc"),
         ("observed/survey.tsv", "739e02d5718619d2"),
         ("observed/weekly_cases.tsv", "884f26939b41d3c2"),
-        ("predictive-excl1.json", "4cdbea7491eb145d"),
-        ("predictive-excl1/daily_cases.tsv", "9da3bbae4c6cf676"),
-        ("predictive-excl1/survey.tsv", "92d97d66eec552d1"),
-        ("predictive-excl1/weekly_cases.tsv", "fe1754ef02714da7"),
+        ("predictive-excl1.json", "05907b26ae02740e"),
+        ("predictive-excl1/daily_cases.tsv", "8bb55a7dec5076d5"),
+        ("predictive-excl1/survey.tsv", "cf8a7ef2889d33ca"),
+        ("predictive-excl1/weekly_cases.tsv", "138201d8e42e0e8b"),
         ("quantities-excl1.json", "daf5039b8d4a73b3"),
         ("quantities-model-excl1/peak_I.tsv", "291336833bcaf220"),
         ("report-excl1.json", "d47528701a6bf746"),
     ]),
     ("forecast", &[
-        ("forecast-samples.tsv", "c91fc0199a18561b"),
-        ("forecast.json", "a1a7f3b2ca056284"),
-        ("forecast/daily_cases.tsv", "81a32ce7808d75c1"),
-        ("forecast/survey.tsv", "3abe3f9249ca92d7"),
+        ("forecast-samples.tsv", "6a967b3d7a0da464"),
+        ("forecast.json", "c29fb0ae029dface"),
+        ("forecast/daily_cases.tsv", "5341c4b2397f0319"),
+        ("forecast/survey.tsv", "ec4ee1c0b309eac2"),
         ("report.json", "d47528701a6bf746"),
     ]),
     ("one_step", &[
@@ -1124,10 +1124,10 @@ const ARM64: Pins = &[
         ("observed/daily_cases.tsv", "ee9d3cb76b7457fc"),
         ("observed/survey.tsv", "739e02d5718619d2"),
         ("observed/weekly_cases.tsv", "884f26939b41d3c2"),
-        ("predictive.json", "b1de3cd243fc3274"),
-        ("predictive/daily_cases.tsv", "44d4e876965d2c6e"),
-        ("predictive/survey.tsv", "74157070354d7fc0"),
-        ("predictive/weekly_cases.tsv", "71b2e2f38444c2c8"),
+        ("predictive.json", "95e83837897e8520"),
+        ("predictive/daily_cases.tsv", "f96fd17cceb68f09"),
+        ("predictive/survey.tsv", "c432e7aa21f31fc0"),
+        ("predictive/weekly_cases.tsv", "23ebe0adc9bbd05e"),
         ("report.json", "d47528701a6bf746"),
     ]),
     ("scenario", &[
@@ -1135,10 +1135,10 @@ const ARM64: Pins = &[
         ("observed/daily_cases.tsv", "ee9d3cb76b7457fc"),
         ("observed/survey.tsv", "739e02d5718619d2"),
         ("observed/weekly_cases.tsv", "884f26939b41d3c2"),
-        ("predictive.json", "e3931f53e02d7c26"),
-        ("predictive/daily_cases.tsv", "f38259ab0c705b22"),
-        ("predictive/survey.tsv", "b355e585e13d5b96"),
-        ("predictive/weekly_cases.tsv", "5b248c032f12ccb7"),
+        ("predictive.json", "5e99d5d143110595"),
+        ("predictive/daily_cases.tsv", "80f1133f9a90e505"),
+        ("predictive/survey.tsv", "250926969b132326"),
+        ("predictive/weekly_cases.tsv", "aa6055e15604bde6"),
         ("quantities-model/peak_I.tsv", "052077fa3035b289"),
         ("quantities.json", "bf916eed6f943d43"),
         ("report.json", "d47528701a6bf746"),
@@ -1148,10 +1148,10 @@ const ARM64: Pins = &[
         ("observed/daily_cases.tsv", "ee9d3cb76b7457fc"),
         ("observed/survey.tsv", "739e02d5718619d2"),
         ("observed/weekly_cases.tsv", "884f26939b41d3c2"),
-        ("predictive.json", "75de61620f2530fe"),
-        ("predictive/daily_cases.tsv", "4a897ca59bea18dc"),
-        ("predictive/survey.tsv", "96221535ef12267e"),
-        ("predictive/weekly_cases.tsv", "efe0ea5b2b9c3329"),
+        ("predictive.json", "a85c551cbda7f85b"),
+        ("predictive/daily_cases.tsv", "02aa9d7af9cba827"),
+        ("predictive/survey.tsv", "cc0a39caf5ed39db"),
+        ("predictive/weekly_cases.tsv", "e6f6e8145ee4455c"),
         ("quantities-model/peak_I.tsv", "7b0623e902b6352c"),
         ("quantities.json", "b22fead586ddd990"),
         ("report.json", "d47528701a6bf746"),
@@ -1229,9 +1229,9 @@ fn a_fixed_point_prediction_is_stored_under_prediction_and_labelled_plug_in() {
     assert!(rows.iter().any(|r| r["mode"] == "one_step") && rows.iter().any(|r| r["mode"] == "free_forward"));
     let ff: Vec<&BTreeMap<String, String>> = rows.iter().filter(|r| r["mode"] == "free_forward").collect();
     assert!(ff.iter().all(|r| r["n_draws"] == "4"), "the band pools the four copies");
-    // Outside a forecast a row has no horizon, and every band is of the
-    // observation.
-    assert!(rows.iter().all(|r| r["horizon"].is_empty()), "no horizon outside a forecast");
+    // Outside a forecast a row has no periods_ahead, and every band is of
+    // the observation.
+    assert!(rows.iter().all(|r| r["periods_ahead"].is_empty()), "no periods_ahead outside a forecast");
     assert!(rows.iter().all(|r| r["quantity"] == "observation"), "every band is of the observation");
     // No --holdout-after: which rows the point was fitted to is not known, so
     // every data row is `unknown`, and every row past them is `future`.

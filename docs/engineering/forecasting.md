@@ -212,8 +212,7 @@ one week ahead, even though the parameters were fitted only through 15 February.
 It is not a forecast three weeks ahead from 16 February. Both sets of rows are
 recorded per stream as a row count and a digest of those rows
 ([`RowPrefix`](rust:cli::fit::training_partition::RowPrefix)), and
-`forecast.json` writes them as `parameter_set` (the training rows) and
-`state_set` (the conditioning rows).
+`forecast.json` writes them as `training_rows` and `conditioning_rows`.
 
 For a fixed-origin forecast the two hold the same rows. The forecast driver
 filters through the training rows and checks that the rows it was given are the
@@ -703,7 +702,7 @@ A parameter point given in a file has no fit record.
 and the result is a declaration that nothing verifies: a score of such a
 prediction is labelled `hold_out_declared` and never `hold_out_tail` (§4.4).
 
-The partition is written to `fit.meta.json` and copied as `parameter_set` into
+The partition is written to `fit.meta.json` and copied as `training_rows` into
 `predictive.json` and `forecast.json`. The fields are in the run specification,
 §2.2.1.
 

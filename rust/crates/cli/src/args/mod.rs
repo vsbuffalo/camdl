@@ -1464,7 +1464,7 @@ The role column says what part each row played in the fit:
   unknown    a data row of a fixed-point prediction given no
              --holdout-after: nothing records which rows the point was
              fitted to.
-predictive.json records both sets: parameter_set (the rows the parameters
+predictive.json records both sets: training_rows (the rows the parameters
 were fitted to) and state_sets (the rows each band's state was filtered
 through).
 For a stream labelled by each period's start, one_step rows carry the

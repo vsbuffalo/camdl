@@ -429,29 +429,31 @@ integrates over the cloud by pooling and quantiling, and writes two files under
 the run directory:
 
 - `predictive/<stream>.tsv` —
-  `time | <dims…> | mode | horizon | treatment | role | quantity | fit_rhat_max | fit_ess_min | rhat_mean | ess_mean | rhat_pred | ess_pred | n_draws | q05 q25 q50 q75 q95`.
+  `time | <dims…> | mode | periods_ahead | treatment | role | quantity | fit_rhat_max | fit_ess_min | rhat_mean | ess_mean | rhat_pred | ess_pred | n_draws | q05 q25 q50 q75 q95`.
   The `q05…q95` columns are the ribbon; the `mode` and `treatment` columns make
   the two predictive axes explicit (so an honestly-wide posterior band is never
   confused with a narrow plug-in one), and `fit_rhat_max`/`fit_ess_min` carry
-  the fit's own convergence numbers alongside every band. `horizon` is a
-  forecast target's position after its origin and is empty here. `quantity` is
-  `observation` on every row: the band is of draws `y` from the observation
-  model, which is what observed data are compared with, not of its mean
-  `E[y | x, θ]`. The `role` column says what part the row played in the fit:
-  `trained` (a row of the fit's training prefix), `held_out` (a row of the bound
-  file after it), `future` (a free-forward row past the last row of the bound
-  file: the prediction read no data row for that period), or `unknown` (a data
-  row of a fixed-point prediction given no `--holdout-after`). **`fit_rhat_max`
-  is the rank-normalized split R̂ and `fit_ess_min` the bulk-ESS** (see
-  [Which R̂, and which ESS](#which-r-and-which-ess)); `fit_ess_min` is left empty
-  when any assessed parameter has no pooled ESS, rather than minimizing over the
-  ones that do. The sibling `predictive.json` tags this contract
-  `camdl.predictive/v5`. Earlier tags are not join-compatible with it and **must
-  not be joined without keying on the tag**: `/v4` held the mode in a column
-  named `horizon` and had no `quantity` column, `/v3` had no `role` column,
-  `/v2` spelled these two columns `rhat_max`/`ess_min` and had no per-row
-  channels, and `/v1` carried classic Gelman–Rubin R̂ and a per-chain Geyer sum
-  under those same two names — the same header, a different statistic.
+  the fit's own convergence numbers alongside every band. `periods_ahead` is how
+  many of its stream's periods a forecast target is ahead of its origin, and is
+  empty here. `quantity` is `observation` on every row: the band is of draws `y`
+  from the observation model, which is what observed data are compared with, not
+  of its mean `E[y | x, θ]`. The `role` column says what part the row played in
+  the fit: `trained` (a row of the fit's training prefix), `held_out` (a row of
+  the bound file after it), `future` (a free-forward row past the last row of
+  the bound file: the prediction read no data row for that period), or `unknown`
+  (a data row of a fixed-point prediction given no `--holdout-after`).
+  **`fit_rhat_max` is the rank-normalized split R̂ and `fit_ess_min` the
+  bulk-ESS** (see [Which R̂, and which ESS](#which-r-and-which-ess));
+  `fit_ess_min` is left empty when any assessed parameter has no pooled ESS,
+  rather than minimizing over the ones that do. The sibling `predictive.json`
+  tags this contract `camdl.predictive/v6`. Earlier tags are not join-compatible
+  with it and **must not be joined without keying on the tag**: `/v5` named the
+  `periods_ahead` column `horizon` and the manifest's `training_rows`
+  `parameter_set`, `/v4` held the mode in a column named `horizon` and had no
+  `quantity` column, `/v3` had no `role` column, `/v2` spelled these two columns
+  `rhat_max`/`ess_min` and had no per-row channels, and `/v1` carried classic
+  Gelman–Rubin R̂ and a per-chain Geyer sum under those same two names — the same
+  header, a different statistic.
 
   `fit_rhat_max`/`fit_ess_min` describe **the fit**, not the row — which is what
   their names say. They are the worst parameter's numbers, repeated identically
