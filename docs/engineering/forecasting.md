@@ -235,20 +235,23 @@ prediction, and each is recorded under its own name in the artifacts:
 **Mode.** The mode is the value of `camdl predict --mode`
 ([`PredictModeArg`](rust:cli::args::types::PredictModeArg)).
 
-- `free_forward` conditions on no rows. The model runs from the start of the
+- `free-forward` conditions on no rows. The model runs from the start of the
   run, and the data reach the prediction only through the parameters.
-- `one_step` predicts each data row from a state filtered through every earlier
+- `one-step` predicts each data row from a state filtered through every earlier
   row of every stream. Under `camdl predict` the filter walks the fit's stored
   training rows. Under `camdl score` it carries on through the outcome rows,
   predicting each one and then assimilating it.
 - `forecast` conditions on the training rows up to the forecast origin and on no
   row after it. Passing `--horizon` without `--mode` selects it.
 
-A `forecast`, and a `one_step` prediction of a held-out row, are forecasts in
-the sense of §1.1. A `one_step` prediction of a training row is what Hyndman and
+The command line also accepts `free_forward` and `one_step`, and the files a
+prediction writes record the mode in that underscore form.
+
+A `forecast`, and a `one-step` prediction of a held-out row, are forecasts in
+the sense of §1.1. A `one-step` prediction of a training row is what Hyndman and
 Athanasopoulos (2021, §5.3) call a fitted value. They note that "fitted values
 are often not true forecasts", because the parameters were estimated from all
-the observations, including those after the predicted one. A `free_forward`
+the observations, including those after the predicted one. A `free-forward`
 prediction over the training rows is in-sample in the same way.
 
 **Role.** Whether the parameters were fitted to the predicted row is a property
@@ -278,7 +281,7 @@ defined: past the origin it is the trajectory each draw determines, read over
 the targets, with observation noise added. camdl does not implement it yet. A
 fixed-origin forecast of an ODE fit is refused by
 [`refuse_unsupported`](rust:cli::fit::forecast_output::refuse_unsupported), and
-the refusal points to `--mode free_forward`. The Gillespie backend simulates but
+the refusal points to `--mode free-forward`. The Gillespie backend simulates but
 does not fit, and a forecast on it is refused as well.
 
 The inference method matters only through what it produced. PMMH and PGAS
@@ -354,7 +357,7 @@ not shift the periods ahead of the weeks after it. A held-out row within the
 reach whose period is not one of the stream's targets is refused. Skipping it
 would leave a period out of the score without saying so.
 
-`camdl predict --mode free_forward` builds no plan. Past a stream's data its
+`camdl predict --mode free-forward` builds no plan. Past a stream's data its
 rows continue at the most common gap between the stream's observation times
 ([`forecast_times`](rust:cli::fit::predict::forecast_times)). That rule is a
 plotting grid for an unconditioned projection, and it is never a source of
@@ -906,6 +909,13 @@ the step, fails the forecast with the draw, the time and the cause. A dropped
 draw would bias the pool toward the parameter values at which the filter
 survives.
 
+A one-step prediction follows the same rule. It runs one filter per draw, and if
+the filter of any draw collapses, the prediction fails with the number of draws
+that collapsed and the first of them, and names `--particles` as the remedy. A
+collapse on a held-out row fails `camdl score` in the same way. The draws whose
+filters collapse are those under which the data were least probable, so pooling
+the survivors would narrow the bands and raise the log score.
+
 The driver runs a fresh filter per draw whatever method produced the draws. A
 PGAS fit also stores sampled state paths, and the forecast does not read them.
 
@@ -1086,7 +1096,7 @@ Each of these is refused or absent.
 - A fixed-origin forecast on the ODE backend. The value of a flow target would
   be the difference of the cumulative flow at the target's two ends on each
   draw's trajectory, plus observation noise. It is refused, and an ODE fit is
-  predicted with `--mode free_forward`.
+  predicted with `--mode free-forward`.
 - A calendar period as a uniform `covers` form. A stream of calendar months or
   epidemiological weeks uses window columns, and needs an `emit_schedule` or
   held-out rows to have targets (§1.5).
