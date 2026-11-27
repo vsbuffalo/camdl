@@ -286,6 +286,36 @@ pub(crate) struct ForecastRun {
     pub scored: crate::fit::scoring::Scored,
 }
 
+/// The notice a forecast prints when a stream's training rows end in `NA`
+/// rows, or `None` when its last training row has a value.
+///
+/// Those rows stay training rows, so the origin falls after them and every
+/// lead time counts from a time later than the stream's newest value. The
+/// notice names that value's end and the origin, and says how to forecast the
+/// periods instead.
+fn trailing_unobserved_note(
+    stream: &str,
+    training: &[ObservedRow],
+    origin: f64,
+    calendar: &ir::caltime::CalendarAxis,
+) -> Option<String> {
+    let trail = crate::fit::training_partition::trailing_unobserved(training)?;
+    let at = |t: f64| {
+        calendar.date_of(t).map(ir::caltime::RenderedInstant::into_string)
+            .unwrap_or_else(|| format!("t = {}", fmt_time(t)))
+    };
+    let newest = match trail.last_value_end {
+        Some(t) => format!("its newest value ends at {}", at(t)),
+        None => "none of its training rows has a value".to_string(),
+    };
+    Some(format!(
+        "predict: stream '{stream}': the last {} training row(s) have no value; {newest}, and \
+         the forecast origin is {}. They are training rows: the filter simulates through them, \
+         and lead times count from the origin. To forecast those periods instead, set \
+         `holdout_after` so the training rows end before them.",
+        trail.rows, at(origin)))
+}
+
 /// The held-out rows of one stream, from the stored problem's
 /// `held_out/<stream>.tsv`: each row's file, position, label and what it
 /// measures, and no value.
@@ -462,6 +492,11 @@ pub(crate) fn run_forecast(out: &crate::out::Out, job: ForecastJob) -> Result<Fo
             o.name));
     }
     let plan = ForecastPlan::new(partition, reach, &plan_streams).map_err(|e| e.to_string())?;
+    for s in &streams {
+        if let Some(note) = trailing_unobserved_note(&s.name, &s.rows, plan.origin(), job.calendar) {
+            out.say(format_args!("{note}"));
+        }
+    }
     // The table forcings the forecast reads after its origin, each with its
     // statement; refused here, before any filter runs, when one has none.
     let mut covariates = Covariates::resolve(
@@ -1163,6 +1198,24 @@ fn write_manifest(arms: &[ArmForecast], job: &ForecastJob, m: ManifestInputs) ->
 mod tests {
     use super::*;
     use crate::fit::forecast_driver::ForecastFailure;
+
+    /// A stream whose training rows end in `NA` rows gets a notice naming its
+    /// newest value and the origin; one that ends on a value gets none.
+    #[test]
+    fn a_trailing_na_training_row_is_reported() {
+        let row = |t: f64, v: Option<f64>| ObservedRow {
+            position: 0, label: t, measures: Measures::Instant(t), temporal: vec![],
+            cell: v.map(sim::inference::ObsCell::Scalar), aux: vec![], design: vec![],
+        };
+        let axis = ir::caltime::CalendarAxis::parse("days", Some("2025-01-05")).unwrap();
+        let rows = [row(42.0, Some(3.0)), row(49.0, None), row(56.0, None)];
+        let note = trailing_unobserved_note("weekly", &rows, 56.0, &axis).expect("a notice");
+        assert!(note.contains("the last 2 training row(s) have no value"), "{note}");
+        assert!(note.contains("newest value ends at 2025-02-16"), "{note}");
+        assert!(note.contains("origin is 2025-03-02"), "{note}");
+        assert!(note.contains("holdout_after"), "{note}");
+        assert_eq!(trailing_unobserved_note("weekly", &rows[..1], 42.0, &axis), None);
+    }
 
     /// A failure names the posterior draw by its row of draws.tsv and its
     /// (chain, draw) key, not by its place among the parameter sets the

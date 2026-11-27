@@ -104,6 +104,15 @@ given. (Note that the model's `origin` declaration is a different thing, the
 calendar date of day 0. Prose and messages write "forecast origin" in full; only
 the fields and methods of the forecast modules shorten it to `origin`.)
 
+A training row whose value is `NA` is still a training row, so training rows at
+the end of a stream that have no value move the forecast origin past the
+stream's newest value. The filter simulates through them without reweighting,
+and their periods are not forecast targets. A forecast says so, naming the end
+of the stream's newest value and the origin. To forecast those periods instead,
+set `holdout_after` so that the training rows end before them: for a declared
+rhythm a target exists whether or not a row has a value (§1.5), so they become
+targets with no observed value.
+
 A forecast predicts a list of _forecast targets_. A forecast target is one
 period of one stream, of the same kind as the periods the stream's data rows
 measure: a week for `weekly`, a day for `daily`. For a stream that reads the

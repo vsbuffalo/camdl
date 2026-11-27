@@ -418,6 +418,33 @@ pub(crate) fn observed_window<'a>(rows: impl IntoIterator<Item = &'a ObservedRow
         .reduce(|(a, b), (c, d)| (a.min(c), b.max(d)))
 }
 
+/// The `NA` rows at the end of a stream's training rows.
+///
+/// Such rows are training rows like any other: the filter simulates through
+/// them without reweighting, and they move the forecast origin later. A
+/// forecast reports them because its lead times then count from a time after
+/// the stream's newest value (`docs/engineering/forecasting.md` §1.2).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TrailingUnobserved {
+    /// How many training rows at the end carry no value.
+    pub rows: usize,
+    /// The end of the latest training row with a value; `None` when no
+    /// training row has one.
+    pub last_value_end: Option<f64>,
+}
+
+/// The trailing `NA` rows of `training`, or `None` when its last row has a
+/// value or it has no rows.
+pub(crate) fn trailing_unobserved(training: &[ObservedRow]) -> Option<TrailingUnobserved> {
+    let has_value = |r: &ObservedRow| matches!(r.cell, Some(sim::inference::ObsCell::Scalar(_)));
+    let rows = training.iter().rev().take_while(|r| !has_value(r)).count();
+    if rows == 0 {
+        return None;
+    }
+    let last_value_end = training[..training.len() - rows].last().map(|r| r.measures.end());
+    Some(TrailingUnobserved { rows, last_value_end })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -587,5 +614,22 @@ mod tests {
     fn the_observed_window_skips_unobserved_rows() {
         let rows = rows_of("window", DAY, "time\tcases\n1\tNA\n2\t3\n3\t4\n4\tNA\n");
         assert_eq!(observed_window(&rows), Some((2.0, 4.0)));
+    }
+
+    /// Only the `NA` rows after the last value are counted; an `NA` row before
+    /// a value is not trailing.
+    #[test]
+    fn trailing_unobserved_counts_the_na_rows_after_the_last_value() {
+        let rows = rows_of("trail", CLOSING_7, "time\tcases\n7\t1\n14\tNA\n21\t2\n28\tNA\n35\tNA\n");
+        assert_eq!(
+            trailing_unobserved(&rows),
+            Some(TrailingUnobserved { rows: 2, last_value_end: Some(21.0) }));
+        let ends_on_value = rows_of("trail_v", CLOSING_7, "time\tcases\n7\tNA\n14\t2\n");
+        assert_eq!(trailing_unobserved(&ends_on_value), None);
+        let all_na = rows_of("trail_na", CLOSING_7, "time\tcases\n7\tNA\n14\tNA\n");
+        assert_eq!(
+            trailing_unobserved(&all_na),
+            Some(TrailingUnobserved { rows: 2, last_value_end: None }));
+        assert_eq!(trailing_unobserved(&[]), None);
     }
 }
