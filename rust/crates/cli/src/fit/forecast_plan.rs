@@ -292,6 +292,12 @@ pub(crate) enum PlanError {
     /// No stream has a target within the horizon. Carries each stream's
     /// refusal, if it had one.
     NoTargets { refusals: Vec<StreamRefusal> },
+    /// A target overlaps a training row of its stream, so the forecast would
+    /// predict a period the parameters were fitted to. The construction of a
+    /// stream's targets rules this out ([`no_target_overlaps_training`]), so
+    /// it is an internal error; the forecast fails rather than drop the
+    /// stream.
+    TargetOverlapsTraining { stream: String, target: (f64, f64), row: usize, row_measures: (f64, f64) },
 }
 
 impl std::fmt::Display for PlanError {
@@ -306,6 +312,11 @@ impl std::fmt::Display for PlanError {
                 }
                 Ok(())
             }
+            PlanError::TargetOverlapsTraining { stream, target, row, row_measures } => write!(f,
+                "internal error: the forecast target [{}, {}] of stream '{stream}' overlaps its \
+                 training row {row}, which measures [{}, {}]; no forecast was made. Please \
+                 report this.",
+                target.0, target.1, row_measures.0, row_measures.1),
         }
     }
 }
@@ -348,6 +359,7 @@ impl ForecastPlan {
         for s in streams {
             match stream_targets(s, origin, horizon) {
                 Ok((source, ts)) => {
+                    no_target_overlaps_training(&s.obs.name, &ts, s.training)?;
                     if !ts.is_empty() {
                         if ts.iter().any(|t| !t.design.is_empty()) {
                             design_modes.push(match s.design {
@@ -547,16 +559,6 @@ fn stream_targets(
     if kind == TemporalKind::Interval {
         check_schedule_agrees(s, &stream, source, &measures, reach)?;
     }
-    // No target overlaps a training row of its stream, for every source: a
-    // tiling continues from its last row, so its periods start where the
-    // rows end; an emit schedule's periods that cut across a row were
-    // refused by D82 above, and one equal to a row ends at or before the
-    // origin, so it is no target; held-out windows that overlap a row were
-    // refused by their validation; an instant target is after the origin,
-    // and every training instant at or before it.
-    debug_assert!(
-        measures.iter().all(|m| !s.training.iter().any(|r| overlaps(m, &r.measures))),
-        "a target of '{stream}' overlaps a training row");
     // D80: a held-out row within the reach names exactly one target. Under a
     // declared cadence it only selects which target is scored, so one that is
     // not a target is refused, not skipped; two naming one target are refused
@@ -591,6 +593,33 @@ fn stream_targets(
         })
         .collect();
     Ok((source, targets))
+}
+
+/// Refuses a target of `stream` among `targets` that overlaps one of the
+/// stream's `training` rows, naming the first.
+///
+/// [`stream_targets`] builds no such target, whatever the targets' source: a
+/// declared tiling continues from the last training row, so its periods
+/// start where the rows end; emit-schedule periods that cut across a row are
+/// refused as a schedule conflict, and one equal to a row ends at or before
+/// the origin, so it is no target; held-out windows that overlap a row are
+/// refused by their validation; an instant target is after the origin, and
+/// every training instant at or before it. The check holds that argument to
+/// account in every build, because a target that overlapped a training row
+/// would be scored as held out on data the parameters were fitted to.
+fn no_target_overlaps_training(stream: &str, targets: &[Target], training: &[ObservedRow]) -> Result<(), PlanError> {
+    let span = |m: &Measures| (m.start(), m.end());
+    for t in targets {
+        if let Some(r) = training.iter().find(|r| overlaps(&t.measures, &r.measures)) {
+            return Err(PlanError::TargetOverlapsTraining {
+                stream: stream.to_string(),
+                target: span(&t.measures),
+                row: r.position,
+                row_measures: span(&r.measures),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// D81: each target's design values, `columns` of the stream's likelihood,
@@ -1383,5 +1412,36 @@ mod tests {
             .contains("\"365 days\" (≈ 1 year)"));
         assert_eq!(parse_reach("4 weeks", "days", Some("2020-01-01")).unwrap(), 28.0);
         assert_eq!(parse_reach("1 months", "days", None).unwrap(), 365.2425 / 12.0);
+    }
+
+    /// A target that overlaps a training row of its stream is refused, in
+    /// every build, naming the stream, the target and the row. No input to
+    /// `ForecastPlan::new` builds such a target, so the check is called
+    /// directly; touching periods and instants at or before the origin are
+    /// not overlaps.
+    #[test]
+    fn a_target_overlapping_a_training_row_is_refused() {
+        let training = vec![row(0, 0.0, 7.0), row(1, 7.0, 14.0)];
+        let target = |start: f64, end: f64| Target {
+            stream: "weekly".into(),
+            measures: Measures::Period(Period::new(start, end).unwrap()),
+            periods_ahead: 1,
+            lead: end - 14.0,
+            observed: None,
+            design: vec![],
+        };
+        assert_eq!(no_target_overlaps_training("weekly", &[target(14.0, 21.0), target(21.0, 28.0)], &training), Ok(()));
+        let err = no_target_overlaps_training("weekly", &[target(14.0, 21.0), target(10.0, 17.0)], &training).unwrap_err();
+        assert_eq!(err, PlanError::TargetOverlapsTraining {
+            stream: "weekly".into(), target: (10.0, 17.0), row: 1, row_measures: (7.0, 14.0),
+        });
+        assert!(err.to_string().starts_with(
+            "internal error: the forecast target [10, 17] of stream 'weekly' overlaps its training row 1"), "{err}");
+
+        let instants = vec![instant_row(0, 7.0), instant_row(1, 14.0)];
+        let at = |t: f64| Target { measures: Measures::Instant(t), ..target(0.0, 1.0) };
+        assert_eq!(no_target_overlaps_training("weekly", &[at(21.0)], &instants), Ok(()));
+        assert!(matches!(no_target_overlaps_training("weekly", &[at(14.0)], &instants),
+            Err(PlanError::TargetOverlapsTraining { row: 1, .. })));
     }
 }
