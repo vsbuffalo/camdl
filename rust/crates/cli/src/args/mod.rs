@@ -573,6 +573,15 @@ pub struct SimulateArgs {
     #[input(identity, vary = crate::input_fixtures::sim_fit)]
     pub fit: Option<PathBuf>,
 
+    /// In place of `--fit <run>`, such as with `--draws posterior`: the one
+    /// fit run listed in the output manifest at PATH, read by its run id
+    /// (run spec §2.10). The run is looked up in the run store `--store`
+    /// names, and each of its files must have the SHA-256 the manifest
+    /// records. A manifest that lists no fit run, or several, is refused.
+    #[arg(long, value_name = "PATH", conflicts_with = "fit")]
+    #[input(identity, vary = crate::input_fixtures::other_manifest)]
+    pub from_manifest: Option<PathBuf>,
+
     /// Number of parameter draws. For --draws uniform/prior: how many to
     /// generate. For --draws posterior: a strided subsample cap across the
     /// whole cloud (default 200, matching `camdl predict` — never silently
@@ -1543,9 +1552,18 @@ pub struct PredictArgs {
     /// prediction uses. A model file (`.camdl` or `.ir.json`) names a model,
     /// predicted at the one point `--params` and `--param` give. A
     /// `fit.toml` names no run and is refused, with the runs it made listed.
-    #[arg(value_name = "RUN|MODEL", required = true)]
+    #[arg(value_name = "RUN|MODEL", required_unless_present = "from_manifest")]
     #[input(identity, vary = crate::input_fixtures::predict_other_run)]
     pub source: Option<String>,
+
+    /// Predict from the one fit run listed in the output manifest at PATH,
+    /// in place of RUN, as its run id names it (run spec §2.10). The run is
+    /// looked up in the run store `--store` names, and each of its files must
+    /// have the SHA-256 the manifest records. A manifest that lists no fit
+    /// run, or several, is refused.
+    #[arg(long, value_name = "PATH", conflicts_with = "source")]
+    #[input(identity, vary = crate::input_fixtures::predict_other_manifest)]
+    pub from_manifest: Option<PathBuf>,
 
     #[command(flatten)]
     #[input(group)]
@@ -2450,6 +2468,18 @@ pub struct PfilterArgs {
     #[input(identity, vary = crate::input_fixtures::other_fit)]
     pub fit: Option<PathBuf>,
 
+    /// In place of `--fit` and a parameters file: the one fit run listed in
+    /// the output manifest at PATH, read by its run id (run spec §2.10). Its
+    /// problem is read as `--fit <run>` reads it, and its `mle_params` as
+    /// the first `--params` file, ahead of any given; a run that stores no
+    /// `mle_params`, such as an MCMC run, is refused. The run is looked up
+    /// in the run store `--store` names, and each of its files must have the
+    /// SHA-256 the manifest records. A manifest that lists no fit run, or
+    /// several, is refused, and so is `--scenario`, as beside `--params`.
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["fit", "scenario"])]
+    #[input(identity, vary = crate::input_fixtures::other_manifest)]
+    pub from_manifest: Option<PathBuf>,
+
     /// Number of independent filter runs
     #[arg(long, default_value_t = 1)]
     #[input(identity)]
@@ -2744,6 +2774,15 @@ pub struct ProfileArgs {
     #[arg(long, value_name = "PATH")]
     #[input(identity, vary = crate::input_fixtures::profile_other_fit)]
     pub fit: Option<PathBuf>,
+
+    /// In place of `--fit`: the problem of the one fit run listed in the
+    /// output manifest at PATH, read by its run id (run spec §2.10). The run
+    /// is looked up in the run store `--store` names, and each of its files
+    /// must have the SHA-256 the manifest records. A manifest that lists no
+    /// fit run, or several, is refused.
+    #[arg(long, value_name = "PATH", conflicts_with = "fit")]
+    #[input(identity, vary = crate::input_fixtures::other_manifest)]
+    pub from_manifest: Option<PathBuf>,
 
     /// Profile grid (repeat for 2D+).
     /// SPEC is `V1,V2,...` | `lin(min,max,n)` | `log10(min,max,n)`.

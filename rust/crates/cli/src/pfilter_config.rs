@@ -145,6 +145,7 @@ pub(crate) fn resolve(
     compile: crate::util::CompileSettings,
     out: &crate::out::Out,
     fit_file: Option<FitArg>,
+    from_manifest: Option<crate::resolve_file::FromManifest>,
     store_root: &std::path::Path,
 ) -> (ResolvedPfilterConfig, ByProductRequests, crate::forcing_extrapolation::Installed) {
     let (
@@ -156,6 +157,7 @@ pub(crate) fn resolve(
         stream,
         data,
         fit,
+        _from_manifest,
         replicates,
         sweep_file,
         trace,
@@ -181,6 +183,11 @@ pub(crate) fn resolve(
     // fit, read here in the store this filter run is stored in.
     crate::fit_store::set_reader_root(store_root.to_path_buf());
     let fit_store = crate::camdl_store::open_existing(store_root);
+    // A fit run named by a manifest is read by its run id, as `--fit <run>`.
+    let fit = match &from_manifest {
+        Some(m) => Some(PathBuf::from(m.fit_run(store_root).unwrap_or_else(|e| out.fail(format!("error: {e}"))))),
+        None => fit,
+    };
     let fit: Option<FitArg> = fit_file.or_else(|| fit.as_ref().map(|handle| {
         FitArg::read(&handle.to_string_lossy(), fit_store.as_ref()).unwrap_or_else(|e| {
             out.fail(format!("error: --fit {}: {e}", handle.display()));
@@ -204,6 +211,15 @@ pub(crate) fn resolve(
             ));
         }
     }
+    // A manifest's fit run gives its point estimate, `mle_params`, as the
+    // first parameters file, which `--params` files given after it override.
+    let params = match (&from_manifest, &fit) {
+        (Some(m), Some(f)) => {
+            let mle = point_estimate(f).unwrap_or_else(|e| out.fail(format!("error: --from-manifest {}: {e}", m.path().display())));
+            std::iter::once(mle).chain(params).collect()
+        }
+        _ => params,
+    };
     let problem = fit.as_ref().map(|f| &f.config.problem);
     // A rate that collapses (a division by an empty compartment) is 0 under
     // `--allow-degenerate-rates` or the fit's `[config] allow_degenerate_rates`,
@@ -260,6 +276,30 @@ pub(crate) fn resolve(
         samples: !no_save_samples,
     };
     (resolved, requests, installed)
+}
+
+/// The point estimate of the stored fit run `fit` names, `mle_params`, as
+/// the path of its copy in the scratch directory `fit` holds open, which a
+/// `--params` file is read from. Refused for a fit problem, and for a run
+/// whose method stores no point estimate, such as an MCMC run, naming the
+/// method.
+fn point_estimate(fit: &FitArg) -> Result<PathBuf, String> {
+    use crate::result_files::ResultFile;
+    let opened = fit.stored.as_deref().ok_or_else(|| format!("{} is not a stored fit run", fit.handle))?;
+    let (Some(run), Some(dir)) = (&opened.fit.run, opened.run_dir()) else {
+        return Err(format!("{} names a fit problem, not a fit run", fit.handle));
+    };
+    let name = crate::result_files::fit_run::If2File::MleParams.stored();
+    if !run.result_files().contains(&name.as_str()) {
+        return Err(format!(
+            "the fit run {} is a `{}` run, which stores no `mle_params`, the point estimate pfilter reads as its \
+             parameters; name an if2 or nl-* run, or run `pfilter --fit {} --params FILE`",
+            run.id().key().short12(),
+            run.identity().chain.method.algorithm(),
+            fit.handle
+        ));
+    }
+    Ok(dir.join(name))
 }
 
 /// The execution inputs of `pfilter`, with the engine's budget filled in.

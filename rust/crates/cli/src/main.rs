@@ -843,12 +843,15 @@ fn run_simulate(inv: args::SimulateInvocation) {
     // `SimulateArgs` does not compile until it is placed; `--dry-run` is
     // `skip` and is read before the split.
     let dry_run = inv.args.dry_run;
+    // `--from-manifest` is read before `--manifest` is claimed below, since
+    // the two can name one file.
+    let from_manifest = inv.args.from_manifest.as_deref().map(crate::resolve_file::FromManifest::read);
     let (declared, execution, exports, request, given) = store::Inputs::split(inv).into_parts();
     let (declared, no_licm) = declared.into_parts();
     let (
         model, to, from, init_state, allow_degenerate_rates, forcing_extrapolation, model_overrides, param_vec,
         scenarios, enable, disable, backend, output_view, seed, seeds, replicates, draws, sweep, sweep_file, fit,
-        n_draws, chains, exclude_chains, emit_every, obs, obs_dir, obs_only, obs_only_dir, quantities_out,
+        _from_manifest, n_draws, chains, exclude_chains, emit_every, obs, obs_dir, obs_only, obs_only_dir, quantities_out,
         event_log,
     ) = declared.into_parts();
     let (allow_forcing_extrapolation,) = forcing_extrapolation.into_parts();
@@ -875,7 +878,19 @@ fn run_simulate(inv: args::SimulateInvocation) {
     let request = crate::camdl_store::store_request_with_fit_file(label.clone(), force, store_root.clone(), file_store)
         .unwrap_or_else(|e| out.fail(format!("error: {e}")));
     // A stored fit `--fit` names is read in the store this command stores in.
-    crate::fit_store::set_reader_root(crate::camdl_store::root_of(&request));
+    let reader_root = crate::camdl_store::root_of(&request);
+    crate::fit_store::set_reader_root(reader_root.clone());
+    // A file an export writes after the cells are stored must have a
+    // directory to go to; one that has none is refused before anything runs.
+    // A dry run and a design-preserving simulation keep nothing in the store,
+    // so they take no link root, from the flag (refused) or the environment.
+    let links = if dry_run || design_from.is_some() { None } else { link_tree::link_root(link_root.as_deref()) };
+    let bindings = bindings::claim(&out, manifest.as_deref(), links, label.as_deref());
+    // A fit run named by a manifest is read by its run id, as `--fit <run>`.
+    let fit = match &from_manifest {
+        Some(m) => Some(std::path::PathBuf::from(m.fit_run(&reader_root).unwrap_or_else(|e| out.fail(format!("error: {e}"))))),
+        None => fit,
+    };
     let execution_record = args::SimulateInvocationExecution {
         args: args::SimulateExecution { forcing_extrapolation: (), model_overrides: (), backend: (), output_view: args::OutputViewExecution { columns: () }, parallel },
         no_ir_cache,
@@ -887,17 +902,11 @@ fn run_simulate(inv: args::SimulateInvocation) {
         param_vec, scenarios, enable, disable,
         backend: args::SimBackend { backend: backend_flag, dt: dt_flag, integrator: integrator_flag },
         output_view: args::OutputView { every, columns: args::ColumnSelection { no_flows, columns } },
-        seed, seeds, replicates, draws, sweep, sweep_file, fit, n_draws, chains, exclude_chains, draws_out, output,
+        seed, seeds, replicates, draws, sweep, sweep_file, fit, from_manifest: None, n_draws, chains, exclude_chains, draws_out, output,
         stdout, emit_every, obs, obs_dir, obs_only, obs_only_dir, design_from, projected_out, dates, quantities_out,
         dry_run, store: store_root, parallel, force, label, event_log, format, tsv, reactive_log,
         manifest, link_root,
     };
-    // A file an export writes after the cells are stored must have a
-    // directory to go to; one that has none is refused before anything runs.
-    // A dry run and a design-preserving simulation keep nothing in the store,
-    // so they take no link root, from the flag (refused) or the environment.
-    let link_root = if a.dry_run || a.design_from.is_some() { None } else { link_tree::link_root(a.link_root.as_deref()) };
-    let bindings = bindings::claim(&out, a.manifest.as_deref(), link_root, a.label.as_deref());
     let file_exports: [(&str, Option<&std::path::Path>); 6] = [
         ("-o", a.output.as_deref()),
         ("--obs", a.obs.as_deref()),

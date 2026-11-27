@@ -571,6 +571,7 @@ fn predict_args(
     };
     crate::args::PredictArgs {
         source: Some(text.to_string()),
+        from_manifest: None,
         flags,
         posterior: crate::args::PosteriorFlags { by_chain: false, exclude_chains: exclude, chains: keep, realised_design: false, model: None },
         fixed_point: crate::args::FixedPointFlags::default(),

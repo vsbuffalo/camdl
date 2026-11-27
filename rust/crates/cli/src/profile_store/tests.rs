@@ -341,6 +341,7 @@ fn argv(inv: &ProfileInvocation) -> Vec<String> {
         obs,
         data,
         fit,
+        from_manifest,
         sweep,
         particles,
         iterations,
@@ -400,6 +401,7 @@ fn argv(inv: &ProfileInvocation) -> Vec<String> {
         }));
     }
     opt("--fit", fit.as_deref().map(p));
+    opt("--from-manifest", from_manifest.as_deref().map(p));
     for s in sweep {
         opt("--sweep", Some(format!("{}={}", s.name, s.grid.expand().iter().map(|x| x.to_string()).collect::<Vec<_>>().join(","))));
     }
@@ -697,10 +699,19 @@ impl InputHarness for Harness {
     }
 }
 
+/// The declared inputs the class check does not run, each with the reason.
+const NOT_RUN: &[(&str, &str)] = &[(
+    "args.from_manifest",
+    "names a stored fit run, which this harness's fresh stores do not hold; `tests/from_manifest.rs` \
+     (`from_manifest_names_the_result_its_handle_names`) checks that it names the result `--fit <run id>` names",
+)];
+
 /// Every declared input of `camdl profile` keeps the promise its class makes.
 #[test]
 fn every_profile_input_keeps_its_class() {
-    let fields: Vec<FieldInfo> = ProfileInvocation::fields().to_vec();
+    let fields: Vec<FieldInfo> =
+        ProfileInvocation::fields().iter().filter(|f| NOT_RUN.iter().all(|(n, _)| *n != f.name)).cloned().collect();
+    assert_eq!(fields.len() + NOT_RUN.len(), ProfileInvocation::fields().len(), "every input the check skips is declared");
     let failures: Vec<ClassFailure> = std::thread::scope(|s| {
         let chunks: Vec<Vec<FieldInfo>> = fields.chunks(fields.len().div_ceil(4)).map(<[_]>::to_vec).collect();
         let handles: Vec<_> = chunks

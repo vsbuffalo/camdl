@@ -39,6 +39,10 @@
 //! entries, so no path through a nested result is looked up through one.
 //! Reading a file ([`ResolvedFile::read`]) checks its bytes against the
 //! digest `run.json` records.
+//!
+//! A command given `--from-manifest` finds the manifest's one fit run, and
+//! checks its files against the manifest, through the same lookup
+//! ([`FromManifest`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -898,6 +902,89 @@ fn file_of(store: &Store, source: &Source, c: &Candidate, named: &Named) -> Resu
         digest,
         format,
     })
+}
+
+// ── `--from-manifest` ────────────────────────────────────────────────────────
+
+/// The output manifest `--from-manifest PATH` names, read when the command
+/// starts. It is read before the command claims its own `--manifest`, which
+/// can be the same file, and its refusals are reported by [`Self::fit_run`],
+/// after that claim, so a command refused for its `--from-manifest` leaves no
+/// manifest of its own.
+pub(crate) struct FromManifest {
+    path: PathBuf,
+    manifest: Result<OutputManifest, String>,
+}
+
+impl FromManifest {
+    /// The manifest at `path`, or why it cannot be read.
+    pub(crate) fn read(path: &Path) -> FromManifest {
+        FromManifest { path: path.to_path_buf(), manifest: OutputManifest::read(path, "--from-manifest") }
+    }
+
+    /// The manifest's path, as given.
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The run id of the one fit run the manifest lists, which a command
+    /// reads as the handle that names it. Refused when the manifest cannot be
+    /// read, when it lists no fit run or several, when the run store at
+    /// `root` holds no completed result of that run id, and when the run's
+    /// result files differ from those the manifest records, in name, SHA-256
+    /// or size.
+    ///
+    /// A command reads each of the run's files through the store, which
+    /// checks its bytes against the digest `run.json` records; the check here
+    /// ties each of those digests to the manifest's, so the command reads the
+    /// files the manifest describes or fails.
+    pub(crate) fn fit_run(&self, root: &Path) -> Result<String, String> {
+        let shown = self.path.display();
+        let manifest = self.manifest.as_ref().map_err(String::clone)?;
+        let kind = <crate::fit_store::FitRun as store::Artifact>::KIND;
+        let runs: Vec<&crate::output_manifest::ManifestEntry> = manifest.results.iter().filter(|e| e.kind == kind).collect();
+        let entry = match &runs[..] {
+            [one] => *one,
+            [] => {
+                let listed: Vec<String> = manifest.results.iter().map(|e| format!("{} {}", e.kind, e.run_id.short12())).collect();
+                return Err(format!(
+                    "--from-manifest {shown} lists no {kind} result, where one is needed; its results are {}",
+                    if listed.is_empty() { "none".to_string() } else { listed.join(", ") }
+                ));
+            }
+            several => {
+                let listed: Vec<String> = several.iter().map(|e| format!("{kind} {}", e.run_id.short12())).collect();
+                return Err(format!(
+                    "--from-manifest {shown} lists {} {kind} results, where one is needed: {}; name one by its run id in place of --from-manifest",
+                    several.len(),
+                    listed.join(", ")
+                ));
+            }
+        };
+        let store = crate::camdl_store::open_existing(root).ok_or_else(|| {
+            format!(
+                "--from-manifest {shown}: there is no run store at {}, where the manifest's {kind} {} is looked up; pass --store or set CAMDL_STORE",
+                root.display(),
+                entry.run_id.short12()
+            )
+        })?;
+        let source = Source::Manifest { manifest, path: &self.path };
+        let narrow = Narrow { kind: Some(kind.to_string()), run: None };
+        let files = every_file(&store, &source, &narrow).map_err(|e| format!("--from-manifest {e}"))?;
+        let Some(first) = files.first() else {
+            return Err(format!("--from-manifest {shown}: the {kind} {} lists no file", entry.run_id.short12()));
+        };
+        // `every_file` checks each file the manifest lists; a result file the
+        // store holds and the manifest does not list is unchecked, and refused.
+        let listed: BTreeSet<&str> = entry.files.values().map(|f| f.file.as_str()).collect();
+        if let Some(unlisted) = first.located.result_files().keys().find(|s| !listed.contains(*s)) {
+            return Err(format!(
+                "--from-manifest {shown} does not describe the stored file `{unlisted}` of the {}: the store holds it and the manifest does not list it; run the command that wrote the manifest again",
+                shown_result(&store, &first.located)
+            ));
+        }
+        Ok(entry.run_id.to_hex())
+    }
 }
 
 // ── `--each` tables ──────────────────────────────────────────────────────────

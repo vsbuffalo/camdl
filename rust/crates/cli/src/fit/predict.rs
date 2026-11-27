@@ -2415,7 +2415,7 @@ pub(crate) fn repose(
             (model_path, PredictSource::FixedPoint(std::sync::Arc::new(point)), fixed_point)
         }
     };
-    let args = crate::args::PredictArgs { source: Some(text), flags, posterior, fixed_point };
+    let args = crate::args::PredictArgs { source: Some(text), from_manifest: None, flags, posterior, fixed_point };
     let config_dt = match &source {
         PredictSource::Posterior(fit) => fit.config.problem.config.dt,
         PredictSource::FixedPoint(p) => p.problem.config.dt,

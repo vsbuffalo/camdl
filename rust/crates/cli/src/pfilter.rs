@@ -202,6 +202,9 @@ pub fn cmd_pfilter(inv: crate::args::PfilterInvocation) {
     // `--no-store` keeps nothing, so it takes no link root, from the flag
     // (refused) or the environment.
     let link_root = if inv.args.no_store { None } else { crate::link_tree::link_root(inv.args.link_root.as_deref()) };
+    // `--from-manifest` is read before `--manifest` is claimed, since the
+    // two can name one file.
+    let from_manifest = inv.args.from_manifest.as_deref().map(crate::resolve_file::FromManifest::read);
     let bindings = crate::bindings::claim(&out, inv.args.manifest.as_deref(), link_root, inv.args.label.as_deref());
     // A fit file is read once, here, before the store is chosen: its `store`
     // key places the filter run in that fit's store (run spec §2.1). A stored
@@ -229,7 +232,7 @@ pub fn cmd_pfilter(inv: crate::args::PfilterInvocation) {
         args: crate::args::PfilterExecution { model_overrides: (), scenario: (), inference, stream: (), path_columns: () },
         no_ir_cache,
     };
-    let (config, requests, _forcing_route) = crate::pfilter_config::resolve(declared, compile, &out, fit_file, &crate::camdl_store::root_of(&request));
+    let (config, requests, _forcing_route) = crate::pfilter_config::resolve(declared, compile, &out, fit_file, from_manifest, &crate::camdl_store::root_of(&request));
     let store = StoreSide { request, no_store, given, execution: execution_record };
     run_pfilter(&out, config, requests, RunExports { output, bindings }, filter_execution, store);
 }

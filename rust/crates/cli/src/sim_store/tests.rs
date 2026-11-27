@@ -267,6 +267,7 @@ fn argv(inv: &SimulateInvocation) -> Vec<String> {
         sweep,
         sweep_file,
         fit,
+        from_manifest,
         n_draws,
         chains,
         exclude_chains,
@@ -352,6 +353,7 @@ fn argv(inv: &SimulateInvocation) -> Vec<String> {
     }
     opt("--sweep-file", sweep_file.as_deref().map(p));
     opt("--fit", fit.as_deref().map(p));
+    opt("--from-manifest", from_manifest.as_deref().map(p));
     opt("-n", n_draws.map(|n| n.to_string()));
     opt("--chains", chains.clone());
     opt("--exclude-chains", exclude_chains.clone());
@@ -650,10 +652,19 @@ impl InputHarness for Harness {
     }
 }
 
+/// The declared inputs the class check does not run, each with the reason.
+const NOT_RUN: &[(&str, &str)] = &[(
+    "args.from_manifest",
+    "names a stored fit run, which this harness's fresh stores do not hold; `tests/from_manifest.rs` \
+     (`from_manifest_names_the_result_its_handle_names`) checks that it names the result `--fit <run id>` names",
+)];
+
 /// Every declared input of `camdl simulate` keeps the promise its class makes.
 #[test]
 fn every_simulate_input_keeps_its_class() {
-    let fields: Vec<FieldInfo> = SimulateInvocation::fields().to_vec();
+    let fields: Vec<FieldInfo> =
+        SimulateInvocation::fields().iter().filter(|f| NOT_RUN.iter().all(|(n, _)| *n != f.name)).cloned().collect();
+    assert_eq!(fields.len() + NOT_RUN.len(), SimulateInvocation::fields().len(), "every input the check skips is declared");
     let failures: Vec<ClassFailure> = std::thread::scope(|s| {
         let chunks: Vec<Vec<FieldInfo>> = fields.chunks(fields.len().div_ceil(4)).map(<[_]>::to_vec).collect();
         let handles: Vec<_> = chunks

@@ -197,24 +197,24 @@ impl OutputManifest {
         })
     }
 
-    /// Reads the manifest at `path`. A file that is not JSON, a JSON file
-    /// whose `schema` is not an output manifest's, and a manifest of a
-    /// version other than [`SCHEMA`]'s are refused, each saying what was
-    /// found.
-    #[expect(clippy::disallowed_methods, reason = "reads a manifest a command wrote, which names stored results and is not an input of a computation")]
-    pub(crate) fn read(path: &Path) -> Result<OutputManifest, String> {
+    /// Reads the manifest at `path`, given as the argument of `flag`, which
+    /// each refusal names. A file that is not JSON, a JSON file whose
+    /// `schema` is not an output manifest's, and a manifest of a version
+    /// other than [`SCHEMA`]'s are refused, each saying what was found.
+    #[expect(clippy::disallowed_methods, reason = "reads a manifest a command wrote, which names stored results by run id; the results are read through the store")]
+    pub(crate) fn read(path: &Path, flag: &str) -> Result<OutputManifest, String> {
         let shown = path.display();
-        let bytes = std::fs::read(path).map_err(|e| format!("--manifest {shown}: {e}"))?;
+        let bytes = std::fs::read(path).map_err(|e| format!("{flag} {shown}: {e}"))?;
         let value: serde_json::Value =
-            serde_json::from_slice(&bytes).map_err(|e| format!("--manifest {shown}: not an output manifest: {e}"))?;
+            serde_json::from_slice(&bytes).map_err(|e| format!("{flag} {shown}: not an output manifest: {e}"))?;
         let schema = value.get("schema").and_then(|s| s.as_str()).unwrap_or("");
         if !schema.starts_with("camdl.output-manifest/") {
-            return Err(format!("--manifest {shown}: not an output manifest (its `schema` is {})", value.get("schema").map_or("absent".to_string(), |s| s.to_string())));
+            return Err(format!("{flag} {shown}: not an output manifest (its `schema` is {})", value.get("schema").map_or("absent".to_string(), |s| s.to_string())));
         }
         if schema != SCHEMA {
-            return Err(format!("--manifest {shown}: an output manifest of version `{schema}`; this camdl reads `{SCHEMA}`"));
+            return Err(format!("{flag} {shown}: an output manifest of version `{schema}`; this camdl reads `{SCHEMA}`"));
         }
-        serde_json::from_value(value).map_err(|e| format!("--manifest {shown}: a malformed output manifest: {e}"))
+        serde_json::from_value(value).map_err(|e| format!("{flag} {shown}: a malformed output manifest: {e}"))
     }
 
     /// The manifest as written: pretty JSON with a final newline.

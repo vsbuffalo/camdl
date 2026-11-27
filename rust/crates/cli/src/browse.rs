@@ -742,7 +742,7 @@ impl Lookup {
         }
         let (target, names, root, shown) = match manifest {
             Some(m) => {
-                let read = crate::output_manifest::OutputManifest::read(m).unwrap_or_else(|e| out.fail(format!("error: {e}")));
+                let read = crate::output_manifest::OutputManifest::read(m, "--manifest").unwrap_or_else(|e| out.fail(format!("error: {e}")));
                 let root = store_root(store_flag);
                 (Target::Manifest { path: m.to_path_buf(), manifest: read }, args.to_vec(), root, m.display().to_string())
             }

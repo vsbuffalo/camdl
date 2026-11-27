@@ -283,6 +283,9 @@ pub fn cmd_profile(inv: crate::args::ProfileInvocation) {
     // whether each stream is a terminal.
     let out = crate::out::Out::new(false);
     crate::profile_config::refuse_data_beside_fit(&inv.args, &out);
+    // `--from-manifest` is read before `--manifest` is claimed, since the
+    // two can name one file.
+    let from_manifest = inv.args.from_manifest.as_deref().map(crate::resolve_file::FromManifest::read);
     let link_root = crate::link_tree::link_root(inv.args.link_root.as_deref());
     let bindings = crate::bindings::claim(&out, inv.args.manifest.as_deref(), link_root, inv.args.label.as_deref());
     // A fit file is read once, here, before the store is chosen: its `store`
@@ -320,7 +323,15 @@ pub fn cmd_profile(inv: crate::args::ProfileInvocation) {
         no_ir_cache,
     };
     let gates = crate::profile_config::ProfileGates { backend, allow_nonconverged_source };
-    let (config, _forcing_route) = crate::profile_config::resolve(declared, gates, compile, &out, fit_file, &crate::camdl_store::root_of(&request));
+    let (config, _forcing_route) = crate::profile_config::resolve(
+        declared,
+        gates,
+        compile,
+        &out,
+        fit_file,
+        from_manifest,
+        &crate::camdl_store::root_of(&request),
+    );
     run_profile(
         &out,
         config,

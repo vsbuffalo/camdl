@@ -21,8 +21,12 @@ use crate::out::Out;
 /// posterior flags name a fit's chains or read its held-out rows, and the
 /// fixed-point flags give what a stored fit problem already holds.
 pub(crate) fn refuse_other_source_flags(args: &PredictArgs) -> Result<(), String> {
-    let Some(source) = args.source.as_deref() else { return Ok(()) };
-    if crate::fit::fixed_point::names_a_model(source) {
+    let source = match (args.source.as_deref(), args.from_manifest.as_deref()) {
+        (Some(s), _) => s.to_string(),
+        (None, Some(m)) => format!("--from-manifest {}", m.display()),
+        (None, None) => return Ok(()),
+    };
+    if crate::fit::fixed_point::names_a_model(&source) {
         let given = args.posterior.given();
         if !given.is_empty() {
             return Err(format!(
@@ -55,6 +59,9 @@ pub(crate) fn cmd_predict(inv: PredictInvocation) {
     if let Err(e) = refuse_other_source_flags(&inv.args) {
         out.fail(format!("error: {e}"));
     }
+    // `--from-manifest` is read before `--manifest` is claimed, since the
+    // two can name one file.
+    let from_manifest = inv.args.from_manifest.as_deref().map(crate::resolve_file::FromManifest::read);
     let time_format = inv.args.fixed_point.time_format;
     // The export and the store request, read before the split hands them to
     // their own parts.
@@ -70,7 +77,7 @@ pub(crate) fn cmd_predict(inv: PredictInvocation) {
     .unwrap_or_else(|e| out.fail(format!("error: {e}")));
     let (declared, execution, _exports, _request, given) = store::Inputs::split(inv).into_parts();
     let (args, no_licm) = declared.into_parts();
-    let (source, flags, posterior, fixed_point) = args.into_parts();
+    let (source, _from_manifest, flags, posterior, fixed_point) = args.into_parts();
     let (
         forcing_extrapolation,
         stream,
@@ -93,10 +100,18 @@ pub(crate) fn cmd_predict(inv: PredictInvocation) {
     let crate::args::PredictInvocationExecution { no_ir_cache, .. } = &execution;
     let compile = crate::util::CompileSettings::resolve(no_licm, *no_ir_cache);
 
+    // A run named by a manifest is read by its run id, in the store the
+    // request names, as a run handle is.
+    let root = crate::camdl_store::root_of(&request);
+    let source = match &from_manifest {
+        Some(m) => Some(m.fit_run(&root).unwrap_or_else(|e| out.fail(format!("error: {e}")))),
+        None => source,
+    };
     // The prediction reads the arguments reassembled, every declared input
     // placed back in the struct it reads.
     let args = PredictArgs {
         source,
+        from_manifest: None,
         flags: PredictFlags {
             forcing_extrapolation: crate::args::ForcingExtrapolationArg { allow_forcing_extrapolation },
             stream,
@@ -141,7 +156,7 @@ pub(crate) fn cmd_predict(inv: PredictInvocation) {
     }
     // A run handle is looked up in the store the request names; a folder
     // handle names its own.
-    crate::fit_store::set_reader_root(crate::camdl_store::root_of(&request));
+    crate::fit_store::set_reader_root(root);
     let info = store::RunInfo::new(&given, &execution, &request).unwrap_or_else(|e| out.fail(format!("error: {e}")));
     crate::fit::predict::predict(&args, compile, info, &request, output.as_deref(), &bindings);
 }

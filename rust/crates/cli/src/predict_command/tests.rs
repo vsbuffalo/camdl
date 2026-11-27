@@ -230,8 +230,14 @@ fn fixture() -> &'static Fixture {
         }
         let store = dir.join("template-store");
         let fx = Fixture { camdl, camdlc, dir, store };
+        // Each run's output manifest, `fit.json` and `other.json`, is a
+        // fixture file, copied into every working directory.
         for (seed, label) in [("1", "fit"), ("2", "other")] {
-            let args: Vec<String> = ["fit", "run", "fit.toml", "--seed", seed, "--label", label, "--progress", "none"].map(String::from).into();
+            let manifest = format!("{label}.json");
+            let args: Vec<String> =
+                ["fit", "run", "fit.toml", "--seed", seed, "--label", label, "--manifest", &manifest, "--progress", "none"]
+                    .map(String::from)
+                    .into();
             let out = camdl_with(&fx, &fx.dir, &fx.store, &args, &[]);
             assert!(out.status.success(), "the fixture's fit @{label}: {}", String::from_utf8_lossy(&out.stderr));
         }
@@ -293,6 +299,7 @@ fn argv(inv: &PredictInvocation) -> Vec<String> {
     let PredictInvocation { args, no_licm, no_ir_cache, verbosity: _, progress: _, no_progress: _ } = inv;
     let crate::args::PredictArgs {
         source,
+        from_manifest,
         flags:
             crate::args::PredictFlags {
                 forcing_extrapolation: crate::args::ForcingExtrapolationArg { allow_forcing_extrapolation },
@@ -332,13 +339,15 @@ fn argv(inv: &PredictInvocation) -> Vec<String> {
                 time_format,
             },
     } = args;
-    let mut v: Vec<String> = vec!["predict".into(), source.clone().expect("a run or a model")];
+    let mut v: Vec<String> = vec!["predict".into()];
+    v.extend(source.clone());
     let mut opt = |flag: &str, value: Option<String>| {
         if let Some(x) = value {
             v.push(flag.into());
             v.push(x);
         }
     };
+    opt("--from-manifest", from_manifest.as_ref().map(|p| p.to_string_lossy().into_owned()));
     for s in stream {
         opt("--stream", Some(s.clone()));
     }
@@ -502,6 +511,7 @@ impl Harness {
         let field = name.rsplit('.').next().unwrap();
         let base = match field {
             "particles" => predict_from(&["@fit", "--mode", "one_step", "--n-draws", "4"]),
+            "from_manifest" => predict_from(&["--from-manifest", "fit.json", "--mode", "free_forward", "--n-draws", "4"]),
             "horizon" => predict_from(&["@fit", "--horizon", "2 weeks", "--stream", "daily_cases", "--n-draws", "4", "--particles", "20"]),
             "design" => predict_from(&[
                 "@fit", "--horizon", "2 weeks", "--stream", "survey", "--design", "survey=design.tsv", "--n-draws", "4",

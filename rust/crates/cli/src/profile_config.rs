@@ -161,14 +161,17 @@ pub(crate) fn read_fit_file(fit: Option<&std::path::Path>) -> Result<Option<FitP
 /// `--allow-nonconverged-source` are execution inputs, given apart: each
 /// decides only whether the profile may run. `fit_file` is the fit file
 /// `--fit` names, already read ([`read_fit_file`]); a stored fit is read in the
-/// run store at `store_root`. Returns the values and the forcing policy's
-/// installation, held for the command.
+/// run store at `store_root`. `from_manifest` is the manifest
+/// `--from-manifest` names, read before `--manifest` was claimed; its one fit
+/// run is read as `--fit <run>` reads it. Returns the values and the forcing
+/// policy's installation, held for the command.
 pub(crate) fn resolve(
     declared: crate::args::ProfileDeclared,
     gates: ProfileGates,
     compile: crate::util::CompileSettings,
     out: &crate::out::Out,
     fit_file: Option<FitProblem>,
+    from_manifest: Option<crate::resolve_file::FromManifest>,
     store_root: &std::path::Path,
 ) -> (ResolvedProfileConfig, crate::forcing_extrapolation::Installed) {
     use crate::profile::PROFILE_NO_PMMH;
@@ -178,6 +181,7 @@ pub(crate) fn resolve(
         scenario,
         inference,
         fit,
+        _from_manifest,
         sweep,
         particles,
         iterations,
@@ -190,6 +194,11 @@ pub(crate) fn resolve(
         seeds,
         algorithm,
     ) = declared.into_parts();
+    // A fit run named by a manifest is read by its run id, as `--fit <run>`.
+    let fit = match &from_manifest {
+        Some(m) => Some(std::path::PathBuf::from(m.fit_run(store_root).unwrap_or_else(|e| out.fail(format!("error: {e}"))))),
+        None => fit,
+    };
     let (fixed_cli, fixed_files, table) = model_overrides.into_parts();
     let (scenario, enable, disable) = scenario.into_parts();
     let (dt, seed, allow_degenerate_rates, forcing_extrapolation, pf_max_substeps, binomial) = inference.into_parts();

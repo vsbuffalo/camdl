@@ -321,6 +321,19 @@ pub(crate) fn predict_other_run() -> Option<String> {
     Some("@other".into())
 }
 
+/// The output manifest of `@other`'s fit, `other.json`, beside `fit.json`,
+/// `@fit`'s.
+pub(crate) fn predict_other_manifest() -> Option<PathBuf> {
+    Some("other.json".into())
+}
+
+/// A second output manifest, for `simulate`, `profile` and `pfilter`,
+/// whose class checks do not run `--from-manifest` (each lists it in its
+/// `NOT_RUN`, with the test that checks it instead).
+pub(crate) fn other_manifest() -> Option<PathBuf> {
+    Some("other.json".into())
+}
+
 pub(crate) fn predict_stream() -> Vec<String> {
     vec!["weekly_cases".into()]
 }
