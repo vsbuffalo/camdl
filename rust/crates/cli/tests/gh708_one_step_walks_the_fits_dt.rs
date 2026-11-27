@@ -102,8 +102,8 @@ algorithm = "pgas"
 backend   = "chain_binomial"
 chains    = 2
 particles = 8
-sweeps    = 8
-burn_in   = 2
+sweeps    = 60
+burn_in   = 50
 thin      = 1
 starts    = "uniform_unconstrained"
 "#
@@ -162,8 +162,9 @@ fn the_one_step_band_is_filtered_on_the_dt_the_fit_used() {
             "[{arm}] fit run failed:\n{}",
             String::from_utf8_lossy(&out.stderr)
         );
-        // A one-step prediction fails if any draw's filter collapses, so the
-        // filter gets enough particles for every draw of this short fit.
+        // A one-step prediction fails if any draw's filter collapses. The fit
+        // burns in long enough that its draws fit the data, and the filter
+        // gets enough particles for each of them.
         let out = run(&["predict", "@fit", "--mode", "one-step", "--particles", "200"]);
         assert!(
             out.status.success(),
