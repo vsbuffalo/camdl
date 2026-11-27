@@ -29,14 +29,37 @@ use super::observed_rows::Measures;
 use super::runner::{ObsStream, TIME_TIE_EPS};
 use super::training_partition::{row_digest, RowPrefix};
 
-/// The rows the state at the origin was conditioned on (§1.4). Built only
-/// here, from the rows handed to the filter: no caller can claim a
-/// conditioning that did not happen.
+/// The rows the latent state at the forecast origin was conditioned on
+/// (`docs/engineering/forecasting.md` §1.3).
+///
+/// Its field is private to this module, and its one constructor is
+/// [`conditioning`], which builds it from the rows handed to the particle
+/// filter after checking that they are the training rows the fit recorded and
+/// that none ends after the origin. A value of this type outside this module
+/// therefore always describes a filter run that happened, on those rows.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum StateConditioning {
+pub(crate) struct StateConditioning(Kind);
+
+#[derive(Debug, Clone, PartialEq)]
+enum Kind {
     /// A particle filter ran through these rows of each stream, ending at
     /// `through`.
     Filtered { through: f64, rows: Vec<RowPrefix> },
+}
+
+impl StateConditioning {
+    /// The end of the last row the filter ran through, in model time.
+    pub(crate) fn through(&self) -> f64 {
+        let Kind::Filtered { through, .. } = &self.0;
+        *through
+    }
+
+    /// The rows of each stream the filter ran through: per stream, the
+    /// number of its first rows and their digest.
+    pub(crate) fn rows(&self) -> &[RowPrefix] {
+        let Kind::Filtered { rows, .. } = &self.0;
+        rows
+    }
 }
 
 /// What the driver computed.
@@ -572,7 +595,7 @@ fn conditioning(plan: &ForecastPlan, training: &[ObsStream]) -> Result<StateCond
             "internal error: a conditioning row ends at {through}, after the origin {}",
             plan.origin())));
     }
-    Ok(StateConditioning::Filtered { through, rows })
+    Ok(StateConditioning(Kind::Filtered { through, rows }))
 }
 
 /// Each training stream's spec with its targets appended as rows carrying no

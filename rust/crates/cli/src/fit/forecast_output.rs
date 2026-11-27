@@ -21,7 +21,7 @@ use std::sync::Arc;
 use crate::fit::failures::{DeterministicFailure, Site, SkipReason, SkippedStream};
 use crate::fit::forecast_arms::{build_arms, ArmInputs, ArmLabel, Difference};
 use crate::fit::predict_streams::StreamSelection;
-use crate::fit::forecast_driver::{extend_run, fixed_origin_forecast, DriverConfig, Forecast, HeldOutValues, StateConditioning};
+use crate::fit::forecast_driver::{extend_run, fixed_origin_forecast, DriverConfig, Forecast, HeldOutValues};
 use crate::fit::forecast_covariates::{classify, Covariates, ReachContext};
 use crate::fit::forecast_plan::{parse_reach, DesignInput, ForecastPlan, HeldOut, PlanStream, RowFile};
 use crate::fit::observed_rows::{Measures, ObservedRow};
@@ -965,7 +965,6 @@ fn write_manifest(arms: &[ArmForecast], job: &ForecastJob, m: ManifestInputs) ->
         "t": t,
         "date": job.calendar.date_of(t).map(ir::caltime::RenderedInstant::into_string),
     });
-    let StateConditioning::Filtered { through, rows } = &fc.state;
     let targets: Vec<serde_json::Value> = fc.plan.targets().iter().map(|t| {
         let (kind, start) = match t.measures {
             Measures::Period(p) => ("period", p.start()),
@@ -1009,8 +1008,8 @@ fn write_manifest(arms: &[ArmForecast], job: &ForecastJob, m: ManifestInputs) ->
         "training_rows": record,
         "conditioning_rows": {
             "conditioning": "filtered",
-            "through": point(*through),
-            "streams": rows.iter().map(|p| serde_json::json!({
+            "through": point(fc.state.through()),
+            "streams": fc.state.rows().iter().map(|p| serde_json::json!({
                 "stream": p.stream, "rows": p.rows, "digest": p.digest.to_hex(),
             })).collect::<Vec<_>>(),
         },
