@@ -190,15 +190,15 @@ run_store_test sir_basic             50 --backend gillespie \
     --sweep beta=0.2,0.5 --replicates 25
 run_store_test seir_erlang           40 --backend gillespie \
     --sweep beta=0.3,0.45 --sweep sigma=0.2,0.6 --replicates 10
-run_store_test sir_five_age          40 --backend chain_binomial --dt 1.0 \
+run_store_test sir_five_age          40 --backend chain-binomial --dt 1.0 \
     --sweep beta=0.2,0.4 --replicates 20
-run_store_test sir_patches_5         40 --backend chain_binomial --dt 0.5 \
+run_store_test sir_patches_5         40 --backend chain-binomial --dt 0.5 \
     --sweep gamma=0.07,0.2 --replicates 20
-run_store_test seir_vaccine          30 --backend chain_binomial --dt 1.0 \
+run_store_test seir_vaccine          30 --backend chain-binomial --dt 1.0 \
     --scenario with_sia --sweep vacc_frac=0.0,0.8 --replicates 15
-run_store_test seir_vaccine_seasonal 30 --backend chain_binomial --dt 1.0 \
+run_store_test seir_vaccine_seasonal 30 --backend chain-binomial --dt 1.0 \
     --scenario with_sia --sweep vacc_frac=0.0,0.8 --replicates 15
-run_store_test polio_spatial_5       45 --backend chain_binomial --dt 1.0 \
+run_store_test polio_spatial_5       45 --backend chain-binomial --dt 1.0 \
     --scenario with_sia --sweep kappa=0.0,0.01,0.05 --replicates 15
 
 echo ""

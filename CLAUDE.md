@@ -210,6 +210,12 @@ Breaking changes are expected pre-1.0. Do not add backwards-compatibility shims,
 `alias` attributes, fallback deserialization paths, or deprecated field names.
 Rename atomically and update all goldens. Policy: `VERSIONING.md`.
 
+One exception: a multi-word option value (`chain-binomial`, `free-forward`,
+`one-step`) is spelled with a dash on the command line and with an underscore in
+files, and each place accepts both. That is two spellings of one value, so a
+value copied between a command and a file still works; it is not a deprecated
+name.
+
 **Publishing is maintainer-gated.** An agent may run `make release-suggest` /
 `make release-prep` and draft notes; tagging and publishing are never an agent's
 call. Runbook: the `releasing` skill.

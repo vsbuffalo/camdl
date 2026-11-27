@@ -14,7 +14,7 @@
 //! writes no `[config] dt`; the other model declares no step and its fit
 //! writes `[config] dt = 0.2`. Both fits walk 0.2, so their posterior clouds
 //! are byte-identical — asserted first, as the premise. The two
-//! `camdl predict --mode one_step` runs then draw from identical clouds at
+//! `camdl predict --mode one-step` runs then draw from identical clouds at
 //! the same seed, so their bands must be identical too. Reading the archived
 //! `[config] dt` instead (its default 1.0 in the first arm) filters the first
 //! band on 1.0 and the bands differ. No fitted value enters the comparison.

@@ -916,7 +916,7 @@ fn a_lag_parameter_that_can_be_negative_is_refused_at_compile_time() {
 
 /// With no `--mode` the prediction is every mode that applies to the fit's
 /// backend, resolved before its identity: on an ODE fit that is the
-/// free-forward band alone, so the default and `--mode free_forward` are one
+/// free-forward band alone, so the default and `--mode free-forward` are one
 /// prediction. On a chain-binomial fit the default is both bands, which no
 /// single `--mode` asks for.
 #[test]
@@ -936,7 +936,7 @@ fn the_default_mode_is_the_mode_it_resolves_to() {
         assert!(out.status.success(), "{line:?}: {}", String::from_utf8_lossy(&out.stderr));
     }
     let ode = predictions();
-    assert_eq!(ode.len(), 1, "the default and --mode free_forward are one prediction on an ODE fit: {ode:?}");
+    assert_eq!(ode.len(), 1, "the default and --mode free-forward are one prediction on an ODE fit: {ode:?}");
     assert!(ode[0].file_name().unwrap().to_string_lossy().starts_with("free_forward-"), "{ode:?}");
     for line in [&["@fit", "--n-draws", "4"][..], &["@fit", "--mode", "free_forward", "--n-draws", "4"]] {
         let out = camdl(cwd.path(), &root, &argv(&predict_from(line)), &[]);

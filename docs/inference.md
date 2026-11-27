@@ -238,7 +238,7 @@ troughs) indicates model misspecification.
 
 The mechanics above are the internal filter view. The user-facing way to get the
 one-step-ahead band that carries full posterior parameter uncertainty is
-`camdl predict @fit --mode one_step`: it re-runs the bootstrap filter once per
+`camdl predict @fit --mode one-step`: it re-runs the bootstrap filter once per
 posterior draw, samples `ỹ` from the propagated (pre-reweight) particles at each
 observation time, and pools over (particles × draws) into the `q05…q95` columns
 of `predictive/<stream>.tsv` — `mode=one_step,
@@ -567,7 +567,7 @@ A fitted stochastic compartmental model gives you three distinct views of the
 data:
 
 1. **Unconditional posterior predictive.**
-   `camdl predict @fit --mode free_forward`. "What does the fitted model predict
+   `camdl predict @fit --mode free-forward`. "What does the fitted model predict
    a priori?" — sampled `y_rep` per posterior draw, pooled into the
    `predictive/<stream>.tsv` ribbon (averaged over the cloud, not run at a
    single plug-in point).

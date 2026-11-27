@@ -878,7 +878,7 @@ flamegraph-real: build-ocaml
 	  compile /tmp/fg_anchor.camdl --no-dim-check -o /tmp/fg_anchor.ir.json
 	@echo "sampling simulate (~12s)..."
 	@TMPDIR=/tmp CAMDL_SKIP_VERSION_CHECK=1 CAMDLC="$(CAMDLC_ABS)" $(PROFILE_CAMDL) \
-	   simulate /tmp/fg_anchor.ir.json --backend chain_binomial --scenario baseline \
+	   simulate /tmp/fg_anchor.ir.json --backend chain-binomial --scenario baseline \
 	   -o /tmp/fg_traj.tsv & \
 	 PID=$$!; sample $$PID 12 -file /tmp/camdl_sample.txt >/dev/null 2>&1; wait $$PID
 	inferno-collapse-sample /tmp/camdl_sample.txt | \

@@ -289,7 +289,7 @@ pub(crate) fn fit_no_ir_cache() -> (FitRunInvocation, FitRunInvocation) {
 
 /// The prediction every check starts from: the free-forward band of a few
 /// draws of the PMMH run the harness stores as `@fit`.
-/// `predict @fit --mode free_forward --n-draws 4`.
+/// `predict @fit --mode free-forward --n-draws 4`.
 #[cfg(test)]
 pub(crate) fn predict_base() -> PredictInvocation {
     predict_from(&["@fit", "--mode", "free_forward", "--n-draws", "4"])
@@ -380,7 +380,7 @@ pub(crate) fn predict_chain_ids() -> Option<String> {
 /// The fixed-point prediction the checks of the fixed-point flags start
 /// from: the free-forward band of four copies of `point.toml` on the
 /// fixture model, conditioned on its daily cases.
-/// `predict model.camdl --params point.toml --data daily_cases=daily_cases.tsv --mode free_forward --n-draws 4`.
+/// `predict model.camdl --params point.toml --data daily_cases=daily_cases.tsv --mode free-forward --n-draws 4`.
 #[cfg(test)]
 pub(crate) fn predict_fixed_base() -> PredictInvocation {
     predict_from(&[

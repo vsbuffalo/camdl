@@ -247,7 +247,7 @@ fn a_refused_tail_still_writes_the_one_step_artifact_and_records_the_failure() {
 }
 
 /// The other half of the rule, and the negative control for the test above:
-/// `--mode one_step` never builds a tail, so a scenario it could not have
+/// `--mode one-step` never builds a tail, so a scenario it could not have
 /// honoured is a plain usage error — refused outright, with no artifact and no
 /// failure record, exactly as before.
 #[test]

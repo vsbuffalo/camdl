@@ -1909,7 +1909,7 @@ fn refuse_fixed_point_flags(args: &crate::args::PredictArgs) -> Result<(), Strin
             "--particles sets the particle count of the one-step band's and the forecast's \
              filters, and this predict runs neither ({}).",
             match mode {
-                Some(PredictModeArg::FreeForward) => "--mode free_forward".to_string(),
+                Some(PredictModeArg::FreeForward) => "--mode free-forward".to_string(),
                 _ => format!("the {backend} backend has no one-step band"),
             }
         ));
@@ -2585,8 +2585,8 @@ fn predict_mode(args: &crate::args::PredictArgs)
     // `--horizon` once named the mode; answer that spelling with the flag
     // that does it now, rather than with a malformed-duration error.
     if let Some(h) = args.flags.horizon.as_deref() {
-        let mode = h.trim().replace('-', "_");
-        if matches!(mode.as_str(), "free_forward" | "one_step" | "forecast") {
+        let mode = h.trim().replace('_', "-");
+        if matches!(mode.as_str(), "free-forward" | "one-step" | "forecast") {
             return Err(format!(
                 "--horizon sets a forecast's reach (a duration such as \"4 weeks\"); the \
                  predictive mode is chosen with --mode {mode}."));
@@ -2600,7 +2600,7 @@ fn predict_mode(args: &crate::args::PredictArgs)
         (Some(m @ (PredictModeArg::FreeForward | PredictModeArg::OneStep)), Some(h)) => Err(format!(
             "--horizon {h:?} sets the reach of a forecast, but --mode {} is not one; use \
              --mode forecast (or omit --mode).",
-            if m == PredictModeArg::FreeForward { "free_forward" } else { "one_step" })),
+            m.flag_value())),
         (m, _) => Ok(m),
     }
 }
@@ -2850,7 +2850,7 @@ fn run_predict(
     let treatment_kind = posterior.treatment();
 
     // 2b. Resolve which predictive(s) to emit. The one-step horizon is gated by a
-    // backend witness ([`FilterableFit`]); an explicit `--mode one_step` on a
+    // backend witness ([`FilterableFit`]); an explicit `--mode one-step` on a
     // non-filterable fit is a hard error, while the default ("all applicable")
     // silently skips it for those backends. `one_step_fit` is `Some` exactly when
     // the one-step producer will run. The forecast mode runs neither.
@@ -2885,7 +2885,7 @@ fn run_predict(
             "--particles sets the particle count of the one-step band's and the forecast's \
              filters, and this predict runs neither ({}).",
             match (mode, treatment_kind) {
-                (Some(PredictModeArg::FreeForward), _) => "--mode free_forward".to_string(),
+                (Some(PredictModeArg::FreeForward), _) => "--mode free-forward".to_string(),
                 (_, TreatmentKind::PlugIn) => format!("the {} backend has no one-step band", posterior.backend),
                 _ => format!("the '{}' leaf ran on a backend with no one-step band", posterior.name),
             }));
@@ -2907,7 +2907,7 @@ fn run_predict(
     // With no --mode, the modes that apply to the fit's backend, resolved
     // before the options are keyed: where the one-step band does not apply,
     // the default computes the free-forward band alone, and is keyed as
-    // `--mode free_forward` is.
+    // `--mode free-forward` is.
     if mode.is_none() && one_step_fit.is_none() {
         options.mode = "free_forward";
     }
@@ -3036,7 +3036,7 @@ fn run_predict(
     // filters the OBSERVED data through the fitted model and carries no overlay
     // at all. When the tail is being built, this is a deterministic failure of
     // the tail, recorded below and reported in `report.json`; when it is not
-    // (`--mode one_step`), the scenario could never have been honoured by
+    // (`--mode one-step`), the scenario could never have been honoured by
     // anything this run produces, so it is a plain usage error with no artifact
     // to salvage.
     let scenario_horizon_refusal: Option<String> = scenario_refs.iter().find_map(|sref| {
@@ -6093,7 +6093,7 @@ fn leaf_name(leaf: &str, method: Option<FitAlgorithm>) -> String {
     method.map(|m| m.as_str()).unwrap_or("posterior").to_string()
 }
 
-/// The actionable refusal for an explicit `--mode one_step` on a fit whose
+/// The actionable refusal for an explicit `--mode one-step` on a fit whose
 /// backend cannot drive a particle filter. ODE's one-step predictive is
 /// identical to free-forward (deterministic given θ), so the redirect points the
 /// user there rather than emit a relabelled-identical band.
@@ -6109,7 +6109,7 @@ fn one_step_refusal(why: NotFilterable, method: Option<FitAlgorithm>, leaf: &str
              reduces to the observation model at the deterministic state, identical to \
              the free-forward band. There is no separate one-step object to emit.\n  \
              Use the free-forward horizon instead:\n    \
-             camdl predict <run> --mode free_forward"
+             camdl predict <run> --mode free-forward"
         ),
         NotFilterable::NotAnInferenceBackend => format!(
             "the '{leaf}' method leaf ran on the Gillespie backend, which is not an \
@@ -6120,18 +6120,18 @@ fn one_step_refusal(why: NotFilterable, method: Option<FitAlgorithm>, leaf: &str
     }
 }
 
-/// The refusal of `--mode one_step` from a fixed point on a backend that runs
+/// The refusal of `--mode one-step` from a fixed point on a backend that runs
 /// no particle filter, for the reason [`one_step_refusal`] gives a fit.
 fn fixed_point_one_step_refusal(why: NotFilterable) -> String {
     match why {
         NotFilterable::Deterministic => "the ODE backend is deterministic given the parameters, so its \
              one-step-ahead predictive p(y_t | y_{1:t-1}) reduces to the observation model at the \
              deterministic state, identical to the free-forward band. There is no separate one-step \
-             object to emit; use --mode free_forward."
+             object to emit; use --mode free-forward."
             .to_string(),
         NotFilterable::NotAnInferenceBackend => "the Gillespie backend runs no particle filter, so a \
-             one-step-ahead predictive is not computed on it; use --backend chain_binomial, or \
-             --mode free_forward."
+             one-step-ahead predictive is not computed on it; use --backend chain-binomial, or \
+             --mode free-forward."
             .to_string(),
     }
 }
@@ -6870,7 +6870,7 @@ mod tests {
     fn one_step_refusal_for_ode_redirects_to_free_forward() {
         let msg = one_step_refusal(NotFilterable::Deterministic, Some(FitAlgorithm::Mh), "posterior");
         assert!(msg.contains("ODE"), "names the backend: {msg}");
-        assert!(msg.contains("--mode free_forward"), "redirects to free-forward: {msg}");
+        assert!(msg.contains("--mode free-forward"), "redirects to free-forward: {msg}");
     }
 
     #[test]

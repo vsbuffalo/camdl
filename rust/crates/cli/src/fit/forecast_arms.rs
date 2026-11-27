@@ -156,7 +156,7 @@ fn refusal(label: &ArmLabel, origin: f64, why: &str) -> String {
         "the forecast arm {} {why}, before the forecast origin t = {origin}. A forecast arm \
          may differ from the fitted model only at or after the origin, so that every arm \
          starts from the state filtered through the same training rows by the same model. \
-         Compare it over the whole run with --mode free_forward.",
+         Compare it over the whole run with --mode free-forward.",
         label.describe())
 }
 

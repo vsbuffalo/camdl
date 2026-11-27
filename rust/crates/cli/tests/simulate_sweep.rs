@@ -94,7 +94,7 @@ impl Fixture {
         name.to_string()
     }
 
-    /// `simulate m.camdl --params p.toml --backend chain_binomial --dt 1 --store out <extra…>`.
+    /// `simulate m.camdl --params p.toml --backend chain-binomial --dt 1 --store out <extra…>`.
     fn simulate(&self, extra: &[&str]) -> Output {
         let mut args = vec![
             "simulate", "m.camdl", "--params", "p.toml", "--backend", "chain_binomial",

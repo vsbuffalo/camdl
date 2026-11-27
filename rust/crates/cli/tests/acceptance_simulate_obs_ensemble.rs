@@ -116,7 +116,7 @@ fn obs_stream_files(seed_leaf: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// `simulate sir.camdl --params params.toml --backend chain_binomial --dt 1
+/// `simulate sir.camdl --params params.toml --backend chain-binomial --dt 1
 /// --seeds <seeds> --store <output> <extra…>`.
 fn simulate(bin: &Path, model: &Path, params: &Path, output: &Path, seeds: &str, extra: &[&str]) -> Output {
     let mut cmd = Command::new(bin);

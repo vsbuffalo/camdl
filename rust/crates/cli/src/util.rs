@@ -4068,7 +4068,7 @@ pub fn unseamed_backend_msg(backend: &str) -> String {
         "--init-state is not supported on the {backend} backend: it has no \
          start-from-state seam, so the run would silently start from the model's \
          `init {{}}` instead of the filtered state.\n  \
-         Fix: use --backend chain_binomial, which is also the process model the \
+         Fix: use --backend chain-binomial, which is also the process model the \
          saved particle states came from."
     )
 }

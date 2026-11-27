@@ -232,7 +232,7 @@ fn d76_row1_the_default_mode_produces_every_eligible_stream_and_exits_0() {
     assert_eq!(m["failed"], serde_json::json!([]));
 }
 
-/// Row 2 under `--mode free_forward`: the unbound weekly stream is skipped by
+/// Row 2 under `--mode free-forward`: the unbound weekly stream is skipped by
 /// name, not dropped silently, and the exit status is 0.
 #[test]
 fn d76_row2_free_forward_names_the_unbound_stream_it_skips_and_exits_0() {
@@ -249,7 +249,7 @@ fn d76_row2_free_forward_names_the_unbound_stream_it_skips_and_exits_0() {
     assert_eq!(json(&pdir.join("report.json"))["skipped"], m["skipped"]);
 }
 
-/// Row 3 under `--mode free_forward`: `--stream weekly_cases` alone.
+/// Row 3 under `--mode free-forward`: `--stream weekly_cases` alone.
 #[test]
 fn d76_row3_free_forward_an_unbound_stream_asked_for_makes_the_exit_status_1() {
     let tmp = tempfile::tempdir().unwrap();
@@ -260,7 +260,7 @@ fn d76_row3_free_forward_an_unbound_stream_asked_for_makes_the_exit_status_1() {
         "{}", stderr(&out));
 }
 
-/// Row 4 under `--mode free_forward`: the daily predictive is written, the
+/// Row 4 under `--mode free-forward`: the daily predictive is written, the
 /// weekly stream is under `failed`, and the exit status is 1.
 #[test]
 fn d76_row4_free_forward_writes_the_streams_it_can_and_fails_the_one_it_cannot() {

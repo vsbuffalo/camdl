@@ -146,13 +146,13 @@ pub(crate) fn fixed_point_forecast_refusal(backend: crate::args::types::ForwardB
         ForwardBackend::ChainBinomial => None,
         ForwardBackend::Ode => Some(
             "a fixed-origin forecast on the ODE backend (the cumulative-flow difference on the \
-             trajectory) is unsupported; forecast on --backend chain_binomial, or use \
-             --mode free_forward."
+             trajectory) is unsupported; forecast on --backend chain-binomial, or use \
+             --mode free-forward."
                 .to_string(),
         ),
         ForwardBackend::Gillespie => Some(
             "a forecast filters the conditioned rows, and the Gillespie backend runs no particle \
-             filter; forecast on --backend chain_binomial, or use --mode free_forward."
+             filter; forecast on --backend chain-binomial, or use --mode free-forward."
                 .to_string(),
         ),
     }
@@ -177,7 +177,7 @@ pub(crate) fn refuse_unsupported(
             "the '{leaf}' method leaf ran on the ODE backend; a fixed-origin forecast of an \
              ODE posterior (the cumulative-flow difference on each draw's trajectory) is not \
              available yet. A chain-binomial posterior (PMMH, PGAS) can be forecast; for an \
-             ODE fit use --mode free_forward.")),
+             ODE fit use --mode free-forward.")),
         ForwardBackend::Gillespie => return Err(format!(
             "the '{leaf}' method leaf ran on the Gillespie backend, which is not a fitting \
              backend, so there is nothing to forecast.")),
@@ -201,7 +201,7 @@ pub(crate) fn refuse_unsupported(
             "{} cannot be combined with --mode forecast yet: a forecast writes no quantities \
              table and no per-chain band, and its arms are the fitted model and the named \
              scenarios. To forecast with interventions switched on or off, declare a \
-             scenario that does it and pass --scenario; or run --mode free_forward.",
+             scenario that does it and pass --scenario; or run --mode free-forward.",
             asked.join(", ")));
     }
     Ok(())

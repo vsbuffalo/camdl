@@ -89,7 +89,7 @@ A normal simulation already writes the cumulative `flow_*` columns next to the
 compartment columns; pass `-o` to mirror the trajectory to a file:
 
 ```bash
-camdl simulate model.ir.json --params p.toml --backend chain_binomial --dt 1 --seed 42 -o traj.tsv
+camdl simulate model.ir.json --params p.toml --backend chain-binomial --dt 1 --seed 42 -o traj.tsv
 ```
 
 ```

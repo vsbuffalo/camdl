@@ -151,7 +151,7 @@ pub struct TableRow {
     /// of a scalar quantity from the model's `quantities {}` block,
     /// read from the run's free-forward predict,
     /// `<fit_dir>/predict/<run id>-<free-forward address key>/quantities/<NAME>.tsv`
-    /// (derived there on demand by `camdl predict --mode free_forward` when
+    /// (derived there on demand by `camdl predict --mode free-forward` when
     /// absent; gh#896). An uncomputable quantity for a
     /// row is simply absent from the map. A field addition is
     /// non-breaking under schema v1 (proposal §3); the

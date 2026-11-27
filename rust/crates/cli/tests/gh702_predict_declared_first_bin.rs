@@ -201,7 +201,7 @@ const CASES_OFF_GRID: &str = "time\tcases\n150\t2470\n";
 const STOCK: &str = "time\tstock\n150\t14888\n200\t19801\n";
 
 /// A chain-binomial fit, so BOTH predictive horizons are reachable
-/// (`--mode one_step` needs a filterable fit).
+/// (`--mode one-step` needs a filterable fit).
 fn fit_toml(out_dir: &str) -> String {
     format!(
         r#"store = "{out_dir}"

@@ -19,7 +19,7 @@
 //! to four digits) settles to annual epidemics. The comparison is on weekly
 //! incidence (the `infection` flow per 7-day output row) from year 4 on.
 //!
-//! Measured on seeds 1-5 (`camdl simulate … --backend chain_binomial --dt …`),
+//! Measured on seeds 1-5 (`camdl simulate … --backend chain-binomial --dt …`),
 //! as relative L2 error of weekly incidence against the ODE / largest relative
 //! error of a yearly peak / alternation of successive yearly peaks from year 8
 //! (mean |log(peak_{y+1}/peak_y)|; the ODE's is 0.030):

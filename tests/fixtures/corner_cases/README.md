@@ -90,7 +90,7 @@ unified-timeline refactor must reproduce bit-for-bit. Run: `--enable cull10`.
 
 ```bash
 camdl simulate tests/fixtures/corner_cases/off_grid_intervention.camdl \
-    --params p.toml --backend chain_binomial --seed 1 --enable pulse --stdout
+    --params p.toml --backend chain-binomial --seed 1 --enable pulse --stdout
 # p.toml: beta=1.0, gamma=0.2 (+ cull=0.5 for the intervention fixtures, N0=1000
 # for all_lifecycle)
 ```

@@ -1388,7 +1388,7 @@ each at the site it refused:
 - `evaluation_failed`, at `"free_forward"` — the tail as a whole refused. The
   one-step-ahead band is data-conditioned and never reaches the forecast
   horizon, so it cannot be invalidated by this: it is written, the tail's
-  failure is recorded, and the run exits 1. `--mode one_step` remains the way to
+  failure is recorded, and the run exits 1. `--mode one-step` remains the way to
   ask for that half alone — and because such a run never builds a tail, a
   scenario it could not have honoured is a plain usage error there, refused
   outright.
@@ -1520,7 +1520,7 @@ score.
 camdl predict @sir --mode forecast --horizon "8 weeks" --label sir_fc
 camdl score @sir_fc --data cases=london.tsv
 camdl predict measles.camdl --params he2010.toml --data cases=london.tsv \
-    --mode one_step --holdout-after 1960-12-31 --label he
+    --mode one-step --holdout-after 1960-12-31 --label he
 camdl score @he --data cases=london.tsv
 ```
 
@@ -3242,7 +3242,7 @@ editing it produces a new leaf. `pfilter`, `profile` and `simulate --fit` take
 **Backend and integration knobs.**
 
 ```bash
---backend {gillespie|chain_binomial|ode}   # default chain_binomial
+--backend {gillespie|chain-binomial|ode}   # default chain-binomial
 --dt N                                     # step size for discrete-time backends (default: the model's dt, else 1.0)
 --integrator {rk4|rk45}                    # ODE method override, refused off ode; tolerances live in the model
 ```
@@ -7845,7 +7845,7 @@ fit_id     run          label                  stem           method   methods c
 
 Read-only by default: every cell is recovered from the stored run's files. **One
 flag breaks that rule** — `--quantity <NAME>` may _derive_ a value on demand,
-running `camdl predict --mode free_forward` for any fit run that has not been
+running `camdl predict --mode free-forward` for any fit run that has not been
 predicted yet, and storing that prediction, with its `quantities-model/` tables,
 inside the run. Optimizer fits have no posterior cloud, so their cell renders
 `—`.
@@ -8399,7 +8399,7 @@ Scenario
   --disable NAME              disable an intervention (repeatable)
 
 Engine
-  --backend gillespie|chain_binomial|ode        (default chain_binomial)
+  --backend gillespie|chain-binomial|ode        (default chain-binomial)
   --dt DT                     step for discrete-time backends (default: the
                               model's dt, else 1.0; replaces the model's)
   --integrator rk4|rk45       ODE method override, refused off ode; tolerances
@@ -8615,7 +8615,7 @@ camdl predict RUN            RUN: the positional run handle, same grammar as `fi
                               GRID = list | lin(min,max,n) | log10(min,max,n).
                               Free-forward, or forecast arms over a parameter read
                               only after the origin; same param in a scenario is an error
-  --mode free_forward|one_step|forecast
+  --mode free-forward|one-step|forecast
   --horizon DURATION          the forecast's reach from the end of the training rows
                               (`4 weeks`, `28 days`); implies --mode forecast
   --design SOURCE=FILE        forecast: a design-reading stream's design values per
@@ -8892,7 +8892,7 @@ PATHS                       ≥2 when --config is absent. Each is a stored score
                             prediction or fit run (its @label, a run-id prefix or
                             its folder), or a prequential.json (or a directory
                             holding one), read as it is
---mode one_step|free_forward|forecast
+--mode one-step|free-forward|forecast
                             the mode whose scores are compared (default one-step
                             on the chain-binomial backend, free-forward on the
                             others; for a stored score or prediction, the first
@@ -8944,7 +8944,7 @@ PATHS                       ≥2 when --config is absent. Each is a stored score
                             1000); a stored prediction or score read in a
                             filtered mode at another count is refused before
                             anything is computed (stored inputs alone must
-                            share one count); not under --mode free_forward
+                            share one count); not under --mode free-forward
 --seed N                    the seed of each fit run's prediction (default
                             predict's)
 --allow-forcing-extrapolation

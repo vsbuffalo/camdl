@@ -138,7 +138,7 @@ pub struct ScenarioArgs {
 /// `--backend` + `--dt`
 #[derive(Args, Clone, store::Inputs)]
 pub struct SimBackend {
-    /// Simulation backend (default: chain_binomial)
+    /// Simulation backend (default: chain-binomial)
     #[arg(long)]
     #[input(identity, vary = crate::input_fixtures::other_backend)]
     pub backend: Option<ForwardBackend>,
@@ -438,7 +438,7 @@ pub struct SimulateArgs {
     /// Start the run from an inferred state at the last observation time
     /// instead of the model's `init {}` block — the forecast workflow. The
     /// origin time becomes the run's `t_start`; pair it with
-    /// `--to "last_obs + 8 weeks"` for the horizon. chain_binomial only.
+    /// `--to "last_obs + 8 weeks"` for the horizon. chain-binomial only.
     /// Two sources:
     ///   FILE — a `camdl pfilter --save-final-state` TSV, drawn from
     ///     p(x_T | y_{1:T}) at the filter's ONE θ (gh#641). Replicate i
@@ -1079,7 +1079,7 @@ pub struct FitMethodFlags {
     pub no_dt_check: bool,
 
     /// Drop the dt-check warning threshold to the strict default
-    /// (0.5 nats for chain_binomial, 0.1 nats for ode_rk4). Targets
+    /// (0.5 nats for chain-binomial, 0.1 nats for ode_rk4). Targets
     /// research-quality fits where sub-nat differences matter for
     /// paper-grade conclusions; the routine default (2.0 / 0.5)
     /// allows more give before flagging. The threshold it selects is stored
@@ -1618,9 +1618,9 @@ pub struct PredictFlags {
     pub sweep: Vec<crate::args::types::SweepSpec>,
 
     /// Which predictive to emit. Omitted = all applicable for the fit's
-    /// backend (chain-binomial → `free_forward` + `one_step`; ODE →
-    /// `free_forward` only), or `forecast` when `--horizon` is given.
-    /// `--mode one_step` on an ODE fit is a hard error. `forecast` is the
+    /// backend (chain-binomial → `free-forward` + `one-step`; ODE →
+    /// `free-forward` only), or `forecast` when `--horizon` is given.
+    /// `--mode one-step` on an ODE fit is a hard error. `forecast` is the
     /// fixed-origin forecast from the end of the fit's training rows, out to
     /// `--horizon`.
     #[arg(long, value_name = "MODE")]
@@ -1864,7 +1864,7 @@ pub struct FixedPointFlags {
     #[input(identity, vary = crate::input_fixtures::predict_holdout_after)]
     pub holdout_after: Option<String>,
 
-    /// The simulation backend (default chain_binomial).
+    /// The simulation backend (default chain-binomial).
     #[arg(long)]
     #[input(identity, vary = crate::input_fixtures::predict_other_backend)]
     pub backend: Option<ForwardBackend>,
@@ -2321,7 +2321,7 @@ pub struct FitTableArgs {
     /// q50 of the no-overlay `fitted` row). Repeatable for several
     /// quantities. Unlike the default read-only table, `--quantity`
     /// may DERIVE the value on demand: for a fit that has not been
-    /// predicted yet it runs `camdl predict --mode free_forward`,
+    /// predicted yet it runs `camdl predict --mode free-forward`,
     /// populating that run's `quantities-model/` outputs. Optimizer fits
     /// (IF2 / NLopt) have no posterior cloud, so their cell renders `—`.
     #[arg(long = "quantity", value_name = "NAME")]
@@ -2902,7 +2902,7 @@ pub struct ProfileArgs {
     pub link_root: Option<PathBuf>,
 
     /// Per-cell inference algorithm. When omitted the per-cell runner
-    /// uses `if2` on `chain_binomial` (the historical default). Pass an
+    /// uses `if2` on `chain-binomial` (the historical default). Pass an
     /// algorithm + backend pair from `camdl fit methods` to switch
     /// (e.g. `--algorithm nl-sbplx --backend ode` for deterministic
     /// per-cell MLE — typically 100×–1000× faster on equilibrium /
@@ -2913,7 +2913,7 @@ pub struct ProfileArgs {
     #[input(identity, vary = crate::input_fixtures::profile_other_algorithm)]
     pub algorithm: Option<String>,
 
-    /// Simulation backend. Defaults to `chain_binomial`; pass
+    /// Simulation backend. Defaults to `chain-binomial`; pass
     /// `--backend ode` together with an ODE-compatible algorithm
     /// (`nl-sbplx`, `nl-bobyqa`, `nl-lbfgs`) for deterministic per-cell MLE.
     #[arg(long, value_name = "NAME")]
@@ -3531,8 +3531,8 @@ pub struct CompareArgs {
     /// computed.
     pub paths: Vec<String>,
 
-    /// The mode of prediction whose scores are compared: `one_step`,
-    /// `free_forward` or `forecast` (which needs --horizon). Default: one-step
+    /// The mode of prediction whose scores are compared: `one-step`,
+    /// `free-forward` or `forecast` (which needs --horizon). Default: one-step
     /// on a backend that runs a particle filter, free-forward otherwise; for a
     /// stored score or prediction, the first of those it holds, else forecast.
     #[arg(long, value_enum)]
@@ -3682,7 +3682,7 @@ pub struct CompareArgs {
     /// filtered mode must have run its filters at this count when it is given
     /// or compare predicts a fit run, and stored inputs alone at one count;
     /// otherwise they are refused before anything is computed. Not used under --mode
-    /// free_forward, which runs no filter.
+    /// free-forward, which runs no filter.
     #[arg(long)]
     pub particles: Option<usize>,
 
@@ -4031,12 +4031,35 @@ mod tests {
     /// `a.backend.backend.unwrap_or(ForwardBackend::ChainBinomial)`), so the help
     /// string claiming `gillespie` was stale doc-vs-code drift dating to
     /// before the 2026-04-19 backend-default-mismatch fix moved the
-    /// simulate default to chain_binomial. Pin the help to the code-true
+    /// simulate default to chain-binomial. Pin the help to the code-true
     /// default so it can't silently drift again.
+    /// A multi-word value is shown with a dash on the command line and
+    /// accepted with a dash or an underscore, so a value copied from a file
+    /// still parses.
+    #[test]
+    fn multi_word_values_show_a_dash_and_accept_both_spellings() {
+        use clap::ValueEnum;
+        use crate::args::types::{ForwardBackend, PredictModeArg};
+        let name = |v: Option<clap::builder::PossibleValue>| v.expect("a named value").get_name().to_string();
+        assert_eq!(name(ForwardBackend::ChainBinomial.to_possible_value()), "chain-binomial");
+        assert_eq!(name(PredictModeArg::FreeForward.to_possible_value()), "free-forward");
+        assert_eq!(name(PredictModeArg::OneStep.to_possible_value()), "one-step");
+        for s in ["chain-binomial", "chain_binomial"] {
+            assert_eq!(ForwardBackend::from_str(s, false), Ok(ForwardBackend::ChainBinomial), "{s}");
+        }
+        for (s, m) in [("free-forward", PredictModeArg::FreeForward), ("free_forward", PredictModeArg::FreeForward),
+                       ("one-step", PredictModeArg::OneStep), ("one_step", PredictModeArg::OneStep)] {
+            assert_eq!(PredictModeArg::from_str(s, false), Ok(m), "{s}");
+            assert_eq!(PredictModeArg::from_str(m.flag_value(), false), Ok(m), "flag_value parses back");
+        }
+    }
+
     #[test]
     fn simulate_backend_help_names_resolved_default() {
         // The resolved default, straight from the enum the resolver uses.
-        let resolved_default = ForwardBackend::ChainBinomial.as_str(); // "chain_binomial"
+        // As the command line spells it, which is what the help prints.
+        let value = clap::ValueEnum::to_possible_value(&ForwardBackend::ChainBinomial).expect("a named value");
+        let resolved_default = value.get_name();
 
         let mut cmd = Cli::command();
         let simulate = cmd

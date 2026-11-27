@@ -49,7 +49,7 @@ separates "my pipeline works" from "my model describes the world". Passing it is
 necessary, not sufficient.
 
 ```bash
-camdl simulate model.camdl --params truth.toml --backend chain_binomial \
+camdl simulate model.camdl --params truth.toml --backend chain-binomial \
     --dt 0.5 --seed 7 --obs synth.tsv
 camdl fit run fit_synth.toml --label synth --seed 0
 camdl fit summary @synth
@@ -521,10 +521,10 @@ obs  = pl.read_csv(".../observed/onset.tsv",   separator="\t")
 [`camdl docs diagnosing-fits`](diagnosing-fits.md) §5). Omit `--mode` to emit
 all applicable for the fit's backend:
 
-- `--mode free_forward` — the generative check: replay the fitted model from the
+- `--mode free-forward` — the generative check: replay the fitted model from the
   start, never re-anchored to data. The harshest test, and what exposes
   generative misspecification. Available on any backend.
-- `--mode one_step` — the honest short-horizon forecast `p(y_t | y_{1:t-1})`:
+- `--mode one-step` — the honest short-horizon forecast `p(y_t | y_{1:t-1})`:
   re-condition on the data each step. Chain-binomial only (an ODE fit's one-step
   is identical to its free-forward and is refused with a redirect). Pools over a
   posterior subsample (`--n-draws`, default 200); both modes stack in the same

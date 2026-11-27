@@ -225,7 +225,7 @@ fn fit_predict_emits_deaths_averted_contrast_with_positive_median() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // `--mode free_forward`: the contrast is a forward counterfactual object;
+    // `--mode free-forward`: the contrast is a forward counterfactual object;
     // this also sidesteps the one-step exact-filter's unrelated limitation with the
     // parametric `at [origin + 4 'weeks]` schedule. Contrasts are horizon-independent.
     let out = run(&bin, &tmp, &["predict", "@fit", "--mode", "free_forward"]);

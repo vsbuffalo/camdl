@@ -63,7 +63,7 @@ ocaml:
 # model declares (one TSV per stream under data/). The stamp makes the recipe
 # stream-name-agnostic so cases with different obs blocks share this harness.
 $(SYNTH): $(CASE)/$(MODEL) $(CASE)/truth.toml | ocaml
-	cd $(CASE) && $(CAMDL) simulate $(MODEL) --backend chain_binomial --seed 1 $(TRUTH) \
+	cd $(CASE) && $(CAMDL) simulate $(MODEL) --backend chain-binomial --seed 1 $(TRUTH) \
 	  --obs-only-dir data
 	@touch $(SYNTH)
 synth: $(SYNTH) ## simulate at truth.toml → obs streams
@@ -73,7 +73,7 @@ pgas: $(SYNTH) ; cd $(CASE) && $(CAMDL) fit run pgas.toml ## PGAS fit
 pmmh: $(SYNTH) ; cd $(CASE) && $(CAMDL) fit run pmmh.toml ## PMMH fit
 
 ensemble: | ocaml ## 30-replicate forward sim (cells bar)
-	cd $(CASE) && $(CAMDL) simulate $(MODEL) --backend chain_binomial $(TRUTH) \
+	cd $(CASE) && $(CAMDL) simulate $(MODEL) --backend chain-binomial $(TRUTH) \
 	  --replicates 30
 
 all: if2 pgas pmmh ## synth + all three fits
@@ -171,7 +171,7 @@ k12-data:
 	cd $(REPO)/rust && cargo build --quiet --release -p cli
 	cd $(K12) && CAMDLC=$(CAMDLC_PATH) $(REPO)/rust/target/release/camdl simulate \
 	  $(REPO)/tests/fixtures/bspline_inference/seir_k12_truth.camdl --params truth.toml \
-	  --backend chain_binomial --seed 8 --obs-only-dir results/data
+	  --backend chain-binomial --seed 8 --obs-only-dir results/data
 k12-benchmark: k12-data
 	cd $(REPO) && CAMDLC=$(CAMDLC_PATH) uv run --quiet --with scipy==1.18.1 --with numpy==2.5.4 \
 	  --with polars==2.1.0 --with arviz==1.3.0 --with matplotlib==3.10.7 python scripts/k12_benchmark.py \

@@ -8,7 +8,7 @@ the downstream analysis requires.
 
 ```
 camdl simulate model.ir.json --params base.toml --backend gillespie
-camdl simulate model.ir.json --params base.toml --backend chain_binomial --dt 1
+camdl simulate model.ir.json --params base.toml --backend chain-binomial --dt 1
 camdl simulate model.ir.json --params base.toml --backend ode          --dt 0.1
 ```
 
@@ -462,5 +462,5 @@ answers.
 ```
 $ camdl simulate model.ir.json --backend gillespie --seed 42
 error: model requires capabilities not supported by backend 'gillespie':
-  - OVERDISPERSION: transitions with overdispersion require --backend chain_binomial
+  - OVERDISPERSION: transitions with overdispersion require --backend chain-binomial
 ```

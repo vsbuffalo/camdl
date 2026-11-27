@@ -36,7 +36,7 @@ trap 'rm -rf "$tmp"' EXIT
 
 echo "[1/2] simulate (seed=$SEED) → per-leaf wide TSVs"
 "$CAMDL" simulate "$MODEL" --params "$PARAMS" \
-  --backend chain_binomial --dt 1 --seed "$SEED" \
+  --backend chain-binomial --dt 1 --seed "$SEED" \
   --obs-only-dir "$tmp/obs" --output-dir "$tmp/results" >/dev/null
 
 mkdir -p "$DATA"

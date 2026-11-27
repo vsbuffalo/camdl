@@ -158,7 +158,7 @@ per grid point (TSV, or `--format json`).
 
 ```bash
 camdl check model.camdl                       # dimension + type check
-camdl simulate model.camdl --param beta=0.4 --backend chain_binomial
+camdl simulate model.camdl --param beta=0.4 --backend chain-binomial
 camdl inspect model.camdl --summary           # compiled structure
 camdl inspect model.camdl --cost-report       # per-step eval cost analysis
 ```
@@ -408,7 +408,7 @@ address, so each count writes to its own directory. `forecast.json` also
 records, per draw, the effective sample size of the filter's weights at its last
 assimilation before the origin (before resampling), its time and ESS/N: a
 measure of the Monte Carlo reliability of the state the forecast starts from,
-not of its accuracy. `--particles` where no filter runs (`--mode free_forward`,
+not of its accuracy. `--particles` where no filter runs (`--mode free-forward`,
 or the default mode on an ODE fit, which has no one-step band) is refused.
 
 With more than one arm the forecast also writes `forecast-contrasts.tsv`: per

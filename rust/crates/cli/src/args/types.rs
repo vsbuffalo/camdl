@@ -87,7 +87,7 @@ impl FromStr for DataSpec {
 
 /// Simulation backend.  Used as a clap `ValueEnum` so `--help` lists variants.
 ///
-/// Canonical names use snake_case on the CLI (`--backend chain_binomial`)
+/// Canonical names use snake_case on the CLI (`--backend chain-binomial`)
 /// to match the IR JSON and run.json `backend` field. Clap 4's default
 /// ValueEnum rendering is kebab-case, which would diverge from
 /// everywhere else in the tool — hence the explicit `#[value(name=...)]`.
@@ -103,7 +103,7 @@ pub enum ForwardBackend {
     #[value(name = "gillespie")]
     #[serde(rename = "gillespie")]
     Gillespie,
-    #[value(name = "chain_binomial", alias = "chain-binomial")]
+    #[value(name = "chain-binomial", alias = "chain_binomial")]
     #[serde(rename = "chain_binomial", alias = "chain-binomial")]
     ChainBinomial,
     #[value(name = "ode")]
@@ -125,17 +125,29 @@ impl ForwardBackend {
 /// command line = "all applicable" (the default): a chain-binomial fit emits
 /// both `free_forward` and `one_step`; an ODE fit emits `free_forward` only
 /// (its one-step is identical, so it is simply not applicable — no error). An
-/// explicit `--mode one_step` on an ODE fit is a hard error with a redirect.
+/// explicit `--mode one-step` on an ODE fit is a hard error with a redirect.
 /// `forecast` is the fixed-origin forecast and needs `--horizon`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PredictModeArg {
-    #[value(name = "free_forward", alias = "free-forward")]
+    #[value(name = "free-forward", alias = "free_forward")]
     FreeForward,
-    #[value(name = "one_step", alias = "one-step")]
+    #[value(name = "one-step", alias = "one_step")]
     OneStep,
     #[value(name = "forecast")]
     Forecast,
+}
+
+impl PredictModeArg {
+    /// The mode as `--mode` spells it. Files spell it with an underscore
+    /// (`free_forward`, `one_step`); the command line accepts both.
+    pub fn flag_value(self) -> &'static str {
+        match self {
+            Self::FreeForward => "free-forward",
+            Self::OneStep => "one-step",
+            Self::Forecast => "forecast",
+        }
+    }
 }
 
 /// What a forecast states the values of a data-table forcing after its

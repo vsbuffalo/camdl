@@ -63,10 +63,10 @@ check-data: bin/camdl-main bin/camdl-br
 	rm -rf work/data && mkdir -p work/data
 	for f in sir seir_age; do \
 	  CAMDL_SKIP_VERSION_CHECK=1 CAMDLC=$(abspath bin/camdlc-main) bin/camdl-main simulate \
-	    $(REPO)/tests/recovery/cases/$$f/model.camdl --backend chain_binomial --seed 1 \
+	    $(REPO)/tests/recovery/cases/$$f/model.camdl --backend chain-binomial --seed 1 \
 	    --params $(REPO)/tests/recovery/cases/$$f/truth.toml --obs-only-dir work/data/$$f; done
 	CAMDL_SKIP_VERSION_CHECK=1 CAMDLC=$(abspath bin/camdlc-br) bin/camdl-br simulate \
-	  fixtures/ebola/model.camdl --backend chain_binomial --seed 1 \
+	  fixtures/ebola/model.camdl --backend chain-binomial --seed 1 \
 	  --params fixtures/ebola/truth.toml --obs-only-dir work/data/ebola
 	for f in sir seir_age ebola; do diff -r work/data/$$f fixtures/$$f/data || exit 1; done
 	@echo "fixture data reproduce"

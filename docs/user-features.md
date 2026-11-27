@@ -540,7 +540,7 @@ One model, three backends. Choose the right tradeoff:
 | `ode`            | Deterministic parameter sweeps                    |
 
 ```bash
-camdl simulate model.camdl --params p.toml --backend chain_binomial --dt 0.5 --seed 42
+camdl simulate model.camdl --params p.toml --backend chain-binomial --dt 0.5 --seed 42
 ```
 
 The chain-binomial uses true multinomial competing-risk draws with deferred

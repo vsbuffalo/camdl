@@ -501,7 +501,7 @@ fn mode_of_run(fit: &OpenedFit, req: &Request) -> Result<PredictModeArg, String>
                 .into(),
         ),
         (PredictModeArg::FreeForward | PredictModeArg::OneStep, Some(h)) => {
-            Err(format!("--horizon {h:?} sets a forecast's reach, and --mode {} is not a forecast", mode_name(mode)))
+            Err(format!("--horizon {h:?} sets a forecast's reach, and --mode {} is not a forecast", mode.flag_value()))
         }
         _ => Ok(mode),
     }

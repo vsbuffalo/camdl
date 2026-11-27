@@ -3,7 +3,7 @@
 //!
 //! The particle filter scores each row from integrator state at its data time,
 //! so a record whose times (here every 2.5 days) miss the default 1-day output
-//! grid fits fine. `camdl predict --mode free_forward` replays its own
+//! grid fits fine. `camdl predict --mode free-forward` replays its own
 //! trajectories and reads each row off the *recorded* snapshots, so it must
 //! record a snapshot at every time its projection reads rather than refuse
 //! with "… which is not a recorded output time". These tests pin that, and

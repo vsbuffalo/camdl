@@ -50,7 +50,7 @@ pub(crate) const PROFILE_NO_PMMH: &str = "`camdl profile` has no per-cell PMMH. 
     a posterior of that parameter, fit once with `camdl fit run` (PMMH or \
     PGAS) and read its marginal from the draws.";
 
-/// Per-cell optimizer choice. `--algorithm if2 --backend chain_binomial`
+/// Per-cell optimizer choice. `--algorithm if2 --backend chain-binomial`
 /// (the default) keeps the historical PF-based per-cell MLE; the new
 /// `--algorithm nl-* --backend ode` paths run NLopt deterministic MLE
 /// against `compute_ode_loglik`. See gh#47 for the dispatch rationale

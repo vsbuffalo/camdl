@@ -219,7 +219,7 @@ fn the_mode_and_horizon_flags_are_checked() {
     assert!(stderr(&out).contains("sets the reach of a forecast"), "{}", stderr(&out));
     // The old spelling of the mode flag is answered with the new one.
     let out = run(tmp.path(), &["predict", "x", "--horizon", "one_step"]);
-    assert!(stderr(&out).contains("--mode one_step"), "{}", stderr(&out));
+    assert!(stderr(&out).contains("--mode one-step"), "{}", stderr(&out));
 }
 
 /// An optimizer (IF2) forecasts from its one winning point, labelled
@@ -683,7 +683,7 @@ fn the_particle_count_defaults_to_the_fits_and_is_recorded_and_addressed() {
     assert_eq!(pj["particles"], serde_json::json!({"n": 40}), "where the count came from is not recorded");
     let out = run(dir, &["predict", "@fit", "--mode", "free_forward", "--particles", "40"]);
     assert!(!out.status.success(), "{}", stderr(&out));
-    assert!(stderr(&out).contains("this predict runs neither (--mode free_forward)"), "{}", stderr(&out));
+    assert!(stderr(&out).contains("this predict runs neither (--mode free-forward)"), "{}", stderr(&out));
 }
 
 /// Forecast artifacts record nothing about held-out rows: removing the
