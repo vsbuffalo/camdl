@@ -1456,7 +1456,7 @@ fn the_fixed_point_refusals() {
         ("--exclude-chains with a model file", [FIXED, &["--exclude-chains", "1"]].concat(), &["--exclude-chains"]),
         ("a fixed-point flag with a handle", vec!["predict", "@fit", "--params", "point.toml", "--mode", "free_forward"], &["--params", "stored fit run"]),
         ("no --data", vec!["predict", "model.camdl", "--params", "point.toml"], &["--data"]),
-        ("one-step on ODE", [FIXED, &["--backend", "ode"]].concat().into_iter().map(|s| if s == "free_forward" { "one_step" } else { s }).collect(), &["ODE", "free_forward"]),
+        ("one-step on ODE", [FIXED, &["--backend", "ode"]].concat().into_iter().map(|s| if s == "free_forward" { "one_step" } else { s }).collect(), &["ODE", "--mode free-forward"]),
         ("one-step on Gillespie", [FIXED, &["--backend", "gillespie"]].concat().into_iter().map(|s| if s == "free_forward" { "one_step" } else { s }).collect(), &["Gillespie"]),
         ("a forecast on Gillespie", vec!["predict", "model.camdl", "--params", "point.toml", "--data", "daily_cases=daily_cases.tsv", "--horizon", "2 weeks", "--backend", "gillespie"], &["Gillespie", "forecast"]),
         ("--particles without a filter", [FIXED, &["--particles", "20"]].concat(), &["--particles"]),
