@@ -212,11 +212,12 @@ one week ahead, even though the parameters were fitted only through 15 February.
 It is not a forecast three weeks ahead from 16 February. Both sets of rows are
 recorded per stream as a row count and a digest of those rows
 ([`RowPrefix`](rust:cli::fit::training_partition::RowPrefix)), and
-`forecast.json` writes them as `training_rows` and `conditioning_rows`.
+`forecast.json` and `predictive.json` write them as `training_rows` and
+`conditioning_rows`.
 
 For a fixed-origin forecast the two hold the same rows. The forecast driver
 filters through the training rows and checks that the rows it was given are the
-training rows the fit recorded (§3.4). A state conditioned on rows newer than
+training rows the fit recorded (§3.5). A state conditioned on rows newer than
 the fit, with the parameters left as fitted, would make the conditioning rows
 the larger set; camdl does not do this in a forecast (§5).
 
@@ -539,28 +540,34 @@ be legitimately available to it.
 camdl's time stamp is the end of what a row measures, and its cut is the
 training extent. A forecasting system built on that cut still has several routes
 by which a held-out row, or something derived from one, can reach a forecast or
-its score. The table lists each route and what closes it. "Type" means a value
-that would violate the rule cannot be built. "Run-time check" means a
-constructor or a command refuses it. "Convention" means the rule holds because
-one function is the only one written to decide it, and nothing stops a second.
+its score. The table lists each route and what closes it, using four kinds of
+closure, which give different guarantees (§3.1):
 
-| Route                                                          | Closed by                                                                                                                                                     | Kind                               |
-| -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- |
-| A held-out row among the rows the parameters were fitted to    | the training rows are a prefix of each stream, held as a row count                                                                                            | type                               |
-| A training row later than a held-out row                       | `from_cutoff` checks the prefix; `check_holdout_files` checks every holdout row ends after the training extent                                                | run-time check                     |
-| The split decided from a row's label                           | `trains_under_cutoff` reads the end of what the row measures                                                                                                  | convention                         |
-| A later command cutting the data differently                   | the partition is read from the fit's record and never cut again                                                                                               | run-time check                     |
-| A fitted row edited after the fit                              | the digest of each stream's leading rows                                                                                                                      | run-time check                     |
-| A held-out row conditioning the state at the origin            | `conditioning` compares the rows handed to the filter with the training rows; a target's value is an `ObsCell::HeldOut`, which the filter does not assimilate | run-time check, and a type         |
-| A forecast origin other than the end of the training rows      | `ForecastPlan::new` takes no origin                                                                                                                           | type                               |
-| A target that overlaps a training row                          | targets are kept only when they end after the origin; an overlap check in debug builds                                                                        | run-time check in part (see §3.3)  |
-| Outcomes scored against a different series                     | `check_agreement` compares the outcome file's leading rows with the conditioning rows                                                                         | run-time check                     |
-| A score that changed the forecast it scores                    | the prediction is computed again with the outcomes bound and compared with the stored one, byte for byte                                                      | run-time check                     |
-| Realised covariates read after the origin                      | refused until a `--covariate` statement is given; `realised` is then a label                                                                                  | run-time check, then a declaration |
-| Realised design values                                         | refused without `--design` or `--realised-design`; ex-post is then a label                                                                                    | run-time check, then a declaration |
-| Rows after the origin moving an interpolated forcing before it | a note and a record                                                                                                                                           | not closed                         |
-| A held-out value in a stored fit                               | the stored fit keeps each held-out row's file, position and period, and not its value                                                                         | by construction of what is stored  |
-| The model chosen after looking at the held-out rows            | nothing                                                                                                                                                       | not closed                         |
+- _shape_: a value that breaks the rule cannot be represented by the type;
+- _constructor_: the type's fields are private and its only constructors refuse
+  a value that breaks the rule;
+- _command_: a command refuses the input at run time;
+- _convention_: the rule holds because one function is the only one written to
+  decide it, and nothing stops a second.
+
+| Route                                                          | Closed by                                                                                                                                                       | Kind                        |
+| -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------- |
+| A held-out row among the rows the parameters were fitted to    | the training rows of a stream are stored as a row count                                                                                                         | shape                       |
+| A training row later than a held-out row                       | `from_cutoff` refuses training rows that are not a prefix; `check_holdout_files` refuses a holdout row that ends at or before the training extent               | constructor, command        |
+| The split decided from a row's label                           | `trains_under_cutoff` reads the end of what the row measures                                                                                                    | convention                  |
+| A later command cutting the data differently                   | the partition is read from the fit's record with `from_record` and never cut again                                                                              | constructor                 |
+| A fitted row edited after the fit                              | `from_record` compares the digest of each stream's training rows                                                                                                | constructor                 |
+| A held-out row conditioning the state at the origin            | a target's value is an `ObsCell::HeldOut`, which the likelihood never assimilates; `conditioning` compares the rows handed to the filter with the training rows | shape, constructor          |
+| A forecast origin other than the end of the training rows      | `ForecastPlan::new` takes no origin                                                                                                                             | shape                       |
+| A target that overlaps a training row                          | `ForecastPlan::new` refuses it in every build, failing the whole forecast                                                                                       | constructor                 |
+| Outcomes scored against a different series                     | `check_agreement` compares the outcome file's leading rows with the conditioning rows                                                                           | command                     |
+| A score that changed the forecast it scores                    | the prediction is computed again with the outcomes bound and compared with the stored one, byte for byte                                                        | command                     |
+| A held-out score labelled in-sample                            | `camdl score` refuses a stored prediction whose manifest does not record its training rows                                                                      | command                     |
+| Realised covariates read after the origin                      | refused until a `--covariate` statement is given; `realised` is then a label                                                                                    | command, then a declaration |
+| Realised design values                                         | refused without `--design` or `--realised-design`; ex-post is then a label                                                                                      | command, then a declaration |
+| Rows after the origin moving an interpolated forcing before it | a note and a record                                                                                                                                             | not closed                  |
+| A held-out value in a stored fit                               | the stored fit keeps each held-out row's file, position and period, and not its value                                                                           | by what is stored           |
+| The model chosen after looking at the held-out rows            | nothing                                                                                                                                                         | not closed                  |
 
 The last row is outside what software can check.
 [Model comparison](../methods/model-comparison.md), §6.3, states the same limit
@@ -614,10 +621,102 @@ camdl score            outcome rows bound to targets
 
 ## 3. The types
 
-Each subsection gives what the type represents, the invalid state it removes,
-who builds it and who reads it. The types are private to the `cli` crate.
+The types below are private to the `cli` crate, except `ObsCell`, which is in
+`sim`. A forecast's values pass through them in this order:
 
-### 3.1 Observed rows
+```text
+data file ──observed_rows()──► ObservedRow { label, measures: Measures, cell: Option<ObsCell>, .. }
+                                    │
+             TrainingPartition::from_cutoff / whole / from_record
+                                    ▼
+             TrainingPartition { rule, extent, streams: Vec<RowPrefix { stream, rows, digest }> }
+                                    │
+             ForecastPlan::new(training: TrainingPartition, horizon, streams)    no origin argument
+                                    ▼
+             ForecastPlan { origin = training.extent(), targets: Vec<Target>, .. }
+                                    │
+             forecast_driver::conditioning(plan, training streams)               private function
+                                    ▼
+             StateConditioning: the conditioning rows, with the time they end
+                                    │   targets appended as ObsCell::HeldOut(v), or with no cell
+                                    ▼
+             particle filter: only an ObsCell::Scalar is assimilated
+```
+
+§3.1 says which of these types close a route of §2 by their shape, which by
+their constructors, and which routes rest on convention. §3.2 to §3.5 give each
+type: what it represents, the invalid state it removes, who builds it and who
+reads it.
+
+### 3.1 How the types close each route
+
+**Shape.** Three routes are closed because a value that breaks the rule cannot
+be represented.
+
+A stream's training rows are stored as a prefix length, a `usize`, with a digest
+of the rows it counts:
+
+```rust
+pub(crate) struct RowPrefix { pub stream: String, pub rows: usize, pub digest: RowDigest }
+```
+
+A row is a training row exactly when its position is below `rows`. No set of row
+positions is stored anywhere, so training rows with a gap, or a row that is both
+a training row and held out, cannot be written down.
+
+The forecast origin is not an argument:
+
+```rust
+pub(crate) fn new(parameters: TrainingPartition, horizon: f64, streams: &[PlanStream])
+    -> Result<ForecastPlan, PlanError> {
+    let origin = parameters.extent();
+```
+
+`ForecastPlan`'s fields are private and `new` is its only constructor, so no
+caller can start a forecast anywhere but the end of the training rows.
+
+A held-out value has its own variant, and the likelihood matches on the pair of
+the value's variant and the use it is being put to:
+
+```rust
+pub enum ObsCell { Scalar(f64), HeldOut(f64) }
+
+match (cell, use_) {
+    (Some(ObsCell::Scalar(v)),  LikelihoodUse::Assimilate)   => v,
+    (Some(ObsCell::HeldOut(v)), LikelihoodUse::ScoreHeldOut) => v,
+    (Some(ObsCell::HeldOut(_)), LikelihoodUse::Assimilate)
+    | (Some(ObsCell::Scalar(_)), LikelihoodUse::ScoreHeldOut) => /* contributes nothing */,
+```
+
+`Assimilate` is the use that weights particles. A held-out value contributes
+nothing to it, and making it contribute requires editing this match.
+
+**Constructor.** Most of the remaining guarantees come from types whose fields
+are private and whose constructors check the rule. Every value of the type that
+exists passed the check. The check is code, so a change to it can weaken the
+guarantee without a compile error.
+
+| Rule                                                                                                        | Checked by                                                  |
+| ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| The training rows are a prefix in time                                                                      | `from_cutoff`, through `cutoff_prefix`                      |
+| The rows read now are the rows the fit was trained on                                                       | `from_record`, by each stream's row count and digest        |
+| Each target ends after the origin and within the reach; one stream's targets are ordered and do not overlap | `ForecastPlan::new`                                         |
+| No target overlaps a training row of its stream                                                             | `ForecastPlan::new`, in every build                         |
+| The filter was given exactly the training rows, all ending at or before the origin                          | `conditioning`, the only constructor of `StateConditioning` |
+
+**Convention.** These rules hold because one function decides them, and nothing
+would stop a second function from deciding them differently:
+
+- The split reads the end of what a row measures. `ObservedRow.label` is a
+  public field, and the rule is kept by every caller using
+  `trains_under_cutoff`.
+- A target's `observed` field is filled only from the rows the caller passes as
+  held out. The plan does not check those rows against the partition.
+- No path in the forecast driver makes an `ObsCell::Scalar` for a target. The
+  match above makes a `HeldOut` value harmless; it does not stop a caller from
+  wrapping a held-out value as a `Scalar`.
+
+### 3.2 Observed rows
 
 <!-- decl: rust:cli::fit::observed_rows::ObservedRow -->
 
@@ -646,7 +745,7 @@ its output, so what is scored and where it is scored come from one read of the
 file. The binder requires each stream's ends to increase strictly, so a row's
 position orders its stream in time.
 
-### 3.2 `TrainingPartition`
+### 3.3 `TrainingPartition`
 
 <!-- decl: rust:cli::fit::training_partition::TrainingPartition -->
 
@@ -706,7 +805,7 @@ The partition is written to `fit.meta.json` and copied as `training_rows` into
 `predictive.json` and `forecast.json`. The fields are in the run specification,
 §2.2.1.
 
-### 3.3 `ForecastPlan` and `Target`
+### 3.4 `ForecastPlan` and `Target`
 
 <!-- decl: rust:cli::fit::forecast_plan::ForecastPlan -->
 
@@ -728,14 +827,17 @@ targets it asserts, in every build, that each target ends after the origin and
 within the reach, and that one stream's targets increase and do not overlap. A
 failure of these is an internal error.
 
-That no target overlaps a training row of its stream is checked by a
-`debug_assert!` in `stream_targets`, which is compiled out of a release build.
-In a release build the property rests on how each source builds its periods: a
-tiling continues from the stream's last training row; a schedule period that
-cuts across a row is refused by `check_schedule_agrees`; held-out windows that
+`new` also refuses a target that overlaps a training row of its stream, in every
+build
+([`PlanError::TargetOverlapsTraining`](rust:cli::fit::forecast_plan::PlanError)).
+The property already follows from how each source builds its periods: a tiling
+continues from the stream's last training row; a schedule period that cuts
+across a row is refused by `check_schedule_agrees`; held-out windows that
 overlap a training row are refused by their validation; and every target is
 filtered to end after the origin, which is at or after the end of every training
-row.
+row. No input reaches the refusal today. It is reported as an internal error and
+fails the whole forecast, since dropping the one stream would hide a broken
+construction as a smaller forecast.
 
 A target's `observed` field names the held-out row that measures the same
 period, by file and position. It is filled only from the rows the caller passed
@@ -755,20 +857,20 @@ not in the digest. How an identity becomes a stored result's address is in
 [`run_forecast`](rust:cli::fit::forecast_output::run_forecast) builds the plan,
 and the forecast driver and the writer of `forecast.json` read it.
 
-### 3.4 `StateConditioning` and the forecast driver
+### 3.5 `StateConditioning` and the forecast driver
 
 <!-- decl: rust:cli::fit::forecast_driver::StateConditioning -->
 
 A `StateConditioning` records the rows the state at the origin was conditioned
-on. It has one variant, for a particle filter run through a prefix of each
-stream.
+on. It has one kind, for a particle filter run through a prefix of each stream.
 
-It is built in one place, the private function
-[`conditioning`](rust:cli::fit::forecast_driver::conditioning), from the rows
-handed to the filter. The function digests those rows and fails unless each
-stream's count and digest equal the plan's training rows and every row ends at
-or before the origin. No caller passes conditioning rows in, so the recorded
-conditioning rows describes the rows the filter was given. The failure is
+Its field is private to the forecast driver's module, and its only constructor
+is the private function
+[`conditioning`](rust:cli::fit::forecast_driver::conditioning), which builds it
+from the rows handed to the filter. The function digests those rows and fails
+unless each stream's count and digest equal the plan's training rows and every
+row ends at or before the origin. No caller passes conditioning rows in, so the
+recorded conditioning rows are the rows the filter was given. The failure is
 reported as an internal error, since a caller that reaches it has cut the
 streams wrongly.
 
@@ -807,7 +909,7 @@ survives.
 The driver runs a fresh filter per draw whatever method produced the draws. A
 PGAS fit also stores sampled state paths, and the forecast does not read them.
 
-### 3.5 What is not a type
+### 3.6 What is not a type
 
 There is no wrapper type per role of a time (a label, a period's end, an
 origin). Inside the engines every time is an `f64` in model time
@@ -845,7 +947,7 @@ columns of the score files are in the run specification, §2.2.4.
 ### 4.2 The log score of a forecast target
 
 The predictive distribution of a fixed-origin forecast at a target is the
-equal-weight mixture over _M_ draws and _N_ particles per draw (§3.4). Its
+equal-weight mixture over _M_ draws and _N_ particles per draw (§3.5). Its
 density at an observed value `y` is estimated by the mean, over the `M·N`
 samples, of the observation density of `y` at each particle's state:
 
@@ -933,7 +1035,12 @@ held-out mean score is a mean over `held_out` rows of one stream in one mode.
 
 The score as a whole carries a `conditioning` label
 ([`Conditioning`](rust:score::trace::Conditioning)), which says what the
-parameters were fitted to:
+parameters were fitted to. It is read from the training rows recorded in the
+stored prediction's manifest. Before scoring, `camdl score` refuses a stored
+prediction whose `predictive*.json` or `forecast.json` is not current, by its
+schema tag, or does not record its training rows; without that refusal, a
+held-out score of such a prediction would be labelled `in_sample`. The labels
+are:
 
 - `hold_out_tail` when the parameters come from a stored fit, and either the
   fit's recorded partition held rows out or the scored rows end after its
