@@ -502,60 +502,43 @@ fn the_onward_pass_ties_with_the_pfilter_on_the_whole_file() {
 }
 
 /// The one-step prediction at `--seed SEED` of two copies of the point at 3
-/// particles, the rows after day 20 held out, and its score's folder.
-fn degenerating(seed: &str) -> (tempfile::TempDir, tempfile::TempDir, PathBuf) {
+/// particles, the rows after day 20 held out, and the store and working
+/// directory it ran in.
+fn degenerating(seed: &str) -> (tempfile::TempDir, PathBuf, tempfile::TempDir, Output) {
     let fresh = tempfile::tempdir().unwrap();
     let root = fresh.path().join("camdl-store");
     let cwd = workdir(&root);
-    ok(
-        &predict_in(cwd.path(), &root, &[
-            "predict", "model.camdl", "--params", "point.toml", "--data", "daily_cases=daily_cases.tsv", "--mode",
-            "one_step", "--n-draws", "2", "--particles", "3", "--seed", seed, "--holdout-after", "20", "--label", "deg",
-        ]),
-        "predict",
-    );
-    ok(&score_in(cwd.path(), &root, &["@deg", "--data", "daily_cases=daily_cases.tsv"]), "score");
-    let folder = the_score(&root);
-    (fresh, cwd, folder)
+    let out = predict_in(cwd.path(), &root, &[
+        "predict", "model.camdl", "--params", "point.toml", "--data", "daily_cases=daily_cases.tsv", "--mode",
+        "one_step", "--n-draws", "2", "--particles", "3", "--seed", seed, "--holdout-after", "20", "--label", "deg",
+    ]);
+    (fresh, root, cwd, out)
 }
 
-/// A draw whose one-step filter degenerates on a held-out row has density
-/// zero there and scores no later row. At seed 4, draw 0 of two degenerates
-/// at t = 29: the row's score stays finite, the draw's later rows are named
-/// unscored for it, and the later rows take their samples from draw 1 alone.
+/// A draw whose one-step filter collapses on a held-out row fails the score,
+/// as it fails a forecast: dropping it would leave out the draw under which
+/// the outcomes were least probable. At seed 4, draw 0 of two collapses at
+/// t = 29, after the conditioning rows, so the prediction succeeds and the
+/// score fails, naming the draw and the remedy.
 #[test]
-fn one_draw_degenerating_on_a_held_out_row_leaves_the_row_scored() {
-    let (_fresh, _cwd, folder) = degenerating("4");
-    let manifest: serde_json::Value = serde_json::from_str(&read(&folder, "score.json")).unwrap();
-    let notes: Vec<String> = manifest["notes"].as_array().unwrap().iter().map(|n| n.as_str().unwrap().to_string()).collect();
-    assert!(notes.iter().any(|n| n.contains("draw 0 degenerated at t = 29")), "{notes:#?}");
-    assert!(notes.iter().any(|n| n.contains("ending at t = 30 is unscored for draw 0")), "{notes:#?}");
-    assert!(notes.iter().any(|n| n.contains("fewer than all draws")), "{notes:#?}");
-    let rows = tsv_rows(&read(&folder, "scored.tsv"));
-    let at = |stream: &str, t: &str| {
-        rows.iter().find(|r| r["stream"] == stream && r["t_stop"] == t).unwrap()["log_score"].parse::<f64>().unwrap()
-    };
-    assert!(at("daily_cases", "29").is_finite() && at("joint", "29").is_finite());
-    assert!(at("daily_cases", "63").is_finite());
-    let summary = tsv_rows(&read(&folder, "summary.tsv"));
-    assert!(summary.iter().all(|r| r["n_unscored"] == "0"), "{summary:?}");
+fn a_draw_collapsing_on_a_held_out_row_fails_the_score() {
+    let (_fresh, root, cwd, out) = degenerating("4");
+    ok(&out, "predict");
+    let o = score_in(cwd.path(), &root, &["@deg", "--data", "daily_cases=daily_cases.tsv"]);
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(!o.status.success(), "a collapsed draw must fail the score:\n{err}");
+    assert!(err.contains("1 of 2 posterior draws collapsed") && err.contains("draw 0"), "{err}");
+    assert!(err.contains("--particles"), "{err}");
 }
 
-/// When every draw that reached a held-out row degenerates there, the row's
-/// score is −∞, written `-inf`, and the rows after it, which no draw reached,
-/// are counted unscored in `summary.tsv`. At seed 2 draw 1 of two
-/// degenerates in the conditioning rows, as it did in the prediction, and
-/// draw 0 at t = 30.
+/// A draw whose one-step filter collapses on a conditioning row fails the
+/// prediction. At seed 2, draw 1 of two collapses before day 20.
 #[test]
-fn every_draw_degenerating_on_a_row_scores_it_minus_infinity() {
-    let (_fresh, _cwd, folder) = degenerating("2");
-    let rows = tsv_rows(&read(&folder, "scored.tsv"));
-    let row = |t: &str| rows.iter().find(|r| r["stream"] == "daily_cases" && r["t_stop"] == t).cloned();
-    assert_eq!(row("30").unwrap()["log_score"], "-inf");
-    assert!(row("31").is_none(), "no draw reached t = 31");
-    let summary = tsv_rows(&read(&folder, "summary.tsv"));
-    let held = summary.iter().find(|r| r["stream"] == "daily_cases" && r["role"] == "held_out").unwrap();
-    assert_eq!((held["n"].as_str(), held["n_unscored"].as_str(), held["log_score_sum"].as_str()), ("10", "33", "-inf"));
+fn a_draw_collapsing_on_a_conditioning_row_fails_the_prediction() {
+    let (_fresh, _root, _cwd, out) = degenerating("2");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "a collapsed draw must fail the prediction:\n{err}");
+    assert!(err.contains("1 of 2 posterior draws collapsed") && err.contains("draw 1"), "{err}");
 }
 
 /// The refusals of `--data` and of the outcome rows.

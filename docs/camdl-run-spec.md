@@ -1149,12 +1149,13 @@ pooled band's. That pooling is why one-step rows carry no `rhat_*`/`ess_*` at
 all (an ESS from an autocorrelation over draws × particles is inflated by the
 particle count — deferred, gh#798); it is not a reason to leave the rows pooled.
 
-A chain whose one-step filter degenerated on some of its draws still bands, and
-its `n_draws` reports what it actually pooled rather than what the subsample
-gave it, so a narrower band there is legible as a thinner sample; the loss is
-named on stderr. A chain that lost _every_ draw contributes no band at all and
-is named too — banding an empty cell would publish `NaN` quantiles, which reads
-as a band.
+A one-step prediction reports every draw of the subsample or fails. If the
+filter of any draw collapses (every particle dead, or the effective sample size
+below its floor), the prediction fails, saying how many draws collapsed and
+naming the first, as a forecast does. Pooling only the surviving draws would
+leave out the draws under which the data were least probable, and so narrow the
+bands and raise the score. A collapse means the filter has too few particles for
+that draw; `--particles` raises the count without changing what is reported.
 
 `--by-chain` adds no artifact address of its own, and composes with
 `--exclude-chains`, which does. A `--by-chain` file is a strict superset of the
@@ -1567,14 +1568,10 @@ What is scored, by mode:
   the particles before it and then assimilating it. Its bands for those rows are
   the score's and are written to no prediction file. A particle the filter
   killed has density zero in every stream, as in the joint, and its draw is no
-  sample. A draw whose filter degenerates on a row after the conditioning rows
-  has density zero at every particle there, and its pass stops: it scores no
-  later row, and `score.json`'s notes name the draw and each row it leaves
-  unscored. A row's score is then the log of the mean density over the particles
-  of every draw that reached it, finite while some draw gave the outcome
-  positive density and `-inf` when none did; its other rules use the samples of
-  the draws that reached it alive. A row no draw reached is counted in
-  `summary.tsv`'s `n_unscored` and written to no other file.
+  sample. A row's score is the log of the mean density over every particle of
+  every draw. A draw whose filter collapses on a row after the conditioning rows
+  fails the score, as one that collapses on a conditioning row fails the
+  prediction (§2.2.2).
 - **Forecast.** Each target whose period an outcome row measures: the
   observation density at each particle at the target's end, recorded before
   anything could be assimilated there.
@@ -9019,9 +9016,9 @@ plug-in score at the posterior mean, or any one point, is a fixed point's: write
 the point to a params file (for an optimizer run `fit summary --params-only`
 prints its winner; it prints no point for a sampler run), predict it with
 `camdl predict MODEL --params`, score it, and compare the score. Each note of a
-score (a stream not scored, a draw whose filter degenerated) is printed on
-stderr, prefixed by its row, and each forcing its computation held is a line
-under the table on its row.
+score (a stream not scored, a row with no observed value) is printed on stderr,
+prefixed by its row, and each forcing its computation held is a line under the
+table on its row.
 
 Two scores are differenced only when they agree on what they are of. A table
 whose rows differ in any of these is refused (exit 2), the refusal naming the

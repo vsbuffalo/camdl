@@ -4270,8 +4270,7 @@ fn run_predict(
                 rows: &s.rows,
             });
             // Then one section per chain (`--by-chain`; empty otherwise), each
-            // reporting the draws it actually pooled — which is smaller than the
-            // chain's share of the subsample when some of its draws degenerated.
+            // reporting the draws it pooled.
             for (chain, chain_rows) in &s.per_chain {
                 sections.push(PredictiveSection {
                     chain: ChainLabel::One(ChainIndex(*chain)),
@@ -5323,18 +5322,14 @@ impl PredictParticles {
     }
 }
 
-/// One chain's share of the one-step pool, plus the draw accounting a per-chain
-/// band has to report honestly (gh#794).
+/// One chain's share of the one-step pool, and the number of draws behind it.
 #[cfg_attr(test, derive(Debug))]
 struct ChainPool {
     /// `pooled[stream_idx][obs_idx]` = ỹ over (particles × this chain's draws).
     pooled: Vec<Vec<Vec<f64>>>,
-    /// Draws of this chain that actually contributed a filter pass.
+    /// Draws of this chain in the subsample, every one of which contributed a
+    /// filter pass.
     n_pooled: usize,
-    /// Draws of this chain the subsample offered. Greater than `n_pooled` when
-    /// some of them degenerated; the gap is what stops a thinned band from
-    /// reading as a full one.
-    n_offered: usize,
 }
 
 /// The one-step predictive: per-(stream-leaf, obs-time) particle samples,
@@ -5359,7 +5354,7 @@ struct PooledOneStep {
     /// carries no chain column and no chain can be named; a keyed cloud never
     /// mixes the two.
     by_chain: BTreeMap<Option<usize>, ChainPool>,
-    /// Draws that contributed (= param_sets.len() − degenerate-skipped).
+    /// Draws pooled: every draw of the subsample.
     n_pooled: usize,
 }
 
@@ -5375,15 +5370,10 @@ impl PooledOneStep {
         out
     }
 
-    /// The chains that can be banded on their own: keyed, and with at least one
-    /// draw that survived its filter. An unkeyed cloud yields none, and neither
-    /// does a chain every one of whose draws degenerated — banding an empty
-    /// cell would publish `NaN` quantiles.
+    /// The chains that can be banded on their own: every chain of a keyed
+    /// cloud, and none of an unkeyed one.
     fn bandable_chains(&self) -> Vec<usize> {
-        self.by_chain
-            .iter()
-            .filter_map(|(k, c)| k.filter(|_| c.n_pooled > 0))
-            .collect()
+        self.by_chain.keys().filter_map(|k| *k).collect()
     }
 }
 
@@ -5396,9 +5386,7 @@ struct OneStepBands {
     /// Draws behind the pooled `all` rows.
     n_pooled: usize,
     /// Chain id -> draws behind that chain's own rows. Empty without
-    /// `--by-chain`. A chain that lost some of its draws to a degenerate filter
-    /// appears here with what it actually pooled, so its `n_draws` cell never
-    /// claims a full band; a chain that lost all of them is absent.
+    /// `--by-chain`.
     n_pooled_by_chain: BTreeMap<usize, usize>,
     /// The conditioning rows: per leaf stream, sorted by name, the rows every band's
     /// filter walked and how many of them the fit held out.
@@ -5415,10 +5403,6 @@ struct DrawRecord {
     samples: Vec<Vec<Vec<f64>>>,
     log_liks: Vec<Vec<Vec<f64>>>,
     joint: Vec<Vec<f64>>,
-    /// The stop at which the draw's filter degenerated, after the
-    /// conditioning rows; `None` when it ran to the end. Its record at that
-    /// stop and after is not read.
-    degenerated: Option<usize>,
 }
 
 /// Filter every posterior draw and pool the per-(stream, time) one-step
@@ -5426,26 +5410,16 @@ struct DrawRecord {
 /// params, seed)`) so the skip policy below is unit-testable without a fit
 /// on disk; production passes `bootstrap_filter`.
 ///
-/// Skip policy (gh#620): a draw whose filter bails with
-/// `SimError::PFDegenerate` — the statistical ESS-collapse /
-/// all-particles-dead bail — is skipped and counted, never fatal. A small
-/// tail of pathological draws is expected in a converging posterior, and one
-/// such draw must not abort the whole predictive. This mirrors the settled
-/// treatment of the same error everywhere else it occurs: PMMH's init-eval
-/// pushes a BadInit diagnostic and skips the chain (`pmmh.rs`), IF2 skips
-/// the one bad chain and continues (`runner.rs`), and the PF eval closures
-/// report −∞ so MH rejects the proposal cleanly (`sim/src/error.rs` on the
-/// variant). The deliberate contrast carries over too: any OTHER error —
-/// compute budget, model eval — stays fatal and aborts on first occurrence,
-/// because it trips identically for every draw and 200 identical skips
-/// would only bury it.
-///
-/// Skips are loud, never silent: one stderr summary line with the count and
-/// the first failure, and the returned `n_pooled` flows into the artifact's
-/// `n_draws` column, so the band never claims more draws than it used. If
-/// EVERY draw degenerates there is nothing to pool and the run errors.
+/// A draw whose filter collapses (`SimError::PFDegenerate`: every particle
+/// dead, or the effective sample size below its floor) fails the prediction,
+/// as it fails a forecast. The draws a filter loses are those under which the
+/// data were least probable, so pooling the rest would narrow the bands and
+/// raise the score. Every draw is still run, so the error says how many
+/// collapsed; a collapse means the filter has too few particles for that
+/// draw, which `--particles` changes without changing what is reported. Any
+/// other filter error fails on its first occurrence, because it trips the
+/// same way for every draw.
 fn pool_one_step_draws(
-    out: &crate::out::Out,
     param_sets: &[Vec<f64>],
     chain_of_draw: &[Option<usize>],
     base_seed: u64,
@@ -5458,24 +5432,17 @@ fn pool_one_step_draws(
     let mut by_chain: BTreeMap<Option<usize>, ChainPool> = BTreeMap::new();
     let mut stream_names: Vec<String> = Vec::new();
     let mut obs_times: Vec<f64> = Vec::new();
-    let mut skipped: Vec<(usize, String)> = Vec::new();
-    // Draws each chain was *offered*, counted before any filter runs, so the gap
-    // to what it contributed is available even for a chain that lost every one.
-    let mut offered: BTreeMap<Option<usize>, usize> = BTreeMap::new();
-    for i in 0..param_sets.len() {
-        *offered.entry(chain_of_draw.get(i).copied().flatten()).or_insert(0) += 1;
-    }
+    let mut collapsed: Vec<(usize, String)> = Vec::new();
 
     for (draw_idx, params) in param_sets.iter().enumerate() {
         // Distinct, reproducible per-draw seed: mix the draw index into the
         // base seed so each filter pass has its own RNG stream and the whole
-        // run is deterministic given `base_seed`. Keyed on the index, so a
-        // skipped draw does not shift the seeds of the draws after it.
+        // run is deterministic given `base_seed`.
         let seed = crate::fit::forecast_driver::draw_seed(base_seed, draw_idx);
         let result = match run_filter(draw_idx, params, seed) {
             Ok(r) => r,
             Err(e @ sim::SimError::PFDegenerate { .. }) => {
-                skipped.push((draw_idx, e.to_string()));
+                collapsed.push((draw_idx, e.to_string()));
                 continue;
             }
             Err(e) => {
@@ -5496,11 +5463,9 @@ fn pool_one_step_draws(
         // This draw's chain gets its own accumulator, created on first use and
         // sized to the axes the first successful filter established.
         let chain = chain_of_draw.get(draw_idx).copied().flatten();
-        let n_offered = offered.get(&chain).copied().unwrap_or(0);
         let pool = by_chain.entry(chain).or_insert_with(|| ChainPool {
             pooled: vec![vec![Vec::new(); obs_times.len()]; stream_names.len()],
             n_pooled: 0,
-            n_offered,
         });
         pool.n_pooled += 1;
 
@@ -5517,68 +5482,19 @@ fn pool_one_step_draws(
     }
 
     let n_total = param_sets.len();
-    if skipped.len() == n_total && n_total > 0 {
-        let (first_idx, first_err) = &skipped[0];
+    if let Some((first_idx, first_err)) = collapsed.first() {
         return Err(format!(
-            "one_step mode: the one-step filter degenerated on ALL {n_total} posterior \
-             draws — there is nothing to pool. First failure (draw {first_idx}): \
-             {first_err}"
+            "the one-step filter of {} of {n_total} posterior draws collapsed (first: draw {first_idx}: \
+             {first_err}). A one-step prediction reports all draws or none: rerun with more particles \
+             (--particles), or check the fit.",
+            collapsed.len()
         ));
     }
-    if !skipped.is_empty() {
-        let (first_idx, first_err) = &skipped[0];
-        out.say(format_args!(
-            "predict: one_step mode — skipped {}/{} posterior draws whose one-step \
-             filter degenerated (a small tail of degenerate draws is expected in a \
-             converging posterior; first: draw {first_idx}: {first_err}); bands pool the \
-             remaining {} draws",
-            skipped.len(),
-            n_total,
-            n_total - skipped.len(),
-        ));
-    }
-    // A chain that lost *some* of its draws still bands, but its `n_draws` cell
-    // reports what it actually pooled -- and the loss is named here, because a
-    // reader comparing chains has to know that a narrower band may be a thinner
-    // sample rather than a more certain chain. A chain that lost *every* draw is
-    // absent from `by_chain` entirely (nothing was inserted for it), so it
-    // yields no band; say so rather than let it vanish silently.
-    for (chain, offered_here) in &offered {
-        let Some(id) = chain else { continue };
-        // Read the denominator off the pool where one exists, so the number in
-        // the message is the number the pool actually carries; a chain that
-        // contributed nothing has no pool, and falls back to what it was given.
-        let (n_pooled, n_offered) = match by_chain.get(chain) {
-            Some(c) => (c.n_pooled, c.n_offered),
-            None => (0, *offered_here),
-        };
-        if n_pooled == n_offered {
-            continue;
-        }
-        if n_pooled == 0 {
-            out.say(format_args!(
-                "predict: one_step mode -- chain {} contributed no band: all \
-                 {n_offered} of its replayed draws degenerated. It is omitted from the \
-                 per-chain rows rather than banded over nothing.",
-                ChainIndex(*id)
-            ));
-        } else {
-            out.say(format_args!(
-                "predict: one_step mode -- chain {} bands over {n_pooled} of the \
-                 {n_offered} draws it was given ({} degenerated); its rows report \
-                 n_draws = {n_pooled}, so a narrower band there may be a thinner \
-                 sample rather than a more certain chain.",
-                ChainIndex(*id),
-                n_offered - n_pooled,
-            ));
-        }
-    }
-
     Ok(PooledOneStep {
         stream_names,
         obs_times,
         by_chain,
-        n_pooled: n_total - skipped.len(),
+        n_pooled: n_total,
     })
 }
 
@@ -5590,8 +5506,7 @@ fn pool_one_step_draws(
 /// (particles × draws) per `(stream-leaf, time)`, quantile, and group by logical
 /// source + stratum exactly like the free-forward path. Mode = one_step.
 ///
-/// [`OneStepBands::n_pooled`] is the number of draws actually pooled — the
-/// subsample minus any degenerate-skipped draws (gh#620) — for the `n_draws`
+/// [`OneStepBands::n_pooled`] is the number of draws pooled, for the `n_draws`
 /// artifact column.
 ///
 /// `by_chain` additionally bands each chain's own draws into
@@ -5860,45 +5775,12 @@ fn one_step_bands(
             s.name
         ));
     }
-    // Each draw's record, kept for a score; `None` for a draw the filter
-    // skipped, which is left out of the pool and the score alike.
+    // Each draw's record, kept for a score.
     let mut records: Vec<Option<DrawRecord>> = (0..param_sets.len()).map(|_| None).collect();
-    let pool = pool_one_step_draws(out, &param_sets, &chain_of_draw, base_seed, |d, params, seed| {
+    let pool = pool_one_step_draws(&param_sets, &chain_of_draw, base_seed, |d, params, seed| {
         let mut result = bootstrap_filter(&process, &obs_model, params, &smc_config, seed);
         if binding.is_none() {
             return result;
-        }
-        let mut degenerated = None;
-        // A draw that degenerates before the end of the conditioning rows
-        // degenerated in the prediction too, and is skipped by both. One that
-        // degenerates at a stop `w` after it was pooled by the prediction: its
-        // filter is run again with every outcome from `w` on a hole, which
-        // leaves every stop in place and assimilates nothing from `w`, so its
-        // record before `w` is the first run's and the prediction's bands are
-        // unchanged. The score reads that record before `w` only.
-        if let Err(sim::SimError::PFDegenerate { obs_window, .. }) = &result {
-            let w = *obs_window;
-            let t_w = obs_model.obs_time(w);
-            if t_w > conditioning_end + crate::OBS_SNAP_EPS {
-                let mut holed = obs_streams.clone();
-                for s in &mut holed {
-                    let n = n_conditioning[&s.name];
-                    for i in n..s.rows.len() {
-                        if s.rows[i].measures.end() >= t_w - crate::OBS_SNAP_EPS {
-                            s.rows[i].cell = None;
-                            s.rows[i].aux.clear();
-                            s.cells[i] = None;
-                            s.aux[i].clear();
-                        }
-                    }
-                }
-                let specs = crate::fit::runner::stream_specs_from_obs_streams(&holed);
-                let (bound, _) = BoundObs::bind(compiled.model.simulation.t_start, specs)
-                    .map_err(|r| sim::SimError::Validation(r.render()))?;
-                let holed_model = MultiStreamObsModel::new(bound, compiled.clone())?;
-                result = bootstrap_filter(&process, &holed_model, params, &smc_config, seed);
-                degenerated = Some(w);
-            }
         }
         if let Ok(r) = &mut result {
             if let Some(p) = r.prequential.as_mut() {
@@ -5906,7 +5788,6 @@ fn one_step_bands(
                     samples: p.per_stream_samples.clone(),
                     log_liks: std::mem::take(&mut p.per_stream_log_liks),
                     joint: std::mem::take(&mut p.log_liks),
-                    degenerated,
                 });
             }
         }
@@ -6053,19 +5934,8 @@ fn one_step_scored(
     training_rows: &TrainingRows,
 ) -> Result<crate::fit::scoring::Scored, String> {
     use crate::fit::scoring::{JointCell, ScoreMode, ScoredCell, Scored};
-    use crate::quantile::fmt_time;
-    // The draws the pool kept, by their index among the draws offered.
-    let kept: Vec<(usize, &DrawRecord)> = records.iter().enumerate().filter_map(|(d, r)| r.as_ref().map(|r| (d, r))).collect();
+    let kept: Vec<&DrawRecord> = records.iter().flatten().collect();
     let mut scored = Scored::default();
-    for (d, r) in &kept {
-        if let Some(w) = r.degenerated {
-            scored.notes.push(format!(
-                "the one-step filter of draw {d} degenerated at t = {}, after the conditioning rows: its density of \
-                 each row ending there is zero, and it scores no row after",
-                fmt_time(obs_times[w])
-            ));
-        }
-    }
     let contribution = draw_contribution;
     // Per stop: the cells scored there, by index into `scored.cells`.
     let mut at_stop: Vec<Vec<usize>> = vec![Vec::new(); obs_times.len()];
@@ -6089,18 +5959,11 @@ fn one_step_scored(
             let mut samples = Vec::new();
             let mut log_liks = Vec::new();
             let mut fewer = false;
-            for (d, r) in &kept {
-                match contribution(r, ti, Some(si)) {
-                    Some((ll, ys)) => {
-                        fewer |= ys.is_empty();
-                        log_liks.extend(ll);
-                        samples.extend(ys);
-                    }
-                    None => {
-                        fewer = true;
-                        scored.notes.push(format!("the row of '{name}' ending at t = {} is unscored for draw {d}", fmt_time(end)));
-                    }
-                }
+            for r in &kept {
+                let (ll, ys) = contribution(r, ti, Some(si));
+                fewer |= ys.is_empty();
+                log_liks.extend(ll);
+                samples.extend(ys);
             }
             if fewer {
                 fewer_rows += 1;
@@ -6134,7 +5997,7 @@ fn one_step_scored(
         if fewer_rows > 0 {
             scored.notes.push(format!(
                 "{fewer_rows} one_step row(s) of '{name}' take their CRPS, WIS, PIT and coverage from the samples of \
-                 fewer than all draws: a draw whose filter degenerated, or a particle the filter killed, has none"
+                 fewer than all particles: a particle the filter killed has none"
             ));
         }
     }
@@ -6161,7 +6024,7 @@ fn one_step_scored(
             stop: obs_times[ti],
             role,
             streams: cells.iter().map(|&c| scored.cells[c].leaf.clone()).collect(),
-            log_liks: kept.iter().filter_map(|(_, r)| contribution(r, ti, None)).flat_map(|(ll, _)| ll).collect(),
+            log_liks: kept.iter().flat_map(|r| contribution(r, ti, None).0).collect(),
         });
     }
     Ok(scored)
@@ -6170,15 +6033,8 @@ fn one_step_scored(
 /// What one draw's one-step record contributes at stop `ti` to the row of
 /// stream `si` (`Some`) or to the joint (`None`): the log density of the
 /// outcome at each particle, and the predictive samples. A particle the
-/// filter killed has density zero and no sample. At the stop where the
-/// draw's filter degenerated every particle has density zero and no sample,
-/// and after it the draw contributes nothing (`None`).
-fn draw_contribution(r: &DrawRecord, ti: usize, si: Option<usize>) -> Option<(Vec<f64>, Vec<f64>)> {
-    match r.degenerated {
-        Some(w) if ti > w => return None,
-        Some(w) if ti == w => return Some((vec![f64::NEG_INFINITY; r.joint[ti].len()], Vec::new())),
-        _ => {}
-    }
+/// filter killed has density zero and no sample.
+fn draw_contribution(r: &DrawRecord, ti: usize, si: Option<usize>) -> (Vec<f64>, Vec<f64>) {
     let dead = sim::inference::prequential::dead_particles(&r.joint[ti], &r.log_liks[ti]);
     let ll: Vec<f64> = match si {
         Some(si) => r.log_liks[ti][si].clone(),
@@ -6189,7 +6045,7 @@ fn draw_contribution(r: &DrawRecord, ti: usize, si: Option<usize>) -> Option<(Ve
         Some(si) => r.samples[ti][si].iter().zip(&dead).filter(|(_, &x)| !x).map(|(&y, _)| y).collect(),
         None => Vec::new(),
     };
-    Some((ll, samples))
+    (ll, samples)
 }
 
 /// Group the observed leaves into `(source, index_dims, rows)` for the observed
@@ -6350,12 +6206,11 @@ mod tests {
     /// One draw's record of one stream over two stops: three particles, the
     /// second killed by the filter at stop 0 (joint weight −∞, its
     /// per-stream term read off its dead state and finite).
-    fn record(degenerated: Option<usize>) -> super::DrawRecord {
+    fn record() -> super::DrawRecord {
         super::DrawRecord {
             samples: vec![vec![vec![3.0, 100.0, 4.0]], vec![vec![5.0, 6.0, 7.0]]],
             log_liks: vec![vec![vec![-1.0, -0.5, -2.0]], vec![vec![-1.5, -1.5, -1.5]]],
             joint: vec![vec![-1.0, f64::NEG_INFINITY, -2.0], vec![-1.5, -1.5, -1.5]],
-            degenerated,
         }
     }
 
@@ -6364,32 +6219,13 @@ mod tests {
     /// its draw is no sample.
     #[test]
     fn a_dead_particle_scores_as_the_joint_does() {
-        let r = record(None);
-        let (stream, samples) = super::draw_contribution(&r, 0, Some(0)).unwrap();
-        let (joint, _) = super::draw_contribution(&r, 0, None).unwrap();
+        let r = record();
+        let (stream, samples) = super::draw_contribution(&r, 0, Some(0));
+        let (joint, _) = super::draw_contribution(&r, 0, None);
         assert_eq!(stream, joint);
         assert_eq!(samples, vec![3.0, 4.0]);
         let lme = crate::fit::scoring::log_mean_exp;
         assert_eq!(lme(&stream).unwrap(), lme(&joint).unwrap());
-    }
-
-    /// A draw whose filter degenerated at a stop has density zero at every
-    /// particle there and no sample, and contributes nothing after; the
-    /// row's score over two draws stays finite while the other draw gives the
-    /// outcome positive density, and is −∞ when both degenerated.
-    #[test]
-    fn a_degenerated_draw_has_density_zero_at_its_stop_and_nothing_after() {
-        let (ll, samples) = super::draw_contribution(&record(Some(0)), 0, Some(0)).unwrap();
-        assert_eq!(ll, vec![f64::NEG_INFINITY; 3]);
-        assert!(samples.is_empty());
-        assert!(super::draw_contribution(&record(Some(0)), 1, Some(0)).is_none());
-        let lme = crate::fit::scoring::log_mean_exp;
-        let other = super::draw_contribution(&record(None), 0, Some(0)).unwrap().0;
-        let both: Vec<f64> = other.iter().chain(&ll).copied().collect();
-        let s = lme(&both).unwrap();
-        assert!(s.is_finite(), "one of two draws degenerated: {s}");
-        assert!((s - (lme(&other).unwrap() - 2.0_f64.ln())).abs() < 1e-12, "the mean over all six particles");
-        assert_eq!(lme(&[ll.clone(), ll].concat()).unwrap(), f64::NEG_INFINITY);
     }
 
     /// gh#896: a predict's address key is pinned. It names stored outputs, so a
@@ -6829,7 +6665,7 @@ mod tests {
         }
     }
 
-    // ── pool_one_step_draws skip policy (gh#620, ebola F11) ─────────────────
+    // ── pool_one_step_draws: pooling and the collapse policy ────────────────
 
     use sim::error::PFDegenerateKind;
     use sim::inference::particle_filter::{PFilterResult, PrequentialRecorded};
@@ -6867,24 +6703,20 @@ mod tests {
         }
     }
 
+    /// A draw whose filter collapses fails the whole one-step prediction, as it
+    /// fails a forecast: dropping it would remove the draws under which the
+    /// data were least probable, narrowing the bands and raising the score.
+    /// Every draw is still run, so the error counts the collapsed ones.
     #[test]
-    fn one_step_pool_skips_degenerate_draw_and_counts() {
-        // Draw 1 of 3 degenerates: it is skipped, the other two pool, and
-        // n_pooled says 2 — the artifact must not claim 3 draws (F11: one
-        // pathological draw of 200 used to abort the whole predictive).
+    fn one_step_pool_fails_when_any_draw_collapses() {
         let param_sets = vec![vec![0.0]; 3];
-        let out = pool_one_step_draws(&crate::out::Out::new(true), &param_sets, &unkeyed(&param_sets), 42, |draw_idx, _params, _seed| {
+        let err = pool_one_step_draws(&param_sets, &unkeyed(&param_sets), 42, |draw_idx, _params, _seed| {
             if draw_idx == 1 { Err(degenerate()) } else { Ok(fake_pf_result(10.0)) }
         })
-        .expect("a single degenerate draw must not abort the pool");
-        assert_eq!(out.n_pooled, 2);
-        assert_eq!(out.stream_names, vec!["cases".to_string()]);
-        assert_eq!(out.obs_times, vec![7.0, 14.0]);
-        // 2 surviving draws × 2 particles per (stream, time).
-        assert_eq!(out.cell(0, 0).len(), 4);
-        assert_eq!(out.cell(0, 1).len(), 4);
-        // No chain column ⇒ one unkeyed bucket and nothing to band per chain.
-        assert!(out.bandable_chains().is_empty());
+        .expect_err("one collapsed draw of three must fail the prediction");
+        assert!(err.contains("1 of 3"), "must count the collapsed draws: {err}");
+        assert!(err.contains("draw 1"), "must name the first collapsed draw: {err}");
+        assert!(err.contains("--particles"), "must name the remedy: {err}");
     }
 
     /// Every draw's chain, for a cloud that carries no chain column — what the
@@ -6905,7 +6737,7 @@ mod tests {
         // Six draws, three per chain, two particles each.
         let param_sets = vec![vec![0.0]; 6];
         let chains = keyed(&[0, 0, 0, 1, 1, 1]);
-        let out = pool_one_step_draws(&crate::out::Out::new(true), &param_sets, &chains, 42, |_, _, _| Ok(fake_pf_result(10.0)))
+        let out = pool_one_step_draws(&param_sets, &chains, 42, |_, _, _| Ok(fake_pf_result(10.0)))
             .expect("nothing degenerates here");
 
         assert_eq!(out.bandable_chains(), vec![0, 1]);
@@ -6914,7 +6746,6 @@ mod tests {
         for c in [0usize, 1] {
             assert_eq!(out.by_chain[&Some(c)].pooled[0][0].len(), 6);
             assert_eq!(out.by_chain[&Some(c)].n_pooled, 3);
-            assert_eq!(out.by_chain[&Some(c)].n_offered, 3);
         }
         // And the pooled cell is exactly their union — the same multiset a flat
         // pool held, which is what keeps the `all` rows byte-identical (the band
@@ -6928,42 +6759,13 @@ mod tests {
         assert_eq!(pooled.len(), 12);
     }
 
-    /// A chain that lost SOME of its draws still bands, and reports what it
-    /// pooled rather than what it was given. A chain that lost ALL of them
-    /// yields no band at all — banding an empty cell would publish `NaN`
-    /// quantiles, which reads as a band.
-    #[test]
-    fn a_partially_degenerate_chain_reports_its_real_count_and_a_dead_one_is_omitted() {
-        // Chain 0: draws 0,1,2 — draw 1 degenerates. Chain 1: draws 3,4 — both
-        // degenerate. Chain 2: draw 5 — survives.
-        let param_sets = vec![vec![0.0]; 6];
-        let chains = keyed(&[0, 0, 0, 1, 1, 2]);
-        let out = pool_one_step_draws(&crate::out::Out::new(true), &param_sets, &chains, 42, |draw_idx, _, _| {
-            if matches!(draw_idx, 1 | 3 | 4) { Err(degenerate()) } else { Ok(fake_pf_result(10.0)) }
-        })
-        .expect("a partially degenerate pool must not abort");
-
-        // Chain 1 contributed nothing, so it cannot be banded: an empty cell
-        // would quantile to NaN and render as a band over nothing.
-        assert_eq!(out.bandable_chains(), vec![0, 2]);
-        assert!(!out.by_chain.contains_key(&Some(1)));
-        // Chain 0 bands, and its count is the 2 it pooled, not the 3 it was
-        // offered — that gap is what the `n_draws` cell has to show.
-        assert_eq!(out.by_chain[&Some(0)].n_pooled, 2);
-        assert_eq!(out.by_chain[&Some(0)].n_offered, 3);
-        assert_eq!(out.by_chain[&Some(2)].n_pooled, 1);
-        // The pooled band still sees every surviving draw of every chain.
-        assert_eq!(out.n_pooled, 3);
-        assert_eq!(out.cell(0, 0).len(), 6); // 3 surviving draws × 2 particles
-    }
-
     #[test]
     fn one_step_pool_aborts_on_structural_error() {
         // A non-degeneracy error (here a numerical collapse) trips identically
         // for every draw — it must abort on first occurrence, naming the draw,
         // not be skipped 200 times.
         let param_sets = vec![vec![0.0]; 3];
-        let err = pool_one_step_draws(&crate::out::Out::new(true), &param_sets, &unkeyed(&param_sets), 42, |draw_idx, _params, _seed| {
+        let err = pool_one_step_draws(&param_sets, &unkeyed(&param_sets), 42, |draw_idx, _params, _seed| {
             if draw_idx == 1 {
                 Err(sim::SimError::NumericalCollapse { kind: sim::CollapseKind::UnOpNan, t: 3.0 })
             } else {
@@ -6975,28 +6777,18 @@ mod tests {
     }
 
     #[test]
-    fn one_step_pool_errors_when_all_draws_degenerate() {
-        // Nothing pooled → no band to emit; the run must error loudly, not
-        // return an empty artifact.
-        let param_sets = vec![vec![0.0]; 3];
-        let err = pool_one_step_draws(&crate::out::Out::new(true), &param_sets, &unkeyed(&param_sets), 42, |_, _, _| Err(degenerate()))
-            .expect_err("an all-degenerate pool must error");
-        assert!(err.contains("ALL 3"), "must say every draw degenerated: {err}");
-    }
-
-    #[test]
     fn one_step_pool_seeds_keyed_on_draw_index() {
-        // A skipped draw must not shift later draws' seeds — reproducibility
+        // A collapsed draw must not shift later draws' seeds — reproducibility
         // of the pooled band is keyed on (base_seed, draw index) alone.
         use std::cell::RefCell;
         let param_sets = vec![vec![0.0]; 3];
         let seeds_with_skip = RefCell::new(Vec::new());
-        let _ = pool_one_step_draws(&crate::out::Out::new(true), &param_sets, &unkeyed(&param_sets), 42, |draw_idx, _params, seed| {
+        let _ = pool_one_step_draws(&param_sets, &unkeyed(&param_sets), 42, |draw_idx, _params, seed| {
             seeds_with_skip.borrow_mut().push((draw_idx, seed));
             if draw_idx == 0 { Err(degenerate()) } else { Ok(fake_pf_result(10.0)) }
         });
         let seeds_no_skip = RefCell::new(Vec::new());
-        let _ = pool_one_step_draws(&crate::out::Out::new(true), &param_sets, &unkeyed(&param_sets), 42, |draw_idx, _params, seed| {
+        let _ = pool_one_step_draws(&param_sets, &unkeyed(&param_sets), 42, |draw_idx, _params, seed| {
             seeds_no_skip.borrow_mut().push((draw_idx, seed));
             Ok(fake_pf_result(10.0))
         });

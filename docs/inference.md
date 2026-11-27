@@ -242,12 +242,14 @@ one-step-ahead band that carries full posterior parameter uncertainty is
 posterior draw, samples `ỹ` from the propagated (pre-reweight) particles at each
 observation time, and pools over (particles × draws) into the `q05…q95` columns
 of `predictive/<stream>.tsv` — `mode=one_step,
-treatment=posterior`. This is
-chain-binomial only (an ODE fit's one-step reduces to its free-forward band).
-Under `[data] holdout_after` the band covers the training rows only, since a
-stored fit keeps its held-out rows' dates and not their values; the
-`free_forward` rows at those dates carry `role` `held_out`. See
-[`camdl docs workflow`](workflow.md) §7.
+treatment=posterior`. If the
+filter of any draw collapses, the prediction fails rather than pooling the draws
+that survived, which would leave out the draws that fit the data worst; rerun
+with more `--particles`. This is chain-binomial only (an ODE fit's one-step
+reduces to its free-forward band). Under `[data] holdout_after` the band covers
+the training rows only, since a stored fit keeps its held-out rows' dates and
+not their values; the `free_forward` rows at those dates carry `role`
+`held_out`. See [`camdl docs workflow`](workflow.md) §7.
 
 ### Forecasts from the end of the training rows
 
