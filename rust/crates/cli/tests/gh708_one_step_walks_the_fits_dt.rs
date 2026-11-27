@@ -162,7 +162,9 @@ fn the_one_step_band_is_filtered_on_the_dt_the_fit_used() {
             "[{arm}] fit run failed:\n{}",
             String::from_utf8_lossy(&out.stderr)
         );
-        let out = run(&["predict", "@fit", "--mode", "one_step"]);
+        // A one-step prediction fails if any draw's filter collapses, so the
+        // filter gets enough particles for every draw of this short fit.
+        let out = run(&["predict", "@fit", "--mode", "one-step", "--particles", "200"]);
         assert!(
             out.status.success(),
             "[{arm}] predict failed:\n{}",
